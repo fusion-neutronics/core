@@ -1,0 +1,12 @@
+[package]
+name = "yamc-test-cache"
+version = "0.1.0"
+edition = "2021"
+description = "Locate the cached nuclear-data fixtures the test suites read"
+license = "MIT"
+
+[dependencies]
+# For `cache_root`, so a test and the loader it is testing never disagree about
+# where the cache is. A dev-dependency cycle back into this crate is fine:
+# Cargo resolves dev-dependency cycles, and nothing here is built into a wheel.
+yamc-nuclide = { path = "../yamc-nuclide" }

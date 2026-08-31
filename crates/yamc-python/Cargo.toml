@@ -1,0 +1,109 @@
+[package]
+name = "yamc-python"
+# The version the next yamc-core release publishes. This crate is never
+# published to crates.io, so its version field is free to carry the wheel's
+# number: packages/yamc-core/pyproject.toml names this manifest as its
+# `manifest-path` and declares `dynamic = ["version"]`, so maturin reads the
+# number from here.
+#
+# CI reads it from here rather than from the release tag, which is what lets
+# yamc-core and yani-core be released together and versioned apart: one tag
+# cannot carry two numbers. Bump it in the PR that earns the bump -- with
+# `cargo set-version -p yamc-python <version>`, which updates Cargo.lock in the
+# same step -- and `verify-versions` refuses a number already on PyPI.
+# See .github/workflows/ci-python.yml and docs/developer_info.md.
+version = "0.9.0"
+edition = "2021"
+license = "MIT"
+description = "Python bindings for yamc"
+
+[lib]
+name = "yamc_python"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+# The `///` doc comments are Python API docs (Google-style, with `>>>` Python
+# examples), surfaced via the generated stubs -- they are not Rust doctests.
+# `rlib` (added so `stub_gen` can link the lib) would otherwise make
+# `cargo test` run them as Rust doctests and fail.
+doctest = false
+
+[[bin]]
+# Emits packages/yamc-core/python/yamc/_core.pyi from the PyO3 bindings' embedded type metadata.
+# Gated behind `stub-gen` so normal `cargo build`/`test` skip it -- it must be
+# built WITHOUT `extension-module` so it can link libpython.
+#   cargo run --bin stub_gen --features "stub-gen,mesh,cad,gpu"
+name = "stub_gen"
+path = "src/bin/stub_gen.rs"
+required-features = ["stub-gen"]
+doc = false
+
+[dependencies]
+pyo3 = { version = "0.29", features = ["abi3-py310"] }
+pyo3-stub-gen = "0.23.0"
+rand = "0.10"
+serde_json = "1.0"
+png = "0.17"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+yamc = { path = "../yamc", features = ["arrow", "download"] }
+yamc-element = { path = "../yamc-element", features = ["download", "arrow"] }
+yamc-nuclide = { path = "../yamc-nuclide", features = ["download", "arrow"] }
+yamc-materials = { path = "../yamc-materials", features = ["download", "arrow"] }
+yamc-particle = { path = "../yamc-particle" }
+yamc-physics = { path = "../yamc-physics", features = ["arrow"] }
+yamc-source = { path = "../yamc-source" }
+yamc-tallies = { path = "../yamc-tallies", features = ["arrow", "mesh"] }
+yamc-plot = { path = "../yamc-plot" }
+yamt = { path = "../yamt", features = ["arrow"] }
+# yamm meshing core (crates/yamm): the scene surface mesher + Rust tet mesher,
+# used from src/cad.rs and src/cad_scene.rs behind the `cad` feature. Shared
+# with cad-to-dagmc so the two use the same meshing algorithms.
+yamm = { path = "../yamm" }
+yani = { path = "../yani" }
+yani-transmute = { path = "../yani-transmute", features = ["arrow", "download"] }
+# Shared transmutation bindings. `default-features = false` keeps its
+# `extension-module` off, so only the `yani` wheel defines `PyInit__core`.
+yani-python = { path = "../yani-python", default-features = false }
+yani-decay = { path = "../yani-decay" }
+yamc-gpu = { path = "../yamc-gpu", optional = true }
+
+[features]
+default = ["mesh", "cad", "download-tls"]
+# HTTPS data downloads via the pure-Rust graviola provider (no C toolchain).
+# On by default so wheels and `maturin develop` fetch over HTTPS. Drop it
+# (build with `--no-default-features --features mesh,cad`) for a crypto-free,
+# HTTP-only build on architectures graviola does not support.
+download-tls = [
+    "yamc/download-tls",
+    "yani-python/download-tls",
+    "yamc-element/download-tls",
+    "yamc-nuclide/download-tls",
+    "yamc-materials/download-tls",
+]
+# `extension-module` suppresses libpython linking so the cdylib loads as a
+# Python extension. It is intentionally NOT in `default` so the `stub_gen`
+# binary (and plain `cargo build`/`test`) can link libpython. maturin
+# re-enables it for wheels via `[tool.maturin] features` in the root pyproject.
+extension-module = ["pyo3/extension-module"]
+# Build gate for the `stub_gen` binary (see [[bin]] above).
+stub-gen = []
+mesh = ["yamc/mesh"]
+cad = ["mesh", "yamc/cad"]
+mpi = ["yamc/mpi"]
+gpu = ["yamc/gpu", "dep:yamc-gpu"]
+debug_xs = ["yamc/debug_xs"]
+debug_sampling = ["yamc/debug_sampling"]
+debug_runtime = ["yamc/debug_runtime"]
+debug_transmutation = ["yamc/debug_transmutation"]
+debug_collision = ["yamc/debug_collision"]
+debug_history = ["yamc/debug_history"]
+debug_timing = ["yamc/debug_timing"]
+debug_diagnostics = ["yamc/debug_diagnostics"]
+
+[package.metadata.cargo-machete]
+# getrandom/getrandom_v04: declared only to enable the `wasm_js` entropy
+# backend for the transitive getrandom under wasm32 (no direct `use`).
+# yamm: used from src/cad.rs and src/cad_scene.rs (behind the `cad` feature),
+# which machete does not evaluate.
+ignored = ["getrandom", "getrandom_v04", "yamm"]

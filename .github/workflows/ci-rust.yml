@@ -1,0 +1,304 @@
+name: Rust tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Three tries over ten seconds is all cargo gives a registry that is briefly
+  # unreachable, and a release has already been lost to a twelve-second one
+  # (yani-core 0.11.0). Ten stretches the same ladder over about a minute.
+  CARGO_NET_RETRY: 10
+
+jobs:
+  build_and_test:
+    name: Test on ${{ matrix.os }} / Rust
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        # macos-latest = Intel (x86_64), macos-14 = Apple Silicon (ARM64)
+        os: [ubuntu-latest, windows-latest, macos-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libhdf5-dev cmake
+      - name: Set up Rust
+        run: rustup update stable && rustup default stable
+      # Cache the dependency build. Without this every Rust job recompiled the
+      # whole workspace -- arrow, faer, wgpu, cubecl -- from scratch on every
+      # push, which is most of why these jobs ran as long as they did.
+      #
+      # Shared with the GPU-check and MPI jobs: same profile, and the bulk of
+      # what they build is the same dependency set.
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          cache-on-failure: true
+      # The `yamc-python` crate is a pyo3 binding built WITHOUT
+      # `extension-module`, so `cargo test --workspace` links its test binary
+      # against the full libpython and must find it at RUNTIME. Pin a Python
+      # and put its lib dir on the loader path so the embed test no longer
+      # depends on whatever interpreter the runner image happens to ship
+      # (a runner-image change is what silently broke this job).
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Expose libpython on the runtime loader path
+        shell: bash
+        run: |
+          libdir="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"
+          echo "python LIBDIR=$libdir"
+          case "$RUNNER_OS" in
+            Linux) echo "LD_LIBRARY_PATH=$libdir:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV" ;;
+            macOS) echo "DYLD_FALLBACK_LIBRARY_PATH=$libdir:${DYLD_FALLBACK_LIBRARY_PATH:-}" >> "$GITHUB_ENV" ;;
+          esac
+      - name: Lint
+        run: cargo fmt --check --all
+      - name: clippy
+        # All targets except benches: the yamc-gpu benches reference the
+        # `kernels` module, which is #[cfg(not(target_os = "macos"))], so
+        # --all-targets would fail to compile them on macOS.
+        run: cargo clippy --workspace --lib --bins --tests --examples -- -D warnings
+      - name: Cache nuclear-data test fixtures
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/yamc
+          key: yamc-test-fixtures-endf-b8.1-v5
+      - name: Fetch nuclear-data test fixtures
+        shell: bash
+        run: python scripts/fetch_test_fixtures.py
+      - name: Build
+        run: cargo build --workspace --verbose
+      - name: Test
+        env:
+          # The fetch step above ran, so the fixtures must now be readable at
+          # the cache this build resolves. Without this the data-dependent tests
+          # self-skip when they are not, and report green: that is how 35 files
+          # spent months reading nothing on windows-latest (issue #544), where
+          # `$HOME` does not exist and every cache path resolved under a literal
+          # `/home/jon`. crates/yamc/tests/fixture_cache_is_readable.rs is what
+          # this switch arms.
+          YAMC_REQUIRE_FIXTURES: "1"
+        run: cargo test --workspace --verbose
+      - name: Build Rust docs (public API)
+        run: cargo doc --workspace --no-deps
+      - name: Test yamc examples
+        run: |
+          cargo run -p yamc --example test_sampling
+          cargo run -p yamc --example test_real_sampling
+          cargo run -p yamc --example materials_demo
+          cargo run -p yamc --example tbr
+          cargo run -p yamc --example flux_example
+      - name: Test yamt benchmark example
+        run: cargo run -p yamt --example benchmark --release
+
+  # The `gpu` feature's integration tests are compiled by no other job, so a
+  # signature change can break them while every check stays green -- which is
+  # exactly what happened in #470, where two `dose_coefficients` call sites went
+  # stale and nothing noticed. `build_and_test` runs default features, and
+  # ci-python builds `--features gpu` through maturin, which compiles the
+  # library and not `crates/yamc/tests`.
+  #
+  # Type-check only: running these needs a Vulkan adapter, but compiling them is
+  # what catches the breakage. Linux alone covers all three files -- one is
+  # `#![cfg(feature = "gpu")]` and two add `not(target_os = "macos")`.
+  gpu_tests_compile:
+    name: GPU-gated tests compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libhdf5-dev cmake
+      # cubecl sets a rust-version above the workspace's other crates, so this
+      # job needs current stable rather than the oldest toolchain that builds
+      # the default features.
+      - name: Set up Rust
+        run: rustup update stable && rustup default stable
+      # Cache the dependency build. Without this every Rust job recompiled the
+      # whole workspace -- arrow, faer, wgpu, cubecl -- from scratch on every
+      # push, which is most of why these jobs ran as long as they did.
+      #
+      # Shared with the workspace tests above; the `gpu` feature changes what is
+      # built on top of a dependency set they otherwise have in common.
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          cache-on-failure: true
+      - name: Check
+        run: cargo check -p yamc --features gpu --tests
+
+  # Code coverage (informational only -- never fails the build yet).
+  # Self-contained: prints the % in the log, uploads the lcov + HTML report as
+  # an artifact, and posts the summary as a PR comment. No external service.
+  coverage:
+    name: Coverage (Linux, informational)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libhdf5-dev cmake
+      - name: Set up Rust
+        run: rustup update stable && rustup default stable
+      # Cache the dependency build. Without this every Rust job recompiled the
+      # whole workspace -- arrow, faer, wgpu, cubecl -- from scratch on every
+      # push, which is most of why these jobs ran as long as they did.
+      #
+      # Its OWN key, not the shared one: llvm-cov instrumentation changes
+      # RUSTFLAGS, so every artifact differs and mixing them in would evict the
+      # cache the other jobs rely on without ever hitting.
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
+          cache-on-failure: true
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Cache nuclear-data test fixtures
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/yamc
+          key: yamc-test-fixtures-endf-b8.1-v5
+      - name: Fetch nuclear-data test fixtures
+        run: python3 scripts/fetch_test_fixtures.py
+      # Default features only (arrow). GPU device tests are adapter-gated and
+      # skip without a Vulkan adapter; MPI is a separate feature. The number is
+      # therefore "workspace, default features" -- not "all features".
+      # TODO: optionally add a second run with --features mpi for fuller coverage.
+      # --no-fail-fast: coverage is informational, so report the number even if
+      # a test flakes (e.g. an adapter-dependent GPU test) rather than aborting.
+      - name: Generate coverage (workspace, default features)
+        run: |
+          cargo llvm-cov --workspace --no-fail-fast --lcov --output-path coverage.lcov
+          cargo llvm-cov --workspace --no-fail-fast --summary-only | tee coverage-summary.txt
+      - name: Generate HTML report
+        run: cargo llvm-cov report --html
+      - name: Build PR comment body
+        if: github.event_name == 'pull_request'
+        run: |
+          {
+            echo '### Coverage (workspace, default features - informational)'
+            echo '```'
+            cat coverage-summary.txt
+            echo '```'
+            echo '_GPU device tests and the `mpi` feature are excluded from this run._'
+          } > coverage-comment.md
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: |
+            coverage.lcov
+            coverage-summary.txt
+            target/llvm-cov/html
+      - name: Post coverage PR comment
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v3
+        with:
+          header: coverage
+          recreate: true
+          path: coverage-comment.md
+
+  # Test MPI build
+  test-mpi:
+    name: Test MPI on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libhdf5-dev cmake libopenmpi-dev openmpi-bin
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install hdf5 open-mpi
+
+      - name: Set up Rust
+        run: rustup update stable && rustup default stable
+      # Cache the dependency build. Without this every Rust job recompiled the
+      # whole workspace -- arrow, faer, wgpu, cubecl -- from scratch on every
+      # push, which is most of why these jobs ran as long as they did.
+      #
+      # Shared with the workspace tests: the `mpi` feature is a thin layer over
+      # the same dependency build.
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          cache-on-failure: true
+
+      - name: Verify MPI installation
+        run: |
+          which mpicc
+          mpicc --version
+          which mpirun || which mpiexec
+
+      - name: Cache nuclear-data test fixtures
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/yamc
+          key: yamc-test-fixtures-endf-b8.1-v5
+      - name: Fetch nuclear-data test fixtures
+        run: python scripts/fetch_test_fixtures.py
+
+      - name: Build with MPI feature
+        run: cargo build -p yamc --features mpi --verbose
+
+      - name: Test with MPI feature
+        env:
+          YAMC_REQUIRE_FIXTURES: "1"
+        run: cargo test -p yamc --features mpi --verbose
+
+      - name: Run TBR example with MPI
+        run: |
+          cargo build -p yamc --example tbr --features mpi --release
+          mpirun -np 2 ./target/release/examples/tbr
+
+      - name: Run TBR example serial (for comparison)
+        run: |
+          cargo run -p yamc --example tbr --release
+
+      - name: Install cross-compilers (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Test cross-compilation (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          # aarch64 is graviola-supported, so it gets the full default-feature
+          # workspace check (the C-free HTTPS `download-tls` path).
+          rustup target add aarch64-unknown-linux-gnu
+          cargo check --workspace --target aarch64-unknown-linux-gnu
+          # graviola supports x86_64 + aarch64 only. On other arches yamc uses the
+          # crypto-free HTTP-only download path (or local data files), so verify
+          # core + http-only build on representative HPC arches. These are pure
+          # Rust (no cross C toolchain needed). 32-bit ARM is dropped: not a
+          # target for this memory/compute-heavy workload.
+          rustup target add powerpc64le-unknown-linux-gnu riscv64gc-unknown-linux-gnu
+          for t in powerpc64le-unknown-linux-gnu riscv64gc-unknown-linux-gnu; do
+            cargo check -p yamc --no-default-features --features arrow,download --target "$t"
+          done

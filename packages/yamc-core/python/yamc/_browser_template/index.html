@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Portable simulation</title>
+<style>
+  body { font: 14px/1.45 system-ui, -apple-system, sans-serif; max-width: 720px; margin: 2em auto; padding: 0 1em; color: #222; }
+  h1 { font-size: 1.4em; margin-bottom: 0.25em; }
+  .sub { color: #777; margin-bottom: 1.5em; }
+  fieldset { border: 1px solid #ddd; padding: 1em; margin-bottom: 1em; border-radius: 6px; }
+  legend { padding: 0 0.5em; color: #555; font-weight: 600; }
+  /* Collapsible editor sections -- styled to match a fieldset's chrome
+     so they sit visually alongside Model / Geometry / Run params. */
+  details.editor-section { border: 1px solid #ddd; padding: 0.6em 1em 1em 1em; margin-bottom: 1em; border-radius: 6px; }
+  details.editor-section > summary { color: #555; font-weight: 600; cursor: pointer; padding: 0.2em 0; user-select: none; list-style: none; }
+  details.editor-section > summary::-webkit-details-marker { display: none; }
+  details.editor-section > summary::before { content: '▸'; display: inline-block; width: 1em; color: #999; transition: transform 0.15s; }
+  details.editor-section[open] > summary::before { transform: rotate(90deg); }
+  details.editor-section > summary:hover { color: #222; }
+  details.editor-section[open] { padding-bottom: 1em; }
+  button { font-size: 1em; padding: 0.5em 1em; cursor: pointer; }
+  button:disabled { cursor: not-allowed; opacity: 0.5; }
+  label { display: inline-block; margin-right: 1.2em; }
+  input[type=number] { width: 6em; padding: 0.2em 0.4em; font-size: 1em; }
+  #status, #sim-status, #mat-status { margin-left: 0.6em; color: #555; }
+  #result, #model-summary { background: #f5f5f5; padding: 0.8em; border-radius: 6px; white-space: pre-wrap; }
+  #result { min-height: 4em; }
+  #model-summary { font-size: 0.9em; }
+  .err { color: #c00; }
+  .mat-card { border: 1px solid #ddd; border-radius: 4px; padding: 0.6em 0.8em; margin-bottom: 0.6em; background: #fafafa; }
+  .mat-name { font-weight: 600; margin-bottom: 0.4em; }
+  .mat-row { display: flex; align-items: center; gap: 0.4em; margin: 0.2em 0; }
+  .mat-row input[type=text] { width: 6em; }
+  .mat-row input[type=number] { width: 7em; }
+  .mat-row .rm { background: none; border: none; color: #c00; font-size: 1.1em; cursor: pointer; padding: 0 0.3em; }
+  .mat-meta { font-size: 0.85em; color: #777; margin-top: 0.3em; }
+  .surf-card { border: 1px solid #ddd; border-radius: 4px; padding: 0.6em 0.8em; margin-bottom: 0.6em; background: #fafafa; }
+  .surf-head { font-weight: 600; margin-bottom: 0.4em; }
+  .surf-row { display: flex; align-items: center; gap: 0.4em; margin: 0.2em 0; flex-wrap: wrap; }
+  .surf-row label { min-width: 6em; color: #555; }
+  .surf-row input[type=number] { width: 6em; }
+  .warn { background: #fff8e1; border: 1px solid #ffd54f; padding: 0.5em 0.8em; border-radius: 4px; margin-bottom: 0.6em; font-size: 0.9em; color: #6c4a00; }
+  .surf-occ { font-size: 0.85em; color: #777; margin-top: 0.3em; }
+  .tally-card { border: 1px solid #ddd; border-radius: 4px; padding: 0.6em 0.8em; margin-bottom: 0.6em; background: #fafafa; }
+  .tally-head { font-weight: 600; margin-bottom: 0.4em; }
+  .score-chip { display: inline-flex; align-items: center; gap: 0.3em; background: #eef; border: 1px solid #ccd; border-radius: 12px; padding: 0.15em 0.6em; margin: 0.15em 0.2em 0.15em 0; font-size: 0.9em; }
+  .score-chip .rm { background: none; border: none; color: #c00; cursor: pointer; padding: 0 0.1em; font-size: 1em; }
+  .tally-add { display: flex; gap: 0.4em; align-items: center; margin-top: 0.4em; }
+  .tally-meta { font-size: 0.85em; color: #777; margin-top: 0.3em; }
+</style>
+</head>
+<body>
+
+<h1>Portable simulation</h1>
+<div class="sub">
+  This HTML embeds an exported model. Click <b>Fetch cross sections</b>
+  to pull the nuclide data this model needs from
+  yamc-data.xsplot.com into browser tab memory (nothing is saved to
+  disk), then <b>Simulate</b> to run.
+</div>
+
+<fieldset>
+  <legend>Model</legend>
+  <div id="model-summary">Loading…</div>
+</fieldset>
+
+<fieldset id="plot-fieldset" data-section="geometry">
+  <legend>Geometry &amp; source</legend>
+  <iframe id="plot-iframe" style="width: 100%; height: 540px; border: 1px solid #ddd; border-radius: 4px; background: #1a1a2e;" sandbox="allow-scripts allow-same-origin" allow="fullscreen"></iframe>
+  <div style="font-size: 0.85em; color: #777; margin-top: 0.3em; display: flex; align-items: center; gap: 0.8em;">
+    <button type="button" class="fullscreen-btn" data-target="plot-iframe" style="font-size: 0.9em; padding: 0.2em 0.7em;">⛶ Full screen</button>
+    <span>Full interactive viewer -- pan, zoom, change slice basis, toggle outlines / source overlay. Refreshes on every Apply (pan/zoom resets).</span>
+  </div>
+</fieldset>
+
+<details id="surfaces-fieldset" class="editor-section" data-section="surfaces" hidden>
+  <summary>Surfaces (editable, CSG only)</summary>
+  <div class="warn">
+    <b>Heads up:</b> changing surface parameters can produce <i>broken
+    geometry</i> -- surfaces overlapping in ways the engineer didn't
+    intend, cells with no inside, particles that get stuck on the
+    boundary. The simulation may then crash, give garbage results, or
+    hang. Mesh-based geometries are not editable from here. Make small
+    changes and re-run.
+  </div>
+  <div id="surfaces-edit"></div>
+  <button id="apply-surfs">Apply surface changes</button>
+  <span id="surf-status"></span>
+</details>
+
+<details id="materials-fieldset" class="editor-section" data-section="materials">
+  <summary>Materials (editable)</summary>
+  <div id="materials-edit"></div>
+  <button id="apply-mats">Apply material changes</button>
+  <span id="mat-status"></span>
+</details>
+
+<details id="tallies-fieldset" class="editor-section" data-section="tallies" hidden>
+  <summary>Tallies (editable scores)</summary>
+  <div id="tallies-edit"></div>
+  <datalist id="score-presets"></datalist>
+  <button id="apply-tallies">Apply tally changes</button>
+  <span id="tally-status"></span>
+</details>
+
+<fieldset>
+  <legend>1. Cross-section data</legend>
+  <button id="dl">Fetch cross sections</button>
+  <span id="status">Will fetch the model's nuclides from yamc-data.xsplot.com into browser tab memory.</span>
+</fieldset>
+
+<fieldset>
+  <legend>2. Run parameters</legend>
+  <label>Total particles: <input id="total-particles" type="number" value="1000" min="1" /></label>
+</fieldset>
+
+<fieldset>
+  <legend>3. Simulate</legend>
+  <button id="sim" disabled>Simulate</button>
+  <span id="sim-status"></span>
+</fieldset>
+
+<pre id="result">__INITIAL_RESULT_TEXT__</pre>
+
+<fieldset id="tally-plot-fieldset" hidden>
+  <legend>Mesh tally -- engineer's pre-run snapshot</legend>
+  <div style="font-size: 0.85em; color: #6c4a00; background: #fff8e1; border: 1px solid #ffd54f; padding: 0.5em 0.8em; border-radius: 4px; margin-bottom: 0.4em;">
+    <b>Pre-run snapshot</b> -- this is the engineer's Python-side
+    simulation result. Click <b>Simulate</b> above to replace it with a
+    fresh plot from your own browser-side run (same mesh + tally,
+    re-sampled with the total particles you chose).
+  </div>
+  <iframe id="tally-plot-iframe" srcdoc="__TALLY_PLOT_SRCDOC__"
+          style="width: 100%; height: 560px; border: 1px solid #ddd; border-radius: 4px; background: #1a1a2e;"
+          sandbox="allow-scripts allow-same-origin"
+          allow="fullscreen"></iframe>
+  <div style="font-size: 0.85em; color: #777; margin-top: 0.3em;">
+    <button type="button" class="fullscreen-btn" data-target="tally-plot-iframe" style="font-size: 0.9em; padding: 0.2em 0.7em;">⛶ Full screen</button>
+  </div>
+</fieldset>
+
+<script type="module">
+__APP_JS__
+</script>
+</body>
+</html>

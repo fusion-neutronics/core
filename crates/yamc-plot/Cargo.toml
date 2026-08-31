@@ -1,0 +1,24 @@
+[package]
+name = "yamc-plot"
+version = "0.1.0"
+edition = "2021"
+description = "Shared interactive-plot HTML/JS templating for yamc -- used by both Python's Model.plot() and the browser-side editor"
+license = "MIT"
+
+[dependencies]
+serde_json = "1.0"
+base64 = "0.22"
+# Surface-table builder needs the geometry / surface primitives; the
+# walker dedupes via Arc::ptr_eq across the region tree.
+yamc-geo = { path = "../yamc-geo" }
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = []
+# Enables the mesh-geometry path inside build_interactive_html, which
+# embeds the yamt wasm blob into the saved viewer HTML. Only available
+# when the wasm files at `packages/yamc-core/python/yamc/_wasm/yamt_*` exist (CI builds
+# them via wasm-pack as part of the yamc-python build).
+mesh = []

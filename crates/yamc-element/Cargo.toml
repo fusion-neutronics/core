@@ -1,0 +1,29 @@
+[package]
+name = "yamc-element"
+version = "0.1.0"
+edition = "2021"
+description = "Evaluated photon nuclear data for yamc -- Element, photon interaction cross-sections, atomic transitions"
+license = "MIT"
+
+[lib]
+name = "yamc_element"
+path = "src/lib.rs"
+
+[dependencies]
+once_cell = "1.21.3"
+rand = "0.10"
+yamc-nuclide = { path = "../yamc-nuclide", default-features = false }
+arrow-array = { version = "53", optional = true }
+
+[features]
+default = ["arrow"]
+arrow = ["dep:arrow-array", "yamc-nuclide/arrow"]
+# Pass-through to yamc-nuclide's `download` feature. `photon.rs`
+# gates path-vs-URL handling on it.
+download = ["yamc-nuclide/download"]
+download-tls = ["download", "yamc-nuclide/download-tls"]
+
+[dev-dependencies]
+# Resolves the nuclear-data fixture cache the same way the loader does,
+# rather than through `HOME` alone (issue #544).
+yamc-test-cache = { path = "../yamc-test-cache" }

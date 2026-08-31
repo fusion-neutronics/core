@@ -1,0 +1,15 @@
+[package]
+name = "yamc-source"
+version = "0.1.0"
+edition = "2021"
+description = "Particle source specifications and spatial/energy/angle distribution samplers for yamc"
+license = "MIT"
+
+[lib]
+name = "yamc_source"
+path = "src/lib.rs"
+
+[dependencies]
+rand = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+yamc-particle = { path = "../yamc-particle" }

@@ -1,0 +1,30 @@
+[package]
+name = "yani-convert"
+version = "0.1.0"
+edition = "2021"
+description = "Convert ENDF decay, fission yield and neutron evaluations into the transmutation Arrow format yani reads"
+license = "MIT"
+
+[lib]
+name = "yani_convert"
+path = "src/lib.rs"
+
+# endf is the parser and has no dependencies of its own; nuclear-data-schema
+# declares the columns. Nothing here reaches the transport engine, which is what
+# keeps this usable from the standalone yani wheel (issue #381).
+[dependencies]
+endf = { path = "../endf" }
+nuclear-data-schema = { path = "../nuclear-data-schema" }
+arrow-array = "53"
+arrow-schema = "53"
+arrow-ipc = { version = "53", features = ["lz4"] }
+serde_json = "1.0"
+
+# Tests only. `yani` is here so the round trip crosses the boundary that
+# matters: this crate writes the files and yani's own reader takes them back,
+# rather than a reader that shares this writer's assumptions. lzma-rs reads the
+# xz fixtures, as it does in the endf crate.
+[dev-dependencies]
+yani = { path = "../yani" }
+lzma-rs = "0.3"
+serde_json = "1.0"

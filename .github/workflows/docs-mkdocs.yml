@@ -1,0 +1,96 @@
+name: Documentation
+
+# Builds the MkDocs site on every PR/push (so a docs break fails CI) and
+# publishes it to GitHub Pages from main.
+#
+# Hosting: the built site is uploaded as a GitHub Pages artifact and served by
+# the Pages service, so it never lands in the repo (not even a gh-pages branch)
+# and cannot bloat it. One-time setup in the repo:
+# Settings > Pages > "Build and deployment" > Source = "GitHub Actions".
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one Pages deployment at a time; let an in-progress deploy finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build_mkdocs:
+    name: Build MkDocs site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install the docs dependencies
+        shell: bash
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+          python -m pip install --upgrade pip
+          # No Rust toolchain, no extension build and no plotting stack: the
+          # pages whose code blocks executed against the compiled module moved
+          # to the public repositories. What is left is the developer guide and
+          # the converter reference, which griffe reads statically.
+          pip install -r docs/requirements.txt
+
+      - name: Build the docs
+        shell: bash
+        run: |
+          source venv/bin/activate
+          mkdocs build -f mkdocs.yml
+
+      - name: Upload site artifact (for download / PR review)
+        uses: actions/upload-artifact@v7
+        with:
+          name: mkdocs-site
+          path: site
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  # Publish from main, not from the release tag.
+  #
+  # The `github-pages` environment only accepts deployments from the refs its
+  # protection rule names, and by default that is the default branch alone. A
+  # release runs at a tag, so this job was turned away at the gate before a
+  # runner was ever assigned: two seconds, no steps, no log. It has failed that
+  # way on every release since yani-core 0.5.0, which means the site has never
+  # once been published and every release has carried a red Documentation run
+  # for it.
+  #
+  # A push to main is the ref the rule already allows, and it is also when the
+  # docs actually change: a tag adds nothing to a site built from the same
+  # commit. Releases still build the site above, so a docs break still fails
+  # the release; it just no longer fails it at a gate nothing in this
+  # repository can satisfy.
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build_mkdocs
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v5

@@ -1,0 +1,73 @@
+[package]
+name = "yamc-gpu"
+version = "0.1.0"
+edition = "2021"
+description = "GPU compute infrastructure for yamc -- Vulkan via cubecl, f64 required"
+license = "MIT"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+thiserror = "2"
+bytemuck = { version = "1.18", features = ["derive"] }
+rayon = "1.10"
+yamc-element = { path = "../yamc-element" }
+yamc-geo = { path = "../yamc-geo" }
+yamc-nuclide = { path = "../yamc-nuclide" }
+yamc-particle = { path = "../yamc-particle" }
+yamc-rng = { path = "../yamc-rng" }
+yamc-physics = { path = "../yamc-physics" }
+
+# Vulkan/SPIR-V compute path. Excluded on macOS because cubecl-wgpu's
+# `spirv` feature build script panics without a Vulkan SDK and the
+# crate has no f64 hardware path on Apple Silicon anyway. On macOS
+# `GpuContext::new()` returns `NoF64Adapter` and the kernels module
+# is omitted entirely.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# Pinned to cubecl main (0.11.0-pre.1) to test GPU transport fixes. cubecl main
+# tracks an unreleased wgpu git rev, so our direct wgpu dep must match the same
+# rev or the wgpu types won't unify. See #411 and the cubecl-bump branch.
+#
+# `cubecl` is aliased to the `cubecl-core` package (not the `cubecl` meta
+# crate). We only use `cubecl::prelude::*` and `cubecl::ir::*` (both provided by
+# cubecl-core, which also re-exports the `#[cube]` macro whose generated code
+# roots at `cubecl::`). Depending on cubecl-core directly avoids the meta
+# crate's optional cubecl-cpu/cuda/hip backends; cubecl-cpu's LLVM bundler
+# pulled `dirs` -> `option-ext` (MPL-2.0) into the lockfile even while disabled.
+# We drive the wgpu backend through cubecl-wgpu directly.
+cubecl = { package = "cubecl-core", git = "https://github.com/tracel-ai/cubecl", rev = "a5bbb8070c68562b50331610de76c97b9b559281" }
+cubecl-wgpu = { git = "https://github.com/tracel-ai/cubecl", rev = "a5bbb8070c68562b50331610de76c97b9b559281", features = ["spirv"] }
+wgpu = { git = "https://github.com/gfx-rs/wgpu.git", rev = "bde709122f8320571ab1733ab055dcb54415a483" }
+pollster = "0.4"
+
+[dev-dependencies]
+# Resolves the nuclear-data fixture cache the same way the loader does,
+# rather than through `HOME` alone (issue #544).
+yamc-test-cache = { path = "../yamc-test-cache" }
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+rand = "0.10"
+
+[[bench]]
+name = "distance_to_collision"
+harness = false
+
+[[bench]]
+name = "transport_step"
+harness = false
+
+[[bench]]
+name = "sphere_distance"
+harness = false
+
+[[bench]]
+name = "full_step"
+harness = false
+
+[[bench]]
+name = "multi_step"
+harness = false
+
+[[bench]]
+name = "multi_cell_transport"
+harness = false

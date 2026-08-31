@@ -1,0 +1,43 @@
+[package]
+name = "yamt"
+version = "0.1.0"
+edition = "2021"
+description = "Yet Another Mesh Transport -- pure-Rust geometry for mesh-based particle transport"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `arrow` is on by default: the Arrow IPC mesh is the only supported mesh
+# input format, so a yamt without it cannot load a mesh at all.
+default = ["arrow", "simd", "parallel"]
+simd = ["dep:multiversion"]
+parallel = ["dep:rayon"]
+arrow = ["dep:arrow-array", "dep:arrow-buffer", "dep:arrow-ipc", "dep:arrow-schema"]
+wasm = ["dep:wasm-bindgen", "dep:serde", "dep:serde_json"]
+
+[dependencies]
+rayon = { version = "1.10", optional = true }
+multiversion = { version = "0.7", optional = true }
+arrow-array = { version = "53", optional = true }
+arrow-buffer = { version = "53", optional = true }
+arrow-ipc = { version = "53", optional = true }
+arrow-schema = { version = "53", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = [
+    'cfg(target_feature, values("retpoline", "retpoline-indirect-branches", "retpoline-indirect-calls"))',
+]
+
+[[example]]
+name = "bench_arrow_read"
+required-features = ["arrow"]
+
+[[example]]
+name = "benchmark"
+required-features = ["arrow"]

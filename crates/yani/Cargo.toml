@@ -1,0 +1,45 @@
+[package]
+name = "yani"
+version = "0.1.0"
+edition = "2021"
+description = "Yet Another Nuclide Inventory -- CRAM matrix exponential for nuclear transmutation"
+license = "MIT"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+num-complex = "0.4"
+once_cell = "1.21"
+arrow-array = "53"
+# lz4 decodes the option-D IPC-lz4 transmutation sections (pure-Rust lz4_flex).
+arrow-ipc = { version = "53", features = ["lz4"] }
+arrow-schema = "53"
+nuclear-data-schema = { path = "../nuclear-data-schema" }
+
+# faer's `rayon` feature would enable internal parallelism in gemm and the
+# sparse-LU factor/solve, but nothing here collects it: `cram.rs` passes
+# `Par::Seq` explicitly, and that is the only `Par` in the crate. Measured on
+# `examples/cram_perf.rs` (the 3820-nuclide ENDF chain), building with the
+# feature and without it are the same to within run-to-run spread: 314.3 ms
+# against 314.1 ms, best of several. An earlier version of this comment
+# credited it with 5-6%, which the hardcoded `Par::Seq` cannot have been
+# collecting (issue #576).
+#
+# `Par::Seq` is deliberate and must stay. faer partitions work as a function of
+# thread count, so under partial-pivoting LU the same matrix can round
+# differently on a 22-core box than an 8-core one. That is precisely what
+# `tests/matrix_reproducibility.rs` exists to prevent, and it would break the
+# bit-identity the whole transmutation path rests on.
+#
+# The feature is kept rather than dropped because the split below is not about
+# performance: `rayon` pulls `spindle → atomic-wait`, which has no wasm32
+# implementation, so the target gate is what keeps the wasm build working. Now
+# that the native side is known to gain nothing, dropping `rayon` and collapsing
+# the two blocks into one dependency line is a reasonable follow-up; it is left
+# alone here because it changes the dependency tree rather than a comment.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg", "rayon"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg"] }

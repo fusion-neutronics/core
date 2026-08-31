@@ -1,0 +1,26 @@
+[package]
+name = "nuclear-data-schema"
+version = "0.1.0"
+edition = "2021"
+description = "The Arrow schema of the simulation-ready nuclear data format, declared once"
+license = "MIT"
+
+[[bin]]
+name = "emit-schema-manifest"
+path = "src/bin/emit_schema_manifest.rs"
+
+[lib]
+name = "nuclear_data_schema"
+path = "src/lib.rs"
+
+# A leaf on purpose: arrow-schema and nothing else. yani depends on this and is
+# the base of the standalone transmutation wheel (#381), so anything heavier
+# here would leak into a package that must be installable without yamc. The
+# neutral name says the same thing: this is not a yamc-* crate, because yani
+# must be able to use it without depending on the transport engine.
+[dependencies]
+arrow-schema = "53"
+
+# Only the manifest emitter needs JSON, and it is a binary, so this stays out
+# of the dependency graph of every crate that just wants a schema.
+serde_json = "1"

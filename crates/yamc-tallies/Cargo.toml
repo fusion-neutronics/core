@@ -1,0 +1,41 @@
+[package]
+name = "yamc-tallies"
+version = "0.1.0"
+edition = "2021"
+description = "Tallies (filters, scores, simulation results) for yamc"
+license = "MIT"
+
+[lib]
+name = "yamc_tallies"
+path = "src/lib.rs"
+
+[dependencies]
+arrow-array = { version = "53", optional = true }
+arrow-ipc = { version = "53", optional = true }
+arrow-schema = { version = "53", optional = true }
+rustc-hash = "2"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+smallvec = "1"
+yamc-element = { path = "../yamc-element", default-features = false }
+yamc-materials = { path = "../yamc-materials", default-features = false }
+yamc-nuclide = { path = "../yamc-nuclide", default-features = false }
+yamc-particle = { path = "../yamc-particle" }
+yamt = { path = "../yamt", optional = true, features = ["arrow"] }
+
+[features]
+default = ["arrow"]
+arrow = [
+    "dep:arrow-array",
+    "dep:arrow-ipc",
+    "dep:arrow-schema",
+    "yamc-nuclide/arrow",
+    "yamc-element/arrow",
+    "yamc-materials/arrow",
+]
+mesh = ["dep:yamt"]
+# All three variance-accumulation methods (per-batch sum/sum_sq, Stage 1
+# online Welford at batch boundaries, Stage 3 per-history Welford with
+# per-worker accumulator) are now compiled in unconditionally and
+# selected at runtime via `Tally::variance_method`. The previous
+# `welford` and `welford_stage3` cargo features have been removed.

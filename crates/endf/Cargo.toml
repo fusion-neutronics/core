@@ -1,0 +1,33 @@
+[package]
+name = "endf"
+description = "Parser for ENDF-6 formatted evaluated nuclear data files"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/fusion-neutronics/yamc"
+rust-version = "1.74"
+readme = "README.md"
+keywords = ["endf", "nuclear", "ace", "physics", "parser"]
+categories = ["science", "parser-implementations"]
+# Ported from github.com/shimwell/endf-python, where the same crate is developed
+# against the Python reader it was written to match. The package fields are
+# spelled out rather than inherited from the workspace because yamc's root
+# manifest declares no `[workspace.package]`; everything else is the upstream
+# file unchanged, so re-syncing is a copy of `src/` and `tests/`.
+#
+# Internal to this repository. Nothing published imports it directly: users
+# reach it through `yamc.convert_*` and `yani.convert_*`, never `import endf`.
+
+# Deliberately dependency-free. This crate is the format layer: consumers that
+# need Arrow or a simulation-ready projection build those on top rather than
+# paying for them here. Keeping it at zero dependencies is also what lets the
+# table crate split out of it later without dragging a parser into the wasm and
+# plotting builds.
+[dependencies]
+
+# Tests only, and so not a dependency of anything that uses this crate. The
+# fixtures in `fixtures/` and the golden dumps in `tests/golden/` are stored
+# xz-compressed (an evaluation is highly repetitive and compresses about six to
+# one), and this reads them. Pure Rust, so there is no C toolchain to have.
+[dev-dependencies]
+lzma-rs = "0.3"

@@ -1,0 +1,32 @@
+[package]
+name = "yamc-materials"
+version = "0.1.0"
+edition = "2021"
+description = "Material composition and macroscopic cross-section data for yamc"
+license = "MIT"
+
+[lib]
+name = "yamc_materials"
+path = "src/lib.rs"
+
+[dependencies]
+rand = "0.10"
+serde = { version = "1.0", features = ["derive", "rc"] }
+yamc-element = { path = "../yamc-element", default-features = false }
+yamc-nuclide = { path = "../yamc-nuclide", default-features = false }
+yamc-rng = { path = "../yamc-rng" }
+
+[features]
+default = ["arrow"]
+arrow = ["yamc-nuclide/arrow", "yamc-element/arrow"]
+download = ["yamc-nuclide/download", "yamc-element/download"]
+download-tls = ["download", "yamc-nuclide/download-tls", "yamc-element/download-tls"]
+# Debug tracing flag shared with the yamc crate. yamc's `debug_collision`
+# feature forwards to this one so `cargo run --features debug_collision`
+# at the workspace level still toggles the material XS lookup traces.
+debug_collision = ["yamc-nuclide/debug_collision"]
+
+[dev-dependencies]
+# Resolves the nuclear-data fixture cache the same way the loader does,
+# rather than through `HOME` alone (issue #544).
+yamc-test-cache = { path = "../yamc-test-cache" }

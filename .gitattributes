@@ -1,0 +1,14 @@
+# Generated data tabulations, not source. They are rebuilt by the scripts named
+# in their own headers (tools/fetch_photon_data.py, tools/convert_photon_data.py)
+# and reviewing them line by line means reviewing a physics tabulation, which a
+# diff cannot help with. Collapsing them keeps a data refresh from burying the
+# code it comes with: the bremsstrahlung file alone is 28,520 lines.
+#
+# They stay uncompressed on purpose. `endf` is deliberately dependency-free,
+# which is what lets its tables split out without dragging a parser into the
+# wasm build, and reading these through xz would make a decompressor a real
+# dependency rather than a dev-dependency. It would also cost time rather than
+# save it: a full load is about 13 ms, and decompressing 2.4 MB of xz is more
+# than that again. The .xz fixtures under crates/endf/fixtures are a different
+# case, read only by tests through a dev-dependency.
+packages/yamc-core/python/yamc/data/*.txt linguist-generated=true -diff

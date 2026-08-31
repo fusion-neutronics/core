@@ -1,0 +1,7 @@
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+
+[alias]
+# GPU tests share a process-global cubecl client, so they must run
+# single-threaded (parallel launches corrupt results). See developer_info.md.
+test-gpu = "test -p yamc-gpu -p yamc --features yamc/gpu --release -- --test-threads=1"

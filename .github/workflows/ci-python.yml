@@ -1,0 +1,1148 @@
+name: Python CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+  # A release tag NAMES EVERY PROJECT IT PUBLISHES, AND THE VERSION EACH GOES
+  # OUT AT. One project per comma:
+  #
+  #   yamc-core-0.5.0                   yamc-core alone, at 0.5.0
+  #   yani-core-0.6.0                   yani-core alone, at 0.6.0
+  #   yamc-core-0.5.0,yani-core-0.6.0   both, at their own versions
+  #
+  # A `v` is allowed on each version (yamc-core-v0.5.0), and whitespace round a
+  # comma is ignored.
+  #
+  # There is no bare tag. `0.5.0` used to mean "both, at 0.5.0", and that was
+  # the whole problem: one tag carries one number, so releasing the two together
+  # forced them to share a version for no reason beyond having been released at
+  # the same moment. A change to the transport converter is not a change to the
+  # inventory package, and a user reading either version should learn something
+  # true about that package alone. Releasing both at the same number is still
+  # possible, by writing that number twice, but it is now a thing you say rather
+  # than a thing the tag shape imposes.
+  #
+  # EACH VERSION LIVES IN ITS OWN CRATE MANIFEST -- crates/yamc-python for
+  # yamc-core, crates/yani-python for yani-core -- and each wheel's
+  # pyproject.toml pulls it from there with `dynamic = ["version"]`. Neither
+  # crate is published to crates.io, so its version field is free to carry the
+  # wheel's number, and one number cannot disagree with itself. (The `^version`
+  # anchor used below therefore matches only the [package] version: dependency
+  # versions in a Cargo manifest are nested inside their own tables.)
+  #
+  # The tag repeats that number rather than setting it, and `verify-versions`
+  # below fails the release if the two disagree. So a tag cannot quietly ship a
+  # number nobody bumped, and a bump cannot quietly ship under a number nobody
+  # tagged.
+  #
+  # That inverts the old rule, where the committed version recorded the LAST
+  # release. It now names the NEXT one, which is what makes a bump reviewable:
+  # the number that will reach PyPI appears in the diff.
+  #
+  # The release flow is therefore: bump the version of each project you are
+  # releasing (`cargo set-version -p yamc-python <version>`, which updates
+  # Cargo.lock in the same step), merge, then tag with those exact versions.
+  #
+  # The inputs below publish without a release, for the cases where there should
+  # not be one: a first upload that creates a project on PyPI, or a re-publish
+  # of one wheel after a fix. They override the files when set, since neither
+  # case has a tag to check against.
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Which distributions to publish to PyPI"
+        type: choice
+        default: none
+        options: [none, yani-core, yamc-core, both]
+      yamc_version:
+        description: "Override yamc-core's version (default: crates/yamc-python/Cargo.toml)"
+        type: string
+        required: false
+      yani_version:
+        description: "Override yani-core's version (default: crates/yani-python/Cargo.toml)"
+        type: string
+        required: false
+
+# A crates.io hiccup must not cost a release. Cargo gives up after three tries
+# spread over about ten seconds, and that is exactly how the yani-core 0.11.0
+# release ended: index.crates.io refused the connection for twelve seconds, the
+# linux wheel never built, and the publish job and the assertion over it went
+# down with it.
+#
+# Ten tries stretches the same ladder over roughly a minute. This block reaches
+# the runner, so the macOS and Windows builds pick it up; the manylinux builds
+# get it through `docker-options`, since the container does not inherit the
+# runner's environment.
+env:
+  CARGO_NET_RETRY: 10
+
+jobs:
+  # What this run builds and publishes, decided once, from the event.
+  #
+  # A release tag names every project it publishes, but only the publish jobs
+  # ever consulted it, so a `yani-core-0.10.0` tag still ran the three yamc-core
+  # wheel builds plus `test` and `test-mpi` and made the yani release wait on
+  # them (issue #534). The grammar also lived in three places, which is how a
+  # tag could mean one thing to `verify-versions` and another to a publish gate.
+  # It lives here now, and every job below reads these outputs instead of the
+  # tag.
+  plan:
+    name: Plan what this run builds and publishes
+    runs-on: ubuntu-latest
+    outputs:
+      # 'true'/'false' as strings, because expressions compare them as strings.
+      build_yamc: ${{ steps.plan.outputs.build_yamc }}
+      build_yani: ${{ steps.plan.outputs.build_yani }}
+      publish_yamc: ${{ steps.plan.outputs.publish_yamc }}
+      publish_yani: ${{ steps.plan.outputs.publish_yani }}
+      # The version each project's tag component names, empty when the tag does
+      # not name that project or there is no tag at all. verify-versions
+      # compares these against the crate manifests rather than re-parsing.
+      tagged_yamc_version: ${{ steps.plan.outputs.tagged_yamc_version }}
+      tagged_yani_version: ${{ steps.plan.outputs.tagged_yani_version }}
+    steps:
+      # No checkout: this reads the event, not the tree, which is what keeps it
+      # a sub-minute job in front of everything else.
+      - id: plan
+        shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          ACTION: ${{ github.event.action }}
+          PUBLISH: ${{ inputs.publish }}
+          YAMC_OVERRIDE: ${{ inputs.yamc_version }}
+          YANI_OVERRIDE: ${{ inputs.yani_version }}
+        run: |
+          set -euo pipefail
+          # Defaults are "nothing", so a case that falls through publishes
+          # nothing rather than everything.
+          build_yamc=false; build_yani=false
+          publish_yamc=false; publish_yani=false
+          tagged_yamc=""; tagged_yani=""
+
+          case "$GITHUB_EVENT_NAME" in
+            release)
+              # `on:` subscribes to published releases only, so any other action
+              # here means that list grew and this parse was not revisited.
+              if [ "${ACTION:-published}" != published ]; then
+                echo "::error::release action is '${ACTION:-}', not 'published'. Decide what that" >&2
+                echo "::error::action should build and publish before letting it through here." >&2
+                exit 1
+              fi
+              # Every component names a project and the version it goes out at,
+              # per the grammar documented at the top of this file.
+              IFS=',' read -ra PARTS <<< "${TAG:-}"
+              for part in ${PARTS[@]+"${PARTS[@]}"}; do
+                part="$(printf '%s' "$part" | tr -d '[:space:]')"
+                [ -n "$part" ] || continue
+                case "$part" in
+                  yamc-core-*) project=yamc-core; version="${part#yamc-core-}" ;;
+                  yani-core-*) project=yani-core; version="${part#yani-core-}" ;;
+                  *) echo "::error::tag component '$part' names no project. Expected" >&2
+                     echo "::error::yamc-core-<version> or yani-core-<version>, comma separated." >&2
+                     exit 1 ;;
+                esac
+                # A `v` is allowed on the version and dropped, since the files
+                # carry the bare number.
+                version="${version#v}"
+                # A component with no version names no release. Refusing it here
+                # is what keeps verify-versions honest: it compares the tagged
+                # version against the file, and an empty one would compare
+                # nothing and wave through whatever the file happens to say.
+                if [ -z "$version" ]; then
+                  echo "::error::tag component '$part' names $project with no version." >&2
+                  exit 1
+                fi
+                # One component per project. Two components for one project name
+                # two versions for it, and only one of them could be published.
+                case "$project" in
+                  yamc-core) if [ "$publish_yamc" = true ]; then
+                               echo "::error::tag names yamc-core twice, so it names two versions for it." >&2
+                               exit 1
+                             fi
+                             build_yamc=true; publish_yamc=true; tagged_yamc="$version" ;;
+                  yani-core) if [ "$publish_yani" = true ]; then
+                               echo "::error::tag names yani-core twice, so it names two versions for it." >&2
+                               exit 1
+                             fi
+                             build_yani=true; publish_yani=true; tagged_yani="$version" ;;
+                esac
+                echo "tag names $project $version"
+              done
+              # A tag naming no project publishes nothing, so it is a typo
+              # rather than a release. Refused here, before a matrix whose only
+              # possible outcome is a green tick and an empty upload.
+              if [ "$publish_yamc" = false ] && [ "$publish_yani" = false ]; then
+                echo "::error::tag '${TAG:-}' names no project, so it would publish nothing." >&2
+                exit 1
+              fi
+              ;;
+            workflow_dispatch)
+              # A dispatch builds what it publishes. `none` is the dry run of
+              # the full matrix, so it builds both and publishes neither.
+              case "${PUBLISH:-none}" in
+                none)      build_yamc=true; build_yani=true ;;
+                yamc-core) build_yamc=true; publish_yamc=true ;;
+                yani-core) build_yani=true; publish_yani=true ;;
+                both)      build_yamc=true; build_yani=true
+                           publish_yamc=true; publish_yani=true ;;
+                *) echo "::error::unknown publish input '${PUBLISH:-}'." >&2; exit 1 ;;
+              esac
+              # A warning rather than an error, since nothing wrong is
+              # published: the override simply has no job left to reach, which
+              # otherwise reads in the log like a version that went out.
+              if [ -n "${YAMC_OVERRIDE:-}" ] && [ "$build_yamc" = false ]; then
+                echo "::warning::yamc_version is set, but publish=${PUBLISH:-none} builds no yamc-core wheel, so the override reaches nothing." >&2
+              fi
+              if [ -n "${YANI_OVERRIDE:-}" ] && [ "$build_yani" = false ]; then
+                echo "::warning::yani_version is set, but publish=${PUBLISH:-none} builds no yani-core wheel, so the override reaches nothing." >&2
+              fi
+              ;;
+            *)
+              # push and pull_request: build and test everything, publish
+              # nothing. That is ordinary CI, and this change leaves it alone.
+              build_yamc=true; build_yani=true ;;
+          esac
+
+          # tee, so the plan is readable in the log of the job that made it.
+          {
+            echo "build_yamc=$build_yamc"
+            echo "build_yani=$build_yani"
+            echo "publish_yamc=$publish_yamc"
+            echo "publish_yani=$publish_yani"
+            echo "tagged_yamc_version=$tagged_yamc"
+            echo "tagged_yani_version=$tagged_yani"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  # Build wheels for Linux
+  linux:
+    needs: [plan]
+    # A release that does not name yamc-core has no use for a transport wheel.
+    # This is also the job the test matrix below hangs off, so skipping it here
+    # is most of the runner time a yani-core-only release used to burn.
+    if: needs.plan.outputs.build_yamc == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Override yamc-core's version
+        # Only a dispatch that names one. A release publishes what the file
+        # says, which verify-versions has already checked against the tag.
+        if: inputs.yamc_version != ''
+        shell: bash
+        env:
+          VERSION: ${{ inputs.yamc_version }}
+        run: bash scripts/set-wheel-version.sh yamc-python "$VERSION"
+
+      - name: Install Rust (third-party license bundle)
+        uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.0
+      - name: Generate THIRD-PARTY-LICENSES.html for the wheel
+        run: cargo about generate about.hbs --all-features --locked -o packages/yamc-core/THIRD-PARTY-LICENSES.html
+
+      # maturin-action's `-m` takes a Cargo manifest, so the package's own
+      # pyproject (which names the crate manifest) is reached by cd'ing to it.
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: packages/yamc-core
+          target: ${{ matrix.target }}
+          args: --release --out dist --features mesh,cad,gpu -i /opt/python/cp310-cp310/bin/python
+          manylinux: auto
+          docker-options: -e CARGO_NET_RETRY=${{ env.CARGO_NET_RETRY }}
+          # The container has its own network, and that is where the 0.11.0
+          # release broke: the host steps above had just reached crates.io,
+          # seconds before cargo inside the container could not. So wait for
+          # the index here, where waiting costs seconds, rather than in the
+          # build, where it costs the release. Purely additive: if the index
+          # never comes back, maturin fails exactly as it does today.
+          before-script-linux: |
+            if command -v curl >/dev/null 2>&1; then
+              for attempt in 1 2 3 4 5 6 7 8 9 10; do
+                curl -sSf -o /dev/null --max-time 20 https://index.crates.io/config.json && break
+                echo "index.crates.io unreachable (attempt $attempt/10), retrying in 15s"
+                sleep 15
+              done
+            fi
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: packages/yamc-core/dist
+
+  # Build the standalone transmutation wheel (issue #381). One target is
+  # enough: it is the same abi3 wheel machinery as yamc's, over a strict subset
+  # of the crates, so a second platform would only re-test maturin.
+  yani-wheel:
+    name: yani-wheel (${{ matrix.name }})
+    needs: [plan]
+    # A release that does not name yani-core has no use for a transmutation
+    # wheel, and this is the only job that builds one.
+    if: needs.plan.outputs.build_yani == 'true'
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      # `pip install yani` has no sdist to fall back on, so a platform without a
+      # wheel here is a platform where the install simply fails. The transport
+      # wheel covers the same three.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runs-on: ubuntu-latest
+            target: x86_64
+            # The manylinux container's own interpreter, not the runner's.
+            interpreter: "-i /opt/python/cp310-cp310/bin/python"
+            manylinux: auto
+          - name: windows-x64
+            runs-on: windows-latest
+            target: x64
+            interpreter: ""
+            manylinux: auto
+          - name: macos-aarch64
+            runs-on: macos-14
+            target: aarch64-apple-darwin
+            interpreter: ""
+            manylinux: auto
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Override yani-core's version
+        # Only a dispatch that names one. A release publishes what the file
+        # says, which verify-versions has already checked against the tag.
+        if: inputs.yani_version != ''
+        shell: bash
+        env:
+          VERSION: ${{ inputs.yani_version }}
+        run: bash scripts/set-wheel-version.sh yani-python "$VERSION"
+
+      - name: Install Rust (third-party license bundle)
+        uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.0
+      - name: Generate THIRD-PARTY-LICENSES.html for the wheel
+        run: cargo about generate about.hbs --all-features --locked -o packages/yani-core/THIRD-PARTY-LICENSES.html
+
+      # maturin-action's `-m` takes a Cargo manifest, so the package's own
+      # pyproject (which names the crate manifest) is reached by cd'ing to it.
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: packages/yani-core
+          target: ${{ matrix.target }}
+          args: --release --out dist ${{ matrix.interpreter }}
+          manylinux: ${{ matrix.manylinux }}
+          docker-options: -e CARGO_NET_RETRY=${{ env.CARGO_NET_RETRY }}
+          # The container has its own network, and that is where the 0.11.0
+          # release broke: the host steps above had just reached crates.io,
+          # seconds before cargo inside the container could not. So wait for
+          # the index here, where waiting costs seconds, rather than in the
+          # build, where it costs the release. Purely additive: if the index
+          # never comes back, maturin fails exactly as it does today.
+          before-script-linux: |
+            if command -v curl >/dev/null 2>&1; then
+              for attempt in 1 2 3 4 5 6 7 8 9 10; do
+                curl -sSf -o /dev/null --max-time 20 https://index.crates.io/config.json && break
+                echo "index.crates.io unreachable (attempt $attempt/10), retrying in 15s"
+                sleep 15
+              done
+            fi
+
+      # The wheel alone, in an interpreter with no yamc in it. That is what
+      # makes the absences packages/yani-core/tests asserts mean anything, and
+      # it is why that suite cannot live in the `test` job.
+      #
+      # It replaces an inline heredoc that asserted a subset of the same names.
+      # pytest.ini has named this testpath since #533 and no job ran it, so the
+      # suite and the heredoc were drifting apart with only the heredoc gating
+      # anything (issue #535).
+      - name: The wheel must carry none of the transport stack
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          pip install packages/yani-core/dist/yani_core-*.whl
+          python -c "import yani; print('yani', yani.__version__)"
+          pytest packages/yani-core/tests -v
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-yani-${{ matrix.name }}
+          path: packages/yani-core/dist
+
+  # Build wheels for Windows
+  windows:
+    needs: [plan]
+    if: needs.plan.outputs.build_yamc == 'true'
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        target: [x64]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Override yamc-core's version
+        # Only a dispatch that names one. A release publishes what the file
+        # says, which verify-versions has already checked against the tag.
+        if: inputs.yamc_version != ''
+        shell: bash
+        env:
+          VERSION: ${{ inputs.yamc_version }}
+        run: bash scripts/set-wheel-version.sh yamc-python "$VERSION"
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install Rust (third-party license bundle)
+        uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.0
+      - name: Generate THIRD-PARTY-LICENSES.html for the wheel
+        run: cargo about generate about.hbs --all-features --locked -o packages/yamc-core/THIRD-PARTY-LICENSES.html
+
+      # maturin-action's `-m` takes a Cargo manifest, so the package's own
+      # pyproject (which names the crate manifest) is reached by cd'ing to it.
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: packages/yamc-core
+          target: ${{ matrix.target }}
+          args: --release --out dist --features mesh,cad,gpu
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-windows-${{ matrix.target }}
+          path: packages/yamc-core/dist
+
+  # Build wheels for macOS (Apple Silicon only)
+  macos:
+    needs: [plan]
+    if: needs.plan.outputs.build_yamc == 'true'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Override yamc-core's version
+        # Only a dispatch that names one. A release publishes what the file
+        # says, which verify-versions has already checked against the tag.
+        if: inputs.yamc_version != ''
+        shell: bash
+        env:
+          VERSION: ${{ inputs.yamc_version }}
+        run: bash scripts/set-wheel-version.sh yamc-python "$VERSION"
+
+      - name: Install Rust (third-party license bundle)
+        uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.0
+      - name: Generate THIRD-PARTY-LICENSES.html for the wheel
+        run: cargo about generate about.hbs --all-features --locked -o packages/yamc-core/THIRD-PARTY-LICENSES.html
+
+      # maturin-action's `-m` takes a Cargo manifest, so the package's own
+      # pyproject (which names the crate manifest) is reached by cd'ing to it.
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: packages/yamc-core
+          target: aarch64-apple-darwin
+          args: --release --out dist --features mesh,cad,gpu
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-macos-aarch64
+          path: packages/yamc-core/dist
+
+  # Test MPI build and functionality
+  test-mpi:
+    name: Test MPI on ${{ matrix.os }}
+    needs: [plan]
+    # Builds the transport extension from source rather than from the wheel
+    # artifacts, so it needs no wheel job. It is still yamc-only work, and a
+    # yani-core release has no use for it.
+    if: needs.plan.outputs.build_yamc == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install MPI (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenmpi-dev openmpi-bin
+
+      - name: Install MPI (macOS)
+        if: matrix.os == 'macos-14'
+        run: |
+          brew install open-mpi
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Verify MPI installation
+        run: |
+          which mpicc
+          mpicc --version
+          which mpirun || which mpiexec
+
+      - name: Install YAMC with MPI (venv + maturin develop)
+        env:
+          YAMC_MPI: "1"
+        shell: bash
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install maturin pytest
+          # In a subshell so the venv above, and the steps below that source it,
+          # keep the repo root as their working directory. maturin needs the
+          # package's own pyproject, and its `-m` takes a Cargo manifest rather
+          # than a pyproject, so cd'ing is what reaches it.
+          (cd packages/yamc-core && maturin develop --release --features mesh,cad,gpu,mpi)
+
+      - name: Verify MPI support
+        run: |
+          source .venv/bin/activate
+          python -c "import yamc; print(f'MPI enabled: {yamc.parallel.has_mpi()}')"
+          mpirun -np 2 python -c "import yamc; print(f'Rank {yamc.parallel.mpi_rank()} of {yamc.parallel.mpi_size()}')"
+
+      - name: Cache nuclear-data test fixtures
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/yamc
+          key: yamc-test-fixtures-endf-b8.1-v5
+
+      - name: Fetch nuclear-data test fixtures
+        run: python3 scripts/fetch_test_fixtures.py
+
+      - name: Run MPI test suite
+        run: |
+          source .venv/bin/activate
+          # Serial: exercises the no-MPI-comm code paths with has_mpi() == True.
+          python -m pytest packages/yamc-core/tests/test_mpi.py -v
+          # Under mpirun: exercises rank/size, particle distribution, and
+          # tally reduction across ranks (np=2 matches the TBR step below).
+          mpirun -np 2 python -m pytest packages/yamc-core/tests/test_mpi.py -v
+
+      - name: Run TBR example with MPI
+        run: |
+          source .venv/bin/activate
+          mpirun -np 2 python examples/python/tbr.py
+
+      - name: Run TBR example serial (for comparison)
+        run: |
+          source .venv/bin/activate
+          python examples/python/tbr.py
+
+  # Test wheels on each platform
+  test:
+    name: Test on ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    needs: [plan, linux, windows, macos]
+    # No status function, so the default success() over `needs` still applies
+    # and a failed wheel build still stops this. The condition only adds the
+    # case the cascade cannot express on its own: nothing to test when nothing
+    # was built.
+    if: needs.plan.outputs.build_yamc == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # GitHub-hosted runners hit "shutdown signal" infra flakes about once
+      # in three runs lately. With the default fail-fast: true, that single
+      # flake cancels every sibling matrix job and blocks the entire PR.
+      # Turn it off so the other ~5 jobs keep running and the PR can still
+      # land if only the flaky one died.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+        # Test only oldest and newest supported Python -- middle versions
+        # exercise the same abi3 wheel and rarely surface unique regressions.
+        python-version: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Determine artifact name
+        id: artifact
+        shell: bash
+        run: |
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            echo "name=wheels-linux-x86_64" >> $GITHUB_OUTPUT
+          elif [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            echo "name=wheels-windows-x64" >> $GITHUB_OUTPUT
+          elif [[ "${{ matrix.os }}" == "macos-14" ]]; then
+            echo "name=wheels-macos-aarch64" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download wheels
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: dist
+
+      - name: Install wheel and test dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest numpy pandas
+          # Install the abi3 wheel (works with any Python 3.9+)
+          python -m pip install dist/*.whl
+
+      - name: Cache nuclear-data test fixtures
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/yamc
+          key: yamc-test-fixtures-endf-b8.1-v5
+
+      - name: Fetch nuclear-data test fixtures
+        shell: bash
+        run: python scripts/fetch_test_fixtures.py
+
+      - name: Run tests
+        run: pytest packages/yamc-core/tests/
+
+      - name: Run example scripts
+        shell: bash
+        run: |
+          python examples/python/nuclide_example.py
+          python examples/python/tbr.py
+          python examples/python/usage_in_python.py
+          python examples/python/usage_in_python_cube.py
+          # simple_tokamak.py runs 1M particles and OOMs the ubuntu CI
+          # runner (~7 GB available). Runs fine locally; skip in CI.
+          # python examples/python/simple_tokamak.py
+          python examples/python/get_particle_tracks.py
+
+
+  # The only job that puts BOTH wheels in one interpreter.
+  #
+  # pytests/parity is owned by neither package for exactly that reason, and
+  # until this job existed its `importorskip("yani")` calls skipped on every
+  # run: the `test` job installs the yamc wheel and the `yani-wheel` job
+  # installs the yani one, so no interpreter in CI had ever held both (issue
+  # #535). The test whose docstring says it guards that splitting the bindings
+  # out (#381) changed no physics had never guarded anything here.
+  #
+  # ubuntu only, and one Python. This proves the two wheels are the same code,
+  # which is a property of the bindings crate rather than of a platform, and
+  # scripts/fetch_test_fixtures.py links the chain fixture into the tree with
+  # symlinks that Windows makes it copy instead.
+  parity:
+    name: yamc + yani parity
+    needs: [plan, linux, yani-wheel]
+    # Both wheels or nothing: a release naming one project builds one wheel,
+    # and there is no parity to check with one of them.
+    if: >-
+      needs.plan.outputs.build_yamc == 'true' &&
+      needs.plan.outputs.build_yani == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # Separate directories, because both wheels are named `*_core-*.whl` and
+      # one `path:` would leave the install globs unable to tell them apart.
+      - name: Download the yamc wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: wheels-linux-x86_64
+          path: dist-yamc
+
+      - name: Download the yani wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: wheels-yani-linux-x86_64
+          path: dist-yani
+
+      - name: Install both wheels into one interpreter
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          # pyarrow is not optional here. test_yani_yamc_converter_parity reads
+          # the Arrow both wheels wrote back through it, so an environment
+          # without it compares nothing.
+          python -m pip install pytest pyarrow
+          python -m pip install dist-yamc/*.whl dist-yani/*.whl
+          # The two extension modules must coexist rather than merely install.
+          python -c "import yamc, yani; assert yamc.Material is not yani.Material; print(yamc.__version__, yani.__version__)"
+
+      - name: Cache nuclear-data test fixtures
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/yamc
+          key: yamc-test-fixtures-endf-b8.1-v5
+
+      # Runs on a cache hit too. The cache holds ~/.cache/yamc, and it is this
+      # script that puts the tests/*.arrow symlinks into the working tree; the
+      # transmutation chain the inventory parity test loads is one of them.
+      - name: Fetch nuclear-data test fixtures
+        shell: bash
+        run: python scripts/fetch_test_fixtures.py
+
+      - name: Run the parity suite
+        env:
+          # Fail rather than skip. This is the job that has both wheels, so a
+          # missing one is the bug, and a green run over ten skips is the exact
+          # report that hid #535.
+          YAMC_PARITY_REQUIRE_WHEELS: "1"
+        run: pytest pytests/parity -v
+
+  # Type-stub integrity + type-checking gate. Keeps the shipped .pyi stubs in
+  # sync with the Rust bindings (regenerate + diff), verifies the advertised
+  # public surface is actually importable, and runs pyright + mypy over sample
+  # usage so the stubs are proven to deliver real types -- and to reject wrong
+  # ones.
+  stubs-typing:
+    name: Stubs + type checking
+    # Ordered after yani-wheel so "yani works with no transport stack
+    # installed" is established before `maturin develop` below brings yamc in.
+    needs: [yani-wheel]
+    # `needs` here is ORDERING ONLY, and `!cancelled()` is what makes it so: it
+    # opts out of the default success() gating, so no outcome of yani-wheel can
+    # take this job with it. Both outcomes would, otherwise. A yamc-core-only
+    # release skips yani-wheel, and a failed yani-wheel is exactly the run whose
+    # repo-wide lint and stub drift you still want reported.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # Repo-wide, so it lives in the repo-wide static-checking job. It used to
+      # sit inside the windows wheel build, where it only ran when that wheel
+      # was built and reported a lint failure as a wheel failure. This job has
+      # no `if`, so the lint runs on every event.
+      - name: Check Python formatting and linting
+        run: |
+          # Pinned: ruff 0.16.0 introduced rules (UP045, pyi handling, ...)
+          # that flag ~580 pre-existing spots, mostly in the generated
+          # stubs. Bump the pin together with a deliberate codebase sweep.
+          python -m pip install "ruff==0.15.22"
+          ruff check .
+
+      # The workspace carries a `[profile.release]` whose whole point is the
+      # published wheels (issue #576), and a wheel job reaches it only through
+      # `--release`. maturin's default is the dev profile, so dropping the flag
+      # would not fail anything -- it would quietly ship an unoptimized
+      # extension, which is the kind of regression nothing else here notices.
+      - name: Every wheel build must be a release build
+        shell: bash
+        run: |
+          missing=0
+          while IFS= read -r line; do
+            case "$line" in
+              *--release*) ;;
+              *) echo "::error::maturin args without --release: $line" >&2; missing=1 ;;
+            esac
+          done < <(grep -E '^\s+args:.*--out dist' .github/workflows/ci-python.yml)
+          exit "$missing"
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Set up venv and build the extension
+        shell: bash
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install maturin pyright mypy
+          # Default features (mesh,cad) match scripts/build_stubs.py, so the
+          # regenerated stub and the runtime surface are compared like-for-like.
+          # In a subshell, so the venv and the steps below keep the repo root:
+          # maturin needs the package's own pyproject, and its `-m` takes a
+          # Cargo manifest rather than a pyproject.
+          (cd packages/yamc-core && maturin develop)
+
+      - name: Regenerate stubs and check for drift
+        shell: bash
+        run: |
+          source .venv/bin/activate
+          python scripts/build_stubs.py
+          # Both wheels' stub trees, because build_stubs.py writes both and they
+          # do not hold the same names: yani's __all__ has the transport surface
+          # filtered out of it (#452), so it drifts on its own.
+          # --porcelain catches both modified tracked files and brand-new
+          # untracked stubs (a new submodule .pyi), which `git diff` would miss.
+          stubs="packages/yamc-core/python/yamc/_core/ packages/yani-core/python/yani/_core/"
+          changed="$(git status --porcelain -- $stubs)"
+          if [ -n "$changed" ]; then
+            echo "::error::Generated stubs are out of date. Run 'python scripts/build_stubs.py' and commit $stubs." >&2
+            echo "$changed"
+            git diff -- $stubs
+            exit 1
+          fi
+
+      - name: Check public surface (stub <-> runtime)
+        shell: bash
+        run: |
+          source .venv/bin/activate
+          python scripts/check_public_surface.py
+
+      - name: Type-check sample usage (pyright + mypy)
+        shell: bash
+        run: |
+          source .venv/bin/activate
+          pyright --pythonpath .venv/bin/python packages/yamc-core/tests/typing/sample_usage.py
+          mypy --python-executable .venv/bin/python packages/yamc-core/tests/typing/sample_usage.py
+
+      - name: Assert the stubs reject wrong types
+        shell: bash
+        run: |
+          source .venv/bin/activate
+          # sample_errors.py is intentionally wrong. Assert mypy reports the
+          # SPECIFIC diagnostics, not merely "some non-zero exit" -- an unrelated
+          # import/syntax failure (exit 2) must not be mistaken for the stubs
+          # correctly rejecting the bad calls.
+          set +e
+          out="$(mypy --python-executable .venv/bin/python --no-error-summary packages/yamc-core/tests/typing/sample_errors.py 2>&1)"
+          code=$?
+          set -e
+          echo "$out"
+          if [ "$code" != "1" ]; then
+            echo "::error::expected mypy to exit 1 (type errors found) for sample_errors.py, got exit $code" >&2
+            exit 1
+          fi
+          echo "$out" | grep -q 'Argument "density".*\[arg-type\]' || { echo "::error::missing expected density [arg-type] error" >&2; exit 1; }
+          echo "$out" | grep -q 'Argument "scores".*\[arg-type\]'  || { echo "::error::missing expected scores [arg-type] error" >&2; exit 1; }
+          echo "$out" | grep -q '\[assignment\]'                    || { echo "::error::missing expected cross_section_data [assignment] error" >&2; exit 1; }
+          # The two subsections that take a bool take only False. Grepping the
+          # rendered union is what proves it is Literal[False] and not bool:
+          # with bool, `= True` type-checks and this line goes quiet.
+          echo "$out" | grep -qE 'Literal\[True\].*\[assignment\]' || { echo "::error::missing expected transmutation_reactions = True [assignment] error" >&2; exit 1; }
+          # and the other three take no bool at all.
+          echo "$out" | grep -qE 'expression has type "bool".*variable has type "str \| None"' || { echo "::error::missing expected transmutation_decay_data = False [assignment] error" >&2; exit 1; }
+          echo "Stubs correctly rejected the negative cases."
+
+  # The versions are in the files, so nothing downstream reads the tag to learn
+  # what it is publishing. This is what keeps the tag honest: a release tagged
+  # yani-core-0.6.0 that ships 0.5.0 because nobody bumped the file is a worse
+  # outcome than a failed release, since PyPI will not let the number be reused
+  # and the tag then names a version that does not exist.
+  verify-versions:
+    name: Versions match the tag and are unpublished
+    needs: [plan]
+    # Only what this run will actually upload, which is the difference from the
+    # old gate: a yani-core release used to echo both projects' versions and so
+    # read in the log like a double release (issue #534).
+    if: >-
+      needs.plan.outputs.publish_yamc == 'true' ||
+      needs.plan.outputs.publish_yani == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - shell: bash
+        env:
+          # The tag was parsed once, in `plan`. This job compares, it does not
+          # re-derive: the grammar living in two places is how a tag could mean
+          # one thing here and another at the publish gate.
+          PUBLISH_YAMC: ${{ needs.plan.outputs.publish_yamc }}
+          PUBLISH_YANI: ${{ needs.plan.outputs.publish_yani }}
+          TAGGED_YAMC: ${{ needs.plan.outputs.tagged_yamc_version }}
+          TAGGED_YANI: ${{ needs.plan.outputs.tagged_yani_version }}
+          YAMC_OVERRIDE: ${{ inputs.yamc_version }}
+          YANI_OVERRIDE: ${{ inputs.yani_version }}
+        run: |
+          set -euo pipefail
+          version_of () { sed -nE 's/^version = "(.*)"/\1/p' "$1" | head -1; }
+          fail=0
+
+          # project, publishing?, version the tag names, dispatch override, file
+          check () {
+            local project="$1" publish="$2" tagged="$3" override="$4" file="$5"
+            if [ "$publish" != true ]; then
+              echo "$project: not published by this run"
+              return 0
+            fi
+            local version="${override:-$(version_of "$file")}"
+            echo "$project $version"
+
+            # A dispatch override has no tag to check against, which is the
+            # case it exists for: a first upload that creates the project on
+            # PyPI, or a re-publish after a fix.
+            if [ -n "$tagged" ] && [ "$tagged" != "$version" ]; then
+              echo "::error::tag says $project $tagged, but $file says $version." >&2
+              echo "::error::Bump the file and re-tag, or tag the version the file already carries." >&2
+              fail=1
+              return 0
+            fi
+
+            # Publishing is the last job of a long matrix, and finding out
+            # there that the number was taken wastes the whole run for a
+            # one-line fix.
+            local code
+            code="$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/$project/$version/json")"
+            if [ "$code" = "200" ]; then
+              echo "::error::$project $version is already on PyPI. Bump it." >&2
+              fail=1
+            else
+              echo "$project $version is free (HTTP $code)"
+            fi
+          }
+
+          check yamc-core "$PUBLISH_YAMC" "${TAGGED_YAMC:-}" "${YAMC_OVERRIDE:-}" crates/yamc-python/Cargo.toml
+          check yani-core "$PUBLISH_YANI" "${TAGGED_YANI:-}" "${YANI_OVERRIDE:-}" crates/yani-python/Cargo.toml
+          exit $fail
+
+  # Sort the built wheels into one directory per PyPI project, so each publish
+  # job below uploads exactly one project's files.
+  collect:
+    name: Collect the distributions
+    # yani-wheel is not an ancestor of `test` (which needs only the three
+    # platform wheel jobs), so without naming it here the download step can run
+    # before that wheel exists and the release goes out with yamc only.
+    needs: [plan, test, test-mpi, yani-wheel, parity, verify-versions]
+    runs-on: ubuntu-latest
+    # `!cancelled()` opts out of the default success() gating over `needs`,
+    # which is the whole difficulty of a single-project release: on a
+    # yani-core-only tag the three yamc wheel jobs skip, so `test` and
+    # `test-mpi` skip, and the cascade would skip `collect` and with it BOTH
+    # publish jobs. Nothing would go out, silently. So each need is named, and
+    # a skip is accepted only where the plan says that project is not being
+    # built. A test that skipped on a run that IS building yamc is still a
+    # stop. `parity` is the same rule over both flags at once: it needs the two
+    # wheels, so it runs, and gates, only when both are built.
+    #
+    # Hyphenated job ids go through needs['...'], since needs.test-mpi parses
+    # as a subtraction.
+    if: >-
+      ${{ !cancelled() &&
+          needs.plan.result == 'success' &&
+          (needs.plan.outputs.publish_yamc == 'true' ||
+           needs.plan.outputs.publish_yani == 'true') &&
+          needs['verify-versions'].result == 'success' &&
+          (needs.plan.outputs.build_yamc != 'true' ||
+           (needs.test.result == 'success' &&
+            needs['test-mpi'].result == 'success')) &&
+          (needs.plan.outputs.build_yani != 'true' ||
+           needs['yani-wheel'].result == 'success') &&
+          (needs.plan.outputs.build_yamc != 'true' ||
+           needs.plan.outputs.build_yani != 'true' ||
+           needs.parity.result == 'success') }}
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: Split the distributions by project
+        env:
+          BUILD_YAMC: ${{ needs.plan.outputs.build_yamc }}
+          BUILD_YANI: ${{ needs.plan.outputs.build_yani }}
+        run: |
+          # The split is on the wheel FILENAME, which is what PyPI reads the
+          # project name from, not on artifact names (yamc's are per-platform).
+          # Filenames normalize `-` to `_`, so the yani-core distribution
+          # matches `yani_core-*` and not `yani-*`.
+          mkdir -p dist-yamc dist-yani
+          # Conditional, because GitHub runs this under `bash -e` and a glob
+          # matching nothing makes `mv` fail: on a single-project release the
+          # other project's wheels were never built, so an unconditional `mv`
+          # breaks `collect` outright and publishes neither.
+          if [ "$BUILD_YAMC" = true ]; then
+            mv dist/yamc_core-* dist-yamc/
+          fi
+          if [ "$BUILD_YANI" = true ]; then
+            mv dist/yani_core-* dist-yani/
+          fi
+          ls -la dist-yamc/ dist-yani/
+          # A wheel neither project claims means a new distribution was added
+          # without a publish step, or one was built that the plan did not
+          # expect. Fail rather than drop it silently.
+          leftover="$(ls -A dist)"
+          if [ -n "$leftover" ]; then
+            echo "::error::distributions with no publish step: $leftover" >&2
+            exit 1
+          fi
+
+      # Gated on the plan rather than uploaded empty: an empty artifact is a
+      # warning nobody reads, and a publish job that fired when it should not
+      # have then uploads whatever it finds instead of dying on a missing one.
+      - uses: actions/upload-artifact@v7
+        if: needs.plan.outputs.build_yamc == 'true'
+        with:
+          name: dist-yamc
+          path: dist-yamc/
+      - uses: actions/upload-artifact@v7
+        if: needs.plan.outputs.build_yani == 'true'
+        with:
+          name: dist-yani
+          path: dist-yani/
+
+  # One publish job per PyPI project, each in its OWN environment.
+  #
+  # Not a style choice: PyPI requires a *pending* trusted publisher to be unique
+  # on (owner, repository, workflow, environment), because that tuple is what
+  # tells it which project to create on the first upload. Two projects released
+  # from one repository and one workflow therefore cannot share an environment
+  # until both exist, and registering the second is refused with "a pending
+  # trusted publisher matching this configuration has already been registered
+  # for a different project name". Distinct environments keep both registrable.
+  publish-yamc-core:
+    name: Publish yamc-core to PyPI
+    needs: [plan, collect]
+    runs-on: ubuntu-latest
+    # The plan, not the tag. Reading `contains(tag_name, 'yamc-core-')` here
+    # meant this job's own condition was true on every push and pull request,
+    # and only `collect` being skipped kept a wheel off PyPI. The gate now says
+    # false directly, so it does not depend on a second job's skip to be safe.
+    #
+    # `success()` over `needs` used to be left implicit. It is spelled out
+    # instead, because the implicit form does not survive "re-run failed jobs":
+    # when the 0.11.0 release lost its linux wheel to a crates.io blip and the
+    # failed jobs were re-run, `collect` -- which carries a status function --
+    # was re-evaluated and rebuilt the distributions, while this job stayed
+    # skipped and nothing went to PyPI. The condition is otherwise the same one:
+    # the plan must have named the project, and `collect` must have succeeded.
+    if: >-
+      ${{ !cancelled() &&
+          needs.plan.result == 'success' &&
+          needs.collect.result == 'success' &&
+          needs.plan.outputs.publish_yamc == 'true' }}
+    environment:
+      name: pypi-yamc-core
+      url: https://pypi.org/p/yamc-core
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist-yamc
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
+  publish-yani-core:
+    name: Publish yani-core to PyPI
+    needs: [plan, collect]
+    runs-on: ubuntu-latest
+    # Gated exactly as publish-yamc-core above, and for the reason given there.
+    if: >-
+      ${{ !cancelled() &&
+          needs.plan.result == 'success' &&
+          needs.collect.result == 'success' &&
+          needs.plan.outputs.publish_yani == 'true' }}
+    environment:
+      name: pypi-yani-core
+      url: https://pypi.org/p/yani-core
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist-yani
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
+  # What actually went out, stated once at the end.
+  #
+  # The complaint that started #534 was that a single-project release READ like
+  # a double release in the log. A run that publishes nothing looks identical to
+  # one that published everything unless something says so, and the failure mode
+  # this whole file has to avoid is a release that quietly publishes nothing at
+  # all. So the plan is echoed, and each project the plan named is confirmed to
+  # be resolvable on PyPI.
+  assert-published:
+    name: Assert what went out
+    needs: [plan, publish-yamc-core, publish-yani-core]
+    runs-on: ubuntu-latest
+    # `!cancelled()`, because on a single-project release the other publish job
+    # skips and the cascade would take this check with it, which is the exact
+    # silence it exists to break.
+    if: >-
+      ${{ !cancelled() &&
+          needs.plan.result == 'success' &&
+          (needs.plan.outputs.publish_yamc == 'true' ||
+           needs.plan.outputs.publish_yani == 'true') }}
+    steps:
+      - uses: actions/checkout@v7
+      - shell: bash
+        env:
+          PUBLISH_YAMC: ${{ needs.plan.outputs.publish_yamc }}
+          PUBLISH_YANI: ${{ needs.plan.outputs.publish_yani }}
+          RESULT_YAMC: ${{ needs['publish-yamc-core'].result }}
+          RESULT_YANI: ${{ needs['publish-yani-core'].result }}
+          YAMC_OVERRIDE: ${{ inputs.yamc_version }}
+          YANI_OVERRIDE: ${{ inputs.yani_version }}
+        run: |
+          set -euo pipefail
+          version_of () { sed -nE 's/^version = "(.*)"/\1/p' "$1" | head -1; }
+          fail=0
+
+          # project, publishing?, that job's result, dispatch override, file
+          confirm () {
+            local project="$1" publish="$2" result="$3" override="$4" file="$5"
+            if [ "$publish" != true ]; then
+              echo "$project: not part of this release (job: $result)"
+              return 0
+            fi
+            if [ "$result" != success ]; then
+              echo "::error::$project was to be published, but its publish job is '$result'." >&2
+              fail=1
+              return 0
+            fi
+
+            local version="${override:-$(version_of "$file")}"
+            # PyPI's JSON API trails the upload by seconds rather than by
+            # nothing, so a single 404 here is propagation, not a failed
+            # release. Two minutes is well past what it takes; beyond that the
+            # upload is the likelier explanation.
+            local code=""
+            for _ in $(seq 1 12); do
+              code="$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/$project/$version/json")"
+              [ "$code" = "200" ] && break
+              sleep 10
+            done
+            if [ "$code" = "200" ]; then
+              echo "PUBLISHED $project $version"
+            else
+              echo "::error::$project $version is not on PyPI two minutes after its publish job succeeded (HTTP $code)." >&2
+              fail=1
+            fi
+          }
+
+          confirm yamc-core "$PUBLISH_YAMC" "$RESULT_YAMC" "${YAMC_OVERRIDE:-}" crates/yamc-python/Cargo.toml
+          confirm yani-core "$PUBLISH_YANI" "$RESULT_YANI" "${YANI_OVERRIDE:-}" crates/yani-python/Cargo.toml
+          exit $fail

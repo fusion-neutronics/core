@@ -1,0 +1,27 @@
+name: Licenses
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Permissive-license gate: `cargo about generate` fails if any dependency
+# in the shipped tree uses a license that is not in about.toml's `accepted`
+# allow-list. The generated THIRD-PARTY-LICENSES.html is NOT committed --
+# it is produced fresh in the wheel-build jobs (ci-python.yml) and shipped
+# via pyproject.toml `license-files`.
+jobs:
+  permissive-licenses:
+    name: Dependency licenses are permissive
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.0
+      # Generating the bundle is the gate: cargo-about exits non-zero if any
+      # dependency's license is outside the allow-list. The output is
+      # discarded here (gitignored); the wheel build regenerates it.
+      - name: Check dependency licenses against the permissive allow-list
+        run: cargo about generate about.hbs --all-features --locked -o THIRD-PARTY-LICENSES.html

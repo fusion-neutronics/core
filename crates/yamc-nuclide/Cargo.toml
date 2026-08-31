@@ -1,0 +1,73 @@
+[package]
+name = "yamc-nuclide"
+version = "0.1.0"
+edition = "2021"
+description = "Evaluated neutron nuclear data for yamc -- Nuclide, Reaction, and reaction-product sampling"
+license = "MIT"
+
+[lib]
+name = "yamc_nuclide"
+path = "src/lib.rs"
+
+[dependencies]
+once_cell = "1.21.3"
+rand = "0.10"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+nuclear-data-schema = { path = "../nuclear-data-schema" }
+# For the reaction name tables, which would otherwise be a second copy of
+# what the parser already declares. The parser itself is dead code here and
+# the linker strips it: +9.8 KB (+0.24%) in the wasm build.
+endf = { path = "../endf" }
+# Not optional, unlike the rest of the Arrow stack: `F64Buffer` is the type of
+# every large numeric field on Nuclide/Reaction/FastXSGrid, so it has to exist in
+# a build with no reader at all. arrow-buffer is a leaf crate (bytes, half, num)
+# and arrow-array already pulls it in at the same version.
+arrow-buffer = "53"
+arrow-array = { version = "53", optional = true }
+# lz4 feature decodes the option-D IPC-lz4 sections (pure-Rust lz4_flex, keeps
+# the download build C-free). arrow-select concats the batch-per-MT
+# reactions.arrow back into one batch on read.
+arrow-ipc = { version = "53", optional = true, features = ["lz4"] }
+arrow-select = { version = "53", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking"], optional = true }
+# Pure-Rust rustls crypto provider for the `download-tls` (HTTPS) build. No C
+# toolchain required, unlike ring. graviola supports x86_64 + aarch64 only (it
+# emits a hard `compile_error!` on other targets); on POWER9 / RISC-V / other
+# arches, build without `download-tls` to get the crypto-free HTTP-only path.
+rustls-graviola = { version = "0.4", optional = true }
+# Home-directory resolution, and NOT optional: `cache_root` is on the
+# no-feature path and every consumer of the cache needs the same answer.
+# A hand-rolled HOME/USERPROFILE read is not a substitute: this wraps
+# `std::env::home_dir`, which additionally falls back to the passwd entry on
+# unix and to SHGetKnownFolderPath on Windows, and a process with no exported
+# HOME (a container, a service, `env -i`) has a home directory by those and
+# not by the variable.
+etcetera = "0.11"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+[features]
+default = ["arrow"]
+arrow = ["dep:arrow-array", "dep:arrow-ipc", "dep:arrow-select"]
+download = ["dep:reqwest"]
+# HTTPS download support (default in wheels/dev). Adds the pure-Rust graviola
+# rustls provider and reqwest's provider-less rustls+webpki-roots stack. Without
+# this feature `download` is HTTP-only with no crypto at all: pure Rust on every
+# architecture, the fallback for targets graviola does not support.
+download-tls = ["download", "dep:rustls-graviola", "reqwest/rustls-tls-webpki-roots-no-provider"]
+# Debug tracing flags shared with the yamc crate. yamc's `debug_*`
+# features forward to these so `cargo run --features debug_collision`
+# at the workspace level still toggles the inner-loop prints.
+debug_collision = []
+debug_sampling = []
+
+[package.metadata.cargo-machete]
+# Declared only to enable the `wasm_js` entropy backend for the
+# transitive getrandom under wasm32 (no direct `use`).
+ignored = ["getrandom", "getrandom_v04"]
+
+[dev-dependencies]
+# Resolves the nuclear-data fixture cache the same way the loader does,
+# rather than through `HOME` alone (issue #544).
+yamc-test-cache = { path = "../yamc-test-cache" }

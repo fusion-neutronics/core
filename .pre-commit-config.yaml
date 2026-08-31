@@ -1,0 +1,139 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Keep in sync with the pinned ruff in .github/workflows/ci-python.yml so a
+    # local pre-commit pass and CI agree on the rule set.
+    rev: v0.15.22
+    hooks:
+      - id: ruff
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --check --all
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      # Auto-apply machine-fixable clippy suggestions first; --allow-dirty
+      # / --allow-staged are required because pre-commit runs on a staged
+      # tree. If it changes files the hook fails so they can be re-staged.
+      # Benches are excluded (matching CI): the yamc-gpu benches reference
+      # the macOS-gated `kernels` module and don't build on macOS.
+      - id: cargo-clippy-fix
+        name: cargo clippy --fix
+        entry: cargo clippy --fix --lib --bins --tests --examples --workspace --allow-dirty --allow-staged
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --workspace --lib --bins --tests --examples -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-test
+        name: cargo test
+        entry: cargo test --workspace --exclude yamc-gpu
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      # yamc-gpu runs separately, one process per test -- see the header of
+      # scripts/test-gpu.sh for why (shared GPU-context exhaustion).
+      - id: cargo-test-gpu
+        name: cargo test (yamc-gpu, per-process)
+        entry: ./scripts/test-gpu.sh
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-examples
+        name: cargo examples
+        entry: bash -c 'cargo build -p yamc --examples --release && cargo build -p yamt --examples --release'
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      # pre-commit runs hooks from the repo root, which holds no pyproject.toml:
+      # the wheel is defined by packages/yamc-core/pyproject.toml. `maturin
+      # develop` has no flag that points at a pyproject (its -m takes a Cargo
+      # manifest instead), so the package directory has to be the working
+      # directory. .venv stays at the repo root, hence ../../ once cd'd in.
+      - id: maturin-develop
+        name: maturin develop (no MPI)
+        entry: bash -c 'cd packages/yamc-core && ../../.venv/bin/maturin develop --release --features mesh,cad'
+        language: system
+        types_or: [rust, python]
+        pass_filenames: false
+
+      # The CAD tier is excluded to keep the hook quick: it needs cadquery and
+      # meshes real geometry. tests/typing/ needs no --ignore, its sample_*.py
+      # files are read by the type checkers and never collected by pytest.
+      - id: pytest
+        name: pytest (yamc, no MPI)
+        entry: .venv/bin/python -m pytest packages/yamc-core/tests/ --ignore=packages/yamc-core/tests/cad
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      # The converter suite needs neither wheel -- pyarrow and the endf reader,
+      # no compiled bindings -- so unlike the yani and parity suites it can run
+      # here. It is also the one that guards the Arrow schema, so a column added
+      # on the Rust side breaks it: that is #573, which went red in CI twice
+      # while every local check passed.
+      - id: pytest-nuclear-data-to-arrow
+        name: pytest (nuclear_data_to_arrow)
+        entry: .venv/bin/python -m pytest packages/nuclear_data_to_arrow/tests -q
+        language: system
+        types_or: [rust, python]
+        pass_filenames: false
+
+      # Stubs are generated from the bindings and committed, and CI diffs them,
+      # so a binding change that does not regenerate them fails there and
+      # nowhere else. Regenerating is not enough on its own either: the drift
+      # has to be a failure, which is what the emptiness test makes it.
+      - id: stubs
+        name: stubs regenerate cleanly
+        # The two stub trees by name, as ci-python.yml checks them. A
+        # `packages/*/python` pathspec silently matches nothing, so the hook
+        # passed on real drift; and --porcelain catches a brand-new untracked
+        # .pyi, which `git diff` would miss.
+        entry: bash -c '.venv/bin/python scripts/build_stubs.py && test -z "$(git status --porcelain -- packages/yamc-core/python/yamc/_core/ packages/yani-core/python/yani/_core/)"'
+        language: system
+        types_or: [rust, python]
+        pass_filenames: false
+
+      # A pyclass is usable without add_class, so a stub can advertise a name
+      # the wheel never binds, and only an installed wheel can tell. This is
+      # what caught `split_nuclide` being routed to the wrong module (#573).
+      - id: public-surface
+        name: public surface matches the runtime
+        entry: .venv/bin/python scripts/check_public_surface.py
+        language: system
+        types_or: [rust, python]
+        pass_filenames: false
+
+      # MPI hooks disabled -- MPI build environment not available
+      # - id: maturin-develop-mpi
+      #   name: maturin develop (with MPI)
+      #   entry: bash -c 'cd packages/yamc-core && BINDGEN_EXTRA_CLANG_ARGS="-I/usr/lib/gcc/x86_64-linux-gnu/14/include" ../../.venv/bin/maturin develop --release --features "mesh,cad,mpi"'
+      #   language: system
+      #   types_or: [rust, python]
+      #   pass_filenames: false
+
+      # - id: pytest-mpi
+      #   name: pytest (with MPI)
+      #   entry: .venv/bin/python -m pytest packages/yamc-core/tests/ --ignore=packages/yamc-core/tests/cad
+      #   language: system
+      #   types: [python]
+      #   pass_filenames: false
+
+      - id: python-examples
+        name: python examples
+        entry: bash -c 'set -e; for f in examples/python/nuclide_example.py examples/python/tbr.py examples/python/usage_in_python.py examples/python/usage_in_python_cube.py examples/python/simple_tokamak.py examples/python/get_particle_tracks.py; do echo "Running $f"; .venv/bin/python "$f"; done'
+        language: system
+        types_or: [python]
+        pass_filenames: false

@@ -1,0 +1,63 @@
+[package]
+name = "yani-transmute"
+version = "0.1.0"
+edition = "2021"
+description = "Transmutation and activation driver over the yani solver -- irradiation schedules, multigroup spectrum collapse, per-material inventories"
+license = "MIT"
+
+[lib]
+name = "yani_transmute"
+path = "src/lib.rs"
+
+[dependencies]
+# Nuclide-name parsing (`zam`), so self-shielding reads the mass number out
+# of "Ta180_m1" the same way the rest of the workspace does rather than by
+# hand. The crate is deliberately dependency-free, so this costs nothing.
+endf = { path = "../endf" }
+yani = { path = "../yani" }
+# Activity and decay heat, so the ensemble accessors evaluate the same
+# functions a user gets off a `Material` rather than a second copy of them.
+# `yani-decay` depends on `yani` and `yamc-nuclide`, both already here, and
+# never on this crate, so the edge is acyclic.
+yani-decay = { path = "../yani-decay" }
+# The counter-based PCG stream the transport side seeds from. A zero-dependency
+# leaf, so the uncertainty sampler costs nothing to reach and gives the same
+# answer on every platform.
+yamc-rng = { path = "../yamc-rng" }
+yamc-materials = { path = "../yamc-materials", default-features = false }
+yamc-nuclide = { path = "../yamc-nuclide", default-features = false }
+
+# Split on target the way `yani/Cargo.toml` splits faer, and for the same
+# reason: rayon has no thread pool on wasm32, where the browser has one thread
+# and `yani-wasm` must keep building. Every parallel site here is written once
+# and only its driver line is `#[cfg]`-ed, so the sequential and parallel forms
+# cannot drift apart. No feature flag: this is a target-level concern, not a
+# user-tunable knob (issue #576, finding 5).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1.10"
+
+[features]
+default = ["arrow"]
+arrow = ["yamc-nuclide/arrow", "yamc-materials/arrow"]
+download = ["yamc-nuclide/download", "yamc-materials/download"]
+download-tls = ["download", "yamc-nuclide/download-tls", "yamc-materials/download-tls"]
+# Debug tracing flag shared with the yamc crate, which forwards its own
+# `debug_transmutation` here so a workspace-level build still gets the
+# per-step inventory traces.
+debug_transmutation = []
+
+[dev-dependencies]
+# The uncertainty test needs a directory that actually carries
+# `covariance.arrow`, and nothing published does yet, so it writes one with the
+# real converter from the committed ENDF fixture. No cycle: `yamc-convert` does
+# not depend on this crate.
+yamc-convert = { path = "../yamc-convert" }
+lzma-rs = "0.3"
+tempfile = "3"
+# Explicit thread pools for the thread-count determinism test. A dev-dependency
+# rather than a target-split one: dev-deps are not built for wasm32, so there is
+# no wasm build to keep working here.
+rayon = "1.10"
+# Resolves the nuclear-data fixture cache the same way the loader does,
+# rather than through `HOME` alone (issue #544).
+yamc-test-cache = { path = "../yamc-test-cache" }

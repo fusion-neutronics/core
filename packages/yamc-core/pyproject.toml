@@ -1,0 +1,48 @@
+[build-system]
+requires = ["maturin>=1.14,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "yamc-core"
+# The version lives in `crates/yamc-python/Cargo.toml`, the manifest named by
+# `manifest-path` below, and `dynamic` is what lets maturin read it from there.
+# A static number here would be a second copy to keep in sync for no gain: that
+# crate is never published to crates.io, so its version field is free to carry
+# this wheel's number, and one number cannot disagree with itself.
+# See that manifest for the bump procedure, and docs/developer_info.md.
+dynamic = ["version"]
+description = "Yet Another Monte Carlo -- neutron transport with mesh geometry support"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+# Ship the project's own MIT license plus the generated third-party license
+# bundle (regenerated and license-gated in CI by .github/workflows/licenses.yml).
+license-files = ["LICENSE", "THIRD-PARTY-LICENSES.html"]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/fusion-neutronics/yamc"
+Documentation = "https://fusion-neutronics.github.io/yamc/"
+Repository = "https://github.com/fusion-neutronics/yamc"
+Issues = "https://github.com/fusion-neutronics/yamc/issues"
+Discussions = "https://github.com/fusion-neutronics/yamc/discussions"
+
+[project.optional-dependencies]
+cad = ["cadquery>=2.8.0", "numpy"]
+viz = ["h5py", "numpy"]
+pandas = ["pandas>=2.2"]
+polars = ["polars>=0.20"]
+xarray = ["xarray", "pandas>=2.2"]
+all = ["cadquery>=2.8.0", "numpy", "h5py"]
+dev = ["pytest", "maturin>=1.14", "cadquery>=2.8.0", "numpy", "matplotlib", "tqdm"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "yamc._core"
+manifest-path = "../../crates/yamc-python/Cargo.toml"
+# `extension-module` is not a default cargo feature (so the `stub_gen` binary
+# can link libpython); maturin must enable it for every wheel/develop build.
+features = ["yamc-python/extension-module"]
+# Ship the PEP 561 marker + generated type stubs in the wheel (belt-and-braces;
+# python-source already copies the tree, but be explicit for older maturin).
+include = ["python/yamc/py.typed", "python/yamc/**/*.pyi"]

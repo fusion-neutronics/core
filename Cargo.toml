@@ -1,0 +1,25 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+# There was no `[profile.*]` anywhere in this repo, so every release build --
+# including the wheels published to PyPI, which the four `maturin-action` jobs
+# in `.github/workflows/ci-python.yml` all build with `--release` -- used
+# cargo's defaults of `lto = false` and `codegen-units = 16`. Most of the
+# transmutation collapse's cost is in calls that cross a crate boundary
+# (`Reaction::cross_section_at` and the `F64Buffer` `Deref`, from
+# `yani-transmute` into `yamc-nuclide`), and without LTO none of them inline.
+#
+# Accuracy-safe: LLVM does not reassociate floating point without `fast-math`,
+# which Rust never enables, so this changes how the same operations are
+# scheduled and not which operations they are. Issue #576.
+[profile.release]
+codegen-units = 1
+# "thin" rather than "fat". Fat gains another percent or so and links arrow,
+# faer and reqwest as one LTO unit, which is where the manylinux wheel
+# containers run out of memory.
+lto = "thin"
+# NOT "abort". pyo3 turns a Rust panic into a Python exception by unwinding
+# across the extension boundary, so aborting here would turn every recoverable
+# error in the bindings into a killed interpreter.
+panic = "unwind"

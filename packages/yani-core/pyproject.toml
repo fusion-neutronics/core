@@ -1,0 +1,35 @@
+[build-system]
+requires = ["maturin>=1.14,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "yani-core"
+# The version lives in `crates/yani-python/Cargo.toml`, the manifest named by
+# `manifest-path` below, and `dynamic` is what lets maturin read it from there.
+# See that manifest for the bump procedure, and docs/developer_info.md.
+dynamic = ["version"]
+description = "Transmutation and activation without transport: a material, an irradiation schedule and a neutron spectrum in, inventories out"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "THIRD-PARTY-LICENSES.html"]
+dependencies = []
+
+# No [project.urls]. This is the compiled distribution, not the one to install,
+# and the links pointed at a repository that is not public -- so on PyPI they
+# were both an invitation to somewhere people cannot go and four dead links.
+# `yani` is the front door and carries the documentation URL; the README below
+# says so. Adding links back here would undo that on purpose.
+
+[project.optional-dependencies]
+dev = ["pytest", "maturin>=1.14"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "yani._core"
+manifest-path = "../../crates/yani-python/Cargo.toml"
+# `extension-module` is off by default on yani-python so that the yamc wheel,
+# which links the same crate as an rlib, never gets a second `PyInit__core`.
+# This wheel is the one that wants it.
+features = ["yani-python/extension-module"]
+include = ["python/yani/py.typed", "python/yani/**/*.pyi"]

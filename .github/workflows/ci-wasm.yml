@@ -1,0 +1,121 @@
+# Gates the wasm32-unknown-unknown build for the full `yamc` crate
+# (with `--features wasm`). The original blockers (getrandom feature
+# wiring, faer/rayon → atomic-wait, the silent bit-rot in the
+# wasm-bindgen modules) were resolved in #169, #170, #173, #174.
+# A failure here means a wasm-side regression -- please don't merge it
+# without understanding why.
+name: WASM tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Three tries over ten seconds is all cargo gives a registry that is briefly
+  # unreachable, and a release has already been lost to a twelve-second one
+  # (yani-core 0.11.0). Ten stretches the same ladder over about a minute.
+  CARGO_NET_RETRY: 10
+
+jobs:
+  build_and_test:
+    name: Rust tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        run: rustup update stable && rustup default stable
+      # Cache the dependency build; see ci-rust.yml for why this matters.
+      # The native half of this workflow: same host target as the Rust tests
+      # workflow, but a different job set, so it keeps its own key rather than
+      # competing for that one.
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-wasm
+          cache-on-failure: true
+      - name: Cache nuclear-data test fixtures
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/yamc
+          key: yamc-test-fixtures-endf-b8.1-v5
+      - name: Fetch nuclear-data test fixtures
+        run: python3 scripts/fetch_test_fixtures.py
+      - name: Test compile
+        run: |
+          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+          cd crates/yamc
+          wasm-pack build --target web --features wasm
+          cargo test -p yamc --features wasm-test
+          RUST_BACKTRACE=full wasm-pack test --headless --firefox --features wasm-test
+
+  # The browser binding, which the job above does not cover: `yamc` builds for
+  # wasm32 there, but `yani-wasm` is a separate crate with its own dependency
+  # set, and nothing gated it.
+  #
+  # `pkg/` is published so a browser front end can consume a built package
+  # rather than vendoring a committed binary, which is what yani-online does
+  # today -- it carries a copy of this output and a CORE_COMMIT file recording
+  # which commit produced it, because there was nothing to download.
+  yani_wasm:
+    name: yani-wasm browser binding
+    runs-on: ubuntu-latest
+    permissions:
+      # Only the release step needs it, and only for `gh release upload`.
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        run: rustup update stable && rustup default stable
+      # Cache the dependency build; see ci-rust.yml for why this matters.
+      # Its OWN key: this builds for wasm32-unknown-unknown, so it shares no
+      # compiled artifacts with any host-target job.
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm32
+          cache-on-failure: true
+      - name: Cache nuclear-data test fixtures
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/yamc
+          key: yamc-test-fixtures-endf-b8.1-v5
+      # The native tests drive `YaniSession` against real Arrow fixtures. They
+      # skip themselves when the fixtures are absent rather than failing, so
+      # without this step the job would pass while asserting nothing.
+      - name: Fetch nuclear-data test fixtures
+        run: python3 scripts/fetch_test_fixtures.py
+
+      - name: Build the package
+        run: |
+          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+          cd crates/yani-wasm
+          wasm-pack build --target web --out-dir pkg
+
+      # `--target web` only. A classic Worker needs a classic script, which is
+      # what `--target no-modules` emits, but a front end can convert the module
+      # form at load time -- yani-online does -- so a second artifact would be
+      # two things to keep in step for no gain.
+      - name: Test the binding natively
+        run: cargo test -p yani-wasm --locked
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: yani-wasm-pkg
+          path: crates/yani-wasm/pkg/
+
+      - name: Attach the package to the release
+        if: github.event_name == 'release' && github.event.action == 'published'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          tar -czf "yani-wasm-${TAG}.tar.gz" -C crates/yani-wasm pkg
+          gh release upload "$TAG" "yani-wasm-${TAG}.tar.gz" --clobber

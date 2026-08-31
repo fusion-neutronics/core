@@ -1,0 +1,76 @@
+[package]
+name = "yani-python"
+# The version the next yani-core release publishes, and not published to
+# crates.io, so it is free to carry the wheel's number; packages/yani-core's
+# pyproject.toml names this manifest and declares `dynamic = ["version"]`.
+# It moves independently of yamc-core's: the two are built and released
+# together and that is no reason to share a number, since a change to the
+# transport converter says nothing about the inventory package. Bump it with
+# `cargo set-version -p yani-python <version>`.
+# See .github/workflows/ci-python.yml and docs/developer_info.md.
+version = "0.12.0"
+edition = "2021"
+license = "MIT"
+description = "Python bindings for the transmutation stack: materials, nuclides, chains, irradiation schedules and inventories. Shared by the yamc and yani wheels."
+
+[lib]
+name = "yani_python"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+# The `///` doc comments are Python API docs, surfaced through the generated
+# stubs, not Rust doctests. See yamc-python's manifest for the same note.
+doctest = false
+
+[[bin]]
+# Emits packages/yani-core/python/yani/_core.pyi. Must be built WITHOUT
+# `extension-module` so it can link libpython.
+name = "stub_gen"
+path = "src/bin/stub_gen.rs"
+required-features = ["stub-gen"]
+doc = false
+
+[dependencies]
+pyo3 = { version = "0.29", features = ["abi3-py310"] }
+pyo3-stub-gen = "0.23.0"
+# Sampling demos on `Nuclide`/`ReactionProduct` (sample_scatter_cosine and
+# friends) draw from a seeded StdRng so the Python examples are reproducible.
+rand = "0.10"
+# Reading the chain manifest that names a library's subsections.
+serde_json = "1.0"
+
+yamc-element = { path = "../yamc-element", features = ["download", "arrow"] }
+endf = { path = "../endf" }
+yamc-nuclide = { path = "../yamc-nuclide", features = ["download", "arrow"] }
+yamc-materials = { path = "../yamc-materials", features = ["download", "arrow"] }
+# The energy/spatial/angular distribution types the irradiation schedule's
+# spectrum is expressed in. This is the one crate outside the transmutation
+# closure proper that the bindings need; it brings `yamc-particle` (229 lines
+# of particle state over `yamc-nuclide`, already here) and nothing else.
+yamc-source = { path = "../yamc-source" }
+yamc-particle = { path = "../yamc-particle" }
+yani = { path = "../yani" }
+# Data generation: the whole reason a yani user never types `import endf`.
+yani-convert = { path = "../yani-convert" }
+# Cross sections for the reaction-rate collapse. The transport sections are
+# deliberately not built here: an activation run never reads them.
+yamc-convert = { path = "../yamc-convert" }
+yani-transmute = { path = "../yani-transmute", features = ["arrow", "download"] }
+yani-decay = { path = "../yani-decay" }
+
+[features]
+default = ["download-tls"]
+# HTTPS data downloads via the pure-Rust graviola provider (no C toolchain).
+download-tls = [
+    "yamc-element/download-tls",
+    "yamc-nuclide/download-tls",
+    "yamc-materials/download-tls",
+]
+# Builds the `_core` pymodule entry point. Off by default so the symbol exists
+# only in the `yani` wheel and can never collide inside yamc's cdylib, and so
+# the `stub_gen` binary can link libpython.
+extension-module = ["pyo3/extension-module"]
+# Build gate for the `stub_gen` binary (see [[bin]] above).
+stub-gen = []
+# Collision-history tracking, mirrored from yamc-particle so a workspace-level
+# build with the flag on still compiles this crate.
+debug_history = ["yamc-particle/debug_history"]

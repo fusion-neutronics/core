@@ -1,0 +1,288 @@
+//! Issue #111 phase 2: the GPU must never lose an (n,xn) secondary.
+//!
+//! The neutron kernel transports a history's extra (n,xn) neutrons in the same
+//! thread, on a stack of `PEND_SLOTS` thread-private slots. Before phase 2 the
+//! slots were append-only, so the cap counted every secondary a history ever
+//! queued rather than the ones outstanding, and past it the kernel reverted to
+//! weight multiplication -- different physics from the CPU, which banks and
+//! transports real neutrons. Phase 2 reclaims the slot on pop and, when the
+//! stack is genuinely full, hands the secondary to the DEVICE PARTICLE BANK for
+//! the host to drain in a later pass.
+//!
+//! The later pass is what these tests are about. A spilled secondary finishes
+//! in a different launch from the rest of its history, so its contributions
+//! have to fold back into the ORIGINATING history's variance sample or the mean
+//! stays right while `std_dev` goes wrong. The non-fissile dispatch normally
+//! runs `PerHistory` (one sample per thread, flushed when that thread's history
+//! ends), which cannot express that; on detecting a spill it redoes the launch
+//! under `PerSource` (one sample per source neutron, keyed by `bank_source_idx`
+//! and therefore alive across launches) and drains into it.
+//!
+//! Finding a fixture that spills at all took some doing: with the slots
+//! reclaimed, the depth needed is the emission tree's DFS depth, and a chain of
+//! endothermic (n,xn) reactions runs out of energy against its own threshold
+//! after a few levels (`matched_stream_diff::nxn_spill_depth_is_sufficient`
+//! measures zero spills in 8e5 histories at 14 MeV). A THICK beryllium sphere
+//! at 19.9 MeV does it: (n,2n) opens at 1.85 MeV and the extra ~6 MeV buys one
+//! more level of multiplication than a 14 MeV source can.
+//!
+//! Run it:
+//!   cargo test -p yamc --features gpu --release \
+//!       --test gpu_nxn_spill -- --nocapture --test-threads=1
+
+#![cfg(all(feature = "gpu", not(target_os = "macos")))]
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use yamc::geo::{BoundaryType, HalfspaceType, Region, Surface, SurfaceKind};
+use yamc::geometry::cell::Cell;
+use yamc::geometry::Geometry;
+use yamc::model::{Model, TrackingMode, TransportSettings, Verbose};
+use yamc_materials::Material;
+use yamc_particle::particle::ParticleType;
+use yamc_source::distribution::angular::AngularDistribution;
+use yamc_source::distribution::energy::Discrete;
+use yamc_source::distribution::spatial::Point;
+use yamc_source::source::{
+    ParticleSource, Source, SourceEnergyDistribution, SourceSpatialDistribution,
+};
+use yamc_tallies::filter::cell::CellFilter;
+use yamc_tallies::filter::particle_type::ParticleTypeFilter;
+use yamc_tallies::filter::Filter;
+use yamc_tallies::tally::Tally;
+use yamc_tallies::Estimator;
+
+const SEED: u64 = 20260726;
+/// 8 mean free paths of beryllium at 14 MeV, so a history multiplies deep into
+/// the (n,2n) chain before it leaks.
+const RADIUS: f64 = 40.0;
+/// 2 mean free paths: deep enough to multiply, shallow enough that no history
+/// ever exceeds the in-thread stack, so it exercises the ordinary path.
+const THIN_RADIUS: f64 = 10.0;
+const BE_DENSITY: f64 = 1.85;
+/// Just below the top of the ENDF/B-8.1 evaluation. At 14 MeV no history in
+/// 8e5 needs more than the four in-thread slots; the extra ~6 MeV here buys one
+/// more level of multiplication, which is what puts histories over the edge.
+const SOURCE_E: f64 = 19.9e6;
+const MAX_STEPS: u32 = 10_000;
+/// Enough histories that the ~1-in-4000 spill rate fires many times over, and
+/// enough that the per-history std_dev comparison has something to say.
+const N_HISTORIES: usize = 200_000;
+
+fn data_path(nuclide: &str) -> String {
+    yamc_test_cache::nuclide_path(nuclide)
+}
+
+fn data_present(nuclide: &str) -> bool {
+    std::path::Path::new(&data_path(nuclide)).exists()
+}
+
+fn gpu_available() -> bool {
+    yamc_gpu::GpuContext::new().is_ok()
+}
+
+fn be9_sphere(radius: f64) -> (Geometry, u32) {
+    let sphere = Surface {
+        surface_id: Some(1),
+        kind: SurfaceKind::Sphere {
+            x0: 0.0,
+            y0: 0.0,
+            z0: 0.0,
+            radius,
+        },
+        boundary: BoundaryType::Vacuum,
+        name: None,
+    };
+    let region = Region::new_from_halfspace(HalfspaceType::Below(Arc::new(sphere)));
+
+    let mut material = Material::new(
+        HashMap::from([("Be9".to_string(), 1.0)]),
+        "atom",
+        "g/cm3",
+        Some(BE_DENSITY),
+    )
+    .unwrap();
+    material.set_material_id(1);
+    material.set_temperature("294");
+    let nm = HashMap::from([("Be9".to_string(), data_path("Be9"))]);
+    material.read_nuclear_data(&nm, None).unwrap();
+
+    let cell = Cell::new(Some(1), region, Some("be".into()), Some(0));
+    (
+        Geometry::new(vec![cell], vec![Arc::new(material)]).unwrap(),
+        1,
+    )
+}
+
+/// Cell-total neutron flux. Deliberately NOT energy-binned: the quantity under
+/// test is how much neutron is in the problem (a lost secondary shows up
+/// directly in the total), and a single bin keeps the per-history variance
+/// comparison to one number per estimator.
+fn flux_tally(cell_id: u32) -> Arc<Tally> {
+    let mut t = Tally::new();
+    t.filters.push(Filter::Cell(CellFilter::from_id(cell_id)));
+    t.filters.push(Filter::ParticleType(ParticleTypeFilter::new(
+        ParticleType::Neutron,
+    )));
+    t.scores = vec!["flux".parse().unwrap()];
+    t.estimator = Estimator::TrackLength;
+    t.initialize_batches(1);
+    Arc::new(t)
+}
+
+fn build_model(total_particles: usize, energy_ev: f64, radius: f64) -> (Model, TransportSettings) {
+    let (geometry, cell_id) = be9_sphere(radius);
+    let source = ParticleSource::Neutron(Source {
+        space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
+        angle: AngularDistribution::Isotropic,
+        energy: SourceEnergyDistribution::Discrete(
+            Discrete::new(vec![energy_ev], vec![1.0]).unwrap(),
+        ),
+        strength: 1.0,
+    });
+    let mut model = Model::new(geometry, vec![source], vec![flux_tally(cell_id)]);
+    model.verbose = Verbose::silent();
+    model.max_steps_per_particle = MAX_STEPS;
+    model.tracking_mode = TrackingMode::Surface;
+    let settings = TransportSettings {
+        total_particles: Some(total_particles),
+        seed: SEED,
+        threads: Some(0),
+        ..Default::default()
+    };
+    (model, settings)
+}
+
+/// Run the same model on both backends and return `((cpu_mean, cpu_std_dev),
+/// (gpu_mean, gpu_std_dev), spilled)` for the flux bin. `spilled` is how many
+/// (n,xn) secondaries the GPU handed to the device bank, so a test can state
+/// whether it exercised the spill path instead of assuming it did.
+fn both_backends(n: usize, energy_ev: f64, radius: f64) -> ((f64, f64), (f64, f64), u64) {
+    let (mut cpu_model, cpu_settings) = build_model(n, energy_ev, radius);
+    cpu_model
+        .simulate_transport(&cpu_settings)
+        .expect("CPU reference run");
+    let (mut gpu_model, gpu_settings) = build_model(n, energy_ev, radius);
+    let spilled = run_gpu_retry(&mut gpu_model, &gpu_settings).expect("GPU run");
+    (flux_stats(&cpu_model), flux_stats(&gpu_model), spilled)
+}
+
+/// `(mean, std_dev)` of the single flux bin.
+fn flux_stats(model: &Model) -> (f64, f64) {
+    let t = &model.tallies[0];
+    let mean = t.get_mean();
+    let sd = t.get_std_dev();
+    assert_eq!(mean.len(), 1, "expected a single-bin flux tally");
+    (mean[0], sd[0])
+}
+
+/// The GPU intermittently surfaces a transient `BufferAsyncError` on this
+/// shared adapter; retry a few times before calling it a failure.
+fn run_gpu_retry(model: &mut Model, settings: &TransportSettings) -> Result<u64, String> {
+    let mut last = String::new();
+    for attempt in 0..5 {
+        match yamc::gpu::run_on_gpu(model, settings) {
+            Ok(r) => return Ok(r.n_spilled_secondaries),
+            Err(e) => {
+                last = e.to_string();
+                let transient = last.contains("BufferAsync") || last.contains("buffer async");
+                if !transient {
+                    return Err(last);
+                }
+                eprintln!("GPU transient error (attempt {attempt}): {last}; retrying");
+            }
+        }
+    }
+    Err(last)
+}
+
+/// The headline: on a model that actually spills, the GPU's flux MEAN and
+/// per-history STD_DEV both agree with the CPU's.
+///
+/// The mean says no secondary was dropped (a dropped one is missing track
+/// length, biased low). The std_dev is the part the spill machinery could get
+/// wrong on its own: the spilling launch is redone under `PerSource`, so if the
+/// per-source fold were broken the std_dev of the WHOLE launch -- all 200000
+/// histories, not just the handful that spilled -- would move, which is what
+/// makes this a discriminating check despite the spill being rare.
+///
+/// Tolerances are Monte-Carlo tolerances, not exactness: the two backends do
+/// not run the same histories in the same order (the GPU banks and re-launches,
+/// the CPU keeps everything in one in-history stack), so this is a statistical
+/// comparison of two correct estimators, and the CPU is the reference.
+#[test]
+fn spilled_secondaries_keep_mean_and_std_dev() {
+    if !data_present("Be9") || !gpu_available() {
+        eprintln!("skipping gpu_nxn_spill: Be9 data or f64 GPU absent");
+        return;
+    }
+    let ((cpu_mean, cpu_sd), (gpu_mean, gpu_sd), spilled) =
+        both_backends(N_HISTORIES, SOURCE_E, RADIUS);
+    eprintln!(
+        "Be9 r={RADIUS} @ {:.1} MeV, {N_HISTORIES} histories, {spilled} spilled:\n  \
+         mean    cpu {cpu_mean:.6e}  gpu {gpu_mean:.6e}  ratio {:.5}\n  \
+         std_dev cpu {cpu_sd:.6e}  gpu {gpu_sd:.6e}  ratio {:.5}",
+        SOURCE_E / 1e6,
+        gpu_mean / cpu_mean,
+        gpu_sd / cpu_sd,
+    );
+
+    // Without this the two comparisons below say nothing about the spill: they
+    // would just be another CPU-vs-GPU parity check on a model that never left
+    // the in-thread stack.
+    assert!(
+        spilled > 0,
+        "no (n,xn) secondary spilled to the device bank, so this run never \
+         exercised the drain. The fixture no longer reaches the stack depth \
+         it was chosen for."
+    );
+
+    // A silently dropped secondary removes its whole sub-history's track
+    // length, so the mean is the direct test that nothing was lost. 1% is far
+    // wider than the statistical spread at this history count and far narrower
+    // than the effect of losing secondaries.
+    let mean_ratio = gpu_mean / cpu_mean;
+    assert!(
+        (mean_ratio - 1.0).abs() < 0.01,
+        "GPU flux mean {gpu_mean:.6e} vs CPU {cpu_mean:.6e} (ratio {mean_ratio:.5}): \
+         a spilled (n,xn) secondary was dropped or double-counted"
+    );
+
+    // The variance claim. A per-source fold that mis-attributed a spilled
+    // secondary's contributions -- to the wrong source, or as a sample of its
+    // own -- would show here even though the mean stayed right.
+    let sd_ratio = gpu_sd / cpu_sd;
+    assert!(
+        (sd_ratio - 1.0).abs() < 0.05,
+        "GPU flux std_dev {gpu_sd:.6e} vs CPU {cpu_sd:.6e} (ratio {sd_ratio:.5}): \
+         the spilled secondaries' contributions are not folding into their \
+         originating history's variance sample"
+    );
+}
+
+/// Control: a thinner Be9 sphere at 14 MeV, which never spills, so the ordinary
+/// (non-escalated) `PerHistory` path runs end to end. It pins that the
+/// agreement above is not an artefact of loose tolerances, and that the
+/// common-case path is unchanged.
+#[test]
+fn non_spilling_model_is_unaffected() {
+    if !data_present("Be9") || !gpu_available() {
+        eprintln!("skipping gpu_nxn_spill control: Be9 data or f64 GPU absent");
+        return;
+    }
+    let n = 100_000;
+    let ((cpu_mean, cpu_sd), (gpu_mean, gpu_sd), spilled) = both_backends(n, 14.06e6, THIN_RADIUS);
+    eprintln!(
+        "control Be9 r={THIN_RADIUS} @ 14.06 MeV, {n} histories, {spilled} spilled: \
+         mean ratio {:.5}, std_dev ratio {:.5}",
+        gpu_mean / cpu_mean,
+        gpu_sd / cpu_sd,
+    );
+    assert_eq!(
+        spilled, 0,
+        "the control fixture spilled, so it is no longer a control"
+    );
+    assert!((gpu_mean / cpu_mean - 1.0).abs() < 0.01);
+    assert!((gpu_sd / cpu_sd - 1.0).abs() < 0.05);
+}

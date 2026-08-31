@@ -1,0 +1,119 @@
+[package]
+name = "yamc"
+version = "0.3.0"
+edition = "2021"
+description = "Yet Another Monte Carlo code for neutron transport simulations"
+license = "MIT"
+exclude = [
+    "*.py",
+    "examples/python/",
+]
+
+[lib]
+name = "yamc"
+# `cdylib` is required for `wasm-pack build --features wasm` (CI lane in
+# ci-wasm.yml). `rlib` is what every downstream workspace crate links
+# against. Keep both.
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+once_cell = "1.21.3"
+nalgebra = "0.34.1"
+rand = "0.10"
+rand_chacha = { version = "0.10", optional = true }
+rayon = "1.10"
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+sha2 = "0.10"
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+mpi = { version = "0.8", optional = true }
+yamt = { path = "../yamt", optional = true, features = ["arrow"] }
+yani = { path = "../yani" }
+yani-transmute = { path = "../yani-transmute", default-features = false }
+yamc-geo = { path = "../yamc-geo" }
+# Only pulled in when the `wasm` feature is on -- adds the viewer
+# templating (~30 KB of strings) to the wasm binary for
+# WasmSimulation.plotHtml(). Native builds skip it entirely.
+yamc-plot = { path = "../yamc-plot", optional = true }
+yamc-nuclide = { path = "../yamc-nuclide", default-features = false }
+yamc-element = { path = "../yamc-element", default-features = false }
+yamc-materials = { path = "../yamc-materials", default-features = false }
+yamc-particle = { path = "../yamc-particle" }
+yamc-physics = { path = "../yamc-physics" }
+yamc-rng = { path = "../yamc-rng" }
+yamc-source = { path = "../yamc-source" }
+yamc-tallies = { path = "../yamc-tallies", default-features = false }
+yamc-gpu = { path = "../yamc-gpu", optional = true }
+
+[dev-dependencies]
+# Resolves the nuclear-data fixture cache the same way the loader does,
+# rather than through `HOME` alone (issue #544).
+yamc-test-cache = { path = "../yamc-test-cache" }
+wasm-bindgen-test = "0.3"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "cell_finding"
+harness = false
+
+[[bench]]
+name = "transport"
+harness = false
+
+# Probe examples are entirely `#![cfg(feature = "gpu")]`; declare the
+# feature requirement so cargo skips them (rather than compiling an
+# empty crate with no `main`) when `gpu` is off.
+[[example]]
+name = "probe_ttb_sampling"
+required-features = ["gpu"]
+
+[[example]]
+name = "probe_ttb_yields"
+required-features = ["gpu"]
+
+[features]
+default = ["arrow"]
+debug_xs = []
+debug_sampling = ["yamc-nuclide/debug_sampling"]
+debug_runtime = []
+debug_transmutation = ["yani-transmute/debug_transmutation"]
+debug_collision = ["yamc-nuclide/debug_collision", "yamc-materials/debug_collision"]
+debug_history = ["yamc-particle/debug_history", "yamc-physics/debug_history"]
+debug_timing = []
+debug_diagnostics = ["yamc-physics/debug_diagnostics"]
+download = ["yamc-nuclide/download", "yamc-element/download", "yamc-materials/download", "yani-transmute/download"]
+download-tls = ["download", "yamc-nuclide/download-tls", "yamc-element/download-tls", "yamc-materials/download-tls", "yani-transmute/download-tls"]
+arrow = ["yamc-nuclide/arrow", "yamc-element/arrow", "yamc-materials/arrow", "yamc-physics/arrow", "yamc-tallies/arrow", "yani-transmute/arrow"]
+mpi = ["dep:mpi"]
+wasm = [
+    "dep:wasm-bindgen",
+    "dep:js-sys",
+    "dep:console_error_panic_hook",
+    "dep:serde-wasm-bindgen",
+    # `plotHtml` on WasmSimulation pulls in the viewer templating.
+    "dep:yamc-plot"
+]
+wasm-test = ["wasm"]
+mesh = ["dep:yamt", "yamc-tallies/mesh"]
+cad = ["mesh"]
+# GPU compute path. Off by default; pulls cubecl/Vulkan via yamc-gpu.
+# On macOS yamc-gpu compiles to a stub whose `GpuContext::new()` returns
+# `NoF64Adapter`, so enabling `gpu` on macOS is a clean build but a
+# runtime no-op (caller falls back to CPU).
+gpu = ["dep:yamc-gpu", "dep:rand_chacha"]
+# The previous `welford` and `welford_stage3` cargo features have been
+# removed; all three variance-accumulation methods are compiled in and
+# selected at runtime via `Tally::variance_method`.
+
+[package.metadata.cargo-machete]
+# Declared only to turn on the `wasm_js` backend for the transitive
+# getrandom (entropy source for `rand` under wasm32). No direct `use`,
+# so cargo-machete can't see they're needed.
+ignored = ["getrandom", "getrandom_v04"]

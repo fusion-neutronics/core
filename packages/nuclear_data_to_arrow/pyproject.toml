@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nuclear_data_to_arrow"
+# Static, and bumped by hand. This package used setuptools-scm when it lived in
+# its own repo; inside the monorepo that would derive the version from yamc's
+# tags instead, and the value is not cosmetic: it is stamped into every
+# version.json as `converter_version` and is the provenance record for
+# published data. Mirrors the root pyproject.toml convention.
+version = "0.3.2"
+description = "Convert ENDF and ACE nuclear data to Apache Arrow IPC format"
+readme = "README.md"
+# Floor set by the endf reader the writers need, which requires >=3.10.
+# Claiming 3.9 (inherited from the standalone repo) made the CI matrix fail to
+# install rather than skip. Matches yamc's own floor.
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "pyarrow>=14.0",
+    "numpy",
+]
+
+# `endf` is deliberately NOT a dependency (issue #525).
+#
+# The writers need the local-develop branch of github.com/shimwell/endf-python
+# (the fork's main tracks upstream and is missing these too), not PyPI's
+# `endf`: from_njoy, Chain, radionuclide_production, isomer_table /
+# level_to_isomeric_state, univariate and the Compton profile helpers are all
+# fork-only. The ACE reader is NOT: endf 0.1.12 on PyPI ships ace.py and
+# IncidentNeutron.from_ace. What breaks a PyPI install is the missing
+# endf.incident_photon, which fails at import rather than at first use.
+#
+# Declaring it here named the WRONG package. `pip install nuclear_data_to_arrow`
+# resolved PyPI's endf, which then broke the import of a package that only
+# needs it for the writers, and there is no way to spell "that git branch" in a
+# dependency list that a published wheel can honour. So the fork is installed
+# explicitly by whoever runs a conversion (see the CI workflow, and the error
+# `__init__.py` raises), and the readers, `schemas` and the manifest work
+# without it.
+
+[project.optional-dependencies]
+# NJOY is needed only for source_format="endf" (Doppler broadening and MT 901);
+# source_format="ace" reads a pre-processed table and needs none of it.
+# NOTE: this wheel is built from upstream njoy/NJOY2016. FENDL 3.2d must be
+# processed with the IAEA-NDS fork instead, which this extra does NOT provide.
+# njoy2016 is not on PyPI, so this extra resolves only with the index it is
+# published to:
+#   pip install --extra-index-url https://shimwell.github.io/wheels \
+#       "nuclear_data_to_arrow[njoy]"
+njoy = ["njoy2016"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# schemas.py rebuilds every pyarrow schema from this manifest, so the package
+# does not import at all without it. Without this line setuptools ships only
+# the .py files and the wheel is dead on arrival, which an editable install
+# hides because it reads straight out of the source tree.
+[tool.setuptools.package-data]
+nuclear_data_to_arrow = ["schema/manifest.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

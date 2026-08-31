@@ -1,0 +1,749 @@
+//! `TransmutationResults`: the per-timestep inventories a transmutation
+//! produces, whether it was driven by transport or by a supplied spectrum.
+
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
+use std::collections::HashMap;
+use yani_transmute::{Estimate, LineEstimate, TransmutationResults};
+
+use crate::material::PyMaterial;
+
+/// A quantity's value, and the spread the nuclear-data ensemble puts on it.
+///
+/// ``nominal`` is the unperturbed run, and is present whether or not
+/// uncertainty was asked for. ``mean`` and ``std_dev`` are ``None`` below two
+/// replicas: a spread over fewer than two samples is unmeasured, not zero, and
+/// reporting it as zero would read as a quantity known exactly.
+#[gen_stub_pyclass]
+#[pyclass(name = "Estimate", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyEstimate {
+    inner: Estimate,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyEstimate {
+    /// The quantity from the unperturbed inventory.
+    #[getter]
+    fn nominal(&self) -> f64 {
+        self.inner.nominal
+    }
+
+    /// The ensemble mean, or None below two replicas.
+    ///
+    /// Worth comparing against ``nominal``: activity and decay heat are linear
+    /// in the atom densities, so the two agree to within the sampling error,
+    /// and a gap between them says the perturbation is biased rather than
+    /// merely wide.
+    #[getter]
+    fn mean(&self) -> Option<f64> {
+        self.inner.mean
+    }
+
+    /// The ensemble's sample standard deviation, or None below two replicas.
+    #[getter]
+    fn std_dev(&self) -> Option<f64> {
+        self.inner.std_dev
+    }
+
+    /// ``std_dev`` as a fraction of ``nominal``, or None if either is absent.
+    #[getter]
+    fn relative_std_dev(&self) -> Option<f64> {
+        self.inner.relative_std_dev()
+    }
+
+    /// How many replicas the ensemble held.
+    #[getter]
+    fn replicas(&self) -> usize {
+        self.inner.replicas
+    }
+
+    fn __repr__(&self) -> String {
+        match self.inner.std_dev {
+            Some(sigma) => format!(
+                "Estimate(nominal={:.4e}, std_dev={:.4e}, replicas={})",
+                self.inner.nominal, sigma, self.inner.replicas
+            ),
+            None => format!(
+                "Estimate(nominal={:.4e}, std_dev=None, replicas={})",
+                self.inner.nominal, self.inner.replicas
+            ),
+        }
+    }
+}
+
+impl From<Estimate> for PyEstimate {
+    fn from(inner: Estimate) -> Self {
+        Self { inner }
+    }
+}
+
+/// One decay-photon line, with the ensemble's spread on its emission rate.
+///
+/// The set of lines is not the same in every replica: a nuclide that falls
+/// below the density floor in one draw takes its lines out of that draw. The
+/// spectrum is reported over the union, a line missing from a replica counts as
+/// a zero in it, and ``emitting`` says how many replicas emitted it at all --
+/// which is the difference between a line that is dim and a line that is
+/// sometimes not there.
+#[gen_stub_pyclass]
+#[pyclass(name = "LineEstimate", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyLineEstimate {
+    inner: LineEstimate,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyLineEstimate {
+    /// Line energy [eV].
+    #[getter]
+    fn energy(&self) -> f64 {
+        self.inner.energy
+    }
+
+    /// Emission rate from the unperturbed inventory [photons/s].
+    #[getter]
+    fn nominal(&self) -> f64 {
+        self.inner.estimate.nominal
+    }
+
+    /// The ensemble mean [photons/s], or None below two replicas.
+    #[getter]
+    fn mean(&self) -> Option<f64> {
+        self.inner.estimate.mean
+    }
+
+    /// The ensemble's sample standard deviation, or None below two replicas.
+    #[getter]
+    fn std_dev(&self) -> Option<f64> {
+        self.inner.estimate.std_dev
+    }
+
+    /// ``std_dev`` as a fraction of ``nominal``, or None if either is absent.
+    #[getter]
+    fn relative_std_dev(&self) -> Option<f64> {
+        self.inner.estimate.relative_std_dev()
+    }
+
+    /// How many replicas the ensemble held.
+    #[getter]
+    fn replicas(&self) -> usize {
+        self.inner.estimate.replicas
+    }
+
+    /// Replicas that emitted this line at a positive rate.
+    ///
+    /// Below ``replicas`` when the emitter dropped out of some draws. A line
+    /// with ``emitting`` far below ``replicas`` has a mean that is mostly
+    /// zeros, and its spread says more about whether the line is there than
+    /// about how bright it is.
+    #[getter]
+    fn emitting(&self) -> usize {
+        self.inner.emitting
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "LineEstimate(energy={:.4e}, nominal={:.4e}, emitting={}/{})",
+            self.inner.energy,
+            self.inner.estimate.nominal,
+            self.inner.emitting,
+            self.inner.estimate.replicas
+        )
+    }
+}
+
+impl From<LineEstimate> for PyLineEstimate {
+    fn from(inner: LineEstimate) -> Self {
+        Self { inner }
+    }
+}
+
+/// Which derived quantity an accessor is after.
+#[derive(Clone, Copy)]
+enum Derived {
+    Activity,
+    DecayHeat,
+    ContactDose {
+        quantity: yani_decay::DoseQuantity,
+        build_up: f64,
+    },
+}
+
+/// Results from a transmutation calculation.
+///
+/// Contains material compositions at each timestep for all transmuted materials.
+/// Index 0 is the initial composition, index i is after timestep[i-1].
+#[gen_stub_pyclass]
+#[pyclass(name = "TransmutationResults", from_py_object)]
+#[derive(Clone)]
+pub struct PyTransmutationResults {
+    pub inner: TransmutationResults,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyTransmutationResults {
+    /// Cumulative times [s] including t=0.
+    #[getter]
+    fn times(&self) -> Vec<f64> {
+        self.inner.times.clone()
+    }
+
+    /// Timesteps used [s].
+    #[getter]
+    fn timesteps(&self) -> Vec<f64> {
+        self.inner.timesteps.clone()
+    }
+
+    /// Source rates used [n/cm^2/s].
+    #[getter]
+    fn source_rates(&self) -> Vec<f64> {
+        self.inner.source_rates.clone()
+    }
+
+    /// Number of transmutation steps.
+    #[getter]
+    fn num_steps(&self) -> usize {
+        self.inner.num_steps()
+    }
+
+    /// Get the evolution of a specific nuclide over all timesteps.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     nuclide: Nuclide name (e.g., "Co60").
+    ///
+    /// Returns:
+    ///     List of atom densities [atoms/barn-cm] at each time point
+    ///     (index 0 = initial, index i = after step i).
+    ///     Returns None if material_id not found.
+    fn get_nuclide_evolution(&self, material_id: u32, nuclide: &str) -> Option<Vec<f64>> {
+        self.inner.get_nuclide_evolution(material_id, nuclide)
+    }
+
+    /// Get nuclide density at a specific timestep.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     nuclide: Nuclide name (e.g., "U235").
+    ///     step: Timestep index (0 = initial).
+    ///
+    /// Returns:
+    ///     Atom density [atoms/barn-cm] or None if not found.
+    fn get_nuclide_density(&self, material_id: u32, nuclide: &str, step: usize) -> Option<f64> {
+        self.inner.get_nuclide_density(material_id, nuclide, step)
+    }
+
+    /// Get the nuclear-data standard deviation on a nuclide density.
+    ///
+    /// The spread over an ensemble of solves with the activation cross sections
+    /// resampled from their MF=33 covariance. In the same units as
+    /// ``get_nuclide_density``, so the pair reads as ``mean ± sigma``.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     nuclide: Nuclide name (e.g., "Mn56").
+    ///     step: Timestep index (0 = initial).
+    ///
+    /// Returns:
+    ///     Standard deviation [atoms/barn-cm], or None if the transmutation was
+    ///     run without ``data_uncertainty``. Step 0 is the initial composition
+    ///     and always reports 0.0: it is an input, and perturbing cross sections
+    ///     does not move it.
+    ///
+    ///     A nuclide whose evaluation carries no covariance also reports 0.0.
+    ///     That is not a claim of certainty -- check
+    ///     ``data_uncertainty_info["no_covariance_data"]``, which lists exactly
+    ///     those nuclides.
+    fn get_nuclide_uncertainty(&self, material_id: u32, nuclide: &str, step: usize) -> Option<f64> {
+        self.inner
+            .get_nuclide_uncertainty(material_id, nuclide, step)
+    }
+
+    /// Get the standard deviation of a nuclide's density at every timestep.
+    ///
+    /// Parallel to ``get_nuclide_evolution``, leading zero included, so the two
+    /// can be zipped without an index correction.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     nuclide: Nuclide name.
+    ///
+    /// Returns:
+    ///     List of standard deviations [atoms/barn-cm], or None if the
+    ///     transmutation was run without ``data_uncertainty``.
+    fn get_nuclide_uncertainty_evolution(
+        &self,
+        material_id: u32,
+        nuclide: &str,
+    ) -> Option<Vec<f64>> {
+        self.inner
+            .get_nuclide_uncertainty_evolution(material_id, nuclide)
+    }
+
+    /// Every replica's inventory at one timestep.
+    ///
+    /// For a quantity that has to be evaluated per sample rather than from the
+    /// mean. Activity, decay heat and the decay-photon spectrum are all
+    /// functions of a whole inventory, so evaluating one of them once per entry
+    /// here and taking the spread keeps the correlations between nuclides.
+    /// Taking the mean inventory and evaluating once throws them away, and
+    /// summing per-nuclide sigmas in quadrature assumes an independence that the
+    /// resampling exists precisely to avoid assuming.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     step: Timestep index (0 = initial, which has no ensemble).
+    ///
+    /// Returns:
+    ///     List of ``{nuclide: density}`` dicts, one per replica, or None if the
+    ///     transmutation was run without ``data_uncertainty``.
+    fn get_uncertainty_inventories(
+        &self,
+        material_id: u32,
+        step: usize,
+    ) -> Option<Vec<HashMap<String, f64>>> {
+        self.inner
+            .uncertainty_inventories(material_id, step)
+            .map(|v| v.into_iter().cloned().collect())
+    }
+
+    /// Activity at one timestep [Bq], with the nuclear-data spread on it.
+    ///
+    /// Evaluated once per replica and summed within each, so the correlations
+    /// between nuclides survive. Doing it any other way gives a plausible
+    /// number that is wrong in a specific direction: evaluating from the mean
+    /// inventory gives no spread at all, and adding the per-nuclide sigmas in
+    /// quadrature double-counts a variance that partly cancels, since every
+    /// Mn56 atom in an irradiated iron foil came out of an Fe56 atom.
+    ///
+    /// The volume is taken from the stored step material, so the nominal value
+    /// and every replica are scaled by the same one.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     step: Timestep index (0 = initial composition, whose spread is zero
+    ///         because it is an input rather than a result).
+    ///     by_nuclide (bool): Return a ``dict[str, Estimate]`` instead of one
+    ///         ``Estimate`` for the total. These do not add up to the total in
+    ///         quadrature, and are not meant to.
+    ///
+    /// Returns:
+    ///     Estimate | dict[str, Estimate] | None: None if the transmutation
+    ///     was run without ``data_uncertainty``.
+    ///
+    /// Raises:
+    ///     ValueError: if the material has no ``volume`` in cm^3, which a
+    ///         quantity in becquerel needs.
+    #[pyo3(signature = (material_id, step, *, by_nuclide=false))]
+    fn get_activity_uncertainty(
+        &self,
+        py: Python<'_>,
+        material_id: u32,
+        step: usize,
+        by_nuclide: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.derived(py, material_id, step, by_nuclide, Derived::Activity)
+    }
+
+    /// Decay heat at one timestep [W], with the nuclear-data spread on it.
+    ///
+    /// See ``get_activity_uncertainty``: same ensemble, same rule, and the
+    /// quantity the FNS decay-heat benchmarks are written against. A calculated
+    /// band beside the measured one is what turns a C/E into a statement about
+    /// whether the disagreement is larger than the data uncertainty allows.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     step: Timestep index (0 = initial composition).
+    ///     by_nuclide (bool): Return a ``dict[str, Estimate]`` of W by nuclide
+    ///         instead of one ``Estimate`` for the total.
+    ///
+    /// Returns:
+    ///     Estimate | dict[str, Estimate] | None: None if the transmutation
+    ///     was run without ``data_uncertainty``.
+    ///
+    /// Raises:
+    ///     ValueError: if the material has no ``volume`` in cm^3.
+    #[pyo3(signature = (material_id, step, *, by_nuclide=false))]
+    fn get_decay_heat_uncertainty(
+        &self,
+        py: Python<'_>,
+        material_id: u32,
+        step: usize,
+        by_nuclide: bool,
+    ) -> PyResult<Py<PyAny>> {
+        self.derived(py, material_id, step, by_nuclide, Derived::DecayHeat)
+    }
+
+    /// Contact dose rate at one timestep, with the nuclear-data spread on it.
+    ///
+    /// The one derived quantity here that is **not** linear in the atom
+    /// densities. The material attenuates its own decay photons, so the
+    /// emitters sit in the numerator and the whole inventory in the
+    /// denominator: a replica that makes more of an emitter also absorbs more
+    /// of it. Scaling the nominal dose by the density spread would report the
+    /// activity's uncertainty, which is wrong by the whole value; evaluating
+    /// per replica gets the cancellation for free.
+    ///
+    /// Needs no ``volume``, unlike the other three, because the estimate takes
+    /// the material for a half-space.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     step: Timestep index (0 = initial composition).
+    ///     dose_quantity (str): ``'absorbed-air'`` (Gy/h, the default) or
+    ///         ``'effective'`` (Sv/h), as ``Material.contact_dose`` takes them.
+    ///     build_up (float): Build-up factor, a plain multiplier on the answer.
+    ///     by_nuclide (bool): Return a ``dict[str, Estimate]`` instead of one
+    ///         ``Estimate`` for the total.
+    ///
+    /// Returns:
+    ///     Estimate | dict[str, Estimate] | None: None if the transmutation
+    ///     was run without ``data_uncertainty``.
+    #[pyo3(signature = (material_id, step, *, dose_quantity="absorbed-air", build_up=2.0, by_nuclide=false))]
+    fn get_contact_dose_uncertainty(
+        &self,
+        py: Python<'_>,
+        material_id: u32,
+        step: usize,
+        dose_quantity: &str,
+        build_up: f64,
+        by_nuclide: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let quantity = match dose_quantity {
+            "absorbed-air" => yani_decay::DoseQuantity::AbsorbedAir,
+            "effective" => yani_decay::DoseQuantity::Effective,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "dose_quantity must be 'absorbed-air' or 'effective', got '{other}'"
+                )))
+            }
+        };
+        self.derived(
+            py,
+            material_id,
+            step,
+            by_nuclide,
+            Derived::ContactDose { quantity, build_up },
+        )
+    }
+
+    /// The decay-photon spectrum at one timestep, line by line, with the
+    /// nuclear-data spread on each emission rate.
+    ///
+    /// Ascending in energy and coincident lines summed, exactly as
+    /// ``Material.decay_photon_spectrum`` returns them, and over the union of
+    /// the lines the nominal run and every replica emit. A line a replica does
+    /// not emit counts as a zero in it -- the same rule the densities follow,
+    /// and the only one under which two lines' spreads are taken over the same
+    /// sample -- and ``LineEstimate.emitting`` reports how many replicas
+    /// emitted it, which is what the zero-fill would otherwise hide.
+    ///
+    ///     >>> lines = results.get_decay_photon_spectrum_uncertainty(mid, step)
+    ///     >>> [(l.energy, l.nominal, l.std_dev) for l in lines[:2]]
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     step: Timestep index (0 = initial composition).
+    ///
+    /// Returns:
+    ///     list[LineEstimate] | None: None if the transmutation was run without
+    ///     ``data_uncertainty``.
+    ///
+    /// Raises:
+    ///     ValueError: if the material has no ``volume`` in cm^3.
+    fn get_decay_photon_spectrum_uncertainty(
+        &self,
+        material_id: u32,
+        step: usize,
+    ) -> PyResult<Option<Vec<PyLineEstimate>>> {
+        let chain = crate::distribution::resolve_chain()?.chain;
+        Ok(self
+            .inner
+            .photon_spectrum_uncertainty(material_id, step, &chain)
+            .map_err(PyValueError::new_err)?
+            .map(|lines| lines.into_iter().map(PyLineEstimate::from).collect()))
+    }
+
+    /// What the nuclear-data uncertainty covered, and what it did not.
+    ///
+    /// ``None`` when the transmutation was run without ``data_uncertainty``.
+    /// Otherwise a dict whose job is to make gaps visible rather than let them
+    /// read as confidence:
+    ///
+    /// - ``perturbed`` / ``no_covariance_data``: which nuclides had usable
+    ///   MF=33 covariance and which had none.
+    /// - ``rate_fraction_covered``: per nuclide and channel, the share of the
+    ///   reaction rate the covariance grid actually spans. Below one means part
+    ///   of the rate carries no stated uncertainty and the sigma is diluted.
+    /// - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
+    ///   covariance blocks that were present but not consumed.
+    /// - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
+    ///   covariance was not positive semi-definite and had to be repaired.
+    /// - ``rates_floored`` / ``rates_sampled``: samples that went negative and
+    ///   were truncated at zero, which biases the mean upward when common.
+    /// - ``not_perturbed``: the sources this does not propagate at all.
+    /// - ``samples`` / ``converged``: how many replicas ran, and whether the
+    ///   sigmas settled or the cap was hit.
+    #[getter]
+    fn data_uncertainty_info<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        match &self.inner.uncertainty_info {
+            None => Ok(None),
+            Some(info) => Ok(Some(crate::data_uncertainty::info_to_dict(py, info)?)),
+        }
+    }
+
+    /// What the self-shielding did, or ``None`` if the run was not shielded.
+    ///
+    /// Always present. ``chord_cm`` of ``None`` means the run was dilute and
+    /// nothing was corrected; otherwise it says how: the ``method`` and
+    /// ``chord_cm`` used, which nuclides were ``shielded``, which were
+    /// ``not_shielded`` and why, and ``strongest_factor``, the smallest factor
+    /// any group average was multiplied by. A run reporting ``1.0`` there
+    /// shielded nothing in practice, which is a different statement from not
+    /// having tried.
+    ///
+    /// ``would_shield`` is the other direction, and is filled only on a dilute
+    /// run: nuclides whose own resonances could have suppressed a reaction,
+    /// mapped to the strongest suppression each could have seen. It is a bound
+    /// computed from that reaction alone, ignoring the rest of the material and
+    /// the geometry, both of which push the real factor back toward one. So it
+    /// says "this answer may be high, and here is by how much at the very
+    /// most", which is the warning a dilute run of a resonance absorber should
+    /// carry rather than silence.
+    #[getter]
+    fn self_shielding_info<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(info) = &self.inner.shielding_info else {
+            return Ok(None);
+        };
+        let d = PyDict::new(py);
+        d.set_item("method", info.method.clone())?;
+        d.set_item("chord_cm", info.chord_cm)?;
+        let mut shielded = info.shielded.clone();
+        shielded.sort();
+        shielded.dedup();
+        d.set_item("shielded", shielded)?;
+        let not = PyDict::new(py);
+        for (name, why) in info.not_shielded.iter() {
+            not.set_item(name, why)?;
+        }
+        d.set_item("not_shielded", not)?;
+        d.set_item("strongest_factor", info.strongest_factor)?;
+        let would = PyDict::new(py);
+        for (name, factor) in info.would_shield.iter() {
+            would.set_item(name, factor)?;
+        }
+        d.set_item("would_shield", would)?;
+        Ok(Some(d))
+    }
+
+    /// Get material composition at a specific timestep as a dict.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     step: Timestep index (0 = initial).
+    ///
+    /// Returns:
+    ///     Dict of nuclide -> density [atoms/barn-cm], or None if not found.
+    fn get_material_nuclides(&self, material_id: u32, step: usize) -> Option<HashMap<String, f64>> {
+        let mat = self.inner.get_material(material_id, step)?;
+        Some(mat.nuclides.clone())
+    }
+
+    /// Get material composition at a specific timestep.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     step: Timestep index (0 = initial).
+    ///
+    /// Returns:
+    ///     Material object with composition at that timestep, or None if not found.
+    fn get_material(&self, material_id: u32, step: usize) -> Option<PyMaterial> {
+        let mat = self.inner.get_material(material_id, step)?;
+        Some(PyMaterial {
+            internal: mat.clone(),
+        })
+    }
+
+    /// Composition at the end of each schedule step, without the initial one.
+    ///
+    /// Indexed as ``timesteps``, so entry ``i`` is the state at the end of step
+    /// ``i`` and pairs with ``get_reaction_rates(material_id, i)``. This is the
+    /// list ``Material.transmute`` used to return on its own.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///
+    /// Returns:
+    ///     List[Material]: One material per step; empty if the material is
+    ///     unknown or was never stepped.
+    fn step_materials(&self, material_id: u32) -> Vec<PyMaterial> {
+        self.inner
+            .step_materials(material_id)
+            .iter()
+            .map(|m| PyMaterial {
+                internal: m.clone(),
+            })
+            .collect()
+    }
+
+    /// Final composition for a material, after the last step.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///
+    /// Returns:
+    ///     Material at the end of the schedule, or None if the material is
+    ///     unknown.
+    fn get_final_material(&self, material_id: u32) -> Option<PyMaterial> {
+        let mat = self.inner.get_final_material(material_id)?;
+        Some(PyMaterial {
+            internal: mat.clone(),
+        })
+    }
+
+    /// Per-edge reaction rates the solve drove one step with.
+    ///
+    /// The rate of each individual production edge, which the solve computes to
+    /// build the burnup matrix and used to throw away. Without it a consumer
+    /// can enumerate the routes into a product but not weight them, so a route
+    /// carrying 99.9% and one carrying 0.1% look alike.
+    ///
+    /// Both methods report the same quantity in the same shape.
+    /// ``method="coupled"`` takes the rates from that step's transport tallies
+    /// and ``method="independent"`` from the single transport's multigroup fold
+    /// scaled by the step's source rate; either way the edge rate is that rate
+    /// times the branching of the chain the step was solved with, isomeric
+    /// overlay included.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     step: Schedule step index, the same index as ``timesteps`` and
+    ///         ``source_rates``. This is one less than the ``step`` the
+    ///         composition getters take, where 0 is the initial composition.
+    ///
+    /// Returns:
+    ///     dict[str, dict[str, list[tuple[str | None, float]]]] | None: parent
+    ///     nuclide -> reaction kind -> [(target, rate [1/s])]. A ``target`` of
+    ///     ``None`` is a channel naming no single product, which in practice
+    ///     means fission, whose products come from the yields rather than from
+    ///     an edge. Empty for a decay-only step, and ``None`` if the material
+    ///     or the step is unknown.
+    ///
+    /// Examples:
+    ///     >>> rates = results.get_reaction_rates(material_id=1, step=0)
+    ///     >>> rates["Fe56"]["(n,gamma)"]
+    ///     [('Fe57', 1.7e-09)]
+    ///     >>> # share of Mn56 production arriving down each route
+    ///     >>> into_mn56 = [
+    ///     ...     (parent, kind, rate)
+    ///     ...     for parent, kinds in rates.items()
+    ///     ...     for kind, edges in kinds.items()
+    ///     ...     for target, rate in edges
+    ///     ...     if target == "Mn56"
+    ///     ... ]
+    fn get_reaction_rates(
+        &self,
+        py: Python<'_>,
+        material_id: u32,
+        step: usize,
+    ) -> Option<Py<PyAny>> {
+        let edges = self.inner.get_reaction_rates(material_id, step)?;
+        let out = PyDict::new(py);
+        for (parent, kinds) in edges {
+            let per_kind = PyDict::new(py);
+            for (kind, targets) in kinds {
+                let list = PyList::empty(py);
+                for (target, rate) in targets {
+                    list.append((target.as_deref(), rate)).unwrap();
+                }
+                per_kind.set_item(kind.as_str(), list).unwrap();
+            }
+            out.set_item(parent.as_str(), per_kind).unwrap();
+        }
+        Some(out.into_any().unbind())
+    }
+
+    /// List of material IDs that were transmuted.
+    #[getter]
+    fn material_ids(&self) -> Vec<u32> {
+        self.inner.materials.keys().copied().collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TransmutationResults(steps={}, materials={})",
+            self.inner.num_steps(),
+            self.inner.materials.len()
+        )
+    }
+}
+
+impl PyTransmutationResults {
+    /// Shared body of the two derived-quantity accessors.
+    ///
+    /// Not a `#[pymethods]` entry: it exists only so the two differ in nothing
+    /// but which `yani-transmute` call they make.
+    fn derived(
+        &self,
+        py: Python<'_>,
+        material_id: u32,
+        step: usize,
+        by_nuclide: bool,
+        which: Derived,
+    ) -> PyResult<Py<PyAny>> {
+        let chain = crate::distribution::resolve_chain()?.chain;
+        if by_nuclide {
+            let breakdown = match which {
+                Derived::Activity => {
+                    self.inner
+                        .activity_uncertainty_by_nuclide(material_id, step, &chain)
+                }
+                Derived::DecayHeat => {
+                    self.inner
+                        .decay_heat_uncertainty_by_nuclide(material_id, step, &chain)
+                }
+                Derived::ContactDose { quantity, build_up } => {
+                    self.inner.contact_dose_uncertainty_by_nuclide(
+                        material_id,
+                        step,
+                        &chain,
+                        quantity,
+                        build_up,
+                    )
+                }
+            }
+            .map_err(PyValueError::new_err)?;
+            let Some(breakdown) = breakdown else {
+                return Ok(py.None());
+            };
+            let out = PyDict::new(py);
+            for (nuclide, estimate) in breakdown {
+                out.set_item(nuclide, Py::new(py, PyEstimate::from(estimate))?)?;
+            }
+            Ok(out.into_any().unbind())
+        } else {
+            let total =
+                match which {
+                    Derived::Activity => self.inner.activity_uncertainty(material_id, step, &chain),
+                    Derived::DecayHeat => {
+                        self.inner.decay_heat_uncertainty(material_id, step, &chain)
+                    }
+                    Derived::ContactDose { quantity, build_up } => self
+                        .inner
+                        .contact_dose_uncertainty(material_id, step, &chain, quantity, build_up),
+                }
+                .map_err(PyValueError::new_err)?;
+            match total {
+                None => Ok(py.None()),
+                Some(estimate) => Ok(Py::new(py, PyEstimate::from(estimate))?.into_any()),
+            }
+        }
+    }
+}

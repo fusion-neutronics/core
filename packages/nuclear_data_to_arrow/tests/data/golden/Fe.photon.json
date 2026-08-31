@@ -1,0 +1,66 @@
+{
+  "bremsstrahlung.arrow": {
+    "I": "949613671af270b6acb6af295fdd1abe",
+    "__rows__": 1,
+    "__schema__": "73e0b90966af1274ea0450e60a67f8cd",
+    "dcs_data": "c63e9dd5be52e88267486835da626f03",
+    "dcs_shape": "34a2ebd6d961f70adb670ccdd4599d1b",
+    "electron_energy": "09b864e866081d893c1c47ba9e1c7214",
+    "ionization_energy": "421b660bad135504a2201a41ed157b8b",
+    "num_electrons": "24e38ad3a78adacc8d8aa646bac30223",
+    "photon_energy": "da78e24ed78afb1167c295cd262783e6"
+  },
+  "compton.arrow": {
+    "J_cdf_data": "7a8fd5e5b344939c10d60fd7810d341e",
+    "J_cdf_shape": "d9d3047e824fb164cf6cd79227d38f39",
+    "J_data": "3f40f0267ebfb7a93946b02ec3c904b3",
+    "J_shape": "d9d3047e824fb164cf6cd79227d38f39",
+    "__rows__": 1,
+    "__schema__": "4a0ee469f382ff33d9a9211181947583",
+    "binding_energy": "a96409271a35047df0ca91918badfddd",
+    "num_electrons": "bf0017f80c5493d0acb9c768c63c7883",
+    "pz": "1f0141a599556b3719f7563f991d0d3f",
+    "subshell_map_indices": "e1119770ad86a7185a19ce55d29b1f0a",
+    "subshell_map_offsets": "aecfcd533ff700bc0e3a440fc6e744c1",
+    "subshell_map_weights": "fffdefce5e98ec42901319a7da17badf"
+  },
+  "element.arrow": {
+    "Z": "9cab0519f56f13acec86572516e8ebe7",
+    "__metadata__": "fa7acad0eaf2aaa54c9a256e63c9d790",
+    "__rows__": 1,
+    "__schema__": "e1787d4f56efadeb14429518f44c7277",
+    "coherent_anomalous_imag_x": "5d136d0623276c0daed373662f0857d1",
+    "coherent_anomalous_imag_y": "f09f7fa86b4d912ee4afe278b109ad72",
+    "coherent_anomalous_real_x": "5d136d0623276c0daed373662f0857d1",
+    "coherent_anomalous_real_y": "ce2f1397ca411aea7b4205778d052722",
+    "coherent_ff_x": "f7456041344c7c525ce6dd2d312c830f",
+    "coherent_ff_y": "7ffc1dc9a005441284f88cd050432925",
+    "coherent_int_ff_x": "5a282b1b44bfcd3af08f0e242e000fda",
+    "coherent_int_ff_y": "4455dfa9a85abe8f52c4a83733e9b52f",
+    "coherent_xs": "019f1eee9694d5bb790de3f9a130bd2c",
+    "heating_xs": "cf1cbb66a638b4860a516671fb74850e",
+    "incoherent_ff_x": "9418716ac445c69454c0f15237f22195",
+    "incoherent_ff_y": "d40eb5b428243f6529141bb7a8ccc5ad",
+    "incoherent_xs": "2381f36fc91504b1097b88685dc31f21",
+    "ln_energy": "a8954145dae28c89d1a3449ffb84b1aa",
+    "name": "9fd4b031d078a5a74116fb02e3291cea",
+    "pair_production_electron_xs": "80c77df793619e7e3fa554a6b9c58ca1",
+    "pair_production_nuclear_xs": "f13071d0453baa883cd258d8b10c2428",
+    "photoelectric_xs": "468f2242551c1cb06503e9dcd5761b8a"
+  },
+  "subshells.arrow": {
+    "__rows__": 10,
+    "__schema__": "8c6f23cc471e0f375492879c78f9687f",
+    "binding_energy": "07c07d137ea4f36ab59be6740eef1545",
+    "designator": "3c57fbdd0bfec535a376cdf843b7a1d1",
+    "ln_xs": "60bddd4d9c91e0db7eb6adf4999a1404",
+    "num_electrons": "cd27d5aa9dbbf578c85835c80f650c3f",
+    "threshold_idx": "f9914fc801d21236bd9d76db59e19b84",
+    "transitions_data": "185d5cb0f88fa34c1cb69913b5e0524c",
+    "transitions_shape": "62f051bbb62be7c967bab9ebd813486e",
+    "xs": "6fb0db085dc243678f8d8c26dc6254df"
+  },
+  "version.json": {
+    "__json__": "aaf6d26a8e0d31a64dc4cc48c190b892"
+  }
+}

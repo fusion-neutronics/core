@@ -1,0 +1,40 @@
+[package]
+name = "yani-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WebAssembly bindings for yani -- transmutation and activation in the browser"
+license = "MIT"
+
+[lib]
+name = "yani_wasm"
+# `cdylib` is what `wasm-pack build` links; `rlib` lets the native test suite
+# drive the same API a browser would, which is where the assertions live.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+yani = { path = "../yani" }
+# `download` must stay off: it pulls reqwest, which does not work on wasm32.
+# The host fetches bytes in JS and hands them to `add_*`.
+yani-transmute = { path = "../yani-transmute", default-features = false, features = [
+  "arrow",
+] }
+yani-decay = { path = "../yani-decay" }
+yamc-materials = { path = "../yamc-materials", default-features = false, features = [
+  "arrow",
+] }
+yamc-nuclide = { path = "../yamc-nuclide", default-features = false, features = [
+  "arrow",
+] }
+yamc-source = { path = "../yamc-source" }
+serde_json = "1.0"
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+# The writer of the byte-range index, so the round-trip test can build the
+# ranges the browser reads out of `version.json` and hand the solver the spliced
+# stream they produce. Fixtures predate the index, so it is computed rather than
+# read. Dev-only: nothing in the wasm build depends on the converter.
+yamc-convert = { path = "../yamc-convert" }

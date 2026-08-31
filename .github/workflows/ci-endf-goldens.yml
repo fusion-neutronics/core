@@ -1,0 +1,59 @@
+name: endf goldens
+
+# The Rust side of `crates/endf` needs nothing extra: `ci-rust.yml` already runs
+# `cargo test --workspace` and `cargo clippy --workspace`, and the crate's
+# fixtures live in the repository, so its 132 unit tests and the golden
+# comparison run there with no Python at all.
+#
+# This workflow guards the other direction: that the goldens can still be
+# REGENERATED. They are what the Rust reader is held to, and they are produced
+# by the Python reader in shimwell/endf-python. A golden that can be verified
+# but not regenerated is a snapshot of itself, so this job re-derives all 28 and
+# fails if any drifts.
+#
+# Path-filtered: it installs a Python reader over the network and has nothing to
+# say about a change elsewhere in the repository.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/endf/**"
+      - "tools/**"
+      - ".github/workflows/ci-endf-goldens.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/endf/**"
+      - "tools/**"
+      - ".github/workflows/ci-endf-goldens.yml"
+  workflow_dispatch:
+
+jobs:
+  goldens:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # The branch is load-bearing twice over. The reader has to be the fork
+      # (upstream has no Chain, no from_njoy, no radionuclide_production), and
+      # it has to be the branch that teaches it to read `.xz`, because every
+      # fixture here is stored compressed. `local-develop` has the first and not
+      # the second, so it cannot regenerate these.
+      #
+      # Move this to `local-develop` once the Rust-rewrite branch merges there.
+      - name: Install the endf reader the goldens are generated from
+        run: |
+          pip install "endf @ git+https://github.com/shimwell/endf-python@claude/rust-rewrite-python-layer-1upmmo"
+
+      # Regenerates all 28 single-file goldens from the fixtures and diffs them
+      # against what is committed. The chain golden is built by a second tool
+      # (it spans ten decay and two neutron evaluations) and is checked next.
+      - name: Goldens are current
+        run: python tools/dump_golden.py --check
+
+      - name: Chain golden is current
+        run: python tools/dump_chain_golden.py --check

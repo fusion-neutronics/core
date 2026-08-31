@@ -1,0 +1,28 @@
+# yamm (Yet Another Mesh Maker): the pyo3-free meshing core -- CDT surface
+# mesher + conformal BCC/Delaunay tet mesher. `src/` is kept in sync with the
+# cad-to-dagmc-mesher repo so yamc and cad-to-dagmc share the exact same meshing
+# algorithms (mesh-independent transport benchmarks). Keep this crate pyo3-free
+# / OCC-free / transport-neutral; yamc's bindings live in
+# crates/yamc-python/src/{cad,cad_scene}.rs.
+#
+# Sync point: cad-to-dagmc-mesher v0.3.0 (upstream 276cd6c). `src/` differs from
+# upstream only in comments -- transport-facing wording in volume/{mod,types}.rs
+# and this repo's ASCII/banner house style. To re-sync, three-way merge each
+# file with the recorded upstream commit as the base, which keeps those local
+# edits; do not copy upstream's files over the top.
+[package]
+name = "yamm"
+version = "0.1.7"
+edition = "2021"
+description = "Yet Another Mesh Maker -- CDT surface mesher + conformal tet mesher (pyo3-free)"
+license = "MIT"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+spade = "2.15"
+rayon = "1.10"
+geometry-predicates = "0.3.0"
+kiddo = "5.3.0"
+smallvec = "1.13"

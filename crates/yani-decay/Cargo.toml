@@ -1,0 +1,16 @@
+[package]
+name = "yani-decay"
+version = "0.1.0"
+edition = "2021"
+description = "Decay-chain observables for yani -- chain enumeration, Bateman activity evolution, activity and decay heat, D1S time-correction factors"
+license = "MIT"
+
+[lib]
+name = "yani_decay"
+path = "src/lib.rs"
+
+[dependencies]
+yani = { path = "../yani" }
+# Atomic masses and the photon attenuation / dose coefficient tabulations the
+# contact dose folds against. Data tables only -- no cross sections are read.
+yamc-nuclide = { path = "../yamc-nuclide" }

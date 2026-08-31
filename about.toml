@@ -1,0 +1,41 @@
+# License policy for the yamc dependency tree, enforced by cargo-about.
+#
+# `cargo about generate` fails if any *shipped* dependency uses a license
+# that is not in `accepted`, so this list doubles as the "permissively
+# open source" gate: it must contain only OSI-approved permissive
+# licenses (no copyleft). Adding a dependency under a license not listed
+# here breaks the wheel build until the license is reviewed and either
+# accepted (if permissive) or the dependency is dropped.
+#
+# The generated THIRD-PARTY-LICENSES.html is bundled into each wheel via the
+# `license-files` key in that package's own pyproject.toml (there are two
+# consumers, packages/yamc-core and packages/yani-core).
+
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Unlicense",
+    "CC0-1.0",
+    "BSL-1.0",
+    # Permissive data license carrying Mozilla's CA root set (webpki-roots,
+    # pulled via reqwest on the data-download path).
+    "CDLA-Permissive-2.0",
+]
+
+# Build- and dev-dependencies are not shipped in the wheel, so they do
+# not need to be permissively licensed; only the runtime dependency tree
+# that ends up in the binary is gated.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# First-party workspace crates (publish = false / unpublished) carry the
+# project's own LICENSE, so they don't belong in the third-party listing.
+private = { ignore = true }
