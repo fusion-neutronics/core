@@ -390,6 +390,10 @@ pub fn transmute_material_shielded(
     // been shielded is the case #564 is about.
     results.shielding_info = Some(shielding_info);
 
+    // Kept so routes can be derived from the same topology the solve used,
+    // rather than from whatever a second load of the chain path returns.
+    results.chain = Some(Arc::clone(&chain));
+
     Ok(results)
 }
 
@@ -882,24 +886,16 @@ fn merge_coverage(
     into: &mut crate::covariance_fold::Coverage,
     from: crate::covariance_fold::Coverage,
 ) {
-    into.covered.extend(from.covered);
-    into.skipped_cross_material += from.skipped_cross_material;
-    into.skipped_nc += from.skipped_nc;
-    into.malformed += from.malformed;
-    for (lb, n) in from.unsupported_layouts {
-        *into.unsupported_layouts.entry(lb).or_insert(0) += n;
-    }
-    for (key, fraction) in from.rate_fraction_covered {
-        into.rate_fraction_covered
-            .entry(key)
-            .and_modify(|f| *f = f.min(fraction))
-            .or_insert(fraction);
-    }
-    // A nuclide covered under any spectrum is covered; `without_data` is
-    // resolved against that at the end rather than accumulated blindly.
-    for name in from.without_data {
-        into.without_data.insert(name);
-    }
+    // Every field merges the way `absorb` merges it, and delegating is what
+    // keeps that true: this function and `absorb` used to carry two copies of
+    // the same rules, and a field added to one of them was silently dropped by
+    // the other.
+    into.absorb(from);
+    // The one rule that is this function's own. `absorb` runs per nuclide
+    // within one spectrum, where "no data" is final. Across spectra it is not:
+    // a nuclide whose covariance was unusable against one spectrum and usable
+    // against another has data, so the two sets are resolved here rather than
+    // accumulated blindly.
     let covered = into.covered.clone();
     into.without_data.retain(|n| !covered.contains(n));
 }
