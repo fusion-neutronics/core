@@ -427,10 +427,17 @@ fn write_provenance(
 /// advertising one subsection while shipping four. An entry whose directory has
 /// gone is dropped rather than left advertising something removed, and a
 /// directory rebuilt for a different library starts over.
+/// `parents` is the set of nuclides the written subsections carry reactions
+/// for, recorded per subsection so a reader can tell what the chain can answer
+/// for before it solves anything. A chain built for one foil's isotopes solves
+/// a different foil to an inventory of nothing, silently, because every
+/// reaction it holds has the wrong parent; without this the only way to find
+/// that out is to notice the decay heat came back as zero.
 fn merge_manifest(
     out: &Path,
     provenance: &Provenance,
     written: &[&str],
+    parents: &[String],
 ) -> Result<(), Box<dyn Error>> {
     let manifest_path = out.join("manifest.json");
     let mut subsections = serde_json::Map::new();
@@ -445,9 +452,13 @@ fn merge_manifest(
         }
     }
     for subsection in written {
+        // Replaced rather than merged with what was there. The subsection's
+        // data was just overwritten, so its scope is whatever this call wrote;
+        // carrying over a previous call's parents would advertise reactions the
+        // directory no longer holds, which is the failure this exists to catch.
         subsections.insert(
             (*subsection).to_string(),
-            serde_json::json!({ "path": subsection }),
+            serde_json::json!({ "path": subsection, "parents": parents }),
         );
     }
     subsections.retain(|_, entry| {
@@ -554,7 +565,19 @@ pub fn convert_transmutation(
         )?;
     }
 
-    merge_manifest(out, provenance, subsections)?;
+    // The nuclides this chain can actually be driven from. A nuclide with no
+    // reactions is reachable as a product but cannot start anything, so it is
+    // not a parent and listing it would let a material through that the chain
+    // has nothing to say about.
+    let parents: Vec<String> = chain
+        .nuclides
+        .iter()
+        .filter(|n| !n.reactions.is_empty())
+        .map(|n| n.name.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    merge_manifest(out, provenance, subsections, &parents)?;
 
     Ok(chain)
 }
@@ -702,6 +725,12 @@ pub fn convert_branching_files(
         &provenance.data_version,
         &provenance.created_utc,
     )?;
-    merge_manifest(out, provenance, &["branching"])?;
+    let parents: Vec<String> = rows
+        .iter()
+        .map(|r| r.nuclide.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    merge_manifest(out, provenance, &["branching"], &parents)?;
     Ok(stats)
 }

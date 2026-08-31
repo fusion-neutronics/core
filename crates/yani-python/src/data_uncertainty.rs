@@ -179,6 +179,14 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     }
     d.set_item("rate_fraction_covered", covered)?;
 
+    // The one number that says whether the sigmas above are a spread over the
+    // answer or over a corner of it. `None` for a decay-only schedule, which
+    // drove no production and so has no share to report.
+    d.set_item(
+        "rate_fraction_covered_total",
+        info.rate_fraction_covered_total,
+    )?;
+
     d.set_item("matrices_clipped", info.matrices_clipped)?;
     d.set_item("worst_relative_clip", info.worst_relative_clip)?;
     d.set_item("rates_floored", info.rates_floored)?;

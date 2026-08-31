@@ -479,6 +479,13 @@ impl PyTransmutationResults {
     ///
     /// - ``perturbed`` / ``no_covariance_data``: which nuclides had usable
     ///   MF=33 covariance and which had none.
+    /// - ``rate_fraction_covered_total``: the share of the production this run
+    ///   drove that a covariance actually spans, weighted by rate and by parent
+    ///   density. Read this before any sigma here. It is a different and much
+    ///   sharper question than how many nuclides carry MF=33: an evaluation can
+    ///   state covariance for every isotope in the material and none for the
+    ///   channel making the product of interest, and the count then reads as
+    ///   full coverage while the ensemble perturbs almost nothing.
     /// - ``rate_fraction_covered``: per nuclide and channel, the share of the
     ///   reaction rate the covariance grid actually spans. Below one means part
     ///   of the rate carries no stated uncertainty and the sigma is diluted.

@@ -222,6 +222,58 @@ pub fn transmute_material_shielded(
         }
     }
 
+    // A chain that can drive none of this material's nuclides. Every reaction
+    // it holds has a parent the material does not contain, so the irradiation
+    // produces nothing and the schedule solves to the composition it started
+    // with. That is a silent zero: no step fails, no rate is negative, and the
+    // mistake surfaces only as a decay heat of exactly zero much later, which
+    // names neither the chain nor what it was built for.
+    //
+    // It happens whenever chains are scoped per material and two of them share
+    // a path, since the second conversion replaces the first and leaves a
+    // directory whose name still says otherwise. The manifest now records the
+    // parents each subsection covers; this is the check that acts on them.
+    //
+    // Stronger than the membership check in `preload_activation_data`, which
+    // asks whether any of the material's nuclides appear in the chain at all.
+    // Appearing is not enough: a nuclide can be in the chain purely as somebody
+    // else's product, carrying no reactions of its own, and a material made
+    // only of those is exactly as undrivable as one that is absent. The two
+    // guards are kept separate because that one must also cover the decay-only
+    // path, where having no reactions is not a fault.
+    //
+    // Only when something is actually irradiated. A decay-only schedule drives
+    // no reactions by construction, and a chain holding none of this material's
+    // parents is the right chain for it.
+    if steps.iter().any(|st| st.irradiation.is_some()) {
+        let has_reactions =
+            |name: &String| chain.get(name).is_some_and(|cn| !cn.reactions.is_empty());
+        // Already sorted by `get_nuclides`, which the message relies on.
+        let held = material.get_nuclides();
+        if !held.iter().any(has_reactions) {
+            let mut parents: Vec<&str> = chain
+                .values()
+                .filter(|cn| !cn.reactions.is_empty())
+                .map(|cn| cn.name.as_str())
+                .collect();
+            parents.sort_unstable();
+            let covers = if parents.is_empty() {
+                "nothing".to_string()
+            } else {
+                parents.join(" ")
+            };
+            return Err(format!(
+                "this chain drives none of the material's nuclides, so the irradiation would \
+                 produce nothing and every step would return the starting composition.\n  \
+                 material holds: {}\n  chain has reactions for: {covers}\n\
+                 A chain is scoped to the nuclides it was built from, so build one for this \
+                 material rather than reusing one built for another.",
+                held.join(" "),
+            )
+            .into());
+        }
+    }
+
     // Load nuclear data for all chain nuclides (not just initial composition)
     // so reaction rates can be computed for daughter products. Into the
     // CALLER's material, so a second call on it finds the data already there.

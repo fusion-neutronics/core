@@ -172,6 +172,16 @@ pub struct Info {
     /// spans. Below one means part of the rate carries no stated uncertainty
     /// and the sigma is diluted accordingly.
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
+    /// Share of the production this run drove that carries a stated covariance,
+    /// weighted by rate and by parent density, or `None` for a decay-only
+    /// schedule that drove none.
+    ///
+    /// The number to read before any sigma here, and not the same question as
+    /// how many nuclides carry MF=33: an evaluation can state covariance for
+    /// every isotope in the material and none of it for the channel making the
+    /// product of interest, which leaves the count reading as full coverage
+    /// while the ensemble perturbs almost nothing.
+    pub rate_fraction_covered_total: Option<f64>,
     /// Covariance matrices that were not positive semi-definite as evaluated,
     /// and the worst repair that had to be made.
     pub matrices_clipped: usize,
@@ -208,6 +218,7 @@ impl Info {
             unsupported_layouts: coverage.unsupported_layouts.clone(),
             malformed_blocks: coverage.malformed,
             rate_fraction_covered: coverage.rate_fraction_covered.clone(),
+            rate_fraction_covered_total: coverage.rate_fraction_total(),
             matrices_clipped: clipping.matrices_clipped,
             worst_relative_clip: clipping.worst_relative_clip,
             not_perturbed: [
