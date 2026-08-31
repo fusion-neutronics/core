@@ -394,7 +394,26 @@ impl Material {
             None
         };
 
-        for nuclide in self.nuclides.keys() {
+        // Name order, not `HashMap` order. Every nuclide accumulates into the
+        // same `macro_values[i]` below, so the iteration order IS the summation
+        // order, and float addition is not associative: walking the map
+        // directly moved the last bit of the macroscopic cross section at most
+        // grid points from one run to the next. Measured on the eight-nuclide
+        // steel of `tests/macro_xs_reproducibility.rs`, 76352 of 151285 points
+        // of MT 1 differed between two builds in a single process (#598).
+        //
+        // Same defect as #502 (`matrix.rs`), #576 (`composition.rs`) and the
+        // four sites of #597. This one was held back from that sweep because it
+        // feeds transport: it is the cross section a collision samples against,
+        // so re-ordering the sum moves transport results in the last bit.
+        //
+        // The rest of this file already sorts wherever it builds an index
+        // (the energy grid, `sorted_nuclide_keys`, `macroscopic_xs_mt_numbers`);
+        // the one place taking a cross-nuclide float sum did not.
+        let mut nuclide_names: Vec<&String> = self.nuclides.keys().collect();
+        nuclide_names.sort_unstable();
+
+        for nuclide in nuclide_names {
             let atoms_per_bcm = atoms_per_bcm_map.get(nuclide);
             let nuclide_data = micro_xs.get(nuclide);
             // Always try to store per-nuclide MT=1 if by_nuclide is true
