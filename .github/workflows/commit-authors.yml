@@ -1,0 +1,88 @@
+name: Commit authors
+
+# Merge gate: every commit in a pull request must be authored by the GitHub
+# account `shimwell`. The check is on the GitHub *account* linked to each
+# commit (the `author.login` the API reports), not on the free-text git author
+# name or email, so a local `git config user.name "shimwell"` does not pass it.
+#
+# Deliberately not path-filtered: a required check that gets skipped never
+# reports a conclusion and would leave every pull request unmergeable.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  commit-authors:
+    name: All commits authored by shimwell
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ALLOWED_LOGIN: shimwell
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      REPO: ${{ github.repository }}
+    steps:
+      # No checkout: the commit list and its account links come from the API,
+      # and the local git objects carry only the unverified name/email strings.
+      - name: Check the GitHub account behind every commit
+        run: |
+          set -euo pipefail
+
+          gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/commits" \
+            --jq '.[] | [
+                    .sha,
+                    (.author.login // "<no linked account>"),
+                    (.committer.login // "<no linked account>"),
+                    (.commit.message | split("\n")[0])
+                  ] | @tsv' > commits.tsv
+          sed -i '/^[[:space:]]*$/d' commits.tsv
+
+          if [ ! -s commits.tsv ]; then
+            echo "::error::No commits returned for PR #${PR_NUMBER}; refusing to pass a check that verified nothing."
+            exit 1
+          fi
+
+          failed=0
+          while IFS=$'\t' read -r sha author committer subject; do
+            bad=""
+            if [ "${author}" != "${ALLOWED_LOGIN}" ]; then
+              bad="author=${author}"
+            fi
+            # `web-flow` is GitHub's own committer for anything created through
+            # the web UI (merge commits, suggestion commits, in-browser edits),
+            # so it is allowed as committer as long as the author is shimwell.
+            case "${committer}" in
+              "${ALLOWED_LOGIN}"|web-flow) ;;
+              *) bad="${bad:+${bad} }committer=${committer}" ;;
+            esac
+
+            if [ -z "${bad}" ]; then
+              echo "ok    ${sha:0:8}  ${subject}"
+            else
+              echo "FAIL  ${sha:0:8}  ${subject}"
+              echo "      ${bad}"
+              echo "::error::Commit ${sha} is not authored by ${ALLOWED_LOGIN} (${bad})"
+              failed=1
+            fi
+          done < commits.tsv
+
+          if [ "${failed}" -ne 0 ]; then
+            cat >&2 <<'MSG'
+
+          Every commit in this pull request must belong to the GitHub account
+          `shimwell`. A commit shows "<no linked account>" when its email address
+          is not registered to any GitHub user, so add that address at
+          https://github.com/settings/emails and re-push, or rewrite the offending
+          commits:
+
+            git rebase -r --exec 'git commit --amend --no-edit --reset-author' origin/main
+            git push --force-with-lease
+
+          MSG
+            exit 1
+          fi
+
+          echo "All $(wc -l < commits.tsv) commit(s) are authored by ${ALLOWED_LOGIN}."
