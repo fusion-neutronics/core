@@ -185,10 +185,11 @@ Install doc requirements:
 pip install -r docs/requirements.txt
 ```
 
-Building the Python extension is not a prerequisite for this site. The pages
-that executed their own code blocks moved to the user-facing repositories, and
-the only `mkdocstrings` reference left here is `packages/nuclear_data_to_arrow`,
-which is plain Python read straight from source. Nothing here imports `yamc`.
+Building the Python extension is not a prerequisite for this site, and neither
+is any Python package of this workspace. The pages that executed their own code
+blocks moved to the user-facing repositories, and the last API reference
+generated from source went with the converter package. What is left is
+hand-written Markdown, so `mkdocs build` imports nothing.
 
 Build the static site (run from the repo root, outputs to `site/`):
 ```bash
@@ -275,9 +276,6 @@ core/
                        typing/)
     yani-core/      -- The yani wheel (python/yani/) plus the tests that
                        prove it ships none of the transport stack
-    nuclear_data_to_arrow/
-                    -- ENDF/ACE to Arrow converter, pure Python and
-                       unpublished
   pytests/
     parity/         -- Tests needing both wheels installed at once, which is
                        why they belong to neither package

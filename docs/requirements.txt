@@ -1,10 +1,10 @@
-# Docs toolchain for this workspace's INTERNAL site (developer guide + the
-# converter reference). Build: mkdocs build -f mkdocs.yml
+# Docs toolchain for this workspace's INTERNAL site (the developer guide).
+# Build: mkdocs build -f mkdocs.yml
 #
 # Deliberately smaller than it was: the user-facing pages moved to the public
 # repositories, and with them everything their executed code blocks needed
 # (markdown-exec, matplotlib, h5py, pyvista) and the extension build itself.
-# What is left documents plain Python, statically.
+# mkdocstrings went with the converter package, which was the last thing here
+# documented from source. What is left is hand-written Markdown.
 mkdocs>=1.6
 mkdocs-material>=9.5
-mkdocstrings[python]>=1.0

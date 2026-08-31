@@ -431,9 +431,9 @@ static EMBEDDED_INDEX: Lazy<HashMap<&'static str, HashSet<&'static str>>> = Lazy
 /// apart.
 ///
 /// The value here is the release identifier the converter stamps into every
-/// `version.json` it writes (`nuclear_data_to_arrow.completion`). A cached
-/// directory whose stamp differs, or which predates stamping and has none, is
-/// evicted and refetched.
+/// `version.json` it writes (`yamc_convert::entry::write_version`, and its
+/// transmutation counterpart in `yani-convert`). A cached directory whose stamp
+/// differs, or which predates stamping and has none, is evicted and refetched.
 ///
 /// Compiled in rather than fetched, for the same reason as [`EMBEDDED_INDEX`]:
 /// the cache-hit path stays a zero-cost offline path with no round trip per

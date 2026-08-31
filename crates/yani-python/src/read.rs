@@ -1,8 +1,8 @@
 //! `read_nuclide_from_arrow` / `read_element_from_arrow`: the readback gate.
 //!
-//! A conversion is checked by reading it back, and until now the only Python
-//! reader was a second implementation of the format in
-//! `packages/nuclear_data_to_arrow`. That is a weaker gate than it looks: a
+//! A conversion is checked by reading it back, and until these existed the only
+//! Python reader was a second implementation of the format, in the converter
+//! package that has since been retired. That is a weaker gate than it looks: a
 //! directory can satisfy every schema and still be refused by the loader that
 //! actually consumes it, and writer and reader sharing a vocabulary is how #379
 //! happened (the transmutation writer spelling MT 18 "fission" while the Rust
