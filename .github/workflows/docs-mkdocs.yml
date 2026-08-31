@@ -46,8 +46,9 @@ jobs:
           python -m pip install --upgrade pip
           # No Rust toolchain, no extension build and no plotting stack: the
           # pages whose code blocks executed against the compiled module moved
-          # to the public repositories. What is left is the developer guide and
-          # the converter reference, which griffe reads statically.
+          # to the public repositories, and the converter reference that griffe
+          # read statically went with the package. What is left is the
+          # developer guide, which is hand-written Markdown.
           pip install -r docs/requirements.txt
 
       - name: Build the docs

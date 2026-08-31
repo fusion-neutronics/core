@@ -1255,10 +1255,11 @@ const ENDF_INTERP_HISTOGRAM: i32 = 1;
 ///
 /// `energy_dist_interpolation` holds the region breakpoints and then the
 /// interpolation codes, in one column: a continuous energy distribution has no
-/// separate breakpoint column, and both writers concatenate the two ENDF fields
-/// (`yamc-convert/src/distributions.rs`, and `neutron_writer.py` in
-/// `nuclear_data_to_arrow`). Splitting at the halfway point recovers both, since
-/// ENDF gives every region one breakpoint and one code.
+/// separate breakpoint column, so the writer concatenates the two ENDF fields
+/// (`yamc-convert/src/distributions.rs`; the retired Python converter did the
+/// same, and published data carries both layouts). Splitting at the halfway
+/// point recovers both, since ENDF gives every region one breakpoint and one
+/// code.
 ///
 /// This used to ask whether EVERY value in the column was 1, which conflated the
 /// two halves. A breakpoint is the index of its region's last point, so the

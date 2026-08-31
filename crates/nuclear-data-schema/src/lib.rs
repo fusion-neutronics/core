@@ -1,19 +1,19 @@
 //! The Arrow schema of the simulation-ready nuclear data format, declared once.
 //!
 //! Before this crate the format was declared in at least three places: the
-//! converter's `schemas.py`, and `yani`'s `chain_arrow.rs`, which writes the
-//! transmutation subsections itself. The readers named the same columns a
-//! fourth time as string literals scattered through their parsing code.
-//! Nothing connected them, and the failure mode is quiet: issue #126 was
-//! writer and reader disagreeing about a name, and it reached published data.
+//! retired Python converter's `schemas.py`, and `yani`'s `chain_arrow.rs`,
+//! which writes the transmutation subsections itself. The readers named the
+//! same columns a fourth time as string literals scattered through their
+//! parsing code. Nothing connected them, and the failure mode is quiet: issue
+//! #126 was writer and reader disagreeing about a name, and it reached
+//! published data.
 //!
 //! Every consumer builds against these declarations, so a rename is a compile
-//! error rather than a runtime surprise. The Python converter reads the
-//! rendered form instead, emitted by the `emit-schema-manifest` binary into
-//! the converter package at
-//! `packages/nuclear_data_to_arrow/src/nuclear_data_to_arrow/schema/`, so it
-//! needs no compiled dependency and the transmutation half stays installable
-//! without yamc (#381).
+//! error rather than a runtime surprise. There is no rendered copy any more:
+//! the JSON manifest and the `emit-schema-manifest` binary that produced it
+//! existed for the Python converter, which read the declarations without
+//! being able to compile against them. Now that every writer and reader is
+//! Rust, the declarations below are the only statement of the format.
 //!
 //! # Layout
 //!

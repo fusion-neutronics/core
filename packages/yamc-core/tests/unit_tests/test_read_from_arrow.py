@@ -3,8 +3,9 @@
 This is the readback gate a conversion is checked with. Its whole point is that
 the reader is the CONSUMER: a directory can satisfy every schema and still be
 refused by the loader that has to use it, and the only Python reader before this
-was a second implementation of the format in ``packages/nuclear_data_to_arrow``
-that shared the writer's vocabulary. That is how #379 happened.
+was a second implementation of the format, in the converter package that has
+since been retired, which shared the writer's vocabulary. That is how #379
+happened.
 
 The contract tests below need no nuclear data. The two that read real fixtures
 skip without them, as the rest of this suite does.

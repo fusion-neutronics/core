@@ -2,12 +2,12 @@
 #
 # The user-facing sites are built from the public repositories, against the
 # published wheels: fusion-neutronics/yamc and fusion-neutronics/yani. What is
-# left here is what only a person with this checkout needs -- how to build the
-# workspace, and the converter package, which is not published at all.
+# left here is what only a person with this checkout needs: how to build the
+# workspace.
 #
 # Build: mkdocs build -f mkdocs.yml   (run from the repo root)
 site_name: core (internal)
-site_description: Internal reference for the core workspace - developer info and the converter package
+site_description: Internal reference for the core workspace - developer info
 docs_dir: docs
 
 theme:
@@ -27,56 +27,21 @@ theme:
 
 plugins:
   - search
-  # markdown-exec went with the user-facing pages: nothing left here executes.
-  - mkdocstrings:
-      handlers:
-        python:
-          # Only the converter is documented here now; the two wheels'
-          # references are built in their own repositories from the .pyi stubs
-          # the published wheels ship.
-          paths: [packages/nuclear_data_to_arrow/src]
-          options:
-            docstring_style: google
-            show_root_heading: true
-            show_signature_annotations: true
-            separate_signature: true
-            signature_crossrefs: true
-            members_order: source
-            # Type chips (class / method / attr) before each symbol -- another
-            # cue for where one object ends and the next starts.
-            show_symbol_type_heading: true
-            show_symbol_type_toc: true
-            merge_init_into_class: true
-            show_submodules: false
-            # Hide private/dunder members.
-            filters: ["!^_"]
-            # The PyO3Constructor / PublicApi griffe extensions went with the
-            # wheels' references: the converter is plain Python, with real
-            # __init__ methods and an explicit __all__, so it needs neither.
+  # No mkdocstrings and no markdown-exec. The two wheels' API references are
+  # built in their own repositories from the .pyi stubs the published wheels
+  # ship, and the converter package that was the only thing documented from
+  # source here has been retired. Nothing left on this site is generated from
+  # Python, so this needs no handler and no import of anything.
 
 extra_css:
-  - css/api.css
   - css/nav.css
 
 markdown_extensions:
   - admonition
   - pymdownx.highlight
-  # def_list renders the "term / : definition" lists the nuclear_data_to_arrow
-  # pages use; without it they come out as stray colons.
-  - def_list
-  - pymdownx.superfences:
-      custom_fences:
-        # ```mermaid fences, which the converter's format diagrams use.
-        - name: mermaid
-          class: mermaid
-          format: !!python/name:pymdownx.superfences.fence_code_format
+  # def_list and the ```mermaid custom fence went with the converter pages,
+  # which were the only ones using definition lists and format diagrams.
+  - pymdownx.superfences
 
 nav:
   - Developer info: developer_info.md
-  - Nuclear data conversion:
-    - Overview: nuclear_data_to_arrow/index.md
-    - Getting started: nuclear_data_to_arrow/getting_started.md
-    - Usage: nuclear_data_to_arrow/usage.md
-    - Arrow format: nuclear_data_to_arrow/format.md
-    - MT synthesis: nuclear_data_to_arrow/synthesis.md
-    - API reference: nuclear_data_to_arrow/api.md

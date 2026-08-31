@@ -79,18 +79,6 @@ repos:
         types: [python]
         pass_filenames: false
 
-      # The converter suite needs neither wheel -- pyarrow and the endf reader,
-      # no compiled bindings -- so unlike the yani and parity suites it can run
-      # here. It is also the one that guards the Arrow schema, so a column added
-      # on the Rust side breaks it: that is #573, which went red in CI twice
-      # while every local check passed.
-      - id: pytest-nuclear-data-to-arrow
-        name: pytest (nuclear_data_to_arrow)
-        entry: .venv/bin/python -m pytest packages/nuclear_data_to_arrow/tests -q
-        language: system
-        types_or: [rust, python]
-        pass_filenames: false
-
       # Stubs are generated from the bindings and committed, and CI diffs them,
       # so a binding change that does not regenerate them fails there and
       # nowhere else. Regenerating is not enough on its own either: the drift
