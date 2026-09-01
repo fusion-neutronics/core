@@ -117,9 +117,40 @@ pub struct Coverage {
     /// gives no covariance for, so the relative uncertainty is diluted by
     /// exactly that much.
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
+    /// Production this spectrum drove through a channel a covariance spans, and
+    /// the production it drove in total. Both are per barn-cm per second, and
+    /// both are weighted by the parent's own density, so a channel on a trace
+    /// isotope counts for what it actually made.
+    ///
+    /// Kept as two sums rather than as their ratio because sums merge and a
+    /// ratio does not: the fold runs per nuclide and a schedule can name more
+    /// than one spectrum, and each part adds its own share without having to
+    /// know how many parts there are. [`Coverage::rate_fraction_total`]
+    /// divides them.
+    pub covered_production: f64,
+    pub total_production: f64,
 }
 
 impl Coverage {
+    /// Share of the production this run drove that carries a stated covariance.
+    ///
+    /// The number to read before any sigma from this fold. Counting nuclides
+    /// with MF=33 answers a different and much weaker question: an evaluation
+    /// can carry covariance for every isotope in the material and state none of
+    /// it for the channel that makes the product of interest, which leaves the
+    /// count reading as full coverage while the ensemble perturbs almost
+    /// nothing. Tungsten is the case that shows it, where two major libraries
+    /// state covariance for all five natural isotopes, give it for `(n,3n)` and
+    /// `(n,gamma)`, and give none for the `(n,2n)` that makes 98% of the decay
+    /// heat.
+    ///
+    /// `None` when this run drove no production at all, which is a decay-only
+    /// schedule and has no fraction to report rather than a fraction of zero.
+    pub fn rate_fraction_total(&self) -> Option<f64> {
+        (self.total_production > 0.0)
+            .then(|| (self.covered_production / self.total_production).clamp(0.0, 1.0))
+    }
+
     /// Fold one nuclide's report into this one.
     ///
     /// Every field is order-free: the sets union, the counters sum, and
@@ -141,6 +172,8 @@ impl Coverage {
                 .and_modify(|f| *f = f.min(fraction))
                 .or_insert(fraction);
         }
+        self.covered_production += other.covered_production;
+        self.total_production += other.total_production;
     }
 
     /// Whether anything at all was skipped or missing.
@@ -524,7 +557,84 @@ pub fn fold_rate_covariance(
         }
     }
 
+    // How much of the production this spectrum drove is covered, weighted by
+    // rate and by the parent's own density. Done here rather than per nuclide
+    // because it is a property of the material: the per-nuclide fold knows its
+    // own rates but not how many atoms of it there are, and a channel on a
+    // 0.1%-abundance isotope must not count the same as one on the bulk.
+    //
+    // Weighted by rate rather than counted per channel for the same reason the
+    // per-channel fraction exists: a channel with no covariance costs nothing
+    // if nothing went through it.
+    let densities = material.get_atoms_per_barn_cm().unwrap_or_default();
+    for (nuclide, kinds) in rates {
+        let density = densities.get(nuclide).copied().unwrap_or(0.0);
+        if density <= 0.0 {
+            continue;
+        }
+        for (kind, rate) in kinds {
+            let production = density * rate;
+            coverage.total_production += production;
+            let fraction = coverage
+                .rate_fraction_covered
+                .get(&(nuclide.clone(), kind.clone()))
+                .copied()
+                .unwrap_or(0.0);
+            coverage.covered_production += production * fraction;
+        }
+    }
+
     (out, coverage)
+}
+
+#[cfg(test)]
+mod coverage_total_tests {
+    use super::*;
+
+    /// Two nuclides, one covered and one not, weighted by what each produced.
+    ///
+    /// The point of the rate weighting: counting nuclides would call this half
+    /// covered, and half the production went through the channel with nothing
+    /// stated about it.
+    #[test]
+    fn the_total_is_weighted_by_production_and_not_by_nuclide_count() {
+        let mut a = Coverage {
+            covered_production: 3.0,
+            total_production: 4.0,
+            ..Default::default()
+        };
+        let b = Coverage {
+            covered_production: 0.0,
+            total_production: 4.0,
+            ..Default::default()
+        };
+        a.absorb(b);
+        // Sums merge; the ratio is taken once at the end over both.
+        assert_eq!(a.covered_production, 3.0);
+        assert_eq!(a.total_production, 8.0);
+        assert_eq!(a.rate_fraction_total(), Some(0.375));
+    }
+
+    /// A decay-only schedule drove no production, so there is no share to
+    /// report. Zero would be the wrong answer: it reads as "nothing is
+    /// covered", which is a statement about the data rather than about there
+    /// being nothing to cover.
+    #[test]
+    fn no_production_reports_no_fraction_rather_than_zero() {
+        assert_eq!(Coverage::default().rate_fraction_total(), None);
+    }
+
+    /// Floating point can put the ratio a hair over one when every channel is
+    /// fully covered; a coverage of 100.0000001% is not a thing to print.
+    #[test]
+    fn full_coverage_cannot_exceed_one() {
+        let c = Coverage {
+            covered_production: 1.0 + f64::EPSILON,
+            total_production: 1.0,
+            ..Default::default()
+        };
+        assert_eq!(c.rate_fraction_total(), Some(1.0));
+    }
 }
 
 #[cfg(test)]
