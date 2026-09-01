@@ -108,7 +108,8 @@ impl Material {
             .iter()
             .filter(|(_, n)| {
                 !n.loaded_temperatures.contains(&wanted)
-                    && n.available_temperatures.contains(&wanted)
+                    && yamc_nuclide::temperature::resolve(&wanted, &n.available_temperatures)
+                        .is_ok()
             })
             .map(|(name, _)| name.clone())
             .collect();

@@ -334,11 +334,36 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
         None
     };
 
-    // Determine which temperatures to load (filter uses normalized keys)
+    // Determine which temperatures to load (filter uses normalized keys).
+    //
+    // A requested temperature the file does not carry is not an error if the
+    // file BRACKETS it: the two neighbours are loaded instead and the request
+    // is served by blending them once, below. This is the only place in the
+    // process that holds the file's full temperature list at the moment the
+    // filter is applied, which is why the expansion belongs here rather than
+    // at the call sites that build the filter.
+    let mut to_synthesise: Vec<String> = Vec::new();
     let loaded_temps: Vec<String> = if let Some(filter) = temps_filter {
+        let mut wanted: Vec<String> = Vec::new();
+        for label in filter {
+            match crate::temperature::resolve(label, &all_temps)
+                .map_err(|e| format!("{name}: {e}"))?
+            {
+                crate::temperature::TemperatureSource::Exact { idx } => {
+                    wanted.push(all_temps[idx].clone())
+                }
+                crate::temperature::TemperatureSource::Blend { lo_idx, hi_idx, .. } => {
+                    wanted.push(all_temps[lo_idx].clone());
+                    wanted.push(all_temps[hi_idx].clone());
+                    to_synthesise.push(crate::temperature::strip_k(label).to_string());
+                }
+            }
+        }
+        // Back into the file's own numeric order, and deduplicated: two
+        // requested temperatures can share a bracket endpoint.
         all_temps
             .iter()
-            .filter(|t| filter.contains(t.as_str()))
+            .filter(|t| wanted.iter().any(|w| w == *t))
             .cloned()
             .collect()
     } else {
@@ -634,7 +659,25 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
         .take_while(|c| c.is_alphabetic())
         .collect::<String>();
 
-    let nuclide = Nuclide {
+    // What this load can ANSWER, which is the union of the labels asked for and
+    // the bracket rungs actually read. Recording only the request would miss a
+    // later query at one of the brackets; recording only the served set would
+    // miss a repeat of the intermediate request and rebuild the blend on every
+    // call. `LoadScope::covers` is a subset test, so the union is the only
+    // choice that is right in both directions.
+    let scope = if to_synthesise.is_empty() {
+        scope.clone()
+    } else {
+        let mut answerable: std::collections::HashSet<String> =
+            loaded_temps.iter().cloned().collect();
+        answerable.extend(to_synthesise.iter().cloned());
+        if let Some(requested) = scope.temperatures.as_ref() {
+            answerable.extend(requested.iter().cloned());
+        }
+        scope.clone().with_temperatures(Some(answerable))
+    };
+
+    let mut nuclide = Nuclide {
         name: Some(name),
         element: crate::nuclide::element_name_from_z(z),
         atomic_symbol: Some(atomic_symbol),
@@ -659,8 +702,16 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
         fission_chi_flat_cache: Default::default(),
         delayed_neutron_cache: Default::default(),
         inelastic_angle_flat_cache: Default::default(),
-        load_scope: scope.clone(),
+        load_scope: scope,
     };
+
+    // Build each requested temperature the file does not carry, now that both
+    // its neighbours are in memory. From here on it is an ordinary loaded
+    // temperature and nothing downstream can tell the difference.
+    for label in &to_synthesise {
+        crate::blend::synthesise_temperature(&mut nuclide, label)
+            .map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
 
     Ok(nuclide)
 }

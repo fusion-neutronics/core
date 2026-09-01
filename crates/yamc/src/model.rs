@@ -1174,9 +1174,16 @@ impl Model {
                 }
             };
 
+            // Servable, not merely listed. The GPU cannot blend in-kernel: its
+            // extractors do an exact `get_temp_idx` match and return
+            // `TemperatureNotLoaded` on a miss. Because the blend is
+            // materialised on the host as a real `loaded_temperatures` entry,
+            // widening here is the only GPU-side change interpolation needs,
+            // and both backends then read the same arrays by construction.
             let needs_widening = material_arc.nuclide_data.values().any(|n| {
                 !n.loaded_temperatures.contains(&temperature)
-                    && n.available_temperatures.contains(&temperature)
+                    && yamc_nuclide::temperature::resolve(&temperature, &n.available_temperatures)
+                        .is_ok()
             });
             if !needs_widening && labelled {
                 continue;

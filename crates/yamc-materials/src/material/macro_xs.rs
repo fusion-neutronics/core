@@ -148,22 +148,21 @@ impl Material {
         // Validate temperature availability before building grid.
         // `ensure_temperature_loaded` ran above, so anything the data offers is
         // now parsed in and this only rejects temperatures genuinely absent.
+        //
+        // Resolvability, not membership: `available_temperatures` is
+        // deliberately still the file's own ladder even after a temperature has
+        // been synthesised between two of its rungs, so a membership test here
+        // would reject the very label the loader just built. What this still
+        // catches is the case `resolve_temperature` cannot: it checks the
+        // request against the UNION over nuclides, so a temperature most of the
+        // material can serve passes there and fails here, naming the one
+        // nuclide whose evaluation ships a shorter ladder.
         for (nuclide_name, nuclide_data) in &self.nuclide_data {
-            if !nuclide_data.available_temperatures.contains(&temperature) {
-                let mut available: Vec<String> = nuclide_data.available_temperatures.clone();
-                available.sort();
-                let temp_list = if available.is_empty() {
-                    "NONE".to_string()
-                } else {
-                    available
-                        .iter()
-                        .map(|s| format!("'{s}'"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
-                panic!(
-                    "Temperature '{temperature}' not available for nuclide '{nuclide_name}'. Available temperatures: {temp_list}"
-                );
+            if let Err(e) = yamc_nuclide::temperature::resolve(
+                &temperature,
+                &nuclide_data.available_temperatures,
+            ) {
+                panic!("Nuclide '{nuclide_name}': {e}");
             }
         }
 

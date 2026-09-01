@@ -214,6 +214,24 @@ mod tests {
     }
 
     #[test]
+    fn a_synthesised_load_covers_both_the_request_and_the_bracket_it_was_built_from() {
+        // What the loader records after serving a 450 K request from a file
+        // carrying 294 K and 600 K: the two rungs it read plus the label it
+        // synthesised. The union is the only choice that works in both
+        // directions, and this pins it.
+        let served = LoadScope::full().with_temperatures(Some(temps(&["294", "450", "600"])));
+
+        // Recording only the two rungs would miss here, and the cache would
+        // rebuild the blend on every call.
+        assert!(served.covers(&LoadScope::full().with_temperatures(Some(temps(&["450"])))));
+        // Recording only the request would miss here, and a later query at a
+        // temperature already in memory would reload the file.
+        assert!(served.covers(&LoadScope::full().with_temperatures(Some(temps(&["294"])))));
+        // It must not claim coverage it does not have.
+        assert!(!served.covers(&LoadScope::full().with_temperatures(Some(temps(&["900"])))));
+    }
+
+    #[test]
     fn union_keeps_both_callers_satisfied() {
         let a = LoadScope::activation(mts(&[102, 16]));
         let b = LoadScope::activation(mts(&[102, 103]));

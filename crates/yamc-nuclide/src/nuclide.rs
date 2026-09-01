@@ -1390,9 +1390,12 @@ impl Nuclide {
         if let Some(temp) = temperature {
             let temp_key = crate::temperature::strip_k(temp);
 
-            // Check if the requested temperature is available but not loaded
+            // Whether the request is servable but not yet in memory. Not
+            // membership of `available_temperatures`: a temperature the file
+            // brackets is servable too, and the reload below is what fetches
+            // its two neighbours so the loader can blend them.
             let needs_temp_load = !self.loaded_temperatures.contains(&temp_key.to_string())
-                && self.available_temperatures.contains(&temp_key.to_string());
+                && crate::temperature::resolve(temp_key, &self.available_temperatures).is_ok();
 
             if needs_temp_load {
                 if let Some(name) = self.name.clone() {
@@ -1477,7 +1480,11 @@ impl Nuclide {
             for temp in &self.loaded_temperatures {
                 temps_to_load.insert(temp.clone());
             }
-            temps_to_load.insert(temperature.to_string());
+            // Stripped, because the filter is matched against the file's
+            // normalised labels. Inserting the raw "999K" spelling could never
+            // match, and would leave `load_scope.temperatures` holding a label
+            // nothing else in the tree spells that way.
+            temps_to_load.insert(crate::temperature::strip_k(temperature).to_string());
 
             // Reload with the expanded temperature set (always pass nuclide_name for keyword/directory resolution)
             let loaded_nuclide = load_nuclide_for_python(
@@ -1593,6 +1600,24 @@ pub fn load_nuclide<P: AsRef<Path>>(
     crate::nuclide_loader::load_nuclide(path, scope)
 }
 
+/// Whether a cached nuclide can actually answer the temperatures a scope names.
+///
+/// [`LoadScope::covers`] treats an unfiltered load as universal, which is right
+/// for every temperature the FILE carries and wrong for one it merely brackets.
+/// An intermediate temperature is built by the Arrow loader only when a filter
+/// names it, so an entry parsed WITHOUT a filter holds every rung and not the
+/// temperature between two of them. Without this check the cache answers a
+/// 450 K request with the unfiltered entry, the label is absent from
+/// `loaded_temperatures`, and the request dies downstream as a missing MT.
+fn serves_temperatures(existing: &Nuclide, scope: &LoadScope) -> bool {
+    match &scope.temperatures {
+        None => true,
+        Some(wanted) => wanted
+            .iter()
+            .all(|t| existing.loaded_temperatures.contains(t)),
+    }
+}
+
 /// Get or load a nuclide from cache, loading from file if needed.
 ///
 /// Parameters:
@@ -1649,7 +1674,7 @@ pub fn get_or_load_nuclide(
         };
         if let Some(weak) = cache.get(&cache_key) {
             if let Some(existing) = weak.upgrade() {
-                if existing.load_scope.covers(scope) {
+                if existing.load_scope.covers(scope) && serves_temperatures(&existing, scope) {
                     return Ok(existing);
                 }
                 cached_scope = Some(existing.load_scope.clone());
@@ -1689,6 +1714,32 @@ pub fn get_or_load_nuclide(
 
     let mut nuclide = crate::nuclide_loader::load_nuclide(&resolved_path, &load_at)?;
     nuclide.data_path = Some(resolved_path.clone());
+
+    // Build any temperature the CALLER asked for that the file only brackets.
+    //
+    // The loader does this itself when it is handed a filter, and that covers
+    // the request-shaped case. It does not cover this one: `load_at` is the
+    // union with whatever was cached, and unioning a concrete temperature set
+    // with an unfiltered load gives `None`, which the loader reads as "every
+    // temperature the file carries" and which contains no intermediate rung. So
+    // the widened read is correct about what to PARSE and has lost what to
+    // BUILD, and this puts it back.
+    //
+    // Before the Arc, so the synthesised temperature is in the cached entry and
+    // a second material at the same temperature reuses it rather than blending
+    // the whole nuclide again.
+    if let Some(wanted) = scope.temperatures.as_ref() {
+        let mut missing: Vec<String> = wanted
+            .iter()
+            .filter(|t| !nuclide.loaded_temperatures.contains(t))
+            .cloned()
+            .collect();
+        missing.sort();
+        for label in missing {
+            crate::blend::synthesise_temperature(&mut nuclide, &label)
+                .map_err(|e| format!("{nuclide_name}: {e}"))?;
+        }
+    }
 
     let arc_nuclide = Arc::new(nuclide);
     {

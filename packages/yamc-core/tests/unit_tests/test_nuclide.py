@@ -183,18 +183,38 @@ def test_microscopic_cross_section_multiple_temperatures_error():
     assert len(energy) > 0, "Energy data should not be empty"
 
 
-def test_microscopic_cross_section_invalid_temperature():
-    """Test error handling for invalid temperature."""
+def test_microscopic_cross_section_out_of_range_temperature():
+    """A temperature the ladder cannot bracket is refused, and says what it has.
+
+    3000 K, not 500 K. Be9 carries 250 through 2500, so 500 sits between 294
+    and 600 and is now served by blending them; the probe has to be outside the
+    ladder for this to remain an error-path test.
+    """
     from yamc import Nuclide
     nuc = Nuclide('Be9')
     nuc.read_nuclear_data('tests/Be9.arrow')
 
-    # Should raise error for non-existent temperature
     with pytest.raises(Exception) as exc_info:
-        nuc.microscopic_cross_section(reaction=2, temperature='500')
+        nuc.microscopic_cross_section(reaction=2, temperature='3000')
     error_msg = str(exc_info.value)
-    assert "Temperature '500' not found" in error_msg or "500" in error_msg
-    assert "294" in error_msg
+    assert "3000" in error_msg
+    assert "2500" in error_msg
+
+
+def test_microscopic_cross_section_at_an_intermediate_temperature():
+    """A failure means the bracketed temperature was not built.
+
+    500 K sits between Be9's 294 and 600. The two arrays must be the same
+    length as each other, since a blend that returned one endpoint's grid and
+    the other's cross sections would still be non-empty.
+    """
+    from yamc import Nuclide
+    nuc = Nuclide('Be9')
+    nuc.read_nuclear_data('tests/Be9.arrow')
+
+    xs, energy = nuc.microscopic_cross_section(reaction=2, temperature='500')
+    assert len(xs) > 0
+    assert len(energy) == len(xs)
 
 
 def test_microscopic_cross_section_invalid_mt():
@@ -387,13 +407,13 @@ def test_auto_loading_with_manual_loading_combined():
     xs_specific, energy_specific = nuc.microscopic_cross_section(reaction=444, temperature='294')
     assert len(xs_specific) > 0, "Should get temperature-specific MT data"
     
-    # Test error handling for invalid temperature
+    # Test error handling for a temperature outside the ladder. 500 used to be
+    # the probe here and is now bracketed by 294 and 600, so it succeeds.
     try:
-        nuc.microscopic_cross_section(reaction=444, temperature='500')
-        assert False, "Should have raised an error for invalid temperature"
+        nuc.microscopic_cross_section(reaction=444, temperature='3000')
+        assert False, "Should have raised an error for an out-of-range temperature"
     except ValueError as e:
-        # This is expected for invalid temperature
-        assert "Temperature '500' not found" in str(e), f"Should get temperature not found error, got: {e}"
+        assert "3000" in str(e), f"Should name the requested temperature, got: {e}"
     
     # Note: For Be9 MT=2, the cross sections at 294K and 300K might be identical
     # This is fine - the important thing is that both calls succeeded
