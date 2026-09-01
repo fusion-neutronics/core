@@ -273,6 +273,16 @@ jobs:
               done
             fi
 
+      # `--remap-path-prefix` is a silent no-op when its prefix does not match,
+      # so a runner-image change that moves the home directory would quietly
+      # start shipping it. This is the step that notices. See
+      # `.cargo/config.toml` for the remaps and the script for what it ignores.
+      - name: The wheel must carry no builder paths
+        shell: bash
+        run: |
+          PY="$(command -v python3 || command -v python)"
+          "$PY" scripts/check_binary_paths.py packages/yamc-core/dist/*.whl
+
       - name: Upload wheels
         uses: actions/upload-artifact@v7
         with:
@@ -365,6 +375,16 @@ jobs:
       # pytest.ini has named this testpath since #533 and no job ran it, so the
       # suite and the heredoc were drifting apart with only the heredoc gating
       # anything (issue #535).
+      # `--remap-path-prefix` is a silent no-op when its prefix does not match,
+      # so a runner-image change that moves the home directory would quietly
+      # start shipping it. This is the step that notices. See
+      # `.cargo/config.toml` for the remaps and the script for what it ignores.
+      - name: The wheel must carry no builder paths
+        shell: bash
+        run: |
+          PY="$(command -v python3 || command -v python)"
+          "$PY" scripts/check_binary_paths.py packages/yani-core/dist/*.whl
+
       - name: The wheel must carry none of the transport stack
         shell: bash
         run: |
@@ -422,6 +442,16 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist --features mesh,cad,gpu
 
+      # `--remap-path-prefix` is a silent no-op when its prefix does not match,
+      # so a runner-image change that moves the home directory would quietly
+      # start shipping it. This is the step that notices. See
+      # `.cargo/config.toml` for the remaps and the script for what it ignores.
+      - name: The wheel must carry no builder paths
+        shell: bash
+        run: |
+          PY="$(command -v python3 || command -v python)"
+          "$PY" scripts/check_binary_paths.py packages/yamc-core/dist/*.whl
+
       - name: Upload wheels
         uses: actions/upload-artifact@v7
         with:
@@ -461,6 +491,16 @@ jobs:
           working-directory: packages/yamc-core
           target: aarch64-apple-darwin
           args: --release --out dist --features mesh,cad,gpu
+
+      # `--remap-path-prefix` is a silent no-op when its prefix does not match,
+      # so a runner-image change that moves the home directory would quietly
+      # start shipping it. This is the step that notices. See
+      # `.cargo/config.toml` for the remaps and the script for what it ignores.
+      - name: The wheel must carry no builder paths
+        shell: bash
+        run: |
+          PY="$(command -v python3 || command -v python)"
+          "$PY" scripts/check_binary_paths.py packages/yamc-core/dist/*.whl
 
       - name: Upload wheels
         uses: actions/upload-artifact@v7

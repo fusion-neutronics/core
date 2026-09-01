@@ -387,6 +387,48 @@ If the pre-commit hooks fail (e.g. due to a missing MPI installation) and you st
 git commit --no-verify -m "commit message"
 ```
 
+## Rebuilding the committed wasm blobs
+
+Three wasm binaries are committed under
+`packages/yamc-core/python/yamc/_wasm/` and ship inside the `yamc-core` wheel:
+
+| file | built from |
+| --- | --- |
+| `yamc_sim_bg.wasm` | `crates/yamc`, `--features wasm` (renamed from `yamc_bg.wasm`) |
+| `yamc_geo_bg.wasm` | `crates/yamc-geo` |
+| `yamt_bg.wasm` | `crates/yamt` |
+
+Nothing in CI produces them; they are built by hand and committed. `_export.py`
+base64-embeds `yamc_sim_bg.wasm` into every file `Model.to_html()` writes, so
+whatever is in the blob travels with each exported viewer.
+
+That is why the remaps in `.cargo/config.toml` list the CI layouts, and it is
+also why they do not help here: they cover `/root`, `/home/runner` and
+`/Users/runner`, not your home directory. Rebuilding on a workstation without
+the extra flag bakes your own path into the blob, which is how the currently
+committed ones came to carry one. So pass it:
+
+```bash
+export RUSTFLAGS="--remap-path-prefix=$HOME=/build"
+cd crates/yamc     && wasm-pack build --target web --features wasm
+cd ../yamc-geo     && wasm-pack build --target web
+cd ../yamt         && wasm-pack build --target web
+```
+
+Then copy the `pkg/` output into `packages/yamc-core/python/yamc/_wasm/`,
+renaming the `crates/yamc` pair to `yamc_sim*`, and check the result before
+committing:
+
+```bash
+python scripts/check_binary_paths.py packages/yamc-core/python/yamc/_wasm/*.wasm
+```
+
+Regenerate the `.js` glue alongside the `.wasm` in the same run. The two are a
+matched pair from one `wasm-bindgen` version, and the committed set is currently
+mismatched: two blobs came from `wasm-bindgen 0.2.108` and one from `0.2.121`,
+while `Cargo.lock` pins `0.2.125`. Rebuilding one without the other, or without
+running `ci-wasm.yml`'s browser test, is how that drift goes unnoticed.
+
 ## Releasing
 
 Two distributions are published from this repository, and they carry
