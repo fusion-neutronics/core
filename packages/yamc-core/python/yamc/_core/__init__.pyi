@@ -4469,6 +4469,13 @@ class TransmutationResults:
         
         - ``perturbed`` / ``no_covariance_data``: which nuclides had usable
           MF=33 covariance and which had none.
+        - ``rate_fraction_covered_total``: the share of the production this run
+          drove that a covariance actually spans, weighted by rate and by parent
+          density. Read this before any sigma here. It is a different and much
+          sharper question than how many nuclides carry MF=33: an evaluation can
+          state covariance for every isotope in the material and none for the
+          channel making the product of interest, and the count then reads as
+          full coverage while the ensemble perturbs almost nothing.
         - ``rate_fraction_covered``: per nuclide and channel, the share of the
           reaction rate the covariance grid actually spans. Below one means part
           of the rate carries no stated uncertainty and the sigma is diluted.
@@ -4790,6 +4797,92 @@ class TransmutationResults:
             ...     for target, rate in edges
             ...     if target == "Mn56"
             ... ]
+        """
+    def get_isomeric_branching(self, material_id: builtins.int, step: builtins.int) -> typing.Optional[typing.Any]:
+        r"""
+        Flux-weighted isomeric branching at one step.
+        
+        Which state a reaction leaves its product in is energy dependent, so the
+        single number describing a spectrum is the branching collapsed against
+        it, and that number exists only inside a solve. The chain file carries
+        the unweighted ratios, and where the branching overlay supplies the
+        split it carries a placeholder instead: on TENDL-2025 the dominant
+        tungsten channel reads ``W186 (n,2n) -> W185 1.000000`` and
+        ``W186 (n,2n) -> W185_m1 0.000000`` in the file, and the overlay
+        replaces both at solve time with roughly the 54/46 that spectrum gives.
+        On a foil whose decay heat comes from an isomer, that difference is the
+        whole answer.
+        
+        Only channels landing in more than one final state appear. A channel
+        with one product has no branching to report, and listing it at 1.0
+        buries the ones that do; ``get_reaction_rates`` has the unnormalised
+        edges if the rest is wanted.
+        
+        This is the number that says whether a disagreement belongs to a cross
+        section or to a branching ratio, which are different data and different
+        fixes.
+        
+        Args:
+            material_id: Material ID number.
+            step: Schedule step index, the same index ``get_reaction_rates``
+                takes, which is one less than the composition getters' step.
+        
+        Returns:
+            dict[str, dict[str, list[tuple[str, float]]]] | None: parent ->
+            reaction kind -> [(target, fraction)], fractions summing to one and
+            ordered with the largest first. Empty for a decay-only step, and
+            None if the material or the step is unknown.
+        
+        Examples:
+            >>> results.get_isomeric_branching(material_id=1, step=0)["W186"]
+            {'(n,2n)': [('W185_m1', 0.535), ('W185', 0.465)]}
+        """
+    def get_production_routes(self, material_id: builtins.int, product: builtins.str, step: builtins.int, reaction_depth: builtins.int = 1, decay_depth: builtins.int = 3) -> typing.Optional[typing.Any]:
+        r"""
+        Every way a product was made over one step, weighted by how much of it
+        arrived down each.
+        
+        Enumerating routes is easy and weighting them is not. Asked what makes
+        W187, a chain answers ``Os190(n,a)`` and ``Ir192(n,npa)`` as readily as
+        ``W186(n,gamma)``, and nothing in a tungsten foil is osmium. So the walk
+        starts from the nuclides the material actually began with, and each
+        route is weighted by what its own reactions drove rather than by
+        anything read off the chain.
+        
+        A route is ``reaction_depth`` neutron reactions followed by up to
+        ``decay_depth`` decays. Its weight is the atoms it starts from, times
+        each reaction step's per-atom production over the step, times the
+        branching of every decay it passes through: a route through a 1% branch
+        delivers 1% of what the reaction made. Reaction steps carry the step
+        duration, so a two-reaction route is in the same units as a one-reaction
+        route and comes out smaller by roughly a factor of the fluence, which is
+        the honest answer for an irradiation short enough that products barely
+        burn.
+        
+        Args:
+            material_id: Material ID number.
+            product: The nuclide whose production is being explained.
+            step: Schedule step index, as ``get_reaction_rates`` takes it.
+            reaction_depth (int): Neutron reactions a route may use. 1 is what
+                the published pathway tables carry.
+            decay_depth (int): Decays a route may follow after them.
+        
+        Returns:
+            list[dict] | None: one entry per route, largest share first, each
+            with ``route`` (the string the published tables print, e.g.
+            ``"W186(n,2n)W185_m1(IT)W185"``), ``steps`` (the same thing as
+            ``(parent, kind, target)`` triples), ``share`` (of this product's
+            production, summing to one) and ``production`` (atoms per barn-cm,
+            before normalising, so that 100% of almost nothing is
+            distinguishable from 100% of the inventory). Empty when nothing in
+            this material makes the product, which is an answer. None if the
+            material, the step, or the chain is unknown.
+        
+        Examples:
+            >>> for r in results.get_production_routes(1, "W185", 0):
+            ...     print(f"{r['route']:<32} {r['share']:.1%}")
+            W186(n,2n)W185_m1(IT)W185        53.0%
+            W186(n,2n)W185                   46.8%
         """
     def __repr__(self) -> builtins.str: ...
 
