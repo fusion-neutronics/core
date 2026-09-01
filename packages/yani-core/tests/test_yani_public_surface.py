@@ -72,6 +72,21 @@ def test_the_transmutation_surface_is_intact():
         assert name in yani.__all__, f"yani no longer advertises {name}"
 
 
+def test_the_readback_gate_is_on_this_wheel_too():
+    """The pair that replaced the Python reader, on the wheel that also writes.
+
+    A conversion is checked by reading it back, and these two bind the real
+    Rust loaders so the gate is the consumer rather than a second
+    implementation of the format (issue #525). They are registered outside the
+    `transport` gate in `register_classes` on purpose, because yani converts as
+    well as yamc does, and nothing else pins that: the only Python tests for
+    the pair live in the yamc package, so re-gating them behind `transport`
+    would quietly drop them from this wheel with every test still green.
+    """
+    for name in ("read_nuclide_from_arrow", "read_element_from_arrow"):
+        assert name in yani.__all__, f"yani no longer advertises {name}"
+
+
 def test_the_stub_reexports_every_submodule():
     """Working at runtime is the half that hides the other half.
 

@@ -38,16 +38,29 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The branch is load-bearing twice over. The reader has to be the fork
+      # The fork is load-bearing twice over. The reader has to be the fork
       # (upstream has no Chain, no from_njoy, no radionuclide_production), and
-      # it has to be the branch that teaches it to read `.xz`, because every
+      # it has to be the revision that teaches it to read `.xz`, because every
       # fixture here is stored compressed. `local-develop` has the first and not
       # the second, so it cannot regenerate these.
       #
-      # Move this to `local-develop` once the Rust-rewrite branch merges there.
+      # Pinned to a commit, not to the branch that carries it. A mutable ref
+      # means the oracle can be redefined without a commit here: a new push to
+      # that branch silently changes what all 28 goldens are compared against,
+      # and deleting the branch (which is the convention once it merges) turns
+      # this job red on an unrelated PR that only touched crates/endf. The Rust
+      # side already pins its git dependencies by revision in Cargo.lock, so
+      # this is the same rule applied to the one Python dependency.
+      #
+      # 8f42576 is the tip of shimwell/endf-python's
+      # `claude/rust-rewrite-python-layer-1upmmo`, 44 commits ahead of
+      # `local-develop` and not merged into it. Bumping it is a deliberate act:
+      # a fix to the fork's reader does not reach these goldens until someone
+      # changes this line, which is the trade a reproducible oracle asks for.
+      # Repoint at `local-develop` once the Rust-rewrite work merges there.
       - name: Install the endf reader the goldens are generated from
         run: |
-          pip install "endf @ git+https://github.com/shimwell/endf-python@claude/rust-rewrite-python-layer-1upmmo"
+          pip install "endf @ git+https://github.com/shimwell/endf-python@8f42576be57b464672bc5f6a0ae66041b336c148"
 
       # Regenerates all 28 single-file goldens from the fixtures and diffs them
       # against what is committed. The chain golden is built by a second tool
