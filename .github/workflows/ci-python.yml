@@ -299,35 +299,11 @@ jobs:
 
       # `--remap-path-prefix` is a silent no-op on a prefix that does not
       # match, so check at the build that produced them rather than only on the
-      # wheel. Guarded because the checker arrives with a separate change; the
-      # grep below is the same question asked more crudely.
+      # wheel, which is where the four other calls to this checker run. If the
+      # remap ever stops applying, this is the step that says so next to the
+      # build that did it.
       - name: The blobs must carry no builder paths
-        run: |
-          set -euo pipefail
-          dest=packages/yamc-core/python/yamc/_wasm
-          if [ -f scripts/check_binary_paths.py ]; then
-            python3 scripts/check_binary_paths.py "$dest"/*.wasm
-          else
-            # Trailing slashes are load-bearing. Unanchored, `/root` matches
-            # `/build/.cargo/.../num-integer-0.1.46/src/roots.rs`, which is a
-            # path the remap already CLEANED, and the check fails on its own
-            # success. It did exactly that on the first run of this job.
-            #
-            # Printing the offending strings matters as much: the first version
-            # said only "carries a runner path" and named the file, which is
-            # not enough to tell a real leak from this.
-            found=0
-            for f in "$dest"/*.wasm; do
-              hits=$(strings "$f" | grep -e /home/runner/ -e /Users/runner/ -e /root/ | sort -u || true)
-              if [ -n "$hits" ]; then
-                echo "::error::$f carries builder paths, so the remap did not apply:"
-                echo "$hits" | sed 's/^/    /'
-                found=1
-              fi
-            done
-            [ "$found" -eq 0 ] || exit 1
-            echo "ok: no builder paths in any blob"
-          fi
+        run: python3 scripts/check_binary_paths.py packages/yamc-core/python/yamc/_wasm/*.wasm
 
       # yamt_bg.wasm and yamt.js are include_bytes!/include_str!'d by
       # crates/yamc-plot behind its own `mesh` feature, which nothing in the
