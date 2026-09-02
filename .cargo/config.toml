@@ -1,5 +1,45 @@
+# Keep the builder's absolute paths out of the shipped binaries. cargo bakes
+# the registry path of every dependency into panic locations, so an unremapped
+# build leaks either the CI container layout or, for anything built by hand, a
+# developer's home directory. The whole home root is remapped rather than just
+# `.cargo`, because `.rustup` leaks too when the rust-src component is present.
+# `--remap-path-prefix` on a prefix that is not present is a no-op, so all three
+# runner layouts are listed rather than computed; cargo does not expand env vars
+# in `rustflags`.
+#
+# This does not hide dependency names or versions, and is not meant to:
+# THIRD-PARTY-LICENSES.html publishes both, by design, in every wheel.
+#
+# `/rustc/<hash>` paths are not remappable here. They are baked into the
+# precompiled std, so rewriting them would need -Zbuild-std on nightly. They
+# name the compiler commit and nothing about the machine.
+#
+# LANDMINE: a `RUSTFLAGS` env var REPLACES this block rather than adding to it,
+# so any job that sets one gets none of these remaps. Today that is `test-mpi`
+# and `stubs-typing`, both via `actions-rust-lang/setup-rust-toolchain`, which
+# defaults to `RUSTFLAGS=-D warnings`. Neither ships a binary, so nothing leaks
+# today. The four wheel jobs use `dtolnay/rust-toolchain`, which sets no
+# RUSTFLAGS, which is the only reason this works. Swap a wheel job to the other
+# action and the remap silently dies; `scripts/check_binary_paths.py` runs in
+# those jobs so that this is caught rather than shipped.
+[build]
+rustflags = [
+    '--remap-path-prefix=/root=/build',
+    '--remap-path-prefix=/home/runner=/build',
+    '--remap-path-prefix=/Users/runner=/build',
+]
+
+# NOTE: cargo does not merge this with `[build].rustflags`; the target-specific
+# array wins outright. So the remaps above have to be repeated here, and this is
+# the target that matters most, because the committed wasm blobs are built by
+# hand and ship inside the wheel.
 [target.wasm32-unknown-unknown]
-rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+rustflags = [
+    '--cfg', 'getrandom_backend="wasm_js"',
+    '--remap-path-prefix=/root=/build',
+    '--remap-path-prefix=/home/runner=/build',
+    '--remap-path-prefix=/Users/runner=/build',
+]
 
 [alias]
 # GPU tests share a process-global cubecl client, so they must run
