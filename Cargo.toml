@@ -23,3 +23,28 @@ lto = "thin"
 # across the extension boundary, so aborting here would turn every recoverable
 # error in the bindings into a killed interpreter.
 panic = "unwind"
+
+# Dev and test builds carried full DWARF, and this workspace cannot afford it.
+# There was no `[profile.dev]`, so cargo's default `debug = 2` applied to every
+# `cargo test`: full type and variable-location info for arrow, faer, wgpu,
+# cubecl, rustpython and nalgebra, plus a copy in each of the ~40 test
+# binaries. A local `target/debug` reached 103 GB, and CI does not have that:
+# on 2026-09-02 the ubuntu runner logged "Free space left: 0 MB" and one second
+# later `ld` died with SIGBUS writing its own mmapped output, which is what a
+# full filesystem looks like from inside the linker rather than a clean ENOSPC.
+# The same failure hit `main` and an unrelated pull request in the same hour, so
+# it was the workspace outgrowing the runner and not anything either change did.
+#
+# `line-tables-only` keeps the line-number program and drops the rest, so a
+# panic backtrace still names the file and line that panicked, which is what
+# these builds are actually read for. What is lost is stepping in a debugger
+# with variable inspection; anyone who needs that can build with
+# `RUSTFLAGS=-Cdebuginfo=2` for the one crate they are debugging.
+#
+# The next lever, if this stops being enough, is `debug = false` under
+# `[profile.dev.package."*"]`, which keeps line tables for this workspace's own
+# crates and drops them for every dependency. Not done yet because it makes a
+# backtrace through faer or arrow unreadable, and those are exactly the frames a
+# numerical bug tends to sit in.
+[profile.dev]
+debug = "line-tables-only"
