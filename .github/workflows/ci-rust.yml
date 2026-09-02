@@ -237,16 +237,37 @@ jobs:
 
       - name: Set up Rust
         run: rustup update stable && rustup default stable
+
+      # `mpi-sys` bakes an absolute `-L` into its build-script output, and cargo
+      # will not re-run a build script whose Rust-side inputs have not changed.
+      # So when the macOS image upgraded open-mpi from 5.0.9 to 5.0.10 the
+      # cached output kept pointing at
+      # /opt/homebrew/Cellar/open-mpi/5.0.9/lib, a directory that no longer
+      # existed, and every build here failed with `ld: library 'mpi' not found`
+      # on a full cache hit. Keying on the native version is what makes an image
+      # upgrade invalidate the cache instead of poisoning it.
+      - name: Record the native MPI version for the cache key
+        id: mpi
+        shell: bash
+        run: |
+          version="$( { mpirun --version 2>/dev/null || mpiexec --version 2>/dev/null; } \
+                      | head -1 | tr -cs '[:alnum:].' '-' | sed 's/^-*//; s/-*$//' )"
+          echo "version=${version:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "native MPI: ${version:-unknown}"
+
       # Cache the dependency build. Without this every Rust job recompiled the
       # whole workspace -- arrow, faer, wgpu, cubecl -- from scratch on every
       # push, which is most of why these jobs ran as long as they did.
       #
-      # Shared with the workspace tests: the `mpi` feature is a thin layer over
-      # the same dependency build.
+      # Deliberately NOT the `ci` key the workspace tests use. That cache is
+      # shared with jobs that never link MPI, so this job's `mpi-sys` output
+      # went in there and came back out on a machine whose open-mpi had moved.
+      # Its own key costs one cold build per MPI version and keeps a native
+      # upgrade from reaching jobs that do not link against it.
       - name: Cache the Rust build
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci
+          shared-key: ci-mpi-${{ steps.mpi.outputs.version }}
           cache-on-failure: true
 
       - name: Verify MPI installation
