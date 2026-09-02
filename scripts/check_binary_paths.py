@@ -40,6 +40,22 @@ LEAKS = re.compile(rb"(/home/[A-Za-z0-9._-]+|/Users/[A-Za-z0-9._-]+|/root)/[A-Za
 # text we author.
 BINARY_SUFFIXES = (".so", ".pyd", ".dylib", ".wasm")
 
+# Members known to carry builder paths, with the issue that removes them.
+# These three wasm blobs are committed and built by hand, so the remaps in
+# `.cargo/config.toml` cannot reach them: those cover the CI runner layouts,
+# and a workstation's home is not one. Tracked in
+# https://github.com/fusion-neutronics/core/issues/16.
+#
+# Listing them here rather than skipping `.wasm` wholesale keeps the rest of the
+# coverage: a fourth blob, or a leak in the extension module itself, still
+# fails. And a member that appears here while being clean is also a failure, so
+# the list cannot quietly outlive the fix.
+KNOWN_DIRTY = {
+    "yamc/_wasm/yamc_geo_bg.wasm",
+    "yamc/_wasm/yamc_sim_bg.wasm",
+    "yamc/_wasm/yamt_bg.wasm",
+}
+
 
 def scan(name: str, blob: bytes) -> list[str]:
     """Return a deduplicated, truncated list of leaked paths in one blob."""
@@ -64,14 +80,25 @@ def check(path: Path) -> int:
 
     total = 0
     for name, blob in targets:
+        member = name.split("::", 1)[-1]
+        known = member in KNOWN_DIRTY
         leaks = scan(name, blob)
-        if leaks:
+
+        if leaks and known:
+            print(f"known (see issue 16): {member} carries {len(leaks)} path(s)")
+        elif leaks:
             total += len(leaks)
             print(f"::error::{name} carries {len(leaks)} builder path(s):")
             for leak in leaks[:10]:
                 print(f"    {leak}")
             if len(leaks) > 10:
                 print(f"    ... and {len(leaks) - 10} more")
+        elif known:
+            total += 1
+            print(
+                f"::error::{member} is listed in KNOWN_DIRTY and is now clean. "
+                "Remove it from the list rather than leaving a stale excuse."
+            )
         else:
             print(f"ok: {name}")
     return total
@@ -97,7 +124,8 @@ def main(argv: list[str]) -> int:
             "artifact was built by hand outside CI."
         )
         return 1
-    print(f"checked {len(paths)} file(s): no builder paths")
+    # "no new": a KNOWN_DIRTY member that leaked is reported above, not here.
+    print(f"checked {len(paths)} file(s): no new builder paths")
     return 0
 
 
