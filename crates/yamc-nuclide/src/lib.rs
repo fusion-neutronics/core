@@ -6,6 +6,7 @@
 //! without dragging in the transport engine. yamc itself depends on
 //! this crate and re-exports its types under their original paths.
 
+pub mod blend;
 pub mod buffer;
 pub mod composition;
 pub mod config;

@@ -1174,6 +1174,12 @@ class Material:
     def temperature(self, value: typing.Any) -> None:
         r"""
         Set current temperature label.
+        
+        Takes a number or a label. The label form matters because the getter
+        returns one: without it ``m.temperature = m.temperature`` raised
+        ``ValueError``, which is a defect on its own and becomes a sharper one
+        now that a non-integer temperature is legitimate input. Both spellings
+        name one temperature, since the core normalises the ``K`` suffix away.
         """
     @property
     def reaction_mts(self) -> builtins.list[builtins.int]:

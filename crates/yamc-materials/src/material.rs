@@ -1700,10 +1700,14 @@ impl Material {
     }
 
     /// Resolve temperature with fallback chain:
-    /// 1. Use provided temperature if Some
-    /// 2. Fall back to material.temperature if set AND available in nuclide data
+    /// 1. Use provided temperature if Some, once it resolves against the data
+    /// 2. Fall back to material.temperature if set AND resolvable
     /// 3. Fall back to the only temperature if nuclide data has exactly one
     /// 4. Otherwise panic with available temperatures listed
+    ///
+    /// "Resolvable" is wider than "listed": a temperature the data BRACKETS is
+    /// served by blending its two neighbours, so only a request outside the
+    /// range the data covers reaches the panic in step 4.
     pub fn resolve_temperature(&mut self, provided: Option<&str>) -> String {
         // Collect all available temperatures from nuclide data
         let mut all_temps: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1718,8 +1722,32 @@ impl Material {
         // is keyed by the stripped form, so `"900K"` would otherwise be
         // rejected as unavailable while `"900"` succeeded on the same data
         // (#481).
+        // Sorted once, and reused by every check below, so one message shape
+        // serves all of them.
+        let mut sorted_all: Vec<String> = all_temps.iter().cloned().collect();
+        sorted_all.sort_by(|a, b| {
+            match (
+                yamc_nuclide::temperature::label_to_kelvin(a),
+                yamc_nuclide::temperature::label_to_kelvin(b),
+            ) {
+                (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+                _ => a.cmp(b),
+            }
+        });
+
         if let Some(temp) = provided {
-            return yamc_nuclide::temperature::strip_k(temp).to_string();
+            let label = yamc_nuclide::temperature::strip_k(temp);
+            // Validated rather than returned unchecked. An unservable label
+            // used to pass straight through and fail much later as a missing
+            // MT, which is the #481 symptom with no mention of temperature.
+            // Skipped when there is no nuclide data at all, so the photon-only
+            // path below still works.
+            if !sorted_all.is_empty() {
+                if let Err(e) = yamc_nuclide::temperature::resolve(label, &sorted_all) {
+                    panic!("{e}");
+                }
+            }
+            return label.to_string();
         }
 
         // Photon-only mode: no nuclide data loaded, return material temperature
@@ -1727,8 +1755,11 @@ impl Material {
             return self.temperature.clone();
         }
 
-        // 2. Fall back to material.temperature if set AND available in nuclide data
-        if !self.temperature.is_empty() && all_temps.contains(&self.temperature) {
+        // 2. Fall back to material.temperature if set AND resolvable against
+        // the nuclide data, which includes the temperatures the data brackets.
+        if !self.temperature.is_empty()
+            && yamc_nuclide::temperature::resolve(&self.temperature, &sorted_all).is_ok()
+        {
             return self.temperature.clone();
         }
 
@@ -1747,14 +1778,15 @@ impl Material {
             return detected_temp;
         }
 
-        // 4. If material.temperature is explicitly set but NOT available, error
+        // 4. If material.temperature is explicitly set but cannot be resolved,
+        // error. Step 2 already tried, so this only re-runs it to get the
+        // message, which carries the requested value, the range and the
+        // available list from one place rather than being rebuilt here.
         if !self.temperature.is_empty() {
-            let mut temps_list: Vec<String> = all_temps.into_iter().collect();
-            temps_list.sort();
-            panic!(
-                "Temperature '{}' not available. Available temperatures: {:?}",
-                self.temperature, temps_list
-            );
+            match yamc_nuclide::temperature::resolve(&self.temperature, &sorted_all) {
+                Ok(_) => unreachable!("step 2 returns for every temperature that resolves"),
+                Err(e) => panic!("{e}"),
+            }
         }
 
         // 5. Panic with helpful error (multiple temps available, none specified)
@@ -1814,19 +1846,44 @@ impl Material {
                 return Err(msg.into());
             }
 
-            // If material temperature is set, verify it's in the common set
-            if !self.temperature.is_empty() && !common_temps.contains(&self.temperature) {
-                let temp_list = common_temps
+            // If material temperature is set, verify every nuclide can SERVE
+            // it, which is wider than every nuclide listing it: a temperature
+            // between two of a nuclide's rungs is served by blending them.
+            //
+            // Per nuclide rather than against the common set, because the two
+            // are no longer the same question. Intersecting the ladders first
+            // and then bracketing inside the intersection would refuse a
+            // temperature every nuclide can serve whenever their ladders differ
+            // in rungs that do not matter for this request.
+            if !self.temperature.is_empty() {
+                let unservable: Vec<&(String, Vec<String>)> = nuclide_temps
                     .iter()
-                    .map(|s| format!("'{s}'"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Err(format!(
-                    "Material temperature '{}' is not available in all nuclides. \
-                     Common temperatures across all nuclides: {}",
-                    self.temperature, temp_list
-                )
-                .into());
+                    .filter(|(_, temps)| {
+                        yamc_nuclide::temperature::resolve(&self.temperature, temps).is_err()
+                    })
+                    .collect();
+                if !unservable.is_empty() {
+                    let detail = unservable
+                        .iter()
+                        .map(|(name, temps)| {
+                            format!(
+                                "{name} has [{}]",
+                                temps
+                                    .iter()
+                                    .map(|s| format!("'{s}'"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(format!(
+                        "Material temperature '{}' is outside the range these \
+                         nuclides cover: {detail}",
+                        self.temperature
+                    )
+                    .into());
+                }
             }
         }
 

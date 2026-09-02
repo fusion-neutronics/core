@@ -433,6 +433,31 @@ def test_temperature_kwarg():
     assert mat.temperature == "600"
 
 
+def test_temperature_round_trips_through_its_own_setter():
+    """Assigning a material's own temperature back to it must work.
+
+    The getter returns a label and the setter took only numbers, so
+    ``m.temperature = m.temperature`` raised ValueError. Harmless-looking until
+    a non-integer temperature became legitimate input, at which point the
+    label form is the one a caller is most likely to have. Reads no nuclear
+    data.
+    """
+    mat = Material(composition={"Fe56": 1.0}, density=7.87, temperature=600.0)
+    mat.temperature = mat.temperature
+    assert mat.temperature == "600"
+
+    # The on-disk spelling names the same temperature as the bare number, which
+    # is what strip_k is for.
+    mat.temperature = "900K"
+    assert mat.temperature == "900"
+
+    mat.temperature = 450.5
+    assert mat.temperature == "450.5"
+
+    with pytest.raises(ValueError):
+        mat.temperature = object()
+
+
 # ---------------------------------------------------------------------------
 # Property setters (post-construction)
 # ---------------------------------------------------------------------------

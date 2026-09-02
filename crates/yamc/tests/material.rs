@@ -799,8 +799,16 @@ mod tests {
         );
     }
 
+    /// A temperature the file brackets is built from its two neighbours.
+    ///
+    /// This used to assert the opposite, that a 300 K load fails. Its comment
+    /// said "only 294 is available", which was never true of this fixture:
+    /// Be9 carries 250, 294, 600, 900, 1200 and 2500, so 300 has always been
+    /// bracketed and the failure was the exact-match rule rather than missing
+    /// data. A failure here now means either that the bracket was not loaded
+    /// or that the blend was not built from it.
     #[test]
-    fn test_selective_temperature_load_be9_300() {
+    fn test_intermediate_temperature_load_be9_300_blends_the_bracket() {
         yamc_nuclide::nuclide::clear_nuclide_cache();
         let mut mat =
             Material::new(HashMap::from([("Be9".into(), 1.0)]), "atom", "sum", None).unwrap();
@@ -808,17 +816,53 @@ mod tests {
         let mut map = std::collections::HashMap::new();
         map.insert("Be9".to_string(), "tests/Be9.arrow".to_string());
 
-        // Loading with temperature 300 when only 294 is available should now fail
-        // with a helpful error message
-        let result = mat.read_nuclear_data(&map, None);
-        assert!(
-            result.is_err(),
-            "Material loading should fail when requested temperature is not available"
+        mat.read_nuclear_data(&map, None)
+            .expect("300 K is bracketed by 294 K and 600 K");
+        let be9 = mat.nuclide_data.get("Be9").expect("Be9 not loaded");
+
+        // The two rungs it was built from, and the rung itself, in numeric
+        // order. Nothing else: a 300 K material has no use for 900 K.
+        assert_eq!(
+            be9.loaded_temperatures,
+            vec!["294".to_string(), "300".to_string(), "600".to_string()]
         );
-        let err_msg = result.unwrap_err().to_string();
+        assert!(be9.get_temp_idx("300").is_some());
+
+        // The file's own ladder is unchanged. Adding "300" to it would make a
+        // later 400 K request bracket 300 to 600 rather than 294 to 600, so
+        // the answer would depend on the order the queries arrived in.
         assert!(
-            err_msg.contains("294"),
-            "Error message should mention available temperature 294, got: {err_msg}"
+            !be9.available_temperatures.contains(&"300".to_string()),
+            "available_temperatures must stay the file's ladder, got {:?}",
+            be9.available_temperatures
+        );
+    }
+
+    /// A temperature the file cannot bracket is still refused, with the list.
+    ///
+    /// The half of the old test worth keeping. A failure means the out-of-range
+    /// rule became a silent clamp onto the nearest rung, which is what OpenMC
+    /// does and what this design deliberately does not.
+    #[test]
+    fn test_out_of_range_temperature_load_be9_3000() {
+        yamc_nuclide::nuclide::clear_nuclide_cache();
+        let mut mat =
+            Material::new(HashMap::from([("Be9".into(), 1.0)]), "atom", "sum", None).unwrap();
+        mat.set_temperature("3000");
+        let mut map = std::collections::HashMap::new();
+        map.insert("Be9".to_string(), "tests/Be9.arrow".to_string());
+
+        let err = mat
+            .read_nuclear_data(&map, None)
+            .expect_err("3000 K is above every rung this file carries");
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("3000"),
+            "should name the request: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("2500"),
+            "should name the top of the ladder: {err_msg}"
         );
     }
 
