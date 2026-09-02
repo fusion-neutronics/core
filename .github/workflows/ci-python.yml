@@ -308,11 +308,25 @@ jobs:
           if [ -f scripts/check_binary_paths.py ]; then
             python3 scripts/check_binary_paths.py "$dest"/*.wasm
           else
-            if grep -l -e /home/runner -e /Users/runner -e /root "$dest"/*.wasm; then
-              echo "::error::the blobs above carry a runner path, so the remap did not apply"
-              exit 1
-            fi
-            echo "ok: no runner paths in any blob"
+            # Trailing slashes are load-bearing. Unanchored, `/root` matches
+            # `/build/.cargo/.../num-integer-0.1.46/src/roots.rs`, which is a
+            # path the remap already CLEANED, and the check fails on its own
+            # success. It did exactly that on the first run of this job.
+            #
+            # Printing the offending strings matters as much: the first version
+            # said only "carries a runner path" and named the file, which is
+            # not enough to tell a real leak from this.
+            found=0
+            for f in "$dest"/*.wasm; do
+              hits=$(strings "$f" | grep -e /home/runner/ -e /Users/runner/ -e /root/ | sort -u || true)
+              if [ -n "$hits" ]; then
+                echo "::error::$f carries builder paths, so the remap did not apply:"
+                echo "$hits" | sed 's/^/    /'
+                found=1
+              fi
+            done
+            [ "$found" -eq 0 ] || exit 1
+            echo "ok: no builder paths in any blob"
           fi
 
       # yamt_bg.wasm and yamt.js are include_bytes!/include_str!'d by

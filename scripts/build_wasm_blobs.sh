@@ -65,7 +65,9 @@ if [ -f scripts/check_binary_paths.py ]; then
     python3 scripts/check_binary_paths.py "$dest"/*.wasm
 else
     echo "checking them for this machine's home directory"
-    if grep -l "$HOME" "$dest"/*.wasm 2>/dev/null; then
+    # Trailing slash: unanchored, a home of "/root" would match the remapped
+    # `.../num-integer/src/roots.rs` and fail on its own success.
+    if grep -l "$HOME/" "$dest"/*.wasm 2>/dev/null; then
         echo "the files above still carry $HOME, so the remap did not apply" >&2
         exit 1
     fi
