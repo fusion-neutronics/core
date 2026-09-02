@@ -121,6 +121,19 @@ fn b10_sphere() -> (Model, Vec<Arc<Tally>>, TransportSettings) {
 
 #[test]
 fn gpu_b10_discrete_inelastic_rates_are_positive_and_match_cpu() {
+    // Before the CPU run, not after. The file header says this test needs a
+    // real GPU, and every other gpu test in this directory opens with this
+    // guard, but this one never had it: `run_on_gpu` below returns
+    // `GpuUnavailable` on a host with no f64 Vulkan adapter and the `expect`
+    // turns that into a panic. Harmless while nothing compiled the `gpu`
+    // feature in CI, and a guaranteed failure the moment something does.
+    // Placed first because `b10_sphere()` plus the CPU solve is 200k histories
+    // of work that only exists to be compared against a GPU result.
+    if yamc_gpu::GpuContext::new().is_err() {
+        eprintln!("skipping -- no GPU with f64 compute available");
+        return;
+    }
+
     let (mut cpu_model, cpu_tallies, settings) = b10_sphere();
     cpu_model.simulate_transport(&settings).unwrap();
     let cpu: Vec<f64> = cpu_tallies.iter().map(|t| t.get_mean()[0]).collect();

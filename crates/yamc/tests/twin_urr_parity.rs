@@ -90,7 +90,17 @@ fn build(comp: &[(&str, f64)], n_mats: usize) -> Option<(Model, Arc<Tally>, Tran
         m.read_nuclear_data(&data, None).ok()?;
         Some(Arc::new(m))
     };
-    let mats: Vec<Arc<Material>> = (0..n_mats).map(|i| mk_mat(i as u32 + 1).unwrap()).collect();
+    // `collect::<Option<_>>()?`, not `unwrap()`. The guard above checks that
+    // each nuclide's cache DIRECTORY exists, which is not the same as it being
+    // complete: a partially downloaded entry has `nuclide.arrow` and no
+    // `reactions.arrow`, so it passes the guard and then fails in
+    // `read_nuclear_data`. That turned an absent fixture into a panic pointing
+    // at this line rather than a skip, which is a confusing way to learn your
+    // cache is half fetched. Natural W needs four isotopes and CI fetches only
+    // W184, so the skip is the normal path there anyway.
+    let mats: Vec<Arc<Material>> = (0..n_mats)
+        .map(|i| mk_mat(i as u32 + 1))
+        .collect::<Option<Vec<_>>>()?;
 
     let mut cells = Vec::new();
     let mut prev: Option<Arc<Surface>> = None;

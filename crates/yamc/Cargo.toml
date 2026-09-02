@@ -103,7 +103,12 @@ wasm = [
 wasm-test = ["wasm"]
 mesh = ["dep:yamt", "yamc-tallies/mesh"]
 cad = ["mesh"]
-# GPU compute path. Off by default; pulls cubecl/Vulkan via yamc-gpu.
+# GPU compute path. Off by default HERE, but on by default for the wheel:
+# `yamc-python`'s `default` includes `gpu`, which turns this on for every
+# `cargo build --workspace` and every `maturin develop`. Off in this crate's own
+# default so the wasm builds and the ppc64le/riscv64 cross-checks, which go
+# through `-p yamc --no-default-features`, never see cubecl.
+# Pulls cubecl/Vulkan via yamc-gpu.
 # On macOS yamc-gpu compiles to a stub whose `GpuContext::new()` returns
 # `NoF64Adapter`, so enabling `gpu` on macOS is a clean build but a
 # runtime no-op (caller falls back to CPU).

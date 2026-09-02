@@ -103,43 +103,17 @@ jobs:
       - name: Test yamt benchmark example
         run: cargo run -p yamt --example benchmark --release
 
-  # The `gpu` feature's integration tests are compiled by no other job, so a
-  # signature change can break them while every check stays green -- which is
-  # exactly what happened in #470, where two `dose_coefficients` call sites went
-  # stale and nothing noticed. `build_and_test` runs default features, and
-  # ci-python builds `--features gpu` through maturin, which compiles the
-  # library and not `crates/yamc/tests`.
+  # There is no `gpu_tests_compile` job any more. It existed because "the `gpu`
+  # feature's integration tests are compiled by no other job", which stopped
+  # being true when `gpu` joined yamc-python's default features: the workspace
+  # build, clippy and test steps above now compile them, on four runners rather
+  # than the one this job used. It type-checked only, because running them needs
+  # a Vulkan adapter; the ones that need an adapter still self-skip, and the ~9
+  # CPU twins that never needed one now actually run, which is what
+  # `twin_temperature_parity.rs` always claimed happened.
   #
-  # Type-check only: running these needs a Vulkan adapter, but compiling them is
-  # what catches the breakage. Linux alone covers all three files -- one is
-  # `#![cfg(feature = "gpu")]` and two add `not(target_os = "macos")`.
-  gpu_tests_compile:
-    name: GPU-gated tests compile
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libhdf5-dev cmake
-      # cubecl sets a rust-version above the workspace's other crates, so this
-      # job needs current stable rather than the oldest toolchain that builds
-      # the default features.
-      - name: Set up Rust
-        run: rustup update stable && rustup default stable
-      # Cache the dependency build. Without this every Rust job recompiled the
-      # whole workspace -- arrow, faer, wgpu, cubecl -- from scratch on every
-      # push, which is most of why these jobs ran as long as they did.
-      #
-      # Shared with the workspace tests above; the `gpu` feature changes what is
-      # built on top of a dependency set they otherwise have in common.
-      - name: Cache the Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci
-          cache-on-failure: true
-      - name: Check
-        run: cargo check -p yamc --features gpu --tests
+  # The `rustup update stable` it did for cubecl's higher rust-version is
+  # already done by `build_and_test` above.
 
   # Code coverage (informational only -- never fails the build yet).
   # Self-contained: prints the % in the log, uploads the lcov + HTML report as

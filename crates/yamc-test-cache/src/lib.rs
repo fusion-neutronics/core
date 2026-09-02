@@ -26,6 +26,33 @@ use std::path::PathBuf;
 /// downloads this one, and the cache entry names carry it.
 pub const LIBRARY: &str = "endf-b8.1";
 
+/// Whether this is a CI runner rather than someone's machine.
+///
+/// For the tests that produce no assertion, only output for a person to read:
+/// the CPU-versus-GPU comparison matrix and the photon spectrum diagnostics.
+/// Those cost real time (the whole CPU side of every mode, in the matrix's
+/// case) and yield nothing a runner can check, so they skip here and run at
+/// home.
+///
+/// They used to carry `#[ignore]`, which got the default backwards. `#[ignore]`
+/// means a developer sees them silently not run and has to know to pass
+/// `-- --ignored`, which is exactly the special step nobody should need in
+/// order to run everything locally. Skipping on CI instead means the local
+/// command is just `cargo test`.
+///
+/// This is NOT how a test decides it has no GPU. That question is answered by
+/// asking for one (`GpuContext::new().is_err()`), which is right on a CI runner
+/// and on a laptop alike, and would still be right if a GPU runner ever
+/// appeared. Environment detection beats environment guessing, and this
+/// function exists only for the one question the environment cannot answer:
+/// whether a human is going to read the output.
+///
+/// Both variables, because `GITHUB_ACTIONS` is specific and `CI` is set by
+/// essentially every runner. Matching more than GitHub is deliberate.
+pub fn on_ci() -> bool {
+    std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some()
+}
+
 /// Root of the fixture cache, as [`yamc_nuclide::url_cache::cache_root`]
 /// resolves it: `YAMC_CACHE_DIR` when set, else `<home>/.cache/yamc`.
 ///

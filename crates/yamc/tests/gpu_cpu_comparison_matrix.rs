@@ -506,8 +506,28 @@ fn fissile_table() {
     }
 }
 
+// Skipped on CI, run locally. This asserts nothing: 24 `println!`s and zero
+// `assert`s, because it exists to PRINT the markdown comparison tables its
+// header describes, for a person to read.
+//
+// The runners have no Vulkan adapter, and that makes it worse rather than
+// free. The adapter-gated tests here cost one `GpuContext::new()` check and
+// return; this one has no such guard, so it would run the whole CPU side of
+// every mode/estimator/capture/score combination, find no GPU to compare
+// against, record `rejected: <message>` in the GPU column, and print. All of
+// the work, none of the answer.
+//
+// Not `#[ignore]`, which is how this was first written and is the wrong
+// default: it would mean a developer has to know to pass `-- --ignored` to run
+// the thing that is only useful to them. `cargo test` locally should just run
+// it.
 #[test]
 fn gpu_cpu_comparison_matrix() {
+    if yamc_test_cache::on_ci() {
+        eprintln!("skipping the CPU/GPU comparison matrix: it prints tables for a person to read and asserts nothing, so a runner learns nothing from it");
+        return;
+    }
+
     if !data_present() {
         eprintln!(
             "skipping gpu_cpu_comparison_matrix -- tests/Fe56.arrow or tests/Fe.arrow not found"

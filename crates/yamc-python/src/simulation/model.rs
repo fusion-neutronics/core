@@ -1620,7 +1620,9 @@ impl PyModel {
     ) -> PyResult<crate::simulation::PySimulationResults> {
         Err(pyo3::exceptions::PyRuntimeError::new_err(
             "compute='gpu' requires yamc to be built with the `gpu` Cargo \
-             feature; rebuild with `maturin build --features mesh,cad,gpu`",
+             feature, which is in the default set, so this build opted out of \
+             it: rebuild without `--no-default-features`, or add `gpu` back to \
+             the feature list you passed",
         ))
     }
 }
