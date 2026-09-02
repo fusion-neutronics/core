@@ -15,17 +15,28 @@
 //! `synthetic-urr.ace.xz`, the only vendored input that reaches
 //! `write_urr`'s write branch at all.
 //!
-//! Three of the eleven tests are built from a HAND-CONSTRUCTED
+//! Six of the fourteen tests are built from a HAND-CONSTRUCTED
 //! `IncidentNeutron` rather than from a parsed evaluation, and their names all
 //! begin with `constructed_`. They exist because of what the vendored bytes
-//! cannot say: every vendored neutron evaluation carries at most ONE
-//! temperature, and the single one that carries unresolved resonance tables
-//! carries a single row whose scalar columns are all equal to each other or to
-//! a constant. A writer that swapped two of those columns, or that ignored a
-//! parsed field and wrote a literal in its place, passes every test built from
-//! vendored bytes. The constructed inputs give those fields deliberately
-//! DIFFERENT values, which is the only thing that separates them. They are not
-//! evaluation parity and nothing in them should be read as such.
+//! cannot say:
+//!
+//! * every vendored neutron evaluation carries at most ONE temperature, so
+//!   `temperatures`, `energy_temperatures` and `xs_temperatures` are one
+//!   element lists with no permutation to catch;
+//! * the single one that carries unresolved resonance tables carries a single
+//!   row whose scalar columns are all equal to each other or to a constant;
+//! * Li6 carries its OWN MT 1 and MT 101, and the ENDF route synthesizes
+//!   nothing at all, so no vendored route writes a synthesized MT 1 or MT 101
+//!   with a number in it;
+//! * no vendored reaction has more than one cross section at a temperature
+//!   outside `temperatures()`, so the extras phase has no order to get wrong.
+//!
+//! A writer that swapped two of those columns, that ignored a parsed field and
+//! wrote a literal in its place, or that dropped a term from a sum whose other
+//! terms Li6 happens not to carry, passes every test built from vendored bytes.
+//! The constructed inputs give those fields deliberately DIFFERENT values,
+//! which is the only thing that separates them. They are not evaluation parity
+//! and nothing in them should be read as such.
 
 mod section_values;
 
@@ -602,6 +613,13 @@ fn reaction_flags_are_the_parsed_reactions_own_flags() {
     // earns its place because `redundant = true` is what keeps a synthesized
     // row out of the sums (reactions.rs:43-45): changing the literal changes
     // the arithmetic of every row above it.
+    //
+    // One of the three is no longer only a pin:
+    // `constructed_synthesized_rows_are_redundant_so_the_rest_sum_to_the_total`
+    // checks `redundant` against the rule a consumer applies to it rather than
+    // against a copy of the literal. `Q_value` and `center_of_mass` are still
+    // transcriptions here and there, and a synthesized sum has no products, so
+    // there is nothing downstream that reads either one to check them by.
     for mt in [3, 4, 27] {
         let row = mt_rows[&mt];
         assert_eq!(f64_at(&batch, "Q_value", row), 0.0, "MT {mt} Q value");
@@ -686,6 +704,12 @@ fn reaction_cross_sections_are_the_parsed_curves_unshifted() {
 /// removed: MT 3 is pinned EXACTLY against those same partial rows a few lines
 /// above, so that assertion could only ever fail on a property of the
 /// evaluation's own seven digit ACE columns, never on a converter defect.
+///
+/// Two of the five synthesized MTs are not reached here at all. Li6 carries its
+/// own MT 1 and its own MT 101, so those two rows are copies of the
+/// evaluation's columns and the values the writer synthesized for them are
+/// discarded. Both are checked on a constructed input in
+/// `constructed_partials_pin_synthesized_mt_101_and_the_mt_3_term_of_mt_1`.
 #[test]
 fn the_synthesized_rows_are_the_sum_of_the_rows_beside_them() {
     let data = li6_ace();
@@ -745,18 +769,25 @@ fn the_synthesized_rows_are_the_sum_of_the_rows_beside_them() {
     // while MT 27 is synthesized as the sum of MT 102, and on this fixture the
     // two are bit identical. So this pins the synthesized absorption against a
     // column the evaluation stored itself. It says nothing about a SYNTHESIZED
-    // MT 101, which nothing in this file reaches: MT 101 is parsed on the ACE
-    // route and empty on the ENDF route. If a future fixture or parser change
-    // breaks the bit equality, 1e-6 relative is the honest fallback rather
-    // than deleting the check.
+    // MT 101, which no VENDORED route in this file reaches: MT 101 is parsed on
+    // the ACE route and empty on the ENDF route. The synthesized row is checked
+    // in
+    // `constructed_partials_pin_synthesized_mt_101_and_the_mt_3_term_of_mt_1`,
+    // on a hand-built nuclide with two disappearance channels rather than
+    // Li6's one. If a future fixture or parser change breaks the bit equality
+    // below, 1e-6 relative is the honest fallback rather than deleting the
+    // check.
     assert_f64_slice_eq("MT 101 against MT 27", &written(101), &written(27));
 }
 
 /// A failure means the writer changed how it handles an evaluation with no
-/// nuclide grid. This is still the only case in this file, vendored or
-/// constructed, where `xs_temperatures` comes from the extras branch at
-/// reactions.rs:87 rather than from the filtered list at :82-86: here
-/// `temperatures()` is empty and the "0K" key comes entirely from `rx.xs`.
+/// nuclide grid. It is the only VENDORED case where `xs_temperatures` comes
+/// from the extras branch at reactions.rs:87 rather than from the filtered list
+/// at :82-86, and the only case anywhere in this file where the filtered list
+/// is EMPTY: `temperatures()` has no entries and the "0K" key comes entirely
+/// from `rx.xs`. With one extra key there is no order to check, which is what
+/// `constructed_extra_temperatures_follow_the_processed_ones_in_map_order`
+/// adds beside it.
 ///
 /// It also pins what the writer actually does with the synthesized MTs on this
 /// route, which is NOT "write no row": `n_energy` is 0 at every temperature so
@@ -1220,5 +1251,387 @@ fn constructed_two_temperature_reactions_keep_each_curve_with_its_own_temperatur
         "MT 1 xs_threshold_idx",
         &i32_list(&batch, "xs_threshold_idx", row),
         &[0, 0],
+    );
+}
+
+/// A hand-built nuclide carrying a NON-ELASTIC partial in every summation
+/// group the synthesized rows are built from.
+///
+/// Parsed from nothing. One temperature, a four point grid and six reactions
+/// whose cross sections are distinct powers of two, so every subset sum is a
+/// different number and a synthesized row built from the wrong set cannot land
+/// on the right value by accident. Three of the six start above the bottom of
+/// the grid, at two different thresholds, so a partial laid on the grid at the
+/// wrong offset changes the sums as well.
+///
+/// What each channel is here for, and what it looks like on the grid:
+///
+/// * MT 2, elastic, `[1, 1, 1, 1]`. The one channel MT 3 excludes, and the
+///   term MT 1 adds to MT 3.
+/// * MT 16, (n,2n), `[0, 0, 2, 2]`. Neutron emitting and not level inelastic,
+///   so it enters MT 3 and nothing else.
+/// * MT 51, first inelastic level, `[0, 4, 4, 4]`. The only term of MT 4.
+/// * MT 102, capture, `[8, 8, 8, 8]`, and MT 103, (n,p), `[0, 0, 16, 16]`.
+///   Both disappearance, so MT 101 is their sum.
+/// * MT 18, fission, `[0, 0, 32, 32]`. Reaches MT 27 and MT 3 through the
+///   fission term and nothing else.
+///
+/// No vendored neutron evaluation has this shape. Li6 carries no MT 16, no
+/// MT 18 and no MT 103, and it carries its OWN MT 1 and MT 101, so on the only
+/// fixture that reaches these rows with real numbers MT 1 and MT 101 are
+/// parsed columns rather than synthesized ones. The numbers here are invented.
+fn multi_channel_nuclide() -> IncidentNeutron {
+    let mut data = IncidentNeutron::new(26, 56, 0);
+    data.k_ts = vec![k_t(294.0)];
+    data.energy
+        .insert("294K".to_string(), vec![1.0, 2.0, 3.0, 4.0]);
+    for (mt, x, y, threshold) in [
+        (2, vec![1.0, 2.0, 3.0, 4.0], vec![1.0; 4], 0),
+        (16, vec![3.0, 4.0], vec![2.0; 2], 2),
+        (18, vec![3.0, 4.0], vec![32.0; 2], 2),
+        (51, vec![2.0, 3.0, 4.0], vec![4.0; 3], 1),
+        (102, vec![1.0, 2.0, 3.0, 4.0], vec![8.0; 4], 0),
+        (103, vec![3.0, 4.0], vec![16.0; 2], 2),
+    ] {
+        let mut rx = Reaction::new(mt);
+        rx.xs
+            .insert("294K".to_string(), partial_xs(x, y, threshold));
+        data.reactions.insert(mt, rx);
+    }
+    data
+}
+
+/// CONSTRUCTED INPUT, not an evaluation. The synthesized MT 101 row, and the
+/// MT 3 term of the synthesized MT 1 row.
+///
+/// No vendored evaluation reaches either. Li6 ACE carries its own MT 1 and its
+/// own MT 101 in the ESZ block, so both rows are PARSED there and the
+/// synthesized values are computed and thrown away; the ENDF route has no
+/// nuclide grid, so it synthesizes nothing and writes those rows empty; and the
+/// only other constructed nuclide in this file has elastic alone, which makes
+/// its MT 3 identically zero and its MT 101 all zeros. Against all three, a
+/// writer that dropped a channel from the disappearance sum, or dropped the
+/// `add(&mut mt1, &mt3)` term of MT 1 entirely, stays green. So the input here
+/// is built by hand with a partial in every group. The numbers are invented and
+/// nothing below is parity with any evaluation.
+///
+/// Every expected row is written out as a literal, computed by hand from the
+/// table in `multi_channel_nuclide`, and then again as a sum of the file's own
+/// partial rows. The literals are the part that does not go through the writer.
+#[test]
+fn constructed_partials_pin_synthesized_mt_101_and_the_mt_3_term_of_mt_1() {
+    let data = multi_channel_nuclide();
+    assert_eq!(data.temperatures(), vec!["294K".to_string()]);
+    for mt in [1, 3, 4, 27, 101] {
+        assert!(
+            !data.reactions.contains_key(&mt),
+            "MT {mt} must be absent from the input or the writer copies it \
+             instead of synthesizing it"
+        );
+    }
+
+    let dir = scratch();
+    yamc_convert::reactions::write_reactions(&data, dir.path())
+        .expect("reactions.arrow is written");
+    let batch = section(dir.path(), "reactions.arrow");
+    let mt_rows = rows_by_mt(&batch);
+    let n = data.energy["294K"].len();
+    assert_eq!(n, 4);
+
+    let on_grid = |mt: i32| written_on_grid(&batch, &mt_rows, mt, n);
+    let sum = |mts: &[i32]| -> Vec<f64> {
+        let mut acc = vec![0.0; n];
+        for &mt in mts {
+            for (a, b) in acc.iter_mut().zip(on_grid(mt)) {
+                *a += b;
+            }
+        }
+        acc
+    };
+
+    assert_eq!(
+        written_mts(&batch),
+        vec![2, 16, 18, 51, 102, 103, 1, 3, 4, 27, 101],
+        "the parsed reactions then the five synthesized MTs, none of which the \
+         input carries"
+    );
+
+    // The partials first, so a failure in the sums below cannot be blamed on
+    // the rows they are summed from. Every value is a small integer, so every
+    // sum in this test is exact in f64 whatever order it is taken in.
+    assert_f64_slice_eq("MT 2", &on_grid(2), &[1.0, 1.0, 1.0, 1.0]);
+    assert_f64_slice_eq("MT 16", &on_grid(16), &[0.0, 0.0, 2.0, 2.0]);
+    assert_f64_slice_eq("MT 18", &on_grid(18), &[0.0, 0.0, 32.0, 32.0]);
+    assert_f64_slice_eq("MT 51", &on_grid(51), &[0.0, 4.0, 4.0, 4.0]);
+    assert_f64_slice_eq("MT 102", &on_grid(102), &[8.0, 8.0, 8.0, 8.0]);
+    assert_f64_slice_eq("MT 103", &on_grid(103), &[0.0, 0.0, 16.0, 16.0]);
+
+    // THE SYNTHESIZED DISAPPEARANCE ROW. Capture plus (n,p), and neither one
+    // alone: 8 is MT 102 by itself and 16 is MT 103 by itself, so a sum missing
+    // either term is a different number at every point above the (n,p)
+    // threshold. Li6 has no MT 103 at all, which is why a disappearance set
+    // that lost it passes every other test here.
+    assert_f64_slice_eq("MT 101", &on_grid(101), &[8.0, 8.0, 24.0, 24.0]);
+    assert_f64_slice_eq(
+        "MT 101 against MT 102 + MT 103",
+        &on_grid(101),
+        &sum(&[102, 103]),
+    );
+
+    // MT 4 is the level inelastic sum and MT 27 is fission plus disappearance.
+    assert_f64_slice_eq("MT 4", &on_grid(4), &[0.0, 4.0, 4.0, 4.0]);
+    assert_f64_slice_eq("MT 4 against MT 51", &on_grid(4), &sum(&[51]));
+    assert_f64_slice_eq("MT 27", &on_grid(27), &[8.0, 8.0, 56.0, 56.0]);
+    assert_f64_slice_eq(
+        "MT 27 against MT 18 + MT 101",
+        &on_grid(27),
+        &sum(&[18, 101]),
+    );
+
+    // MT 3 is everything but elastic: the neutron emitting channels, plus
+    // fission, plus disappearance.
+    assert_f64_slice_eq("MT 3", &on_grid(3), &[8.0, 12.0, 62.0, 62.0]);
+    assert_f64_slice_eq(
+        "MT 3 against its partials",
+        &on_grid(3),
+        &sum(&[16, 18, 51, 102, 103]),
+    );
+
+    // THE MT 3 TERM OF MT 1. Elastic is 1 barn flat, so a writer that wrote
+    // MT 1 as elastic alone gets [1, 1, 1, 1] and this fires at index 0. On
+    // Li6 the same defect is invisible because MT 1 is the evaluation's own
+    // column, and on an elastic-only nuclide it is invisible because MT 3 is
+    // zero.
+    assert_f64_slice_eq("MT 1", &on_grid(1), &[9.0, 13.0, 63.0, 63.0]);
+    assert_f64_slice_eq("MT 1 against MT 2 + MT 3", &on_grid(1), &sum(&[2, 3]));
+    assert_ne!(
+        on_grid(3),
+        vec![0.0; n],
+        "MT 3 must be non-zero or MT 1 cannot show that it added it"
+    );
+
+    // No two synthesized rows are equal, so a row copied from its neighbour is
+    // visible. Without this the pairs (MT 27, MT 101) and (MT 3, MT 4) are the
+    // easy mistakes to make, and on a nuclide with no fission MT 27 and MT 101
+    // are identical.
+    let synthesized: Vec<(i32, Vec<f64>)> = [1, 3, 4, 27, 101]
+        .into_iter()
+        .map(|mt| (mt, on_grid(mt)))
+        .collect();
+    for (i, (mt, xs)) in synthesized.iter().enumerate() {
+        for (other, other_xs) in &synthesized[i + 1..] {
+            assert_ne!(
+                xs, other_xs,
+                "MT {mt} and MT {other} hold the same curve, so a copy between \
+                 them would pass"
+            );
+        }
+        // Each one spans the whole grid from index 0, whatever its partials'
+        // thresholds were.
+        assert_i32_slice_eq(
+            &format!("MT {mt} xs_threshold_idx"),
+            &i32_list(&batch, "xs_threshold_idx", mt_rows[mt]),
+            &[0],
+        );
+        assert_eq!(
+            nested_f64_list(&batch, "xs_values", mt_rows[mt])[0].len(),
+            n,
+            "MT {mt} is not defined on the whole grid"
+        );
+    }
+}
+
+/// CONSTRUCTED INPUT, not an evaluation. `redundant = true` on a synthesized
+/// row, checked by the rule a consumer applies to that column rather than by
+/// transcribing the literal.
+///
+/// The three synthesized rows on Li6 (MT 3, 4 and 27) have no parsed side, so
+/// `reaction_flags_are_the_parsed_reactions_own_flags` can only compare the
+/// writer's literals at reactions.rs:130-132 against a copy of them, and says
+/// so. This test replaces the copy for ONE of the three columns. A consumer
+/// with no fast_xs grid reconstructs the total by summing every reaction whose
+/// `redundant` flag is false (yamc-gpu `total_xs_at`,
+/// crates/yamc-gpu/src/neutron/xs/extract.rs:151-163, and the same guard on the
+/// scattering sum at crates/yamc-nuclide/src/nuclide/sampling.rs:499). On this
+/// input that sum must come out as the MT 1 row exactly, and it does so only
+/// because the five synthesized rows are excluded from it. A writer that
+/// flagged them `false` makes the consumer count MT 3, 4, 27 and 101 a second
+/// time, and the assertion below fires whether or not the transcription
+/// elsewhere in this file was changed to match.
+///
+/// No vendored evaluation reaches this. It needs a nuclide whose parsed rows
+/// are all non-redundant and partition the total, which Li6 is not: its MT 1,
+/// MT 101 and MT 203 to 207 are parsed AND redundant, so the same sum there is
+/// a statement about the evaluation rather than about the writer's literal.
+///
+/// Still a transcription after this, and still recorded as such: `Q_value` 0.0
+/// and `center_of_mass` false on those rows. A synthesized sum has no products,
+/// so nothing downstream reads either one, and there is no rule to check them
+/// against.
+#[test]
+fn constructed_synthesized_rows_are_redundant_so_the_rest_sum_to_the_total() {
+    let data = multi_channel_nuclide();
+    let dir = scratch();
+    yamc_convert::reactions::write_reactions(&data, dir.path())
+        .expect("reactions.arrow is written");
+    let batch = section(dir.path(), "reactions.arrow");
+    let mt_rows = rows_by_mt(&batch);
+    let n = data.energy["294K"].len();
+
+    let mut plain = Vec::new();
+    let mut redundant = Vec::new();
+    let mut plain_sum = vec![0.0; n];
+    let mut every_row_sum = vec![0.0; n];
+    for row in 0..batch.num_rows() {
+        let mt = i32_at(&batch, "mt", row);
+        let xs = written_on_grid(&batch, &mt_rows, mt, n);
+        for (a, b) in every_row_sum.iter_mut().zip(&xs) {
+            *a += b;
+        }
+        if bool_at(&batch, "redundant", row) {
+            redundant.push(mt);
+        } else {
+            plain.push(mt);
+            for (a, b) in plain_sum.iter_mut().zip(&xs) {
+                *a += b;
+            }
+        }
+    }
+
+    // The consumer's rule, first, so it is what fires. Exact: every value in
+    // the file is a small integer.
+    assert_f64_slice_eq(
+        "the non-redundant rows summed, against the MT 1 row",
+        &plain_sum,
+        &written_on_grid(&batch, &mt_rows, 1, n),
+    );
+    // And the filter is load bearing: without it the same consumer counts the
+    // sums as well as their parts.
+    assert_ne!(
+        every_row_sum, plain_sum,
+        "every row is flagged the same way, so the redundant filter cannot be \
+         shown to matter on this input"
+    );
+
+    // Which rows ended up on which side, as documentation. This part IS a
+    // transcription of reactions.rs:132 and the parser's default; the sum above
+    // is the assertion that does not depend on it.
+    assert_eq!(plain, vec![2, 16, 18, 51, 102, 103]);
+    assert_eq!(redundant, yamc_convert::synthesis::SYNTHETIC_MTS.to_vec());
+
+    // The other two literals on those rows, pinned and not endorsed: there is
+    // no parsed side and no consumer rule to check them against.
+    for &mt in &redundant {
+        let row = mt_rows[&mt];
+        assert_eq!(f64_at(&batch, "Q_value", row), 0.0, "MT {mt} Q value");
+        assert!(!bool_at(&batch, "center_of_mass", row), "MT {mt}");
+    }
+}
+
+/// CONSTRUCTED INPUT, not an evaluation. TWO cross sections at temperatures the
+/// nuclide was never processed at, so the order the extras phase writes them in
+/// is finally visible.
+///
+/// No vendored evaluation reaches this. The extras branch at reactions.rs:87 is
+/// reached only on the ENDF route, where `temperatures()` is empty and `rx.xs`
+/// holds the single key "0K": one extra has no order. Everything else in this
+/// file has one temperature and no extras at all. So a writer that reversed or
+/// re-sorted the extras is green everywhere else, and the input here is built
+/// by hand with three keys whose curves have three different lengths, three
+/// different thresholds and no shared value.
+///
+/// What the assertion pins is the writer's rule and not a physical fact: the
+/// processed temperatures in `k_ts` order, then whatever `rx.xs` holds that
+/// `temperatures()` does not, in the map's own (BTreeMap, so lexicographic)
+/// order. The load bearing half is that `xs_values` and `xs_threshold_idx` are
+/// built by walking that same list, so each curve keeps its own name and its
+/// own threshold whichever order the names come out in.
+#[test]
+fn constructed_extra_temperatures_follow_the_processed_ones_in_map_order() {
+    let mut data = IncidentNeutron::new(3, 6, 0);
+    data.k_ts = vec![k_t(294.0)];
+    data.energy.insert("294K".to_string(), vec![1.0, 2.0, 3.0]);
+    let mut elastic = Reaction::new(2);
+    // Only "294K" is a processed temperature. "0K" is the unbroadened grid the
+    // NJOY route leaves behind and "600K" stands for a broadened set that was
+    // never named in k_ts; both are extras.
+    elastic.xs.insert(
+        "294K".to_string(),
+        partial_xs(vec![1.0, 2.0, 3.0], vec![1.0, 2.0, 3.0], 0),
+    );
+    elastic.xs.insert(
+        "0K".to_string(),
+        partial_xs(vec![2.0, 3.0], vec![10.0, 20.0], 1),
+    );
+    // "600K" has no grid in `data.energy` at all, so its abscissae are its
+    // own: four points starting at index 4 of a grid this nuclide does not
+    // carry. Nothing checks a span for a temperature with no grid, which is
+    // exactly the situation the extras branch exists for.
+    elastic.xs.insert(
+        "600K".to_string(),
+        partial_xs(
+            vec![5.0, 6.0, 7.0, 8.0],
+            vec![100.0, 200.0, 300.0, 400.0],
+            4,
+        ),
+    );
+    data.reactions.insert(2, elastic);
+    assert_eq!(data.temperatures(), vec!["294K".to_string()]);
+
+    let dir = scratch();
+    yamc_convert::reactions::write_reactions(&data, dir.path())
+        .expect("reactions.arrow is written");
+    let batch = section(dir.path(), "reactions.arrow");
+    let mt_rows = rows_by_mt(&batch);
+
+    let row = mt_rows[&2];
+    let temperatures = str_list(&batch, "xs_temperatures", row);
+    assert_eq!(
+        temperatures,
+        vec!["294K".to_string(), "0K".to_string(), "600K".to_string()],
+        "the processed temperature first, then the two extras in the map's own \
+         order, which is lexicographic and puts 0K before 600K"
+    );
+    // The restated rule beside the literal, on the only input in this file
+    // where the extras phase holds more than one name.
+    assert_eq!(
+        temperatures,
+        expected_xs_temperatures(&data, &data.reactions[&2])
+    );
+
+    // Each curve with its own name. Three lengths, three thresholds, no shared
+    // value, so a permutation cannot pass on either column.
+    let values = nested_f64_list(&batch, "xs_values", row);
+    assert_f64_slice_eq("MT 2 at 294K", &values[0], &[1.0, 2.0, 3.0]);
+    assert_f64_slice_eq("MT 2 at 0K", &values[1], &[10.0, 20.0]);
+    assert_f64_slice_eq("MT 2 at 600K", &values[2], &[100.0, 200.0, 300.0, 400.0]);
+    assert_i32_slice_eq(
+        "MT 2 xs_threshold_idx",
+        &i32_list(&batch, "xs_threshold_idx", row),
+        &[0, 1, 4],
+    );
+
+    // The synthesized rows are built from `temperatures` rather than from
+    // `rx.xs`, so no extra may leak into them: a nuclide processed at one
+    // temperature has one synthesized curve, whatever else the reaction was
+    // stored at.
+    for mt in [1, 3, 4, 27, 101] {
+        let row = mt_rows[&mt];
+        assert_eq!(
+            str_list(&batch, "xs_temperatures", row),
+            vec!["294K".to_string()],
+            "MT {mt} gained a temperature the nuclide was not processed at"
+        );
+        assert_eq!(
+            nested_f64_list(&batch, "xs_values", row).len(),
+            1,
+            "MT {mt}"
+        );
+    }
+    // MT 1 is elastic alone here, on the 294K grid only.
+    assert_f64_slice_eq(
+        "MT 1 at 294K",
+        &nested_f64_list(&batch, "xs_values", mt_rows[&1])[0],
+        &[1.0, 2.0, 3.0],
     );
 }
