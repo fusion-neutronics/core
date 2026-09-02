@@ -48,7 +48,8 @@ use std::sync::OnceLock;
 
 use endf::function::Tabulated1D;
 use endf::incident_photon::{
-    compton_subshell_map, AtomicRelaxation, ComptonProfiles, PhotonReaction, Transitions, SUBSHELLS,
+    compton_subshell_map, AtomicRelaxation, Bremsstrahlung, ComptonProfiles, PhotonReaction,
+    Transitions, SUBSHELLS,
 };
 use endf::{IncidentPhoton, PhotonData};
 
@@ -329,6 +330,165 @@ fn element_cross_section_columns_are_the_parsed_reactions_on_the_union_grid() {
         "heating_xs is written as an empty list, not as a null"
     );
     assert_eq!(list_len(&batch, "heating_xs", 0), 0);
+}
+
+/// A failure means an interpolated cross section is no longer the number the
+/// evaluation implies.
+///
+/// Four of the twelve spot values in
+/// `element_cross_section_columns_are_the_parsed_reactions_on_the_union_grid`
+/// are GOLDEN: they fall between two tabulated points and were captured from a
+/// run of the same `Tabulated1D::eval` the writer ran, so they detect a CHANGE
+/// to `eval` without saying the value is right. This test derives all four
+/// from the evaluation instead.
+///
+/// The two tabulated points bracketing each one are transcribed here and
+/// checked to appear, side by side and in that order, in the decompressed
+/// fixture text, so they are reads of the file rather than captures of the
+/// code. The interpolant is then formed as the weighted average
+/// `(y0 (x1 - e) + y1 (e - x0)) / (x1 - x0)`, deliberately NOT the slope form
+/// `y0 + (e - x0) / (x1 - x0) * (y1 - y0)` that `eval` uses
+/// (`crates/endf/src/function.rs:103`). The two forms agree to one ulp at worst
+/// on these four points, which is why this is the one comparison in the
+/// vendored half of this file made to a relative tolerance.
+///
+/// What this does NOT close. No mutation separates it from the golden
+/// literals: any change to `eval` turns both red, so the gain is that the
+/// expected value is now derived from the file and cannot be "refreshed" from
+/// a run. And every interpolation region in this evaluation is scheme 2, so
+/// nothing here checks `eval` in a log region; the expected value is a second
+/// hand-written implementation of the same lin-lin rule, not an outside
+/// source.
+#[test]
+fn element_interior_spot_values_are_the_lin_lin_interpolant_of_two_fixture_points() {
+    /// One interpolated spot value and the two tabulated points it comes from.
+    struct Probe {
+        column: &'static str,
+        mt: i32,
+        /// Index into the union grid, which is where the written column is
+        /// read.
+        index: usize,
+        below: (f64, f64),
+        above: (f64, f64),
+        /// The two points exactly as they appear in the fixture text, one
+        /// eleven-column field each with the single space between them.
+        below_text: &'static str,
+        above_text: &'static str,
+        /// The literal the vendored spot-value test asserts, so the two cannot
+        /// drift apart.
+        golden: f64,
+    }
+
+    let probes = [
+        Probe {
+            column: "coherent_xs",
+            mt: 502,
+            index: 137,
+            below: (13.5990191, 8.93264869),
+            above: (13.6538059, 9.51682411),
+            below_text: "13.5990191 8.93264869",
+            above_text: "13.6538059 9.51682411",
+            golden: 8.943107736147576,
+        },
+        Probe {
+            column: "coherent_xs",
+            mt: 502,
+            index: 1000,
+            below: (629462.706, 1.16803e-5),
+            above: (690192.132, 9.71529e-6),
+            below_text: "629462.706 1.16803E-5",
+            above_text: "690192.132 9.71529E-6",
+            golden: 1.0422148052673345e-5,
+        },
+        Probe {
+            column: "incoherent_xs",
+            mt: 504,
+            index: 137,
+            below: (13.3350268, 1.70030e-5),
+            above: (13.9234189, 1.85363e-5),
+            below_text: "13.3350268 1.70030E-5",
+            above_text: "13.9234189 1.85363E-5",
+            golden: 1.769349772687295e-5,
+        },
+        Probe {
+            column: "photoelectric_xs",
+            mt: 522,
+            index: 1000,
+            below: (663552.073, 4.80501e-9),
+            above: (683911.700, 4.46483e-9),
+            below_text: "663552.073 4.80501E-9",
+            above_text: "683911.700 4.46483E-9",
+            golden: 4.724903727980379e-9,
+        },
+    ];
+
+    let c = convert(true, false);
+    let batch = section(&c.dir, "element.arrow");
+    let grid = union_grid_expected(&c.data);
+    let raw = text(H_PHOTOAT);
+
+    for p in &probes {
+        let (x0, y0) = p.below;
+        let (x1, y1) = p.above;
+
+        // In the file, as a pair, in that order.
+        assert!(
+            raw.contains(p.below_text),
+            "`{}` is not in photoat-001_H_000.endf, so it is not a fixture read",
+            p.below_text
+        );
+        assert!(
+            raw.contains(p.above_text),
+            "`{}` is not in photoat-001_H_000.endf, so it is not a fixture read",
+            p.above_text
+        );
+
+        // And consecutive points of the reaction the column names, so the
+        // transcription is the right bracket rather than two points from
+        // elsewhere on the curve.
+        let f = c
+            .data
+            .get(p.mt)
+            .and_then(|rx| rx.xs.as_ref())
+            .unwrap_or_else(|| panic!("MT {} has no cross section", p.mt));
+        let k =
+            f.x.iter()
+                .position(|&v| v == x0)
+                .unwrap_or_else(|| panic!("MT {} does not tabulate {x0:e}", p.mt));
+        assert_eq!(f.y[k], y0, "MT {} at {x0:e}", p.mt);
+        assert_eq!(f.x[k + 1], x1, "MT {} after {x0:e}", p.mt);
+        assert_eq!(f.y[k + 1], y1, "MT {} after {x0:e}", p.mt);
+        // One region, lin-lin, which is the rule the expected value uses.
+        assert_eq!(f.breakpoints, vec![f.x.len() as i32]);
+        assert_eq!(f.interpolation, vec![2]);
+
+        // The union grid point really is inside that bin, so the value is
+        // interpolated rather than tabulated or clamped.
+        let e = grid[p.index];
+        assert!(
+            x0 < e && e < x1,
+            "grid[{}] = {e:e} is not strictly between {x0:e} and {x1:e}",
+            p.index
+        );
+
+        let expected = (y0 * (x1 - e) + y1 * (e - x0)) / (x1 - x0);
+        let written = f64_list(&batch, p.column, 0)[p.index];
+        assert_close(
+            &format!("{}[{}]", p.column, p.index),
+            written,
+            expected,
+            1e-15,
+        );
+        // The same number as the literal in the vendored spot-value test, bit
+        // for bit. Refreshing that literal from a run after an `eval` change
+        // fails the comparison above, and dropping this one would let the two
+        // tests disagree in silence.
+        assert_eq!(
+            written, p.golden,
+            "{}[{}] no longer matches the literal the spot-value test asserts",
+            p.column, p.index
+        );
+    }
 }
 
 /// A failure means a form factor or an anomalous scattering term is in the
@@ -1412,4 +1572,377 @@ fn constructed_out_of_order_subshell_rows_are_refused_by_write_compton() {
         "L2",
         "the rows really were out of order, rather than the guard misfiring"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The gaps the pull request published, closed where a constructed input can
+// reach the writer at all.
+// ---------------------------------------------------------------------------
+
+/// [`constructed_element`] with every `element.arrow` column the writer can
+/// populate carrying its own distinct values. NOT A PARSED EVALUATION.
+///
+/// Three changes to the shared builder, each of them because two equal columns
+/// cannot discriminate a swap between them:
+///
+/// * MT 517 and MT 515 are added, so the two pair-production columns are no
+///   longer both empty. Their abscissae are already union grid points, so the
+///   grid stays `[1, 5, 10, 20, 50, 100]`, and their ordinates do not start at
+///   zero, unlike a real evaluation's, so `eval`'s clamp below the threshold is
+///   visible on them too.
+/// * The coherent form factor becomes the line from `(0, 10)` to `(3, 0)`.
+///   Squared and divided by `Z^2 = 100` that is the line from `(0, 1)` to
+///   `(9, 0)`, whose cumulative integral is `[0, 4.5]`. The shared builder's
+///   `[0, 2]` is the same pair as its own `coherent_ff_x`.
+/// * The incoherent form factor gets the abscissa `[0, 7]`, which the shared
+///   builder shares with `coherent_anomalous_imag_x`.
+fn constructed_element_fully_populated() -> IncidentPhoton {
+    let mut data = constructed_element();
+
+    for (mt, x, y) in [
+        (517, [20.0, 100.0], [41.0, 43.0]),
+        (515, [50.0, 100.0], [47.0, 53.0]),
+    ] {
+        let mut rx = PhotonReaction::new(mt);
+        rx.xs = Some(Tabulated1D::new(x.to_vec(), y.to_vec()));
+        data.reactions.insert(mt, rx);
+    }
+
+    data.reactions
+        .get_mut(&502)
+        .expect("MT 502")
+        .scattering_factor = Some(Tabulated1D::new(vec![0.0, 3.0], vec![10.0, 0.0]));
+    data.reactions
+        .get_mut(&504)
+        .expect("MT 504")
+        .scattering_factor = Some(Tabulated1D::new(vec![0.0, 7.0], vec![0.0, 10.0]));
+
+    data
+}
+
+/// A failure means two `element.arrow` columns were exchanged.
+///
+/// CONSTRUCTED INPUT, not an evaluation. `element.arrow` declares seventeen
+/// consecutive `list<double>` fields and a permutation among any two that are
+/// EMPTY on the input at hand writes a byte-identical file. On
+/// [`constructed_element`] three of them are empty at once
+/// (`pair_production_nuclear_xs`, `pair_production_electron_xs` and
+/// `heating_xs`), so exchanging the two pair-production slots in
+/// `write_element`'s argument vector leaves all eight constructed tests green.
+///
+/// Here sixteen of the seventeen carry values that are pairwise different, and
+/// `heating_xs` is empty on every input the writer can be handed
+/// (`constructed_mt_525_is_dropped_from_the_heating_column`), which makes it
+/// the unique empty column and so makes a permutation involving it visible as
+/// well. The pairwise comparison at the end of this test is the property that
+/// says so: no two of the seventeen columns are equal, therefore every
+/// permutation of them changes the file.
+#[test]
+fn constructed_element_columns_are_pairwise_distinct_so_no_permutation_is_invisible() {
+    /// The seventeen list columns, in the order `write_element` passes them.
+    const LIST_COLUMNS: [&str; 17] = [
+        "ln_energy",
+        "coherent_xs",
+        "incoherent_xs",
+        "photoelectric_xs",
+        "pair_production_nuclear_xs",
+        "pair_production_electron_xs",
+        "heating_xs",
+        "coherent_int_ff_x",
+        "coherent_int_ff_y",
+        "coherent_ff_x",
+        "coherent_ff_y",
+        "coherent_anomalous_real_x",
+        "coherent_anomalous_real_y",
+        "coherent_anomalous_imag_x",
+        "coherent_anomalous_imag_y",
+        "incoherent_ff_x",
+        "incoherent_ff_y",
+    ];
+
+    let data = constructed_element_fully_populated();
+    let (_scratch, dir) = write_constructed(&data);
+    let batch = section(&dir, "element.arrow");
+    assert_schema_is_declared(&batch, "element.arrow");
+
+    // Those seventeen are every column but the two scalars, in that order, so
+    // the pairwise property below cannot miss one that was added later.
+    let names: Vec<String> = batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
+    assert_eq!(names.len(), 2 + LIST_COLUMNS.len());
+    assert_eq!(names[0], "name");
+    assert_eq!(names[1], "Z");
+    for (i, expected) in LIST_COLUMNS.iter().enumerate() {
+        assert_eq!(
+            names[2 + i],
+            *expected,
+            "column {} is not the one write_element writes there",
+            2 + i
+        );
+    }
+
+    // The grid is the shared builder's, unchanged: both added channels are
+    // tabulated on points it already carries.
+    let grid = union_grid_expected(&data);
+    assert_f64_slice_eq("the constructed union grid", &grid, &CONSTRUCTED_GRID);
+    let ln_energy = f64_list(&batch, "ln_energy", 0);
+    let expected_ln: Vec<f64> = grid.iter().map(|e| e.ln()).collect();
+    assert_f64_slice_eq("ln_energy", &ln_energy, &expected_ln);
+    assert_eq!(ln_energy[0], 0.0, "ln(1 eV) is exactly zero");
+
+    // The five channels ELEMENT_MTS lets through, each against the reaction it
+    // names. A restatement of the writer's own `eval`, so this pins WIRING,
+    // which is what a permutation is.
+    for (col, mt) in [
+        ("coherent_xs", 502),
+        ("incoherent_xs", 504),
+        ("photoelectric_xs", 522),
+        ("pair_production_nuclear_xs", 517),
+        ("pair_production_electron_xs", 515),
+    ] {
+        let written = f64_list(&batch, col, 0);
+        assert_f64_slice_eq(col, &written, &eval_on(&data, mt, &grid));
+        assert_eq!(written.len(), grid.len(), "{col} is on the union grid");
+    }
+
+    // The two pair-production channels in closed form. Their first three
+    // points are below the tabulated range, where `eval` clamps to y[0]: 41
+    // and 47, not zero. The evaluation's own pair-production curves start at
+    // zero, so on hydrogen that clamp cannot be told from a zero fill.
+    assert_f64_slice_eq(
+        "pair_production_nuclear_xs",
+        &f64_list(&batch, "pair_production_nuclear_xs", 0),
+        &[41.0, 41.0, 41.0, 41.0, 41.75, 43.0],
+    );
+    assert_f64_slice_eq(
+        "pair_production_electron_xs",
+        &f64_list(&batch, "pair_production_electron_xs", 0),
+        &[47.0, 47.0, 47.0, 47.0, 47.0, 53.0],
+    );
+    // The other three at the bottom of the grid, where the three differ.
+    assert_eq!(f64_list(&batch, "coherent_xs", 0)[0], 2.0);
+    assert_eq!(f64_list(&batch, "incoherent_xs", 0)[0], 7.0);
+    assert_eq!(f64_list(&batch, "photoelectric_xs", 0)[0], 17.0);
+
+    // The ten copied columns, verbatim.
+    for (col, expected) in [
+        ("coherent_int_ff_x", vec![0.0, 9.0]),
+        ("coherent_int_ff_y", vec![0.0, 4.5]),
+        ("coherent_ff_x", vec![0.0, 3.0]),
+        ("coherent_ff_y", vec![10.0, 0.0]),
+        ("coherent_anomalous_real_x", vec![1.0, 2.0]),
+        ("coherent_anomalous_real_y", vec![-1.5, -0.5]),
+        ("coherent_anomalous_imag_x", vec![1.0, 3.0]),
+        ("coherent_anomalous_imag_y", vec![0.25, 0.75]),
+        ("incoherent_ff_x", vec![0.0, 7.0]),
+        ("incoherent_ff_y", vec![0.0, 10.0]),
+    ] {
+        assert_f64_slice_eq(col, &f64_list(&batch, col, 0), &expected);
+    }
+
+    // Sixteen populated, one empty, and the empty one is the MT 525 defect.
+    let written: Vec<Vec<f64>> = LIST_COLUMNS
+        .iter()
+        .map(|&c| f64_list(&batch, c, 0))
+        .collect();
+    for (col, values) in LIST_COLUMNS.iter().zip(&written) {
+        assert_eq!(
+            values.is_empty(),
+            *col == "heating_xs",
+            "{col} is the wrong side of the populated/empty divide"
+        );
+    }
+
+    // The property this element exists for.
+    for i in 0..LIST_COLUMNS.len() {
+        for j in (i + 1)..LIST_COLUMNS.len() {
+            assert_ne!(
+                written[i], written[j],
+                "{} and {} carry the same values, so exchanging the two slots \
+                 would write an identical file",
+                LIST_COLUMNS[i], LIST_COLUMNS[j]
+            );
+        }
+    }
+}
+
+/// A failure means `compton.arrow` stopped taking its momentum grid from the
+/// first shell.
+///
+/// CONSTRUCTED INPUT, and a deliberately malformed one. No parser can produce
+/// a ragged `ComptonProfiles`: `IncidentPhoton::add_photon_data`
+/// (`crates/endf/src/incident_photon.rs:286-300`) builds every row as
+/// `Tabulated1D::new(data.pz.clone(), row)`, one shared abscissa, so on every
+/// input the writer can be handed through a parser `first.x` and `last.x` are
+/// the same values and `photon.rs:281` could read either. Nothing here says an
+/// evaluation can be ragged; it says what the writer does when it is handed
+/// one, which is to use shell 0's abscissa for every shell and say nothing.
+///
+/// PINS TWO SUSPECTED DEFECTS, neither of them endorsed. `write_compton`
+/// validates nothing about the shape of `profiles.j`, so when the rows differ
+/// in length it writes a `J_shape` that describes the first row alone while
+/// `J_data` concatenates all of them, and `compton_profile_cdfs`
+/// (`crates/endf/src/incident_photon.rs:551-564`) stops each row at
+/// `pz.len()`, leaving the tail of a longer row at zero and the cumulative
+/// distribution decreasing. A writer that refused a ragged input, or that
+/// wrote the true row length, would turn this test red; see the assertions
+/// below before changing them.
+#[test]
+fn constructed_ragged_compton_profiles_are_written_on_the_first_shell_abscissa() {
+    let mut data = constructed_element();
+    data.compton_profiles = Some(ComptonProfiles {
+        num_electrons: vec![2.0, 8.0],
+        binding_energy: vec![51.0, 6.0],
+        j: vec![
+            Tabulated1D::new(vec![0.0, 1.0, 2.0], vec![0.9, 0.5, 0.1]),
+            // A different abscissa, of a different length, which is what no
+            // parser produces.
+            Tabulated1D::new(vec![0.0, 4.0, 8.0, 10.0], vec![0.8, 0.4, 0.2, 0.05]),
+        ],
+    });
+
+    let profiles = data.compton_profiles.as_ref().expect("just set");
+    assert_ne!(
+        profiles.j[0].x, profiles.j[1].x,
+        "the two shells have to disagree about the momentum grid for this test \
+         to discriminate between them"
+    );
+
+    let (_scratch, dir) = write_constructed(&data);
+    let batch = section(&dir, "compton.arrow");
+    assert_schema_is_declared(&batch, "compton.arrow");
+
+    // Shell 0's abscissa, not shell 1's.
+    let pz = f64_list(&batch, "pz", 0);
+    assert_f64_slice_eq("compton.pz", &pz, &[0.0, 1.0, 2.0]);
+    assert_f64_slice_eq("compton.pz", &pz, &profiles.j[0].x);
+
+    // Every ordinate is still written, so the flat array is longer than the
+    // shape says. DEFECT: `[2, 3]` describes six values and there are seven.
+    let j_data = f64_list(&batch, "J_data", 0);
+    assert_f64_slice_eq("J_data", &j_data, &[0.9, 0.5, 0.1, 0.8, 0.4, 0.2, 0.05]);
+    let j_shape = i32_list(&batch, "J_shape", 0);
+    assert_i32_slice_eq("J_shape", &j_shape, &[2, 3]);
+    assert_ne!(
+        (j_shape[0] * j_shape[1]) as usize,
+        j_data.len(),
+        "the shape and the data agreeing would mean the writer had learned to \
+         refuse or to describe a ragged profile set; read this test's doc \
+         comment before deleting the assertion"
+    );
+
+    // Shell 1's own abscissa is never used: its cumulative distribution is
+    // integrated against shell 0's spacing. With its own [0, 4, 8, 10] the
+    // first step would be 0.5 * (0.8 + 0.4) * 4 = 2.4, not 0.6. DEFECT: the
+    // trailing 0.0 is the tail `compton_profile_cdfs` never reaches, so the
+    // row falls from 0.9 back to zero.
+    let cdf = f64_list(&batch, "J_cdf_data", 0);
+    assert_f64_slice_close(
+        "J_cdf_data",
+        &cdf,
+        &[0.0, 0.7, 1.0, 0.0, 0.6, 0.9, 0.0],
+        1e-15,
+    );
+    assert!(
+        cdf[6] < cdf[5],
+        "the second row's tail is what makes this a defect rather than a \
+         curiosity: a cumulative distribution that decreases"
+    );
+    assert_i32_slice_eq("J_cdf_shape", &i32_list(&batch, "J_cdf_shape", 0), &[2, 3]);
+}
+
+/// A failure means a `bremsstrahlung.arrow` column was sourced from the wrong
+/// place.
+///
+/// CONSTRUCTED INPUT, not an evaluation. On hydrogen `ionization_energy` is
+/// `[13.6]`, which is also the MF=28 K-shell binding energy and also the MF=23
+/// MT=522 threshold, so a column wired to the relaxation data instead of to
+/// the Seltzer-Berger tabulation writes identical bytes and no assertion
+/// against the vendored fixture can tell the two apart. The element built here
+/// has three subshells bound at 50, 20 and 5 eV and two ionization energies of
+/// 21.5 and 7.25 eV, so every candidate source is a different number.
+///
+/// The DCS is 3 by 2 rather than 200 by 30, which is enough on its own to tell
+/// a row-major ravel from a column-major one and a `[rows, cols]` shape from
+/// its transpose. What it does not do is check the not-a-knot spline that
+/// produces the real one: those numbers are the parser's and verifying them
+/// needs a second spline implementation, which is a test of `crates/endf` and
+/// not of this writer.
+#[test]
+fn constructed_bremsstrahlung_columns_come_from_the_attached_tabulation() {
+    let mut data = constructed_element();
+    data.bremsstrahlung = Some(Bremsstrahlung {
+        i: 42.5,
+        num_electrons: vec![4.0, 6.0],
+        ionization_energy: vec![21.5, 7.25],
+        electron_energy: vec![1000.0, 2000.0, 4000.0],
+        photon_energy: vec![0.125, 0.5],
+        dcs: vec![vec![1.5, 2.5], vec![3.5, 4.5], vec![5.5, 6.5]],
+    });
+
+    let (_scratch, dir) = write_constructed(&data);
+    let batch = section(&dir, "bremsstrahlung.arrow");
+    assert_schema_is_declared(&batch, "bremsstrahlung.arrow");
+    assert_eq!(batch.num_rows(), 1);
+
+    assert_eq!(f64_at(&batch, "I", 0), 42.5);
+    assert_f64_slice_eq(
+        "electron_energy",
+        &f64_list(&batch, "electron_energy", 0),
+        &[1000.0, 2000.0, 4000.0],
+    );
+    assert_f64_slice_eq(
+        "photon_energy",
+        &f64_list(&batch, "photon_energy", 0),
+        &[0.125, 0.5],
+    );
+    assert_f64_slice_eq(
+        "bremsstrahlung.num_electrons",
+        &f64_list(&batch, "num_electrons", 0),
+        &[4.0, 6.0],
+    );
+
+    let ionization = f64_list(&batch, "ionization_energy", 0);
+    assert_f64_slice_eq("ionization_energy", &ionization, &[21.5, 7.25]);
+
+    // None of the other places the column could have come from. The subshell
+    // binding energies are read out of the file this same conversion wrote,
+    // so this is a comparison between two written sections and not between two
+    // expressions in this test.
+    let subshells = section(&dir, "subshells.arrow");
+    let bound: Vec<f64> = (0..subshells.num_rows())
+        .map(|r| f64_at(&subshells, "binding_energy", r))
+        .collect();
+    assert_f64_slice_eq(
+        "the relaxation binding energies",
+        &bound,
+        &[50.0, 20.0, 5.0],
+    );
+    for &v in &ionization {
+        assert!(
+            !bound.contains(&v),
+            "{v} is a relaxation binding energy as well, so this element cannot \
+             tell the two sources apart"
+        );
+    }
+    let compton_bound = f64_list(&section(&dir, "compton.arrow"), "binding_energy", 0);
+    assert_f64_slice_eq("the Compton binding energies", &compton_bound, &[51.0, 6.0]);
+    for &v in &ionization {
+        assert!(!compton_bound.contains(&v));
+    }
+    assert_ne!(ionization, f64_list(&batch, "num_electrons", 0));
+    assert!(!ionization.contains(&f64_at(&batch, "I", 0)));
+
+    // Row-major, one row per electron energy.
+    let dcs = f64_list(&batch, "dcs_data", 0);
+    assert_f64_slice_eq("dcs_data", &dcs, &[1.5, 2.5, 3.5, 4.5, 5.5, 6.5]);
+    let shape = i32_list(&batch, "dcs_shape", 0);
+    assert_i32_slice_eq("dcs_shape", &shape, &[3, 2]);
+    assert_eq!(shape[0] as usize, list_len(&batch, "electron_energy", 0));
+    assert_eq!(shape[1] as usize, list_len(&batch, "photon_energy", 0));
+    assert_eq!((shape[0] * shape[1]) as usize, dcs.len());
 }

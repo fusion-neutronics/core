@@ -6,7 +6,11 @@
 //! No arithmetic happens in `crates/yamc-convert/src/fission_nu.rs` at all, so
 //! every numeric assertion here is exact equality and a tolerance anywhere
 //! would only hide the wrong-slot and wrong-unit mistakes these tests exist to
-//! find.
+//! find. The one arithmetic step anywhere in the chain is upstream, the NPLY=2
+//! unit correction at `crates/endf/src/fission_energy.rs:132-138`, and nothing
+//! here reaches it: a test that tried was dropped because the guard does not
+//! gate the way its own comment says, which is its own issue rather than
+//! something to pin from here.
 //!
 //! Neither section is reachable through `entry::convert_neutron_transport`
 //! without NJOY, so both writers are called directly. That loses nothing:
@@ -19,13 +23,20 @@
 //! # Two kinds of input, and they are not interchangeable
 //!
 //! The first two tests are handed VENDORED evaluations, and are parity checks
-//! against them. The last three are handed inputs this file BUILDS BY HAND, and
-//! are not parity checks against anything: no vendored evaluation reaches those
-//! branches, so a constructed `IncidentNeutron` or `FissionEnergyRelease` is
-//! the only way to reach them at all. Each says so in its own doc comment, and
-//! each gives its constructed fields values that differ from every constant the
-//! writer might hard-code, because two fields that happen to be equal on a
-//! fixture cannot tell a copy from a constant.
+//! against them. Everything below the CONSTRUCTED INPUTS banner is handed input
+//! this file BUILDS BY HAND, and is a parity check against nothing: no vendored
+//! evaluation reaches those branches, so a constructed `IncidentNeutron`, a
+//! constructed `FissionEnergyRelease`, or a parsed `Material` with one
+//! coefficient replaced, is the only way to reach them at all. Each says so in
+//! its own doc comment, and each gives its constructed fields values that
+//! differ from every constant the writer might hard-code, because two fields
+//! that happen to be equal on a fixture cannot tell a copy from a constant.
+//!
+//! Two of them go further and pin behaviour that is not evaluation parity in
+//! any sense: which of two candidates the writer picks when an input carries
+//! both, where no evaluation carries both and there is no evaluated answer.
+//! Those two say in their own doc comments which part of what they assert is a
+//! fact about fission and which part is a choice being held still.
 
 mod section_values;
 use section_values::*;
@@ -437,6 +448,46 @@ const SENTINEL_PARTICLE: &str = "sentinel-particle";
 /// precursor and carries zero here, so zero is the constant to defend against.
 const SENTINEL_DECAY_RATE: f64 = 3.75e-3;
 
+/// The redundant MT 18 that stands beside the derived total in every
+/// constructed nuclide here.
+///
+/// Its ordinary PROMPT product is what a writer that fell back to
+/// `products.first()` would find, and its name, mode, decay rate and yield all
+/// differ from every sentinel below, so that fallback fails on four columns
+/// rather than passing unnoticed.
+fn constructed_redundant_mt18() -> endf::Reaction {
+    let mut mt18 = endf::Reaction::new(18);
+    mt18.redundant = true;
+    mt18.products.push(endf::Product {
+        name: "neutron".to_string(),
+        emission_mode: endf::EmissionMode::Prompt,
+        decay_rate: 0.0,
+        yield_: Yield::Tabulated(Tabulated1D::new(vec![1.0e-5, 2.0e7], vec![2.41, 4.20])),
+        ..Default::default()
+    });
+    mt18
+}
+
+/// A derived total-nu product carrying the four fields `write_total_nu` copies.
+///
+/// Every other field is left at its default, because the writer reads no other
+/// field: `fission_nu.rs:43-76` touches `name`, `emission_mode`, `decay_rate`
+/// and `yield_` and nothing else.
+fn constructed_total(
+    name: &str,
+    emission_mode: endf::EmissionMode,
+    decay_rate: f64,
+    yield_: Yield,
+) -> endf::Product {
+    endf::Product {
+        name: name.to_string(),
+        emission_mode,
+        decay_rate,
+        yield_,
+        ..Default::default()
+    }
+}
+
 /// A fissionable `IncidentNeutron` built by hand, with a derived total nu-bar
 /// on `fission_mt`.
 ///
@@ -451,25 +502,16 @@ const SENTINEL_DECAY_RATE: f64 = 3.75e-3;
 /// MT 18 prompt product, whose fields differ from the sentinel ones on every
 /// column below.
 fn constructed_fissile_nuclide(fission_mt: i32, total_yield: Yield) -> endf::IncidentNeutron {
-    let mut mt18 = endf::Reaction::new(18);
-    mt18.redundant = true;
-    mt18.products.push(endf::Product {
-        name: "neutron".to_string(),
-        emission_mode: endf::EmissionMode::Prompt,
-        decay_rate: 0.0,
-        yield_: Yield::Tabulated(Tabulated1D::new(vec![1.0e-5, 2.0e7], vec![2.41, 4.20])),
-        ..Default::default()
-    });
+    let mut mt18 = constructed_redundant_mt18();
 
-    let total = endf::Product {
-        name: SENTINEL_PARTICLE.to_string(),
-        // Neither "total" (what the section is for) nor "prompt" (what #364
-        // wrote instead), so a writer that hard-codes either one fails.
-        emission_mode: endf::EmissionMode::Delayed,
-        decay_rate: SENTINEL_DECAY_RATE,
-        yield_: total_yield,
-        ..Default::default()
-    };
+    // Neither "total" (what the section is for) nor "prompt" (what #364 wrote
+    // instead), so a writer that hard-codes either one fails.
+    let total = constructed_total(
+        SENTINEL_PARTICLE,
+        endf::EmissionMode::Delayed,
+        SENTINEL_DECAY_RATE,
+        total_yield,
+    );
 
     let mut data = endf::IncidentNeutron::new(92, 240, 0);
     if fission_mt == 18 {
@@ -688,4 +730,301 @@ fn a_polynomial_release_term_with_no_coefficients_is_refused() {
             "{role}: the refusal must leave no half-written section behind"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Which of two candidates the writer picks.
+//
+// `write_total_nu` makes two tie-breaks that no vendored evaluation ever puts
+// to the test, because the parser attaches at most one derived product to at
+// most one fission reaction: `fission_products_ace` pushes a single total
+// (`reaction.rs:817-853`) and the ENDF route does the same
+// (`reaction.rs:406-435`). Both are reachable only from a constructed nuclide,
+// and neither is a parity claim.
+// ---------------------------------------------------------------------------
+
+/// With two derived products on one fission reaction, the FIRST one is written.
+///
+/// CONSTRUCTED INPUT, and this test pins a CHOICE rather than a fact. No parser
+/// path produces two derived products on a reaction, so there is no evaluated
+/// answer to "which of two totals is this nuclide's nu-bar" and none is being
+/// claimed. What is not arbitrary is that the writer be deterministic about it
+/// and not change its mind silently: `derived_products.first()`
+/// (`fission_nu.rs:38`) is the behaviour, and replacing it with `.last()` is
+/// invisible to every other test in the workspace.
+///
+/// Both orderings are built and the assertion in each is that the FRONT product
+/// won, which is what makes this more than a restatement of `.first()`. A
+/// writer that picked by `emission_mode == Total`, or by "the one with a
+/// tabulated yield", satisfies one ordering and fails the other. The two
+/// products differ on all four columns compared, so a failure names the column.
+#[test]
+fn total_nu_takes_the_first_derived_product_when_a_reaction_carries_two() {
+    // A tabulated total against a polynomial one, so `yield_type` separates
+    // them as well as the three scalar columns do.
+    let tabulated = || {
+        constructed_total(
+            "first-of-two-totals",
+            endf::EmissionMode::Total,
+            1.25e-2,
+            Yield::Tabulated(Tabulated1D::new(vec![1.0e-5, 2.0e7], vec![2.44, 4.55])),
+        )
+    };
+    let polynomial = || {
+        constructed_total(
+            "second-of-two-totals",
+            endf::EmissionMode::Delayed,
+            7.5e-2,
+            Yield::Polynomial(Polynomial::new(vec![9.99, -8.88])),
+        )
+    };
+
+    for (label, front, back, front_yield_type) in [
+        (
+            "a Total ahead of a Delayed",
+            tabulated(),
+            polynomial(),
+            "Tabulated1D",
+        ),
+        (
+            "a Delayed ahead of a Total",
+            polynomial(),
+            tabulated(),
+            "Polynomial",
+        ),
+    ] {
+        // Read off before the product is moved into the reaction, so the
+        // expectation is the front product's own fields and not a transcription.
+        let (name, mode, decay_rate) = (
+            front.name.clone(),
+            front.emission_mode.name(),
+            front.decay_rate,
+        );
+
+        let mut mt18 = constructed_redundant_mt18();
+        mt18.derived_products.push(front);
+        mt18.derived_products.push(back);
+        let mut data = endf::IncidentNeutron::new(92, 240, 0);
+        data.reactions.insert(18, mt18);
+
+        let dir = scratch();
+        assert!(
+            yamc_convert::fission_nu::write_total_nu(&data, dir.path()).expect("the writer runs"),
+            "{label}: a derived total is present, so a nu-bar must be written"
+        );
+        let batch = section(dir.path(), "total_nu.arrow");
+        assert_eq!(
+            batch.num_rows(),
+            1,
+            "{label}: total_nu.arrow is one row per nuclide, so the second derived \
+             product is dropped rather than written as a second row the reader \
+             would never look at"
+        );
+
+        assert_eq!(
+            str_at(&batch, "particle", 0),
+            name,
+            "{label}: the written particle is not the front product's"
+        );
+        assert_eq!(
+            str_at(&batch, "emission_mode", 0),
+            mode,
+            "{label}: the written emission_mode is not the front product's"
+        );
+        assert_eq!(
+            f64_at(&batch, "decay_rate", 0),
+            decay_rate,
+            "{label}: the written decay_rate is not the front product's"
+        );
+        assert_eq!(
+            str_at(&batch, "yield_type", 0),
+            front_yield_type,
+            "{label}: the written yield is not the front product's"
+        );
+    }
+}
+
+/// With a derived total on MT 18 AND on MT 19, MT 18 is the one written.
+///
+/// CONSTRUCTED INPUT: the parser attaches the NU block to exactly one reaction,
+/// so no evaluation carries a derived total on two fission MTs at once, and
+/// `find_map` over `FISSION_MTS` (`fission_nu.rs:35`) never has to break a tie.
+/// Iterating that list backwards passes every other test in this file, because
+/// every other nuclide here has its total on exactly one MT.
+///
+/// Unlike the two-derived-products tie above, this one pins a FACT and not just
+/// a choice. MT 18 is total fission and MTs 19, 20, 21 and 38 are its first-,
+/// second-, third- and fourth-chance partials, so where MT 18 has a total
+/// nu-bar it is the nuclide's, and the one-row section holds the nuclide's.
+/// Writing the first-chance nu-bar in its place would be low wherever
+/// second-chance fission contributes, which for a fusion source is exactly the
+/// energies that matter, and nothing on disk would say so.
+#[test]
+fn total_nu_prefers_mt_18_when_two_fission_mts_carry_a_total() {
+    let mut mt18 = constructed_redundant_mt18();
+    mt18.derived_products.push(constructed_total(
+        "mt18-total-fission",
+        endf::EmissionMode::Total,
+        1.0e-3,
+        Yield::Tabulated(Tabulated1D::new(vec![1.0e-5, 2.0e7], vec![2.44, 4.55])),
+    ));
+
+    let mut mt19 = endf::Reaction::new(19);
+    mt19.derived_products.push(constructed_total(
+        "mt19-first-chance",
+        endf::EmissionMode::Delayed,
+        2.0e-3,
+        Yield::Polynomial(Polynomial::new(vec![9.99, -8.88])),
+    ));
+
+    let mut data = endf::IncidentNeutron::new(92, 240, 0);
+    data.reactions.insert(18, mt18);
+    data.reactions.insert(19, mt19);
+
+    let dir = scratch();
+    assert!(
+        yamc_convert::fission_nu::write_total_nu(&data, dir.path()).expect("the writer runs"),
+        "both fission MTs carry a derived total, so one of them must be written"
+    );
+    let batch = section(dir.path(), "total_nu.arrow");
+    assert_eq!(batch.num_rows(), 1);
+
+    assert_eq!(
+        str_at(&batch, "particle", 0),
+        "mt18-total-fission",
+        "the written nu-bar is MT 19's first-chance total, not MT 18's"
+    );
+    assert_eq!(str_at(&batch, "emission_mode", 0), "total");
+    assert_eq!(f64_at(&batch, "decay_rate", 0), 1.0e-3);
+    assert_eq!(str_at(&batch, "yield_type", 0), "Tabulated1D");
+}
+
+/// A multi-region tabulated release term is never silently truncated to one
+/// region.
+///
+/// CONSTRUCTED INPUT. Every vendored EGP tabulation is a single linear-linear
+/// region (U235's is `[2]` and `[18]`), so `t.interpolation.clone()` and
+/// `vec![t.interpolation[0]]` write the same bytes there, and so do the two
+/// forms of the breakpoint copy.
+///
+/// This is the one place in the file where the writer's current behaviour is
+/// arguably wrong, so the test says what it is doing. The writer copies both
+/// region lists through, and the reader then refuses the file it produced:
+/// `ReleaseFunction::from_tabulated` (`crates/yamc-nuclide/src/fission_photon.rs:66-73`)
+/// errors on `interpolation.len() > 1 || breakpoints.len() > 1`. This input
+/// therefore has no outcome that is both written and loadable, which is the
+/// asymmetric validation this pull request reports: the writer refuses an empty
+/// polynomial because the reader refuses one, and applies no equivalent check
+/// to a tabulated term.
+///
+/// So the assertion is the invariant rather than today's return value. The
+/// writer either refuses the term, naming it and leaving no file, or copies
+/// both region lists whole; adding the missing refusal is then a passing change
+/// rather than a spurious failure. What both arms rule out is the third
+/// outcome, and it is the dangerous one: truncating to the first region turns a
+/// file the reader REFUSES into a file the reader ACCEPTS, evaluating a
+/// histogram tail as linear-linear with nothing on disk to say so. That is the
+/// #369 class of error the reader's refusal exists to prevent. Neither arm is
+/// vacuous, and a writer that simply always failed would be caught by
+/// `fission_photon_carries_both_release_terms_in_their_own_forms` above.
+#[test]
+fn a_multi_region_release_table_is_never_silently_truncated_to_one_region() {
+    // Two regions of different widths and different schemes: linear-linear to
+    // the second point, histogram to the fourth. Truncating either list to its
+    // first element therefore loses a value that differs from the one kept.
+    let x = vec![1.0e-5, 1.0e3, 1.0e6, 3.0e7];
+    let y = vec![6.60e6, 6.81e6, 7.42e6, 1.023e7];
+    let breakpoints = vec![2, 4];
+    let interpolation = vec![2, 1];
+    let release = constructed_release(
+        Component::Tabulated(Tabulated1D::with_regions(
+            x.clone(),
+            y.clone(),
+            breakpoints.clone(),
+            interpolation.clone(),
+        )),
+        Component::Polynomial(Polynomial::new(vec![6.33e6, -0.075])),
+    );
+
+    let dir = scratch();
+    match yamc_convert::fission_nu::write_fission_photon(&release, dir.path()) {
+        Ok(()) => {
+            let batch = section(dir.path(), "fission_photon.arrow");
+            assert_eq!(str_at(&batch, "kind", 0), "tabulated");
+            assert_f64_slice_eq("prompt_photons x", &f64_list(&batch, "x", 0), &x);
+            assert_f64_slice_eq("prompt_photons y", &f64_list(&batch, "y", 0), &y);
+            assert_i32_slice_eq(
+                "prompt_photons interpolation",
+                &i32_list(&batch, "interpolation", 0),
+                &interpolation,
+            );
+            assert_i32_slice_eq(
+                "prompt_photons breakpoints",
+                &i32_list(&batch, "breakpoints", 0),
+                &breakpoints,
+            );
+        }
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                message.contains("prompt_photons"),
+                "a refusal must name the term it refused, got: {message}"
+            );
+            assert!(
+                absent(dir.path(), "fission_photon.arrow"),
+                "a refusal must leave no half-written section behind"
+            );
+        }
+    }
+}
+
+/// Neither writer reports success for a section it could not write.
+///
+/// CONSTRUCTED INPUT, and a constructed destination: every other call in this
+/// file writes into a scratch directory that exists, so nothing here or
+/// anywhere else in the workspace exercises the `?` on `write_section`. The
+/// directory named below is never created, so `File::create`
+/// (`sections.rs:45`) fails with `NotFound` on every platform, with no `chmod`
+/// and no assumption about who the test runs as.
+///
+/// What that defends. `write_total_nu` returns a bool the caller writes into
+/// the manifest, so a swallowed error there means `entry.rs` records a
+/// `total_nu.arrow` that is not on disk, and the reader then falls back to the
+/// PROMPT yield, which is issue #364 arriving by a different route. A swallowed
+/// error in `write_fission_photon` loses the delayed photon scaling the same
+/// way. Both are silent: the conversion reports success and the wrong numbers
+/// turn up in a transport result.
+#[test]
+fn neither_writer_reports_success_for_a_section_it_could_not_write() {
+    let dir = scratch();
+    let missing = dir.path().join("this-directory-is-never-created");
+    assert!(!missing.exists(), "the destination must not exist");
+
+    let data =
+        constructed_fissile_nuclide(18, Yield::Polynomial(Polynomial::new(vec![2.44, 0.01])));
+    let error = yamc_convert::fission_nu::write_total_nu(&data, &missing)
+        .expect_err("write_total_nu must report a directory it cannot write into");
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::NotFound),
+        "the failure must be the IO one, not something further down: {error}"
+    );
+    assert!(absent(&missing, "total_nu.arrow"));
+
+    let release = constructed_release(
+        Component::Polynomial(Polynomial::new(vec![6.33e6, -0.075])),
+        Component::Polynomial(Polynomial::new(vec![5.11e6, -0.081])),
+    );
+    let error = yamc_convert::fission_nu::write_fission_photon(&release, &missing)
+        .expect_err("write_fission_photon must report a directory it cannot write into");
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::NotFound),
+        "the failure must be the IO one, not the empty-polynomial refusal: {error}"
+    );
+    assert!(absent(&missing, "fission_photon.arrow"));
 }
