@@ -13,6 +13,15 @@
 # `/rustc/<hash>` paths are not remappable here. They are baked into the
 # precompiled std, so rewriting them would need -Zbuild-std on nightly. They
 # name the compiler commit and nothing about the machine.
+#
+# LANDMINE: a `RUSTFLAGS` env var REPLACES this block rather than adding to it,
+# so any job that sets one gets none of these remaps. Today that is `test-mpi`
+# and `stubs-typing`, both via `actions-rust-lang/setup-rust-toolchain`, which
+# defaults to `RUSTFLAGS=-D warnings`. Neither ships a binary, so nothing leaks
+# today. The four wheel jobs use `dtolnay/rust-toolchain`, which sets no
+# RUSTFLAGS, which is the only reason this works. Swap a wheel job to the other
+# action and the remap silently dies; `scripts/check_binary_paths.py` runs in
+# those jobs so that this is caught rather than shipped.
 [build]
 rustflags = [
     '--remap-path-prefix=/root=/build',
