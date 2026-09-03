@@ -29,11 +29,6 @@ rustflags = [
     '--remap-path-prefix=/Users/runner=/build',
 ]
 
-# NOTE: cargo does not merge this with `[build].rustflags`; the target-specific
-# array wins outright. So the remaps above have to be repeated here, and this is
-# the target that matters most, because the committed wasm blobs are built by
-# hand and ship inside the wheel.
-
 # The remaps are repeated here because cargo does not merge this with
 # `[build].rustflags`: a target-specific array wins outright, so a `[build]`
 # entry alone would be silently ignored for exactly this target. The `--cfg`
