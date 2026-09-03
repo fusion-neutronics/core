@@ -1909,13 +1909,26 @@ class TransmutationResults:
         having tried.
         
         ``would_shield`` is the other direction, and is filled only on a dilute
-        run: nuclides whose own resonances could have suppressed a reaction,
-        mapped to the strongest suppression each could have seen. It is a bound
-        computed from that reaction alone, ignoring the rest of the material and
-        the geometry, both of which push the real factor back toward one. So it
-        says "this answer may be high, and here is by how much at the very
-        most", which is the warning a dilute run of a resonance absorber should
-        carry rather than silence.
+        run: nuclides whose own resonances are structured enough to have
+        suppressed a reaction, each mapped to how strongly.
+        
+        It is an indicator, not a correction and not a bound. There is no
+        geometry in it: the weight is ``1 / (1 + N * sigma_x)`` on that one
+        reaction and that nuclide's own density, which fixes the background at
+        1/cm, while the correction proper uses ``1 / chord_cm`` against the
+        material's total. So the number scales with how strongly a nuclide's own
+        resonances could bite without predicting what a given lump would see,
+        and it can sit either side of the real factor: a lump thinner than a
+        centimetre of chord shields less, and a material whose other nuclides
+        dominate the total at the resonance dips the flux further than this one
+        reaction can express.
+        
+        On the FNS tungsten foil, ``would_shield`` reads 0.634 for W186 while
+        the slowing-down correction on the same foil and spectrum saturates at
+        0.730 from a millimetre of chord upward. Read it as "this answer may be
+        high, and this is a resonance absorber", which is the warning a dilute
+        run should carry rather than silence. Read the size of the effect off a
+        shielded run, by asking for one.
         """
     @property
     def material_ids(self) -> builtins.list[builtins.int]:
