@@ -713,6 +713,21 @@ struct Collapse<'a> {
 }
 
 impl Collapse<'_> {
+    /// The reactions loaded for one nuclide at the temperature in use.
+    ///
+    /// Shared so that every consumer of the collapse resolves the temperature
+    /// the same way; a second copy of this is a second chance to read a
+    /// different evaluation than the one the rates came from.
+    fn reactions_for(&self, nuclide_name: &str) -> Option<&HashMap<i32, std::sync::Arc<Reaction>>> {
+        let nuclide_data = self.material.nuclide_data.get(nuclide_name)?;
+        let temperature = if self.material.temperature().is_empty() {
+            crate::default_temperature(nuclide_data)?
+        } else {
+            self.material.temperature().to_string()
+        };
+        nuclide_data.reactions_for_temp(&temperature)
+    }
+
     /// The flux shape one nuclide's group averages are taken under, with what
     /// a report should say about it: `(shape, why not, whether it was)`.
     ///
@@ -814,18 +829,7 @@ impl Collapse<'_> {
             return None;
         }
 
-        // Get nuclide data
-        let nuclide_data = self.material.nuclide_data.get(nuclide_name)?;
-
-        // Get temperature for data lookup
-        let temperature = if self.material.temperature().is_empty() {
-            crate::default_temperature(nuclide_data)?
-        } else {
-            self.material.temperature().to_string()
-        };
-
-        // Get reactions for this temperature
-        let reactions = nuclide_data.reactions_for_temp(&temperature)?;
+        let reactions = self.reactions_for(nuclide_name)?;
 
         let mut out = NuclideCollapse {
             rates: HashMap::new(),
@@ -840,16 +844,7 @@ impl Collapse<'_> {
         out.not_shielded = not_shielded;
         out.shielded = shielded;
 
-        // Get unique reaction types from chain
-        let mut reaction_types: Vec<&str> = chain_nuclide
-            .reactions
-            .iter()
-            .map(|r| r.kind.as_str())
-            .collect();
-        reaction_types.sort();
-        reaction_types.dedup();
-
-        for &rx_type in &reaction_types {
+        for &rx_type in &kinds_of(chain_nuclide) {
             let mt = match reaction_type_to_mt(rx_type) {
                 Some(mt) => mt,
                 None => continue,
@@ -950,6 +945,18 @@ impl Collapse<'_> {
     }
 }
 
+/// The reaction kinds the chain drives on one nuclide, sorted and deduped.
+fn kinds_of(chain_nuclide: &ChainNuclide) -> Vec<&str> {
+    let mut kinds: Vec<&str> = chain_nuclide
+        .reactions
+        .iter()
+        .map(|r| r.kind.as_str())
+        .collect();
+    kinds.sort();
+    kinds.dedup();
+    kinds
+}
+
 /// The nuclide's fission yields, if it has any tabulated.
 fn fy_set_for(chain_nuclide: &ChainNuclide) -> Option<&FissionYieldSet> {
     chain_nuclide
@@ -1008,15 +1015,6 @@ pub fn reaction_rate_spectrum(
         return None;
     }
     let mt = reaction_type_to_mt(kind)?;
-    let nuclide_data = material.nuclide_data.get(nuclide)?;
-    let temperature = if material.temperature().is_empty() {
-        crate::default_temperature(nuclide_data)?
-    } else {
-        material.temperature().to_string()
-    };
-    let reactions = nuclide_data.reactions_for_temp(&temperature)?;
-    let reaction = reactions.get(&mt)?;
-
     let setup = CollapseSetup::new(material, multigroup_flux, shielding)?;
     let context = setup.context(
         material,
@@ -1025,6 +1023,8 @@ pub fn reaction_rate_spectrum(
         source_rate,
         shielding,
     );
+    let reactions = context.reactions_for(nuclide)?;
+    let reaction = reactions.get(&mt)?;
     // The shielded average needs the nuclide's flux shape; the self-shielding
     // indicator does not belong to a rate, so its density is left off and the
     // walk skips that accumulation.
@@ -1043,26 +1043,32 @@ pub fn reaction_rate_spectrum(
 /// The per-group contributions to each reaction rate, for flux uncertainty.
 ///
 /// `out[nuclide][kind][g]` is that group's share of the rate, so the nominal
-/// rate is the sum over `g`. Computed by the same collapse as
-/// [`compute_multigroup_reaction_rates`] and against the same cross sections,
-/// so the sums agree with the rates it returns.
+/// rate is the sum over `g`. Every group average comes from
+/// [`Collapse::walk_channel`], the same walk
+/// [`compute_multigroup_reaction_rates_shielded`] collapses with and under the
+/// same `shielding`, so the terms sum to the rate that run produced rather than
+/// to a differently weighted one.
 ///
 /// Separate rather than an extra return value because it is only ever wanted
 /// when flux uncertainty is requested: it is the rate map times the group
 /// count, which on a 709-group structure is tens of MB, and the default path
-/// should not pay that (issue #559).
+/// should not pay that (issue #559). [`reaction_rate_spectrum`] is the
+/// one-channel form, for asking rather than for perturbing.
 pub fn per_group_reaction_rates(
     material: &Material,
     chain: &HashMap<String, ChainNuclide>,
     multigroup_flux: &[f64],
     group_boundaries: &[f64],
+    shielding: Option<&Shielding>,
 ) -> crate::flux_uncertainty::PerGroupRates {
     let mut out: crate::flux_uncertainty::PerGroupRates = HashMap::new();
     let n_groups = multigroup_flux.len();
-    let total_flux: f64 = multigroup_flux.iter().sum();
-    if n_groups == 0 || total_flux <= 0.0 {
+    let Some(setup) = CollapseSetup::new(material, multigroup_flux, shielding) else {
         return out;
-    }
+    };
+    // Unit source rate: these decompose the unit-flux rates the replicas
+    // perturb, and the step's magnitude is applied to both alike afterwards.
+    let context = setup.context(material, multigroup_flux, group_boundaries, 1.0, shielding);
 
     // Per nuclide and independent, exactly as the collapse it mirrors is, and
     // merged into a map keyed by a name that appears once -- so the order the
@@ -1072,40 +1078,26 @@ pub fn per_group_reaction_rates(
         if chain_nuclide.reactions.is_empty() {
             return None;
         }
-        let nuclide_data = material.nuclide_data.get(nuclide_name)?;
-        let temperature = if material.temperature().is_empty() {
-            crate::default_temperature(nuclide_data)?
-        } else {
-            material.temperature().to_string()
-        };
-        let reactions = nuclide_data.reactions_for_temp(&temperature)?;
-
-        let mut kinds: Vec<&str> = chain_nuclide
-            .reactions
-            .iter()
-            .map(|r| r.kind.as_str())
-            .collect();
-        kinds.sort();
-        kinds.dedup();
+        let reactions = context.reactions_for(nuclide_name)?;
+        let (shape, _, _) = context.shape_for(nuclide_name, reactions);
 
         let mut per_kind: HashMap<String, Vec<f64>> = HashMap::new();
-        for kind in kinds {
+        for kind in kinds_of(chain_nuclide) {
             let Some(mt) = reaction_type_to_mt(kind) else {
                 continue;
             };
             let Some(reaction) = reactions.get(&mt) else {
                 continue;
             };
-            let terms: Vec<f64> = (0..n_groups)
-                .map(|g| {
-                    let sigma_g =
-                        group_averaged_xs(reaction, group_boundaries[g], group_boundaries[g + 1]);
-                    // The same 1e-24 barn-to-cm^2 factor the rate carries, so
-                    // these sum to the rate rather than to something
-                    // proportional to it.
-                    sigma_g * multigroup_flux[g] * 1.0e-24
-                })
-                .collect();
+            // A group the walk skips carries no flux, so its term is exactly
+            // zero and the vector is sized to the whole structure regardless:
+            // the perturbation indexes it by the caller's own bin.
+            let mut terms = vec![0.0; n_groups];
+            context.walk_channel(reaction, shape.as_ref(), None, |g, sigma_g, phi| {
+                // The same 1e-24 barn-to-cm^2 factor the rate carries, so these
+                // sum to the rate rather than to something proportional to it.
+                terms[g] = sigma_g * phi * 1.0e-24;
+            });
             if terms.iter().any(|t| *t > 0.0) {
                 per_kind.insert(kind.to_string(), terms);
             }

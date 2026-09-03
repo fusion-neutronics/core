@@ -380,6 +380,7 @@ pub fn transmute_material_shielded(
             parts,
             &stepper,
             request,
+            shielding,
         )?;
         results.uncertainty.insert(material_id, ensemble);
         results.uncertainty_info = Some(info);
@@ -685,6 +686,7 @@ fn run_replicas(
     parts: yani::ChainParts,
     stepper: &ForwardEulerStepper,
     request: &DataUncertainty,
+    shielding: Option<&Shielding>,
 ) -> Result<(Ensemble, Info), Box<dyn std::error::Error>> {
     // One fold and one factorization per distinct spectrum, not per replica.
     // The fold is relativized, so the per-step `scale_rates` leaves it correct:
@@ -745,6 +747,7 @@ fn run_replicas(
                         &per_spectrum[idx].2,
                         &spectrum.masses,
                         &spectrum.boundaries,
+                        shielding,
                     ),
                 )));
             }
