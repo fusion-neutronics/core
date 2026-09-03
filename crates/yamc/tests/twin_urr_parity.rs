@@ -71,36 +71,44 @@ fn cache(n: &str) -> String {
 /// One solid W184 sphere cut into `n_mats` concentric shells, each its own
 /// `Material`. Flux is tallied in the outermost shell.
 fn build(comp: &[(&str, f64)], n_mats: usize) -> Option<(Model, Arc<Tally>, TransportSettings)> {
-    if comp
-        .iter()
-        .any(|(n, _)| !std::path::Path::new(&cache(n)).exists())
-    {
+    // Usable, not merely present. Checking the cache DIRECTORY exists is not
+    // the same as it being complete: a partially downloaded entry has
+    // `nuclide.arrow` and no `reactions.arrow`, and used to pass this guard and
+    // then fail inside `read_nuclear_data`, so a half-fetched cache surfaced as
+    // a panic on an unrelated-looking line rather than as a skip. Asking for
+    // the two sections a transport load requires puts that answer here, where
+    // the skip belongs, and lets `mk_mat` below treat any later failure as the
+    // real bug it would be.
+    let usable = |n: &str| {
+        let dir = std::path::PathBuf::from(cache(n));
+        ["nuclide.arrow", "reactions.arrow"]
+            .iter()
+            .all(|f| dir.join(f).is_file())
+    };
+    if comp.iter().any(|(n, _)| !usable(n)) {
         return None;
     }
-    let mk_mat = |id: u32| -> Option<Arc<Material>> {
+    // `expect`, deliberately. Every reason this could fail that is not the
+    // caller's problem has been ruled out by the guard above, so a failure here
+    // is a real regression in material construction and should be loud. The
+    // earlier version swallowed it into a skip, which traded a confusing
+    // failure for a silent one.
+    let mk_mat = |id: u32| -> Arc<Material> {
         let composition: HashMap<String, f64> =
             comp.iter().map(|(n, f)| (n.to_string(), *f)).collect();
         let data: HashMap<String, String> = comp
             .iter()
             .map(|(n, _)| (n.to_string(), cache(n)))
             .collect();
-        let mut m = Material::new(composition, "atom", "g/cm3", Some(DENSITY)).ok()?;
+        let mut m = Material::new(composition, "atom", "g/cm3", Some(DENSITY))
+            .expect("the composition is a literal in this file");
         m.set_material_id(id);
         m.set_temperature("294");
-        m.read_nuclear_data(&data, None).ok()?;
-        Some(Arc::new(m))
+        m.read_nuclear_data(&data, None)
+            .expect("the guard above checked every fixture is complete");
+        Arc::new(m)
     };
-    // `collect::<Option<_>>()?`, not `unwrap()`. The guard above checks that
-    // each nuclide's cache DIRECTORY exists, which is not the same as it being
-    // complete: a partially downloaded entry has `nuclide.arrow` and no
-    // `reactions.arrow`, so it passes the guard and then fails in
-    // `read_nuclear_data`. That turned an absent fixture into a panic pointing
-    // at this line rather than a skip, which is a confusing way to learn your
-    // cache is half fetched. Natural W needs four isotopes and CI fetches only
-    // W184, so the skip is the normal path there anyway.
-    let mats: Vec<Arc<Material>> = (0..n_mats)
-        .map(|i| mk_mat(i as u32 + 1))
-        .collect::<Option<Vec<_>>>()?;
+    let mats: Vec<Arc<Material>> = (0..n_mats).map(|i| mk_mat(i as u32 + 1)).collect();
 
     let mut cells = Vec::new();
     let mut prev: Option<Arc<Surface>> = None;
