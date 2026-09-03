@@ -406,30 +406,35 @@ mod gpu_guards {
     /// preparation, BEFORE any GPU context -- so this guard runs on any host. It
     /// is not a "decay photons are rejected" check; they are accepted, the decay
     /// data is what is missing here.
-    /// IGNORED: broken in two layers, neither of them this test's fault, and
-    /// both invisible until `gpu` joined the default features and this ran for
-    /// the first time. Tracked in #43.
+    /// IGNORED: this test asks for a state the public API forbids, and then
+    /// two further things go wrong. See #43.
     ///
-    /// 1. It cannot reach what it asserts on. `neutron_csg_model()` uses
-    ///    `build_csg()`, whose "inside the sphere" is `Complement(Above(..))`,
-    ///    and the GPU AABB pass rejects a Complement as unbounded extent, so
-    ///    the run is refused at translate. `build_csg_gpu()` in this very
-    ///    module exists for that reason and its comment names the error.
-    /// 2. Swapping in `build_csg_gpu()` does not fix it, it makes it worse:
-    ///    the run then gets far enough to PANIC in
-    ///    `yamc-gpu/src/photon/xs/photon_xs.rs:121`, on
-    ///    `.expect("at least one material with at least one element")`, because
-    ///    this model carries neutron data only. So the coupled GPU path
-    ///    panics where it should return an error when a material has no photon
-    ///    data, which is a defect in its own right and is the thing this guard
-    ///    would have caught years earlier had it been able to run.
+    /// It sets `use_decay_photons` ALONE. The Python constructor rejects that
+    /// outright ("use_decay_photons=True requires transport_secondary_photons
+    /// =True", `yamc-python/src/simulation/model.rs:277`), so no supported
+    /// caller can produce this model. That matters because `has_photons()`
+    /// (`yamc/src/model.rs:454`) does not count `use_decay_photons`, so with
+    /// only that flag set the model reports "no photons", and
+    /// `ensure_photon_data_for_gpu` returns early WITHOUT running its
+    /// missing-photon-data check. That check exists precisely to turn this into
+    /// a clean message rather than a panic, and its own comment says so.
     ///
-    /// Ignored rather than deleted, and rather than weakened to accept
-    /// whichever error happens to come out first: the assertion is the correct
-    /// one and should survive to be un-ignored once the panic is an error and
-    /// the fixture carries photon data.
+    /// With the invariant respected the guard fires and the error is about
+    /// photon data, which is what the sibling
+    /// `gpu_coupled_requires_photon_data` already asserts. So to test what THIS
+    /// test wants, the model needs photon data PRESENT and decay data absent,
+    /// which means the two-fixture material `gpu_coupled_photon.rs` builds.
+    ///
+    /// And it still could not get there: `neutron_csg_model()` uses
+    /// `build_csg()`, whose "inside the sphere" is `Complement(Above(..))`, and
+    /// the GPU AABB pass rejects a Complement as unbounded extent. That is what
+    /// `build_csg_gpu()` in this module exists for; its comment names the
+    /// error.
+    ///
+    /// Ignored rather than deleted or weakened to accept whichever error
+    /// surfaces first. The assertion is the right one; #43 says what it needs.
     #[test]
-    #[ignore = "cannot reach decay-data prep; see the comment above and #43"]
+    #[ignore = "sets use_decay_photons alone, which the API forbids; see above and #43"]
     fn gpu_decay_photons_require_decay_data() {
         let mut m = neutron_csg_model();
         m.use_decay_photons = true;
