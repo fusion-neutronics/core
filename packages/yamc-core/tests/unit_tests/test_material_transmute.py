@@ -280,3 +280,81 @@ def test_step_materials_pairs_with_the_rate_index():
     assert dict(steps[-1].nuclides) == dict(
         results.get_final_material(mat_id).nuclides
     )
+
+
+# --- energy-resolved reaction rates (issue #27) -------------------------------
+
+def test_the_rate_spectrum_sums_to_the_collapsed_rate():
+    """The breakdown must decompose the rate the solve used, not resemble it.
+
+    ``get_reaction_rates`` gives one number per edge, already collapsed against
+    the whole spectrum, which cannot say which part of the spectrum made it.
+    This is that number resolved onto the spectrum's own groups, so the two have
+    to agree on the total.
+    """
+    iron = _make_iron()
+    results = iron.transmute(
+        schedule=yamc.PulseSchedule([
+            yamc.Pulse(rate=RATE, duration=DAY, source=_spectrum()),
+        ]),
+    )
+
+    mat_id = iron.id or 0
+    spectrum = results.get_reaction_rate_spectrum(mat_id, "Fe56", "(n,gamma)", 0)
+    assert spectrum is not None, "the seed nuclide's capture channel was driven"
+    assert spectrum["boundaries"] == ENERGY_GROUPS
+    assert len(spectrum["rates"]) == len(ENERGY_GROUPS) - 1
+
+    # The edge rate is the channel rate times the branching, and Fe56(n,gamma)
+    # makes only Fe57, so the one edge carries the whole channel.
+    (_, edge_rate), = results.get_reaction_rates(mat_id, 0)["Fe56"]["(n,gamma)"]
+    assert sum(spectrum["rates"]) == pytest.approx(edge_rate, rel=1e-12)
+
+
+def test_the_rate_spectrum_says_where_in_energy_the_rate_came_from():
+    """The point of the getter: which group drove the rate.
+
+    Capture on Fe56 is a 1/v cross section, and this spectrum puts 1e12 of its
+    1.06e14 in the thermal group. That group nonetheless carries most of the
+    capture rate, which is exactly the attribution a one-group rate hides.
+    """
+    iron = _make_iron()
+    results = iron.transmute(
+        schedule=yamc.PulseSchedule([
+            yamc.Pulse(rate=RATE, duration=DAY, source=_spectrum()),
+        ]),
+    )
+
+    rates = results.get_reaction_rate_spectrum(
+        iron.id or 0, "Fe56", "(n,gamma)", 0
+    )["rates"]
+    thermal, epithermal, fast = rates
+    assert thermal > fast, (
+        "0.9% of the flux is thermal and Fe56 capture is 1/v, so the thermal "
+        f"group must still out-drive the fast one: {rates}"
+    )
+    assert epithermal > 0.0
+
+
+def test_no_rate_spectrum_where_there_is_no_rate():
+    """Absences are reported rather than answered with an invented spectrum."""
+    iron = _make_iron()
+    results = iron.transmute(
+        schedule=yamc.PulseSchedule([
+            yamc.Pulse(rate=RATE, duration=DAY, source=_spectrum()),
+            yamc.Cooldown(duration=DAY),
+        ]),
+    )
+
+    mat_id = iron.id or 0
+
+    def ask(*args):
+        return results.get_reaction_rate_spectrum(*args)
+
+    # A cooldown drives no reactions, and step 2 does not exist.
+    assert ask(mat_id, "Fe56", "(n,gamma)", 1) is None
+    assert ask(mat_id, "Fe56", "(n,gamma)", 2) is None
+    # A nuclide the material never loaded, and a kind that names no MT.
+    assert ask(mat_id, "U235", "(n,gamma)", 0) is None
+    assert ask(mat_id, "Fe56", "(n,banana)", 0) is None
+    assert ask(9999, "Fe56", "(n,gamma)", 0) is None

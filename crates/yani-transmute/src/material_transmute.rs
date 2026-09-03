@@ -380,6 +380,7 @@ pub fn transmute_material_shielded(
             parts,
             &stepper,
             request,
+            shielding,
         )?;
         results.uncertainty.insert(material_id, ensemble);
         results.uncertainty_info = Some(info);
@@ -393,6 +394,23 @@ pub fn transmute_material_shielded(
     // Kept so routes can be derived from the same topology the solve used,
     // rather than from whatever a second load of the chain path returns.
     results.chain = Some(Arc::clone(&chain));
+
+    // And the spectra it collapsed against, for the same reason: an
+    // energy-resolved view of a rate is a statement about the spectrum that
+    // drove it, and re-deriving one channel's breakdown on demand costs a few
+    // KB of stored spectrum rather than the tens of MB the whole breakdown
+    // would (yani#27).
+    results.collapse = Some(crate::results::CollapseInputs {
+        spectra: spectra
+            .iter()
+            .map(|s| (s.boundaries.clone(), s.masses.clone()))
+            .collect(),
+        step_spectrum: steps
+            .iter()
+            .map(|st| st.irradiation.map(|(idx, _)| idx))
+            .collect(),
+        shielding: shielding.copied(),
+    });
 
     Ok(results)
 }
@@ -668,6 +686,7 @@ fn run_replicas(
     parts: yani::ChainParts,
     stepper: &ForwardEulerStepper,
     request: &DataUncertainty,
+    shielding: Option<&Shielding>,
 ) -> Result<(Ensemble, Info), Box<dyn std::error::Error>> {
     // One fold and one factorization per distinct spectrum, not per replica.
     // The fold is relativized, so the per-step `scale_rates` leaves it correct:
@@ -728,6 +747,7 @@ fn run_replicas(
                         &per_spectrum[idx].2,
                         &spectrum.masses,
                         &spectrum.boundaries,
+                        shielding,
                     ),
                 )));
             }

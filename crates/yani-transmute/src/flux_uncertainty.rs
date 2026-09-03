@@ -140,9 +140,17 @@ const FLUX_STREAM: u32 = 0xF10D_5EED;
 
 /// Apply one replica's flux perturbation to a set of unit-flux rates.
 ///
+/// The perturbation is applied as a factor on the rate, not as a replacement
+/// for it: the terms say how the rate is distributed over the bins, and the
+/// rate itself stays the one the collapse produced. So an unperturbed replica
+/// reproduces the nominal rate bit for bit rather than to rounding, and a
+/// weighting the terms do not describe cannot be silently substituted for the
+/// one that drove the nominal run.
+///
 /// Rates with no per-group terms are passed through unchanged, which is what a
 /// nuclide whose cross sections were never collapsed against this spectrum
-/// looks like.
+/// looks like, and so is a channel whose rate comes from the branching overlay
+/// rather than from a group average.
 pub fn perturb_rates(
     rates: &ReactionRates,
     per_group: &PerGroupRates,
@@ -157,14 +165,16 @@ pub fn perturb_rates(
             let Some(rate) = nuclide_rates.get_mut(kind) else {
                 continue;
             };
-            // Sum the same terms the nominal rate is the sum of, weighted. With
-            // every delta zero this reproduces the nominal rate exactly, which
-            // is what keeps an unperturbed replica honest.
-            *rate = terms
+            let nominal: f64 = terms.iter().sum();
+            if nominal <= 0.0 {
+                continue;
+            }
+            let perturbed: f64 = terms
                 .iter()
                 .zip(delta)
                 .map(|(term, d)| term * (1.0 + d))
                 .sum();
+            *rate *= perturbed / nominal;
         }
     }
     out
@@ -211,6 +221,35 @@ mod tests {
         let nominal: f64 = terms.iter().sum();
         let out = perturb_rates(&rates(nominal), &per_group(terms), &[0.0, 0.0, 0.0]);
         assert_eq!(out["Li6"]["(n,t)"], nominal);
+    }
+
+    /// And reproduces it even when the terms describe a different weighting.
+    ///
+    /// The terms are a shape, not a substitute for the rate. Assigning their
+    /// sum instead of scaling by it is how a shielded rate used to be replaced
+    /// by a dilute one at zero perturbation.
+    #[test]
+    fn an_unperturbed_replica_does_not_replace_the_rate_with_the_terms() {
+        // A rate 30% below what the terms sum to, which is roughly what
+        // self-shielding does to a resonance absorber's capture.
+        let shielded = 0.7;
+        let out = perturb_rates(
+            &rates(shielded),
+            &per_group(vec![0.25, 0.5, 0.25]),
+            &[0.0, 0.0, 0.0],
+        );
+        assert_eq!(out["Li6"]["(n,t)"], shielded);
+    }
+
+    /// A term set summing to nothing has no shape to perturb along.
+    #[test]
+    fn a_channel_with_no_rate_in_any_bin_is_left_alone() {
+        let out = perturb_rates(
+            &rates(1.0),
+            &per_group(vec![0.0, 0.0, 0.0]),
+            &[0.5, 0.5, 0.5],
+        );
+        assert_eq!(out["Li6"]["(n,t)"], 1.0);
     }
 
     /// The rate is linear in the flux, so a uniform perturbation scales it.

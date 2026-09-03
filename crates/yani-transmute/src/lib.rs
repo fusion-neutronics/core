@@ -120,8 +120,10 @@ pub fn load_configured_chain() -> Result<yani::LoadedChain, Box<dyn std::error::
     )
 }
 pub use derived::{Estimate, LineEstimate};
-pub use multigroup::{compute_multigroup_reaction_rates, scale_rates, EnergyGroups};
-pub use results::TransmutationResults;
+pub use multigroup::{
+    compute_multigroup_reaction_rates, reaction_rate_spectrum, scale_rates, EnergyGroups,
+};
+pub use results::{CollapseInputs, RateSpectrum, TransmutationResults};
 pub use schedule::{duration_to_seconds, Schedule, ScheduleStep};
 pub use self_shielding::{Shape, Shielding, ShieldingInfo};
 pub use transmutation::TransmutationDriver;

@@ -98,7 +98,7 @@ fn main() {
     let masses: Vec<f64> = flux.iter().map(|f| f / total).collect();
 
     // Per group, so a single group average that moves is visible where it moved.
-    let per_group = per_group_reaction_rates(&material, &chain, &masses, &boundaries);
+    let per_group = per_group_reaction_rates(&material, &chain, &masses, &boundaries, None);
     let mut nuclides: Vec<&String> = per_group.keys().collect();
     nuclides.sort();
     for name in nuclides {

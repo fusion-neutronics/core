@@ -125,6 +125,7 @@ fn padding_a_spectrum_with_empty_groups_changes_no_bits() {
         &chain,
         &padded,
         &boundaries,
+        None,
     );
     let mut checked = 0;
     for (nuclide, per_kind) in &wide {

@@ -490,7 +490,6 @@ pub fn compute_multigroup_reaction_rates_shielded(
 ) -> (ReactionRates, FissionYieldWeights, ShieldingInfo) {
     let mut rates: ReactionRates = HashMap::new();
     let mut fy_weights: FissionYieldWeights = HashMap::new();
-    let n_groups = multigroup_flux.len();
 
     let mut info = ShieldingInfo::default();
     if let Some(s) = shielding {
@@ -504,39 +503,8 @@ pub fn compute_multigroup_reaction_rates_shielded(
     }
 
     // Total scalar flux = sum of group fluxes
-    let total_flux: f64 = multigroup_flux.iter().sum();
-    if total_flux <= 0.0 {
+    let Some(setup) = CollapseSetup::new(material, multigroup_flux, shielding) else {
         return (rates, fy_weights, info);
-    }
-
-    // The flux depression is a property of the whole material, so the mixture
-    // total is gathered once and every nuclide's shape is built against it.
-    let densities = material.get_atoms_per_barn_cm().unwrap_or_default();
-    let temperature_for = |name: &str| -> Option<String> {
-        let nd = material.nuclide_data.get(name)?;
-        if material.temperature().is_empty() {
-            crate::default_temperature(nd)
-        } else {
-            Some(material.temperature().to_string())
-        }
-    };
-    let mixture = shielding.map(|_| mixture_total(material, &densities, &temperature_for));
-
-    // The groups worth walking, decided once for the whole spectrum rather than
-    // per nuclide per reaction. A group with no flux contributes `sigma_g * 0.0`
-    // to the collapse and `scale = 0.0` to the yield fold, both of which are
-    // exactly `+0.0`, so skipping it is bit-neutral -- and a monoenergetic 14
-    // MeV source in CCFE-709 leaves 1 group of 709 (issue #576, finding 2).
-    //
-    // Only on the dilute path. `info.strongest_factor` mins over every group a
-    // shielded run walks, zero-flux ones included, so skipping them there would
-    // change a reported number rather than only the time taken.
-    let active: Vec<usize> = if shielding.is_none() {
-        (0..n_groups)
-            .filter(|&g| multigroup_flux[g] != 0.0)
-            .collect()
-    } else {
-        (0..n_groups).collect()
     };
 
     // One nuclide's collapse is independent of every other's: it reads the
@@ -549,17 +517,13 @@ pub fn compute_multigroup_reaction_rates_shielded(
     // comes out in the order the sequential loop produced rather than merely
     // holding the same names.
     let entries: Vec<(&String, &ChainNuclide)> = chain.iter().collect();
-    let context = Collapse {
+    let context = setup.context(
         material,
         multigroup_flux,
         group_boundaries,
         source_rate,
         shielding,
-        densities: &densities,
-        mixture: mixture.as_ref(),
-        active: &active,
-        total_flux,
-    };
+    );
     let collapsed: Vec<Option<NuclideCollapse>> = {
         let one = |&(name, chain_nuclide): &(&String, &ChainNuclide)| {
             context.collapse_nuclide(name, chain_nuclide)
@@ -627,6 +591,113 @@ struct NuclideCollapse {
     strongest_factor: Option<f64>,
 }
 
+/// Everything derived from the material and the spectrum that every nuclide's
+/// collapse shares, gathered once.
+///
+/// A struct rather than four locals so that [`reaction_rate_spectrum`], which
+/// walks one channel long after the solve, builds its context the same way
+/// [`compute_multigroup_reaction_rates_shielded`] does. Two copies of this
+/// gather would be two chances for an energy-resolved rate and the collapsed
+/// rate it is supposed to sum to to disagree.
+struct CollapseSetup<'a> {
+    densities: HashMap<String, f64>,
+    mixture: Option<crate::self_shielding::MixtureTotal<'a>>,
+    active: Vec<usize>,
+    total_flux: f64,
+}
+
+impl<'a> CollapseSetup<'a> {
+    /// `None` when the spectrum carries no flux, which drives nothing.
+    fn new(
+        material: &'a Material,
+        multigroup_flux: &[f64],
+        shielding: Option<&Shielding>,
+    ) -> Option<Self> {
+        let total_flux: f64 = multigroup_flux.iter().sum();
+        if total_flux <= 0.0 {
+            return None;
+        }
+
+        // The flux depression is a property of the whole material, so the
+        // mixture total is gathered once and every nuclide's shape is built
+        // against it.
+        let densities = material.get_atoms_per_barn_cm().unwrap_or_default();
+        let temperature_for = |name: &str| -> Option<String> {
+            let nd = material.nuclide_data.get(name)?;
+            if material.temperature().is_empty() {
+                crate::default_temperature(nd)
+            } else {
+                Some(material.temperature().to_string())
+            }
+        };
+        let mixture = shielding.map(|_| mixture_total(material, &densities, &temperature_for));
+
+        // The groups worth walking, decided once for the whole spectrum rather
+        // than per nuclide per reaction. A group with no flux contributes
+        // `sigma_g * 0.0` to the collapse and `scale = 0.0` to the yield fold,
+        // both of which are exactly `+0.0`, so skipping it is bit-neutral --
+        // and a monoenergetic 14 MeV source in CCFE-709 leaves 1 group of 709
+        // (issue #576, finding 2).
+        //
+        // Only on the dilute path. `info.strongest_factor` mins over every
+        // group a shielded run walks, zero-flux ones included, so skipping them
+        // there would change a reported number rather than only the time taken.
+        let n_groups = multigroup_flux.len();
+        let active: Vec<usize> = if shielding.is_none() {
+            (0..n_groups)
+                .filter(|&g| multigroup_flux[g] != 0.0)
+                .collect()
+        } else {
+            (0..n_groups).collect()
+        };
+
+        Some(Self {
+            densities,
+            mixture,
+            active,
+            total_flux,
+        })
+    }
+
+    /// The per-nuclide collapse context this setup supports.
+    fn context<'b>(
+        &'b self,
+        material: &'b Material,
+        multigroup_flux: &'b [f64],
+        group_boundaries: &'b [f64],
+        source_rate: f64,
+        shielding: Option<&'b Shielding>,
+    ) -> Collapse<'b>
+    where
+        'a: 'b,
+    {
+        Collapse {
+            material,
+            multigroup_flux,
+            group_boundaries,
+            source_rate,
+            shielding,
+            densities: &self.densities,
+            mixture: self.mixture.as_ref(),
+            active: &self.active,
+            total_flux: self.total_flux,
+        }
+    }
+}
+
+/// What one channel's walk accumulates besides the rate itself.
+///
+/// Returned rather than written in place so the walk is a pure function of its
+/// inputs and both of its callers can ignore what they do not want.
+#[derive(Default)]
+struct ChannelWalk {
+    /// The strongest per-group suppression the shielded average applied.
+    strongest_factor: Option<f64>,
+    /// Numerator and denominator of the dilute run's self-shielding indicator.
+    bound_shielded: f64,
+    bound_dilute: f64,
+}
+
 /// What one nuclide's collapse needs from outside itself. All of it read-only,
 /// which is what makes the map safe to run in parallel.
 struct Collapse<'a> {
@@ -642,6 +713,112 @@ struct Collapse<'a> {
 }
 
 impl Collapse<'_> {
+    /// The reactions loaded for one nuclide at the temperature in use.
+    ///
+    /// Shared so that every consumer of the collapse resolves the temperature
+    /// the same way; a second copy of this is a second chance to read a
+    /// different evaluation than the one the rates came from.
+    fn reactions_for(&self, nuclide_name: &str) -> Option<&HashMap<i32, std::sync::Arc<Reaction>>> {
+        let nuclide_data = self.material.nuclide_data.get(nuclide_name)?;
+        let temperature = if self.material.temperature().is_empty() {
+            crate::default_temperature(nuclide_data)?
+        } else {
+            self.material.temperature().to_string()
+        };
+        nuclide_data.reactions_for_temp(&temperature)
+    }
+
+    /// The flux shape one nuclide's group averages are taken under, with what
+    /// a report should say about it: `(shape, why not, whether it was)`.
+    ///
+    /// One flux shape per nuclide: the mixture sets the depression, the
+    /// nuclide's own elastic scattering fills its resonance dips. `None` on the
+    /// dilute path, and on the shielded path for a nuclide whose name or data
+    /// will not support one.
+    fn shape_for(
+        &self,
+        nuclide_name: &str,
+        reactions: &HashMap<i32, std::sync::Arc<Reaction>>,
+    ) -> (Option<FluxShape>, Option<String>, bool) {
+        match (self.shielding, self.mixture) {
+            (Some(request), Some(mix)) => match mass_number_of(nuclide_name) {
+                Some(mass_number) => {
+                    let elastic = reactions
+                        .get(&crate::self_shielding::MT_ELASTIC)
+                        .map(|r| r.as_ref());
+                    let why_not = elastic.is_none().then(|| "no MT=2 elastic".to_string());
+                    let density = self.densities.get(nuclide_name).copied().unwrap_or(0.0);
+                    (
+                        Some(flux_shape(mix, elastic, density, mass_number, request)),
+                        why_not,
+                        true,
+                    )
+                }
+                None => (
+                    None,
+                    Some("mass number not parsable from the name".to_string()),
+                    false,
+                ),
+            },
+            _ => (None, None, false),
+        }
+    }
+
+    /// Walk one channel over every active group, handing each group's average
+    /// to `on_group` as `(g, sigma_g, phi_g)`.
+    ///
+    /// This is the one definition of what `sigma_g` means for a group, so the
+    /// collapsed rate and any energy-resolved view of it cannot drift apart:
+    /// [`Collapse::collapse_nuclide`] sums `sigma_g * phi_g` out of it and
+    /// [`reaction_rate_spectrum`] keeps the terms.
+    ///
+    /// `bound_density` (atoms/barn-cm, and only meaningful when positive) turns
+    /// on the dilute run's self-shielding indicator. A caller that does not
+    /// want it passes `None` and the walk does less work.
+    fn walk_channel(
+        &self,
+        reaction: &Reaction,
+        shape: Option<&FluxShape>,
+        bound_density: Option<f64>,
+        mut on_group: impl FnMut(usize, f64, f64),
+    ) -> ChannelWalk {
+        let mut walk = ChannelWalk::default();
+        for &g in self.active {
+            let e_lo = self.group_boundaries[g];
+            let e_hi = self.group_boundaries[g + 1];
+            let phi = self.multigroup_flux[g];
+            // One walk of this group's points, whichever of the three
+            // integrals over them are wanted.
+            let terms = walk_group(
+                reaction,
+                e_lo,
+                e_hi,
+                shape,
+                // `strongest_possible_suppression` skips a group with no
+                // flux in it, so the indicator must not accumulate one here.
+                bound_density.filter(|_| phi > 0.0),
+            );
+            let sigma_g = if shape.is_some() {
+                let shielded = terms.shielded();
+                let dilute = terms.dilute(e_lo, e_hi);
+                if dilute > 0.0 {
+                    let factor = shielded / dilute;
+                    walk.strongest_factor =
+                        Some(walk.strongest_factor.map_or(factor, |f: f64| f.min(factor)));
+                }
+                shielded
+            } else {
+                terms.dilute(e_lo, e_hi)
+            };
+            if let Some((s, d)) = terms.bound_contribution(phi) {
+                walk.bound_shielded += s;
+                walk.bound_dilute += d;
+            }
+            on_group(g, sigma_g, phi);
+        }
+        walk
+    }
+
     /// Collapse one nuclide, or `None` when it has nothing to contribute.
     fn collapse_nuclide(
         &self,
@@ -652,18 +829,7 @@ impl Collapse<'_> {
             return None;
         }
 
-        // Get nuclide data
-        let nuclide_data = self.material.nuclide_data.get(nuclide_name)?;
-
-        // Get temperature for data lookup
-        let temperature = if self.material.temperature().is_empty() {
-            crate::default_temperature(nuclide_data)?
-        } else {
-            self.material.temperature().to_string()
-        };
-
-        // Get reactions for this temperature
-        let reactions = nuclide_data.reactions_for_temp(&temperature)?;
+        let reactions = self.reactions_for(nuclide_name)?;
 
         let mut out = NuclideCollapse {
             rates: HashMap::new(),
@@ -674,39 +840,11 @@ impl Collapse<'_> {
             strongest_factor: None,
         };
 
-        // One flux shape per nuclide: the mixture sets the depression, the
-        // nuclide's own elastic scattering fills its resonance dips.
-        let shape: Option<FluxShape> = match (self.shielding, self.mixture) {
-            (Some(request), Some(mix)) => match mass_number_of(nuclide_name) {
-                Some(mass_number) => {
-                    let elastic = reactions
-                        .get(&crate::self_shielding::MT_ELASTIC)
-                        .map(|r| r.as_ref());
-                    if elastic.is_none() {
-                        out.not_shielded = Some("no MT=2 elastic".to_string());
-                    }
-                    let density = self.densities.get(nuclide_name).copied().unwrap_or(0.0);
-                    out.shielded = true;
-                    Some(flux_shape(mix, elastic, density, mass_number, request))
-                }
-                None => {
-                    out.not_shielded = Some("mass number not parsable from the name".to_string());
-                    None
-                }
-            },
-            _ => None,
-        };
+        let (shape, not_shielded, shielded) = self.shape_for(nuclide_name, reactions);
+        out.not_shielded = not_shielded;
+        out.shielded = shielded;
 
-        // Get unique reaction types from chain
-        let mut reaction_types: Vec<&str> = chain_nuclide
-            .reactions
-            .iter()
-            .map(|r| r.kind.as_str())
-            .collect();
-        reaction_types.sort();
-        reaction_types.dedup();
-
-        for &rx_type in &reaction_types {
+        for &rx_type in &kinds_of(chain_nuclide) {
             let mt = match reaction_type_to_mt(rx_type) {
                 Some(mt) => mt,
                 None => continue,
@@ -741,58 +879,36 @@ impl Collapse<'_> {
                 .is_none()
                 .then(|| self.densities.get(nuclide_name).copied().unwrap_or(0.0))
                 .filter(|&d| d > 0.0);
-            let (mut bound_shielded, mut bound_dilute) = (0.0, 0.0);
 
             // Collapse: σ_eff = Σ(σ_g × φ_g) / Σ(φ_g)
             let mut sigma_phi_sum = 0.0;
-            for &g in self.active {
-                let e_lo = self.group_boundaries[g];
-                let e_hi = self.group_boundaries[g + 1];
-                let phi = self.multigroup_flux[g];
-                // One walk of this group's points, whichever of the three
-                // integrals over them are wanted.
-                let terms = walk_group(
-                    reaction,
-                    e_lo,
-                    e_hi,
-                    shape.as_ref(),
-                    // `strongest_possible_suppression` skips a group with no
-                    // flux in it, so the indicator must not accumulate one here.
-                    bound_density.filter(|_| phi > 0.0),
-                );
-                let sigma_g = if shape.is_some() {
-                    let shielded = terms.shielded();
-                    let dilute = terms.dilute(e_lo, e_hi);
-                    if dilute > 0.0 {
-                        let factor = shielded / dilute;
-                        out.strongest_factor =
-                            Some(out.strongest_factor.map_or(factor, |f: f64| f.min(factor)));
+            let walk = self.walk_channel(
+                reaction,
+                shape.as_ref(),
+                bound_density,
+                |g, sigma_g, phi| {
+                    sigma_phi_sum += sigma_g * phi;
+                    if let Some(fy_set) = fold_yields {
+                        add_group_fission_xs_by_yield_point(
+                            reaction,
+                            fy_set,
+                            &fy_energies,
+                            self.group_boundaries[g],
+                            self.group_boundaries[g + 1],
+                            phi,
+                            &mut yield_shares,
+                        );
                     }
-                    shielded
-                } else {
-                    terms.dilute(e_lo, e_hi)
-                };
-                if let Some((s, d)) = terms.bound_contribution(phi) {
-                    bound_shielded += s;
-                    bound_dilute += d;
-                }
-                sigma_phi_sum += sigma_g * phi;
-                if let Some(fy_set) = fold_yields {
-                    add_group_fission_xs_by_yield_point(
-                        reaction,
-                        fy_set,
-                        &fy_energies,
-                        e_lo,
-                        e_hi,
-                        phi,
-                        &mut yield_shares,
-                    );
-                }
+                },
+            );
+            if let Some(factor) = walk.strongest_factor {
+                out.strongest_factor =
+                    Some(out.strongest_factor.map_or(factor, |f: f64| f.min(factor)));
             }
 
             if bound_density.is_some() {
-                let bound = if bound_dilute > 0.0 {
-                    (bound_shielded / bound_dilute).min(1.0)
+                let bound = if walk.bound_dilute > 0.0 {
+                    (walk.bound_shielded / walk.bound_dilute).min(1.0)
                 } else {
                     1.0
                 };
@@ -829,6 +945,18 @@ impl Collapse<'_> {
     }
 }
 
+/// The reaction kinds the chain drives on one nuclide, sorted and deduped.
+fn kinds_of(chain_nuclide: &ChainNuclide) -> Vec<&str> {
+    let mut kinds: Vec<&str> = chain_nuclide
+        .reactions
+        .iter()
+        .map(|r| r.kind.as_str())
+        .collect();
+    kinds.sort();
+    kinds.dedup();
+    kinds
+}
+
 /// The nuclide's fission yields, if it has any tabulated.
 fn fy_set_for(chain_nuclide: &ChainNuclide) -> Option<&FissionYieldSet> {
     chain_nuclide
@@ -837,29 +965,110 @@ fn fy_set_for(chain_nuclide: &ChainNuclide) -> Option<&FissionYieldSet> {
         .filter(|s| !s.yields.is_empty())
 }
 
+/// The per-group contributions to one channel's collapsed reaction rate.
+///
+/// `out[g]` is `1e-24 * sigma_g * phi_g * source_rate` in 1/s, so summing over
+/// the groups gives the rate
+/// [`compute_multigroup_reaction_rates_shielded`] reports for the same
+/// channel, and each entry is that group's share of it. Both come from
+/// [`Collapse::walk_channel`], self-shielding included, so the two cannot
+/// disagree about what `sigma_g` means; they agree to floating-point rounding
+/// rather than bit-exactly, because the collapse divides the sum by the total
+/// flux and multiplies it back.
+///
+/// # Why one channel, and nothing stored
+///
+/// This is the question a one-group rate cannot answer: a rate of 57 mb
+/// against a spectrum that is 89% fast and 0.7% below 100 keV says nothing
+/// about which of those two the rate came from, and the answer decides whether
+/// a disagreement belongs to resonance processing or to the fast cross section
+/// (yani#27).
+///
+/// Keeping the breakdown for every channel would be the rate map times the
+/// group count, tens of MB on a 709-group structure, which is why
+/// [`per_group_reaction_rates`] is built only when flux uncertainty asks for it
+/// (issue #559). A diagnostic asks about one channel at a time, and walking a
+/// single reaction over 709 groups is fast enough to do on demand, so nothing
+/// is stored and the default path pays nothing.
+///
+/// # Returns
+///
+/// `None` when the material holds no data for `nuclide`, when `kind` names no
+/// MT this build collapses, when the reaction is absent from the data, or when
+/// the spectrum carries no flux. `(n,n')` is the notable absence: it has no
+/// transport total, so its rate comes from the branching overlay's MF=10
+/// partials rather than from a group average, and there is no `sigma_g` here
+/// to report.
+pub fn reaction_rate_spectrum(
+    material: &Material,
+    multigroup_flux: &[f64],
+    group_boundaries: &[f64],
+    source_rate: f64,
+    shielding: Option<&Shielding>,
+    nuclide: &str,
+    kind: &str,
+) -> Option<Vec<f64>> {
+    // A pulse at zero flux drives nothing, exactly as
+    // `compute_multigroup_reaction_rates_shielded` treats it, and a vector of
+    // zeros would read as a rate resolved rather than as no rate at all.
+    if source_rate == 0.0 {
+        return None;
+    }
+    let mt = reaction_type_to_mt(kind)?;
+    let setup = CollapseSetup::new(material, multigroup_flux, shielding)?;
+    let context = setup.context(
+        material,
+        multigroup_flux,
+        group_boundaries,
+        source_rate,
+        shielding,
+    );
+    let reactions = context.reactions_for(nuclide)?;
+    let reaction = reactions.get(&mt)?;
+    // The shielded average needs the nuclide's flux shape; the self-shielding
+    // indicator does not belong to a rate, so its density is left off and the
+    // walk skips that accumulation.
+    let (shape, _, _) = context.shape_for(nuclide, reactions);
+
+    // A zero-flux group is not walked on the dilute path, and its term is
+    // exactly zero, so the vector is sized to the whole structure and only the
+    // active groups are written into it.
+    let mut out = vec![0.0; multigroup_flux.len()];
+    context.walk_channel(reaction, shape.as_ref(), None, |g, sigma_g, phi| {
+        out[g] = sigma_g * phi * 1.0e-24 * source_rate;
+    });
+    Some(out)
+}
+
 /// The per-group contributions to each reaction rate, for flux uncertainty.
 ///
 /// `out[nuclide][kind][g]` is that group's share of the rate, so the nominal
-/// rate is the sum over `g`. Computed by the same collapse as
-/// [`compute_multigroup_reaction_rates`] and against the same cross sections,
-/// so the sums agree with the rates it returns.
+/// rate is the sum over `g`. Every group average comes from
+/// [`Collapse::walk_channel`], the same walk
+/// [`compute_multigroup_reaction_rates_shielded`] collapses with and under the
+/// same `shielding`, so the terms sum to the rate that run produced rather than
+/// to a differently weighted one.
 ///
 /// Separate rather than an extra return value because it is only ever wanted
 /// when flux uncertainty is requested: it is the rate map times the group
 /// count, which on a 709-group structure is tens of MB, and the default path
-/// should not pay that (issue #559).
+/// should not pay that (issue #559). [`reaction_rate_spectrum`] is the
+/// one-channel form, for asking rather than for perturbing.
 pub fn per_group_reaction_rates(
     material: &Material,
     chain: &HashMap<String, ChainNuclide>,
     multigroup_flux: &[f64],
     group_boundaries: &[f64],
+    shielding: Option<&Shielding>,
 ) -> crate::flux_uncertainty::PerGroupRates {
     let mut out: crate::flux_uncertainty::PerGroupRates = HashMap::new();
     let n_groups = multigroup_flux.len();
-    let total_flux: f64 = multigroup_flux.iter().sum();
-    if n_groups == 0 || total_flux <= 0.0 {
+    let Some(setup) = CollapseSetup::new(material, multigroup_flux, shielding) else {
         return out;
-    }
+    };
+    // Unit source rate: these decompose the unit-flux rates the replicas
+    // perturb, and the step's magnitude is applied to both alike afterwards.
+    let context = setup.context(material, multigroup_flux, group_boundaries, 1.0, shielding);
 
     // Per nuclide and independent, exactly as the collapse it mirrors is, and
     // merged into a map keyed by a name that appears once -- so the order the
@@ -869,40 +1078,26 @@ pub fn per_group_reaction_rates(
         if chain_nuclide.reactions.is_empty() {
             return None;
         }
-        let nuclide_data = material.nuclide_data.get(nuclide_name)?;
-        let temperature = if material.temperature().is_empty() {
-            crate::default_temperature(nuclide_data)?
-        } else {
-            material.temperature().to_string()
-        };
-        let reactions = nuclide_data.reactions_for_temp(&temperature)?;
-
-        let mut kinds: Vec<&str> = chain_nuclide
-            .reactions
-            .iter()
-            .map(|r| r.kind.as_str())
-            .collect();
-        kinds.sort();
-        kinds.dedup();
+        let reactions = context.reactions_for(nuclide_name)?;
+        let (shape, _, _) = context.shape_for(nuclide_name, reactions);
 
         let mut per_kind: HashMap<String, Vec<f64>> = HashMap::new();
-        for kind in kinds {
+        for kind in kinds_of(chain_nuclide) {
             let Some(mt) = reaction_type_to_mt(kind) else {
                 continue;
             };
             let Some(reaction) = reactions.get(&mt) else {
                 continue;
             };
-            let terms: Vec<f64> = (0..n_groups)
-                .map(|g| {
-                    let sigma_g =
-                        group_averaged_xs(reaction, group_boundaries[g], group_boundaries[g + 1]);
-                    // The same 1e-24 barn-to-cm^2 factor the rate carries, so
-                    // these sum to the rate rather than to something
-                    // proportional to it.
-                    sigma_g * multigroup_flux[g] * 1.0e-24
-                })
-                .collect();
+            // A group the walk skips carries no flux, so its term is exactly
+            // zero and the vector is sized to the whole structure regardless:
+            // the perturbation indexes it by the caller's own bin.
+            let mut terms = vec![0.0; n_groups];
+            context.walk_channel(reaction, shape.as_ref(), None, |g, sigma_g, phi| {
+                // The same 1e-24 barn-to-cm^2 factor the rate carries, so these
+                // sum to the rate rather than to something proportional to it.
+                terms[g] = sigma_g * phi * 1.0e-24;
+            });
             if terms.iter().any(|t| *t > 0.0) {
                 per_kind.insert(kind.to_string(), terms);
             }
