@@ -28,7 +28,7 @@ Issues = "https://github.com/fusion-neutronics/yamc/issues"
 Discussions = "https://github.com/fusion-neutronics/yamc/discussions"
 
 [project.optional-dependencies]
-cad = ["cadquery>=2.8.0", "numpy"]
+cad = ["cadquery>=2.8.0"]
 viz = ["h5py", "numpy"]
 pandas = ["pandas>=2.2"]
 polars = ["polars>=0.20"]
