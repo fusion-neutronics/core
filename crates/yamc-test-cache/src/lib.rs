@@ -49,8 +49,21 @@ pub const LIBRARY: &str = "endf-b8.1";
 ///
 /// Both variables, because `GITHUB_ACTIONS` is specific and `CI` is set by
 /// essentially every runner. Matching more than GitHub is deliberate.
+///
+/// Presence is not enough, which is the trap: `CI=false` and `CI=0` are things
+/// people set ON PURPOSE to force the non-CI path, and an `is_some()` check
+/// reads them as "yes, CI" and does the opposite of what was asked. So the
+/// value is inspected, the way `YAMC_REQUIRE_FIXTURES` inspects its own.
 pub fn on_ci() -> bool {
-    std::env::var_os("CI").is_some() || std::env::var_os("GITHUB_ACTIONS").is_some()
+    let set = |name: &str| {
+        std::env::var(name)
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                !(v.is_empty() || v == "false" || v == "0")
+            })
+            .unwrap_or(false)
+    };
+    set("CI") || set("GITHUB_ACTIONS")
 }
 
 /// Root of the fixture cache, as [`yamc_nuclide::url_cache::cache_root`]
