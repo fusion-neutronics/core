@@ -1003,8 +1003,12 @@ jobs:
           source .venv/bin/activate
           python -m pip install --upgrade pip
           pip install maturin pyright mypy
-          # Default features (mesh,cad) match scripts/build_stubs.py, so the
-          # regenerated stub and the runtime surface are compared like-for-like.
+          # Default features (mesh, cad, download-tls, gpu) match what
+          # scripts/build_stubs.py resolves, so the regenerated stub and the
+          # runtime surface are compared like-for-like. The gpu gating in
+          # yamc-python is body-level, not signature-level, so it does not move
+          # the stub either way; it is listed because the default set is what
+          # this job builds.
           # In a subshell, so the venv and the steps below keep the repo root:
           # maturin needs the package's own pyproject, and its `-m` takes a
           # Cargo manifest rather than a pyproject.

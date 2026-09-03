@@ -69,7 +69,25 @@ yani-decay = { path = "../yani-decay" }
 yamc-gpu = { path = "../yamc-gpu", optional = true }
 
 [features]
-default = ["mesh", "cad", "download-tls"]
+# `gpu` is in here because the wheels have always built with it
+# (`--features mesh,cad,gpu` in all three yamc-core jobs) while the default did
+# not, so a developer's `maturin develop` produced a binary with a capability
+# the published one had. Reproducing a user's bug meant testing something else.
+#
+# It is close to free to carry: cubecl and wgpu are compiled by every
+# `cargo build --workspace` already, because yamc-gpu is a workspace member with
+# no `[features]` table of its own. And it costs nothing at runtime, because
+# `compute` defaults to "cpu" and returns before touching any GPU code, nothing
+# probes at import, and Vulkan arrives through `dlopen` rather than a link-time
+# dependency (`readelf -d` is identical with and without the stack), so a
+# gpu-enabled wheel imports fine on a host with no driver.
+#
+# What it does cost is the ~9 gpu-gated CPU-twin tests in `crates/yamc/tests`,
+# which need no adapter and so now run rather than skip under
+# `cargo test --workspace`. That is coverage that was always meant to run:
+# `twin_temperature_parity.rs` says "The twin needs no GPU, so this runs in CI"
+# and until now it did not.
+default = ["mesh", "cad", "download-tls", "gpu"]
 # HTTPS data downloads via the pure-Rust graviola provider (no C toolchain).
 # On by default so wheels and `maturin develop` fetch over HTTPS. Drop it
 # (build with `--no-default-features --features mesh,cad`) for a crypto-free,

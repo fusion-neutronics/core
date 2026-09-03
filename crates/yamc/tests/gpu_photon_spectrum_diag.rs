@@ -3,7 +3,20 @@
 //! photoelectric matrix sweep. photoelectric ∝ E^-3 is dominated by the
 //! low-energy tail; this shows WHERE the GPU under-populates so we can
 //! attribute the photoelectric deficit (#415). Run with:
-//!   cargo test -p yamc --features gpu --release --test gpu_photon_spectrum_diag -- --nocapture --ignored --test-threads=1
+//!   cargo test --release --test gpu_photon_spectrum_diag -- --nocapture --test-threads=1
+//!
+//! Both tests here assert nothing: they print tables for a person to read.
+//! They no longer carry `#[ignore]`, because the adapter guard each one opens
+//! with is already the right gate: they compare CPU against GPU, so without a
+//! GPU there is nothing to print, and with one there is a person looking. On a
+//! CI runner the guard skips them for free. `#[ignore]` on top of that only
+//! meant a developer on a GPU box had to know to pass `-- --ignored` to run
+//! the one thing these exist for.
+//!
+//! The command above lost `--features gpu` too, since that feature is in the
+//! default set now. It keeps `--test-threads=1`, which is not optional: the
+//! GPU tests share a process-global cubecl client and parallel launches
+//! corrupt results (see the `test-gpu` alias in `.cargo/config.toml`).
 
 #![cfg(all(feature = "gpu", not(target_os = "macos")))]
 
@@ -105,7 +118,6 @@ fn build_r(radius: f64) -> (Model, Arc<Tally>, TransportSettings) {
 /// If it stays empty even in a large sphere, the per-scatter Compton energy
 /// loss is too small. (#415)
 #[test]
-#[ignore = "diagnostic, run manually with --ignored on a GPU box"]
 fn diag_radius_sweep_deep_tail() {
     if yamc_gpu::GpuContext::new().is_err() {
         eprintln!("skipping -- no GPU with f64 compute available");
@@ -138,7 +150,6 @@ fn diag_radius_sweep_deep_tail() {
 }
 
 #[test]
-#[ignore = "diagnostic, run manually with --ignored on a GPU box"]
 fn diag_photon_flux_spectrum_cpu_vs_gpu() {
     if yamc_gpu::GpuContext::new().is_err() {
         eprintln!("skipping -- no GPU with f64 compute available");

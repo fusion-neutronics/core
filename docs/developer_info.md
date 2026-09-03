@@ -293,6 +293,15 @@ they can be reused from the browser build, while `yamc-gpu` and `yamc-plot`
 are isolated so they don't pull heavy dependencies (cubecl, plot templating)
 into builds that don't need them.
 
+That isolation is now partly historical for `yamc-gpu`: `yamc-python`'s
+`default` includes `gpu`, so a plain `cargo build --workspace` or
+`maturin develop` does build it. The isolation still does real work for the
+targets that opt out, which reach `yamc` through
+`--no-default-features`: the wasm builds and the ppc64le/riscv64
+cross-checks never compile cubecl. And the crate boundary is what makes
+`GpuContext::new()` returning `NoF64Adapter` on macOS a clean stub rather
+than a build failure.
+
 The transmutation stack is layered so it can be built without transport:
 `yani` (solver) and `yani-decay` (chain observables) are leaves, and
 `yani-transmute` reaches only `yani`, `yamc-materials`, `yamc-nuclide` and
