@@ -33,6 +33,23 @@ rustflags = [
 # array wins outright. So the remaps above have to be repeated here, and this is
 # the target that matters most, because the committed wasm blobs are built by
 # hand and ship inside the wheel.
+
+# The remaps are repeated here because cargo does not merge this with
+# `[build].rustflags`: a target-specific array wins outright, so a `[build]`
+# entry alone would be silently ignored for exactly this target. The `--cfg`
+# has to stay in the same array for the same reason.
+#
+# This target matters most, and used to matter most for a worse reason. The
+# three blobs under `packages/yamc-core/python/yamc/_wasm/` were committed
+# binaries built by hand, and `python-source = "python"` copies that tree
+# verbatim into the wheel, so the committed bytes WERE the shipped bytes: 92
+# distinct `/home/jon/.cargo/...` and `/home/jon/.rustup/...` paths in every
+# published wheel. No remap list could fix that, because a developer's home
+# cannot be enumerated here and cargo does not expand environment variables in
+# `rustflags`. They are built in CI now, on a runner whose home IS one of the
+# prefixes above, so they come out as `/build/...`.
+# `scripts/build_wasm_blobs.sh` is the local build, and it passes a `$HOME`
+# remap on the command line where the shell can expand it.
 [target.wasm32-unknown-unknown]
 rustflags = [
     '--cfg', 'getrandom_backend="wasm_js"',

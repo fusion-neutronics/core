@@ -41,20 +41,21 @@ LEAKS = re.compile(rb"(/home/[A-Za-z0-9._-]+|/Users/[A-Za-z0-9._-]+|/root)/[A-Za
 BINARY_SUFFIXES = (".so", ".pyd", ".dylib", ".wasm")
 
 # Members known to carry builder paths, with the issue that removes them.
-# These three wasm blobs are committed and built by hand, so the remaps in
-# `.cargo/config.toml` cannot reach them: those cover the CI runner layouts,
-# and a workstation's home is not one. Tracked in
-# https://github.com/fusion-neutronics/core/issues/16.
 #
-# Listing them here rather than skipping `.wasm` wholesale keeps the rest of the
-# coverage: a fourth blob, or a leak in the extension module itself, still
-# fails. And a member that appears here while being clean is also a failure, so
-# the list cannot quietly outlive the fix.
-KNOWN_DIRTY = {
-    "yamc/_wasm/yamc_geo_bg.wasm",
-    "yamc/_wasm/yamc_sim_bg.wasm",
-    "yamc/_wasm/yamt_bg.wasm",
-}
+# Deliberately EMPTY. It held the three `yamc/_wasm/*.wasm` blobs, which were
+# committed and built by hand so the remaps in `.cargo/config.toml` could not
+# reach them: those cover the CI runner layouts and a workstation's home is not
+# one. They are built in CI now and come out as `/build/...`, and
+# `yamc_geo_bg.wasm` is gone entirely because nothing referenced it. That was
+# issue #16.
+#
+# The mechanism is kept rather than deleted, because the empty set is still
+# doing work: a new blob, or a leak in the extension module itself, fails. And
+# the check below treats a listed-but-clean member as a failure too, which is
+# what forced this list to be emptied in the same change that fixed the blobs
+# rather than left behind as a stale excuse. Keep that property if you ever add
+# an entry.
+KNOWN_DIRTY: set[str] = set()
 
 
 def scan(name: str, blob: bytes) -> list[str]:

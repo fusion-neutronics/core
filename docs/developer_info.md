@@ -387,47 +387,42 @@ If the pre-commit hooks fail (e.g. due to a missing MPI installation) and you st
 git commit --no-verify -m "commit message"
 ```
 
-## Rebuilding the committed wasm blobs
+## Building the wasm blobs
 
-Three wasm binaries are committed under
+Two `.wasm` and `.js` pairs live under
 `packages/yamc-core/python/yamc/_wasm/` and ship inside the `yamc-core` wheel:
 
-| file | built from |
+| files | built from |
 | --- | --- |
-| `yamc_sim_bg.wasm` | `crates/yamc`, `--features wasm` (renamed from `yamc_bg.wasm`) |
-| `yamc_geo_bg.wasm` | `crates/yamc-geo` |
-| `yamt_bg.wasm` | `crates/yamt` |
+| `yamc_sim_bg.wasm`, `yamc_sim.js` | `crates/yamc`, `--out-name yamc_sim`, `--features wasm` |
+| `yamt_bg.wasm`, `yamt.js` | `crates/yamt`, `--features wasm` |
 
-Nothing in CI produces them; they are built by hand and committed. `_export.py`
-base64-embeds `yamc_sim_bg.wasm` into every file `Model.to_html()` writes, so
-whatever is in the blob travels with each exported viewer.
-
-That is why the remaps in `.cargo/config.toml` list the CI layouts, and it is
-also why they do not help here: they cover `/root`, `/home/runner` and
-`/Users/runner`, not your home directory. Rebuilding on a workstation without
-the extra flag bakes your own path into the blob, which is how the currently
-committed ones came to carry one. So pass it:
+They are not committed. The `wasm-blobs` job in `ci-python.yml` builds them and
+the wheel jobs fetch them, so a fresh checkout has none until you build them:
 
 ```bash
-export RUSTFLAGS="--remap-path-prefix=$HOME=/build"
-cd crates/yamc     && wasm-pack build --target web --features wasm
-cd ../yamc-geo     && wasm-pack build --target web
-cd ../yamt         && wasm-pack build --target web
+scripts/build_wasm_blobs.sh
 ```
 
-Then copy the `pkg/` output into `packages/yamc-core/python/yamc/_wasm/`,
-renaming the `crates/yamc` pair to `yamc_sim*`, and check the result before
-committing:
+Needed for `maturin develop`, for `Model.to_html()`, which base64-embeds
+`yamc_sim_bg.wasm` into every file it writes, and for
+`cargo check -p yamc-plot --features mesh`, which `include_bytes!`s the yamt
+pair.
+
+The script passes a `$HOME` remap on the command line because
+`.cargo/config.toml` names the CI runner homes and cannot name yours: cargo
+does not expand environment variables in `rustflags`. It re-supplies the
+`getrandom_backend` cfg at the same time, since a `RUSTFLAGS` environment
+variable replaces the target-specific array rather than adding to it. Check the
+result with:
 
 ```bash
 python scripts/check_binary_paths.py packages/yamc-core/python/yamc/_wasm/*.wasm
 ```
 
-Regenerate the `.js` glue alongside the `.wasm` in the same run. The two are a
-matched pair from one `wasm-bindgen` version, and the committed set is currently
-mismatched: two blobs came from `wasm-bindgen 0.2.108` and one from `0.2.121`,
-while `Cargo.lock` pins `0.2.125`. Rebuilding one without the other, or without
-running `ci-wasm.yml`'s browser test, is how that drift goes unnoticed.
+A `.js` file and its `.wasm` are a matched pair from one `wasm-bindgen`
+version, so regenerate both together. `ci-wasm.yml`'s browser test is what
+catches a mismatch: it builds cleanly and fails only when run.
 
 ## Releasing
 

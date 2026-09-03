@@ -217,9 +217,127 @@ jobs:
             echo "tagged_yani_version=$tagged_yani"
           } | tee -a "$GITHUB_OUTPUT"
 
+  # The wasm blobs the yamc-core wheel ships.
+  #
+  # They used to be committed binaries built by hand, and because
+  # `python-source = "python"` in packages/yamc-core's pyproject copies that
+  # tree verbatim into the wheel, the committed bytes WERE the shipped bytes:
+  # 92 distinct `/home/jon/.cargo/...` and `/home/jon/.rustup/...` paths went
+  # into every published wheel. Built here they land on a runner whose home the
+  # remaps in `.cargo/config.toml` cover, so they come out as `/build/...`.
+  #
+  # One Linux build serves all three wheel jobs: wasm32 output does not depend
+  # on the host. Building per-job would also mean building on windows-latest,
+  # whose home is `C:\Users\runneradmin` and is in neither the remap list nor
+  # anything that would notice, so the Windows wheel would quietly go back to
+  # leaking.
+  #
+  # `crates/yamc-plot/Cargo.toml` has claimed since it was written that "CI
+  # builds them via wasm-pack as part of the yamc-python build". This is that,
+  # finally.
+  wasm-blobs:
+    name: Build the wasm blobs the wheel ships
+    needs: [plan]
+    if: needs.plan.outputs.build_yamc == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # dtolnay, NOT actions-rust-lang/setup-rust-toolchain: that one defaults
+      # to `RUSTFLAGS=-D warnings`, and a RUSTFLAGS env var REPLACES
+      # `[target.wasm32-unknown-unknown].rustflags` rather than adding to it,
+      # which would drop both the remaps and the `getrandom_backend` cfg the
+      # wasm build needs. Same reason the wheel jobs use it.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # Its own key: wasm32-unknown-unknown shares no compiled artifacts with
+      # any host-target job, so mixing it into the shared cache would evict
+      # what those jobs rely on without ever hitting.
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm32-blobs
+          cache-on-failure: true
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      # Deliberately sets no RUSTFLAGS: `.cargo/config.toml` supplies both the
+      # cfg and the remaps, and an env var here would replace the lot.
+      - name: Build the blobs
+        run: |
+          set -euo pipefail
+          # `--out-name` is a wasm-pack flag and `--features` is not: anything
+          # wasm-pack does not recognise is forwarded to `cargo build`, so with
+          # the two in the other order cargo is handed `--out-name` and fails.
+          (cd crates/yamc && wasm-pack build --target web --out-name yamc_sim -- --features wasm)
+          # Keeps yamt's default features. `wasm` is not one of them, and
+          # without it the crate has no #[wasm_bindgen] exports and wasm-pack
+          # happily emits a 366-byte module that compiles into the viewer and
+          # does nothing. `--no-default-features` is also wrong: it would drop
+          # `arrow`, which is the only mesh input format yamt supports.
+          (cd crates/yamt && wasm-pack build --target web -- --features wasm)
+
+      - name: Copy the blobs into the python package
+        run: |
+          set -euo pipefail
+          dest=packages/yamc-core/python/yamc/_wasm
+          mkdir -p "$dest"
+          # Named files only. Copying the whole `pkg/` would also bring
+          # wasm-pack's package.json, its .d.ts pair and its .gitignore, and a
+          # .gitignore in this directory silently drops the whole thing out of
+          # every wheel, because maturin honours gitignore when it copies
+          # `python-source`.
+          cp crates/yamc/pkg/yamc_sim.js      "$dest/yamc_sim.js"
+          cp crates/yamc/pkg/yamc_sim_bg.wasm "$dest/yamc_sim_bg.wasm"
+          cp crates/yamt/pkg/yamt.js          "$dest/yamt.js"
+          cp crates/yamt/pkg/yamt_bg.wasm     "$dest/yamt_bg.wasm"
+          ls -l "$dest"
+
+      # `--remap-path-prefix` is a silent no-op on a prefix that does not
+      # match, so check at the build that produced them rather than only on the
+      # wheel, which is where the four other calls to this checker run. If the
+      # remap ever stops applying, this is the step that says so next to the
+      # build that did it.
+      - name: The blobs must carry no builder paths
+        run: python3 scripts/check_binary_paths.py packages/yamc-core/python/yamc/_wasm/*.wasm
+
+      # yamt_bg.wasm and yamt.js are include_bytes!/include_str!'d by
+      # crates/yamc-plot behind its own `mesh` feature, which nothing in the
+      # workspace enables, so a plain build would not notice if the
+      # regenerated glue stopped matching. This is the only thing that does.
+      - name: The mesh viewer still compiles against the new blobs
+        run: cargo check -p yamc-plot --features mesh
+
+      # The failure this whole job exists to prevent is someone committing a
+      # hand-built blob again. They cannot be gitignored, because maturin
+      # honours gitignore when it copies `python-source` and the directory
+      # would silently drop out of every wheel, so this is the guard instead.
+      - name: The blobs must not be committed
+        run: |
+          set -euo pipefail
+          tracked=$(git ls-files -- 'packages/yamc-core/python/yamc/_wasm/*.wasm' 'packages/yamc-core/python/yamc/_wasm/*.js')
+          if [ -n "$tracked" ]; then
+            echo "::error::these are built in CI and must not be committed, because a hand-built blob carries its builder's home into every wheel:"
+            echo "$tracked"
+            exit 1
+          fi
+          echo "ok: no wasm blobs tracked in git"
+
+      - name: Upload the blobs
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-blobs
+          path: packages/yamc-core/python/yamc/_wasm/
+          if-no-files-found: error
+          retention-days: 1
+
   # Build wheels for Linux
   linux:
-    needs: [plan]
+    needs: [plan, wasm-blobs]
     # A release that does not name yamc-core has no use for a transport wheel.
     # This is also the job the test matrix below hangs off, so skipping it here
     # is most of the runner time a yani-core-only release used to burn.
@@ -247,6 +365,15 @@ jobs:
           tool: cargo-about@0.9.0
       - name: Generate THIRD-PARTY-LICENSES.html for the wheel
         run: cargo about generate about.hbs --all-features --locked -o packages/yamc-core/THIRD-PARTY-LICENSES.html
+
+      # The wasm blobs the wheel ships, built by the `wasm-blobs` job on a
+      # runner whose home the remaps cover. They are not committed, so without
+      # this the wheel would go out without them.
+      - name: Fetch the wasm blobs
+        uses: actions/download-artifact@v8
+        with:
+          name: wasm-blobs
+          path: packages/yamc-core/python/yamc/_wasm/
 
       # maturin-action's `-m` takes a Cargo manifest, so the package's own
       # pyproject (which names the crate manifest) is reached by cd'ing to it.
@@ -402,7 +529,7 @@ jobs:
 
   # Build wheels for Windows
   windows:
-    needs: [plan]
+    needs: [plan, wasm-blobs]
     if: needs.plan.outputs.build_yamc == 'true'
     runs-on: windows-latest
     strategy:
@@ -433,6 +560,15 @@ jobs:
       - name: Generate THIRD-PARTY-LICENSES.html for the wheel
         run: cargo about generate about.hbs --all-features --locked -o packages/yamc-core/THIRD-PARTY-LICENSES.html
 
+      # The wasm blobs the wheel ships, built by the `wasm-blobs` job on a
+      # runner whose home the remaps cover. They are not committed, so without
+      # this the wheel would go out without them.
+      - name: Fetch the wasm blobs
+        uses: actions/download-artifact@v8
+        with:
+          name: wasm-blobs
+          path: packages/yamc-core/python/yamc/_wasm/
+
       # maturin-action's `-m` takes a Cargo manifest, so the package's own
       # pyproject (which names the crate manifest) is reached by cd'ing to it.
       - name: Build wheels
@@ -460,7 +596,7 @@ jobs:
 
   # Build wheels for macOS (Apple Silicon only)
   macos:
-    needs: [plan]
+    needs: [plan, wasm-blobs]
     if: needs.plan.outputs.build_yamc == 'true'
     runs-on: macos-14
     steps:
@@ -482,6 +618,15 @@ jobs:
           tool: cargo-about@0.9.0
       - name: Generate THIRD-PARTY-LICENSES.html for the wheel
         run: cargo about generate about.hbs --all-features --locked -o packages/yamc-core/THIRD-PARTY-LICENSES.html
+
+      # The wasm blobs the wheel ships, built by the `wasm-blobs` job on a
+      # runner whose home the remaps cover. They are not committed, so without
+      # this the wheel would go out without them.
+      - name: Fetch the wasm blobs
+        uses: actions/download-artifact@v8
+        with:
+          name: wasm-blobs
+          path: packages/yamc-core/python/yamc/_wasm/
 
       # maturin-action's `-m` takes a Cargo manifest, so the package's own
       # pyproject (which names the crate manifest) is reached by cd'ing to it.

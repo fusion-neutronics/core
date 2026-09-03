@@ -30,6 +30,29 @@ _WASM_DIR = _HERE / "_wasm"
 _WASM_BIN = _WASM_DIR / "yamc_sim_bg.wasm"
 _WASM_JS_GLUE = _WASM_DIR / "yamc_sim.js"
 
+
+def _require_wasm() -> None:
+    """Fail with something actionable when the wasm blobs are not there.
+
+    They ship in the wheel, so an installed yamc always has them. They are NOT
+    committed to the repository: they used to be, and because
+    ``python-source = "python"`` copies that tree verbatim into the wheel, a
+    hand-built blob put its builder's home directory into every published
+    wheel. CI builds them now, which leaves one gap worth a real message rather
+    than a bare ``FileNotFoundError`` from ``read_bytes``: a source checkout
+    where nobody has built them yet.
+    """
+    missing = [p.name for p in (_WASM_BIN, _WASM_JS_GLUE) if not p.is_file()]
+    if not missing:
+        return
+    raise FileNotFoundError(
+        f"the browser transport blobs are missing from {_WASM_DIR}: "
+        f"{', '.join(missing)}. They are built rather than committed, so a "
+        "source checkout does not have them until you run "
+        "scripts/build_wasm_blobs.sh (needs wasm-pack). An installed wheel "
+        "always ships them, so this only happens when working from a checkout."
+    )
+
 # Local on-disk cross-section cache yamc populates via the URL cache layer.
 # Same layout the wasm side expects after extraction:
 #   ~/.cache/yamc/endf-b8.1-<Name>.arrow/{nuclide,reactions,distributions,...}.arrow
@@ -246,6 +269,7 @@ def to_html(
     )
 
     model_json = self.to_json()
+    _require_wasm()
     wasm_b64 = base64.b64encode(_WASM_BIN.read_bytes()).decode("ascii")
     js_glue_src = _WASM_JS_GLUE.read_text(encoding="utf-8")
 

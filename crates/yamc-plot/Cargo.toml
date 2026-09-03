@@ -20,8 +20,7 @@ default = []
 # Enables the mesh-geometry path inside build_interactive_html, which
 # embeds the yamt wasm blob into the saved viewer HTML. Only available
 # when the wasm files at `packages/yamc-core/python/yamc/_wasm/yamt_*`
-# exist. Those are committed, and built by hand: nothing in CI produces
-# them. See developer_info.md for the rebuild recipe, which matters
-# because a plain local build bakes the builder's absolute paths into
-# the blob and the blob ships in the wheel.
+# exist. They are not committed: the `wasm-blobs` job builds them in CI,
+# and `scripts/build_wasm_blobs.sh` is the same build locally. A fresh
+# checkout has none until one of those has run.
 mesh = []
