@@ -1,12 +1,24 @@
 name: Documentation
 
-# Builds the MkDocs site on every PR/push (so a docs break fails CI) and
-# publishes it to GitHub Pages from main.
+# Builds the MkDocs site on every PR and push so a docs break fails CI, and
+# uploads it as a downloadable artifact. It does NOT publish to GitHub Pages.
 #
-# Hosting: the built site is uploaded as a GitHub Pages artifact and served by
-# the Pages service, so it never lands in the repo (not even a gh-pages branch)
-# and cannot bloat it. One-time setup in the repo:
-# Settings > Pages > "Build and deployment" > Source = "GitHub Actions".
+# There used to be a deploy job, and it had never once succeeded. Latest
+# failure, and every push to main before it:
+#
+#   Failed to create deployment (status: 404) ... Ensure GitHub Pages has been
+#   enabled: https://github.com/fusion-neutronics/core/settings/pages
+#
+# Enabling Pages is not the fix. This is an internal site (mkdocs.yml names it
+# "core (internal)"), the user-facing docs are built from the public yamc and
+# yani repositories, and this repository is becoming private, which puts Pages
+# out of reach on the organisation's free plan: Pages serves private
+# repositories only on paid plans.
+#
+# So the job was a publish step that could not work, turning every push to main
+# red. Removing it also removes the reason for `pages: write`, `id-token:
+# write`, the `github-pages` environment and the pages artifact upload. The site
+# is still built, and still downloadable from the run's artifacts.
 on:
   push:
     branches: [main]
@@ -18,13 +30,16 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
-# Allow one Pages deployment at a time; let an in-progress deploy finish.
+# Per ref, so two open pull requests do not queue behind each other. The old
+# group was the single global `pages`, shared by every run in the repository
+# because Pages permits one deployment at a time. With no deployment left there
+# is nothing to serialise, and sharing it meant each new run cancelled whichever
+# docs build was already pending: that is why so many PR runs show "cancelled"
+# rather than a result.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build_mkdocs:
@@ -62,36 +77,3 @@ jobs:
         with:
           name: mkdocs-site
           path: site
-
-      - name: Upload GitHub Pages artifact
-        uses: actions/upload-pages-artifact@v5
-        with:
-          path: site
-
-  # Publish from main, not from the release tag.
-  #
-  # The `github-pages` environment only accepts deployments from the refs its
-  # protection rule names, and by default that is the default branch alone. A
-  # release runs at a tag, so this job was turned away at the gate before a
-  # runner was ever assigned: two seconds, no steps, no log. It has failed that
-  # way on every release since yani-core 0.5.0, which means the site has never
-  # once been published and every release has carried a red Documentation run
-  # for it.
-  #
-  # A push to main is the ref the rule already allows, and it is also when the
-  # docs actually change: a tag adds nothing to a site built from the same
-  # commit. Releases still build the site above, so a docs break still fails
-  # the release; it just no longer fails it at a gate nothing in this
-  # repository can satisfy.
-  deploy:
-    name: Deploy to GitHub Pages
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: build_mkdocs
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy
-        id: deployment
-        uses: actions/deploy-pages@v5
