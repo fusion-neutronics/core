@@ -2204,6 +2204,62 @@ class TransmutationResults:
             ...     if target == "Mn56"
             ... ]
         """
+    def get_reaction_rate_spectrum(self, material_id: builtins.int, nuclide: builtins.str, kind: builtins.str, step: builtins.int) -> typing.Optional[typing.Any]:
+        r"""
+        One channel's reaction rate over one step, resolved onto the groups of
+        the spectrum that drove it.
+        
+        ``get_reaction_rates`` answers with one number per edge, already
+        collapsed against the whole spectrum. That number cannot say which part
+        of the spectrum made it, and where a cross section spans decades the two
+        readings are different physics: an effective ``W186(n,gamma)`` of 57 mb
+        against a spectrum 89% of which sits in 12-16 MeV and 0.7% of which is
+        below 100 keV is either a fast-capture rate or a resonance-region rate,
+        and only the breakdown says which. A disagreement can then be pinned on
+        resonance processing rather than guessed at, and a covariance grid that
+        stops short of the spectrum can be checked against where the rate
+        actually is.
+        
+        The per-group entries sum to the collapsed rate for the same channel, to
+        floating-point rounding, because both come from the same walk of the
+        same cross sections with the same self-shielding weighting.
+        
+        Nothing is stored for this. The breakdown is re-derived from the
+        spectrum when asked for, which is one reaction over the group structure;
+        keeping it for every channel would be tens of megabytes on a 709-group
+        structure, and a run that never asks should not pay that.
+        
+        Args:
+            material_id: Material ID number.
+            nuclide: The parent the reaction happens on, e.g. ``"W186"``.
+            kind: The reaction, spelled as the chain spells it, e.g.
+                ``"(n,gamma)"``.
+            step: Schedule step index, as ``get_reaction_rates`` takes it.
+        
+        Returns:
+            dict | None: ``boundaries``, the group boundaries [eV] ascending and
+            one longer than the rates, and ``rates``, each group's contribution
+            to the rate [1/s]. None when the material, the step, the nuclide or
+            the channel is unknown; for a step that drove no flux, whether by
+            being a cooldown or by carrying a zero rate; for ``(n,n')``, whose
+            rate comes from the branching overlay's partials rather than from a
+            group average; and for a transport-coupled solve, which scores its
+            rates at the collision energy and keeps no group structure to
+            resolve them onto.
+        
+        Examples:
+            >>> spectrum = results.get_reaction_rate_spectrum(
+            ...     material_id=1, nuclide="W186", kind="(n,gamma)", step=0
+            ... )
+            >>> sum(spectrum["rates"])  # the collapsed rate
+            1.9e-09
+            >>> # where in energy that rate came from
+            >>> below_100_keV = sum(
+            ...     r
+            ...     for lo, r in zip(spectrum["boundaries"], spectrum["rates"])
+            ...     if lo < 1.0e5
+            ... )
+        """
     def get_isomeric_branching(self, material_id: builtins.int, step: builtins.int) -> typing.Optional[typing.Any]:
         r"""
         Flux-weighted isomeric branching at one step.

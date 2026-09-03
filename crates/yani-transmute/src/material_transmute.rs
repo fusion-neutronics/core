@@ -394,6 +394,23 @@ pub fn transmute_material_shielded(
     // rather than from whatever a second load of the chain path returns.
     results.chain = Some(Arc::clone(&chain));
 
+    // And the spectra it collapsed against, for the same reason: an
+    // energy-resolved view of a rate is a statement about the spectrum that
+    // drove it, and re-deriving one channel's breakdown on demand costs a few
+    // KB of stored spectrum rather than the tens of MB the whole breakdown
+    // would (yani#27).
+    results.collapse = Some(crate::results::CollapseInputs {
+        spectra: spectra
+            .iter()
+            .map(|s| (s.boundaries.clone(), s.masses.clone()))
+            .collect(),
+        step_spectrum: steps
+            .iter()
+            .map(|st| st.irradiation.map(|(idx, _)| idx))
+            .collect(),
+        shielding: shielding.copied(),
+    });
+
     Ok(results)
 }
 

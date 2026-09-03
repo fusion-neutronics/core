@@ -70,6 +70,50 @@ pub struct TransmutationResults {
     ///
     /// `None` on results built by hand, which is what the tests do.
     pub chain: Option<std::sync::Arc<HashMap<String, yani::ChainNuclide>>>,
+
+    /// What the multigroup collapse was driven with, for re-deriving an
+    /// energy-resolved view of a rate afterwards.
+    ///
+    /// `None` when there was no multigroup collapse: a transport-coupled solve
+    /// scores its rates at the collision energy and keeps no group structure to
+    /// resolve them onto, and results built by hand have no spectrum at all.
+    pub collapse: Option<CollapseInputs>,
+}
+
+/// The spectra a solve collapsed against, and how its steps used them.
+///
+/// Small on purpose. Two vectors per distinct spectrum is a few KB against the
+/// tens of MB the full per-group rate breakdown would be, and it is enough to
+/// re-derive any single channel's breakdown on demand
+/// (see [`crate::multigroup::reaction_rate_spectrum`]).
+#[derive(Debug, Clone)]
+pub struct CollapseInputs {
+    /// One entry per distinct spectrum: group boundaries [eV], ascending and
+    /// one longer than the flux, and the flux shape the collapse weighted with.
+    ///
+    /// The shape is normalized, so the magnitude of a step's flux is its entry
+    /// in [`TransmutationResults::source_rates`], exactly as the solve applies
+    /// it.
+    pub spectra: Vec<(Vec<f64>, Vec<f64>)>,
+
+    /// Which spectrum each schedule step used, indexed as
+    /// [`TransmutationResults::timesteps`]. `None` for a decay-only step, which
+    /// drives no reactions.
+    pub step_spectrum: Vec<Option<usize>>,
+
+    /// The self-shielding request the collapse ran under, when there was one,
+    /// so a re-derived breakdown is weighted the way the solve weighted it.
+    pub shielding: Option<crate::self_shielding::Shielding>,
+}
+
+/// One channel's reaction rate, resolved onto the spectrum's own groups.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RateSpectrum {
+    /// Group boundaries [eV], ascending, one longer than `rates`.
+    pub boundaries: Vec<f64>,
+    /// Each group's contribution to the rate [1/s], summing to the rate
+    /// [`TransmutationResults::get_reaction_rates`] reports for the channel.
+    pub rates: Vec<f64>,
 }
 
 /// Flux-weighted isomeric branching: `parent -> kind -> [(target, fraction)]`.
@@ -142,6 +186,7 @@ impl TransmutationResults {
             uncertainty_info: None,
             shielding_info: None,
             chain: None,
+            collapse: None,
         }
     }
 
@@ -182,6 +227,68 @@ impl TransmutationResults {
     /// `Some(&empty)` for a decay-only step.
     pub fn get_reaction_rates(&self, material_id: u32, step: usize) -> Option<&EdgeRates> {
         self.reaction_rates.get(&material_id)?.get(step)
+    }
+
+    /// One channel's reaction rate over one step, resolved onto the groups of
+    /// the spectrum that drove it.
+    ///
+    /// [`Self::get_reaction_rates`] answers with one number per edge, already
+    /// collapsed. That number cannot say which part of the spectrum made it,
+    /// and on a channel whose cross section spans decades the two readings are
+    /// different physics: an effective `W186(n,gamma)` of 57 mb against a
+    /// spectrum 89% of which sits in 12-16 MeV and 0.7% below 100 keV is
+    /// either a fast-capture rate or a resonance-region rate, and only the
+    /// breakdown says which (yani#27). A disagreement can then be attributed
+    /// to resonance processing rather than guessed at, and a covariance grid
+    /// that stops short of the spectrum can be checked against where the rate
+    /// actually is.
+    ///
+    /// The entries sum to the collapsed rate for the same `(nuclide, kind)`,
+    /// up to floating-point rounding, because both come from the same walk of
+    /// the same cross sections, self-shielding included.
+    ///
+    /// Nothing is stored for this: the breakdown is re-derived from the
+    /// spectrum and the step's initial composition when asked for, which is one
+    /// reaction over the group structure. Keeping it for every channel would be
+    /// tens of MB on a 709-group structure, and the default path should not pay
+    /// that.
+    ///
+    /// `step` indexes [`Self::timesteps`], as [`Self::get_reaction_rates`]
+    /// does.
+    ///
+    /// `None` when the material, the step, the nuclide or the channel is
+    /// unknown; when the step drove no flux, whether by being decay-only or by
+    /// carrying a zero rate; and on a transport-coupled solve, which scores its
+    /// rates at the collision energy and keeps no group structure to resolve
+    /// them onto.
+    pub fn get_reaction_rate_spectrum(
+        &self,
+        material_id: u32,
+        nuclide: &str,
+        kind: &str,
+        step: usize,
+    ) -> Option<RateSpectrum> {
+        let inputs = self.collapse.as_ref()?;
+        let spectrum = (*inputs.step_spectrum.get(step)?)?;
+        let (boundaries, flux) = inputs.spectra.get(spectrum)?;
+        let source_rate = self.source_rates.get(step).copied()?;
+        // The collapse is done once from the initial composition and scaled per
+        // step, so this is the material it read, and `source_rate` is the
+        // scaling the step applied.
+        let material = self.get_material(material_id, 0)?;
+        let rates = crate::multigroup::reaction_rate_spectrum(
+            material,
+            flux,
+            boundaries,
+            source_rate,
+            inputs.shielding.as_ref(),
+            nuclide,
+            kind,
+        )?;
+        Some(RateSpectrum {
+            boundaries: boundaries.clone(),
+            rates,
+        })
     }
 
     /// Flux-weighted isomeric branching for one material over one step:
@@ -773,5 +880,49 @@ mod tests {
         );
         assert!(results.get_reaction_rates(7, 1).expect("step 1").is_empty());
         assert!(results.get_reaction_rates(7, 2).is_none());
+    }
+
+    /// A rate that came from somewhere other than a multigroup collapse has no
+    /// group structure to resolve onto, and must say so rather than answer with
+    /// a spectrum it invented.
+    #[test]
+    fn a_rate_from_no_spectrum_has_no_spectrum() {
+        let mut results = TransmutationResults::new(vec![1.0], vec![1.0e14]);
+        results.add_initial(7, material("initial"));
+        results.add_step_rates(7, EdgeRates::new());
+        results.add_step(7, material("after"));
+
+        // This is the transport-coupled case: the rates are scored at the
+        // collision energy and no spectrum is kept.
+        assert!(results.collapse.is_none());
+        assert!(results
+            .get_reaction_rate_spectrum(7, "Fe56", "(n,gamma)", 0)
+            .is_none());
+    }
+
+    /// A decay-only step drives no reactions, so there is nothing to resolve,
+    /// and the step after it must still be answerable.
+    #[test]
+    fn a_decay_only_step_has_no_rate_spectrum() {
+        let mut results = TransmutationResults::new(vec![1.0, 2.0], vec![0.0, 1.0e14]);
+        results.add_initial(7, material("initial"));
+        results.collapse = Some(CollapseInputs {
+            spectra: vec![(vec![1.0e-5, 1.0e5, 2.0e7], vec![1.0, 1.0])],
+            step_spectrum: vec![None, Some(0)],
+            shielding: None,
+        });
+
+        assert!(results
+            .get_reaction_rate_spectrum(7, "Fe56", "(n,gamma)", 0)
+            .is_none());
+        // The irradiation step is reachable, and stops on the material's data
+        // rather than on the indexing: this one was built by hand and carries
+        // no cross sections.
+        assert!(results
+            .get_reaction_rate_spectrum(7, "Fe56", "(n,gamma)", 1)
+            .is_none());
+        assert!(results
+            .get_reaction_rate_spectrum(7, "Fe56", "(n,gamma)", 2)
+            .is_none());
     }
 }
