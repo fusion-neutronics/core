@@ -1,7 +1,11 @@
-[![Test usage with Python](https://github.com/fusion-neutronics/yamc/actions/workflows/ci-python.yml/badge.svg)](https://github.com/fusion-neutronics/yamc/actions/workflows/ci-python.yml)
-[![Test usage with Rust](https://github.com/fusion-neutronics/yamc/actions/workflows/ci-rust.yml/badge.svg)](https://github.com/fusion-neutronics/yamc/actions/workflows/ci-rust.yml)
+<!-- The CI badges point at `fusion-neutronics/core` because ci-python, ci-rust
+and ci-wasm run here. The Documentation badge points at `fusion-neutronics/yamc`
+on purpose: docs.yml lives in that repo, not this one, so retargeting it here
+would give a 404. It renders blank until that repo is public. -->
+[![Test usage with Python](https://github.com/fusion-neutronics/core/actions/workflows/ci-python.yml/badge.svg)](https://github.com/fusion-neutronics/core/actions/workflows/ci-python.yml)
+[![Test usage with Rust](https://github.com/fusion-neutronics/core/actions/workflows/ci-rust.yml/badge.svg)](https://github.com/fusion-neutronics/core/actions/workflows/ci-rust.yml)
 [![Documentation](https://github.com/fusion-neutronics/yamc/actions/workflows/docs.yml/badge.svg)](https://github.com/fusion-neutronics/yamc/actions/workflows/docs.yml)
-<!-- [![Test usage with WASM](https://github.com/fusion-neutronics/yamc/actions/workflows/ci-wasm.yml/badge.svg)](https://github.com/fusion-neutronics/yamc/actions/workflows/ci-wasm.yml) -->
+<!-- [![Test usage with WASM](https://github.com/fusion-neutronics/core/actions/workflows/ci-wasm.yml/badge.svg)](https://github.com/fusion-neutronics/core/actions/workflows/ci-wasm.yml) -->
 
 # YAMC
 
