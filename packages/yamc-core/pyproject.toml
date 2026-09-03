@@ -20,13 +20,6 @@ license = "MIT"
 license-files = ["LICENSE", "THIRD-PARTY-LICENSES.html"]
 dependencies = []
 
-[project.urls]
-Homepage = "https://github.com/fusion-neutronics/yamc"
-Documentation = "https://fusion-neutronics.github.io/yamc/"
-Repository = "https://github.com/fusion-neutronics/yamc"
-Issues = "https://github.com/fusion-neutronics/yamc/issues"
-Discussions = "https://github.com/fusion-neutronics/yamc/discussions"
-
 [project.optional-dependencies]
 cad = ["cadquery>=2.8.0", "numpy"]
 viz = ["h5py", "numpy"]
