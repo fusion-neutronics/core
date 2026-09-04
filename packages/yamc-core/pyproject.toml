@@ -21,7 +21,7 @@ license-files = ["LICENSE", "THIRD-PARTY-LICENSES.html"]
 dependencies = []
 
 [project.optional-dependencies]
-cad = ["cadquery>=2.8.0", "numpy"]
+cad = ["cadquery>=2.8.0"]
 viz = ["h5py", "numpy"]
 pandas = ["pandas>=2.2"]
 polars = ["polars>=0.20"]
