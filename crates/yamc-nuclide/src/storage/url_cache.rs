@@ -448,22 +448,29 @@ static EMBEDDED_INDEX: Lazy<HashMap<&'static str, HashSet<&'static str>>> = Lazy
 /// fails, by design (see `download_and_cache`).
 #[cfg(feature = "download")]
 const EXPECTED_DATA_VERSION: &[(&str, &str)] = &[
-    // The 2026-08-21 republish, which is the first one to stamp anything and
-    // which restamped every library in the same run, so they share a value
-    // rather than drifting per library. Confirmed against the origin before
-    // pinning, because the warning above is real: an entry no published data
-    // carries invalidates every cache on first load and then fails.
+    // The 2026-09-02 republish, which restamped every library in the same run,
+    // so they share a value rather than drifting per library. Confirmed against
+    // the origin before pinning, because the warning above is real: an entry no
+    // published data carries invalidates every cache on first load and then
+    // fails.
     //
     // Swept over neutron for all six, photon for the three that publish it, and
-    // all four transmutation subsections; every one reads "2026-08-21".
-    // jeff-4.0 publishes no photon data at all (404 on element.arrow, not an
-    // unstamped directory), so there is nothing to pin for it there.
-    ("tendl-2025", "2026-08-21"),
-    ("tendl-2017", "2026-08-21"),
-    ("fendl-3.2d", "2026-08-21"),
-    ("endf-b8.1", "2026-08-21"),
-    ("jeff-4.0", "2026-08-21"),
-    ("jendl-5.0", "2026-08-21"),
+    // every transmutation subsection each library provides (four for endf-b8.1
+    // / jeff-4.0 / jendl-5.0, two for the TENDLs, none for fendl-3.2d); all 25
+    // published paths read "2026-09-02". jeff-4.0 publishes no photon data at
+    // all (404 on element.arrow, not an unstamped directory), so there is
+    // nothing to pin for it there.
+    //
+    // This pin has to move with a republish. The previous value was
+    // "2026-08-21", and leaving it behind does not serve stale data: it fails
+    // every fresh download outright, because the stamp the origin now carries
+    // no longer matches what this build expects.
+    ("tendl-2025", "2026-09-02"),
+    ("tendl-2017", "2026-09-02"),
+    ("fendl-3.2d", "2026-09-02"),
+    ("endf-b8.1", "2026-09-02"),
+    ("jeff-4.0", "2026-09-02"),
+    ("jendl-5.0", "2026-09-02"),
 ];
 
 /// The `data_version` this build expects for `source`, if it pins one.
