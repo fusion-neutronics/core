@@ -1884,6 +1884,33 @@ fn ring_apex_cycle(tets: &Delaunay3D, p: usize, q: usize, ring: &[usize]) -> Opt
             return None;
         }
     }
+    // Validate: the link polygon must be SIMPLE, i.e. every finite apex occurs
+    // exactly once. A repeated apex means the cycle is PINCHED (a figure-eight
+    // through that vertex), which is not a polygon, so the bipyramid rebuild in
+    // `flip_ring_general` is not defined on it: its polygon DP would form a
+    // "triangle" with a repeated vertex, a degenerate simplex that no
+    // orientation predicate can sign, and `orient_3d_sos` would (correctly)
+    // panic on it rather than invent a sign.
+    //
+    // INFINITE is exempt: the hull pair legitimately contributes it twice, and
+    // the DP never puts two INFINITE apices in one fan triangle.
+    //
+    // The pinch is not created here. It originates in the coplanar-region
+    // rebuild, which replays a 2-D flip log as a stack of zero-volume tets, one
+    // per flip. Sequential constrained recovery flips a diagonal out and later
+    // flips it back, and that inverse pair replays as two COINCIDENT tets with
+    // identical vertex sets, leaving in-plane faces owned by four tets instead
+    // of two. That is tracked separately as a redesign of the sandwich
+    // construction; rejecting the ring here is what keeps the corruption away
+    // from a predicate that cannot sign it.
+    //
+    // Ported from fusion-energy/cad-to-dagmc-mesher#158 (its issue #157), where
+    // this aborted a two-solid assembly sharing a curved interface.
+    for k in 0..n {
+        if w[k] != INFINITE && w[..k].contains(&w[k]) {
+            return None; // pinched link polygon: not a clean cyclic chain
+        }
+    }
     Some(w)
 }
 
@@ -7362,6 +7389,102 @@ mod tests {
             [1, 3, 5, 0],
         ];
         build_test_mesh(vertices, tets)
+    }
+
+    /// A PINCHED ring around edge (1, 3): apex 4 sits at two positions of the
+    /// cycle, so the link "polygon" is a figure-eight through vertex 4 rather
+    /// than a simple cycle.
+    ///
+    /// Six tets with apex cycle `[0, 4, 2, 5, 4, 6]`. Every tet has a distinct
+    /// vertex set and non-zero volume, so neither a duplicate-tet check nor a
+    /// volume check can see the defect: it lives purely in the cyclic
+    /// structure. This is the shape the coplanar-region rebuild produces when
+    /// its 2-D flip log replays an inverse flip pair as coincident tets.
+    fn pinched_apex_ring() -> Delaunay3D {
+        let vertices = vec![
+            [1.0, 0.0, 0.0],   // 0  apex
+            [0.0, 0.0, -1.0],  // 1  ring edge end
+            [-0.5, 0.9, 0.0],  // 2  apex
+            [0.0, 0.0, 1.0],   // 3  ring edge end
+            [0.5, 0.9, 0.0],   // 4  apex, REPEATED in the cycle
+            [-1.0, 0.0, 0.0],  // 5  apex
+            [-0.6, -0.8, 0.0], // 6  apex
+        ];
+        let tets = vec![
+            [1, 3, 0, 4],
+            [1, 3, 4, 2],
+            [1, 3, 2, 5],
+            [1, 3, 5, 4],
+            [1, 3, 4, 6],
+            [1, 3, 6, 0],
+        ];
+        build_test_mesh(vertices, tets)
+    }
+
+    /// Index of the live tet carrying exactly `verts`.
+    fn find_tet(dt: &Delaunay3D, verts: [usize; 4]) -> usize {
+        let mut want = verts;
+        want.sort_unstable();
+        (0..dt.tets.len())
+            .find(|&i| {
+                if !dt.is_live(i) {
+                    return false;
+                }
+                let mut got = dt.tets[i].verts;
+                got.sort_unstable();
+                got == want
+            })
+            .unwrap_or_else(|| panic!("no live tet with vertex set {want:?}"))
+    }
+
+    #[test]
+    fn test_ring_apex_cycle_rejects_a_pinched_link_polygon() {
+        // The reducer must decline a non-simple cycle, which is what
+        // `ring_apex_cycle`'s contract already promised. Handing it on would
+        // make `flip_ring_general`'s polygon DP form a "triangle" with a
+        // repeated vertex, and `orient_3d_sos` panics on that degenerate
+        // simplex rather than invent a sign for it.
+        let dt = pinched_apex_ring();
+        let ring: Vec<usize> = [
+            [1, 3, 0, 4],
+            [1, 3, 4, 2],
+            [1, 3, 2, 5],
+            [1, 3, 5, 4],
+            [1, 3, 4, 6],
+            [1, 3, 6, 0],
+        ]
+        .iter()
+        .map(|&v| find_tet(&dt, v))
+        .collect();
+
+        // The fixture is corrupt ONLY in its cycle: six distinct tets, none
+        // coincident. A duplicate-tet check would pass on it.
+        let mut snapshot = live_finite_snapshot(&dt);
+        assert_eq!(snapshot.len(), 6, "fixture must hold exactly six tets");
+        snapshot.dedup();
+        assert_eq!(snapshot.len(), 6, "fixture must hold no coincident tets");
+
+        assert!(
+            ring_apex_cycle(&dt, 1, 3, &ring).is_none(),
+            "a pinched link polygon (apex 4 at two positions) must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_ring_apex_cycle_accepts_a_simple_link_polygon() {
+        // The guard must not cost a healthy ring its flip: the 5-cycle of
+        // `coplanar_sliver_ring` has apices [0, 4, 2, 6, 5], all distinct.
+        let dt = coplanar_sliver_ring();
+        let ring = edge_ring_cycle(&dt, 1, 3).expect("closed ring");
+        let w = ring_apex_cycle(&dt, 1, 3, &ring).expect("simple ring must be accepted");
+        let mut distinct = w.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            w.len(),
+            "fixture ring must have distinct apices"
+        );
     }
 
     #[test]
