@@ -150,6 +150,61 @@ fn a_chain_can_be_built_from_materials() {
     assert!(!chain.nuclides.is_empty());
 }
 
+/// A placeholder average decay energy is labelled as one, and can be replaced
+/// from a library that evaluated the decay scheme.
+#[test]
+fn placeholder_decay_energies_are_labelled_and_fillable() {
+    let decay = vec![Material::from_str(&read_text("dec-050_Sn_111.endf.xz")).unwrap()];
+    let mut chain = Chain::from_endf(&decay, &[], &[], &[]).unwrap();
+    let sn111 = chain.get("Sn111").unwrap();
+    assert_eq!(
+        sn111.decay_energy_source.as_deref(),
+        Some(endf::chain::DECAY_ENERGY_PLACEHOLDER)
+    );
+    assert!((sn111.decay_energy - 1_634_549.4).abs() < 1.0);
+
+    let jendl = vec![Material::from_str(&read_text("dec-050-Sn-111.jendl5.endf.xz")).unwrap()];
+    let report = chain
+        .fill_placeholder_decay_energies(&jendl, "jendl-5.0")
+        .unwrap();
+    assert_eq!(report.library, "jendl-5.0");
+    assert_eq!(report.replaced.len(), 1);
+    assert_eq!(report.replaced[0].0, "Sn111");
+    assert!(report.half_life_mismatch.is_empty() && report.unfilled.is_empty());
+
+    let sn111 = chain.get("Sn111").unwrap();
+    assert!((sn111.decay_energy - 693_315.8).abs() < 1.0);
+    assert_eq!(
+        sn111.decay_energy_source.as_deref(),
+        Some("filled:jendl-5.0")
+    );
+    // The half-life is still this chain's own.
+    assert_eq!(sn111.half_life, Some(2118.0));
+
+    // Filling again finds nothing left to fill, and an evaluated record is
+    // never touched.
+    let again = chain
+        .fill_placeholder_decay_energies(&jendl, "jendl-5.0")
+        .unwrap();
+    assert_eq!(
+        again,
+        endf::chain::DecayEnergyFill {
+            library: "jendl-5.0".to_string(),
+            ..Default::default()
+        }
+    );
+    let evaluated = vec![Material::from_str(&read_text("dec-049_In_116m1.endf.xz")).unwrap()];
+    let chain = Chain::from_endf(&evaluated, &[], &[], &[]).unwrap();
+    assert_eq!(
+        chain
+            .get("In116_m1")
+            .unwrap()
+            .decay_energy_source
+            .as_deref(),
+        Some(endf::chain::DECAY_ENERGY_EVALUATED)
+    );
+}
+
 /// Photon data, the other sublibrary with a high-level class.
 #[test]
 fn photoatomic_data_is_reachable() {

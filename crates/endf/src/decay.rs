@@ -272,6 +272,59 @@ pub struct Decay {
     /// The spectra, by radiation type. An evaluation gives at most one per
     /// type, so a later one of the same type replaces the earlier.
     pub spectra: BTreeMap<&'static str, DecaySpectrum>,
+    /// Whether the average energies are a placeholder rather than an
+    /// evaluation. See [`Decay::placeholder_mean_energies`].
+    pub mean_energy_placeholder: bool,
+}
+
+/// Relative tolerance on "equal" average energies and on the Q/3 check.
+const PLACEHOLDER_TOLERANCE: f64 = 1.0e-3;
+
+impl Decay {
+    /// Whether the average energies are the Q/3 placeholder rather than an
+    /// evaluation.
+    ///
+    /// A nuclide whose decay scheme nobody has evaluated still gets a decay
+    /// file: the NNDC's conversions from the Nuclear Wallet Cards (ENDF/B) and
+    /// the NUBASE conversions (JEFF) carry a half-life and the decay modes and,
+    /// in place of measured average energies, book a third of each beta or
+    /// electron-capture branch's Q to the light particles, a third to the
+    /// electromagnetic radiation and the last third to the neutrino. Two things
+    /// give it away, and both are required: the light and electromagnetic
+    /// averages are equal, and either the record has no spectra at all or
+    /// three times the light average is the beta and electron-capture Q
+    /// summed over branches. The second condition is what separates a
+    /// placeholder from the odd real evaluation whose two averages happen to
+    /// coincide (Sn117m, a 315 keV isomeric transition split almost evenly
+    /// between conversion electrons and photons), and it also catches JENDL-5.0
+    /// records that keep the Q/3 averages while carrying theoretical spectra.
+    ///
+    /// The placeholder is not a rough estimate. Electron capture hands most of
+    /// Q to the neutrino, so for an EC emitter the placeholder can be several
+    /// times the recoverable energy; Sn111 is booked at 1.63 MeV per decay
+    /// against 0.69 MeV from its decay scheme. A consumer summing decay heat
+    /// needs to know which records these are.
+    pub fn placeholder_mean_energies(&self) -> bool {
+        let (Some(&(light, _)), Some(&(electromagnetic, _))) = (
+            self.average_energies.get("light"),
+            self.average_energies.get("electromagnetic"),
+        ) else {
+            return false;
+        };
+        if light <= 0.0 || (light - electromagnetic).abs() > PLACEHOLDER_TOLERANCE * light {
+            return false;
+        }
+        if self.spectra.is_empty() {
+            return true;
+        }
+        let beta_q: f64 = self
+            .modes
+            .iter()
+            .filter(|mode| matches!(mode.modes.first(), Some(&"beta-") | Some(&"ec/beta+")))
+            .map(|mode| mode.branching_ratio.0 * mode.energy.0)
+            .sum();
+        beta_q > 0.0 && (3.0 * light - beta_q).abs() <= PLACEHOLDER_TOLERANCE * beta_q
+    }
 }
 
 impl Decay {
@@ -364,6 +417,7 @@ impl Decay {
             );
         }
 
+        decay.mean_energy_placeholder = decay.placeholder_mean_energies();
         Ok(decay)
     }
 
@@ -806,5 +860,117 @@ mod tests {
         // The yields are simply absent rather than an error.
         let fpy = FissionProductYields::from_material(&m).unwrap();
         assert!(fpy.energies.is_empty());
+    }
+
+    /// Sn111 in ENDF/B-VIII.1 is a Nuclear Wallet Cards conversion: no
+    /// spectra, and Q/3 in each of the light and electromagnetic slots.
+    #[test]
+    fn a_wallet_cards_conversion_is_a_placeholder() {
+        const SN111: &[u8] = include_bytes!("../fixtures/dec-050_Sn_111.endf.xz");
+        let m = Material::from_str(&crate::testdata::text(SN111)).unwrap();
+        let d = Decay::from_material(&m).unwrap();
+        assert!(d.mean_energy_placeholder);
+        assert!(d.spectra.is_empty());
+        let (light, _) = d.average_energies["light"];
+        let (em, _) = d.average_energies["electromagnetic"];
+        assert_eq!(light, em);
+        // 2451.824 keV of Q, a third each way, and the sum is what a heat
+        // calculation would otherwise take at face value.
+        assert!((light - 2_451_824.0 / 3.0).abs() < 1.0);
+        assert!((d.decay_energy().0 - 1_634_549.4).abs() < 1.0);
+    }
+
+    /// The same nuclide in JENDL-5.0 has an evaluated decay scheme.
+    #[test]
+    fn an_evaluated_decay_scheme_is_not_a_placeholder() {
+        const SN111_JENDL: &[u8] = include_bytes!("../fixtures/dec-050-Sn-111.jendl5.endf.xz");
+        let m = Material::from_str(&crate::testdata::text(SN111_JENDL)).unwrap();
+        let d = Decay::from_material(&m).unwrap();
+        assert!(!d.mean_energy_placeholder);
+        assert!(!d.spectra.is_empty());
+        assert!((d.decay_energy().0 - 693_315.8).abs() < 1.0);
+
+        // In116m1, an ENSDF conversion with spectra, likewise.
+        const IN116M1: &[u8] = include_bytes!("../fixtures/dec-049_In_116m1.endf.xz");
+        let m = Material::from_str(&crate::testdata::text(IN116M1)).unwrap();
+        assert!(!Decay::from_material(&m).unwrap().mean_energy_placeholder);
+    }
+
+    /// Sn117m is an evaluated 315 keV isomeric transition whose conversion
+    /// electrons and photons carry almost the same energy: equal averages, but
+    /// spectra and no beta branch, so not a placeholder.
+    #[test]
+    fn coincidentally_equal_averages_with_spectra_are_not_a_placeholder() {
+        const SN117M1: &[u8] = include_bytes!("../fixtures/dec-050_Sn_117m1.endf.xz");
+        let m = Material::from_str(&crate::testdata::text(SN117M1)).unwrap();
+        let d = Decay::from_material(&m).unwrap();
+        let (light, _) = d.average_energies["light"];
+        let (em, _) = d.average_energies["electromagnetic"];
+        assert!((light - em).abs() < 1.0e-3 * light, "{light} vs {em}");
+        assert!(!d.spectra.is_empty());
+        assert!(!d.mean_energy_placeholder);
+    }
+
+    /// The rule on its own: equal positive averages, and then either no
+    /// spectra or the Q/3 arithmetic.
+    #[test]
+    fn the_placeholder_rule_needs_equal_energies_and_a_reason() {
+        let decay = |light: f64, em: f64, spectra: bool, modes: Vec<(&'static str, f64, f64)>| {
+            let mut d = Decay {
+                average_energies: BTreeMap::from([
+                    ("light", (light, 0.0)),
+                    ("electromagnetic", (em, 0.0)),
+                ]),
+                ..Default::default()
+            };
+            if spectra {
+                d.spectra.insert("gamma", DecaySpectrum::default());
+            }
+            for (mode, q, br) in modes {
+                d.modes.push(DecayMode {
+                    modes: vec![mode],
+                    energy: (q, 0.0),
+                    branching_ratio: (br, 0.0),
+                    ..Default::default()
+                });
+            }
+            d
+        };
+        // Wallet Cards: equal, no spectra.
+        assert!(decay(
+            817_274.7,
+            817_274.7,
+            false,
+            vec![("ec/beta+", 2_451_824.0, 1.0)]
+        )
+        .placeholder_mean_energies());
+        // Equal within a part in a thousand still counts (Co62m: 1761.1 vs 1761.3 keV).
+        assert!(decay(
+            1_761_075.0,
+            1_761_295.0,
+            false,
+            vec![("beta-", 5_336_591.0, 0.99), ("IT", 22_000.0, 0.01)]
+        )
+        .placeholder_mean_energies());
+        // JENDL-5.0 style: Q/3 averages beside theoretical spectra.
+        assert!(decay(
+            814_806.7,
+            814_904.2,
+            true,
+            vec![("ec/beta+", 2_444_420.0, 1.0)]
+        )
+        .placeholder_mean_energies());
+        // Equal by coincidence, with spectra and no beta branch: an evaluation.
+        assert!(
+            !decay(157_811.6, 157_820.3, true, vec![("IT", 314_580.0, 1.0)])
+                .placeholder_mean_energies()
+        );
+        // Not equal.
+        assert!(
+            !decay(1000.0, 1002.0, false, vec![("beta-", 3000.0, 1.0)]).placeholder_mean_energies()
+        );
+        // Nothing stated.
+        assert!(!decay(0.0, 0.0, false, vec![]).placeholder_mean_energies());
+        assert!(!Decay::default().placeholder_mean_energies());
     }
 }

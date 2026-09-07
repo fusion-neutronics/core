@@ -24,6 +24,7 @@ use std::error::Error;
 use std::path::Path;
 
 use endf::function::Tabulated1D;
+use endf::radionuclide_production::LevelRoute;
 use endf::Material;
 
 use crate::{list_of, strings, write_section};
@@ -266,6 +267,16 @@ pub struct BranchingStats {
     pub linearized_curves: usize,
     pub merged_duplicate_groups: usize,
     pub metastable_targets: Vec<String>,
+    /// How many excited production levels each route of
+    /// `endf::radionuclide_production::resolve_level` accounted for, by the
+    /// route's label. A rebuild against another decay library, or a newer
+    /// TENDL, shows up here as levels moving from `energy` to `level_index`
+    /// or `unresolved`, which is the regression the plain counts above hide.
+    pub level_routes: BTreeMap<String, usize>,
+    /// The levels worth a look, one line each: unresolved and so taken as
+    /// ground, matched only by the looser energy pass, or matched by energy
+    /// while the level index pointed at another isomer.
+    pub flagged_levels: Vec<String>,
 }
 
 /// Extract branching rows for each parent's neutron evaluation.
@@ -308,7 +319,7 @@ pub fn extract_branching(
             for s in states {
                 let z = s.zap / 1000;
                 let a = s.zap % 1000;
-                let liso = endf::radionuclide_production::level_to_isomeric_state(
+                let resolved = endf::radionuclide_production::resolve_level(
                     z,
                     a,
                     s.lfs,
@@ -316,9 +327,36 @@ pub fn extract_branching(
                     &isomers,
                     tol_ev,
                 );
+                let liso = resolved.liso;
                 let target = endf::gnds_name(z as u32, a as u32, liso as u32);
                 if liso > 0 {
                     metastable.insert(target.clone());
+                }
+                if s.lfs > 0 {
+                    *stats
+                        .level_routes
+                        .entry(resolved.route.label().to_string())
+                        .or_insert(0) += 1;
+                    let why = match (resolved.route, resolved.conflicting_liso) {
+                        (LevelRoute::Unresolved, _) => {
+                            Some("unresolved, taken as ground".to_string())
+                        }
+                        (LevelRoute::NearEnergy, _) => {
+                            Some("matched by energy only within a tenth".to_string())
+                        }
+                        (_, Some(other)) => Some(format!(
+                            "level index points at {}",
+                            endf::gnds_name(z as u32, a as u32, other as u32)
+                        )),
+                        _ => None,
+                    };
+                    if let Some(why) = why {
+                        stats.flagged_levels.push(format!(
+                            "{parent} MT{mt} -> {target}: level {} at {:.1} keV, {why}",
+                            s.lfs,
+                            s.excitation_energy() / 1.0e3
+                        ));
+                    }
                 }
                 for (quantity, tab) in [("yield", &s.yields), ("cross_section", &s.cross_section)] {
                     let Some(tab) = tab else { continue };
