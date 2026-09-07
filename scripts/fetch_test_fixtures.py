@@ -13,6 +13,14 @@ Usage::
     python scripts/fetch_test_fixtures.py --force    # re-download everything
 
 Already-cached sections are left alone, so re-running is cheap. See issue #126.
+
+A cached fixture whose ``data_version`` no longer matches the origin's is
+fetched again from scratch. The runtime rejects data stamped with a release
+other than the one it pins and re-downloads it lazily, and when the fixture is
+a symlink into that same cache the files disappear from under a test that is
+reading them: after the 2026-09-02 republish every Python test job restored a
+cache stamped 2026-08-21, fetched nothing, and failed on
+``tests/Fe54.arrow/reactions.arrow: No such file``.
 """
 
 from __future__ import annotations
@@ -62,18 +70,21 @@ PHOTON_SECTIONS = [
     ("bremsstrahlung.arrow", False),
 ]
 # Transmutation subsections, and the section files published in each.
+# The stamp file that carries `data_version` comes first in every list, which is
+# where `fetch_sections` looks for it: `version.json` above, `provenance.json`
+# here.
 CHAIN_SECTIONS = {
     "decay": [
+        ("provenance.json", True),
         ("nuclides.arrow", True),
         ("decay_modes.arrow", False),
         ("sources.arrow", False),
-        ("provenance.json", False),
     ],
-    "reactions": [("reactions.arrow", True), ("provenance.json", False)],
+    "reactions": [("provenance.json", True), ("reactions.arrow", True)],
     "fission_yields": [
+        ("provenance.json", True),
         ("fission_yields.arrow", True),
         ("aliases.arrow", False),
-        ("provenance.json", False),
     ],
 }
 
@@ -148,7 +159,38 @@ def fetch(url: str, dest: pathlib.Path, required: bool, force: bool) -> str:
     return "downloaded"
 
 
+def restamped(base_url: str, dest_dir: pathlib.Path, stamp: str) -> bool:
+    """Whether the cached fixture carries a different ``data_version`` than the
+    origin's copy of its stamp file (``version.json`` for a nuclide or element,
+    ``provenance.json`` for a chain subsection).
+
+    False when nothing is cached yet: there is nothing to be stale. An
+    unreadable cached stamp counts as stale, since the fixture cannot be
+    trusted either way.
+    """
+    cached = dest_dir / stamp
+    if not cached.is_file():
+        return False
+    try:
+        local = json.loads(cached.read_text()).get("data_version")
+    except (OSError, ValueError):
+        return True
+    request = urllib.request.Request(f"{base_url}/{stamp}", headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(request, timeout=600) as response:
+            remote = json.loads(response.read()).get("data_version")
+    except (urllib.error.HTTPError, ValueError) as exc:
+        raise SystemExit(f"failed to fetch {base_url}/{stamp}: {exc}")
+    return remote != local
+
+
 def fetch_sections(base_url: str, dest_dir: pathlib.Path, sections, force: bool) -> int:
+    if not force and restamped(base_url, dest_dir, sections[0][0]):
+        # Start over rather than refreshing file by file: the absent markers
+        # and optional sections of the old release say nothing about the new.
+        print(f"{dest_dir.name}: data_version differs from the origin, fetching again")
+        shutil.rmtree(dest_dir)
+        force = True
     downloaded = 0
     for filename, required in sections:
         state = fetch(f"{base_url}/{filename}", dest_dir / filename, required, force)
@@ -229,10 +271,16 @@ def main() -> int:
         ]
         if not (cache / f"{LIBRARY}-{CHAIN_FIXTURE}.arrow").is_dir():
             missing.append(CHAIN_FIXTURE)
+        stale = [
+            name for name, base_url, sections in plan
+            if restamped(base_url, cache / f"{LIBRARY}-{name}.arrow", sections[0][0])
+        ]
         print(f"{len(plan) + 1 - len(missing)}/{len(plan) + 1} fixtures cached in {cache}")
         if missing:
             print("missing: " + ", ".join(missing))
-        return 1 if missing else 0
+        if stale:
+            print("stamped with another release than the origin: " + ", ".join(stale))
+        return 1 if missing or stale else 0
 
     downloaded = 0
     for name, base_url, sections in plan:
