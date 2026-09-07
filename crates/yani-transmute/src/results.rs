@@ -116,12 +116,32 @@ pub struct RateSpectrum {
     pub rates: Vec<f64>,
 }
 
-/// Flux-weighted isomeric branching: `parent -> kind -> [(target, fraction)]`.
+/// One channel that lands in more than one final state, and how much of it the
+/// material made.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IsomericChannel {
+    /// The nuclide the reaction happened on.
+    pub parent: String,
+    /// The reaction kind, `"(n,2n)"` and the like.
+    pub reaction: String,
+    /// `(target, fraction)`, summing to one, largest share first.
+    pub split: Vec<(String, f64)>,
+    /// The channel's rate times the parent's atom density at the start of the
+    /// step: what this channel actually made, in the material's own units.
+    ///
+    /// The rate alone is per atom of the parent, so it says nothing about how
+    /// much of the parent there is. Ranking on it promotes whatever sits on a
+    /// trace isotope.
+    pub production: f64,
+}
+
+/// Flux-weighted isomeric branching for one material over one step, ordered by
+/// production.
 ///
-/// Named for the same reason [`yani::EdgeRates`] is: it is three levels deep
-/// and appears in a signature, a return and a binding, and spelling it out
-/// three times is three chances to spell it differently.
-pub type IsomericBranching = HashMap<String, HashMap<String, Vec<(String, f64)>>>;
+/// Named for the same reason [`yani::EdgeRates`] is: it appears in a signature,
+/// a return and a binding, and spelling it out three times is three chances to
+/// spell it differently.
+pub type IsomericBranching = Vec<IsomericChannel>;
 
 /// One way a product is made: the steps, and the share of it arriving this way.
 #[derive(Debug, Clone, PartialEq)]
@@ -310,6 +330,19 @@ impl TransmutationResults {
     /// at 1.0 buries the ones that do. [`Self::get_reaction_rates`] has the
     /// unnormalised edges if the rest is wanted.
     ///
+    /// Ordered by production, the channel's rate times its parent's atom
+    /// density at the start of the step, largest first. Rate alone is per atom
+    /// of the parent and ranking on it promotes whatever sits on a trace
+    /// isotope: on an FNS tungsten foil `W180(n,2n)` has the highest per-atom
+    /// rate of any channel in the foil and W180 is 0.12% of it, so weighted by
+    /// what it made the channel falls to fifth, two orders of magnitude below
+    /// the `W186(n,2n)` that carries most of that foil's decay heat. This is
+    /// the same trap `rate_fraction_covered_total` was fixed for.
+    ///
+    /// A parent absent from the step's starting composition has production
+    /// zero, so it sorts last rather than being dropped: its split is still
+    /// the honest answer for the reactions that did happen on it.
+    ///
     /// This is what says whether a disagreement belongs to a cross section or
     /// to a branching ratio, which are different data and different fixes.
     ///
@@ -322,7 +355,14 @@ impl TransmutationResults {
         step: usize,
     ) -> Option<IsomericBranching> {
         let edges = self.get_reaction_rates(material_id, step)?;
-        let mut out: IsomericBranching = HashMap::new();
+        // The composition the rates were driven against: step `s` of the
+        // schedule runs from composition `s`, which is why this is not
+        // `step + 1`.
+        let densities = self
+            .get_material(material_id, step)
+            .map(|m| m.get_atoms_per_barn_cm().unwrap_or_default())
+            .unwrap_or_default();
+        let mut out: IsomericBranching = Vec::new();
         for (parent, kinds) in edges {
             for (kind, targets) in kinds {
                 // A channel naming no single product (fission) has no split to
@@ -349,11 +389,23 @@ impl TransmutationResults {
                         .unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| a.0.cmp(&b.0))
                 });
-                out.entry(parent.clone())
-                    .or_default()
-                    .insert(kind.clone(), split);
+                out.push(IsomericChannel {
+                    parent: parent.clone(),
+                    reaction: kind.clone(),
+                    split,
+                    production: total * densities.get(parent).copied().unwrap_or(0.0),
+                });
             }
         }
+        // Most produced first; ties by parent then reaction, so the order is
+        // stable run to run and does not depend on the edge map's walk.
+        out.sort_by(|a, b| {
+            b.production
+                .partial_cmp(&a.production)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.parent.cmp(&b.parent))
+                .then_with(|| a.reaction.cmp(&b.reaction))
+        });
         Some(out)
     }
 
@@ -821,16 +873,84 @@ mod tests {
         results.add_step(7, material("after"));
 
         let split = results.get_isomeric_branching(7, 0).expect("step 0");
-        let w186 = &split["W186"];
         assert!(
-            !w186.contains_key("(n,gamma)"),
+            !split.iter().any(|c| c.reaction == "(n,gamma)"),
             "a channel with one product has no branching to report"
         );
+        let w186 = split
+            .iter()
+            .find(|c| c.parent == "W186" && c.reaction == "(n,2n)")
+            .expect("the channel that splits");
         // Largest share first, so the state the channel mostly makes leads.
-        assert_eq!(w186["(n,2n)"][0].0, "W185");
-        assert!((w186["(n,2n)"][0].1 - 0.75).abs() < 1e-12);
-        assert_eq!(w186["(n,2n)"][1].0, "W185_m1");
-        assert!((w186["(n,2n)"][1].1 - 0.25).abs() < 1e-12);
+        assert_eq!(w186.split[0].0, "W185");
+        assert!((w186.split[0].1 - 0.75).abs() < 1e-12);
+        assert_eq!(w186.split[1].0, "W185_m1");
+        assert!((w186.split[1].1 - 0.25).abs() < 1e-12);
+    }
+
+    /// A foil that is almost all W186 with a trace of W180, the abundances that
+    /// make the ordering below mean something.
+    fn tungsten_foil() -> Material {
+        let mut m = Material::new(
+            HashMap::from([("W186".to_string(), 0.9988), ("W180".to_string(), 0.0012)]),
+            "atom",
+            "g/cm3",
+            Some(19.3),
+        )
+        .expect("build a material");
+        m.name = Some("foil".to_string());
+        m
+    }
+
+    /// Channels come back ordered by what they made, not by their rate.
+    ///
+    /// A rate is per atom of its parent, so ranking on it promotes whatever
+    /// sits on a trace isotope: on the FNS tungsten foil `W180(n,2n)` has the
+    /// highest per-atom rate in the foil and W180 is 0.12% of it (issue #6).
+    #[test]
+    fn isomeric_branching_orders_by_production_not_by_rate() {
+        let mut results = TransmutationResults::new(vec![1.0], vec![1.0e14]);
+        results.add_initial(7, tungsten_foil());
+
+        let mut irradiation = EdgeRates::new();
+        // The higher rate, on the isotope there is almost none of.
+        irradiation.insert(
+            "W180".to_string(),
+            HashMap::from([(
+                "(n,2n)".to_string(),
+                vec![
+                    (Some("W179".to_string()), 4.0e-12),
+                    (Some("W179_m1".to_string()), 2.0e-12),
+                ],
+            )]),
+        );
+        // The lower rate, on almost all of the foil.
+        irradiation.insert(
+            "W186".to_string(),
+            HashMap::from([(
+                "(n,2n)".to_string(),
+                vec![
+                    (Some("W185".to_string()), 3.0e-12),
+                    (Some("W185_m1".to_string()), 1.0e-12),
+                ],
+            )]),
+        );
+        results.add_step_rates(7, irradiation);
+        results.add_step(7, tungsten_foil());
+
+        let split = results.get_isomeric_branching(7, 0).expect("step 0");
+        let order: Vec<&str> = split.iter().map(|c| c.parent.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["W186", "W180"],
+            "ordered on rate alone this comes back W180 first, on 0.12% of the foil"
+        );
+        assert!(
+            split[0].production > 100.0 * split[1].production,
+            "W186 made {} against W180's {}",
+            split[0].production,
+            split[1].production
+        );
     }
 
     /// A decay-only step splits nothing, and says so rather than being absent.

@@ -4897,20 +4897,32 @@ class TransmutationResults:
         section or to a branching ratio, which are different data and different
         fixes.
         
+        Channels come back ordered by production, the channel's rate times its
+        parent's atom density at the start of the step. A rate on its own is per
+        atom of the parent, so ordering on it promotes whatever sits on a trace
+        isotope: on an FNS tungsten foil ``W180(n,2n)`` has the highest per-atom
+        rate of any channel in the foil, and W180 is 0.12% of it, so by what it
+        made the channel falls to fifth, two orders of magnitude below the
+        ``W186(n,2n)`` carrying most of that foil's decay heat.
+        
         Args:
             material_id: Material ID number.
             step: Schedule step index, the same index ``get_reaction_rates``
                 takes, which is one less than the composition getters' step.
         
         Returns:
-            dict[str, dict[str, list[tuple[str, float]]]] | None: parent ->
-            reaction kind -> [(target, fraction)], fractions summing to one and
-            ordered with the largest first. Empty for a decay-only step, and
-            None if the material or the step is unknown.
+            list[dict] | None: one entry per splitting channel, most produced
+            first, each with ``parent``, ``reaction``, ``production`` and
+            ``split``. ``split`` is [(target, fraction)] summing to one and
+            ordered with the largest share first. Empty for a decay-only step,
+            and None if the material or the step is unknown. A parent absent
+            from the step's starting composition has production 0.0 and sorts
+            last rather than being dropped.
         
         Examples:
-            >>> results.get_isomeric_branching(material_id=1, step=0)["W186"]
-            {'(n,2n)': [('W185_m1', 0.535), ('W185', 0.465)]}
+            >>> results.get_isomeric_branching(material_id=1, step=0)[0]
+            {'parent': 'W186', 'reaction': '(n,2n)', 'production': 9.35e-14,
+             'split': [('W185_m1', 0.535), ('W185', 0.465)]}
         """
     def get_production_routes(self, material_id: builtins.int, product: builtins.str, step: builtins.int, reaction_depth: builtins.int = 1, decay_depth: builtins.int = 3) -> typing.Optional[typing.Any]:
         r"""
