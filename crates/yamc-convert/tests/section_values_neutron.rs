@@ -789,21 +789,19 @@ fn the_synthesized_rows_are_the_sum_of_the_rows_beside_them() {
 /// `constructed_extra_temperatures_follow_the_processed_ones_in_map_order`
 /// adds beside it.
 ///
-/// It also pins what the writer actually does with the synthesized MTs on this
-/// route, which is NOT "write no row": `n_energy` is 0 at every temperature so
-/// the synthesis loop at reactions.rs:67-74 never runs, but the row loop at
-/// :113-137 is unconditional, so MT 3, 27 and 101 each get a row whose
-/// xs_temperatures, xs_values and xs_threshold_idx are all empty lists.
+/// It also pins what the writer does with the synthesized MTs on this route,
+/// which is to write no row at all. `n_energy` is 0 at every temperature, so
+/// nothing is synthesized, and the row loop skips an MT that no temperature
+/// synthesized rather than writing one whose xs_temperatures, xs_values and
+/// xs_threshold_idx are all empty.
 ///
-/// Those three rows are a SUSPECTED DEFECT, pinned and not endorsed. An
-/// evaluation with no nuclide grid gains three reactions carrying no cross
-/// section at all, and the loader skips its own grid length check in exactly
-/// that situation (nuclide_arrow.rs:496), so they load as three silently empty
-/// reactions rather than as an error. The fix belongs in reactions.rs, not
-/// here. When it lands this test is EXPECTED to fail on the row count, and the
-/// answer then is 38 rows, not a deleted test.
+/// It used to write those three rows, which was issue #12: an evaluation with
+/// no nuclide grid gained three reactions carrying no cross section at all, and
+/// the loader skips its own grid length check in exactly that situation
+/// (nuclide_arrow.rs:496), so they loaded as silently empty reactions rather
+/// than as an error. The row count is the assertion that pins the fix.
 #[test]
-fn the_endf_route_synthesizes_empty_rows_and_keys_its_cross_sections_at_0k() {
+fn the_endf_route_writes_no_synthetic_rows_and_keys_its_cross_sections_at_0k() {
     let data = endf_nuclide(LI6_ENDF);
     assert!(
         data.energy.is_empty(),
@@ -820,10 +818,11 @@ fn the_endf_route_synthesizes_empty_rows_and_keys_its_cross_sections_at_0k() {
     let batch = section(dir.path(), "reactions.arrow");
     let mt_rows = rows_by_mt(&batch);
 
-    let mut expected: Vec<i32> = data.reactions.keys().copied().collect();
+    // Exactly the evaluation's own reactions. MT 1 and MT 4 are among them; MT
+    // 3, 27 and 101 are not, and with no grid to synthesize them on they are
+    // left out rather than written empty (issue #12).
+    let expected: Vec<i32> = data.reactions.keys().copied().collect();
     assert_eq!(expected.len(), 38);
-    // MT 1 and MT 4 are the evaluation's own, so only these three are appended.
-    expected.extend([3, 27, 101]);
     assert_eq!(written_mts(&batch), expected);
 
     for (&mt, rx) in &data.reactions {
@@ -846,22 +845,16 @@ fn the_endf_route_synthesizes_empty_rows_and_keys_its_cross_sections_at_0k() {
         assert!(!bool_at(&batch, "redundant", row), "MT {mt}");
     }
 
-    // No grid length invariant here: data.energy is empty, and the loader
-    // skips its own check in the same situation (nuclide_arrow.rs:496).
+    // The three synthesizable MTs the evaluation does not carry are absent
+    // rather than present and empty. An empty row would pass every column check
+    // above and still mean nothing: the loader's grid length check is skipped
+    // when there is no grid (nuclide_arrow.rs:496), so it would load as a
+    // reaction that resolves to a name and carries no cross section.
     for mt in [3, 27, 101] {
-        let row = mt_rows[&mt];
         assert!(
-            str_list(&batch, "xs_temperatures", row).is_empty(),
-            "MT {mt}"
+            !mt_rows.contains_key(&mt),
+            "MT {mt} was written with no grid to synthesize it on"
         );
-        assert_eq!(list_len(&batch, "xs_values", row), 0, "MT {mt}");
-        assert!(
-            i32_list(&batch, "xs_threshold_idx", row).is_empty(),
-            "MT {mt}"
-        );
-        for column in ["xs_temperatures", "xs_values", "xs_threshold_idx"] {
-            assert!(!is_null(&batch, column, row), "MT {mt} {column} is null");
-        }
     }
 }
 
