@@ -17,8 +17,8 @@ fn material(compressed: &[u8]) -> Material {
 
 /// In115's evaluation gives isomer production for (n,n'), (n,2n) and (n,gamma).
 /// With decay data for In116's two isomers only, the first two products have no
-/// isomer table and the capture level is matched by its level index, since
-/// In116_m1 decays by beta- alone and so has no transition energy to match.
+/// isomer table and the capture level is matched by energy: In116_m1 decays by
+/// beta- alone, but its decay file's header states its 127.27 keV.
 #[test]
 fn routes_are_counted_and_nothing_here_is_flagged() {
     let neutron = vec![material(fixture!("n-049_In-115_trimmed.endf.xz"))];
@@ -35,7 +35,7 @@ fn routes_are_counted_and_nothing_here_is_flagged() {
     .expect("branching extracts");
     assert!(!rows.is_empty());
     assert_eq!(stats.metastable_targets, vec!["In116_m1".to_string()]);
-    assert_eq!(stats.level_routes.get("level_index"), Some(&1));
+    assert_eq!(stats.level_routes.get("energy"), Some(&1));
     assert_eq!(stats.level_routes.get("no_isomers"), Some(&2));
     assert_eq!(stats.level_routes.values().sum::<usize>(), 3);
     assert!(
