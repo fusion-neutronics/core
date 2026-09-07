@@ -327,6 +327,91 @@ impl Decay {
     }
 }
 
+/// Relative tolerance on the light plus electromagnetic averages of an
+/// isomeric transition against its Q.
+pub const ISOMERIC_TRANSITION_ENERGY_TOLERANCE: f64 = 0.05;
+
+/// Tolerance on the sum of the branching ratios of the decay modes.
+pub const BRANCHING_RATIO_SUM_TOLERANCE: f64 = 0.01;
+
+/// One thing a decay record says that cannot be right.
+///
+/// None of these stops the record being read: the numbers are the library's
+/// and a converter passes them on. They are for the record's provenance, so
+/// that a nuclide carrying heat in an inventory can be looked up before its
+/// number is believed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DecayInconsistency {
+    /// Flagged unstable (NST = 0) with a half-life of zero. ENDF/B-VIII.1
+    /// writes fourteen of these, Xe136 and W182 among them, for nuclides
+    /// whose double-beta decay is predicted and not observed. They are
+    /// treated as stable, see [`Decay::decay_constant`].
+    ZeroHalfLife,
+    /// The branching ratios of the decay modes do not sum to one, so the
+    /// daughters are fed more or less than one nuclide per decay.
+    BranchingRatioSum { sum: f64 },
+    /// An isomeric transition emits no neutrino, so its light and
+    /// electromagnetic averages should add up to its Q. ENDF/B-VIII.1's
+    /// Hf177_m1 books 1.52 MeV against a 1.32 MeV transition and its
+    /// Ir190_m1 17 keV against 26 keV; a decay heat summed from either is
+    /// wrong by that much.
+    IsomericTransitionEnergy { q: f64, recoverable: f64 },
+}
+
+impl DecayInconsistency {
+    /// Every kind's label, in the order a record lists them.
+    pub const LABELS: [&'static str; 3] = [
+        "zero_half_life",
+        "branching_ratio_sum",
+        "isomeric_transition_energy",
+    ];
+
+    /// A stable name for the kind, one of [`Self::LABELS`].
+    pub fn label(&self) -> &'static str {
+        match self {
+            DecayInconsistency::ZeroHalfLife => Self::LABELS[0],
+            DecayInconsistency::BranchingRatioSum { .. } => Self::LABELS[1],
+            DecayInconsistency::IsomericTransitionEnergy { .. } => Self::LABELS[2],
+        }
+    }
+}
+
+impl Decay {
+    /// What this record says that cannot all be true.
+    ///
+    /// Empty for a consistent record, and for a stable one, which claims
+    /// nothing to check.
+    pub fn inconsistencies(&self) -> Vec<DecayInconsistency> {
+        let mut out = Vec::new();
+        if self.nuclide.stable {
+            return out;
+        }
+        if self.half_life.is_some_and(|(t, _)| t <= 0.0) {
+            out.push(DecayInconsistency::ZeroHalfLife);
+        }
+        if self.modes.is_empty() {
+            return out;
+        }
+        let sum: f64 = self.modes.iter().map(|m| m.branching_ratio.0).sum();
+        if (sum - 1.0).abs() > BRANCHING_RATIO_SUM_TOLERANCE {
+            out.push(DecayInconsistency::BranchingRatioSum { sum });
+        }
+        if self.modes.iter().all(|m| m.modes == ["IT"]) {
+            let q: f64 = self
+                .modes
+                .iter()
+                .map(|m| m.branching_ratio.0 * m.energy.0)
+                .sum();
+            let average = |name| self.average_energies.get(name).map_or(0.0, |&(v, _)| v);
+            let recoverable = average("light") + average("electromagnetic");
+            if q > 0.0 && (recoverable - q).abs() > ISOMERIC_TRANSITION_ENERGY_TOLERANCE * q {
+                out.push(DecayInconsistency::IsomericTransitionEnergy { q, recoverable });
+            }
+        }
+        out
+    }
+}
+
 impl Decay {
     /// Read the decay data of a material.
     pub fn from_material(material: &Material) -> Result<Decay> {
@@ -802,6 +887,67 @@ mod tests {
         assert_eq!(parts.len(), DECAY_HEAT_ENERGY_NAMES.len());
         for (part, name) in parts.iter().zip(DECAY_HEAT_ENERGY_NAMES) {
             assert_eq!(*part, d.average_energies.get(name).copied(), "{name}");
+        }
+    }
+
+    /// Xe136's zero half-life is the one thing wrong with its record, and an
+    /// evaluated record has nothing reported: In116_m1 (beta-) and Sn117_m1,
+    /// whose 315 keV transition is split between conversion electrons and
+    /// photons and adds back up to its Q.
+    #[test]
+    fn a_zero_half_life_is_reported_and_an_evaluated_record_is_not() {
+        const XE136: &[u8] = include_bytes!("../fixtures/dec-054_Xe_136.endf.xz");
+        const SN117M1: &[u8] = include_bytes!("../fixtures/dec-050_Sn_117m1.endf.xz");
+        assert_eq!(
+            decay(XE136).inconsistencies(),
+            vec![DecayInconsistency::ZeroHalfLife]
+        );
+        assert_eq!(decay(IN116M1).inconsistencies(), vec![]);
+        assert_eq!(decay(SN117M1).inconsistencies(), vec![]);
+    }
+
+    /// ENDF/B-VIII.1 books 1.52 MeV of electrons and photons to Hf177_m1's
+    /// 1.32 MeV isomeric transition, which has no neutrino to make up the
+    /// difference.
+    #[test]
+    fn an_isomeric_transition_paying_out_more_than_its_q_is_reported() {
+        const HF177M1: &[u8] = include_bytes!("../fixtures/dec-072_Hf_177m1.endf.xz");
+        let found = decay(HF177M1).inconsistencies();
+        let [DecayInconsistency::IsomericTransitionEnergy { q, recoverable }] = &found[..] else {
+            panic!("{found:?}");
+        };
+        assert!((q - 1_315_450.0).abs() < 1.0, "{q}");
+        assert!((recoverable - 1_518_972.4).abs() < 1.0, "{recoverable}");
+        assert_eq!(found[0].label(), "isomeric_transition_energy");
+    }
+
+    /// Branching ratios more than a percent off one are reported, and a
+    /// stable nuclide claims nothing to check.
+    #[test]
+    fn branching_ratios_off_one_are_reported() {
+        let mut d = decay(IN116M1);
+        d.modes[0].branching_ratio.0 -= 0.1;
+        let sum: f64 = d.modes.iter().map(|m| m.branching_ratio.0).sum();
+        assert_eq!(
+            d.inconsistencies(),
+            vec![DecayInconsistency::BranchingRatioSum { sum }]
+        );
+        d.nuclide.stable = true;
+        assert!(d.inconsistencies().is_empty());
+    }
+
+    #[test]
+    fn every_kind_has_a_label_in_the_list() {
+        let kinds = [
+            DecayInconsistency::ZeroHalfLife,
+            DecayInconsistency::BranchingRatioSum { sum: 0.0 },
+            DecayInconsistency::IsomericTransitionEnergy {
+                q: 1.0,
+                recoverable: 1.0,
+            },
+        ];
+        for kind in &kinds {
+            assert!(DecayInconsistency::LABELS.contains(&kind.label()));
         }
     }
 
