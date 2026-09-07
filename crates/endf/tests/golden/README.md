@@ -127,6 +127,7 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 | `n-095_Am_244` | MF1 (incl. MT458), MF2 LRF=0, MF3, MF4, MF5 LF=7 |
 | `n-095_Am_242_trimmed` | MF1, a metastable target |
 | `n-049_In-115_trimmed` | MF3, MF8, MF9, MF10: isomer production |
+| `n-077_Ir_191_trimmed` | MF1, MF3 (incl. MT3), MF8, MF9, MF10: TENDL-2017 (n,2n) partials that sum to less than MF3 |
 | `n-054_Xe_136_trimmed` | MF1, MF3 |
 | `n-003_Li_006_trimmed` | MF6 LAW=2 and LAW=4, MF12, MF14, MF33 |
 | `n-026_Fe_056_trimmed` | MF2 Reich-Moore, MF6 LAW=1, MF12/14, MF33 |

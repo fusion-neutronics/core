@@ -2399,7 +2399,10 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         energy within a tenth, by level index, as the only isomer, or not at
         all) and ``flagged_levels`` (one line per level that was unresolved,
         matched only by the looser energy pass, or matched by energy while its
-        level index pointed at another isomer).
+        level index pointed at another isomer), and ``partial_sum_mismatches``
+        (one line per reaction whose MF=10 partial cross sections do not sum to
+        its MF=3 total, or whose MF=9 yields do not sum to one, within two
+        percent below 20 MeV).
     """
 
 def convert_neutron_transport(input_path: builtins.str, output_dir: builtins.str, njoy_exec: builtins.str = 'njoy', temperatures: typing.Optional[typing.Sequence[builtins.float]] = None, library: builtins.str = '', data_version: builtins.str = '', created_utc: typing.Optional[builtins.str] = None, covariance: builtins.bool = False) -> builtins.str:

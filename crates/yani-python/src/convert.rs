@@ -186,7 +186,10 @@ pub fn convert_transmutation(
 ///     energy within a tenth, by level index, as the only isomer, or not at
 ///     all) and ``flagged_levels`` (one line per level that was unresolved,
 ///     matched only by the looser energy pass, or matched by energy while its
-///     level index pointed at another isomer).
+///     level index pointed at another isomer), and ``partial_sum_mismatches``
+///     (one line per reaction whose MF=10 partial cross sections do not sum to
+///     its MF=3 total, or whose MF=9 yields do not sum to one, within two
+///     percent below 20 MeV).
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
@@ -245,6 +248,7 @@ pub fn convert_branching(
     out.set_item("metastable_targets", stats.metastable_targets)?;
     out.set_item("level_routes", stats.level_routes)?;
     out.set_item("flagged_levels", stats.flagged_levels)?;
+    out.set_item("partial_sum_mismatches", stats.partial_sum_mismatches)?;
     Ok(out.unbind())
 }
 
