@@ -427,29 +427,55 @@ fn partial_sum(
     worst
 }
 
-/// Extract branching rows for each parent's neutron evaluation.
+/// Accumulates branching rows, one neutron evaluation at a time.
 ///
-/// `neutron` and `decay` are the parsed evaluations; the decay files are read
-/// only for the isomer table, so metastable evaluations suffice.
-pub fn extract_branching(
-    neutron: &[Material],
-    decay: &[Material],
+/// The work is per-evaluation once the isomer table is built, so a caller
+/// reading a sublibrary off disk can add each file and drop it instead of
+/// holding the set. That matters for the same reason it did in
+/// `Chain::from_endf` (issue #53): the 552 parents this is usually scoped to
+/// are about 7 GB parsed, and the scoping is a convention of the driver rather
+/// than anything this enforces, so an unscoped call is the 39 GB that used to
+/// be fatal. [`extract_branching`] is this driven over a slice.
+pub struct BranchingExtractor {
+    mt2type: BTreeMap<i64, String>,
+    isomers: endf::radionuclide_production::IsomerTable,
     tol_ev: f64,
     linearize_tol: f64,
-) -> Result<(Vec<BranchingRow>, BranchingStats), Box<dyn Error>> {
-    let mt2type = mt_to_type();
-    let isomers = endf::radionuclide_production::isomer_table_from_materials(decay);
+    rows: Vec<BranchingRow>,
+    stats: BranchingStats,
+    metastable: std::collections::BTreeSet<String>,
+}
 
-    let mut rows = Vec::new();
-    let mut stats = BranchingStats::default();
-    let mut metastable: std::collections::BTreeSet<String> = Default::default();
+impl BranchingExtractor {
+    /// `decay` is read only for the isomer table, so metastable evaluations
+    /// suffice.
+    pub fn new(decay: &[Material], tol_ev: f64, linearize_tol: f64) -> BranchingExtractor {
+        BranchingExtractor {
+            mt2type: mt_to_type(),
+            isomers: endf::radionuclide_production::isomer_table_from_materials(decay),
+            tol_ev,
+            linearize_tol,
+            rows: Vec::new(),
+            stats: BranchingStats::default(),
+            metastable: Default::default(),
+        }
+    }
 
-    for material in neutron {
+    /// Add one neutron evaluation's rows.
+    pub fn add(&mut self, material: &Material) {
+        let (mt2type, isomers, tol_ev, linearize_tol) = (
+            &self.mt2type,
+            &self.isomers,
+            self.tol_ev,
+            self.linearize_tol,
+        );
+        let (rows, stats, metastable) = (&mut self.rows, &mut self.stats, &mut self.metastable);
+
         // The evaluation names itself in MF=1/451, which is the same route
         // Chain::from_endf takes, so parent names match the reactions
         // subsection rather than a filename convention.
         let Some(meta) = material.mf1_mt451() else {
-            continue;
+            return;
         };
         let parent = endf::gnds_name(
             (meta.za / 1000) as u32,
@@ -480,7 +506,7 @@ pub fn extract_branching(
                     a,
                     s.lfs,
                     Some(s.excitation_energy()),
-                    &isomers,
+                    isomers,
                     tol_ev,
                 );
                 let liso = resolved.liso;
@@ -537,10 +563,31 @@ pub fn extract_branching(
         }
     }
 
-    let (rows, merged) = merge_duplicates(rows);
-    stats.merged_duplicate_groups = merged;
-    stats.metastable_targets = metastable.into_iter().collect();
-    Ok((rows, stats))
+    /// The rows and statistics, with duplicate target groups merged.
+    pub fn finish(mut self) -> (Vec<BranchingRow>, BranchingStats) {
+        let (rows, merged) = merge_duplicates(self.rows);
+        self.stats.merged_duplicate_groups = merged;
+        self.stats.metastable_targets = self.metastable.into_iter().collect();
+        (rows, self.stats)
+    }
+}
+
+/// Extract branching rows for each parent's neutron evaluation.
+///
+/// For a caller that holds the evaluations anyway. One reading them off disk
+/// should drive [`BranchingExtractor`] over the files instead, so its peak is
+/// one evaluation rather than the sublibrary.
+pub fn extract_branching(
+    neutron: &[Material],
+    decay: &[Material],
+    tol_ev: f64,
+    linearize_tol: f64,
+) -> Result<(Vec<BranchingRow>, BranchingStats), Box<dyn Error>> {
+    let mut extractor = BranchingExtractor::new(decay, tol_ev, linearize_tol);
+    for material in neutron {
+        extractor.add(material);
+    }
+    Ok(extractor.finish())
 }
 
 /// Write the `branching/` subsection.

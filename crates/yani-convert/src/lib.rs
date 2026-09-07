@@ -863,10 +863,19 @@ pub fn convert_branching_files(
             .map(|p| Material::from_file(p).map_err(|e| format!("{p}: {e}").into()))
             .collect()
     };
-    let neutron = read(neutron_files)?;
     let decay = read(decay_files)?;
 
-    let (rows, stats) = branching::extract_branching(&neutron, &decay, tol_ev, linearize_tol)?;
+    // Streamed, like the Q values above and for the same reason (issue #53).
+    // The branching pass gets away with holding its neutron set today only
+    // because the driver scopes the call to the parents of a reactions
+    // subsection, a few hundred rather than a few thousand evaluations, which
+    // is a convention rather than a promise.
+    let mut extractor = branching::BranchingExtractor::new(&decay, tol_ev, linearize_tol);
+    for path in neutron_files {
+        let material = Material::from_file(path).map_err(|e| format!("{path}: {e}"))?;
+        extractor.add(&material);
+    }
+    let (rows, stats) = extractor.finish();
     let dir = out.join("branching");
     branching::write_branching(&rows, &dir)?;
     write_provenance(
