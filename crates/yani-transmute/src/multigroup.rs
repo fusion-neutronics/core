@@ -291,14 +291,36 @@ pub(crate) fn walk_group(
     // `group_averaged_xs` is reachable with a hand-built `Reaction` and the
     // index below should not be what discovers it.
     let lengths_agree = grid.len() == values.len();
-    let (start, inner) = interior_from(grid, e_lo, e_hi);
+
+    // Above the evaluation's last energy point there is no cross section, and
+    // the walk stops there. `cross_section_at` holds its last value above the
+    // grid, which is right for a lookup at a single energy just past the end
+    // but not for an integral: a CCFE-709 group reaching 1 GeV against an
+    // evaluation that ends at 200 MeV would carry the 200 MeV cross section
+    // across the other 800 MeV. The group keeps its full width in the dilute
+    // average, and the tail keeps its flux in the shielded denominator, so the
+    // averages say what they should: no cross section over that part of the
+    // group. A group that lies entirely above the grid has nothing to walk.
+    let top = grid.last().copied().unwrap_or(e_lo);
+    let e_end = e_hi.min(top);
+    if e_end <= e_lo {
+        if shape.is_some() {
+            terms.shielded_den += 0.5 * (prev_phi + phi_at(e_hi)) * (e_hi - e_lo);
+        }
+        if bound_density.is_some() {
+            terms.bound_den += e_hi - e_lo;
+            terms.bound_width += e_hi - e_lo;
+        }
+        return terms;
+    }
+    let (start, inner) = interior_from(grid, e_lo, e_end);
 
     let points = inner
         .iter()
         .enumerate()
         .map(|(k, &e)| (Some(k), e))
         // The upper edge is not a grid point in general, so it is interpolated.
-        .chain(std::iter::once((None, e_hi)));
+        .chain(std::iter::once((None, e_end)));
     for (offset, e) in points {
         let xs = match offset.filter(|_| lengths_agree) {
             Some(k) => {
@@ -346,8 +368,88 @@ pub(crate) fn walk_group(
         prev_phi = phi;
     }
 
+    // The part of the group above the evaluation: zero cross section, so it
+    // adds to the denominators alone.
+    if e_end < e_hi {
+        let de = e_hi - e_end;
+        if shape.is_some() {
+            terms.shielded_den += 0.5 * (phi_at(e_end) + phi_at(e_hi)) * de;
+        }
+        if bound_density.is_some() {
+            terms.bound_den += de;
+            terms.bound_width += de;
+        }
+    }
+
     terms
 }
+
+/// The share of a spectrum's flux above `top`, with the flux flat inside each
+/// group, which is what the fold assumes.
+pub(crate) fn fraction_above(multigroup_flux: &[f64], group_boundaries: &[f64], top: f64) -> f64 {
+    let total: f64 = multigroup_flux.iter().sum();
+    if total <= 0.0 {
+        return 0.0;
+    }
+    let mut above = 0.0;
+    for (g, &phi) in multigroup_flux.iter().enumerate() {
+        let (lo, hi) = (group_boundaries[g], group_boundaries[g + 1]);
+        if phi <= 0.0 || hi <= top {
+            continue;
+        }
+        above += phi * (hi - lo.max(top)) / (hi - lo);
+    }
+    above / total
+}
+
+/// The spectrum's flux above the last energy each nuclide's evaluation
+/// reaches: `(nuclide, top energy [eV], fraction of the flux)`, for the
+/// nuclides where that fraction is not zero, in name order.
+///
+/// No cross section exists there and [`walk_group`] folds it as zero, which is
+/// the honest value for one group's tail but misstates every rate once a
+/// material part of the spectrum is involved. TENDL evaluations end at 200
+/// MeV and ENDF/B's at 20 MeV, and CCFE-709 runs to 1 GeV, so a spectrum with
+/// flux in its top groups can reach this with either library.
+pub fn spectrum_above_evaluation(
+    material: &Material,
+    multigroup_flux: &[f64],
+    group_boundaries: &[f64],
+) -> Vec<(String, f64, f64)> {
+    let mut names: Vec<&String> = material.nuclide_data.keys().collect();
+    names.sort();
+    let mut out = Vec::new();
+    for name in names {
+        let nuclide_data = &material.nuclide_data[name];
+        let temperature = if material.temperature().is_empty() {
+            crate::default_temperature(nuclide_data)
+        } else {
+            Some(material.temperature().to_string())
+        };
+        let Some(temperature) = temperature else {
+            continue;
+        };
+        let Some(reactions) = nuclide_data.reactions_for_temp(&temperature) else {
+            continue;
+        };
+        let top = reactions
+            .values()
+            .filter_map(|r| r.energy.last().copied())
+            .fold(f64::NEG_INFINITY, f64::max);
+        if !top.is_finite() {
+            continue;
+        }
+        let fraction = fraction_above(multigroup_flux, group_boundaries, top);
+        if fraction > 0.0 {
+            out.push((name.clone(), top, fraction));
+        }
+    }
+    out
+}
+
+/// The most of a spectrum that may lie above a nuclide's evaluation before a
+/// transmutation refuses to run on it.
+pub const ABOVE_EVALUATION_TOLERANCE: f64 = 1.0e-3;
 
 /// Compute group-averaged cross section for a single energy group via trapezoidal integration.
 ///
@@ -1194,6 +1296,37 @@ mod tests {
         );
     }
 
+    /// Above the evaluation's last point the cross section is not the last
+    /// value carried on, it is nothing: the group average over the part of a
+    /// group past the grid is zero, and a group entirely past it is zero.
+    #[test]
+    fn the_average_stops_at_the_evaluations_last_point() {
+        let rxn = flat_reaction((1e6, 1e7), 2.0, 16);
+        // Half of this group is above the grid.
+        let avg = group_averaged_xs(&rxn, 5e6, 1.5e7);
+        assert!((avg - 1.0).abs() < 1e-12, "got {avg}");
+        // All of it.
+        assert_eq!(group_averaged_xs(&rxn, 2e7, 3e7), 0.0);
+        // None of it: unchanged.
+        assert!((group_averaged_xs(&rxn, 2e6, 4e6) - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_flux_above_an_evaluation_is_counted_flat_within_a_group() {
+        let flux = [1.0, 2.0, 4.0];
+        let edges = [0.0, 1e7, 2e7, 4e7];
+        // Nothing above 4e7.
+        assert_eq!(fraction_above(&flux, &edges, 4e7), 0.0);
+        // The top group only, whole: 4 of 7.
+        assert!((fraction_above(&flux, &edges, 2e7) - 4.0 / 7.0).abs() < 1e-12);
+        // Half of the top group: 2 of 7.
+        assert!((fraction_above(&flux, &edges, 3e7) - 2.0 / 7.0).abs() < 1e-12);
+        // Everything.
+        assert!((fraction_above(&flux, &edges, 0.0) - 1.0).abs() < 1e-12);
+        // No flux at all.
+        assert_eq!(fraction_above(&[0.0, 0.0], &[0.0, 1.0, 2.0], 0.5), 0.0);
+    }
+
     #[test]
     fn test_group_averaged_xs_ramp() {
         // Linear ramp from 0 to 100 barns over 0 to 1e6 eV
@@ -1281,7 +1414,14 @@ mod tests {
         if e_lo >= e_hi {
             return 0.0;
         }
-        let points = scanned_points(&reaction.energy, e_lo, e_hi);
+        // The walk stops at the evaluation's last point and counts nothing
+        // above it, so the reference integrates to there and divides by the
+        // whole width.
+        let e_end = e_hi.min(reaction.energy.last().copied().unwrap_or(e_lo));
+        if e_end <= e_lo {
+            return 0.0;
+        }
+        let points = scanned_points(&reaction.energy, e_lo, e_end);
         let xs: Vec<f64> = points
             .iter()
             .map(|&e| reaction.cross_section_at(e).unwrap_or(0.0))
@@ -1369,11 +1509,19 @@ mod tests {
         rxn.threshold_idx = 0;
         assert_eq!(group_averaged_xs(&rxn, 1.0, 5.0), 3.0);
 
-        // And above the last grid point, flat-clamped to the last value either
-        // way, since `cross_section_at` does not consult the flag up there.
-        assert_eq!(group_averaged_xs(&rxn, 30.0, 40.0), 4.0);
+        // Above the last grid point there is no cross section either way:
+        // `cross_section_at` holds its last value up there for a single
+        // lookup, but an integral over energies the evaluation never reached
+        // counts nothing.
+        assert_eq!(group_averaged_xs(&rxn, 30.0, 40.0), 0.0);
         rxn.threshold_idx = 1;
-        assert_eq!(group_averaged_xs(&rxn, 30.0, 40.0), 4.0);
+        assert_eq!(group_averaged_xs(&rxn, 30.0, 40.0), 0.0);
+        // A group straddling the end integrates to the end and no further:
+        // 4.0 over half the group.
+        assert_eq!(
+            group_averaged_xs(&rxn, 15.0, 25.0),
+            (0.5 * (3.5 + 4.0) * 5.0) / 10.0
+        );
     }
 
     #[test]
