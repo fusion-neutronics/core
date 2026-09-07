@@ -126,6 +126,10 @@ pub type IsomerTable = BTreeMap<(i64, i64), BTreeMap<i64, Isomer>>;
 struct RawIsomer {
     lis: i64,
     half_life: Option<f64>,
+    /// The excitation energy the file's own header states (MF=1 MT=451
+    /// ELIS), when it states one. Zero there means unknown, not the ground
+    /// state: the header of a metastable file is describing that isomer.
+    elis: Option<f64>,
     /// Q value of the isomeric-transition decay mode, when there is one.
     it_q: Option<f64>,
     /// The isomeric state that transition leaves behind.
@@ -139,9 +143,12 @@ struct RawIsomer {
 /// nuclide needs the excitation energies of the isomers, which is what decay
 /// data provides.
 ///
-/// Each isomer's absolute excitation energy is recovered from the Q value of
-/// its isomeric-transition decay mode (RTYP = 3), chained through that mode's
-/// final isomeric state down to lower isomers.
+/// Each isomer's absolute excitation energy is the one its decay file states
+/// in the MF=1 MT=451 header (ELIS), which 624 of ENDF/B-VIII.1's 738
+/// metastable files give. Where the header says nothing the energy is
+/// recovered from the Q value of the isomeric-transition decay mode
+/// (RTYP = 3), chained through that mode's final isomeric state down to lower
+/// isomers; a pure-beta isomer with no stated energy has none.
 ///
 /// Only the metastable files are needed; ground states are implicit.
 pub fn isomer_table<I, P>(decay_files: I) -> Result<IsomerTable>
@@ -171,12 +178,17 @@ pub fn isomer_table_from_materials(materials: &[Material]) -> IsomerTable {
         // The first isomeric transition is the one that fixes the energy; a
         // second would describe the same level.
         let it = section.modes.iter().find(|m| m.rtyp == 3.0);
+        let elis = material
+            .mf1_mt451()
+            .map(|header| header.elis)
+            .filter(|&e| e > 0.0);
 
         raw.entry((z, a)).or_default().insert(
             section.liso,
             RawIsomer {
                 lis: section.lis,
                 half_life: section.half_life.map(|(v, _)| v),
+                elis,
                 it_q: it.map(|m| m.q.0),
                 it_rfs: it.map_or(0, |m| m.rfs as i64),
             },
@@ -188,23 +200,25 @@ pub fn isomer_table_from_materials(materials: &[Material]) -> IsomerTable {
         .collect()
 }
 
-/// Turn the isomeric transitions of one nuclide into absolute energies.
+/// The absolute excitation energy of each isomer of one nuclide.
 ///
-/// An isomer's energy is the Q of its transition plus the energy of the state
-/// that transition lands on, so the states are walked from the lowest ordinal
-/// up and each one reads back what was resolved before it. A state whose
-/// transition lands on a state of unknown energy, or whose transition carries
-/// no Q at all, has an unknown energy too: `None`, not the bare Q. Booking the
-/// bare Q used to put In116's second isomer at 162 keV (its 290 keV transition
-/// lands on the pure-beta first isomer, whose energy the decay file cannot
-/// state), and a wrong energy is worse than a missing one, because a production
-/// level that happens to sit near 162 keV then matches it.
+/// The header's ELIS is taken as stated. Without it, an isomer's energy is the
+/// Q of its transition plus the energy of the state that transition lands on,
+/// so the states are walked from the lowest ordinal up and each one reads
+/// back what was resolved before it. A state whose transition lands on a state
+/// of unknown energy, or whose transition carries no Q at all, has an unknown
+/// energy too: `None`, not the bare Q. Booking the bare Q used to put In116's
+/// second isomer at 162 keV (its 290 keV transition lands on the pure-beta
+/// first isomer), and a wrong energy is worse than a missing one, because a
+/// production level that happens to sit near 162 keV then matches it.
 fn chain_isomer_energies(isomers: &BTreeMap<i64, RawIsomer>) -> BTreeMap<i64, Isomer> {
     let mut resolved: BTreeMap<i64, Option<f64>> = BTreeMap::from([(0, Some(0.0))]);
     let mut out = BTreeMap::new();
     for (&liso, info) in isomers {
         let energy = if liso == 0 {
             Some(0.0)
+        } else if info.elis.is_some() {
+            info.elis
         } else {
             match (info.it_q, resolved.get(&info.it_rfs).copied().flatten()) {
                 (Some(q), Some(base)) if q > 0.0 => Some(q + base),
@@ -558,15 +572,41 @@ mod tests {
 
         assert_eq!(in116[&1].lis, 1);
         assert_eq!(in116[&1].half_life, Some(3257.4));
-        // Pure beta-, so the energy is unknown rather than zero.
-        assert_eq!(in116[&1].e_iso, None);
+        // Pure beta-, so no transition to measure the energy by; the header
+        // states it.
+        assert_eq!(in116[&1].e_iso, Some(127_267.0));
 
         assert_eq!(in116[&2].lis, 4);
         assert_eq!(in116[&2].half_life, Some(2.18));
-        // Its isomeric transition goes to state 1, whose energy is unknown, so
-        // its own is unknown too. The bare Q (162 keV) used to be reported
-        // here; the state actually sits near 290 keV.
-        assert_eq!(in116[&2].e_iso, None);
+        // The header's 289.66 keV. Chaining its 162 keV transition through
+        // the first isomer would give 289.66 keV too, now that the first
+        // isomer's energy is known, and used to give 162 keV.
+        assert_eq!(in116[&2].e_iso, Some(289_660.0));
+    }
+
+    /// Without a header energy the transitions are chained; with one it wins,
+    /// and it feeds the chaining of the states above it.
+    #[test]
+    fn a_stated_excitation_energy_is_taken_over_the_chained_one() {
+        let raw = |lis, elis: Option<f64>, it_q: Option<f64>, it_rfs| RawIsomer {
+            lis,
+            half_life: Some(1.0),
+            elis,
+            it_q,
+            it_rfs,
+        };
+        let isomers = BTreeMap::from([
+            // A pure-beta isomer whose header states 127 keV.
+            (1, raw(1, Some(127_267.0), None, 0)),
+            // Its header is silent; the transition to state 1 is chained.
+            (2, raw(4, None, Some(162_393.0), 1)),
+            // The header disagrees with the chain, and the header wins.
+            (3, raw(5, Some(500_000.0), Some(100_000.0), 2)),
+        ]);
+        let out = chain_isomer_energies(&isomers);
+        assert_eq!(out[&1].e_iso, Some(127_267.0));
+        assert_eq!(out[&2].e_iso, Some(289_660.0));
+        assert_eq!(out[&3].e_iso, Some(500_000.0));
     }
 
     /// The chaining, on its own: a transition to a resolved state adds up, a
@@ -576,6 +616,7 @@ mod tests {
         let raw = |lis, it_q: Option<f64>, it_rfs| RawIsomer {
             lis,
             half_life: Some(1.0),
+            elis: None,
             it_q,
             it_rfs,
         };
