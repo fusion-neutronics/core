@@ -20,6 +20,14 @@ arrow-schema = "53"
 arrow-ipc = { version = "53", features = ["lz4"] }
 serde_json = "1.0"
 
+# Split on target the way `yani-transmute/Cargo.toml` splits it, and for the
+# same reason: rayon has no thread pool on wasm32, and nothing that builds for
+# the browser should have to care that this crate parses in parallel. The
+# per-file work is written once and only the driver line is `#[cfg]`-ed, so the
+# sequential and parallel forms cannot drift apart.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1.10"
+
 # Tests only. `yani` is here so the round trip crosses the boundary that
 # matters: this crate writes the files and yani's own reader takes them back,
 # rather than a reader that shares this writer's assumptions. lzma-rs reads the
