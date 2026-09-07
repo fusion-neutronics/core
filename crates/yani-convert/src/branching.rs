@@ -446,6 +446,20 @@ pub struct BranchingExtractor {
     metastable: std::collections::BTreeSet<String>,
 }
 
+/// What one evaluation contributed, before it is merged into an extractor.
+///
+/// Exists so the per-evaluation work, which is independent of every other
+/// evaluation's, can run off to the side and be merged back afterwards. Merging
+/// in the order the files were read leaves the result identical to reading them
+/// one at a time, which matters because the rows, the flagged levels and the
+/// partial-sum lines are all ordered.
+#[derive(Debug, Clone, Default)]
+pub struct BranchingPartial {
+    rows: Vec<BranchingRow>,
+    stats: BranchingStats,
+    metastable: std::collections::BTreeSet<String>,
+}
+
 impl BranchingExtractor {
     /// `decay` is read only for the isomer table, so metastable evaluations
     /// suffice.
@@ -463,19 +477,28 @@ impl BranchingExtractor {
 
     /// Add one neutron evaluation's rows.
     pub fn add(&mut self, material: &Material) {
+        let partial = self.extract_one(material);
+        self.absorb(partial);
+    }
+
+    /// One evaluation's contribution, worked out without touching the
+    /// accumulator, so callers can do this for many evaluations at once and
+    /// [`Self::absorb`] the results in file order afterwards.
+    pub fn extract_one(&self, material: &Material) -> BranchingPartial {
         let (mt2type, isomers, tol_ev, linearize_tol) = (
             &self.mt2type,
             &self.isomers,
             self.tol_ev,
             self.linearize_tol,
         );
-        let (rows, stats, metastable) = (&mut self.rows, &mut self.stats, &mut self.metastable);
+        let mut out = BranchingPartial::default();
+        let (rows, stats, metastable) = (&mut out.rows, &mut out.stats, &mut out.metastable);
 
         // The evaluation names itself in MF=1/451, which is the same route
         // Chain::from_endf takes, so parent names match the reactions
         // subsection rather than a filename convention.
         let Some(meta) = material.mf1_mt451() else {
-            return;
+            return out;
         };
         let parent = endf::gnds_name(
             (meta.za / 1000) as u32,
@@ -561,6 +584,29 @@ impl BranchingExtractor {
         if emitted_any {
             stats.parents_with_data += 1;
         }
+        out
+    }
+
+    /// Merge one evaluation's contribution.
+    ///
+    /// Call order is the row order, so a caller that extracted out of order
+    /// must absorb in the order the files were read to get the same answer.
+    /// `merged_duplicate_groups` and `metastable_targets` are not merged here
+    /// because [`Self::finish`] is what sets them.
+    pub fn absorb(&mut self, partial: BranchingPartial) {
+        self.rows.extend(partial.rows);
+        self.metastable.extend(partial.metastable);
+        let stats = partial.stats;
+        self.stats.parents += stats.parents;
+        self.stats.parents_with_data += stats.parents_with_data;
+        self.stats.linearized_curves += stats.linearized_curves;
+        for (route, n) in stats.level_routes {
+            *self.stats.level_routes.entry(route).or_insert(0) += n;
+        }
+        self.stats.flagged_levels.extend(stats.flagged_levels);
+        self.stats
+            .partial_sum_mismatches
+            .extend(stats.partial_sum_mismatches);
     }
 
     /// The rows and statistics, with duplicate target groups merged.

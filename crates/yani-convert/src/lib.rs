@@ -898,10 +898,34 @@ pub fn convert_branching_files(
     // because the driver scopes the call to the parents of a reactions
     // subsection, a few hundred rather than a few thousand evaluations, which
     // is a convention rather than a promise.
-    let mut extractor = branching::BranchingExtractor::new(&decay, tol_ev, linearize_tol);
-    for path in neutron_files {
+    //
+    // In parallel, one evaluation at a time per worker, absorbed afterwards in
+    // file order. Each evaluation's rows depend on nothing but that evaluation
+    // and the isomer table, and absorbing in order leaves the rows, the flagged
+    // levels and the partial-sum lines exactly as reading the files one at a
+    // time left them.
+    let extractor = branching::BranchingExtractor::new(&decay, tol_ev, linearize_tol);
+    let extract = |path: &String| -> Result<branching::BranchingPartial, String> {
         let material = Material::from_file(path).map_err(|e| format!("{path}: {e}"))?;
-        extractor.add(&material);
+        Ok(extractor.extract_one(&material))
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let partials: Vec<branching::BranchingPartial> = {
+        use rayon::prelude::*;
+        neutron_files
+            .par_iter()
+            .map(extract)
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    #[cfg(target_arch = "wasm32")]
+    let partials: Vec<branching::BranchingPartial> = neutron_files
+        .iter()
+        .map(extract)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut extractor = extractor;
+    for partial in partials {
+        extractor.absorb(partial);
     }
     let (rows, stats) = extractor.finish();
     let dir = out.join("branching");

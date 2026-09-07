@@ -727,3 +727,42 @@ fn streaming_the_neutron_files_writes_the_same_tree_as_holding_them() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Extracting evaluations one at a time and absorbing them in file order gives
+/// exactly what adding them one at a time gives.
+///
+/// That equivalence is what lets `convert_branching_files` parse in parallel.
+/// The rows, the flagged levels and the partial-sum lines are all ordered, and
+/// the counters are sums, so a merge that lost the order or forgot a statistic
+/// would change the written subsection without changing anything else.
+#[test]
+fn absorbing_partials_in_file_order_matches_adding_one_at_a_time() {
+    use yani_convert::branching::{BranchingExtractor, DEFAULT_LINEARIZE_TOL};
+
+    let decay = materials(DECAY);
+    let neutron = materials(NEUTRON);
+    let build = || BranchingExtractor::new(&decay, 3000.0, DEFAULT_LINEARIZE_TOL);
+
+    let mut sequential = build();
+    for material in &neutron {
+        sequential.add(material);
+    }
+
+    // What the parallel driver does: every evaluation worked out against the
+    // same isomer table, then merged in the order the files were read.
+    let base = build();
+    let partials: Vec<_> = neutron.iter().map(|m| base.extract_one(m)).collect();
+    let mut merged = base;
+    for partial in partials {
+        merged.absorb(partial);
+    }
+
+    let (rows_one_at_a_time, stats_one_at_a_time) = sequential.finish();
+    let (rows_merged, stats_merged) = merged.finish();
+    assert!(
+        !rows_one_at_a_time.is_empty(),
+        "the fixtures produced no branching rows, so this proves nothing"
+    );
+    assert_eq!(rows_merged, rows_one_at_a_time);
+    assert_eq!(stats_merged, stats_one_at_a_time);
+}
