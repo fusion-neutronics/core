@@ -302,6 +302,29 @@ pub fn transmute_material_shielded(
     let mut shielding_info = ShieldingInfo::default();
     let mut per_spectrum: Vec<PerSpectrum> = Vec::with_capacity(spectra.len());
     for s in spectra {
+        // Where an evaluation ends the cross section is unknown, and the fold
+        // treats it as zero. A sliver of flux there is a rounding matter; more
+        // than that and every rate on the nuclide would be understated by data
+        // that does not exist, so the run stops and says which nuclide and how
+        // much rather than answering as if it knew.
+        let above = crate::multigroup::spectrum_above_evaluation(
+            &current_material,
+            &s.masses,
+            &s.boundaries,
+        );
+        if let Some((name, top, fraction)) = above
+            .iter()
+            .find(|(_, _, fraction)| *fraction > crate::multigroup::ABOVE_EVALUATION_TOLERANCE)
+        {
+            return Err(format!(
+                "{:.3}% of the spectrum lies above {top:.4e} eV, the last energy point in \
+                 {name}'s evaluation. No cross section exists there, so the rates on {name} \
+                 would be understated by that share. Cut the spectrum at the evaluation's \
+                 top energy, or use a library evaluated to higher energy.",
+                fraction * 100.0
+            )
+            .into());
+        }
         let (mut rates, fy_weights, info) = compute_multigroup_reaction_rates_shielded(
             &current_material,
             &chain,
