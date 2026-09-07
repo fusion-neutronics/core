@@ -38,7 +38,7 @@ use arrow_ipc::writer::{FileWriter, IpcWriteOptions};
 use arrow_ipc::CompressionType;
 use arrow_schema::{ArrowError, Schema};
 
-use endf::chain::Chain;
+use endf::chain::{collect_q_values, Chain, QValues};
 use endf::decay::DecayInconsistency;
 use endf::{Decay, Material};
 
@@ -510,16 +510,21 @@ pub struct Provenance {
     pub created_utc: String,
 }
 
-/// The evaluations a chain is built from.
+/// What a chain is built from: two sublibraries of evaluations, and the Q
+/// values read out of a third.
 ///
 /// Grouped because they always travel together and because which of them is
 /// required depends on the subsections being written, which is easier to say
 /// about one value than about three parameters.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Inputs<'a> {
     pub decay: &'a [Material],
     pub fpy: &'a [Material],
-    pub neutron: &'a [Material],
+    /// The neutron set as Q values rather than as evaluations, because that is
+    /// all a chain reads of it and because a caller whose neutron sublibrary
+    /// does not fit in memory can fill the map one file at a time.
+    /// [`convert_transmutation_files`] does exactly that.
+    pub q_values: &'a QValues,
     /// Decay evaluations from a second library, read only to replace the
     /// placeholder average decay energies in `decay` (see
     /// `endf::chain::Chain::fill_placeholder_decay_energies`). Empty for no
@@ -546,14 +551,14 @@ pub fn convert_transmutation(
     out: &Path,
     provenance: &Provenance,
 ) -> Result<Chain, Box<dyn Error>> {
-    let (decay, fpy, neutron) = (inputs.decay, inputs.fpy, inputs.neutron);
+    let (decay, fpy, q_values) = (inputs.decay, inputs.fpy, inputs.q_values);
     let Provenance {
         library,
         decay_library,
         data_version,
         created_utc,
     } = provenance;
-    let mut chain = Chain::from_endf(decay, fpy, neutron, reactions)?;
+    let mut chain = Chain::from_endf(decay, fpy, q_values, reactions)?;
     if let Some(path) = branch_ratios {
         apply_branch_ratios(&mut chain, path)?;
     }
@@ -772,8 +777,19 @@ pub fn convert_transmutation_files(
     }
     let decay = read(decay_files)?;
     let fpy = read(fpy_files)?;
-    let neutron = read(neutron_files)?;
     let decay_fill = read(decay_fill_files)?;
+
+    // Read one at a time and dropped, rather than collected like the others. A
+    // chain wants nothing from a neutron evaluation but its channels' Q values,
+    // and holding the parsed set to get them peaked at 39 GB over TENDL's 2848
+    // files, which is more than an ordinary machine has: it was killed three
+    // times on a 45 GB one (issue #53). Streamed, the peak is one evaluation,
+    // and the largest single TENDL file is 40 MB.
+    let mut q_values = QValues::new();
+    for path in neutron_files {
+        let material = Material::from_file(path).map_err(|e| format!("{path}: {e}"))?;
+        collect_q_values(&material, &mut q_values);
+    }
 
     // Every reaction the chain builder knows, not endf::chain::DEFAULT_REACTIONS.
     // That short list is six names, and defaulting to it silently drops 2554 of
@@ -813,7 +829,7 @@ pub fn convert_transmutation_files(
         &Inputs {
             decay: &decay,
             fpy: &fpy,
-            neutron: &neutron,
+            q_values: &q_values,
             decay_fill: &decay_fill,
             decay_fill_library,
         },

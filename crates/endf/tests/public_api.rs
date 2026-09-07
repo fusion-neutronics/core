@@ -14,8 +14,8 @@
 use std::path::{Path, PathBuf};
 
 use endf::{
-    tables_from_str, AngleEnergy, Chain, Decay, FissionProductYields, IncidentNeutron,
-    IncidentPhoton, Interpretation, Material, MetastableScheme, ProbabilityTables,
+    q_values, tables_from_str, AngleEnergy, Chain, Decay, FissionProductYields, IncidentNeutron,
+    IncidentPhoton, Interpretation, Material, MetastableScheme, ProbabilityTables, QValues,
     RadionuclideProduction, Tabulated1D,
 };
 
@@ -146,7 +146,7 @@ fn a_chain_can_be_built_from_materials() {
         .collect();
     let neutron = vec![Material::from_str(&read_text("n-049_In-115_trimmed.endf.xz")).unwrap()];
 
-    let chain = Chain::from_endf(&decay, &[], &neutron, &["(n,gamma)"]).unwrap();
+    let chain = Chain::from_endf(&decay, &[], &q_values(&neutron), &["(n,gamma)"]).unwrap();
     assert!(!chain.nuclides.is_empty());
 }
 
@@ -155,7 +155,7 @@ fn a_chain_can_be_built_from_materials() {
 #[test]
 fn placeholder_decay_energies_are_labelled_and_fillable() {
     let decay = vec![Material::from_str(&read_text("dec-050_Sn_111.endf.xz")).unwrap()];
-    let mut chain = Chain::from_endf(&decay, &[], &[], &[]).unwrap();
+    let mut chain = Chain::from_endf(&decay, &[], &QValues::new(), &[]).unwrap();
     let sn111 = chain.get("Sn111").unwrap();
     assert_eq!(
         sn111.decay_energy_source.as_deref(),
@@ -194,7 +194,7 @@ fn placeholder_decay_energies_are_labelled_and_fillable() {
         }
     );
     let evaluated = vec![Material::from_str(&read_text("dec-049_In_116m1.endf.xz")).unwrap()];
-    let chain = Chain::from_endf(&evaluated, &[], &[], &[]).unwrap();
+    let chain = Chain::from_endf(&evaluated, &[], &QValues::new(), &[]).unwrap();
     assert_eq!(
         chain
             .get("In116_m1")

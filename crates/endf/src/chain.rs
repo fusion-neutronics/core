@@ -822,6 +822,54 @@ impl Nuclide {
     }
 }
 
+/// Every channel's Q value, by target nuclide name and then by MT.
+///
+/// This is the whole of what [`Chain::from_endf`] takes from the neutron
+/// sublibrary, which is why it takes this rather than the evaluations
+/// themselves: filled one file at a time, a caller never holds more than one
+/// [`Material`]. Holding them all is what made a TENDL chain build peak at
+/// 39 GB and get killed on a 45 GB machine, all of it to harvest the few
+/// hundred KB of scalars in here (issue #53).
+pub type QValues = BTreeMap<String, BTreeMap<i32, f64>>;
+
+/// Record one neutron evaluation's channel Q values into `into`.
+///
+/// QI is the Q of the channel actually populated; QM, the mass-difference Q,
+/// is not the same thing and a few evaluations give it with the opposite sign.
+///
+/// An evaluation with no MF=1 MT=451 header cannot be named, so it contributes
+/// nothing rather than failing, which is how the rest of the chain builder
+/// treats it too.
+pub fn collect_q_values(material: &Material, into: &mut QValues) {
+    let Some(meta) = material.mf1_mt451() else {
+        return;
+    };
+    let (z, a) = (meta.za / 1000, meta.za % 1000);
+    let name = gnds_name(z as u32, a as u32, meta.liso as u32);
+    let entry = into.entry(name).or_default();
+    for &(mf, mt) in material.section_data.keys() {
+        if mf == 3 {
+            if let Some(section) = material.mf3(mt) {
+                entry.insert(mt, section.qi);
+            }
+        }
+    }
+}
+
+/// The Q values of a neutron set already in memory.
+///
+/// For a caller that holds the evaluations anyway, such as a test over a
+/// handful of fixtures. A caller reading a sublibrary off disk should drive
+/// [`collect_q_values`] over the files instead, so its peak is one evaluation
+/// rather than all of them.
+pub fn q_values(neutron: &[Material]) -> QValues {
+    let mut out = QValues::new();
+    for material in neutron {
+        collect_q_values(material, &mut out);
+    }
+    out
+}
+
 /// A depletion chain: every nuclide, and the paths between them.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Chain {
@@ -929,39 +977,24 @@ impl Chain {
         self.nuclides.is_empty()
     }
 
-    /// Build a chain from decay, fission product yield and neutron
-    /// evaluations.
+    /// Build a chain from decay and fission product yield evaluations, and the
+    /// Q values of the neutron set.
     ///
     /// `reactions` names the transmutation reactions to follow; pass
     /// [`DEFAULT_REACTIONS`] for the usual set. Fission is always followed
     /// where an evaluation has it.
+    ///
+    /// The neutron half arrives as [`QValues`] rather than as [`Material`]s
+    /// because that is all of it this reads, and because a whole neutron
+    /// sublibrary held in memory does not fit on an ordinary machine. Build the
+    /// map with [`q_values`] from a slice, or with [`collect_q_values`] one
+    /// file at a time.
     pub fn from_endf(
         decay: &[Material],
         fpy: &[Material],
-        neutron: &[Material],
+        q_values: &QValues,
         reactions: &[&str],
     ) -> Result<Chain> {
-        // What each target's neutron evaluation says each channel's Q value
-        // is. QI is the Q of the channel actually populated; QM, the
-        // mass-difference Q, is not the same thing and a few evaluations give
-        // it with the opposite sign.
-        let mut q_values: BTreeMap<String, BTreeMap<i32, f64>> = BTreeMap::new();
-        for material in neutron {
-            let Some(meta) = material.mf1_mt451() else {
-                continue;
-            };
-            let (z, a) = (meta.za / 1000, meta.za % 1000);
-            let name = gnds_name(z as u32, a as u32, meta.liso as u32);
-            let entry = q_values.entry(name).or_default();
-            for &(mf, mt) in material.section_data.keys() {
-                if mf == 3 {
-                    if let Some(section) = material.mf3(mt) {
-                        entry.insert(mt, section.qi);
-                    }
-                }
-            }
-        }
-
         let mut decay_data: BTreeMap<String, Decay> = BTreeMap::new();
         for material in decay {
             let data = Decay::from_material(material)?;

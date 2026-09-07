@@ -2240,8 +2240,8 @@ fn check(golden_path: &Path) -> usize {
                 .collect()
         };
         let reactions: Vec<&str> = g.chain_reactions.iter().map(String::as_str).collect();
-        let chain =
-            endf::Chain::from_endf(&read(&g.decay), &[], &read(&g.neutron), &reactions).unwrap();
+        let q_values = endf::chain::q_values(&read(&g.neutron));
+        let chain = endf::Chain::from_endf(&read(&g.decay), &[], &q_values, &reactions).unwrap();
         let mut d = Dump::default();
         dump_chain(&mut d, "chain", &chain);
         compare(&name, &d.map, &g.values);
