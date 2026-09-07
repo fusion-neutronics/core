@@ -24,7 +24,7 @@ use std::error::Error;
 use std::path::Path;
 
 use endf::function::Tabulated1D;
-use endf::radionuclide_production::LevelRoute;
+use endf::radionuclide_production::{LevelRoute, RadionuclideProduction};
 use endf::Material;
 
 use crate::{list_of, strings, write_section};
@@ -34,6 +34,20 @@ pub const DEFAULT_LINEARIZE_TOL: f64 = 1e-3;
 
 /// Depth cap on the adaptive bisection, so a pathological interval terminates.
 const MAX_DEPTH: u32 = 24;
+
+/// How far a reaction's summed partials may sit from the total they should
+/// reconstruct (MF=10 cross sections from MF=3, MF=9 yields from one) before
+/// the reaction is listed, as a fraction of the nonelastic cross section at
+/// the same energy. Measured against the nonelastic rather than against the
+/// reaction itself so that a channel which barely happens cannot fill the
+/// list: TENDL-2017's (n,2alpha) yields on exotic nuclides sum to anything
+/// from 0.04 to 2.9, on cross sections of microbarns.
+pub const PARTIAL_SUM_TOLERANCE: f64 = 0.02;
+
+/// Incident energies above this are not held to [`PARTIAL_SUM_TOLERANCE`].
+/// TENDL evaluates to 200 MeV and its partials up there routinely stop short
+/// of the total, and nothing a fission or fusion device makes gets there.
+const PARTIAL_SUM_TOP_EV: f64 = 2.0e7;
 
 /// One row of `branching/branching.arrow`.
 #[derive(Debug, Clone, PartialEq)]
@@ -277,6 +291,140 @@ pub struct BranchingStats {
     /// ground, matched only by the looser energy pass, or matched by energy
     /// while the level index pointed at another isomer.
     pub flagged_levels: Vec<String>,
+    /// The reactions whose partials do not reconstruct their total within
+    /// [`PARTIAL_SUM_TOLERANCE`], one line each with the worst point. yani
+    /// shares the MF=3 total out in the proportions of the partials, so a
+    /// defect here does not move yani's numbers; it does move a code that
+    /// folds the partials as they stand, which is one way two codes on the
+    /// same library come to disagree. TENDL-2017's Ir191 (n,2n), whose
+    /// partials sum to 95% of MF=3 at 14 MeV and 84% at 20 MeV, is the case
+    /// that prompted the check.
+    pub partial_sum_mismatches: Vec<String>,
+}
+
+/// The value of `t` at `e`, zero outside its tabulated range.
+///
+/// `Tabulated1D::eval` clamps to the range, which for a partial tabulated from
+/// its threshold up would carry its first point down to zero energy.
+fn value_or_zero(t: &Tabulated1D, e: f64) -> f64 {
+    match (t.x.first(), t.x.last()) {
+        (Some(&lo), Some(&hi)) if e >= lo && e <= hi => t.eval(e),
+        _ => 0.0,
+    }
+}
+
+/// How the partials of one reaction compare with the total they should sum to,
+/// at the point where the defect matters most.
+struct PartialSum {
+    /// Which partials were summed.
+    partials: &'static str,
+    /// What they were compared with.
+    total: &'static str,
+    /// Summed partials over the total.
+    ratio: f64,
+    /// The defect as a fraction of the nonelastic cross section.
+    share: f64,
+    /// That point's incident energy in eV.
+    energy: f64,
+}
+
+/// Compare a reaction's partials with its total.
+///
+/// `None` when the comparison is not meaningful: the partials leave out the
+/// ground state (a file giving isomer partials alone leaves the ground state
+/// as the remainder, by design), mix MF=9 and MF=10, or have no MF=3 for the
+/// reaction or for the nonelastic (MT=3, else the total MT=1) to stand
+/// against. The points checked, below [`PARTIAL_SUM_TOP_EV`], are the ones
+/// every partial that covers them tabulates: there the partials are exact and
+/// only the finer MF=3 is interpolated. Checking on the MF=3 grid reads a
+/// coarse partial between its points and calls the interpolation a defect
+/// (Au197 (n,n') at 270 keV, a level step MF=3 resolves and a 100 keV
+/// partial grid does not), and so does a point one partial has and another
+/// lacks (Ir191 (n,n') at 172 keV, the second isomer's threshold, reading
+/// the ground-state partial between 100 and 200 keV).
+/// Where the file gives resonance parameters that MF=3 leaves out (LRP = 1)
+/// the check starts above the resonance ranges, since MF=3 there is a
+/// background. The point returned is the one with the largest defect
+/// relative to the nonelastic cross section.
+fn partial_sum(
+    material: &Material,
+    mt: i32,
+    states: &[RadionuclideProduction],
+) -> Option<PartialSum> {
+    if !states.iter().any(|s| s.lfs == 0) {
+        return None;
+    }
+    let sigma = &material.mf3(mt)?.sigma;
+    let nonelastic = &material.mf3(3).or_else(|| material.mf3(1))?.sigma;
+    let (partials, total, curves, yields): (&'static str, &'static str, Vec<&Tabulated1D>, bool) =
+        if states.iter().all(|s| s.cross_section.is_some()) {
+            (
+                "MF=10 partial cross sections",
+                "the MF=3 cross section",
+                states
+                    .iter()
+                    .filter_map(|s| s.cross_section.as_ref())
+                    .collect(),
+                false,
+            )
+        } else if states.iter().all(|s| s.yields.is_some()) {
+            (
+                "MF=9 yields",
+                "one",
+                states.iter().filter_map(|s| s.yields.as_ref()).collect(),
+                true,
+            )
+        } else {
+            return None;
+        };
+    let resonance_top = match material.mf1_mt451().map(|h| h.lrp) {
+        Some(1) => material.mf2().map_or(0.0, |mf2| {
+            mf2.isotopes
+                .iter()
+                .flat_map(|isotope| isotope.ranges.iter())
+                .filter(|range| range.lru != 0)
+                .map(|range| range.eh)
+                .fold(0.0, f64::max)
+        }),
+        _ => 0.0,
+    };
+    let mut grid: Vec<f64> = curves
+        .iter()
+        .flat_map(|c| c.x.iter().copied())
+        .filter(|&e| e > resonance_top && e <= PARTIAL_SUM_TOP_EV)
+        .collect();
+    grid.sort_by(f64::total_cmp);
+    grid.dedup();
+    let covers = |c: &Tabulated1D, e: f64| {
+        c.x.first().is_some_and(|&lo| lo <= e) && c.x.last().is_some_and(|&hi| e <= hi)
+    };
+    let tabulates = |c: &Tabulated1D, e: f64| c.x.binary_search_by(|x| x.total_cmp(&e)).is_ok();
+    grid.retain(|&e| curves.iter().all(|c| !covers(c, e) || tabulates(c, e)));
+    let mut worst: Option<PartialSum> = None;
+    for &energy in &grid {
+        let reference = value_or_zero(nonelastic, energy);
+        let total_here = value_or_zero(sigma, energy);
+        if reference <= 0.0 || total_here <= 0.0 {
+            continue;
+        }
+        let sum = curves.iter().map(|c| value_or_zero(c, energy)).sum::<f64>();
+        let (ratio, defect) = if yields {
+            (sum, (sum - 1.0) * total_here)
+        } else {
+            (sum / total_here, sum - total_here)
+        };
+        let share = defect.abs() / reference;
+        if worst.as_ref().is_none_or(|w| share > w.share) {
+            worst = Some(PartialSum {
+                partials,
+                total,
+                ratio,
+                share,
+                energy,
+            });
+        }
+    }
+    worst
 }
 
 /// Extract branching rows for each parent's neutron evaluation.
@@ -316,6 +464,14 @@ pub fn extract_branching(
             let Some(rtype) = mt2type.get(&(*mt as i64)) else {
                 continue;
             };
+            if let Some(sum) = partial_sum(material, *mt, states) {
+                if sum.share > PARTIAL_SUM_TOLERANCE {
+                    stats.partial_sum_mismatches.push(format!(
+                        "{parent} MT{mt}: {} sum to {:.3} of {} at {:.4e} eV, a defect of {:.1}% of the nonelastic cross section",
+                        sum.partials, sum.ratio, sum.total, sum.energy, 100.0 * sum.share
+                    ));
+                }
+            }
             for s in states {
                 let z = s.zap / 1000;
                 let a = s.zap % 1000;
@@ -432,6 +588,17 @@ mod tests {
         let (x, y) = linearize(&t, DEFAULT_LINEARIZE_TOL);
         assert_eq!(x, t.x);
         assert_eq!(y, t.y);
+    }
+
+    /// Outside its range a partial contributes nothing, where `eval` would
+    /// carry its end points outward.
+    #[test]
+    fn a_partial_is_zero_outside_its_range() {
+        let t = tab(vec![1.0, 2.0], vec![3.0, 5.0], 2);
+        assert_eq!(value_or_zero(&t, 0.5), 0.0);
+        assert_eq!(value_or_zero(&t, 1.5), 4.0);
+        assert_eq!(value_or_zero(&t, 2.5), 0.0);
+        assert_eq!(t.eval(2.5), 5.0);
     }
 
     /// Histogram is exact: the step becomes a duplicated breakpoint.
