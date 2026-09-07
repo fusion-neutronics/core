@@ -39,6 +39,7 @@ use arrow_ipc::CompressionType;
 use arrow_schema::{ArrowError, Schema};
 
 use endf::chain::Chain;
+use endf::decay::DecayInconsistency;
 use endf::{Decay, Material};
 
 /// The declared schema for a section, by its path in the format.
@@ -562,7 +563,11 @@ pub fn convert_transmutation(
         Some(chain.fill_placeholder_decay_energies(inputs.decay_fill, inputs.decay_fill_library)?)
     };
     let chain = chain;
-    let decay_record = decay_energy_record(&chain, fill.as_ref());
+    let mut decay_record = decay_energy_record(&chain, fill.as_ref());
+    decay_record.insert(
+        "decay_inconsistencies".to_string(),
+        decay_inconsistency_record(decay),
+    );
     let sources = decay_sources(decay)?;
 
     std::fs::create_dir_all(out)?;
@@ -646,6 +651,55 @@ fn decay_energy_record(
         );
     }
     record
+}
+
+/// What the decay records say that cannot be right, for the decay
+/// subsection's provenance.
+///
+/// One list per kind of [`endf::decay::DecayInconsistency`], every kind
+/// present so a reader indexes without guessing, and the records listed by
+/// name for the same reason the placeholders are: the question is whether one
+/// of the heat carriers in an inventory is on it. Nothing is corrected; the
+/// numbers written are the library's.
+fn decay_inconsistency_record(decay: &[Material]) -> serde_json::Value {
+    let mut by_kind: BTreeMap<&'static str, Vec<serde_json::Value>> = DecayInconsistency::LABELS
+        .iter()
+        .map(|&label| (label, Vec::new()))
+        .collect();
+    let mut count = 0;
+    for material in decay {
+        let Ok(d) = Decay::from_material(material) else {
+            continue;
+        };
+        if d.nuclide.atomic_number == 0 {
+            continue;
+        }
+        for finding in d.inconsistencies() {
+            let entry = match &finding {
+                DecayInconsistency::ZeroHalfLife => {
+                    serde_json::json!({"nuclide": d.nuclide.name})
+                }
+                DecayInconsistency::BranchingRatioSum { sum } => {
+                    serde_json::json!({"nuclide": d.nuclide.name, "sum": sum})
+                }
+                DecayInconsistency::IsomericTransitionEnergy { q, recoverable } => {
+                    serde_json::json!({
+                        "nuclide": d.nuclide.name,
+                        "q_eV": q,
+                        "recoverable_eV": recoverable,
+                    })
+                }
+            };
+            by_kind.entry(finding.label()).or_default().push(entry);
+            count += 1;
+        }
+    }
+    let mut record = serde_json::Map::new();
+    record.insert("count".to_string(), serde_json::json!(count));
+    for (kind, entries) in by_kind {
+        record.insert(kind.to_string(), serde_json::Value::Array(entries));
+    }
+    serde_json::Value::Object(record)
 }
 
 /// Split a reaction between a ground state and its metastable partners.
