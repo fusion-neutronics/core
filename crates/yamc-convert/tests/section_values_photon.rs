@@ -12,7 +12,7 @@
 //!
 //! `write_section` builds each batch from a positional `Vec<ArrayRef>` and
 //! Arrow validates the data type and the row count, never the meaning.
-//! `element.arrow` declares seventeen consecutive `list<double>` fields, so
+//! `element.arrow` declares sixteen consecutive `list<double>` fields, so
 //! any permutation among them is type-valid and writes without complaint.
 //! `read_photon_interaction_from_arrow`
 //! (`crates/yamc-element/src/photon_arrow.rs:53`) does read every one of those
@@ -175,7 +175,7 @@ fn eval_on(data: &IncidentPhoton, mt: i32, grid: &[f64]) -> Vec<f64> {
 /// A failure means a photon cross section landed in the wrong slot or on the
 /// wrong grid.
 ///
-/// `element.arrow` declares seventeen consecutive `list<double>` fields, so
+/// `element.arrow` declares sixteen consecutive `list<double>` fields, so
 /// any permutation among them is type-valid and `RecordBatch::try_new`
 /// accepts it. The grid itself is load-bearing and subtle: MT 501 tabulates
 /// 13.6 eV twice for the K edge and `Vec::dedup` collapses the pair, so the
@@ -312,24 +312,11 @@ fn element_cross_section_columns_are_the_parsed_reactions_on_the_union_grid() {
         2_044_000.0
     );
 
-    // MT 525 is absent from this evaluation, so heating is an EMPTY list and
-    // not a null and not 2020 zeros. The reader substitutes a zero vector for
-    // the empty case, so a wrongly-empty heating column loads as zero KERMA
-    // without a word.
-    //
-    // Empty is the right answer here, but it is also the ONLY answer the
-    // writer can give: `ELEMENT_MTS` (photon.rs:31) lists 501, which
-    // `take` never asks for, and omits 525, which it does, so the filter at
-    // photon.rs:94 drops the heating reaction before it can be evaluated.
-    // Handing `write_photon` a constructed element with an MT 525 cross
-    // section still writes an empty column, which is pinned as a suspected
-    // defect by `constructed_mt_525_is_dropped_from_the_heating_column`.
+    // MT 525 is absent from this evaluation, as it is from every ENDF
+    // photoatomic file: MF=23 does not carry it. There is no heating column to
+    // check, and `constructed_mt_525_writes_no_heating_column` pins that even a
+    // constructed MT 525 does not bring one back.
     assert!(!c.data.reactions.contains_key(&525), "H carries no MT 525");
-    assert!(
-        !is_null(&batch, "heating_xs", 0),
-        "heating_xs is written as an empty list, not as a null"
-    );
-    assert_eq!(list_len(&batch, "heating_xs", 0), 0);
 }
 
 /// A failure means an interpolated cross section is no longer the number the
@@ -1243,30 +1230,25 @@ fn constructed_anomalous_scattering_columns_keep_their_own_abscissae() {
     );
 }
 
-/// PINS A SUSPECTED DEFECT. `element.arrow.heating_xs` can never be populated.
+/// A failure means `element.arrow` grew a heating column back.
 ///
-/// This test does not endorse the behaviour it asserts. `ELEMENT_MTS`
-/// (`photon.rs:31`) is `[501, 502, 504, 515, 517, 522]`: it contains 501,
-/// which `take` at `photon.rs:139` never asks for, and omits 525, which is the
-/// MT named `"heating"` (`crates/endf/src/incident_photon.rs:33`). The filter
-/// at `photon.rs:94` therefore drops the heating reaction before it can be
-/// evaluated and `take("heating")` falls through to `unwrap_or_default`. The
-/// reader substitutes `vec![0.0; n_energy]` for an empty column
-/// (`crates/yamc-element/src/photon_arrow.rs:88-94`), so photon KERMA loads as
-/// identically zero with no error anywhere.
+/// `heating_xs` was declared but unfillable and is now gone. MT 525 is the MT
+/// named `"heating"` (`crates/endf/src/incident_photon.rs:33`) and it reaches
+/// an `IncidentPhoton` only through `from_ace`; the converter is ENDF-only,
+/// and ENDF photoatomic MF=23 has no MT 525. The column was empty in all 261
+/// published elements across endf-b8.1, fendl-3.2d and jendl-5.0, so nothing
+/// ever read a value from it.
 ///
 /// CONSTRUCTED INPUT, not an evaluation: `photoat-001_H_000.endf` has no
-/// MF=23 MT=525 and is the only photoatomic file in the tree, so the branch is
-/// unreachable from vendored bytes. If you have just fixed `ELEMENT_MTS` to
-/// `[502, 504, 515, 517, 522, 525]` then this test is what went red, and the
-/// two assertions below should become a comparison against MT 525 evaluated on
-/// the union grid, the same shape as the five channels in
-/// `element_cross_section_columns_are_the_parsed_reactions_on_the_union_grid`.
+/// MF=23 MT=525 and is the only photoatomic file in the tree, so this is the
+/// only way to hand the writer an MT 525 at all. If an ACE photoatomic route
+/// is ever added, this test is what should go red, and the column, the schema
+/// field and the reader all come back together rather than one at a time.
 #[test]
-fn constructed_mt_525_is_dropped_from_the_heating_column() {
+fn constructed_mt_525_writes_no_heating_column() {
     let data = constructed_element();
     // The input really does carry a heating cross section, under the name the
-    // writer asks for.
+    // writer used to ask for.
     let heating = data.get(525).expect("the constructed element has MT 525");
     assert_eq!(heating.name(), Some("heating"));
     assert_f64_slice_eq(
@@ -1278,17 +1260,17 @@ fn constructed_mt_525_is_dropped_from_the_heating_column() {
     let (_scratch, dir) = write_constructed(&data);
     let batch = section(&dir, "element.arrow");
 
-    // The channels ELEMENT_MTS does list are on the union grid.
+    // The channels ELEMENT_MTS lists are on the union grid.
     assert_eq!(list_len(&batch, "ln_energy", 0), CONSTRUCTED_GRID.len());
     assert_eq!(list_len(&batch, "coherent_xs", 0), CONSTRUCTED_GRID.len());
-    // Heating is not, and it is an empty list rather than a null.
-    assert!(!is_null(&batch, "heating_xs", 0));
-    assert_eq!(
-        list_len(&batch, "heating_xs", 0),
-        0,
-        "heating_xs is written empty even though MT 525 was supplied; see this \
-         test's doc comment before changing the assertion"
+
+    // The heating column is absent, not empty. An empty column is what the old
+    // defect looked like, so asserting absence is what tells the two apart.
+    assert!(
+        batch.column_by_name("heating_xs").is_none(),
+        "MT 525 was supplied and must not produce a heating_xs column"
     );
+    assert_schema_is_declared(&batch, "element.arrow");
 }
 
 /// A failure means `subshells.arrow` is no longer written most-bound-first.
@@ -1622,32 +1604,30 @@ fn constructed_element_fully_populated() -> IncidentPhoton {
 
 /// A failure means two `element.arrow` columns were exchanged.
 ///
-/// CONSTRUCTED INPUT, not an evaluation. `element.arrow` declares seventeen
+/// CONSTRUCTED INPUT, not an evaluation. `element.arrow` declares sixteen
 /// consecutive `list<double>` fields and a permutation among any two that are
 /// EMPTY on the input at hand writes a byte-identical file. On
-/// [`constructed_element`] three of them are empty at once
-/// (`pair_production_nuclear_xs`, `pair_production_electron_xs` and
-/// `heating_xs`), so exchanging the two pair-production slots in
-/// `write_element`'s argument vector leaves all eight constructed tests green.
+/// [`constructed_element`] two of them are empty at once
+/// (`pair_production_nuclear_xs` and `pair_production_electron_xs`), so
+/// exchanging those two slots in `write_element`'s argument vector leaves all
+/// eight constructed tests green.
 ///
-/// Here sixteen of the seventeen carry values that are pairwise different, and
-/// `heating_xs` is empty on every input the writer can be handed
-/// (`constructed_mt_525_is_dropped_from_the_heating_column`), which makes it
-/// the unique empty column and so makes a permutation involving it visible as
-/// well. The pairwise comparison at the end of this test is the property that
-/// says so: no two of the seventeen columns are equal, therefore every
-/// permutation of them changes the file.
+/// Here all sixteen carry values that are pairwise different. The pairwise
+/// comparison at the end of this test is the property that says so: no two of
+/// the sixteen columns are equal, therefore every permutation of them changes
+/// the file. Retiring the unfillable `heating_xs` strengthened this: it was
+/// the one column that could never carry a value, so it was the one slot a
+/// permutation could hide in.
 #[test]
 fn constructed_element_columns_are_pairwise_distinct_so_no_permutation_is_invisible() {
-    /// The seventeen list columns, in the order `write_element` passes them.
-    const LIST_COLUMNS: [&str; 17] = [
+    /// The sixteen list columns, in the order `write_element` passes them.
+    const LIST_COLUMNS: [&str; 16] = [
         "ln_energy",
         "coherent_xs",
         "incoherent_xs",
         "photoelectric_xs",
         "pair_production_nuclear_xs",
         "pair_production_electron_xs",
-        "heating_xs",
         "coherent_int_ff_x",
         "coherent_int_ff_y",
         "coherent_ff_x",
@@ -1665,7 +1645,7 @@ fn constructed_element_columns_are_pairwise_distinct_so_no_permutation_is_invisi
     let batch = section(&dir, "element.arrow");
     assert_schema_is_declared(&batch, "element.arrow");
 
-    // Those seventeen are every column but the two scalars, in that order, so
+    // Those sixteen are every column but the two scalars, in that order, so
     // the pairwise property below cannot miss one that was added later.
     let names: Vec<String> = batch
         .schema()
@@ -1744,17 +1724,14 @@ fn constructed_element_columns_are_pairwise_distinct_so_no_permutation_is_invisi
         assert_f64_slice_eq(col, &f64_list(&batch, col, 0), &expected);
     }
 
-    // Sixteen populated, one empty, and the empty one is the MT 525 defect.
+    // All sixteen populated. There is no longer a column that cannot carry a
+    // value, so there is no slot a permutation can hide in.
     let written: Vec<Vec<f64>> = LIST_COLUMNS
         .iter()
         .map(|&c| f64_list(&batch, c, 0))
         .collect();
     for (col, values) in LIST_COLUMNS.iter().zip(&written) {
-        assert_eq!(
-            values.is_empty(),
-            *col == "heating_xs",
-            "{col} is the wrong side of the populated/empty divide"
-        );
+        assert!(!values.is_empty(), "{col} is empty, so a swap with it is invisible");
     }
 
     // The property this element exists for.

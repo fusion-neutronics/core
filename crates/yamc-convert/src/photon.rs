@@ -28,7 +28,11 @@ use endf::IncidentPhoton;
 use crate::sections::*;
 
 /// The MTs that are whole-atom cross sections rather than per-subshell ones.
-const ELEMENT_MTS: [i32; 6] = [501, 502, 504, 515, 517, 522];
+///
+/// MT 501 is the photoatomic total and is deliberately absent: no column is
+/// built from it, so evaluating it onto the union grid was work thrown away on
+/// every element.
+const ELEMENT_MTS: [i32; 5] = [502, 504, 515, 517, 522];
 
 /// The per-subshell photoionization range, MT 534 (K) to MT 572.
 const SUBSHELL_MTS: std::ops::RangeInclusive<i32> = 534..=572;
@@ -136,7 +140,6 @@ fn write_element(data: &IncidentPhoton, grid: &[f64], dir: &Path) -> Result<(), 
             float_list(&take("photoelectric")),
             float_list(&take("pair_production_nuclear")),
             float_list(&take("pair_production_electron")),
-            float_list(&take("heating")),
             float_list(&int_ff_x),
             float_list(&int_ff_y),
             float_list(&ff_x),

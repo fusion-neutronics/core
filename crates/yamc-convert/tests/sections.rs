@@ -176,12 +176,10 @@ fn nuclide_section_matches_the_published_file() {
     let mine = read_batch(&dir.join("nuclide.arrow"));
     let theirs = read_batch(&ref_dir.join("nuclide.arrow"));
 
-    // The published file still holds the columns this build has retired, and
-    // will until it is rebuilt, so parity is against the published set minus
-    // those. Taken from nuclear_data_schema::retired rather than restated here:
-    // a second copy of that list is how the schema and its compatibility half
-    // drift apart, and this test is the thing that would stop noticing.
-    let retired = nuclear_data_schema::retired("nuclide.arrow");
+    // Straight parity now: the published files no longer carry any column this
+    // build does not write. That was checked across the published data before
+    // the compatibility list was deleted, so a mismatch here means the writer
+    // and the published library have genuinely diverged.
     let names = |b: &arrow_array::RecordBatch| -> Vec<String> {
         b.schema()
             .fields()
@@ -191,14 +189,10 @@ fn nuclide_section_matches_the_published_file() {
     };
     assert_eq!(
         names(&mine),
-        names(&theirs)
-            .into_iter()
-            .filter(|n| !retired.contains(&n.as_str()))
-            .collect::<Vec<_>>(),
-        "column names differ from the published file, allowing for retired columns"
+        names(&theirs),
+        "column names differ from the published file"
     );
 
-    // `metastable` is retired, so it is no longer written and cannot be compared.
     for col in ["Z", "A"] {
         assert_eq!(
             mine.column_by_name(col)
