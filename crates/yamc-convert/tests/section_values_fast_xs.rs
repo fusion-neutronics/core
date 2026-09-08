@@ -14,9 +14,8 @@
 //! asserted below), and `entry::convert_neutron_transport` declines an ACE
 //! source, so `write_fast_xs` is called here directly rather than through the
 //! entry point. `synthetic-urr.ace.xz` reaches it too, with a grid of four
-//! zeros, and what it produces is pinned in
-//! `a_grid_with_no_positive_extent_is_written_rather_than_refused` as a
-//! suspected defect rather than as correct behaviour.
+//! zeros, and its refusal is asserted in
+//! `a_grid_with_no_positive_extent_is_refused`.
 //!
 //! # Where the input is CONSTRUCTED rather than parsed
 //!
@@ -446,62 +445,48 @@ fn the_log_lookup_index_is_the_last_grid_point_at_or_below_every_bin() {
     assert_i32_slice_eq("log_grid_index", &index, &expected);
 }
 
-/// PINS A SUSPECTED DEFECT rather than endorsing it.
+/// The refusal that closed the defect this test used to pin.
 ///
-/// `write_fast_xs` refuses an EMPTY grid (`fast_xs.rs:144-146`) and accepts a
-/// grid with no positive extent, which is what `synthetic-urr.ace.xz` parses to:
-/// four zeros. The accelerator it then writes is poisoned. `log_e_min` is
-/// `ln(0.0)`, negative infinity (`fast_xs.rs:77`), and `inv_log_delta` is
-/// `1.0 / ((-inf) - (-inf))`, NaN (`fast_xs.rs:79-80`).
+/// `write_fast_xs` used to refuse only an EMPTY grid and accept a grid with no
+/// positive extent, which is what `synthetic-urr.ace.xz` parses to: four zeros.
+/// The accelerator it wrote was poisoned. `log_e_min` was `ln(0.0)`, negative
+/// infinity, and `inv_log_delta` was `1.0 / ((-inf) - (-inf))`, NaN.
 ///
-/// Nothing downstream catches it. `log_grid_index_u32`
-/// (`nuclide_arrow.rs:714-753`) checks only that the entries are in range and
-/// non-decreasing, and all 8001 of them are, so the file loads.
-/// `FastXSGrid::lookup` then computes `((ln E - (-inf)) * NaN) as usize`, and a
-/// NaN cast to `usize` saturates to 0 in Rust, so every energy would silently
-/// take bin 0's bracket.
-///
-/// The assertions below therefore state what the writer DOES today, not what it
-/// should do. When it learns to refuse a grid with no positive extent, replace
-/// them with the refusal, in the shape of the two in
-/// `the_fast_xs_row_set_is_the_temperatures_that_have_a_grid`.
+/// Nothing downstream caught it, which is what made it worth closing.
+/// `log_grid_index_u32` (`nuclide_arrow.rs:714-753`) checks only that the
+/// entries are in range and non-decreasing, and all 8001 of them were, so the
+/// file loaded. `FastXSGrid::lookup` then computes
+/// `((ln E - (-inf)) * NaN) as usize`, and a NaN cast to `usize` saturates to 0
+/// in Rust, so every energy silently took bin 0's bracket for the whole grid.
+/// No error, no warning, and the transport kept running.
 #[test]
-fn a_grid_with_no_positive_extent_is_written_rather_than_refused() {
+fn a_grid_with_no_positive_extent_is_refused() {
     let data = ace_nuclide(URR_ACE);
     let temperatures = data.temperatures();
     let grid = &data.energy[&temperatures[0]];
     assert_f64_slice_eq("the fixture's own grid", grid, &[0.0; 4]);
 
     let dir = scratch();
-    write_fast_xs(&data, dir.path())
-        .expect("a grid of zeros is accepted today, which is what this test pins");
-    let batch = section(dir.path(), "fast_xs.arrow");
-    assert_eq!(batch.num_rows(), 1, "the degenerate grid is not skipped");
-
-    let log_e_min = f64_at(&batch, "log_e_min", 0);
+    let refused = write_fast_xs(&data, dir.path())
+        .expect_err("a grid with no positive extent cannot be indexed logarithmically");
+    let message = refused.to_string();
     assert!(
-        log_e_min.is_infinite() && log_e_min.is_sign_negative(),
-        "log_e_min is ln(0.0), so negative infinity, not {log_e_min}"
+        message.contains("cannot be indexed logarithmically"),
+        "the refusal must name why the grid was rejected: {message}"
     );
     assert!(
-        f64_at(&batch, "inv_log_delta", 0).is_nan(),
-        "inv_log_delta is 1 / ((-inf) - (-inf)), so NaN"
+        message.contains(&data.name()),
+        "the refusal must name the nuclide, so a directory-wide conversion \
+         says which file to look at: {message}"
     );
-
-    // Every probe energy is NaN, so `energy[at + 1] <= e` is false at every bin
-    // and the scan never advances; only the top-entry override moves anything.
-    let index = i32_list(&batch, "log_grid_index", 0);
-    assert_eq!(index.len(), LOG_BINS + 1);
     assert!(
-        index[..LOG_BINS].iter().all(|&v| v == 0),
-        "the scan cannot advance past a NaN probe"
+        message.contains(&temperatures[0]),
+        "the refusal must name the temperature, since a nuclide's other \
+         temperatures may be fine: {message}"
     );
-    assert_eq!(
-        index[LOG_BINS],
-        (grid.len() - 1) as i32,
-        "the top entry is set rather than derived, so it is the one entry that \
-         is not zero: in range and non-decreasing, which is all the loader \
-         checks before accepting the file"
+    assert!(
+        absent(dir.path(), "fast_xs.arrow"),
+        "a refused conversion must leave no file behind for a later pass to read"
     );
 }
 

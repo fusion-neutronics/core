@@ -144,6 +144,29 @@ pub fn write_fast_xs(data: &IncidentNeutron, dir: &Path) -> Result<(), Box<dyn E
         if energy.is_empty() {
             continue;
         }
+        // A grid that is present but has no positive extent cannot be indexed
+        // logarithmically, and nothing downstream would notice. `ln(0.0)` is
+        // negative infinity, so `inv_log_delta` comes out
+        // `1.0 / ((-inf) - (-inf))`, NaN. The loader's index validation checks
+        // only that the entries are in range and non-decreasing, which a
+        // NaN-probed scan satisfies, and `FastXSGrid::lookup` casts its NaN bin
+        // to `usize`, which saturates to 0 in Rust. Every energy would take bin
+        // 0's bracket, for the whole grid, with no error anywhere.
+        //
+        // Refused rather than skipped, unlike the empty grid above: an ENDF
+        // evaluation legitimately reaches here with no grid at all, but a grid
+        // that is present and degenerate is corrupt input, and no real
+        // evaluation has one.
+        let (first, last) = (energy[0], energy[energy.len() - 1]);
+        if !(first > 0.0 && last > first && last.is_finite()) {
+            return Err(format!(
+                "{}'s energy grid at {temperature} runs from {first:e} to \
+                 {last:e} eV, which cannot be indexed logarithmically. The \
+                 grid has to start above zero and end above where it starts.",
+                data.name(),
+            )
+            .into());
+        }
         let n_energy = energy.len();
 
         // The per-MT columns, split by whether the reaction is a fission or
