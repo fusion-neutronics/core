@@ -525,3 +525,88 @@ pub fn convert_photon(
     })
     .map_err(|e| PyRuntimeError::new_err(e.to_string()))
 }
+
+/// List the final states each reaction of an evaluation can leave its product
+/// in.
+///
+/// A reaction that can leave its product in a metastable state says so in
+/// MF=8, one subsection per final state. An evaluation that lists only the
+/// ground state is not merely less accurate: the isomer is absent from any
+/// network built from it, so no code can make it, and a measurement that sees
+/// its decay heat cannot be reproduced by any means. TENDL-2017 omits the
+/// 1706 keV state from ``Os190(n,n')``, which is why the FNS osmium foil comes
+/// out at a third of the measured heat with that library, in yani and in
+/// FISPACT-II alike. Nothing about the reaction looks wrong from outside: it
+/// is present, its cross section is reasonable, and only the state list is
+/// short. So comparing the state lists of several libraries is how such a gap
+/// is found, and this is the read that makes the comparison possible.
+///
+/// A read, not a conversion. Nothing is written, no decay data is involved,
+/// and the answer is what the files say rather than what a network built from
+/// them would hold.
+///
+/// Parameters
+/// ----------
+/// neutron_files : list[str]
+///     Neutron evaluations. Read one at a time rather than held, so a whole
+///     sublibrary is a valid argument.
+///
+/// Returns
+/// -------
+/// list[dict]
+///     One entry per (parent, reaction) carrying MF=9 or MF=10, in file order,
+///     each with ``parent``, ``mt``, ``reaction`` (the transmutation reaction
+///     name, or ``None`` for an MT no chain reaction covers) and ``states``.
+///     Each state has ``excitation_energy_eV``, ``level_index``, ``product``
+///     and ``source``.
+///
+///     ``product`` is the product's **ground-state** name even for an excited
+///     state, because naming the isomer needs decay data to say which
+///     isomeric ordinal a level is; pair it with ``excitation_energy_eV``.
+///     ``level_index`` is the evaluation's own LFS and is not comparable
+///     between libraries: Ir190's 377 keV isomer is level 3 in ENDF/B-VIII.1
+///     and level 37 in JEFF-4.0. ``source`` is ``"cross_section"`` for MF=10
+///     or ``"yield"`` for MF=9.
+///
+/// Examples
+/// --------
+///     >>> [c for c in yani.radionuclide_production(["n-Os190.tendl"])
+///     ...  if c["mt"] == 4][0]["states"]
+///     [{'excitation_energy_eV': 0.0, 'level_index': 0, 'product': 'Os190',
+///       'source': 'cross_section'}]
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (neutron_files))]
+pub fn radionuclide_production(
+    py: Python<'_>,
+    neutron_files: Vec<String>,
+) -> PyResult<Py<pyo3::types::PyList>> {
+    if neutron_files.is_empty() {
+        return Err(PyValueError::new_err(
+            "neutron_files is required: the production data is in the neutron \
+             evaluations, so there is nothing to read without them",
+        ));
+    }
+    let channels = yani_convert::production::production_from_files(&neutron_files)
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+    let out = pyo3::types::PyList::empty(py);
+    for channel in channels {
+        let entry = pyo3::types::PyDict::new(py);
+        entry.set_item("parent", channel.parent)?;
+        entry.set_item("mt", channel.mt)?;
+        entry.set_item("reaction", channel.reaction)?;
+        let states = pyo3::types::PyList::empty(py);
+        for state in channel.states {
+            let row = pyo3::types::PyDict::new(py);
+            row.set_item("excitation_energy_eV", state.excitation_energy)?;
+            row.set_item("level_index", state.level_index)?;
+            row.set_item("product", state.product)?;
+            row.set_item("source", state.source)?;
+            states.append(row)?;
+        }
+        entry.set_item("states", states)?;
+        out.append(entry)?;
+    }
+    Ok(out.unbind())
+}

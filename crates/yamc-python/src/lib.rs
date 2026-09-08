@@ -141,6 +141,10 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        yani_python::convert::radionuclide_production,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         yani_python::convert::convert_neutron_xs,
         m
     )?)?;

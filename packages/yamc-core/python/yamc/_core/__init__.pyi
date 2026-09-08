@@ -95,6 +95,7 @@ __all__ = [
     "mesh_faces_scene_resolved",
     "mesh_to_arrow",
     "mesh_volume_rs",
+    "radionuclide_production",
     "read_element_from_arrow",
     "read_nuclide_from_arrow",
     "reduce_mesh_tally_block",
@@ -5692,6 +5693,58 @@ def mesh_volume_rs(boundary_vertices: typing.Sequence[typing.Sequence[builtins.f
     preserved exactly (tet indices `0..len(boundary_vertices)` reference them,
     `>=` reference the returned interior vertices), and tets are pre-oriented
     to positive volume - so no winding swap or face remapping is needed.
+    """
+
+def radionuclide_production(neutron_files: typing.Sequence[builtins.str]) -> list:
+    r"""
+    List the final states each reaction of an evaluation can leave its product
+    in.
+    
+    A reaction that can leave its product in a metastable state says so in
+    MF=8, one subsection per final state. An evaluation that lists only the
+    ground state is not merely less accurate: the isomer is absent from any
+    network built from it, so no code can make it, and a measurement that sees
+    its decay heat cannot be reproduced by any means. TENDL-2017 omits the
+    1706 keV state from ``Os190(n,n')``, which is why the FNS osmium foil comes
+    out at a third of the measured heat with that library, in yani and in
+    FISPACT-II alike. Nothing about the reaction looks wrong from outside: it
+    is present, its cross section is reasonable, and only the state list is
+    short. So comparing the state lists of several libraries is how such a gap
+    is found, and this is the read that makes the comparison possible.
+    
+    A read, not a conversion. Nothing is written, no decay data is involved,
+    and the answer is what the files say rather than what a network built from
+    them would hold.
+    
+    Parameters
+    ----------
+    neutron_files : list[str]
+        Neutron evaluations. Read one at a time rather than held, so a whole
+        sublibrary is a valid argument.
+    
+    Returns
+    -------
+    list[dict]
+        One entry per (parent, reaction) carrying MF=9 or MF=10, in file order,
+        each with ``parent``, ``mt``, ``reaction`` (the transmutation reaction
+        name, or ``None`` for an MT no chain reaction covers) and ``states``.
+        Each state has ``excitation_energy_eV``, ``level_index``, ``product``
+        and ``source``.
+    
+        ``product`` is the product's **ground-state** name even for an excited
+        state, because naming the isomer needs decay data to say which
+        isomeric ordinal a level is; pair it with ``excitation_energy_eV``.
+        ``level_index`` is the evaluation's own LFS and is not comparable
+        between libraries: Ir190's 377 keV isomer is level 3 in ENDF/B-VIII.1
+        and level 37 in JEFF-4.0. ``source`` is ``"cross_section"`` for MF=10
+        or ``"yield"`` for MF=9.
+    
+    Examples
+    --------
+        >>> [c for c in yani.radionuclide_production(["n-Os190.tendl"])
+        ...  if c["mt"] == 4][0]["states"]
+        [{'excitation_energy_eV': 0.0, 'level_index': 0, 'product': 'Os190',
+          'source': 'cross_section'}]
     """
 
 def read_element_from_arrow(path: builtins.str) -> typing.Any:
