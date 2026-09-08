@@ -70,10 +70,9 @@ pub fn read_photon_interaction_from_arrow(dir: &Path) -> Result<PhotonInteractio
     let incoherent_xs = log_transform_xs(&incoherent_xs_raw);
     let photoelectric_total_xs = log_transform_xs(&photoelectric_xs_raw);
 
-    // Pair production and heating
+    // Pair production
     let pp_nuclear_raw = try_get_f64_list(&elem_batch, "pair_production_nuclear_xs", 0);
     let pp_electron_raw = try_get_f64_list(&elem_batch, "pair_production_electron_xs", 0);
-    let heating_raw = try_get_f64_list(&elem_batch, "heating_xs", 0);
 
     // Default to zeros if empty
     let pp_nuclear_raw = if pp_nuclear_raw.is_empty() {
@@ -86,11 +85,6 @@ pub fn read_photon_interaction_from_arrow(dir: &Path) -> Result<PhotonInteractio
     } else {
         pp_electron_raw
     };
-    let heating_raw = if heating_raw.is_empty() {
-        vec![0.0; n_energy]
-    } else {
-        heating_raw
-    };
 
     // Compute pair_production_total = nuclear + electron (in raw space), then log-transform
     let pp_total_raw: Vec<f64> = pp_nuclear_raw
@@ -102,7 +96,6 @@ pub fn read_photon_interaction_from_arrow(dir: &Path) -> Result<PhotonInteractio
     let pair_production_total_xs = log_transform_xs(&pp_total_raw);
     let pair_production_nuclear_xs = log_transform_xs(&pp_nuclear_raw);
     let pair_production_electron_xs = log_transform_xs(&pp_electron_raw);
-    let heating_xs = log_transform_xs(&heating_raw);
 
     // Form factors
     let coh_ff_x = get_f64_list(&elem_batch, "coherent_int_ff_x", 0)?;
@@ -204,7 +197,6 @@ pub fn read_photon_interaction_from_arrow(dir: &Path) -> Result<PhotonInteractio
         pair_production_total_xs,
         pair_production_nuclear_xs,
         pair_production_electron_xs,
-        heating_xs,
         coherent_int_form_factor,
         incoherent_form_factor,
         electron_pdf,

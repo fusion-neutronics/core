@@ -727,9 +727,8 @@ fn multi_cell_photon_transport_kernel(
                 // Macroscopic photon heating / KERMA XS, interpolated the
                 // SAME linear way as the component XS. The host array is
                 // built from the density-weighted per-element
-                // `ElementMicroXS.heating` (log-linear-interp-then-exp of
-                // the tabulated `heating_xs`), so this is a table +
-                // arithmetic match to the CPU `calculate_photon_xs().heating`.
+                // `ElementMicroXS.heating`, so this is an arithmetic match to
+                // the CPU `calculate_photon_xs().heating`.
                 let xh_lo = heating_xs_per_material[(mat_offset + idx_lo) as usize];
                 let xh_hi = heating_xs_per_material[(mat_offset + idx_hi) as usize];
                 let sigma_heating = xh_lo + (xh_hi - xh_lo) * frac;

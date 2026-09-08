@@ -171,9 +171,8 @@ pub fn extract_photon_material_xs(
                 pair += density * micro.pair_production;
                 // Density-weighted heating, mirroring CPU
                 // `Material::calculate_photon_xs`: `micro.heating` is
-                // the element's KERMA value (log-linear-interp of the
-                // tabulated `heating_xs` then `.exp()`, with the same
-                // physics fallback when the table is absent).
+                // the element's KERMA value, computed from the Compton,
+                // photoelectric and pair-production components.
                 heat += density * micro.heating;
                 // Per-element macro total -- the selection weight the kernel
                 // samples the interacting element from (task #72), mirroring

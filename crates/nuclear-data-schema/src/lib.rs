@@ -111,54 +111,15 @@ pub fn flat_section_for_path(path: &std::path::Path) -> Option<String> {
 ///
 /// `Ok(())` for an unknown section, so a caller can validate opportunistically
 /// without knowing whether a path is declared.
-/// Columns this schema used to declare and no longer does (issue #500).
-///
-/// [`check_batch`] runs on every read, so without this list a build carrying
-/// the current schema could not read one already-published file: every one of
-/// them still holds these columns. Retiring a column is therefore two changes,
-/// and this is the compatibility half. Entries stay until no supported data set
-/// carries them; a name here is accepted and ignored, never read.
-///
-/// Per section rather than global, because a retired name can still be a live
-/// column elsewhere: `energy` is gone from `element.arrow` and is load-bearing
-/// in `fast_xs.arrow` and `urr.arrow`.
-///
-/// Public because the converter's published-file parity tests need it too: a
-/// published file still carries these columns, so "what we write equals what
-/// is published" only holds once the retired names are subtracted. Asserting
-/// that against a second, hand-copied list is how the two drift apart.
-pub fn retired(section: &str) -> &'static [&'static str] {
-    match section {
-        "fast_xs.arrow" => &[
-            "n_energies",
-            "n_scatter_mts",
-            "n_fission_mts",
-            "scatter_mt_to_idx",
-            "fission_mt_to_idx",
-        ],
-        "element.arrow" => &[
-            "energy",
-            "ln_coherent_xs",
-            "ln_incoherent_xs",
-            "ln_photoelectric_xs",
-        ],
-        "nuclide.arrow" => &["metastable", "fissionable"],
-        "reactions.arrow" => &["n_products"],
-        _ => &[],
-    }
-}
-
 pub fn check_batch(section: &str, batch: &Schema) -> Result<(), String> {
     let Some(declared) = self::section(section) else {
         return Ok(());
     };
-    let retired = self::retired(section);
     let mut undeclared: Vec<&str> = batch
         .fields()
         .iter()
         .filter(|f| declared.field_with_name(f.name()).is_err())
         .map(|f| f.name().as_str())
-        .filter(|name| !retired.contains(name))
         .collect();
     undeclared.sort();
     if !undeclared.is_empty() {
@@ -530,7 +491,6 @@ pub fn element() -> Schema {
         f64s("photoelectric_xs", true),
         f64s("pair_production_nuclear_xs", true),
         f64s("pair_production_electron_xs", true),
-        f64s("heating_xs", true),
         f64s("coherent_int_ff_x", true),
         f64s("coherent_int_ff_y", true),
         f64s("coherent_ff_x", true),
@@ -542,7 +502,7 @@ pub fn element() -> Schema {
         f64s("incoherent_ff_x", true),
         f64s("incoherent_ff_y", true),
     ])
-    .with_metadata(meta([("filetype", "data_photon"), ("version", "4.0")]))
+    .with_metadata(meta([("filetype", "data_photon"), ("version", "5.0")]))
 }
 
 /// `fast_xs.arrow`

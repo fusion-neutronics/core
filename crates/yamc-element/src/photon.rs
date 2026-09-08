@@ -265,7 +265,6 @@ pub struct PhotonInteraction {
     pub pair_production_total_xs: Vec<f64>,
     pub pair_production_nuclear_xs: Vec<f64>,
     pub pair_production_electron_xs: Vec<f64>,
-    pub heating_xs: Vec<f64>,
 
     // ------------------------------------------------------------------
     // Form factors (Tabulated1D from reaction_product)
@@ -549,14 +548,16 @@ impl PhotonInteraction {
         // particles per unit flux.  Since yamc does not transport electrons or
         // positrons, all charged-particle kinetic energy is deposited locally.
         //
-        // Use tabulated heating XS from the Arrow data when available (computed by
-        // NJOY HEATR); otherwise fall back to physics-based calculation.
-        let heating_from_table = (self.heating_xs[i_grid]
-            + f * (self.heating_xs[i_grid + 1] - self.heating_xs[i_grid]))
-            .exp();
-        let heating = if heating_from_table > 0.0 {
-            heating_from_table
-        } else {
+        // Computed from the components rather than read from a table. There was
+        // a `heating_xs` column for an NJOY HEATR / ACE KERMA, but nothing could
+        // ever fill it: MT 525 reaches an `IncidentPhoton` only through the ACE
+        // route, and the converter is ENDF-only, where MF=23 has no MT 525. It
+        // was empty in all 261 published elements across endf-b8.1, fendl-3.2d
+        // and jendl-5.0, so this expression is what every run has always used.
+        // OpenMC's photon library has no heating dataset either, and OpenMC
+        // ignores the field when one is present: it scores photon heating by
+        // analog per-collision energy balance instead.
+        let heating = {
             // Compton (incoherent): average electron recoil energy from the
             // Klein-Nishina formula.  α = E / (m_e c²).
             // Average scattered photon energy:
@@ -1586,7 +1587,6 @@ mod tests {
         assert_eq!(fe.pair_production_total_xs.len(), n);
         assert_eq!(fe.pair_production_nuclear_xs.len(), n);
         assert_eq!(fe.pair_production_electron_xs.len(), n);
-        assert_eq!(fe.heating_xs.len(), n);
 
         // Coherent XS should have reasonable log values (not all -900)
         let non_trivial = fe.coherent_xs.iter().filter(|&&v| v > -900.0).count();
@@ -2387,8 +2387,7 @@ mod tests {
 
     #[test]
     fn photoelectric_heating_subtracts_transported_fluorescence() {
-        // End-to-end on Fe (whose fixture has no tabulated heating_xs, so the
-        // physics fallback runs): the photoelectric photon-KERMA coefficient must
+        // End-to-end on Fe: the photoelectric photon-KERMA coefficient must
         // subtract the fluorescence energy that atomic_relaxation banks and
         // transports, leaving it strictly below the old "full incident energy"
         // value wherever photoelectric contributes.
