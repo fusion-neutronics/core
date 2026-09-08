@@ -5834,7 +5834,7 @@ dependencies = [
 
 [[package]]
 name = "yamc-python"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "getrandom 0.3.4",
  "getrandom 0.4.2",
@@ -5962,7 +5962,7 @@ dependencies = [
 
 [[package]]
 name = "yani-python"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "endf",
  "pyo3",

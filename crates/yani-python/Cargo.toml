@@ -8,7 +8,7 @@ name = "yani-python"
 # transport converter says nothing about the inventory package. Bump it with
 # `cargo set-version -p yani-python <version>`.
 # See .github/workflows/ci-python.yml and docs/developer_info.md.
-version = "0.14.0"
+version = "0.15.0"
 edition = "2021"
 license = "MIT"
 description = "Python bindings for the transmutation stack: materials, nuclides, chains, irradiation schedules and inventories. Shared by the yamc and yani wheels."

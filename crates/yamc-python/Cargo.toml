@@ -12,7 +12,7 @@ name = "yamc-python"
 # `cargo set-version -p yamc-python <version>`, which updates Cargo.lock in the
 # same step -- and `verify-versions` refuses a number already on PyPI.
 # See .github/workflows/ci-python.yml and docs/developer_info.md.
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 license = "MIT"
 description = "Python bindings for yamc"
