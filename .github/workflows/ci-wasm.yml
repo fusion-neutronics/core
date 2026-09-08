@@ -44,7 +44,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/yamc
-          key: yamc-test-fixtures-endf-b8.1-v5
+          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs') }}
       - name: Fetch nuclear-data test fixtures
         run: python3 scripts/fetch_test_fixtures.py
       - name: Test compile
@@ -86,7 +86,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/yamc
-          key: yamc-test-fixtures-endf-b8.1-v5
+          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs') }}
       # The native tests drive `YaniSession` against real Arrow fixtures. They
       # skip themselves when the fixtures are absent rather than failing, so
       # without this step the job would pass while asserting nothing.

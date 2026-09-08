@@ -39,6 +39,7 @@ use arrow_ipc::CompressionType;
 use arrow_schema::{ArrowError, Schema};
 
 use endf::chain::Chain;
+use endf::decay::DecayInconsistency;
 use endf::{Decay, Material};
 
 /// The declared schema for a section, by its path in the format.
@@ -394,6 +395,10 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
 /// `data_version` identifies the published release rather than the code, and is
 /// what yamc compares a cached copy against (issue #366). It is supplied by the
 /// build: only the build knows whether a run is a new release or a resumed one.
+///
+/// `extra` is merged into the record: what one subsection has to say about
+/// itself beyond the common fields, such as which decay energies are
+/// placeholders.
 fn write_provenance(
     dir: &Path,
     subsection: &str,
@@ -401,8 +406,9 @@ fn write_provenance(
     decay_library: &str,
     data_version: &str,
     created_utc: &str,
+    extra: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<(), Box<dyn Error>> {
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "subsection": subsection,
         "library": library,
         // Always present, empty when the caller did not say, so a reader can
@@ -413,6 +419,11 @@ fn write_provenance(
         "converter_version": concat!("yani-convert ", env!("CARGO_PKG_VERSION")),
         "created_utc": created_utc,
     });
+    if let (Some(extra), Some(record)) = (extra, body.as_object_mut()) {
+        for (key, value) in extra {
+            record.insert(key.clone(), value.clone());
+        }
+    }
     std::fs::write(
         dir.join("provenance.json"),
         serde_json::to_string_pretty(&body)?,
@@ -509,6 +520,13 @@ pub struct Inputs<'a> {
     pub decay: &'a [Material],
     pub fpy: &'a [Material],
     pub neutron: &'a [Material],
+    /// Decay evaluations from a second library, read only to replace the
+    /// placeholder average decay energies in `decay` (see
+    /// `endf::chain::Chain::fill_placeholder_decay_energies`). Empty for no
+    /// fill, which leaves every number as `decay` gave it.
+    pub decay_fill: &'a [Material],
+    /// The library `decay_fill` came from, recorded per replaced nuclide.
+    pub decay_fill_library: &'a str,
 }
 
 /// Convert decay, fission yield and neutron evaluations into a transmutation
@@ -539,7 +557,17 @@ pub fn convert_transmutation(
     if let Some(path) = branch_ratios {
         apply_branch_ratios(&mut chain, path)?;
     }
+    let fill = if inputs.decay_fill.is_empty() {
+        None
+    } else {
+        Some(chain.fill_placeholder_decay_energies(inputs.decay_fill, inputs.decay_fill_library)?)
+    };
     let chain = chain;
+    let mut decay_record = decay_energy_record(&chain, fill.as_ref());
+    decay_record.insert(
+        "decay_inconsistencies".to_string(),
+        decay_inconsistency_record(decay),
+    );
     let sources = decay_sources(decay)?;
 
     std::fs::create_dir_all(out)?;
@@ -562,6 +590,7 @@ pub fn convert_transmutation(
             decay_library,
             data_version,
             created_utc,
+            (*subsection == "decay").then_some(&decay_record),
         )?;
     }
 
@@ -580,6 +609,97 @@ pub fn convert_transmutation(
     merge_manifest(out, provenance, subsections, &parents)?;
 
     Ok(chain)
+}
+
+/// What the decay subsection's provenance says about its average energies.
+///
+/// The placeholder records are listed by name rather than counted, because
+/// the question a reader asks is whether a nuclide carrying heat in their
+/// inventory is one of them, and a count cannot answer it. The list is bounded
+/// by the library (about a thousand names for ENDF/B-VIII.1), which a JSON
+/// sidecar carries without trouble.
+fn decay_energy_record(
+    chain: &Chain,
+    fill: Option<&endf::chain::DecayEnergyFill>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let placeholders: Vec<&str> = chain
+        .nuclides
+        .iter()
+        .filter(|n| n.decay_energy_source.as_deref() == Some(endf::chain::DECAY_ENERGY_PLACEHOLDER))
+        .map(|n| n.name.as_str())
+        .collect();
+    let mut record = serde_json::Map::new();
+    record.insert(
+        "decay_energy_placeholders".to_string(),
+        serde_json::json!({
+            "rule": "MT=457 light and electromagnetic average energies equal (Q/3 each), no evaluated decay scheme",
+            "count": placeholders.len(),
+            "nuclides": placeholders,
+        }),
+    );
+    if let Some(fill) = fill {
+        record.insert(
+            "decay_energy_fill".to_string(),
+            serde_json::json!({
+                "library": fill.library,
+                "replaced": fill.replaced.iter().map(|(name, before, after)| {
+                    serde_json::json!({"nuclide": name, "before_eV": before, "after_eV": after})
+                }).collect::<Vec<_>>(),
+                "half_life_mismatch": fill.half_life_mismatch,
+                "unfilled": fill.unfilled,
+            }),
+        );
+    }
+    record
+}
+
+/// What the decay records say that cannot be right, for the decay
+/// subsection's provenance.
+///
+/// One list per kind of [`endf::decay::DecayInconsistency`], every kind
+/// present so a reader indexes without guessing, and the records listed by
+/// name for the same reason the placeholders are: the question is whether one
+/// of the heat carriers in an inventory is on it. Nothing is corrected; the
+/// numbers written are the library's.
+fn decay_inconsistency_record(decay: &[Material]) -> serde_json::Value {
+    let mut by_kind: BTreeMap<&'static str, Vec<serde_json::Value>> = DecayInconsistency::LABELS
+        .iter()
+        .map(|&label| (label, Vec::new()))
+        .collect();
+    let mut count = 0;
+    for material in decay {
+        let Ok(d) = Decay::from_material(material) else {
+            continue;
+        };
+        if d.nuclide.atomic_number == 0 {
+            continue;
+        }
+        for finding in d.inconsistencies() {
+            let entry = match &finding {
+                DecayInconsistency::ZeroHalfLife => {
+                    serde_json::json!({"nuclide": d.nuclide.name})
+                }
+                DecayInconsistency::BranchingRatioSum { sum } => {
+                    serde_json::json!({"nuclide": d.nuclide.name, "sum": sum})
+                }
+                DecayInconsistency::IsomericTransitionEnergy { q, recoverable } => {
+                    serde_json::json!({
+                        "nuclide": d.nuclide.name,
+                        "q_eV": q,
+                        "recoverable_eV": recoverable,
+                    })
+                }
+            };
+            by_kind.entry(finding.label()).or_default().push(entry);
+            count += 1;
+        }
+    }
+    let mut record = serde_json::Map::new();
+    record.insert("count".to_string(), serde_json::json!(count));
+    for (kind, entries) in by_kind {
+        record.insert(kind.to_string(), serde_json::Value::Array(entries));
+    }
+    serde_json::Value::Object(record)
 }
 
 /// Split a reaction between a ground state and its metastable partners.
@@ -620,11 +740,16 @@ fn apply_branch_ratios(chain: &mut Chain, path: &Path) -> Result<(), Box<dyn Err
 /// `reactions` defaults to every reaction the chain builder knows rather than
 /// the short default set, because a network quietly missing channels is worse
 /// than a slower conversion.
+///
+/// `decay_fill_files` and `decay_fill_library` are the second decay library
+/// that replaces placeholder average energies; both empty for no fill.
 #[allow(clippy::too_many_arguments)]
 pub fn convert_transmutation_files(
     decay_files: &[String],
     fpy_files: &[String],
     neutron_files: &[String],
+    decay_fill_files: &[String],
+    decay_fill_library: &str,
     reactions: Option<&[String]>,
     branch_ratios: Option<&Path>,
     subsections: Option<&[String]>,
@@ -637,9 +762,18 @@ pub fn convert_transmutation_files(
             .map(|p| Material::from_file(p).map_err(|e| format!("{p}: {e}").into()))
             .collect()
     };
+    if !decay_fill_files.is_empty() && decay_fill_library.is_empty() {
+        return Err(
+            "decay_fill_files were given without decay_fill_library; the \
+                    replacements are recorded per nuclide under that name, so it \
+                    cannot be left blank"
+                .into(),
+        );
+    }
     let decay = read(decay_files)?;
     let fpy = read(fpy_files)?;
     let neutron = read(neutron_files)?;
+    let decay_fill = read(decay_fill_files)?;
 
     // Every reaction the chain builder knows, not endf::chain::DEFAULT_REACTIONS.
     // That short list is six names, and defaulting to it silently drops 2554 of
@@ -680,6 +814,8 @@ pub fn convert_transmutation_files(
             decay: &decay,
             fpy: &fpy,
             neutron: &neutron,
+            decay_fill: &decay_fill,
+            decay_fill_library,
         },
         &names,
         branch_ratios,
@@ -724,6 +860,7 @@ pub fn convert_branching_files(
         &provenance.decay_library,
         &provenance.data_version,
         &provenance.created_utc,
+        None,
     )?;
     let parents: Vec<String> = rows
         .iter()

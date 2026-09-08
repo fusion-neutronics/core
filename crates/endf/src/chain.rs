@@ -736,6 +736,14 @@ pub struct Nuclide {
     /// between them. `None` where the evaluation stated none, which is not
     /// zero.
     pub decay_energy_uncertainty: Option<f64>,
+    /// Where `decay_energy` came from: [`DECAY_ENERGY_EVALUATED`] for an
+    /// evaluated decay scheme, [`DECAY_ENERGY_PLACEHOLDER`] for the Q/3
+    /// stand-in some libraries write for nuclides nobody has evaluated (see
+    /// [`crate::decay::placeholder_mean_energies`]), or `filled:<library>`
+    /// after [`Chain::fill_placeholder_decay_energies`] replaced a placeholder
+    /// from another library. `None` for a stable nuclide, which has no decay
+    /// energy to source.
+    pub decay_energy_source: Option<String>,
     pub decay_modes: Vec<DecayPath>,
     pub reactions: Vec<ReactionPath>,
     /// Fission yields by incident energy in eV. Empty when the nuclide does
@@ -820,9 +828,89 @@ pub struct Chain {
     pub nuclides: Vec<Nuclide>,
 }
 
+/// `decay_energy_source` of a nuclide whose average energies were evaluated.
+pub const DECAY_ENERGY_EVALUATED: &str = "evaluation";
+/// `decay_energy_source` of a nuclide carrying the Q/3 placeholder.
+pub const DECAY_ENERGY_PLACEHOLDER: &str = "placeholder";
+
+/// What [`Chain::fill_placeholder_decay_energies`] did, nuclide by nuclide.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DecayEnergyFill {
+    /// The library the replacements came from.
+    pub library: String,
+    /// Placeholders replaced: `(nuclide, before, after)` in eV.
+    pub replaced: Vec<(String, f64, f64)>,
+    /// Placeholders left alone because the other library's record for the
+    /// same name has a half-life more than a quarter away from this one's, so
+    /// it may describe a different isomer: libraries do not agree on which of
+    /// two close-lying isomers is `m1`.
+    pub half_life_mismatch: Vec<String>,
+    /// Placeholders the other library could not improve on: absent there, or
+    /// a placeholder there too.
+    pub unfilled: Vec<String>,
+}
+
 impl Chain {
     pub fn new() -> Chain {
         Chain::default()
+    }
+
+    /// Replace placeholder average decay energies with another library's
+    /// evaluated ones.
+    ///
+    /// Only the mean decay energy and its uncertainty move; the half-life and
+    /// the decay modes stay as this chain's own library gave them, since the
+    /// placeholder records carry evaluated half-lives and the point is to
+    /// change as little as possible. A replacement is taken only where the
+    /// other library has a real decay scheme for the same nuclide name and a
+    /// half-life within 25% of this one's, and each nuclide's
+    /// `decay_energy_source` records what happened. `library` names the fill
+    /// in that record and in the returned report.
+    pub fn fill_placeholder_decay_energies(
+        &mut self,
+        fill: &[Material],
+        library: &str,
+    ) -> Result<DecayEnergyFill> {
+        let mut other: BTreeMap<String, Decay> = BTreeMap::new();
+        for material in fill {
+            let data = Decay::from_material(material)?;
+            other.insert(data.nuclide.name.clone(), data);
+        }
+
+        let mut report = DecayEnergyFill {
+            library: library.to_string(),
+            ..Default::default()
+        };
+        for nuclide in &mut self.nuclides {
+            if nuclide.decay_energy_source.as_deref() != Some(DECAY_ENERGY_PLACEHOLDER) {
+                continue;
+            }
+            let candidate = other.get(&nuclide.name).filter(|d| {
+                !d.nuclide.stable && !d.mean_energy_placeholder && d.decay_energy().0 > 0.0
+            });
+            let Some(candidate) = candidate else {
+                report.unfilled.push(nuclide.name.clone());
+                continue;
+            };
+            let same_state = match (nuclide.half_life, candidate.half_life) {
+                (Some(ours), Some((theirs, _))) if ours > 0.0 && theirs > 0.0 => {
+                    (theirs / ours - 1.0).abs() <= 0.25
+                }
+                _ => false,
+            };
+            if !same_state {
+                report.half_life_mismatch.push(nuclide.name.clone());
+                continue;
+            }
+            let (energy, sigma) = candidate.decay_energy();
+            report
+                .replaced
+                .push((nuclide.name.clone(), nuclide.decay_energy, energy));
+            nuclide.decay_energy = energy;
+            nuclide.decay_energy_uncertainty = (sigma > 0.0).then_some(sigma);
+            nuclide.decay_energy_source = Some(format!("filled:{library}"));
+        }
+        Ok(report)
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -921,6 +1009,14 @@ impl Chain {
                 let (energy, energy_sigma) = data.decay_energy();
                 nuclide.decay_energy = energy;
                 nuclide.decay_energy_uncertainty = (energy_sigma > 0.0).then_some(energy_sigma);
+                nuclide.decay_energy_source = Some(
+                    if data.mean_energy_placeholder {
+                        DECAY_ENERGY_PLACEHOLDER
+                    } else {
+                        DECAY_ENERGY_EVALUATED
+                    }
+                    .to_string(),
+                );
 
                 let mut ratios: Vec<f64> = Vec::new();
                 let mut ids: Vec<(String, Option<String>)> = Vec::new();

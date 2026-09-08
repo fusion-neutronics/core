@@ -126,6 +126,10 @@ pub type IsomerTable = BTreeMap<(i64, i64), BTreeMap<i64, Isomer>>;
 struct RawIsomer {
     lis: i64,
     half_life: Option<f64>,
+    /// The excitation energy the file's own header states (MF=1 MT=451
+    /// ELIS), when it states one. Zero there means unknown, not the ground
+    /// state: the header of a metastable file is describing that isomer.
+    elis: Option<f64>,
     /// Q value of the isomeric-transition decay mode, when there is one.
     it_q: Option<f64>,
     /// The isomeric state that transition leaves behind.
@@ -139,9 +143,12 @@ struct RawIsomer {
 /// nuclide needs the excitation energies of the isomers, which is what decay
 /// data provides.
 ///
-/// Each isomer's absolute excitation energy is recovered from the Q value of
-/// its isomeric-transition decay mode (RTYP = 3), chained through that mode's
-/// final isomeric state down to lower isomers.
+/// Each isomer's absolute excitation energy is the one its decay file states
+/// in the MF=1 MT=451 header (ELIS), which 624 of ENDF/B-VIII.1's 738
+/// metastable files give. Where the header says nothing the energy is
+/// recovered from the Q value of the isomeric-transition decay mode
+/// (RTYP = 3), chained through that mode's final isomeric state down to lower
+/// isomers; a pure-beta isomer with no stated energy has none.
 ///
 /// Only the metastable files are needed; ground states are implicit.
 pub fn isomer_table<I, P>(decay_files: I) -> Result<IsomerTable>
@@ -171,55 +178,136 @@ pub fn isomer_table_from_materials(materials: &[Material]) -> IsomerTable {
         // The first isomeric transition is the one that fixes the energy; a
         // second would describe the same level.
         let it = section.modes.iter().find(|m| m.rtyp == 3.0);
+        let elis = material
+            .mf1_mt451()
+            .map(|header| header.elis)
+            .filter(|&e| e > 0.0);
 
         raw.entry((z, a)).or_default().insert(
             section.liso,
             RawIsomer {
                 lis: section.lis,
                 half_life: section.half_life.map(|(v, _)| v),
+                elis,
                 it_q: it.map(|m| m.q.0),
                 it_rfs: it.map_or(0, |m| m.rfs as i64),
             },
         );
     }
 
-    let mut table = IsomerTable::new();
-    for (za, isomers) in raw {
-        // Energies resolved so far, which the chaining reads back.
-        let mut resolved: BTreeMap<i64, f64> = BTreeMap::from([(0, 0.0)]);
-        let mut out = BTreeMap::new();
-        for (&liso, info) in &isomers {
-            let energy = if liso == 0 {
-                Some(0.0)
-            } else {
-                info.it_q
-                    .map(|q| q + resolved.get(&info.it_rfs).copied().unwrap_or(0.0))
-            };
-            resolved.insert(liso, energy.unwrap_or(0.0));
-            out.insert(
-                liso,
-                Isomer {
-                    lis: info.lis,
-                    half_life: info.half_life,
-                    e_iso: energy,
-                },
-            );
-        }
-        table.insert(za, out);
+    raw.into_iter()
+        .map(|(za, isomers)| (za, chain_isomer_energies(&isomers)))
+        .collect()
+}
+
+/// The absolute excitation energy of each isomer of one nuclide.
+///
+/// The header's ELIS is taken as stated. Without it, an isomer's energy is the
+/// Q of its transition plus the energy of the state that transition lands on,
+/// so the states are walked from the lowest ordinal up and each one reads
+/// back what was resolved before it. A state whose transition lands on a state
+/// of unknown energy, or whose transition carries no Q at all, has an unknown
+/// energy too: `None`, not the bare Q. Booking the bare Q used to put In116's
+/// second isomer at 162 keV (its 290 keV transition lands on the pure-beta
+/// first isomer), and a wrong energy is worse than a missing one, because a
+/// production level that happens to sit near 162 keV then matches it.
+fn chain_isomer_energies(isomers: &BTreeMap<i64, RawIsomer>) -> BTreeMap<i64, Isomer> {
+    let mut resolved: BTreeMap<i64, Option<f64>> = BTreeMap::from([(0, Some(0.0))]);
+    let mut out = BTreeMap::new();
+    for (&liso, info) in isomers {
+        let energy = if liso == 0 {
+            Some(0.0)
+        } else if info.elis.is_some() {
+            info.elis
+        } else {
+            match (info.it_q, resolved.get(&info.it_rfs).copied().flatten()) {
+                (Some(q), Some(base)) if q > 0.0 => Some(q + base),
+                _ => None,
+            }
+        };
+        resolved.insert(liso, energy);
+        out.insert(
+            liso,
+            Isomer {
+                lis: info.lis,
+                half_life: info.half_life,
+                e_iso: energy,
+            },
+        );
     }
-    table
+    out
 }
 
 /// Default tolerance in eV for matching a level energy to an isomer energy.
 pub const ISOMER_ENERGY_TOLERANCE: f64 = 3000.0;
 
+/// Relative tolerance of the second, looser energy pass.
+///
+/// A production level and the decay data can place the same isomer some way
+/// apart when they descend from different level schemes: TENDL-2017 puts the
+/// 5.5 s isomer of Ir191 at 2201 keV where ENDF/B-VIII.1's transition energies
+/// put it at 2046 keV. Within a tenth of the isomer's own energy, and with no
+/// other isomer that close, it is the same state.
+pub const ISOMER_ENERGY_RELATIVE_TOLERANCE: f64 = 0.10;
+
+/// How a production level was matched to an isomeric state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LevelRoute {
+    /// The ground state: level 0, no energy given, or below a keV.
+    Ground,
+    /// The decay data has no metastable state for this nuclide.
+    NoIsomers,
+    /// The energy matched an isomer within [`ISOMER_ENERGY_TOLERANCE`].
+    Energy,
+    /// No isomer within the absolute tolerance, but exactly one within
+    /// [`ISOMER_ENERGY_RELATIVE_TOLERANCE`] of its own energy.
+    NearEnergy,
+    /// The level index equals an isomer's LIS.
+    LevelIndex,
+    /// The nuclide has one isomer, so the level can only mean that one.
+    SingleIsomer,
+    /// Nothing matched; the level is taken to cascade to ground.
+    Unresolved,
+}
+
+impl LevelRoute {
+    /// The route as a short label, for statistics keyed by name.
+    pub fn label(self) -> &'static str {
+        match self {
+            LevelRoute::Ground => "ground",
+            LevelRoute::NoIsomers => "no_isomers",
+            LevelRoute::Energy => "energy",
+            LevelRoute::NearEnergy => "near_energy",
+            LevelRoute::LevelIndex => "level_index",
+            LevelRoute::SingleIsomer => "single_isomer",
+            LevelRoute::Unresolved => "unresolved",
+        }
+    }
+}
+
+/// A production level resolved to an isomeric state, and how.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedLevel {
+    /// The isomeric-state ordinal; 0 is the ground state.
+    pub liso: i64,
+    pub route: LevelRoute,
+    /// The isomer the level index pointed at, when the energy picked another.
+    /// The two signals come from two level schemes and can disagree, as they
+    /// do for Pm152, where the 150 keV level carries the first isomer's index
+    /// and the second isomer's transition energy; the caller is told rather
+    /// than left to trust whichever won.
+    pub conflicting_liso: Option<i64>,
+}
+
 /// Map a production level to an isomeric-state ordinal.
 ///
 /// The ground state maps to 0. Otherwise the level's excitation energy is
-/// matched against the isomer energies in `table`; failing that, the level
-/// index is compared against LIS; failing that, a nuclide with exactly one
-/// isomer maps to it. A level that resolves to none of these is treated as
-/// ground, on the basis that a short-lived level gamma-cascades down.
+/// matched against the isomer energies in `table`, first within `tol_ev` and
+/// then, for a single candidate, within a tenth of the isomer's energy;
+/// failing that, the level index is compared against LIS; failing that, a
+/// nuclide with exactly one isomer maps to it. A level that resolves to none
+/// of these is treated as ground, on the basis that a short-lived level
+/// gamma-cascades down. [`resolve_level`] says which of these happened.
 pub fn level_to_isomeric_state(
     z: i64,
     a: i64,
@@ -228,22 +316,46 @@ pub fn level_to_isomeric_state(
     table: &IsomerTable,
     tol_ev: f64,
 ) -> i64 {
+    resolve_level(z, a, lfs, excitation_energy, table, tol_ev).liso
+}
+
+/// As [`level_to_isomeric_state`], with the route taken and any conflict.
+pub fn resolve_level(
+    z: i64,
+    a: i64,
+    lfs: i64,
+    excitation_energy: Option<f64>,
+    table: &IsomerTable,
+    tol_ev: f64,
+) -> ResolvedLevel {
+    let resolved = |liso, route| ResolvedLevel {
+        liso,
+        route,
+        conflicting_liso: None,
+    };
     let Some(isomers) = table.get(&(z, a)) else {
-        return 0;
+        return resolved(0, LevelRoute::NoIsomers);
     };
     let metastable: Vec<(&i64, &Isomer)> = isomers.iter().filter(|(&liso, _)| liso > 0).collect();
     if metastable.is_empty() {
-        return 0;
+        return resolved(0, LevelRoute::NoIsomers);
     }
     // A level below a keV is not a metastable state; nor is the ground state,
     // whatever energy it is given.
-    match excitation_energy {
-        _ if lfs == 0 => return 0,
-        None => return 0,
-        Some(e) if e < 1000.0 => return 0,
-        Some(_) => {}
-    }
-    let excitation_energy = excitation_energy.unwrap_or(0.0);
+    let excitation_energy = match excitation_energy {
+        _ if lfs == 0 => return resolved(0, LevelRoute::Ground),
+        None => return resolved(0, LevelRoute::Ground),
+        Some(e) if e < 1000.0 => return resolved(0, LevelRoute::Ground),
+        Some(e) => e,
+    };
+
+    // What the level index says, read once: it decides the third step and
+    // qualifies the first two.
+    let by_index = metastable
+        .iter()
+        .find(|(_, isomer)| isomer.lis == lfs)
+        .map(|(&liso, _)| liso);
+    let conflict = |liso: i64| by_index.filter(|&other| other != liso);
 
     // 1. The energy match against the decay isomer energies.
     let mut best: Option<(i64, f64)> = None;
@@ -258,24 +370,45 @@ pub fn level_to_isomeric_state(
     }
     if let Some((liso, residual)) = best {
         if residual <= tol_ev {
-            return liso;
+            return ResolvedLevel {
+                liso,
+                route: LevelRoute::Energy,
+                conflicting_liso: conflict(liso),
+            };
         }
+    }
+
+    // 1b. The looser pass: one isomer, and only one, within a tenth of its
+    // own energy.
+    let near: Vec<i64> = metastable
+        .iter()
+        .filter(|(_, isomer)| {
+            isomer.e_iso.is_some_and(|e_iso| {
+                (excitation_energy - e_iso).abs() <= ISOMER_ENERGY_RELATIVE_TOLERANCE * e_iso
+            })
+        })
+        .map(|(&liso, _)| liso)
+        .collect();
+    if let [liso] = near[..] {
+        return ResolvedLevel {
+            liso,
+            route: LevelRoute::NearEnergy,
+            conflicting_liso: conflict(liso),
+        };
     }
 
     // 2. The level index.
-    for (&liso, isomer) in &metastable {
-        if isomer.lis == lfs {
-            return liso;
-        }
+    if let Some(liso) = by_index {
+        return resolved(liso, LevelRoute::LevelIndex);
     }
 
     // 3. A nuclide with one isomer can only mean that one.
-    if metastable.len() == 1 {
-        return *metastable[0].0;
+    if let [(&liso, _)] = metastable[..] {
+        return resolved(liso, LevelRoute::SingleIsomer);
     }
 
     // 4. Unresolved, so cascade to ground.
-    0
+    resolved(0, LevelRoute::Unresolved)
 }
 
 #[cfg(test)]
@@ -393,10 +526,8 @@ mod tests {
     fn a_level_index_resolves_what_energy_cannot() {
         let table = two_isomers();
         // Far from either isomer energy, but the level index says which.
-        assert_eq!(
-            level_to_isomeric_state(95, 242, 2, Some(9.0e6), &table, ISOMER_ENERGY_TOLERANCE),
-            2
-        );
+        let level = resolve_level(95, 242, 2, Some(9.0e6), &table, ISOMER_ENERGY_TOLERANCE);
+        assert_eq!((level.liso, level.route), (2, LevelRoute::LevelIndex));
         // Neither energy nor index matches, and there are two isomers, so the
         // level is taken to cascade to ground.
         assert_eq!(
@@ -441,14 +572,163 @@ mod tests {
 
         assert_eq!(in116[&1].lis, 1);
         assert_eq!(in116[&1].half_life, Some(3257.4));
-        // Pure beta-, so the energy is unknown rather than zero.
-        assert_eq!(in116[&1].e_iso, None);
+        // Pure beta-, so no transition to measure the energy by; the header
+        // states it.
+        assert_eq!(in116[&1].e_iso, Some(127_267.0));
 
         assert_eq!(in116[&2].lis, 4);
         assert_eq!(in116[&2].half_life, Some(2.18));
-        // Its isomeric transition goes to state 1, whose energy is unknown and
-        // so contributes nothing; the Q value stands alone.
-        assert_eq!(in116[&2].e_iso, Some(162_393.0));
+        // The header's 289.66 keV. Chaining its 162 keV transition through
+        // the first isomer would give 289.66 keV too, now that the first
+        // isomer's energy is known, and used to give 162 keV.
+        assert_eq!(in116[&2].e_iso, Some(289_660.0));
+    }
+
+    /// Without a header energy the transitions are chained; with one it wins,
+    /// and it feeds the chaining of the states above it.
+    #[test]
+    fn a_stated_excitation_energy_is_taken_over_the_chained_one() {
+        let raw = |lis, elis: Option<f64>, it_q: Option<f64>, it_rfs| RawIsomer {
+            lis,
+            half_life: Some(1.0),
+            elis,
+            it_q,
+            it_rfs,
+        };
+        let isomers = BTreeMap::from([
+            // A pure-beta isomer whose header states 127 keV.
+            (1, raw(1, Some(127_267.0), None, 0)),
+            // Its header is silent; the transition to state 1 is chained.
+            (2, raw(4, None, Some(162_393.0), 1)),
+            // The header disagrees with the chain, and the header wins.
+            (3, raw(5, Some(500_000.0), Some(100_000.0), 2)),
+        ]);
+        let out = chain_isomer_energies(&isomers);
+        assert_eq!(out[&1].e_iso, Some(127_267.0));
+        assert_eq!(out[&2].e_iso, Some(289_660.0));
+        assert_eq!(out[&3].e_iso, Some(500_000.0));
+    }
+
+    /// The chaining, on its own: a transition to a resolved state adds up, a
+    /// transition to an unknown one or with no Q gives an unknown energy.
+    #[test]
+    fn isomer_energies_chain_only_through_known_states() {
+        let raw = |lis, it_q: Option<f64>, it_rfs| RawIsomer {
+            lis,
+            half_life: Some(1.0),
+            elis: None,
+            it_q,
+            it_rfs,
+        };
+        let isomers = BTreeMap::from([
+            (1, raw(1, Some(48_600.0), 0)),
+            (2, raw(2, Some(2_000_000.0), 1)),
+            (3, raw(3, None, 0)),
+            (4, raw(4, Some(100_000.0), 3)),
+            (5, raw(5, Some(0.0), 0)),
+        ]);
+        let out = chain_isomer_energies(&isomers);
+        assert_eq!(out[&1].e_iso, Some(48_600.0));
+        assert_eq!(out[&2].e_iso, Some(2_048_600.0));
+        // Pure beta: nothing to measure the energy by.
+        assert_eq!(out[&3].e_iso, None);
+        // Lands on a state of unknown energy.
+        assert_eq!(out[&4].e_iso, None);
+        // A transition the evaluation gave no Q for.
+        assert_eq!(out[&5].e_iso, None);
+    }
+
+    /// Ir191 as TENDL-2017 and ENDF/B-VIII.1 describe it: the production level
+    /// at 2201 keV is the 5.5 s isomer the decay data puts at 2046 keV.
+    #[test]
+    fn a_lone_isomer_within_a_tenth_of_its_energy_is_taken() {
+        let table = IsomerTable::from([(
+            (77, 191),
+            BTreeMap::from([
+                (
+                    1,
+                    Isomer {
+                        lis: 1,
+                        half_life: Some(4.94),
+                        e_iso: Some(171_290.0),
+                    },
+                ),
+                (
+                    2,
+                    Isomer {
+                        lis: 2,
+                        half_life: Some(5.5),
+                        e_iso: Some(2_046_000.0),
+                    },
+                ),
+            ]),
+        )]);
+        let level = resolve_level(
+            77,
+            191,
+            30,
+            Some(2_201_000.0),
+            &table,
+            ISOMER_ENERGY_TOLERANCE,
+        );
+        assert_eq!(level.liso, 2);
+        assert_eq!(level.route, LevelRoute::NearEnergy);
+        assert_eq!(level.conflicting_liso, None);
+        // Twice the energy is not the same state.
+        let level = resolve_level(
+            77,
+            191,
+            30,
+            Some(4_000_000.0),
+            &table,
+            ISOMER_ENERGY_TOLERANCE,
+        );
+        assert_eq!((level.liso, level.route), (0, LevelRoute::Unresolved));
+    }
+
+    /// Pm152 as the two libraries describe it: the level index says the first
+    /// isomer, the transition energy says the second. The energy wins, as it
+    /// always did, and the disagreement is reported.
+    #[test]
+    fn a_level_index_pointing_elsewhere_is_reported() {
+        let table = IsomerTable::from([(
+            (61, 152),
+            BTreeMap::from([
+                (
+                    1,
+                    Isomer {
+                        lis: 4,
+                        half_life: Some(451.2),
+                        e_iso: None,
+                    },
+                ),
+                (
+                    2,
+                    Isomer {
+                        lis: 2,
+                        half_life: Some(828.0),
+                        e_iso: Some(150_000.0),
+                    },
+                ),
+            ]),
+        )]);
+        let level = resolve_level(61, 152, 4, Some(150_000.0), &table, ISOMER_ENERGY_TOLERANCE);
+        assert_eq!(level.liso, 2);
+        assert_eq!(level.route, LevelRoute::Energy);
+        assert_eq!(level.conflicting_liso, Some(1));
+        // The 350 keV level matches nothing and has no index match either.
+        let level = resolve_level(
+            61,
+            152,
+            10,
+            Some(350_000.0),
+            &table,
+            ISOMER_ENERGY_TOLERANCE,
+        );
+        assert_eq!((level.liso, level.route), (0, LevelRoute::Unresolved));
+        // Agreement is not a conflict.
+        let level = resolve_level(61, 152, 2, Some(150_000.0), &table, ISOMER_ENERGY_TOLERANCE);
+        assert_eq!(level.conflicting_liso, None);
     }
 
     #[test]

@@ -47,6 +47,22 @@ use pyo3_stub_gen::derive::gen_stub_pyfunction;
 /// reactions : list[str], optional
 ///     Reaction names to follow. Defaults to every reaction the chain builder
 ///     knows, not the six-name short set, so nothing is silently left out.
+/// decay_fill_files : list[str], optional
+///     Decay evaluations from a second library, read only to replace the
+///     placeholder average decay energies in ``decay_files``. Some libraries
+///     write a stand-in for nuclides nobody has evaluated: a third of each
+///     beta or electron-capture branch's Q to the light particles and a third
+///     to the photons, which for an electron-capture emitter can be several
+///     times the recoverable energy (Sn111 in ENDF/B-VIII.1 is 1.63 MeV per
+///     decay against 0.69 MeV from its decay scheme). A placeholder is
+///     replaced only where the second library has an evaluated decay scheme
+///     for the same nuclide with a half-life within 25% of the first's.
+///     Half-lives and decay modes are never touched. The decay subsection's
+///     ``provenance.json`` lists every placeholder and every replacement,
+///     with or without a fill.
+/// decay_fill_library : str, optional
+///     The library ``decay_fill_files`` came from, e.g. ``"jendl-5.0"``.
+///     Required with ``decay_fill_files``.
 ///
 /// Returns
 /// -------
@@ -66,6 +82,8 @@ use pyo3_stub_gen::derive::gen_stub_pyfunction;
     reactions = None,
     branch_ratios = None,
     subsections = None,
+    decay_fill_files = Vec::new(),
+    decay_fill_library = "",
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn convert_transmutation(
@@ -80,6 +98,8 @@ pub fn convert_transmutation(
     reactions: Option<Vec<String>>,
     branch_ratios: Option<&str>,
     subsections: Option<Vec<String>>,
+    decay_fill_files: Vec<String>,
+    decay_fill_library: &str,
 ) -> PyResult<usize> {
     // Which inputs are required depends on what is being written. A caller
     // asking only for the reaction topology, to graft onto decay data from
@@ -119,6 +139,8 @@ pub fn convert_transmutation(
         &decay_files,
         &fpy_files,
         &neutron_files,
+        &decay_fill_files,
+        decay_fill_library,
         reactions.as_deref(),
         branch_ratios.map(PathBuf::from).as_deref(),
         subsections.as_deref(),
@@ -159,7 +181,15 @@ pub fn convert_transmutation(
 /// -------
 /// dict
 ///     Coverage: parents read, parents with data, curves linearized, duplicate
-///     groups merged, and the metastable targets found.
+///     groups merged, the metastable targets found, ``level_routes`` (how many
+///     excited production levels were matched to an isomer by energy, by
+///     energy within a tenth, by level index, as the only isomer, or not at
+///     all) and ``flagged_levels`` (one line per level that was unresolved,
+///     matched only by the looser energy pass, or matched by energy while its
+///     level index pointed at another isomer), and ``partial_sum_mismatches``
+///     (one line per reaction whose MF=10 partial cross sections do not sum to
+///     its MF=3 total, or whose MF=9 yields do not sum to one, within two
+///     percent below 20 MeV).
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
@@ -216,6 +246,9 @@ pub fn convert_branching(
     out.set_item("linearized_curves", stats.linearized_curves)?;
     out.set_item("merged_duplicate_groups", stats.merged_duplicate_groups)?;
     out.set_item("metastable_targets", stats.metastable_targets)?;
+    out.set_item("level_routes", stats.level_routes)?;
+    out.set_item("flagged_levels", stats.flagged_levels)?;
+    out.set_item("partial_sum_mismatches", stats.partial_sum_mismatches)?;
     Ok(out.unbind())
 }
 

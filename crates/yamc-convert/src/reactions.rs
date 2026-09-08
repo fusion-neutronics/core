@@ -108,10 +108,20 @@ pub fn write_reactions(data: &IncidentNeutron, dir: &Path) -> Result<(), Box<dyn
 
     // Then the redundant sums the evaluation did not carry. A synthesized MT is
     // defined on the whole grid, so its threshold index is zero everywhere.
-    let mut synthetic_mts = synthesis::SYNTHETIC_MTS;
-    synthetic_mts.sort_unstable();
-    for mt in synthetic_mts {
+    //
+    // SYNTHETIC_MTS is maintained in ascending order, so the rows come out
+    // ordered without sorting here.
+    for mt in synthesis::SYNTHETIC_MTS {
         if data.reactions.contains_key(&mt) {
+            continue;
+        }
+        // Nothing synthesized this MT, which is what an evaluation with no
+        // nuclide grid looks like: the loop above skipped every temperature, so
+        // a row written here would carry an empty cross section at every one of
+        // them. The loader skips its grid length check in exactly that
+        // situation (nuclide_arrow.rs:496), so the row would load as a reaction
+        // that resolves to a name and carries nothing (issue #12).
+        if !synthesized.values().any(|per_mt| per_mt.contains_key(&mt)) {
             continue;
         }
         let xs_values: Vec<Vec<f64>> = temperatures

@@ -68,11 +68,15 @@ fn padding_a_spectrum_with_empty_groups_changes_no_bits() {
 
     // CCFE-709, with flux in three groups spread across the structure and
     // nothing anywhere else -- the shape a monoenergetic or few-line source has.
+    // The highest is the last group wholly under 20 MeV, where the ENDF/B-VIII.1
+    // evaluation ends: a group above it carries no cross section and so no rate,
+    // which would leave the threshold channels with nothing to compare.
     let boundaries = yamc_nuclide::group_structures::get_group_structure("CCFE-709")
         .expect("CCFE-709")
         .to_vec();
     let n = boundaries.len() - 1;
-    let carrying = [12usize, 400, n - 2];
+    let top = boundaries.iter().rposition(|&e| e <= 2.0e7).unwrap() - 1;
+    let carrying = [12usize, 400, top];
     let mut padded = vec![0.0; n];
     for (i, &g) in carrying.iter().enumerate() {
         padded[g] = (i + 1) as f64;

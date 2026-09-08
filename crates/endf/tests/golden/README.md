@@ -127,6 +127,7 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 | `n-095_Am_244` | MF1 (incl. MT458), MF2 LRF=0, MF3, MF4, MF5 LF=7 |
 | `n-095_Am_242_trimmed` | MF1, a metastable target |
 | `n-049_In-115_trimmed` | MF3, MF8, MF9, MF10: isomer production |
+| `n-077_Ir_191_trimmed` | MF1, MF3 (incl. MT3), MF8, MF9, MF10: TENDL-2017 (n,2n) partials that sum to less than MF3 |
 | `n-054_Xe_136_trimmed` | MF1, MF3 |
 | `n-003_Li_006_trimmed` | MF6 LAW=2 and LAW=4, MF12, MF14, MF33 |
 | `n-026_Fe_056_trimmed` | MF2 Reich-Moore, MF6 LAW=1, MF12/14, MF33 |
@@ -138,6 +139,7 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 | `dec-049_In_116m1` | MF8 MT=457 decay data: four spectra, beta- only |
 | eight more `dec-*` | The decay evaluations that close the chain fixture |
 | `dec-049_In_116m2` | MF8 MT=457 decay data: an isomeric transition down to m1 |
+| `dec-072_Hf_177m1` | MF8 MT=457 decay data: an isomeric transition whose average energies exceed its Q |
 | `Li6.ace` | An ACE Type 1 table; AND in all three shapes, DLW laws 3, 33 and 44, 15 reactions with photon production |
 | `synthetic-urr.ace` | The unresolved resonance block, which no small real table has |
 | `synthetic-laws.ace` | DLW laws 2, 4, 7, 9, 11, 61 and 66 |

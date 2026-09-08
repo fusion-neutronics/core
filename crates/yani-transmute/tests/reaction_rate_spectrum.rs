@@ -185,12 +185,17 @@ fn a_group_with_no_flux_carries_no_rate() {
     let boundaries = ccfe_709();
     let n = boundaries.len() - 1;
     // Flux in three groups and nothing anywhere else, which is the shape a
-    // few-line source has.
-    let carrying = [12usize, 400, n - 2];
+    // few-line source has. The highest of the three is the last group that
+    // lies wholly under 20 MeV, where the ENDF/B-VIII.1 evaluation ends:
+    // CCFE-709 runs on to 1 GeV, and a group past the evaluation's last point
+    // carries flux but no cross section, so it carries no rate by design.
+    let top = boundaries.iter().rposition(|&e| e <= 2.0e7).unwrap() - 1;
+    let carrying = [12usize, 400, top];
     let mut flux = vec![0.0; n];
     for (i, &g) in carrying.iter().enumerate() {
         flux[g] = (i + 1) as f64;
     }
+    flux[n - 2] = 1.0;
 
     let terms = reaction_rate_spectrum(
         &iron(&data),
@@ -206,6 +211,11 @@ fn a_group_with_no_flux_carries_no_rate() {
     for (g, &term) in terms.iter().enumerate() {
         if carrying.contains(&g) {
             assert!(term > 0.0, "group {g} carries flux and must carry rate");
+        } else if g == n - 2 {
+            assert_eq!(
+                term, 0.0,
+                "group {g} lies above the evaluation and must carry no rate"
+            );
         } else {
             assert_eq!(
                 term, 0.0,
