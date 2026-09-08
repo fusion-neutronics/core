@@ -782,38 +782,51 @@ impl PyTransmutationResults {
     /// section or to a branching ratio, which are different data and different
     /// fixes.
     ///
+    /// Channels come back ordered by production, the channel's rate times its
+    /// parent's atom density at the start of the step. A rate on its own is per
+    /// atom of the parent, so ordering on it promotes whatever sits on a trace
+    /// isotope: on an FNS tungsten foil ``W180(n,2n)`` has the highest per-atom
+    /// rate of any channel in the foil, and W180 is 0.12% of it, so by what it
+    /// made the channel falls to fifth, two orders of magnitude below the
+    /// ``W186(n,2n)`` carrying most of that foil's decay heat.
+    ///
     /// Args:
     ///     material_id: Material ID number.
     ///     step: Schedule step index, the same index ``get_reaction_rates``
     ///         takes, which is one less than the composition getters' step.
     ///
     /// Returns:
-    ///     dict[str, dict[str, list[tuple[str, float]]]] | None: parent ->
-    ///     reaction kind -> [(target, fraction)], fractions summing to one and
-    ///     ordered with the largest first. Empty for a decay-only step, and
-    ///     None if the material or the step is unknown.
+    ///     list[dict] | None: one entry per splitting channel, most produced
+    ///     first, each with ``parent``, ``reaction``, ``production`` and
+    ///     ``split``. ``split`` is [(target, fraction)] summing to one and
+    ///     ordered with the largest share first. Empty for a decay-only step,
+    ///     and None if the material or the step is unknown. A parent absent
+    ///     from the step's starting composition has production 0.0 and sorts
+    ///     last rather than being dropped.
     ///
     /// Examples:
-    ///     >>> results.get_isomeric_branching(material_id=1, step=0)["W186"]
-    ///     {'(n,2n)': [('W185_m1', 0.535), ('W185', 0.465)]}
+    ///     >>> results.get_isomeric_branching(material_id=1, step=0)[0]
+    ///     {'parent': 'W186', 'reaction': '(n,2n)', 'production': 9.35e-14,
+    ///      'split': [('W185_m1', 0.535), ('W185', 0.465)]}
     fn get_isomeric_branching(
         &self,
         py: Python<'_>,
         material_id: u32,
         step: usize,
     ) -> Option<Py<PyAny>> {
-        let split = self.inner.get_isomeric_branching(material_id, step)?;
-        let out = PyDict::new(py);
-        for (parent, kinds) in &split {
-            let per_kind = PyDict::new(py);
-            for (kind, targets) in kinds {
-                let list = PyList::empty(py);
-                for (target, fraction) in targets {
-                    list.append((target.as_str(), fraction)).unwrap();
-                }
-                per_kind.set_item(kind.as_str(), list).unwrap();
+        let channels = self.inner.get_isomeric_branching(material_id, step)?;
+        let out = PyList::empty(py);
+        for channel in &channels {
+            let row = PyDict::new(py);
+            row.set_item("parent", channel.parent.as_str()).unwrap();
+            row.set_item("reaction", channel.reaction.as_str()).unwrap();
+            row.set_item("production", channel.production).unwrap();
+            let split = PyList::empty(py);
+            for (target, fraction) in &channel.split {
+                split.append((target.as_str(), fraction)).unwrap();
             }
-            out.set_item(parent.as_str(), per_kind).unwrap();
+            row.set_item("split", split).unwrap();
+            out.append(row).unwrap();
         }
         Some(out.into_any().unbind())
     }
