@@ -754,7 +754,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/yamc
-          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs') }}
+          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
 
       - name: Fetch nuclear-data test fixtures
         run: python3 scripts/fetch_test_fixtures.py
@@ -838,7 +838,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/yamc
-          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs') }}
+          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
 
       - name: Fetch nuclear-data test fixtures
         shell: bash
@@ -920,7 +920,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/yamc
-          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs') }}
+          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
 
       # Runs on a cache hit too. The cache holds ~/.cache/yamc, and it is this
       # script that puts the tests/*.arrow symlinks into the working tree; the
