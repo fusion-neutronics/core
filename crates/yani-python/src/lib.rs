@@ -103,6 +103,7 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
     // Nuclear-data configuration: which library, and which chain subsections.
     m.add_function(wrap_pyfunction!(convert::convert_transmutation, m)?)?;
     m.add_function(wrap_pyfunction!(convert::convert_branching, m)?)?;
+    m.add_function(wrap_pyfunction!(convert::radionuclide_production, m)?)?;
     m.add_function(wrap_pyfunction!(convert::convert_neutron_xs, m)?)?;
     m.add_function(wrap_pyfunction!(convert::convert_neutron_transport, m)?)?;
     m.add_function(wrap_pyfunction!(convert::convert_photon, m)?)?;

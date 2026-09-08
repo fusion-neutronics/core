@@ -260,7 +260,7 @@ pub fn merge_duplicates(rows: Vec<BranchingRow>) -> (Vec<BranchingRow>, usize) {
 /// Built from the chain's own reaction set so the names match the reactions
 /// subsection exactly, plus MT 4 for inelastic isomeric transitions, which the
 /// chain's set omits because it produces no new nuclide.
-fn mt_to_type() -> BTreeMap<i64, String> {
+pub(crate) fn mt_to_type() -> BTreeMap<i64, String> {
     let mut map: BTreeMap<i64, String> = BTreeMap::new();
     for info in endf::chain::REACTIONS.iter() {
         for &mt in info.mts.iter() {

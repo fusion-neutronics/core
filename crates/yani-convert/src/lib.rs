@@ -25,6 +25,7 @@
 //! nuclide. See [`decay_sources`].
 
 pub mod branching;
+pub mod production;
 
 use std::collections::BTreeMap;
 use std::error::Error;
