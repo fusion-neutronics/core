@@ -25,6 +25,7 @@ target/
 # python env
 .yamc_env/
 .venv/
+.venv-cad/
 
 __pycache__/
 *.so
