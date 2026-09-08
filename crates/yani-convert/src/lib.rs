@@ -38,7 +38,7 @@ use arrow_ipc::writer::{FileWriter, IpcWriteOptions};
 use arrow_ipc::CompressionType;
 use arrow_schema::{ArrowError, Schema};
 
-use endf::chain::Chain;
+use endf::chain::{collect_q_values, Chain, QValues};
 use endf::decay::DecayInconsistency;
 use endf::{Decay, Material};
 
@@ -510,16 +510,21 @@ pub struct Provenance {
     pub created_utc: String,
 }
 
-/// The evaluations a chain is built from.
+/// What a chain is built from: two sublibraries of evaluations, and the Q
+/// values read out of a third.
 ///
 /// Grouped because they always travel together and because which of them is
 /// required depends on the subsections being written, which is easier to say
 /// about one value than about three parameters.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Inputs<'a> {
     pub decay: &'a [Material],
     pub fpy: &'a [Material],
-    pub neutron: &'a [Material],
+    /// The neutron set as Q values rather than as evaluations, because that is
+    /// all a chain reads of it and because a caller whose neutron sublibrary
+    /// does not fit in memory can fill the map one file at a time.
+    /// [`convert_transmutation_files`] does exactly that.
+    pub q_values: &'a QValues,
     /// Decay evaluations from a second library, read only to replace the
     /// placeholder average decay energies in `decay` (see
     /// `endf::chain::Chain::fill_placeholder_decay_energies`). Empty for no
@@ -546,14 +551,14 @@ pub fn convert_transmutation(
     out: &Path,
     provenance: &Provenance,
 ) -> Result<Chain, Box<dyn Error>> {
-    let (decay, fpy, neutron) = (inputs.decay, inputs.fpy, inputs.neutron);
+    let (decay, fpy, q_values) = (inputs.decay, inputs.fpy, inputs.q_values);
     let Provenance {
         library,
         decay_library,
         data_version,
         created_utc,
     } = provenance;
-    let mut chain = Chain::from_endf(decay, fpy, neutron, reactions)?;
+    let mut chain = Chain::from_endf(decay, fpy, q_values, reactions)?;
     if let Some(path) = branch_ratios {
         apply_branch_ratios(&mut chain, path)?;
     }
@@ -772,8 +777,47 @@ pub fn convert_transmutation_files(
     }
     let decay = read(decay_files)?;
     let fpy = read(fpy_files)?;
-    let neutron = read(neutron_files)?;
     let decay_fill = read(decay_fill_files)?;
+
+    // Read and dropped one at a time, rather than collected like the others. A
+    // chain wants nothing from a neutron evaluation but its channels' Q values,
+    // and holding the parsed set to get them peaked at 39 GB over TENDL's 2848
+    // files, which is more than an ordinary machine has: it was killed three
+    // times on a 45 GB one (issue #53).
+    //
+    // One map per file, in parallel, merged in file order afterwards. The files
+    // are independent, and merging in order leaves the result identical to a
+    // sequential read, including which of two evaluations of the same nuclide
+    // wins. Only the evaluations in flight are held, so the peak is set by the
+    // core count rather than by the size of the sublibrary, and parsing is what
+    // the pass spends effectively all of its time on: 41 s of the 41.4 s a
+    // TENDL-2017 reactions build took on one core.
+    let read_q = |path: &String| -> Result<QValues, String> {
+        let material = Material::from_file(path).map_err(|e| format!("{path}: {e}"))?;
+        let mut out = QValues::new();
+        collect_q_values(&material, &mut out);
+        Ok(out)
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let per_file: Vec<QValues> = {
+        use rayon::prelude::*;
+        neutron_files
+            .par_iter()
+            .map(read_q)
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    #[cfg(target_arch = "wasm32")]
+    let per_file: Vec<QValues> = neutron_files
+        .iter()
+        .map(read_q)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut q_values = QValues::new();
+    for map in per_file {
+        for (nuclide, channels) in map {
+            q_values.entry(nuclide).or_default().extend(channels);
+        }
+    }
 
     // Every reaction the chain builder knows, not endf::chain::DEFAULT_REACTIONS.
     // That short list is six names, and defaulting to it silently drops 2554 of
@@ -813,7 +857,7 @@ pub fn convert_transmutation_files(
         &Inputs {
             decay: &decay,
             fpy: &fpy,
-            neutron: &neutron,
+            q_values: &q_values,
             decay_fill: &decay_fill,
             decay_fill_library,
         },
@@ -847,10 +891,43 @@ pub fn convert_branching_files(
             .map(|p| Material::from_file(p).map_err(|e| format!("{p}: {e}").into()))
             .collect()
     };
-    let neutron = read(neutron_files)?;
     let decay = read(decay_files)?;
 
-    let (rows, stats) = branching::extract_branching(&neutron, &decay, tol_ev, linearize_tol)?;
+    // Streamed, like the Q values above and for the same reason (issue #53).
+    // The branching pass gets away with holding its neutron set today only
+    // because the driver scopes the call to the parents of a reactions
+    // subsection, a few hundred rather than a few thousand evaluations, which
+    // is a convention rather than a promise.
+    //
+    // In parallel, one evaluation at a time per worker, absorbed afterwards in
+    // file order. Each evaluation's rows depend on nothing but that evaluation
+    // and the isomer table, and absorbing in order leaves the rows, the flagged
+    // levels and the partial-sum lines exactly as reading the files one at a
+    // time left them.
+    let extractor = branching::BranchingExtractor::new(&decay, tol_ev, linearize_tol);
+    let extract = |path: &String| -> Result<branching::BranchingPartial, String> {
+        let material = Material::from_file(path).map_err(|e| format!("{path}: {e}"))?;
+        Ok(extractor.extract_one(&material))
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let partials: Vec<branching::BranchingPartial> = {
+        use rayon::prelude::*;
+        neutron_files
+            .par_iter()
+            .map(extract)
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    #[cfg(target_arch = "wasm32")]
+    let partials: Vec<branching::BranchingPartial> = neutron_files
+        .iter()
+        .map(extract)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut extractor = extractor;
+    for partial in partials {
+        extractor.absorb(partial);
+    }
+    let (rows, stats) = extractor.finish();
     let dir = out.join("branching");
     branching::write_branching(&rows, &dir)?;
     write_provenance(

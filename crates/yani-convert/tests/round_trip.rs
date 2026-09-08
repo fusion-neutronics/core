@@ -77,7 +77,8 @@ fn convert(name: &str) -> Converted {
     let fpy = materials(FPY);
     let neutron = materials(NEUTRON);
 
-    let chain = Chain::from_endf(&decay, &fpy, &neutron, &endf::chain::DEFAULT_REACTIONS)
+    let q_values = endf::chain::q_values(&neutron);
+    let chain = Chain::from_endf(&decay, &fpy, &q_values, &endf::chain::DEFAULT_REACTIONS)
         .expect("chain builds from the fixtures");
     let sources = yani_convert::decay_sources(&decay).expect("decay sources read");
 
@@ -229,11 +230,12 @@ fn convert_transmutation_writes_a_complete_directory() {
     let dir = std::env::temp_dir().join(format!("yani-convert-full-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
 
+    let q_values = endf::chain::q_values(&neutron);
     let chain = yani_convert::convert_transmutation(
         &yani_convert::Inputs {
             decay: &decay,
             fpy: &fpy,
-            neutron: &neutron,
+            q_values: &q_values,
             decay_fill: &[],
             decay_fill_library: "",
         },
@@ -302,7 +304,7 @@ fn convert_transmutation_writes_a_complete_directory() {
         &yani_convert::Inputs {
             decay: &decay,
             fpy: &fpy,
-            neutron: &neutron,
+            q_values: &q_values,
             decay_fill: &[],
             decay_fill_library: "",
         },
@@ -609,4 +611,158 @@ fn a_single_subsection_can_be_written_without_the_other_inputs() {
     assert_eq!(listed, vec!["reactions"], "manifest lists {listed:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Streaming the neutron files writes exactly what holding them all wrote.
+///
+/// [`yani_convert::convert_transmutation_files`] reads each neutron evaluation,
+/// takes its channels' Q values and drops it, so that a sublibrary far larger
+/// than memory can be converted: TENDL's 2848 files parse to about 39 GB held
+/// all at once, which was killed three times on a 45 GB machine (issue #53).
+/// That is only a safe trade if the result is unchanged, so this drives the
+/// same fixtures down both routes and compares the trees byte for byte.
+#[test]
+fn streaming_the_neutron_files_writes_the_same_tree_as_holding_them() {
+    let dir = std::env::temp_dir().join(format!("yani-convert-stream-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch directory");
+
+    let write = |blobs: &[&[u8]], stem: &str| -> Vec<String> {
+        blobs
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let p = dir.join(format!("{stem}{i}.endf"));
+                std::fs::write(&p, text(b)).expect("write fixture");
+                p.to_string_lossy().into_owned()
+            })
+            .collect()
+    };
+    let decay_files = write(DECAY, "d");
+    let fpy_files = write(FPY, "f");
+    let neutron_files = write(NEUTRON, "n");
+
+    // Named explicitly rather than left to default, because the two entry
+    // points default differently: the files route takes every reaction the
+    // chain builder knows, and the in-memory route takes what it is given.
+    let reactions: Vec<String> = endf::chain::DEFAULT_REACTIONS
+        .iter()
+        .map(|r| r.to_string())
+        .collect();
+    let subsections: Vec<String> = ["decay", "reactions", "fission_yields"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let streamed = dir.join("streamed");
+    yani_convert::convert_transmutation_files(
+        &decay_files,
+        &fpy_files,
+        &neutron_files,
+        &[],
+        "",
+        Some(&reactions),
+        None,
+        Some(&subsections),
+        &streamed,
+        &provenance(),
+    )
+    .expect("streamed conversion succeeds");
+
+    let held = dir.join("held");
+    let decay = materials(DECAY);
+    let fpy = materials(FPY);
+    let neutron = materials(NEUTRON);
+    let q_values = endf::chain::q_values(&neutron);
+    yani_convert::convert_transmutation(
+        &yani_convert::Inputs {
+            decay: &decay,
+            fpy: &fpy,
+            q_values: &q_values,
+            decay_fill: &[],
+            decay_fill_library: "",
+        },
+        &endf::chain::DEFAULT_REACTIONS,
+        None,
+        &["decay", "reactions", "fission_yields"],
+        &held,
+        &provenance(),
+    )
+    .expect("in-memory conversion succeeds");
+
+    let files = |root: &std::path::Path| -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for entry in std::fs::read_dir(&d).expect("read output directory") {
+                let path = entry.expect("directory entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    let rel = path.strip_prefix(root).expect("under root");
+                    out.push(rel.to_string_lossy().into_owned());
+                }
+            }
+        }
+        out.sort();
+        out
+    };
+
+    let written = files(&streamed);
+    assert_eq!(
+        written,
+        files(&held),
+        "the two routes wrote different sets of files"
+    );
+    assert!(
+        written.len() >= 6,
+        "only {} files written, too few to prove anything: {written:?}",
+        written.len()
+    );
+    for rel in &written {
+        let a = std::fs::read(streamed.join(rel)).expect("streamed file");
+        let b = std::fs::read(held.join(rel)).expect("held file");
+        assert_eq!(a, b, "{rel} differs between the streamed and held routes");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Extracting evaluations one at a time and absorbing them in file order gives
+/// exactly what adding them one at a time gives.
+///
+/// That equivalence is what lets `convert_branching_files` parse in parallel.
+/// The rows, the flagged levels and the partial-sum lines are all ordered, and
+/// the counters are sums, so a merge that lost the order or forgot a statistic
+/// would change the written subsection without changing anything else.
+#[test]
+fn absorbing_partials_in_file_order_matches_adding_one_at_a_time() {
+    use yani_convert::branching::{BranchingExtractor, DEFAULT_LINEARIZE_TOL};
+
+    let decay = materials(DECAY);
+    let neutron = materials(NEUTRON);
+    let build = || BranchingExtractor::new(&decay, 3000.0, DEFAULT_LINEARIZE_TOL);
+
+    let mut sequential = build();
+    for material in &neutron {
+        sequential.add(material);
+    }
+
+    // What the parallel driver does: every evaluation worked out against the
+    // same isomer table, then merged in the order the files were read.
+    let base = build();
+    let partials: Vec<_> = neutron.iter().map(|m| base.extract_one(m)).collect();
+    let mut merged = base;
+    for partial in partials {
+        merged.absorb(partial);
+    }
+
+    let (rows_one_at_a_time, stats_one_at_a_time) = sequential.finish();
+    let (rows_merged, stats_merged) = merged.finish();
+    assert!(
+        !rows_one_at_a_time.is_empty(),
+        "the fixtures produced no branching rows, so this proves nothing"
+    );
+    assert_eq!(rows_merged, rows_one_at_a_time);
+    assert_eq!(stats_merged, stats_one_at_a_time);
 }

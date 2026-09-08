@@ -36,7 +36,7 @@ fn inconsistent_records_are_listed_by_kind() {
         &yani_convert::Inputs {
             decay: &decay,
             fpy: &[],
-            neutron: &[],
+            q_values: &endf::chain::QValues::new(),
             decay_fill: &[],
             decay_fill_library: "",
         },

@@ -5948,6 +5948,7 @@ dependencies = [
  "endf",
  "lzma-rs",
  "nuclear-data-schema",
+ "rayon",
  "serde_json",
  "yani",
 ]

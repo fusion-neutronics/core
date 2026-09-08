@@ -52,7 +52,7 @@ pub use ace::{get_table, get_tables, tables_from_str, MetastableScheme, Table, T
 pub use angle_energy::{
     AngleEnergy, CorrelatedAngleEnergy, KalbachMann, NBodyPhaseSpace, UncorrelatedAngleEnergy,
 };
-pub use chain::{Chain, Nuclide, ReactionInfo, REACTIONS};
+pub use chain::{collect_q_values, q_values, Chain, Nuclide, QValues, ReactionInfo, REACTIONS};
 pub use data::{gnds_name, zam, EV_PER_MEV, K_BOLTZMANN};
 pub use decay::{Decay, DecayMode, FissionProductYields, FissioningNuclide, ProductYield};
 pub use error::{Error, Result};
