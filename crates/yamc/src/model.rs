@@ -453,6 +453,7 @@ impl Model {
     /// no flag. Mirrors the native auto-enable in `simulate_transport`.
     pub fn has_photons(&self) -> bool {
         self.transport_secondary_photons
+            || self.use_decay_photons
             || self
                 .sources
                 .iter()
@@ -3111,6 +3112,51 @@ mod tests {
     use yamc_source::source::{
         ParticleSource, Source, SourceEnergyDistribution, SourceSpatialDistribution,
     };
+
+    /// `use_decay_photons` puts photons in flight, so the predicate that gates
+    /// photon data has to count it. It did not.
+    ///
+    /// The gap was invisible from Python, whose constructor refuses
+    /// `use_decay_photons` without `transport_secondary_photons`, so the two
+    /// flags can never disagree there. From Rust, which has no such
+    /// validation, it was a trap: the model reported no photons, so
+    /// `ensure_photon_data_for_gpu` returned before its missing-data check,
+    /// and the coupled path then panicked where that check exists to produce a
+    /// clean error. Issue #43.
+    ///
+    /// No nuclear data is read, so this runs anywhere.
+    #[test]
+    fn a_decay_photon_model_reports_photons() {
+        let sphere = Arc::new(Surface::sphere(
+            0.0,
+            0.0,
+            0.0,
+            10.0,
+            Some(1),
+            Some(BoundaryType::Vacuum),
+        ));
+        let mat = Material::new(
+            HashMap::from([("Fe56".into(), 1.0)]),
+            "atom",
+            "g/cm3",
+            Some(7.874),
+        )
+        .unwrap();
+        let region = Region::new_from_halfspace(HalfspaceType::Below(sphere));
+        let cell = Cell::new(Some(1), region, None, Some(0));
+        let geometry = Geometry::new(vec![cell], vec![Arc::new(mat)]).unwrap();
+        let mut model = Model::new(geometry, vec![], vec![]);
+
+        // Neither flag, no photon source: nothing in flight, nothing to load.
+        assert!(!model.has_photons());
+        assert!(model.required_elements().is_empty());
+
+        // Decay photons alone. This is the state Python forbids and Rust
+        // allows, and the one the predicate used to miss.
+        model.use_decay_photons = true;
+        assert!(model.has_photons());
+        assert_eq!(model.required_elements(), vec!["Fe".to_string()]);
+    }
 
     /// Smoke test: run photon transport through an Fe sphere.
     /// Verifies the transport loop doesn't crash and particles are processed.

@@ -1731,7 +1731,10 @@ fn constructed_element_columns_are_pairwise_distinct_so_no_permutation_is_invisi
         .map(|&c| f64_list(&batch, c, 0))
         .collect();
     for (col, values) in LIST_COLUMNS.iter().zip(&written) {
-        assert!(!values.is_empty(), "{col} is empty, so a swap with it is invisible");
+        assert!(
+            !values.is_empty(),
+            "{col} is empty, so a swap with it is invisible"
+        );
     }
 
     // The property this element exists for.

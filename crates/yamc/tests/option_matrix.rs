@@ -412,18 +412,19 @@ mod gpu_guards {
     /// It sets `use_decay_photons` ALONE. The Python constructor rejects that
     /// outright ("use_decay_photons=True requires transport_secondary_photons
     /// =True", `yamc-python/src/simulation/model.rs:277`), so no supported
-    /// caller can produce this model. That matters because `has_photons()`
-    /// (`yamc/src/model.rs:454`) does not count `use_decay_photons`, so with
-    /// only that flag set the model reports "no photons", and
-    /// `ensure_photon_data_for_gpu` returns early WITHOUT running its
-    /// missing-photon-data check. That check exists precisely to turn this into
-    /// a clean message rather than a panic, and its own comment says so.
+    /// caller can produce this model.
     ///
-    /// With the invariant respected the guard fires and the error is about
-    /// photon data, which is what the sibling
-    /// `gpu_coupled_requires_photon_data` already asserts. So to test what THIS
-    /// test wants, the model needs photon data PRESENT and decay data absent,
-    /// which means the two-fixture material `gpu_coupled_photon.rs` builds.
+    /// The third problem is fixed: `has_photons()` now counts
+    /// `use_decay_photons`, so this model no longer reports "no photons" and
+    /// `ensure_photon_data_for_gpu` no longer skips its missing-photon-data
+    /// check. `a_decay_photon_model_reports_photons` in `yamc/src/model.rs`
+    /// pins that.
+    ///
+    /// With the guard now firing the error is about photon data, which is what
+    /// the sibling `gpu_coupled_requires_photon_data` already asserts. So to
+    /// test what THIS test wants, reaching decay-data preparation, the model
+    /// needs photon data PRESENT and decay data absent, which means the
+    /// two-fixture material `gpu_coupled_photon.rs` builds.
     ///
     /// And it still could not get there: `neutron_csg_model()` uses
     /// `build_csg()`, whose "inside the sphere" is `Complement(Above(..))`, and
