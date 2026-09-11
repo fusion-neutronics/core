@@ -462,15 +462,23 @@ const EXPECTED_DATA_VERSION: &[(&str, &str)] = &[
     // nothing to pin for it there.
     //
     // This pin has to move with a republish. The previous value was
-    // "2026-08-21", and leaving it behind does not serve stale data: it fails
+    // "2026-09-02", and leaving it behind does not serve stale data: it fails
     // every fresh download outright, because the stamp the origin now carries
     // no longer matches what this build expects.
-    ("tendl-2025", "2026-09-02"),
-    ("tendl-2017", "2026-09-02"),
-    ("fendl-3.2d", "2026-09-02"),
-    ("endf-b8.1", "2026-09-02"),
-    ("jeff-4.0", "2026-09-02"),
-    ("jendl-5.0", "2026-09-02"),
+    //
+    // The 2026-09-08 rebuild is the first carrying the placeholder and decay
+    // consistency records in the transmutation provenance, isomer excitation
+    // energies read from the decay headers, TENDL branching scoped to TENDL's
+    // own parents, and photon sections without the heating column this schema
+    // stopped declaring. A released wheel pinning 2026-09-02 can read none of
+    // it, and one pinning this can read none of what came before, which is the
+    // coupling issue #366 accepted and #28 in the generation scripts is about.
+    ("tendl-2025", "2026-09-08"),
+    ("tendl-2017", "2026-09-08"),
+    ("fendl-3.2d", "2026-09-08"),
+    ("endf-b8.1", "2026-09-08"),
+    ("jeff-4.0", "2026-09-08"),
+    ("jendl-5.0", "2026-09-08"),
 ];
 
 /// The `data_version` this build expects for `source`, if it pins one.
