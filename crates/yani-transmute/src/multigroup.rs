@@ -1018,9 +1018,15 @@ impl Collapse<'_> {
                     walk.strongest_factor =
                         Some(walk.strongest_factor.map_or(factor, |f: f64| f.min(factor)));
                 }
+                // No within-group weight here: the shielded flux shape IS the
+                // weight, and a better one, since it is built from this
+                // material rather than assumed.
                 shielded
             } else {
-                terms.dilute(e_lo, e_hi)
+                match within_group_weight() {
+                    Weighting::FlatInEnergy => terms.dilute(e_lo, e_hi),
+                    Weighting::OneOverE => terms.lethargy(e_lo, e_hi),
+                }
             };
             if let Some((s, d)) = terms.bound_contribution(phi) {
                 walk.bound_shielded += s;
