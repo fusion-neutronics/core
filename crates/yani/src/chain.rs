@@ -47,6 +47,32 @@ pub enum BranchQuantity {
 /// (parent, reaction, final-state) triple, as stored in the `branching/`
 /// subsection. The overlay folds these against the transport spectrum at
 /// rate-compute time to obtain flux-weighted branching fractions.
+///
+/// # The branching subsection is a second source of cross sections
+///
+/// Worth stating plainly, because the name says "branch ratios" and the
+/// setting sits beside `cross_section_data` as though the two were disjoint.
+/// A [`BranchQuantity::CrossSection`] curve is a partial cross section in
+/// barns, not a dimensionless fraction, and for `(n,n')` it is the *only*
+/// thing the metastable production rate is computed from: `build_fold_refine`
+/// folds it directly and grafts the result into the rates, without consulting
+/// the parent's own evaluation at all.
+///
+/// Two consequences follow, and neither is obvious from the setting names.
+///
+/// * A run that names one library for `cross_section_data` and another for
+///   `transmutation_branch_ratios` is taking cross sections from both. On the
+///   published 2026-09-08 TENDL-2025 build, 39409 of the 40905 branching rows
+///   are `CrossSection` rather than `Yield`, so this is the common case and
+///   not a corner.
+/// * Changing only the branching source therefore changes rates, not just how
+///   an existing rate is split. On the FNS decay-heat benchmark, moving that
+///   one setting from TENDL-2017 to ENDF/B-VIII.1 and holding the other four
+///   fixed moves 78 of 132 experiments by more than a point and drops the
+///   count agreeing within 10% from 64 to 38.
+///
+/// Anything reporting the provenance of a result should name the branching
+/// source among its cross-section inputs, not only among its branching ones.
 #[derive(Clone, Debug)]
 pub struct BranchCurve {
     /// Final-state nuclide (GNDS name, e.g. "Ag110" ground or "Ag110_m1").
