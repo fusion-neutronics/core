@@ -606,11 +606,8 @@ pub fn preload_activation_data(
         // said nothing. The precise error already exists one layer down
         // ("Nuclide 'Os190' is not available in 'fendl-3.2d'.") and was being
         // discarded by the `.ok()` this replaces.
-        let composition: HashSet<&str> =
-            material.nuclides.keys().map(|s| s.as_str()).collect();
-        let decoded: Vec<
-            Result<Option<(String, std::sync::Arc<yamc_nuclide::Nuclide>)>, String>,
-        > = {
+        let composition: HashSet<&str> = material.nuclides.keys().map(|s| s.as_str()).collect();
+        let decoded: Vec<Result<Option<(String, std::sync::Arc<yamc_nuclide::Nuclide>)>, String>> = {
             let load_one = |(name, path): (String, String)| {
                 let sources = HashMap::from([(name.clone(), path)]);
                 match get_or_load_nuclide(&name, &sources, &scope) {
