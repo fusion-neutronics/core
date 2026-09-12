@@ -2,11 +2,12 @@
 //! tally accumulation.
 //!
 //! Two earlier probes ruled out the obvious paths on AMD/RADV +
-//! cubecl-spirv: native `Atomic<f64>::fetch_add` isn't exposed by the
-//! driver (`atomic_f64.rs`), and `Atomic<u64>::compare_exchange_weak`
-//! panics inside cubecl-spirv during shader compile (`atomic_u64_cas.rs`,
-//! filed as cubecl#1318). The next viable shape is plain u64 atomic
-//! add: scale every f64 contribution by a fixed factor (e.g. 2^30),
+//! cubecl-spirv at the time: native `Atomic<f64>::fetch_add` isn't
+//! exposed by the driver (`atomic_f64.rs`), and on cubecl 0.10
+//! `Atomic<u64>::compare_exchange_weak` panicked inside cubecl-spirv
+//! during shader compile (`atomic_u64_cas.rs`, filed as cubecl#1318 and
+//! working again since cubecl 0.11.0-pre.3). The next viable shape is
+//! plain u64 atomic add: scale every f64 contribution by a fixed factor (e.g. 2^30),
 //! drop the fractional bits, and accumulate as u64. Convert back to
 //! f64 on the host side after the kernel.
 //!
@@ -39,7 +40,7 @@ fn atomic_u64_add_kernel(accumulator: &mut [Atomic<u64>]) {
 /// (rather than just LoadStore).
 pub fn supports_u64_atomic_add(ctx: &GpuContext) -> bool {
     let client = ctx.client();
-    let ty = Type::atomic(Type::scalar(ElemType::UInt(UIntKind::U64)));
+    let ty = Type::atomic(Type::new(ElemType::UInt(UIntKind::U64)));
     client
         .properties()
         .atomic_type_usage(ty)

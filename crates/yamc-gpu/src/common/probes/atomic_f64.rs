@@ -38,7 +38,7 @@ fn atomic_f64_add_kernel(accumulator: &mut [Atomic<f64>]) {
 /// has the corresponding capability registered).
 pub fn supports_f64_atomic_add(ctx: &GpuContext) -> bool {
     let client = ctx.client();
-    let ty = Type::atomic(Type::scalar(ElemType::Float(FloatKind::F64)));
+    let ty = Type::atomic(Type::new(ElemType::Float(FloatKind::F64)));
     client
         .properties()
         .atomic_type_usage(ty)
