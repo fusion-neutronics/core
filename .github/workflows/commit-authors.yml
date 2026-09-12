@@ -1,12 +1,35 @@
 name: Commit authors
 
 # Merge gate: every commit in a pull request must be authored by the GitHub
-# account `shimwell`. The check is on the GitHub *account* linked to each
-# commit (the `author.login` the API reports), not on the free-text git author
-# name or email, so a local `git config user.name "shimwell"` does not pass it.
+# account `shimwell`, and must claim nobody else. Two questions, answered from
+# two different places in the same API response:
+#
+#   * Who made it. The GitHub *account* linked to each commit (the
+#     `author.login` the API reports), not the free-text git author name or
+#     email, so a local `git config user.name "shimwell"` does not pass it.
+#   * Who it credits. `Co-Authored-By:` trailers and tool attribution footers,
+#     which are plain text in the message body and reach no API field at all.
+#     A commit can therefore carry `Co-Authored-By: Claude <...>` and still
+#     report `author.login: shimwell`, which is exactly what happened in
+#     example-endf-to-transmutation-to-validation#20: the account check passed
+#     on its own terms and the trailer went in anyway, and only a human reading
+#     the message caught it. Reading the message is the only way to see it, so
+#     that is what the second check does.
+#
+# Neither check can do the other's job, which is why there are two. The account
+# check cannot see a trailer, because a trailer reaches none of the fields it
+# reads. The trailer check cannot establish identity, because a message body is
+# unverified text that anyone can write anything into. They are complements: one
+# says the commit is shimwell's, the other says it claims nobody else.
+#
+# This file is kept byte-identical across the fusion-neutronics repositories
+# that use it, so it is written to name no repository but the one the miss
+# happened in.
 #
 # Deliberately not path-filtered: a required check that gets skipped never
-# reports a conclusion and would leave every pull request unmergeable.
+# reports a conclusion and would leave every pull request unmergeable. The job
+# name below is what branch protection matches, so it stays as it is even
+# though the job now asks more than it used to.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -25,25 +48,37 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       REPO: ${{ github.repository }}
     steps:
-      # No checkout: the commit list and its account links come from the API,
-      # and the local git objects carry only the unverified name/email strings.
-      - name: Check the GitHub account behind every commit
+      # No checkout: the commit list, its account links and its messages all
+      # come from the API, and the local git objects carry only the unverified
+      # name/email strings. Fetched once into a file because both checks below
+      # read it, and `--paginate` without `--jq` returns one array per page
+      # rather than one array, so the pages are streamed out and slurped back
+      # into a single array here.
+      - name: Fetch the commits in this pull request
         run: |
           set -euo pipefail
 
           gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/commits" \
-            --jq '.[] | [
-                    .sha,
-                    (.author.login // "<no linked account>"),
-                    (.committer.login // "<no linked account>"),
-                    (.commit.message | split("\n")[0])
-                  ] | @tsv' > commits.tsv
-          sed -i '/^[[:space:]]*$/d' commits.tsv
+            --jq '.[]' | jq -s '.' > commits.json
 
-          if [ ! -s commits.tsv ]; then
+          count=$(jq 'length' commits.json)
+          if [ "${count}" -eq 0 ]; then
             echo "::error::No commits returned for PR #${PR_NUMBER}; refusing to pass a check that verified nothing."
             exit 1
           fi
+          echo "${count} commit(s) to check."
+
+      - name: Check the GitHub account behind every commit
+        run: |
+          set -euo pipefail
+
+          jq -r '.[] | [
+                   .sha,
+                   (.author.login // "<no linked account>"),
+                   (.committer.login // "<no linked account>"),
+                   (.commit.message | split("\n")[0])
+                 ] | @tsv' commits.json > commits.tsv
+          sed -i '/^[[:space:]]*$/d' commits.tsv
 
           failed=0
           while IFS=$'\t' read -r sha author committer subject; do
@@ -86,3 +121,68 @@ jobs:
           fi
 
           echo "All $(wc -l < commits.tsv) commit(s) are authored by ${ALLOWED_LOGIN}."
+
+      - name: Check no commit credits a co-author or a tool
+        run: |
+          set -euo pipefail
+
+          # Every `Co-Authored-By:` trailer fails, whoever it names. A denylist
+          # of tool names would be one release behind whatever the next tool
+          # calls itself, and the rule here is not "no Claude" but the one in
+          # CLAUDE.md: commits are authored solely by the user. A commit whose
+          # author already has to be shimwell has nobody left to credit, so
+          # there is no legitimate trailer for this to refuse.
+          jq -r '
+            .[]
+            | .sha as $sha
+            | .commit.message
+            | split("\n")[]
+            | select(test("^\\s*co-authored-by\\s*:"; "i"))
+            | [$sha, "co-author trailer", (sub("^\\s+"; "") | sub("\\s+$"; ""))]
+            | @tsv
+          ' commits.json > claims.tsv
+
+          # The attribution footer is the same policy in the same artefact and
+          # is not a trailer, so it needs its own pattern. Anchored on the words
+          # that only ever appear in a generated footer rather than on the tool
+          # name alone, so a commit message that discusses the tooling in prose
+          # is not caught by it.
+          jq -r '
+            .[]
+            | .sha as $sha
+            | .commit.message
+            | split("\n")[]
+            | select(test("generated with\\s+\\[?claude|claude\\.(com|ai)/(claude-)?code"; "i"))
+            | [$sha, "tool attribution footer", (sub("^\\s+"; "") | sub("\\s+$"; ""))]
+            | @tsv
+          ' commits.json >> claims.tsv
+
+          sed -i '/^[[:space:]]*$/d' claims.tsv
+
+          if [ ! -s claims.tsv ]; then
+            echo "No commit credits a co-author or a tool."
+            exit 0
+          fi
+
+          while IFS=$'\t' read -r sha kind line; do
+            echo "FAIL  ${sha:0:8}  ${kind}: ${line}"
+            echo "::error::Commit ${sha} carries a ${kind}: ${line}"
+          done < claims.tsv
+
+          cat >&2 <<'MSG'
+
+          Commits in this repository are authored solely by shimwell: no
+          `Co-Authored-By:` trailer, and no "Generated with ..." attribution
+          footer, whoever or whatever it names. Strip the offending lines and
+          re-push:
+
+            git rebase -r --exec 'git commit --amend --no-edit' origin/main
+            git push --force-with-lease
+
+          Amending one commit is the quicker route when only the tip is wrong:
+
+            git commit --amend
+            git push --force-with-lease
+
+          MSG
+          exit 1
