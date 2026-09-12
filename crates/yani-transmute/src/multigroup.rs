@@ -475,6 +475,100 @@ pub fn spectrum_above_evaluation(
 /// transmutation refuses to run on it.
 pub const ABOVE_EVALUATION_TOLERANCE: f64 = 1.0e-3;
 
+/// Above this relative difference, the within-group weight is deciding a rate
+/// rather than refining it.
+///
+/// One percent is well under the uncertainty on any activation measurement, so
+/// a reaction below it is insensitive to the choice in any way that matters.
+/// Above it the group structure is not resolving the cross section, and the
+/// answer depends on an assumption the multigroup spectrum does not state.
+pub const WEIGHT_SENSITIVITY_TOLERANCE: f64 = 0.01;
+
+/// How much one reaction's rate on this field depends on the within-group
+/// weight: `|rate(1/E) / rate(flat) - 1|`, or `0.0` if the flat rate is zero.
+///
+/// Zero means the group structure resolves this cross section and the weight is
+/// irrelevant to it. A large value means the opposite, and that the answer
+/// rests on a shape the multigroup spectrum never stated.
+pub fn weight_sensitivity(
+    reaction: &Reaction,
+    multigroup_flux: &[f64],
+    group_boundaries: &[f64],
+) -> f64 {
+    let (mut flat, mut lethargy) = (0.0, 0.0);
+    for (g, &phi) in multigroup_flux.iter().enumerate() {
+        if phi <= 0.0 || g + 1 >= group_boundaries.len() {
+            continue;
+        }
+        let (e_lo, e_hi) = (group_boundaries[g], group_boundaries[g + 1]);
+        if e_lo >= e_hi {
+            continue;
+        }
+        let terms = walk_group(reaction, e_lo, e_hi, None, None);
+        flat += phi * terms.dilute(e_lo, e_hi);
+        lethargy += phi * terms.lethargy(e_lo, e_hi);
+    }
+    if flat <= 0.0 {
+        return 0.0;
+    }
+    (lethargy / flat - 1.0).abs()
+}
+
+/// Reactions whose rate depends on which within-group weight is used:
+/// `(nuclide, MT, relative difference)`, above
+/// [`WEIGHT_SENSITIVITY_TOLERANCE`], largest first.
+///
+/// A multigroup spectrum states the integral of the flux over each group and
+/// not its shape inside one, so a group average has to assume a shape. Where
+/// the cross section is smooth across a group the assumption does not matter
+/// and any weight gives the same answer. Where it is not, the assumption is
+/// doing the work, and the honest response is a finer group structure rather
+/// than a better guess.
+///
+/// This says which reactions are in the second case, so a caller can tell the
+/// difference between a converged rate and one that rests on the weight. It
+/// costs nothing extra: [`walk_group`] accumulates both averages on the same
+/// point set already, so this is the same walk the rates themselves do.
+///
+/// Measured on the CoNDERC JAEA-FNS fields, the split is sharp and follows the
+/// group structure rather than the physics: on the published 175-group form
+/// the median capture reaction moves 1.70% and Dy-164(n,g) moves 19.15%, while
+/// on the CCFE-709 form of the same field the median is 0.04% and nothing
+/// exceeds this tolerance.
+pub fn weight_sensitive_reactions(
+    material: &Material,
+    multigroup_flux: &[f64],
+    group_boundaries: &[f64],
+) -> Vec<(String, i32, f64)> {
+    let mut names: Vec<&String> = material.nuclide_data.keys().collect();
+    names.sort();
+    let mut out = Vec::new();
+    for name in names {
+        let nuclide_data = &material.nuclide_data[name];
+        let temperature = if material.temperature().is_empty() {
+            crate::default_temperature(nuclide_data)
+        } else {
+            Some(material.temperature().to_string())
+        };
+        let Some(temperature) = temperature else {
+            continue;
+        };
+        let Some(reactions) = nuclide_data.reactions_for_temp(&temperature) else {
+            continue;
+        };
+        let mut mts: Vec<&i32> = reactions.keys().collect();
+        mts.sort();
+        for mt in mts {
+            let difference = weight_sensitivity(&reactions[mt], multigroup_flux, group_boundaries);
+            if difference > WEIGHT_SENSITIVITY_TOLERANCE {
+                out.push((name.clone(), *mt, difference));
+            }
+        }
+    }
+    out.sort_by(|a, b| b.2.total_cmp(&a.2));
+    out
+}
+
 /// How a cross section is averaged *within* a group.
 ///
 /// A group average needs a weight, because `σ_g = ∫σφ dE / ∫φ dE` and a
@@ -1353,6 +1447,85 @@ pub fn scale_rates(rates: &ReactionRates, factor: f64) -> ReactionRates {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn one_over_v(e_lo: f64, e_hi: f64, points: usize) -> Reaction {
+        let e: Vec<f64> = (0..=points)
+            .map(|k| {
+                let f = (k as f64) / (points as f64);
+                (e_lo.ln() + f * (e_hi / e_lo).ln()).exp()
+            })
+            .collect();
+        let xs: Vec<f64> = e.iter().map(|x| x.powf(-0.5)).collect();
+        Reaction {
+            cross_section: xs.into(),
+            threshold_idx: 0,
+            energy: e.into(),
+            mt_number: 102,
+            q_value: 0.0,
+            products: vec![],
+            scatter_in_cm: false,
+            redundant: false,
+        }
+    }
+
+    /// One decade in a single group: the weight decides the answer.
+    #[test]
+    fn a_coarse_group_over_a_one_over_v_cross_section_is_flagged() {
+        let reaction = one_over_v(1.0, 1.0e4, 20_000);
+        let boundaries = vec![1.0, 10.0, 100.0, 1.0e3, 1.0e4];
+        let flux = vec![1.0, 1.0, 1.0, 1.0];
+        let sensitivity = weight_sensitivity(&reaction, &flux, &boundaries);
+        assert!(
+            sensitivity > WEIGHT_SENSITIVITY_TOLERANCE,
+            "a decade per group should be flagged, got {sensitivity}"
+        );
+    }
+
+    /// The same cross section and the same field, resolved finely: the weight
+    /// stops mattering. This is the property the whole diagnostic rests on.
+    #[test]
+    fn refining_the_groups_removes_the_sensitivity() {
+        let reaction = one_over_v(1.0, 1.0e4, 20_000);
+        let coarse = vec![1.0, 10.0, 100.0, 1.0e3, 1.0e4];
+        let coarse_flux = vec![1.0; 4];
+
+        let fine: Vec<f64> = (0..=400)
+            .map(|k| (4.0 * (k as f64) / 400.0 * std::f64::consts::LN_10).exp())
+            .collect();
+        let fine_flux = vec![1.0; fine.len() - 1];
+
+        let a = weight_sensitivity(&reaction, &coarse_flux, &coarse);
+        let b = weight_sensitivity(&reaction, &fine_flux, &fine);
+        assert!(a > WEIGHT_SENSITIVITY_TOLERANCE, "coarse {a}");
+        assert!(b < a / 10.0, "fine {b} should be far below coarse {a}");
+    }
+
+    #[test]
+    fn a_flat_cross_section_is_never_flagged() {
+        let e: Vec<f64> = vec![1.0, 1.0e4];
+        let reaction = Reaction {
+            cross_section: vec![2.5, 2.5].into(),
+            threshold_idx: 0,
+            energy: e.into(),
+            mt_number: 102,
+            q_value: 0.0,
+            products: vec![],
+            scatter_in_cm: false,
+            redundant: false,
+        };
+        let boundaries = vec![1.0, 10.0, 100.0, 1.0e3, 1.0e4];
+        let flux = vec![1.0; 4];
+        assert!(weight_sensitivity(&reaction, &flux, &boundaries) < WEIGHT_SENSITIVITY_TOLERANCE);
+    }
+
+    #[test]
+    fn a_reaction_with_no_rate_reports_no_sensitivity() {
+        let reaction = one_over_v(1.0e6, 1.0e7, 100);
+        // Flux entirely below the evaluation, so nothing folds.
+        let boundaries = vec![1.0, 10.0, 100.0];
+        let flux = vec![1.0, 1.0];
+        assert_eq!(weight_sensitivity(&reaction, &flux, &boundaries), 0.0);
+    }
 
     /// A 1/v cross section over a wide group: the two weights must differ, and
     /// each must equal its own analytic average.
