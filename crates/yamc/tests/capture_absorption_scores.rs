@@ -119,7 +119,7 @@ fn run(nuclide: &str, density: f64, energy_ev: f64, tallies: Vec<Arc<Tally>>) ->
         tallies.iter().map(Arc::clone).collect(),
     );
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = 20_000;
+    model.gpu_max_steps_per_particle = 20_000;
     model.tracking_mode = TrackingMode::Surface;
     let settings = TransportSettings {
         total_particles: Some(N),

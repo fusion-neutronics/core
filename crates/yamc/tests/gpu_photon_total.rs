@@ -110,7 +110,7 @@ fn build_photon_total_model(estimator: Estimator) -> (Model, Arc<Tally>, Transpo
     let (geometry, cell_id) = fe_sphere();
     let tally = photon_total_tally(cell_id, estimator);
     let mut model = Model::new(geometry, vec![photon_source()], vec![tally.clone()]);
-    model.max_steps_per_particle = 5_000;
+    model.gpu_max_steps_per_particle = 5_000;
     model.transport_secondary_photons = true;
     let settings = TransportSettings {
         total_particles: Some(20_000 * 4),
@@ -184,7 +184,7 @@ fn specific_neutron_mt_on_photon_rejected_gpu_zero_cpu() {
         t.initialize_batches(4);
         let tally = Arc::new(t);
         let mut model = Model::new(geometry, vec![photon_source()], vec![tally.clone()]);
-        model.max_steps_per_particle = 5_000;
+        model.gpu_max_steps_per_particle = 5_000;
         model.transport_secondary_photons = true;
         let settings = TransportSettings {
             total_particles: Some(20_000 * 4),
@@ -279,7 +279,7 @@ fn neutron_total_reaction_rate_unchanged() {
     let col = mk(Estimator::Collision);
 
     let mut model = Model::new(geometry, vec![source], vec![tl.clone(), col.clone()]);
-    model.max_steps_per_particle = 10_000;
+    model.gpu_max_steps_per_particle = 10_000;
     model
         .simulate_transport(&TransportSettings {
             total_particles: Some(10_000 * 4),

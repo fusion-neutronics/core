@@ -147,7 +147,7 @@ fn run_cpu_config(tracking: TrackingMode, estimator: Estimator, survival: bool) 
     let mut model = Model::new(build_csg(), vec![neutron_source()], tallies.clone());
     model.verbose = Verbose::silent();
     model.tracking_mode = tracking;
-    model.max_steps_per_particle = 10_000;
+    model.gpu_max_steps_per_particle = 10_000;
     if survival {
         model.variance_reduction = vec![VarianceReduction::SurvivalBiasing(
             SurvivalBiasing::default(),
@@ -299,7 +299,7 @@ fn cpu_neutron_mesh_geometry_runs_all_modes() {
             let mut model = Model::new_with_mesh(mesh, vec![neutron_source()], vec![t.clone()]);
             model.verbose = Verbose::silent();
             model.tracking_mode = tracking;
-            model.max_steps_per_particle = 10_000;
+            model.gpu_max_steps_per_particle = 10_000;
             model
                 .simulate_transport(&TransportSettings {
                     total_particles: Some(N_PER_BATCH * N_BATCHES),
@@ -658,7 +658,7 @@ mod gpu_guards {
             Model::new(build_csg_gpu(), vec![neutron_source()], cpu_tallies.clone());
         cpu_model.verbose = Verbose::silent();
         cpu_model.tracking_mode = TrackingMode::Surface;
-        cpu_model.max_steps_per_particle = 10_000;
+        cpu_model.gpu_max_steps_per_particle = 10_000;
         cpu_model
             .simulate_transport(&settings)
             .expect("CPU reference run");
@@ -674,7 +674,7 @@ mod gpu_guards {
             .collect();
         let mut m = Model::new(build_csg_gpu(), vec![neutron_source()], gpu_tallies.clone());
         m.verbose = Verbose::silent();
-        m.max_steps_per_particle = 10_000;
+        m.gpu_max_steps_per_particle = 10_000;
         yamc::gpu::run_on_gpu(&mut m, &settings)
             .expect("GPU dispatch for the supported CSG/neutron/track-length/analog slice");
         let gpu: Vec<f64> = gpu_tallies
@@ -713,7 +713,7 @@ mod gpu_guards {
         let flux = make_tally("flux", Estimator::TrackLength, 1);
         let mut m = Model::new(build_csg_gpu(), vec![neutron_source()], vec![flux.clone()]);
         m.verbose = Verbose::silent();
-        m.max_steps_per_particle = 10_000;
+        m.gpu_max_steps_per_particle = 10_000;
         // The request the GPU cannot honor: must warn-and-proceed, not reject.
         m.tracking_mode = TrackingMode::Woodcock;
 
@@ -832,7 +832,7 @@ mod gpu_guards {
             ];
             let mut model = Model::new(geometry, vec![source], tallies.clone());
             model.verbose = Verbose::silent();
-            model.max_steps_per_particle = 5_000;
+            model.gpu_max_steps_per_particle = 5_000;
             model.transport_secondary_photons = true;
             (model, tallies)
         };
@@ -970,7 +970,7 @@ mod gpu_guards {
             Model::new(build_csg_gpu(), vec![neutron_source()], cpu_tallies.clone());
         cpu_model.verbose = Verbose::silent();
         cpu_model.tracking_mode = TrackingMode::Surface;
-        cpu_model.max_steps_per_particle = 10_000;
+        cpu_model.gpu_max_steps_per_particle = 10_000;
         cpu_model
             .simulate_transport(&settings)
             .expect("CPU collision reference run");
@@ -986,7 +986,7 @@ mod gpu_guards {
             .collect();
         let mut m = Model::new(build_csg_gpu(), vec![neutron_source()], gpu_tallies.clone());
         m.verbose = Verbose::silent();
-        m.max_steps_per_particle = 10_000;
+        m.gpu_max_steps_per_particle = 10_000;
         yamc::gpu::run_on_gpu(&mut m, &settings)
             .expect("GPU dispatch for CSG/neutron/collision/analog slice");
         let gpu: Vec<f64> = gpu_tallies
@@ -1092,7 +1092,7 @@ mod gpu_guards {
             ];
             let mut model = Model::new(geometry, vec![source], tallies.clone());
             model.verbose = Verbose::silent();
-            model.max_steps_per_particle = 5_000;
+            model.gpu_max_steps_per_particle = 5_000;
             model.transport_secondary_photons = true;
             (model, tallies)
         };

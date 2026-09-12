@@ -130,7 +130,7 @@ fn build_model(n: usize, seed: u64) -> (Model, Vec<Arc<Tally>>, TransportSetting
     ];
     let tally_refs: Vec<Arc<Tally>> = tallies.iter().map(Arc::clone).collect();
     let mut model = Model::new(geometry, vec![source], tally_refs);
-    model.max_steps_per_particle = 5_000;
+    model.gpu_max_steps_per_particle = 5_000;
     model.transport_secondary_photons = true;
     model.electron_treatment = yamc::model::ElectronTreatment::Ttb;
     let _ = model.ensure_photon_data_for_gpu();

@@ -189,7 +189,7 @@ fn build_model(case: &SphereCase, energy_ev: f64) -> Model {
     });
     let mut model = Model::new(sphere(case), vec![source], vec![]);
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = MAX_STEPS;
+    model.gpu_max_steps_per_particle = MAX_STEPS;
     model.tracking_mode = TrackingMode::Surface;
     // Analog (no survival biasing), no secondary photons -- both default off.
     model

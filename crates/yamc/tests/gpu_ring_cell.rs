@@ -154,7 +154,7 @@ fn build(total: usize) -> (Model, TransportSettings) {
         vec![ring_flux_tally()],
     );
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = 10_000;
+    model.gpu_max_steps_per_particle = 10_000;
     model.tracking_mode = TrackingMode::Surface;
     let settings = TransportSettings {
         total_particles: Some(total),
