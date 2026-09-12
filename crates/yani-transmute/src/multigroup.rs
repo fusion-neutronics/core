@@ -509,8 +509,7 @@ pub enum Weighting {
     OneOverE,
 }
 
-static WITHIN_GROUP_WEIGHT: std::sync::atomic::AtomicU8 =
-    std::sync::atomic::AtomicU8::new(0);
+static WITHIN_GROUP_WEIGHT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// Set the within-group weight used by every later group average.
 ///
@@ -1364,8 +1363,7 @@ mod tests {
         let flat_exact = 2.0 * (hi.sqrt() - lo.sqrt()) / (hi - lo);
         // Flat in lethargy: int E^-3/2 dE / ln(hi/lo)
         //                 = 2(1/sqrt(lo) - 1/sqrt(hi)) / ln(hi/lo)
-        let leth_exact =
-            2.0 * (1.0 / lo.sqrt() - 1.0 / hi.sqrt()) / (hi / lo).ln();
+        let leth_exact = 2.0 * (1.0 / lo.sqrt() - 1.0 / hi.sqrt()) / (hi / lo).ln();
 
         let flat = terms.dilute(lo, hi);
         let leth = terms.lethargy(lo, hi);
@@ -2049,5 +2047,4 @@ mod shielding_tests {
         // The suffix must not be read as the mass.
         assert_eq!(mass_number_of("Ag110_m1"), Some(110.0));
     }
-
 }
