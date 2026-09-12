@@ -25,9 +25,10 @@ yamc-physics = { path = "../yamc-physics" }
 # `GpuContext::new()` returns `NoF64Adapter` and the kernels module
 # is omitted entirely.
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-# Pinned to cubecl main (0.11.0-pre.1) to test GPU transport fixes. cubecl main
-# tracks an unreleased wgpu git rev, so our direct wgpu dep must match the same
-# rev or the wgpu types won't unify. See #411 and the cubecl-bump branch.
+# cubecl 0.11.0-pre.3 from crates.io. Earlier this was pinned to a cubecl main
+# rev, which tracked an unreleased wgpu git rev and so forced our direct wgpu
+# dep onto the same rev or the wgpu types would not unify. pre.3 depends on
+# released wgpu 30, so the direct wgpu dep below is a plain version again.
 #
 # `cubecl` is aliased to the `cubecl-core` package (not the `cubecl` meta
 # crate). We only use `cubecl::prelude::*` and `cubecl::ir::*` (both provided by
@@ -36,9 +37,9 @@ yamc-physics = { path = "../yamc-physics" }
 # crate's optional cubecl-cpu/cuda/hip backends; cubecl-cpu's LLVM bundler
 # pulled `dirs` -> `option-ext` (MPL-2.0) into the lockfile even while disabled.
 # We drive the wgpu backend through cubecl-wgpu directly.
-cubecl = { package = "cubecl-core", git = "https://github.com/tracel-ai/cubecl", rev = "a5bbb8070c68562b50331610de76c97b9b559281" }
-cubecl-wgpu = { git = "https://github.com/tracel-ai/cubecl", rev = "a5bbb8070c68562b50331610de76c97b9b559281", features = ["spirv"] }
-wgpu = { git = "https://github.com/gfx-rs/wgpu.git", rev = "bde709122f8320571ab1733ab055dcb54415a483" }
+cubecl = { package = "cubecl-core", version = "=0.11.0-pre.3" }
+cubecl-wgpu = { version = "=0.11.0-pre.3", features = ["spirv"] }
+wgpu = "30"
 pollster = "0.4"
 
 [dev-dependencies]

@@ -24,6 +24,12 @@
 //! - **NVIDIA Vulkan untested here** -- likely works since NVIDIA's f64
 //!   path is more mature, but until verified the safe assumption is
 //!   "exp/ln may need a polyfill on at least one major Vulkan driver."
+//! - **Still broken on cubecl 0.11.0-pre.3** (Mesa 26.0.3, re-tested
+//!   2026-09-13): the pliron rewrite of cubecl-spirv still lowers
+//!   `ExpOp`/`LogOp` straight to GLSL.std.450 `Exp`/`Log` with no
+//!   operand-width check (`cubecl-spirv/src/ops/math.rs`), so the same
+//!   `fexp2`/`flog2` ACO errors fire and `exp(100)` reads back as
+//!   `2.3e-311`. cubecl#1316 stays open; the polyfills stay.
 //!
 //! sqrt and exp/ln are split into separate kernels so the passing
 //! sqrt test runs without triggering the AMD driver's compile-time

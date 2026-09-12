@@ -14,9 +14,10 @@
 //!   exactly 2x the tally of an otherwise-identical weight-1.0 photon,
 //!   pinning that Part A applies weight at every score site.
 //!
-//! N is kept small and the photons monoenergetic so the cubecl-spirv
-//! thread-private-memory race (see `gpu_photon_determinism.rs`) does not
-//! perturb the byte-equality assertions.
+//! N is kept small and the photons monoenergetic. That was originally
+//! so the cubecl-spirv 0.10 thread-private-memory race (see
+//! `gpu_photon_determinism.rs`, fixed upstream in 0.11.0-pre.3) could not
+//! perturb the byte-equality assertions; it also keeps the test fast.
 
 #![cfg(all(feature = "gpu", not(target_os = "macos")))]
 

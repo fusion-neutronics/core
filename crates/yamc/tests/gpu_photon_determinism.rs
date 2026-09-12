@@ -7,21 +7,25 @@
 //!   - Two identical-input kernel launches produce bit-identical
 //!     per-particle outputs and tally outputs.
 //!
-//! Status: the two larger tests are `#[ignore]`'d because they fail
-//! against a cubecl-spirv 0.10 + Vulkan/RADV bug, not a yamc bug.
-//! Tracked upstream: <https://github.com/tracel-ai/cubecl/issues/1336>.
+//! Status: all three run unconditionally since cubecl 0.11.0-pre.3.
 //!
-//! Above ~544 bytes of total thread-private state, cubecl-spirv
-//! silently demotes some `Function`-storage variables to a location
-//! that races across threads - affecting the photon kernel regardless
-//! of whether the cascade stack is held as `Array::new(16usize)`, two
-//! `Array::new(8usize)` halves, sixteen `CascadeSlot` struct locals,
-//! or 128 individual scalars. Only reducing total private-memory
-//! pressure below the threshold (`PHOTON_CASCADE_STACK_CAP = 8` with
-//! 8-slot arrays, ≈ 544 bytes) restores full determinism. CAP=8 is
-//! unacceptable for high-Z + high-E pair cascades, so the kernel
-//! keeps CAP=16 and lives with the race; un-ignore these tests once
-//! the upstream bug is fixed.
+//! On cubecl-spirv 0.10 + Vulkan/RADV the two larger tests failed and
+//! were `#[ignore]`d, against an upstream bug rather than a yamc one
+//! (<https://github.com/tracel-ai/cubecl/issues/1336>): above ~544
+//! bytes of total thread-private state, cubecl-spirv silently demoted
+//! some `Function`-storage variables to a location that raced across
+//! threads, regardless of whether the cascade stack was held as
+//! `Array::new(16usize)`, two `Array::new(8usize)` halves, sixteen
+//! `CascadeSlot` struct locals, or 128 individual scalars. Only
+//! dropping below the threshold (`PHOTON_CASCADE_STACK_CAP = 8`)
+//! restored determinism, and CAP=8 is unacceptable for high-Z + high-E
+//! pair cascades, so the kernel kept CAP=16 and lived with the race.
+//!
+//! The pliron rewrite of the SPIR-V backend in cubecl 0.11.0-pre.3
+//! (zero-initialised arrays, SROA pass) removed it: re-tested
+//! 2026-09-13 on RADV STRIX_HALO / Mesa 26.0.3, the 50k-history run
+//! and the repeated identical-input launch are bit-identical across
+//! repeated runs. These tests are the regression guard for it.
 
 #![cfg(all(feature = "gpu", not(target_os = "macos")))]
 
@@ -156,7 +160,6 @@ fn gpu_photon_kernel_is_reproducible_small() {
 }
 
 #[test]
-#[ignore = "blocked on cubecl-spirv #1336 - thread-private memory racy above ~544 bytes total"]
 fn gpu_photon_kernel_is_reproducible_large() {
     if yamc_gpu::GpuContext::new().is_err() {
         eprintln!("skipping - no GPU with f64 compute available");
@@ -173,7 +176,6 @@ fn gpu_photon_kernel_is_reproducible_large() {
 }
 
 #[test]
-#[ignore = "blocked on cubecl-spirv #1336 - thread-private memory racy above ~544 bytes total"]
 fn gpu_photon_kernel_repeated_launch_with_identical_inputs() {
     // Builds the GPU inputs ONCE, then calls the kernel twice with
     // the SAME inputs. If outputs differ → kernel is internally racy.

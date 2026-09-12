@@ -2,10 +2,12 @@
 //!
 //! Phase D needs many GPU threads atomically summing f64 contributions
 //! into per-cell tally accumulators. Direct `Atomic<f64>::fetch_add`
-//! isn't available on AMD/RADV (`atomic_f64.rs`), and the obvious
-//! fallback `Atomic<u64>::compare_exchange_weak` panics in cubecl-spirv
-//! (`atomic_u64_cas.rs`, cubecl#1318). Plain `Atomic<u64>::fetch_add`
-//! does work (`atomic_u64_add.rs`), so the workable shape is:
+//! isn't available on AMD/RADV (`atomic_f64.rs`), and when this was
+//! designed the obvious fallback `Atomic<u64>::compare_exchange_weak`
+//! panicked in cubecl-spirv (`atomic_u64_cas.rs`, cubecl#1318, working
+//! again since cubecl 0.11.0-pre.3). Plain `Atomic<u64>::fetch_add`
+//! does work (`atomic_u64_add.rs`), needs no retry loop, and so stays
+//! the accumulator. The shape is:
 //!
 //! 1. Pick a fixed scale factor `S` (here `2^30` ≈ 1.07e9). Each f64
 //!    contribution `x` is converted to `(x * S).round() as u64` and
