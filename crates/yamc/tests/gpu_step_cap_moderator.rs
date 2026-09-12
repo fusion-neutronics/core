@@ -12,8 +12,11 @@
 //! The fix raises the default cap to 100000 (the loop still exits the
 //! instant a particle leaks or is absorbed, so it is free for fast cases).
 //! This test pins the behaviour: with the default cap the GPU/CPU flux
-//! ratio must be within statistical noise; the historical 1000-step cap
-//! is also exercised to document the divergence it caused.
+//! ratio must be within statistical noise. The historical 1000-step cap is
+//! also exercised: a binding cap is now an error rather than a warning
+//! (fusion-neutronics/core#23), because the under-counted flux it produces
+//! is not a valid answer, so that case asserts the refusal instead of the
+//! ~10% deficit it used to document.
 
 #![cfg(all(feature = "gpu", not(target_os = "macos")))]
 
@@ -109,6 +112,11 @@ fn gpu_flux(max_steps: u32) -> f64 {
     t.get_mean().iter().sum::<f64>()
 }
 
+fn gpu_run(max_steps: u32) -> Result<yamc::gpu::GpuRunResult, yamc::gpu::GpuDispatchError> {
+    let (mut m, _t, settings) = sphere("H2", "tests/H2.arrow", 7, max_steps);
+    yamc::gpu::run_on_gpu(&mut m, &settings)
+}
+
 #[test]
 fn gpu_h2_flux_matches_cpu_with_default_step_cap() {
     if yamc_gpu::GpuContext::new().is_err() {
@@ -128,23 +136,42 @@ fn gpu_h2_flux_matches_cpu_with_default_step_cap() {
 }
 
 #[test]
-fn gpu_h2_low_step_cap_truncates_flux() {
+fn gpu_h2_low_step_cap_is_refused() {
     if yamc_gpu::GpuContext::new().is_err() {
         eprintln!("skipping -- no GPU with f64 compute available");
         return;
     }
-    // The CPU ignores the cap (runs to completion), so its flux is the
-    // same at 1000 and 100000 steps. The GPU honours the cap; at 1000 it
-    // truncates H2 histories and reports ~10% LOW. This documents WHY the
-    // default was raised -- if the GPU ever stops truncating at 1000
-    // (e.g. cap semantics change) this test should be revisited.
-    let cpu = cpu_flux(1_000);
-    let gpu_capped = gpu_flux(1_000);
-    let ratio = gpu_capped / cpu;
-    eprintln!("H2 r=35 cap=1000: CPU = {cpu:.4e}  GPU = {gpu_capped:.4e}  ratio = {ratio:.4}");
-    assert!(
-        ratio < 0.95,
-        "expected the 1000-step cap to truncate H2 GPU flux well below CPU \
-         (historical ~0.90), got ratio {ratio:.4}"
-    );
+    // The CPU ignores the cap (runs to completion). The GPU honours it, and
+    // at 1000 steps a 14 MeV neutron in 35 cm of H2 is still scattering, so
+    // histories truncate and the flux would come out ~10% LOW. That used to
+    // be a stderr warning gated on `verbose.summary`; a `verbose=[]` run
+    // returned the deficit in silence. It is an error now, raised at the
+    // first launch that truncates, so the under-counted flux is never
+    // returned at all. If the GPU ever stops truncating H2 at 1000 (e.g. the
+    // cap semantics change) this test should be revisited.
+    match gpu_run(1_000) {
+        Err(yamc::gpu::GpuDispatchError::HistoriesTruncated {
+            truncated,
+            launched,
+            max_steps,
+        }) => {
+            eprintln!("H2 r=35 cap=1000: {truncated} of {launched} truncated at {max_steps}");
+            assert_eq!(max_steps, 1_000);
+            assert!(truncated > 0 && truncated <= launched);
+            // The message has to carry the remedy, since it is all the user sees.
+            let msg = yamc::gpu::GpuDispatchError::HistoriesTruncated {
+                truncated,
+                launched,
+                max_steps,
+            }
+            .to_string();
+            assert!(msg.contains("max_steps_per_particle=1000"), "{msg}");
+            assert!(msg.contains("Raise max_steps_per_particle"), "{msg}");
+        }
+        Err(other) => panic!("expected HistoriesTruncated, got {other}"),
+        Ok(_) => panic!(
+            "expected the 1000-step cap to truncate H2 histories and fail the run \
+             (historically ~10% of the flux was lost); it ran to completion instead"
+        ),
+    }
 }
