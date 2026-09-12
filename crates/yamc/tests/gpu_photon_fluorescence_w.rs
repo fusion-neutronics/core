@@ -144,7 +144,7 @@ fn build() -> Option<(Model, Arc<Tally>, Vec<f64>, TransportSettings)> {
     let t = Arc::new(t);
 
     let mut model = Model::new(geometry, vec![source], vec![t.clone()]);
-    model.max_steps_per_particle = 5_000;
+    model.gpu_max_steps_per_particle = 5_000;
     model.transport_secondary_photons = true;
     let settings = TransportSettings {
         total_particles: Some(40_000 * 8),

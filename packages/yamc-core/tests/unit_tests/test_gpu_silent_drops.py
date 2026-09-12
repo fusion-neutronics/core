@@ -9,7 +9,7 @@ reported only under a verbosity flag the user can switch off, so a
 - ``convergence_targets``: the launch loop cannot stop on them. With a
   particle cap also set, the run used to go silently to the cap. It is now
   refused up front, whatever else is set.
-- ``max_steps_per_particle``: a launch that truncated histories under-counts
+- ``gpu_max_steps_per_particle``: a launch that truncated histories under-counts
   the flux. That was a gated warning; it is now an error, so the under-counted
   tallies are never returned.
 
@@ -108,10 +108,10 @@ def test_binding_step_cap_is_an_error_on_gpu():
     # would come out ~10% low. That used to be a stderr warning gated on
     # verbose.summary, i.e. nothing at all on this verbose=[] model, with the
     # under-counted tallies returned as if valid. It is an error now.
-    model = _sphere("H2", 35.0, max_steps_per_particle=1000)
-    with pytest.raises(ValueError, match="max_steps_per_particle=1000") as exc:
+    model = _sphere("H2", 35.0, gpu_max_steps_per_particle=1000)
+    with pytest.raises(ValueError, match="gpu_max_steps_per_particle=1000") as exc:
         model.simulate_transport(total_particles=2000, seed=7, compute="gpu")
-    assert "Raise max_steps_per_particle" in str(exc.value)
+    assert "Raise gpu_max_steps_per_particle" in str(exc.value)
 
 
 @needs_gpu

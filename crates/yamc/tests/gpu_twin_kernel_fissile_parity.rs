@@ -93,7 +93,7 @@ fn sphere_model(nuclide: &str, density: f64, radius: f64, energy_ev: f64) -> Mod
     });
     let mut model = Model::new(geometry, vec![source], vec![]);
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = MAX_STEPS;
+    model.gpu_max_steps_per_particle = MAX_STEPS;
     model.tracking_mode = TrackingMode::Surface;
     model
 }

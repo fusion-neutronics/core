@@ -199,7 +199,7 @@ fn build_coupled(
     let mut model = Model::new(geo, vec![src], vec![neutron_t, photon_t]);
     model.verbose = Verbose::silent();
     model.transport_secondary_photons = true;
-    model.max_steps_per_particle = 10_000;
+    model.gpu_max_steps_per_particle = 10_000;
     (model, settings(total))
 }
 
@@ -211,7 +211,7 @@ fn build_photon(photon_t: Arc<Tally>, total: usize) -> (Model, TransportSettings
     let src = point_source(ParticleType::Photon, 2_000_000.0, 1.0);
     let mut model = Model::new(geo, vec![src], vec![photon_t]);
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = 10_000;
+    model.gpu_max_steps_per_particle = 10_000;
     (model, settings(total))
 }
 
@@ -234,7 +234,7 @@ fn build_mixed(
     );
     model.verbose = Verbose::silent();
     model.transport_secondary_photons = true;
-    model.max_steps_per_particle = 10_000;
+    model.gpu_max_steps_per_particle = 10_000;
     (model, settings(total))
 }
 

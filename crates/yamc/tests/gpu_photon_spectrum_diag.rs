@@ -102,7 +102,7 @@ fn build_r(radius: f64) -> (Model, Arc<Tally>, TransportSettings) {
     t.initialize_batches(8);
     let t = Arc::new(t);
     let mut model = Model::new(geometry, vec![source], vec![t.clone()]);
-    model.max_steps_per_particle = 5_000;
+    model.gpu_max_steps_per_particle = 5_000;
     model.transport_secondary_photons = true;
     let settings = TransportSettings {
         total_particles: Some(2_500 * 8),

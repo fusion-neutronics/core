@@ -123,7 +123,7 @@ fn o16_sphere_model(seed: u64) -> (Model, Vec<Arc<Tally>>, TransportSettings) {
         ),
     ];
     let mut model = Model::new(geometry, vec![source], tallies.clone());
-    model.max_steps_per_particle = 10_000;
+    model.gpu_max_steps_per_particle = 10_000;
     let settings = TransportSettings {
         total_particles: Some(n_particles * n_batches),
         seed,

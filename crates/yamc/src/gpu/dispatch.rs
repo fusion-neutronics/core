@@ -187,7 +187,7 @@ pub enum GpuDispatchError {
         n_targets: usize,
     },
     /// Histories in a launch were still transporting when they hit
-    /// `Model::max_steps_per_particle`. Their remaining track length was never
+    /// `Model::gpu_max_steps_per_particle`. Their remaining track length was never
     /// scored, so every tally they touched is under-counted, by an amount
     /// nothing downstream can correct. This used to be a stderr warning gated
     /// on `verbose.summary`, so a `verbose=[]` run reported nothing and a
@@ -315,10 +315,10 @@ impl std::fmt::Display for GpuDispatchError {
             } => write!(
                 f,
                 "{truncated} of {launched} GPU histories in one launch ({:.2}%) were still \
-                 transporting when they hit max_steps_per_particle={max_steps}. Their remaining \
+                 transporting when they hit gpu_max_steps_per_particle={max_steps}. Their remaining \
                  track length was not scored, so the tallies would be under-counted by an \
                  amount that cannot be corrected afterwards. The CPU runs every history to \
-                 completion. Raise max_steps_per_particle (the default is 100000), or run on \
+                 completion. Raise gpu_max_steps_per_particle (the default is 100000), or run on \
                  the CPU.",
                 100.0 * *truncated as f64 / (*launched).max(1) as f64
             ),
@@ -491,7 +491,7 @@ fn warn_if_ranks_share_one_device(device: Option<&str>, verbose: bool) {
 }
 
 /// Fail the run when a launch truncated histories at the
-/// `max_steps_per_particle` cap. A particle still `alive` at loop exit hit
+/// `gpu_max_steps_per_particle` cap. A particle still `alive` at loop exit hit
 /// the cap before it leaked or was absorbed, so its remaining track length
 /// was never scored and every tally it touched is under-counted relative to
 /// the CPU, which runs every history to completion and ignores the cap.
@@ -904,7 +904,7 @@ fn run_on_gpu_dispatch(
         build_tallies_pack(&validated, geometry, n_cells, &score_mts, &per_mt_scales)?
     };
 
-    let max_steps = model.max_steps_per_particle;
+    let max_steps = model.gpu_max_steps_per_particle;
     let survival = survival_inputs(model);
     let ctx = GpuContext::with_device(device)?;
     if model.verbose.summary {
@@ -1899,7 +1899,7 @@ fn launch_chunk_size(mem_safe_max: usize) -> usize {
 /// The remaining limit is the provisioning itself: `per_history_spill_cap` is a
 /// worst case (a history that touched a distinct bin on every one of its
 /// `max_steps` steps), and a real history touches ~100. So
-/// `max_steps_per_particle` is now a throughput knob for a fine tally -- lower
+/// `gpu_max_steps_per_particle` is now a throughput knob for a fine tally -- lower
 /// it and the chunk grows -- and a model left at the default 100,000 gets
 /// `spill_cap == total_out_len - K` and still lands on a small chunk. Cutting
 /// that over-provisioning is the next step; it needs exact handling of a
@@ -2895,7 +2895,7 @@ pub(super) fn run_on_gpu_photon(
         }
     }
 
-    let max_steps = model.max_steps_per_particle;
+    let max_steps = model.gpu_max_steps_per_particle;
     let ctx = GpuContext::with_device(device)?;
     if model.verbose.summary {
         println!("GPU: {}", ctx.adapter_info());
@@ -3234,7 +3234,7 @@ fn run_on_gpu_coupled(
         }
     }
 
-    let max_steps = model.max_steps_per_particle;
+    let max_steps = model.gpu_max_steps_per_particle;
     let survival = survival_inputs(model);
     let ctx = GpuContext::with_device(device)?;
     if model.verbose.summary {
@@ -3657,7 +3657,7 @@ fn run_on_gpu_mixed(
         }
     }
 
-    let max_steps = model.max_steps_per_particle;
+    let max_steps = model.gpu_max_steps_per_particle;
     let ctx = GpuContext::with_device(device)?;
     if model.verbose.summary {
         println!("GPU (mixed neutron+photon source): {}", ctx.adapter_info());

@@ -117,7 +117,7 @@ fn mesh_flux_tally(particle: ParticleType, shape: usize, n_batches: usize) -> Ar
 fn build_model(tallies: Vec<Arc<Tally>>, total_particles: usize) -> (Model, TransportSettings) {
     let mut model = Model::new(fe_sphere(), vec![neutron_source()], tallies);
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = MAX_STEPS;
+    model.gpu_max_steps_per_particle = MAX_STEPS;
     model.tracking_mode = TrackingMode::Surface;
     model.transport_secondary_photons = true;
     let settings = TransportSettings {

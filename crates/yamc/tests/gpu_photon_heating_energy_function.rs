@@ -115,7 +115,7 @@ fn fe_sphere(energy_function: Option<&[f64]>) -> (Model, Arc<Tally>, TransportSe
     let tally = Arc::new(t);
 
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&tally)]);
-    model.max_steps_per_particle = 5_000;
+    model.gpu_max_steps_per_particle = 5_000;
     let settings = TransportSettings {
         total_particles: Some(n_particles * n_batches),
         seed: 42,

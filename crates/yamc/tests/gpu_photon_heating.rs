@@ -109,7 +109,7 @@ fn fe_sphere_with_heating(
         vec![source],
         vec![Arc::clone(&flux), Arc::clone(&heating)],
     );
-    model.max_steps_per_particle = 5_000;
+    model.gpu_max_steps_per_particle = 5_000;
     model.transport_secondary_photons = true;
     let settings = TransportSettings {
         total_particles: Some(n_particles * n_batches),

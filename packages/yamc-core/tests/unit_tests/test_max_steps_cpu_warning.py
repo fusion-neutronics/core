@@ -1,4 +1,4 @@
-"""`max_steps_per_particle` warns when it is set and then ignored (#302).
+"""`gpu_max_steps_per_particle` warns when it is set and then ignored (#302).
 
 Only the GPU kernel applies the cap: it needs a bound in its loop condition
 (driver watchdog, lockstep workgroups). CPU transport runs `while particle.alive`
@@ -50,11 +50,11 @@ def _max_steps_warnings(model, **run_kwargs):
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         model.simulate_transport(total_particles=500, seed=1, **run_kwargs)
-    return [str(w.message) for w in caught if "max_steps_per_particle" in str(w.message)]
+    return [str(w.message) for w in caught if "gpu_max_steps_per_particle" in str(w.message)]
 
 
 def test_explicit_cap_warns_on_cpu():
-    hits = _max_steps_warnings(_model(max_steps_per_particle=50_000))
+    hits = _max_steps_warnings(_model(gpu_max_steps_per_particle=50_000))
     assert len(hits) == 1, f"expected one warning, got {hits}"
     assert "has no effect" in hits[0]
     assert "50000" in hits[0], "the warning should quote the value that was set"
@@ -62,7 +62,7 @@ def test_explicit_cap_warns_on_cpu():
 
 def test_cap_set_through_the_setter_warns_on_cpu():
     model = _model()
-    model.max_steps_per_particle = 4_242
+    model.gpu_max_steps_per_particle = 4_242
     hits = _max_steps_warnings(model)
     assert len(hits) == 1, f"expected one warning, got {hits}"
     assert "4242" in hits[0]
@@ -75,15 +75,15 @@ def test_default_cap_is_silent():
 
 def test_getter_still_reports_the_default():
     """Taking `None` as "not given" must not change the visible default."""
-    assert _model().max_steps_per_particle == 100_000
-    assert _model(max_steps_per_particle=7).max_steps_per_particle == 7
+    assert _model().gpu_max_steps_per_particle == 100_000
+    assert _model(gpu_max_steps_per_particle=7).gpu_max_steps_per_particle == 7
 
 
 def test_gpu_run_is_silent_because_the_cap_applies_there():
     if not yamc.parallel.gpu_available():
         pytest.skip("no f64 GPU available")
     hits = _max_steps_warnings(
-        _model(max_steps_per_particle=50_000), compute="gpu"
+        _model(gpu_max_steps_per_particle=50_000), compute="gpu"
     )
     assert hits == [], f"the GPU honours the cap, so it must not warn: {hits}"
 
@@ -116,7 +116,7 @@ def test_transmutation_warns_because_it_is_cpu_only():
         position=(0.0, 0.0, 0.0), energy=yamc.sources.Discrete([14.06e6], [1.0])
     )
     model = yamc.Model(
-        geometry=geometry, source=source, verbose=[], max_steps_per_particle=1_234
+        geometry=geometry, source=source, verbose=[], gpu_max_steps_per_particle=1_234
     )
     schedule = yamc.PulseSchedule(
         [
@@ -129,6 +129,6 @@ def test_transmutation_warns_because_it_is_cpu_only():
         model.simulate_transmutation(
             method="independent", schedule=schedule, total_particles=500, seed=1
         )
-    hits = [str(w.message) for w in caught if "max_steps_per_particle" in str(w.message)]
+    hits = [str(w.message) for w in caught if "gpu_max_steps_per_particle" in str(w.message)]
     assert len(hits) == 1, f"expected one warning, got {hits}"
     assert "1234" in hits[0]
