@@ -309,4 +309,44 @@ mod tests {
             REACTION_MT.len()
         );
     }
+
+    /// The table had `Li6` and `Li7` twice, once at the top out of alphabetical
+    /// order and once in place. `parse_f64_table` collects into a `HashMap`, so
+    /// the later line won and the surviving 0.07589 was the right one, but that
+    /// is luck: a first-wins parser or a reordered file would have shifted Li6
+    /// by +0.013% silently.
+    #[test]
+    fn the_natural_abundance_table_has_no_duplicate_nuclides() {
+        let mut seen = std::collections::HashSet::new();
+        let mut duplicated: Vec<&str> = include_str!("natural_abundance.txt")
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .filter(|name| !seen.insert(*name))
+            .collect();
+        duplicated.sort_unstable();
+        assert!(
+            duplicated.is_empty(),
+            "duplicate entries would make the value depend on parser order: {duplicated:?}"
+        );
+    }
+
+    #[test]
+    fn every_element_abundance_sums_to_one() {
+        let mut by_element: std::collections::HashMap<String, f64> =
+            std::collections::HashMap::new();
+        for (nuclide, abundance) in NATURAL_ABUNDANCE.iter() {
+            // `Ta180_m1` is tantalum, and its abundance counts towards it.
+            let stem = nuclide.split('_').next().unwrap_or(nuclide);
+            let symbol: String = stem.chars().take_while(|c| c.is_alphabetic()).collect();
+            *by_element.entry(symbol).or_insert(0.0) += abundance;
+        }
+        assert!(!by_element.is_empty());
+        for (symbol, sum) in &by_element {
+            assert!(
+                (sum - 1.0).abs() < 1.0e-3,
+                "{symbol} abundances sum to {sum}, not 1"
+            );
+        }
+    }
+
 }
