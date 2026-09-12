@@ -170,11 +170,36 @@ pub enum GpuDispatchError {
     OverlayTallyUnsupported {
         tally_index: usize,
     },
-    /// An uncapped run (`total_particles = None`) with no `max_runtime`. On the
-    /// GPU that has no stop condition (convergence-target stopping is not on the
-    /// GPU yet, #241), so it would launch forever. Rejected up front. The Python
-    /// layer raises the equivalent `ValueError` before reaching here.
+    /// An uncapped run (`total_particles = None`) with no `max_runtime`. The
+    /// GPU launch loop has no other stop condition, so it would launch forever.
+    /// Rejected up front. The Python layer's own "at least one stop condition"
+    /// guard fires first, so from Python this is unreachable.
     UncappedWithoutRuntime,
+    /// `Model::convergence_targets` is non-empty. The GPU launch loop stops on
+    /// `total_particles` and `max_runtime` only: it cannot evaluate a precision
+    /// target between launches, because the per-history aggregate moments the
+    /// targets are defined on are not read back from the device yet
+    /// (fusion-neutronics/core#29). A run carrying targets plus a particle cap
+    /// used to run silently to the cap, ignoring the precision the user asked
+    /// to stop at (fusion-neutronics/core#23). Refused instead, whatever else
+    /// is set, so the request is never quietly dropped.
+    ConvergenceTargetsUnsupported {
+        n_targets: usize,
+    },
+    /// Histories in a launch were still transporting when they hit
+    /// `Model::max_steps_per_particle`. Their remaining track length was never
+    /// scored, so every tally they touched is under-counted, by an amount
+    /// nothing downstream can correct. This used to be a stderr warning gated
+    /// on `verbose.summary`, so a `verbose=[]` run reported nothing and a
+    /// truncated flux could pass for a converged one
+    /// (fusion-neutronics/core#23). Now it fails the run at the first launch
+    /// that truncates. The CPU never truncates (it runs every history to
+    /// completion), so the remedy is a higher cap or the CPU.
+    HistoriesTruncated {
+        truncated: usize,
+        launched: usize,
+        max_steps: u32,
+    },
     /// More than `Model::max_lost_particles` histories ended in no cell, i.e.
     /// the geometry does not cover the space particles reached (issue #289).
     /// The GPU twin of the CPU's `handle_lost_particle` abort: same cause, same
@@ -273,9 +298,29 @@ impl std::fmt::Display for GpuDispatchError {
             ),
             Self::UncappedWithoutRuntime => write!(
                 f,
-                "compute='gpu' needs total_particles or max_runtime to stop; it cannot yet stop \
-                 on convergence targets (see #241). Set total_particles and/or max_runtime, or \
-                 run on the CPU."
+                "compute='gpu' needs total_particles or max_runtime to stop. Set one or both, \
+                 or run on the CPU."
+            ),
+            Self::ConvergenceTargetsUnsupported { n_targets } => write!(
+                f,
+                "compute='gpu' cannot stop on convergence targets yet: the launch loop only \
+                 checks total_particles and max_runtime between launches, so the {n_targets} \
+                 target(s) on this model would be ignored and the run would go to the cap. \
+                 Clear Model.convergence_targets to run this on the GPU, or run on the CPU."
+            ),
+            Self::HistoriesTruncated {
+                truncated,
+                launched,
+                max_steps,
+            } => write!(
+                f,
+                "{truncated} of {launched} GPU histories in one launch ({:.2}%) were still \
+                 transporting when they hit max_steps_per_particle={max_steps}. Their remaining \
+                 track length was not scored, so the tallies would be under-counted by an \
+                 amount that cannot be corrected afterwards. The CPU runs every history to \
+                 completion. Raise max_steps_per_particle (the default is 100000), or run on \
+                 the CPU.",
+                100.0 * *truncated as f64 / (*launched).max(1) as f64
             ),
             Self::MaxLostParticlesExceeded { count, max, .. } => write!(
                 f,
@@ -445,44 +490,46 @@ fn warn_if_ranks_share_one_device(device: Option<&str>, verbose: bool) {
     );
 }
 
-/// Warn when histories were truncated by the `max_steps_per_particle`
-/// cap. A particle still `alive` at loop exit hit the cap before it
-/// leaked or was absorbed, so its remaining track length was never
-/// scored -- the GPU under-counts flux relative to the CPU (which runs
-/// every history to completion and ignores the cap). The default cap is
-/// high enough that this should not fire for normal physics; if it does,
-/// the user should raise `max_steps_per_particle`. Printed only once per
-/// run, gated on `verbose.summary` so it never spams batched output.
-fn warn_if_truncated(alive: &[u32], max_steps: u32, verbose: bool) {
-    if !verbose || alive.is_empty() {
-        return;
-    }
+/// Fail the run when a launch truncated histories at the
+/// `max_steps_per_particle` cap. A particle still `alive` at loop exit hit
+/// the cap before it leaked or was absorbed, so its remaining track length
+/// was never scored and every tally it touched is under-counted relative to
+/// the CPU, which runs every history to completion and ignores the cap.
+///
+/// Checked after every launch rather than once at the end, so a run that
+/// truncates fails at its first chunk instead of after the whole budget.
+/// This was a `verbose.summary`-gated warning, which a `verbose=[]` run
+/// silenced entirely while still returning the under-counted flux
+/// (fusion-neutronics/core#23). A truncated flux is not a valid answer to
+/// the question asked, so it is an error at every verbosity. The default
+/// cap is high enough that this does not fire for normal physics; when it
+/// does, the remedy is a higher cap or the CPU.
+fn fail_if_truncated(alive: &[u32], max_steps: u32) -> Result<(), GpuDispatchError> {
     let truncated = alive.iter().filter(|&&a| a == 1).count();
     if truncated > 0 {
-        let frac = truncated as f64 / alive.len() as f64;
-        eprintln!(
-            "WARNING: {truncated} of {} GPU particles ({:.2}%) hit the \
-             max_steps_per_particle={max_steps} cap while still transporting; \
-             their remaining track length was not scored and the flux is \
-             under-counted relative to the CPU. Raise max_steps_per_particle.",
-            alive.len(),
-            frac * 100.0,
-        );
+        return Err(GpuDispatchError::HistoriesTruncated {
+            truncated,
+            launched: alive.len(),
+            max_steps,
+        });
     }
+    Ok(())
 }
 
 /// Warn when the model requests a non-Surface tracking mode. The GPU
 /// neutron and photon kernels always surface-track and have no Woodcock
 /// (delta) / Hybrid analogue, so a `tracking_mode = Woodcock | Hybrid`
-/// request is silently not applied. The returned flux is still unbiased
-/// (surface tracking and Woodcock/Hybrid are different estimators of the
-/// same quantity), so this is a notice, not a hard error: rejecting would
-/// remove a working, numerically-correct capability. Printed once per run,
-/// gated on `verbose.summary` so it never spams batched output. Surface
-/// tracking (the default) is silent.
-fn warn_if_tracking_mode_ignored(tracking_mode: crate::model::TrackingMode, verbose: bool) {
+/// request is not applied. The returned flux is still unbiased (surface
+/// tracking and Woodcock/Hybrid are different estimators of the same
+/// quantity), so this is a notice, not a hard error: rejecting would remove
+/// a working, numerically-correct capability. Printed once per run at every
+/// verbosity: it used to be gated on `verbose.summary`, so a `verbose=[]`
+/// run dropped the request in silence (fusion-neutronics/core#23), and
+/// `Verbose` governs progress output, not whether the user is told their
+/// setting was ignored. Surface tracking (the default) is silent.
+fn warn_if_tracking_mode_ignored(tracking_mode: crate::model::TrackingMode) {
     use crate::model::TrackingMode;
-    if !verbose || tracking_mode == TrackingMode::Surface {
+    if tracking_mode == TrackingMode::Surface {
         return;
     }
     eprintln!(
@@ -681,10 +728,18 @@ fn run_on_gpu_dispatch(
 ) -> Result<GpuRunResult, GpuDispatchError> {
     // GPU stop conditions (#230): a finite particle cap (`total_particles`)
     // and/or a wall-time budget (`max_runtime`), checked between launches.
-    // `Some(0)` is an error (0 is not "unlimited"); `None` + no `max_runtime`
-    // has no way to stop on GPU (convergence-target stopping is not on GPU yet,
-    // see #241), so reject it here rather than loop forever. Covers every
+    // Convergence targets are not one of them: the launch loop cannot evaluate
+    // a precision target (fusion-neutronics/core#29), and a run that carries
+    // targets alongside a cap used to go silently to the cap, so it is refused
+    // first and in its own words (fusion-neutronics/core#23). `Some(0)` is an
+    // error (0 is not "unlimited"); `None` + no `max_runtime` has no way to
+    // stop, so it is rejected here rather than looping forever. Covers every
     // kernel path since they all route through this entry.
+    if !model.convergence_targets.is_empty() {
+        return Err(GpuDispatchError::ConvergenceTargetsUnsupported {
+            n_targets: model.convergence_targets.len(),
+        });
+    }
     match (settings.total_particles, settings.max_runtime) {
         (Some(0), _) => {
             return Err(GpuDispatchError::Translate(
@@ -710,7 +765,7 @@ fn run_on_gpu_dispatch(
     // flux, so warn-and-proceed rather than refuse -- a reject would drop a
     // working capability. Covers all kernel paths (neutron, photon, coupled)
     // since they share this entry. See `warn_if_tracking_mode_ignored`.
-    warn_if_tracking_mode_ignored(model.tracking_mode, model.verbose.summary);
+    warn_if_tracking_mode_ignored(model.tracking_mode);
     warn_if_ranks_share_one_device(device, model.verbose.summary);
     // Photon models need the same photon prep the CPU runs inline in
     // `run_internal` (`init_photon_data` + `init_bremsstrahlung`).
@@ -2215,6 +2270,8 @@ fn run_neutron_per_history(
             }
         }
 
+        fail_if_truncated(&kernel.alive, max_steps)?;
+
         alive_all.extend(kernel.alive);
         n_steps_all.extend(kernel.n_steps);
         final_energies_all.extend(kernel.final_energies);
@@ -2227,9 +2284,6 @@ fn run_neutron_per_history(
 
     // Finalize per tally into the CPU's per-history Welford representation.
     finalize_per_history_tallies(validated, &sum_acc, &sumsq_acc, n_hist_total);
-
-    warn_if_truncated(&alive_all, max_steps, model.verbose.summary);
-
     Ok(GpuRunResult {
         n_particles: n_hist_total as usize,
         n_cells: last_n_cells,
@@ -2475,6 +2529,7 @@ fn run_neutron_per_history_fissile(
             total_out_len,
             &mut per_source_total,
         );
+        fail_if_truncated(&kernel.alive, max_steps)?;
         alive_all.extend(kernel.alive);
         n_steps_all.extend(kernel.n_steps);
         final_energies_all.extend(kernel.final_energies);
@@ -2555,9 +2610,6 @@ fn run_neutron_per_history_fissile(
     };
     let n = n_hist_total;
     install_grouped_stats(validated, &sum_acc, &sumsq_acc, n);
-
-    warn_if_truncated(&alive_all, max_steps, model.verbose.summary);
-
     Ok(GpuRunResult {
         n_particles: n_hist_total as usize,
         n_cells: last_n_cells,
@@ -2980,6 +3032,8 @@ pub(super) fn run_on_gpu_photon(
             }
         }
 
+        fail_if_truncated(&result.alive, max_steps)?;
+
         alive_all.extend(result.alive);
         n_steps_all.extend(result.n_steps);
         final_energies_all.extend(result.final_energies);
@@ -2991,8 +3045,6 @@ pub(super) fn run_on_gpu_photon(
     }
 
     finalize_per_history_tallies(&validated, &sum_acc, &sumsq_acc, n_hist_total);
-    warn_if_truncated(&alive_all, max_steps, model.verbose.summary);
-
     Ok(GpuRunResult {
         n_particles: n_hist_total as usize,
         n_cells: last_n_cells,
@@ -3324,6 +3376,7 @@ fn run_on_gpu_coupled(
         }
         let mut pst_n = vec![0.0f64; chunk_sources * total_out_len_n];
         accumulate_src_acc(&kernel.src_acc, &flat_scales_n, total_out_len_n, &mut pst_n);
+        fail_if_truncated(&kernel.alive, max_steps)?;
         alive_all.extend(kernel.alive);
         n_steps_all.extend(kernel.n_steps);
         final_energies_all.extend(kernel.final_energies);
@@ -3428,9 +3481,6 @@ fn run_on_gpu_coupled(
     finalize_per_history_tallies(&validated_n[..n_neutron_only], &sum_n, &sq_n, n_hist_total);
     finalize_per_history_tallies(&validated_p[..n_photon_only], &sum_p, &sq_p, n_hist_total);
     finalize_per_history_tallies(&validated_n[n_neutron_only..], &sum_d, &sq_d, n_hist_total);
-
-    warn_if_truncated(&alive_all, max_steps, model.verbose.summary);
-
     Ok(GpuRunResult {
         n_particles: n_hist_total as usize,
         n_cells: last_n_cells,
@@ -3758,6 +3808,7 @@ fn run_on_gpu_mixed(
                 });
             }
             accumulate_src_acc(&kernel.src_acc, &flat_scales_n, total_out_len_n, &mut pst_n);
+            fail_if_truncated(&kernel.alive, max_steps)?;
             alive_all.extend(kernel.alive);
             n_steps_all.extend(kernel.n_steps);
             final_energies_all.extend(kernel.final_energies);
@@ -3848,6 +3899,7 @@ fn run_on_gpu_mixed(
                 total_out_len_p,
                 &mut pst_p,
             );
+            fail_if_truncated(&primary.alive, max_steps)?;
             alive_all.extend(primary.alive);
             n_steps_all.extend(primary.n_steps);
             final_energies_all.extend(primary.final_energies);
@@ -3911,9 +3963,6 @@ fn run_on_gpu_mixed(
     finalize_per_history_tallies(&validated_n[..n_neutron_only], &sum_n, &sq_n, n_hist_total);
     finalize_per_history_tallies(&validated_p[..n_photon_only], &sum_p, &sq_p, n_hist_total);
     finalize_per_history_tallies(&validated_n[n_neutron_only..], &sum_d, &sq_d, n_hist_total);
-
-    warn_if_truncated(&alive_all, max_steps, model.verbose.summary);
-
     Ok(GpuRunResult {
         n_particles: n_hist_total as usize,
         n_cells: last_n_cells,
