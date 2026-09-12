@@ -593,24 +593,71 @@ pub fn preload_activation_data(
         // bytes and the scope, and `scope` is one value for every item, so the
         // results do not depend on the order they are produced in -- nor does
         // the map they land in, which is keyed by name (issue #576, finding 5a).
-        let decoded: Vec<(String, std::sync::Arc<yamc_nuclide::Nuclide>)> = {
+        // A nuclide the material is MADE of is not optional. `to_load` is the
+        // reachable chain closure, most of which is daughters and
+        // grand-daughters: a library may legitimately not publish one of those,
+        // and dropping it understates a second-generation inventory. Dropping a
+        // nuclide from the composition is different in kind, because the foil
+        // then cannot activate at all and the solve returns a decay curve for
+        // an unirradiated material with no indication that anything is wrong.
+        //
+        // Observed on fendl-3.2d, which publishes 61 elements: an osmium foil
+        // solved in 0.4 s, reported C/E 0.000 at all 21 cooling points, and
+        // said nothing. The precise error already exists one layer down
+        // ("Nuclide 'Os190' is not available in 'fendl-3.2d'.") and was being
+        // discarded by the `.ok()` this replaces.
+        let composition: HashSet<&str> =
+            material.nuclides.keys().map(|s| s.as_str()).collect();
+        let decoded: Vec<
+            Result<Option<(String, std::sync::Arc<yamc_nuclide::Nuclide>)>, String>,
+        > = {
             let load_one = |(name, path): (String, String)| {
                 let sources = HashMap::from([(name.clone(), path)]);
-                get_or_load_nuclide(&name, &sources, &scope)
-                    .ok()
-                    .map(|nd| (name, nd))
+                match get_or_load_nuclide(&name, &sources, &scope) {
+                    Ok(nd) => Ok(Some((name, nd))),
+                    Err(error) if composition.contains(name.as_str()) => {
+                        // Just the first line. The underlying error appends the
+                        // library's whole published index, which is useful once
+                        // and unreadable seven times over, and a foil element
+                        // has one entry per natural isotope.
+                        let text = error.to_string();
+                        Err(text.lines().next().unwrap_or(&text).to_string())
+                    }
+                    // A daughter the library does not publish. Tolerated, as
+                    // before, so a partial network still runs.
+                    Err(_) => Ok(None),
+                }
             };
             #[cfg(not(target_arch = "wasm32"))]
             {
                 use rayon::prelude::*;
-                to_load.into_par_iter().filter_map(load_one).collect()
+                to_load.into_par_iter().map(load_one).collect()
             }
             #[cfg(target_arch = "wasm32")]
             {
-                to_load.into_iter().filter_map(load_one).collect()
+                to_load.into_iter().map(load_one).collect()
             }
         };
-        for (name, nd) in decoded {
+        let mut refused: Vec<String> = Vec::new();
+        let mut loaded = Vec::new();
+        for outcome in decoded {
+            match outcome {
+                Ok(Some(pair)) => loaded.push(pair),
+                Ok(None) => {}
+                Err(message) => refused.push(message),
+            }
+        }
+        if !refused.is_empty() {
+            refused.sort();
+            return Err(format!(
+                "cross sections could not be loaded for {} nuclide(s) the \
+                 material is made of, so it cannot activate:\n  {}",
+                refused.len(),
+                refused.join("\n  ")
+            )
+            .into());
+        }
+        for (name, nd) in loaded {
             material.nuclide_data.insert(name, nd);
         }
     }
