@@ -487,7 +487,9 @@ pub const ABOVE_EVALUATION_TOLERANCE: f64 = 1.0e-3;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Weighting {
     /// `φ(E)` constant inside the group: `σ_g = ∫σ dE / (E_hi - E_lo)`.
-    #[default]
+    ///
+    /// Kept selectable to reproduce results produced before `OneOverE` became
+    /// the default, and for bit-exact regression against them.
     FlatInEnergy,
     /// `φ(E) ∝ 1/E` inside the group, i.e. flat in lethargy:
     /// `σ_g = ∫σ/E dE / ∫1/E dE`.
@@ -522,10 +524,17 @@ pub enum Weighting {
     /// a validation one; against the measurements themselves the count
     /// agreeing within 20% goes from 10 to 13 of 33 while the median
     /// |C/E - 1| is 43.50% against 45.57%.
+    #[default]
     OneOverE,
 }
 
-static WITHIN_GROUP_WEIGHT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// Nothing has called [`set_within_group_weight`], so [`Weighting::default`]
+/// decides. Held as a sentinel rather than as the default's own code so the two
+/// cannot drift apart when the default changes.
+const WEIGHT_UNSET: u8 = u8::MAX;
+
+static WITHIN_GROUP_WEIGHT: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(WEIGHT_UNSET);
 
 /// Set the within-group weight used by every later group average.
 ///
@@ -542,8 +551,9 @@ pub fn set_within_group_weight(weighting: Weighting) {
 /// The within-group weight in force.
 pub fn within_group_weight() -> Weighting {
     match WITHIN_GROUP_WEIGHT.load(std::sync::atomic::Ordering::Relaxed) {
-        1 => Weighting::OneOverE,
-        _ => Weighting::FlatInEnergy,
+        WEIGHT_UNSET => Weighting::default(),
+        0 => Weighting::FlatInEnergy,
+        _ => Weighting::OneOverE,
     }
 }
 
@@ -1348,6 +1358,21 @@ pub fn scale_rates(rates: &ReactionRates, factor: f64) -> ReactionRates {
 mod tests {
     use super::*;
 
+    /// The flat-in-energy group average, whatever the process-wide setting is.
+    ///
+    /// Every test below was written to check the structure of the walk -- that
+    /// a boundary on a grid point is not counted twice, that a threshold flag
+    /// is read, that a duplicated energy stays bit-identical -- by comparing
+    /// against a hand-computed flat average. Routing them through
+    /// `group_averaged_xs` would make each one also a test of which weight is
+    /// currently selected, which is not what any of them is for.
+    fn flat_group_average(reaction: &Reaction, e_lo: f64, e_hi: f64) -> f64 {
+        if e_lo >= e_hi {
+            return 0.0;
+        }
+        walk_group(reaction, e_lo, e_hi, None, None).dilute(e_lo, e_hi)
+    }
+
     /// A 1/v cross section over a wide group: the two weights must differ, and
     /// each must equal its own analytic average.
     #[test]
@@ -1418,12 +1443,13 @@ mod tests {
     }
 
     #[test]
-    fn the_default_weight_is_flat_in_energy_and_is_settable() {
-        assert_eq!(within_group_weight(), Weighting::FlatInEnergy);
-        set_within_group_weight(Weighting::OneOverE);
+    fn the_default_weight_is_one_over_e_and_is_settable() {
+        assert_eq!(Weighting::default(), Weighting::OneOverE);
         assert_eq!(within_group_weight(), Weighting::OneOverE);
         set_within_group_weight(Weighting::FlatInEnergy);
         assert_eq!(within_group_weight(), Weighting::FlatInEnergy);
+        set_within_group_weight(Weighting::OneOverE);
+        assert_eq!(within_group_weight(), Weighting::OneOverE);
     }
 
     /// Helper: build a Reaction with a flat (constant) cross section.
@@ -1460,14 +1486,14 @@ mod tests {
         let rxn = flat_reaction((1.0, 1e6), 10.0, 102);
 
         // Group that spans the whole range
-        let avg = group_averaged_xs(&rxn, 1.0, 1e6);
+        let avg = flat_group_average(&rxn, 1.0, 1e6);
         assert!(
             (avg - 10.0).abs() < 1e-10,
             "Flat XS should average to 10.0, got {avg}"
         );
 
         // Subgroup should also be 10.0
-        let avg2 = group_averaged_xs(&rxn, 100.0, 1000.0);
+        let avg2 = flat_group_average(&rxn, 100.0, 1000.0);
         assert!(
             (avg2 - 10.0).abs() < 1e-10,
             "Flat XS subgroup should be 10.0, got {avg2}"
@@ -1481,12 +1507,12 @@ mod tests {
     fn the_average_stops_at_the_evaluations_last_point() {
         let rxn = flat_reaction((1e6, 1e7), 2.0, 16);
         // Half of this group is above the grid.
-        let avg = group_averaged_xs(&rxn, 5e6, 1.5e7);
+        let avg = flat_group_average(&rxn, 5e6, 1.5e7);
         assert!((avg - 1.0).abs() < 1e-12, "got {avg}");
         // All of it.
-        assert_eq!(group_averaged_xs(&rxn, 2e7, 3e7), 0.0);
+        assert_eq!(flat_group_average(&rxn, 2e7, 3e7), 0.0);
         // None of it: unchanged.
-        assert!((group_averaged_xs(&rxn, 2e6, 4e6) - 2.0).abs() < 1e-12);
+        assert!((flat_group_average(&rxn, 2e6, 4e6) - 2.0).abs() < 1e-12);
     }
 
     #[test]
@@ -1511,7 +1537,7 @@ mod tests {
         let rxn = ramp_reaction(0.0, 1e6, 0.0, 100.0, 102);
 
         // Average of a linear function over full range = (0 + 100) / 2 = 50
-        let avg = group_averaged_xs(&rxn, 0.0, 1e6);
+        let avg = flat_group_average(&rxn, 0.0, 1e6);
         assert!(
             (avg - 50.0).abs() < 1e-6,
             "Ramp XS average should be 50.0, got {avg}"
@@ -1533,14 +1559,14 @@ mod tests {
         };
 
         // Group entirely below threshold
-        let avg_below = group_averaged_xs(&rxn, 1.0, 1e4);
+        let avg_below = flat_group_average(&rxn, 1.0, 1e4);
         assert!(
             avg_below.abs() < 1e-10,
             "Below threshold should be 0, got {avg_below}"
         );
 
         // Group spanning threshold
-        let avg_span = group_averaged_xs(&rxn, 1e4, 1e6);
+        let avg_span = flat_group_average(&rxn, 1e4, 1e6);
         assert!(
             avg_span > 0.0,
             "Spanning threshold should give non-zero average"
@@ -1550,7 +1576,7 @@ mod tests {
     #[test]
     fn test_group_averaged_xs_zero_width() {
         let rxn = flat_reaction((1.0, 1e6), 10.0, 102);
-        let avg = group_averaged_xs(&rxn, 100.0, 100.0);
+        let avg = flat_group_average(&rxn, 100.0, 100.0);
         assert!(avg.abs() < 1e-10, "Zero-width group should return 0");
     }
 
@@ -1588,7 +1614,7 @@ mod tests {
     }
 
     /// The trapezoid rule over the old point set, to the bit.
-    fn scanned_group_averaged_xs(reaction: &Reaction, e_lo: f64, e_hi: f64) -> f64 {
+    fn scanned_flat_group_average(reaction: &Reaction, e_lo: f64, e_hi: f64) -> f64 {
         if e_lo >= e_hi {
             return 0.0;
         }
@@ -1667,8 +1693,8 @@ mod tests {
                 (2.0, 3.0),
             ] {
                 assert_eq!(
-                    group_averaged_xs(&rxn, e_lo, e_hi).to_bits(),
-                    scanned_group_averaged_xs(&rxn, e_lo, e_hi).to_bits(),
+                    flat_group_average(&rxn, e_lo, e_hi).to_bits(),
+                    scanned_flat_group_average(&rxn, e_lo, e_hi).to_bits(),
                     "group ({e_lo}, {e_hi}) moved"
                 );
             }
@@ -1681,23 +1707,23 @@ mod tests {
 
         // A threshold reaction is zero below its first grid point.
         rxn.threshold_idx = 1;
-        assert_eq!(group_averaged_xs(&rxn, 1.0, 5.0), 0.0);
+        assert_eq!(flat_group_average(&rxn, 1.0, 5.0), 0.0);
 
         // A non-threshold one (capture, say) is flat-clamped to its first value.
         rxn.threshold_idx = 0;
-        assert_eq!(group_averaged_xs(&rxn, 1.0, 5.0), 3.0);
+        assert_eq!(flat_group_average(&rxn, 1.0, 5.0), 3.0);
 
         // Above the last grid point there is no cross section either way:
         // `cross_section_at` holds its last value up there for a single
         // lookup, but an integral over energies the evaluation never reached
         // counts nothing.
-        assert_eq!(group_averaged_xs(&rxn, 30.0, 40.0), 0.0);
+        assert_eq!(flat_group_average(&rxn, 30.0, 40.0), 0.0);
         rxn.threshold_idx = 1;
-        assert_eq!(group_averaged_xs(&rxn, 30.0, 40.0), 0.0);
+        assert_eq!(flat_group_average(&rxn, 30.0, 40.0), 0.0);
         // A group straddling the end integrates to the end and no further:
         // 4.0 over half the group.
         assert_eq!(
-            group_averaged_xs(&rxn, 15.0, 25.0),
+            flat_group_average(&rxn, 15.0, 25.0),
             (0.5 * (3.5 + 4.0) * 5.0) / 10.0
         );
     }
@@ -1708,7 +1734,7 @@ mod tests {
         // `unwrap_or(0.0)` turns into a zero integrand rather than an index
         // out of bounds.
         let rxn = on_grid(vec![], vec![]);
-        assert_eq!(group_averaged_xs(&rxn, 1.0, 100.0), 0.0);
+        assert_eq!(flat_group_average(&rxn, 1.0, 100.0), 0.0);
     }
 
     #[test]
@@ -1717,9 +1743,9 @@ mod tests {
         // halves must add back to the whole, which they cannot if a shared
         // boundary appears as both an interior point and an edge.
         let rxn = on_grid(vec![0.0, 10.0, 20.0], vec![0.0, 10.0, 20.0]);
-        let whole = group_averaged_xs(&rxn, 0.0, 20.0) * 20.0;
-        let lower = group_averaged_xs(&rxn, 0.0, 10.0) * 10.0;
-        let upper = group_averaged_xs(&rxn, 10.0, 20.0) * 10.0;
+        let whole = flat_group_average(&rxn, 0.0, 20.0) * 20.0;
+        let lower = flat_group_average(&rxn, 0.0, 10.0) * 10.0;
+        let upper = flat_group_average(&rxn, 10.0, 20.0) * 10.0;
         assert!(
             (whole - (lower + upper)).abs() < 1e-12 * whole,
             "{whole} != {lower} + {upper}"
@@ -1788,7 +1814,7 @@ mod tests {
                 &mut out,
             );
             let split: f64 = out.iter().sum();
-            let whole = group_averaged_xs(&rxn, e_lo, e_hi);
+            let whole = flat_group_average(&rxn, e_lo, e_hi);
             assert!(
                 (split - whole).abs() <= 1e-12 * whole.abs().max(1.0),
                 "group ({e_lo}, {e_hi}): shares sum to {split}, group average is {whole}"
@@ -2014,7 +2040,7 @@ mod tests {
                     &mut out,
                 );
                 let split: f64 = out.iter().sum();
-                let whole = group_averaged_xs(&rxn, e_lo, e_hi);
+                let whole = flat_group_average(&rxn, e_lo, e_hi);
                 assert!(
                     (split - whole).abs() <= 1e-12 * whole.abs().max(1.0),
                     "{energies:?} over ({e_lo}, {e_hi}): shares sum to {split}, \
