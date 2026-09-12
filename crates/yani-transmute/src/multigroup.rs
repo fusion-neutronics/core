@@ -492,20 +492,36 @@ pub enum Weighting {
     /// `φ(E) ∝ 1/E` inside the group, i.e. flat in lethargy:
     /// `σ_g = ∫σ/E dE / ∫1/E dE`.
     ///
-    /// This is the standard assumption for a slowing-down spectrum, which is
-    /// what the epithermal region of any moderated field is, and it is what
-    /// NJOY-processed group libraries are built with. Measured against the
-    /// CoNDERC effective-cross-section benchmark on TENDL-2017, over the 33
-    /// radiative-capture measurements, it moves the median difference from
-    /// FISPACT-II's published value from 0.0959 to 0.0054 in C/E, i.e. the
-    /// weight is the whole of the residual disagreement between the two codes
-    /// on those reactions.
+    /// This is what NJOY-processed group libraries are built with, and it is
+    /// the asymptotic slowing-down shape in a well-moderated medium. It is
+    /// offered rather than made the default, and it is worth being precise
+    /// about why, because neither this nor [`Weighting::FlatInEnergy`] is
+    /// correct in general.
     ///
-    /// Against the measurements themselves it is a smaller and less one-sided
-    /// gain: the count agreeing within 20% goes from 10 to 13 of 33, while the
-    /// median |C/E - 1| is 43.50% against 45.57%, because a handful of those
-    /// measurements disagree with every evaluation by factors and dominate a
-    /// median either way.
+    /// **The weight only matters in proportion to how coarse the groups are.**
+    /// Folding the same radiative-capture reactions against the CoNDERC
+    /// JAEA-FNS fields on both the 175-group form and the CCFE-709 form of the
+    /// same field, the median sensitivity to the weight is 0.82% on 175 groups
+    /// (up to 19% on Dy-164) and 0.04% on CCFE-709. The 709-group answer is
+    /// the same under either weight, which is what identifies that answer as
+    /// the converged one and the weight as a discretisation-error compensator
+    /// rather than a physical choice. Finer groups remove the need to assume
+    /// anything.
+    ///
+    /// **Neither constant matches a real field.** Fitting `φ ∝ E^p` over 1 eV
+    /// to 100 keV on the two JAEA-FNS spectra gives `p = -0.63` at position 3
+    /// and `p = -0.29` at position 7. Position 3 is nearer `1/E` and position
+    /// 7, which is 94.9% above 12 MeV and barely moderated, is nearer flat. So
+    /// this setting is the better assumption on some fields and the worse one
+    /// on others.
+    ///
+    /// What it does reliably is reproduce another code that uses it: over the
+    /// 33 capture measurements in the effective-cross-section set on
+    /// TENDL-2017, the median difference from FISPACT-II's published value
+    /// falls from 0.0959 to 0.0054 in C/E. That is a verification result, not
+    /// a validation one; against the measurements themselves the count
+    /// agreeing within 20% goes from 10 to 13 of 33 while the median
+    /// |C/E - 1| is 43.50% against 45.57%.
     OneOverE,
 }
 
