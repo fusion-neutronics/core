@@ -607,7 +607,7 @@ pub fn preload_activation_data(
         // ("Nuclide 'Os190' is not available in 'fendl-3.2d'.") and was being
         // discarded by the `.ok()` this replaces.
         let composition: HashSet<&str> = material.nuclides.keys().map(|s| s.as_str()).collect();
-        let decoded: Vec<Result<Option<(String, std::sync::Arc<yamc_nuclide::Nuclide>)>, String>> = {
+        let decoded: Vec<LoadOutcome> = {
             let load_one = |(name, path): (String, String)| {
                 let sources = HashMap::from([(name.clone(), path)]);
                 match get_or_load_nuclide(&name, &sources, &scope) {
@@ -1019,6 +1019,12 @@ pub(crate) fn fold_branching_into_chain(
 }
 
 /// Build the fold's per-target fraction map into `refine`.
+/// What one nuclide's cross-section load produced.
+///
+/// `Ok(Some(..))` loaded, `Ok(None)` absent and tolerable because it is a chain
+/// daughter rather than something the material is made of, and `Err` refused.
+type LoadOutcome = Result<Option<(String, std::sync::Arc<yamc_nuclide::Nuclide>)>, String>;
+
 fn build_fold_refine(
     material: &Material,
     chain: &Arc<HashMap<String, ChainNuclide>>,
