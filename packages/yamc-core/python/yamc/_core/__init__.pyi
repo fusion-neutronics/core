@@ -5777,9 +5777,9 @@ def read_element_from_arrow(path: builtins.str) -> typing.Any:
         read installs the Compton momentum grid and the two TTB grids on first
         use, so inspecting a candidate directory in an interpreter that also
         runs transport would hand that candidate's grids to every later element
-        load and every photon collision. A different-length grid then panics
-        out of the sampler; a same-length one with different values changes
-        every Doppler sample and says nothing.
+        load and every photon collision. The sampler reads the profile tables
+        against whichever grid is installed, so a different grid changes every
+        Doppler sample and says nothing about it.
     
     Returns
     -------
