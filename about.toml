@@ -39,3 +39,16 @@ ignore-dev-dependencies = true
 # First-party workspace crates (publish = false / unpublished) carry the
 # project's own LICENSE, so they don't belong in the third-party listing.
 private = { ignore = true }
+
+# Per-crate acceptance, appended to the global list for this crate only.
+# cargo-about requires crate sections to come last in the file.
+#
+# `buildid` is a required dependency of cubecl-runtime (since 0.11.0-pre.3),
+# which hashes the executable's build id into its compiled-kernel cache key.
+# It is MPL-2.0. MPL is a file-level weak copyleft: it obliges us to make the
+# MPL-covered source available, which the unmodified crates.io release
+# already is, and it places no terms on the rest of the wheel. Nothing in the
+# yamc tree modifies it. Accepted here for this one crate rather than
+# globally so the "permissive only" gate above stays the default.
+[buildid]
+accepted = ["MPL-2.0"]

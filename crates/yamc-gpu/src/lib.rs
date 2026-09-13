@@ -383,17 +383,40 @@ pub fn list_vulkan_f64_adapters() -> Vec<AdapterInfo> {
         .collect()
 }
 
+/// The one `wgpu::Instance` this crate enumerates adapters through, built on
+/// first use and never destroyed.
+///
+/// It used to be created and dropped inside every `enumerate_vulkan_adapters`
+/// call, which every `GpuContext::new()` makes. That put a `vkDestroyInstance`
+/// on one thread against a live kernel compile on cubecl's device thread
+/// whenever GPU work ran concurrently, and the Vulkan loader does not survive
+/// it: with cubecl 0.11.0-pre.3 the yamc-gpu unit suite, whose tests each
+/// call `GpuContext::new()` and run in parallel, segfaulted intermittently
+/// inside `libvulkan.so.1` under `vkSetDebugUtilsObjectNameEXT` (the object
+/// label wgpu attaches to every shader module in a debug build), reached from
+/// cubecl-wgpu's `create_module`. The teardown was the only instance churn in
+/// the process: cubecl's own instance and device are cached per device. One
+/// enumeration instance for the life of the process removes the churn, and
+/// creating a `VkInstance` is not cheap, so repeat callers get faster as
+/// well.
+#[cfg(not(target_os = "macos"))]
+fn vulkan_instance() -> &'static wgpu::Instance {
+    static INSTANCE: OnceLock<wgpu::Instance> = OnceLock::new();
+    INSTANCE.get_or_init(|| {
+        wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        })
+    })
+}
+
 /// Enumerate every Vulkan adapter on the host (f64 or not), in the driver's
 /// order, each tagged with whether it exposes `SHADER_F64`. Shared by
 /// `list_vulkan_f64_adapters` (which filters to f64) and name resolution
 /// (which needs the full list to reproduce cubecl's per-type indexing).
 #[cfg(not(target_os = "macos"))]
 fn enumerate_vulkan_adapters() -> Vec<(AdapterInfo, bool)> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN,
-        ..wgpu::InstanceDescriptor::new_without_display_handle()
-    });
-    let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN));
+    let adapters = pollster::block_on(vulkan_instance().enumerate_adapters(wgpu::Backends::VULKAN));
     adapters
         .into_iter()
         .map(|a| {
