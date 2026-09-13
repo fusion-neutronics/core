@@ -288,14 +288,17 @@ fn woodcock_track_length_matches_surface_within_statistics() {
         (t.total_mean(), t.total_std())
     };
     let (mean_surf, std_surf) = run(TrackingMode::Surface);
-    let (mean_wood, _) = run(TrackingMode::Woodcock);
+    let (mean_wood, std_wood) = run(TrackingMode::Woodcock);
     assert!(
         mean_surf > 0.0,
         "Surface (TL) mean was zero -- test rig broken"
     );
     assert!(mean_wood > 0.0, "Woodcock (TL) mean was zero");
     let diff = (mean_surf - mean_wood).abs();
-    let tol = 3.0 * std_surf;
+    // Two independent estimates: judge their difference against the combined
+    // standard error, not the surface run's alone (which made this a 2.1 sigma
+    // test that any change to the photon streams could trip).
+    let tol = 3.0 * (std_surf * std_surf + std_wood * std_wood).sqrt();
     assert!(
         diff < tol,
         "Woodcock TL mean {mean_wood:.6e} differs from Surface TL mean \
@@ -327,13 +330,16 @@ fn woodcock_matches_surface_within_statistics() {
     };
 
     let (mean_surf, std_surf) = run(TrackingMode::Surface);
-    let (mean_wood, _std_wood) = run(TrackingMode::Woodcock);
+    let (mean_wood, std_wood) = run(TrackingMode::Woodcock);
 
     assert!(mean_surf > 0.0, "Surface mean was zero -- test rig broken");
     assert!(mean_wood > 0.0, "Woodcock mean was zero");
     let diff = (mean_surf - mean_wood).abs();
     // 3σ tolerance using surface's std-error-of-mean.
-    let tol = 3.0 * std_surf;
+    // Two independent estimates: judge their difference against the combined
+    // standard error, not the surface run's alone (which made this a 2.1 sigma
+    // test that any change to the photon streams could trip).
+    let tol = 3.0 * (std_surf * std_surf + std_wood * std_wood).sqrt();
     assert!(
         diff < tol,
         "Woodcock mean {mean_wood:.6e} differs from Surface mean \
@@ -366,11 +372,14 @@ fn woodcock_collision_matches_surface_two_material() {
         (t.total_mean(), t.total_std())
     };
     let (mean_surf, std_surf) = run(TrackingMode::Surface);
-    let (mean_wood, _) = run(TrackingMode::Woodcock);
+    let (mean_wood, std_wood) = run(TrackingMode::Woodcock);
     assert!(mean_surf > 0.0, "Surface (collision) mean was zero");
     assert!(mean_wood > 0.0, "Woodcock (collision) mean was zero");
     let diff = (mean_surf - mean_wood).abs();
-    let tol = 3.0 * std_surf;
+    // Two independent estimates: judge their difference against the combined
+    // standard error, not the surface run's alone (which made this a 2.1 sigma
+    // test that any change to the photon streams could trip).
+    let tol = 3.0 * (std_surf * std_surf + std_wood * std_wood).sqrt();
     assert!(
         diff < tol,
         "Woodcock collision mean {mean_wood:.6e} differs from Surface \
@@ -408,11 +417,14 @@ fn woodcock_track_length_matches_surface_two_material() {
         (t.total_mean(), t.total_std())
     };
     let (mean_surf, std_surf) = run(TrackingMode::Surface);
-    let (mean_wood, _) = run(TrackingMode::Woodcock);
+    let (mean_wood, std_wood) = run(TrackingMode::Woodcock);
     assert!(mean_surf > 0.0, "Surface (TL) mean was zero");
     assert!(mean_wood > 0.0, "Woodcock (TL) mean was zero");
     let diff = (mean_surf - mean_wood).abs();
-    let tol = 3.0 * std_surf;
+    // Two independent estimates: judge their difference against the combined
+    // standard error, not the surface run's alone (which made this a 2.1 sigma
+    // test that any change to the photon streams could trip).
+    let tol = 3.0 * (std_surf * std_surf + std_wood * std_wood).sqrt();
     assert!(
         diff < tol,
         "Woodcock TL mean {mean_wood:.6e} differs from Surface TL \
@@ -633,11 +645,14 @@ fn woodcock_urr_matches_surface() {
         (t.total_mean(), t.total_std())
     };
     let (mean_surf, std_surf) = run(TrackingMode::Surface);
-    let (mean_wood, _) = run(TrackingMode::Woodcock);
+    let (mean_wood, std_wood) = run(TrackingMode::Woodcock);
     assert!(mean_surf > 0.0, "Surface URR flux was zero -- rig broken");
     assert!(mean_wood > 0.0, "Woodcock URR flux was zero");
     let diff = (mean_surf - mean_wood).abs();
-    let tol = 3.0 * std_surf;
+    // Two independent estimates: judge their difference against the combined
+    // standard error, not the surface run's alone (which made this a 2.1 sigma
+    // test that any change to the photon streams could trip).
+    let tol = 3.0 * (std_surf * std_surf + std_wood * std_wood).sqrt();
     assert!(
         diff < tol,
         "Woodcock URR flux {mean_wood:.6e} differs from Surface {mean_surf:.6e} \
@@ -1044,14 +1059,17 @@ fn woodcock_photon_source_matches_surface() {
         (t.total_mean(), t.total_std())
     };
     let (mean_surf, std_surf) = run(TrackingMode::Surface);
-    let (mean_wood, _) = run(TrackingMode::Woodcock);
+    let (mean_wood, std_wood) = run(TrackingMode::Woodcock);
     assert!(
         mean_surf > 0.0,
         "Surface photon flux was zero -- rig broken"
     );
     assert!(mean_wood > 0.0, "Woodcock photon flux was zero");
     let diff = (mean_surf - mean_wood).abs();
-    let tol = 3.0 * std_surf;
+    // Two independent estimates: judge their difference against the combined
+    // standard error, not the surface run's alone (which made this a 2.1 sigma
+    // test that any change to the photon streams could trip).
+    let tol = 3.0 * (std_surf * std_surf + std_wood * std_wood).sqrt();
     assert!(
         diff < tol,
         "Woodcock photon flux {mean_wood:.6e} differs from Surface flux \
@@ -1091,7 +1109,7 @@ fn woodcock_coupled_neutron_photon_produces_photons() {
         (t.total_mean(), t.total_std())
     };
     let (mean_surf, std_surf) = run(TrackingMode::Surface);
-    let (mean_wood, _) = run(TrackingMode::Woodcock);
+    let (mean_wood, std_wood) = run(TrackingMode::Woodcock);
     assert!(
         mean_wood > 0.0,
         "Woodcock coupled n->photon flux was zero -- no secondary photons transported"
@@ -1101,7 +1119,10 @@ fn woodcock_coupled_neutron_photon_produces_photons() {
         "Surface coupled n->photon flux was zero -- rig broken"
     );
     let diff = (mean_surf - mean_wood).abs();
-    let tol = 3.0 * std_surf;
+    // Two independent estimates: judge their difference against the combined
+    // standard error, not the surface run's alone (which made this a 2.1 sigma
+    // test that any change to the photon streams could trip).
+    let tol = 3.0 * (std_surf * std_surf + std_wood * std_wood).sqrt();
     assert!(
         diff < tol,
         "Woodcock coupled photon flux {mean_wood:.6e} differs from Surface \
@@ -1144,10 +1165,13 @@ fn woodcock_photon_track_length_matches_surface() {
         (t.total_mean(), t.total_std())
     };
     let (mean_surf, std_surf) = run(TrackingMode::Surface);
-    let (mean_wood, _) = run(TrackingMode::Woodcock);
+    let (mean_wood, std_wood) = run(TrackingMode::Woodcock);
     assert!(mean_surf > 0.0 && mean_wood > 0.0);
     let diff = (mean_surf - mean_wood).abs();
-    let tol = 3.0 * std_surf;
+    // Two independent estimates: judge their difference against the combined
+    // standard error, not the surface run's alone (which made this a 2.1 sigma
+    // test that any change to the photon streams could trip).
+    let tol = 3.0 * (std_surf * std_surf + std_wood * std_wood).sqrt();
     assert!(
         diff < tol,
         "Woodcock photon TL flux {mean_wood:.6e} differs from Surface \
@@ -1311,11 +1335,13 @@ fn hybrid_void_flux_matches_surface() {
     };
 
     let (mean_surf, std_surf) = run(TrackingMode::Surface);
-    let (mean_hyb, _) = run(TrackingMode::Hybrid);
+    let (mean_hyb, std_hyb) = run(TrackingMode::Hybrid);
     assert!(mean_surf > 0.0, "Surface void flux was zero -- rig broken");
     assert!(mean_hyb > 0.0, "Hybrid void flux was zero");
     let diff = (mean_surf - mean_hyb).abs();
-    let tol = 3.0 * std_surf;
+    // Two independent estimates: judge their difference against the combined
+    // standard error, not the surface run's alone.
+    let tol = 3.0 * (std_surf * std_surf + std_hyb * std_hyb).sqrt();
     assert!(
         diff < tol,
         "Hybrid void flux {mean_hyb:.6e} differs from Surface {mean_surf:.6e} \
@@ -1422,11 +1448,14 @@ fn woodcock_pure_void_flux_matches_surface() {
     };
 
     let (mean_surf, std_surf) = run(TrackingMode::Surface);
-    let (mean_wood, _) = run(TrackingMode::Woodcock);
+    let (mean_wood, std_wood) = run(TrackingMode::Woodcock);
     assert!(mean_surf > 0.0, "Surface void flux was zero -- rig broken");
     assert!(mean_wood > 0.0, "Pure Woodcock void flux was zero");
     let diff = (mean_surf - mean_wood).abs();
-    let tol = 3.0 * std_surf;
+    // Two independent estimates: judge their difference against the combined
+    // standard error, not the surface run's alone (which made this a 2.1 sigma
+    // test that any change to the photon streams could trip).
+    let tol = 3.0 * (std_surf * std_surf + std_wood * std_wood).sqrt();
     assert!(
         diff < tol,
         "Pure Woodcock void flux {mean_wood:.6e} differs from Surface \
@@ -1556,11 +1585,13 @@ fn hybrid_low_density_material_matches_surface() {
     };
 
     let (mean_surf, std_surf) = run(TrackingMode::Surface);
-    let (mean_hyb, _) = run(TrackingMode::Hybrid);
+    let (mean_hyb, std_hyb) = run(TrackingMode::Hybrid);
     assert!(mean_surf > 0.0, "Surface MT 105 was zero -- rig broken");
     assert!(mean_hyb > 0.0, "Hybrid MT 105 was zero");
     let diff = (mean_surf - mean_hyb).abs();
-    let tol = 3.0 * std_surf;
+    // Two independent estimates: judge their difference against the combined
+    // standard error, not the surface run's alone.
+    let tol = 3.0 * (std_surf * std_surf + std_hyb * std_hyb).sqrt();
     assert!(
         diff < tol,
         "Hybrid low-density MT 105 {mean_hyb:.6e} differs from Surface \
@@ -1678,14 +1709,16 @@ fn hybrid_photon_low_density_matches_surface() {
     };
 
     let (mean_surf, std_surf) = run(TrackingMode::Surface);
-    let (mean_hyb, _) = run(TrackingMode::Hybrid);
+    let (mean_hyb, std_hyb) = run(TrackingMode::Hybrid);
     assert!(
         mean_surf > 0.0,
         "Surface photon flux was zero -- rig broken"
     );
     assert!(mean_hyb > 0.0, "Hybrid photon flux was zero");
     let diff = (mean_surf - mean_hyb).abs();
-    let tol = 3.0 * std_surf;
+    // Two independent estimates: judge their difference against the combined
+    // standard error, not the surface run's alone.
+    let tol = 3.0 * (std_surf * std_surf + std_hyb * std_hyb).sqrt();
     assert!(
         diff < tol,
         "Hybrid low-density photon flux {mean_hyb:.6e} differs from Surface \
