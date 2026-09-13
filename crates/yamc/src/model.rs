@@ -402,6 +402,12 @@ pub struct Model {
     /// completion. The loop exits as soon as a particle is absorbed or
     /// leaks, so the high cap is free for fast-escaping problems and
     /// only costs work the CPU also does for genuine moderators.
+    ///
+    /// A cap that binds is an error, not a warning: a GPU launch in which
+    /// any history was still transporting at the cap fails the run with
+    /// [`GpuDispatchError::HistoriesTruncated`](crate::gpu::GpuDispatchError),
+    /// because the under-counted flux it would return is not a valid
+    /// answer (fusion-neutronics/core#23). Raise the cap or run on the CPU.
     pub max_steps_per_particle: u32,
     /// Whether to use decay photons (D1S method). Default: false
     pub use_decay_photons: bool,
@@ -411,6 +417,11 @@ pub struct Model {
     /// void-free models); [`TrackingMode::Hybrid`] is delta tracking with
     /// an automatic surface fallback in voids/low-density cells. See
     /// [`TrackingMode`] for which to pick.
+    ///
+    /// CPU only. The GPU kernels always surface-track: a Woodcock or Hybrid
+    /// request on the GPU prints a one-line notice to stderr at every
+    /// verbosity and proceeds, since the surface-tracked flux is an unbiased
+    /// estimate of the same quantity (fusion-neutronics/core#23).
     #[serde(default)]
     pub tracking_mode: TrackingMode,
     /// Variance-reduction techniques applied during transport. Empty (the
@@ -441,6 +452,12 @@ pub struct Model {
     /// gathered to root, folded with Chen's exact parallel combine, evaluated
     /// once, and the single decision bit broadcast, so a borderline target
     /// cannot flip on summation order. Runtime config; not serialized.
+    ///
+    /// CPU only. The GPU dispatch refuses a model carrying targets with
+    /// [`GpuDispatchError::ConvergenceTargetsUnsupported`](crate::gpu::GpuDispatchError)
+    /// rather than running to the particle cap while ignoring them
+    /// (fusion-neutronics/core#23); GPU convergence stopping is
+    /// fusion-neutronics/core#29.
     #[serde(skip)]
     pub convergence_targets: Vec<yamc_tallies::ConvergenceTarget>,
 }

@@ -183,7 +183,10 @@ fn extract_sources(source: &Bound<'_, PyAny>) -> PyResult<Vec<ParticleSource>> {
 ///         behaviour for strong scatterers such as a pure-H2 sphere (a 1000
 ///         cap cost ~10% of the integral flux there); the loop exits early once
 ///         a particle leaks or is absorbed, so it is free for fast-escaping
-///         problems.
+///         problems. A cap that binds is an error: if any history in a GPU
+///         launch is still transporting at the cap, ``simulate_transport``
+///         raises ``ValueError`` instead of returning the under-counted
+///         tallies. Raise the cap or run on the CPU.
 ///     verbose: Progress output as a list of independent flags (reported in
 ///         source particles). Any of ``"progress"`` (``Progress: N/total
 ///         particles (P%)`` lines), ``"eta"`` (progress with elapsed + ETA),
@@ -212,7 +215,11 @@ fn extract_sources(source: &Bound<'_, PyAny>) -> PyResult<Vec<ParticleSource>> {
 ///
 ///         All three support neutrons and photons (photon sources, coupled
 ///         neutron->photon production, and D1S decay photons) and give the
-///         same answer within statistics.
+///         same answer within statistics. CPU only: the GPU kernels always
+///         surface-track, so ``compute='gpu'`` with ``"hybrid"`` or
+///         ``"woodcock"`` prints a one-line notice to stderr (at every
+///         ``verbose`` setting) and proceeds with surface tracking, whose
+///         flux is an unbiased estimate of the same quantity.
 ///     variance_reduction: List of variance-reduction technique objects
 ///         applied during transport; an empty list or ``None`` (default)
 ///         is fully analog. Currently accepts ``yamc.SurvivalBiasing``
@@ -937,7 +944,11 @@ impl PyModel {
     ///
     /// Raises:
     ///     ValueError: if two tallies share the same name or the same id, or
-    ///         if the model uses a feature the GPU kernel doesn't support.
+    ///         if the model uses a feature the GPU kernel doesn't support,
+    ///         including convergence targets (the GPU launch loop cannot stop
+    ///         on them yet, so they are refused rather than ignored), or if a
+    ///         GPU launch truncated histories at ``max_steps_per_particle``
+    ///         (the under-counted tallies are never returned).
     ///     RuntimeError: if ``compute='gpu'`` and no GPU with f64 compute is
     ///         available.
     ///
@@ -1010,16 +1021,24 @@ impl PyModel {
             self.warn_if_max_steps_ignored(py, "simulate_transport(compute='cpu')")?;
             return self.simulate_transport_cpu(&settings, capture_tracks, py);
         }
-        // GPU stop conditions are total_particles and/or max_runtime (both
-        // checked between launches). It cannot stop on convergence targets yet
-        // (#241), so a run with neither budget would launch forever: reject it
-        // with a clear message rather than hang.
-        if total_particles.is_none() && max_runtime_secs.is_none() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "compute='gpu' needs total_particles or max_runtime to stop; it cannot yet \
-                 stop on convergence targets (see #241). Set total_particles and/or \
-                 max_runtime, or use compute='cpu'.",
-            ));
+        // The GPU launch loop stops on total_particles and/or max_runtime,
+        // checked between launches. It cannot evaluate convergence targets
+        // (fusion-neutronics/core#29), so a model carrying them is refused
+        // outright: it used to be refused only when neither budget was set,
+        // and with a cap present it ran silently to the cap while the
+        // precision the user asked to stop at was ignored
+        // (fusion-neutronics/core#23). The OR-guard above already ensures a
+        // cap or budget exists once there are no targets, so the Rust
+        // dispatch's own UncappedWithoutRuntime is unreachable from here. The
+        // Rust dispatch repeats this check for its other callers.
+        if !self.inner.convergence_targets.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "compute='gpu' cannot stop on convergence targets yet: the launch loop only \
+                 checks total_particles and max_runtime between launches, so the {} target(s) \
+                 on this model would be ignored and the run would go to the cap. Clear \
+                 Model.convergence_targets to run this on the GPU, or use compute='cpu'.",
+                self.inner.convergence_targets.len()
+            )));
         }
         let device: Option<String> = if compute == "gpu" {
             None

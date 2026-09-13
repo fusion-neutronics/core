@@ -1845,7 +1845,10 @@ class Model:
             behaviour for strong scatterers such as a pure-H2 sphere (a 1000
             cap cost ~10% of the integral flux there); the loop exits early once
             a particle leaks or is absorbed, so it is free for fast-escaping
-            problems.
+            problems. A cap that binds is an error: if any history in a GPU
+            launch is still transporting at the cap, ``simulate_transport``
+            raises ``ValueError`` instead of returning the under-counted
+            tallies. Raise the cap or run on the CPU.
         verbose: Progress output as a list of independent flags (reported in
             source particles). Any of ``"progress"`` (``Progress: N/total
             particles (P%)`` lines), ``"eta"`` (progress with elapsed + ETA),
@@ -1874,7 +1877,11 @@ class Model:
     
             All three support neutrons and photons (photon sources, coupled
             neutron->photon production, and D1S decay photons) and give the
-            same answer within statistics.
+            same answer within statistics. CPU only: the GPU kernels always
+            surface-track, so ``compute='gpu'`` with ``"hybrid"`` or
+            ``"woodcock"`` prints a one-line notice to stderr (at every
+            ``verbose`` setting) and proceeds with surface tracking, whose
+            flux is an unbiased estimate of the same quantity.
         variance_reduction: List of variance-reduction technique objects
             applied during transport; an empty list or ``None`` (default)
             is fully analog. Currently accepts ``yamc.SurvivalBiasing``
@@ -2240,7 +2247,11 @@ class Model:
         
         Raises:
             ValueError: if two tallies share the same name or the same id, or
-                if the model uses a feature the GPU kernel doesn't support.
+                if the model uses a feature the GPU kernel doesn't support,
+                including convergence targets (the GPU launch loop cannot stop
+                on them yet, so they are refused rather than ignored), or if a
+                GPU launch truncated histories at ``max_steps_per_particle``
+                (the under-counted tallies are never returned).
             RuntimeError: if ``compute='gpu'`` and no GPU with f64 compute is
                 available.
         
