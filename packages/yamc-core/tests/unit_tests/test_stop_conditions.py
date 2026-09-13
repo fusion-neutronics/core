@@ -79,19 +79,23 @@ def test_uncapped_run_stops_on_convergence():
     assert r.aggregate_relative_error <= 0.12
 
 
-def test_gpu_rejects_convergence_only_stop_for_photon_models():
-    # The GPU's neutron launch loops stop on convergence targets
-    # (fusion-neutronics/core#29); its photon launch loops do not yet, so a
-    # model that transports photons is refused before any adapter is touched
-    # (core#23); no GPU needed here.
+@pytest.mark.skipif(
+    not yamc.parallel.gpu_available(),
+    reason="no GPU with f64 compute available, or yamc was built without the `gpu` feature",
+)
+def test_gpu_coupled_uncapped_run_stops_on_convergence():
+    # The coupled (secondary photons on) GPU launch loop stops on the target
+    # too (fusion-neutronics/core#29); before, a model that transported photons
+    # was refused. No cap, no budget: the target alone ends the run.
     model = _build_model(
         photon_data={"Li": "tests/Li.arrow"}, transport_secondary_photons=True
     )
     model.convergence_targets = [
         yamc.ConvergenceTarget("relative_error", 0.10, tally="tbr")
     ]
-    with pytest.raises(ValueError, match="cannot stop on convergence targets"):
-        model.simulate_transport(compute="gpu")  # None total, no max_runtime
+    r = model.simulate_transport(seed=1, compute="gpu")["tbr"]
+    assert r.n_histories > 0
+    assert 0.0 < r.aggregate_relative_error <= 0.10
 
 
 @pytest.mark.skipif(
