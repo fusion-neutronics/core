@@ -357,6 +357,11 @@ pub fn run_multi_cell_transport(
         !nuclide_select.fission_channel_xs.is_empty(),
         "fission_channel_xs must hold at least one element"
     );
+    assert_eq!(
+        nuclide_select.nuc_fission_yield.len(),
+        expected_nuc * NUC_YIELD_COLS,
+        "nuc_fission_yield must be tight CSR: sum_m nuc_count[m] x fine_n[m] x NUC_YIELD_COLS"
+    );
     assert_eq!(fission_eout_n_energies_per_material.len(), n_chi_rows);
     assert_eq!(
         fission_eout_ae_offset.len(),
@@ -1294,6 +1299,8 @@ pub fn run_multi_cell_transport(
         client.create_from_slice(bytemuck::cast_slice(&nuclide_select.chi_slab_meta));
     let fission_channel_xs_h =
         client.create_from_slice(bytemuck::cast_slice(&nuclide_select.fission_channel_xs));
+    let nuc_fission_yield_h =
+        client.create_from_slice(bytemuck::cast_slice(&nuclide_select.nuc_fission_yield));
     let bank_f64_z = vec![0.0_f64; bank_capacity * crate::common::particle_bank::BANK_F64_STRIDE];
     let bank_u32_z = vec![0u32; bank_capacity * crate::common::particle_bank::BANK_U32_STRIDE];
     let bank_f64_h = client.create_from_slice(bytemuck::cast_slice(&bank_f64_z));
@@ -1607,6 +1614,7 @@ pub fn run_multi_cell_transport(
                 fission_channel_xs_h,
                 nuclide_select.fission_channel_xs.len(),
             ),
+            BufferArg::from_raw_parts(nuc_fission_yield_h, nuclide_select.nuc_fission_yield.len()),
             BufferArg::from_raw_parts(fission_bank_enabled_h, fission_bank.enabled.len()),
             BufferArg::from_raw_parts(
                 bank_f64_h.clone(),

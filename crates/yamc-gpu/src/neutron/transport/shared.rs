@@ -21,7 +21,8 @@ use super::{
     CHI_SLAB_DELAYED_ROW, CHI_SLAB_META_COLS, CHI_SLAB_N_CHANNELS, CHI_SLAB_PROMPT_ROW,
     COARSE_META_COLS, COL_COARSE_GRID_OFFSET, COL_COARSE_MT_BASE, COL_COARSE_N,
     COL_FINE_GRID_OFFSET, COL_FINE_N, COL_FINE_NUC_BASE, COL_PERMT_I_START, COL_PERMT_N_STORED,
-    COL_PERMT_VALUE_OFFSET, FINE_META_COLS, FISSION_WEIGHT_CAP, PERMT_META_COLS, REGION_CROSS_EPS,
+    COL_PERMT_VALUE_OFFSET, FINE_META_COLS, FISSION_WEIGHT_CAP, NUC_YIELD_BETA, NUC_YIELD_COLS,
+    NUC_YIELD_NU_BAR, PERMT_META_COLS, REGION_CROSS_EPS,
 };
 use crate::common::geometry::bvh_cell_finding::bvh_find_cell_at_point;
 use crate::common::geometry::cell_finding::CELL_NOT_FOUND;
@@ -176,6 +177,9 @@ pub(super) struct TransportInputs<'a> {
     // and `NuclideSelectInputs::fission_channel_xs`.
     pub chi_slab_meta: &'a [u32],
     pub fission_channel_xs: &'a [f64],
+    // Per-(slab, fine energy) fission yield pairs (fusion-neutronics/core#93).
+    // See `NuclideSelectInputs::nuc_fission_yield`.
+    pub nuc_fission_yield: &'a [f64],
     // Fission outgoing energy
     pub fission_a_per_material: &'a [f64],
     pub fission_b_per_material: &'a [f64],
@@ -392,6 +396,7 @@ pub(super) fn validate_transport_inputs(
     // (fusion-neutronics/core#34 entry 1).
     chi_slab_meta: &[u32],
     fission_channel_xs: &[f64],
+    nuc_fission_yield: &[f64],
     xs_elastic_per_material: &[f64],
     xs_absorption_per_material: &[f64],
     xs_inelastic_per_material: &[f64],
@@ -507,6 +512,18 @@ pub(super) fn validate_transport_inputs(
         );
     }
     assert!(!fission_channel_xs.is_empty());
+    let expected_nuc: usize = (0..n_materials)
+        .map(|m| {
+            let nuc_count = mat_nuclide_meta[m * 2 + 1] as usize;
+            let fine_n = fine_meta[m * FINE_META_COLS as usize + COL_FINE_N as usize] as usize;
+            nuc_count * fine_n
+        })
+        .sum();
+    assert_eq!(
+        nuc_fission_yield.len(),
+        expected_nuc * NUC_YIELD_COLS,
+        "nuc_fission_yield must be tight CSR: sum_m nuc_count[m] x fine_n[m] x NUC_YIELD_COLS"
+    );
     assert_eq!(
         fission_eout_energy_grid_per_material.len(),
         n_fission_eout_ae_rows
@@ -1188,11 +1205,11 @@ pub(super) fn transport_one_particle(
             let sigma_f = xs_f_lo + (xs_f_hi - xs_f_lo) * frac_f;
             let nu_lo = inputs.nu_bar_per_material[fine_off + idx_lo_f];
             let nu_hi = inputs.nu_bar_per_material[fine_off + idx_hi_f];
-            let nu_bar = nu_lo + (nu_hi - nu_lo) * frac_f;
+            let mut nu_bar = nu_lo + (nu_hi - nu_lo) * frac_f;
             // Delayed fraction on the same fine grid (issue #364).
             let beta_lo = inputs.beta_delayed_per_material[fine_off + idx_lo_f];
             let beta_hi = inputs.beta_delayed_per_material[fine_off + idx_hi_f];
-            let beta_delayed = beta_lo + (beta_hi - beta_lo) * frac_f;
+            let mut beta_delayed = beta_lo + (beta_hi - beta_lo) * frac_f;
 
             // Per-(material, nuclide) URR probability-table perturbation
             // (issues #210, #342), twin of the kernel's block. The band base is
@@ -1598,6 +1615,18 @@ pub(super) fn transport_one_particle(
                     sigma_a_rx = split.absorption;
                     sigma_i_rx = split.inelastic;
                     sigma_f_rx = split.fission;
+                    // The struck nuclide's own fission yield
+                    // (fusion-neutronics/core#93), twin of the kernel's read.
+                    let y_lo =
+                        (fine_nuc_base + (slab - nuc_off) * fine_n + idx_lo_f) * NUC_YIELD_COLS;
+                    let y_hi =
+                        (fine_nuc_base + (slab - nuc_off) * fine_n + idx_hi_f) * NUC_YIELD_COLS;
+                    let nu_lo_s = inputs.nuc_fission_yield[y_lo + NUC_YIELD_NU_BAR];
+                    let nu_hi_s = inputs.nuc_fission_yield[y_hi + NUC_YIELD_NU_BAR];
+                    nu_bar = nu_lo_s + (nu_hi_s - nu_lo_s) * frac_f;
+                    let b_lo_s = inputs.nuc_fission_yield[y_lo + NUC_YIELD_BETA];
+                    let b_hi_s = inputs.nuc_fission_yield[y_hi + NUC_YIELD_BETA];
+                    beta_delayed = b_lo_s + (b_hi_s - b_lo_s) * frac_f;
                 }
 
                 let s_xi2 = state;

@@ -1347,6 +1347,14 @@ pub struct PerNuclideInelastic {
     pub sigma_absorption: Vec<f64>,
     pub sigma_inelastic: Vec<f64>,
     pub sigma_fission: Vec<f64>,
+    /// Per-nuclide fission yield on the master grid, flat `[n_nuclides x
+    /// n_grid]` each (fusion-neutronics/core#93): the nuclide's own `nu_bar(E)`
+    /// (total neutrons per fission, the same `nu * sigma_f / sigma_f` fold
+    /// `extract_xs_from_nuclide` does for one nuclide) and its delayed fraction
+    /// `beta(E) = nu_d(E) / nu_t(E)`. Zero for a non-fissionable nuclide. The
+    /// kernel takes the struck nuclide's pair from these after the selection.
+    pub nu_bar: Vec<f64>,
+    pub beta_delayed: Vec<f64>,
     /// SPARSE per-MT inelastic XS / yield (issue #212). Per (slab, MT slot) only
     /// the tight nonzero (above-threshold) range of the material's coarse grid is
     /// stored, concatenated in (slab, slot) order. `permt_i_start[slab *
@@ -1465,6 +1473,8 @@ pub fn extract_per_nuclide_inelastic(
         sigma_absorption: Vec::with_capacity(n * n_grid),
         sigma_inelastic: Vec::with_capacity(n * n_grid),
         sigma_fission: Vec::with_capacity(n * n_grid),
+        nu_bar: Vec::with_capacity(n * n_grid),
+        beta_delayed: Vec::with_capacity(n * n_grid),
         // Sparse per-MT storage (issue #212): capacity is a loose upper bound
         // (real data is 90-99.9% zeros, so the sparse buffers stay far smaller).
         xs_inelastic_per_mt_sparse: Vec::new(),
@@ -1551,6 +1561,14 @@ pub fn extract_per_nuclide_inelastic(
                     mt: MT_ELASTIC,
                     temperature: temperature.to_string(),
                 })?;
+        // This nuclide's own fission yield on the fine grid
+        // (fusion-neutronics/core#93): microscopic `sigma_f`, `nu sigma_f` and
+        // `nu_d sigma_f` summed over the non-redundant fission channels, folded
+        // the way `extract_xs_from_nuclide` folds them for one nuclide.
+        let mut nuc_xs_f: Vec<f64> = Vec::with_capacity(n_grid);
+        let mut nuc_nu_sigma_f: Vec<f64> = Vec::with_capacity(n_grid);
+        let mut nuc_nu_d_sigma_f: Vec<f64> = Vec::with_capacity(n_grid);
+        let delayed = nuclide.delayed_neutrons(temperature);
         for &e in fine_grid {
             let s_e = density * elastic.cross_section_at(e).unwrap_or(0.0);
             let s_t = density * total_xs_at(nuclide, temp_idx, e);
@@ -1565,7 +1583,15 @@ pub fn extract_per_nuclide_inelastic(
                 }
             }
             let mut s_f = 0.0_f64;
+            let mut xs_f_micro = 0.0_f64;
+            let mut nu_sigma_f = 0.0_f64;
+            let mut nu_d_sigma_f = 0.0_f64;
             if nuclide.fissionable {
+                let nu = nuclide
+                    .fission_nu
+                    .as_ref()
+                    .map(|n| n.evaluate(e))
+                    .unwrap_or(2.5);
                 for &fmt in &[18, 19, 20, 21, 38] {
                     if let Some(rxn) = reactions.get(&fmt) {
                         // Redundant MT 18 beside its partials: see the matching
@@ -1576,7 +1602,13 @@ pub fn extract_per_nuclide_inelastic(
                         if rxn.redundant {
                             continue;
                         }
-                        s_f += density * rxn.cross_section_at(e).unwrap_or(0.0);
+                        let xs_f = rxn.cross_section_at(e).unwrap_or(0.0);
+                        s_f += density * xs_f;
+                        xs_f_micro += xs_f;
+                        nu_sigma_f += xs_f * nu;
+                        if let Some(d) = delayed {
+                            nu_d_sigma_f += xs_f * d.nu(e);
+                        }
                     }
                 }
             }
@@ -1585,7 +1617,14 @@ pub fn extract_per_nuclide_inelastic(
             pool.sigma_inelastic.push(s_i);
             pool.sigma_fission.push(s_f);
             pool.sigma_absorption.push(s_a);
+            nuc_xs_f.push(xs_f_micro);
+            nuc_nu_sigma_f.push(nu_sigma_f);
+            nuc_nu_d_sigma_f.push(nu_d_sigma_f);
         }
+        pool.nu_bar
+            .extend(nu_bar_from_nu_sigma_f(&nuc_nu_sigma_f, &nuc_xs_f));
+        pool.beta_delayed
+            .extend(beta_from_nu_sigma_f(&nuc_nu_d_sigma_f, &nuc_nu_sigma_f));
 
         // Per-MT inelastic XS / Q / yield on the master grid, density-weighted.
         // Bit-for-bit the SAME accounting `extract_material_xs` uses for one

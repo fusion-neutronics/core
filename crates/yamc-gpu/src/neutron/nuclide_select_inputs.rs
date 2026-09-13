@@ -57,6 +57,13 @@ pub const CHI_SLAB_N_CHANNELS: usize = 1;
 pub const CHI_SLAB_DELAYED_ROW: usize = 2;
 pub const CHI_SLAB_CHANNEL_XS_BASE: usize = 3;
 
+/// Columns of [`NuclideSelectInputs::nuc_fission_yield`], the per-(slab, fine
+/// energy) fission yield pair (fusion-neutronics/core#93): the struck nuclide's
+/// own `nu_bar(E)` and delayed fraction `beta(E)`.
+pub const NUC_YIELD_COLS: usize = 2;
+pub const NUC_YIELD_NU_BAR: usize = 0;
+pub const NUC_YIELD_BETA: usize = 1;
+
 /// Packed per-collision nuclide-selection inputs (see module docs). Built once
 /// per launch and passed by reference into the host launcher and the CPU twin.
 #[derive(Debug, Clone, Default)]
@@ -98,6 +105,18 @@ pub struct NuclideSelectInputs {
     /// `base_s + c * fine_n + i`. Single-channel slabs contribute nothing; one
     /// zero pads an all-single model, since cubecl rejects an empty buffer.
     pub fission_channel_xs: Vec<f64>,
+    /// Per-(slab, fine energy) fission yield, packed `[n_slab x fine_n x
+    /// NUC_YIELD_COLS]` on the owning material's FINE grid like
+    /// `nuc_partial_xs` (fusion-neutronics/core#93): column `NUC_YIELD_NU_BAR`
+    /// is the nuclide's own `nu_bar(E)` (total neutrons per fission), column
+    /// `NUC_YIELD_BETA` its delayed fraction `nu_d(E) / nu_t(E)`. After
+    /// selecting the struck nuclide in a multi-nuclide material the kernel
+    /// takes both from here instead of the material's fission-weighted
+    /// averages (`nu_bar_per_material`, `beta_delayed_per_material`), so a
+    /// fission in one nuclide is paired with that nuclide's yield, as on the
+    /// CPU. Single-nuclide materials never read it (the aggregate equals the
+    /// nuclide's own value there), so the row is zeros for them.
+    pub nuc_fission_yield: Vec<f64>,
 }
 
 /// The two-rows-per-slab chi table: slab `s` reads its prompt spectrum at row
@@ -140,7 +159,20 @@ impl NuclideSelectInputs {
             nuc_partial_xs: vec![0.0; n_mat.max(1) * n_grid.max(1) * NUC_PARTIAL_COLS],
             chi_slab_meta: two_rows_per_slab(n_mat),
             fission_channel_xs: vec![0.0],
+            nuc_fission_yield: vec![0.0; n_mat.max(1) * n_grid.max(1) * NUC_YIELD_COLS],
         }
+    }
+
+    /// Install the per-(slab, fine energy) fission yield pairs
+    /// (fusion-neutronics/core#93), `[n_slab x fine_n x NUC_YIELD_COLS]` in the
+    /// same tight CSR as `nuc_partial_xs`.
+    pub fn set_fission_yield(&mut self, nuc_fission_yield: Vec<f64>) {
+        assert_eq!(
+            nuc_fission_yield.len() * NUC_PARTIAL_COLS,
+            self.nuc_partial_xs.len() * NUC_YIELD_COLS,
+            "nuc_fission_yield must be [n_slab x fine_n x NUC_YIELD_COLS], aligned with nuc_partial_xs"
+        );
+        self.nuc_fission_yield = nuc_fission_yield;
     }
 
     /// Replace the chi row table and the per-channel fission cross sections
@@ -233,6 +265,7 @@ impl NuclideSelectInputs {
             nuc_partial_xs = vec![0.0; n_grid.max(1) * NUC_PARTIAL_COLS];
         }
         let chi_slab_meta = two_rows_per_slab(nuc_awr.len());
+        let nuc_fission_yield = vec![0.0; nuc_partial_xs.len() / NUC_PARTIAL_COLS * NUC_YIELD_COLS];
         Self {
             nuc_macro_total,
             nuc_awr,
@@ -240,6 +273,7 @@ impl NuclideSelectInputs {
             nuc_partial_xs,
             chi_slab_meta,
             fission_channel_xs: vec![0.0],
+            nuc_fission_yield,
         }
     }
 
@@ -299,6 +333,7 @@ impl NuclideSelectInputs {
             nuc_partial_xs = vec![0.0; NUC_PARTIAL_COLS];
         }
         let chi_slab_meta = two_rows_per_slab(nuc_awr.len());
+        let nuc_fission_yield = vec![0.0; nuc_partial_xs.len() / NUC_PARTIAL_COLS * NUC_YIELD_COLS];
         Self {
             nuc_macro_total,
             nuc_awr,
@@ -306,6 +341,7 @@ impl NuclideSelectInputs {
             nuc_partial_xs,
             chi_slab_meta,
             fission_channel_xs: vec![0.0],
+            nuc_fission_yield,
         }
     }
 
@@ -334,6 +370,8 @@ impl NuclideSelectInputs {
         // zero block to keep `nuc_partial_xs` length == n_slab x n_grid x cols.
         self.nuc_partial_xs
             .extend(std::iter::repeat_n(0.0, n_grid * NUC_PARTIAL_COLS));
+        self.nuc_fission_yield
+            .extend(std::iter::repeat_n(0.0, n_grid * NUC_YIELD_COLS));
     }
 }
 

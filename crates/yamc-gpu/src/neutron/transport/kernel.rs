@@ -2080,6 +2080,14 @@ pub(crate) fn multi_cell_transport_kernel(
     // slabs, tight CSR on the owning material's FINE grid: slab base (from
     // `chi_slab_meta`) + `channel * fine_n` + fine index.
     fission_channel_xs: &[f64],
+    // Per-(slab, fine energy) fission yield pairs, packed `[n_slab x fine_n x
+    // NUC_YIELD_COLS]` like `nuc_partial_xs` (fusion-neutronics/core#93):
+    // column 0 the nuclide's own `nu_bar(E)`, column 1 its delayed fraction.
+    // After selecting the struck nuclide (count > 1) the fission branch takes
+    // both from here instead of the material's fission-weighted averages, so a
+    // fission in one nuclide is paired with that nuclide's yield, as on the
+    // CPU. Single-nuclide materials never read it.
+    nuc_fission_yield: &[f64],
     // Runtime gate for the device fission bank (issue #78, 1 element). When
     // `fission_bank_enabled[0] == 0` the fission branch keeps the legacy
     // `weight *= nu_bar` + `FISSION_WEIGHT_CAP` terminator (byte-identical to a
@@ -2649,11 +2657,11 @@ pub(crate) fn multi_cell_transport_kernel(
             let sigma_f = xs_f_lo + (xs_f_hi - xs_f_lo) * frac_f;
             let nu_lo = nu_bar_per_material[(fine_off + idx_lo_f) as usize];
             let nu_hi = nu_bar_per_material[(fine_off + idx_hi_f) as usize];
-            let nu_bar = nu_lo + (nu_hi - nu_lo) * frac_f;
+            let mut nu_bar = nu_lo + (nu_hi - nu_lo) * frac_f;
             // Delayed fraction on the same fine grid (issue #364).
             let beta_lo = beta_delayed_per_material[(fine_off + idx_lo_f) as usize];
             let beta_hi = beta_delayed_per_material[(fine_off + idx_hi_f) as usize];
-            let beta_delayed = beta_lo + (beta_hi - beta_lo) * frac_f;
+            let mut beta_delayed = beta_lo + (beta_hi - beta_lo) * frac_f;
 
             // Per-(material, nuclide) URR probability-table sampling (issue
             // #210). URR is applied to EVERY in-range URR nuclide of the
@@ -3949,6 +3957,17 @@ pub(crate) fn multi_cell_transport_kernel(
                     let f_lo_p = nuc_partial_xs[(p_lo + 3u32) as usize];
                     let f_hi_p = nuc_partial_xs[(p_hi + 3u32) as usize];
                     sigma_f_rx = f_lo_p + (f_hi_p - f_lo_p) * frac_f;
+                    // The struck nuclide's own fission yield
+                    // (fusion-neutronics/core#93): same element index as the
+                    // partials, two columns.
+                    let y_lo = (fine_nuc_base + (slab - nuc_off) * fine_n + idx_lo_f) * 2u32;
+                    let y_hi = (fine_nuc_base + (slab - nuc_off) * fine_n + idx_hi_f) * 2u32;
+                    let nu_lo_s = nuc_fission_yield[y_lo as usize];
+                    let nu_hi_s = nuc_fission_yield[y_hi as usize];
+                    nu_bar = nu_lo_s + (nu_hi_s - nu_lo_s) * frac_f;
+                    let b_lo_s = nuc_fission_yield[(y_lo + 1u32) as usize];
+                    let b_hi_s = nuc_fission_yield[(y_hi + 1u32) as usize];
+                    beta_delayed = b_lo_s + (b_hi_s - b_lo_s) * frac_f;
                     // Split the struck nuclide on the SAME band its selection
                     // and the flight used (issue #347). Smooth partials here
                     // would mis-weight capture against scatter: the URR capture
