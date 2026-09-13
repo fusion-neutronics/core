@@ -76,16 +76,14 @@ def test_uncapped_run_stops_on_convergence():
 
 
 def test_gpu_rejects_convergence_only_stop():
-    # GPU stops on total_particles and/or max_runtime, not (yet) on convergence
-    # targets (#241), so a convergence-only run on GPU is rejected up front
-    # rather than launching forever.
-    if not yamc.parallel.gpu_available():
-        pytest.skip("no f64-capable GPU available")
+    # GPU stops on total_particles and/or max_runtime, not on convergence
+    # targets (fusion-neutronics/core#29), so a model carrying targets is
+    # refused before any adapter is touched (core#23); no GPU needed here.
     model = _build_model()
     model.convergence_targets = [
         yamc.ConvergenceTarget("relative_error", 0.10, tally="tbr")
     ]
-    with pytest.raises(ValueError, match="cannot yet.*stop on convergence"):
+    with pytest.raises(ValueError, match="cannot stop on convergence targets"):
         model.simulate_transport(compute="gpu")  # None total, no max_runtime
 
 

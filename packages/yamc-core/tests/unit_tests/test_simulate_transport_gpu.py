@@ -843,13 +843,15 @@ def test_max_steps_per_particle_default_is_100000():
 
 
 def test_max_steps_per_particle_kwarg_propagates():
-    """`Model(max_steps_per_particle=N)` should set the value the GPU
-    dispatch uses as the kernel step cap. Smoke: a small step cap
-    should leave more particles `alive` (terminated by the cap rather
-    than absorbed/leaked) than the default."""
+    """The constructor kwarg reaches the kernel: a cap of 5 steps on a
+    2.5-mean-free-path iron sphere binds on nearly every history, and a
+    binding cap is an error naming the cap (core#23), which is the only
+    observable way the value could have reached the dispatch."""
     sphere = yamc.Sphere(radius=10.0, boundary='vacuum')
     material = yamc.Material(
-        composition={'Fe56': 1.0}, density=7.8, temperature=294,
+        composition={'Fe56': 1.0},
+        density=7.8,
+        temperature=294,
     )
     material.read_nuclear_data({'Fe56': FE56_DATA_PATH})
     cell = yamc.Cell(region=sphere.below, material=material)
@@ -863,9 +865,8 @@ def test_max_steps_per_particle_kwarg_propagates():
         max_steps_per_particle=5,
     )
     assert model.max_steps_per_particle == 5
-    # Should run without error -- exercises the dispatch threading the
-    # value through to the kernel.
-    model.simulate_transport(compute='gpu', total_particles=50, seed=42)
+    with pytest.raises(ValueError, match="max_steps_per_particle=5"):
+        model.simulate_transport(compute='gpu', total_particles=50, seed=42)
 
 
 def test_gpu_max_runtime_uncapped_runs():

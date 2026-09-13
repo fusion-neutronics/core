@@ -838,7 +838,14 @@ pub(super) fn transport_one_particle(
     let mut lost: Option<crate::common::lost_particles::LostParticleRecord> = None;
 
     let mut step = 0u32;
+    // Sticky truncation flag, the kernel's twin: any walk of this history
+    // that hits the cap while alive marks the whole history as unfinished,
+    // even when a later popped secondary ends normally.
+    let mut truncated = false;
     while (alive == 1 && step < inputs.max_steps) || !pend.is_empty() {
+        if alive == 1 && step >= inputs.max_steps {
+            truncated = true;
+        }
         // Current particle finished but secondaries are queued: pop the next one
         // and keep transporting inside the same history (issue #274), exact twin
         // of the kernel's top-of-loop pop -- plus the re-seed of the thread PCG
@@ -2022,7 +2029,7 @@ pub(super) fn transport_one_particle(
     }
 
     ParticleOutcome {
-        alive,
+        alive: if truncated { 1 } else { alive },
         n_steps,
         final_energy: energy,
         lost,

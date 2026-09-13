@@ -3557,6 +3557,13 @@ fn multi_cell_photon_transport_kernel(
         }
     }
 
+    // Queued secondaries the cap left untransported are a truncation of this
+    // history too (the step budget is shared by the primary and its stack),
+    // so report them as "did not finish" for the dispatch's cap check
+    // (fusion-neutronics/core#23).
+    if stack_size > 0u32 {
+        alive = 1u32;
+    }
     out_alive[ABSOLUTE_POS] = alive;
     out_n_steps[ABSOLUTE_POS] = n_steps;
     out_final_energy[ABSOLUTE_POS] = energy;

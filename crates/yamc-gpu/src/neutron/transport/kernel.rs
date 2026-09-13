@@ -2128,7 +2128,17 @@ pub(crate) fn multi_cell_transport_kernel(
     let mut last_cell = 4_294_967_295u32;
 
     let mut step = 0u32;
+    // Sticky: set when any walk of this history (the primary or a popped
+    // (n,xn) secondary) hits `max_steps` while still alive. The pop below
+    // resets `alive` and `step` for the next secondary, so `alive` at loop
+    // exit alone would only describe the LAST walk and a truncated primary
+    // whose secondary then finished normally would go unreported
+    // (fusion-neutronics/core#23).
+    let mut truncated = 0u32;
     while (alive == 1u32 && step < max_steps) || pend_n > 0u32 {
+        if alive == 1u32 && step >= max_steps {
+            truncated = 1u32;
+        }
         // Current particle finished but (n,xn) secondaries are queued: pop
         // the most recent one and keep transporting inside the same history
         // (issue #274). The per-history accumulators carry over; the
@@ -5566,6 +5576,12 @@ pub(crate) fn multi_cell_transport_kernel(
         }
     }
 
+    // `1` means "did not finish": still alive at the cap, or truncated at the
+    // cap earlier in this history (see `truncated`). The dispatch fails a
+    // launch on either.
+    if truncated == 1u32 {
+        alive = 1u32;
+    }
     out_alive[ABSOLUTE_POS] = alive;
     out_n_steps[ABSOLUTE_POS] = n_steps;
     out_final_energy[ABSOLUTE_POS] = energy;
