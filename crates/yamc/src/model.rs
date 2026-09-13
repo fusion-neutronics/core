@@ -408,7 +408,7 @@ pub struct Model {
     /// [`GpuDispatchError::HistoriesTruncated`](crate::gpu::GpuDispatchError),
     /// because the under-counted flux it would return is not a valid
     /// answer (fusion-neutronics/core#23). Raise the cap or run on the CPU.
-    pub max_steps_per_particle: u32,
+    pub gpu_max_steps_per_particle: u32,
     /// Whether to use decay photons (D1S method). Default: false
     pub use_decay_photons: bool,
     /// Particle-transport tracking algorithm. Default:
@@ -523,7 +523,7 @@ impl Model {
             photon_cutoff_energy: 1000.0,
             electron_treatment: ElectronTreatment::Ttb,
             max_lost_particles: 10,
-            max_steps_per_particle: 100_000,
+            gpu_max_steps_per_particle: 100_000,
             use_decay_photons: false,
             tracking_mode: TrackingMode::default(),
             variance_reduction: Vec::new(),
@@ -554,7 +554,7 @@ impl Model {
             photon_cutoff_energy: 1000.0,
             electron_treatment: ElectronTreatment::Ttb,
             max_lost_particles: 10,
-            max_steps_per_particle: 100_000,
+            gpu_max_steps_per_particle: 100_000,
             use_decay_photons: false,
             tracking_mode: TrackingMode::default(),
             variance_reduction: Vec::new(),

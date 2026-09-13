@@ -100,7 +100,7 @@ fn gpu_h2_two_million_histories_does_not_lose_device() {
     // device; post-fix it caps at 100k/launch (20 launches).
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&tally)]);
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = 20_000;
+    model.gpu_max_steps_per_particle = 20_000;
     model.tracking_mode = TrackingMode::Surface;
 
     let settings = TransportSettings {

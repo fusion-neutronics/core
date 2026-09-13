@@ -90,7 +90,7 @@ fn fe_sphere_model(source_e: f64) -> Model {
         strength: 1.0,
     });
     let mut model = Model::new(geometry, vec![source], vec![]);
-    model.max_steps_per_particle = MAX_STEPS;
+    model.gpu_max_steps_per_particle = MAX_STEPS;
     model.transport_secondary_photons = true;
     model.electron_treatment = yamc::model::ElectronTreatment::Ttb;
     let _ = model.ensure_photon_data_for_gpu();

@@ -122,7 +122,7 @@ fn build_model_with(nuclide: &str, density: f64, energy_ev: f64, survival: bool)
     });
     let mut model = Model::new(nuclide_sphere(nuclide, density), vec![source], vec![]);
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = MAX_STEPS;
+    model.gpu_max_steps_per_particle = MAX_STEPS;
     model.tracking_mode = TrackingMode::Surface;
     if survival {
         model.variance_reduction = vec![

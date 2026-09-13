@@ -124,7 +124,7 @@ fn mixed_fe_sphere() -> (Model, Arc<Tally>, Arc<Tally>, Arc<Tally>, TransportSet
         ],
     );
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = 5_000;
+    model.gpu_max_steps_per_particle = 5_000;
     model.photon_cutoff_energy = 1000.0;
     let settings = TransportSettings {
         total_particles: Some(N_PER_BATCH * N_BATCHES),
