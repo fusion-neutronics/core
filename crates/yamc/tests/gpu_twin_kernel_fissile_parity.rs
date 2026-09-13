@@ -1104,3 +1104,14 @@ fn compare_cpu_vs_twin(nuclide: &str, density: f64, radius: f64, energy_ev: f64,
 fn cpu_and_twin_agree_on_tallies() {
     compare_cpu_vs_twin("U235", 18.95, 5.0, 1.0e6, 100_000);
 }
+
+/// U240 at 14.06 MeV: the one ENDF/B-VIII.1 fissionable with partial fission
+/// channels (MT 19 / 20 / 21 / 38), so every fission here spends the channel
+/// draw and samples the chosen channel's own chi row
+/// (fusion-neutronics/core#34 entry 1). Twin and kernel must still agree bit
+/// for bit, which checks the walk, the row table and the per-channel cross
+/// sections on both sides. Skips without the U240 fixture.
+#[test]
+fn twin_and_kernel_agree_on_a_partial_channel_fissile_sphere() {
+    compare("U240 r=12 14.06 MeV", "U240", 19.1, 12.0, 14.06e6, 20_000);
+}

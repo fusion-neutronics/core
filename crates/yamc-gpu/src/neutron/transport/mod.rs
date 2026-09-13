@@ -104,8 +104,9 @@ pub fn per_history_spill_cap(total_out_len: usize, max_steps: u32, n_tallies: us
 
 pub use crate::neutron::fission_bank_inputs::FissionBankInputs;
 pub use crate::neutron::nuclide_select_inputs::{
-    NuclideSelectInputs, NUC_PARTIAL_ABSORPTION, NUC_PARTIAL_COLS, NUC_PARTIAL_ELASTIC,
-    NUC_PARTIAL_FISSION, NUC_PARTIAL_INELASTIC,
+    NuclideSelectInputs, CHI_SLAB_CHANNEL_XS_BASE, CHI_SLAB_DELAYED_ROW, CHI_SLAB_META_COLS,
+    CHI_SLAB_N_CHANNELS, CHI_SLAB_PROMPT_ROW, NUC_PARTIAL_ABSORPTION, NUC_PARTIAL_COLS,
+    NUC_PARTIAL_ELASTIC, NUC_PARTIAL_FISSION, NUC_PARTIAL_INELASTIC,
 };
 pub use crate::neutron::survival_biasing::SurvivalBiasingInputs;
 // The `permt_meta` layout constants moved to the always-built
@@ -182,7 +183,7 @@ pub const REGION_CROSS_EPS: f64 = 1e-8;
 // NOTE: this counts the kernel's READ-ONLY `&[T]` slice parameters only, which
 // is what the lockstep test in `tests.rs` checks; `&mut [T]` outputs (including
 // the issue-#289 `lost_count` / `lost_f64` pair) are not included.
-pub const KERNEL_STORAGE_BUFFER_COUNT: u32 = 181;
+pub const KERNEL_STORAGE_BUFFER_COUNT: u32 = 183;
 
 /// Compile-time cap on the number of secondary photons banked per neutron
 /// collision (coupled neutron->photon production, S4b). cubecl needs a bounded

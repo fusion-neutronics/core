@@ -1185,9 +1185,11 @@ pub struct BankedProgeny {
 }
 
 /// Append `n_to_bank` fission progeny of one collision to the device bank,
-/// each with an independent chi energy and an independent isotropic-in-lab
-/// direction built about the incident direction `(dx, dy, dz)`, carrying
-/// `weight` and the source index of the walk that fissioned.
+/// each with an independent chi energy from the event's chi rows
+/// (`prompt_row` for the channel that fissioned, `delayed_row` for the struck
+/// nuclide's delayed spectrum) and an independent isotropic-in-lab direction
+/// built about the incident direction `(dx, dy, dz)`, carrying `weight` and
+/// the source index of the walk that fissioned.
 ///
 /// Two callers share it. The analog fission branch continues progeny 0 as the
 /// current walk and banks the other N-1. The survival-biased collision banks
@@ -1216,7 +1218,8 @@ fn bank_fission_progeny(
     walk_seed: u32,
     walk_secondaries_in: u32,
     state_in: u64,
-    mat_idx: u32,
+    prompt_row: u32,
+    delayed_row: u32,
     beta_delayed: f64,
     watt_a: f64,
     watt_b: f64,
@@ -1242,10 +1245,11 @@ fn bank_fission_progeny(
     let mut k = 0u32;
     while k < cap_prog {
         if k < n_to_bank {
-            // Independent chi energy.
+            // Independent chi energy from the event's channel.
             let chi = sample_fission_progeny_energy(
                 e_incident,
-                mat_idx,
+                prompt_row,
+                delayed_row,
                 beta_delayed,
                 watt_a,
                 watt_b,
@@ -1439,10 +1443,11 @@ pub(crate) fn multi_cell_transport_kernel(
     //     for nuclides whose χ uses none of the above encodings.
     fission_eout_kind_per_material: &[u32],
     fission_eout_n_energies_per_material: &[u32],
-    // Two chi ROWS per material (issue #364): row `2*mat` is the prompt spectrum
-    // and row `2*mat + 1` the delayed groups' folded spectrum, so every
-    // `*_per_material` buffer below is indexed by chi row, not by material. A
-    // material with no delayed data carries an empty delayed row and `beta == 0`.
+    // Chi ROWS (issue #364, fusion-neutronics/core#34 entry 1): one prompt row
+    // per (nuclide slab, fission channel) plus one delayed row per slab, laid
+    // out by `chi_slab_meta` below, so every `*_per_material` buffer here is
+    // indexed by chi row, not by material. A nuclide with no delayed data
+    // carries an empty delayed row and `beta == 0`.
     //
     // Tight CSR (issue #104): `fission_eout_ae_offset[chi_row]` is the row's
     // first ae-row into `fission_eout_n_x` / `energy_grid`;
@@ -2063,6 +2068,18 @@ pub(crate) fn multi_cell_transport_kernel(
     // `sigma_*`. Single-nuclide materials never read this (the aggregate split
     // is exact and byte-identical).
     nuc_partial_xs: &[f64],
+    // Per-slab fission chi row table, packed `[n_slab x CHI_SLAB_META_COLS]`
+    // (fusion-neutronics/core#34 entry 1): for the struck slab, the first of
+    // its prompt chi rows (one per fission channel), its channel count, its
+    // delayed row and its element base into `fission_channel_xs`. A fission in
+    // a slab with more than one channel draws one uniform and walks the
+    // channels' cross sections at the collision energy to pick the prompt row
+    // (`select_fission_chi_rows`); a single-channel slab takes no draw.
+    chi_slab_meta: &[u32],
+    // Per-channel microscopic fission cross sections for the multi-channel
+    // slabs, tight CSR on the owning material's FINE grid: slab base (from
+    // `chi_slab_meta`) + `channel * fine_n` + fine index.
+    fission_channel_xs: &[f64],
     // Runtime gate for the device fission bank (issue #78, 1 element). When
     // `fission_bank_enabled[0] == 0` the fission branch keeps the legacy
     // `weight *= nu_bar` + `FISSION_WEIGHT_CAP` terminator (byte-identical to a
@@ -4015,6 +4032,20 @@ pub(crate) fn multi_cell_transport_kernel(
                         }
                         let watt_a_sv = mat_f64_meta[(mat_meta_off + 2u32) as usize];
                         let watt_b_sv = mat_f64_meta[(mat_meta_off + 3u32) as usize];
+                        // The channel that fissioned, one draw only for a
+                        // nuclide with partial channels
+                        // (fusion-neutronics/core#34 entry 1).
+                        let rows_sv = crate::common::sampling::fission_chi::select_fission_chi_rows(
+                            slab,
+                            fine_n,
+                            idx_lo_f,
+                            idx_hi_f,
+                            frac_f,
+                            chi_slab_meta,
+                            fission_channel_xs,
+                            state,
+                        );
+                        state = rows_sv.state;
                         let bp = bank_fission_progeny(
                             n_bank,
                             weight,
@@ -4030,7 +4061,8 @@ pub(crate) fn multi_cell_transport_kernel(
                             walk_seed,
                             walk_secondaries,
                             state,
-                            mat_idx,
+                            rows_sv.prompt_row,
+                            rows_sv.delayed_row,
                             beta_delayed,
                             watt_a_sv,
                             watt_b_sv,
@@ -5404,10 +5436,29 @@ pub(crate) fn multi_cell_transport_kernel(
                         let watt_b_fis = mat_f64_meta[(mat_meta_off + 3u32) as usize];
                         let e_incident_fis = energy;
 
+                        // Which of the struck nuclide's fission channels fired,
+                        // hence which prompt chi row every progeny of this event
+                        // samples from (fusion-neutronics/core#34 entry 1). One
+                        // draw, taken only when the nuclide carries partial
+                        // channels, as CPU `sample_fission_reaction` does.
+                        let rows_fis =
+                            crate::common::sampling::fission_chi::select_fission_chi_rows(
+                                slab,
+                                fine_n,
+                                idx_lo_f,
+                                idx_hi_f,
+                                frac_f,
+                                chi_slab_meta,
+                                fission_channel_xs,
+                                state,
+                            );
+                        state = rows_fis.state;
+
                         // Continuing progeny (progeny 0): one chi draw.
                         let chi0 = sample_fission_progeny_energy(
                             e_incident_fis,
-                            mat_idx,
+                            rows_fis.prompt_row,
+                            rows_fis.delayed_row,
                             beta_delayed,
                             watt_a_fis,
                             watt_b_fis,
@@ -5487,7 +5538,8 @@ pub(crate) fn multi_cell_transport_kernel(
                                 walk_seed,
                                 walk_secondaries,
                                 state,
-                                mat_idx,
+                                rows_fis.prompt_row,
+                                rows_fis.delayed_row,
                                 beta_delayed,
                                 watt_a_fis,
                                 watt_b_fis,

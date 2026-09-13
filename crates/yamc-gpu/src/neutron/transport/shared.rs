@@ -17,10 +17,11 @@
 use super::dispatch::sample_inelastic_angle;
 use super::urr_perturb;
 use super::{
-    accumulate_collision_tallies, accumulate_tallies, BOUNDARY_VACUUM, COARSE_META_COLS,
-    COL_COARSE_GRID_OFFSET, COL_COARSE_MT_BASE, COL_COARSE_N, COL_FINE_GRID_OFFSET, COL_FINE_N,
-    COL_FINE_NUC_BASE, COL_PERMT_I_START, COL_PERMT_N_STORED, COL_PERMT_VALUE_OFFSET,
-    FINE_META_COLS, FISSION_WEIGHT_CAP, PERMT_META_COLS, REGION_CROSS_EPS,
+    accumulate_collision_tallies, accumulate_tallies, BOUNDARY_VACUUM, CHI_SLAB_CHANNEL_XS_BASE,
+    CHI_SLAB_DELAYED_ROW, CHI_SLAB_META_COLS, CHI_SLAB_N_CHANNELS, CHI_SLAB_PROMPT_ROW,
+    COARSE_META_COLS, COL_COARSE_GRID_OFFSET, COL_COARSE_MT_BASE, COL_COARSE_N,
+    COL_FINE_GRID_OFFSET, COL_FINE_N, COL_FINE_NUC_BASE, COL_PERMT_I_START, COL_PERMT_N_STORED,
+    COL_PERMT_VALUE_OFFSET, FINE_META_COLS, FISSION_WEIGHT_CAP, PERMT_META_COLS, REGION_CROSS_EPS,
 };
 use crate::common::geometry::bvh_cell_finding::bvh_find_cell_at_point;
 use crate::common::geometry::cell_finding::CELL_NOT_FOUND;
@@ -170,12 +171,18 @@ pub(super) struct TransportInputs<'a> {
     // `[n_slab x n_grid x NUC_PARTIAL_COLS]` (#74 Stage 2b). See
     // `NuclideSelectInputs::nuc_partial_xs`.
     pub nuc_partial_xs: &'a [f64],
+    // Per-slab fission chi row table and per-channel fission cross sections
+    // (fusion-neutronics/core#34 entry 1). See `NuclideSelectInputs::chi_slab_meta`
+    // and `NuclideSelectInputs::fission_channel_xs`.
+    pub chi_slab_meta: &'a [u32],
+    pub fission_channel_xs: &'a [f64],
     // Fission outgoing energy
     pub fission_a_per_material: &'a [f64],
     pub fission_b_per_material: &'a [f64],
-    // Two chi ROWS per material (issue #364): row `2*mat` is the prompt spectrum,
-    // row `2*mat + 1` the delayed groups' folded spectrum. Every buffer below is
-    // indexed by chi row, not by material.
+    // Fission chi ROWS (issue #364, fusion-neutronics/core#34 entry 1): one
+    // prompt row per (nuclide slab, fission channel) plus one delayed row per
+    // slab, laid out by `chi_slab_meta`. Every buffer below is indexed by chi
+    // row, not by material.
     pub fission_eout_kind_per_material: &'a [u32],
     pub fission_eout_n_energies_per_material: &'a [u32],
     // Tight CSR (issue #104): `fission_eout_ae_offset` is the per-chi-row
@@ -381,6 +388,10 @@ pub(super) fn validate_transport_inputs(
     // be summed over materials (`sum_m fine_n[m]`).
     fine_meta: &[u32],
     mat_nuclide_meta: &[u32],
+    // Per-slab fission chi row table and per-channel fission cross sections
+    // (fusion-neutronics/core#34 entry 1).
+    chi_slab_meta: &[u32],
+    fission_channel_xs: &[f64],
     xs_elastic_per_material: &[f64],
     xs_absorption_per_material: &[f64],
     xs_inelastic_per_material: &[f64],
@@ -471,12 +482,31 @@ pub(super) fn validate_transport_inputs(
     // [n_materials]; incident-energy rows are [total ae-rows]; (x, cdf) points
     // are [total x-points]. No fixed per-axis stride.
     let n_fission_eout_ae_rows = fission_eout_n_x_per_material.len();
-    // TWO chi rows per material: prompt at `2*mat`, delayed at `2*mat + 1`
-    // (issue #364).
-    let n_chi_rows = 2 * n_materials;
-    assert_eq!(fission_eout_kind_per_material.len(), n_chi_rows);
+    // Chi rows are laid out per (slab, channel) by `chi_slab_meta` (issue #364,
+    // fusion-neutronics/core#34 entry 1); every row the table points at must
+    // exist.
+    let n_chi_rows = fission_eout_kind_per_material.len();
     assert_eq!(fission_eout_n_energies_per_material.len(), n_chi_rows);
     assert_eq!(fission_eout_ae_offset.len(), n_chi_rows);
+    assert_eq!(
+        chi_slab_meta.len(),
+        n_slab * CHI_SLAB_META_COLS,
+        "chi_slab_meta must be [n_slab x CHI_SLAB_META_COLS]"
+    );
+    for row in chi_slab_meta.as_chunks::<CHI_SLAB_META_COLS>().0 {
+        let prompt = row[CHI_SLAB_PROMPT_ROW] as usize;
+        let n_ch = row[CHI_SLAB_N_CHANNELS] as usize;
+        assert!(n_ch >= 1, "every slab has at least one fission channel row");
+        assert!(
+            prompt + n_ch <= n_chi_rows,
+            "chi_slab_meta prompt rows out of range"
+        );
+        assert!(
+            (row[CHI_SLAB_DELAYED_ROW] as usize) < n_chi_rows,
+            "chi_slab_meta delayed row out of range"
+        );
+    }
+    assert!(!fission_channel_xs.is_empty());
     assert_eq!(
         fission_eout_energy_grid_per_material.len(),
         n_fission_eout_ae_rows
@@ -639,25 +669,81 @@ pub struct CollisionRecord {
 /// CPU twin of the kernel's `sample_fission_progeny_energy`: pick the prompt or
 /// the delayed spectrum, then sample it (issue #364).
 ///
-/// `beta` is the material's delayed fraction `nu_d(E) / nu_t(E)` at the incident
-/// energy. ONE uniform, drawn only when `beta > 0.0`, so a material with no delayed
-/// data keeps the previous draw schedule exactly.
+/// `prompt_row` and `delayed_row` are the event's chi rows from
+/// [`select_fission_chi_rows_cpu`]; `mat_idx` supplies the Watt fall-through
+/// parameters. `beta` is the material's delayed fraction `nu_d(E) / nu_t(E)` at
+/// the incident energy. ONE uniform, drawn only when `beta > 0.0`, so a material
+/// with no delayed data keeps the previous draw schedule exactly.
 fn fission_progeny_energy_cpu(
     inputs: &TransportInputs<'_>,
     mat_idx: usize,
+    prompt_row: usize,
+    delayed_row: usize,
     beta: f64,
     e_in: f64,
     state: &mut u64,
 ) -> f64 {
-    let mut chi_row = 2 * mat_idx;
+    let mut chi_row = prompt_row;
     if beta > 0.0 {
         let (xi_del, st_del) = crate::common::pcg32::draw_uniform_cpu(*state);
         *state = st_del;
         if xi_del < beta {
-            chi_row = 2 * mat_idx + 1;
+            chi_row = delayed_row;
         }
     }
     fission_chi_cpu(inputs, chi_row, mat_idx, e_in, state)
+}
+
+/// CPU twin of the kernel's `select_fission_chi_rows`
+/// (fusion-neutronics/core#34 entry 1): the prompt chi row of the channel that
+/// fissioned and the struck slab's delayed row. With one channel no draw is
+/// taken; with more, ONE uniform and a cumulative walk over the channels'
+/// fission cross sections interpolated at the collision bracket on the owning
+/// material's fine grid, the same first-pass total / `accum >= target` /
+/// last-channel fallback as CPU `FastXSGrid::sample_fission_reaction`.
+fn select_fission_chi_rows_cpu(
+    inputs: &TransportInputs<'_>,
+    slab: usize,
+    fine_n: usize,
+    idx_lo_f: usize,
+    idx_hi_f: usize,
+    frac_f: f64,
+    state: &mut u64,
+) -> (usize, usize) {
+    let meta = &inputs.chi_slab_meta[slab * CHI_SLAB_META_COLS..(slab + 1) * CHI_SLAB_META_COLS];
+    let prompt_base = meta[CHI_SLAB_PROMPT_ROW] as usize;
+    let n_ch = meta[CHI_SLAB_N_CHANNELS] as usize;
+    let delayed_row = meta[CHI_SLAB_DELAYED_ROW] as usize;
+    let xs_base = meta[CHI_SLAB_CHANNEL_XS_BASE] as usize;
+    if n_ch <= 1 {
+        return (prompt_base, delayed_row);
+    }
+    let (xi, st) = crate::common::pcg32::draw_uniform_cpu(*state);
+    *state = st;
+    let channel_xs = |c: usize| {
+        let row = xs_base + c * fine_n;
+        let v_lo = inputs.fission_channel_xs[row + idx_lo_f];
+        let v_hi = inputs.fission_channel_xs[row + idx_hi_f];
+        v_lo + (v_hi - v_lo) * frac_f
+    };
+    let total: f64 = (0..n_ch).map(channel_xs).filter(|&xs| xs > 0.0).sum();
+    if total <= 0.0 {
+        return (prompt_base, delayed_row);
+    }
+    let target = xi * total;
+    let mut accum = 0.0;
+    let mut chosen = n_ch - 1;
+    for c in 0..n_ch {
+        let xs = channel_xs(c);
+        if xs > 0.0 {
+            accum += xs;
+            if accum >= target {
+                chosen = c;
+                break;
+            }
+        }
+    }
+    (prompt_base + chosen, delayed_row)
 }
 
 /// Queue `n_to_bank` fission progeny of one collision for this history, the
@@ -679,6 +765,7 @@ fn push_fission_progeny(
     (px, py, pz): (f64, f64, f64),
     (dx, dy, dz): (f64, f64, f64),
     mat_idx: usize,
+    (prompt_row, delayed_row): (usize, usize),
     beta_delayed: f64,
     walk_seed: u32,
     walk_secondaries: &mut u32,
@@ -689,8 +776,15 @@ fn push_fission_progeny(
     let mut k = 0u32;
     while k < cap_prog {
         if k < n_to_bank {
-            let e_bank =
-                fission_progeny_energy_cpu(inputs, mat_idx, beta_delayed, e_incident, state);
+            let e_bank = fission_progeny_energy_cpu(
+                inputs,
+                mat_idx,
+                prompt_row,
+                delayed_row,
+                beta_delayed,
+                e_incident,
+                state,
+            );
             let (xi_mu, st_mu) = crate::common::pcg32::draw_uniform_cpu(*state);
             *state = st_mu;
             let mu_b = 1.0 - 2.0 * xi_mu;
@@ -751,9 +845,10 @@ fn push_fission_progeny(
 /// Watt-rejection draw -- the exact logic that previously lived inline in the CPU
 /// twin's fission branch.
 ///
-/// Rows come in (prompt, delayed) pairs: material `m`'s prompt spectrum is row
-/// `2m`, its delayed spectrum row `2m + 1` (issue #364). Callers go through
-/// [`fission_progeny_energy_cpu`], which picks the row.
+/// Rows are laid out per (nuclide slab, fission channel) plus one delayed row
+/// per slab by `chi_slab_meta` (issue #364, fusion-neutronics/core#34 entry 1).
+/// Callers go through [`select_fission_chi_rows_cpu`] and
+/// [`fission_progeny_energy_cpu`], which pick the row.
 fn fission_chi_cpu(
     inputs: &TransportInputs<'_>,
     chi_row: usize,
@@ -1537,6 +1632,12 @@ pub(super) fn transport_one_particle(
                         } else {
                             n_floor
                         };
+                        // The channel that fissioned, one draw only for a
+                        // nuclide with partial channels
+                        // (fusion-neutronics/core#34 entry 1).
+                        let rows_sv = select_fission_chi_rows_cpu(
+                            inputs, slab, fine_n, idx_lo_f, idx_hi_f, frac_f, &mut state,
+                        );
                         push_fission_progeny(
                             inputs,
                             n_bank,
@@ -1545,6 +1646,7 @@ pub(super) fn transport_one_particle(
                             (px, py, pz),
                             (dx, dy, dz),
                             mat_idx,
+                            rows_sv,
                             beta_delayed,
                             walk_seed,
                             &mut walk_secondaries,
@@ -1949,9 +2051,17 @@ pub(super) fn transport_one_particle(
                         //     `ParticleBank` transports fission progeny inside the
                         //     history too.
                         let e_incident_fis = energy;
+                        // Which of the struck nuclide's fission channels fired,
+                        // hence which prompt chi row every progeny of this event
+                        // samples from (fusion-neutronics/core#34 entry 1).
+                        let rows_fis = select_fission_chi_rows_cpu(
+                            inputs, slab, fine_n, idx_lo_f, idx_hi_f, frac_f, &mut state,
+                        );
                         energy = fission_progeny_energy_cpu(
                             inputs,
                             mat_idx,
+                            rows_fis.0,
+                            rows_fis.1,
                             beta_delayed,
                             e_incident_fis,
                             &mut state,
@@ -1994,6 +2104,7 @@ pub(super) fn transport_one_particle(
                                 (px, py, pz),
                                 (dx, dy, dz),
                                 mat_idx,
+                                rows_fis,
                                 beta_delayed,
                                 walk_seed,
                                 &mut walk_secondaries,

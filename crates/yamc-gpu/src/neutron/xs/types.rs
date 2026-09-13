@@ -246,10 +246,10 @@ pub struct GpuNuclideXs {
     /// shape as `xs_elastic` (`n_grid` entries). Used by the kernel
     /// to pick the fission *branch* in collision sampling
     /// (4-way: elastic / inelastic / fission / absorption). When the
-    /// branch is taken, the kernel multiplies the surviving particle's
-    /// weight by `nu_bar` (variance-reduction equivalent of emitting
-    /// `nu_bar` independent prompt neutrons) and resamples the
-    /// outgoing energy from a Watt spectrum.
+    /// branch is taken, the kernel samples the progeny's outgoing energy
+    /// from the struck nuclide's per-channel chi rows (see
+    /// `NuclideSelectInputs::chi_slab_meta`), falling back to a Watt
+    /// spectrum with the parameters below.
     pub xs_fission: Vec<f64>,
     /// Average prompt neutrons per fission, ν̄(E), evaluated at every
     /// master-grid energy point. Same shape as `xs_elastic`. Used as
@@ -275,63 +275,6 @@ pub struct GpuNuclideXs {
     /// Watt-spectrum `b` parameter (1/eV). MVP default 2.249e-6 1/eV
     /// (typical thermal Watt).
     pub fission_watt_b: f64,
-    /// Discriminant for the fission outgoing-energy sampler. Values:
-    /// - `EOUT_KIND_CONTINUOUS_TABULAR` (1): kernel samples from
-    ///   `fission_eout_x` / `fission_eout_cdf` (also covers the
-    ///   `CorrelatedAngleEnergy` E_out marginal -- same buffer encoding).
-    /// - `EOUT_KIND_MAXWELL` (6): kernel samples `√E·exp(-E/θ)` via the
-    ///   shared Maxwell rejection helper. Tight CSR (issue #104): each E_in
-    ///   row carries one point (`fission_eout_n_x[i] == 1`); the tabulated
-    ///   `θ(E_in)` lives in that single `fission_eout_x` slot per row and the
-    ///   scalar restriction energy `u` in the material's row-0 `fission_eout_cdf`
-    ///   slot.
-    /// - `EOUT_KIND_EVAPORATION` (4): kernel samples `E·exp(-E/θ)` via the
-    ///   shared Evaporation rejection helper. Same θ / `u` packing as Maxwell.
-    /// - `EOUT_KIND_WATT` (7): kernel uses the Watt-rejection branch
-    ///   with `fission_watt_a` / `fission_watt_b`. Retained as the
-    ///   fallback for nuclides whose χ uses none of the above encodings.
-    pub fission_eout_kind: u32,
-    /// Number of populated incident-energy points in the fission
-    /// outgoing-energy table. Zero for Watt-fallback / non-fissionable
-    /// materials.
-    pub fission_eout_n_energies: u32,
-    /// Incident-energy grid for the fission outgoing-energy table.
-    /// Tight (issue #104): length `fission_eout_n_energies` (no padding).
-    pub fission_eout_energy_grid: Vec<f64>,
-    /// Per (E_in_idx) outgoing-energy point count, length
-    /// `fission_eout_n_energies`.
-    pub fission_eout_n_x: Vec<u32>,
-    /// Tabulated outgoing-energy values, tight CSR (issue #104): rows
-    /// concatenated back-to-back, row `i` occupying `n_x[i]` points.
-    /// Length `sum(fission_eout_n_x)`. The per-row CSR base is built at
-    /// translate time (`fission_eout_x_offset`).
-    pub fission_eout_x: Vec<f64>,
-    /// Cumulative distribution for `fission_eout_x`, same shape.
-    pub fission_eout_cdf: Vec<f64>,
-    /// Probability density for `fission_eout_x`, same shape, normalized
-    /// by the same `cdf_max` as `fission_eout_cdf`. Zero-filled for rows
-    /// without a usable PDF (the sampler then falls back to linear-in-c).
-    pub fission_eout_p: Vec<f64>,
-    /// Per-incident-energy-row interpolation discriminant for the fission
-    /// E_out inversion, one entry per ae-row (length
-    /// `fission_eout_n_energies`). `0` = histogram, `1` = lin-lin
-    /// (matching `TabulatedInterp`).
-    pub fission_eout_interp: Vec<u32>,
-    /// The DELAYED fission spectrum, same six-buffer encoding as the prompt
-    /// `fission_eout_*` fields above (issue #364). It is the yield-weighted fold of
-    /// the evaluation's six delayed groups, so it is always
-    /// `EOUT_KIND_CONTINUOUS_TABULAR` when present and all-zero / empty when the
-    /// material has no delayed data. Translate time appends these as a SECOND chi
-    /// row per material, so the kernel reads material `m`'s prompt spectrum at row
-    /// `2m` and its delayed spectrum at row `2m + 1`.
-    pub fission_eout_delayed_kind: u32,
-    pub fission_eout_delayed_n_energies: u32,
-    pub fission_eout_delayed_energy_grid: Vec<f64>,
-    pub fission_eout_delayed_n_x: Vec<u32>,
-    pub fission_eout_delayed_x: Vec<f64>,
-    pub fission_eout_delayed_cdf: Vec<f64>,
-    pub fission_eout_delayed_p: Vec<f64>,
-    pub fission_eout_delayed_interp: Vec<u32>,
     /// Kalbach-Mann incident-energy point count per MT slot, length
     /// `MT_INELASTIC_COUNT`. Non-zero only when `eout_kind ==
     /// EOUT_KIND_KALBACH_MANN` for that slot. The per-slot KM table
@@ -585,24 +528,6 @@ impl GpuNuclideXs {
             beta_delayed: vec![0.0; n_grid],
             fission_watt_a: 0.0,
             fission_watt_b: 0.0,
-            fission_eout_kind: 0,
-            fission_eout_n_energies: 0,
-            // Tight CSR (issue #104): no fission distribution -> zero rows,
-            // zero points, so every buffer is empty.
-            fission_eout_energy_grid: Vec::new(),
-            fission_eout_n_x: Vec::new(),
-            fission_eout_x: Vec::new(),
-            fission_eout_cdf: Vec::new(),
-            fission_eout_p: Vec::new(),
-            fission_eout_interp: Vec::new(),
-            fission_eout_delayed_kind: 0,
-            fission_eout_delayed_n_energies: 0,
-            fission_eout_delayed_energy_grid: Vec::new(),
-            fission_eout_delayed_n_x: Vec::new(),
-            fission_eout_delayed_x: Vec::new(),
-            fission_eout_delayed_cdf: Vec::new(),
-            fission_eout_delayed_p: Vec::new(),
-            fission_eout_delayed_interp: Vec::new(),
             km_n_energies: vec![0u32; mt],
             // Tight CSR (issue #104): no Kalbach-Mann rows on the void slot.
             km_energy_grid: Vec::new(),
