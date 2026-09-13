@@ -509,6 +509,135 @@ fn continuous_to_flat(
 /// This is the single definition of the set. [`crate::nuclide::is_fission_mt`]
 /// tests membership of it, so a channel cannot be added to one and forgotten in
 /// the other.
+impl FissionChiFlat {
+    /// Flatten the outgoing-energy MARGINAL of a `CorrelatedAngleEnergy` prompt
+    /// fission spectrum (ENDF File 6 LAW 1, the encoding Th232, Pa231 and Pa233
+    /// use) into the same `Continuous` layout a `ContinuousTabular` chi takes,
+    /// dropping the per-(E_in, E_out) angular tables (fusion-neutronics/core#34
+    /// entry 2).
+    ///
+    /// The shared GPU/CPU path emits fission neutrons isotropically in the lab,
+    /// and the GPU extractor already packs this marginal; carrying it here puts
+    /// the CPU's prompt chi for these nuclides on the same PCG stream instead of
+    /// the legacy per-product sampler, and gives them the delayed-neutron
+    /// treatment that only the flat path has. What is lost is the correlation
+    /// the tables carry, measured on the ENDF/B-VIII.1 data at 0.03 mean cosine
+    /// at 14 MeV incident (flat below a few MeV), on a channel that is a few
+    /// percent of a 14 MeV collision.
+    ///
+    /// Rows without a tabulated CDF get one by trapezoid integration of the PDF;
+    /// each row's CDF is renormalised to end at 1 with the PDF scaled alike, as
+    /// `continuous_to_flat` does. The incident-energy interpolation is lin-lin.
+    pub fn from_correlated(corr: &crate::secondary_correlated::CorrelatedAngleEnergy) -> Self {
+        use crate::secondary_correlated::Interpolation;
+        let n_e = corr.energy.len();
+        if n_e == 0 || corr.distributions.len() != n_e {
+            return FissionChiFlat::None;
+        }
+        let max_x = corr
+            .distributions
+            .iter()
+            .map(|t| t.e_out.len())
+            .max()
+            .unwrap_or(0);
+        if max_x == 0 {
+            return FissionChiFlat::None;
+        }
+        let mut n_x = vec![0u32; n_e];
+        let mut interp = vec![CHI_INTERP_HISTOGRAM; n_e];
+        let mut n_discrete = vec![0u32; n_e];
+        let mut x_t = vec![0.0; n_e * max_x];
+        let mut p_t = vec![0.0; n_e * max_x];
+        let mut c_t = vec![0.0; n_e * max_x];
+        for (i, table) in corr.distributions.iter().enumerate() {
+            let m = table.e_out.len();
+            if m == 0 {
+                continue;
+            }
+            let has_pdf = table.p.len() == m;
+            let cdf_owned: Vec<f64>;
+            let cdf: &[f64] = if table.c.len() == m {
+                &table.c
+            } else if has_pdf {
+                cdf_owned = trapezoid_cdf(&table.e_out, &table.p);
+                &cdf_owned
+            } else {
+                continue;
+            };
+            let cdf_max = cdf.last().copied().unwrap_or(0.0);
+            n_x[i] = m as u32;
+            n_discrete[i] = table.n_discrete as u32;
+            interp[i] = if has_pdf && cdf_max > 0.0 {
+                match table.interpolation {
+                    Interpolation::Histogram => CHI_INTERP_HISTOGRAM,
+                    Interpolation::LinLin => CHI_INTERP_LINLIN,
+                }
+            } else {
+                CHI_INTERP_HISTOGRAM
+            };
+            let off = i * max_x;
+            for j in 0..m {
+                x_t[off + j] = table.e_out[j];
+                c_t[off + j] = if cdf_max > 0.0 {
+                    cdf[j] / cdf_max
+                } else {
+                    j as f64 / (m - 1).max(1) as f64
+                };
+                p_t[off + j] = if has_pdf && cdf_max > 0.0 {
+                    table.p[j] / cdf_max
+                } else {
+                    0.0
+                };
+            }
+        }
+        FissionChiFlat::Continuous {
+            energy_grid: corr.energy.clone(),
+            n_x,
+            interp,
+            n_discrete,
+            x: x_t,
+            p: p_t,
+            c: c_t,
+            max_x,
+            histogram_outer: false,
+        }
+    }
+
+    /// Flatten whichever prompt-chi encoding the first neutron product carries:
+    /// the energy part of an `UncorrelatedAngleEnergy`, or the E_out marginal of
+    /// a `CorrelatedAngleEnergy`. Anything else (or no distribution) is
+    /// [`FissionChiFlat::None`], which sends the caller to the legacy sampler.
+    pub fn from_angle_energy(
+        dist: Option<&crate::reaction_product::AngleEnergyDistribution>,
+    ) -> Self {
+        use crate::reaction_product::AngleEnergyDistribution;
+        match dist {
+            Some(AngleEnergyDistribution::UncorrelatedAngleEnergy {
+                energy: Some(energy),
+                ..
+            }) => energy.to_fission_chi_flat(),
+            Some(AngleEnergyDistribution::CorrelatedAngleEnergy { correlated }) => {
+                Self::from_correlated(correlated)
+            }
+            _ => FissionChiFlat::None,
+        }
+    }
+}
+
+/// Trapezoid-rule cumulative integral of a tabulated PDF, un-normalised (the
+/// caller scales by the last value).
+fn trapezoid_cdf(x: &[f64], p: &[f64]) -> Vec<f64> {
+    let mut c = Vec::with_capacity(x.len());
+    let mut acc = 0.0;
+    for j in 0..x.len() {
+        if j > 0 {
+            acc += 0.5 * (x[j] - x[j - 1]) * (p[j] + p[j - 1]);
+        }
+        c.push(acc);
+    }
+    c
+}
+
 pub(crate) const FISSION_CHI_MTS: [i32; 5] = [18, 19, 20, 21, 38];
 
 /// Per-nuclide cache of the flattened fission chi (issue #111), one slot per
@@ -555,11 +684,12 @@ impl FissionChiFlatCache {
 
     /// Return `mt`'s cached flat chi, building it from `dist` (or
     /// [`FissionChiFlat::None`] when `dist` is `None`) on that slot's first access.
-    pub fn get_or_build(&self, mt: i32, dist: Option<&EnergyDistribution>) -> &FissionChiFlat {
-        self.0[Self::slot(mt)].get_or_init(|| match dist {
-            Some(d) => d.to_fission_chi_flat(),
-            None => FissionChiFlat::None,
-        })
+    pub fn get_or_build(
+        &self,
+        mt: i32,
+        dist: Option<&crate::reaction_product::AngleEnergyDistribution>,
+    ) -> &FissionChiFlat {
+        self.0[Self::slot(mt)].get_or_init(|| FissionChiFlat::from_angle_energy(dist))
     }
 }
 
@@ -814,15 +944,21 @@ mod fission_chi_cache_tests {
 
     /// Maxwell chi with a distinguishing `theta`, so two channels are tellable
     /// apart by the value that comes back out of the cache.
-    fn maxwell(theta: f64) -> EnergyDistribution {
-        EnergyDistribution::Maxwell {
-            theta: Tabulated1D::Tabulated1D {
-                x: vec![1.0, 2.0e7],
-                y: vec![theta, theta],
-                breakpoints: vec![2],
-                interpolation: vec![2],
+    fn maxwell(theta: f64) -> crate::reaction_product::AngleEnergyDistribution {
+        crate::reaction_product::AngleEnergyDistribution::UncorrelatedAngleEnergy {
+            angle: crate::reaction_product::AngleDistribution {
+                energy: Vec::new(),
+                mu: Vec::new(),
             },
-            u: 0.0,
+            energy: Some(EnergyDistribution::Maxwell {
+                theta: Tabulated1D::Tabulated1D {
+                    x: vec![1.0, 2.0e7],
+                    y: vec![theta, theta],
+                    breakpoints: vec![2],
+                    interpolation: vec![2],
+                },
+                u: 0.0,
+            }),
         }
     }
 
@@ -1123,5 +1259,73 @@ mod delayed_mixture_tests {
             weighted_energy_mixture(&[(1.0, &discrete)]).is_none(),
             "discrete lines are not foldable as continuous density"
         );
+    }
+
+    /// A two-row correlated table flattens to the same `Continuous` shape a
+    /// tabular chi does: per-row CDF ending at 1, PDF scaled alike, a
+    /// trapezoid CDF where the table carries none, angles dropped.
+    #[test]
+    fn correlated_marginal_flattens_like_a_tabular_chi() {
+        use crate::secondary_correlated::{
+            CorrTable, CorrelatedAngleEnergy, Interpolation, Tabular,
+        };
+        let iso = Tabular {
+            x: vec![-1.0, 1.0],
+            p: vec![0.5, 0.5],
+            c: vec![0.0, 1.0],
+            interpolation: Interpolation::LinLin,
+            n_discrete: 0,
+        };
+        let corr = CorrelatedAngleEnergy {
+            energy: vec![1.0e6, 2.0e6],
+            distributions: vec![
+                CorrTable {
+                    interpolation: Interpolation::LinLin,
+                    n_discrete: 0,
+                    e_out: vec![0.0, 1.0e6, 2.0e6],
+                    p: vec![0.0, 2.0, 0.0],
+                    c: vec![0.0, 1.0e6, 2.0e6],
+                    angle: vec![iso.clone(), iso.clone(), iso.clone()],
+                },
+                CorrTable {
+                    interpolation: Interpolation::Histogram,
+                    n_discrete: 0,
+                    e_out: vec![0.0, 3.0e6],
+                    p: vec![1.0, 1.0],
+                    c: Vec::new(),
+                    angle: vec![iso.clone(), iso],
+                },
+            ],
+        };
+        let FissionChiFlat::Continuous {
+            energy_grid,
+            n_x,
+            interp,
+            x,
+            p,
+            c,
+            max_x,
+            histogram_outer,
+            ..
+        } = FissionChiFlat::from_correlated(&corr)
+        else {
+            panic!("expected a Continuous chi");
+        };
+        assert_eq!(energy_grid, vec![1.0e6, 2.0e6]);
+        assert_eq!(n_x, vec![3, 2]);
+        assert_eq!(interp, vec![CHI_INTERP_LINLIN, CHI_INTERP_HISTOGRAM]);
+        assert_eq!(max_x, 3);
+        assert!(!histogram_outer);
+        assert_eq!(&x[..3], &[0.0, 1.0e6, 2.0e6]);
+        assert!((c[2] - 1.0).abs() < 1e-12 && (c[1] - 0.5).abs() < 1e-12);
+        assert!(
+            (p[1] - 2.0 / 2.0e6).abs() < 1e-18,
+            "pdf scaled by the cdf max"
+        );
+        // Row 2 carried no CDF: the trapezoid of a flat pdf over [0, 3 MeV]
+        // ends at 3e6 and renormalises to 1.
+        assert_eq!(&x[3..5], &[0.0, 3.0e6]);
+        assert!((c[4] - 1.0).abs() < 1e-12 && c[3] == 0.0);
+        assert!((p[4] - 1.0 / 3.0e6).abs() < 1e-18);
     }
 }
