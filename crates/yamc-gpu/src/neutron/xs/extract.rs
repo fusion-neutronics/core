@@ -396,8 +396,9 @@ pub fn extract_xs_from_nuclide(
     // absorption below, so the GPU would kill neutrons the CPU scatters.
     check_unslotted_scatter_mts(nuclide, reactions, &xs_total, energy_grid)?;
 
-    // Per-energy fission xs (sum across MT 18 / 19 / 20 / 21 / 38) and
-    // ν̄(E) for the fission-branch sampling. Mirrors the multi-nuclide
+    // Per-energy fission xs (sum across the non-redundant fission MTs among
+    // 18 / 19 / 20 / 21 / 38) and ν̄(E) for the fission-branch sampling.
+    // Mirrors the multi-nuclide
     // path in `extract_material_xs`. Empty for non-fissionable
     // nuclides -- kernel just sees σ_f = 0 everywhere and never samples
     // the branch.
@@ -412,6 +413,15 @@ pub fn extract_xs_from_nuclide(
         let delayed = nuclide.delayed_neutrons(temperature);
         for &fmt in &[18, 19, 20, 21, 38] {
             if let Some(rxn) = reactions.get(&fmt) {
+                // Skip a redundant aggregate: an evaluation that carries the
+                // partial channels (MT 19/20/21/38) flags its MT 18 as their
+                // sum, so adding both counted fission twice. U240 is the
+                // fixture-set nuclide that does this, and the doubled sigma_f
+                // put its GPU flux 33% above the CPU's (the same guard the
+                // total and the scatter slots already apply).
+                if rxn.redundant {
+                    continue;
+                }
                 for (i, &e) in energy_grid.iter().enumerate() {
                     let xs_f = rxn.cross_section_at(e).unwrap_or(0.0);
                     xs_fission[i] += xs_f;
@@ -896,6 +906,11 @@ pub fn extract_material_xs(
             let delayed = nuclide.delayed_neutrons(temperature);
             for &fmt in &[18, 19, 20, 21, 38] {
                 if let Some(rxn) = reactions.get(&fmt) {
+                    // Redundant MT 18 beside its partials: see the matching
+                    // guard in `extract_xs_from_nuclide`.
+                    if rxn.redundant {
+                        continue;
+                    }
                     for (i, &e) in energy_grid.iter().enumerate() {
                         let xs_f = rxn.cross_section_at(e).unwrap_or(0.0);
                         xs_fission_total[i] += density * xs_f;
@@ -2278,6 +2293,59 @@ mod tests {
             derive_absorption(&total, &elastic, &inelastic, &fission),
             vec![6.0, 3.0, 0.0]
         );
+    }
+
+    /// U240's evaluation carries the partial fission channels (MT 19/20/21/38)
+    /// and flags its MT 18 as their redundant sum. Summing all five counted
+    /// fission twice, which put the GPU flux on a U240 sphere 33% above the
+    /// CPU's. The GPU fission cross section must equal the CPU's fast-grid
+    /// fission cross section, which is the sum over the non-redundant channels
+    /// only. Skips without the U240 fixture.
+    #[test]
+    fn u240_fission_xs_counts_its_redundant_mt18_once() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../yamc/tests/U240.arrow");
+        if !std::path::Path::new(path).exists() {
+            eprintln!("Skipping: U240.arrow fixture absent");
+            return;
+        }
+        let nuclide = yamc_nuclide::nuclide_loader::load_nuclide(
+            std::path::PathBuf::from(path),
+            &yamc_nuclide::LoadScope::full(),
+        )
+        .expect("load U240");
+        let reactions = nuclide.reactions_for_temp("294").expect("294 K");
+        assert!(
+            reactions.get(&18).is_some_and(|r| r.redundant),
+            "the fixture's MT 18 is expected to be flagged redundant; without that this \
+             test guards nothing"
+        );
+        let temp_idx = nuclide.get_temp_idx("294").expect("294");
+        let grid = &nuclide.fast_xs[temp_idx];
+        let gpu = extract_xs_from_nuclide(&nuclide, "294").expect("extract");
+        assert_eq!(gpu.xs_fission.len(), grid.energy.len());
+        let mut checked = 0usize;
+        for (i, &e) in grid.energy.iter().enumerate() {
+            let expected: f64 = [18, 19, 20, 21, 38]
+                .iter()
+                .filter_map(|mt| reactions.get(mt))
+                .filter(|r| !r.redundant)
+                .map(|r| r.cross_section_at(e).unwrap_or(0.0))
+                .sum();
+            if expected > 0.0 {
+                checked += 1;
+                let (_, _, _, cpu_fission) = grid.lookup(e);
+                assert!(
+                    (gpu.xs_fission[i] - expected).abs() <= 1e-9 * expected,
+                    "at {e:.4e} eV GPU sigma_f {} vs non-redundant sum {expected}",
+                    gpu.xs_fission[i]
+                );
+                assert!(
+                    (cpu_fission - expected).abs() <= 1e-6 * expected.max(1e-300),
+                    "at {e:.4e} eV the CPU fast grid gives {cpu_fission}, the reactions {expected}"
+                );
+            }
+        }
+        assert!(checked > 100, "only {checked} grid points had fission open");
     }
 
     #[test]
