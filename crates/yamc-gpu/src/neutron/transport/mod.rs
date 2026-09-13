@@ -401,6 +401,17 @@ pub struct MultiCellResult {
     /// were actually used. CPU mirrors only (the kernel does not report it);
     /// zero from the GPU host path.
     pub max_pend_depth: u32,
+    /// Histogram of the UNCAPPED peak depth per history: `pend_depth_hist[d]`
+    /// is how many histories would have needed `d` in-thread slots to hold
+    /// every secondary they queued, counting the pushes past
+    /// [`shared::PEND_SLOTS`] that the kernel spills. So the bins above
+    /// `PEND_SLOTS` are exactly the histories that spill, and by how much,
+    /// while `max_pend_depth` above is the capped register-slot figure. The
+    /// rate alone cannot say whether a deeper stack or the bank drain is the
+    /// right answer for a material; the distribution can
+    /// (fusion-neutronics/core#20). CPU mirrors only; empty from the GPU host
+    /// path.
+    pub pend_depth_hist: Vec<u64>,
 }
 
 impl MultiCellResult {
