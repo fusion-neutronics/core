@@ -205,9 +205,13 @@ impl IntoCrossSectionsInput for HashMap<String, String> {
             if crate::url_cache::is_keyword(&path) {
                 // If value is a keyword, set as global default
                 config.default_cross_section = Some(path.clone());
-            } else if !std::path::Path::new(&path).is_dir() && !std::path::Path::new(&path).exists()
-            {
-                // Validate file exists (keywords and directories bypass)
+            } else if !crate::storage::exists(std::path::Path::new(&path)) {
+                // Validate the path through the active storage backend, not
+                // `std::fs`: a browser host's in-memory files (`InMemoryStorage`)
+                // have no filesystem behind them, and `std::path::Path::exists`
+                // was always false there, so every non-keyword path panicked
+                // (fusion-neutronics/core#99). Keywords bypass; the backend's
+                // `exists` already covers directories.
                 panic!("Cross section file for '{nuclide}' does not exist at path: {path}");
             }
             config.cross_sections.insert(nuclide, path);
