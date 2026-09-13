@@ -1083,6 +1083,26 @@ const PB208: SphereCase = SphereCase {
     radius: 30.0,
 };
 
+/// Tungsten: (n,2n) opens near 7.4 MeV with a cross-section above 2 b at
+/// 14 MeV, on the heaviest nucleus in the fixture set, so the chain is again
+/// threshold-limited rather than moderation-limited. About five mean free paths.
+const W184: SphereCase = SphereCase {
+    nuclide: "W184",
+    data: "tests/W184.arrow",
+    density_g_cm3: 19.3,
+    radius: 15.0,
+};
+
+/// Chromium, standing in for the steel constituents: (n,2n) opens near 12 MeV,
+/// so at 14 MeV only the first collision can multiply and the depth needed is
+/// the smallest of the set. About five mean free paths.
+const CR52: SphereCase = SphereCase {
+    nuclide: "Cr52",
+    data: "tests/Cr52.arrow",
+    density_g_cm3: 7.19,
+    radius: 15.0,
+};
+
 /// Issue #111 phase 2: how deep the kernel's thread-private (n,xn) stack has to
 /// be, measured rather than assumed.
 ///
@@ -1101,6 +1121,13 @@ const PB208: SphereCase = SphereCase {
 /// emission tree's DFS depth, and every (n,xn) is endothermic and divides what
 /// is left of the incident energy between its products, so from 14 MeV the
 /// chain runs out of energy against the reaction threshold after a few levels.
+///
+/// It also prints each fixture's histogram of peak pending depth per history,
+/// because the rate alone cannot say whether a material that spills wants a
+/// deeper in-thread stack or the bank drain: a tail that stops one slot past
+/// `PEND_SLOTS` is a stack-depth question, a long tail is a drain question
+/// (fusion-neutronics/core#20). Six fixtures at 14 MeV: beryllium thick and
+/// thin, lead with (n,3n) open, iron and chromium for steel, and tungsten.
 #[test]
 fn nxn_spill_depth_is_sufficient() {
     let cases = [
@@ -1108,6 +1135,8 @@ fn nxn_spill_depth_is_sufficient() {
         ("Be9 (2 mfp)", BE9),
         ("Pb208 (n,2n)+(n,3n)", PB208),
         ("Fe56", FE56),
+        ("Cr52", CR52),
+        ("W184", W184),
     ];
     let n = 4000;
     for (label, case) in cases {
@@ -1121,11 +1150,25 @@ fn nxn_spill_depth_is_sufficient() {
         let pack = TalliesPack::flux_abs_pack((inputs.cell_aabbs.len() / 6) as u32, &edges);
         let (res, _) = run_twin(&inputs, &pack, PendDrain::Lifo);
         let spilled = res.n_spilled_secondaries;
+        let hist: Vec<String> = res
+            .pend_depth_hist
+            .iter()
+            .enumerate()
+            .filter(|(_, &count)| count > 0)
+            .map(|(depth, count)| format!("{depth}:{count}"))
+            .collect();
         println!(
             "  {label:22}: deepest stack {} of {PEND_SLOTS} slots; {spilled} of {n} \
-             histories would spill to the device bank ({:.4}%)",
+             histories would spill to the device bank ({:.4}%); peak depth histogram \
+             [{}]",
             res.max_pend_depth,
             100.0 * spilled as f64 / n as f64,
+            hist.join(" "),
+        );
+        assert_eq!(
+            res.pend_depth_hist.iter().sum::<u64>(),
+            n as u64,
+            "{label}: the depth histogram does not account for every history"
         );
         assert!(
             spilled * 1000 <= n as u64,

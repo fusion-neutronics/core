@@ -22,9 +22,17 @@
 //! reclaimed, the depth needed is the emission tree's DFS depth, and a chain of
 //! endothermic (n,xn) reactions runs out of energy against its own threshold
 //! after a few levels (`matched_stream_diff::nxn_spill_depth_is_sufficient`
-//! measures zero spills in 8e5 histories at 14 MeV). A THICK beryllium sphere
-//! at 19.9 MeV does it: (n,2n) opens at 1.85 MeV and the extra ~6 MeV buys one
-//! more level of multiplication than a 14 MeV source can.
+//! bounds the rate below one history in a thousand at 14 MeV and prints the
+//! depth histogram per fixture). A THICK beryllium sphere at 19.9 MeV does it:
+//! (n,2n) opens at 1.85 MeV and the extra ~6 MeV buys one more level of
+//! multiplication than a 14 MeV source can.
+//!
+//! The coupled (neutron -> photon) and mixed-source passes used to refuse a
+//! launch that spilled at all, because their bank drain was photon-only and a
+//! banked neutron would have been filtered out and lost. They drain banked
+//! neutrons now too (fusion-neutronics/core#20); the last test here runs the
+//! same spilling fixture with secondary photons on and holds both backends to
+//! the same agreement.
 //!
 //! Run it:
 //!   cargo test -p yamc --features gpu --release \
@@ -61,9 +69,10 @@ const RADIUS: f64 = 40.0;
 /// ever exceeds the in-thread stack, so it exercises the ordinary path.
 const THIN_RADIUS: f64 = 10.0;
 const BE_DENSITY: f64 = 1.85;
-/// Just below the top of the ENDF/B-8.1 evaluation. At 14 MeV no history in
-/// 8e5 needs more than the four in-thread slots; the extra ~6 MeV here buys one
-/// more level of multiplication, which is what puts histories over the edge.
+/// Just below the top of the ENDF/B-8.1 evaluation. At 14 MeV fewer than one
+/// history in a thousand needs more than the four in-thread slots; the extra
+/// ~6 MeV here buys one more level of multiplication, which is what puts
+/// histories over the edge.
 const SOURCE_E: f64 = 19.9e6;
 const MAX_STEPS: u32 = 10_000;
 /// Enough histories that the ~1-in-4000 spill rate fires many times over, and
@@ -83,6 +92,12 @@ fn gpu_available() -> bool {
 }
 
 fn be9_sphere(radius: f64) -> (Geometry, u32) {
+    be9_sphere_with_photons(radius, false)
+}
+
+/// The same sphere, optionally with beryllium photon data loaded so the
+/// material can run coupled neutron -> photon transport.
+fn be9_sphere_with_photons(radius: f64, coupled: bool) -> (Geometry, u32) {
     let sphere = Surface {
         surface_id: Some(1),
         kind: SurfaceKind::Sphere {
@@ -106,7 +121,15 @@ fn be9_sphere(radius: f64) -> (Geometry, u32) {
     material.set_material_id(1);
     material.set_temperature("294");
     let nm = HashMap::from([("Be9".to_string(), data_path("Be9"))]);
-    material.read_nuclear_data(&nm, None).unwrap();
+    if coupled {
+        let photon_paths = HashMap::from([("Be".to_string(), data_path("Be"))]);
+        material
+            .read_nuclear_data(&nm, Some(&photon_paths))
+            .unwrap();
+        material.init_photon_data(&photon_paths).unwrap();
+    } else {
+        material.read_nuclear_data(&nm, None).unwrap();
+    }
 
     let cell = Cell::new(Some(1), region, Some("be".into()), Some(0));
     (
@@ -120,11 +143,14 @@ fn be9_sphere(radius: f64) -> (Geometry, u32) {
 /// directly in the total), and a single bin keeps the per-history variance
 /// comparison to one number per estimator.
 fn flux_tally(cell_id: u32) -> Arc<Tally> {
+    particle_flux_tally(cell_id, ParticleType::Neutron)
+}
+
+fn particle_flux_tally(cell_id: u32, particle: ParticleType) -> Arc<Tally> {
     let mut t = Tally::new();
     t.filters.push(Filter::Cell(CellFilter::from_id(cell_id)));
-    t.filters.push(Filter::ParticleType(ParticleTypeFilter::new(
-        ParticleType::Neutron,
-    )));
+    t.filters
+        .push(Filter::ParticleType(ParticleTypeFilter::new(particle)));
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
     t.initialize_batches(1);
@@ -154,6 +180,42 @@ fn build_model(total_particles: usize, energy_ev: f64, radius: f64) -> (Model, T
     (model, settings)
 }
 
+/// The spilling fixture with secondary photons switched on, so the dispatch
+/// takes the coupled path: a neutron flux tally and a photon flux tally, both
+/// particle-filtered so each counts one species on both backends.
+fn build_coupled_model(
+    total_particles: usize,
+    energy_ev: f64,
+    radius: f64,
+) -> (Model, TransportSettings) {
+    let (geometry, cell_id) = be9_sphere_with_photons(radius, true);
+    let source = ParticleSource::Neutron(Source {
+        space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
+        angle: AngularDistribution::Isotropic,
+        energy: SourceEnergyDistribution::Discrete(
+            Discrete::new(vec![energy_ev], vec![1.0]).unwrap(),
+        ),
+        strength: 1.0,
+    });
+    let tallies = vec![
+        particle_flux_tally(cell_id, ParticleType::Neutron),
+        particle_flux_tally(cell_id, ParticleType::Photon),
+    ];
+    let mut model = Model::new(geometry, vec![source], tallies);
+    model.verbose = Verbose::silent();
+    model.gpu_max_steps_per_particle = MAX_STEPS;
+    model.tracking_mode = TrackingMode::Surface;
+    model.transport_secondary_photons = true;
+    model.photon_cutoff_energy = 1000.0;
+    let settings = TransportSettings {
+        total_particles: Some(total_particles),
+        seed: SEED,
+        threads: Some(0),
+        ..Default::default()
+    };
+    (model, settings)
+}
+
 /// Run the same model on both backends and return `((cpu_mean, cpu_std_dev),
 /// (gpu_mean, gpu_std_dev), spilled)` for the flux bin. `spilled` is how many
 /// (n,xn) secondaries the GPU handed to the device bank, so a test can state
@@ -170,7 +232,12 @@ fn both_backends(n: usize, energy_ev: f64, radius: f64) -> ((f64, f64), (f64, f6
 
 /// `(mean, std_dev)` of the single flux bin.
 fn flux_stats(model: &Model) -> (f64, f64) {
-    let t = &model.tallies[0];
+    tally_stats(model, 0)
+}
+
+/// `(mean, std_dev)` of the single bin of tally `index`.
+fn tally_stats(model: &Model, index: usize) -> (f64, f64) {
+    let t = &model.tallies[index];
     let mean = t.get_mean();
     let sd = t.get_std_dev();
     assert_eq!(mean.len(), 1, "expected a single-bin flux tally");
@@ -285,4 +352,79 @@ fn non_spilling_model_is_unaffected() {
     );
     assert!((gpu_mean / cpu_mean - 1.0).abs() < 0.01);
     assert!((gpu_sd / cpu_sd - 1.0).abs() < 0.05);
+}
+
+/// The coupled pass drains spilled (n,xn) secondaries too (core#20).
+///
+/// Same spilling fixture as `spilled_secondaries_keep_mean_and_std_dev`, with
+/// secondary-photon transport on so the dispatch takes the coupled path. That
+/// path used to refuse the moment a launch spilled, because its bank drain was
+/// photon-only. It now relaunches the banked neutrons under their originating
+/// source indices before the photon sub-pass, so the neutron flux has to agree
+/// with the CPU exactly as on the neutron-only path, and the photons those
+/// relaunched neutrons emit have to reach the photon tally: a drain that
+/// transported the neutron but dropped its photons would pass the neutron
+/// check and fail the photon one.
+///
+/// The photon flux from beryllium is small and its statistics are wide at this
+/// history count, so it is held to a z-score against the two backends' own
+/// standard deviations rather than a fixed ratio.
+#[test]
+fn spilled_secondaries_drain_on_the_coupled_pass() {
+    if !data_present("Be9") || !data_present("Be") || !gpu_available() {
+        eprintln!("skipping gpu_nxn_spill coupled: Be9 / Be data or f64 GPU absent");
+        return;
+    }
+    let (mut cpu_model, cpu_settings) = build_coupled_model(N_HISTORIES, SOURCE_E, RADIUS);
+    cpu_model
+        .simulate_transport(&cpu_settings)
+        .expect("CPU coupled reference run");
+    let (mut gpu_model, gpu_settings) = build_coupled_model(N_HISTORIES, SOURCE_E, RADIUS);
+    let spilled = run_gpu_retry(&mut gpu_model, &gpu_settings).expect("GPU coupled run");
+
+    let (cpu_n_mean, cpu_n_sd) = tally_stats(&cpu_model, 0);
+    let (gpu_n_mean, gpu_n_sd) = tally_stats(&gpu_model, 0);
+    let (cpu_p_mean, cpu_p_sd) = tally_stats(&cpu_model, 1);
+    let (gpu_p_mean, gpu_p_sd) = tally_stats(&gpu_model, 1);
+    eprintln!(
+        "coupled Be9 r={RADIUS} @ {:.1} MeV, {N_HISTORIES} histories, {spilled} spilled:\n  \
+         neutron mean    cpu {cpu_n_mean:.6e}  gpu {gpu_n_mean:.6e}  ratio {:.5}\n  \
+         neutron std_dev cpu {cpu_n_sd:.6e}  gpu {gpu_n_sd:.6e}  ratio {:.5}\n  \
+         photon  mean    cpu {cpu_p_mean:.6e}  gpu {gpu_p_mean:.6e}  ratio {:.5}\n  \
+         photon  std_dev cpu {cpu_p_sd:.6e}  gpu {gpu_p_sd:.6e}",
+        SOURCE_E / 1e6,
+        gpu_n_mean / cpu_n_mean,
+        gpu_n_sd / cpu_n_sd,
+        gpu_p_mean / cpu_p_mean,
+    );
+
+    assert!(
+        spilled > 0,
+        "no (n,xn) secondary spilled on the coupled pass, so this run never \
+         exercised the coupled drain"
+    );
+    let mean_ratio = gpu_n_mean / cpu_n_mean;
+    assert!(
+        (mean_ratio - 1.0).abs() < 0.01,
+        "coupled GPU neutron flux {gpu_n_mean:.6e} vs CPU {cpu_n_mean:.6e} (ratio \
+         {mean_ratio:.5}): a spilled (n,xn) secondary was dropped or double-counted"
+    );
+    let sd_ratio = gpu_n_sd / cpu_n_sd;
+    assert!(
+        (sd_ratio - 1.0).abs() < 0.05,
+        "coupled GPU neutron std_dev {gpu_n_sd:.6e} vs CPU {cpu_n_sd:.6e} (ratio \
+         {sd_ratio:.5}): the relaunched secondaries are not folding into their \
+         originating source's variance sample"
+    );
+    assert!(
+        cpu_p_mean > 0.0 && gpu_p_mean > 0.0,
+        "no secondary photons scored"
+    );
+    let z = (gpu_p_mean - cpu_p_mean).abs() / (cpu_p_sd * cpu_p_sd + gpu_p_sd * gpu_p_sd).sqrt();
+    assert!(
+        z < 4.0,
+        "coupled GPU photon flux {gpu_p_mean:.6e} vs CPU {cpu_p_mean:.6e} is {z:.1} sigma \
+         apart: photons emitted by relaunched (n,xn) secondaries are not reaching \
+         the photon sub-pass"
+    );
 }

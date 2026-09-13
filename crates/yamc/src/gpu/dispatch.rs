@@ -146,21 +146,6 @@ pub enum GpuDispatchError {
     /// transported alongside the primary photons. Only the decay-photon
     /// coupling on top of a mixed source is unimplemented.
     MixedSourceWithSecondariesUnsupported,
-    /// A history on a coupled (neutron -> photon) or mixed-source pass produced
-    /// more simultaneous (n,xn) secondaries than a thread's in-thread stack
-    /// holds, so the kernel handed them to the device particle bank (issue #111
-    /// phase 2). The neutron-only paths drain banked neutrons; the coupled and
-    /// mixed passes drain only banked PHOTONS, so continuing would silently drop
-    /// a real neutron. Refused instead.
-    ///
-    /// This has never been observed: the stack is deep enough for every fixture
-    /// measured (see `nxn_spill_depth_is_sufficient`, zero spills in 8e5
-    /// histories of an 8 mean-free-path Be9 sphere at 14 MeV). It exists so a
-    /// material that does exceed it fails loudly rather than quietly biasing the
-    /// result low.
-    CoupledNxnSpillUnsupported {
-        spilled: u64,
-    },
     /// A virtual-overlay tally (`response=`, i.e. `multiply_density == false`).
     /// The kernel scores the CELL material's macroscopic XS; the overlay regime
     /// scores a different material's response across the whole geometry, void
@@ -281,14 +266,6 @@ impl std::fmt::Display for GpuDispatchError {
                 "compute='gpu' does not yet support a mixed neutron+photon source combined \
                  with D1S decay photons. Set use_decay_photons=False, or run on the CPU."
             ),
-            Self::CoupledNxnSpillUnsupported { spilled } => write!(
-                f,
-                "compute='gpu' coupled/mixed pass: {spilled} (n,xn) secondaries needed more \
-                 simultaneous in-thread slots than the neutron kernel holds and were handed to \
-                 the device particle bank, which this pass drains for photons only. Refusing \
-                 rather than dropping real neutrons. Run the neutron-only GPU path (which drains \
-                 them) or run on the CPU."
-            ),
             Self::OverlayTallyUnsupported { tally_index } => write!(
                 f,
                 "compute='gpu' tally {tally_index}: virtual-overlay tallies (response=) are \
@@ -382,9 +359,12 @@ pub struct GpuRunResult {
     pub lost: Vec<crate::util::lost_particle::LostParticle>,
     /// (n,xn) secondaries this run handed to the device particle bank because
     /// the producing thread's in-thread stack was full, and which were
-    /// therefore transported in a later pass (issue #111 phase 2). Zero for
-    /// every model measured so far; surfaced so a test can tell whether it
-    /// exercised the spill path rather than assuming it did.
+    /// therefore transported in a later pass (issue #111 phase 2), on every
+    /// path: neutron-only, coupled and mixed all drain them. Rare at 14 MeV
+    /// (`nxn_spill_depth_is_sufficient` bounds it below one history in a
+    /// thousand) and about one in 4000 on the thick Be9 sphere at 19.9 MeV
+    /// that `gpu_nxn_spill` uses to exercise it. Surfaced so a test can tell
+    /// whether it exercised the spill path rather than assuming it did.
     pub n_spilled_secondaries: u64,
 }
 
@@ -583,13 +563,16 @@ const MAX_FISSION_GENERATIONS: usize = 50;
 /// Device-bank slots reserved per source neutron for (n,xn) secondaries that
 /// overflow a thread's in-thread pending stack (issue #111 phase 2).
 ///
-/// The measured need is zero: `nxn_spill_depth_is_sufficient` finds no history
-/// in 8e5 needing more than the kernel's four stack slots, on the most strongly
-/// multiplying fixtures available (an 8 mean-free-path Be9 sphere at 14 MeV,
-/// and Pb208 where both (n,2n) and (n,3n) are open). One slot per source
-/// neutron is therefore enormous head-room, and costs ~84 bytes per source
-/// neutron of device bank -- an eighth of what a fissile run already allocates.
-/// Overflow past it is a hard error, never a silent drop.
+/// The measured need is small but not zero: `nxn_spill_depth_is_sufficient`
+/// (`crates/yamc/tests/matched_stream_diff.rs`) runs the CPU twin over Be9 at 8
+/// and 2 mean free paths, Pb208 with (n,2n) and (n,3n) open, Fe56 and W184 at
+/// 14 MeV, prints each fixture's spill rate and depth histogram, and asserts
+/// only that the rate stays below one history in a thousand. `gpu_nxn_spill`
+/// exercises a fixture that does spill (thick Be9 at 19.9 MeV, about one
+/// history in 4000). One slot per source neutron is ample head-room against
+/// either, and costs ~84 bytes per source neutron of device bank, an eighth of
+/// what a fissile run already allocates. Overflow past it is a hard error,
+/// never a silent drop.
 #[cfg(not(target_os = "macos"))]
 const NXN_SPILL_SLOTS_PER_SOURCE: usize = 1;
 
@@ -2166,9 +2149,10 @@ fn run_neutron_per_history(
         // the redo reproduces it exactly and the first attempt is simply
         // discarded (nothing has been folded from it yet).
         //
-        // This is a cold path: `nxn_spill_depth_is_sufficient` measures zero
-        // spills in 8e5 histories of the most strongly multiplying fixture
-        // available, so the common case pays only the `bank_count` read.
+        // This is a cold path: `nxn_spill_depth_is_sufficient` bounds the spill
+        // rate below one history in a thousand on the most strongly multiplying
+        // 14 MeV fixtures available, so the common case pays only the
+        // `bank_count` read.
         //
         // A mesh model is already `PerSourceDirect`, which is per-source
         // accumulation, so it drains without redoing anything. A model with no
@@ -2718,6 +2702,10 @@ fn drain_banked_neutrons(
                 capacity: gen_cap,
             });
         }
+        // A generation launch can truncate too, and its histories are not in
+        // `alive_all`, so check here or a banked neutron's cut-off track goes
+        // unreported (fusion-neutronics/core#23).
+        fail_if_truncated(&gen_kernel.alive, max_steps)?;
         spilled += gen_kernel.n_spilled_secondaries;
         accumulate_src_acc(
             &gen_kernel.src_acc,
@@ -2744,6 +2732,189 @@ fn drain_banked_neutrons(
         pending_count = leftover + new_n;
     }
     Ok(spilled)
+}
+
+/// Compact the neutron records out of a mixed neutron/photon bank.
+///
+/// The coupled and mixed passes share one device bank between the photons a
+/// history emits and the (n,xn) secondaries that overflowed its thread's
+/// pending stack, so the two have to be told apart by `ptype` before either is
+/// drained. Returns the neutron records in bank order, with their source
+/// indices, as a [`BankedNeutrons`] ready for `fission_source_inputs`.
+#[cfg(not(target_os = "macos"))]
+fn neutron_records(bank: &BankedNeutrons) -> BankedNeutrons {
+    use yamc_gpu::common::particle_bank::{BANK_F64_STRIDE, BANK_U32_STRIDE, PTYPE_NEUTRON};
+    let live = bank
+        .count
+        .min(bank.f64s.len() / BANK_F64_STRIDE)
+        .min(bank.u32s.len() / BANK_U32_STRIDE)
+        .min(bank.src.len());
+    let mut out = BankedNeutrons {
+        f64s: Vec::new(),
+        u32s: Vec::new(),
+        src: Vec::new(),
+        count: 0,
+    };
+    for i in 0..live {
+        let u = i * BANK_U32_STRIDE;
+        if bank.u32s[u] != PTYPE_NEUTRON {
+            continue;
+        }
+        let f = i * BANK_F64_STRIDE;
+        out.f64s
+            .extend_from_slice(&bank.f64s[f..f + BANK_F64_STRIDE]);
+        out.u32s
+            .extend_from_slice(&bank.u32s[u..u + BANK_U32_STRIDE]);
+        out.src.push(bank.src[i]);
+        out.count += 1;
+    }
+    out
+}
+
+/// Re-transport every (n,xn) secondary a coupled neutron launch banked, and
+/// hand back one bank holding every photon the whole cascade produced.
+///
+/// The coupled and mixed passes used to refuse a launch whose bank held any
+/// neutron (`CoupledNxnSpillUnsupported`): their drain was photon-only, so a
+/// spilled secondary would have been filtered out and silently lost. That made
+/// the refusal reachable for any genuinely multiplying material at 14 MeV even
+/// though the neutron-only paths had drained banked neutrons for a long time
+/// (fusion-neutronics/core#20). This is the coupled twin of
+/// [`drain_banked_neutrons`]: generation by generation it pulls the neutron
+/// records out of the bank, relaunches them through the coupled kernel under
+/// their originating source indices so their tallies fold into the right
+/// per-source sample, and appends every record the relaunch banks (its own
+/// photons, and any further spill) to the bank it returns. The photon sub-pass
+/// then drains that combined bank; it filters on `PTYPE_PHOTON` itself, so the
+/// neutron records left in it are skipped, not transported twice.
+///
+/// Returns `(spilled, bank)`: how many secondaries spilled across the primary
+/// launch and every generation, and the combined bank.
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
+fn drain_banked_neutrons_coupled(
+    ctx: &GpuContext,
+    model: &Model,
+    inputs: &super::translate::GpuTransportInputs,
+    pack: &TalliesPack,
+    xs_score_per_mt: &[f64],
+    survival: &yamc_gpu::neutron::survival_biasing::SurvivalBiasingInputs,
+    coupled: &yamc_gpu::neutron::transport::CoupledPhotonInputs,
+    decay: &yamc_gpu::neutron::transport::DecayPhotonInputs,
+    max_steps: u32,
+    has_mesh: bool,
+    chunk: usize,
+    chunk_sources: usize,
+    total_out_len: usize,
+    flat_scales: &[f64],
+    primary_spilled: u64,
+    mut bank: BankedNeutrons,
+    lost: &mut LostTracker,
+    per_source_total: &mut [f64],
+) -> Result<(u64, BankedNeutrons), GpuDispatchError> {
+    let mut spilled = primary_spilled;
+    let mut pending = if primary_spilled > 0 {
+        neutron_records(&bank)
+    } else {
+        // The common case: the kernel counted no spill, so the bank holds only
+        // photons and there is nothing to scan for.
+        BankedNeutrons {
+            f64s: Vec::new(),
+            u32s: Vec::new(),
+            src: Vec::new(),
+            count: 0,
+        }
+    };
+    for _launch in 0..MAX_FISSION_GENERATIONS {
+        if pending.count == 0 {
+            break;
+        }
+        let n_drain = pending.count.min(chunk);
+        let (gen_inputs, gen_source_idx) =
+            fission_source_inputs(inputs, &pending.f64s, &pending.u32s, &pending.src, n_drain);
+        let n_launch = gen_inputs.seeds.len();
+        let gen_cap = n_launch.saturating_mul(COUPLED_PHOTONS_PER_NEUTRON).max(1);
+        let gen_kernel = run_coupled_kernel_path(
+            ctx,
+            &gen_inputs,
+            pack,
+            xs_score_per_mt,
+            survival,
+            coupled,
+            decay,
+            gen_cap,
+            max_steps,
+            per_source_variance(
+                has_mesh,
+                chunk_sources as u32,
+                total_out_len as u32,
+                Some(&gen_source_idx),
+            ),
+        )?;
+        lost.absorb(
+            &gen_kernel.lost,
+            ParticleType::Neutron,
+            &csg_geometry(model).cells,
+            model.max_lost_particles,
+        )?;
+        if gen_kernel.bank_overflow > 0 {
+            return Err(GpuDispatchError::PhotonBankOverflow {
+                overflow: gen_kernel.bank_overflow,
+                count: gen_kernel.bank_count,
+                capacity: gen_cap,
+            });
+        }
+        fail_if_truncated(&gen_kernel.alive, max_steps)?;
+        spilled += gen_kernel.n_spilled_secondaries;
+        accumulate_src_acc(
+            &gen_kernel.src_acc,
+            flat_scales,
+            total_out_len,
+            per_source_total,
+        );
+        // Everything this generation banked joins the combined bank: its
+        // photons for the sub-pass, and any further spilled neutrons for the
+        // next iteration (the sub-pass skips those by `ptype`).
+        let new_n = (gen_kernel.bank_count as usize).min(gen_kernel.bank_f64.len() / 8);
+        let gen_bank = BankedNeutrons {
+            f64s: gen_kernel.bank_f64[..new_n * 8].to_vec(),
+            u32s: gen_kernel.bank_u32[..new_n * 4].to_vec(),
+            src: gen_kernel.bank_source_idx[..new_n].to_vec(),
+            count: new_n,
+        };
+        let next_neutrons = if gen_kernel.n_spilled_secondaries > 0 {
+            neutron_records(&gen_bank)
+        } else {
+            BankedNeutrons {
+                f64s: Vec::new(),
+                u32s: Vec::new(),
+                src: Vec::new(),
+                count: 0,
+            }
+        };
+        bank.f64s.truncate(bank.count * 8);
+        bank.u32s.truncate(bank.count * 4);
+        bank.src.truncate(bank.count);
+        bank.f64s.extend_from_slice(&gen_bank.f64s);
+        bank.u32s.extend_from_slice(&gen_bank.u32s);
+        bank.src.extend_from_slice(&gen_bank.src);
+        bank.count += new_n;
+        // Next pending = leftover of THIS generation's queue, then the spill
+        // the relaunch just produced.
+        let leftover = pending.count - n_drain;
+        let mut next = BankedNeutrons {
+            f64s: pending.f64s[n_drain * 8..pending.count * 8].to_vec(),
+            u32s: pending.u32s[n_drain * 4..pending.count * 4].to_vec(),
+            src: pending.src[n_drain..pending.count].to_vec(),
+            count: leftover,
+        };
+        next.f64s.extend_from_slice(&next_neutrons.f64s);
+        next.u32s.extend_from_slice(&next_neutrons.u32s);
+        next.src.extend_from_slice(&next_neutrons.src);
+        next.count += next_neutrons.count;
+        pending = next;
+    }
+    Ok((spilled, bank))
 }
 
 /// Unpack a per-source accumulator launch result (`src_acc`, fixed-point,
@@ -3053,8 +3224,7 @@ pub(super) fn run_on_gpu_photon(
         final_energies: final_energies_all,
         lost_count: lost.count,
         lost: lost.records,
-        // Photon / coupled / mixed passes refuse an (n,xn) spill outright
-        // (`CoupledNxnSpillUnsupported`), so reaching here means none happened.
+        // A photon-only pass transports no neutrons, so nothing can spill.
         n_spilled_secondaries: 0,
     })
 }
@@ -3298,6 +3468,7 @@ fn run_on_gpu_coupled(
     let has_mesh_p = pack_p.mesh_kind.iter().any(|&k| k != MESH_NONE);
 
     let mut alive_all: Vec<u32> = Vec::with_capacity(settings.total_particles.unwrap_or(0));
+    let mut spilled_total: u64 = 0;
     let mut n_steps_all: Vec<u32> = Vec::with_capacity(settings.total_particles.unwrap_or(0));
     let mut final_energies_all: Vec<f64> =
         Vec::with_capacity(settings.total_particles.unwrap_or(0));
@@ -3367,13 +3538,6 @@ fn run_on_gpu_coupled(
                 capacity: bank_capacity,
             });
         }
-        // The drain below is photon-only, so a banked NEUTRON would be filtered
-        // out and silently lost (issue #111 phase 2).
-        if kernel.n_spilled_secondaries > 0 {
-            return Err(GpuDispatchError::CoupledNxnSpillUnsupported {
-                spilled: kernel.n_spilled_secondaries,
-            });
-        }
         let mut pst_n = vec![0.0f64; chunk_sources * total_out_len_n];
         accumulate_src_acc(&kernel.src_acc, &flat_scales_n, total_out_len_n, &mut pst_n);
         fail_if_truncated(&kernel.alive, max_steps)?;
@@ -3381,20 +3545,51 @@ fn run_on_gpu_coupled(
         n_steps_all.extend(kernel.n_steps);
         final_energies_all.extend(kernel.final_energies);
 
+        // Any (n,xn) secondary that spilled to the bank is a real neutron the
+        // photon sub-pass below would skip. Finish it first, under its own
+        // source's sample, and collect the photons it emits into the same bank
+        // (fusion-neutronics/core#20).
+        let (chunk_spilled, bank) = drain_banked_neutrons_coupled(
+            &ctx,
+            model,
+            &inputs,
+            &pack_n,
+            &xs_score_per_mt,
+            &survival,
+            &coupled,
+            &decay,
+            max_steps,
+            has_mesh_n,
+            chunk,
+            chunk_sources,
+            total_out_len_n,
+            &flat_scales_n,
+            kernel.n_spilled_secondaries,
+            BankedNeutrons {
+                f64s: kernel.bank_f64,
+                u32s: kernel.bank_u32,
+                src: kernel.bank_source_idx,
+                count: kernel.bank_count as usize,
+            },
+            &mut lost,
+            &mut pst_n,
+        )?;
+        spilled_total += chunk_spilled;
+
         // Photon sub-pass (PerSource): drain the bank in sub-launches of at most
         // `chunk` photons so the per-thread spill stays bounded; each photon
         // carries its source neutron's index (from `bank_source_idx`), scattering
         // into `src_acc` keyed by the source neutron.
         let mut pst_p = vec![0.0f64; chunk_sources * total_out_len_p];
-        let bank_count = kernel.bank_count as usize;
-        let bank_avail = kernel.bank_f64.len() / 8;
+        let bank_count = bank.count;
+        let bank_avail = bank.f64s.len() / 8;
         let mut drained = 0usize;
         while drained < bank_count {
             let n_this = (bank_count - drained).min(bank_avail - drained).min(chunk);
             if n_this == 0 {
                 break;
             }
-            let src_idx: Vec<u32> = kernel.bank_source_idx[drained..drained + n_this].to_vec();
+            let src_idx: Vec<u32> = bank.src[drained..drained + n_this].to_vec();
             let variance_p = per_source_variance(
                 has_mesh_p,
                 chunk_sources as u32,
@@ -3404,8 +3599,8 @@ fn run_on_gpu_coupled(
             let pres = run_photon_subpass(
                 &ctx,
                 &photon_inputs,
-                &kernel.bank_f64[drained * 8..],
-                &kernel.bank_u32[drained * 4..],
+                &bank.f64s[drained * 8..],
+                &bank.u32s[drained * 4..],
                 n_this,
                 &pack_p,
                 max_steps,
@@ -3489,9 +3684,7 @@ fn run_on_gpu_coupled(
         final_energies: final_energies_all,
         lost_count: lost.count,
         lost: lost.records,
-        // Photon / coupled / mixed passes refuse an (n,xn) spill outright
-        // (`CoupledNxnSpillUnsupported`), so reaching here means none happened.
-        n_spilled_secondaries: 0,
+        n_spilled_secondaries: spilled_total,
     })
 }
 
@@ -3721,6 +3914,7 @@ fn run_on_gpu_mixed(
     let has_mesh_p = pack_p.mesh_kind.iter().any(|&k| k != MESH_NONE);
 
     let mut alive_all: Vec<u32> = Vec::new();
+    let mut spilled_total: u64 = 0;
     let mut n_steps_all: Vec<u32> = Vec::new();
     let mut final_energies_all: Vec<f64> = Vec::new();
     let mut last_n_cells = n_cells;
@@ -3800,22 +3994,44 @@ fn run_on_gpu_mixed(
                     capacity: bank_capacity,
                 });
             }
-            // Photon-only drain below: a banked NEUTRON would be filtered out
-            // and silently lost (issue #111 phase 2).
-            if kernel.n_spilled_secondaries > 0 {
-                return Err(GpuDispatchError::CoupledNxnSpillUnsupported {
-                    spilled: kernel.n_spilled_secondaries,
-                });
-            }
             accumulate_src_acc(&kernel.src_acc, &flat_scales_n, total_out_len_n, &mut pst_n);
             fail_if_truncated(&kernel.alive, max_steps)?;
             alive_all.extend(kernel.alive);
             n_steps_all.extend(kernel.n_steps);
             final_energies_all.extend(kernel.final_energies);
-            bank_f64 = kernel.bank_f64;
-            bank_u32 = kernel.bank_u32;
-            bank_src = kernel.bank_source_idx;
-            bank_count = kernel.bank_count as usize;
+            // Finish any spilled (n,xn) secondary before the photon-only pass
+            // below, which would skip it (fusion-neutronics/core#20). The
+            // relaunch's photons join the bank that pass drains.
+            let (chunk_spilled, bank) = drain_banked_neutrons_coupled(
+                &ctx,
+                model,
+                &n_inputs,
+                &pack_n,
+                &xs_score_per_mt,
+                &survival,
+                &coupled,
+                &decay,
+                max_steps,
+                has_mesh_n,
+                chunk,
+                chunk_total,
+                total_out_len_n,
+                &flat_scales_n,
+                kernel.n_spilled_secondaries,
+                BankedNeutrons {
+                    f64s: kernel.bank_f64,
+                    u32s: kernel.bank_u32,
+                    src: kernel.bank_source_idx,
+                    count: kernel.bank_count as usize,
+                },
+                &mut lost,
+                &mut pst_n,
+            )?;
+            spilled_total += chunk_spilled;
+            bank_f64 = bank.f64s;
+            bank_u32 = bank.u32s;
+            bank_src = bank.src;
+            bank_count = bank.count;
         }
 
         // --- Photon pass (a): the neutron-induced secondary photons, folded into
@@ -3971,9 +4187,7 @@ fn run_on_gpu_mixed(
         final_energies: final_energies_all,
         lost_count: lost.count,
         lost: lost.records,
-        // Photon / coupled / mixed passes refuse an (n,xn) spill outright
-        // (`CoupledNxnSpillUnsupported`), so reaching here means none happened.
-        n_spilled_secondaries: 0,
+        n_spilled_secondaries: spilled_total,
     })
 }
 

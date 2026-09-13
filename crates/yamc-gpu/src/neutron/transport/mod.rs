@@ -401,6 +401,14 @@ pub struct MultiCellResult {
     /// were actually used. CPU mirrors only (the kernel does not report it);
     /// zero from the GPU host path.
     pub max_pend_depth: u32,
+    /// Histogram of that depth per history: `pend_depth_hist[d]` is how many
+    /// histories peaked at `d` outstanding secondaries, so the last bins above
+    /// [`shared::PEND_SLOTS`] are the histories that would spill and by how
+    /// much. The rate alone cannot say whether a deeper stack or the bank
+    /// drain is the right answer for a material; the distribution can
+    /// (fusion-neutronics/core#20). CPU mirrors only; empty from the GPU host
+    /// path.
+    pub pend_depth_hist: Vec<u64>,
 }
 
 impl MultiCellResult {

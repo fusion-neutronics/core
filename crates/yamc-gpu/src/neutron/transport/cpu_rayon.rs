@@ -440,6 +440,8 @@ pub fn run_multi_cell_transport_cpu_rayon(
         n_spilled: u64,
         /// Deepest pending-secondary stack seen in this chunk.
         max_pend_depth: u32,
+        /// Histories per peak pending depth in this chunk, merged below.
+        pend_depth_hist: Vec<u64>,
     }
 
     /// Per-thread chunk size. 4096 keeps the per-thread allocation
@@ -460,6 +462,7 @@ pub fn run_multi_cell_transport_cpu_rayon(
             let mut lost_chunk: Vec<crate::common::lost_particles::LostParticleRecord> = Vec::new();
             let mut n_spilled_chunk = 0u64;
             let mut max_depth_chunk = 0u32;
+            let mut hist_chunk: Vec<u64> = Vec::new();
             for i in chunk_start..chunk_end {
                 let outcome = transport_one_particle(&inputs, i, &mut tally_acc, None);
                 alive_chunk.push(outcome.alive);
@@ -467,6 +470,11 @@ pub fn run_multi_cell_transport_cpu_rayon(
                 energies_chunk.push(outcome.final_energy);
                 n_spilled_chunk += outcome.n_spilled as u64;
                 max_depth_chunk = max_depth_chunk.max(outcome.max_pend_depth);
+                let d = outcome.max_pend_depth as usize;
+                if hist_chunk.len() <= d {
+                    hist_chunk.resize(d + 1, 0);
+                }
+                hist_chunk[d] += 1;
                 if let Some(record) = outcome.lost {
                     lost_chunk.push(record);
                 }
@@ -480,6 +488,7 @@ pub fn run_multi_cell_transport_cpu_rayon(
                 lost: lost_chunk,
                 n_spilled: n_spilled_chunk,
                 max_pend_depth: max_depth_chunk,
+                pend_depth_hist: hist_chunk,
             }
         })
         .collect();
@@ -495,9 +504,16 @@ pub fn run_multi_cell_transport_cpu_rayon(
     let mut lost = crate::common::lost_particles::LostParticleResult::default();
     let mut n_spilled_secondaries = 0u64;
     let mut max_pend_depth = 0u32;
+    let mut pend_depth_hist: Vec<u64> = Vec::new();
     for c in chunks {
         n_spilled_secondaries += c.n_spilled;
         max_pend_depth = max_pend_depth.max(c.max_pend_depth);
+        if pend_depth_hist.len() < c.pend_depth_hist.len() {
+            pend_depth_hist.resize(c.pend_depth_hist.len(), 0);
+        }
+        for (slot, count) in pend_depth_hist.iter_mut().zip(c.pend_depth_hist.iter()) {
+            *slot += count;
+        }
         alive_out.extend(c.alive);
         n_steps_out.extend(c.n_steps);
         final_energies.extend(c.final_energies);
@@ -532,5 +548,6 @@ pub fn run_multi_cell_transport_cpu_rayon(
         lost,
         n_spilled_secondaries,
         max_pend_depth,
+        pend_depth_hist,
     }
 }
