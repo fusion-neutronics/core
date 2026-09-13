@@ -66,8 +66,18 @@ pub struct GpuComptonDoppler {
     /// `[n_materials × MAX_COMPTON_SHELLS × MAX_COMPTON_PZ]`.
     pub profile_pdf: Vec<f64>,
     /// Per-material per-shell trapezoidal CDF of the profile, flat
-    /// `[n_materials × MAX_COMPTON_SHELLS × MAX_COMPTON_PZ]`.
+    /// `[n_materials × MAX_COMPTON_SHELLS × MAX_COMPTON_PZ]`. Normalised
+    /// together with `profile_pdf` at load so the half-profile plus its tail
+    /// integrates to 1/2 (see `finalize_compton_profiles`).
     pub profile_cdf: Vec<f64>,
+    /// Per-material per-shell slope of the log-linear tail past the last
+    /// tabulated point, flat `[n_materials × MAX_COMPTON_SHELLS]`. Mirror of
+    /// the CPU `profile_tail_slope` (core#22).
+    pub profile_tail_slope: Vec<f64>,
+    /// Per-material per-shell `K_i(1/alpha)`, the accessible mass of the
+    /// negative-momentum branch, flat `[n_materials × MAX_COMPTON_SHELLS]`.
+    /// Mirror of the CPU `profile_negative_mass`.
+    pub profile_negative_mass: Vec<f64>,
 
     /// Number of valid Compton shells per material, length
     /// `n_materials`. Zero means "no Doppler data" -- combined with
@@ -110,6 +120,8 @@ impl GpuComptonDoppler {
             binding_energy: vec![0.0; n_slab * MAX_COMPTON_SHELLS],
             profile_pdf: vec![0.0; n_slab * MAX_COMPTON_SHELLS * MAX_COMPTON_PZ],
             profile_cdf: vec![0.0; n_slab * MAX_COMPTON_SHELLS * MAX_COMPTON_PZ],
+            profile_tail_slope: vec![0.0; n_slab * MAX_COMPTON_SHELLS],
+            profile_negative_mass: vec![0.0; n_slab * MAX_COMPTON_SHELLS],
             n_shells: vec![0u32; n_slab],
             has_data: vec![0u32; n_slab],
             subshell_idx: vec![u32::MAX; n_slab * MAX_COMPTON_SHELLS * MAX_COMPTON_RELAX],
@@ -145,6 +157,8 @@ pub fn extract_compton_doppler_for_gpu(
     let mut binding_energy = vec![0.0_f64; n_slab.max(1) * MAX_COMPTON_SHELLS];
     let mut profile_pdf = vec![0.0_f64; n_slab.max(1) * MAX_COMPTON_SHELLS * MAX_COMPTON_PZ];
     let mut profile_cdf = vec![0.0_f64; n_slab.max(1) * MAX_COMPTON_SHELLS * MAX_COMPTON_PZ];
+    let mut profile_tail_slope = vec![0.0_f64; n_slab.max(1) * MAX_COMPTON_SHELLS];
+    let mut profile_negative_mass = vec![0.0_f64; n_slab.max(1) * MAX_COMPTON_SHELLS];
     let mut n_shells_v = vec![0u32; n_slab.max(1)];
     let mut has_data = vec![0u32; n_slab.max(1)];
     let mut subshell_idx = vec![u32::MAX; n_slab.max(1) * MAX_COMPTON_SHELLS * MAX_COMPTON_RELAX];
@@ -168,7 +182,9 @@ pub fn extract_compton_doppler_for_gpu(
                 .len()
                 .min(el.binding_energy.len())
                 .min(el.profile_pdf.len())
-                .min(el.profile_cdf.len());
+                .min(el.profile_cdf.len())
+                .min(el.profile_tail_slope.len())
+                .min(el.profile_negative_mass.len());
             let n_shells = n_shells_src.min(MAX_COMPTON_SHELLS);
             if n_shells == 0 {
                 continue;
@@ -178,6 +194,8 @@ pub fn extract_compton_doppler_for_gpu(
             for s in 0..n_shells {
                 electron_pdf[shell_off + s] = el.electron_pdf[s];
                 binding_energy[shell_off + s] = el.binding_energy[s];
+                profile_tail_slope[shell_off + s] = el.profile_tail_slope[s];
+                profile_negative_mass[shell_off + s] = el.profile_negative_mass[s];
                 // Compton-profile shell `s` -> its constituent relaxation subshells
                 // (occupancy weighted). CPU `compton_relax_map[s]` holds 0, 1, or 2
                 // targets; an empty list means no relaxation counterpart so the
@@ -214,6 +232,8 @@ pub fn extract_compton_doppler_for_gpu(
         binding_energy,
         profile_pdf,
         profile_cdf,
+        profile_tail_slope,
+        profile_negative_mass,
         n_shells: n_shells_v,
         has_data,
         subshell_idx,

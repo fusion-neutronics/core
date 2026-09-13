@@ -148,8 +148,15 @@ pub fn read_photon_interaction_from_arrow(dir: &Path) -> Result<PhotonInteractio
     // path no longer re-derives it from binding energies. Compton shells with no
     // clean counterpart (outer/valence) carry an empty target list and bank no
     // fluorescence.
-    let (electron_pdf, binding_energy_cp, profile_pdf, profile_cdf, compton_relax_map) =
-        read_compton(dir)?;
+    let (
+        electron_pdf,
+        binding_energy_cp,
+        profile_pdf,
+        profile_cdf,
+        compton_relax_map,
+        profile_tail_slope,
+        profile_negative_mass,
+    ) = read_compton(dir)?;
 
     // Expected fluorescence energy banked per Compton event: the event ionizes
     // the shell sampled from `electron_pdf` (Doppler broadening) and relaxes one
@@ -203,6 +210,8 @@ pub fn read_photon_interaction_from_arrow(dir: &Path) -> Result<PhotonInteractio
         binding_energy: binding_energy_cp,
         profile_pdf,
         profile_cdf,
+        profile_tail_slope,
+        profile_negative_mass,
         shells,
         cross_sections,
         subshell_radiative_energy,
@@ -349,20 +358,32 @@ fn read_compton(
         Vec<Vec<f64>>,
         Vec<Vec<f64>>,
         Vec<Vec<ComptonRelaxTarget>>,
+        Vec<f64>,
+        Vec<f64>,
     ),
     Box<dyn Error>,
 > {
     let path = dir.join("compton.arrow");
     if !path.exists() {
-        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        return Ok((
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ));
     }
 
     let batch = read_arrow_file(&path)?;
 
-    // Read momentum grid and set global
+    // Read momentum grid and set global. Kept locally too: the profile
+    // normalisation below needs it whether or not the shared grid is being
+    // published (inspection loads suppress it).
     let pz = get_f64_list(&batch, "pz", 0)?;
     if !pz.is_empty() {
-        crate::photon::set_compton_profile_pz(pz);
+        crate::photon::set_compton_profile_pz(pz.clone());
     }
 
     // Read per-shell data
@@ -413,6 +434,8 @@ fn read_compton(
             Vec::new(),
             Vec::new(),
             compton_relax_map,
+            Vec::new(),
+            Vec::new(),
         ));
     };
 
@@ -426,7 +449,7 @@ fn read_compton(
     // Read pre-computed CDF
     let cdf_data = get_f64_list(&batch, "J_cdf_data", 0)?;
     let cdf_shape = get_i32_list(&batch, "J_cdf_shape", 0)?;
-    let profile_cdf = if !cdf_data.is_empty() && cdf_shape.len() >= 2 {
+    let mut profile_cdf = if !cdf_data.is_empty() && cdf_shape.len() >= 2 {
         let n_s = cdf_shape[0] as usize;
         let n_p = cdf_shape[1] as usize;
         let mut cdf = Vec::with_capacity(n_s);
@@ -440,12 +463,24 @@ fn read_compton(
         Vec::new()
     };
 
+    // The shipped cdf is the raw trapezoid sum over the tabulated half-profile.
+    // Normalise both tables over the extrapolated whole profile and fit the
+    // tail the sampler extends each shell with (core#22).
+    let (profile_tail_slope, profile_negative_mass) = if profile_cdf.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        crate::photon::finalize_compton_profiles(&mut profile_pdf, &mut profile_cdf, &pz)
+            .map_err(|e| format!("{}: {e}", path.display()))?
+    };
+
     Ok((
         num_electrons,
         binding_energy,
         profile_pdf,
         profile_cdf,
         compton_relax_map,
+        profile_tail_slope,
+        profile_negative_mass,
     ))
 }
 
