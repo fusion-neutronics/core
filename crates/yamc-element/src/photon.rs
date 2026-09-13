@@ -284,7 +284,25 @@ pub struct PhotonInteraction {
     /// Compton profile PDF J(pz) for each shell. profile_pdf[shell][pz_index].
     pub profile_pdf: Vec<Vec<f64>>,
     /// Compton profile CDF (computed by trapezoidal integration). profile_cdf[shell][pz_index].
+    ///
+    /// Both `profile_pdf` and `profile_cdf` are normalised at load by
+    /// [`finalize_compton_profiles`] so that the tabulated half-profile plus
+    /// its extrapolated tail integrate to 1/2 (the mass of one half of the
+    /// symmetric profile); the raw trapezoid sums in the data files end near
+    /// but not at 1/2.
     pub profile_cdf: Vec<Vec<f64>>,
+    /// Slope `a_i` of the log-linear tail fitted to the last two tabulated
+    /// points of each shell's profile, `ln(J_N / J_{N-1}) / (pz_N - pz_{N-1})`
+    /// (negative). Past the grid `J_i(pz) = J_N exp(a_i (pz - pz_N))`, which is
+    /// what lets the sampler cover the whole kinematically allowed momentum
+    /// interval, down to `-1/alpha`, rather than only the tabulated range. One
+    /// per shell.
+    pub profile_tail_slope: Vec<f64>,
+    /// `K_i(FINE_STRUCTURE)`: the half-profile mass between `pz = 0` and
+    /// `1/alpha_fs` (about 137), which by symmetry is the mass of the whole
+    /// negative-momentum branch the impulse approximation allows, whose lower
+    /// bound is `-1/alpha_fs`. One per shell.
+    pub profile_negative_mass: Vec<f64>,
 
     // ------------------------------------------------------------------
     // Subshell data
@@ -366,7 +384,7 @@ pub struct PhotonInteraction {
 pub const MASS_ELECTRON_EV: f64 = 0.51099895000e6;
 
 /// Inverse fine structure constant (dimensionless).
-pub(crate) const FINE_STRUCTURE: f64 = 137.035999084;
+pub const FINE_STRUCTURE: f64 = 137.035999084;
 
 /// Planck's constant times c in eV-Angstroms.
 pub(crate) const PLANCK_C: f64 = 1.2398419839593942e4;
@@ -723,12 +741,40 @@ impl PhotonInteraction {
         }
     }
 
-    /// Compton Doppler broadening -- sample outgoing photon energy from electron
-    /// momentum distribution.
+    /// Compton Doppler broadening: sample the outgoing photon energy from the
+    /// bound-electron momentum distribution.
     ///
-    /// Uses rejection sampling over Compton profile shells to account for
-    /// electron binding energies and momentum distributions.
+    /// Implements the relativistic-impulse-approximation procedure of
+    /// Kaltiaisenaho (2016, Sec. 3.4.8) as adopted by OpenMC in
+    /// openmc-dev/openmc#4036, which replaced the LA-UR-04-0487 algorithm this
+    /// used to implement (fusion-neutronics/core#22). Three things changed:
     ///
+    /// 1. Shell selection is weighted by occupancy AND by the fraction of the
+    ///    shell's profile that is kinematically accessible, not by occupancy
+    ///    alone. A shell whose `p_z,max` is deep in the negative tail is
+    ///    rarely the one that scatters, and now rarely gets picked.
+    /// 2. `p_z` is sampled over the whole allowed interval
+    ///    `-1/alpha_fs <= p_z <= p_z,max` (`alpha_fs` the fine-structure
+    ///    constant, so the lower bound is `-FINE_STRUCTURE`, about -137,
+    ///    in atomic momentum units), signed, with the profile extrapolated
+    ///    log-linearly past the tabulated grid. The old code integrated
+    ///    `[0, p_z,max]` only, and gave up (returned the free-electron energy)
+    ///    whenever `p_z,max` was negative, which is exactly the forward-
+    ///    scattering and near-threshold regime where Doppler broadening
+    ///    matters most.
+    /// 3. The sign of `p_z` picks the branch of the kinematics quadratic
+    ///    (`p_z < 0` gives `E' < E_C`, the free-electron Compton energy;
+    ///    `p_z > 0` gives `E' > E_C`) instead of a coin flip, and the
+    ///    `E'/E` factor of the approximate RIA double-differential cross
+    ///    section is applied as a rejection, which the old code omitted.
+    ///
+    /// The shell is first proposed by occupancy and accepted with its
+    /// accessible profile mass, twice; if neither attempt lands, the
+    /// equivalent conditional shell PMF is formed once and sampled directly,
+    /// which bounds the work for near-forward scattering where almost no mass
+    /// is accessible. A run of rejections on the `E'/E` factor is bounded too;
+    /// past it the free-electron Compton energy is returned rather than
+    /// looping.
     ///
     /// # Arguments
     /// * `alpha` - Ratio of photon energy to electron rest mass: E / m_e c^2
@@ -747,148 +793,257 @@ impl PhotonInteraction {
         mu: f64,
         rng: &mut R,
     ) -> (f64, i32) {
+        const N_FAST_SAMPLES: usize = 2;
         let e_in = alpha * MASS_ELECTRON_EV;
-        let pz = compton_profile_pz();
-        let n = pz.len();
-
-        // Klein-Nishina free-electron result as fallback
+        let n_shells = self
+            .electron_pdf
+            .len()
+            .min(self.binding_energy.len())
+            .min(self.profile_pdf.len())
+            .min(self.profile_cdf.len())
+            .min(self.profile_tail_slope.len())
+            .min(self.profile_negative_mass.len());
         let e_out_kn = alpha / (1.0 + alpha * (1.0 - mu)) * MASS_ELECTRON_EV;
+        if n_shells == 0 {
+            return (e_out_kn, -1);
+        }
 
-        let mut i_shell: usize;
-
-        loop {
-            // Sample shell from electron_pdf (cumulative sum sampling)
+        let mut shell = 0usize;
+        for _attempt in 0..N_FAST_SAMPLES {
+            // Propose the shell by occupancy (the first step of Kaltiaisenaho
+            // Eq. 3.119).
             let xi = rng.random::<f64>();
             let mut cumsum = 0.0;
-            i_shell = 0;
-            for (i, &pdf) in self.electron_pdf.iter().enumerate() {
+            shell = n_shells - 1;
+            for (i, &pdf) in self.electron_pdf.iter().take(n_shells).enumerate() {
                 cumsum += pdf;
-                if cumsum > xi {
-                    i_shell = i;
+                if xi < cumsum {
+                    shell = i;
                     break;
                 }
-                i_shell = i;
             }
-
-            // Get binding energy for this shell
-            let e_b = self.binding_energy[i_shell];
-
-            // If photon energy < binding energy, use free-electron result
-            if e_in < e_b {
-                return (e_out_kn, i_shell as i32);
-            }
-
-            // Determine pz_max
-            let pz_max = -FINE_STRUCTURE * (e_b - (e_in - e_b) * alpha * (1.0 - mu))
-                / (2.0 * e_in * (e_in - e_b) * (1.0 - mu) + e_b * e_b).sqrt();
-
-            if pz_max < 0.0 {
-                return (e_out_kn, i_shell as i32);
-            }
-
-            // Determine profile CDF value at pz_max
-            let profile = &self.profile_pdf[i_shell];
-            let cdf = &self.profile_cdf[i_shell];
-
-            let c_max = if pz_max > pz[n - 1] {
-                cdf[n - 1]
-            } else {
-                // lower_bound_index: last index where pz[i] <= pz_max
-                // Clamp to n-2 so that i_pz+1 is always valid
-                let i_pz = match pz.partition_point(|&v| v <= pz_max) {
-                    0 => 0,
-                    i => (i - 1).min(n - 2),
-                };
-
-                let pz_l = pz[i_pz];
-                let pz_r = pz[i_pz + 1];
-                let p_l = profile[i_pz];
-                let p_r = profile[i_pz + 1];
-                let c_l = cdf[i_pz];
-
-                if pz_l == pz_r {
-                    c_l
-                } else if p_l == p_r {
-                    c_l + (pz_max - pz_l) * p_l
-                } else {
-                    let m = (p_l - p_r) / (pz_l - pz_r);
-                    c_l + ((m * (pz_max - pz_l) + p_l).powi(2) - p_l * p_l) / (2.0 * m)
-                }
-            };
-
-            if c_max <= 0.0 {
-                return (e_out_kn, i_shell as i32);
-            }
-
-            // Sample c uniformly in [0, c_max]
-            let c = rng.random::<f64>() * c_max;
-
-            // Find interval in CDF containing c (lower_bound_index)
-            // Clamp to n-2 so that i_c+1 is always valid
-            let i_c = match cdf.partition_point(|&v| v <= c) {
-                0 => 0,
-                i => (i - 1).min(n - 2),
-            };
-
-            // Invert CDF to get pz_sample
-            let pz_l = pz[i_c];
-            let pz_r = pz[i_c + 1];
-            let p_l = profile[i_c];
-            let p_r = profile[i_c + 1];
-            let c_l = cdf[i_c];
-
-            let pz_sample = if pz_l == pz_r {
-                pz_l
-            } else if p_l == p_r {
-                pz_l + (c - c_l) / p_l
-            } else {
-                let m = (p_l - p_r) / (pz_l - pz_r);
-                pz_l + ((p_l * p_l + 2.0 * m * (c - c_l)).sqrt() - p_l) / m
-            };
-
-            // Solve quadratic for outgoing photon energy
-            let momentum_sq = (pz_sample / FINE_STRUCTURE).powi(2);
-            let f_val = 1.0 + alpha * (1.0 - mu);
-
-            let a_coeff = momentum_sq - f_val * f_val;
-            let b_coeff = 2.0 * e_in * (f_val - momentum_sq * mu);
-            let c_coeff = e_in * e_in * (momentum_sq - 1.0);
-
-            let quad = b_coeff * b_coeff - 4.0 * a_coeff * c_coeff;
-            if quad < 0.0 {
-                // No real solution -- return KN result
-                return (e_out_kn, i_shell as i32);
-            }
-            let sqrt_quad = quad.sqrt();
-
-            let e_out_1 = -(b_coeff + sqrt_quad) / (2.0 * a_coeff);
-            let e_out_2 = -(b_coeff - sqrt_quad) / (2.0 * a_coeff);
-
-            // Determine positive solution
-            let e_out = if e_out_1 > 0.0 {
-                if e_out_2 > 0.0 {
-                    // Both positive -- pick one at random
-                    if rng.random::<f64>() < 0.5 {
-                        e_out_1
-                    } else {
-                        e_out_2
-                    }
-                } else {
-                    e_out_1
-                }
-            } else if e_out_2 > 0.0 {
-                e_out_2
-            } else {
-                // No positive solution -- resample
+            let kin = self.compton_shell_kinematics(alpha, mu, e_in, shell);
+            if kin.profile_mass <= 0.0 {
                 continue;
-            };
-
-            // Accept if E_out < E_in - E_b
-            if e_out < e_in - e_b {
-                return (e_out, i_shell as i32);
             }
-            // Otherwise resample
+            // Accept with the accessible profile mass (Eq. 3.119).
+            if rng.random::<f64>() >= kin.profile_mass {
+                continue;
+            }
+            if let Some(e_out) = self.sample_compton_momentum(alpha, mu, e_in, shell, &kin, rng) {
+                return (e_out, shell as i32);
+            }
         }
+
+        if let Some((e_out, i_shell)) =
+            self.compton_doppler_conditional(alpha, mu, e_in, n_shells, rng)
+        {
+            return (e_out, i_shell as i32);
+        }
+
+        // No shell and momentum sample was accepted within the budget (or no
+        // shell is accessible at all, e.g. `E` below every binding energy):
+        // fall back to the free-electron Compton energy for the last shell
+        // proposed rather than loop forever.
+        (e_out_kn, shell as i32)
+    }
+
+    /// `K_i(pz)`, the normalised half-profile integral of shell `i_shell` from
+    /// `0` to `pz >= 0` (Kaltiaisenaho Eq. 3.117), using the tabulated
+    /// trapezoid cdf inside the grid and the log-linear tail past it. Zero for
+    /// `pz <= 0`, capped at 1/2.
+    pub fn compton_profile_cdf(&self, i_shell: usize, pz: f64) -> f64 {
+        if pz <= 0.0 {
+            return 0.0;
+        }
+        let grid = compton_profile_pz();
+        let profile = &self.profile_pdf[i_shell];
+        let cdf = &self.profile_cdf[i_shell];
+        let n = grid.len().min(profile.len()).min(cdf.len());
+        if n < 2 {
+            return 0.0;
+        }
+        let pz_last = grid[n - 1];
+        let c = if pz >= pz_last {
+            cdf[n - 1]
+                + compton_profile_tail_integral(
+                    pz,
+                    pz_last,
+                    profile[n - 1],
+                    self.profile_tail_slope[i_shell],
+                )
+        } else {
+            let i = bracket_index(&grid[..n], pz);
+            let pz_l = grid[i];
+            let pz_r = grid[i + 1];
+            let p_l = profile[i];
+            let p_r = profile[i + 1];
+            let slope = (p_r - p_l) / (pz_r - pz_l);
+            let delta = pz - pz_l;
+            cdf[i] + p_l * delta + 0.5 * slope * delta * delta
+        };
+        c.min(0.5)
+    }
+
+    /// Inverse of [`Self::compton_profile_cdf`]: the `pz >= 0` at which the
+    /// half-profile integral of shell `i_shell` reaches `c`. Inverts the
+    /// piecewise-linear tabulated profile inside the grid (Kaltiaisenaho
+    /// Eq. 3.126, in the rationalised form that stays well conditioned when the
+    /// local slope is small) and the log-linear tail past it (Eq. 3.123).
+    pub fn invert_compton_profile_cdf(&self, i_shell: usize, c: f64) -> f64 {
+        let grid = compton_profile_pz();
+        let profile = &self.profile_pdf[i_shell];
+        let cdf = &self.profile_cdf[i_shell];
+        let n = grid.len().min(profile.len()).min(cdf.len());
+        if n < 2 {
+            return 0.0;
+        }
+        let c_last = cdf[n - 1];
+        if c >= c_last {
+            return invert_compton_profile_tail(
+                c - c_last,
+                grid[n - 1],
+                profile[n - 1],
+                self.profile_tail_slope[i_shell],
+            );
+        }
+        let i = bracket_index(&cdf[..n], c);
+        let pz_l = grid[i];
+        let pz_r = grid[i + 1];
+        let p_l = profile[i];
+        let p_r = profile[i + 1];
+        let c_l = cdf[i];
+        if p_l == p_r {
+            return pz_l + (c - c_l) / p_l;
+        }
+        let slope = (p_r - p_l) / (pz_r - pz_l);
+        let delta_c = c - c_l;
+        let discriminant = p_l * p_l + 2.0 * slope * delta_c;
+        let denominator = p_l + discriminant.max(0.0).sqrt();
+        pz_l + 2.0 * delta_c / denominator
+    }
+
+    /// The kinematic bounds of shell `i_shell` for incident `E = alpha m_e c^2`
+    /// scattering through `mu`: `p_z,max` (Kaltiaisenaho Eq. 3.73), the
+    /// half-profile integral at `|p_z,max|`, and the accessible profile mass
+    /// between `-FINE_STRUCTURE` (the `-1/alpha_fs` lower bound; `alpha` here
+    /// is E / m_e c^2 as everywhere else in this file) and `p_z,max`
+    /// (Eq. 3.118). All zero when the shell is closed (`E <= E_b`) or `p_z,max`
+    /// lies at or below `-FINE_STRUCTURE`.
+    fn compton_shell_kinematics(
+        &self,
+        alpha: f64,
+        mu: f64,
+        e_in: f64,
+        i_shell: usize,
+    ) -> ShellKinematics {
+        let mut kin = ShellKinematics::default();
+        let e_b = self.binding_energy[i_shell];
+        if e_in <= e_b {
+            return kin;
+        }
+        kin.pz_max = -FINE_STRUCTURE * (e_b - (e_in - e_b) * alpha * (1.0 - mu))
+            / (2.0 * e_in * (e_in - e_b) * (1.0 - mu) + e_b * e_b).sqrt();
+        if kin.pz_max <= -FINE_STRUCTURE {
+            return kin;
+        }
+        let c_negative = self.profile_negative_mass[i_shell];
+        kin.c_limit = self.compton_profile_cdf(i_shell, kin.pz_max.abs());
+        kin.profile_mass = c_negative + kin.c_limit.copysign(kin.pz_max);
+        kin
+    }
+
+    /// Sample a signed `p_z` for the selected shell, conditional on the allowed
+    /// interval, and turn it into `E'` (Kaltiaisenaho Eqs. 3.120 to 3.127).
+    /// `None` means the sample was rejected: the momentum gave no physical
+    /// root, or the outgoing energy exceeded `E - E_b`, or it failed the
+    /// `E'/E` rejection.
+    fn sample_compton_momentum<R: rand::Rng + ?Sized>(
+        &self,
+        alpha: f64,
+        mu: f64,
+        e_in: f64,
+        i_shell: usize,
+        kin: &ShellKinematics,
+        rng: &mut R,
+    ) -> Option<f64> {
+        let c_negative = self.profile_negative_mass[i_shell];
+        // The tabulated profile is symmetric, so the negative branch is the
+        // reflected half-profile cdf.
+        let pz = if kin.pz_max < 0.0 {
+            let c = kin.c_limit + rng.random::<f64>() * kin.profile_mass;
+            -self.invert_compton_profile_cdf(i_shell, c)
+        } else {
+            let c = rng.random::<f64>() * kin.profile_mass;
+            if c < c_negative {
+                -self.invert_compton_profile_cdf(i_shell, c_negative - c)
+            } else {
+                self.invert_compton_profile_cdf(i_shell, c - c_negative)
+            }
+        };
+
+        let energy_ratio = compton_energy_ratio(alpha, mu, pz)?;
+        let max_energy_ratio = 1.0 - self.binding_energy[i_shell] / e_in;
+        if energy_ratio <= 0.0 {
+            return None;
+        }
+        let tolerance = 16.0 * f64::EPSILON * max_energy_ratio.max(1.0);
+        if energy_ratio > max_energy_ratio + tolerance {
+            return None;
+        }
+        let energy_ratio = energy_ratio.min(max_energy_ratio);
+        // Eq. 3.127: the E'/E factor of the approximate RIA DDCS, applied as a
+        // rejection once E' is known.
+        if rng.random::<f64>() <= energy_ratio {
+            Some(energy_ratio * e_in)
+        } else {
+            None
+        }
+    }
+
+    /// Sample the shell from the conditional PMF of Kaltiaisenaho Eq. 3.116,
+    /// `f_i` times the accessible profile mass, evaluated once for every shell,
+    /// then draw the momentum. Algebraically equivalent to repeating the
+    /// occupancy-propose-and-accept step, without its cost when almost no
+    /// profile mass is accessible. `None` when no shell is open at all, or when
+    /// the momentum sampling budget runs out.
+    fn compton_doppler_conditional<R: rand::Rng + ?Sized>(
+        &self,
+        alpha: f64,
+        mu: f64,
+        e_in: f64,
+        n_shells: usize,
+        rng: &mut R,
+    ) -> Option<(f64, usize)> {
+        const MAX_SAMPLES: usize = 100_000;
+        let mut shell_data = Vec::with_capacity(n_shells);
+        let mut shell_cdf = Vec::with_capacity(n_shells);
+        let mut norm = 0.0;
+        for i in 0..n_shells {
+            let kin = self.compton_shell_kinematics(alpha, mu, e_in, i);
+            norm += self.electron_pdf[i] * kin.profile_mass;
+            shell_data.push(kin);
+            shell_cdf.push(norm);
+        }
+        if norm <= 0.0 {
+            return None;
+        }
+        for _attempt in 0..MAX_SAMPLES {
+            let rn = rng.random::<f64>() * norm;
+            let mut shell = n_shells - 1;
+            for (i, &c) in shell_cdf.iter().enumerate() {
+                if rn < c {
+                    shell = i;
+                    break;
+                }
+            }
+            if let Some(e_out) =
+                self.sample_compton_momentum(alpha, mu, e_in, shell, &shell_data[shell], rng)
+            {
+                return Some((e_out, shell));
+            }
+        }
+        None
     }
 
     // ====================================================================
@@ -1373,6 +1528,209 @@ impl Drop for SharedGridsSuppressed {
 
 fn shared_grids_suppressed() -> bool {
     SHARED_GRIDS_SUPPRESSED.with(|f| f.get())
+}
+
+/// Kinematic bounds of one Compton-profile shell for a given collision, from
+/// `PhotonInteraction::compton_shell_kinematics`.
+#[derive(Clone, Copy, Debug, Default)]
+struct ShellKinematics {
+    /// Upper bound of the allowed momentum interval (Kaltiaisenaho Eq. 3.73).
+    pz_max: f64,
+    /// Half-profile integral `K_i(|pz_max|)` (Eq. 3.117).
+    c_limit: f64,
+    /// Accessible profile mass between `-1/alpha` and `pz_max` (Eq. 3.118).
+    profile_mass: f64,
+}
+
+/// Index `i` of the tabulated interval `[grid[i], grid[i + 1])` holding `x`,
+/// clamped to the last interval. `grid` must be non-decreasing with at least
+/// two entries.
+fn bracket_index(grid: &[f64], x: f64) -> usize {
+    match grid.partition_point(|&v| v <= x) {
+        0 => 0,
+        i => (i - 1).min(grid.len() - 2),
+    }
+}
+
+/// Integral of the log-linear Compton-profile tail
+/// `J_N exp(slope (u - pz_last))` from `pz_last` to `pz`.
+pub fn compton_profile_tail_integral(pz: f64, pz_last: f64, profile_last: f64, slope: f64) -> f64 {
+    profile_last * (slope * (pz - pz_last)).exp_m1() / slope
+}
+
+/// Inverse of [`compton_profile_tail_integral`]: the `pz` past `pz_last` at
+/// which the tail integral reaches `integral` (Kaltiaisenaho Eq. 3.123).
+pub fn invert_compton_profile_tail(
+    integral: f64,
+    pz_last: f64,
+    profile_last: f64,
+    slope: f64,
+) -> f64 {
+    pz_last + (slope * integral / profile_last).ln_1p() / slope
+}
+
+/// Outgoing-to-incident energy ratio `E'/E` for a bound electron with signed
+/// longitudinal momentum `pz` (atomic units), from the impulse-approximation
+/// kinematics (LA-UR-04-0487 Eq. 39 solved for `E'`). The quadratic has two
+/// positive roots either side of the free-electron ratio `1 / (1 + alpha (1 -
+/// mu))`; `pz < 0` selects the lower and `pz > 0` the upper, so the sign of the
+/// electron's momentum along the scattering vector decides whether the photon
+/// loses more or less energy than a free electron would take. `None` when
+/// there is no physical root on that branch.
+pub fn compton_energy_ratio(alpha: f64, mu: f64, pz: f64) -> Option<f64> {
+    let f = 1.0 + alpha * (1.0 - mu);
+    if pz == 0.0 {
+        return Some(1.0 / f);
+    }
+    let momentum = pz / FINE_STRUCTURE;
+    let momentum_sq = momentum * momentum;
+    let a = momentum_sq - f * f;
+    let b = 2.0 * (f - momentum_sq * mu);
+    let c = momentum_sq - 1.0;
+    let mut discriminant = b * b - 4.0 * a * c;
+    let discriminant_tolerance = 16.0 * f64::EPSILON * (b * b + (4.0 * a * c).abs());
+    if discriminant < -discriminant_tolerance {
+        return None;
+    }
+    discriminant = discriminant.max(0.0);
+
+    let (root1, root2) = if a.abs() < 1.0e-14 * (b.abs() + c.abs()) {
+        if b == 0.0 {
+            return None;
+        }
+        (-c / b, -c / b)
+    } else {
+        let sqrt_discriminant = discriminant.sqrt();
+        let q = -0.5 * (b + sqrt_discriminant.copysign(b));
+        let root1 = q / a;
+        let root2 = if q == 0.0 {
+            (-b + sqrt_discriminant) / (2.0 * a)
+        } else {
+            c / q
+        };
+        (root1, root2)
+    };
+
+    let mut root_min = f64::INFINITY;
+    let mut root_max = f64::NEG_INFINITY;
+    if root1.is_finite() && root1 > 0.0 {
+        root_min = root1;
+        root_max = root1;
+    }
+    if root2.is_finite() && root2 > 0.0 {
+        root_min = root_min.min(root2);
+        root_max = root_max.max(root2);
+    }
+    if !root_min.is_finite() {
+        return None;
+    }
+    let energy_ratio = if pz < 0.0 { root_min } else { root_max };
+    let free_electron_ratio = 1.0 / f;
+    let tolerance = 16.0 * f64::EPSILON * free_electron_ratio.max(1.0);
+    if (pz < 0.0 && energy_ratio > free_electron_ratio + tolerance)
+        || (pz > 0.0 && energy_ratio < free_electron_ratio - tolerance)
+    {
+        return None;
+    }
+    Some(energy_ratio)
+}
+
+/// Normalise a set of Compton profiles over the whole momentum axis and fit
+/// the log-linear tail each needs past the tabulated grid.
+///
+/// The tabulated `J_i(pz)` cover `pz >= 0` only (the profile is symmetric) and
+/// end at a finite `pz_N`, while the kinematically allowed interval of the
+/// impulse approximation runs from `-1/alpha_fs` (`-FINE_STRUCTURE`, about
+/// -137, in atomic momentum units) up to `p_z,max`,
+/// well past any grid. Following Kaltiaisenaho (2016) and OpenMC
+/// (openmc-dev/openmc#4036), each profile is extrapolated as
+/// `J_N exp(a_i (pz - pz_N))` with `a_i` from its last two points, and the pdf
+/// and trapezoid cdf are rescaled so that the tabulated part plus the tail
+/// integrate to 1/2. Returns `(tail_slope, negative_mass)` per shell, where
+/// `negative_mass` is `K_i(FINE_STRUCTURE)`, the mass of the negative branch.
+///
+/// Shells whose last two points cannot carry the extrapolation (fewer than two
+/// grid points, a non-positive value, or a non-decreasing tail) are an error:
+/// the data would make the sampler silently wrong.
+pub fn finalize_compton_profiles(
+    profile_pdf: &mut [Vec<f64>],
+    profile_cdf: &mut [Vec<f64>],
+    pz: &[f64],
+) -> Result<(Vec<f64>, Vec<f64>), String> {
+    let n_shells = profile_pdf.len().min(profile_cdf.len());
+    let mut slopes = Vec::with_capacity(n_shells);
+    let mut negative_mass = Vec::with_capacity(n_shells);
+    for i in 0..n_shells {
+        let n = pz.len().min(profile_pdf[i].len()).min(profile_cdf[i].len());
+        if n < 2 {
+            return Err(format!(
+                "Compton profile shell {i} has {n} momentum points; at least two are needed"
+            ));
+        }
+        let (pz_last, pz_prev) = (pz[n - 1], pz[n - 2]);
+        let (j_last, j_prev) = (profile_pdf[i][n - 1], profile_pdf[i][n - 2]);
+        // Spelled with `partial_cmp` so a NaN in the data fails here too, which
+        // `<=` on its own would let through.
+        let increasing = pz_last.partial_cmp(&pz_prev) == Some(std::cmp::Ordering::Greater);
+        let positive = |v: f64| v.partial_cmp(&0.0) == Some(std::cmp::Ordering::Greater);
+        if !increasing || !positive(j_last) || !positive(j_prev) {
+            return Err(format!(
+                "Compton profile shell {i}: the last two points (pz {pz_prev}, {pz_last}; \
+                 J {j_prev}, {j_last}) cannot be extrapolated"
+            ));
+        }
+        let slope = (j_last / j_prev).ln() / (pz_last - pz_prev);
+        if !slope.is_finite() || slope >= 0.0 {
+            return Err(format!(
+                "Compton profile shell {i}: the last two values do not form a decreasing tail \
+                 (slope {slope})"
+            ));
+        }
+        let norm = 2.0 * (profile_cdf[i][n - 1] - j_last / slope);
+        if !norm.is_finite() || norm <= 0.0 {
+            return Err(format!(
+                "Compton profile shell {i} has an invalid normalisation ({norm})"
+            ));
+        }
+        for v in profile_pdf[i].iter_mut().take(n) {
+            *v /= norm;
+        }
+        for v in profile_cdf[i].iter_mut().take(n) {
+            *v /= norm;
+        }
+        slopes.push(slope);
+        // K_i(FINE_STRUCTURE), the negative-branch mass, on the normalised
+        // tables and through the same bracketing the sampler uses.
+        let k = half_profile_integral(
+            &profile_pdf[i][..n],
+            &profile_cdf[i][..n],
+            &pz[..n],
+            slope,
+            FINE_STRUCTURE,
+        );
+        negative_mass.push(k);
+    }
+    Ok((slopes, negative_mass))
+}
+
+/// `K_i(pz)` on explicit tables (the free-function form of
+/// `PhotonInteraction::compton_profile_cdf`, used at load before the struct
+/// exists).
+fn half_profile_integral(profile: &[f64], cdf: &[f64], pz: &[f64], slope: f64, x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let n = pz.len();
+    let pz_last = pz[n - 1];
+    let c = if x >= pz_last {
+        cdf[n - 1] + compton_profile_tail_integral(x, pz_last, profile[n - 1], slope)
+    } else {
+        let i = bracket_index(pz, x);
+        let local_slope = (profile[i + 1] - profile[i]) / (pz[i + 1] - pz[i]);
+        let delta = x - pz[i];
+        cdf[i] + profile[i] * delta + 0.5 * local_slope * delta * delta
+    };
+    c.min(0.5)
 }
 
 /// Set the shared Compton profile momentum grid.
