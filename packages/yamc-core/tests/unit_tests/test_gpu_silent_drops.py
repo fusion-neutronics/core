@@ -6,15 +6,16 @@ reported only under a verbosity flag the user can switch off, so a
 
 - ``tracking_mode``: the kernels always surface-track. The notice is now
   printed to stderr at every ``verbose`` setting.
-- ``convergence_targets``: the launch loop cannot stop on them. With a
-  particle cap also set, the run used to go silently to the cap. It is now
-  refused up front, whatever else is set.
+- ``convergence_targets``: the neutron launch loops now stop on them
+  (core#29). The photon launch loops still cannot, so a model that transports
+  photons is refused up front, whatever else is set, rather than run silently
+  to the cap as it once did.
 - ``gpu_max_steps_per_particle``: a launch that truncated histories under-counts
   the flux. That was a gated warning; it is now an error, so the under-counted
   tallies are never returned.
 
-The convergence refusal happens before any GPU is touched, so those tests run
-everywhere. The other two need an f64 Vulkan adapter and skip without one.
+The photon refusal happens before any GPU is touched, so that test runs
+everywhere. The others need an f64 Vulkan adapter and skip without one.
 """
 
 import os
@@ -33,9 +34,16 @@ needs_gpu = pytest.mark.skipif(
 )
 
 
-def _sphere(nuclide, radius, **model_kwargs):
+def _sphere(nuclide, radius, photon_element=None, **model_kwargs):
     material = yamc.Material(composition={nuclide: 1.0}, density=1.0, temperature=294)
-    material.read_nuclear_data({nuclide: os.path.join(TESTS_DIR, f"{nuclide}.arrow")})
+    photon_data = (
+        {photon_element: os.path.join(TESTS_DIR, f"{photon_element}.arrow")}
+        if photon_element
+        else None
+    )
+    material.read_nuclear_data(
+        {nuclide: os.path.join(TESTS_DIR, f"{nuclide}.arrow")}, photon_data=photon_data
+    )
     sphere = yamc.Sphere(radius=radius, boundary="vacuum")
     cell = yamc.Cell(name="s", region=sphere.below, material=material)
     geometry = yamc.Geometry([cell])
@@ -56,19 +64,41 @@ def _sphere(nuclide, radius, **model_kwargs):
         pytest.param({}, id="targets-only"),
     ],
 )
-def test_convergence_targets_are_refused_on_gpu(run_kwargs):
-    # Before, only the targets-only case was refused (as "needs total_particles
-    # or max_runtime"); with a cap or budget present the targets were dropped
-    # in silence and the run went to the cap. Now every combination is refused
-    # in the same words, before any adapter is touched, so this holds on hosts
-    # without a GPU too.
-    model = _sphere("Fe56", 10.0)
+def test_convergence_targets_are_refused_on_gpu_for_photon_models(run_kwargs):
+    # The photon launch loops cannot evaluate a target yet, so a model that
+    # transports photons is refused in the same words for every combination,
+    # before any adapter is touched (this holds on hosts without a GPU too).
+    # Before core#29 every GPU model was refused this way; the neutron loops
+    # now stop on the targets (see the test below).
+    # The material carries the Fe photon data so the model is a valid photon
+    # model; the refusal is then the convergence one, not a missing-data error.
+    model = _sphere("Fe56", 10.0, photon_element="Fe", transport_secondary_photons=True)
     model.convergence_targets = [yamc.ConvergenceTarget("relative_error", 0.05, tally="t")]
     with pytest.raises(ValueError, match="cannot stop on convergence targets") as exc:
         model.simulate_transport(seed=1, compute="gpu", **run_kwargs)
     # The message must name the way out.
     assert "Model.convergence_targets" in str(exc.value)
     assert "1 target(s)" in str(exc.value)
+    assert "photon" in str(exc.value)
+
+
+@needs_gpu
+def test_convergence_targets_stop_a_neutron_run_on_gpu():
+    # A neutron-only model with only a convergence target: no particle cap, no
+    # time budget, the launch loop stops when the target is met (core#29). The
+    # target is loose so the first launch chunk already satisfies it; the point
+    # is that the run ends, that the aggregate relative error the GPU reports
+    # honours the target, and that a cap set alongside is not what stopped it.
+    model = _sphere("Fe56", 10.0)
+    model.convergence_targets = [yamc.ConvergenceTarget("relative_error", 0.05, tally="t")]
+    results = model.simulate_transport(seed=1, compute="gpu")
+    r = results["t"]
+    assert r.n_histories > 0
+    assert 0.0 < r.aggregate_relative_error <= 0.05
+    capped = _sphere("Fe56", 10.0)
+    capped.convergence_targets = [yamc.ConvergenceTarget("relative_error", 0.05, tally="t")]
+    rc = capped.simulate_transport(seed=1, compute="gpu", total_particles=10_000_000)["t"]
+    assert rc.n_histories == r.n_histories
 
 
 def test_convergence_targets_still_run_on_cpu():

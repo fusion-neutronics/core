@@ -2105,6 +2105,15 @@ pub(crate) fn multi_cell_transport_kernel(
     out_n_steps: &mut [u32],
     out_final_energy: &mut [f64],
     tally_out: &mut [Atomic<u64>],
+    // Per-(history, tally) total score (fusion-neutronics/core#29): row
+    // `ABSOLUTE_POS`, one f64 per tally entry, the sum of this history's
+    // per-bin totals over the tally's bins. Written by the `PerHistory`
+    // history-end flush only, with a plain add (each thread owns its row, no
+    // atomics); the host folds the rows into the per-history aggregate moments
+    // the convergence targets are defined on. A size-1 dummy in the other
+    // variance modes (the per-source paths derive the same totals host-side
+    // from `src_acc`).
+    hist_tally_total: &mut [f64],
     // Batch-free per-history variance spill (issue #233). Per-history
     // overflow list for a history touching MORE than `PERHIST_K` distinct
     // bins: each thread owns the slice `[ABSOLUTE_POS * spill_cap ..
@@ -5709,7 +5718,11 @@ pub(crate) fn multi_cell_transport_kernel(
                 // sum_sq is deferred to the host finalize (once per source).
                 src_acc[src_base + idx as usize].fetch_add(u64::reinterpret(sbits));
             } else {
-                // Stage 1 (non-fissile): flush sum + sum_sq directly.
+                // Stage 1 (non-fissile): flush sum + sum_sq directly, and add
+                // this bin's total into the history's per-tally total
+                // (fusion-neutronics/core#29).
+                let hrow = ABSOLUTE_POS * n_tallies as usize + t as usize;
+                hist_tally_total[hrow] = hist_tally_total[hrow] + x;
                 tally_out[idx as usize].fetch_add(u64::reinterpret(sbits));
                 let s_sq = if s <= kerma_scale {
                     kerma_sumsq
@@ -5750,6 +5763,8 @@ pub(crate) fn multi_cell_transport_kernel(
             if per_source_var {
                 src_acc[src_base + idx as usize].fetch_add(u64::reinterpret(sbits));
             } else {
+                let hrow = ABSOLUTE_POS * n_tallies as usize + t as usize;
+                hist_tally_total[hrow] = hist_tally_total[hrow] + x;
                 tally_out[idx as usize].fetch_add(u64::reinterpret(sbits));
                 let s_sq = if s <= kerma_scale {
                     kerma_sumsq
