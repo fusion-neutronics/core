@@ -454,6 +454,7 @@ pub fn run_multi_cell_transport_cpu(
     let mut lost = crate::common::lost_particles::LostParticleResult::default();
     let mut n_spilled_secondaries = 0u64;
     let mut max_pend_depth = 0u32;
+    let mut pend_depth_hist: Vec<u64> = Vec::new();
     for i in 0..n {
         let mut rec: Vec<CollisionRecord> = Vec::new();
         let outcome = transport_one_particle(
@@ -467,6 +468,11 @@ pub fn run_multi_cell_transport_cpu(
         final_energies.push(outcome.final_energy);
         n_spilled_secondaries += outcome.n_spilled as u64;
         max_pend_depth = max_pend_depth.max(outcome.max_pend_depth);
+        let d = outcome.max_pend_depth as usize;
+        if pend_depth_hist.len() <= d {
+            pend_depth_hist.resize(d + 1, 0);
+        }
+        pend_depth_hist[d] += 1;
         if let Some(record) = outcome.lost {
             lost.count += 1;
             if lost.records.len() < crate::common::lost_particles::LOST_RECORD_CAPACITY {
@@ -500,6 +506,7 @@ pub fn run_multi_cell_transport_cpu(
             lost,
             n_spilled_secondaries,
             max_pend_depth,
+            pend_depth_hist,
         },
         traces,
     )
