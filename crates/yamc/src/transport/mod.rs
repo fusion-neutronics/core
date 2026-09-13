@@ -1794,9 +1794,12 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
         // banked from the pre-discount weight below. That is OpenMC's scheme
         // (`physics.cpp`: fission sites first, then
         // `wgt -= wgt * absorption/total` with fission inside `absorption`,
-        // then the survivor scatters), and for a non-fissile nuclide it is
-        // identical to what the kernel already does, since its `sigma_sf`
-        // collapses to `sigma_e + sigma_i` there.
+        // then the survivor scatters), and the GPU kernel runs the same scheme
+        // whenever its fission bank is on (fusion-neutronics/core#25); with
+        // the bank off the kernel keeps its legacy weight-multiply fission
+        // analog alongside scatter, which coincides with this for a
+        // non-fissile nuclide since its `sigma_sf` collapses to
+        // `sigma_e + sigma_i`.
         let mut analog_split: Option<AnalogSplit> = None;
         // Angle seed for an analog FISSION collision: the same `xi3` the split
         // drew, which the GPU kernel's fission branch reuses as the continuing
