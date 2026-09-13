@@ -600,6 +600,14 @@ pub(super) struct ParticleOutcome {
     /// Reported next to [`n_spilled`](Self::n_spilled) so the slot count can be
     /// justified by the headroom it leaves, not only by the absence of spills.
     pub max_pend_depth: u32,
+    /// Deepest the stack would have had to be to hold every secondary this
+    /// history queued in-thread, counting the pushes past [`PEND_SLOTS`] that
+    /// the kernel spills. `max_pend_depth` is the same quantity capped at the
+    /// register slots; this one is what the depth histogram bins, so a
+    /// spilling history lands in a bin above `PEND_SLOTS` rather than being
+    /// folded into the histories that exactly filled the stack
+    /// (fusion-neutronics/core#20).
+    pub peak_pend_depth: u32,
 }
 
 /// One neutron collision recorded by the CPU twin, for the issue-#40
@@ -829,6 +837,7 @@ pub(super) fn transport_one_particle(
     let mut n_pend_nxn = 0usize;
     let mut n_spilled = 0u32;
     let mut max_pend_depth = 0u32;
+    let mut peak_pend_depth = 0u32;
 
     let n_grid = inputs.n_grid;
     let n_cells = inputs.n_cells;
@@ -1759,6 +1768,13 @@ pub(super) fn transport_one_particle(
                                             / sin_phi_w_x;
                                     xdz = mu_s * dz - sin_th_x * sin_phi_w_x * cos_phi_x;
                                 }
+                                // Uncapped: how deep the stack WOULD have to be
+                                // to hold this history in-thread, counting the
+                                // pushes the kernel spills. `max_pend_depth`
+                                // below stays capped at the register slots.
+                                if n_pend_nxn as u32 + 1 > peak_pend_depth {
+                                    peak_pend_depth = n_pend_nxn as u32 + 1;
+                                }
                                 if n_pend_nxn >= PEND_SLOTS {
                                     // Past this depth the kernel spills to the
                                     // device bank; count it so tests can see
@@ -2035,5 +2051,6 @@ pub(super) fn transport_one_particle(
         lost,
         n_spilled,
         max_pend_depth,
+        peak_pend_depth,
     }
 }

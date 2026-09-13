@@ -1695,8 +1695,9 @@ pub fn run_multi_cell_transport(
         photon_bank,
         lost,
         n_spilled_secondaries,
-        // CPU-mirror diagnostic only; the kernel does not report stack depth.
+        // CPU-mirror diagnostics only; the kernel does not report stack depth.
         max_pend_depth: 0,
+        pend_depth_hist: Vec::new(),
     }
 }
 
