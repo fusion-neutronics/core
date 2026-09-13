@@ -174,7 +174,7 @@ fn extract_sources(source: &Bound<'_, PyAny>) -> PyResult<Vec<ParticleSource>> {
 ///         through a surface foreign to the current volume (overlapping or
 ///         self-intersecting mesh volumes, or a corrupted tracking state)
 ///         records the particle as lost, exactly like a geometry gap.
-///     max_steps_per_particle: Hard cap on transport steps per particle on
+///     gpu_max_steps_per_particle: Hard cap on transport steps per particle on
 ///         the GPU path, which needs a bounded loop. CPU transport runs every
 ///         history to completion (ending it on absorption, leakage or a lost
 ///         particle) and ignores the value, warning if you set it and then run
@@ -240,11 +240,11 @@ fn extract_sources(source: &Bound<'_, PyAny>) -> PyResult<Vec<ParticleSource>> {
 #[derive(Clone)]
 pub struct PyModel {
     pub inner: Model,
-    /// Whether `max_steps_per_particle` was set explicitly (constructor argument
+    /// Whether `gpu_max_steps_per_particle` was set explicitly (constructor argument
     /// or setter) rather than left at its default. Only the GPU path honours the
     /// cap, so `simulate_transport(compute='cpu')` warns that the request has no
     /// effect -- but only when it was actually asked for, never for the default.
-    max_steps_explicit: bool,
+    gpu_max_steps_explicit: bool,
 }
 
 #[gen_stub_pymethods]
@@ -252,7 +252,7 @@ pub struct PyModel {
 impl PyModel {
     /// Create a new Model.
     #[new]
-    #[pyo3(signature = (geometry, tallies=None, source=None, transport_secondary_photons=false, use_decay_photons=false, photon_cutoff_energy=1000.0, electron_treatment=None, free_gas_threshold=400.0, max_lost_particles=10, max_steps_per_particle=None, verbose=None, tracking_mode="surface", variance_reduction=None, gpu_fission_bank=true))]
+    #[pyo3(signature = (geometry, tallies=None, source=None, transport_secondary_photons=false, use_decay_photons=false, photon_cutoff_energy=1000.0, electron_treatment=None, free_gas_threshold=400.0, max_lost_particles=10, gpu_max_steps_per_particle=None, verbose=None, tracking_mode="surface", variance_reduction=None, gpu_fission_bank=true))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         #[gen_stub(override_type(type_repr = "Geometry | MeshGeometry"))] geometry: &Bound<
@@ -271,7 +271,7 @@ impl PyModel {
         electron_treatment: Option<String>,
         free_gas_threshold: f64,
         max_lost_particles: usize,
-        max_steps_per_particle: Option<u32>,
+        gpu_max_steps_per_particle: Option<u32>,
         verbose: Option<Vec<String>>,
         tracking_mode: &str,
         #[gen_stub(override_type(
@@ -369,7 +369,7 @@ impl PyModel {
             max_lost_particles,
             // `None` means "not given": fall back to the same default the Rust
             // core uses, and record below that the user did not ask for a cap.
-            max_steps_per_particle: max_steps_per_particle.unwrap_or(100_000),
+            gpu_max_steps_per_particle: gpu_max_steps_per_particle.unwrap_or(100_000),
             use_decay_photons,
             tracking_mode: tracking_mode_parsed,
             variance_reduction,
@@ -389,7 +389,7 @@ impl PyModel {
                 inner: make_model(yamc::geometry::backend::GeometryKind::Csg(
                     csg.inner.clone(),
                 )),
-                max_steps_explicit: max_steps_per_particle.is_some(),
+                gpu_max_steps_explicit: gpu_max_steps_per_particle.is_some(),
             });
         }
 
@@ -400,7 +400,7 @@ impl PyModel {
                 inner: make_model(yamc::geometry::backend::GeometryKind::Mesh(Box::new(
                     mesh.inner.clone(),
                 ))),
-                max_steps_explicit: max_steps_per_particle.is_some(),
+                gpu_max_steps_explicit: gpu_max_steps_per_particle.is_some(),
             });
         }
 
@@ -577,15 +577,15 @@ impl PyModel {
     /// Hard cap on transport steps per particle on the GPU path.
     /// Ignored by the CPU path.
     #[getter]
-    pub fn max_steps_per_particle(&self) -> u32 {
-        self.inner.max_steps_per_particle
+    pub fn gpu_max_steps_per_particle(&self) -> u32 {
+        self.inner.gpu_max_steps_per_particle
     }
 
     /// Set the per-particle transport-step cap for the next run.
-    #[setter(max_steps_per_particle)]
-    pub fn set_max_steps_per_particle(&mut self, value: u32) {
-        self.inner.max_steps_per_particle = value;
-        self.max_steps_explicit = true;
+    #[setter(gpu_max_steps_per_particle)]
+    pub fn set_gpu_max_steps_per_particle(&mut self, value: u32) {
+        self.inner.gpu_max_steps_per_particle = value;
+        self.gpu_max_steps_explicit = true;
     }
 
     /// Progress output as a list of flags (reported in source particles).
@@ -857,10 +857,10 @@ impl PyModel {
         };
         let inner: yamc::model::Model = serde_json::from_str(&json)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("parse JSON: {e}")))?;
-        let max_steps_explicit = inner.max_steps_per_particle != 100_000;
+        let gpu_max_steps_explicit = inner.gpu_max_steps_per_particle != 100_000;
         Ok(PyModel {
             inner,
-            max_steps_explicit,
+            gpu_max_steps_explicit,
         })
     }
 
@@ -947,7 +947,7 @@ impl PyModel {
     ///         if the model uses a feature the GPU kernel doesn't support,
     ///         including convergence targets (the GPU launch loop cannot stop
     ///         on them yet, so they are refused rather than ignored), or if a
-    ///         GPU launch truncated histories at ``max_steps_per_particle``
+    ///         GPU launch truncated histories at ``gpu_max_steps_per_particle``
     ///         (the under-counted tallies are never returned).
     ///     RuntimeError: if ``compute='gpu'`` and no GPU with f64 compute is
     ///         available.
@@ -1560,7 +1560,7 @@ impl PyModel {
         crate::simulation::build_results(&self.inner, settings, "cpu", elapsed, py_tracks)
     }
 
-    /// Warn that `max_steps_per_particle` does nothing on a CPU run.
+    /// Warn that `gpu_max_steps_per_particle` does nothing on a CPU run.
     ///
     /// Only the GPU kernel reads the cap: it needs a bound in its loop condition
     /// (driver watchdog, lockstep workgroups). CPU transport runs
@@ -1572,18 +1572,18 @@ impl PyModel {
     /// Fires only when the value was set explicitly (constructor argument or
     /// setter), never for the default, which every model carries.
     fn warn_if_max_steps_ignored(&self, py: Python<'_>, entry_point: &str) -> PyResult<()> {
-        if !self.max_steps_explicit {
+        if !self.gpu_max_steps_explicit {
             return Ok(());
         }
         py.import("warnings")?.call_method1(
             "warn",
             (format!(
-                "max_steps_per_particle={} has no effect on {entry_point}: only the GPU \
+                "gpu_max_steps_per_particle={} has no effect on {entry_point}: only the GPU \
                  kernel applies the cap (it needs a bounded loop), while CPU transport runs \
                  every history to completion and ends it on absorption, leakage or a lost \
                  particle. Remove the argument, or pass compute='gpu' if you meant to cap \
                  GPU histories.",
-                self.inner.max_steps_per_particle
+                self.inner.gpu_max_steps_per_particle
             ),),
         )?;
         Ok(())

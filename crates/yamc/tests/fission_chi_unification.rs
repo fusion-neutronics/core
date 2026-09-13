@@ -83,7 +83,7 @@ fn build(nuclide: &str, density: f64) -> Option<(Model, Arc<Tally>, TransportSet
     let tally = Arc::new(tally);
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&tally)]);
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = 20_000;
+    model.gpu_max_steps_per_particle = 20_000;
     model.tracking_mode = TrackingMode::Surface;
     let settings = TransportSettings {
         total_particles: Some(200_000),

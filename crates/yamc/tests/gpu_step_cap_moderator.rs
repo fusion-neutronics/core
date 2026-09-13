@@ -1,8 +1,8 @@
 //! GPU vs CPU integral-flux regression for a strong, near-pure scatterer.
 //!
 //! The CPU transport loop runs every history to completion (it ignores
-//! `max_steps_per_particle` entirely). The GPU kernel cannot loop
-//! unbounded, so it caps each history at `max_steps_per_particle` steps.
+//! `gpu_max_steps_per_particle` entirely). The GPU kernel cannot loop
+//! unbounded, so it caps each history at `gpu_max_steps_per_particle` steps.
 //! When that cap was 1000, a 14.06 MeV neutron in a 35 cm pure-H2 sphere
 //! -- which undergoes many hundreds of elastic collisions before leaking
 //! (H2 barely absorbs) -- got truncated mid-history on the GPU. Its
@@ -90,7 +90,7 @@ fn sphere(
     tally.initialize_batches(n_batches);
     let tally = Arc::new(tally);
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&tally)]);
-    model.max_steps_per_particle = max_steps;
+    model.gpu_max_steps_per_particle = max_steps;
     let settings = TransportSettings {
         total_particles: Some(n_particles * n_batches),
         seed,
@@ -165,8 +165,8 @@ fn gpu_h2_low_step_cap_is_refused() {
                 max_steps,
             }
             .to_string();
-            assert!(msg.contains("max_steps_per_particle=1000"), "{msg}");
-            assert!(msg.contains("Raise max_steps_per_particle"), "{msg}");
+            assert!(msg.contains("gpu_max_steps_per_particle=1000"), "{msg}");
+            assert!(msg.contains("Raise gpu_max_steps_per_particle"), "{msg}");
         }
         Err(other) => panic!("expected HistoriesTruncated, got {other}"),
         Ok(_) => panic!(

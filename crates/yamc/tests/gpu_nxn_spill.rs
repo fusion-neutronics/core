@@ -143,7 +143,7 @@ fn build_model(total_particles: usize, energy_ev: f64, radius: f64) -> (Model, T
     });
     let mut model = Model::new(geometry, vec![source], vec![flux_tally(cell_id)]);
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = MAX_STEPS;
+    model.gpu_max_steps_per_particle = MAX_STEPS;
     model.tracking_mode = TrackingMode::Surface;
     let settings = TransportSettings {
         total_particles: Some(total_particles),

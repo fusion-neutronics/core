@@ -177,7 +177,7 @@ fn model(tallies: Vec<Arc<Tally>>) -> (Model, TransportSettings) {
     let mut m = Model::new(build_geometry(), vec![neutron_source()], tallies);
     m.verbose = Verbose::silent();
     m.tracking_mode = TrackingMode::Surface;
-    m.max_steps_per_particle = 10_000;
+    m.gpu_max_steps_per_particle = 10_000;
     let settings = TransportSettings {
         total_particles: Some(N_PARTICLES),
         seed: SEED,

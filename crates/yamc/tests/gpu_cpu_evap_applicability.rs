@@ -196,7 +196,7 @@ fn total_tally(cell_id: u32) -> Arc<Tally> {
 fn build_model(geometry: Geometry, tallies: Vec<Arc<Tally>>) -> (Model, TransportSettings) {
     let mut model = Model::new(geometry, vec![neutron_source()], tallies);
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = MAX_STEPS;
+    model.gpu_max_steps_per_particle = MAX_STEPS;
     model.tracking_mode = TrackingMode::Surface;
     let settings = TransportSettings {
         total_particles: Some(N_PER_BATCH * N_BATCHES),

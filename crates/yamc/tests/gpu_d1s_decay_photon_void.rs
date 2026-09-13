@@ -199,7 +199,7 @@ fn d1s_void_model(
         vec![Arc::clone(&photon_tally)],
     );
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = 5_000;
+    model.gpu_max_steps_per_particle = 5_000;
     model.transport_secondary_photons = true;
     model.use_decay_photons = true;
     model.photon_cutoff_energy = 1000.0;

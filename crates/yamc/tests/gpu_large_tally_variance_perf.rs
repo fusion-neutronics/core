@@ -185,7 +185,7 @@ fn run_case(n_cells: usize, n_energy: usize, n_particles: usize) -> f64 {
     let tallies = tallies(&cell_ids, n_energy);
     let mut model = Model::new(geometry, vec![neutron_source()], tallies);
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = max_steps();
+    model.gpu_max_steps_per_particle = max_steps();
     model.tracking_mode = TrackingMode::Surface;
     let settings = TransportSettings {
         total_particles: Some(n_particles),

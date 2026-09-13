@@ -140,7 +140,7 @@ fn coupled_fe_sphere(
     };
 
     let mut model = Model::new(geometry, vec![source], tallies);
-    model.max_steps_per_particle = 5_000;
+    model.gpu_max_steps_per_particle = 5_000;
     model.transport_secondary_photons = true;
     model.photon_cutoff_energy = 1000.0;
     let settings = TransportSettings {
@@ -305,7 +305,7 @@ fn three_tally_model(
         Arc::clone(&photon),
     ];
     let mut model = Model::new(geometry, vec![source], tallies);
-    model.max_steps_per_particle = 5_000;
+    model.gpu_max_steps_per_particle = 5_000;
     model.transport_secondary_photons = true;
     model.photon_cutoff_energy = 1000.0;
     let settings = TransportSettings {

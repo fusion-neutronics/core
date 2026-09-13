@@ -84,7 +84,7 @@ fn fe_sphere(seed: u64, radius: f64, source_energy: f64) -> (Model, Arc<Tally>, 
     tally.initialize_batches(n_batches);
     let tally = Arc::new(tally);
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&tally)]);
-    model.max_steps_per_particle = 5_000;
+    model.gpu_max_steps_per_particle = 5_000;
     model.transport_secondary_photons = true;
     let settings = TransportSettings {
         total_particles: Some(n_particles * n_batches),

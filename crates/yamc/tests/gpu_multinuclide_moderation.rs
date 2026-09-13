@@ -151,7 +151,7 @@ fn finish_model(material: Material, region: Region) -> (Model, Arc<Tally>, Trans
     let tally = energy_binned_tally(1);
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&tally)]);
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = MAX_STEPS;
+    model.gpu_max_steps_per_particle = MAX_STEPS;
     model.tracking_mode = TrackingMode::Surface;
     let settings = TransportSettings {
         total_particles: Some(N_PER_BATCH * N_BATCHES),

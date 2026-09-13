@@ -149,7 +149,7 @@ fn build(det_id: u32) -> (Model, Arc<Tally>, TransportSettings) {
     let tally = Arc::new(t);
     let mut model = Model::new(geo, vec![photon_source()], vec![Arc::clone(&tally)]);
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = 5_000;
+    model.gpu_max_steps_per_particle = 5_000;
     model.tracking_mode = TrackingMode::Surface;
     model.transport_secondary_photons = true;
     let settings = TransportSettings {

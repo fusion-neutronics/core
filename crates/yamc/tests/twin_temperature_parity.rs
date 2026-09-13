@@ -111,7 +111,7 @@ fn build(temperature: &str) -> Option<(Model, Arc<Tally>, TransportSettings)> {
 
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&tally)]);
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = MAX_STEPS;
+    model.gpu_max_steps_per_particle = MAX_STEPS;
     model.tracking_mode = TrackingMode::Surface;
     let settings = TransportSettings {
         total_particles: Some(HISTORIES),

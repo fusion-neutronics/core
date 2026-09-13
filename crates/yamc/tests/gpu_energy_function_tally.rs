@@ -144,7 +144,7 @@ fn model(tallies: Vec<Arc<Tally>>, nuclide: &str, density: f64) -> (Model, Trans
     );
     m.verbose = Verbose::silent();
     m.tracking_mode = TrackingMode::Surface;
-    m.max_steps_per_particle = 10_000;
+    m.gpu_max_steps_per_particle = 10_000;
     let settings = TransportSettings {
         total_particles: Some(N_PARTICLES),
         seed: SEED,

@@ -32,12 +32,12 @@ def test_total_particles_is_a_per_run_argument():
 
 
 def test_model_run_guard_setters():
-    """max_lost_particles / max_steps_per_particle are editable run guards."""
+    """max_lost_particles / gpu_max_steps_per_particle are editable run guards."""
     model = yamc.Model(_geometry())
     model.max_lost_particles = 42
-    model.max_steps_per_particle = 7777
+    model.gpu_max_steps_per_particle = 7777
     assert model.max_lost_particles == 42
-    assert model.max_steps_per_particle == 7777
+    assert model.gpu_max_steps_per_particle == 7777
 
 
 def test_cell_name_setter():

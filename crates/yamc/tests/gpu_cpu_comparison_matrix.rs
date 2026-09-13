@@ -172,7 +172,7 @@ fn build_model(
 ) -> (Model, TransportSettings) {
     let mut model = Model::new(geometry, vec![source], tallies);
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = MAX_STEPS;
+    model.gpu_max_steps_per_particle = MAX_STEPS;
     model.tracking_mode = TrackingMode::Surface;
     if survival {
         model.variance_reduction = vec![VarianceReduction::SurvivalBiasing(
@@ -808,7 +808,7 @@ fn build_mixed_model(tallies: Vec<Arc<Tally>>) -> (Model, TransportSettings) {
     let (geometry, _) = fe_sphere(1);
     let mut model = Model::new(geometry, vec![neutron_source(), photon_source()], tallies);
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = MAX_STEPS;
+    model.gpu_max_steps_per_particle = MAX_STEPS;
     model.tracking_mode = TrackingMode::Surface;
     model.photon_cutoff_energy = 1000.0;
     let settings = TransportSettings {
@@ -1198,7 +1198,7 @@ fn mesh_row() {
         let t = Arc::new(t);
         let mut m = Model::new_with_mesh(mesh, vec![neutron_source()], vec![Arc::clone(&t)]);
         m.verbose = Verbose::silent();
-        m.max_steps_per_particle = MAX_STEPS;
+        m.gpu_max_steps_per_particle = MAX_STEPS;
         let settings = TransportSettings {
             total_particles: Some(N_PER_BATCH * N_BATCHES),
             seed: SEED,
@@ -1218,7 +1218,7 @@ fn mesh_row() {
         t.initialize_batches(N_BATCHES);
         let mut m = Model::new_with_mesh(mesh, vec![neutron_source()], vec![Arc::new(t)]);
         m.verbose = Verbose::silent();
-        m.max_steps_per_particle = MAX_STEPS;
+        m.gpu_max_steps_per_particle = MAX_STEPS;
         let settings = TransportSettings {
             total_particles: Some(N_PER_BATCH * N_BATCHES),
             seed: SEED,

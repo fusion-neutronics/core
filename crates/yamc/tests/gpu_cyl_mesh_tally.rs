@@ -113,7 +113,7 @@ fn build_model(
 ) -> (Model, TransportSettings) {
     let mut model = Model::new(geometry, vec![neutron_source()], tallies);
     model.verbose = Verbose::silent();
-    model.max_steps_per_particle = MAX_STEPS;
+    model.gpu_max_steps_per_particle = MAX_STEPS;
     model.tracking_mode = TrackingMode::Surface;
     let settings = TransportSettings {
         total_particles: Some(total_particles),

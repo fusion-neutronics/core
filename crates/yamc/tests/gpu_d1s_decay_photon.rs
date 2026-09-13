@@ -158,7 +158,7 @@ fn d1s_fe_sphere(
     let tallies: Vec<Arc<Tally>> = vec![Arc::clone(&neutron_tally), Arc::clone(&photon_tally)];
 
     let mut model = Model::new(geometry, vec![source], tallies);
-    model.max_steps_per_particle = 5_000;
+    model.gpu_max_steps_per_particle = 5_000;
     model.transport_secondary_photons = true;
     model.use_decay_photons = true;
     model.photon_cutoff_energy = 1000.0;
@@ -191,7 +191,7 @@ fn neutron_only_fe_sphere(
     neutron_tally.initialize_batches(n_batches);
     let neutron_tally = Arc::new(neutron_tally);
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&neutron_tally)]);
-    model.max_steps_per_particle = 5_000;
+    model.gpu_max_steps_per_particle = 5_000;
     let settings = TransportSettings {
         total_particles: Some(n_particles * n_batches),
         seed,

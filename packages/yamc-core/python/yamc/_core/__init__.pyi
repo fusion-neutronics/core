@@ -1836,7 +1836,7 @@ class Model:
             through a surface foreign to the current volume (overlapping or
             self-intersecting mesh volumes, or a corrupted tracking state)
             records the particle as lost, exactly like a geometry gap.
-        max_steps_per_particle: Hard cap on transport steps per particle on
+        gpu_max_steps_per_particle: Hard cap on transport steps per particle on
             the GPU path, which needs a bounded loop. CPU transport runs every
             history to completion (ending it on absorption, leakage or a lost
             particle) and ignores the value, warning if you set it and then run
@@ -1974,13 +1974,13 @@ class Model:
         Set the lost-particle abort threshold for the next run.
         """
     @property
-    def max_steps_per_particle(self) -> builtins.int:
+    def gpu_max_steps_per_particle(self) -> builtins.int:
         r"""
         Hard cap on transport steps per particle on the GPU path.
         Ignored by the CPU path.
         """
-    @max_steps_per_particle.setter
-    def max_steps_per_particle(self, value: builtins.int) -> None:
+    @gpu_max_steps_per_particle.setter
+    def gpu_max_steps_per_particle(self, value: builtins.int) -> None:
         r"""
         Set the per-particle transport-step cap for the next run.
         """
@@ -2046,7 +2046,7 @@ class Model:
         Returns:
             List of LostParticle objects
         """
-    def __new__(cls, geometry: Geometry | MeshGeometry, tallies: typing.Optional[typing.Sequence[Tally]] = None, source: NeutronSource | PhotonSource | typing.Sequence[NeutronSource | PhotonSource] | None = None, transport_secondary_photons: builtins.bool = False, use_decay_photons: builtins.bool = False, photon_cutoff_energy: builtins.float = 1000.0, electron_treatment: typing.Literal['ttb', 'local'] | None = None, free_gas_threshold: builtins.float = 400.0, max_lost_particles: builtins.int = 10, max_steps_per_particle: typing.Optional[builtins.int] = None, verbose: typing.Optional[typing.Sequence[builtins.str]] = None, tracking_mode: builtins.str = 'surface', variance_reduction: typing.Sequence[SurvivalBiasing | WeightWindowBounds] | None = None, gpu_fission_bank: builtins.bool = True) -> Model:
+    def __new__(cls, geometry: Geometry | MeshGeometry, tallies: typing.Optional[typing.Sequence[Tally]] = None, source: NeutronSource | PhotonSource | typing.Sequence[NeutronSource | PhotonSource] | None = None, transport_secondary_photons: builtins.bool = False, use_decay_photons: builtins.bool = False, photon_cutoff_energy: builtins.float = 1000.0, electron_treatment: typing.Literal['ttb', 'local'] | None = None, free_gas_threshold: builtins.float = 400.0, max_lost_particles: builtins.int = 10, gpu_max_steps_per_particle: typing.Optional[builtins.int] = None, verbose: typing.Optional[typing.Sequence[builtins.str]] = None, tracking_mode: builtins.str = 'surface', variance_reduction: typing.Sequence[SurvivalBiasing | WeightWindowBounds] | None = None, gpu_fission_bank: builtins.bool = True) -> Model:
         r"""
         Create a new Model.
         """
@@ -2250,7 +2250,7 @@ class Model:
                 if the model uses a feature the GPU kernel doesn't support,
                 including convergence targets (the GPU launch loop cannot stop
                 on them yet, so they are refused rather than ignored), or if a
-                GPU launch truncated histories at ``max_steps_per_particle``
+                GPU launch truncated histories at ``gpu_max_steps_per_particle``
                 (the under-counted tallies are never returned).
             RuntimeError: if ``compute='gpu'`` and no GPU with f64 compute is
                 available.
