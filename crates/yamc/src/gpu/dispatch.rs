@@ -90,15 +90,6 @@ pub enum GpuDispatchError {
         tally_index: usize,
         found: Vec<&'static str>,
     },
-    /// A `MeshFilter` in a configuration the GPU kernel does not yet score
-    /// (issues #234, #279). Rectangular and cylindrical
-    /// meshes are all supported; this now only rejects a mesh tally combined
-    /// with the GPU fission bank, with an explicit message rather than a silent
-    /// CPU-only fallback.
-    UnsupportedMeshKind {
-        tally_index: usize,
-        reason: String,
-    },
     /// Tally has more than one score, or a score the kernel can't
     /// estimate (only `Flux`, `ReactionRate(total)`, and
     /// `ReactionRate(absorption)` are supported).
@@ -220,13 +211,6 @@ impl std::fmt::Display for GpuDispatchError {
                  EnergyFilter, EnergyFunctionFilter and/or ParticleTypeFilter(Neutron); \
                  got [{}]",
                 found.join(", ")
-            ),
-            Self::UnsupportedMeshKind {
-                tally_index,
-                reason,
-            } => write!(
-                f,
-                "compute='gpu' tally {tally_index}: mesh kind not supported on GPU: {reason}"
             ),
             Self::UnsupportedTallyScore {
                 tally_index,
@@ -922,29 +906,10 @@ fn run_on_gpu_dispatch(
     //   (which multiplies weight in-thread via `weight *= nu_bar`, so each source
     //   thread is already a complete history -- Stage 1 handles it correctly).
     let has_fission_xs = inputs.xs_fission_per_material.iter().any(|&x| x > 0.0);
-    // Mesh tallies use the per-source-direct variance path (issue #234), which
-    // the non-fissile loop implements. Combining it with the GPU fission bank
-    // (per-source accumulation across fission generations AND direct mesh
-    // scoring) is not wired yet, so reject that combination explicitly rather
-    // than silently mis-scoring.
-    //
-    // Making the bank work WITH meshes is the wanted fix and is tracked on #338;
-    // the suggestion below is a way through in the meantime, not the answer.
-    if has_fission_xs && model.gpu_fission_bank && pack.mesh_kind.iter().any(|&k| k != MESH_NONE) {
-        if let Some(idx) = validated
-            .iter()
-            .position(|v| v.tally.get_mesh_filter().is_some())
-        {
-            return Err(GpuDispatchError::UnsupportedMeshKind {
-                tally_index: validated[idx].index,
-                reason: "mesh tallies combined with the GPU fission bank \
-                         (gpu_fission_bank=True on a fissile model) are not yet supported; \
-                         pass Model(gpu_fission_bank=False) to run this on the GPU without \
-                         banking fission progeny on the device, or run the mesh tally on the CPU"
-                    .to_string(),
-            });
-        }
-    }
+    // A mesh tally rides the per-source-direct variance mode on both loops: the
+    // fissile loop keys every launch (source and generation) on the source
+    // neutron, so a mesh contribution from a fission descendant folds into its
+    // source's sample exactly as a cell-bin one does (fusion-neutronics/core#30).
     if has_fission_xs && model.gpu_fission_bank {
         return run_neutron_per_history_fissile(
             model,
@@ -2427,6 +2392,12 @@ fn run_neutron_per_history_fissile(
     let per_thread_words = total_out_len.max(spill_cap).max(1);
     let mem_safe_max = ((64usize * 1024 * 1024) / per_thread_words).max(1);
     let chunk = launch_chunk_size(mem_safe_max);
+    // A mesh tally switches every launch of this loop to the direct per-source
+    // mode (issue #234): each voxel crossing scores straight into `src_acc`
+    // under the history's SOURCE index, which the generation launches carry
+    // through `bank_source_idx`, so a descendant's mesh contributions fold into
+    // its source's sample before squaring (fusion-neutronics/core#30).
+    let has_mesh = pack.mesh_kind.iter().any(|&k| k != MESH_NONE);
 
     // This path is only entered when `model.gpu_fission_bank` is on.
     let fission_bank = FissionBankInputs::on();
@@ -2505,11 +2476,7 @@ fn run_neutron_per_history_fissile(
             &fission_bank,
             bank_capacity,
             max_steps,
-            TallyVarianceMode::PerSource {
-                chunk_sources: chunk_sources as u32,
-                total_bins: total_out_len as u32,
-                source_idx: None,
-            },
+            per_source_variance(has_mesh, chunk_sources as u32, total_out_len as u32, None),
         )?;
         lost.absorb(
             &kernel.lost,
@@ -2557,7 +2524,7 @@ fn run_neutron_per_history_fissile(
             survival,
             &fission_bank,
             max_steps,
-            false,
+            has_mesh,
             chunk,
             chunk_sources,
             total_out_len,

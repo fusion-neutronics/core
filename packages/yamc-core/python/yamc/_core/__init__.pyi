@@ -1938,12 +1938,11 @@ class Model:
         r"""
         Whether the GPU banks fission progeny on the device.
         
-        Default `True`, and inert without fissile material or on the CPU. Turn
-        it off to run a fissile model with a mesh tally on the GPU, which the
-        dispatch otherwise refuses: the combination of per-source accumulation
-        across fission generations and direct mesh scoring is not wired up.
-        The cost is that fission progeny are not banked on the device, so the
-        run takes the non-fissile loop, which is why the mesh path works.
+        Default `True`, and inert without fissile material or on the CPU. With
+        it on, a fissile model's fission progeny are transported in later
+        launches and folded into their source neutron's variance sample, cell
+        and mesh tallies alike. Off, the kernel multiplies the weight by nu_bar
+        in-thread instead, the pre-bank approximation kept for comparison.
         """
     @gpu_fission_bank.setter
     def gpu_fission_bank(self, value: builtins.bool) -> None: ...
