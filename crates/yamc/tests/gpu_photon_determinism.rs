@@ -271,6 +271,8 @@ fn launch(
         &inputs.doppler.binding_energy,
         &inputs.doppler.profile_pdf,
         &inputs.doppler.profile_cdf,
+        &inputs.doppler.profile_tail_slope,
+        &inputs.doppler.profile_negative_mass,
         &inputs.doppler.n_shells,
         &inputs.doppler.has_data,
         &inputs.doppler.subshell_idx,

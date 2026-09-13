@@ -60,6 +60,8 @@ fn gpu_compton_doppler_matches_cpu_distribution() {
             &dop.binding_energy,
             &dop.profile_pdf,
             &dop.profile_cdf,
+            &dop.profile_tail_slope,
+            &dop.profile_negative_mass,
         );
 
         let mut rng = rand::rngs::StdRng::seed_from_u64(0xD0FF);

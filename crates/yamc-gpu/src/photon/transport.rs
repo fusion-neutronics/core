@@ -92,7 +92,7 @@ pub const PHOTON_BOUNDARY_VACUUM: u32 = 1;
 /// more storage buffers than the adapter advertises aliases bindings and
 /// produces garbage reads that look like physics bugs. Kept in lockstep with
 /// the kernel signature by `photon_kernel_storage_buffer_count_matches_signature`.
-pub const PHOTON_KERNEL_STORAGE_BUFFER_COUNT: u32 = 84;
+pub const PHOTON_KERNEL_STORAGE_BUFFER_COUNT: u32 = 86;
 
 /// `run_params` slot holding the model's `photon_cutoff_energy` in eV (issue
 /// #286). One buffer carries the per-run scalars so adding another costs a slot
@@ -285,14 +285,17 @@ fn multi_cell_photon_transport_kernel(
     // `compton_doppler` sampler ported to GPU). Per-material:
     // shell occupancy `dop_electron_pdf[m * MAX_SHELLS + s]`,
     // binding energies `dop_binding_energy[...]`, J(p_z) profile
-    // and CDF on a shared pz grid. `dop_has_data[m]` gates whether
-    // the kernel applies Doppler -- otherwise falls back to free
-    // Klein-Nishina E_out.
+    // and CDF on a shared pz grid, plus the log-linear tail slope and
+    // the negative-branch mass per shell (core#22). `dop_has_data[m]`
+    // gates whether the kernel applies Doppler -- otherwise falls back
+    // to free Klein-Nishina E_out.
     dop_pz_grid: &[f64],
     dop_electron_pdf: &[f64],
     dop_binding_energy: &[f64],
     dop_profile_pdf: &[f64],
     dop_profile_cdf: &[f64],
+    dop_tail_slope: &[f64],
+    dop_negative_mass: &[f64],
     dop_n_shells: &[u32],
     dop_has_data: &[u32],
     // Compton-profile shell -> constituent atomic-relaxation subshells, letting
@@ -2796,9 +2799,10 @@ fn multi_cell_photon_transport_kernel(
 
                             // ---------- Compton Doppler broadening ----------
                             // Shared `compton_doppler_sample` helper -- single
-                            // source of truth, unit-tested vs the CPU
-                            // `compton_doppler`. Byte-identical: same 3 draws,
-                            // same kinematics; returns e_out_kn when skipped.
+                            // source of truth, tested against the CPU
+                            // `compton_doppler` distribution. Same algorithm
+                            // (Kaltiaisenaho / OpenMC 4036, core#22); returns
+                            // e_out_kn when no shell is accessible.
                             let e_out_kn = alpha_out * MASS_ELECTRON_EV;
                             // Doppler profiles keyed by the per-collision-
                             // selected element slab (task #72).
@@ -2815,6 +2819,8 @@ fn multi_cell_photon_transport_kernel(
                                 dop_binding_energy,
                                 dop_profile_pdf,
                                 dop_profile_cdf,
+                                dop_tail_slope,
+                                dop_negative_mass,
                             );
                             state = ds.state;
                             let e_out_final = ds.e_out;
@@ -3670,6 +3676,8 @@ pub fn run_multi_cell_photon_transport(
     dop_binding_energy: &[f64],
     dop_profile_pdf: &[f64],
     dop_profile_cdf: &[f64],
+    dop_tail_slope: &[f64],
+    dop_negative_mass: &[f64],
     dop_n_shells: &[u32],
     dop_has_data: &[u32],
     dop_subshell_idx: &[u32],
@@ -3895,6 +3903,8 @@ pub fn run_multi_cell_photon_transport(
     let dop_binding_energy_h = client.create_from_slice(bytemuck::cast_slice(dop_binding_energy));
     let dop_profile_pdf_h = client.create_from_slice(bytemuck::cast_slice(dop_profile_pdf));
     let dop_profile_cdf_h = client.create_from_slice(bytemuck::cast_slice(dop_profile_cdf));
+    let dop_tail_slope_h = client.create_from_slice(bytemuck::cast_slice(dop_tail_slope));
+    let dop_negative_mass_h = client.create_from_slice(bytemuck::cast_slice(dop_negative_mass));
     let dop_n_shells_h = client.create_from_slice(bytemuck::cast_slice(dop_n_shells));
     let dop_has_data_h = client.create_from_slice(bytemuck::cast_slice(dop_has_data));
     let dop_subshell_idx_h = client.create_from_slice(bytemuck::cast_slice(dop_subshell_idx));
@@ -4077,6 +4087,8 @@ pub fn run_multi_cell_photon_transport(
             BufferArg::from_raw_parts(dop_binding_energy_h, dop_binding_energy.len()),
             BufferArg::from_raw_parts(dop_profile_pdf_h, dop_profile_pdf.len()),
             BufferArg::from_raw_parts(dop_profile_cdf_h, dop_profile_cdf.len()),
+            BufferArg::from_raw_parts(dop_tail_slope_h, dop_tail_slope.len()),
+            BufferArg::from_raw_parts(dop_negative_mass_h, dop_negative_mass.len()),
             BufferArg::from_raw_parts(dop_n_shells_h, dop_n_shells.len()),
             BufferArg::from_raw_parts(dop_has_data_h, dop_has_data.len()),
             BufferArg::from_raw_parts(dop_subshell_idx_h, dop_subshell_idx.len()),
