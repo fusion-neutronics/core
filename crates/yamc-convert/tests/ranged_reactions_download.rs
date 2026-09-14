@@ -1,8 +1,9 @@
 //! Fetching only the MTs a chain names must load the same cross sections as
 //! fetching the whole `reactions.arrow`.
 //!
-//! The converter publishes a byte range for every MT's record batch, so an
-//! activation load fetches a few ranges instead of a multi-megabyte object. The
+//! The converter publishes a byte range for every (MT, temperature) record
+//! batch, so an activation load fetches a few ranges instead of a
+//! multi-megabyte object. The
 //! bytes are spliced into an Arrow IPC stream and cached under `subset/`, which
 //! is a different framing and a different path from anything the loader read
 //! before. Both have to come out at the same numbers, and the cache must not let
