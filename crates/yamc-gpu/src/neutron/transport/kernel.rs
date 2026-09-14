@@ -1176,6 +1176,166 @@ pub(crate) fn cyl_mesh_bin_at_kernel(
     out
 }
 
+/// Outcome of [`bank_fission_progeny`]: the advanced PCG state and the
+/// history's secondary ordinal after the banked progeny were numbered.
+#[derive(CubeType)]
+pub struct BankedProgeny {
+    pub state: u64,
+    pub walk_secondaries: u32,
+}
+
+/// Append `n_to_bank` fission progeny of one collision to the device bank,
+/// each with an independent chi energy and an independent isotropic-in-lab
+/// direction built about the incident direction `(dx, dy, dz)`, carrying
+/// `weight` and the source index of the walk that fissioned.
+///
+/// Two callers share it. The analog fission branch continues progeny 0 as the
+/// current walk and banks the other N-1. The survival-biased collision banks
+/// all N before the reaction split, because under implicit capture fission
+/// never happens to the survivor: OpenMC's `sample_neutron_reaction` creates
+/// the fission sites from the un-discounted weight first, then discounts by
+/// absorption including fission, then the survivor scatters
+/// (fusion-neutronics/core#25). The loop is comptime-bounded at
+/// `FISSION_BANK_PROGENY_CAP` and guarded by `k < n_to_bank`, so its draw
+/// schedule (one chi draw, one mu draw, one azimuth draw per progeny) is the
+/// same as the CPU twin's `push_fission_progeny`.
+#[cube]
+#[allow(clippy::too_many_arguments)]
+fn bank_fission_progeny(
+    n_to_bank: u32,
+    weight: f64,
+    e_incident: f64,
+    px: f64,
+    py: f64,
+    pz: f64,
+    dx: f64,
+    dy: f64,
+    dz: f64,
+    cell: u32,
+    my_source_idx: u32,
+    walk_seed: u32,
+    walk_secondaries_in: u32,
+    state_in: u64,
+    mat_idx: u32,
+    beta_delayed: f64,
+    watt_a: f64,
+    watt_b: f64,
+    fission_eout_kind_per_material: &[u32],
+    fission_eout_n_energies_per_material: &[u32],
+    fission_eout_ae_offset: &[u32],
+    fission_eout_energy_grid_per_material: &[f64],
+    fission_eout_n_x_per_material: &[u32],
+    fission_eout_x_offset: &[u32],
+    fission_eout_x_per_material: &[f64],
+    fission_eout_cdf_per_material: &[f64],
+    fission_eout_p_per_material: &[f64],
+    fission_eout_interp_per_material: &[u32],
+    bank_f64: &mut [f64],
+    bank_u32: &mut [u32],
+    bank_count: &mut [Atomic<u64>],
+    bank_overflow: &mut [Atomic<u64>],
+    bank_source_idx: &mut [u32],
+) -> BankedProgeny {
+    let mut state = state_in;
+    let mut walk_secondaries = walk_secondaries_in;
+    let cap_prog = 8u32; // FISSION_BANK_PROGENY_CAP
+    let mut k = 0u32;
+    while k < cap_prog {
+        if k < n_to_bank {
+            // Independent chi energy.
+            let chi = sample_fission_progeny_energy(
+                e_incident,
+                mat_idx,
+                beta_delayed,
+                watt_a,
+                watt_b,
+                fission_eout_kind_per_material,
+                fission_eout_n_energies_per_material,
+                fission_eout_ae_offset,
+                fission_eout_energy_grid_per_material,
+                fission_eout_n_x_per_material,
+                fission_eout_x_offset,
+                fission_eout_x_per_material,
+                fission_eout_cdf_per_material,
+                fission_eout_p_per_material,
+                fission_eout_interp_per_material,
+                state,
+            );
+            state = chi.state;
+            let e_bank = chi.e_out;
+
+            // Isotropic-in-lab direction: uniform mu in [-1, 1] plus a
+            // `TAU * xi` azimuth (ONE draw, like every other azimuth in this
+            // kernel since #136 / #111), rotating the incident direction.
+            let d_mu = crate::common::pcg32::draw_uniform(state);
+            state = d_mu.state;
+            let mu_b = 1.0 - 2.0 * d_mu.xi;
+            let mphi_b = crate::common::sampling::marsaglia_phi::azimuth_cos_sin_phi(state);
+            state = mphi_b.state;
+            let cos_phi_b = mphi_b.cos_phi;
+            let sin_phi_b = mphi_b.sin_phi;
+            let sin_th_sq_b = 1.0 - mu_b * mu_b;
+            let mut sin_th_b = 0.0;
+            if sin_th_sq_b > 0.0 {
+                sin_th_b = sin_th_sq_b.sqrt();
+            }
+            let one_minus_w_sq_b = 1.0 - dz * dz;
+            let mut bdx = sin_th_b * cos_phi_b;
+            let mut bdy = sin_th_b * sin_phi_b;
+            let mut bdz = mu_b;
+            if dz < 0.0 {
+                bdy = -bdy;
+                bdz = -mu_b;
+            }
+            if one_minus_w_sq_b > 1e-14 {
+                let sin_phi_w_b = one_minus_w_sq_b.sqrt();
+                bdx = mu_b * dx + sin_th_b * (dx * dz * cos_phi_b - dy * sin_phi_b) / sin_phi_w_b;
+                bdy = mu_b * dy + sin_th_b * (dy * dz * cos_phi_b + dx * sin_phi_b) / sin_phi_w_b;
+                bdz = mu_b * dz - sin_th_b * sin_phi_w_b * cos_phi_b;
+            }
+
+            // The progeny's own collision stream, fixed by its place in the
+            // emission tree (issue #111 / #322). Derived before the capacity
+            // check so the numbering cannot depend on how full the bank was.
+            let f_seed = crate::common::pcg32::secondary_seed(walk_seed, walk_secondaries);
+
+            let fcap = (bank_f64.len() / 8) as u64;
+            let fslot = bank_count[0].fetch_add(1u64);
+            if fslot < fcap {
+                let f = (fslot * 8u64) as usize;
+                bank_f64[f] = e_bank;
+                bank_f64[f + 1] = px;
+                bank_f64[f + 2] = py;
+                bank_f64[f + 3] = pz;
+                bank_f64[f + 4] = bdx;
+                bank_f64[f + 5] = bdy;
+                bank_f64[f + 6] = bdz;
+                bank_f64[f + 7] = weight;
+                let u = (fslot * 4u64) as usize;
+                bank_u32[u] = PTYPE_NEUTRON;
+                bank_u32[u + 1] = cell;
+                bank_u32[u + 2] = f_seed;
+                // `gen` is informational; the host bounds the drain by counting
+                // passes.
+                bank_u32[u + 3] = 1u32;
+                // Per-source variance (issue #233 Stage 2): the SOURCE neutron
+                // this progeny descends from, inherited through generations.
+                bank_source_idx[fslot as usize] = my_source_idx;
+            } else {
+                bank_overflow[0].fetch_add(1u64);
+            }
+            // Advance the ordinal whether the progeny made it into the bank or
+            // overflowed, so its key never depends on the capacity.
+            walk_secondaries += 1u32;
+        }
+        k += 1u32;
+    }
+    BankedProgeny {
+        state,
+        walk_secondaries,
+    }
+}
+
 #[allow(clippy::manual_clamp, clippy::assign_op_pattern, clippy::identity_op)]
 #[cube(launch_unchecked)]
 pub(crate) fn multi_cell_transport_kernel(
@@ -3805,33 +3965,108 @@ pub(crate) fn multi_cell_transport_kernel(
                 let d_xi2 = crate::common::pcg32::draw_uniform(state);
                 state = d_xi2.state;
                 let xi2 = d_xi2.xi;
-                // Survival biasing (implicit capture): when enabled and the
-                // scatter+fission mass is positive, renormalise the
-                // selection over `sigma_sf = sigma_e + sigma_i + sigma_f`
-                // (drop the capture mass) and discount the weight by
-                // `sigma_sf / sigma_t`. The `xi2` draw above is unchanged, so
-                // an OFF run keeps the analog branch boundaries and RNG
-                // schedule byte-for-byte. A pure absorber (`sigma_sf == 0`)
-                // falls through to the analog kill below.
+                // Survival biasing (implicit capture). With the device fission
+                // bank on this is OpenMC's scheme (`sample_neutron_reaction`,
+                // fusion-neutronics/core#25): fission sites first, from the
+                // PRE-discount weight and scaled by `sigma_f / sigma_t`, since
+                // under implicit capture fission never happens to the
+                // survivor; then the weight is discounted by absorption
+                // INCLUDING fission, `weight *= (sigma_e + sigma_i) / sigma_t`;
+                // then the survivor always scatters, split between elastic and
+                // inelastic only. That is what the production CPU does
+                // (`transport/mod.rs`, `survival_capture`), so the two backends
+                // now run the same per-history scheme on fissile materials.
+                //
+                // With the bank OFF the fission branch below is the legacy
+                // `weight *= nu_bar` multiply, which has no "bank the sites"
+                // form, so that mode keeps sampling fission analog alongside
+                // scatter over `sigma_sf = sigma_e + sigma_i + sigma_f` and
+                // discounts by `sigma_sf / sigma_t`. Either way the `xi2` draw
+                // above is unchanged, so an OFF run keeps the analog branch
+                // boundaries and RNG schedule byte-for-byte, and a pure
+                // absorber falls through to the analog kill below.
                 // Reaction-type split runs against the SELECTED nuclide's
                 // partials (#74 Stage 2b). For single-nuclide materials the
                 // `*_rx` values equal the material-aggregate (URR-perturbed)
                 // `sigma_*` exactly, and `sigma_t_rx == sigma_t`, so the split
                 // is byte-identical to the pre-Stage-2b flow.
                 let survival_on = survival_params[0] != 0.0;
+                let bank_on = fission_bank_enabled[0] == 1u32;
                 let sigma_t_rx = sigma_e_rx + sigma_a_rx + sigma_i_rx + sigma_f_rx;
-                let sigma_sf = sigma_e_rx + sigma_i_rx + sigma_f_rx;
+                let sigma_scatter_rx = sigma_e_rx + sigma_i_rx;
+                // The mass the survivor's selection runs over; the fission
+                // share is dropped from it under the banked survival scheme.
+                let mut sigma_sf = sigma_scatter_rx + sigma_f_rx;
                 let mut sel_denom = sigma_t_rx;
-                if survival_on && sigma_sf > 0.0 {
+                if survival_on && bank_on && sigma_scatter_rx > 0.0 {
+                    if sigma_f_rx > 0.0 {
+                        // Expected fission neutrons per collision is nu_bar
+                        // times the fission probability; stochastically round
+                        // it (the CPU `sample_fission_neutrons` rounding) and
+                        // bank every one from the pre-discount weight.
+                        let nu_eff = nu_bar * (sigma_f_rx / sigma_t_rx);
+                        let d_nr = crate::common::pcg32::draw_uniform(state);
+                        state = d_nr.state;
+                        let n_floor = nu_eff as u32;
+                        let frac_nr = nu_eff - (n_floor as f64);
+                        let mut n_bank = n_floor;
+                        if d_nr.xi < frac_nr {
+                            n_bank = n_floor + 1u32;
+                        }
+                        let watt_a_sv = mat_f64_meta[(mat_meta_off + 2u32) as usize];
+                        let watt_b_sv = mat_f64_meta[(mat_meta_off + 3u32) as usize];
+                        let bp = bank_fission_progeny(
+                            n_bank,
+                            weight,
+                            energy,
+                            px,
+                            py,
+                            pz,
+                            dx,
+                            dy,
+                            dz,
+                            cell,
+                            my_source_idx,
+                            walk_seed,
+                            walk_secondaries,
+                            state,
+                            mat_idx,
+                            beta_delayed,
+                            watt_a_sv,
+                            watt_b_sv,
+                            fission_eout_kind_per_material,
+                            fission_eout_n_energies_per_material,
+                            fission_eout_ae_offset,
+                            fission_eout_energy_grid_per_material,
+                            fission_eout_n_x_per_material,
+                            fission_eout_x_offset,
+                            fission_eout_x_per_material,
+                            fission_eout_cdf_per_material,
+                            fission_eout_p_per_material,
+                            fission_eout_interp_per_material,
+                            bank_f64,
+                            bank_u32,
+                            bank_count,
+                            bank_overflow,
+                            bank_source_idx,
+                        );
+                        state = bp.state;
+                        walk_secondaries = bp.walk_secondaries;
+                    }
+                    sel_denom = sigma_scatter_rx;
+                    weight = weight * (sigma_scatter_rx / sigma_t_rx);
+                    sigma_sf = sigma_scatter_rx;
+                } else if survival_on && sigma_sf > 0.0 {
                     sel_denom = sigma_sf;
                     weight = weight * (sigma_sf / sigma_t_rx);
                 }
                 let p_elastic = sigma_e_rx / sel_denom;
-                let p_scatter = (sigma_e_rx + sigma_i_rx) / sel_denom;
-                // With survival biasing on (and `sigma_sf > 0`) the capture
-                // mass is gone, so `p_fission_or_scatter == 1.0` and the
-                // absorption-kill branch is never taken. Off (or pure
-                // absorber): the analog `sigma_sf / sigma_t_rx` threshold.
+                let p_scatter = sigma_scatter_rx / sel_denom;
+                // With survival biasing on the capture mass is gone (and under
+                // the banked scheme so is the fission arm), so
+                // `p_fission_or_scatter == 1.0` and the absorption-kill branch
+                // is never taken. Off (or pure absorber): the analog
+                // `sigma_sf / sigma_t_rx` threshold.
                 let p_fission_or_scatter = sigma_sf / sel_denom;
 
                 if xi2 >= p_fission_or_scatter {
@@ -5230,144 +5465,50 @@ pub(crate) fn multi_cell_transport_kernel(
                                 alive = 0u32;
                             }
 
-                            // Bank progeny 1..N (comptime-bounded loop, guarded
-                            // by `prog < n_prog`, mirroring the photon-emission
-                            // loop). Each banked neutron gets an INDEPENDENT chi
-                            // energy + isotropic direction, and carries the
-                            // current weight.
-                            let cap_prog = 8u32; // FISSION_BANK_PROGENY_CAP
-                            let mut prog = 1u32;
-                            while prog < cap_prog {
-                                if prog < n_prog {
-                                    // Independent chi energy.
-                                    let chi = sample_fission_progeny_energy(
-                                        e_incident_fis,
-                                        mat_idx,
-                                        beta_delayed,
-                                        watt_a_fis,
-                                        watt_b_fis,
-                                        fission_eout_kind_per_material,
-                                        fission_eout_n_energies_per_material,
-                                        fission_eout_ae_offset,
-                                        fission_eout_energy_grid_per_material,
-                                        fission_eout_n_x_per_material,
-                                        fission_eout_x_offset,
-                                        fission_eout_x_per_material,
-                                        fission_eout_cdf_per_material,
-                                        fission_eout_p_per_material,
-                                        fission_eout_interp_per_material,
-                                        state,
-                                    );
-                                    state = chi.state;
-                                    let e_bank = chi.e_out;
-
-                                    // Isotropic-in-lab direction: uniform μ in
-                                    // [-1, 1] + a `TAU * xi` azimuth (ONE draw,
-                                    // like every other azimuth in this kernel
-                                    // since #136 / #111), rotating the incident
-                                    // direction (dx, dy, dz). Same construction
-                                    // the continuing walk uses, so each banked
-                                    // progeny is independently isotropic in lab.
-                                    // Marsaglia rejection used to sample this
-                                    // one, which spent a VARIABLE number of
-                                    // draws (2 to 16) and so put the rest of the
-                                    // walk on a different stream position from
-                                    // the CPU's single-draw `TAU * next_xi`.
-                                    let d_mu = crate::common::pcg32::draw_uniform(state);
-                                    state = d_mu.state;
-                                    let mu_b = 1.0 - 2.0 * d_mu.xi;
-                                    let mphi_b =
-                                        crate::common::sampling::marsaglia_phi::azimuth_cos_sin_phi(
-                                            state,
-                                        );
-                                    state = mphi_b.state;
-                                    let cos_phi_b = mphi_b.cos_phi;
-                                    let sin_phi_b = mphi_b.sin_phi;
-                                    let sin_th_sq_b = 1.0 - mu_b * mu_b;
-                                    let mut sin_th_b = 0.0;
-                                    if sin_th_sq_b > 0.0 {
-                                        sin_th_b = sin_th_sq_b.sqrt();
-                                    }
-                                    let one_minus_w_sq_b = 1.0 - dz * dz;
-                                    let mut bdx = sin_th_b * cos_phi_b;
-                                    let mut bdy = sin_th_b * sin_phi_b;
-                                    let mut bdz = mu_b;
-                                    if dz < 0.0 {
-                                        bdy = -bdy;
-                                        bdz = -mu_b;
-                                    }
-                                    if one_minus_w_sq_b > 1e-14 {
-                                        let sin_phi_w_b = one_minus_w_sq_b.sqrt();
-                                        bdx = mu_b * dx
-                                            + sin_th_b * (dx * dz * cos_phi_b - dy * sin_phi_b)
-                                                / sin_phi_w_b;
-                                        bdy = mu_b * dy
-                                            + sin_th_b * (dy * dz * cos_phi_b + dx * sin_phi_b)
-                                                / sin_phi_w_b;
-                                        bdz = mu_b * dz - sin_th_b * sin_phi_w_b * cos_phi_b;
-                                    }
-
-                                    // The progeny's own collision stream, fixed
-                                    // by its place in the emission tree (issue
-                                    // #111 / #322), exactly as the (n,xn)
-                                    // secondaries above derive theirs -- NOT a
-                                    // drawn seed word, which cost the walk an
-                                    // extra draw the CPU never makes. Derived
-                                    // before the capacity check so the numbering
-                                    // cannot depend on how full the bank was.
-                                    let f_seed = crate::common::pcg32::secondary_seed(
-                                        walk_seed,
-                                        walk_secondaries,
-                                    );
-
-                                    // Append to the device bank (inlined atomic
-                                    // fetch-add slot reservation + record write,
-                                    // mirroring the photon-emission append).
-                                    let fcap = (bank_f64.len() / 8) as u64;
-                                    let fslot = bank_count[0].fetch_add(1u64);
-                                    if fslot < fcap {
-                                        let f = (fslot * 8u64) as usize;
-                                        bank_f64[f] = e_bank;
-                                        bank_f64[f + 1] = px;
-                                        bank_f64[f + 2] = py;
-                                        bank_f64[f + 3] = pz;
-                                        bank_f64[f + 4] = bdx;
-                                        bank_f64[f + 5] = bdy;
-                                        bank_f64[f + 6] = bdz;
-                                        bank_f64[f + 7] = weight;
-                                        let u = (fslot * 4u64) as usize;
-                                        bank_u32[u] = PTYPE_NEUTRON;
-                                        bank_u32[u + 1] = cell;
-                                        bank_u32[u + 2] = f_seed;
-                                        // `gen` field is informational; the host
-                                        // enforces the generation cap by counting
-                                        // bank-drain passes (a banked neutron that
-                                        // fissions again appends to the bank the
-                                        // host re-drains next pass).
-                                        bank_u32[u + 3] = 1u32;
-                                        // Per-source variance (issue #233 Stage 2):
-                                        // stamp this progeny with the SOURCE neutron
-                                        // it descends from (inherited transitively
-                                        // through generations), so its contributions
-                                        // fold into that source's variance sample.
-                                        // Written unconditionally (a size-1 dummy
-                                        // when per_source_var is off, but the fission
-                                        // bank is only exercised on the neutron
-                                        // path); `fslot < fcap` guards the index.
-                                        bank_source_idx[fslot as usize] = my_source_idx;
-                                    } else {
-                                        bank_overflow[0].fetch_add(1u64);
-                                    }
-                                    // Advance the ordinal whether the progeny
-                                    // made it into the bank or overflowed, so
-                                    // its key never depends on the capacity --
-                                    // the same rule the (n,xn) secondaries
-                                    // above follow, and the numbering the CPU
-                                    // `ParticleBank` gives the same progeny.
-                                    walk_secondaries += 1u32;
-                                }
-                                prog += 1u32;
+                            // Bank progeny 1..N: the helper draws each one an
+                            // independent chi energy and isotropic direction and
+                            // appends it with the current (unchanged) weight.
+                            let mut n_bank = 0u32;
+                            if n_prog > 0u32 {
+                                n_bank = n_prog - 1u32;
                             }
+                            let bp = bank_fission_progeny(
+                                n_bank,
+                                weight,
+                                e_incident_fis,
+                                px,
+                                py,
+                                pz,
+                                dx,
+                                dy,
+                                dz,
+                                cell,
+                                my_source_idx,
+                                walk_seed,
+                                walk_secondaries,
+                                state,
+                                mat_idx,
+                                beta_delayed,
+                                watt_a_fis,
+                                watt_b_fis,
+                                fission_eout_kind_per_material,
+                                fission_eout_n_energies_per_material,
+                                fission_eout_ae_offset,
+                                fission_eout_energy_grid_per_material,
+                                fission_eout_n_x_per_material,
+                                fission_eout_x_offset,
+                                fission_eout_x_per_material,
+                                fission_eout_cdf_per_material,
+                                fission_eout_p_per_material,
+                                fission_eout_interp_per_material,
+                                bank_f64,
+                                bank_u32,
+                                bank_count,
+                                bank_overflow,
+                                bank_source_idx,
+                            );
+                            state = bp.state;
+                            walk_secondaries = bp.walk_secondaries;
                         }
                     }
                     // Shared angular sampling: Marsaglia rejection

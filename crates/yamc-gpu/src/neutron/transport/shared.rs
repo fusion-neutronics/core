@@ -660,6 +660,89 @@ fn fission_progeny_energy_cpu(
     fission_chi_cpu(inputs, chi_row, mat_idx, e_in, state)
 }
 
+/// Queue `n_to_bank` fission progeny of one collision for this history, the
+/// twin of the kernel's `bank_fission_progeny`: each gets an independent chi
+/// energy and an independent isotropic-in-lab direction (a uniform mu then a
+/// `TAU * xi` azimuth, ONE draw, as the kernel and the production CPU both do)
+/// built about the incident direction, and carries `weight`. The kernel sends
+/// these to the device bank for the host to drain; the twin transports them
+/// in-thread, which is the same physics because each progeny's collision
+/// stream is keyed on its place in the emission tree (issue #322). Capped
+/// exactly as the kernel's comptime-bounded loop is, and gated the same way,
+/// so the two draw the same schedule.
+#[allow(clippy::too_many_arguments)]
+fn push_fission_progeny(
+    inputs: &TransportInputs<'_>,
+    n_to_bank: u32,
+    weight: f64,
+    e_incident: f64,
+    (px, py, pz): (f64, f64, f64),
+    (dx, dy, dz): (f64, f64, f64),
+    mat_idx: usize,
+    beta_delayed: f64,
+    walk_seed: u32,
+    walk_secondaries: &mut u32,
+    state: &mut u64,
+    pend: &mut Vec<PendEntry>,
+) {
+    let cap_prog = 8u32; // FISSION_BANK_PROGENY_CAP
+    let mut k = 0u32;
+    while k < cap_prog {
+        if k < n_to_bank {
+            let e_bank =
+                fission_progeny_energy_cpu(inputs, mat_idx, beta_delayed, e_incident, state);
+            let (xi_mu, st_mu) = crate::common::pcg32::draw_uniform_cpu(*state);
+            *state = st_mu;
+            let mu_b = 1.0 - 2.0 * xi_mu;
+            let s_phb = *state;
+            let r_phb = pcg_out(s_phb);
+            *state = s_phb.wrapping_mul(PCG_MULT).wrapping_add(PCG_INCR);
+            let xi_phb = (r_phb as f64 + 1.0) * (1.0 / 4_294_967_297.0);
+            let phi_b = std::f64::consts::TAU * xi_phb;
+            let cos_phi_b = phi_b.cos();
+            let sin_phi_b = phi_b.sin();
+            let sin_th_sq_b = 1.0 - mu_b * mu_b;
+            let sin_th_b = if sin_th_sq_b > 0.0 {
+                sin_th_sq_b.sqrt()
+            } else {
+                0.0
+            };
+            let one_minus_w_sq_b = 1.0 - dz * dz;
+            let mut bdx = sin_th_b * cos_phi_b;
+            let mut bdy = sin_th_b * sin_phi_b;
+            let mut bdz = mu_b;
+            if dz < 0.0 {
+                bdy = -bdy;
+                bdz = -mu_b;
+            }
+            if one_minus_w_sq_b > 1e-14 {
+                let sin_phi_w_b = one_minus_w_sq_b.sqrt();
+                bdx = mu_b * dx + sin_th_b * (dx * dz * cos_phi_b - dy * sin_phi_b) / sin_phi_w_b;
+                bdy = mu_b * dy + sin_th_b * (dy * dz * cos_phi_b + dx * sin_phi_b) / sin_phi_w_b;
+                bdz = mu_b * dz - sin_th_b * sin_phi_w_b * cos_phi_b;
+            }
+            // `nxn: false` keeps it out of `n_spilled` / the depth counters:
+            // those track the kernel's REGISTER queue for (n,xn) secondaries,
+            // and a fission progeny never enters it (the kernel always sends
+            // these to the device bank).
+            pend.push(PendEntry {
+                seed: secondary_seed(walk_seed, *walk_secondaries),
+                nxn: false,
+                energy: e_bank,
+                px,
+                py,
+                pz,
+                dx: bdx,
+                dy: bdy,
+                dz: bdz,
+                weight,
+            });
+            *walk_secondaries += 1;
+        }
+        k += 1;
+    }
+}
+
 /// CPU twin of the kernel's `sample_fission_chi`: sample one fission outgoing
 /// energy from chi row `chi_row` at incident energy `e_in`, advancing `state`
 /// exactly as the kernel does (so the continuing fission progeny's RNG stream
@@ -1427,19 +1510,57 @@ pub(super) fn transport_one_particle(
                 state = s_xi2.wrapping_mul(PCG_MULT).wrapping_add(PCG_INCR);
                 let xi2 = (r_xi2 as f64 + 1.0) * (1.0 / 4_294_967_297.0);
                 // Survival biasing (implicit capture): exact twin of the
-                // kernel branch. The reaction split runs against the SELECTED
-                // nuclide's partials; single-nuclide => `*_rx == sigma_*`,
-                // `sigma_t_rx == sigma_t`, byte-identical.
+                // kernel branch. With the fission bank on this is OpenMC's
+                // scheme (fusion-neutronics/core#25): fission sites first from
+                // the PRE-discount weight scaled by `sigma_f / sigma_t`, then
+                // the weight discounted by absorption including fission, then
+                // the survivor always scatters. With the bank off the legacy
+                // weight-multiply fission stays analog alongside scatter. The
+                // reaction split runs against the SELECTED nuclide's partials;
+                // single-nuclide => `*_rx == sigma_*`, `sigma_t_rx == sigma_t`,
+                // byte-identical.
                 let survival_on = inputs.survival_enabled;
+                let bank_on = inputs.fission_bank_enabled;
                 let sigma_t_rx = sigma_e_rx + sigma_a_rx + sigma_i_rx + sigma_f_rx;
-                let sigma_sf = sigma_e_rx + sigma_i_rx + sigma_f_rx;
+                let sigma_scatter_rx = sigma_e_rx + sigma_i_rx;
+                let mut sigma_sf = sigma_scatter_rx + sigma_f_rx;
                 let mut sel_denom = sigma_t_rx;
-                if survival_on && sigma_sf > 0.0 {
+                if survival_on && bank_on && sigma_scatter_rx > 0.0 {
+                    if sigma_f_rx > 0.0 {
+                        let nu_eff = nu_bar * (sigma_f_rx / sigma_t_rx);
+                        let (xi_nr, st_nr) = crate::common::pcg32::draw_uniform_cpu(state);
+                        state = st_nr;
+                        let n_floor = nu_eff as u32;
+                        let frac_nr = nu_eff - (n_floor as f64);
+                        let n_bank = if xi_nr < frac_nr {
+                            n_floor + 1
+                        } else {
+                            n_floor
+                        };
+                        push_fission_progeny(
+                            inputs,
+                            n_bank,
+                            weight,
+                            energy,
+                            (px, py, pz),
+                            (dx, dy, dz),
+                            mat_idx,
+                            beta_delayed,
+                            walk_seed,
+                            &mut walk_secondaries,
+                            &mut state,
+                            &mut pend,
+                        );
+                    }
+                    sel_denom = sigma_scatter_rx;
+                    weight *= sigma_scatter_rx / sigma_t_rx;
+                    sigma_sf = sigma_scatter_rx;
+                } else if survival_on && sigma_sf > 0.0 {
                     sel_denom = sigma_sf;
                     weight *= sigma_sf / sigma_t_rx;
                 }
                 let p_elastic = sigma_e_rx / sel_denom;
-                let p_scatter = (sigma_e_rx + sigma_i_rx) / sel_denom;
+                let p_scatter = sigma_scatter_rx / sel_denom;
                 let p_fission_or_scatter = sigma_sf / sel_denom;
 
                 if xi2 >= p_fission_or_scatter {
@@ -1862,81 +1983,23 @@ pub(super) fn transport_one_particle(
                             if n_prog == 0 {
                                 alive = 0;
                             }
-                            // Progeny 1..N: each gets an independent chi energy
-                            // and an independent isotropic-in-lab direction (a
-                            // uniform μ then a `TAU * xi` azimuth, ONE draw, as
-                            // the kernel and the production CPU both do), built
-                            // about the INCIDENT direction. Capped exactly as the
-                            // kernel's comptime-bounded loop is.
-                            let cap_prog = 8u32; // FISSION_BANK_PROGENY_CAP
-                            let mut prog = 1u32;
-                            while prog < cap_prog {
-                                if prog < n_prog {
-                                    let e_bank = fission_progeny_energy_cpu(
-                                        inputs,
-                                        mat_idx,
-                                        beta_delayed,
-                                        e_incident_fis,
-                                        &mut state,
-                                    );
-                                    let (xi_mu, st_mu) =
-                                        crate::common::pcg32::draw_uniform_cpu(state);
-                                    state = st_mu;
-                                    let mu_b = 1.0 - 2.0 * xi_mu;
-                                    let s_phb = state;
-                                    let r_phb = pcg_out(s_phb);
-                                    state = s_phb.wrapping_mul(PCG_MULT).wrapping_add(PCG_INCR);
-                                    let xi_phb = (r_phb as f64 + 1.0) * (1.0 / 4_294_967_297.0);
-                                    let phi_b = std::f64::consts::TAU * xi_phb;
-                                    let cos_phi_b = phi_b.cos();
-                                    let sin_phi_b = phi_b.sin();
-                                    let sin_th_sq_b = 1.0 - mu_b * mu_b;
-                                    let sin_th_b = if sin_th_sq_b > 0.0 {
-                                        sin_th_sq_b.sqrt()
-                                    } else {
-                                        0.0
-                                    };
-                                    let one_minus_w_sq_b = 1.0 - dz * dz;
-                                    let mut bdx = sin_th_b * cos_phi_b;
-                                    let mut bdy = sin_th_b * sin_phi_b;
-                                    let mut bdz = mu_b;
-                                    if dz < 0.0 {
-                                        bdy = -bdy;
-                                        bdz = -mu_b;
-                                    }
-                                    if one_minus_w_sq_b > 1e-14 {
-                                        let sin_phi_w_b = one_minus_w_sq_b.sqrt();
-                                        bdx = mu_b * dx
-                                            + sin_th_b * (dx * dz * cos_phi_b - dy * sin_phi_b)
-                                                / sin_phi_w_b;
-                                        bdy = mu_b * dy
-                                            + sin_th_b * (dy * dz * cos_phi_b + dx * sin_phi_b)
-                                                / sin_phi_w_b;
-                                        bdz = mu_b * dz - sin_th_b * sin_phi_w_b * cos_phi_b;
-                                    }
-                                    // Queue it for this history. `nxn: false`
-                                    // keeps it out of `n_spilled` /
-                                    // `max_pend_depth`: those track the kernel's
-                                    // REGISTER queue for (n,xn) secondaries, and
-                                    // a fission progeny never enters it (the
-                                    // kernel always sends these to the device
-                                    // bank).
-                                    pend.push(PendEntry {
-                                        seed: secondary_seed(walk_seed, walk_secondaries),
-                                        nxn: false,
-                                        energy: e_bank,
-                                        px,
-                                        py,
-                                        pz,
-                                        dx: bdx,
-                                        dy: bdy,
-                                        dz: bdz,
-                                        weight,
-                                    });
-                                    walk_secondaries += 1;
-                                }
-                                prog += 1;
-                            }
+                            // Progeny 1..N go to this history's queue with the
+                            // current (unchanged) weight; the kernel banks them.
+                            let n_bank = n_prog.saturating_sub(1);
+                            push_fission_progeny(
+                                inputs,
+                                n_bank,
+                                weight,
+                                e_incident_fis,
+                                (px, py, pz),
+                                (dx, dy, dz),
+                                mat_idx,
+                                beta_delayed,
+                                walk_seed,
+                                &mut walk_secondaries,
+                                &mut state,
+                                &mut pend,
+                            );
                         }
                     }
 
