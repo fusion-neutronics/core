@@ -329,9 +329,18 @@ fn a_spliced_stream_transmutes_to_the_same_answer_as_the_whole_file() {
         .collect();
     assert!(!wanted.is_empty(), "chain should name MTs Fe56 carries");
 
+    // Every temperature of an MT, once each: a file written one batch per MT
+    // lists the same batch under each temperature it carries.
+    let ranges_of = |mt: i32| -> Vec<(u64, u64)> {
+        let mut r: Vec<(u64, u64)> = index.mts[&mt].values().copied().collect();
+        r.sort_unstable();
+        r.dedup();
+        r
+    };
+
     // File order, not MT order: the loader fuses the batches it reads, so the
     // order they arrive in is the row order of the fused batch.
-    let mut ranges: Vec<(u64, u64)> = wanted.iter().map(|mt| index.mts[mt]).collect();
+    let mut ranges: Vec<(u64, u64)> = wanted.iter().flat_map(|mt| ranges_of(*mt)).collect();
     ranges.sort_unstable();
     let spliced = yamc_convert::reaction_ranges::splice_stream(
         &cut(index.schema),
@@ -395,8 +404,10 @@ fn a_spliced_stream_transmutes_to_the_same_answer_as_the_whole_file() {
     // agreement could in principle be the second run being served the first
     // one's parse rather than reading the splice at all. Starving the splice of
     // capture must move the answer; if it does not, nothing here is being read.
-    let starved =
-        yamc_convert::reaction_ranges::splice_stream(&cut(index.schema), &[cut(index.mts[&16])]);
+    let starved = yamc_convert::reaction_ranges::splice_stream(
+        &cut(index.schema),
+        &ranges_of(16).into_iter().map(cut).collect::<Vec<_>>(),
+    );
     let c = activity(&run(starved));
     assert!(
         (c - b).abs() > 1e-6 * b.abs(),

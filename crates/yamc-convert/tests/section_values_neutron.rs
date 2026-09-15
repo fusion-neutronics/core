@@ -21,8 +21,9 @@
 //! cannot say:
 //!
 //! * every vendored neutron evaluation carries at most ONE temperature, so
-//!   `temperatures`, `energy_temperatures` and `xs_temperatures` are one
-//!   element lists with no permutation to catch;
+//!   `temperatures` and `energy_temperatures` are one element lists with no
+//!   permutation to catch, and every MT is a single row of `reactions.arrow`
+//!   (the writer lays a reaction out one row per (MT, temperature));
 //! * the single one that carries unresolved resonance tables carries a single
 //!   row whose scalar columns are all equal to each other or to a constant;
 //! * Li6 carries its OWN MT 1 and MT 101, and the ENDF route synthesizes
@@ -80,8 +81,8 @@ fn expected_energy_temperatures(data: &IncidentNeutron) -> Vec<String> {
     out
 }
 
-/// The same two phase rule for one reaction's cross sections
-/// (`reactions.rs:82-87`), which reads `rx.xs` rather than `data.energy`.
+/// The same two phase rule for the `xs_temperatures` list `write_reactions`
+/// builds per reaction, which reads `rx.xs` rather than `data.energy`.
 ///
 /// A restatement of the writer, with the same caveat: it pins which list
 /// reached which column. The order it encodes is discriminated only in
@@ -104,6 +105,48 @@ fn expected_xs_temperatures(data: &IncidentNeutron, rx: &Reaction) -> Vec<String
 fn rows_by_mt(batch: &RecordBatch) -> BTreeMap<i32, usize> {
     (0..batch.num_rows())
         .map(|row| (i32_at(batch, "mt", row), row))
+        .collect()
+}
+
+/// The rows carrying `mt`, in file order: one per temperature, since the writer
+/// lays a reaction out one row per (MT, temperature).
+fn rows_of_mt(batch: &RecordBatch, mt: i32) -> Vec<usize> {
+    (0..batch.num_rows())
+        .filter(|&row| i32_at(batch, "mt", row) == mt)
+        .collect()
+}
+
+/// The one temperature label of each of `rows`, in that order. Every row of
+/// `reactions.arrow` carries exactly one.
+fn row_temperatures(batch: &RecordBatch, rows: &[usize]) -> Vec<String> {
+    rows.iter()
+        .map(|&row| {
+            let t = str_list(batch, "xs_temperatures", row);
+            assert_eq!(t.len(), 1, "row {row} carries one temperature");
+            t[0].clone()
+        })
+        .collect()
+}
+
+/// The one cross section of each of `rows`, in that order.
+fn row_values(batch: &RecordBatch, rows: &[usize]) -> Vec<Vec<f64>> {
+    rows.iter()
+        .map(|&row| {
+            let mut v = nested_f64_list(batch, "xs_values", row);
+            assert_eq!(v.len(), 1, "row {row} carries one cross section");
+            v.remove(0)
+        })
+        .collect()
+}
+
+/// The one threshold index of each of `rows`, in that order.
+fn row_thresholds(batch: &RecordBatch, rows: &[usize]) -> Vec<i32> {
+    rows.iter()
+        .map(|&row| {
+            let t = i32_list(batch, "xs_threshold_idx", row);
+            assert_eq!(t.len(), 1, "row {row} carries one threshold");
+            t[0]
+        })
         .collect()
 }
 
@@ -556,8 +599,8 @@ fn reaction_rows_are_every_parsed_mt_then_the_synthesized_ones() {
 /// A failure means a reaction's Q value or one of its two boolean flags no
 /// longer matches the parser. `center_of_mass` and `redundant` are adjacent
 /// Boolean columns and `RecordBatch::try_new` validates position and type
-/// only, so swapping the two `bools()` arguments at reactions.rs:101-102
-/// writes a valid, loadable, wrong file; `redundant` also drives
+/// only, so swapping the two `bools()` arguments in `write_reactions`'s `row`
+/// helper writes a valid, loadable, wrong file; `redundant` also drives
 /// `is_fission_mt(mt) && !redundant` in the loader at
 /// nuclide_arrow.rs:503-505.
 #[test]
@@ -608,10 +651,11 @@ fn reaction_flags_are_the_parsed_reactions_own_flags() {
     assert_eq!(f64_at(&batch, "Q_value", mt_rows[&102]), 7.251091e6);
 
     // A PIN, not a check. These three rows have no parsed side at all, so this
-    // compares the writer's own literals at reactions.rs:130-132 against a
+    // compares the writer's own literals on the synthesized rows against a
     // transcription of them and cannot tell you the literals are right. It
     // earns its place because `redundant = true` is what keeps a synthesized
-    // row out of the sums (reactions.rs:43-45): changing the literal changes
+    // row out of the sums (`partials_on_grid` skips every `SYNTHETIC_MTS`):
+    // changing the literal changes
     // the arithmetic of every row above it.
     //
     // One of the three is no longer only a pin:
@@ -638,7 +682,7 @@ fn reaction_flags_are_the_parsed_reactions_own_flags() {
 ///
 /// `xs_temperatures` is wiring only here: Li6 has one temperature, so the list
 /// is `["294K"]` on every row and `expected_xs_temperatures` restates
-/// reactions.rs:82-87 rather than deriving it. The ordering rule and the
+/// `write_reactions`'s own ordering rule rather than deriving it. The ordering rule and the
 /// pairing of each curve with its own temperature are discriminated in
 /// `constructed_two_temperature_reactions_keep_each_curve_with_its_own_temperature`.
 #[test]
@@ -667,7 +711,7 @@ fn reaction_cross_sections_are_the_parsed_curves_unshifted() {
 
         for (i, t) in temperatures.iter().enumerate() {
             let xs = &rx.xs[t];
-            // Exact: reactions.rs:88-91 clones `.y` with no grid alignment, no
+            // Exact: `write_reactions` clones `.y` with no grid alignment, no
             // scaling and no filtering, so a tolerance could only hide a
             // defect.
             assert_f64_slice_eq(&format!("MT {mt} xs_values[{t}]"), &values[i], &xs.y);
@@ -782,8 +826,8 @@ fn the_synthesized_rows_are_the_sum_of_the_rows_beside_them() {
 
 /// A failure means the writer changed how it handles an evaluation with no
 /// nuclide grid. It is the only VENDORED case where `xs_temperatures` comes
-/// from the extras branch at reactions.rs:87 rather than from the filtered list
-/// at :82-86, and the only case anywhere in this file where the filtered list
+/// from the extras branch of `write_reactions`'s `xs_temperatures` rather than
+/// from its filtered list, and the only case anywhere in this file where it
 /// is EMPTY: `temperatures()` has no entries and the "0K" key comes entirely
 /// from `rx.xs`. With one extra key there is no order to check, which is what
 /// `constructed_extra_temperatures_follow_the_processed_ones_in_map_order`
@@ -1163,29 +1207,29 @@ fn partial_xs(x: Vec<f64>, y: Vec<f64>, threshold_idx: usize) -> Tabulated1D {
     }
 }
 
-/// CONSTRUCTED INPUT, not an evaluation. Each temperature's curve stays with
-/// its own temperature, its own threshold and its own grid.
+/// CONSTRUCTED INPUT, not an evaluation. Each temperature's curve is its own
+/// row, with its own temperature, its own threshold and its own grid, and the
+/// rows of one MT come out in the processed order.
 ///
 /// No vendored evaluation reaches this: every vendored neutron evaluation has
 /// exactly one temperature ("294K" on the ACE route, "0K" on the ENDF route),
-/// so `xs_temperatures`, `xs_values` and `xs_threshold_idx` are one element
-/// lists on every row of every other test here and no permutation of them
+/// so every MT is one row in every other test here and no permutation of rows
 /// exists to be caught. The input is built by hand with two temperatures whose
 /// curves have different lengths, different thresholds and no shared value, so
 /// a writer that walked `rx.xs` in the map's own order ("1200K" before "294K")
 /// or that paired a curve with the wrong name fails. Not parity with any
 /// evaluation.
 ///
-/// Both branches that build a row are covered, because they iterate different
-/// lists: the parsed row at reactions.rs:82-95 walks `xs_temperatures`, and
-/// the synthesized rows at :117-135 walk `temperatures` instead.
+/// Both branches that build rows are covered, because they iterate different
+/// lists: the parsed reaction walks its own `xs_temperatures`, and the
+/// synthesized rows walk `temperatures` instead.
 #[test]
 fn constructed_two_temperature_reactions_keep_each_curve_with_its_own_temperature() {
     let mut data = two_temperature_nuclide();
     // The 0 K grid this builder carries is deliberately left in place:
     // `write_reactions` reads `data.energy` only for each PROCESSED
-    // temperature's grid length (reactions.rs:68) and never iterates its keys,
-    // so no row may gain a third entry from it.
+    // temperature's grid length and never iterates its keys, so no MT may gain
+    // a third row from it.
     let mut elastic = Reaction::new(2);
     elastic.xs.insert(
         "294K".to_string(),
@@ -1201,17 +1245,16 @@ fn constructed_two_temperature_reactions_keep_each_curve_with_its_own_temperatur
     yamc_convert::reactions::write_reactions(&data, dir.path())
         .expect("reactions.arrow is written");
     let batch = section(dir.path(), "reactions.arrow");
-    let mt_rows = rows_by_mt(&batch);
 
-    let row = mt_rows[&2];
-    let temperatures = str_list(&batch, "xs_temperatures", row);
+    let rows = rows_of_mt(&batch, 2);
+    let temperatures = row_temperatures(&batch, &rows);
     assert_eq!(
         temperatures,
         vec!["294K".to_string(), "1200K".to_string()],
-        "MT 2 xs_temperatures is the processed order, not the map's"
+        "MT 2's rows follow the processed order, not the map's"
     );
-    let values = nested_f64_list(&batch, "xs_values", row);
-    let thresholds = i32_list(&batch, "xs_threshold_idx", row);
+    let values = row_values(&batch, &rows);
+    let thresholds = row_thresholds(&batch, &rows);
     assert_f64_slice_eq("MT 2 at 294K", &values[0], &[7.0, 8.0, 9.0]);
     assert_f64_slice_eq("MT 2 at 1200K", &values[1], &[70.0, 80.0]);
     assert_i32_slice_eq("MT 2 xs_threshold_idx", &thresholds, &[0, 2]);
@@ -1231,18 +1274,18 @@ fn constructed_two_temperature_reactions_keep_each_curve_with_its_own_temperatur
     // reaction, so MT 1 is the elastic curve and nothing else, laid on each
     // temperature's own grid: three points at 294K, four at 1200K with the
     // threshold's two leading zeros.
-    let row = mt_rows[&1];
+    let rows = rows_of_mt(&batch, 1);
     assert_eq!(
-        str_list(&batch, "xs_temperatures", row),
+        row_temperatures(&batch, &rows),
         vec!["294K".to_string(), "1200K".to_string()],
-        "MT 1 xs_temperatures"
+        "MT 1 rows"
     );
-    let values = nested_f64_list(&batch, "xs_values", row);
+    let values = row_values(&batch, &rows);
     assert_f64_slice_eq("MT 1 at 294K", &values[0], &[7.0, 8.0, 9.0]);
     assert_f64_slice_eq("MT 1 at 1200K", &values[1], &[0.0, 0.0, 70.0, 80.0]);
     assert_i32_slice_eq(
         "MT 1 xs_threshold_idx",
-        &i32_list(&batch, "xs_threshold_idx", row),
+        &row_thresholds(&batch, &rows),
         &[0, 0],
     );
 }
@@ -1440,7 +1483,7 @@ fn constructed_partials_pin_synthesized_mt_101_and_the_mt_3_term_of_mt_1() {
 ///
 /// The three synthesized rows on Li6 (MT 3, 4 and 27) have no parsed side, so
 /// `reaction_flags_are_the_parsed_reactions_own_flags` can only compare the
-/// writer's literals at reactions.rs:130-132 against a copy of them, and says
+/// writer's literals on the synthesized rows against a copy of them, and says
 /// so. This test replaces the copy for ONE of the three columns. A consumer
 /// with no fast_xs grid reconstructs the total by summing every reaction whose
 /// `redundant` flag is false (yamc-gpu `total_xs_at`,
@@ -1507,7 +1550,8 @@ fn constructed_synthesized_rows_are_redundant_so_the_rest_sum_to_the_total() {
     );
 
     // Which rows ended up on which side, as documentation. This part IS a
-    // transcription of reactions.rs:132 and the parser's default; the sum above
+    // transcription of the writer's synthesized-row literals and the parser's
+    // default; the sum above
     // is the assertion that does not depend on it.
     assert_eq!(plain, vec![2, 16, 18, 51, 102, 103]);
     assert_eq!(redundant, yamc_convert::synthesis::SYNTHETIC_MTS.to_vec());
@@ -1525,7 +1569,7 @@ fn constructed_synthesized_rows_are_redundant_so_the_rest_sum_to_the_total() {
 /// nuclide was never processed at, so the order the extras phase writes them in
 /// is finally visible.
 ///
-/// No vendored evaluation reaches this. The extras branch at reactions.rs:87 is
+/// No vendored evaluation reaches this. `write_reactions`'s extras branch is
 /// reached only on the ENDF route, where `temperatures()` is empty and `rx.xs`
 /// holds the single key "0K": one extra has no order. Everything else in this
 /// file has one temperature and no extras at all. So a writer that reversed or
@@ -1575,10 +1619,9 @@ fn constructed_extra_temperatures_follow_the_processed_ones_in_map_order() {
     yamc_convert::reactions::write_reactions(&data, dir.path())
         .expect("reactions.arrow is written");
     let batch = section(dir.path(), "reactions.arrow");
-    let mt_rows = rows_by_mt(&batch);
 
-    let row = mt_rows[&2];
-    let temperatures = str_list(&batch, "xs_temperatures", row);
+    let rows = rows_of_mt(&batch, 2);
+    let temperatures = row_temperatures(&batch, &rows);
     assert_eq!(
         temperatures,
         vec!["294K".to_string(), "0K".to_string(), "600K".to_string()],
@@ -1592,39 +1635,35 @@ fn constructed_extra_temperatures_follow_the_processed_ones_in_map_order() {
         expected_xs_temperatures(&data, &data.reactions[&2])
     );
 
-    // Each curve with its own name. Three lengths, three thresholds, no shared
-    // value, so a permutation cannot pass on either column.
-    let values = nested_f64_list(&batch, "xs_values", row);
+    // Each curve with its own name, on its own row. Three lengths, three
+    // thresholds, no shared value, so a permutation cannot pass on either
+    // column.
+    let values = row_values(&batch, &rows);
     assert_f64_slice_eq("MT 2 at 294K", &values[0], &[1.0, 2.0, 3.0]);
     assert_f64_slice_eq("MT 2 at 0K", &values[1], &[10.0, 20.0]);
     assert_f64_slice_eq("MT 2 at 600K", &values[2], &[100.0, 200.0, 300.0, 400.0]);
     assert_i32_slice_eq(
         "MT 2 xs_threshold_idx",
-        &i32_list(&batch, "xs_threshold_idx", row),
+        &row_thresholds(&batch, &rows),
         &[0, 1, 4],
     );
 
     // The synthesized rows are built from `temperatures` rather than from
     // `rx.xs`, so no extra may leak into them: a nuclide processed at one
-    // temperature has one synthesized curve, whatever else the reaction was
+    // temperature has one synthesized row, whatever else the reaction was
     // stored at.
     for mt in [1, 3, 4, 27, 101] {
-        let row = mt_rows[&mt];
+        let rows = rows_of_mt(&batch, mt);
         assert_eq!(
-            str_list(&batch, "xs_temperatures", row),
+            row_temperatures(&batch, &rows),
             vec!["294K".to_string()],
             "MT {mt} gained a temperature the nuclide was not processed at"
-        );
-        assert_eq!(
-            nested_f64_list(&batch, "xs_values", row).len(),
-            1,
-            "MT {mt}"
         );
     }
     // MT 1 is elastic alone here, on the 294K grid only.
     assert_f64_slice_eq(
         "MT 1 at 294K",
-        &nested_f64_list(&batch, "xs_values", mt_rows[&1])[0],
+        &row_values(&batch, &rows_of_mt(&batch, 1))[0],
         &[1.0, 2.0, 3.0],
     );
 }

@@ -25,9 +25,10 @@ use arrow_schema::{DataType, Field, Schema};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Where each MT lives inside a published `reactions.arrow`, so a reader can
-/// fetch only the channels it needs. Part of the published format, and shared
-/// by the converter that writes the index and the loader that reads it.
+/// Where each (MT, temperature) lives inside a published `reactions.arrow`, so
+/// a reader can fetch only the cross sections it needs. Part of the published
+/// format, and shared by the converter that writes the index and the loader
+/// that reads it.
 pub mod reaction_ranges;
 
 /// Every section, keyed by its path within the output directory.

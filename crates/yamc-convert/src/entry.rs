@@ -336,10 +336,12 @@ fn write_version(dir: &Path, provenance: &Provenance) -> Result<(), Box<dyn Erro
         "created_utc": provenance.created_utc,
     });
 
-    // Where each MT's record batch sits in reactions.arrow, so an activation
-    // reader can range-request just the channels its chain names rather than
-    // pulling the full-grid transport MTs it never looks at (8.2x less on
-    // Fe56). Absent for a photon element, which has no reactions table.
+    // Where each (MT, temperature) record batch sits in reactions.arrow, so an
+    // activation reader can range-request just the channels its chain names
+    // rather than pulling the full-grid transport MTs it never looks at (8.2x
+    // less on Fe56), and a plotter just the one temperature it draws
+    // (fusion-neutronics/core#100). Absent for a photon element, which has no
+    // reactions table.
     // Best-effort: the index is an optimisation, and a reader that does not
     // find one falls back to fetching the whole file. Failing a conversion over
     // it would trade a working data set for a faster one.
