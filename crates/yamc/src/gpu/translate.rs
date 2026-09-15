@@ -11,7 +11,7 @@ use rand_chacha::ChaCha8Rng;
 use yamc_geo::{BoundaryType, HalfspaceType, RegionExpr, Surface, SurfaceKind};
 use yamc_gpu::neutron::nuclide_select_inputs::{
     NuclideSelectInputs, NUC_PARTIAL_ABSORPTION, NUC_PARTIAL_COLS, NUC_PARTIAL_ELASTIC,
-    NUC_PARTIAL_FISSION, NUC_PARTIAL_INELASTIC,
+    NUC_PARTIAL_FISSION, NUC_PARTIAL_INELASTIC, NUC_YIELD_BETA, NUC_YIELD_COLS, NUC_YIELD_NU_BAR,
 };
 use yamc_gpu::neutron::xs::{
     extract_fission_chi_per_nuclide, extract_material_xs, extract_per_nuclide_elastic_angle,
@@ -1459,6 +1459,9 @@ fn translate_materials(
     // per material in slab order and installed on `nuclide_select` after the loop.
     let mut chi_slab_meta: Vec<u32> = Vec::new();
     let mut fission_channel_xs: Vec<f64> = Vec::new();
+    // Per-(slab, fine energy) fission yield pairs (fusion-neutronics/core#93),
+    // packed per material in slab order and installed after the loop.
+    let mut nuc_fission_yield: Vec<f64> = Vec::new();
     // Running element base into the tight-CSR `nuc_macro_total` / `nuc_partial_xs`
     // for the NEXT material's first slab (issue #212). Advances by `nuc_count *
     // fine_n` per material; recorded in `fine_meta` col COL_FINE_NUC_BASE.
@@ -1649,6 +1652,7 @@ fn translate_materials(
         })?;
         append_per_nuclide_inelastic(&mut out, &inel_pool);
         let partials = pack_nuc_partials(&inel_pool, mat_fine.len());
+        nuc_fission_yield.extend(pack_nuc_yield(&inel_pool, mat_fine.len()));
         nuc_select_materials.push((per_nuc.macro_total_xs, awr, partials));
     }
 
@@ -1660,6 +1664,7 @@ fn translate_materials(
         NuclideSelectInputs::from_materials_with_partials_per_material(&nuc_select_materials);
     out.nuclide_select
         .set_fission_chi(chi_slab_meta, fission_channel_xs);
+    out.nuclide_select.set_fission_yield(nuc_fission_yield);
 
     Ok(out)
 }
@@ -2056,6 +2061,22 @@ fn pack_nuc_partials(p: &PerNuclideInelastic, n_grid: usize) -> Vec<f64> {
         packed[off + NUC_PARTIAL_ABSORPTION] = p.sigma_absorption[r];
         packed[off + NUC_PARTIAL_INELASTIC] = p.sigma_inelastic[r];
         packed[off + NUC_PARTIAL_FISSION] = p.sigma_fission[r];
+    }
+    packed
+}
+
+/// Pack a material's per-(nuclide, energy) fission yield into the flat
+/// `[n_nuclides x n_grid x NUC_YIELD_COLS]` block the kernel reads after
+/// selecting the struck nuclide (fusion-neutronics/core#93): column
+/// `NUC_YIELD_NU_BAR` the nuclide's `nu_bar(E)`, column `NUC_YIELD_BETA` its
+/// delayed fraction, laid out like `pack_nuc_partials`.
+fn pack_nuc_yield(p: &PerNuclideInelastic, n_grid: usize) -> Vec<f64> {
+    let rows = p.n_nuclides * n_grid;
+    let mut packed = vec![0.0_f64; rows * NUC_YIELD_COLS];
+    for r in 0..rows {
+        let off = r * NUC_YIELD_COLS;
+        packed[off + NUC_YIELD_NU_BAR] = p.nu_bar[r];
+        packed[off + NUC_YIELD_BETA] = p.beta_delayed[r];
     }
     packed
 }

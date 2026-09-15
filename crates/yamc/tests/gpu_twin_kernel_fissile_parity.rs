@@ -53,7 +53,7 @@ fn data_present(nuclide: &str) -> bool {
 }
 
 /// Single-nuclide sphere, `Below(sphere)` so the GPU AABB pass bounds it.
-fn sphere_model(nuclide: &str, density: f64, radius: f64, energy_ev: f64) -> Model {
+fn sphere_model(composition: &[(&str, f64)], density: f64, radius: f64, energy_ev: f64) -> Model {
     let sphere = Surface {
         surface_id: Some(1),
         kind: SurfaceKind::Sphere {
@@ -67,7 +67,10 @@ fn sphere_model(nuclide: &str, density: f64, radius: f64, energy_ev: f64) -> Mod
     };
     let region = Region::new_from_halfspace(HalfspaceType::Below(Arc::new(sphere)));
     let mut material = Material::new(
-        HashMap::from([(nuclide.to_string(), 1.0)]),
+        composition
+            .iter()
+            .map(|(nuc, frac)| (nuc.to_string(), *frac))
+            .collect::<HashMap<String, f64>>(),
         "atom",
         "g/cm3",
         Some(density),
@@ -77,7 +80,10 @@ fn sphere_model(nuclide: &str, density: f64, radius: f64, energy_ev: f64) -> Mod
     material.set_temperature("294");
     material
         .read_nuclear_data(
-            &HashMap::from([(nuclide.to_string(), cache_dir(nuclide))]),
+            &composition
+                .iter()
+                .map(|(nuc, _)| (nuc.to_string(), cache_dir(nuc)))
+                .collect::<HashMap<String, String>>(),
             None,
         )
         .unwrap();
@@ -116,8 +122,15 @@ fn worst_rel(a: &[f64], b: &[f64]) -> (f64, usize) {
 
 /// Twin and kernel, same inputs, same seeds, fission bank OFF, `PerStep`
 /// accumulation (the mode whose `tally_outputs` the twin mirrors).
-fn compare(label: &str, nuclide: &str, density: f64, radius: f64, energy_ev: f64, n: usize) {
-    if !data_present(nuclide) {
+fn compare(
+    label: &str,
+    composition: &[(&str, f64)],
+    density: f64,
+    radius: f64,
+    energy_ev: f64,
+    n: usize,
+) {
+    if let Some((nuclide, _)) = composition.iter().find(|(nuc, _)| !data_present(nuc)) {
         eprintln!("skipping {label} -- endf-b8.1-{nuclide}.arrow cache absent");
         return;
     }
@@ -128,7 +141,7 @@ fn compare(label: &str, nuclide: &str, density: f64, radius: f64, energy_ev: f64
             return;
         }
     };
-    let model = sphere_model(nuclide, density, radius, energy_ev);
+    let model = sphere_model(composition, density, radius, energy_ev);
     let inputs = translate_for_gpu(&model, n, SEED).expect("translate");
     let n_cells = (inputs.cell_aabbs.len() / 6) as u32;
     let edges: Vec<f64> = [1.0e-5, 1.0e3, 1.0e5, 1.0e6, 2.0e6, 5.0e6, 2.0e7]
@@ -657,14 +670,28 @@ fn compare(label: &str, nuclide: &str, density: f64, radius: f64, energy_ev: f64
 /// U235 at 1 MeV: the #154 configuration, fission on essentially every history.
 #[test]
 fn twin_and_kernel_agree_on_a_fissile_sphere() {
-    compare("U235 r=5 1 MeV", "U235", 18.95, 5.0, 1.0e6, 20_000);
+    compare(
+        "U235 r=5 1 MeV",
+        &[("U235", 1.0)],
+        18.95,
+        5.0,
+        1.0e6,
+        20_000,
+    );
 }
 
 /// Fe56 at 14 MeV: the non-fissile control, which reads 1.00000 GPU-vs-CPU at
 /// the dispatch level, so it should read clean here too.
 #[test]
 fn twin_and_kernel_agree_on_a_non_fissile_sphere() {
-    compare("Fe56 r=5 14 MeV", "Fe56", 7.87, 5.0, 14.06e6, 20_000);
+    compare(
+        "Fe56 r=5 14 MeV",
+        &[("Fe56", 1.0)],
+        7.87,
+        5.0,
+        14.06e6,
+        20_000,
+    );
 }
 
 /// Bank ON: the twin transports the fission chain IN-THREAD, the dispatch banks
@@ -699,7 +726,7 @@ fn compare_bank_on(nuclide: &str, density: f64, radius: f64, energy_ev: f64, n: 
         20260731u64,
     ] {
         // Twin: raw single-bin flux pack, fission bank ON, LIFO drain.
-        let model = sphere_model(nuclide, density, radius, energy_ev);
+        let model = sphere_model(&[(nuclide, 1.0)], density, radius, energy_ev);
         let inputs = translate_for_gpu(&model, n, seed).expect("translate");
         let n_cells = (inputs.cell_aabbs.len() / 6) as u32;
         let edges: Vec<f64> = [1.0e-5f64, 2.0e7].iter().map(|e| e.ln()).collect();
@@ -845,7 +872,7 @@ fn compare_bank_on(nuclide: &str, density: f64, radius: f64, energy_ev: f64, n: 
         let twin_flux: f64 = twin.tally_outputs[0].iter().sum::<f64>() / n as f64;
 
         // Dispatch: the same model with an equivalent single-bin flux tally.
-        let mut disp_model = sphere_model(nuclide, density, radius, energy_ev);
+        let mut disp_model = sphere_model(&[(nuclide, 1.0)], density, radius, energy_ev);
         let mut tally = yamc_tallies::tally::Tally::new();
         tally.filters.push(yamc_tallies::filter::Filter::Cell(
             yamc_tallies::filter::cell::CellFilter::from_id(1),
@@ -923,7 +950,7 @@ fn compare_cpu_vs_twin(nuclide: &str, density: f64, radius: f64, energy_ev: f64,
         31337u64,
         20260731u64,
     ] {
-        let model = sphere_model(nuclide, density, radius, energy_ev);
+        let model = sphere_model(&[(nuclide, 1.0)], density, radius, energy_ev);
         let inputs = translate_for_gpu(&model, n, seed).expect("translate");
         let n_cells = (inputs.cell_aabbs.len() / 6) as u32;
         let edges: Vec<f64> = [1.0e-5f64, 2.0e7].iter().map(|e| e.ln()).collect();
@@ -1068,7 +1095,7 @@ fn compare_cpu_vs_twin(nuclide: &str, density: f64, radius: f64, energy_ev: f64,
         let twin_flux: f64 = twin.tally_outputs[0].iter().sum::<f64>() / n as f64;
         let twin_abs: f64 = twin.tally_outputs[1].iter().sum::<f64>() / n as f64;
 
-        let mut cpu_model = sphere_model(nuclide, density, radius, energy_ev);
+        let mut cpu_model = sphere_model(&[(nuclide, 1.0)], density, radius, energy_ev);
         let mk = |score: &str| {
             let mut t = yamc_tallies::tally::Tally::new();
             t.filters.push(yamc_tallies::filter::Filter::Cell(
@@ -1113,5 +1140,30 @@ fn cpu_and_twin_agree_on_tallies() {
 /// sections on both sides. Skips without the U240 fixture.
 #[test]
 fn twin_and_kernel_agree_on_a_partial_channel_fissile_sphere() {
-    compare("U240 r=12 14.06 MeV", "U240", 19.1, 12.0, 14.06e6, 20_000);
+    compare(
+        "U240 r=12 14.06 MeV",
+        &[("U240", 1.0)],
+        19.1,
+        12.0,
+        14.06e6,
+        20_000,
+    );
+}
+
+/// A two-nuclide fissile material: the per-collision nuclide selection is live
+/// (`count > 1`), so the kernel and twin take the struck nuclide's partials,
+/// its chi rows and, since fusion-neutronics/core#93, its own `nu_bar` and
+/// delayed fraction, all on the same draw schedule. Bit-for-bit agreement here
+/// pins that whole path on both sides. Skips without U235 and U238 in the
+/// cache.
+#[test]
+fn twin_and_kernel_agree_on_a_two_nuclide_fissile_sphere() {
+    compare(
+        "U235/U238 50/50 r=6 14.06 MeV",
+        &[("U235", 0.5), ("U238", 0.5)],
+        19.0,
+        6.0,
+        14.06e6,
+        20_000,
+    );
 }
