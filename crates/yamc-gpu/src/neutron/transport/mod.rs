@@ -362,6 +362,14 @@ pub struct MultiCellResult {
     /// with `tally_outputs` (the sum) and the history count it gives the
     /// exact per-history variance `m2 = sum_sq − sum²/N`.
     pub tally_sum_sq: Vec<Vec<f64>>,
+    /// Per-(history, tally entry) total score (fusion-neutronics/core#29),
+    /// flat `[n_histories x n_tallies]` row-major by history, in physical
+    /// units: each history's per-bin totals summed over the entry's bins. This
+    /// is the per-history sample the convergence targets' aggregate moments
+    /// (`AggMoments`) are built from. Non-empty only for `PerHistory`; the
+    /// per-source paths derive the same totals from `src_acc`, and the CPU
+    /// mirrors leave it empty.
+    pub hist_tally_total: Vec<f64>,
     /// Raw per-source accumulator (issue #233 Stage 2, `PerSource` mode only):
     /// flat `chunk_sources * total_out_len` fixed-point words, row-major by
     /// source index, holding this launch's per-`(source, flat_bin)` sum (per-tally

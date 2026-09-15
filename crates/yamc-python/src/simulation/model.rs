@@ -492,9 +492,11 @@ impl PyModel {
             .collect()
     }
 
-    /// Precision-based stopping criteria. When non-empty (single-process
-    /// runs), the transport loop ends at the first checkpoint where every
-    /// convergence target is satisfied.
+    /// Precision-based stopping criteria. When non-empty, the transport loop
+    /// ends at the first checkpoint where every convergence target is
+    /// satisfied: between CPU chunks, or between GPU launches for a neutron-only
+    /// model (the GPU refuses them on a model that transports photons). Under
+    /// MPI the decision is made on the rank-combined moments.
     #[getter]
     pub fn convergence_targets(&self) -> Vec<crate::tally::PyConvergenceTarget> {
         self.inner
@@ -888,10 +890,13 @@ impl PyModel {
     ///         continues until another stop condition trips, so set
     ///         ``max_runtime`` and/or convergence targets, or the run never
     ///         ends. A run with no stop condition at all raises ``ValueError``.
-    ///         On ``compute='gpu'`` the only stop conditions are
-    ///         ``total_particles`` and ``max_runtime``; a model with
-    ///         ``convergence_targets`` set is refused with ``ValueError``
-    ///         rather than run to the cap with the targets ignored.
+    ///         On ``compute='gpu'`` convergence targets stop neutron-only
+    ///         models (the launch loop decides them between launches, so the
+    ///         run overshoots the target by at most one launch chunk); a model
+    ///         that transports photons (photon source, secondary or decay
+    ///         photons) with ``convergence_targets`` set is refused with
+    ///         ``ValueError`` rather than run to the cap with the targets
+    ///         ignored.
     ///     seed: Base RNG seed for this run (default: 1). Per-particle
     ///         streams derive from it, so the seed fully determines the
     ///         run. Give each run a distinct seed when accumulating
@@ -933,8 +938,9 @@ impl PyModel {
     ///         on ``compute='cpu'`` and ``compute='gpu'`` (the GPU can only stop
     ///         between kernel launches, so it may overshoot the budget by up to
     ///         one launch). Under MPI (``mpi_size > 1``) the stop is collective
-    ///         (any rank over budget stops them all at the same checkpoint); the
-    ///         convergence early-stop is still single-process for now. A
+    ///         (any rank over budget stops them all at the same checkpoint), and
+    ///         so is the convergence early-stop, decided on the rank-combined
+    ///         moments. A
     ///         time-bounded run is non-deterministic in history count, but the
     ///         results are statistically valid for the histories completed.
     ///
@@ -946,8 +952,9 @@ impl PyModel {
     /// Raises:
     ///     ValueError: if two tallies share the same name or the same id, or
     ///         if the model uses a feature the GPU kernel doesn't support,
-    ///         including convergence targets (the GPU launch loop cannot stop
-    ///         on them yet, so they are refused rather than ignored), or if a
+    ///         including convergence targets on a model that transports
+    ///         photons (the photon launch loops cannot stop on them yet, so
+    ///         they are refused rather than ignored), or if a
     ///         GPU launch truncated histories at ``gpu_max_steps_per_particle``
     ///         (the under-counted tallies are never returned).
     ///     RuntimeError: if ``compute='gpu'`` and no GPU with f64 compute is
@@ -1022,25 +1029,10 @@ impl PyModel {
             self.warn_if_max_steps_ignored(py, "simulate_transport(compute='cpu')")?;
             return self.simulate_transport_cpu(&settings, capture_tracks, py);
         }
-        // The GPU launch loop stops on total_particles and/or max_runtime,
-        // checked between launches. It cannot evaluate convergence targets
-        // (fusion-neutronics/core#29), so a model carrying them is refused
-        // outright: it used to be refused only when neither budget was set,
-        // and with a cap present it ran silently to the cap while the
-        // precision the user asked to stop at was ignored
-        // (fusion-neutronics/core#23). The OR-guard above already ensures a
-        // cap or budget exists once there are no targets, so the Rust
-        // dispatch's own UncappedWithoutRuntime is unreachable from here. The
-        // Rust dispatch repeats this check for its other callers.
-        if !self.inner.convergence_targets.is_empty() {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "compute='gpu' cannot stop on convergence targets yet: the launch loop only \
-                 checks total_particles and max_runtime between launches, so the {} target(s) \
-                 on this model would be ignored and the run would go to the cap. Clear \
-                 Model.convergence_targets to run this on the GPU, or use compute='cpu'.",
-                self.inner.convergence_targets.len()
-            )));
-        }
+        // Convergence targets stop the GPU's neutron launch loops
+        // (fusion-neutronics/core#29); a model that transports photons is
+        // refused by the Rust dispatch before any adapter is touched, since the
+        // photon launch loops cannot evaluate them yet.
         let device: Option<String> = if compute == "gpu" {
             None
         } else {

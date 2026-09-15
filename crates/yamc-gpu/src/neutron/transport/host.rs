@@ -1358,6 +1358,16 @@ pub fn run_multi_cell_transport(
     // launch, which dominated large-tally throughput (issue #233 Stage 4).
     let spill_bin_h = client.empty(spill_len * std::mem::size_of::<u32>());
     let spill_val_h = client.empty(spill_len * std::mem::size_of::<f64>());
+    // Per-(history, tally) totals (fusion-neutronics/core#29): one f64 row per
+    // history in `PerHistory` mode, accumulated by the history-end flush, so it
+    // is zero-initialised; a size-1 dummy otherwise.
+    let hist_total_len = if matches!(variance, TallyVarianceMode::PerHistory) {
+        n.saturating_mul(tallies.n_tallies() as usize).max(1)
+    } else {
+        1
+    };
+    let hist_total_zeros = vec![0.0f64; hist_total_len];
+    let hist_total_h = client.create_from_slice(bytemuck::cast_slice(&hist_total_zeros));
     // Per-source accumulator (Stage 2): `chunk_sources * total_bins` fixed-point
     // words scatter-written by `source_idx`. Size-1 dummy off the fissile path.
     let total_bins = variance.total_bins() as usize;
@@ -1612,6 +1622,7 @@ pub fn run_multi_cell_transport(
             BufferArg::from_raw_parts(out_steps_h.clone(), n),
             BufferArg::from_raw_parts(out_e_h.clone(), n),
             BufferArg::from_raw_parts(tally_out_h.clone(), alloc_out_len.max(1)),
+            BufferArg::from_raw_parts(hist_total_h.clone(), hist_total_len),
             BufferArg::from_raw_parts(spill_bin_h.clone(), spill_len),
             BufferArg::from_raw_parts(spill_val_h.clone(), spill_len),
             BufferArg::from_raw_parts(source_idx_h.clone(), source_idx_len),
@@ -1653,6 +1664,11 @@ pub fn run_multi_cell_transport(
             Vec::new()
         };
         (outputs, sum_sq, Vec::new())
+    };
+    let hist_tally_total: Vec<f64> = if matches!(variance, TallyVarianceMode::PerHistory) {
+        bytemuck::cast_slice(&client.read_one(hist_total_h).unwrap()).to_vec()
+    } else {
+        Vec::new()
     };
     // Read back the device particle bank: coupled photons (S4b), fission
     // progeny (#78) and (n,xn) spills (issue #111 phase 2) share it. Overflow
@@ -1725,6 +1741,7 @@ pub fn run_multi_cell_transport(
         final_energies,
         tally_outputs,
         tally_sum_sq,
+        hist_tally_total,
         src_acc,
         bank_source_idx,
         n_bins_per_tally: tallies.n_bins_per_tally.clone(),

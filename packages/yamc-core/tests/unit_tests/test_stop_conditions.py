@@ -13,13 +13,15 @@ import pytest
 import yamc
 
 
-def _build_model():
+def _build_model(photon_data=None, **model_kwargs):
     inner = yamc.Sphere(x0=0, y0=0, z0=0, radius=1.0)
     outer = yamc.Sphere(x0=0, y0=0, z0=0, radius=200.0, boundary="vacuum")
     breeder = yamc.Material(
         composition={"Li6": 0.5, "Li7": 0.5}, density=2.0, temperature=294
     )
-    breeder.read_nuclear_data({"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"})
+    breeder.read_nuclear_data(
+        {"Li6": "tests/Li6.arrow", "Li7": "tests/Li7.arrow"}, photon_data=photon_data
+    )
     void = yamc.Cell(name="void", region=inner.below)
     cell = yamc.Cell(name="breeder", region=inner.above & outer.below, material=breeder)
     geometry = yamc.Geometry([void, cell])
@@ -27,7 +29,9 @@ def _build_model():
         energy=yamc.sources.fusion_neutron_spectrum(20000.0), position=(0, 0, 0)
     )
     tally = yamc.Tally(name="tbr", cells=cell, scores=["H3-production"])
-    return yamc.Model(geometry=geometry, tallies=[tally], source=source, verbose=[])
+    return yamc.Model(
+        geometry=geometry, tallies=[tally], source=source, verbose=[], **model_kwargs
+    )
 
 
 def test_no_stop_condition_raises():
@@ -75,16 +79,36 @@ def test_uncapped_run_stops_on_convergence():
     assert r.aggregate_relative_error <= 0.12
 
 
-def test_gpu_rejects_convergence_only_stop():
-    # GPU stops on total_particles and/or max_runtime, not on convergence
-    # targets (fusion-neutronics/core#29), so a model carrying targets is
-    # refused before any adapter is touched (core#23); no GPU needed here.
-    model = _build_model()
+def test_gpu_rejects_convergence_only_stop_for_photon_models():
+    # The GPU's neutron launch loops stop on convergence targets
+    # (fusion-neutronics/core#29); its photon launch loops do not yet, so a
+    # model that transports photons is refused before any adapter is touched
+    # (core#23); no GPU needed here.
+    model = _build_model(
+        photon_data={"Li": "tests/Li.arrow"}, transport_secondary_photons=True
+    )
     model.convergence_targets = [
         yamc.ConvergenceTarget("relative_error", 0.10, tally="tbr")
     ]
     with pytest.raises(ValueError, match="cannot stop on convergence targets"):
         model.simulate_transport(compute="gpu")  # None total, no max_runtime
+
+
+@pytest.mark.skipif(
+    not yamc.parallel.gpu_available(),
+    reason="no GPU with f64 compute available, or yamc was built without the `gpu` feature",
+)
+def test_gpu_uncapped_run_stops_on_convergence():
+    # The GPU twin of test_uncapped_run_stops_on_convergence: no cap, no
+    # budget, the launch loop ends when the target is met and the aggregate
+    # relative error it reports honours it (fusion-neutronics/core#29).
+    model = _build_model()
+    model.convergence_targets = [
+        yamc.ConvergenceTarget("relative_error", 0.10, tally="tbr")
+    ]
+    r = model.simulate_transport(seed=1, compute="gpu")["tbr"]
+    assert r.n_histories > 0
+    assert 0.0 < r.aggregate_relative_error <= 0.10
 
 
 def test_simulate_transmutation_requires_a_stop_condition():

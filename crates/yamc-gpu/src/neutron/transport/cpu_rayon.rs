@@ -542,6 +542,7 @@ pub fn run_multi_cell_transport_cpu_rayon(
         // per-history sum-of-squares or per-source accumulator (issue #233
         // batch-free variance is GPU-only).
         tally_sum_sq: Vec::new(),
+        hist_tally_total: Vec::new(),
         src_acc: Vec::new(),
         bank_source_idx: Vec::new(),
         n_bins_per_tally: tallies.n_bins_per_tally.clone(),
