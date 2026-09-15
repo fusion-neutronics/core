@@ -28,9 +28,10 @@ pub mod photon;
 pub use common::particle::GpuParticle;
 pub use common::rng::GpuRng;
 pub use neutron::xs::{
-    extract_material_xs, extract_per_nuclide_inelastic, extract_per_nuclide_macro_total_xs,
-    extract_score_xs_per_mt, extract_xs_from_nuclide, GpuNuclideXs, NuclideXsError,
-    PerNuclideInelastic, PerNuclideMacroXs,
+    extract_fission_chi_per_nuclide, extract_material_xs, extract_per_nuclide_inelastic,
+    extract_per_nuclide_macro_total_xs, extract_score_xs_per_mt, extract_xs_from_nuclide,
+    FissionEoutSlot, GpuNuclideXs, NuclideFissionChi, NuclideXsError, PerNuclideInelastic,
+    PerNuclideMacroXs,
 };
 pub use photon::xs::atomic_relaxation_xs::{
     extract_atomic_relaxation_for_gpu, GpuAtomicRelaxation, MAX_AR_SHELLS, MAX_AR_TRANS,

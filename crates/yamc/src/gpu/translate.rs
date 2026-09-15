@@ -14,9 +14,10 @@ use yamc_gpu::neutron::nuclide_select_inputs::{
     NUC_PARTIAL_FISSION, NUC_PARTIAL_INELASTIC,
 };
 use yamc_gpu::neutron::xs::{
-    extract_material_xs, extract_per_nuclide_elastic_angle, extract_per_nuclide_inelastic,
-    extract_per_nuclide_macro_total_xs, union_energy_grid, GpuNuclideXs, PerNuclideElasticAngle,
-    PerNuclideInelastic, PERMT_META_COLS, URR_META_COLS, URR_META_N_CDF, URR_META_N_ENERGIES,
+    extract_fission_chi_per_nuclide, extract_material_xs, extract_per_nuclide_elastic_angle,
+    extract_per_nuclide_inelastic, extract_per_nuclide_macro_total_xs, union_energy_grid,
+    FissionEoutSlot, GpuNuclideXs, NuclideFissionChi, PerNuclideElasticAngle, PerNuclideInelastic,
+    PERMT_META_COLS, URR_META_COLS, URR_META_N_CDF, URR_META_N_ENERGIES,
 };
 use yamc_rng::history_seed;
 use yamc_source::source::SourceSelector;
@@ -168,18 +169,20 @@ pub struct GpuTransportInputs {
     pub fission_a_per_material: Vec<f64>,
     /// Per-material Watt-spectrum `b` parameter (1/eV).
     pub fission_b_per_material: Vec<f64>,
-    /// Per-material fission outgoing-energy sampler discriminant.
-    /// `EOUT_KIND_CONTINUOUS_TABULAR` (1) selects the new tabulated
-    /// sampler; `EOUT_KIND_WATT` (7) keeps the Watt-rejection fallback.
-    /// Length `n_materials`.
+    /// Per-chi-row fission outgoing-energy sampler discriminant.
+    /// `EOUT_KIND_CONTINUOUS_TABULAR` (1) selects the tabulated sampler;
+    /// `EOUT_KIND_WATT` (7) keeps the Watt-rejection fallback. Chi rows are
+    /// laid out per (nuclide slab, fission channel) plus one delayed row per
+    /// slab (issue #364, fusion-neutronics/core#34 entry 1); the row table is
+    /// `nuclide_select.chi_slab_meta`. One entry per chi row.
     pub fission_eout_kind_per_material: Vec<u32>,
     /// Per-chi-row count of populated E_in points in
-    /// `fission_eout_energy_grid`. Length `2 * n_materials`.
+    /// `fission_eout_energy_grid`. One entry per chi row.
     pub fission_eout_n_energies_per_material: Vec<u32>,
     /// CSR base (issue #104): global ae-row where each chi row's
     /// incident-energy rows start in the tight
     /// `fission_eout_energy_grid_per_material` / `fission_eout_n_x_per_material`.
-    /// Length `2 * n_materials`; the row's count is
+    /// One entry per chi row; the row's count is
     /// `fission_eout_n_energies_per_material[chi_row]`.
     pub fission_eout_ae_offset: Vec<u32>,
     /// Per-material fission incident-energy grid, tight CSR (issue #104):
@@ -583,12 +586,19 @@ pub fn translate_for_gpu(
         // One empty elastic-angle slab for the void slot (its single nuclide
         // never collides), keeping the slab table aligned with `nuclide_select`.
         push_empty_elastic_angle_slab(&mut translated);
+        // Two empty chi rows for the void slot (never read: void cells never
+        // collide), keeping the chi row table aligned with the slab table.
+        let void_prompt_row = push_fission_eout_row(&mut translated, &FissionEoutSlot::empty());
+        let void_delayed_row = push_fission_eout_row(&mut translated, &FissionEoutSlot::empty());
         // Mirror the void slot in the nuclide-selection slab table (single
         // nuclide => never drawn; void cells never collide anyway). Its nuc row
         // is `void_fine_n` wide to match the per-material FINE-grid CSR stride.
-        translated
-            .nuclide_select
-            .push_single_nuclide_material(0.0, void_fine_n);
+        translated.nuclide_select.push_single_nuclide_material(
+            0.0,
+            void_fine_n,
+            void_prompt_row,
+            void_delayed_row,
+        );
     }
     let (seeds, energies, positions, directions) =
         sample_initial_particles(model, n_particles, base_seed);
@@ -1444,6 +1454,11 @@ fn translate_materials(
     // Stage 2b) driving the per-nuclide reaction-type split.
     let mut nuc_select_materials: Vec<(Vec<f64>, Vec<f64>, Vec<f64>)> =
         Vec::with_capacity(materials.len());
+    // Per-slab fission chi row table and per-channel fission cross sections
+    // (fusion-neutronics/core#34 entry 1), filled by `append_fission_chi_slabs`
+    // per material in slab order and installed on `nuclide_select` after the loop.
+    let mut chi_slab_meta: Vec<u32> = Vec::new();
+    let mut fission_channel_xs: Vec<f64> = Vec::new();
     // Running element base into the tight-CSR `nuc_macro_total` / `nuc_partial_xs`
     // for the NEXT material's first slab (issue #212). Advances by `nuc_count *
     // fine_n` per material; recorded in `fine_meta` col COL_FINE_NUC_BASE.
@@ -1570,6 +1585,25 @@ fn translate_materials(
         );
         append_material_xs(&mut out, &mat_xs);
 
+        // Fission chi rows per (nuclide, fission channel) plus one delayed row
+        // per nuclide (fusion-neutronics/core#34 entry 1), slab-major in
+        // `weighted` order so the kernel indexes them by the struck nuclide's
+        // global slab. The per-channel cross sections ride this material's FINE
+        // grid, the bracket the kernel already holds at the collision.
+        let chi_pool =
+            extract_fission_chi_per_nuclide(&weighted, material.temperature(), &mat_fine).map_err(
+                |e| GpuTranslateError::CellRegionUnsupported {
+                    cell_id: None,
+                    reason: format!("material `{mat_name}` per-nuclide fission chi: {e}"),
+                },
+            )?;
+        append_fission_chi_slabs(
+            &mut out,
+            &mut chi_slab_meta,
+            &mut fission_channel_xs,
+            &chi_pool,
+        );
+
         // Per-collision nuclide-selection rows for this material, on THIS
         // material's OWN fine grid (`mat_fine`, linear, issue #212). Rows are
         // nuclide-major `[n_nuclides x fine_n]`; AWRs are per nuclide in the same
@@ -1624,6 +1658,8 @@ fn translate_materials(
     // row block.
     out.nuclide_select =
         NuclideSelectInputs::from_materials_with_partials_per_material(&nuc_select_materials);
+    out.nuclide_select
+        .set_fission_chi(chi_slab_meta, fission_channel_xs);
 
     Ok(out)
 }
@@ -1677,42 +1713,6 @@ fn append_material_xs(out: &mut TranslatedMaterials, x: &GpuNuclideXs) {
     out.nu_bar_per_material.extend(&x.nu_bar);
     out.beta_delayed_per_material.extend(&x.beta_delayed);
 
-    // Fission outgoing-energy chi, tight CSR (issue #104). Record this
-    // material's bases BEFORE extending the tight data arrays, so they
-    // reflect the prior length (mirrors `push_eout_csr_offsets`, but
-    // per-MATERIAL: fission eout is appended once per material here, not
-    // per nuclide). `fission_eout_ae_offset[mat]` is the material's first
-    // ae-row in the concatenated `fission_eout_n_x` / `energy_grid`;
-    // `fission_eout_x_offset` gets one entry per appended ae-row, the
-    // global start of that row's `(x, cdf)` points.
-    //
-    // TWO chi rows per material (issue #364), pushed back to back: the prompt
-    // spectrum at row `2*mat` and the delayed groups' folded spectrum at row
-    // `2*mat + 1`. Appending the delayed spectrum as an extra row rather than a
-    // parallel set of buffers keeps the kernel's storage-buffer count unchanged.
-    push_fission_eout_row(
-        out,
-        &x.fission_eout_energy_grid,
-        &x.fission_eout_n_x,
-        &x.fission_eout_interp,
-        &x.fission_eout_x,
-        &x.fission_eout_cdf,
-        &x.fission_eout_p,
-        x.fission_eout_kind,
-        x.fission_eout_n_energies,
-    );
-    push_fission_eout_row(
-        out,
-        &x.fission_eout_delayed_energy_grid,
-        &x.fission_eout_delayed_n_x,
-        &x.fission_eout_delayed_interp,
-        &x.fission_eout_delayed_x,
-        &x.fission_eout_delayed_cdf,
-        &x.fission_eout_delayed_p,
-        x.fission_eout_delayed_kind,
-        x.fission_eout_delayed_n_energies,
-    );
-
     // Per-material scalars (one element pushed per material).
     out.fission_a_per_material.push(x.fission_watt_a);
     out.fission_b_per_material.push(x.fission_watt_b);
@@ -1720,43 +1720,68 @@ fn append_material_xs(out: &mut TranslatedMaterials, x: &GpuNuclideXs) {
     out.temperature_k_per_material.push(x.temperature_k);
 }
 
-/// Append ONE fission chi row onto the tight per-row CSR buffers (issue #104,
-/// extended to two rows per material by issue #364). Records the row's bases
-/// BEFORE extending the data arrays, so they reflect the prior length (mirrors
-/// `push_eout_csr_offsets`): `fission_eout_ae_offset` gets the row's first ae-row
-/// in the concatenated `fission_eout_n_x` / `energy_grid`, and
-/// `fission_eout_x_offset` one entry per appended ae-row, the global start of that
-/// ae-row's `(x, cdf)` points. An empty row (a material with no delayed data)
-/// pushes a base with zero rows behind it, which the kernel never reads because
-/// `beta == 0` there.
-#[allow(clippy::too_many_arguments)]
-fn push_fission_eout_row(
-    out: &mut TranslatedMaterials,
-    energy_grid: &[f64],
-    n_x: &[u32],
-    interp: &[u32],
-    x_vals: &[f64],
-    cdf: &[f64],
-    p: &[f64],
-    kind: u32,
-    n_energies: u32,
-) {
+/// Append ONE fission chi row onto the tight per-row CSR buffers (issue #104;
+/// rows per (slab, channel) plus a delayed row per slab, issue #364 and
+/// fusion-neutronics/core#34 entry 1) and return its row index. Records the
+/// row's bases BEFORE extending the data arrays, so they reflect the prior
+/// length (mirrors `push_eout_csr_offsets`): `fission_eout_ae_offset` gets the
+/// row's first ae-row in the concatenated `fission_eout_n_x` / `energy_grid`,
+/// and `fission_eout_x_offset` one entry per appended ae-row, the global start
+/// of that ae-row's `(x, cdf)` points. An empty row (a nuclide with no delayed
+/// data, or a non-fissionable one) pushes a base with zero rows behind it, which
+/// the kernel never reads (`beta == 0`, or no fission).
+fn push_fission_eout_row(out: &mut TranslatedMaterials, slot: &FissionEoutSlot) -> u32 {
+    let row = out.fission_eout_kind_per_material.len() as u32;
     out.fission_eout_ae_offset
         .push(out.fission_eout_n_x_per_material.len() as u32);
     let mut x_base = out.fission_eout_x_per_material.len() as u32;
-    for &n in n_x {
+    for &n in &slot.n_x {
         out.fission_eout_x_offset.push(x_base);
         x_base += n;
     }
     out.fission_eout_energy_grid_per_material
-        .extend(energy_grid);
-    out.fission_eout_n_x_per_material.extend(n_x);
-    out.fission_eout_interp_per_material.extend(interp);
-    out.fission_eout_x_per_material.extend(x_vals);
-    out.fission_eout_cdf_per_material.extend(cdf);
-    out.fission_eout_p_per_material.extend(p);
-    out.fission_eout_kind_per_material.push(kind);
-    out.fission_eout_n_energies_per_material.push(n_energies);
+        .extend(&slot.energy_grid);
+    out.fission_eout_n_x_per_material.extend(&slot.n_x);
+    out.fission_eout_interp_per_material.extend(&slot.interp);
+    out.fission_eout_x_per_material.extend(&slot.x);
+    out.fission_eout_cdf_per_material.extend(&slot.cdf);
+    out.fission_eout_p_per_material.extend(&slot.p);
+    out.fission_eout_kind_per_material.push(slot.kind);
+    out.fission_eout_n_energies_per_material
+        .push(slot.n_energies);
+    row
+}
+
+/// Append one material's per-nuclide fission chi rows (fusion-neutronics/core#34
+/// entry 1), one slab per nuclide in `weighted` order (the slab order of
+/// `nuclide_select`): each nuclide's prompt rows, one per fission channel, then
+/// its delayed row, with the slab's `chi_slab_meta` entry recording the prompt
+/// base, channel count, delayed row and (for a multi-channel nuclide) its
+/// element base into `fission_channel_xs`, whose block is `[n_channels x fine_n]`
+/// on this material's fine grid.
+fn append_fission_chi_slabs(
+    out: &mut TranslatedMaterials,
+    chi_slab_meta: &mut Vec<u32>,
+    fission_channel_xs: &mut Vec<f64>,
+    pool: &[NuclideFissionChi],
+) {
+    for chi in pool {
+        let prompt_base = out.fission_eout_kind_per_material.len() as u32;
+        for channel in &chi.channels {
+            push_fission_eout_row(out, channel);
+        }
+        let delayed_row = push_fission_eout_row(out, &chi.delayed);
+        let xs_base = fission_channel_xs.len() as u32;
+        if chi.channels.len() > 1 {
+            fission_channel_xs.extend_from_slice(&chi.channel_xs);
+        }
+        chi_slab_meta.extend_from_slice(&[
+            prompt_base,
+            chi.channels.len() as u32,
+            delayed_row,
+            xs_base,
+        ]);
+    }
 }
 
 /// Append a material's per-(material, nuclide) inelastic distribution pool onto

@@ -46,6 +46,17 @@ pub const NUC_PARTIAL_ABSORPTION: usize = 1;
 pub const NUC_PARTIAL_INELASTIC: usize = 2;
 pub const NUC_PARTIAL_FISSION: usize = 3;
 
+/// Columns of [`NuclideSelectInputs::chi_slab_meta`], the per-slab fission chi
+/// row table (fusion-neutronics/core#34 entry 1). For slab `s` the row
+/// `chi_slab_meta[s * CHI_SLAB_META_COLS ..]` holds: the first of its prompt chi
+/// rows, its fission channel count, its delayed chi row, and its element base
+/// into [`NuclideSelectInputs::fission_channel_xs`].
+pub const CHI_SLAB_META_COLS: usize = 4;
+pub const CHI_SLAB_PROMPT_ROW: usize = 0;
+pub const CHI_SLAB_N_CHANNELS: usize = 1;
+pub const CHI_SLAB_DELAYED_ROW: usize = 2;
+pub const CHI_SLAB_CHANNEL_XS_BASE: usize = 3;
+
 /// Packed per-collision nuclide-selection inputs (see module docs). Built once
 /// per launch and passed by reference into the host launcher and the CPU twin.
 #[derive(Debug, Clone, Default)]
@@ -67,6 +78,42 @@ pub struct NuclideSelectInputs {
     /// whose scattering = elastic + inelastic). Packing the four partials into
     /// one buffer adds a single storage-buffer binding (#74 Stage 2b).
     pub nuc_partial_xs: Vec<f64>,
+    /// Per-slab fission chi row table, packed `[n_slab x CHI_SLAB_META_COLS]`
+    /// (fusion-neutronics/core#34 entry 1). The `fission_eout_*` chi buffers are
+    /// indexed by ROW, and this table says which rows belong to which struck
+    /// nuclide: `CHI_SLAB_PROMPT_ROW` is the first of the slab's prompt rows, one
+    /// per fission channel (the non-redundant MTs among 18 / 19 / 20 / 21 / 38,
+    /// in the CPU fast grid's `fission_mt_numbers` order); `CHI_SLAB_N_CHANNELS`
+    /// is how many; `CHI_SLAB_DELAYED_ROW` is the slab's delayed-spectrum row;
+    /// `CHI_SLAB_CHANNEL_XS_BASE` is its element base into `fission_channel_xs`.
+    /// A fission in a slab with more than one channel draws one uniform and walks
+    /// the channels' cross sections at the collision energy to pick the prompt
+    /// row, mirroring CPU `FastXSGrid::sample_fission_reaction`; a single-channel
+    /// slab takes no draw and uses the base row, so every evaluation with MT 18
+    /// alone keeps its RNG stream byte for byte.
+    pub chi_slab_meta: Vec<u32>,
+    /// Per-channel microscopic fission cross sections for the slabs that carry
+    /// more than one channel, tight CSR on the owning material's FINE grid: the
+    /// value for slab `s`, channel `c`, fine index `i` sits at element
+    /// `base_s + c * fine_n + i`. Single-channel slabs contribute nothing; one
+    /// zero pads an all-single model, since cubecl rejects an empty buffer.
+    pub fission_channel_xs: Vec<f64>,
+}
+
+/// The two-rows-per-slab chi table: slab `s` reads its prompt spectrum at row
+/// `2s` and its delayed spectrum at row `2s + 1`, one channel each. This is the
+/// layout every fixture that hands the chi buffers over per material uses
+/// (slab == material there), and the layout the translator starts from before
+/// [`NuclideSelectInputs::set_fission_chi`] replaces it with the real one.
+fn two_rows_per_slab(n_slab: usize) -> Vec<u32> {
+    let mut meta = Vec::with_capacity(n_slab.max(1) * CHI_SLAB_META_COLS);
+    for s in 0..n_slab.max(1) {
+        meta.push(2 * s as u32);
+        meta.push(1);
+        meta.push(2 * s as u32 + 1);
+        meta.push(0);
+    }
+    meta
 }
 
 impl NuclideSelectInputs {
@@ -91,7 +138,28 @@ impl NuclideSelectInputs {
             // count == 1), so these rows are never read. Sized to one row per
             // material to keep the host length assertion happy.
             nuc_partial_xs: vec![0.0; n_mat.max(1) * n_grid.max(1) * NUC_PARTIAL_COLS],
+            chi_slab_meta: two_rows_per_slab(n_mat),
+            fission_channel_xs: vec![0.0],
         }
+    }
+
+    /// Replace the chi row table and the per-channel fission cross sections
+    /// (fusion-neutronics/core#34 entry 1) once the caller has laid the chi rows
+    /// out per (slab, channel). `chi_slab_meta` must hold one
+    /// `CHI_SLAB_META_COLS` row per slab; an empty `fission_channel_xs` is padded
+    /// to one element.
+    pub fn set_fission_chi(&mut self, chi_slab_meta: Vec<u32>, fission_channel_xs: Vec<f64>) {
+        assert_eq!(
+            chi_slab_meta.len(),
+            self.nuc_awr.len() * CHI_SLAB_META_COLS,
+            "chi_slab_meta must be [n_slab x CHI_SLAB_META_COLS]"
+        );
+        self.chi_slab_meta = chi_slab_meta;
+        self.fission_channel_xs = if fission_channel_xs.is_empty() {
+            vec![0.0]
+        } else {
+            fission_channel_xs
+        };
     }
 
     /// Build from per-material `(macro_total_rows, awr)` where `macro_total_rows`
@@ -164,11 +232,14 @@ impl NuclideSelectInputs {
         if nuc_partial_xs.is_empty() {
             nuc_partial_xs = vec![0.0; n_grid.max(1) * NUC_PARTIAL_COLS];
         }
+        let chi_slab_meta = two_rows_per_slab(nuc_awr.len());
         Self {
             nuc_macro_total,
             nuc_awr,
             mat_nuclide_meta,
             nuc_partial_xs,
+            chi_slab_meta,
+            fission_channel_xs: vec![0.0],
         }
     }
 
@@ -227,22 +298,35 @@ impl NuclideSelectInputs {
         if nuc_partial_xs.is_empty() {
             nuc_partial_xs = vec![0.0; NUC_PARTIAL_COLS];
         }
+        let chi_slab_meta = two_rows_per_slab(nuc_awr.len());
         Self {
             nuc_macro_total,
             nuc_awr,
             mat_nuclide_meta,
             nuc_partial_xs,
+            chi_slab_meta,
+            fission_channel_xs: vec![0.0],
         }
     }
 
     /// Append one more single-nuclide material (count 1, so it never triggers a
     /// selection draw). Used for the synthetic void material slot appended after
     /// the real materials. `n_grid` must match the existing rows. `awr` is the
-    /// (never-read) target mass for the slot.
-    pub fn push_single_nuclide_material(&mut self, awr: f64, n_grid: usize) {
+    /// (never-read) target mass for the slot; `prompt_row` and `delayed_row` are
+    /// the slot's (never-read) chi rows, which the caller has already pushed onto
+    /// the chi buffers so the row table stays aligned with them.
+    pub fn push_single_nuclide_material(
+        &mut self,
+        awr: f64,
+        n_grid: usize,
+        prompt_row: u32,
+        delayed_row: u32,
+    ) {
         let slab_base = self.nuc_awr.len() as u32;
         self.mat_nuclide_meta.push(slab_base);
         self.mat_nuclide_meta.push(1);
+        self.chi_slab_meta
+            .extend_from_slice(&[prompt_row, 1, delayed_row, 0]);
         self.nuc_macro_total
             .extend(std::iter::repeat_n(0.0, n_grid));
         self.nuc_awr.push(awr);
@@ -250,5 +334,53 @@ impl NuclideSelectInputs {
         // zero block to keep `nuc_partial_xs` length == n_slab x n_grid x cols.
         self.nuc_partial_xs
             .extend(std::iter::repeat_n(0.0, n_grid * NUC_PARTIAL_COLS));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The fixture layout: every slab reads its prompt spectrum at row `2s` and
+    /// its delayed spectrum at row `2s + 1`, one channel each, so no channel
+    /// draw is ever taken.
+    #[test]
+    fn builders_default_to_two_rows_per_slab() {
+        let inputs = NuclideSelectInputs::from_materials(
+            &[(vec![0.0; 6], vec![1.0, 2.0]), (vec![0.0; 3], vec![3.0])],
+            3,
+        );
+        assert_eq!(inputs.nuc_awr.len(), 3);
+        assert_eq!(
+            inputs.chi_slab_meta,
+            vec![0, 1, 1, 0, 2, 1, 3, 0, 4, 1, 5, 0]
+        );
+        assert_eq!(inputs.fission_channel_xs, vec![0.0]);
+        let single = NuclideSelectInputs::single_nuclide(&[1.0, 1.0], 4);
+        assert_eq!(single.chi_slab_meta, vec![0, 1, 1, 0, 2, 1, 3, 0]);
+    }
+
+    /// The translator replaces the table wholesale once the rows are laid out
+    /// per (slab, channel); the void slot appended afterwards carries its own
+    /// two rows.
+    #[test]
+    fn set_fission_chi_replaces_the_table_and_the_void_slot_appends() {
+        let mut inputs = NuclideSelectInputs::from_materials(&[(vec![0.0; 4], vec![1.0])], 4);
+        inputs.set_fission_chi(vec![0, 4, 4, 0], vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(inputs.chi_slab_meta, vec![0, 4, 4, 0]);
+        assert_eq!(inputs.fission_channel_xs.len(), 4);
+        inputs.push_single_nuclide_material(0.0, 2, 5, 6);
+        assert_eq!(inputs.chi_slab_meta, vec![0, 4, 4, 0, 5, 1, 6, 0]);
+        assert_eq!(inputs.nuc_awr.len(), 2);
+        let mut padded = NuclideSelectInputs::from_materials(&[(vec![0.0; 4], vec![1.0])], 4);
+        padded.set_fission_chi(vec![0, 1, 1, 0], Vec::new());
+        assert_eq!(padded.fission_channel_xs, vec![0.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "chi_slab_meta must be [n_slab x CHI_SLAB_META_COLS]")]
+    fn set_fission_chi_rejects_a_table_of_the_wrong_size() {
+        let mut inputs = NuclideSelectInputs::from_materials(&[(vec![0.0; 4], vec![1.0])], 4);
+        inputs.set_fission_chi(vec![0, 1, 1], Vec::new());
     }
 }

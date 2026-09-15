@@ -1,7 +1,8 @@
 //! Shared `#[cube]` fission outgoing-energy (chi) sampler.
 //!
-//! Samples one outgoing neutron energy from a material's fission spectrum,
-//! dispatching on the per-row `fission_eout_kind`:
+//! Samples one outgoing neutron energy from a chi row (one nuclide's spectrum
+//! for one fission channel, or its delayed spectrum), dispatching on the
+//! per-row `fission_eout_kind`:
 //!   - `1` ContinuousTabular: stochastic E_in bracket pick + interp-aware CDF
 //!     inversion + bracket-bound stretch (mirrors the inelastic ContinuousTabular
 //!     eout sampler and `yamc_physics::gpu::flat::fission_eout_continuous`).
@@ -39,13 +40,13 @@ pub struct FissionChiDraw {
     pub state: u64,
 }
 
-/// Sample one prompt-fission outgoing energy from the per-material chi spectrum.
+/// Sample one fission outgoing energy from chi row `chi_row`.
 ///
-/// `chi_row` selects the row in every per-material chi buffer. Rows come in
-/// (prompt, delayed) pairs, so material `m`'s prompt spectrum is row `2m` and its
-/// delayed spectrum is row `2m + 1` (issue #364). `e_in` is the incident neutron
-/// energy. `watt_a` / `watt_b` are the material's Watt
-/// parameters (the fall-through law). The fission chi table is tight CSR
+/// Rows are laid out per struck nuclide by `NuclideSelectInputs::chi_slab_meta`:
+/// one prompt row per fission channel plus one delayed row
+/// (fusion-neutronics/core#34 entry 1); [`select_fission_chi_rows`] picks them.
+/// `e_in` is the incident neutron energy. `watt_a` / `watt_b` are the material's
+/// Watt parameters (the fall-through law). The fission chi table is tight CSR
 /// (issue #104): `fission_eout_ae_offset[chi_row]` is the row's first
 /// ae-row in `fission_eout_n_x_per_material` / `fission_eout_energy_grid_per_material`,
 /// and `fission_eout_x_offset[ae_row]` is each ae-row's start in
@@ -335,14 +336,103 @@ pub fn sample_fission_chi(
     }
 }
 
+/// The chi rows one fission event samples from: the prompt row of the channel
+/// that fissioned and the struck nuclide's delayed row, with the PCG state after
+/// the channel draw (if one was taken).
+#[derive(CubeType)]
+pub struct FissionChiRows {
+    pub prompt_row: u32,
+    pub delayed_row: u32,
+    pub state: u64,
+}
+
+/// Pick the chi rows for a fission in nuclide slab `slab`
+/// (fusion-neutronics/core#34 entry 1).
+///
+/// Reads the slab's row in `chi_slab_meta` (`CHI_SLAB_META_COLS` wide: prompt
+/// row base, channel count, delayed row, channel-xs base). With one channel the
+/// prompt row is the base and NO draw is taken, so single-channel evaluations
+/// (every ENDF/B-VIII.1 fissionable but U240) keep their RNG stream byte for
+/// byte. With more, ONE uniform is drawn and the channels' fission cross
+/// sections at the collision energy are walked cumulatively to pick the channel,
+/// mirroring CPU `FastXSGrid::sample_fission_reaction`: a first pass sums the
+/// positive channel values, the walk stops at the first channel whose running
+/// sum reaches `xi * total`, and a zero total or an exhausted walk falls back
+/// to the first / last channel respectively. The per-channel values ride the
+/// owning material's fine grid, so the caller passes its collision bracket
+/// (`idx_lo_f`, `idx_hi_f`, `frac_f`) and the grid length `fine_n`.
+#[cube]
+#[allow(clippy::too_many_arguments)]
+pub fn select_fission_chi_rows(
+    slab: u32,
+    fine_n: u32,
+    idx_lo_f: u32,
+    idx_hi_f: u32,
+    frac_f: f64,
+    chi_slab_meta: &[u32],
+    fission_channel_xs: &[f64],
+    state_in: u64,
+) -> FissionChiRows {
+    let mut state = state_in;
+    let meta = slab * 4u32; // CHI_SLAB_META_COLS
+    let prompt_base = chi_slab_meta[meta as usize];
+    let n_ch = chi_slab_meta[(meta + 1u32) as usize];
+    let delayed_row = chi_slab_meta[(meta + 2u32) as usize];
+    let xs_base = chi_slab_meta[(meta + 3u32) as usize];
+    let mut prompt_row = prompt_base;
+    if n_ch > 1u32 {
+        let d_ch = crate::common::pcg32::draw_uniform(state);
+        state = d_ch.state;
+        let mut total = 0.0_f64;
+        let mut c = 0u32;
+        while c < n_ch {
+            let row = xs_base + c * fine_n;
+            let v_lo = fission_channel_xs[(row + idx_lo_f) as usize];
+            let v_hi = fission_channel_xs[(row + idx_hi_f) as usize];
+            let xs = v_lo + (v_hi - v_lo) * frac_f;
+            if xs > 0.0 {
+                total += xs;
+            }
+            c += 1u32;
+        }
+        if total > 0.0 {
+            let target = d_ch.xi * total;
+            let mut accum = 0.0_f64;
+            let mut chosen = n_ch - 1u32;
+            let mut found = 0u32;
+            let mut k = 0u32;
+            while k < n_ch {
+                let row = xs_base + k * fine_n;
+                let v_lo = fission_channel_xs[(row + idx_lo_f) as usize];
+                let v_hi = fission_channel_xs[(row + idx_hi_f) as usize];
+                let xs = v_lo + (v_hi - v_lo) * frac_f;
+                if found == 0u32 && xs > 0.0 {
+                    accum += xs;
+                    if accum >= target {
+                        chosen = k;
+                        found = 1u32;
+                    }
+                }
+                k += 1u32;
+            }
+            prompt_row = prompt_base + chosen;
+        }
+    }
+    FissionChiRows {
+        prompt_row,
+        delayed_row,
+        state,
+    }
+}
+
 /// Sample one fission progeny's outgoing energy, choosing the prompt or the
 /// delayed spectrum first (issue #364).
 ///
-/// `beta` is the material's delayed fraction `nu_d(E) / nu_t(E)` at the incident
-/// energy. The count of progeny already comes from nu_TOTAL, so what the delayed
-/// groups add is that a `beta` share of them are born from the (much softer)
-/// delayed spectrum in row `2*mat_idx + 1` instead of the prompt spectrum in row
-/// `2*mat_idx`.
+/// `prompt_row` and `delayed_row` are the event's chi rows from
+/// [`select_fission_chi_rows`]. `beta` is the material's delayed fraction
+/// `nu_d(E) / nu_t(E)` at the incident energy. The count of progeny already comes
+/// from nu_TOTAL, so what the delayed groups add is that a `beta` share of them
+/// are born from the (much softer) delayed spectrum instead of the prompt one.
 ///
 /// Mirrors CPU `yamc_physics::neutron::interaction::fission_progeny_energy`: ONE
 /// uniform, drawn only when `beta > 0.0`, so a material with no delayed data keeps
@@ -351,7 +441,8 @@ pub fn sample_fission_chi(
 #[allow(clippy::too_many_arguments)]
 pub fn sample_fission_progeny_energy(
     e_in: f64,
-    mat_idx: u32,
+    prompt_row: u32,
+    delayed_row: u32,
     beta: f64,
     watt_a: f64,
     watt_b: f64,
@@ -368,12 +459,12 @@ pub fn sample_fission_progeny_energy(
     state_in: u64,
 ) -> FissionChiDraw {
     let mut state = state_in;
-    let mut chi_row = 2u32 * mat_idx;
+    let mut chi_row = prompt_row;
     if beta > 0.0 {
         let d_del = crate::common::pcg32::draw_uniform(state);
         state = d_del.state;
         if d_del.xi < beta {
-            chi_row = 2u32 * mat_idx + 1u32;
+            chi_row = delayed_row;
         }
     }
     sample_fission_chi(
