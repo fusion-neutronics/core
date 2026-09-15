@@ -16,11 +16,11 @@
 //! longer; on a single-bin tally the aggregate moments reproduce the bin
 //! statistics exactly (both fold the same per-history sample); on a multi-bin
 //! tally the aggregate agrees with the CPU's (same seed, lockstep histories);
-//! and a model that transports photons is still refused, in words, before any
-//! device work.
+//! and the photon-only and coupled launch loops stop on the target too, with
+//! the same single-bin identity on their per-history and per-source folds.
 //!
-//! Run them (needs an f64 GPU and the Fe56 fixture; the fissile case takes
-//! U235 from the cache):
+//! Run them (needs an f64 GPU and the Fe56 and Fe fixtures; the fissile case
+//! takes U235 from the cache):
 //!   cargo test -p yamc --features gpu --release \
 //!       --test gpu_convergence_targets -- --nocapture
 
@@ -32,7 +32,6 @@ use std::sync::Arc;
 use yamc::geo::{BoundaryType, HalfspaceType, Region, Surface, SurfaceKind};
 use yamc::geometry::cell::Cell;
 use yamc::geometry::Geometry;
-use yamc::gpu::GpuDispatchError;
 use yamc::model::{Model, TrackingMode, TransportSettings, Verbose};
 use yamc_materials::Material;
 use yamc_source::distribution::angular::AngularDistribution;
@@ -43,6 +42,7 @@ use yamc_source::source::{
 };
 use yamc_tallies::filter::cell::CellFilter;
 use yamc_tallies::filter::energy::EnergyFilter;
+use yamc_tallies::filter::particle_type::ParticleTypeFilter;
 use yamc_tallies::filter::Filter;
 use yamc_tallies::tally::Tally;
 use yamc_tallies::welford::AggMoments;
@@ -407,19 +407,161 @@ fn multi_bin_aggregate_agrees_with_the_cpu() {
     );
 }
 
+/// A photon model: Fe56 sphere carrying the Fe photon data, 2 MeV photon
+/// point source, photon flux tally. `coupled` instead makes it a neutron
+/// source with secondary photons on and a photon flux tally beside the neutron
+/// one, so the coupled loop's per-source fold is what stops the run.
+fn build_photon_model(
+    coupled: bool,
+    targets: Vec<ConvergenceTarget>,
+) -> Option<(Model, Arc<Tally>, Arc<Tally>)> {
+    if !std::path::Path::new("tests/Fe56.arrow").exists()
+        || !std::path::Path::new("tests/Fe.arrow").exists()
+    {
+        eprintln!("skipping: Fe56 / Fe fixtures absent");
+        return None;
+    }
+    let sphere = Surface {
+        surface_id: Some(1),
+        kind: SurfaceKind::Sphere {
+            x0: 0.0,
+            y0: 0.0,
+            z0: 0.0,
+            radius: 10.0,
+        },
+        boundary: BoundaryType::Vacuum,
+        name: None,
+    };
+    let region = Region::new_from_halfspace(HalfspaceType::Below(Arc::new(sphere)));
+    let mut material = Material::new(
+        HashMap::from([("Fe56".to_string(), 1.0)]),
+        "atom",
+        "g/cm3",
+        Some(7.874),
+    )
+    .unwrap();
+    material.set_material_id(1);
+    material.set_temperature("294");
+    let nm = HashMap::from([("Fe56".to_string(), "tests/Fe56.arrow".to_string())]);
+    let photon_paths = HashMap::from([("Fe".to_string(), "tests/Fe.arrow".to_string())]);
+    material
+        .read_nuclear_data(&nm, Some(&photon_paths))
+        .unwrap();
+    material.init_photon_data(&photon_paths).unwrap();
+    let cell = Cell::new(Some(1), region, Some("c".into()), Some(0));
+    let cell_id = cell.cell_id.unwrap();
+    let geometry = Geometry::new(vec![cell], vec![Arc::new(material)]).unwrap();
+    let source_inner = Source {
+        space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
+        angle: AngularDistribution::Isotropic,
+        energy: SourceEnergyDistribution::Discrete(
+            Discrete::new(vec![if coupled { SOURCE_E } else { 2.0e6 }], vec![1.0]).unwrap(),
+        ),
+        strength: 1.0,
+    };
+    let source = if coupled {
+        ParticleSource::Neutron(source_inner)
+    } else {
+        ParticleSource::Photon(source_inner)
+    };
+    let particle_tally = |name: &str, kind: yamc_particle::particle::ParticleType| {
+        let mut t = Tally::new();
+        t.name = Some(name.to_string());
+        t.filters.push(Filter::Cell(CellFilter::from_id(cell_id)));
+        t.filters
+            .push(Filter::ParticleType(ParticleTypeFilter::new(kind)));
+        t.scores = vec!["flux".parse().unwrap()];
+        t.estimator = Estimator::TrackLength;
+        t.initialize_batches(1);
+        Arc::new(t)
+    };
+    let photon_t = particle_tally("p", yamc_particle::particle::ParticleType::Photon);
+    let neutron_t = particle_tally("n", yamc_particle::particle::ParticleType::Neutron);
+    let tallies = if coupled {
+        vec![Arc::clone(&neutron_t), Arc::clone(&photon_t)]
+    } else {
+        vec![Arc::clone(&photon_t)]
+    };
+    let mut model = Model::new(geometry, vec![source], tallies);
+    model.verbose = Verbose::silent();
+    model.tracking_mode = TrackingMode::Surface;
+    model.gpu_max_steps_per_particle = 10_000;
+    model.transport_secondary_photons = coupled;
+    model.convergence_targets = targets;
+    Some((model, neutron_t, photon_t))
+}
+
+/// Aggregate mean and standard error against the bin's, for a single-bin tally.
+fn assert_single_bin_identity(label: &str, tally: &Tally, n: u64) {
+    let agg = tally.get_agg();
+    let mean = tally.get_mean()[0];
+    let std = tally.get_std_dev()[0];
+    let agg_std = (agg.m2 / ((agg.n as f64 - 1.0) * agg.n as f64)).sqrt();
+    eprintln!(
+        "{label}: n {} mean {mean:.6e} vs agg {:.6e}; std {std:.4e} vs agg {agg_std:.4e}",
+        agg.n, agg.mean
+    );
+    assert_eq!(agg.n, n, "{label}: sample count");
+    assert!(
+        ((agg.mean - mean) / mean).abs() < 1e-9,
+        "{label}: aggregate mean {} vs bin mean {mean}",
+        agg.mean
+    );
+    assert!(
+        ((agg_std - std) / std).abs() < 1e-6,
+        "{label}: aggregate std {agg_std} vs bin std {std}"
+    );
+}
+
+/// The photon-only launch loop: the photon kernel emits the same per-history
+/// totals, and the run stops on the target.
 #[test]
-fn photon_models_are_still_refused_in_words() {
+fn a_photon_run_stops_when_the_target_is_met() {
     let _env = GpuTest::with_chunk(CHUNK);
-    let Some(case) = fe56() else {
+    if !gpu_ready() {
+        return;
+    }
+    let target = ConvergenceTarget::new(ConvergenceMetric::RelativeError, 0.01);
+    let Some((mut model, _, photon_t)) = build_photon_model(false, vec![target.clone()]) else {
         return;
     };
-    let target = ConvergenceTarget::new(ConvergenceMetric::RelativeError, 0.01);
-    let (mut model, _) = build_model(&case, None, rel_error(&target));
-    model.transport_secondary_photons = true;
-    match yamc::gpu::run_on_gpu(&mut model, &uncapped()) {
-        Err(GpuDispatchError::ConvergenceTargetsUnsupported { n_targets }) => {
-            assert_eq!(n_targets, 1);
-        }
-        other => panic!("expected the photon refusal, got {other:?}"),
+    let result = yamc::gpu::run_on_gpu(&mut model, &uncapped()).expect("GPU run");
+    let rel = agg_rel_error(&photon_t.get_agg());
+    eprintln!(
+        "photon 1% target: stopped after {} histories, aggregate rel err {rel:.4}",
+        result.n_particles
+    );
+    assert_eq!(result.n_particles % CHUNK, 0);
+    assert!(rel > 0.0 && rel <= 0.01);
+    assert_single_bin_identity("photon flux", &photon_t, result.n_particles as u64);
+}
+
+/// The coupled launch loop: every tally is per source (the photon pass folds
+/// into the neutron source's sample), the target applies to both tallies, and
+/// the run stops once both meet it.
+#[test]
+fn a_coupled_run_stops_when_both_tallies_meet_the_target() {
+    let _env = GpuTest::with_chunk(CHUNK);
+    if !gpu_ready() {
+        return;
     }
+    // No selector: the target applies to every tally on the model.
+    let target = ConvergenceTarget::new(ConvergenceMetric::RelativeError, 0.02);
+    let Some((mut model, neutron_t, photon_t)) = build_photon_model(true, vec![target]) else {
+        return;
+    };
+    let result = yamc::gpu::run_on_gpu(&mut model, &uncapped()).expect("GPU run");
+    let rel_n = agg_rel_error(&neutron_t.get_agg());
+    let rel_p = agg_rel_error(&photon_t.get_agg());
+    eprintln!(
+        "coupled 2% target: stopped after {} sources, aggregate rel err neutron {rel_n:.4} \
+         photon {rel_p:.4}",
+        result.n_particles
+    );
+    assert_eq!(result.n_particles % CHUNK, 0);
+    assert!(rel_n > 0.0 && rel_n <= 0.02);
+    assert!(rel_p > 0.0 && rel_p <= 0.02);
+    let n = result.n_particles as u64;
+    assert_single_bin_identity("coupled neutron flux", &neutron_t, n);
+    assert_single_bin_identity("coupled photon flux", &photon_t, n);
 }

@@ -6,16 +6,14 @@ reported only under a verbosity flag the user can switch off, so a
 
 - ``tracking_mode``: the kernels always surface-track. The notice is now
   printed to stderr at every ``verbose`` setting.
-- ``convergence_targets``: the neutron launch loops now stop on them
-  (core#29). The photon launch loops still cannot, so a model that transports
-  photons is refused up front, whatever else is set, rather than run silently
-  to the cap as it once did.
+- ``convergence_targets``: every GPU launch loop now stops on them (core#29),
+  neutron, photon and coupled alike, where the run once went silently to the
+  cap with the targets ignored.
 - ``gpu_max_steps_per_particle``: a launch that truncated histories under-counts
   the flux. That was a gated warning; it is now an error, so the under-counted
   tallies are never returned.
 
-The photon refusal happens before any GPU is touched, so that test runs
-everywhere. The others need an f64 Vulkan adapter and skip without one.
+All of these need an f64 Vulkan adapter and skip without one.
 """
 
 import os
@@ -56,30 +54,26 @@ def _sphere(nuclide, radius, photon_element=None, **model_kwargs):
     )
 
 
+@needs_gpu
 @pytest.mark.parametrize(
     "run_kwargs",
     [
-        pytest.param({"total_particles": 1000}, id="with-particle-cap"),
-        pytest.param({"max_runtime": 1.0}, id="with-runtime-budget"),
+        pytest.param({"total_particles": 10_000_000}, id="with-particle-cap"),
+        pytest.param({"max_runtime": 600.0}, id="with-runtime-budget"),
         pytest.param({}, id="targets-only"),
     ],
 )
-def test_convergence_targets_are_refused_on_gpu_for_photon_models(run_kwargs):
-    # The photon launch loops cannot evaluate a target yet, so a model that
-    # transports photons is refused in the same words for every combination,
-    # before any adapter is touched (this holds on hosts without a GPU too).
-    # Before core#29 every GPU model was refused this way; the neutron loops
-    # now stop on the targets (see the test below).
-    # The material carries the Fe photon data so the model is a valid photon
-    # model; the refusal is then the convergence one, not a missing-data error.
+def test_convergence_targets_stop_a_photon_run_on_gpu(run_kwargs):
+    # A photon model (secondary photons on, the material carries the Fe photon
+    # data) with a loose target: whatever cap or budget sits alongside, the
+    # target is what ends the run, and the aggregate error honours it. Before
+    # core#29 every one of these combinations was refused (and before core#23
+    # the targets were dropped in silence and the run went to the cap).
     model = _sphere("Fe56", 10.0, photon_element="Fe", transport_secondary_photons=True)
     model.convergence_targets = [yamc.ConvergenceTarget("relative_error", 0.05, tally="t")]
-    with pytest.raises(ValueError, match="cannot stop on convergence targets") as exc:
-        model.simulate_transport(seed=1, compute="gpu", **run_kwargs)
-    # The message must name the way out.
-    assert "Model.convergence_targets" in str(exc.value)
-    assert "1 target(s)" in str(exc.value)
-    assert "photon" in str(exc.value)
+    r = model.simulate_transport(seed=1, compute="gpu", **run_kwargs)["t"]
+    assert r.n_histories > 0
+    assert 0.0 < r.aggregate_relative_error <= 0.05
 
 
 @needs_gpu
