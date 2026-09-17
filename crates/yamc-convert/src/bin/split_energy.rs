@@ -27,11 +27,19 @@
 //! Each DIR either is a `{Name}.arrow` folder or holds them. A folder with no
 //! `nuclide.arrow` is skipped, which covers a photon element (whose layout this
 //! does not change) and a folder already migrated.
+//!
+//! `--data-version VERSION` additionally stamps `data_version` on every folder
+//! walked, skipped ones included. That is the field a cache compares against
+//! the origin's to decide whether to refetch, so a release wants one value
+//! across the whole tree: a folder left on the previous stamp is one no client
+//! will refetch. Photon elements need it as much as the nuclides do, which is
+//! why the stamp is not tied to whether there was anything to migrate.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use yamc_convert::energy_ranges::write_energy_ranges;
+use yamc_convert::marker;
 use yamc_convert::nuclide::migrate_energy_out_of_nuclide;
 
 /// The `*.arrow` folders under `root`, or `root` itself when it is one.
@@ -48,18 +56,32 @@ fn folders(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-/// Set `format_version` to 2 in a folder's marker, staged and renamed.
-fn stamp_version(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let path = dir.join("version.json");
-    let mut version: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
-    version
-        .as_object_mut()
-        .ok_or("version.json is not a JSON object")?
-        .insert("format_version".to_string(), serde_json::json!(2));
-    let tmp = dir.join("version.json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&version)?)?;
-    std::fs::rename(tmp, path)?;
-    Ok(())
+/// Command line: the folders, and the release stamp to write.
+struct Args {
+    dirs: Vec<String>,
+    /// `--data-version VERSION`, the stamp every folder walked is given.
+    data_version: Option<String>,
+}
+
+/// Parse `argv`, or `None` to print usage and exit 2.
+fn parse(argv: Vec<String>) -> Option<Args> {
+    let mut out = Args {
+        dirs: Vec::new(),
+        data_version: None,
+    };
+    let mut it = argv.into_iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "-h" | "--help" => return None,
+            "--data-version" => out.data_version = Some(it.next()?),
+            rest if rest.starts_with("--data-version=") => {
+                out.data_version = Some(rest["--data-version=".len()..].to_string());
+            }
+            rest if rest.starts_with('-') => return None,
+            rest => out.dirs.push(rest.to_string()),
+        }
+    }
+    (!out.dirs.is_empty()).then_some(out)
 }
 
 /// Migrate one folder. `Ok(false)` when it has nothing to move.
@@ -68,20 +90,20 @@ fn migrate(dir: &Path) -> Result<bool, Box<dyn std::error::Error>> {
         return Ok(false);
     }
     write_energy_ranges(dir)?;
-    stamp_version(dir)?;
+    marker::update(dir, &[("format_version", serde_json::json!(2))])?;
     Ok(true)
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
-        eprintln!("usage: split_energy DIR [DIR ...]");
+    let Some(args) = parse(std::env::args().skip(1).collect()) else {
+        eprintln!("usage: split_energy [--data-version VERSION] DIR [DIR ...]");
         eprintln!("  DIR is a {{Name}}.arrow folder, or a directory holding them");
+        eprintln!("  --data-version  stamp every folder walked with this release stamp");
         return ExitCode::from(2);
-    }
+    };
 
-    let (mut moved, mut skipped, mut failed) = (0usize, 0usize, 0usize);
-    for arg in &args {
+    let (mut moved, mut skipped, mut stamped, mut failed) = (0usize, 0usize, 0usize, 0usize);
+    for arg in &args.dirs {
         let root = Path::new(arg);
         let dirs = match folders(root) {
             Ok(d) if d.is_empty() => {
@@ -111,12 +133,30 @@ fn main() -> ExitCode {
                 Err(e) => {
                     failed += 1;
                     eprintln!("FAIL {name}: {e}");
+                    // Not stamped: a folder whose migration failed must not
+                    // claim to be part of the release.
+                    continue;
+                }
+            }
+            if let Some(version) = &args.data_version {
+                match marker::stamp_data_version(&dir, version) {
+                    Ok(true) => stamped += 1,
+                    Ok(false) => {}
+                    Err(e) => {
+                        failed += 1;
+                        eprintln!("FAIL {name}: stamping data_version: {e}");
+                    }
                 }
             }
         }
     }
 
-    println!("{moved} migrated, {skipped} skipped, {failed} failed");
+    match &args.data_version {
+        Some(v) => {
+            println!("{moved} migrated, {skipped} skipped, {stamped} stamped {v}, {failed} failed")
+        }
+        None => println!("{moved} migrated, {skipped} skipped, {failed} failed"),
+    }
     if failed > 0 {
         ExitCode::FAILURE
     } else {
