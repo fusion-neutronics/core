@@ -29,6 +29,7 @@ use std::sync::Arc;
 /// a reader can fetch only the cross sections it needs. Part of the published
 /// format, and shared by the converter that writes the index and the loader
 /// that reads it.
+pub mod energy_ranges;
 pub mod reaction_ranges;
 
 /// Every section, keyed by its path within the output directory.
@@ -46,6 +47,7 @@ pub fn all_sections() -> Vec<(&'static str, Schema)> {
         ("decay/sources.arrow", decay_sources()),
         ("distributions.arrow", distributions()),
         ("element.arrow", element()),
+        ("energy.arrow", energy()),
         ("fast_xs.arrow", fast_xs()),
         ("fission_photon.arrow", fission_photon()),
         ("fission_yields/aliases.arrow", fission_yields_aliases()),
@@ -564,6 +566,11 @@ pub fn fission_yields_fission_yields() -> Schema {
 }
 
 /// `nuclide.arrow`
+///
+/// Metadata only since the union energy grids moved to [`energy()`]
+/// (fusion-neutronics/core#100). One row, on the order of a kilobyte, so a
+/// client that wants to know what a nuclide IS no longer pays 6.33 MB of U238
+/// grids to find out.
 pub fn nuclide() -> Schema {
     Schema::new(vec![
         utf8("name", true),
@@ -572,10 +579,25 @@ pub fn nuclide() -> Schema {
         f64("atomic_weight_ratio", true),
         utf8s("temperatures", true),
         f64s("kTs", true),
-        utf8s("energy_temperatures", true),
-        f64ss("energy_values", true),
     ])
-    .with_metadata(meta([("filetype", "data_neutron"), ("version", "4.0")]))
+    .with_metadata(meta([("filetype", "data_neutron"), ("version", "5.0")]))
+}
+
+/// `energy.arrow`
+///
+/// The union energy grids, one row and one record batch per temperature, so a
+/// client that plots at one temperature range-fetches one of them instead of
+/// reading all six out of `nuclide.arrow`.
+///
+/// `temperature` is the label as the file spells it, `"294K"`. The rows are not
+/// only the nuclide's `temperatures`: the NJOY route carries an extra 0 K grid
+/// off the PENDF tape, which is published here under its own label and which no
+/// temperature filter can name.
+pub fn energy() -> Schema {
+    Schema::new(vec![utf8("temperature", true), f64s("energy_values", true)]).with_metadata(meta([
+        ("filetype", "data_neutron_energy"),
+        ("version", "1.0"),
+    ]))
 }
 
 /// `products.arrow`
@@ -675,7 +697,7 @@ mod tests {
         let sections = all_sections();
         assert_eq!(
             sections.len(),
-            20,
+            21,
             "section count changed; update the manifest"
         );
         let mut paths: Vec<&str> = sections.iter().map(|(p, _)| *p).collect();
