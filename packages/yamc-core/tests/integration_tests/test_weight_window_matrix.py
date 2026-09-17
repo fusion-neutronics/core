@@ -540,14 +540,41 @@ def test_model_save_load_round_trips_the_window(tmp_path):
     )
 
 
-@pytest.mark.xfail(
-    reason="gap: a second window for the same particle is accepted and silently "
-    "ignored instead of being rejected as ambiguous",
-    strict=True,
-)
 def test_duplicate_window_for_one_particle_is_rejected():
+    """Two windows for one particle is ambiguous input, so it is refused.
+
+    Several entries are allowed so that one window can be given per particle.
+    Two for the same particle is not a stronger request: only the first is ever
+    consulted at a collision, so nothing downstream can tell which was meant.
+    """
     window = acting_window()
-    with pytest.raises(ValueError):
-        build(vr=[window, window]).simulate_transport(
-            total_particles=1_000, seed=SEED
+    with pytest.raises(ValueError, match="at most one WeightWindowBounds per"):
+        build(vr=[window, window])
+
+
+def test_one_window_per_particle_is_still_allowed():
+    """The refusal above must not catch the case it exists to permit."""
+    neutron = acting_window()
+    photon = acting_window(particle="photon")
+    model = build(vr=[neutron, photon])
+    assert len(model.variance_reduction) == 2
+
+
+def test_cylindrical_mesh_refusal_names_the_limitation():
+    """The refusal says weight windows are rectangular-only, not that a type mismatched.
+
+    pyo3's stock message for a typed argument describes the mismatch
+    ("'RegularCylindricalMesh' object is not an instance of
+    'RegularRectangularMesh'"), which tells a reader nothing about whether a
+    cylindrical weight window exists and they got the call wrong, or whether it
+    does not exist at all.
+    """
+    cylindrical = yamc.RegularCylindricalMesh(
+        r_bounds=(0.0, 10.0), z_bounds=(-5.0, 5.0), shape=(5, 4, 2)
+    )
+    with pytest.raises(TypeError, match="rectangular mesh only"):
+        yamc.WeightWindowBounds(
+            mesh=cylindrical, lower_bounds=[LOWER_ACTS] * cylindrical.num_bins
         )
+    with pytest.raises(TypeError, match="rectangular mesh only"):
+        yamc.WeightWindowGeneratorDeGVR(mesh=cylindrical)

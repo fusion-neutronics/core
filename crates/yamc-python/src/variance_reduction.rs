@@ -100,14 +100,43 @@ impl PySurvivalBiasing {
     }
 }
 
+/// Extract a rectangular mesh, naming the limitation when it is not one.
+///
+/// pyo3's own refusal for a typed argument reads
+/// `TypeError: 'RegularCylindricalMesh' object is not an instance of
+/// 'RegularRectangularMesh'`, which describes a type mismatch rather than
+/// saying weight windows are rectangular-mesh-only and that there is nothing
+/// the caller can pass instead today. The GPU dispatch refusals name their
+/// limitation and their remedy; this matches them (issue #113).
+fn rectangular_mesh(mesh: &Bound<'_, PyAny>, owner: &str) -> PyResult<PyRegularRectangularMesh> {
+    mesh.extract::<PyRegularRectangularMesh>().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(format!(
+            "{owner} requires a RegularRectangularMesh, got {}. Weight windows are \
+             defined on a rectangular mesh only; there is no cylindrical or \
+             unstructured weight-window path yet.",
+            mesh.get_type()
+                .name()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|_| "an unknown type".to_string())
+        ))
+    })
+}
+
 /// A mesh-based weight-window map applied at collisions: a particle whose
 /// weight exceeds the local upper bound is split into equal-weight copies
 /// (capped by ``max_split``), one at or below the lower bound plays Russian
 /// roulette (survivor weight ``survival_factor * lower``), and one below
 /// ``weight_floor`` is killed. Bounds are given per (energy group, voxel),
 /// flat, indexed ``group * num_voxels + voxel``; a negative lower bound is
-/// the "no window" sentinel. Add to ``Model(variance_reduction=[...])``;
-/// several entries (for example one per particle type) are allowed.
+/// the "no window" sentinel. Add to ``Model(variance_reduction=[...])``; one
+/// entry per particle type is allowed, and two for the same particle is
+/// rejected rather than silently shadowed.
+///
+/// A mesh smaller than the geometry is allowed and unbiased: a particle
+/// outside it gets no window and behaves analog. That is easy to do by
+/// accident and hard to notice, since the only symptom is that the window did
+/// not help, so the coverage is reported at the start of a run when
+/// ``verbose`` includes ``"summary"``.
 ///
 /// Args:
 ///     mesh: RegularRectangularMesh the windows are defined on.
@@ -136,7 +165,7 @@ impl PyWeightWindowBounds {
     #[pyo3(signature = (mesh, lower_bounds, upper_bounds=None, ratio=5.0, energy_bins=None, particle="neutron", survival_factor=3.0, max_split=10, weight_floor=1e-38))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        mesh: PyRegularRectangularMesh,
+        mesh: &Bound<'_, PyAny>,
         lower_bounds: Vec<f64>,
         upper_bounds: Option<Vec<f64>>,
         ratio: f64,
@@ -170,7 +199,9 @@ impl PyWeightWindowBounds {
             }
         };
         let inner = WeightWindowBounds {
-            mesh: mesh.internal.clone(),
+            mesh: rectangular_mesh(mesh, "WeightWindowBounds")?
+                .internal
+                .clone(),
             particle,
             energy_bins,
             lower_bounds,
@@ -288,7 +319,7 @@ impl PyWeightWindowGeneratorDeGVR {
     #[pyo3(signature = (mesh, energy_bins=None, particle=None, density_reduction=None, ratio=5.0, survival_factor=3.0, max_split=10, weight_floor=1e-38, photon_energy=None))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        mesh: PyRegularRectangularMesh,
+        mesh: &Bound<'_, PyAny>,
         energy_bins: Option<Vec<f64>>,
         particle: Option<Bound<'_, PyAny>>,
         density_reduction: Option<f64>,
@@ -300,7 +331,9 @@ impl PyWeightWindowGeneratorDeGVR {
     ) -> PyResult<Self> {
         let (particles, particle_is_list) = parse_particles(particle)?;
         let inner = WeightWindowGeneratorDeGVR {
-            mesh: mesh.internal.clone(),
+            mesh: rectangular_mesh(mesh, "WeightWindowGeneratorDeGVR")?
+                .internal
+                .clone(),
             energy_bins,
             particles,
             photon_energy,
@@ -441,11 +474,26 @@ pub fn parse_variance_reduction(
 ) -> PyResult<Vec<VarianceReduction>> {
     let mut parsed = Vec::with_capacity(entries.len());
     let mut survival_count = 0usize;
+    // Windows already taken, so a second one for the same particle is caught
+    // here rather than silently shadowed. Only the first entry for a particle
+    // is ever consulted at a collision, so two is ambiguous input: nothing
+    // downstream can tell which the caller meant.
+    let mut window_particles: Vec<ParticleType> = Vec::new();
     for entry in &entries {
         if let Ok(sb) = entry.extract::<PySurvivalBiasing>() {
             survival_count += 1;
             parsed.push(VarianceReduction::SurvivalBiasing(sb.inner));
         } else if let Ok(ww) = entry.extract::<PyWeightWindowBounds>() {
+            let particle = ww.inner.particle;
+            if window_particles.contains(&particle) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "variance_reduction may contain at most one WeightWindowBounds per \
+                     particle type (got two for {particle:?}). Several entries are allowed \
+                     so that one window can be given per particle; two for the same particle \
+                     is ambiguous, and only the first would be applied."
+                )));
+            }
+            window_particles.push(particle);
             parsed.push(VarianceReduction::WeightWindowBounds(Box::new(ww.inner)));
         } else {
             return Err(pyo3::exceptions::PyTypeError::new_err(format!(

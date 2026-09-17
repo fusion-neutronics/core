@@ -1939,6 +1939,25 @@ impl Model {
             // Weight-window maps borrowed for the run (empty if none). Slice
             // of references, mirroring `tallies`; consumed at collisions.
             let weight_window_refs = self.weight_windows();
+            // A window mesh smaller than the geometry is legal and unbiased,
+            // but silent: particles outside it go analog and the only symptom
+            // is that the window did not help. Said once here, where the mesh
+            // and the geometry are both in hand, rather than counted per
+            // collision (issue #113).
+            if self.verbose.summary {
+                let bounds = self.geometry.bounding_box();
+                for ww in &weight_window_refs {
+                    if let Some((covered, short)) = ww.coverage_of(&bounds) {
+                        println!(
+                            "Weight window for {:?} covers {:.1}% of the geometry bounding box \
+                             and stops short on {}; particles outside it run analog.",
+                            ww.particle,
+                            covered * 100.0,
+                            short.join(", ")
+                        );
+                    }
+                }
+            }
             // Flattened per-(nuclide, MT) inelastic kinematics tables, built
             // lazily on first use and shared across threads (issue #111). Its
             // keys are nuclide addresses, so it is deliberately scoped to this

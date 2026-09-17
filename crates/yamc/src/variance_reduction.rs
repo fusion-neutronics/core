@@ -209,6 +209,41 @@ impl WeightWindowBounds {
         Some((lower, self.upper_bounds[idx]))
     }
 
+    /// The fraction of `geometry` this mesh covers, and the axes it falls short
+    /// on, or `None` when it covers the whole thing.
+    ///
+    /// A window mesh smaller than the geometry is legal and unbiased: a
+    /// particle outside it simply gets no window and behaves analog. The
+    /// problem is that it is silent, and the symptom (the window "did not
+    /// help") looks nothing like the cause. Checked once against the geometry
+    /// bounds rather than counted per collision, so it costs nothing on the
+    /// transport path and still names a mis-sized mesh before the run rather
+    /// than after it.
+    ///
+    /// The fraction is by volume of the geometry's bounding box, which
+    /// overstates coverage for a geometry that does not fill its own box. It is
+    /// a prompt to look, not a metric.
+    pub fn coverage_of(&self, geometry: &yamc_geo::BoundingBox) -> Option<(f64, Vec<&str>)> {
+        let mesh_lo = self.mesh.lower_left();
+        let mesh_hi = self.mesh.upper_right();
+        let mut short = Vec::new();
+        let mut covered = 1.0f64;
+        for (axis, name) in ["x", "y", "z"].iter().enumerate().map(|(i, n)| (i, *n)) {
+            let geo_lo = geometry.lower_left[axis];
+            let geo_hi = geometry.upper_right[axis];
+            let span = geo_hi - geo_lo;
+            if span <= 0.0 {
+                continue;
+            }
+            let overlap = (mesh_hi[axis].min(geo_hi) - mesh_lo[axis].max(geo_lo)).max(0.0);
+            covered *= (overlap / span).min(1.0);
+            if mesh_lo[axis] > geo_lo || mesh_hi[axis] < geo_hi {
+                short.push(name);
+            }
+        }
+        (!short.is_empty()).then_some((covered, short))
+    }
+
     /// Validate bound-array sizes and parameter ranges.
     pub fn validate(&self) -> Result<(), String> {
         let n_v = self.num_voxels();
@@ -548,6 +583,39 @@ mod tests {
         assert!(wwb(vec![0.1; 8], vec![0.5; 8], Some(vec![0.0, 2e6, 1e6]))
             .validate()
             .is_err());
+    }
+
+    #[test]
+    fn coverage_is_silent_when_the_mesh_covers_the_geometry() {
+        let w = wwb(vec![0.1; 4], vec![0.5; 4], None);
+        let lo = w.mesh.lower_left();
+        let hi = w.mesh.upper_right();
+        // Exactly coincident, and strictly inside, both count as covered.
+        let exact = yamc_geo::BoundingBox::new(lo, hi);
+        assert!(w.coverage_of(&exact).is_none());
+        let inside = yamc_geo::BoundingBox::new(
+            [lo[0] + 0.1, lo[1] + 0.1, lo[2] + 0.1],
+            [hi[0] - 0.1, hi[1] - 0.1, hi[2] - 0.1],
+        );
+        assert!(w.coverage_of(&inside).is_none());
+    }
+
+    #[test]
+    fn coverage_names_the_axes_a_short_mesh_falls_off() {
+        let w = wwb(vec![0.1; 4], vec![0.5; 4], None);
+        let lo = w.mesh.lower_left();
+        let hi = w.mesh.upper_right();
+        // Geometry twice the mesh on x alone: short on x, and half covered.
+        let span_x = hi[0] - lo[0];
+        let geometry = yamc_geo::BoundingBox::new(lo, [lo[0] + 2.0 * span_x, hi[1], hi[2]]);
+        let (covered, short) = w
+            .coverage_of(&geometry)
+            .expect("a mesh half the geometry is not full coverage");
+        assert_eq!(short, vec!["x"]);
+        assert!(
+            (covered - 0.5).abs() < 1e-12,
+            "half the box on one axis is half the volume, got {covered}"
+        );
     }
 
     #[test]
