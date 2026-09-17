@@ -270,11 +270,21 @@ fn nuclide_columns_are_the_parsed_tables_own_numbers() {
         );
     }
 
-    let energy_temperatures = str_list(&batch, "energy_temperatures", 0);
+    // The grids are their own section since #100, one row per temperature. The
+    // rule they are ordered by is unchanged and still asserted, because it is
+    // the order the published files are in even though nothing zips them
+    // positionally any more.
+    yamc_convert::nuclide::write_energy(&data, dir.path()).expect("energy.arrow is written");
+    let energy = section(dir.path(), "energy.arrow");
+    let energy_temperatures: Vec<String> = (0..energy.num_rows())
+        .map(|row| str_at(&energy, "temperature", row))
+        .collect();
     assert_eq!(energy_temperatures, expected_energy_temperatures(&data));
     assert_eq!(energy_temperatures, vec!["294K".to_string()]);
 
-    let grids = nested_f64_list(&batch, "energy_values", 0);
+    let grids: Vec<Vec<f64>> = (0..energy.num_rows())
+        .map(|row| f64_list(&energy, "energy_values", row))
+        .collect();
     assert_eq!(
         grids.len(),
         energy_temperatures.len(),
@@ -345,18 +355,21 @@ fn the_endf_route_writes_no_temperature_and_no_grid_it_was_not_given() {
     // Empty and PRESENT, not null: string_list and float_list_list at
     // sections.rs:101-135 always append a row, so an absent temperature is an
     // empty list here and never a null.
-    for column in [
-        "temperatures",
-        "energy_temperatures",
-        "energy_values",
-        "kTs",
-    ] {
+    for column in ["temperatures", "kTs"] {
         assert!(!is_null(&batch, column, 0), "{column} was written as null");
     }
     assert!(str_list(&batch, "temperatures", 0).is_empty());
     assert!(f64_list(&batch, "kTs", 0).is_empty());
-    assert!(str_list(&batch, "energy_temperatures", 0).is_empty());
-    assert_eq!(list_len(&batch, "energy_values", 0), 0);
+
+    // And no energy.arrow at all. This route carries no processed temperature,
+    // so there is no union grid to publish; an Arrow file with no record
+    // batches would be damage rather than emptiness, so the writer declines to
+    // make one. The loader pairs that with the empty `temperatures` above and
+    // accepts the absence, which is why the two facts are asserted together.
+    assert!(
+        !yamc_convert::nuclide::write_energy(&data, dir.path()).expect("no grids is not an error")
+    );
+    assert!(absent(dir.path(), "energy.arrow"));
 }
 
 // ---------------------------------------------------------------------------
@@ -967,8 +980,14 @@ fn constructed_two_temperature_nuclide_separates_the_two_temperature_columns() {
     yamc_convert::nuclide::write_nuclide(&data, dir.path()).expect("nuclide.arrow is written");
     let batch = section(dir.path(), "nuclide.arrow");
 
+    yamc_convert::nuclide::write_energy(&data, dir.path()).expect("energy.arrow is written");
+    let energy = section(dir.path(), "energy.arrow");
     let temperatures = str_list(&batch, "temperatures", 0);
-    let energy_temperatures = str_list(&batch, "energy_temperatures", 0);
+    // One row per temperature since #100, where these were a second pair of
+    // columns on nuclide.arrow's single row.
+    let energy_temperatures: Vec<String> = (0..energy.num_rows())
+        .map(|row| str_at(&energy, "temperature", row))
+        .collect();
     assert_eq!(
         temperatures,
         vec!["294K".to_string(), "1200K".to_string()],
@@ -982,7 +1001,7 @@ fn constructed_two_temperature_nuclide_separates_the_two_temperature_columns() {
     assert_eq!(
         energy_temperatures,
         vec!["294K".to_string(), "1200K".to_string(), "0K".to_string()],
-        "energy_temperatures is the two phase list of nuclide.rs:41-51"
+        "the energy rows are the two phase list of `energy_labels`"
     );
     // The restated rule against the literal, on the only input in this file
     // where the rule's two phases hold different things. This says nothing
@@ -1013,9 +1032,11 @@ fn constructed_two_temperature_nuclide_separates_the_two_temperature_columns() {
         );
     }
 
-    // Three grids of three different lengths: a grid paired with the wrong
-    // temperature fails on the length before it fails on a value.
-    let grids = nested_f64_list(&batch, "energy_values", 0);
+    // Three grids of three different lengths: a grid on the wrong row fails on
+    // the length before it fails on a value.
+    let grids: Vec<Vec<f64>> = (0..energy.num_rows())
+        .map(|row| f64_list(&energy, "energy_values", row))
+        .collect();
     assert_eq!(
         grids.len(),
         energy_temperatures.len(),
@@ -1024,6 +1045,15 @@ fn constructed_two_temperature_nuclide_separates_the_two_temperature_columns() {
     for (grid, t) in grids.iter().zip(&energy_temperatures) {
         assert_f64_slice_eq(&format!("energy_values[{t}]"), grid, &data.energy[t]);
     }
+
+    // And each grid is its own record batch, which is what the range index
+    // addresses. A single fused batch would read the same through the loader
+    // and make every `energy_ranges` entry name the same bytes.
+    assert_eq!(
+        batches(dir.path(), "energy.arrow"),
+        energy_temperatures.len(),
+        "one record batch per temperature"
+    );
 }
 
 /// The value the constructed probability tables hold at one

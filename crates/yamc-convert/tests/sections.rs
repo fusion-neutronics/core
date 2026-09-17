@@ -38,6 +38,18 @@ fn published(nuclide: &str) -> Option<PathBuf> {
     p.is_dir().then_some(p)
 }
 
+/// Every record batch of a section file, in order.
+///
+/// `read_batch` takes the first, which for a file written one batch per row
+/// would silently be the first row alone.
+fn read_batches(path: &Path) -> Vec<arrow_array::RecordBatch> {
+    use arrow_ipc::reader::FileReader;
+    let reader = FileReader::try_new(std::fs::File::open(path).expect("open"), None).expect("ipc");
+    let batches: Vec<_> = reader.collect::<Result<Vec<_>, _>>().expect("batches");
+    assert!(!batches.is_empty(), "{} has no batches", path.display());
+    batches
+}
+
 fn read_batch(path: &Path) -> arrow_array::RecordBatch {
     use arrow_ipc::reader::FileReader;
     let reader = FileReader::try_new(std::fs::File::open(path).expect("open"), None).expect("ipc");
@@ -77,16 +89,15 @@ fn nuclide_section_matches_the_parsed_table() {
         6
     );
 
-    // The two temperature lists are written from different sources and are not
-    // required to be equal: the NJOY route adds a 0 K energy grid. For a pure
-    // ACE table they must agree, and a mismatch here means the energy map and
-    // the kT list came apart.
+    // The temperature list and the grid labels are written from different
+    // sources and are not required to be equal: the NJOY route adds a 0 K
+    // energy grid. For a pure ACE table they must agree, and a mismatch means
+    // the energy map and the kT list came apart.
+    //
+    // The grids are `energy.arrow` since #100, one row and one record batch
+    // per temperature, so this reads every batch rather than one cell.
     let temps = batch
         .column_by_name("temperatures")
-        .unwrap()
-        .as_list::<i32>();
-    let energy_temps = batch
-        .column_by_name("energy_temperatures")
         .unwrap()
         .as_list::<i32>();
     let t: Vec<String> = temps
@@ -96,29 +107,44 @@ fn nuclide_section_matches_the_parsed_table() {
         .flatten()
         .map(str::to_string)
         .collect();
-    let et: Vec<String> = energy_temps
-        .value(0)
-        .as_string::<i32>()
-        .iter()
-        .flatten()
-        .map(str::to_string)
-        .collect();
     assert!(!t.is_empty(), "no temperatures were written");
+
+    assert!(
+        yamc_convert::nuclide::write_energy(&data, &dir).expect("writes"),
+        "an ACE table has grids to write"
+    );
+    let energy_batches = read_batches(&dir.join("energy.arrow"));
+    let et: Vec<String> = energy_batches
+        .iter()
+        .map(|b| {
+            b.column_by_name("temperature")
+                .unwrap()
+                .as_string::<i32>()
+                .value(0)
+                .to_string()
+        })
+        .collect();
     assert_eq!(t, et, "an ACE table has one energy grid per temperature");
+    assert_eq!(
+        energy_batches.len(),
+        et.len(),
+        "one record batch per temperature, which is what the range index addresses"
+    );
 
     // Every energy grid must be non-empty and ascending. A grid that is not
     // sorted breaks every binary search downstream and nothing else checks it.
-    let grids = batch
-        .column_by_name("energy_values")
-        .unwrap()
-        .as_list::<i32>();
-    let outer = grids.value(0);
-    let outer = outer.as_list::<i32>();
-    let n_grids = arrow_array::Array::len(outer);
-    assert_eq!(n_grids, et.len(), "one grid per energy temperature");
-    for i in 0..n_grids {
-        let g = outer.value(i);
-        let g: Vec<f64> = g.as_primitive::<Float64Type>().iter().flatten().collect();
+    for (i, b) in energy_batches.iter().enumerate() {
+        assert_eq!(b.num_rows(), 1, "batch {i} is not a single grid");
+        let cell = b
+            .column_by_name("energy_values")
+            .unwrap()
+            .as_list::<i32>()
+            .value(0);
+        let g: Vec<f64> = cell
+            .as_primitive::<Float64Type>()
+            .iter()
+            .flatten()
+            .collect();
         assert!(!g.is_empty(), "grid {i} is empty");
         assert!(
             g.windows(2).all(|w| w[1] >= w[0]),
@@ -470,7 +496,14 @@ fn an_ace_conversion_loads_through_yamcs_own_reader() {
         serde_json::from_str(&std::fs::read_to_string(out.join("version.json")).expect("marker"))
             .expect("json");
     assert_eq!(marker["data_version"], "rust-check");
-    assert_eq!(marker["format_version"], 1);
+    // 2 since the union energy grids moved into their own section (#100). The
+    // loader below refuses anything else, so this pins the writer and the
+    // reader to the same number from opposite sides.
+    assert_eq!(marker["format_version"], 2);
+    assert!(
+        marker["energy_ranges"]["temperatures"].is_object(),
+        "a conversion indexes its energy.arrow so a client can range-fetch one grid"
+    );
 
     // The conversion must load through the reader a real run uses, under the
     // scope an activation calculation asks for. XsOnly skips products and
