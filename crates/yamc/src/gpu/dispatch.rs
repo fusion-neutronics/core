@@ -2131,6 +2131,13 @@ struct LaunchLoop {
     /// Chunk-index stride: `1` single-process, `mpi_size` under MPI, so rank `r`
     /// takes global chunks `r, r + size, r + 2*size, ...` (issue #303).
     stride: usize,
+    /// When the launch handed out by the most recent [`LaunchLoop::next`]
+    /// began.
+    ///
+    /// Distinct from `start`, which times the whole loop against the wall-clock
+    /// budget and must not be reset. This one restarts per launch, so a caller
+    /// can report how long one launch took without keeping its own clock.
+    launch_start: Instant,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2160,6 +2167,7 @@ impl LaunchLoop {
             start: Instant::now(),
             idx: rank.min(stride - 1),
             stride,
+            launch_start: Instant::now(),
         }
     }
 
@@ -2179,7 +2187,17 @@ impl LaunchLoop {
         };
         let idx = self.idx;
         self.idx += self.stride;
+        self.launch_start = Instant::now();
         Some((idx, launch_n))
+    }
+
+    /// Wall time since the most recent [`LaunchLoop::next`] handed out a launch.
+    ///
+    /// Meaningful only at the chunk boundary, after the launch has folded, and
+    /// only if `next` has been called: before that it reports the age of the
+    /// loop itself.
+    fn launch_elapsed(&self) -> std::time::Duration {
+        self.launch_start.elapsed()
     }
 
     /// Whether the wall-time budget is spent. Call at the outer chunk boundary
@@ -2187,6 +2205,31 @@ impl LaunchLoop {
     fn hit_time_budget(&self) -> bool {
         self.budget_secs
             .is_some_and(|b| self.start.elapsed().as_secs_f64() >= b)
+    }
+}
+
+/// Print how long one GPU launch took, root rank only and only under
+/// `verbose.summary` (issue #115).
+///
+/// One line per launch rather than a total, because the useful signal is the
+/// shape across launches: a chunk size is bounded by memory alone, so a launch
+/// that grows past the driver's watchdog looks identical to a fast run in any
+/// aggregate. `kind` names which loop is reporting, since a coupled run drives
+/// more than one.
+#[cfg(not(target_os = "macos"))]
+fn announce_launch_time(
+    model: &Model,
+    mpi_ctx: &crate::mpi_context::MpiContext,
+    kind: &str,
+    launch_idx: usize,
+    launch_n: usize,
+    elapsed: std::time::Duration,
+) {
+    if mpi_ctx.is_root() && model.verbose.summary {
+        println!(
+            "GPU {kind} launch {launch_idx}: {launch_n} histories in {:.3} s",
+            elapsed.as_secs_f64()
+        );
     }
 }
 
@@ -2459,6 +2502,15 @@ fn run_neutron_per_history(
         n_steps_all.extend(kernel.n_steps);
         final_energies_all.extend(kernel.final_energies);
         n_hist_total += launch_n as u64;
+
+        announce_launch_time(
+            model,
+            &mpi_ctx,
+            "neutron",
+            launch_idx,
+            launch_n,
+            sched.launch_elapsed(),
+        );
 
         if sched.hit_time_budget() {
             break;
@@ -2796,6 +2848,15 @@ fn run_neutron_per_history_fissile(
             &pack.out_offsets,
         );
         n_hist_total += chunk_sources as u64;
+
+        announce_launch_time(
+            model,
+            &mpi_ctx,
+            "neutron fissile",
+            chunk_idx,
+            chunk_sources,
+            sched.launch_elapsed(),
+        );
 
         if sched.hit_time_budget() {
             break;
@@ -3455,6 +3516,15 @@ pub(super) fn run_on_gpu_photon(
         final_energies_all.extend(result.final_energies);
         n_hist_total += launch_n as u64;
 
+        announce_launch_time(
+            model,
+            &mpi_ctx,
+            "photon",
+            launch_idx,
+            launch_n,
+            sched.launch_elapsed(),
+        );
+
         if sched.hit_time_budget() {
             break;
         }
@@ -3953,6 +4023,15 @@ fn run_on_gpu_coupled(
             chunk_sources,
         );
         n_hist_total += chunk_sources as u64;
+
+        announce_launch_time(
+            model,
+            &mpi_ctx,
+            "coupled",
+            chunk_idx,
+            chunk_sources,
+            sched.launch_elapsed(),
+        );
 
         if sched.hit_time_budget() {
             break;
@@ -4517,6 +4596,15 @@ fn run_on_gpu_mixed(
             chunk_total,
         );
         n_hist_total += chunk_total as u64;
+
+        announce_launch_time(
+            model,
+            &mpi_ctx,
+            "mixed",
+            chunk_idx,
+            this_total,
+            sched.launch_elapsed(),
+        );
 
         if sched.hit_time_budget() {
             break;
