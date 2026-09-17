@@ -709,7 +709,6 @@ fn tally_score_factor(
             // Twin of the kernel's `if urr_fired` substitution.
             if urr.fired {
                 match tallies.score_mt[t] {
-                    102 => return urr.macro_capture,
                     27 => return sigma_a + sigma_f,
                     2 => return urr.sigma_elastic,
                     18 => return sigma_f,
@@ -720,7 +719,15 @@ fn tally_score_factor(
             let off = mat_idx * n_score_mts * n_grid + slot * n_grid;
             let xs_lo = xs_score_per_mt[off + idx_lo];
             let xs_hi = xs_score_per_mt[off + idx_hi];
-            xs_lo + (xs_hi - xs_lo) * frac
+            let smooth = xs_lo + (xs_hi - xs_lo) * frac;
+            // Capture is the smooth MT 102 plus what the bands moved, rather
+            // than the perturbed disappearance: the material's disappearance
+            // carries every nuclide's (n,p) and (n,alpha) too
+            // (fusion-neutronics/core#106).
+            if urr.fired && tallies.score_mt[t] == 102 {
+                return (smooth + urr.capture_delta).max(0.0);
+            }
+            smooth
         }
         _ => 1.0,
     }
@@ -731,7 +738,9 @@ fn tally_score_factor(
 #[derive(Clone, Copy, Default)]
 pub(super) struct UrrScore {
     pub fired: bool,
-    pub macro_capture: f64,
+    /// Added to the smooth MT 102, not used in its place. See
+    /// [`super::urr_perturb::UrrPerturbation::capture_delta`].
+    pub capture_delta: f64,
     pub sigma_elastic: f64,
 }
 
