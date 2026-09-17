@@ -396,8 +396,9 @@ pub fn extract_xs_from_nuclide(
     // absorption below, so the GPU would kill neutrons the CPU scatters.
     check_unslotted_scatter_mts(nuclide, reactions, &xs_total, energy_grid)?;
 
-    // Per-energy fission xs (sum across MT 18 / 19 / 20 / 21 / 38) and
-    // ν̄(E) for the fission-branch sampling. Mirrors the multi-nuclide
+    // Per-energy fission xs (sum across the non-redundant fission MTs among
+    // 18 / 19 / 20 / 21 / 38) and ν̄(E) for the fission-branch sampling.
+    // Mirrors the multi-nuclide
     // path in `extract_material_xs`. Empty for non-fissionable
     // nuclides -- kernel just sees σ_f = 0 everywhere and never samples
     // the branch.
@@ -412,6 +413,15 @@ pub fn extract_xs_from_nuclide(
         let delayed = nuclide.delayed_neutrons(temperature);
         for &fmt in &[18, 19, 20, 21, 38] {
             if let Some(rxn) = reactions.get(&fmt) {
+                // Skip a redundant aggregate: an evaluation that carries the
+                // partial channels (MT 19/20/21/38) flags its MT 18 as their
+                // sum, so adding both counted fission twice. U240 is the
+                // fixture-set nuclide that does this, and the doubled sigma_f
+                // put its GPU flux 33% above the CPU's (the same guard the
+                // total and the scatter slots already apply).
+                if rxn.redundant {
+                    continue;
+                }
                 for (i, &e) in energy_grid.iter().enumerate() {
                     let xs_f = rxn.cross_section_at(e).unwrap_or(0.0);
                     xs_fission[i] += xs_f;
@@ -526,10 +536,6 @@ pub fn extract_xs_from_nuclide(
     // thermal-fission `(0.988 MeV, 2.249 / MeV)`.
     let (fission_watt_a, fission_watt_b) =
         extract_watt_params_single(nuclide, temperature).unwrap_or((0.988e6, 2.249e-6));
-    let fission_eout = extract_fission_eout_single(nuclide, temperature);
-    let fission_eout_delayed =
-        FissionEoutSlot::delayed_from_nuclides(&[(nuclide, 1.0)], temperature);
-
     Ok(GpuNuclideXs {
         // Single nuclide: fine and coarse grids are the same nuclide grid, so
         // this path stays bit-identical to before issue #88.
@@ -580,22 +586,6 @@ pub fn extract_xs_from_nuclide(
         beta_delayed,
         fission_watt_a,
         fission_watt_b,
-        fission_eout_kind: fission_eout.kind,
-        fission_eout_n_energies: fission_eout.n_energies,
-        fission_eout_energy_grid: fission_eout.energy_grid,
-        fission_eout_n_x: fission_eout.n_x,
-        fission_eout_x: fission_eout.x,
-        fission_eout_cdf: fission_eout.cdf,
-        fission_eout_p: fission_eout.p,
-        fission_eout_interp: fission_eout.interp,
-        fission_eout_delayed_kind: fission_eout_delayed.kind,
-        fission_eout_delayed_n_energies: fission_eout_delayed.n_energies,
-        fission_eout_delayed_energy_grid: fission_eout_delayed.energy_grid,
-        fission_eout_delayed_n_x: fission_eout_delayed.n_x,
-        fission_eout_delayed_x: fission_eout_delayed.x,
-        fission_eout_delayed_cdf: fission_eout_delayed.cdf,
-        fission_eout_delayed_p: fission_eout_delayed.p,
-        fission_eout_delayed_interp: fission_eout_delayed.interp,
         km_n_energies,
         km_energy_grid,
         km_interp,
@@ -896,6 +886,11 @@ pub fn extract_material_xs(
             let delayed = nuclide.delayed_neutrons(temperature);
             for &fmt in &[18, 19, 20, 21, 38] {
                 if let Some(rxn) = reactions.get(&fmt) {
+                    // Redundant MT 18 beside its partials: see the matching
+                    // guard in `extract_xs_from_nuclide`.
+                    if rxn.redundant {
+                        continue;
+                    }
                     for (i, &e) in energy_grid.iter().enumerate() {
                         let xs_f = rxn.cross_section_at(e).unwrap_or(0.0);
                         xs_fission_total[i] += density * xs_f;
@@ -1087,9 +1082,6 @@ pub fn extract_material_xs(
     // until the comparison shows it matters.
     let (fission_watt_a, fission_watt_b) =
         extract_watt_params(nuclides, temperature).unwrap_or((0.988e6, 2.249e-6));
-    let fission_eout = FissionEoutSlot::from_nuclides(nuclides, temperature);
-    let fission_eout_delayed = FissionEoutSlot::delayed_from_nuclides(nuclides, temperature);
-
     Ok(GpuNuclideXs {
         // Dual grid (issue #88): the FINE `log_energy_grid` is the union of the
         // per-nuclide grids (resonance-faithful collision / selection XS); the
@@ -1142,22 +1134,6 @@ pub fn extract_material_xs(
         beta_delayed: beta_delayed_total,
         fission_watt_a,
         fission_watt_b,
-        fission_eout_kind: fission_eout.kind,
-        fission_eout_n_energies: fission_eout.n_energies,
-        fission_eout_energy_grid: fission_eout.energy_grid,
-        fission_eout_n_x: fission_eout.n_x,
-        fission_eout_x: fission_eout.x,
-        fission_eout_cdf: fission_eout.cdf,
-        fission_eout_p: fission_eout.p,
-        fission_eout_interp: fission_eout.interp,
-        fission_eout_delayed_kind: fission_eout_delayed.kind,
-        fission_eout_delayed_n_energies: fission_eout_delayed.n_energies,
-        fission_eout_delayed_energy_grid: fission_eout_delayed.energy_grid,
-        fission_eout_delayed_n_x: fission_eout_delayed.n_x,
-        fission_eout_delayed_x: fission_eout_delayed.x,
-        fission_eout_delayed_cdf: fission_eout_delayed.cdf,
-        fission_eout_delayed_p: fission_eout_delayed.p,
-        fission_eout_delayed_interp: fission_eout_delayed.interp,
         km_n_energies,
         km_energy_grid,
         km_interp,
@@ -1371,6 +1347,14 @@ pub struct PerNuclideInelastic {
     pub sigma_absorption: Vec<f64>,
     pub sigma_inelastic: Vec<f64>,
     pub sigma_fission: Vec<f64>,
+    /// Per-nuclide fission yield on the master grid, flat `[n_nuclides x
+    /// n_grid]` each (fusion-neutronics/core#93): the nuclide's own `nu_bar(E)`
+    /// (total neutrons per fission, the same `nu * sigma_f / sigma_f` fold
+    /// `extract_xs_from_nuclide` does for one nuclide) and its delayed fraction
+    /// `beta(E) = nu_d(E) / nu_t(E)`. Zero for a non-fissionable nuclide. The
+    /// kernel takes the struck nuclide's pair from these after the selection.
+    pub nu_bar: Vec<f64>,
+    pub beta_delayed: Vec<f64>,
     /// SPARSE per-MT inelastic XS / yield (issue #212). Per (slab, MT slot) only
     /// the tight nonzero (above-threshold) range of the material's coarse grid is
     /// stored, concatenated in (slab, slot) order. `permt_i_start[slab *
@@ -1489,6 +1473,8 @@ pub fn extract_per_nuclide_inelastic(
         sigma_absorption: Vec::with_capacity(n * n_grid),
         sigma_inelastic: Vec::with_capacity(n * n_grid),
         sigma_fission: Vec::with_capacity(n * n_grid),
+        nu_bar: Vec::with_capacity(n * n_grid),
+        beta_delayed: Vec::with_capacity(n * n_grid),
         // Sparse per-MT storage (issue #212): capacity is a loose upper bound
         // (real data is 90-99.9% zeros, so the sparse buffers stay far smaller).
         xs_inelastic_per_mt_sparse: Vec::new(),
@@ -1575,6 +1561,14 @@ pub fn extract_per_nuclide_inelastic(
                     mt: MT_ELASTIC,
                     temperature: temperature.to_string(),
                 })?;
+        // This nuclide's own fission yield on the fine grid
+        // (fusion-neutronics/core#93): microscopic `sigma_f`, `nu sigma_f` and
+        // `nu_d sigma_f` summed over the non-redundant fission channels, folded
+        // the way `extract_xs_from_nuclide` folds them for one nuclide.
+        let mut nuc_xs_f: Vec<f64> = Vec::with_capacity(n_grid);
+        let mut nuc_nu_sigma_f: Vec<f64> = Vec::with_capacity(n_grid);
+        let mut nuc_nu_d_sigma_f: Vec<f64> = Vec::with_capacity(n_grid);
+        let delayed = nuclide.delayed_neutrons(temperature);
         for &e in fine_grid {
             let s_e = density * elastic.cross_section_at(e).unwrap_or(0.0);
             let s_t = density * total_xs_at(nuclide, temp_idx, e);
@@ -1589,10 +1583,32 @@ pub fn extract_per_nuclide_inelastic(
                 }
             }
             let mut s_f = 0.0_f64;
+            let mut xs_f_micro = 0.0_f64;
+            let mut nu_sigma_f = 0.0_f64;
+            let mut nu_d_sigma_f = 0.0_f64;
             if nuclide.fissionable {
+                let nu = nuclide
+                    .fission_nu
+                    .as_ref()
+                    .map(|n| n.evaluate(e))
+                    .unwrap_or(2.5);
                 for &fmt in &[18, 19, 20, 21, 38] {
                     if let Some(rxn) = reactions.get(&fmt) {
-                        s_f += density * rxn.cross_section_at(e).unwrap_or(0.0);
+                        // Redundant MT 18 beside its partials: see the matching
+                        // guard in `extract_xs_from_nuclide`. This per-slab sum
+                        // drives the reaction split in multi-nuclide materials,
+                        // and counted U240's fission twice there
+                        // (fusion-neutronics/core#34 entry 1).
+                        if rxn.redundant {
+                            continue;
+                        }
+                        let xs_f = rxn.cross_section_at(e).unwrap_or(0.0);
+                        s_f += density * xs_f;
+                        xs_f_micro += xs_f;
+                        nu_sigma_f += xs_f * nu;
+                        if let Some(d) = delayed {
+                            nu_d_sigma_f += xs_f * d.nu(e);
+                        }
                     }
                 }
             }
@@ -1601,7 +1617,14 @@ pub fn extract_per_nuclide_inelastic(
             pool.sigma_inelastic.push(s_i);
             pool.sigma_fission.push(s_f);
             pool.sigma_absorption.push(s_a);
+            nuc_xs_f.push(xs_f_micro);
+            nuc_nu_sigma_f.push(nu_sigma_f);
+            nuc_nu_d_sigma_f.push(nu_d_sigma_f);
         }
+        pool.nu_bar
+            .extend(nu_bar_from_nu_sigma_f(&nuc_nu_sigma_f, &nuc_xs_f));
+        pool.beta_delayed
+            .extend(beta_from_nu_sigma_f(&nuc_nu_d_sigma_f, &nuc_nu_sigma_f));
 
         // Per-MT inelastic XS / Q / yield on the master grid, density-weighted.
         // Bit-for-bit the SAME accounting `extract_material_xs` uses for one
@@ -1839,23 +1862,17 @@ fn extract_watt_params(nuclides: &[(&Nuclide, f64)], temperature: &str) -> Optio
     None
 }
 
-/// Per-material fission outgoing-energy table extracted from the first
-/// fissionable nuclide's first-found fission MT (18/19/20/21/38).
-/// Mirrors `EoutSlot`'s flat layout but per-material rather than per-MT
-/// slot -- fission collapses to a single branch on GPU. `kind` records
-/// which sampler the kernel should use:
+/// One fission outgoing-energy (chi) table, the unit the device chi buffers are
+/// built from: one row per (nuclide, fission channel) for the prompt spectra and
+/// one row per nuclide for the delayed spectrum (fusion-neutronics/core#34 entry
+/// 1; the per-(slab, channel) row table is
+/// `NuclideSelectInputs::chi_slab_meta`). Mirrors `EoutSlot`'s flat layout.
+/// `kind` records which sampler the kernel should use:
 /// - `EOUT_KIND_CONTINUOUS_TABULAR` (1): sample from `(x, cdf)`
-/// - `EOUT_KIND_WATT` (7): fall back to Watt rejection using
+/// - `EOUT_KIND_MAXWELL` (6) / `EOUT_KIND_EVAPORATION` (4): the closed-form
+///   spectra, with `theta(E_in)` in column 0 of `x` and `u` in column 0 of `cdf`
+/// - `EOUT_KIND_WATT` (7): fall back to Watt rejection using the material's
 ///   `fission_watt_a` / `fission_watt_b`
-///
-/// Taking the FIRST fission MT that carries a neutron product is exact for the
-/// 87 ENDF/B-VIII.1 fissionables that have MT 18 alone, and wrong for U240, the
-/// one nuclide with partial channels. U240's MT 18 is redundant and carries no
-/// neutron product, so the walk lands on MT 19 and every U240 fission on the GPU
-/// uses first-chance fission's spectrum regardless of energy. The CPU samples the
-/// channel that actually fissioned and keys its chi cache per MT (issues #418,
-/// #425), so the two backends disagree on U240 until this table is per MT as
-/// well. See issue #424.
 ///
 /// `n_energies == 0` means no usable distribution was found (or the
 /// nuclide is non-fissionable) -- kernel never enters the fission
@@ -1868,22 +1885,29 @@ fn extract_watt_params(nuclides: &[(&Nuclide, f64)], temperature: &str) -> Optio
 /// linear-in-c one. Rows whose source table lacks a usable PDF get
 /// `p == 0.0` per point and `interp == 0`, which routes the sampler to
 /// the legacy linear-in-c fallback.
-struct FissionEoutSlot {
-    kind: u32,
-    n_energies: u32,
-    energy_grid: Vec<f64>, // length n_energies (tight, issue #104)
-    n_x: Vec<u32>,         // length n_energies
-    x: Vec<f64>,           // length sum(n_x) (tight CSR, issue #104)
-    cdf: Vec<f64>,         // length sum(n_x)
-    p: Vec<f64>,           // length sum(n_x), normalized like `cdf`
-    interp: Vec<u32>,      // length n_energies (0 histogram, 1 lin-lin)
+#[derive(Debug, Clone)]
+pub struct FissionEoutSlot {
+    pub kind: u32,
+    pub n_energies: u32,
+    /// Length `n_energies` (tight, issue #104).
+    pub energy_grid: Vec<f64>,
+    /// Length `n_energies`.
+    pub n_x: Vec<u32>,
+    /// Length `sum(n_x)` (tight CSR, issue #104).
+    pub x: Vec<f64>,
+    /// Length `sum(n_x)`.
+    pub cdf: Vec<f64>,
+    /// Length `sum(n_x)`, normalized like `cdf`.
+    pub p: Vec<f64>,
+    /// Length `n_energies` (0 histogram, 1 lin-lin).
+    pub interp: Vec<u32>,
 }
 
 impl FissionEoutSlot {
     /// Default slot: Watt fallback, no continuum data. Tight CSR
     /// (issue #104): an empty slot has zero rows and zero points, so
     /// every Vec is empty (`n_energies == 0`).
-    fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             kind: EOUT_KIND_WATT,
             n_energies: 0,
@@ -1896,30 +1920,29 @@ impl FissionEoutSlot {
         }
     }
 
-    /// Walk the per-material nuclide list, find the first fissionable
-    /// nuclide, and pull the prompt-neutron product's outgoing-energy
-    /// spectrum from its dominant fission MT.
+    /// Pull one fission channel's prompt-neutron outgoing-energy spectrum from
+    /// its reaction, or `None` when the reaction carries no neutron product with
+    /// a recognised encoding (an evaluation hangs a redundant MT 18 off photons
+    /// alone, for instance).
     ///
-    /// The prompt fission spectrum lives on the FIRST neutron product of
-    /// the fission reaction (matching the CPU's `sample_fission_neutrons`,
-    /// which samples `products[0]`). Four encodings appear in ENDF/B-VIII.1:
+    /// The prompt fission spectrum lives on the FIRST neutron product of the
+    /// fission reaction (matching the CPU's `sample_fission_neutrons`, which
+    /// samples `products[0]`). Four encodings appear in ENDF/B-VIII.1:
     /// `UncorrelatedAngleEnergy/ContinuousTabular` (U235, U238, Pu239),
     /// `CorrelatedAngleEnergy` (Th232, the energy-angle-correlated prompt
     /// spectrum), and `UncorrelatedAngleEnergy/{Maxwell,Evaporation}` (the
-    /// closed-form fission spectra; Maxwell χ appears on Pu241, U237,
-    /// Am244, Pu243, Pu245, Ra223, Ra226 in ENDF/B-VIII.1). Fission mu is
-    /// sampled isotropically in lab on the GPU regardless, so for the
-    /// correlated case only the E_out marginal is needed; it is packed
-    /// into the same ContinuousTabular `fission_eout_*` buffers. The
-    /// ContinuousTabular / Correlated cases route through the kernel's
-    /// interp-aware fission E_out sampler; Maxwell / Evaporation route to
-    /// the kernel's shared `maxwell_rejection_draw` /
-    /// `evaporation_rejection_draw` helpers (the same code the inelastic
-    /// path uses) with the tabulated θ(E_in) and restriction energy `u`
-    /// packed into the otherwise-unused `fission_eout_x` (θ, column 0) and
-    /// `fission_eout_cdf` (u, column 0) buffers -- no new GPU bindings.
-    /// Returns the Watt-fallback empty slot if no recognised encoding is
-    /// found.
+    /// closed-form fission spectra; Maxwell chi appears on Pu241, U237, Am244,
+    /// Pu243, Pu245, Ra223, Ra226 in ENDF/B-VIII.1). Fission mu is sampled
+    /// isotropically in lab on the GPU regardless, so for the correlated case
+    /// only the E_out marginal is needed; it is packed into the same
+    /// ContinuousTabular `fission_eout_*` buffers. The ContinuousTabular /
+    /// Correlated cases route through the kernel's interp-aware fission E_out
+    /// sampler; Maxwell / Evaporation route to the kernel's shared
+    /// `maxwell_rejection_draw` / `evaporation_rejection_draw` helpers (the same
+    /// code the inelastic path uses) with the tabulated theta(E_in) and
+    /// restriction energy `u` packed into the otherwise-unused `fission_eout_x`
+    /// (theta, column 0) and `fission_eout_cdf` (u, column 0) buffers, so no new
+    /// GPU bindings.
     ///
     /// Earlier this scanned EVERY neutron product for the first
     /// ContinuousTabular match, so for Th232 (whose `products[0]` is
@@ -1927,93 +1950,68 @@ impl FissionEoutSlot {
     /// product carrying a much softer partial spectrum -- the GPU then
     /// emitted no prompt fission neutrons above the incident energy,
     /// producing a ~10% flux-weighted spectral error vs the CPU.
-    fn from_nuclides(nuclides: &[(&Nuclide, f64)], temperature: &str) -> Self {
-        for (nuclide, _density) in nuclides {
-            if !nuclide.fissionable {
-                continue;
-            }
-            let Some(temp_idx) = nuclide.get_temp_idx(temperature) else {
-                continue;
-            };
-            let reactions = &nuclide.reactions[temp_idx];
-            for fmt in &[18, 19, 20, 21, 38] {
-                let Some(rxn) = reactions.get(fmt) else {
-                    continue;
-                };
-                // The prompt spectrum is the FIRST neutron product, to
-                // mirror the CPU's `products[0]` selection.
-                let Some(product) = rxn.products.iter().find(|p| {
-                    p.is_particle_type(&yamc_nuclide::particle_type::ParticleType::Neutron)
-                }) else {
-                    continue;
-                };
-                for ae in &product.distribution {
-                    match ae {
-                        AngleEnergyDistribution::UncorrelatedAngleEnergy {
-                            energy:
-                                Some(EnergyDistribution::ContinuousTabular {
-                                    energy, energy_out, ..
-                                }),
-                            ..
-                        } => {
-                            return Self::from_continuous_tabular(energy, energy_out);
-                        }
-                        AngleEnergyDistribution::UncorrelatedAngleEnergy {
-                            energy: Some(EnergyDistribution::Maxwell { theta, u }),
-                            ..
-                        } => {
-                            let Tabulated1D::Tabulated1D { x, y, .. } = theta;
-                            return Self::from_maxwell_or_evap(EOUT_KIND_MAXWELL, x, y, *u);
-                        }
-                        AngleEnergyDistribution::UncorrelatedAngleEnergy {
-                            energy: Some(EnergyDistribution::Evaporation { theta, u }),
-                            ..
-                        } => {
-                            let Tabulated1D::Tabulated1D { x, y, .. } = theta;
-                            return Self::from_maxwell_or_evap(EOUT_KIND_EVAPORATION, x, y, *u);
-                        }
-                        AngleEnergyDistribution::CorrelatedAngleEnergy { correlated } => {
-                            return Self::from_correlated(correlated);
-                        }
-                        _ => {}
-                    }
+    pub fn from_reaction(rxn: &Reaction) -> Option<Self> {
+        let product = rxn
+            .products
+            .iter()
+            .find(|p| p.is_particle_type(&yamc_nuclide::particle_type::ParticleType::Neutron))?;
+        for ae in &product.distribution {
+            match ae {
+                AngleEnergyDistribution::UncorrelatedAngleEnergy {
+                    energy:
+                        Some(EnergyDistribution::ContinuousTabular {
+                            energy, energy_out, ..
+                        }),
+                    ..
+                } => {
+                    return Some(Self::from_continuous_tabular(energy, energy_out));
                 }
+                AngleEnergyDistribution::UncorrelatedAngleEnergy {
+                    energy: Some(EnergyDistribution::Maxwell { theta, u }),
+                    ..
+                } => {
+                    let Tabulated1D::Tabulated1D { x, y, .. } = theta;
+                    return Some(Self::from_maxwell_or_evap(EOUT_KIND_MAXWELL, x, y, *u));
+                }
+                AngleEnergyDistribution::UncorrelatedAngleEnergy {
+                    energy: Some(EnergyDistribution::Evaporation { theta, u }),
+                    ..
+                } => {
+                    let Tabulated1D::Tabulated1D { x, y, .. } = theta;
+                    return Some(Self::from_maxwell_or_evap(EOUT_KIND_EVAPORATION, x, y, *u));
+                }
+                AngleEnergyDistribution::CorrelatedAngleEnergy { correlated } => {
+                    return Some(Self::from_correlated(correlated));
+                }
+                _ => {}
             }
         }
-        Self::empty()
+        None
     }
 
-    /// Walk the per-material nuclide list for the first fissionable nuclide with
-    /// DELAYED neutron data, and pack its yield-weighted folded delayed spectrum
-    /// (issue #364).
-    ///
-    /// Takes the first nuclide that has any, mirroring how `from_nuclides` takes
-    /// the first fissionable nuclide's prompt spectrum, so a material's prompt and
-    /// delayed rows come from the same nuclide whenever one nuclide dominates. The
-    /// fold is `ContinuousTabular` by construction, so it reuses the same packing.
-    /// Returns the empty slot when no nuclide has delayed data; `beta == 0` then
-    /// keeps the kernel from ever reading it.
-    fn delayed_from_nuclides(nuclides: &[(&Nuclide, f64)], temperature: &str) -> Self {
-        for (nuclide, _density) in nuclides {
-            if !nuclide.fissionable {
-                continue;
-            }
-            let Some(delayed) = nuclide.delayed_neutrons(temperature) else {
-                continue;
-            };
-            if let FissionChiFlat::Continuous {
-                energy_grid,
-                n_x,
-                interp,
-                x,
-                p,
-                c,
-                max_x,
-                ..
-            } = delayed.chi_flat()
-            {
-                return Self::from_flat_continuous(energy_grid, n_x, interp, x, p, c, *max_x);
-            }
+    /// Pack one nuclide's yield-weighted folded DELAYED spectrum (issue #364).
+    /// The fold is `ContinuousTabular` by construction, so it reuses the same
+    /// packing. Returns the empty slot when the nuclide has no delayed data;
+    /// `beta == 0` then keeps the kernel from ever reading it.
+    pub fn delayed_from_nuclide(nuclide: &Nuclide, temperature: &str) -> Self {
+        if !nuclide.fissionable {
+            return Self::empty();
+        }
+        let Some(delayed) = nuclide.delayed_neutrons(temperature) else {
+            return Self::empty();
+        };
+        if let FissionChiFlat::Continuous {
+            energy_grid,
+            n_x,
+            interp,
+            x,
+            p,
+            c,
+            max_x,
+            ..
+        } = delayed.chi_flat()
+        {
+            return Self::from_flat_continuous(energy_grid, n_x, interp, x, p, c, *max_x);
         }
         Self::empty()
     }
@@ -2241,9 +2239,143 @@ impl FissionEoutSlot {
     }
 }
 
-/// Build a single-nuclide fission eout slot for `extract_xs_from_nuclide`.
-fn extract_fission_eout_single(nuclide: &Nuclide, temperature: &str) -> FissionEoutSlot {
-    FissionEoutSlot::from_nuclides(&[(nuclide, 1.0)], temperature)
+/// One nuclide's fission chi rows for the device (fusion-neutronics/core#34
+/// entry 1): a prompt spectrum per fission channel plus the delayed spectrum,
+/// built by [`extract_fission_chi_per_nuclide`] and laid out per slab by the
+/// translator.
+#[derive(Debug, Clone)]
+pub struct NuclideFissionChi {
+    /// Prompt spectra, one per fission channel, in the CPU fast grid's
+    /// `fission_mt_numbers` order (the order its channel walk visits). At least
+    /// one entry: a nuclide without partial channels gets its single fission MT,
+    /// a non-fissionable nuclide a single Watt-fallback empty slot.
+    pub channels: Vec<FissionEoutSlot>,
+    /// The channels' MT numbers, parallel to `channels` (empty for a
+    /// non-fissionable nuclide).
+    pub channel_mts: Vec<i32>,
+    /// Per-channel microscopic fission cross section on the caller's grid,
+    /// channel-major `[n_channels x n_grid]`, filled only when there is more than
+    /// one channel (a single channel is never walked, so it is empty then).
+    pub channel_xs: Vec<f64>,
+    /// The yield-weighted folded delayed spectrum; the empty slot when the
+    /// nuclide has no delayed data.
+    pub delayed: FissionEoutSlot,
+}
+
+/// Extract each nuclide's fission chi rows (see [`NuclideFissionChi`]) for
+/// `nuclides` at `temperature`, with the per-channel cross sections sampled on
+/// `energy_grid` (pass the material's fine grid, so the kernel's collision
+/// bracket indexes them directly). Output order is the input order, which is the
+/// slab order the per-collision selector picks against.
+///
+/// The channel list and its order are the CPU fast grid's
+/// (`FastXSGrid::fission_mt_numbers`, the non-redundant fission MTs), and the
+/// channel walk exists only when the evaluation flags partial channels
+/// (`has_partial_fission`), exactly the condition under which the CPU
+/// `sample_fission_reaction` spends a draw; otherwise the first MT stands alone
+/// and no draw is ever taken. A channel whose reaction carries no neutron product
+/// borrows the spectrum of the first other channel that does, as the CPU's
+/// `resolve_chi_products` fallback does (ENDF hangs the redundant MT 18 of U234,
+/// U236 and U240 off photons alone), and a nuclide with no non-redundant fission
+/// MT at all falls back to whichever fission MT carries a neutron product.
+pub fn extract_fission_chi_per_nuclide(
+    nuclides: &[(&Nuclide, f64)],
+    temperature: &str,
+    energy_grid: &[f64],
+) -> Result<Vec<NuclideFissionChi>, NuclideXsError> {
+    if nuclides.is_empty() {
+        return Err(NuclideXsError::EmptyMaterial);
+    }
+    let mut out = Vec::with_capacity(nuclides.len());
+    for (nuclide, _density) in nuclides {
+        let temp_idx = nuclide
+            .get_temp_idx(temperature)
+            .ok_or_else(|| NuclideXsError::TemperatureNotLoaded(temperature.to_string()))?;
+        if !nuclide.fissionable {
+            out.push(NuclideFissionChi {
+                channels: vec![FissionEoutSlot::empty()],
+                channel_mts: Vec::new(),
+                channel_xs: Vec::new(),
+                delayed: FissionEoutSlot::empty(),
+            });
+            continue;
+        }
+        let reactions = &nuclide.reactions[temp_idx];
+        let (mut mts, walk): (Vec<i32>, bool) = match nuclide.fast_xs.get(temp_idx) {
+            Some(grid) if !grid.fission_mt_numbers.is_empty() => {
+                (grid.fission_mt_numbers.clone(), grid.has_partial_fission)
+            }
+            _ => (
+                [18, 19, 20, 21, 38]
+                    .into_iter()
+                    .filter(|mt| reactions.get(mt).is_some_and(|r| !r.redundant))
+                    .collect(),
+                false,
+            ),
+        };
+        if !walk {
+            mts.truncate(1);
+        }
+        if mts.is_empty() {
+            // No non-redundant fission MT: take whichever fission MT carries a
+            // neutron product, as a single channel.
+            mts = [18, 19, 20, 21, 38]
+                .into_iter()
+                .filter(|mt| {
+                    reactions
+                        .get(mt)
+                        .is_some_and(|r| FissionEoutSlot::from_reaction(r).is_some())
+                })
+                .take(1)
+                .collect();
+        }
+        let own: Vec<Option<FissionEoutSlot>> = mts
+            .iter()
+            .map(|mt| {
+                reactions
+                    .get(mt)
+                    .and_then(|r| FissionEoutSlot::from_reaction(r))
+            })
+            .collect();
+        let channels: Vec<FissionEoutSlot> = (0..mts.len())
+            .map(|j| {
+                own[j]
+                    .clone()
+                    .or_else(|| {
+                        // The CPU's `resolve_chi_products` fallback: the first
+                        // OTHER channel that carries a neutron product.
+                        (0..mts.len())
+                            .filter(|&k| k != j)
+                            .find_map(|k| own[k].clone())
+                    })
+                    .unwrap_or_else(FissionEoutSlot::empty)
+            })
+            .collect();
+        let channel_xs = if mts.len() > 1 {
+            let mut xs = Vec::with_capacity(mts.len() * energy_grid.len());
+            for mt in &mts {
+                let rxn = reactions.get(mt);
+                for &e in energy_grid {
+                    xs.push(rxn.map_or(0.0, |r| r.cross_section_at(e).unwrap_or(0.0)));
+                }
+            }
+            xs
+        } else {
+            Vec::new()
+        };
+        let channels = if channels.is_empty() {
+            vec![FissionEoutSlot::empty()]
+        } else {
+            channels
+        };
+        out.push(NuclideFissionChi {
+            channels,
+            channel_mts: mts,
+            channel_xs,
+            delayed: FissionEoutSlot::delayed_from_nuclide(nuclide, temperature),
+        });
+    }
+    Ok(out)
 }
 
 // ----------------------------- Tests -----------------------------
@@ -2278,6 +2410,59 @@ mod tests {
             derive_absorption(&total, &elastic, &inelastic, &fission),
             vec![6.0, 3.0, 0.0]
         );
+    }
+
+    /// U240's evaluation carries the partial fission channels (MT 19/20/21/38)
+    /// and flags its MT 18 as their redundant sum. Summing all five counted
+    /// fission twice, which put the GPU flux on a U240 sphere 33% above the
+    /// CPU's. The GPU fission cross section must equal the CPU's fast-grid
+    /// fission cross section, which is the sum over the non-redundant channels
+    /// only. Skips without the U240 fixture.
+    #[test]
+    fn u240_fission_xs_counts_its_redundant_mt18_once() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../yamc/tests/U240.arrow");
+        if !std::path::Path::new(path).exists() {
+            eprintln!("Skipping: U240.arrow fixture absent");
+            return;
+        }
+        let nuclide = yamc_nuclide::nuclide_loader::load_nuclide(
+            std::path::PathBuf::from(path),
+            &yamc_nuclide::LoadScope::full(),
+        )
+        .expect("load U240");
+        let reactions = nuclide.reactions_for_temp("294").expect("294 K");
+        assert!(
+            reactions.get(&18).is_some_and(|r| r.redundant),
+            "the fixture's MT 18 is expected to be flagged redundant; without that this \
+             test guards nothing"
+        );
+        let temp_idx = nuclide.get_temp_idx("294").expect("294");
+        let grid = &nuclide.fast_xs[temp_idx];
+        let gpu = extract_xs_from_nuclide(&nuclide, "294").expect("extract");
+        assert_eq!(gpu.xs_fission.len(), grid.energy.len());
+        let mut checked = 0usize;
+        for (i, &e) in grid.energy.iter().enumerate() {
+            let expected: f64 = [18, 19, 20, 21, 38]
+                .iter()
+                .filter_map(|mt| reactions.get(mt))
+                .filter(|r| !r.redundant)
+                .map(|r| r.cross_section_at(e).unwrap_or(0.0))
+                .sum();
+            if expected > 0.0 {
+                checked += 1;
+                let (_, _, _, cpu_fission) = grid.lookup(e);
+                assert!(
+                    (gpu.xs_fission[i] - expected).abs() <= 1e-9 * expected,
+                    "at {e:.4e} eV GPU sigma_f {} vs non-redundant sum {expected}",
+                    gpu.xs_fission[i]
+                );
+                assert!(
+                    (cpu_fission - expected).abs() <= 1e-6 * expected.max(1e-300),
+                    "at {e:.4e} eV the CPU fast grid gives {cpu_fission}, the reactions {expected}"
+                );
+            }
+        }
+        assert!(checked > 100, "only {checked} grid points had fission open");
     }
 
     #[test]
@@ -2366,5 +2551,167 @@ mod tests {
         assert_eq!(evap.x[0], 1.3597e6);
         assert_eq!(evap.x[3], 1.6049e6);
         assert_eq!(evap.cdf[0], -3.0e7);
+    }
+
+    fn load_u240() -> Option<Nuclide> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../yamc/tests/U240.arrow");
+        if !std::path::Path::new(path).exists() {
+            eprintln!("Skipping: U240.arrow fixture absent");
+            return None;
+        }
+        Some(
+            yamc_nuclide::nuclide_loader::load_nuclide(
+                std::path::PathBuf::from(path),
+                &yamc_nuclide::LoadScope::full(),
+            )
+            .expect("load U240"),
+        )
+    }
+
+    /// U240 carries the partial fission channels MT 19 / 20 / 21 / 38 (its MT 18
+    /// is their redundant sum and has no neutron product), and the CPU samples
+    /// the channel that fissioned and keys its chi per MT. The device rows must
+    /// follow: one prompt row per channel in the fast grid's order, each from
+    /// that channel's own spectrum, with the channel cross sections the kernel
+    /// walks matching the reactions at every grid point
+    /// (fusion-neutronics/core#34 entry 1).
+    #[test]
+    fn u240_fission_chi_has_one_prompt_row_per_channel() {
+        let Some(nuclide) = load_u240() else { return };
+        let temp_idx = nuclide.get_temp_idx("294").expect("294");
+        let grid = &nuclide.fast_xs[temp_idx];
+        assert!(
+            grid.has_partial_fission,
+            "the fixture is expected to flag partial fission"
+        );
+        let reactions = nuclide.reactions_for_temp("294").expect("294 K");
+        let energies: Vec<f64> = grid.energy.to_vec();
+        let pool =
+            extract_fission_chi_per_nuclide(&[(&nuclide, 1.0)], "294", &energies).expect("chi");
+        assert_eq!(pool.len(), 1);
+        let chi = &pool[0];
+        assert_eq!(chi.channel_mts, grid.fission_mt_numbers);
+        assert_eq!(chi.channel_mts, vec![19, 20, 21, 38]);
+        assert_eq!(chi.channels.len(), 4);
+        assert_eq!(chi.channel_xs.len(), 4 * energies.len());
+        // Each channel carries its own spectrum. U240's are all Maxwell laws
+        // with nearly the same temperature (theta about 1.48 to 1.49 MeV at the
+        // source energy); what separates them is the restriction energy `u`,
+        // which truncates the Maxwellian at `E_in - u`: first-chance fission is
+        // unrestricted (u = -30 MeV) while (n,n'f) and (n,2nf) carry their
+        // thresholds as `u`, so at 14.06 MeV MT 21 emits nothing above ~4.1 MeV
+        // and its mean drops from 2.22 MeV to 1.66 MeV. The kernel's Maxwell
+        // branch reads theta from column 0 of `x` and `u` from column 0 of `cdf`.
+        let mut u_per_channel: Vec<f64> = Vec::new();
+        for (c, mt) in chi.channel_mts.iter().enumerate() {
+            let rxn = &reactions[mt];
+            let slot = &chi.channels[c];
+            assert_eq!(slot.kind, EOUT_KIND_MAXWELL, "MT {mt} row kind");
+            assert!(slot.n_energies > 0, "MT {mt} row is empty");
+            let u = slot.cdf[0];
+            eprintln!(
+                "MT {mt}: Maxwell, {} E_in points from {:.3e} to {:.3e} eV, theta {:?}, u {u:.3e} eV",
+                slot.n_energies,
+                slot.energy_grid[0],
+                slot.energy_grid[slot.n_energies as usize - 1],
+                slot.x
+            );
+            u_per_channel.push(u);
+            for (i, &e) in energies.iter().enumerate() {
+                let expected = rxn.cross_section_at(e).unwrap_or(0.0);
+                let got = chi.channel_xs[c * energies.len() + i];
+                assert!(
+                    (got - expected).abs() <= 1e-12 * expected.max(1e-300),
+                    "MT {mt} channel xs at {e:e} eV: {got} vs {expected}"
+                );
+            }
+        }
+        assert!(
+            u_per_channel[0] < 0.0,
+            "MT 19 is unrestricted: {u_per_channel:?}"
+        );
+        assert!(
+            u_per_channel[1] > 1.0e6 && u_per_channel[2] > 9.0e6 && u_per_channel[3] > 1.4e7,
+            "the partial channels carry their thresholds as restriction energies: \
+             {u_per_channel:?}"
+        );
+        // At 14.06 MeV three channels are open and MT 38 is still closed, so the
+        // walk has a real choice to make there.
+        let (i_grid, f) = grid.lookup_grid_index(14.06e6);
+        let at_14: Vec<f64> = (0..4)
+            .map(|j| grid.fission_xs_interp(i_grid, f, j))
+            .collect();
+        let total_14: f64 = at_14.iter().sum();
+        eprintln!(
+            "channel shares at 14.06 MeV: {:?}",
+            at_14.iter().map(|x| x / total_14).collect::<Vec<_>>()
+        );
+        assert!(
+            at_14[0] > 0.0 && at_14[1] > 0.0 && at_14[2] > 0.0,
+            "{at_14:?}"
+        );
+        assert_eq!(at_14[3], 0.0, "{at_14:?}");
+        assert!(chi.delayed.n_energies > 0, "U240 carries delayed data");
+    }
+
+    /// A single-channel evaluation gets one prompt row, no channel cross
+    /// sections (nothing to walk, no draw), and a non-fissionable nuclide a
+    /// single empty row.
+    #[test]
+    fn single_channel_and_non_fissionable_nuclides_get_one_row() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../yamc/tests/Fe56.arrow");
+        if !std::path::Path::new(path).exists() {
+            eprintln!("Skipping: Fe56.arrow fixture absent");
+            return;
+        }
+        let fe = yamc_nuclide::nuclide_loader::load_nuclide(
+            std::path::PathBuf::from(path),
+            &yamc_nuclide::LoadScope::full(),
+        )
+        .expect("load Fe56");
+        let energies: Vec<f64> = vec![1.0e3, 1.0e6, 1.0e7];
+        let pool = extract_fission_chi_per_nuclide(&[(&fe, 1.0)], "294", &energies).expect("chi");
+        assert_eq!(pool[0].channels.len(), 1);
+        assert!(pool[0].channel_mts.is_empty());
+        assert!(pool[0].channel_xs.is_empty());
+        assert_eq!(pool[0].channels[0].n_energies, 0);
+        assert_eq!(pool[0].delayed.n_energies, 0);
+    }
+
+    /// The per-slab fission partial that drives the reaction split in
+    /// multi-nuclide materials summed every fission MT present, so U240's
+    /// redundant MT 18 was counted on top of its partials there, exactly the
+    /// double count the single-nuclide path had (fusion-neutronics/core#89).
+    #[test]
+    fn per_slab_fission_partial_counts_redundant_mt18_once() {
+        let Some(nuclide) = load_u240() else { return };
+        let reactions = nuclide.reactions_for_temp("294").expect("294 K");
+        let temp_idx = nuclide.get_temp_idx("294").expect("294");
+        let energies: Vec<f64> = nuclide.fast_xs[temp_idx].energy.to_vec();
+        let density = 0.5;
+        let pool =
+            extract_per_nuclide_inelastic(&[(&nuclide, density)], "294", &energies, &energies)
+                .expect("per-nuclide");
+        let mut checked = 0usize;
+        for (i, &e) in energies.iter().enumerate() {
+            let expected: f64 = [18, 19, 20, 21, 38]
+                .iter()
+                .filter_map(|mt| reactions.get(mt))
+                .filter(|r| !r.redundant)
+                .map(|r| density * r.cross_section_at(e).unwrap_or(0.0))
+                .sum();
+            if expected > 0.0 {
+                checked += 1;
+                assert!(
+                    (pool.sigma_fission[i] - expected).abs() <= 1e-9 * expected,
+                    "at {e:.4e} eV per-slab sigma_f {} vs non-redundant sum {expected}",
+                    pool.sigma_fission[i]
+                );
+            }
+        }
+        assert!(
+            checked > 100,
+            "only {checked} grid points had a fission cross section"
+        );
     }
 }

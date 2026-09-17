@@ -67,6 +67,7 @@ use yamc_particle::particle::ParticleType;
 use yamc_tallies::filter::Filter;
 use yamc_tallies::mt::Mt;
 use yamc_tallies::tally::{Score, Tally};
+use yamc_tallies::welford::AggMoments;
 
 /// Errors `run_on_gpu` can return.
 ///
@@ -89,15 +90,6 @@ pub enum GpuDispatchError {
     UnsupportedTallyFilters {
         tally_index: usize,
         found: Vec<&'static str>,
-    },
-    /// A `MeshFilter` in a configuration the GPU kernel does not yet score
-    /// (issues #234, #279). Rectangular and cylindrical
-    /// meshes are all supported; this now only rejects a mesh tally combined
-    /// with the GPU fission bank, with an explicit message rather than a silent
-    /// CPU-only fallback.
-    UnsupportedMeshKind {
-        tally_index: usize,
-        reason: String,
     },
     /// Tally has more than one score, or a score the kernel can't
     /// estimate (only `Flux`, `ReactionRate(total)`, and
@@ -160,17 +152,6 @@ pub enum GpuDispatchError {
     /// Rejected up front. The Python layer's own "at least one stop condition"
     /// guard fires first, so from Python this is unreachable.
     UncappedWithoutRuntime,
-    /// `Model::convergence_targets` is non-empty. The GPU launch loop stops on
-    /// `total_particles` and `max_runtime` only: it cannot evaluate a precision
-    /// target between launches, because the per-history aggregate moments the
-    /// targets are defined on are not read back from the device yet
-    /// (fusion-neutronics/core#29). A run carrying targets plus a particle cap
-    /// used to run silently to the cap, ignoring the precision the user asked
-    /// to stop at (fusion-neutronics/core#23). Refused instead, whatever else
-    /// is set, so the request is never quietly dropped.
-    ConvergenceTargetsUnsupported {
-        n_targets: usize,
-    },
     /// Histories in a launch were still transporting when they hit
     /// `Model::gpu_max_steps_per_particle`. Their remaining track length was never
     /// scored, so every tally they touched is under-counted, by an amount
@@ -220,13 +201,6 @@ impl std::fmt::Display for GpuDispatchError {
                  EnergyFilter, EnergyFunctionFilter and/or ParticleTypeFilter(Neutron); \
                  got [{}]",
                 found.join(", ")
-            ),
-            Self::UnsupportedMeshKind {
-                tally_index,
-                reason,
-            } => write!(
-                f,
-                "compute='gpu' tally {tally_index}: mesh kind not supported on GPU: {reason}"
             ),
             Self::UnsupportedTallyScore {
                 tally_index,
@@ -284,13 +258,6 @@ impl std::fmt::Display for GpuDispatchError {
                 f,
                 "compute='gpu' needs total_particles or max_runtime to stop. Set one or both, \
                  or run on the CPU."
-            ),
-            Self::ConvergenceTargetsUnsupported { n_targets } => write!(
-                f,
-                "compute='gpu' cannot stop on convergence targets yet: the launch loop only \
-                 checks total_particles and max_runtime between launches, so the {n_targets} \
-                 target(s) on this model would be ignored and the run would go to the cap. \
-                 Clear Model.convergence_targets to run this on the GPU, or run on the CPU."
             ),
             Self::HistoriesTruncated {
                 truncated,
@@ -732,18 +699,14 @@ fn run_on_gpu_dispatch(
     // error (0 is not "unlimited"); `None` + no `max_runtime` has no way to
     // stop, so it is rejected here rather than looping forever. Covers every
     // kernel path since they all route through this entry.
-    if !model.convergence_targets.is_empty() {
-        return Err(GpuDispatchError::ConvergenceTargetsUnsupported {
-            n_targets: model.convergence_targets.len(),
-        });
-    }
+    let has_targets = !model.convergence_targets.is_empty();
     match (settings.total_particles, settings.max_runtime) {
         (Some(0), _) => {
             return Err(GpuDispatchError::Translate(
                 super::error::GpuTranslateError::NoParticles,
             ))
         }
-        (None, None) => return Err(GpuDispatchError::UncappedWithoutRuntime),
+        (None, None) if !has_targets => return Err(GpuDispatchError::UncappedWithoutRuntime),
         _ => {}
     }
     // The neutron kernel supports survival biasing (implicit capture); any
@@ -922,29 +885,10 @@ fn run_on_gpu_dispatch(
     //   (which multiplies weight in-thread via `weight *= nu_bar`, so each source
     //   thread is already a complete history -- Stage 1 handles it correctly).
     let has_fission_xs = inputs.xs_fission_per_material.iter().any(|&x| x > 0.0);
-    // Mesh tallies use the per-source-direct variance path (issue #234), which
-    // the non-fissile loop implements. Combining it with the GPU fission bank
-    // (per-source accumulation across fission generations AND direct mesh
-    // scoring) is not wired yet, so reject that combination explicitly rather
-    // than silently mis-scoring.
-    //
-    // Making the bank work WITH meshes is the wanted fix and is tracked on #338;
-    // the suggestion below is a way through in the meantime, not the answer.
-    if has_fission_xs && model.gpu_fission_bank && pack.mesh_kind.iter().any(|&k| k != MESH_NONE) {
-        if let Some(idx) = validated
-            .iter()
-            .position(|v| v.tally.get_mesh_filter().is_some())
-        {
-            return Err(GpuDispatchError::UnsupportedMeshKind {
-                tally_index: validated[idx].index,
-                reason: "mesh tallies combined with the GPU fission bank \
-                         (gpu_fission_bank=True on a fissile model) are not yet supported; \
-                         pass Model(gpu_fission_bank=False) to run this on the GPU without \
-                         banking fission progeny on the device, or run the mesh tally on the CPU"
-                    .to_string(),
-            });
-        }
-    }
+    // A mesh tally rides the per-source-direct variance mode on both loops: the
+    // fissile loop keys every launch (source and generation) on the source
+    // neutron, so a mesh contribution from a fission descendant folds into its
+    // source's sample exactly as a cell-bin one does (fusion-neutronics/core#30).
     if has_fission_xs && model.gpu_fission_bank {
         return run_neutron_per_history_fissile(
             model,
@@ -1768,9 +1712,14 @@ fn install_grouped_stats(
     sum_acc: &[Vec<f64>],
     sumsq_acc: &[Vec<f64>],
     n: u64,
+    // Per-history aggregate moments, one per tally GROUP in `validated`
+    // order (fusion-neutronics/core#29); `None` on the paths that do not fold
+    // them yet, which install `AggMoments::ZERO` as before.
+    aggs: Option<&[AggMoments]>,
 ) {
     let nf = n as f64;
     let mut t = 0usize;
+    let mut group = 0usize;
     while t < validated.len() {
         let tally = validated[t].tally;
         let n_scores = tally.scores.len();
@@ -1810,10 +1759,231 @@ fn install_grouped_stats(
             mean,
             m2,
             n_histories: n,
-            agg: yamc_tallies::welford::AggMoments::ZERO,
+            agg: aggs.map_or(AggMoments::ZERO, |a| a[group]),
             score_pdf: yamc_tallies::welford::ScorePdf::default(),
         });
         t += n_scores;
+        group += 1;
+    }
+}
+
+/// Per-history aggregate moments of every tally on a GPU run
+/// (fusion-neutronics/core#29): the `AggMoments` the convergence targets are
+/// defined on, folded launch by launch from each history's total score.
+///
+/// The GPU per-history path produces per-bin `sum` and `sum_sq`, from which
+/// the aggregate variance cannot be recovered (one history scores several
+/// bins, so `sum_h (sum_b x_hb)^2 != sum_b sum_h x_hb^2`). The kernel
+/// therefore emits one scalar per (history, tally entry), the history's total,
+/// and the host folds it here with the higher-order Welford update; the
+/// per-source paths already hold each source's per-bin grand total and fold
+/// its sum over the tally's bins instead. Both give exactly the per-history
+/// (per-source, on the fissile path) sample the CPU folds into its own
+/// `AggMoments`, so the same `convergence_targets_met` decides both backends.
+///
+/// One entry per tally GROUP: consecutive `validated` entries that belong to
+/// one model tally (its scores) share a group, matching `install_grouped_stats`,
+/// and a history's total for the tally sums over every score entry.
+struct AggFold {
+    /// `validated` entry range of each group.
+    groups: Vec<std::ops::Range<usize>>,
+    aggs: Vec<AggMoments>,
+}
+
+impl AggFold {
+    fn new(validated: &[ValidatedTally<'_>]) -> Self {
+        let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut t = 0usize;
+        while t < validated.len() {
+            let n_scores = validated[t].tally.scores.len().max(1);
+            groups.push(t..(t + n_scores).min(validated.len()));
+            t += n_scores;
+        }
+        let aggs = vec![AggMoments::ZERO; groups.len()];
+        AggFold { groups, aggs }
+    }
+
+    /// Fold a `PerHistory` launch: `rows` is the kernel's `[n_hist x
+    /// n_entries]` per-(history, entry) totals.
+    fn fold_history_rows(&mut self, rows: &[f64], n_hist: usize, n_entries: usize) {
+        if n_entries == 0 {
+            return;
+        }
+        debug_assert_eq!(rows.len(), n_hist * n_entries);
+        for h in 0..n_hist {
+            let row = &rows[h * n_entries..(h + 1) * n_entries];
+            for (g, range) in self.groups.iter().enumerate() {
+                let x: f64 = row[range.clone()].iter().sum();
+                self.aggs[g].update(x);
+            }
+        }
+    }
+
+    /// Fold a per-source launch: `per_source_total` is `[n_sources x
+    /// total_out_len]` in physical units and entry `e` spans flat bins
+    /// `out_offsets[e]..out_offsets[e + 1]`.
+    fn fold_source_rows(
+        &mut self,
+        per_source_total: &[f64],
+        n_sources: usize,
+        total_out_len: usize,
+        out_offsets: &[u32],
+    ) {
+        self.fold_source_rows_at(per_source_total, n_sources, total_out_len, out_offsets, 0);
+    }
+
+    /// [`Self::fold_source_rows`] for a fold built over a SLICE of a pack's
+    /// entries: local entry `e` of this fold is pack entry `entry_base + e`
+    /// (the coupled paths split one pack into neutron-only, photon-only and
+    /// dual slices).
+    fn fold_source_rows_at(
+        &mut self,
+        per_source_total: &[f64],
+        n_sources: usize,
+        total_out_len: usize,
+        out_offsets: &[u32],
+        entry_base: usize,
+    ) {
+        for src in 0..n_sources {
+            let row = &per_source_total[src * total_out_len..(src + 1) * total_out_len];
+            for (g, range) in self.groups.iter().enumerate() {
+                let start = out_offsets[entry_base + range.start] as usize;
+                let end = out_offsets[entry_base + range.end] as usize;
+                let x: f64 = row[start..end].iter().sum();
+                self.aggs[g].update(x);
+            }
+        }
+    }
+
+    /// Fold the dual (all-particle) tallies of a coupled launch: a source's
+    /// sample is the SUM of its neutron-pass and photon-pass totals, added
+    /// before the moments are taken so the two passes' correlation (one shared
+    /// source) is kept exactly, as `fold_per_source_dual` keeps it per bin.
+    /// Local entry `e` is neutron pack entry `entry_base_n + e` and photon pack
+    /// entry `entry_base_p + e`.
+    #[allow(clippy::too_many_arguments)]
+    fn fold_dual_rows(
+        &mut self,
+        pst_n: &[f64],
+        total_out_len_n: usize,
+        out_offsets_n: &[u32],
+        entry_base_n: usize,
+        pst_p: &[f64],
+        total_out_len_p: usize,
+        out_offsets_p: &[u32],
+        entry_base_p: usize,
+        n_sources: usize,
+    ) {
+        for src in 0..n_sources {
+            let row_n = &pst_n[src * total_out_len_n..(src + 1) * total_out_len_n];
+            let row_p = &pst_p[src * total_out_len_p..(src + 1) * total_out_len_p];
+            for (g, range) in self.groups.iter().enumerate() {
+                let sn = out_offsets_n[entry_base_n + range.start] as usize;
+                let en = out_offsets_n[entry_base_n + range.end] as usize;
+                let sp = out_offsets_p[entry_base_p + range.start] as usize;
+                let ep = out_offsets_p[entry_base_p + range.end] as usize;
+                let x: f64 = row_n[sn..en].iter().sum::<f64>() + row_p[sp..ep].iter().sum::<f64>();
+                self.aggs[g].update(x);
+            }
+        }
+    }
+
+    /// The moments combined across MPI ranks (every rank ran a disjoint subset
+    /// of the launch chunks, issue #303), identical on every rank: gathered to
+    /// root, folded with the exact pairwise combine, and broadcast back.
+    /// Single-process, a copy.
+    fn reduced_across_ranks(&self, mpi_ctx: &crate::mpi_context::MpiContext) -> Vec<AggMoments> {
+        let size = mpi_ctx.size().max(1) as usize;
+        if size <= 1 {
+            return self.aggs.clone();
+        }
+        let n_groups = self.aggs.len();
+        let mut packed: Vec<f64> = Vec::with_capacity(n_groups * 5);
+        for a in &self.aggs {
+            packed.extend_from_slice(&[a.n as f64, a.mean, a.m2, a.m3, a.m4]);
+        }
+        let mut folded_packed = vec![0.0f64; n_groups * 5];
+        if let Some(g) = mpi_ctx.gather_f64(&packed, 0) {
+            let mut folded = vec![AggMoments::ZERO; n_groups];
+            for r in 0..size {
+                for (t, slot) in folded.iter_mut().enumerate() {
+                    let off = (r * n_groups + t) * 5;
+                    slot.combine(&AggMoments {
+                        n: g[off] as u64,
+                        mean: g[off + 1],
+                        m2: g[off + 2],
+                        m3: g[off + 3],
+                        m4: g[off + 4],
+                    });
+                }
+            }
+            for (t, a) in folded.iter().enumerate() {
+                folded_packed[t * 5..t * 5 + 5]
+                    .copy_from_slice(&[a.n as f64, a.mean, a.m2, a.m3, a.m4]);
+            }
+        }
+        mpi_ctx.broadcast_f64(&mut folded_packed, 0);
+        (0..n_groups)
+            .map(|t| AggMoments {
+                n: folded_packed[t * 5] as u64,
+                mean: folded_packed[t * 5 + 1],
+                m2: folded_packed[t * 5 + 2],
+                m3: folded_packed[t * 5 + 3],
+                m4: folded_packed[t * 5 + 4],
+            })
+            .collect()
+    }
+
+    /// Whether every convergence target on `model` is satisfied by the moments
+    /// so far, decided on the rank-combined moments so a borderline target
+    /// cannot flip between ranks and desynchronise the launch loops. `false`
+    /// with no targets.
+    fn targets_met(
+        &self,
+        model: &Model,
+        validated: &[ValidatedTally<'_>],
+        mpi_ctx: &crate::mpi_context::MpiContext,
+    ) -> bool {
+        convergence_met(&[(self, validated)], model, mpi_ctx)
+    }
+
+    /// The model tally each group folds, in group order.
+    fn tallies<'a>(&self, validated: &[ValidatedTally<'a>]) -> Vec<&'a Tally> {
+        self.groups
+            .iter()
+            .map(|g| validated[g.start].tally)
+            .collect()
+    }
+}
+
+/// Whether every convergence target on `model` is satisfied by the moments of
+/// every fold in `folds` (each paired with the `validated` slice it was built
+/// over), decided on the rank-combined moments. The coupled paths hold three
+/// folds (neutron-only, photon-only and dual tallies); every rank walks them
+/// in the same order, so the MPI gathers line up. `false` with no targets or
+/// no tallies.
+fn convergence_met(
+    folds: &[(&AggFold, &[ValidatedTally<'_>])],
+    model: &Model,
+    mpi_ctx: &crate::mpi_context::MpiContext,
+) -> bool {
+    if model.convergence_targets.is_empty() || folds.iter().all(|(f, _)| f.groups.is_empty()) {
+        return false;
+    }
+    let mut aggs: Vec<AggMoments> = Vec::new();
+    let mut tallies: Vec<&Tally> = Vec::new();
+    for (fold, validated) in folds {
+        aggs.extend(fold.reduced_across_ranks(mpi_ctx));
+        tallies.extend(fold.tallies(validated));
+    }
+    crate::model::convergence_targets_met(&aggs, &tallies, &model.convergence_targets)
+}
+
+/// Print the CPU's early-stop line for a GPU run, root rank only and only
+/// under `verbose.summary`.
+fn announce_convergence_stop(model: &Model, mpi_ctx: &crate::mpi_context::MpiContext, done: u64) {
+    if mpi_ctx.is_root() && model.verbose.summary {
+        println!("Convergence targets satisfied after {done} particles; stopping early.");
     }
 }
 
@@ -1822,6 +1992,7 @@ fn finalize_per_history_tallies(
     sum_acc: &[Vec<f64>],
     sumsq_acc: &[Vec<f64>],
     n: u64,
+    aggs: Option<&[AggMoments]>,
 ) {
     // Under MPI each rank ran a DISJOINT subset of the launch chunks (see
     // `LaunchLoop::new_for_rank`), so these accumulators and the history count
@@ -1837,7 +2008,7 @@ fn finalize_per_history_tallies(
         Some((s, sq, rn)) => (&s[..], &sq[..], *rn),
         None => (sum_acc, sumsq_acc, n),
     };
-    install_grouped_stats(validated, sum_acc, sumsq_acc, n);
+    install_grouped_stats(validated, sum_acc, sumsq_acc, n, aggs);
 }
 
 /// Size of the one-shot initial `translate_*_for_gpu` particle sample. Every
@@ -2089,6 +2260,10 @@ fn run_neutron_per_history(
     // stack was full (issue #111 phase 2).
     let mut spilled_total: u64 = 0;
     let mut relaunched_total: u64 = 0;
+    // Per-history (per-source, once fission progeny join a sample) aggregate
+    // moments per tally, folded launch by launch; the convergence targets are
+    // decided on them at every chunk boundary (fusion-neutronics/core#29).
+    let mut agg = AggFold::new(validated);
     // Partition the launch chunks across MPI ranks (issue #303): before this the
     // GPU path had no MPI awareness, so every rank transported the full
     // `total_particles` and rank 0 reported its own result -- n x the work, and
@@ -2264,11 +2439,18 @@ fn run_neutron_per_history(
                 accumulate_kernel_tally(v, &sum_flat[start..end], &mut sum_acc[t]);
                 accumulate_kernel_tally(v, &sumsq_flat[start..end], &mut sumsq_acc[t]);
             }
+            agg.fold_source_rows(
+                &per_source_total,
+                launch_n,
+                total_out_len,
+                &pack.out_offsets,
+            );
         } else {
             for (t, v) in validated.iter().enumerate() {
                 accumulate_kernel_tally(v, &kernel.tally_outputs[t], &mut sum_acc[t]);
                 accumulate_kernel_tally(v, &kernel.tally_sum_sq[t], &mut sumsq_acc[t]);
             }
+            agg.fold_history_rows(&kernel.hist_tally_total, launch_n, validated.len());
         }
 
         fail_if_truncated(&kernel.alive, max_steps)?;
@@ -2281,10 +2463,19 @@ fn run_neutron_per_history(
         if sched.hit_time_budget() {
             break;
         }
+        // Convergence targets, decided collectively at the chunk boundary
+        // (fusion-neutronics/core#29), the third stop condition beside the
+        // particle cap and the time budget.
+        if agg.targets_met(model, validated, &mpi_ctx) {
+            announce_convergence_stop(model, &mpi_ctx, n_hist_total);
+            break;
+        }
     }
 
-    // Finalize per tally into the CPU's per-history Welford representation.
-    finalize_per_history_tallies(validated, &sum_acc, &sumsq_acc, n_hist_total);
+    // Finalize per tally into the CPU's per-history Welford representation,
+    // aggregate moments included.
+    let aggs = agg.reduced_across_ranks(&mpi_ctx);
+    finalize_per_history_tallies(validated, &sum_acc, &sumsq_acc, n_hist_total, Some(&aggs));
     Ok(GpuRunResult {
         n_particles: n_hist_total as usize,
         n_cells: last_n_cells,
@@ -2427,6 +2618,12 @@ fn run_neutron_per_history_fissile(
     let per_thread_words = total_out_len.max(spill_cap).max(1);
     let mem_safe_max = ((64usize * 1024 * 1024) / per_thread_words).max(1);
     let chunk = launch_chunk_size(mem_safe_max);
+    // A mesh tally switches every launch of this loop to the direct per-source
+    // mode (issue #234): each voxel crossing scores straight into `src_acc`
+    // under the history's SOURCE index, which the generation launches carry
+    // through `bank_source_idx`, so a descendant's mesh contributions fold into
+    // its source's sample before squaring (fusion-neutronics/core#30).
+    let has_mesh = pack.mesh_kind.iter().any(|&k| k != MESH_NONE);
 
     // This path is only entered when `model.gpu_fission_bank` is on.
     let fission_bank = FissionBankInputs::on();
@@ -2461,6 +2658,10 @@ fn run_neutron_per_history_fissile(
     // progeny (issue #111 phase 2); they drain together.
     let mut spilled_total: u64 = 0;
     let mut relaunched_total: u64 = 0;
+    // Per-history (per-source, once fission progeny join a sample) aggregate
+    // moments per tally, folded launch by launch; the convergence targets are
+    // decided on them at every chunk boundary (fusion-neutronics/core#29).
+    let mut agg = AggFold::new(validated);
     // Partition the launch chunks across MPI ranks (issue #303): before this the
     // GPU path had no MPI awareness, so every rank transported the full
     // `total_particles` and rank 0 reported its own result -- n x the work, and
@@ -2505,11 +2706,7 @@ fn run_neutron_per_history_fissile(
             &fission_bank,
             bank_capacity,
             max_steps,
-            TallyVarianceMode::PerSource {
-                chunk_sources: chunk_sources as u32,
-                total_bins: total_out_len as u32,
-                source_idx: None,
-            },
+            per_source_variance(has_mesh, chunk_sources as u32, total_out_len as u32, None),
         )?;
         lost.absorb(
             &kernel.lost,
@@ -2557,7 +2754,7 @@ fn run_neutron_per_history_fissile(
             survival,
             &fission_bank,
             max_steps,
-            false,
+            has_mesh,
             chunk,
             chunk_sources,
             total_out_len,
@@ -2592,9 +2789,19 @@ fn run_neutron_per_history_fissile(
             accumulate_kernel_tally(v, &sum_flat[start..end], &mut sum_acc[ti]);
             accumulate_kernel_tally(v, &sumsq_flat[start..end], &mut sumsq_acc[ti]);
         }
+        agg.fold_source_rows(
+            &per_source_total,
+            chunk_sources,
+            total_out_len,
+            &pack.out_offsets,
+        );
         n_hist_total += chunk_sources as u64;
 
         if sched.hit_time_budget() {
+            break;
+        }
+        if agg.targets_met(model, validated, &mpi_ctx) {
+            announce_convergence_stop(model, &mpi_ctx, n_hist_total);
             break;
         }
     }
@@ -2614,7 +2821,8 @@ fn run_neutron_per_history_fissile(
         None => (sum_acc, sumsq_acc, n_hist_total),
     };
     let n = n_hist_total;
-    install_grouped_stats(validated, &sum_acc, &sumsq_acc, n);
+    let aggs = agg.reduced_across_ranks(&mpi_ctx);
+    install_grouped_stats(validated, &sum_acc, &sumsq_acc, n, Some(&aggs));
     Ok(GpuRunResult {
         n_particles: n_hist_total as usize,
         n_cells: last_n_cells,
@@ -3142,6 +3350,9 @@ pub(super) fn run_on_gpu_photon(
     // GPU path had no MPI awareness, so every rank transported the full
     // `total_particles` and rank 0 reported its own result -- n x the work, and
     // slower than serial because the ranks contend for one device.
+    // Per-history aggregate moments per tally for the convergence targets
+    // (fusion-neutronics/core#29).
+    let mut agg = AggFold::new(&validated);
     let mpi_ctx = crate::mpi_context::MpiContext::init();
     let mut sched = LaunchLoop::new_for_rank(
         settings,
@@ -3223,11 +3434,18 @@ pub(super) fn run_on_gpu_photon(
                 accumulate_kernel_tally(v, &sum_flat[start..end], &mut sum_acc[t]);
                 accumulate_kernel_tally(v, &sumsq_flat[start..end], &mut sumsq_acc[t]);
             }
+            agg.fold_source_rows(
+                &per_source_total,
+                launch_n,
+                total_out_len,
+                &pack.out_offsets,
+            );
         } else {
             for (t, v) in validated.iter().enumerate() {
                 accumulate_kernel_tally(v, &result.tally_outputs[t], &mut sum_acc[t]);
                 accumulate_kernel_tally(v, &result.tally_sum_sq[t], &mut sumsq_acc[t]);
             }
+            agg.fold_history_rows(&result.hist_tally_total, launch_n, validated.len());
         }
 
         fail_if_truncated(&result.alive, max_steps)?;
@@ -3240,9 +3458,14 @@ pub(super) fn run_on_gpu_photon(
         if sched.hit_time_budget() {
             break;
         }
+        if agg.targets_met(model, &validated, &mpi_ctx) {
+            announce_convergence_stop(model, &mpi_ctx, n_hist_total);
+            break;
+        }
     }
 
-    finalize_per_history_tallies(&validated, &sum_acc, &sumsq_acc, n_hist_total);
+    let aggs = agg.reduced_across_ranks(&mpi_ctx);
+    finalize_per_history_tallies(&validated, &sum_acc, &sumsq_acc, n_hist_total, Some(&aggs));
     Ok(GpuRunResult {
         n_particles: n_hist_total as usize,
         n_cells: last_n_cells,
@@ -3495,6 +3718,13 @@ fn run_on_gpu_coupled(
     // row layout, so the per-source fold below is identical either way.
     let has_mesh_n = pack_n.mesh_kind.iter().any(|&k| k != MESH_NONE);
     let has_mesh_p = pack_p.mesh_kind.iter().any(|&k| k != MESH_NONE);
+    // Per-source aggregate moments for the convergence targets
+    // (fusion-neutronics/core#29), one fold per tally slice: neutron-only,
+    // photon-only, and the dual (all-particle) tallies whose sample is the sum
+    // of a source's neutron and photon passes.
+    let mut agg_n = AggFold::new(&validated_n[..n_neutron_only]);
+    let mut agg_p = AggFold::new(&validated_p[..n_photon_only]);
+    let mut agg_d = AggFold::new(&validated_n[n_neutron_only..]);
 
     let mut alive_all: Vec<u32> = Vec::with_capacity(settings.total_particles.unwrap_or(0));
     let mut spilled_total: u64 = 0;
@@ -3697,18 +3927,77 @@ fn run_on_gpu_coupled(
                 &mut sq_d[d],
             );
         }
+        agg_n.fold_source_rows_at(
+            &pst_n,
+            chunk_sources,
+            total_out_len_n,
+            &pack_n.out_offsets,
+            0,
+        );
+        agg_p.fold_source_rows_at(
+            &pst_p,
+            chunk_sources,
+            total_out_len_p,
+            &pack_p.out_offsets,
+            0,
+        );
+        agg_d.fold_dual_rows(
+            &pst_n,
+            total_out_len_n,
+            &pack_n.out_offsets,
+            n_neutron_only,
+            &pst_p,
+            total_out_len_p,
+            &pack_p.out_offsets,
+            n_photon_only,
+            chunk_sources,
+        );
         n_hist_total += chunk_sources as u64;
 
         if sched.hit_time_budget() {
             break;
         }
+        if convergence_met(
+            &[
+                (&agg_n, &validated_n[..n_neutron_only]),
+                (&agg_p, &validated_p[..n_photon_only]),
+                (&agg_d, &validated_n[n_neutron_only..]),
+            ],
+            model,
+            &mpi_ctx,
+        ) {
+            announce_convergence_stop(model, &mpi_ctx, n_hist_total);
+            break;
+        }
     }
+
+    let aggs_n = agg_n.reduced_across_ranks(&mpi_ctx);
+    let aggs_p = agg_p.reduced_across_ranks(&mpi_ctx);
+    let aggs_d = agg_d.reduced_across_ranks(&mpi_ctx);
 
     // Finalize + install (N = source-neutron count). Dual tallies install through
     // their neutron-pass ValidatedTally entries (which wrap the same Tally).
-    finalize_per_history_tallies(&validated_n[..n_neutron_only], &sum_n, &sq_n, n_hist_total);
-    finalize_per_history_tallies(&validated_p[..n_photon_only], &sum_p, &sq_p, n_hist_total);
-    finalize_per_history_tallies(&validated_n[n_neutron_only..], &sum_d, &sq_d, n_hist_total);
+    finalize_per_history_tallies(
+        &validated_n[..n_neutron_only],
+        &sum_n,
+        &sq_n,
+        n_hist_total,
+        Some(&aggs_n),
+    );
+    finalize_per_history_tallies(
+        &validated_p[..n_photon_only],
+        &sum_p,
+        &sq_p,
+        n_hist_total,
+        Some(&aggs_p),
+    );
+    finalize_per_history_tallies(
+        &validated_n[n_neutron_only..],
+        &sum_d,
+        &sq_d,
+        n_hist_total,
+        Some(&aggs_d),
+    );
     Ok(GpuRunResult {
         n_particles: n_hist_total as usize,
         n_cells: last_n_cells,
@@ -3946,6 +4235,13 @@ fn run_on_gpu_mixed(
     // `PerSource`, so the unified-sample fold below is unchanged.
     let has_mesh_n = pack_n.mesh_kind.iter().any(|&k| k != MESH_NONE);
     let has_mesh_p = pack_p.mesh_kind.iter().any(|&k| k != MESH_NONE);
+    // Per-source aggregate moments for the convergence targets
+    // (fusion-neutronics/core#29), one fold per tally slice: neutron-only,
+    // photon-only, and the dual (all-particle) tallies whose sample is the sum
+    // of a source's neutron and photon passes.
+    let mut agg_n = AggFold::new(&validated_n[..n_neutron_only]);
+    let mut agg_p = AggFold::new(&validated_p[..n_photon_only]);
+    let mut agg_d = AggFold::new(&validated_n[n_neutron_only..]);
 
     let mut alive_all: Vec<u32> = Vec::new();
     let mut spilled_total: u64 = 0;
@@ -4207,16 +4503,63 @@ fn run_on_gpu_mixed(
                 &mut sq_d[d],
             );
         }
+        agg_n.fold_source_rows_at(&pst_n, chunk_total, total_out_len_n, &pack_n.out_offsets, 0);
+        agg_p.fold_source_rows_at(&pst_p, chunk_total, total_out_len_p, &pack_p.out_offsets, 0);
+        agg_d.fold_dual_rows(
+            &pst_n,
+            total_out_len_n,
+            &pack_n.out_offsets,
+            n_neutron_only,
+            &pst_p,
+            total_out_len_p,
+            &pack_p.out_offsets,
+            n_photon_only,
+            chunk_total,
+        );
         n_hist_total += chunk_total as u64;
 
         if sched.hit_time_budget() {
             break;
         }
+        if convergence_met(
+            &[
+                (&agg_n, &validated_n[..n_neutron_only]),
+                (&agg_p, &validated_p[..n_photon_only]),
+                (&agg_d, &validated_n[n_neutron_only..]),
+            ],
+            model,
+            &mpi_ctx,
+        ) {
+            announce_convergence_stop(model, &mpi_ctx, n_hist_total);
+            break;
+        }
     }
 
-    finalize_per_history_tallies(&validated_n[..n_neutron_only], &sum_n, &sq_n, n_hist_total);
-    finalize_per_history_tallies(&validated_p[..n_photon_only], &sum_p, &sq_p, n_hist_total);
-    finalize_per_history_tallies(&validated_n[n_neutron_only..], &sum_d, &sq_d, n_hist_total);
+    let aggs_n = agg_n.reduced_across_ranks(&mpi_ctx);
+    let aggs_p = agg_p.reduced_across_ranks(&mpi_ctx);
+    let aggs_d = agg_d.reduced_across_ranks(&mpi_ctx);
+
+    finalize_per_history_tallies(
+        &validated_n[..n_neutron_only],
+        &sum_n,
+        &sq_n,
+        n_hist_total,
+        Some(&aggs_n),
+    );
+    finalize_per_history_tallies(
+        &validated_p[..n_photon_only],
+        &sum_p,
+        &sq_p,
+        n_hist_total,
+        Some(&aggs_p),
+    );
+    finalize_per_history_tallies(
+        &validated_n[n_neutron_only..],
+        &sum_d,
+        &sq_d,
+        n_hist_total,
+        Some(&aggs_d),
+    );
     Ok(GpuRunResult {
         n_particles: n_hist_total as usize,
         n_cells: last_n_cells,
@@ -4578,6 +4921,10 @@ struct KernelOutput {
     // #233). Non-empty only for the `PerHistory` (Stage 1) mode; same
     // shape/order as `tally_outputs`. Empty on the per-step / per-source paths.
     tally_sum_sq: Vec<Vec<f64>>,
+    // Per-(history, tally entry) total score, `[n_hist x n_entries]`
+    // (fusion-neutronics/core#29). Non-empty only in `PerHistory` mode; the
+    // per-history sample the aggregate moments are folded from.
+    hist_tally_total: Vec<f64>,
     // Per-source accumulator raw fixed-point words (issue #233 Stage 2,
     // `PerSource` mode): `chunk_sources * total_out_len`, this launch's
     // per-`(source, flat_bin)` sum. Empty otherwise.
@@ -4881,6 +5228,7 @@ fn run_kernel_path_impl(
         final_energies: result.final_energies,
         tally_outputs: result.tally_outputs,
         tally_sum_sq: result.tally_sum_sq,
+        hist_tally_total: result.hist_tally_total,
         src_acc: result.src_acc,
         bank_source_idx: result.bank_source_idx,
         bank_f64: result.photon_bank.bank_f64,

@@ -221,6 +221,9 @@ pub fn run_multi_cell_transport_cpu(
         coarse_meta,
         fine_meta,
         &nuclide_select.mat_nuclide_meta,
+        &nuclide_select.chi_slab_meta,
+        &nuclide_select.fission_channel_xs,
+        &nuclide_select.nuc_fission_yield,
         xs_elastic_per_material,
         xs_absorption_per_material,
         xs_inelastic_per_material,
@@ -324,6 +327,9 @@ pub fn run_multi_cell_transport_cpu(
         nuc_awr: &nuclide_select.nuc_awr,
         mat_nuclide_meta: &nuclide_select.mat_nuclide_meta,
         nuc_partial_xs: &nuclide_select.nuc_partial_xs,
+        chi_slab_meta: &nuclide_select.chi_slab_meta,
+        fission_channel_xs: &nuclide_select.fission_channel_xs,
+        nuc_fission_yield: &nuclide_select.nuc_fission_yield,
         fission_a_per_material,
         fission_b_per_material,
         fission_eout_kind_per_material,
@@ -496,6 +502,7 @@ pub fn run_multi_cell_transport_cpu(
             // per-history sum-of-squares or per-source accumulator (issue #233
             // batch-free variance is GPU-only).
             tally_sum_sq: Vec::new(),
+            hist_tally_total: Vec::new(),
             src_acc: Vec::new(),
             bank_source_idx: Vec::new(),
             n_bins_per_tally: tallies.n_bins_per_tally.clone(),

@@ -104,8 +104,10 @@ pub fn per_history_spill_cap(total_out_len: usize, max_steps: u32, n_tallies: us
 
 pub use crate::neutron::fission_bank_inputs::FissionBankInputs;
 pub use crate::neutron::nuclide_select_inputs::{
-    NuclideSelectInputs, NUC_PARTIAL_ABSORPTION, NUC_PARTIAL_COLS, NUC_PARTIAL_ELASTIC,
-    NUC_PARTIAL_FISSION, NUC_PARTIAL_INELASTIC,
+    NuclideSelectInputs, CHI_SLAB_CHANNEL_XS_BASE, CHI_SLAB_DELAYED_ROW, CHI_SLAB_META_COLS,
+    CHI_SLAB_N_CHANNELS, CHI_SLAB_PROMPT_ROW, NUC_PARTIAL_ABSORPTION, NUC_PARTIAL_COLS,
+    NUC_PARTIAL_ELASTIC, NUC_PARTIAL_FISSION, NUC_PARTIAL_INELASTIC, NUC_YIELD_BETA,
+    NUC_YIELD_COLS, NUC_YIELD_NU_BAR,
 };
 pub use crate::neutron::survival_biasing::SurvivalBiasingInputs;
 // The `permt_meta` layout constants moved to the always-built
@@ -182,7 +184,7 @@ pub const REGION_CROSS_EPS: f64 = 1e-8;
 // NOTE: this counts the kernel's READ-ONLY `&[T]` slice parameters only, which
 // is what the lockstep test in `tests.rs` checks; `&mut [T]` outputs (including
 // the issue-#289 `lost_count` / `lost_f64` pair) are not included.
-pub const KERNEL_STORAGE_BUFFER_COUNT: u32 = 181;
+pub const KERNEL_STORAGE_BUFFER_COUNT: u32 = 184;
 
 /// Compile-time cap on the number of secondary photons banked per neutron
 /// collision (coupled neutron->photon production, S4b). cubecl needs a bounded
@@ -361,6 +363,14 @@ pub struct MultiCellResult {
     /// with `tally_outputs` (the sum) and the history count it gives the
     /// exact per-history variance `m2 = sum_sq − sum²/N`.
     pub tally_sum_sq: Vec<Vec<f64>>,
+    /// Per-(history, tally entry) total score (fusion-neutronics/core#29),
+    /// flat `[n_histories x n_tallies]` row-major by history, in physical
+    /// units: each history's per-bin totals summed over the entry's bins. This
+    /// is the per-history sample the convergence targets' aggregate moments
+    /// (`AggMoments`) are built from. Non-empty only for `PerHistory`; the
+    /// per-source paths derive the same totals from `src_acc`, and the CPU
+    /// mirrors leave it empty.
+    pub hist_tally_total: Vec<f64>,
     /// Raw per-source accumulator (issue #233 Stage 2, `PerSource` mode only):
     /// flat `chunk_sources * total_out_len` fixed-point words, row-major by
     /// source index, holding this launch's per-`(source, flat_bin)` sum (per-tally

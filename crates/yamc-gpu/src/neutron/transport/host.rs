@@ -324,18 +324,49 @@ pub fn run_multi_cell_transport(
     );
     assert_eq!(fission_a_per_material.len(), n_materials);
     assert_eq!(fission_b_per_material.len(), n_materials);
-    // Variable-length tight layout (issue #104): per-chi-row counts/bases are
-    // [2 * n_materials] (prompt at row 2m, delayed at row 2m + 1, issue #364);
+    // Variable-length tight layout (issue #104): chi rows are laid out per
+    // (nuclide slab, fission channel) plus one delayed row per slab by
+    // `chi_slab_meta` (issue #364, fusion-neutronics/core#34 entry 1);
     // incident-energy rows are [total ae-rows]; (x, cdf) points are [total
     // x-points]. No fixed per-axis stride.
     let n_fission_eout_ae_rows = fission_eout_n_x_per_material.len();
-    let n_chi_rows = 2 * n_materials;
-    assert_eq!(fission_eout_kind_per_material.len(), n_chi_rows);
+    let n_chi_rows = fission_eout_kind_per_material.len();
+    assert_eq!(
+        nuclide_select.chi_slab_meta.len(),
+        n_slab * CHI_SLAB_META_COLS,
+        "chi_slab_meta must be [n_slab x CHI_SLAB_META_COLS]"
+    );
+    for row in nuclide_select
+        .chi_slab_meta
+        .as_chunks::<CHI_SLAB_META_COLS>()
+        .0
+    {
+        let prompt = row[CHI_SLAB_PROMPT_ROW] as usize;
+        let n_ch = row[CHI_SLAB_N_CHANNELS] as usize;
+        assert!(n_ch >= 1, "every slab has at least one fission channel row");
+        assert!(
+            prompt + n_ch <= n_chi_rows,
+            "chi_slab_meta prompt rows out of range"
+        );
+        assert!(
+            (row[CHI_SLAB_DELAYED_ROW] as usize) < n_chi_rows,
+            "chi_slab_meta delayed row out of range"
+        );
+    }
+    assert!(
+        !nuclide_select.fission_channel_xs.is_empty(),
+        "fission_channel_xs must hold at least one element"
+    );
+    assert_eq!(
+        nuclide_select.nuc_fission_yield.len(),
+        expected_nuc * NUC_YIELD_COLS,
+        "nuc_fission_yield must be tight CSR: sum_m nuc_count[m] x fine_n[m] x NUC_YIELD_COLS"
+    );
     assert_eq!(fission_eout_n_energies_per_material.len(), n_chi_rows);
     assert_eq!(
         fission_eout_ae_offset.len(),
         n_chi_rows,
-        "fission_eout_ae_offset must be flat [2 * n_materials]"
+        "fission_eout_ae_offset must hold one base per chi row"
     );
     assert_eq!(
         fission_eout_energy_grid_per_material.len(),
@@ -1262,6 +1293,14 @@ pub fn run_multi_cell_transport(
         client.create_from_slice(bytemuck::cast_slice(&nuclide_select.mat_nuclide_meta));
     let nuc_partial_h =
         client.create_from_slice(bytemuck::cast_slice(&nuclide_select.nuc_partial_xs));
+    // Per-slab fission chi row table and per-channel fission cross sections
+    // (fusion-neutronics/core#34 entry 1).
+    let chi_slab_meta_h =
+        client.create_from_slice(bytemuck::cast_slice(&nuclide_select.chi_slab_meta));
+    let fission_channel_xs_h =
+        client.create_from_slice(bytemuck::cast_slice(&nuclide_select.fission_channel_xs));
+    let nuc_fission_yield_h =
+        client.create_from_slice(bytemuck::cast_slice(&nuclide_select.nuc_fission_yield));
     let bank_f64_z = vec![0.0_f64; bank_capacity * crate::common::particle_bank::BANK_F64_STRIDE];
     let bank_u32_z = vec![0u32; bank_capacity * crate::common::particle_bank::BANK_U32_STRIDE];
     let bank_f64_h = client.create_from_slice(bytemuck::cast_slice(&bank_f64_z));
@@ -1326,6 +1365,16 @@ pub fn run_multi_cell_transport(
     // launch, which dominated large-tally throughput (issue #233 Stage 4).
     let spill_bin_h = client.empty(spill_len * std::mem::size_of::<u32>());
     let spill_val_h = client.empty(spill_len * std::mem::size_of::<f64>());
+    // Per-(history, tally) totals (fusion-neutronics/core#29): one f64 row per
+    // history in `PerHistory` mode, accumulated by the history-end flush, so it
+    // is zero-initialised; a size-1 dummy otherwise.
+    let hist_total_len = if matches!(variance, TallyVarianceMode::PerHistory) {
+        n.saturating_mul(tallies.n_tallies() as usize).max(1)
+    } else {
+        1
+    };
+    let hist_total_zeros = vec![0.0f64; hist_total_len];
+    let hist_total_h = client.create_from_slice(bytemuck::cast_slice(&hist_total_zeros));
     // Per-source accumulator (Stage 2): `chunk_sources * total_bins` fixed-point
     // words scatter-written by `source_idx`. Size-1 dummy off the fissile path.
     let total_bins = variance.total_bins() as usize;
@@ -1560,6 +1609,12 @@ pub fn run_multi_cell_transport(
             BufferArg::from_raw_parts(nuc_awr_h, nuclide_select.nuc_awr.len()),
             BufferArg::from_raw_parts(nuc_meta_h, nuclide_select.mat_nuclide_meta.len()),
             BufferArg::from_raw_parts(nuc_partial_h, nuclide_select.nuc_partial_xs.len()),
+            BufferArg::from_raw_parts(chi_slab_meta_h, nuclide_select.chi_slab_meta.len()),
+            BufferArg::from_raw_parts(
+                fission_channel_xs_h,
+                nuclide_select.fission_channel_xs.len(),
+            ),
+            BufferArg::from_raw_parts(nuc_fission_yield_h, nuclide_select.nuc_fission_yield.len()),
             BufferArg::from_raw_parts(fission_bank_enabled_h, fission_bank.enabled.len()),
             BufferArg::from_raw_parts(
                 bank_f64_h.clone(),
@@ -1575,6 +1630,7 @@ pub fn run_multi_cell_transport(
             BufferArg::from_raw_parts(out_steps_h.clone(), n),
             BufferArg::from_raw_parts(out_e_h.clone(), n),
             BufferArg::from_raw_parts(tally_out_h.clone(), alloc_out_len.max(1)),
+            BufferArg::from_raw_parts(hist_total_h.clone(), hist_total_len),
             BufferArg::from_raw_parts(spill_bin_h.clone(), spill_len),
             BufferArg::from_raw_parts(spill_val_h.clone(), spill_len),
             BufferArg::from_raw_parts(source_idx_h.clone(), source_idx_len),
@@ -1616,6 +1672,11 @@ pub fn run_multi_cell_transport(
             Vec::new()
         };
         (outputs, sum_sq, Vec::new())
+    };
+    let hist_tally_total: Vec<f64> = if matches!(variance, TallyVarianceMode::PerHistory) {
+        bytemuck::cast_slice(&client.read_one(hist_total_h).unwrap()).to_vec()
+    } else {
+        Vec::new()
     };
     // Read back the device particle bank: coupled photons (S4b), fission
     // progeny (#78) and (n,xn) spills (issue #111 phase 2) share it. Overflow
@@ -1688,6 +1749,7 @@ pub fn run_multi_cell_transport(
         final_energies,
         tally_outputs,
         tally_sum_sq,
+        hist_tally_total,
         src_acc,
         bank_source_idx,
         n_bins_per_tally: tallies.n_bins_per_tally.clone(),

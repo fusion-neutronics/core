@@ -177,8 +177,10 @@ fn delayed_spectra_are_softer_than_prompt() {
             ..
         }) = prompt
         else {
-            // Th232's prompt chi is CorrelatedAngleEnergy, which the shared flat
-            // path does not carry yet (issue #356), so it has no prompt row here.
+            // Th232's prompt chi is CorrelatedAngleEnergy. The shared flat path
+            // carries its E_out marginal (fusion-neutronics/core#34 entry 2), but
+            // this comparison reads tabulated rows straight off the product and
+            // only covers the ContinuousTabular encoding.
             eprintln!("{name}: prompt chi is not ContinuousTabular, skipping the comparison");
             continue;
         };

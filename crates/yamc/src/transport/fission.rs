@@ -95,15 +95,17 @@ pub(super) fn charge_fission_progeny(
 /// Returns the sampled reaction's MT number (18 when unresolved, for tally
 /// compatibility) and the sampled neutrons, each carrying the incident
 /// particle's current weight.
-/// Extract the prompt fission neutron product's outgoing-energy (chi)
-/// distribution, used to build the per-nuclide flat chi cache (issue #111).
+/// The prompt fission neutron product's first angle-energy distribution, the
+/// source of the per-nuclide flat chi cache (issue #111). The cache flattens
+/// an `UncorrelatedAngleEnergy` (its energy part) and, since
+/// fusion-neutronics/core#34 entry 2, a `CorrelatedAngleEnergy` (its E_out
+/// marginal, the angle dropped for the isotropic emission the shared path
+/// uses), so Th232, Pa231 and Pa233 sample on the shared PCG stream like every
+/// other fissionable instead of the legacy per-product sampler.
 fn prompt_chi_dist(
     product: &yamc_nuclide::reaction_product::ReactionProduct,
-) -> Option<&yamc_nuclide::reaction_product::EnergyDistribution> {
-    product.distribution.first().and_then(|d| match d {
-        AngleEnergyDistribution::UncorrelatedAngleEnergy { energy, .. } => energy.as_ref(),
-        _ => None,
-    })
+) -> Option<&AngleEnergyDistribution> {
+    product.distribution.first()
 }
 
 /// Resolve which neutron products supply the prompt chi, and the MT they came

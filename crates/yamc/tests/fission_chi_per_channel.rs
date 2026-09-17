@@ -35,7 +35,7 @@ use yamc_nuclide::nuclide::Nuclide;
 use yamc_nuclide::reaction::Reaction;
 use yamc_nuclide::reaction_product::energy::FissionChiFlatCache;
 use yamc_nuclide::reaction_product::{
-    AngleEnergyDistribution, EnergyDistribution, FissionChiFlat, ParticleType, ReactionProduct,
+    AngleEnergyDistribution, FissionChiFlat, ParticleType, ReactionProduct,
 };
 use yamc_nuclide::LoadScope;
 
@@ -59,13 +59,8 @@ fn first_neutron_product(rxn: &Reaction) -> Option<&ReactionProduct> {
 
 /// The prompt chi lives on the first neutron product, matching what
 /// `sample_fission_event` hands the cache.
-fn prompt_dist(rxn: &Reaction) -> Option<&EnergyDistribution> {
-    first_neutron_product(rxn).and_then(|p| {
-        p.distribution.first().and_then(|d| match d {
-            AngleEnergyDistribution::UncorrelatedAngleEnergy { energy, .. } => energy.as_ref(),
-            _ => None,
-        })
-    })
+fn prompt_dist(rxn: &Reaction) -> Option<&AngleEnergyDistribution> {
+    first_neutron_product(rxn).and_then(|p| p.distribution.first())
 }
 
 /// Draw `n` outgoing energies at `e_in` on a fixed stream, so channels compare

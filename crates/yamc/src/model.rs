@@ -2930,7 +2930,7 @@ impl Model {
 /// Shared by the single-process path and the MPI path (which passes the
 /// rank-folded moments), so both decide from one implementation and cannot
 /// drift on the metric formulas.
-fn convergence_targets_met(
+pub(crate) fn convergence_targets_met(
     aggs: &[yamc_tallies::welford::AggMoments],
     tallies: &[&yamc_tallies::tally::Tally],
     targets: &[yamc_tallies::ConvergenceTarget],

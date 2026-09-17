@@ -897,18 +897,21 @@ fn parity_am240_low_energy_spectrum() {
     }
 }
 
-/// Th232 at 14 MeV: the fissile case the shared fission path does NOT cover, so
-/// the one place the assertions above deliberately do not apply.
+/// Th232 at 14 MeV: the correlated prompt chi on the shared fission path
+/// (fusion-neutronics/core#34 entry 2).
 ///
 /// Th232, Pa231 and Pa233 are the only three fissionable nuclides in endf-b8.1
 /// whose prompt-fission spectrum is `CorrelatedAngleEnergy` (the other 85 are 74
-/// ContinuousTabular + 11 Maxwell). `transport/fission.rs`'s `prompt_chi_dist`
-/// only recognises the uncorrelated form, so the CPU gets `FissionChiFlat::None`
-/// and falls back to the legacy `FastRng` sampler, off the shared stream, while
-/// the GPU host packs the correlated table's E_out marginal into its fission
-/// buffers and emits isotropically in lab. So the MT18 line below shows a real
-/// gap where every other fissile nuclide's is bit-equal. Report-only; issue #356
-/// carries the fix, which needs a decision on the emission angle first.
+/// ContinuousTabular + 11 Maxwell). The GPU host has always packed the table's
+/// E_out marginal into its fission buffers and emitted isotropically in lab;
+/// `transport/fission.rs`'s `prompt_chi_dist` used to recognise only the
+/// uncorrelated form, so the CPU got `FissionChiFlat::None` and fell back to the
+/// legacy `FastRng` sampler, off the shared stream. That read 95.16% of
+/// histories identical within rounding, 4838 of 100k first diverging at MT18
+/// with a -1.28% collision-0 gap on the MT18 line. The CPU flattens the same
+/// marginal now, so this case is held to what every other fissile nuclide is:
+/// MT18 bit-equal at collision 0 and every history within rounding. The strict
+/// floor sits below the measured 99.67% for the same reason as U235's.
 #[test]
 fn localize_th232_correlated_chi() {
     if !data_present("Th232") {
@@ -921,6 +924,14 @@ fn localize_th232_correlated_chi() {
         rep.both > n / 4,
         "expected substantial collisions ({} / {n})",
         rep.both
+    );
+    assert_fission_chi_bit_identical(&rep);
+    assert_identical_within_rounding(&rep);
+    assert!(
+        rep.identical * 100 >= n * 99,
+        "Th232 histories must be bit-identical to the twin end to end apart from \
+         arithmetic association: {} / {n}",
+        rep.identical
     );
 }
 

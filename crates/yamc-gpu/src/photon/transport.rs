@@ -376,6 +376,12 @@ fn multi_cell_photon_transport_kernel(
     out_n_steps: &mut [u32],
     out_final_energy: &mut [f64],
     tally_out: &mut [Atomic<u64>],
+    // Per-(history, tally) total score (fusion-neutronics/core#29): row
+    // `ABSOLUTE_POS`, one f64 per tally entry, summed over the tally's bins at
+    // the `PerHistory` history-end flush with a plain add (each thread owns its
+    // row). The host folds the rows into the per-history aggregate moments the
+    // convergence targets are defined on. A size-1 dummy in the other modes.
+    hist_tally_total: &mut [f64],
     // Batch-free per-history / per-source variance (issue #233 Stage 3), mirroring
     // the neutron kernel. `spill_bin`/`spill_val` are the per-history overflow list
     // (a thread touching more than `PERHIST_K` distinct bins owns
@@ -3504,6 +3510,8 @@ fn multi_cell_photon_transport_kernel(
             if per_source_var {
                 src_acc[src_base + idx as usize].fetch_add(u64::reinterpret(sbits));
             } else {
+                let hrow = ABSOLUTE_POS * n_tallies as usize + t as usize;
+                hist_tally_total[hrow] = hist_tally_total[hrow] + x;
                 tally_out[idx as usize].fetch_add(u64::reinterpret(sbits));
                 let s_sq = if s <= kerma_scale {
                     kerma_sumsq
@@ -3544,6 +3552,8 @@ fn multi_cell_photon_transport_kernel(
             if per_source_var {
                 src_acc[src_base + idx as usize].fetch_add(u64::reinterpret(sbits));
             } else {
+                let hrow = ABSOLUTE_POS * n_tallies as usize + t as usize;
+                hist_tally_total[hrow] = hist_tally_total[hrow] + x;
                 tally_out[idx as usize].fetch_add(u64::reinterpret(sbits));
                 let s_sq = if s <= kerma_scale {
                     kerma_sumsq
@@ -3592,6 +3602,12 @@ pub struct PhotonMultiCellResult {
     /// Per-tally per-bin sum-of-squares (issue #233 Stage 3), non-empty only in
     /// `PerHistory` mode. Same shape/order as `tally_outputs`.
     pub tally_sum_sq: Vec<Vec<f64>>,
+    /// Per-(history, tally entry) total score (fusion-neutronics/core#29),
+    /// flat `[n_histories x n_tallies]` row-major by history, physical units:
+    /// each history's per-bin totals summed over the entry's bins, the sample
+    /// the convergence targets' aggregate moments are built from. Non-empty
+    /// only for `PerHistory`.
+    pub hist_tally_total: Vec<f64>,
     /// Raw per-source accumulator (issue #233 Stage 3, `PerSource` mode only):
     /// flat `chunk_sources * total_out_len` fixed-point words, this launch's
     /// per-`(source, flat_bin)` sum. Empty otherwise.
@@ -3986,6 +4002,16 @@ pub fn run_multi_cell_photon_transport(
     // Stage 4). Mirrors the neutron host.
     let spill_bin_h = client.empty(spill_len * std::mem::size_of::<u32>());
     let spill_val_h = client.empty(spill_len * std::mem::size_of::<f64>());
+    // Per-(history, tally) totals (fusion-neutronics/core#29): one f64 row per
+    // history in `PerHistory` mode, accumulated by the flush (zero-initialised);
+    // a size-1 dummy otherwise.
+    let hist_total_len = if matches!(variance, TallyVarianceMode::PerHistory) {
+        n.saturating_mul(tallies.n_tallies() as usize).max(1)
+    } else {
+        1
+    };
+    let hist_total_h =
+        client.create_from_slice(bytemuck::cast_slice(&vec![0.0f64; hist_total_len]));
     let total_bins = variance.total_bins() as usize;
     let src_acc_len = match variance {
         TallyVarianceMode::PerSource { chunk_sources, .. }
@@ -4128,6 +4154,7 @@ pub fn run_multi_cell_photon_transport(
             BufferArg::from_raw_parts(out_steps_h.clone(), n),
             BufferArg::from_raw_parts(out_e_h.clone(), n),
             BufferArg::from_raw_parts(tally_out_h.clone(), alloc_out_len.max(1)),
+            BufferArg::from_raw_parts(hist_total_h.clone(), hist_total_len),
             BufferArg::from_raw_parts(spill_bin_h.clone(), spill_len),
             BufferArg::from_raw_parts(spill_val_h.clone(), spill_len),
             BufferArg::from_raw_parts(source_idx_h.clone(), source_idx_len),
@@ -4166,6 +4193,11 @@ pub fn run_multi_cell_photon_transport(
         };
         (outputs, sum_sq, Vec::new())
     };
+    let hist_tally_total: Vec<f64> = if matches!(variance, TallyVarianceMode::PerHistory) {
+        bytemuck::cast_slice(&client.read_one(hist_total_h).unwrap()).to_vec()
+    } else {
+        Vec::new()
+    };
 
     let lost = {
         let count = bytemuck::cast_slice::<u8, u64>(&client.read_one(lost_count_h).unwrap())[0];
@@ -4181,6 +4213,7 @@ pub fn run_multi_cell_photon_transport(
         final_energies,
         tally_outputs,
         tally_sum_sq,
+        hist_tally_total,
         src_acc,
         lost,
     }
