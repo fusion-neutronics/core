@@ -162,7 +162,7 @@ pub fn migrate_energy_out_of_nuclide(dir: &Path) -> Result<bool, Box<dyn Error>>
                 .ok_or("an energy grid is not Float64")?;
             Ok(vec![
                 strings(&[labels.value(i).to_string()]),
-                float_list(&grid.values().to_vec()),
+                float_list(grid.values()),
             ])
         })
         .collect::<Result<_, Box<dyn Error>>>()?;
