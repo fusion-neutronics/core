@@ -57,22 +57,18 @@ fn cache_dir(nuclide: &str) -> String {
 
 /// Whether this machine can supply `nuclide` at the scope these tests need.
 ///
-/// Reading is the check, not `is_dir`. Since #389 a cache directory is
-/// routinely populated at activation scope, holding cross sections and none of
-/// the transport sections; the directory exists either way, and the read below
-/// is what tells them apart. CI fetches only the fixture list, so it skips
-/// these outright; without this, any developer machine that has run a
-/// transmutation panics in `nuclide_sphere` instead.
+/// Reading is the check, not `is_dir`, and what came back is the answer. Since
+/// #389 a cache directory is routinely populated at activation scope, holding
+/// cross sections and none of the transport sections; the directory exists
+/// either way and the read succeeds either way, because the loader narrows a
+/// `Full` request to the sections on disk rather than refusing it. Only the
+/// scope it actually loaded tells them apart, and getting that wrong turns a
+/// skip into a panic at the first `(n,2n)`: a windows runner whose restored
+/// fixture cache carried an activation-scope Ar38 failed
+/// `parity_ar38_collision0_spectrum` that way while every other runner skipped
+/// it.
 fn data_present(nuclide: &str) -> bool {
-    let path = cache_dir(nuclide);
-    if !std::path::Path::new(&path).is_dir() {
-        return false;
-    }
-    yamc_nuclide::arrow::nuclide_arrow::read_nuclide_from_arrow(
-        std::path::Path::new(&path),
-        &yamc_nuclide::LoadScope::full(),
-    )
-    .is_ok()
+    yamc_test_cache::transport_nuclide(nuclide).is_some()
 }
 
 /// Single-nuclide sphere (vacuum boundary), neutron data from the endf-b8.1
