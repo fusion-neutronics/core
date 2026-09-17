@@ -1,14 +1,23 @@
-//! Add MT byte ranges to already-converted nuclide folders.
+//! Add cross-section byte ranges to already-converted nuclide folders.
 //!
 //! Rewrites `version.json` in each `{Name}.arrow/` to carry the byte range of
-//! every MT's record batch in `reactions.arrow`, so an activation reader can
-//! range-request just the channels its chain names (8.2x less on Fe56) instead
-//! of pulling the full-grid transport MTs it never looks at.
+//! every (MT, temperature) record batch in `reactions.arrow`, so an activation
+//! reader can range-request just the channels its chain names (8.2x less on
+//! Fe56) instead of pulling the full-grid transport MTs it never looks at, and
+//! a plotter just the one temperature it draws.
 //!
 //! The cross-section files themselves are never opened for writing and stay
 //! byte-identical, which is what makes this a reindex rather than a rebuild: a
 //! published library gains the index without NJOY running again, and only the
 //! few-kB `version.json` objects need reuploading.
+//!
+//! A library published before fusion-neutronics/core#100 has to be rerun
+//! through this: its `version.json` carries the one-level `mt -> [off, len]`
+//! index, which this build reads as no index at all and answers by fetching
+//! whole objects. Rerunning it here writes the two-level shape over the
+//! unchanged per-MT data, which is enough to put the ranged path back; each MT
+//! is then listed under every temperature its one batch carries.
+//! `split_reactions` is the separate step that also splits those batches.
 //!
 //! ```text
 //! cargo run --release -p yamc-convert --bin index_reactions -- DIR [DIR ...]

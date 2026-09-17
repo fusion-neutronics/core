@@ -6,8 +6,14 @@
 //! products, distributions and lookup accelerators a transport run needs are a
 //! separate concern.
 //!
-//! Written one record batch per row, which no other section does, so a consumer
-//! can range-read a single MT out of the middle without decoding the rest.
+//! Written one record batch per (MT, temperature), which no other section does,
+//! so a consumer can range-read a single cross section out of the middle
+//! without decoding the rest (fusion-neutronics/core#100). Each row's
+//! `xs_temperatures`, `xs_values` and `xs_threshold_idx` therefore carry one
+//! element. The schema is the one the reader has always taken, and the reader
+//! selects its temperature by searching each row's list and skipping the rows
+//! that do not carry it, so a file in this shape and one written one batch per
+//! MT load to the same reactions.
 //!
 //! # The label is `endf::reaction_name`, for every row
 //!
@@ -24,8 +30,14 @@
 
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::fs::File;
 use std::path::Path;
 
+use arrow_array::cast::AsArray;
+use arrow_array::types::{Float64Type, Int32Type};
+use arrow_array::Array;
+use arrow_array::{ArrayRef, RecordBatch};
+use arrow_ipc::reader::FileReader;
 use endf::IncidentNeutron;
 
 use crate::sections::*;
@@ -54,6 +66,30 @@ fn partials_on_grid(
     out
 }
 
+/// One row of `reactions.arrow`: one MT at one temperature.
+#[allow(clippy::too_many_arguments)]
+fn row(
+    mt: i32,
+    label: &str,
+    q_value: f64,
+    center_of_mass: bool,
+    redundant: bool,
+    temperature: &str,
+    xs: Vec<f64>,
+    threshold_idx: i32,
+) -> Vec<ArrayRef> {
+    vec![
+        ints(&[mt]),
+        strings(&[label.to_string()]),
+        floats(&[q_value]),
+        bools(&[center_of_mass]),
+        bools(&[redundant]),
+        string_list(&[temperature.to_string()]),
+        float_list_list(&[xs]),
+        int_list(&[threshold_idx]),
+    ]
+}
+
 /// Write `reactions.arrow`.
 pub fn write_reactions(data: &IncidentNeutron, dir: &Path) -> Result<(), Box<dyn Error>> {
     // A summation set that overlaps would double count into MT 3 and MT 1, and
@@ -73,9 +109,11 @@ pub fn write_reactions(data: &IncidentNeutron, dir: &Path) -> Result<(), Box<dyn
         synthesized.insert(t.clone(), synthesis::synthesize(&partials, n_energy));
     }
 
-    let mut rows: Vec<Vec<arrow_array::ArrayRef>> = Vec::new();
+    let mut rows: Vec<Vec<ArrayRef>> = Vec::new();
 
-    // The evaluation's own reactions first, each keeping its canonical name.
+    // The evaluation's own reactions first, each keeping its canonical name,
+    // with its temperatures back to back so one MT's batches are one run of
+    // bytes and a reader wanting every temperature of it asks for one span.
     for (&mt, rx) in &data.reactions {
         // In processed order, not the BTreeMap's lexicographic walk over the
         // temperature names, which would put 1200K before 250K.
@@ -85,25 +123,21 @@ pub fn write_reactions(data: &IncidentNeutron, dir: &Path) -> Result<(), Box<dyn
             .cloned()
             .collect();
         xs_temperatures.extend(rx.xs.keys().filter(|t| !temperatures.contains(t)).cloned());
-        let xs_values: Vec<Vec<f64>> = xs_temperatures
-            .iter()
-            .map(|t| rx.xs.get(t).map(|x| x.y.clone()).unwrap_or_default())
-            .collect();
-        let xs_threshold_idx: Vec<i32> = xs_temperatures
-            .iter()
-            .map(|t| rx.xs.get(t).and_then(|x| x.threshold_idx).unwrap_or(0) as i32)
-            .collect();
-
-        rows.push(vec![
-            ints(&[mt]),
-            strings(&[endf::reaction_name(mt).unwrap_or_else(|| mt.to_string())]),
-            floats(&[rx.q_reaction]),
-            bools(&[rx.center_of_mass]),
-            bools(&[rx.redundant]),
-            string_list(&xs_temperatures),
-            float_list_list(&xs_values),
-            int_list(&xs_threshold_idx),
-        ]);
+        let label = endf::reaction_name(mt).unwrap_or_else(|| mt.to_string());
+        for t in &xs_temperatures {
+            let xs = rx.xs.get(t).map(|x| x.y.clone()).unwrap_or_default();
+            let threshold_idx = rx.xs.get(t).and_then(|x| x.threshold_idx).unwrap_or(0) as i32;
+            rows.push(row(
+                mt,
+                &label,
+                rx.q_reaction,
+                rx.center_of_mass,
+                rx.redundant,
+                t,
+                xs,
+                threshold_idx,
+            ));
+        }
     }
 
     // Then the redundant sums the evaluation did not carry. A synthesized MT is
@@ -124,27 +158,114 @@ pub fn write_reactions(data: &IncidentNeutron, dir: &Path) -> Result<(), Box<dyn
         if !synthesized.values().any(|per_mt| per_mt.contains_key(&mt)) {
             continue;
         }
-        let xs_values: Vec<Vec<f64>> = temperatures
-            .iter()
-            .map(|t| {
-                synthesized
-                    .get(t)
-                    .and_then(|m| m.get(&mt))
-                    .cloned()
-                    .unwrap_or_default()
-            })
-            .collect();
-        rows.push(vec![
-            ints(&[mt]),
-            strings(&[endf::reaction_name(mt).unwrap_or_else(|| mt.to_string())]),
-            floats(&[0.0]),
-            bools(&[false]),
-            bools(&[true]),
-            string_list(&temperatures),
-            float_list_list(&xs_values),
-            int_list(&vec![0; temperatures.len()]),
-        ]);
+        let label = endf::reaction_name(mt).unwrap_or_else(|| mt.to_string());
+        for t in &temperatures {
+            let xs = synthesized
+                .get(t)
+                .and_then(|m| m.get(&mt))
+                .cloned()
+                .unwrap_or_default();
+            rows.push(row(mt, &label, 0.0, false, true, t, xs, 0));
+        }
     }
 
     write_section_per_row(&dir.join("reactions.arrow"), "reactions.arrow", rows)
+}
+
+/// A column of `batch` by name, or an error naming it.
+fn column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a ArrayRef, Box<dyn Error>> {
+    batch
+        .column_by_name(name)
+        .ok_or_else(|| format!("reactions.arrow has no `{name}` column").into())
+}
+
+/// Rewrite an existing `reactions.arrow` one record batch per (MT, temperature).
+///
+/// For a library published one batch per MT: the cross sections are copied, not
+/// recomputed, so NJOY does not run again and every value is what it was; only
+/// the framing changes. `version.json` has to be reindexed afterwards
+/// ([`crate::reaction_ranges::write_reaction_ranges`]), since every offset
+/// moves. A file already in this shape rewrites to the same rows.
+///
+/// `dst` must not be `src`: the rows are read into memory first, so writing
+/// over the source would destroy the input the moment the write fails.
+pub fn rewrite_per_temperature(src: &Path, dst: &Path) -> Result<(), Box<dyn Error>> {
+    if src == dst {
+        return Err("rewrite_per_temperature: the destination must differ from the source".into());
+    }
+    let reader = FileReader::try_new(File::open(src)?, None)?;
+    let mut rows: Vec<Vec<ArrayRef>> = Vec::new();
+    for batch in reader {
+        let batch = batch?;
+        let mts = column(&batch, "mt")?
+            .as_primitive_opt::<Int32Type>()
+            .ok_or("`mt` is not an Int32Array")?;
+        let labels = column(&batch, "label")?
+            .as_string_opt::<i32>()
+            .ok_or("`label` is not a StringArray")?;
+        let q_values = column(&batch, "Q_value")?
+            .as_primitive_opt::<Float64Type>()
+            .ok_or("`Q_value` is not a Float64Array")?;
+        let center_of_mass = column(&batch, "center_of_mass")?
+            .as_boolean_opt()
+            .ok_or("`center_of_mass` is not a BooleanArray")?;
+        let redundant = column(&batch, "redundant")?
+            .as_boolean_opt()
+            .ok_or("`redundant` is not a BooleanArray")?;
+        let temperatures = column(&batch, "xs_temperatures")?
+            .as_list_opt::<i32>()
+            .ok_or("`xs_temperatures` is not a ListArray")?;
+        let values = column(&batch, "xs_values")?
+            .as_list_opt::<i32>()
+            .ok_or("`xs_values` is not a ListArray")?;
+        let thresholds = column(&batch, "xs_threshold_idx")?
+            .as_list_opt::<i32>()
+            .ok_or("`xs_threshold_idx` is not a ListArray")?;
+
+        for r in 0..batch.num_rows() {
+            let mt = mts.value(r);
+            let row_temperatures = temperatures.value(r);
+            let row_temperatures = row_temperatures
+                .as_string_opt::<i32>()
+                .ok_or("`xs_temperatures` items are not strings")?;
+            let row_values = values.value(r);
+            let row_values = row_values
+                .as_list_opt::<i32>()
+                .ok_or("`xs_values` items are not lists")?;
+            let row_thresholds = thresholds.value(r);
+            let row_thresholds = row_thresholds
+                .as_primitive_opt::<Int32Type>()
+                .ok_or("`xs_threshold_idx` items are not Int32")?;
+            if row_values.len() != row_temperatures.len()
+                || row_thresholds.len() != row_temperatures.len()
+            {
+                return Err(format!(
+                    "MT {mt}: {} temperatures against {} cross sections and {} thresholds",
+                    row_temperatures.len(),
+                    row_values.len(),
+                    row_thresholds.len()
+                )
+                .into());
+            }
+            for i in 0..row_temperatures.len() {
+                let xs = row_values.value(i);
+                let xs = xs
+                    .as_primitive_opt::<Float64Type>()
+                    .ok_or("`xs_values` inner items are not Float64")?
+                    .values()
+                    .to_vec();
+                rows.push(row(
+                    mt,
+                    labels.value(r),
+                    q_values.value(r),
+                    center_of_mass.value(r),
+                    redundant.value(r),
+                    row_temperatures.value(i),
+                    xs,
+                    row_thresholds.value(i),
+                ));
+            }
+        }
+    }
+    write_section_per_row(dst, "reactions.arrow", rows)
 }

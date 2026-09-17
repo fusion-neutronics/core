@@ -1,4 +1,4 @@
-//! Byte ranges of each MT's record batch within `reactions.arrow`.
+//! Byte ranges of each (MT, temperature) record batch within `reactions.arrow`.
 //!
 //! A transmutation run reads only the MTs its chain names, but `reactions.arrow`
 //! is fetched whole. On Fe56 (TENDL-2025) ten full-grid transport MTs -- total,
@@ -6,14 +6,17 @@
 //! are 13.6 MB of a 14.7 MB file, and an activation run reads none of them.
 //! [`LoadScope::activation`] already drops them, but only after the download:
 //! `yamc-nuclide/src/load_scope.rs` says outright that filtering there "saves
-//! parse time and retained memory, **not bytes read**".
+//! parse time and retained memory, **not bytes read**". A plotter wants less
+//! still: one MT at the one temperature it draws, where the file carries six
+//! (fusion-neutronics/core#100).
 //!
-//! The file is written one record batch per MT, so every MT is *already* a
-//! contiguous byte range in the published object. Recording those ranges lets a
-//! reader fetch just the MTs it wants over HTTP range requests, which cuts a
-//! full ENDF/B-8.1 activation closure from 2.9 GB to about 508 MB. The origin
-//! serves `accept-ranges: bytes` behind Cloudflare with a one-year TTL, so
-//! ranged reads are answered from the edge cache.
+//! The file is written one record batch per (MT, temperature), so every cross
+//! section is *already* a contiguous byte range in the published object.
+//! Recording those ranges lets a reader fetch just the batches it wants over
+//! HTTP range requests, which cuts a full ENDF/B-8.1 activation closure from
+//! 2.9 GB to about 508 MB. The origin serves `accept-ranges: bytes` behind
+//! Cloudflare with a one-year TTL, so ranged reads are answered from the edge
+//! cache.
 //!
 //! Nothing is duplicated and no new object is published: the index rides in
 //! `version.json`, which every consumer already fetches. A reader that wants
@@ -28,6 +31,14 @@
 //! because the indexing below is what produces one and this is where a caller
 //! looks. What stays is the part that needs an Arrow reader: walking the footer
 //! to find the batches.
+//!
+//! # Files written one batch per MT
+//!
+//! A `reactions.arrow` from before the temperature split has one batch per MT
+//! carrying every temperature. Indexing it lists that batch under each
+//! temperature it holds, which is the truth about where each cross section can
+//! be read from; `rewrite_per_temperature` in `reactions` is what turns such a
+//! file into the per-temperature shape without running NJOY again.
 //!
 //! # Reassembling a stream
 //!
@@ -47,6 +58,8 @@ use std::error::Error;
 use std::fs::File;
 use std::path::Path;
 
+use arrow_array::cast::AsArray;
+use arrow_array::Array;
 use arrow_ipc::reader::FileReader;
 
 pub use nuclear_data_schema::reaction_ranges::{splice_stream, Range, ReactionRanges, EOS};
@@ -108,8 +121,9 @@ fn schema_offset(bytes: &[u8]) -> Result<u64, Box<dyn Error>> {
 /// Index the record batches of a `{Nuclide}.arrow/reactions.arrow`.
 ///
 /// Reads the footer for the batch offsets and the batches themselves for their
-/// MTs; footer block *i* is reader batch *i*, which is what ties the two
-/// together.
+/// MT and temperatures; footer block *i* is reader batch *i*, which is what
+/// ties the two together. A batch carrying several temperatures (a file
+/// written one batch per MT) is listed under each of them.
 pub fn index_reactions(reactions: &Path) -> Result<ReactionRanges, Box<dyn Error>> {
     let bytes = std::fs::read(reactions)?;
 
@@ -130,30 +144,55 @@ pub fn index_reactions(reactions: &Path) -> Result<ReactionRanges, Box<dyn Error
         .recordBatches()
         .ok_or("Arrow footer names no record batches")?;
 
-    // MTs come from the batches, so this pass is what makes the index
-    // addressable by reaction rather than by position.
+    // MTs and temperatures come from the batches, so this pass is what makes
+    // the index addressable by cross section rather than by position.
     let reader = FileReader::try_new(File::open(reactions)?, None)?;
-    let mut mts = BTreeMap::new();
+    let mut mts: BTreeMap<i32, BTreeMap<String, Range>> = BTreeMap::new();
     for (i, batch) in reader.enumerate() {
         let batch = batch?;
         let block = blocks.get(i);
         let mt = batch
             .column_by_name("mt")
             .ok_or("a reactions batch has no `mt` column")?
-            .as_any()
-            .downcast_ref::<arrow_array::Int32Array>()
+            .as_primitive_opt::<arrow_array::types::Int32Type>()
             .ok_or("`mt` is not an Int32Array")?;
-        if mt.is_empty() {
-            return Err("a reactions batch carries no mt value".into());
+        // One row per batch is what makes a batch's range a cross section's
+        // range. A batch holding two rows would be indexed by its first and
+        // fetched whole, so the index would lie about what a range holds.
+        if mt.len() != 1 {
+            return Err(format!(
+                "a reactions batch carries {} rows; the index needs one row per batch",
+                mt.len()
+            )
+            .into());
+        }
+        let mt = mt.value(0);
+        let temperatures = batch
+            .column_by_name("xs_temperatures")
+            .ok_or("a reactions batch has no `xs_temperatures` column")?
+            .as_list_opt::<i32>()
+            .ok_or("`xs_temperatures` is not a ListArray")?
+            .value(0);
+        let temperatures = temperatures
+            .as_string_opt::<i32>()
+            .ok_or("`xs_temperatures` items are not strings")?;
+        if temperatures.is_empty() {
+            return Err(format!("MT {mt} carries no temperature").into());
         }
         let len = u64::try_from(block.metaDataLength())? + u64::try_from(block.bodyLength())?;
-        if mts
-            .insert(mt.value(0), (u64::try_from(block.offset())?, len))
-            .is_some()
-        {
-            // Two batches for one MT would make the index lossy: a reader
-            // asking for that MT would silently get half its cross section.
-            return Err(format!("MT {} appears in more than one batch", mt.value(0)).into());
+        let range = (u64::try_from(block.offset())?, len);
+        let by_temperature = mts.entry(mt).or_default();
+        for temperature in temperatures.iter().flatten() {
+            if by_temperature
+                .insert(temperature.to_string(), range)
+                .is_some()
+            {
+                // Two batches for one cross section would make the index
+                // lossy: a reader asking for it would silently get half.
+                return Err(
+                    format!("MT {mt} at {temperature} appears in more than one batch").into(),
+                );
+            }
         }
     }
 

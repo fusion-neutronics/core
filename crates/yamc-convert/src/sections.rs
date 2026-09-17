@@ -52,8 +52,9 @@ pub fn write_section(
 /// Write one record batch PER ROW.
 ///
 /// Only `reactions.arrow` is written this way, so a consumer can range-read a
-/// single MT out of the middle of the file without decoding the rest. A single
-/// fused batch would read the same through the loader and defeat that.
+/// single cross section (one MT at one temperature) out of the middle of the
+/// file without decoding the rest. A single fused batch would read the same
+/// through the loader and defeat that.
 pub fn write_section_per_row(
     path: &Path,
     section: &str,

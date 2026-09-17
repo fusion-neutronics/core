@@ -1985,14 +1985,23 @@ mod tests {
         }
     }
 
-    /// Write a `version.json` carrying a byte-range index for `mts`, laid out
-    /// back to back the way the converter writes the batches.
+    /// Write a `version.json` carrying a byte-range index for `mts`, one batch
+    /// per (MT, temperature) at two temperatures, laid out back to back the way
+    /// the converter writes the batches.
     fn write_index(dir: &std::path::Path, mts: &[i32]) {
-        let mut ranges = std::collections::BTreeMap::new();
+        let mut ranges: std::collections::BTreeMap<
+            i32,
+            std::collections::BTreeMap<String, (u64, u64)>,
+        > = std::collections::BTreeMap::new();
         let mut at = 768u64;
         for mt in mts {
-            ranges.insert(*mt, (at, 100u64));
-            at += 100;
+            for temperature in ["294K", "600K"] {
+                ranges
+                    .entry(*mt)
+                    .or_default()
+                    .insert(temperature.to_string(), (at, 100u64));
+                at += 100;
+            }
         }
         let index = ReactionRanges {
             schema: (64, 704),
