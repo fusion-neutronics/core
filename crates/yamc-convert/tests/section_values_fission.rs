@@ -8,9 +8,9 @@
 //! would only hide the wrong-slot and wrong-unit mistakes these tests exist to
 //! find. The one arithmetic step anywhere in the chain is upstream, the NPLY=2
 //! unit correction at `crates/endf/src/fission_energy.rs:132-138`, and nothing
-//! here reaches it: a test that tried was dropped because the guard does not
-//! gate the way its own comment says, which is its own issue rather than
-//! something to pin from here.
+//! here reaches it. It is pinned where it lives instead, by
+//! `crates/endf/tests/nply2_unit_guard.rs`, which is also where the suspicion
+//! that it gated early was settled: it does not (issue #17).
 //!
 //! Neither section is reachable through `entry::convert_neutron_transport`
 //! without NJOY, so both writers are called directly. That loses nothing:
