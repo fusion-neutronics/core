@@ -787,6 +787,9 @@ fn download_error(
 const NEUTRON_SECTIONS: &[(&str, bool)] = &[
     ("version.json", true),
     ("nuclide.arrow", true),
+    // Required from format_version 2: the union energy grids, which every
+    // neutron scope interpolates against (fusion-neutronics/core#100).
+    ("energy.arrow", true),
     ("reactions.arrow", true),
     ("products.arrow", true),
     ("distributions.arrow", true),
@@ -805,6 +808,9 @@ const NEUTRON_SECTIONS: &[(&str, bool)] = &[
 const NEUTRON_SECTIONS_WITH_COVARIANCE: &[(&str, bool)] = &[
     ("version.json", true),
     ("nuclide.arrow", true),
+    // Required from format_version 2: the union energy grids, which every
+    // neutron scope interpolates against (fusion-neutronics/core#100).
+    ("energy.arrow", true),
     ("reactions.arrow", true),
     ("products.arrow", true),
     ("distributions.arrow", true),
@@ -834,6 +840,9 @@ const PHOTON_SECTIONS: &[(&str, bool)] = &[
 const NEUTRON_XS_ONLY_SECTIONS: &[(&str, bool)] = &[
     ("version.json", true),
     ("nuclide.arrow", true),
+    // Required from format_version 2: the union energy grids, which every
+    // neutron scope interpolates against (fusion-neutronics/core#100).
+    ("energy.arrow", true),
     ("reactions.arrow", true),
 ];
 
@@ -845,6 +854,9 @@ const NEUTRON_XS_ONLY_SECTIONS: &[(&str, bool)] = &[
 const NEUTRON_XS_ONLY_SECTIONS_WITH_COVARIANCE: &[(&str, bool)] = &[
     ("version.json", true),
     ("nuclide.arrow", true),
+    // Required from format_version 2: the union energy grids, which every
+    // neutron scope interpolates against (fusion-neutronics/core#100).
+    ("energy.arrow", true),
     ("reactions.arrow", true),
     ("covariance.arrow", false),
 ];
