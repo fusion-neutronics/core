@@ -14,6 +14,7 @@
 
 pub mod covariance;
 pub mod distributions;
+pub mod energy_ranges;
 pub mod entry;
 pub mod fast_xs;
 pub mod fission_nu;

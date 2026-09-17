@@ -79,7 +79,7 @@ const FILE_HEADER_LEN: u64 = 8;
 /// The metadata length already includes padding to an 8-byte boundary, so
 /// header plus length is the whole message when there is no body -- the case
 /// for a schema.
-fn message_len(bytes: &[u8], offset: u64) -> Result<u64, Box<dyn Error>> {
+pub(crate) fn message_len(bytes: &[u8], offset: u64) -> Result<u64, Box<dyn Error>> {
     let at = usize::try_from(offset)?;
     let header: [u8; 8] = bytes
         .get(at..at + 8)
@@ -106,7 +106,7 @@ fn message_len(bytes: &[u8], offset: u64) -> Result<u64, Box<dyn Error>> {
 /// encapsulated framing opens with the continuation marker and the legacy one
 /// with a non-zero metadata length, so skipping zeroed 8-byte blocks finds the
 /// message under either.
-fn schema_offset(bytes: &[u8]) -> Result<u64, Box<dyn Error>> {
+pub(crate) fn schema_offset(bytes: &[u8]) -> Result<u64, Box<dyn Error>> {
     let mut at = usize::try_from(FILE_HEADER_LEN)?;
     while bytes
         .get(at..at + 8)

@@ -288,6 +288,7 @@ pub fn convert_neutron_xs(
     std::fs::create_dir_all(&dir)?;
 
     nuclide::write_nuclide(&data, &dir)?;
+    nuclide::write_energy(&data, &dir)?;
     reactions::write_reactions(&data, &dir)?;
     // urr.arrow is transport-only, but it costs nothing to carry when the
     // evaluation has it and a later transport conversion would want it.
@@ -329,7 +330,7 @@ fn write_covariance_if_asked(
 /// resume takes as proof the conversion finished.
 fn write_version(dir: &Path, provenance: &Provenance) -> Result<(), Box<dyn Error>> {
     let mut marker = serde_json::json!({
-        "format_version": 1,
+        "format_version": 2,
         "library": provenance.library,
         "data_version": provenance.data_version,
         "converter_version": concat!("yamc-convert ", env!("CARGO_PKG_VERSION")),
@@ -350,6 +351,17 @@ fn write_version(dir: &Path, provenance: &Provenance) -> Result<(), Box<dyn Erro
         match crate::reaction_ranges::index_reactions(&reactions) {
             Ok(ranges) => marker["reaction_ranges"] = ranges.to_json(),
             Err(e) => eprintln!("warning: no reaction_ranges for {}: {e}", dir.display()),
+        }
+    }
+
+    // Where each temperature's grid sits in energy.arrow, so a client that
+    // draws one temperature fetches one grid rather than every one of them
+    // (fusion-neutronics/core#100). Best-effort for the same reason.
+    let energy = dir.join("energy.arrow");
+    if energy.exists() {
+        match crate::energy_ranges::index_energy(&energy) {
+            Ok(ranges) => marker["energy_ranges"] = ranges.to_json(),
+            Err(e) => eprintln!("warning: no energy_ranges for {}: {e}", dir.display()),
         }
     }
 
@@ -396,6 +408,7 @@ pub fn convert_neutron_transport(
     std::fs::create_dir_all(&dir)?;
 
     nuclide::write_nuclide(&data, &dir)?;
+    nuclide::write_energy(&data, &dir)?;
     reactions::write_reactions(&data, &dir)?;
     nuclide::write_urr(&data, &dir)?;
     products::write_products(&data, &dir)?;
