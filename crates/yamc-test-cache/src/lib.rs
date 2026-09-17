@@ -110,6 +110,40 @@ pub fn have(nuclide: &str) -> bool {
     std::path::Path::new(&nuclide_path(nuclide)).is_dir()
 }
 
+/// The fixture for `nuclide` when it carries the TRANSPORT sections, or `None`.
+///
+/// What a test that samples a secondary needs, and a stricter question than
+/// [`nuclide`]. Since #389 a cache directory is routinely left at activation
+/// scope, holding `reactions.arrow` and none of the products or distributions:
+/// the directory is there, `nuclide` says yes, and the loader does not object
+/// either, because `narrow_to_present_sections` narrows a `Full` request to
+/// what is on disk rather than failing it. The first `(n,2n)` then panics with
+/// "Missing product distributions", which is how a windows CI runner whose
+/// restored fixture cache carried an activation-scope Ar38 failed
+/// `parity_ar38_collision0_spectrum` while every other runner skipped it.
+///
+/// So the load is the check, and what it loaded is the answer: a nuclide whose
+/// own `load_scope` came back without the transport sections is reported
+/// absent, which is what the caller means by "this machine cannot run that
+/// case".
+pub fn transport_nuclide(name: &str) -> Option<String> {
+    let path = nuclide(name)?;
+    transport_ready(std::path::Path::new(&path)).then_some(path)
+}
+
+/// Whether the cache directory at `path` loads WITH its transport sections.
+///
+/// The path-taking half of [`transport_nuclide`], so the behaviour can be
+/// tested on a directory built for the purpose rather than on whatever this
+/// machine's cache happens to hold.
+pub fn transport_ready(path: &std::path::Path) -> bool {
+    yamc_nuclide::arrow::nuclide_arrow::read_nuclide_from_arrow(
+        path,
+        &yamc_nuclide::LoadScope::full(),
+    )
+    .is_ok_and(|n| n.load_scope.wants_transport_sections())
+}
+
 /// The photoatomic fixture for `element`, or `None` when it is not cached.
 ///
 /// Same layout and the same naming rule as a nuclide: an element is cached as

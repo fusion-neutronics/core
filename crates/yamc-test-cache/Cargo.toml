@@ -10,3 +10,7 @@ license = "MIT"
 # where the cache is. A dev-dependency cycle back into this crate is fine:
 # Cargo resolves dev-dependency cycles, and nothing here is built into a wheel.
 yamc-nuclide = { path = "../yamc-nuclide" }
+
+[dev-dependencies]
+# For the activation-scope fixture the transport_ready test builds.
+tempfile = "3"
