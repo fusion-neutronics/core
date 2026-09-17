@@ -1875,8 +1875,8 @@ pub(crate) fn multi_cell_transport_kernel(
     // `xs_score_per_mt` value loses the per-collision resonance
     // self-shielding the transport step sampled, biasing capture
     // high. When `urr_fired` and this MT is 102 (n,gamma) the kernel
-    // scores the URR-perturbed macroscopic capture
-    // (`urr_macro_capture`) the step actually used; for MT 27
+    // corrects the smooth value by `urr_capture_delta`, what the bands
+    // the step sampled moved the material's capture by; for MT 27
     // (absorption) it scores `sigma_a + sigma_f` (the already-
     // perturbed absorption macro). The CPU twin has no URR block, so
     // `urr_fired` is always false there and the substitution is a
@@ -2685,15 +2685,14 @@ pub(crate) fn multi_cell_transport_kernel(
             let mut sigma_f_use = sigma_f;
             let mut sigma_i_use = sigma_i;
             // URR scoring-correlation state (hoisted so the tally score loops
-            // below can substitute the URR-perturbed capture for the smooth
-            // `xs_score_per_mt` value). `urr_fired` is set when any URR
-            // nuclide is sampled this step; `urr_macro_capture` is the
-            // full-material URR-modified macroscopic capture (n,gamma,
-            // EXCLUDING fission) = `sigma_a_use - sigma_f_use` (the GPU twin
-            // of CPU `UrrMacroXs.capture`, including non-URR nuclides' smooth
-            // capture). Both stay at their defaults when no URR nuclide fires.
+            // below can correct the smooth `xs_score_per_mt` value for the
+            // band the step sampled). `urr_fired` is set when any URR nuclide
+            // is sampled this step; `urr_capture_delta` is how much those
+            // bands moved the material's macroscopic capture, to be ADDED to
+            // the smooth MT 102 (fusion-neutronics/core#106). Both stay at
+            // their defaults when no URR nuclide fires.
             let mut urr_fired = false;
-            let mut urr_macro_capture = 0.0_f64;
+            let mut urr_capture_delta = 0.0_f64;
 
             // This material's slab range [nuc_off, nuc_off + nuc_count) into
             // the global per-(material, nuclide) tables (the same table the
@@ -2825,17 +2824,15 @@ pub(crate) fn multi_cell_transport_kernel(
                 sigma_f_use = new_f;
                 sigma_i_use = new_i;
 
-                // Full-material URR-modified macroscopic capture (n,gamma) for
-                // tally scoring = summed absorption minus fission. This
-                // INCLUDES non-URR nuclides' smooth capture (they sit inside
-                // `sigma_a`), so mixed materials where only some isotopes are
-                // URR-in-range still score capture correctly (issue #210). Do
-                // NOT build a URR-only capture accumulator here.
-                let mut new_g = new_a - new_f;
-                if new_g < 0.0 {
-                    new_g = 0.0;
-                }
-                urr_macro_capture = new_g;
+                // How much the bands moved the material's macroscopic
+                // capture, for the MT 102 score below. The perturbed
+                // disappearance (`new_a`) is NOT that number: it carries every
+                // nuclide's (n,p) and (n,alpha) as well, and scoring capture
+                // from it collected those too (fusion-neutronics/core#106).
+                // Only the URR nuclides' own disappearance moved, and inside a
+                // band that movement is the capture movement, so the delta
+                // added to the smooth MT 102 is what capture wants.
+                urr_capture_delta = new_a - sigma_a;
             }
             let sigma_e = sigma_e_use;
             let sigma_a = sigma_a_use;
@@ -3069,14 +3066,18 @@ pub(crate) fn multi_cell_transport_kernel(
                         // draw that perturbed the transport macro, biasing the
                         // score. Score each URR-perturbed reaction with the
                         // perturbed macro the step actually used: capture
-                        // (MT 102) = urr_macro_capture, absorption (MT 27) =
-                        // sigma_a + sigma_f, elastic (MT 2) = sigma_e, fission
-                        // (MT 18) = sigma_f (all rebound to their *_use values
-                        // above). No-op when no URR sample fired this step.
+                        // (MT 102) = the smooth value plus urr_capture_delta,
+                        // absorption (MT 27) = sigma_a + sigma_f, elastic
+                        // (MT 2) = sigma_e, fission (MT 18) = sigma_f (all
+                        // rebound to their *_use values above). No-op when no
+                        // URR sample fired this step.
                         if urr_fired {
                             let mt_t = tally_score_mt[t as usize];
                             if mt_t == 102u32 {
-                                score = urr_macro_capture;
+                                score = score + urr_capture_delta;
+                                if score < 0.0 {
+                                    score = 0.0;
+                                }
                             } else if mt_t == 27u32 {
                                 score = sigma_a + sigma_f;
                             } else if mt_t == 2u32 {
@@ -3297,7 +3298,10 @@ pub(crate) fn multi_cell_transport_kernel(
                             if urr_fired {
                                 let mt_tc = tally_score_mt[tc as usize];
                                 if mt_tc == 102u32 {
-                                    score_c = urr_macro_capture;
+                                    score_c = score_c + urr_capture_delta;
+                                    if score_c < 0.0 {
+                                        score_c = 0.0;
+                                    }
                                 } else if mt_tc == 27u32 {
                                     score_c = sigma_a + sigma_f;
                                 } else if mt_tc == 2u32 {

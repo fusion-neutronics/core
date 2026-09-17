@@ -62,10 +62,18 @@ pub(super) struct UrrPerturbation {
     /// Whether any URR nuclide was sampled, i.e. whether the tally score loops
     /// should substitute the perturbed macros for the smooth `xs_score_per_mt`.
     pub fired: bool,
-    /// Full-material URR-modified macroscopic capture (n,gamma, EXCLUDING
-    /// fission). Includes non-URR nuclides' smooth capture, so mixed materials
-    /// still score capture correctly (issue #210).
-    pub macro_capture: f64,
+    /// How much the sampled bands moved the material's macroscopic capture,
+    /// to be ADDED to the smooth MT 102 the score loop already looked up
+    /// (fusion-neutronics/core#106).
+    ///
+    /// A delta rather than the absolute value: the absolute one has to be
+    /// built out of the material's disappearance partial, which carries every
+    /// nuclide's (n,p) and (n,alpha) as well, so scoring MT 102 from it
+    /// collected those too. Only the URR nuclides' own disappearance is
+    /// perturbed, and inside a band that perturbation is the capture
+    /// perturbation (their charged-particle channels are zero there), so the
+    /// delta is what MT 102 wants and the smooth part stays MT 102.
+    pub capture_delta: f64,
 }
 
 impl<'a> UrrTables<'a> {
@@ -285,7 +293,7 @@ pub(super) fn perturb(
         return UrrPerturbation {
             partials: smooth,
             fired: false,
-            macro_capture: 0.0,
+            capture_delta: 0.0,
         };
     }
 
@@ -295,10 +303,9 @@ pub(super) fn perturb(
         inelastic: (smooth.inelastic + d_i).max(0.0),
         fission: (smooth.fission + d_f).max(0.0),
     };
-    let macro_capture = (partials.absorption - partials.fission).max(0.0);
     UrrPerturbation {
         partials,
         fired: true,
-        macro_capture,
+        capture_delta: d_a,
     }
 }

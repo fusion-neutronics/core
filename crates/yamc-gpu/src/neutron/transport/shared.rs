@@ -1228,7 +1228,7 @@ pub(super) fn transport_one_particle(
             let urr_nuc_off = inputs.mat_nuclide_meta[mat_idx * 2] as usize;
             let urr_nuc_count = inputs.mat_nuclide_meta[mat_idx * 2 + 1] as usize;
             let mut urr_fired = false;
-            let mut urr_macro_capture = 0.0;
+            let mut urr_capture_delta = 0.0;
             let (mut sigma_e, mut sigma_a, mut sigma_i, mut sigma_f) =
                 (sigma_e, sigma_a, sigma_i, sigma_f);
             if urr_tables.any_in_range(urr_nuc_off, urr_nuc_count, energy) {
@@ -1269,11 +1269,11 @@ pub(super) fn transport_one_particle(
                 sigma_i = p.partials.inelastic;
                 sigma_f = p.partials.fission;
                 urr_fired = p.fired;
-                urr_macro_capture = p.macro_capture;
+                urr_capture_delta = p.capture_delta;
             }
             let urr_score = super::UrrScore {
                 fired: urr_fired,
-                macro_capture: urr_macro_capture,
+                capture_delta: urr_capture_delta,
                 sigma_elastic: sigma_e,
             };
             let sigma_t = sigma_e + sigma_a + sigma_i + sigma_f;

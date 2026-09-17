@@ -404,11 +404,19 @@ pub struct MacroPhotonXS {
 /// URR-modified macroscopic cross-sections for tally scoring.
 /// Contains the key MTs affected by URR probability tables.
 pub struct UrrMacroXs {
-    pub total: f64,      // MT 1
-    pub elastic: f64,    // MT 2
-    pub fission: f64,    // MT 18
-    pub capture: f64,    // MT 102 (n,gamma)
-    pub absorption: f64, // MT 27 (= capture + fission)
+    pub total: f64,   // MT 1
+    pub elastic: f64, // MT 2
+    pub fission: f64, // MT 18
+    /// MT 102 (n,gamma). The URR nuclides' share is the probability table's
+    /// perturbed value; every other nuclide contributes its own MT 102, so a
+    /// capture tally does not collect the material's charged-particle channels
+    /// (fusion-neutronics/core#106).
+    pub capture: f64,
+    /// MT 27 (= disappearance + fission). Disappearance rather than capture,
+    /// so this stays what MT 27 means: the URR nuclides' share is the same
+    /// perturbed value (the tables' capture factor multiplies the smooth
+    /// disappearance, as OpenMC's does), and the rest contribute MT 101.
+    pub absorption: f64,
 }
 
 /// Result of sampling the URR probability table for a single nuclide at one energy.
@@ -1301,6 +1309,7 @@ impl Material {
         let mut macro_elastic = 0.0;
         let mut macro_fission = 0.0;
         let mut macro_capture = 0.0;
+        let mut macro_disappearance = 0.0;
         let mut any_urr = false;
 
         for (name, nuclide) in &self.nuclide_data {
@@ -1333,7 +1342,18 @@ impl Material {
                             + sample.urr_fission);
                     macro_elastic += n_density * sample.urr_elastic;
                     macro_fission += n_density * sample.urr_fission;
+                    // The same perturbed value on both accumulators. Inside the
+                    // band the table's capture factor multiplies the smooth
+                    // DISAPPEARANCE (`urr.sample` is handed
+                    // `smooth_absorption - smooth_fission`, which is what
+                    // OpenMC's `capture *= (micro.absorption - micro.fission)`
+                    // does), and OpenMC scores an (n,gamma) tally from exactly
+                    // that for a nuclide whose tables are in range. The
+                    // charged-particle channels it folds in are negligible for
+                    // the heavy nuclides that have tables, which is the
+                    // approximation both codes make.
                     macro_capture += n_density * sample.urr_capture;
+                    macro_disappearance += n_density * sample.urr_capture;
                     any_urr = true;
                     true
                 } else {
@@ -1345,18 +1365,26 @@ impl Material {
                 macro_total += self.lookup_nuclide_macro_xs_by_mt(name, n_density, 1, energy);
                 macro_elastic += self.lookup_nuclide_macro_xs_by_mt(name, n_density, 2, energy);
                 macro_fission += self.lookup_nuclide_macro_xs_by_mt(name, n_density, 18, energy);
-                // MT 101 (disappearance), not MT 102: `absorption` below is built
-                // as `macro_capture + macro_fission`, which is OpenMC's
+                // Two accumulators, because the two scores want different
+                // things from a nuclide whose tables are not in range
+                // (fusion-neutronics/core#106). MT 27 is built below as
+                // `disappearance + fission`, OpenMC's
                 // `micro.absorption = capture + fission` where its `capture` is
-                // `absorption - fission`, i.e. disappearance. Asking for MT 102
-                // here would drop the charged-particle absorption channels and,
-                // before #362, returned zero outright for a fissile nuclide.
-                macro_capture += self.lookup_nuclide_macro_xs_by_mt(name, n_density, 101, energy);
+                // `absorption - fission`; asking MT 102 for that would drop the
+                // charged-particle absorption channels and, before #362,
+                // returned zero outright for a fissile nuclide. An (n,gamma)
+                // tally wants MT 102 itself: OpenMC substitutes disappearance
+                // only for the nuclide whose `use_ptable` is set, so a Be9 or a
+                // Cr52 beside a URR nuclide keeps its own capture rather than
+                // donating its (n,alpha) to the material's.
+                macro_capture += self.lookup_nuclide_macro_xs_by_mt(name, n_density, 102, energy);
+                macro_disappearance +=
+                    self.lookup_nuclide_macro_xs_by_mt(name, n_density, 101, energy);
             }
         }
 
         if any_urr {
-            let absorption = macro_capture + macro_fission;
+            let absorption = macro_disappearance + macro_fission;
             Some(UrrMacroXs {
                 total: macro_total,
                 elastic: macro_elastic,
