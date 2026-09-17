@@ -13,7 +13,7 @@ path = "src/lib.rs"
 once_cell = "1.21.3"
 rand = "0.10"
 yamc-nuclide = { path = "../yamc-nuclide", default-features = false }
-arrow-array = { version = "53", optional = true }
+arrow-array = { version = "60", optional = true }
 
 [features]
 default = ["arrow"]

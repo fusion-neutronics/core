@@ -14,9 +14,9 @@ path = "src/lib.rs"
 [dependencies]
 endf = { path = "../endf" }
 nuclear-data-schema = { path = "../nuclear-data-schema" }
-arrow-array = "53"
-arrow-schema = "53"
-arrow-ipc = { version = "53", features = ["lz4"] }
+arrow-array = "60"
+arrow-schema = "60"
+arrow-ipc = { version = "60", features = ["lz4"] }
 serde_json = "1.0"
 
 [dev-dependencies]

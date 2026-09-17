@@ -23,13 +23,13 @@ endf = { path = "../endf" }
 # every large numeric field on Nuclide/Reaction/FastXSGrid, so it has to exist in
 # a build with no reader at all. arrow-buffer is a leaf crate (bytes, half, num)
 # and arrow-array already pulls it in at the same version.
-arrow-buffer = "53"
-arrow-array = { version = "53", optional = true }
+arrow-buffer = "60"
+arrow-array = { version = "60", optional = true }
 # lz4 feature decodes the option-D IPC-lz4 sections (pure-Rust lz4_flex, keeps
 # the download build C-free). arrow-select concats the batch-per-MT
 # reactions.arrow back into one batch on read.
-arrow-ipc = { version = "53", optional = true, features = ["lz4"] }
-arrow-select = { version = "53", optional = true }
+arrow-ipc = { version = "60", optional = true, features = ["lz4"] }
+arrow-select = { version = "60", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking"], optional = true }
 # Pure-Rust rustls crypto provider for the `download-tls` (HTTPS) build. No C
 # toolchain required, unlike ring. graviola supports x86_64 + aarch64 only (it
