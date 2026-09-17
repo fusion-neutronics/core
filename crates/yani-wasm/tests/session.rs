@@ -367,6 +367,12 @@ fn a_spliced_stream_transmutes_to_the_same_answer_as_the_whole_file() {
             .unwrap();
         let nuclide = std::fs::read(fe56.join("nuclide.arrow")).unwrap();
         session.add_nuclide_data("Fe56", "nuclide.arrow", nuclide);
+        // The union energy grids, their own section since #100. Fed whole even
+        // here, where the point is a spliced `reactions.arrow`: what this test
+        // compares is the reaction bytes, so the grids must be identical on
+        // both sides of the comparison.
+        let energy = std::fs::read(fe56.join("energy.arrow")).unwrap();
+        session.add_nuclide_data("Fe56", "energy.arrow", energy);
         session.add_nuclide_data("Fe56", "reactions.arrow", reactions_bytes);
         serde_json::from_str(&session.run(spectra, &schedule).expect("transmutation runs")).unwrap()
     };
@@ -432,7 +438,12 @@ fn a_transmutation_runs_and_reports_every_series_the_plots_need() {
         .build_material(r#"{"Fe56": 1.0}"#, 7.874, "g/cm3", "atom", 1000.0)
         .unwrap();
 
-    for file in ["version.json", "nuclide.arrow", "reactions.arrow"] {
+    for file in [
+        "version.json",
+        "nuclide.arrow",
+        "energy.arrow",
+        "reactions.arrow",
+    ] {
         let path = fe56.join(file);
         if path.exists() {
             session.add_nuclide_data("Fe56", file, std::fs::read(&path).unwrap());
@@ -534,7 +545,12 @@ fn repeated_runs_of_one_session_agree() {
     session
         .build_material(r#"{"Fe56": 1.0}"#, 7.874, "g/cm3", "atom", 1000.0)
         .unwrap();
-    for file in ["version.json", "nuclide.arrow", "reactions.arrow"] {
+    for file in [
+        "version.json",
+        "nuclide.arrow",
+        "energy.arrow",
+        "reactions.arrow",
+    ] {
         let path = fe56.join(file);
         if path.exists() {
             session.add_nuclide_data("Fe56", file, std::fs::read(&path).unwrap());

@@ -256,8 +256,8 @@ pub fn convert_branching(
 /// calculation reads.
 ///
 /// Writes a ``{nuclide}.arrow/`` directory holding ``nuclide.arrow``,
-/// ``reactions.arrow`` and ``version.json``, which is exactly what a
-/// transport-free reaction-rate collapse reads. The secondary distributions and
+/// ``energy.arrow``, ``reactions.arrow`` and ``version.json``, which is exactly
+/// what a transport-free reaction-rate collapse reads. The secondary distributions and
 /// lookup tables a transport run needs are deliberately not written: an
 /// activation calculation never touches them, and building them from an ACE
 /// table would cost heating data it does not carry.

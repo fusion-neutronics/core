@@ -266,8 +266,8 @@ fn read(source: &Source) -> Result<Read, Box<dyn Error>> {
 
 /// Write the cross-section data an activation calculation reads.
 ///
-/// `nuclide.arrow`, `reactions.arrow` and `version.json`, which is exactly the
-/// set `NEUTRON_XS_ONLY_SECTIONS` names. Not a partial transport conversion:
+/// `nuclide.arrow`, `energy.arrow`, `reactions.arrow` and `version.json`,
+/// which is exactly the set `NEUTRON_XS_ONLY_SECTIONS` names. Not a partial transport conversion:
 /// the products, secondary distributions and lookup accelerators a transport
 /// run needs are a separate concern and their absence is what the scope means.
 ///

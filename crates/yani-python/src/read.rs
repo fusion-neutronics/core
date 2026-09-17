@@ -34,8 +34,9 @@ use yamc_nuclide::load_scope::{LoadScope, SectionScope};
 ///     cannot silently check a different file from the one it named.
 /// scope : str, optional
 ///     ``"full"`` (default) reads every section, which is what transport
-///     needs. ``"xs"`` reads ``nuclide.arrow`` and ``reactions.arrow`` only,
-///     which is what a transport-free reaction-rate collapse touches.
+///     needs. ``"xs"`` reads ``nuclide.arrow``, ``energy.arrow`` and
+///     ``reactions.arrow`` only, which is what a transport-free reaction-rate
+///     collapse touches.
 ///
 /// Returns
 /// -------

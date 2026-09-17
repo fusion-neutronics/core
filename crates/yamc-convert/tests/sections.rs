@@ -485,7 +485,12 @@ fn an_ace_conversion_loads_through_yamcs_own_reader() {
     .expect("conversion succeeds");
 
     assert_eq!(out.file_name().unwrap(), "Li6.arrow");
-    for f in ["nuclide.arrow", "reactions.arrow", "version.json"] {
+    for f in [
+        "nuclide.arrow",
+        "energy.arrow",
+        "reactions.arrow",
+        "version.json",
+    ] {
         assert!(out.join(f).is_file(), "{f} was not written");
     }
     // No unresolved range for Li6, and an empty file would be worse than none.
@@ -721,6 +726,7 @@ fn a_transport_conversion_loads_under_a_full_scope() {
     // are absent for Li6, which has no unresolved range and does not fission.
     for f in [
         "nuclide.arrow",
+        "energy.arrow",
         "reactions.arrow",
         "products.arrow",
         "distributions.arrow",

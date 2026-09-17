@@ -81,7 +81,7 @@ fn build(comp: &[(&str, f64)], n_mats: usize) -> Option<(Model, Arc<Tally>, Tran
     // real bug it would be.
     let usable = |n: &str| {
         let dir = std::path::PathBuf::from(cache(n));
-        ["nuclide.arrow", "reactions.arrow"]
+        ["nuclide.arrow", "energy.arrow", "reactions.arrow"]
             .iter()
             .all(|f| dir.join(f).is_file())
     };

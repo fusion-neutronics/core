@@ -2102,6 +2102,7 @@ mod tests {
         write_subset(&dir.0, &[16, 102]);
         for name in [
             "nuclide.arrow",
+            "energy.arrow",
             "products.arrow",
             "distributions.arrow",
             "fast_xs.arrow",

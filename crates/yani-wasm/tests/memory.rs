@@ -89,7 +89,12 @@ fn report_the_memory_a_session_costs() {
     let session = YaniSession::new();
     let mut raw_bytes = 0u64;
     for (name, dir) in &fixtures {
-        for file in ["version.json", "nuclide.arrow", "reactions.arrow"] {
+        for file in [
+            "version.json",
+            "nuclide.arrow",
+            "energy.arrow",
+            "reactions.arrow",
+        ] {
             let path = dir.join(file);
             if path.exists() {
                 let bytes = std::fs::read(&path).unwrap();
@@ -169,7 +174,12 @@ fn report_what_parsing_costs_on_top_of_the_bytes() {
     let after_chain = rss().unwrap();
 
     let mut raw = 0u64;
-    for file in ["version.json", "nuclide.arrow", "reactions.arrow"] {
+    for file in [
+        "version.json",
+        "nuclide.arrow",
+        "energy.arrow",
+        "reactions.arrow",
+    ] {
         let path = dir.join(file);
         if path.exists() {
             let bytes = std::fs::read(&path).unwrap();
@@ -218,7 +228,12 @@ fn report_what_parsing_costs_on_top_of_the_bytes() {
         return;
     }
     let mut big_raw = 0u64;
-    for file in ["version.json", "nuclide.arrow", "reactions.arrow"] {
+    for file in [
+        "version.json",
+        "nuclide.arrow",
+        "energy.arrow",
+        "reactions.arrow",
+    ] {
         let path = big.join(file);
         if path.exists() {
             let bytes = std::fs::read(&path).unwrap();
@@ -270,7 +285,7 @@ fn clearing_the_virtual_filesystem_frees_the_raw_bytes() {
 
     let mut session = YaniSession::new();
     for (name, dir) in &fixtures {
-        for file in ["nuclide.arrow", "reactions.arrow"] {
+        for file in ["nuclide.arrow", "energy.arrow", "reactions.arrow"] {
             let path = dir.join(file);
             if path.exists() {
                 session.add_nuclide_data(name, file, std::fs::read(&path).unwrap());
