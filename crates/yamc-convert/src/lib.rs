@@ -14,10 +14,12 @@
 
 pub mod covariance;
 pub mod distributions;
+pub mod energy_ranges;
 pub mod entry;
 pub mod fast_xs;
 pub mod fission_nu;
 pub mod heating;
+pub mod marker;
 pub mod nuclide;
 pub mod photon;
 pub mod products;

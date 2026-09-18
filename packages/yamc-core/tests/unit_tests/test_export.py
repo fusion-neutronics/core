@@ -29,6 +29,7 @@ def _make_fake_nuclide(cache_dir: Path, name: str, payload: bytes = b"<arrow-dat
     nuc_dir.mkdir(parents=True, exist_ok=True)
     for fname in (
         "nuclide.arrow",
+        "energy.arrow",
         "reactions.arrow",
         "distributions.arrow",
         "products.arrow",
@@ -93,6 +94,7 @@ def test_export_embed_true_embeds_material_nuclides(tmp_path: Path) -> None:
     assert set(embedded.keys()) == {"Li6"}
     files = embedded["Li6"]
     assert "nuclide.arrow" in files
+    assert "energy.arrow" in files
     assert "reactions.arrow" in files
     # The base64 must decode cleanly back to non-empty bytes.
     raw = base64.b64decode(files["nuclide.arrow"])

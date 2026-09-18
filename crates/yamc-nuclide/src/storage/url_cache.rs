@@ -787,6 +787,9 @@ fn download_error(
 const NEUTRON_SECTIONS: &[(&str, bool)] = &[
     ("version.json", true),
     ("nuclide.arrow", true),
+    // Required from format_version 2: the union energy grids, which every
+    // neutron scope interpolates against (fusion-neutronics/core#100).
+    ("energy.arrow", true),
     ("reactions.arrow", true),
     ("products.arrow", true),
     ("distributions.arrow", true),
@@ -805,6 +808,9 @@ const NEUTRON_SECTIONS: &[(&str, bool)] = &[
 const NEUTRON_SECTIONS_WITH_COVARIANCE: &[(&str, bool)] = &[
     ("version.json", true),
     ("nuclide.arrow", true),
+    // Required from format_version 2: the union energy grids, which every
+    // neutron scope interpolates against (fusion-neutronics/core#100).
+    ("energy.arrow", true),
     ("reactions.arrow", true),
     ("products.arrow", true),
     ("distributions.arrow", true),
@@ -834,6 +840,9 @@ const PHOTON_SECTIONS: &[(&str, bool)] = &[
 const NEUTRON_XS_ONLY_SECTIONS: &[(&str, bool)] = &[
     ("version.json", true),
     ("nuclide.arrow", true),
+    // Required from format_version 2: the union energy grids, which every
+    // neutron scope interpolates against (fusion-neutronics/core#100).
+    ("energy.arrow", true),
     ("reactions.arrow", true),
 ];
 
@@ -845,6 +854,9 @@ const NEUTRON_XS_ONLY_SECTIONS: &[(&str, bool)] = &[
 const NEUTRON_XS_ONLY_SECTIONS_WITH_COVARIANCE: &[(&str, bool)] = &[
     ("version.json", true),
     ("nuclide.arrow", true),
+    // Required from format_version 2: the union energy grids, which every
+    // neutron scope interpolates against (fusion-neutronics/core#100).
+    ("energy.arrow", true),
     ("reactions.arrow", true),
     ("covariance.arrow", false),
 ];
@@ -2090,6 +2102,7 @@ mod tests {
         write_subset(&dir.0, &[16, 102]);
         for name in [
             "nuclide.arrow",
+            "energy.arrow",
             "products.arrow",
             "distributions.arrow",
             "fast_xs.arrow",
@@ -2119,6 +2132,9 @@ mod tests {
         write_index(&dir.0, &[16, 102]);
         write_subset(&dir.0, &[16, 102]);
         dir.touch("nuclide.arrow");
+        // The union energy grids are their own required section since #100, so
+        // a folder without one is not a satisfied activation load.
+        dir.touch("energy.arrow");
         let wanted = mts(&[16, 102]);
         let xs_only = sections_for(
             DataKind::Neutron,
@@ -2153,13 +2169,24 @@ mod tests {
     }
 
     #[test]
-    fn an_activation_scope_asks_for_three_neutron_sections() {
+    fn an_activation_scope_asks_for_four_neutron_sections() {
         let xs = sections_for(
             DataKind::Neutron,
             &crate::LoadScope::activation([102].into()),
         );
         let names: Vec<&str> = xs.iter().map(|(n, _)| *n).collect();
-        assert_eq!(names, ["version.json", "nuclide.arrow", "reactions.arrow"]);
+        // energy.arrow joined the list in #100, when the union grids moved out
+        // of nuclide.arrow. An activation collapse folds cross sections onto
+        // that grid, so it is as required here as the cross sections are.
+        assert_eq!(
+            names,
+            [
+                "version.json",
+                "nuclide.arrow",
+                "energy.arrow",
+                "reactions.arrow"
+            ]
+        );
         assert!(
             xs.iter().all(|(_, required)| *required),
             "an activation fetch has no optional section, so no 404 to reason about"
@@ -2209,6 +2236,7 @@ mod tests {
             [
                 "version.json",
                 "nuclide.arrow",
+                "energy.arrow",
                 "reactions.arrow",
                 "covariance.arrow"
             ]

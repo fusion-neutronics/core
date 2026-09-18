@@ -37,6 +37,30 @@ pub const EOS: [u8; 8] = [0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0];
 /// Where a message lives in `reactions.arrow`: `(offset, length)` in bytes.
 pub type Range = (u64, u64);
 
+/// The spans to request for `schema` followed by `ranges`, with spans that
+/// touch merged into one.
+///
+/// Merged only where they are strictly adjacent, so every byte fetched is a
+/// byte wanted and the responses concatenate to exactly `schema ++ batches`.
+/// Nothing has to be cut back out, which is the whole reason not to merge
+/// across gaps. Shared by the reaction and energy indexes, which differ in what
+/// they key batches by and not at all in how a set of them is asked for.
+pub fn coalesce(schema: Range, mut ranges: Vec<Range>) -> Vec<Range> {
+    // Ascending offset order is what lets the merge below be a single backward
+    // look, and the schema is the first message in the file, so leading with it
+    // keeps the list sorted.
+    ranges.sort_unstable();
+    ranges.dedup();
+    let mut spans: Vec<Range> = Vec::new();
+    for (off, len) in std::iter::once(schema).chain(ranges) {
+        match spans.last_mut() {
+            Some(last) if last.0 + last.1 == off => last.1 += len,
+            _ => spans.push((off, len)),
+        }
+    }
+    spans
+}
+
 /// Byte ranges for the schema message and each (MT, temperature) record batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReactionRanges {
@@ -131,29 +155,18 @@ impl ReactionRanges {
     /// names that this nuclide does not publish is simply absent: the nuclide
     /// has no such channel, which is not the same as a fetch having failed.
     pub fn spans_where(&self, wants: impl Fn(i32, &str) -> bool) -> Vec<Range> {
-        let mut ranges: Vec<Range> = self
-            .mts
-            .iter()
-            .flat_map(|(mt, by_temperature)| {
-                by_temperature
-                    .iter()
-                    .filter(|(t, _)| wants(*mt, t))
-                    .map(|(_, r)| *r)
-            })
-            .collect();
-        // Ascending offset order is what lets the merge below be a single
-        // backward look, and the schema is the first message in the file, so
-        // leading with it keeps the list sorted.
-        ranges.sort_unstable();
-        ranges.dedup();
-        let mut spans: Vec<Range> = Vec::new();
-        for (off, len) in std::iter::once(self.schema).chain(ranges) {
-            match spans.last_mut() {
-                Some(last) if last.0 + last.1 == off => last.1 += len,
-                _ => spans.push((off, len)),
-            }
-        }
-        spans
+        coalesce(
+            self.schema,
+            self.mts
+                .iter()
+                .flat_map(|(mt, by_temperature)| {
+                    by_temperature
+                        .iter()
+                        .filter(|(t, _)| wants(*mt, t))
+                        .map(|(_, r)| *r)
+                })
+                .collect(),
+        )
     }
 
     /// Which of `wants` this nuclide actually publishes a batch for.

@@ -183,6 +183,18 @@ pub fn absent(dir: &Path, file: &str) -> bool {
     !dir.join(file).is_file()
 }
 
+/// How many record batches a section file holds.
+///
+/// [`section`] fuses them into one row space, which is what the loader wants
+/// and exactly what a test about the batch-per-row framing must not use: the
+/// framing is what the byte-range indexes address.
+pub fn batches(dir: &Path, file: &str) -> usize {
+    let path = dir.join(file);
+    let reader =
+        arrow_ipc::reader::FileReader::try_new(std::fs::File::open(&path).unwrap(), None).unwrap();
+    reader.count()
+}
+
 pub fn f64_at(batch: &RecordBatch, col: &str, row: usize) -> f64 {
     yamc_nuclide::arrow_helpers::get_f64(batch, col, row).unwrap_or_else(|e| panic!("{col}: {e}"))
 }

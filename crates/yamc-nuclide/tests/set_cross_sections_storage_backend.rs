@@ -42,6 +42,7 @@ fn a_path_present_only_in_the_storage_backend_is_accepted() {
         &[
             "/Li6.arrow/version.json",
             "/Li6.arrow/nuclide.arrow",
+            "/Li6.arrow/energy.arrow",
             "/Li6.arrow/reactions.arrow",
         ],
         || {

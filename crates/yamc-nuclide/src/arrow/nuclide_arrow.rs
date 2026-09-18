@@ -146,6 +146,15 @@ fn adopt(values: &ScalarBuffer<f64>, share: bool) -> F64Buffer {
 /// each handled where it is read.
 const TRANSPORT_SECTIONS: [&str; 3] = ["products.arrow", "distributions.arrow", "fast_xs.arrow"];
 
+/// The `format_version` this build reads.
+///
+/// 2 since the union energy grids moved out of `nuclide.arrow` into
+/// `energy.arrow` (fusion-neutronics/core#100). Bumped rather than made
+/// optional: a v1 folder read by this build would find no grids at all, and a
+/// v2 folder read by an older build would find no `energy_values` column, so
+/// there is no version of "best effort" that produces a correct cross section.
+const FORMAT_VERSION: i64 = 2;
+
 /// Which file holds this load's cross sections.
 ///
 /// Normally `reactions.arrow`, the whole published object. A download that read
@@ -287,8 +296,23 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
             .get("format_version")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        if fmt_version != 1 {
-            return Err(format!("Unsupported Arrow format version: {fmt_version}").into());
+        if fmt_version != FORMAT_VERSION {
+            // Version 1 put the union energy grids in `nuclide.arrow`; version
+            // 2 has them in `energy.arrow`, one batch per temperature
+            // (fusion-neutronics/core#100). A v1 folder is not read on a
+            // best-effort basis, because the grids would simply be missing and
+            // every cross section would then interpolate against nothing.
+            let hint = if fmt_version == 1 {
+                ". Data published before the energy grids moved to energy.arrow; \
+                 re-download it, or migrate the folder with `split_energy`"
+            } else {
+                ""
+            };
+            return Err(format!(
+                "Unsupported Arrow format version: {fmt_version} (this build reads \
+                 {FORMAT_VERSION}){hint}"
+            )
+            .into());
         }
     }
 
@@ -302,8 +326,44 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
     // The rest of the codebase uses bare numbers (e.g., "294").
     // We strip "K" here for consistency, but keep the originals for Arrow file lookups.
     let all_temps_raw = get_str_list(&nuclide_batch, "temperatures", 0)?;
-    let energy_temps_raw = get_str_list(&nuclide_batch, "energy_temperatures", 0)?;
-    let energy_values = borrow_nested_f64_list(&nuclide_batch, "energy_values", 0)?;
+
+    // The union energy grids, one row per temperature, from their own section.
+    // They were two columns of `nuclide.arrow` until #100: one
+    // `list<list<f64>>` cell, so a reader that wanted one temperature decoded
+    // all of them (6.33 MB on U238). A ranged download now brings only the rows
+    // it asked for, and this reads however many arrived.
+    //
+    // Absent only for a nuclide with no processed temperature, which is what
+    // the ENDF route (no NJOY, no ACE) produces: no temperature means no union
+    // grid, and an Arrow file with no record batches is damage rather than
+    // emptiness, so nothing is written. Tying the requirement to
+    // `temperatures` rather than to a convention is what keeps a truncated
+    // download loud: on a nuclide that HAS temperatures a missing section is an
+    // error here, not an empty map that would leave every cross section
+    // interpolating against nothing.
+    let energy_path = dir.join("energy.arrow");
+    let (energy_temps_raw, energy_values): (Vec<String>, Vec<ScalarBuffer<f64>>) =
+        if crate::storage::exists(&energy_path) {
+            let energy_batch = read_arrow_file(&energy_path)?;
+            let labels = (0..energy_batch.num_rows())
+                .map(|row| get_str(&energy_batch, "temperature", row))
+                .collect::<Result<Vec<_>, _>>()?;
+            let grids = (0..energy_batch.num_rows())
+                .map(|row| borrow_f64_list(&energy_batch, "energy_values", row))
+                .collect::<Result<Vec<_>, _>>()?;
+            (labels, grids)
+        } else if all_temps_raw.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            return Err(format!(
+                "{}: energy.arrow is missing, but this nuclide is published at {} \
+                 temperature(s), so it has union energy grids that every cross section \
+                 is interpolated against",
+                dir.display(),
+                all_temps_raw.len()
+            )
+            .into());
+        };
 
     // Strip "K" suffix for normalized keys
     let strip_k = |s: &str| crate::temperature::strip_k(s).to_string();

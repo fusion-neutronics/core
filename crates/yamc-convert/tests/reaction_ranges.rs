@@ -485,10 +485,12 @@ fn a_file_too_short_to_sniff_still_errors() {
 
 /// A copy of the fixture with its `reactions.arrow` rewritten one batch per
 /// (MT, temperature) and reindexed: what `split_reactions` does to a published
-/// folder. Only the two sections an activation load reads are copied.
+/// folder. Only the sections an activation load reads are copied, which since
+/// #100 includes `energy.arrow`: the union grids every cross section is
+/// interpolated against used to be columns of `nuclide.arrow`.
 fn split_copy_of(dir: &Path) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
-    for section in ["nuclide.arrow", "version.json"] {
+    for section in ["nuclide.arrow", "energy.arrow", "version.json"] {
         std::fs::copy(dir.join(section), tmp.path().join(section)).unwrap();
     }
     rewrite_per_temperature(

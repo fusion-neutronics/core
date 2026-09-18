@@ -130,8 +130,12 @@ impl YaniSession {
 
     /// Hand over one section of a nuclide's cross-section data and register it.
     ///
-    /// `file` is `nuclide.arrow`, `reactions.arrow` or `version.json`, matching
-    /// `NEUTRON_XS_ONLY_SECTIONS`. The bytes land at `/{nuclide}.arrow/{file}`
+    /// `file` is `nuclide.arrow`, `energy.arrow`, `reactions.arrow` or
+    /// `version.json`, matching `NEUTRON_XS_ONLY_SECTIONS`. `energy.arrow`
+    /// carries the union energy grids, which moved out of `nuclide.arrow` in
+    /// fusion-neutronics/core#100; a host that does not upload it gets a load
+    /// error naming it, not a silent answer. The bytes land at
+    /// `/{nuclide}.arrow/{file}`
     /// in the virtual filesystem and the nuclear-data config is pointed at that
     /// directory, which is what `transmute` resolves against.
     #[wasm_bindgen(js_name = addNuclideData)]

@@ -30,6 +30,7 @@ import json
 import os
 import pathlib
 import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -54,6 +55,13 @@ ABSENT_SUFFIX = ".absent"  # crates/yamc-nuclide/src/storage/url_cache.rs
 NEUTRON_SECTIONS = [
     ("version.json", True),
     ("nuclide.arrow", True),
+    # Optional only until the libraries are republished at format_version 2:
+    # the origin still serves version 1, where the grids are columns of
+    # nuclide.arrow and there is no such object (fusion-neutronics/core#100).
+    # `migrate_to_v2` below builds it locally from what was downloaded, so the
+    # fixtures this build reads are version 2 either way. Once the republish
+    # lands this becomes required and the migration stops finding anything.
+    ("energy.arrow", False),
     ("reactions.arrow", True),
     ("products.arrow", False),
     ("distributions.arrow", False),
@@ -254,6 +262,46 @@ def link(fixture: pathlib.Path, target: pathlib.Path) -> None:
         shutil.copytree(target, fixture)
 
 
+def migrate_to_v2(dirs) -> int:
+    """Move the energy grids of any version 1 fixture into ``energy.arrow``.
+
+    The origin still publishes ``format_version: 1``, where the union energy
+    grids are two columns of ``nuclide.arrow``; this build reads version 2,
+    where they are their own section, one record batch per temperature
+    (fusion-neutronics/core#100). Rather than block every test on the library
+    being republished, the downloaded fixture is migrated in place by the
+    converter's own ``split_energy``, which copies the grids rather than
+    recomputing them.
+
+    Transitional by construction: once the libraries are republished the
+    downloads are already version 2, nothing here matches, and this returns 0.
+    """
+    stale = []
+    for d in dirs:
+        marker = d / "version.json"
+        if not marker.is_file():
+            continue
+        try:
+            if json.loads(marker.read_text()).get("format_version") == 1:
+                stale.append(d)
+        except (json.JSONDecodeError, OSError):
+            continue
+    if not stale:
+        return 0
+
+    print(f"migrating {len(stale)} fixture(s) to format_version 2 ...")
+    cmd = [
+        "cargo", "run", "--release", "--quiet",
+        "-p", "yamc-convert", "--bin", "split_energy", "--",
+    ] + [str(d) for d in stale]
+    if subprocess.run(cmd, cwd=REPO_ROOT).returncode != 0:
+        raise SystemExit(
+            "split_energy failed; the fixtures are version 1 and this build "
+            "reads version 2, so the tests would fail on every one of them"
+        )
+    return len(stale)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="report only")
@@ -283,10 +331,14 @@ def main() -> int:
         return 1 if missing or stale else 0
 
     downloaded = 0
+    fetched_dirs = []
     for name, base_url, sections in plan:
         dest = cache / f"{LIBRARY}-{name}.arrow"
         downloaded += fetch_sections(base_url, dest, sections, args.force)
         link(FIXTURE_DIR / f"{name}.arrow", dest)
+        fetched_dirs.append(dest)
+
+    migrated = migrate_to_v2(fetched_dirs)
 
     chain_dest = cache / f"{LIBRARY}-{CHAIN_FIXTURE}.arrow"
     downloaded += fetch_chain(chain_dest, args.force)
@@ -294,7 +346,8 @@ def main() -> int:
 
     print(
         f"{len(plan) + 1} fixtures ready in {cache} "
-        f"({downloaded} section files downloaded), linked into {FIXTURE_DIR}"
+        f"({downloaded} section files downloaded, {migrated} migrated to "
+        f"format_version 2), linked into {FIXTURE_DIR}"
     )
     return 0
 

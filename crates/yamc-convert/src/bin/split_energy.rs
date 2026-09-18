@@ -1,45 +1,46 @@
-//! Rewrite already-converted nuclide folders one record batch per (MT,
-//! temperature), and reindex them.
+//! Move the union energy grids of already-converted nuclide folders out of
+//! `nuclide.arrow` into `energy.arrow`, and reindex them.
 //!
-//! A library published one batch per MT makes a client that wants one
-//! temperature of one reaction download all six (fusion-neutronics/core#100).
-//! This rewrites each `{Name}.arrow/reactions.arrow` so every (MT, temperature)
-//! is its own batch, copying the cross sections rather than recomputing them,
-//! so NJOY does not run again and every value is what it was. `version.json`
-//! is then reindexed, since every batch offset moves.
+//! A library published with the grids inside `nuclide.arrow` makes a client
+//! that wants one temperature read all six, and makes a client that wants only
+//! to know what a nuclide IS read 6.33 MB of U238 grids to find out
+//! (fusion-neutronics/core#100). This rewrites each folder into the version 2
+//! layout, copying the grids rather than recomputing them, so NJOY does not run
+//! again and every value is what it was. `version.json` is then set to
+//! `format_version: 2` and given an `energy_ranges` index.
 //!
-//! The rewrite is staged beside the file and renamed into place, so an
-//! interrupted run leaves either the old file or the new one, never a torn
-//! one; `version.json` is rewritten the same way. Between the two renames the
-//! folder holds a split `reactions.arrow` beside a `version.json` indexing the
-//! file it replaced; rerunning this over the folder repairs it, since a file
-//! already in this shape rewrites to the same rows and is reindexed after.
+//! Each file is staged beside its target and renamed into place, and
+//! `energy.arrow` is written before `nuclide.arrow` loses its columns, so an
+//! interrupted run leaves a folder with its grids in one file or the other,
+//! never in neither. The marker is written last: a folder whose marker still
+//! says 1 is re-migrated correctly on a rerun.
 //!
-//! Publishing the result needs a data-version bump, unlike a plain reindex:
-//! every offset moves, so a client still holding the old `version.json` would
-//! range-fetch the new object at the old boundaries and splice a stream of the
-//! wrong bytes. The bump is what makes a cache evict both objects together.
+//! Publishing the result needs a data-version bump, and every client has to be
+//! on a build that reads version 2, since that build does not read version 1
+//! and vice versa. Pair it with `split_reactions` so users take one cache
+//! eviction rather than two.
 //!
 //! ```text
-//! cargo run --release -p yamc-convert --bin split_reactions -- DIR [DIR ...]
+//! cargo run --release -p yamc-convert --bin split_energy -- DIR [DIR ...]
 //! ```
 //!
 //! Each DIR either is a `{Name}.arrow` folder or holds them. A folder with no
-//! `reactions.arrow` (a photon element) is skipped.
+//! `nuclide.arrow` is skipped, which covers a photon element (whose layout this
+//! does not change) and a folder already migrated.
 //!
 //! `--data-version VERSION` additionally stamps `data_version` on every folder
 //! walked, skipped ones included. That is the field a cache compares against
 //! the origin's to decide whether to refetch, so a release wants one value
 //! across the whole tree: a folder left on the previous stamp is one no client
 //! will refetch. Photon elements need it as much as the nuclides do, which is
-//! why the stamp is not tied to whether there was anything to split.
+//! why the stamp is not tied to whether there was anything to migrate.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use yamc_convert::energy_ranges::write_energy_ranges;
 use yamc_convert::marker;
-use yamc_convert::reaction_ranges::write_reaction_ranges;
-use yamc_convert::reactions::rewrite_per_temperature;
+use yamc_convert::nuclide::migrate_energy_out_of_nuclide;
 
 /// The `*.arrow` folders under `root`, or `root` itself when it is one.
 fn folders(root: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -83,29 +84,25 @@ fn parse(argv: Vec<String>) -> Option<Args> {
     (!out.dirs.is_empty()).then_some(out)
 }
 
-/// Rewrite one folder's `reactions.arrow` and reindex it. `Ok(false)` when
-/// the folder has no reactions table.
-fn split(dir: &Path) -> Result<bool, Box<dyn std::error::Error>> {
-    let reactions = dir.join("reactions.arrow");
-    if !reactions.exists() {
+/// Migrate one folder. `Ok(false)` when it has nothing to move.
+fn migrate(dir: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+    if !migrate_energy_out_of_nuclide(dir)? {
         return Ok(false);
     }
-    let staged = dir.join("reactions.arrow.tmp");
-    rewrite_per_temperature(&reactions, &staged)?;
-    std::fs::rename(&staged, &reactions)?;
-    write_reaction_ranges(dir)?;
+    write_energy_ranges(dir)?;
+    marker::update(dir, &[("format_version", serde_json::json!(2))])?;
     Ok(true)
 }
 
 fn main() -> ExitCode {
     let Some(args) = parse(std::env::args().skip(1).collect()) else {
-        eprintln!("usage: split_reactions [--data-version VERSION] DIR [DIR ...]");
+        eprintln!("usage: split_energy [--data-version VERSION] DIR [DIR ...]");
         eprintln!("  DIR is a {{Name}}.arrow folder, or a directory holding them");
         eprintln!("  --data-version  stamp every folder walked with this release stamp");
         return ExitCode::from(2);
     };
 
-    let (mut split_count, mut skipped, mut stamped, mut failed) = (0usize, 0usize, 0usize, 0usize);
+    let (mut moved, mut skipped, mut stamped, mut failed) = (0usize, 0usize, 0usize, 0usize);
     for arg in &args.dirs {
         let root = Path::new(arg);
         let dirs = match folders(root) {
@@ -127,17 +124,17 @@ fn main() -> ExitCode {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            match split(&dir) {
+            match migrate(&dir) {
                 Ok(false) => skipped += 1,
                 Ok(true) => {
-                    split_count += 1;
+                    moved += 1;
                     println!("ok   {name}");
                 }
                 Err(e) => {
                     failed += 1;
                     eprintln!("FAIL {name}: {e}");
-                    // Not stamped: a folder whose split failed must not claim
-                    // to be part of the release.
+                    // Not stamped: a folder whose migration failed must not
+                    // claim to be part of the release.
                     continue;
                 }
             }
@@ -156,11 +153,9 @@ fn main() -> ExitCode {
 
     match &args.data_version {
         Some(v) => {
-            println!(
-                "{split_count} split, {skipped} skipped, {stamped} stamped {v}, {failed} failed"
-            )
+            println!("{moved} migrated, {skipped} skipped, {stamped} stamped {v}, {failed} failed")
         }
-        None => println!("{split_count} split, {skipped} skipped, {failed} failed"),
+        None => println!("{moved} migrated, {skipped} skipped, {failed} failed"),
     }
     if failed > 0 {
         ExitCode::FAILURE
