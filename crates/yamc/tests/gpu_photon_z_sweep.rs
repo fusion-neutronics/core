@@ -12,12 +12,24 @@
 //!
 //! Measured on the stack that carries the Compton Doppler rewrite (#85), 10M
 //! histories at seed 20260913 then 50M at seed 7: W -0.018% / -0.042%,
-//! Pb -0.039% / -0.063%, C -0.009% / +0.011%, O +0.003% / +0.005%. The bias is
+//! Pb -0.039% / -0.063%, C -0.009% / +0.011%, O +0.003% / +0.005%. The bias was
 //! four to five times smaller than filed but the same shape, and at 50M
-//! histories it is still real (Pb 6.6 sigma). The bound below is therefore a
-//! relative one at the level the entry filed, so the sweep cannot drift back
-//! to that magnitude unnoticed, and the residual is recorded rather than
-//! asserted away.
+//! histories still real (Pb 6.6 sigma).
+//!
+//! The cause was the photoelectron's bremsstrahlung direction: the GPU gave the
+//! brem the parent photon's direction, where the CPU and OpenMC both give it a
+//! Sauter-sampled one. The photoelectron carries nearly the whole photon
+//! energy, so in a high-Z medium that brem is a large share of the secondary
+//! flux, and aiming it along the parent's flight out of a central point source
+//! shortened its tracks. Photoelectric is ~2.5% of 1 MeV collisions in Pb and
+//! ~2e-5 in C, which is the whole Z shape. With the GPU sampling the same
+//! Sauter direction, at 50M / seed 7: W -0.015% (z -1.32), Pb -0.003%
+//! (z -0.36), C +0.011% (z +1.02), O +0.004% (z +0.52). Pb's 6.6 sigma is
+//! 0.36 sigma and nothing here is significant.
+//!
+//! The bound below is a relative one, tightened to 0.1% now that the residual
+//! is consistent with zero. It stays well clear of the ~0.02% one-sigma noise
+//! at the default 10M so the sweep cannot drift back unnoticed.
 //!
 //! `YAMC_Z_SWEEP_HISTORIES` and `YAMC_Z_SWEEP_SEED` override the history count
 //! (default 10M) and the seed. Run
@@ -231,17 +243,19 @@ fn total_photon_flux_across_z_matches_the_cpu() {
         ran += 1;
     }
     assert!(ran > 0, "no element had its data present");
-    // The entry filed 0.25% on W and 0.22% on Pb; the residual measured on this
-    // stack is 0.04% to 0.06% on the heavy elements (see the module doc), so a
-    // relative bound at the filed level guards the regression without
-    // asserting the small residual away. `worst_z` is reported for the log.
+    // The entry filed 0.25% on W and 0.22% on Pb. With the photoelectron brem
+    // direction fixed the residual is consistent with zero (see the module
+    // doc), so the bound is 0.1%: ~5 sigma of headroom on the noisiest element
+    // at the default 10M, and tight enough that the old 0.04% to 0.06% heavy-
+    // element bias would show up as a near-miss in the log line below.
+    // `worst_z` is reported for the log.
     eprintln!(
         "worst |z| {worst_z:.2}, worst |GPU/CPU - 1| {:.4}%",
         100.0 * worst_rel
     );
     assert!(
-        worst_rel < 0.002,
-        "worst element {:.3}% from the CPU (photoelectric Z bias at the level the entry filed)",
+        worst_rel < 0.001,
+        "worst element {:.3}% from the CPU (photoelectric Z bias)",
         100.0 * worst_rel
     );
 }
