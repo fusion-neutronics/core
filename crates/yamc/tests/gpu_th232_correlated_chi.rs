@@ -22,8 +22,8 @@
 //! read 0.23 before and 0.006 after on this box. The threshold sits between
 //! them; the per-history claim is the localizer's.
 //!
-//! Run it (needs an f64 GPU and Th232 in the cache; Th232 is not a CI
-//! fixture, so both tests self-skip there):
+//! Run it (Th232 is a CI fixture, so the marginal check runs there; the GPU
+//! run below self-skips without an f64 adapter):
 //!   cargo test -p yamc --features gpu --release \
 //!       --test gpu_th232_correlated_chi -- --nocapture
 

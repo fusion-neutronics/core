@@ -107,7 +107,7 @@ NUCLIDES = [
     # channels (MT 19/20/21/38, each with its own prompt spectrum, while its
     # MT 18 is redundant and carries no neutron product). It covers the
     # per-channel fission chi of issue #425 and the partial-fission-MT draw of
-    # issue #418, and it is the set's only fissionable.
+    # issue #418. It was the set's only fissionable until Th232 below.
     "U240",
     # Carries the MT 91 continuum-inelastic correlated angle-energy law that
     # crates/yamc/tests/correlated_flat_reference_parity.rs samples 4M times
@@ -128,6 +128,24 @@ NUCLIDES = [
     # samples MT 16/22/28/91 two million times through both the legacy product
     # and the flattened path.
     "F19",
+    # Th232 is one of only three ENDF/B-VIII.1 fissionables whose prompt
+    # fission spectrum is a `CorrelatedAngleEnergy` (ENDF File 6 LAW 1), and
+    # `crates/yamc/tests/gpu_th232_correlated_chi.rs` is the guard for the fix
+    # that taught the CPU's `prompt_chi_dist` to flatten that encoding
+    # (issue #34 entry 2). Its non-GPU half has self-skipped on every CI run
+    # since it was written.
+    #
+    # It is also the second fissionable in the set, which is what
+    # `crates/yamc/tests/mixed_fissile_yield_fixture.rs` needs: the per-nuclide
+    # nu_bar / beta rows of issue #93 were only ever checked on a U235 / U238
+    # pair, and those two are 370 MB. Th232 with the U240 already here gives
+    # the same extractor guard for nothing further.
+    #
+    # 54 MB, the second largest entry. The other actinides stay out: U235
+    # (191 MB), U238 (179 MB) and Pu239 (78 MB) are each larger than the rest
+    # of this list put together, and nothing needs them that Th232 + U240 does
+    # not now cover.
+    "Th232",
 ]
 ELEMENTS = ["Be", "Fe", "Li"]
 CHAIN_FIXTURE = "transmutation-endf-b8.1-sfr"

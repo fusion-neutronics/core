@@ -10,11 +10,11 @@
 //! backends. With the kernel on the same scheme, flux and fission rate agree
 //! in mean AND in the per-history standard deviation the tallies report.
 //!
-//! Two fixtures. U240 is the only fissionable nuclide in the fixture set
-//! (its partial fission channels are why it is there, issue #425); at 14 MeV
-//! its fission cross section is about 1.3 b against ~6 b total, so roughly
-//! one collision in five banks progeny under this scheme. U235 runs when the
-//! endf-b8.1 cache has it (it is 189 MB and not a fixture), and is the
+//! Two fixtures. U240 is the fissionable this one runs on (its partial
+//! fission channels are why it is a fixture, issue #425); at 14 MeV its
+//! fission cross section is about 1.3 b against ~6 b total, so roughly one
+//! collision in five banks progeny under this scheme. U235 runs when the
+//! endf-b8.1 cache has it (it is 191 MB and not a fixture), and is the
 //! actinide every other fissile GPU test uses.
 //!
 //! Run it (needs an f64 GPU and the U240 fixture; U235 from the cache):
