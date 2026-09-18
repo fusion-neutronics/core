@@ -6256,6 +6256,7 @@ dependencies = [
 name = "yamc-test-cache"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "tempfile",
  "yamc-nuclide",
 ]
