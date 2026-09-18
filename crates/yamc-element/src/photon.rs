@@ -2356,7 +2356,7 @@ mod tests {
         // Run many relaxation cascades to verify statistical properties
         let n = 2000;
         let mut total_photons = 0;
-        let mut _total_electrons = 0;
+        let mut total_electrons = 0;
         let mut max_photon_energy = 0.0_f64;
 
         for _ in 0..n {
@@ -2378,7 +2378,7 @@ mod tests {
                     total_photons += 1;
                     max_photon_energy = max_photon_energy.max(e);
                 } else {
-                    _total_electrons += 1;
+                    total_electrons += 1;
                 }
             }
         }
@@ -2387,6 +2387,20 @@ mod tests {
         assert!(
             total_photons > 0,
             "Fe K-shell relaxation should produce fluorescent photons"
+        );
+
+        // A cascade emits SEVERAL Auger electrons, not one: the K vacancy's
+        // non-radiative transition leaves two new vacancies, each of which
+        // relaxes in turn. Every one of them is a bremsstrahlung source, which
+        // is why `photon_photoelectric` loops `bank_ttb_photons` over the whole
+        // Auger list and why the GPU kernel TTBs every hop's Auger rather than
+        // just the first (fusion-neutronics/core#31). Fe averages ~4.9 Augers
+        // per K-shell cascade; assert well clear of 1 so a consumer that keeps
+        // only the first is visibly wrong here.
+        let mean_augers = total_electrons as f64 / n as f64;
+        assert!(
+            mean_augers > 2.0,
+            "Fe K-shell cascade should emit several Auger electrons per cascade, got {mean_augers}"
         );
         // Max fluorescent photon energy should be near K-shell binding energy
         // (Fe K-alpha ~ 6.4 keV)

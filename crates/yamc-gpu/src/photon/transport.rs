@@ -19,8 +19,8 @@
 //!   `μ = 1 − 2·x² / x²_max` with a Klein-Nishina-style angular
 //!   acceptance `0.5·(1 + μ²)`.
 //! - Photoelectric → full atomic-relaxation cascade: sample the
-//!   absorbing subshell, then emit fluorescent X-rays / first-Auger
-//!   electrons (the latter fed to TTB) -- matches the CPU
+//!   absorbing subshell, then emit fluorescent X-rays and Auger
+//!   electrons, every one of the latter fed to TTB -- matches the CPU
 //!   `sample_photoelectric_subshell` + `atomic_relaxation` chain.
 //! - Pair production → sample the e⁻/e⁺ energies and angles, run TTB
 //!   bremsstrahlung on each, and emit two 511 keV annihilation
@@ -32,9 +32,10 @@
 //!   photon-heating estimate `calculate_photon_xs().heating`
 //!   (issue #356).
 //!
-//! Still out of scope (the CPU pipeline handles these): multi-hop
-//! Auger-cascade TTB (only the first Auger electron is TTB'd here),
-//! and explicit secondary-electron transport.
+//! Still out of scope (the CPU pipeline handles these): TTB on the
+//! Auger electrons of the *Compton* relaxation cascade (the
+//! photoelectric cascade TTBs all of them), and explicit
+//! secondary-electron transport.
 //!
 //! ## Reproducibility
 //!
@@ -1393,18 +1394,16 @@ fn multi_cell_photon_transport_kernel(
 
                     if rxn_kind == 2u32 {
                         // Photoelectric absorption -- sample which
-                        // subshell absorbs the photon (slice 3b);
-                        // compute photoelectron KE = E - E_binding;
-                        // emit TTB bremsstrahlung from the
-                        // photoelectron; then run single-hop atomic
-                        // relaxation to emit a fluorescent X-ray (if
-                        // the sampled transition is radiative).
-                        // Auger electrons (non-radiative transitions)
-                        // are not yet TTB'd -- they're dropped, a
-                        // known under-shoot for low-Z materials where
-                        // Auger dominates. Mirrors CPU's
+                        // subshell absorbs the photon; compute
+                        // photoelectron KE = E - E_binding; run the
+                        // full atomic-relaxation cascade, emitting a
+                        // fluorescent X-ray per radiative transition
+                        // and TTB-radiating the Auger electron of
+                        // every non-radiative one; then TTB the
+                        // photoelectron. Mirrors CPU's
                         // `sample_photoelectric_subshell` +
-                        // `atomic_relaxation` chain.
+                        // `atomic_relaxation` + `bank_ttb_photons`
+                        // chain.
 
                         // ---- 1. Sample subshell. Two-pass: total →
                         // cumulative comparison. Matches CPU's
@@ -1459,51 +1458,34 @@ fn multi_cell_photon_transport_kernel(
                             energy * 0.0_f64
                         };
 
-                        // ---- 3. Multi-hop atomic relaxation
-                        // cascade. Mirrors CPU's `atomic_relaxation`:
-                        // a per-thread hole stack tracks pending
-                        // vacancies. For each, sample one transition;
-                        // push the primary-electron's source vacancy
-                        // onto the hole stack (always) plus the
-                        // secondary vacancy for non-radiative
-                        // transitions. Radiative -> push fluorescent
-                        // photon onto the cascade stack. Non-radiative
-                        // -> the Auger electron's KE feeds the inline
-                        // TTB pass below; only the *first* Auger
-                        // electron is TTB'd because we have a single
-                        // inline TTB block per electron source -- the
-                        // shallow cascade hops past that lose their
-                        // electron's brem photons. The fluor chain is
-                        // preserved in full.
-                        let mut auger_ke = energy * 0.0_f64;
-                        // Direction of the (first) Auger electron,
-                        // sampled isotropically inside the cascade loop
-                        // -- matches CPU's `atomic_relaxation` at
-                        // `crates/yamc-element/src/photon.rs:815`. Only
-                        // read when `got_auger == 1u32`, which gates the
-                        // downstream Auger-TTB block, so the initial
-                        // value below is never observed.
-                        let mut auger_dx = dx * 0.0_f64;
-                        let mut auger_dy = dy * 0.0_f64;
-                        let mut auger_dz = dz * 0.0_f64 + 1.0_f64;
-                        // Full atomic-relaxation cascade over the whole vacancy
-                        // tree, mirroring CPU `atomic_relaxation`
-                        // (crates/yamc-element/src/photon.rs:948). `ar_holes`
+                        // ---- 3. Multi-hop atomic relaxation cascade over the
+                        // whole vacancy tree, mirroring CPU `atomic_relaxation`
+                        // (crates/yamc-element/src/photon.rs:1104). `ar_holes`
                         // (declared unconditionally with the emission stacks;
                         // size 8 >= CPU MAX_STACK_SIZE=7) is the pending-vacancy
                         // stack. Each pop samples one transition and pushes the
                         // primary vacancy always, plus the secondary (Auger)
                         // vacancy for a non-radiative transition -- so deep
                         // high-Z cascades and Auger-branch fluorescence are
-                        // followed in full (the old 4-slot, primary-only variant
-                        // truncated them, under-producing the soft fluorescence
-                        // lines vs CPU). Radiative -> push fluorescent X-ray;
+                        // followed in full. Radiative -> push fluorescent X-ray;
                         // a shell with no transitions emits a photon at its
-                        // binding energy (CPU:972-977). The first Auger's KE
-                        // feeds the inline TTB below; per-Auger TTB is a
-                        // negligible sub-1 keV effect, deferred (see #37).
+                        // binding energy (CPU:1125-1131). Non-radiative -> the
+                        // Auger electron's KE and direction land in
+                        // `auger_ke` / `auger_d*` and are TTB'd by the block at
+                        // the bottom of the same hop, so every Auger of the
+                        // cascade radiates, not just the first.
                         // `cascade_iter` bounds the loop trip count for SPIRV.
-                        let mut got_auger = 0u32;
+                        //
+                        // `auger_ke` / `auger_d*` are hop-local in effect but
+                        // declared outside the loop: cubecl needs the binding to
+                        // outlive the loop body it is assigned in. The direction
+                        // is the per-hop isotropic one, matching CPU
+                        // `atomic_relaxation`, which hands each Auger its own
+                        // `isotropic_direction` to `bank_ttb_photons`.
+                        let mut auger_ke = energy * 0.0_f64;
+                        let mut auger_dx = dx * 0.0_f64;
+                        let mut auger_dy = dy * 0.0_f64;
+                        let mut auger_dz = dz * 0.0_f64 + 1.0_f64;
                         let mut n_holes = 0u32;
                         if ar_has == 1u32 {
                             ar_holes[0] = sampled_shell;
@@ -1512,6 +1494,10 @@ fn multi_cell_photon_transport_kernel(
                         let mut cascade_iter = 0u32;
                         while n_holes > 0u32 && cascade_iter < 64u32 {
                             cascade_iter += 1u32;
+                            // Clear the Auger slot for this hop. Only a
+                            // non-radiative transition refills it; anything else
+                            // leaves KE 0, which the TTB guard below rejects.
+                            auger_ke = energy * 0.0_f64;
                             n_holes -= 1u32;
                             let i_hole = ar_holes[n_holes as usize];
                             if i_hole != 4_294_967_295u32 && i_hole < ar_ns {
@@ -1577,18 +1563,17 @@ fn multi_cell_photon_transport_kernel(
                                     } else {
                                         // Non-radiative: push the secondary
                                         // (Auger) vacancy so its own cascade is
-                                        // followed too; TTB the first Auger only.
+                                        // followed too, and hand the Auger
+                                        // electron to the TTB pass at the
+                                        // bottom of this hop.
                                         if secondary < ar_ns && n_holes < 8u32 {
                                             ar_holes[n_holes as usize] = secondary;
                                             n_holes += 1u32;
                                         }
-                                        if got_auger == 0u32 {
-                                            auger_ke = e_trans;
-                                            auger_dx = iso_dx;
-                                            auger_dy = iso_dy;
-                                            auger_dz = iso_dz;
-                                            got_auger = 1u32;
-                                        }
+                                        auger_ke = e_trans;
+                                        auger_dx = iso_dx;
+                                        auger_dy = iso_dy;
+                                        auger_dz = iso_dz;
                                     }
                                 } else {
                                     // No transition data: emit a photon at the
@@ -1607,9 +1592,152 @@ fn multi_cell_photon_transport_kernel(
                                     }
                                 }
                             }
+
+                            // ---- TTB on this hop's Auger electron. Runs once per
+                            // cascade hop, inside the loop, so *every* Auger of the
+                            // cascade radiates -- matching CPU `photon_photoelectric`,
+                            // which loops `bank_ttb_photons` over the whole
+                            // `auger_electrons` vector
+                            // (crates/yamc/src/transport/photon.rs:375). `auger_ke` is
+                            // zeroed at the top of each hop, so hops that took a
+                            // radiative transition (or no transition at all) fall
+                            // through the cutoff guard with nothing to radiate.
+                            let electron_ke = auger_ke;
+                            if electron_ke > photon_cutoff
+                                && ttb_has_data[mat_idx as usize] == 1u32
+                                && n_ttb_e >= 2u32
+                                && current_depth < 3u32
+                            {
+                                let log_ke = ln_f64(electron_ke);
+                                let mut j_lo = 0u32;
+                                let mut j_hi = n_ttb_e;
+                                let mut j_iter = 0u32;
+                                while j_iter < 16u32 && j_lo + 1u32 < j_hi {
+                                    let j_mid = (j_lo + j_hi) / 2u32;
+                                    if ttb_e_grid_log[j_mid as usize] <= log_ke {
+                                        j_lo = j_mid;
+                                    } else {
+                                        j_hi = j_mid;
+                                    }
+                                    j_iter += 1u32;
+                                }
+                                let mut j_idx = j_lo;
+                                if j_idx >= n_ttb_e - 1u32 {
+                                    j_idx = n_ttb_e - 2u32;
+                                }
+                                let e_l_log = ttb_e_grid_log[j_idx as usize];
+                                let e_r_log = ttb_e_grid_log[(j_idx + 1u32) as usize];
+                                let denom_e = e_r_log - e_l_log;
+                                let mut f_int = 0.0_f64;
+                                if denom_e > 1e-30 {
+                                    f_int = (log_ke - e_l_log) / denom_e;
+                                }
+                                let yield_off = mat_idx * n_ttb_e;
+                                let y_l = ttb_electron_yield[(yield_off + j_idx) as usize];
+                                let y_r = ttb_electron_yield[(yield_off + j_idx + 1u32) as usize];
+                                let y = exp_f64(y_l + (y_r - y_l) * f_int);
+
+                                let d_n = crate::common::pcg32::draw_uniform(state);
+                                state = d_n.state;
+                                let xi_n = d_n.xi;
+                                let n_int = y as u32;
+                                let frac_y = y - (n_int as f64);
+                                let mut n_photons = n_int;
+                                if xi_n < frac_y {
+                                    n_photons += 1u32;
+                                }
+
+                                let d_ie = crate::common::pcg32::draw_uniform(state);
+                                state = d_ie.state;
+                                let xi_ie = d_ie.xi;
+
+                                let slab_off = mat_idx * n_ttb_e * n_ttb_e;
+                                let mut i_e = j_idx;
+                                let mut c_max = 0.0_f64;
+                                if xi_ie <= f_int || j_idx == 0u32 {
+                                    i_e = j_idx + 1u32;
+                                    let p_l = ttb_electron_pdf
+                                        [(slab_off + i_e * n_ttb_e + (i_e - 1u32)) as usize];
+                                    let p_r =
+                                        ttb_electron_pdf[(slab_off + i_e * n_ttb_e + i_e) as usize];
+                                    let c_l = ttb_electron_cdf
+                                        [(slab_off + i_e * n_ttb_e + (i_e - 1u32)) as usize];
+                                    let a_int = ln_f64(p_r / p_l) / denom_e + 1.0;
+                                    let exp_term = exp_f64(a_int * (log_ke - e_l_log)) - 1.0;
+                                    c_max = c_l + exp_f64(e_l_log) * p_l / a_int * exp_term;
+                                } else {
+                                    i_e = j_idx;
+                                    c_max =
+                                        ttb_electron_cdf[(slab_off + i_e * n_ttb_e + i_e) as usize];
+                                }
+
+                                let mut e_lost = electron_ke * 0.0_f64;
+                                let mut k_photon = 0u32;
+                                while k_photon < n_photons
+                                    && stack_size < PHOTON_CASCADE_STACK_CAP
+                                    && i_e >= 2u32
+                                {
+                                    let d_c = crate::common::pcg32::draw_uniform(state);
+                                    state = d_c.state;
+                                    let xi_c = d_c.xi;
+                                    let c = xi_c * c_max;
+
+                                    let cdf_row_off = slab_off + i_e * n_ttb_e;
+                                    let mut iw_lo = 0u32;
+                                    let mut iw_hi = i_e;
+                                    let mut iw_iter = 0u32;
+                                    while iw_iter < 16u32 && iw_lo + 1u32 < iw_hi {
+                                        let iw_mid = (iw_lo + iw_hi) / 2u32;
+                                        if ttb_electron_cdf[(cdf_row_off + iw_mid) as usize] <= c {
+                                            iw_lo = iw_mid;
+                                        } else {
+                                            iw_hi = iw_mid;
+                                        }
+                                        iw_iter += 1u32;
+                                    }
+                                    let i_w = iw_lo;
+
+                                    let w_l_log = ttb_e_grid_log[i_w as usize];
+                                    let w_r_log = ttb_e_grid_log[(i_w + 1u32) as usize];
+                                    let p_l_w = ttb_electron_pdf[(cdf_row_off + i_w) as usize];
+                                    let p_r_w =
+                                        ttb_electron_pdf[(cdf_row_off + i_w + 1u32) as usize];
+                                    let c_l_w = ttb_electron_cdf[(cdf_row_off + i_w) as usize];
+                                    let mut w =
+                                        ttb_photon_energy(c, w_l_log, w_r_log, p_l_w, p_r_w, c_l_w);
+
+                                    // Auger-TTB brem photons inherit
+                                    // the Auger electron's (isotropic)
+                                    // direction sampled in the multi-
+                                    // hop loop above, not the parent
+                                    // photon's direction -- matches CPU
+                                    // `thick_target_bremsstrahlung`,
+                                    // which is fed the electron's
+                                    // direction by
+                                    // `atomic_relaxation`.
+                                    if w > photon_cutoff && stack_size < PHOTON_CASCADE_STACK_CAP {
+                                        if e_lost + w > electron_ke {
+                                            w = electron_ke - e_lost;
+                                        }
+                                        if w > photon_cutoff {
+                                            stack_e[stack_size as usize] = w;
+                                            stack_dx[stack_size as usize] = auger_dx;
+                                            stack_dy[stack_size as usize] = auger_dy;
+                                            stack_dz[stack_size as usize] = auger_dz;
+                                            stack_px[stack_size as usize] = px;
+                                            stack_py[stack_size as usize] = py;
+                                            stack_pz[stack_size as usize] = pz;
+                                            stack_depth[stack_size as usize] = current_depth + 1u32;
+                                            stack_size += 1u32;
+                                            e_lost += w;
+                                        }
+                                    }
+                                    k_photon += 1u32;
+                                }
+                            }
                         }
 
-                        // ---- 4a. TTB pass on the photoelectron.
+                        // ---- 4. TTB pass on the photoelectron.
                         let electron_ke = (energy - e_b_k).max(0.0_f64);
                         // Cap cascade at depth 3 -- primary + two
                         // generations of cascade photons trigger
@@ -1776,157 +1904,6 @@ fn multi_cell_photon_transport_kernel(
                             }
                         }
                         // ----------- end TTB sampling -----------
-
-                        // ---- 4b. TTB pass on the Auger electron
-                        // (non-radiative atomic-relaxation product).
-                        // Wrapped in `{}` to give the inner bindings
-                        // a fresh scope so they shadow the
-                        // photoelectron-TTB bindings cleanly. We
-                        // duplicate the TTB block rather than wrap
-                        // both passes in a `for` / `while` loop --
-                        // empirically (on this kernel + cubecl
-                        // version), wrapping the TTB body in a
-                        // multi-iter loop doubled the kernel's
-                        // track-length tally even when the second
-                        // iteration's runtime if-guard skipped the
-                        // body. Root cause is in cubecl/SPIR-V
-                        // codegen of nested loops around mutating
-                        // bodies; sidestepped by inline duplication.
-                        {
-                            let electron_ke = auger_ke;
-                            if electron_ke > photon_cutoff
-                                && ttb_has_data[mat_idx as usize] == 1u32
-                                && n_ttb_e >= 2u32
-                                && current_depth < 3u32
-                            {
-                                let log_ke = ln_f64(electron_ke);
-                                let mut j_lo = 0u32;
-                                let mut j_hi = n_ttb_e;
-                                let mut j_iter = 0u32;
-                                while j_iter < 16u32 && j_lo + 1u32 < j_hi {
-                                    let j_mid = (j_lo + j_hi) / 2u32;
-                                    if ttb_e_grid_log[j_mid as usize] <= log_ke {
-                                        j_lo = j_mid;
-                                    } else {
-                                        j_hi = j_mid;
-                                    }
-                                    j_iter += 1u32;
-                                }
-                                let mut j_idx = j_lo;
-                                if j_idx >= n_ttb_e - 1u32 {
-                                    j_idx = n_ttb_e - 2u32;
-                                }
-                                let e_l_log = ttb_e_grid_log[j_idx as usize];
-                                let e_r_log = ttb_e_grid_log[(j_idx + 1u32) as usize];
-                                let denom_e = e_r_log - e_l_log;
-                                let mut f_int = 0.0_f64;
-                                if denom_e > 1e-30 {
-                                    f_int = (log_ke - e_l_log) / denom_e;
-                                }
-                                let yield_off = mat_idx * n_ttb_e;
-                                let y_l = ttb_electron_yield[(yield_off + j_idx) as usize];
-                                let y_r = ttb_electron_yield[(yield_off + j_idx + 1u32) as usize];
-                                let y = exp_f64(y_l + (y_r - y_l) * f_int);
-
-                                let d_n = crate::common::pcg32::draw_uniform(state);
-                                state = d_n.state;
-                                let xi_n = d_n.xi;
-                                let n_int = y as u32;
-                                let frac_y = y - (n_int as f64);
-                                let mut n_photons = n_int;
-                                if xi_n < frac_y {
-                                    n_photons += 1u32;
-                                }
-
-                                let d_ie = crate::common::pcg32::draw_uniform(state);
-                                state = d_ie.state;
-                                let xi_ie = d_ie.xi;
-
-                                let slab_off = mat_idx * n_ttb_e * n_ttb_e;
-                                let mut i_e = j_idx;
-                                let mut c_max = 0.0_f64;
-                                if xi_ie <= f_int || j_idx == 0u32 {
-                                    i_e = j_idx + 1u32;
-                                    let p_l = ttb_electron_pdf
-                                        [(slab_off + i_e * n_ttb_e + (i_e - 1u32)) as usize];
-                                    let p_r =
-                                        ttb_electron_pdf[(slab_off + i_e * n_ttb_e + i_e) as usize];
-                                    let c_l = ttb_electron_cdf
-                                        [(slab_off + i_e * n_ttb_e + (i_e - 1u32)) as usize];
-                                    let a_int = ln_f64(p_r / p_l) / denom_e + 1.0;
-                                    let exp_term = exp_f64(a_int * (log_ke - e_l_log)) - 1.0;
-                                    c_max = c_l + exp_f64(e_l_log) * p_l / a_int * exp_term;
-                                } else {
-                                    i_e = j_idx;
-                                    c_max =
-                                        ttb_electron_cdf[(slab_off + i_e * n_ttb_e + i_e) as usize];
-                                }
-
-                                let mut e_lost = electron_ke * 0.0_f64;
-                                let mut k_photon = 0u32;
-                                while k_photon < n_photons
-                                    && stack_size < PHOTON_CASCADE_STACK_CAP
-                                    && i_e >= 2u32
-                                {
-                                    let d_c = crate::common::pcg32::draw_uniform(state);
-                                    state = d_c.state;
-                                    let xi_c = d_c.xi;
-                                    let c = xi_c * c_max;
-
-                                    let cdf_row_off = slab_off + i_e * n_ttb_e;
-                                    let mut iw_lo = 0u32;
-                                    let mut iw_hi = i_e;
-                                    let mut iw_iter = 0u32;
-                                    while iw_iter < 16u32 && iw_lo + 1u32 < iw_hi {
-                                        let iw_mid = (iw_lo + iw_hi) / 2u32;
-                                        if ttb_electron_cdf[(cdf_row_off + iw_mid) as usize] <= c {
-                                            iw_lo = iw_mid;
-                                        } else {
-                                            iw_hi = iw_mid;
-                                        }
-                                        iw_iter += 1u32;
-                                    }
-                                    let i_w = iw_lo;
-
-                                    let w_l_log = ttb_e_grid_log[i_w as usize];
-                                    let w_r_log = ttb_e_grid_log[(i_w + 1u32) as usize];
-                                    let p_l_w = ttb_electron_pdf[(cdf_row_off + i_w) as usize];
-                                    let p_r_w =
-                                        ttb_electron_pdf[(cdf_row_off + i_w + 1u32) as usize];
-                                    let c_l_w = ttb_electron_cdf[(cdf_row_off + i_w) as usize];
-                                    let mut w =
-                                        ttb_photon_energy(c, w_l_log, w_r_log, p_l_w, p_r_w, c_l_w);
-
-                                    // Auger-TTB brem photons inherit
-                                    // the Auger electron's (isotropic)
-                                    // direction sampled in the multi-
-                                    // hop loop above, not the parent
-                                    // photon's direction -- matches CPU
-                                    // `thick_target_bremsstrahlung`,
-                                    // which is fed the electron's
-                                    // direction by
-                                    // `atomic_relaxation`.
-                                    if w > photon_cutoff && stack_size < PHOTON_CASCADE_STACK_CAP {
-                                        if e_lost + w > electron_ke {
-                                            w = electron_ke - e_lost;
-                                        }
-                                        if w > photon_cutoff {
-                                            stack_e[stack_size as usize] = w;
-                                            stack_dx[stack_size as usize] = auger_dx;
-                                            stack_dy[stack_size as usize] = auger_dy;
-                                            stack_dz[stack_size as usize] = auger_dz;
-                                            stack_px[stack_size as usize] = px;
-                                            stack_py[stack_size as usize] = py;
-                                            stack_pz[stack_size as usize] = pz;
-                                            stack_depth[stack_size as usize] = current_depth + 1u32;
-                                            stack_size += 1u32;
-                                            e_lost += w;
-                                        }
-                                    }
-                                    k_photon += 1u32;
-                                }
-                            }
-                        }
                         // ----------- end photoelectric branch -----------
 
                         alive = 0u32;
