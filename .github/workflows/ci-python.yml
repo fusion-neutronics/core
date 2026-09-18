@@ -1072,6 +1072,15 @@ jobs:
           echo "$out" | grep -qE 'Literal\[True\].*\[assignment\]' || { echo "::error::missing expected transmutation_reactions = True [assignment] error" >&2; exit 1; }
           # and the other three take no bool at all.
           echo "$out" | grep -qE 'expression has type "bool".*variable has type "str \| None"' || { echo "::error::missing expected transmutation_decay_data = False [assignment] error" >&2; exit 1; }
+          # Weight-window `mesh` is `&Bound<PyAny>` in the bindings, so the
+          # constructor can name the rectangular-mesh-only limitation itself.
+          # Grepping for the expected type is what proves the
+          # `#[gen_stub(override_type(...))]` override survived: with the bare
+          # `typing.Any` pyo3-stub-gen infers, these three lines go quiet
+          # (issue #121).
+          echo "$out" | grep -q 'Argument "mesh" to "WeightWindowBounds".*expected "RegularRectangularMesh".*\[arg-type\]' || { echo "::error::missing expected WeightWindowBounds mesh [arg-type] error" >&2; exit 1; }
+          echo "$out" | grep -q 'Argument "mesh" to "WeightWindowGeneratorDeGVR".*expected "RegularRectangularMesh".*\[arg-type\]' || { echo "::error::missing expected WeightWindowGeneratorDeGVR mesh [arg-type] error" >&2; exit 1; }
+          echo "$out" | grep -q 'Argument "particle" to "WeightWindowGeneratorDeGVR".*\[arg-type\]' || { echo "::error::missing expected WeightWindowGeneratorDeGVR particle [arg-type] error" >&2; exit 1; }
           echo "Stubs correctly rejected the negative cases."
 
   # The versions are in the files, so nothing downstream reads the tag to learn

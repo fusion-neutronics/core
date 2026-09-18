@@ -69,3 +69,26 @@ assert_type(yamc.materials.pnnl.search("concrete"), list[str])
 assert_type(yamc.materials.pnnl.names(), list[str])
 assert_type(yamc.materials.collections(), list[str])
 assert_type(yamc.materials.pnnl.citation, str)
+
+# --- Weight-window constructors take a rectangular mesh, not Any ------------
+# `mesh` is `&Bound<PyAny>` in the bindings so the constructor can raise a
+# refusal that names the rectangular-mesh-only limitation, which pyo3-stub-gen
+# cannot see through. A `#[gen_stub(override_type(...))]` on the argument puts
+# the real type back (issue #121), and `assert_type` below would not fail if it
+# regressed to `Any`, so the negative cases in sample_errors.py are what guard
+# it. These prove the accepting side still type-checks.
+ww_mesh = yamc.RegularRectangularMesh(
+    lower_left=[0.0, 0.0, 0.0], upper_right=[1.0, 1.0, 1.0], shape=[2, 2, 2]
+)
+assert_type(ww_mesh, yamc.RegularRectangularMesh)
+
+bounds = yamc.WeightWindowBounds(mesh=ww_mesh, lower_bounds=[0.5] * 8)
+assert_type(bounds, yamc.WeightWindowBounds)
+
+# `particle` takes a single name or a list of them, which the stub now says.
+gen_one = yamc.WeightWindowGeneratorDeGVR(mesh=ww_mesh, particle="photon")
+assert_type(gen_one, yamc.WeightWindowGeneratorDeGVR)
+gen_both = yamc.WeightWindowGeneratorDeGVR(
+    mesh=ww_mesh, particle=["neutron", "photon"]
+)
+assert_type(gen_both, yamc.WeightWindowGeneratorDeGVR)

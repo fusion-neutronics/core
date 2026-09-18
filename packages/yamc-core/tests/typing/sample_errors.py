@@ -26,3 +26,14 @@ yamc.transmutation_reactions = True  # ERROR
 
 # and the other three subsections take no bool at all.
 yamc.transmutation_decay_data = False  # ERROR
+
+# Weight windows are defined on a rectangular mesh only. A cylindrical mesh is
+# the mistake the runtime refusal was written for, and with `mesh: typing.Any`
+# in the stub it type-checked clean and only failed when run (issue #121).
+_cyl = yamc.RegularCylindricalMesh(r_bounds=(0.0, 1.0), z_bounds=(0.0, 1.0), shape=[2, 2, 2])
+yamc.WeightWindowBounds(mesh=_cyl, lower_bounds=[0.5])  # ERROR
+yamc.WeightWindowGeneratorDeGVR(mesh=_cyl)  # ERROR
+
+# `particle` is a name or a list of names, never a number.
+_rect = yamc.RegularRectangularMesh(lower_left=[0.0] * 3, upper_right=[1.0] * 3, shape=[1, 1, 1])
+yamc.WeightWindowGeneratorDeGVR(mesh=_rect, particle=5)  # ERROR
