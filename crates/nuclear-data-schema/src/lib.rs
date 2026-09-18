@@ -21,8 +21,7 @@
 //! - [`photon`] -- `{element}.arrow/`
 //! - [`transmutation`] -- `transmutation_{library}.arrow/<subsection>/`
 
-use arrow_schema::{DataType, Field, Schema};
-use std::collections::HashMap;
+use arrow_schema::{DataType, Field, Metadata, Schema};
 use std::sync::Arc;
 
 /// Where each (MT, temperature) lives inside a published `reactions.arrow`, so
@@ -190,59 +189,32 @@ fn f64ss(name: &str, nullable: bool) -> Field {
     Field::new(name, list_of(list_of(DataType::Float64)), nullable)
 }
 
-/// Schema metadata, built so that it ITERATES IN SORTED KEY ORDER.
+/// Schema metadata, which iterates in sorted key order.
 ///
 /// Arrow writes schema metadata in the map's iteration order and does not sort
-/// it (`arrow-ipc`, `metadata_to_fb`). `std`'s `HashMap` seeds its hasher per
-/// instance, so the same conversion run twice writes `filetype,version` or
-/// `version,filetype` at random. The data is identical either way, but the
-/// FILE is not: a converted `element.arrow` came out as one of two byte
-/// patterns differing in 114 bytes, all inside the two schema blocks. That
-/// makes a published library impossible to checksum and makes a rebuild look
-/// like it changed every file (issue #441).
+/// it (`arrow-ipc`, `metadata_to_fb`), so the order here is the order on disk.
+/// That matters because a published library has to be checksummable: when the
+/// order was a `HashMap`'s, the same conversion run twice wrote
+/// `filetype,version` or `version,filetype` at random, and a converted
+/// `element.arrow` came out as one of two byte patterns differing in 114 bytes,
+/// all inside the two schema blocks. A rebuild then looked like it had changed
+/// every file (issue #441).
 ///
-/// The type is not ours to choose: `arrow_schema::Schema::metadata` is a
-/// concrete `HashMap<String, String>`, so a `BTreeMap` or a fixed hasher
-/// cannot be substituted. What can be chosen is WHICH `HashMap`. A fresh one
-/// gets a fresh seed, so building it again gives an independent order, and one
-/// whose order is already sorted is kept.
+/// Since arrow 60, `arrow_schema::Schema::metadata` is a `Metadata` newtype over
+/// a `BTreeMap`, which is ordered by construction, so collecting into it is
+/// enough (issue #28). Before that the field was a concrete
+/// `HashMap<String, String>`, which could be neither swapped for a `BTreeMap`
+/// nor given a fixed hasher, and this function held a build-and-check loop that
+/// rebuilt the map until a fresh hasher seed happened to yield sorted order.
 ///
-/// The cost is small and measured: for the two-key maps this format uses, the
-/// mean is 1.63 attempts and the worst seen in 200 trials was 7. The bound
-/// below is far above that, and reaching it returns the map anyway rather than
-/// looping or panicking, since an unsorted map is the behaviour we have today
-/// and not a regression.
-///
-/// # Removing this
-///
-/// arrow's `main` replaces the field with a `Metadata` newtype over a
-/// `BTreeMap`, which is ordered by construction. When that ships, this whole
-/// function becomes a plain `collect()` again.
-///
-/// Nothing will tell you. `impl From<HashMap<String, String>> for Metadata`
-/// sorts on conversion, so this keeps compiling, the determinism tests keep
-/// passing, and the loop simply runs for nothing. That is why removal is
-/// tracked as an issue rather than left to a compiler error to surface: the
-/// cost of leaving it is a couple of two-entry map builds per file written,
-/// which is why it will otherwise sit here forever.
-fn meta<const N: usize>(pairs: [(&str, &str); N]) -> HashMap<String, String> {
-    // 1/N! chance per attempt, so 64 is beyond generous for N <= 3 and still
-    // terminates instantly if a future section ever carries more keys.
-    const ATTEMPTS: usize = 64;
-    let build = || -> HashMap<String, String> {
-        pairs
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
-    };
-    for _ in 0..ATTEMPTS {
-        let map = build();
-        let keys: Vec<&String> = map.keys().collect();
-        if keys.windows(2).all(|w| w[0] <= w[1]) {
-            return map;
-        }
-    }
-    build()
+/// The determinism tests that pinned that loop are kept as they are: they assert
+/// the property this format needs, not the mechanism that delivers it, so they
+/// go on being the thing that would catch a regression here.
+fn meta<const N: usize>(pairs: [(&str, &str); N]) -> Metadata {
+    pairs
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
 }
 
 /// `branching/branching.arrow`
@@ -751,9 +723,12 @@ mod determinism {
 
     /// Built repeatedly, the order must not change.
     ///
-    /// The check above could pass by luck on a single build; this one fails if
-    /// the sorting is dropped, because a fresh `HashMap` reseeds and would
-    /// eventually come out the other way round.
+    /// The check above could pass by luck on a single build. This one is what
+    /// catches a return to a per-instance-seeded map: `HashMap` reseeds, so a
+    /// rebuild would eventually come out the other way round and this would
+    /// fail. Kept after arrow 60 made `Metadata` a `BTreeMap` (issue #28),
+    /// because it asserts the property the published format needs rather than
+    /// whichever mechanism currently provides it.
     #[test]
     fn metadata_order_is_stable_across_rebuilds() {
         let first: Vec<String> = section("nuclide.arrow")

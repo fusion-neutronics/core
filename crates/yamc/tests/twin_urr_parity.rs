@@ -71,20 +71,20 @@ fn cache(n: &str) -> String {
 /// One solid W184 sphere cut into `n_mats` concentric shells, each its own
 /// `Material`. Flux is tallied in the outermost shell.
 fn build(comp: &[(&str, f64)], n_mats: usize) -> Option<(Model, Arc<Tally>, TransportSettings)> {
-    // Usable, not merely present. Checking the cache DIRECTORY exists is not
-    // the same as it being complete: a partially downloaded entry has
-    // `nuclide.arrow` and no `reactions.arrow`, and used to pass this guard and
-    // then fail inside `read_nuclear_data`, so a half-fetched cache surfaced as
-    // a panic on an unrelated-looking line rather than as a skip. Asking for
-    // the two sections a transport load requires puts that answer here, where
-    // the skip belongs, and lets `mk_mat` below treat any later failure as the
-    // real bug it would be.
-    let usable = |n: &str| {
-        let dir = std::path::PathBuf::from(cache(n));
-        ["nuclide.arrow", "energy.arrow", "reactions.arrow"]
-            .iter()
-            .all(|f| dir.join(f).is_file())
-    };
+    // Usable, not merely present, and not merely a file list either. Naming the
+    // sections a transport load needs was the first attempt and it is not
+    // enough: since #389 a cache directory is routinely left at ACTIVATION
+    // scope, carrying `nuclide.arrow` and `reactions.arrow` and none of the
+    // products or distributions. That passes a file check, and the loader does
+    // not object either, because it narrows a `Full` request to the sections on
+    // disk rather than refusing it. The first inelastic scatter then panics with
+    // "Missing product distributions" on an unrelated-looking line instead of
+    // skipping, which is what a restored CI fixture cache did to this test on
+    // windows while every other runner skipped it.
+    //
+    // `transport_nuclide` (#108) reads the directory and answers with the scope
+    // that came back, which is the only thing that separates the two shapes.
+    let usable = |n: &str| yamc_test_cache::transport_nuclide(n).is_some();
     if comp.iter().any(|(n, _)| !usable(n)) {
         return None;
     }
