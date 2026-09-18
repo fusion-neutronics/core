@@ -473,12 +473,24 @@ const EXPECTED_DATA_VERSION: &[(&str, &str)] = &[
     // stopped declaring. A released wheel pinning 2026-09-02 can read none of
     // it, and one pinning this can read none of what came before, which is the
     // coupling issue #366 accepted and #28 in the generation scripts is about.
-    ("tendl-2025", "2026-09-08"),
-    ("tendl-2017", "2026-09-08"),
-    ("fendl-3.2d", "2026-09-08"),
-    ("endf-b8.1", "2026-09-08"),
-    ("jeff-4.0", "2026-09-08"),
-    ("jendl-5.0", "2026-09-08"),
+    //
+    // The 2026-09-18 republish is the format_version 2 one: the union energy
+    // grids moved out of nuclide.arrow into energy.arrow (#100/#109) and
+    // reactions.arrow went to one record batch per (MT, temperature) (#103).
+    // The cross sections were relaid out rather than reconverted, so no value
+    // moved; the chains were rebuilt, so theirs did. All 8047 published markers
+    // carry this stamp and format_version 2, checked over the built tree before
+    // upload.
+    //
+    // This pin MUST NOT ship until every library is live. A wheel pinning
+    // 2026-09-18 fails outright against any library still serving 2026-09-08,
+    // and the six are uploaded one at a time.
+    ("tendl-2025", "2026-09-18"),
+    ("tendl-2017", "2026-09-18"),
+    ("fendl-3.2d", "2026-09-18"),
+    ("endf-b8.1", "2026-09-18"),
+    ("jeff-4.0", "2026-09-18"),
+    ("jendl-5.0", "2026-09-18"),
 ];
 
 /// The `data_version` this build expects for `source`, if it pins one.
