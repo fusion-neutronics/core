@@ -11,10 +11,10 @@ crate-type = ["rlib"]
 [dependencies]
 num-complex = "0.4"
 once_cell = "1.21"
-arrow-array = "53"
+arrow-array = "60"
 # lz4 decodes the option-D IPC-lz4 transmutation sections (pure-Rust lz4_flex).
-arrow-ipc = { version = "53", features = ["lz4"] }
-arrow-schema = "53"
+arrow-ipc = { version = "60", features = ["lz4"] }
+arrow-schema = "60"
 nuclear-data-schema = { path = "../nuclear-data-schema" }
 
 # faer's `rayon` feature would enable internal parallelism in gemm and the

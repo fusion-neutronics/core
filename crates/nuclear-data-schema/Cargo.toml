@@ -16,7 +16,7 @@ path = "src/lib.rs"
 # the same thing: this is not a yamc-* crate, because yani must be able to use
 # it without depending on the transport engine.
 [dependencies]
-arrow-schema = "53"
+arrow-schema = "60"
 
 # `reaction_ranges` parses and renders the index that rides in `version.json`.
 serde_json = "1"

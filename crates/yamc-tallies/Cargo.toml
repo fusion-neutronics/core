@@ -10,9 +10,9 @@ name = "yamc_tallies"
 path = "src/lib.rs"
 
 [dependencies]
-arrow-array = { version = "53", optional = true }
-arrow-ipc = { version = "53", optional = true }
-arrow-schema = { version = "53", optional = true }
+arrow-array = { version = "60", optional = true }
+arrow-ipc = { version = "60", optional = true }
+arrow-schema = { version = "60", optional = true }
 rustc-hash = "2"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
