@@ -26,6 +26,7 @@ cache stamped 2026-08-21, fetched nothing, and failed on
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import pathlib
@@ -198,7 +199,17 @@ def fetch(url: str, dest: pathlib.Path, required: bool, force: bool) -> str:
             # Any other HTTP status is the origin answering, so retrying it
             # only turns one clear failure into four slow ones.
             raise SystemExit(f"failed to fetch {url}: {exc}")
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+        # `http.client.HTTPException` is the body going wrong after the headers
+        # arrived: `IncompleteRead` when the connection drops mid-transfer, which
+        # is the shape a reset takes once `read()` has started. It is not a
+        # `URLError`, so without it here the retry only covered a reset during
+        # the connect.
+        except (
+            urllib.error.URLError,
+            http.client.HTTPException,
+            TimeoutError,
+            ConnectionError,
+        ) as exc:
             if attempt == FETCH_ATTEMPTS:
                 raise SystemExit(
                     f"failed to fetch {url} after {FETCH_ATTEMPTS} attempts: {exc}"
