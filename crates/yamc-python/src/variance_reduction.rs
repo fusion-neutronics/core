@@ -108,6 +108,14 @@ impl PySurvivalBiasing {
 /// saying weight windows are rectangular-mesh-only and that there is nothing
 /// the caller can pass instead today. The GPU dispatch refusals name their
 /// limitation and their remedy; this matches them (issue #113).
+///
+/// The cost is that pyo3-stub-gen cannot see through `PyAny`, so both callers
+/// carry `#[gen_stub(override_type(type_repr = "RegularRectangularMesh"))]` on
+/// the argument to put the real static type back. Without it the stub says
+/// `typing.Any`, which silences the type checker entirely and leaves it
+/// disagreeing with the docstring right above it (issue #121). The negative
+/// cases in `packages/yamc-core/tests/typing/sample_errors.py` are what keep
+/// the override honest.
 fn rectangular_mesh(mesh: &Bound<'_, PyAny>, owner: &str) -> PyResult<PyRegularRectangularMesh> {
     mesh.extract::<PyRegularRectangularMesh>().map_err(|_| {
         pyo3::exceptions::PyTypeError::new_err(format!(
@@ -165,7 +173,7 @@ impl PyWeightWindowBounds {
     #[pyo3(signature = (mesh, lower_bounds, upper_bounds=None, ratio=5.0, energy_bins=None, particle="neutron", survival_factor=3.0, max_split=10, weight_floor=1e-38))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        mesh: &Bound<'_, PyAny>,
+        #[gen_stub(override_type(type_repr = "RegularRectangularMesh"))] mesh: &Bound<'_, PyAny>,
         lower_bounds: Vec<f64>,
         upper_bounds: Option<Vec<f64>>,
         ratio: f64,
@@ -319,8 +327,12 @@ impl PyWeightWindowGeneratorDeGVR {
     #[pyo3(signature = (mesh, energy_bins=None, particle=None, density_reduction=None, ratio=5.0, survival_factor=3.0, max_split=10, weight_floor=1e-38, photon_energy=None))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        mesh: &Bound<'_, PyAny>,
+        #[gen_stub(override_type(type_repr = "RegularRectangularMesh"))] mesh: &Bound<'_, PyAny>,
         energy_bins: Option<Vec<f64>>,
+        #[gen_stub(override_type(
+            type_repr = "typing.Optional[builtins.str | typing.Sequence[builtins.str]]",
+            imports = ("builtins", "typing")
+        ))]
         particle: Option<Bound<'_, PyAny>>,
         density_reduction: Option<f64>,
         ratio: f64,
