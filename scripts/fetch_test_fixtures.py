@@ -26,12 +26,14 @@ cache stamped 2026-08-21, fetched nothing, and failed on
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import pathlib
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -107,7 +109,7 @@ NUCLIDES = [
     # channels (MT 19/20/21/38, each with its own prompt spectrum, while its
     # MT 18 is redundant and carries no neutron product). It covers the
     # per-channel fission chi of issue #425 and the partial-fission-MT draw of
-    # issue #418, and it is the set's only fissionable.
+    # issue #418. It was the set's only fissionable until Th232 below.
     "U240",
     # Carries the MT 91 continuum-inelastic correlated angle-energy law that
     # crates/yamc/tests/correlated_flat_reference_parity.rs samples 4M times
@@ -128,6 +130,24 @@ NUCLIDES = [
     # samples MT 16/22/28/91 two million times through both the legacy product
     # and the flattened path.
     "F19",
+    # Th232 is one of only three ENDF/B-VIII.1 fissionables whose prompt
+    # fission spectrum is a `CorrelatedAngleEnergy` (ENDF File 6 LAW 1), and
+    # `crates/yamc/tests/gpu_th232_correlated_chi.rs` is the guard for the fix
+    # that taught the CPU's `prompt_chi_dist` to flatten that encoding
+    # (issue #34 entry 2). Its non-GPU half has self-skipped on every CI run
+    # since it was written.
+    #
+    # It is also the second fissionable in the set, which is what
+    # `crates/yamc/tests/mixed_fissile_yield_fixture.rs` needs: the per-nuclide
+    # nu_bar / beta rows of issue #93 were only ever checked on a U235 / U238
+    # pair, and those two are 370 MB. Th232 with the U240 already here gives
+    # the same extractor guard for nothing further.
+    #
+    # 54 MB, the second largest entry. The other actinides stay out: U235
+    # (191 MB), U238 (179 MB) and Pu239 (78 MB) are each larger than the rest
+    # of this list put together, and nothing needs them that Th232 + U240 does
+    # not now cover.
+    "Th232",
 ]
 ELEMENTS = ["Be", "Fe", "Li"]
 CHAIN_FIXTURE = "transmutation-endf-b8.1-sfr"
@@ -140,25 +160,63 @@ def cache_root() -> pathlib.Path:
     return pathlib.Path.home() / ".cache" / "yamc"
 
 
+# How many times a section download is attempted before the script gives up,
+# and the base delay between attempts (doubled each time).
+#
+# A 404 is an answer and is never retried; this is for the transport dropping
+# underneath a transfer, which a runner does hit: a windows-latest job took
+# `ConnectionResetError: [WinError 10054] An existing connection was forcibly
+# closed by the remote host` partway through a section and failed the whole
+# job. The sections are tens of megabytes each and the cache is cold on every
+# key change, so one reset in a few hundred requests is enough to be a regular
+# red build.
+FETCH_ATTEMPTS = 4
+FETCH_BACKOFF_SECONDS = 2.0
+
+
 def fetch(url: str, dest: pathlib.Path, required: bool, force: bool) -> str:
     """Fetch one section. Returns 'cached', 'downloaded', or 'absent'."""
     marker = dest.with_name(dest.name + ABSENT_SUFFIX)
     if (dest.exists() or marker.exists()) and not force:
         return "cached"
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(request, timeout=600) as response:
-            payload = response.read()
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404 and not required:
-            # Record the 404 the way the runtime cache does. Without this the
-            # loader cannot tell "this nuclide has no total_nu" from "this
-            # fixture is half-downloaded", and a full-scope read fails with a
-            # bare NotFound (Fe58, which has no total_nu, did exactly that).
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_bytes(b"")
-            return "absent"
-        raise SystemExit(f"failed to fetch {url}: {exc}")
+    payload = None
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=600) as response:
+                payload = response.read()
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404 and not required:
+                # Record the 404 the way the runtime cache does. Without this
+                # the loader cannot tell "this nuclide has no total_nu" from
+                # "this fixture is half-downloaded", and a full-scope read
+                # fails with a bare NotFound (Fe58, which has no total_nu, did
+                # exactly that).
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_bytes(b"")
+                return "absent"
+            # Any other HTTP status is the origin answering, so retrying it
+            # only turns one clear failure into four slow ones.
+            raise SystemExit(f"failed to fetch {url}: {exc}")
+        # `http.client.HTTPException` is the body going wrong after the headers
+        # arrived: `IncompleteRead` when the connection drops mid-transfer, which
+        # is the shape a reset takes once `read()` has started. It is not a
+        # `URLError`, so without it here the retry only covered a reset during
+        # the connect.
+        except (
+            urllib.error.URLError,
+            http.client.HTTPException,
+            TimeoutError,
+            ConnectionError,
+        ) as exc:
+            if attempt == FETCH_ATTEMPTS:
+                raise SystemExit(
+                    f"failed to fetch {url} after {FETCH_ATTEMPTS} attempts: {exc}"
+                ) from exc
+            delay = FETCH_BACKOFF_SECONDS * 2 ** (attempt - 1)
+            print(f"{url}: {exc}; retrying in {delay:.0f}s ({attempt}/{FETCH_ATTEMPTS})")
+            time.sleep(delay)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(payload)
     # A section that used to be absent and is now published must lose its
