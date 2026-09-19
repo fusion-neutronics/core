@@ -100,9 +100,46 @@ pub fn nuclide_path(nuclide: &str) -> String {
 /// regular file at the same path is not one, and admitting it would hand the
 /// loader something it fails on at the first section read, turning a skip into
 /// a panic.
+///
+/// A directory stamped with a `format_version` this build does not read is
+/// rejected for the same reason, and it is not hypothetical: after the
+/// 2026-09-18 republish moved the libraries to format 2, any cache entry the
+/// fetch script does not refresh is left at format 1, the loader refuses it
+/// with "Unsupported Arrow format version: 1 (this build reads 2)", and a test
+/// written to skip on an absent nuclide panics instead. Three files did on a
+/// developer box carrying a pre-republish U235. Being unable to read a fixture
+/// is what the caller means by "this machine cannot run that case", however the
+/// directory came to be unreadable.
+///
+/// Absence is still the only thing reported to CI as a skip, because
+/// `YAMC_REQUIRE_FIXTURES=1` turns the `None` into a failure there
+/// (`crates/yamc/tests/fixture_cache_is_readable.rs`), so a stale fixture is
+/// loud on a runner and quiet on a laptop.
 pub fn nuclide(nuclide: &str) -> Option<String> {
     let path = nuclide_path(nuclide);
-    std::path::Path::new(&path).is_dir().then_some(path)
+    let dir = std::path::Path::new(&path);
+    (dir.is_dir() && format_version_is_readable(dir)).then_some(path)
+}
+
+/// Whether the NUCLIDE cache directory at `dir` carries a `format_version` the
+/// nuclide loader reads. Elements are not checked this way, see [`element`].
+///
+/// True when there is no `version.json` at all, matching the loader: it only
+/// applies the check when the marker is present, so a directory without one is
+/// not rejected here either. An unreadable or malformed marker is treated the
+/// same way, since the loader will not reject it on that basis and this is not
+/// the place to invent a stricter rule.
+pub fn format_version_is_readable(dir: &std::path::Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join("version.json")) else {
+        return true;
+    };
+    let Ok(marker) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return true;
+    };
+    let Some(found) = marker.get("format_version").and_then(|v| v.as_i64()) else {
+        return true;
+    };
+    found == yamc_nuclide::arrow::nuclide_arrow::FORMAT_VERSION
 }
 
 /// Whether the fixture for `nuclide` is cached, as a directory of sections.
@@ -150,8 +187,19 @@ pub fn transport_ready(path: &std::path::Path) -> bool {
 /// `<library>-Fe.arrow`. Named separately because the two are different
 /// fixtures with different sections inside, and a caller asking for one and
 /// getting the other would find out at the first section read.
+///
+/// Presence only, deliberately NOT the `format_version` gate [`nuclide`]
+/// applies. That gate mirrors the nuclide loader, and the element loader has
+/// no counterpart: format 2 moved the neutron energy grids into `energy.arrow`
+/// and split `reactions.arrow` per (MT, temperature), and a photon directory
+/// (`element.arrow`, `subshells.arrow`, `compton.arrow`, `bremsstrahlung.arrow`)
+/// carries none of that. The converter stamps every directory it writes, so a
+/// pre-republish element is stamped 1 and reads exactly as one stamped 2 does;
+/// routing it through the nuclide check reported the W the photon Z sweep had
+/// just run on as absent.
 pub fn element(element: &str) -> Option<String> {
-    nuclide(element)
+    let path = nuclide_path(element);
+    std::path::Path::new(&path).is_dir().then_some(path)
 }
 
 /// Root of the raw ENDF/B-VIII.1 evaluation tree the NJOY-backed tests read.

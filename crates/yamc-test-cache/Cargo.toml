@@ -10,6 +10,10 @@ license = "MIT"
 # where the cache is. A dev-dependency cycle back into this crate is fine:
 # Cargo resolves dev-dependency cycles, and nothing here is built into a wheel.
 yamc-nuclide = { path = "../yamc-nuclide" }
+# For reading a cache directory's `version.json` stamp. Hand-splitting that
+# string would be the kind of parser that survives until someone reformats the
+# marker.
+serde_json = "1.0"
 
 [dev-dependencies]
 # For the activation-scope fixture the transport_ready test builds.

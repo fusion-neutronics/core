@@ -153,7 +153,7 @@ const TRANSPORT_SECTIONS: [&str; 3] = ["products.arrow", "distributions.arrow", 
 /// optional: a v1 folder read by this build would find no grids at all, and a
 /// v2 folder read by an older build would find no `energy_values` column, so
 /// there is no version of "best effort" that produces a correct cross section.
-const FORMAT_VERSION: i64 = 2;
+pub const FORMAT_VERSION: i64 = 2;
 
 /// Which file holds this load's cross sections.
 ///
