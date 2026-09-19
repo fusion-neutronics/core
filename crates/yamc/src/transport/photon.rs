@@ -343,23 +343,11 @@ fn photon_photoelectric<R: rand::Rng + ?Sized>(
     let binding_energy = element.shells[i_shell].binding_energy;
     let electron_energy = particle.energy - binding_energy;
 
-    // Sample photoelectron direction from non-relativistic Sauter distribution
-    // (Sauter, Ann. Phys. 11, 454-488, 1931; sampling per Kaltiaisenaho,
-    // Comput. Phys. Commun. 252, 107143, 2020, Eqns 3.19-3.20).
-    let electron_direction = {
-        let mu_e = loop {
-            let r: f64 = rng.random::<f64>();
-            if 4.0 * (1.0 - r) * r >= rng.random::<f64>() {
-                let rel_vel = (electron_energy * (electron_energy + 2.0 * MASS_ELECTRON_EV)).sqrt()
-                    / (electron_energy + MASS_ELECTRON_EV);
-                break (2.0 * r + rel_vel - 1.0) / (2.0 * rel_vel * r - rel_vel + 1.0);
-            }
-        };
-        let phi_e: f64 = rng.random_range(0.0..std::f64::consts::TAU);
-        // Construct direction in global frame from polar and azimuthal angles
-        let sin_theta = (1.0 - mu_e * mu_e).max(0.0).sqrt();
-        [mu_e, sin_theta * phi_e.cos(), sin_theta * phi_e.sin()]
-    };
+    // Sample photoelectron direction from the non-relativistic Sauter
+    // distribution. Shared with the GPU kernel's `#[cube]` copy, which is
+    // tested against this one.
+    let electron_direction =
+        yamc_physics::photon::photoelectron::sample_photoelectron_direction(electron_energy, rng);
 
     // The photoelectron deposits its kinetic energy locally (minus the
     // TTB-radiated photons banked below), so it is NOT counted here.

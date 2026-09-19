@@ -19,4 +19,5 @@ pub mod photon_element_select;
 pub mod photon_select;
 pub mod rayleigh_scatter;
 pub mod rotate_mu_phi;
+pub mod sauter_direction;
 pub mod sphere_distance;

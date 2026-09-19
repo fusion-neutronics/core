@@ -60,6 +60,7 @@ use crate::common::probes::pe_subshell::sample_pe_subshell;
 use crate::common::probes::photon_element_select::select_photon_element;
 use crate::common::probes::photon_select::select_photon_reaction;
 use crate::common::probes::rayleigh_scatter::rayleigh_propose;
+use crate::common::probes::sauter_direction::sample_sauter_direction;
 use crate::common::tallies::{TalliesPack, TallyVarianceMode};
 use crate::neutron::transport::{
     cyl_mesh_bin_at_kernel, cyl_mesh_score_src_acc, energy_function_weight_kernel,
@@ -1749,6 +1750,38 @@ fn multi_cell_photon_transport_kernel(
                             && n_ttb_e >= 2u32
                             && current_depth < 3u32
                         {
+                            // Photoelectron direction, non-relativistic Sauter
+                            // distribution (Sauter, Ann. Phys. 11, 454-488,
+                            // 1931; sampled per Kaltiaisenaho, Comput. Phys.
+                            // Commun. 252, 107143, 2020, Eqns 3.19-3.20). The
+                            // brem photons inherit it, matching CPU
+                            // `photon_photoelectric` and OpenMC
+                            // `sample_photon_reaction`. Both build the
+                            // direction with the polar axis along +x in the LAB
+                            // frame rather than rotating `mu` into the incident
+                            // photon's frame, so this does the same: the point
+                            // here is CPU/OpenMC parity, and a rotation would
+                            // silently diverge from both.
+                            //
+                            // Inheriting `dx/dy/dz` (the parent photon's
+                            // direction) instead, as this kernel used to, is a
+                            // Z-biased flux error: the photoelectron carries
+                            // nearly the whole photon energy, so in a high-Z
+                            // medium its brem is a large share of the secondary
+                            // flux, and giving that brem the parent's direction
+                            // aims it along the parent's flight rather than
+                            // isotropically-ish off the collision site
+                            // (fusion-neutronics/core#110 entry 1).
+                            //
+                            // Sampled by the shared `sample_sauter_direction`
+                            // probe, the single source of truth, unit-tested
+                            // against the CPU sampler it mirrors.
+                            let pe = sample_sauter_direction(state, electron_ke);
+                            state = pe.state;
+                            let pe_dx = pe.dx;
+                            let pe_dy = pe.dy;
+                            let pe_dz = pe.dz;
+
                             let log_ke = ln_f64(electron_ke);
                             // Binary search for largest j with
                             // ttb_e_grid_log[j] <= log_ke (matches the
@@ -1889,9 +1922,9 @@ fn multi_cell_photon_transport_kernel(
                                     }
                                     if w > photon_cutoff {
                                         stack_e[stack_size as usize] = w;
-                                        stack_dx[stack_size as usize] = dx;
-                                        stack_dy[stack_size as usize] = dy;
-                                        stack_dz[stack_size as usize] = dz;
+                                        stack_dx[stack_size as usize] = pe_dx;
+                                        stack_dy[stack_size as usize] = pe_dy;
+                                        stack_dz[stack_size as usize] = pe_dz;
                                         stack_px[stack_size as usize] = px;
                                         stack_py[stack_size as usize] = py;
                                         stack_pz[stack_size as usize] = pz;
