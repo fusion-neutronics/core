@@ -27,6 +27,13 @@ pub mod wasm {
     pub mod config_wasm;
     pub mod data_wasm;
     pub mod element_wasm;
+    pub mod fetch_plan;
+    // The fetcher itself calls the browser's `fetch`, which only exists on
+    // wasm32. The plan it executes is the cfg-free module above, so the native
+    // `--features wasm-test` build still compiles and tests everything with
+    // arithmetic in it.
+    #[cfg(target_arch = "wasm32")]
+    pub mod fetch_wasm;
     pub mod material_wasm;
     pub mod nuclide_wasm;
     pub mod reaction_wasm;

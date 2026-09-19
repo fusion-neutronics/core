@@ -9,12 +9,15 @@
 //!    string (the one produced by Python's `model.save(path)` or
 //!    `model.export(html)`). The model fully describes geometry,
 //!    materials, source, and tallies; the wasm side just executes it.
-//! 3. `sim.add_file("/<Nuclide>.arrow/<file>", bytes)` once per option-D
-//!    section object the JS host fetched under `<Nuclide>.arrow/`
-//!    (nuclide.arrow, reactions.arrow, version.json, ...). No tar: each
-//!    section is fetched and registered directly. The lz4-compressed
-//!    sections decode transparently in the arrow reader. The model's
-//!    materials reference these paths as `/<Nuclide>.arrow`.
+//! 3. `sim.fetchNuclearData(library_url, on_progress)` fetches every
+//!    section object the model's nuclides need under `<Nuclide>.arrow/`
+//!    (nuclide.arrow, reactions.arrow, version.json, ...) and registers it
+//!    in the store, ranging `reactions.arrow` and `energy.arrow` to the
+//!    material temperatures (see `fetch_wasm`). A host that holds the bytes
+//!    already (embedded data) registers them itself with
+//!    `sim.add_file("/<Nuclide>.arrow/<file>", bytes)`, once per section.
+//!    The lz4-compressed sections decode transparently in the arrow reader.
+//!    The model's materials reference these paths as `/<Nuclide>.arrow`.
 //! 4. `sim.simulate_transport(particles, batches, seed)` -- runs the
 //!    loaded model. Returns JSON: `{status, tritium_mean, tritium_std,
 //!    particles, batches, seed}` on success, `{status: "error",
@@ -51,6 +54,30 @@ pub struct WasmSimulation {
     storage: InMemoryStorage,
     /// `None` until [`WasmSimulation::load_model_json`] is called.
     model: Arc<RwLock<Option<Model>>>,
+}
+
+/// The CSG geometry of a loaded model, or the reason the wasm viewer cannot
+/// use it: mesh-backed models do not plot in the browser yet.
+///
+/// One place for the four viewer entry points that need it. Without the
+/// `mesh` feature the enum has one variant and clippy would rather see a
+/// `let`, but the second arm is exactly what exists under that feature.
+#[allow(clippy::infallible_destructuring_match)]
+fn csg_geometry<'a>(
+    model: &'a Model,
+    what: &str,
+) -> Result<&'a crate::geometry::csg::Geometry, String> {
+    let geom = match &model.geometry {
+        GeometryKind::Csg(g) => g,
+        #[cfg(feature = "mesh")]
+        GeometryKind::Mesh(_) => {
+            return Err(format!(
+                "{what}: mesh-geometry models are not supported in the wasm viewer yet"
+            ))
+        }
+    };
+    let _ = what;
+    Ok(geom)
 }
 
 #[wasm_bindgen]
@@ -125,6 +152,40 @@ impl WasmSimulation {
         model.required_elements().join(",")
     }
 
+    /// The required nuclides whose section set is not in the store yet,
+    /// comma-joined; empty when transport can run. What the host's
+    /// Simulate gate reads, so that the answer comes from the store itself
+    /// rather than from bookkeeping the host keeps beside it.
+    #[wasm_bindgen]
+    pub fn model_missing_nuclides(&self) -> String {
+        let model = self.model.read().unwrap_or_else(|p| p.into_inner());
+        let Some(model) = model.as_ref() else {
+            return String::new();
+        };
+        model
+            .required_nuclides()
+            .into_iter()
+            .filter(|name| !self.holds(&format!("/{name}.arrow/nuclide.arrow")))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// The required photon elements whose section set is not in the store
+    /// yet, comma-joined. See [`Self::model_missing_nuclides`].
+    #[wasm_bindgen]
+    pub fn model_missing_elements(&self) -> String {
+        let model = self.model.read().unwrap_or_else(|p| p.into_inner());
+        let Some(model) = model.as_ref() else {
+            return String::new();
+        };
+        model
+            .required_elements()
+            .into_iter()
+            .filter(|element| !self.holds(&format!("/{element}.arrow/element.arrow")))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
     // --- Geometry plotting API (used by the in-browser viewer) ---
     //
     // These four entries let the JS host drive the same interactive plot
@@ -164,13 +225,7 @@ impl WasmSimulation {
         let model = model
             .as_ref()
             .ok_or_else(|| "no model loaded -- call load_model_json first".to_string())?;
-        let geom = match &model.geometry {
-            GeometryKind::Csg(g) => g,
-            #[cfg(feature = "mesh")]
-            GeometryKind::Mesh(_) => {
-                return Err("mesh-geometry plotting is not yet supported in the wasm path".into())
-            }
-        };
+        let geom = csg_geometry(model, "sampleSlice")?;
 
         let (cells, mats) = geom.sample_slice(
             (p.origin[0], p.origin[1], p.origin[2]),
@@ -206,11 +261,7 @@ impl WasmSimulation {
         let model = model
             .as_ref()
             .ok_or_else(|| "no model loaded".to_string())?;
-        let geom = match &model.geometry {
-            GeometryKind::Csg(g) => g,
-            #[cfg(feature = "mesh")]
-            GeometryKind::Mesh(_) => return Err("mesh boundingBox not supported".into()),
-        };
+        let geom = csg_geometry(model, "boundingBox")?;
         let bb = geom.bounding_box();
         let cx = 0.5 * (bb.lower_left[0] + bb.upper_right[0]);
         let cy = 0.5 * (bb.lower_left[1] + bb.upper_right[1]);
@@ -231,11 +282,7 @@ impl WasmSimulation {
         let model = model
             .as_ref()
             .ok_or_else(|| "no model loaded".to_string())?;
-        let geom = match &model.geometry {
-            GeometryKind::Csg(g) => g,
-            #[cfg(feature = "mesh")]
-            GeometryKind::Mesh(_) => return Err("mesh geometryJson not supported".into()),
-        };
+        let geom = csg_geometry(model, "geometryJson")?;
         let csg = crate::geometry::conversion::geometry_to_csg(geom);
         serde_json::to_string(&csg).map_err(|e| format!("geometry_to_csg serialize: {e}"))
     }
@@ -268,11 +315,7 @@ impl WasmSimulation {
         let model = model
             .as_ref()
             .ok_or_else(|| "no model loaded".to_string())?;
-        let geom = match &model.geometry {
-            GeometryKind::Csg(g) => g,
-            #[cfg(feature = "mesh")]
-            GeometryKind::Mesh(_) => return Err("mesh plotHtml not supported".into()),
-        };
+        let geom = csg_geometry(model, "plotHtml")?;
         let csg = crate::geometry::conversion::geometry_to_csg(geom);
         let geometry_json =
             serde_json::to_string(&csg).map_err(|e| format!("geometry_to_csg serialize: {e}"))?;
@@ -851,8 +894,42 @@ impl WasmSimulation {
     }
 }
 
+// `storage` and `with_model` serve the wasm32-only fetcher in `fetch_wasm`, so
+// on the native `--features wasm-test` build nothing calls them.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+impl WasmSimulation {
+    /// The in-memory store this simulation reads from. Cheap to clone; the
+    /// process-global `Storage` is a twin over the same backing map.
+    pub(crate) fn storage(&self) -> &InMemoryStorage {
+        &self.storage
+    }
+
+    /// Whether the store holds a file at `path`.
+    fn holds(&self, path: &str) -> bool {
+        use yamc_nuclide::storage::Storage;
+        self.storage.exists(std::path::Path::new(path))
+    }
+
+    /// Run `f` against the loaded model, or say that there is none.
+    pub(crate) fn with_model<R>(&self, f: impl FnOnce(&Model) -> R) -> Result<R, String> {
+        let model = self.model.read().unwrap_or_else(|p| p.into_inner());
+        model
+            .as_ref()
+            .map(f)
+            .ok_or_else(|| "no model loaded -- call load_model_json first".to_string())
+    }
+}
+
 impl Default for WasmSimulation {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The published library `fetchNuclearData` reads from unless the host names
+/// another: the neutron and photon section objects of ENDF/B-VIII.1 on the yamc
+/// data CDN. Exposed so an exported page has one source for the URL.
+#[wasm_bindgen]
+pub fn default_library_url() -> String {
+    super::fetch_plan::DEFAULT_LIBRARY_URL.to_string()
 }

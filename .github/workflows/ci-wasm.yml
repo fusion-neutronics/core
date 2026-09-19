@@ -47,6 +47,13 @@ jobs:
           key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
       - name: Fetch nuclear-data test fixtures
         run: python3 scripts/fetch_test_fixtures.py
+      # The browser run is not only a compile check: tests/wasm_fetch_browser.rs
+      # drives `WasmSimulation.fetchNuclearData` against the published data on
+      # yamc-data.xsplot.com from inside headless Firefox and runs transport
+      # on what arrived. That is the path an exported `Model.to_html()` page
+      # takes, and it once shipped broken (fetching bundles the CDN no longer
+      # served) with nothing here to notice. A failure in that test with an
+      # unchanged tree means the published layout moved.
       - name: Test compile
         run: |
           curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh

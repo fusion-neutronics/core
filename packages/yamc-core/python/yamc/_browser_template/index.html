@@ -54,9 +54,9 @@
 <h1>Portable simulation</h1>
 <div class="sub">
   This HTML embeds an exported model. Click <b>Fetch cross sections</b>
-  to pull the nuclide data this model needs from
-  yamc-data.xsplot.com into browser tab memory (nothing is saved to
-  disk), then <b>Simulate</b> to run.
+  to pull the nuclide data this model needs, at the temperatures its
+  materials are at, from yamc-data.xsplot.com into browser tab memory
+  (nothing is saved to disk), then <b>Simulate</b> to run.
 </div>
 
 <fieldset>
@@ -106,7 +106,7 @@
 <fieldset>
   <legend>1. Cross-section data</legend>
   <button id="dl">Fetch cross sections</button>
-  <span id="status">Will fetch the model's nuclides from yamc-data.xsplot.com into browser tab memory.</span>
+  <span id="status">Will fetch the model's nuclides from yamc-data.xsplot.com into browser tab memory, one temperature at a time.</span>
 </fieldset>
 
 <fieldset>
@@ -116,7 +116,7 @@
 
 <fieldset>
   <legend>3. Simulate</legend>
-  <button id="sim" disabled>Simulate</button>
+  <button id="sim" disabled>Fetch the cross section data first</button>
   <span id="sim-status"></span>
 </fieldset>
 

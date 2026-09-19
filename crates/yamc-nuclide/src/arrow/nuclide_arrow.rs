@@ -37,6 +37,21 @@ use std::sync::Arc;
 // Main reader
 // =============================================================================
 
+/// The temperature labels a nuclide directory is published at, as
+/// `nuclide.arrow` spells them (`"294K"`), in file order.
+///
+/// What a ranged download plans against: a client that will fetch one
+/// temperature's batches out of `reactions.arrow` and `energy.arrow` has to
+/// resolve the material's temperature against this list, exactly as
+/// [`read_nuclide_from_arrow`] does, or it fetches batches the loader will
+/// never ask for and misses the ones it will. Reads the one small section and
+/// nothing else, so it is cheap to call before the rest of the directory is
+/// there.
+pub fn read_available_temperatures(dir: &Path) -> Result<Vec<String>, Box<dyn Error>> {
+    let nuclide_batch = read_arrow_file(&dir.join("nuclide.arrow"))?;
+    get_str_list(&nuclide_batch, "temperatures", 0)
+}
+
 /// Read the optional `fission_photon.arrow` section (issue #369).
 ///
 /// Layout is one row per term, keyed by `role` ("prompt_photons" /
@@ -54,7 +69,10 @@ fn read_fission_photon_release(
     nuclide: &str,
 ) -> Result<Option<FissionPhotonRelease>, Box<dyn Error>> {
     let path = dir.join("fission_photon.arrow");
-    if !path.exists() {
+    // Through the storage backend, not `Path::exists`: under the in-memory
+    // browser store there is no filesystem, and a `std::fs` probe would report
+    // every optional section absent.
+    if !crate::storage::exists(&path) {
         return Ok(None);
     }
     let batch = read_arrow_file(&path)?;
@@ -659,7 +677,7 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
     let urr_path = dir.join("urr.arrow");
     if !scope.wants_transport_sections() {
         urr_data.resize_with(loaded_temps.len(), || None);
-    } else if urr_path.exists() {
+    } else if crate::storage::exists(&urr_path) {
         let urr_batch = read_arrow_file(&urr_path)?;
         for temp_key in &loaded_temps {
             match find_temp_row(&urr_batch, temp_key) {
@@ -691,7 +709,7 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
     if !scope.wants_transport_sections() {
         // Left as None: the yield fallback below reads reaction products, which
         // an XsOnly load does not carry.
-    } else if total_nu_path.exists() {
+    } else if crate::storage::exists(&total_nu_path) {
         let nu_batch = read_arrow_file(&total_nu_path)?;
         fission_nu = Some(parse_fission_nu(&nu_batch)?);
     } else if fissionable {
