@@ -65,10 +65,12 @@ fn a_required_fixture_actually_loads() {
     let Some(path) = yamc_test_cache::nuclide(REQUIRED_NUCLIDE) else {
         assert!(
             !required(),
-            "YAMC_REQUIRE_FIXTURES=1 but {REQUIRED_NUCLIDE} is absent from {}",
+            "YAMC_REQUIRE_FIXTURES=1 but {REQUIRED_NUCLIDE} is absent from {}, or is \
+             stamped with a format_version this build does not read \
+             (yamc_test_cache::nuclide reports both as None)",
             yamc_test_cache::root().display()
         );
-        eprintln!("skip -- no {REQUIRED_NUCLIDE} fixture");
+        eprintln!("skip -- no readable {REQUIRED_NUCLIDE} fixture");
         return;
     };
 

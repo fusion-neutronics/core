@@ -121,8 +121,8 @@ pub fn nuclide(nuclide: &str) -> Option<String> {
     (dir.is_dir() && format_version_is_readable(dir)).then_some(path)
 }
 
-/// Whether the cache directory at `dir` carries a `format_version` this build
-/// reads.
+/// Whether the NUCLIDE cache directory at `dir` carries a `format_version` the
+/// nuclide loader reads. Elements are not checked this way, see [`element`].
 ///
 /// True when there is no `version.json` at all, matching the loader: it only
 /// applies the check when the marker is present, so a directory without one is
@@ -187,8 +187,19 @@ pub fn transport_ready(path: &std::path::Path) -> bool {
 /// `<library>-Fe.arrow`. Named separately because the two are different
 /// fixtures with different sections inside, and a caller asking for one and
 /// getting the other would find out at the first section read.
+///
+/// Presence only, deliberately NOT the `format_version` gate [`nuclide`]
+/// applies. That gate mirrors the nuclide loader, and the element loader has
+/// no counterpart: format 2 moved the neutron energy grids into `energy.arrow`
+/// and split `reactions.arrow` per (MT, temperature), and a photon directory
+/// (`element.arrow`, `subshells.arrow`, `compton.arrow`, `bremsstrahlung.arrow`)
+/// carries none of that. The converter stamps every directory it writes, so a
+/// pre-republish element is stamped 1 and reads exactly as one stamped 2 does;
+/// routing it through the nuclide check reported the W the photon Z sweep had
+/// just run on as absent.
 pub fn element(element: &str) -> Option<String> {
-    nuclide(element)
+    let path = nuclide_path(element);
+    std::path::Path::new(&path).is_dir().then_some(path)
 }
 
 /// Root of the raw ENDF/B-VIII.1 evaluation tree the NJOY-backed tests read.
