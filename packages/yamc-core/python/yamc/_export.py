@@ -179,7 +179,10 @@ def to_html(
         embed_cross_sections: Controls the in-HTML nuclide data:
 
             - ``False`` (default): no XS data embedded. The recipient
-              must be online and the page fetches from yamc-data.xsplot.com.
+              must be online and the page fetches from yamc-data.xsplot.com:
+              each nuclide's published section objects, with the reactions
+              and energy grids ranged to the temperature its material is
+              at, so one temperature of six comes down the wire.
             - ``True``: embed exactly the nuclides currently referenced by
               the model's materials. Makes the HTML fully offline-runnable
               *until* the recipient edits the materials to add new ones.
@@ -217,10 +220,11 @@ def to_html(
 
     Notes:
         Embedded data inflates the HTML size by ~the raw byte count × 1.33
-        for base64. ENDF/B-VIII.1 nuclides range from ~2 MB (Li-6) to
-        ~150 MB (Fe-56). Embedding everything in a heavy-element material
-        produces a multi-hundred-MB HTML; choose ``embed_cross_sections``
-        accordingly.
+        for base64, and embeds every temperature the local cache holds.
+        ENDF/B-VIII.1 nuclides range from ~1.4 MB (Li-6) to ~75 MB (Fe-56)
+        whole. Embedding everything in a heavy-element material produces a
+        multi-hundred-MB HTML; choose ``embed_cross_sections`` accordingly,
+        or leave it off and let the page fetch one temperature per nuclide.
 
         The ``show_*`` flags are presentation-only -- the recipient can
         still inspect (or open devtools and edit) the embedded model

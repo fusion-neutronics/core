@@ -31,6 +31,15 @@ wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 serde-wasm-bindgen = { version = "0.6", optional = true }
+# `WasmSimulation.fetchNuclearData` pulls the model's nuclear data through the
+# browser's own `fetch`: wasm-bindgen-futures turns its Promises into futures
+# and back, web-sys types the Response. Only the three web-sys interfaces the
+# fetcher touches, so the binding stays small.
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", features = ["Headers", "RequestInit", "Response"], optional = true }
+# The byte-range index that rides in each nuclide's version.json, which the
+# browser fetcher plans its ranged requests from.
+nuclear-data-schema = { path = "../nuclear-data-schema", optional = true }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 mpi = { version = "0.8", optional = true }
@@ -97,6 +106,9 @@ wasm = [
     "dep:js-sys",
     "dep:console_error_panic_hook",
     "dep:serde-wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:web-sys",
+    "dep:nuclear-data-schema",
     # `plotHtml` on WasmSimulation pulls in the viewer templating.
     "dep:yamc-plot"
 ]

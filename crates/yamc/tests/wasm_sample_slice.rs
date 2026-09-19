@@ -119,6 +119,8 @@ fn tally_plot_html_works_on_a_freshly_simulated_mesh_tally() {
         Some(0.46),
     )
     .unwrap();
+    // Irrefutable without the `mesh` feature, which is the only other variant.
+    #[allow(irrefutable_let_patterns)]
     if let GeometryKind::Csg(ref mut g) = model.geometry {
         g.materials = vec![std::sync::Arc::new(mat)];
     }

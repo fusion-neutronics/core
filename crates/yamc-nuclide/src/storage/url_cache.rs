@@ -795,8 +795,11 @@ fn download_error(
 /// optional sections are absent for many nuclides (urr only in resonance
 /// nuclides, total_nu and fission_photon only in fissionables) and a 404 there
 /// is expected.
-#[cfg(feature = "download")]
-const NEUTRON_SECTIONS: &[(&str, bool)] = &[
+///
+/// Public and not gated on `download`: the browser build has no reqwest and
+/// fetches these same objects through the JS `fetch` API, and the one list is
+/// what keeps the two downloaders asking for the same files.
+pub const NEUTRON_SECTIONS: &[(&str, bool)] = &[
     ("version.json", true),
     ("nuclide.arrow", true),
     // Required from format_version 2: the union energy grids, which every
@@ -835,9 +838,9 @@ const NEUTRON_SECTIONS_WITH_COVARIANCE: &[(&str, bool)] = &[
     ("covariance.arrow", false),
 ];
 
-/// Per-element photon section objects (option-D).
-#[cfg(feature = "download")]
-const PHOTON_SECTIONS: &[(&str, bool)] = &[
+/// Per-element photon section objects (option-D). Public for the same reason
+/// [`NEUTRON_SECTIONS`] is.
+pub const PHOTON_SECTIONS: &[(&str, bool)] = &[
     ("version.json", true),
     ("element.arrow", true),
     ("subshells.arrow", false),

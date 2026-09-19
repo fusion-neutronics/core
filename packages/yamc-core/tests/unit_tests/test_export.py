@@ -74,8 +74,11 @@ def test_export_no_embed_writes_html_with_empty_xs(tmp_path: Path) -> None:
     out = _li6_model().to_html(tmp_path / "out.html")
     assert out.is_file()
     html = out.read_text(encoding="utf-8")
-    # Sanity: real placeholders all got substituted.
-    leftover = re.findall(r"__[A-Z0-9_]+__", html)
+    # Sanity: real placeholders all got substituted. A placeholder starts
+    # with a letter or digit after its underscores (`__WASM_B64__`); the
+    # wasm-bindgen glue's mangled closure shims contain runs of bare
+    # underscores (`__closures_____invoke__`) that are not placeholders.
+    leftover = re.findall(r"__[A-Z0-9][A-Z0-9_]*__", html)
     assert leftover == [], f"unsubstituted placeholders: {leftover}"
     assert _extract_embedded_xs(html) == {}
 
@@ -192,6 +195,24 @@ def test_exported_html_contains_load_model_json_and_plot(tmp_path: Path) -> None
     # The wasm base64 payload should be substantial (the binary is >1 MB).
     m = re.search(r'const WASM_B64 = "([A-Za-z0-9+/=]+)"', html)
     assert m is not None and len(m.group(1)) > 1_000_000
+
+
+def test_exported_html_fetches_through_the_wasm_fetcher(tmp_path: Path) -> None:
+    """The page's Fetch button goes through `WasmSimulation.fetchNuclearData`,
+    which reads the published per-section objects. The page once fetched
+    `.arrow.tar` bundles the CDN had stopped serving, and nothing here
+    noticed; this pins the wiring, and the browser test in
+    crates/yamc/tests/wasm_fetch_browser.rs exercises the fetch itself."""
+    html = _li6_model().to_html(tmp_path / "out.html").read_text(encoding="utf-8")
+    assert "sim.fetchNuclearData(" in html
+    assert "default_library_url()" in html
+    assert "sim.model_missing_nuclides()" in html
+    # The greyed-out Simulate button says what to do, before the fetch and
+    # again whenever an edit adds a nuclide the store lacks.
+    assert 'id="sim" disabled>Fetch the cross section data first<' in html
+    assert '"Fetch the cross section data first" : "Simulate"' in html
+    assert ".arrow.tar" not in html
+    assert "parseTar" not in html
 
 
 def test_editor_sections_are_collapsible_and_closed_by_default(tmp_path: Path) -> None:

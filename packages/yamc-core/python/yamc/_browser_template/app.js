@@ -45,7 +45,7 @@ const JS_SRC = __JS_SRC_JSON__;
 const jsBlob = new Blob([JS_SRC], { type: "application/javascript" });
 const mod = await import(URL.createObjectURL(jsBlob));
 const init = mod.default;
-const { WasmSimulation } = mod;
+const { WasmSimulation, default_library_url } = mod;
 
 function b64ToBytes(b64) {
   const bin = atob(b64);
@@ -93,11 +93,6 @@ for (const [el, files] of Object.entries(EMBEDDED_PHOTON_XS)) {
 const model = JSON.parse(MODEL_JSON);
 const csgGeom = (model.geometry && model.geometry.Csg) || null;
 
-// Track which nuclides we have data files for in the in-memory storage.
-// Pre-populated with any embedded XS nuclides, then grown by Fetch.
-const loadedNuclides = new Set(Object.keys(EMBEDDED_XS));
-// Photon data we hold, keyed by element symbol (parallel to loadedNuclides).
-const loadedElements = new Set(Object.keys(EMBEDDED_PHOTON_XS));
 // Whether the recipient is *allowed* to fetch -- distinct from
 // "nothing left to fetch". An engineer can ship a model that already has
 // all its data embedded; the fetch button then shows "All cross sections
@@ -123,11 +118,17 @@ Default total particles: ${model.total_particles ?? 1000}  (seed ${model.seed ??
 }
 
 function refreshSimGate() {
-  const required = sim.model_required_nuclides().split(",").filter(Boolean);
-  const reqElements = sim.model_required_elements().split(",").filter(Boolean);
-  const missing = required.filter((n) => !loadedNuclides.has(n))
-    .concat(reqElements.filter((e) => !loadedElements.has(e)));
-  document.getElementById("sim").disabled = missing.length > 0;
+  // What the store lacks, asked of the store itself: a nuclide counts as
+  // held once its section set is registered, whether it was embedded at
+  // export or fetched just now.
+  const missing = sim.model_missing_nuclides().split(",").filter(Boolean)
+    .concat(sim.model_missing_elements().split(",").filter(Boolean));
+  // The Simulate button says why it is greyed out, and names what is
+  // missing in its tooltip, rather than sitting disabled without a word.
+  const simBtn = document.getElementById("sim");
+  simBtn.disabled = missing.length > 0;
+  simBtn.textContent = missing.length > 0 ? "Fetch the cross section data first" : "Simulate";
+  simBtn.title = missing.length > 0 ? `Not yet loaded: ${missing.join(", ")}` : "";
   const dlBtn = document.getElementById("dl");
   const statusEl = document.getElementById("status");
   if (missing.length === 0) {
@@ -142,7 +143,7 @@ function refreshSimGate() {
   } else {
     dlBtn.disabled = false;
     dlBtn.textContent =
-      loadedNuclides.size === 0 ? "Fetch cross sections" : `Fetch missing (${missing.join(", ")})`;
+      sim.file_count() === 0 ? "Fetch cross sections" : `Fetch missing (${missing.join(", ")})`;
   }
   return missing;
 }
@@ -706,75 +707,42 @@ if (applyMatsBtn) applyMatsBtn.onclick = () => {
   }
 };
 
-// --- Minimal tar reader (POSIX ustar). ---
-function parseTar(bytes) {
-  const dec = new TextDecoder("ascii");
-  const files = [];
-  let off = 0;
-  while (off + 512 <= bytes.length) {
-    if (bytes[off] === 0) break;
-    const nameRaw = bytes.subarray(off, off + 100);
-    const nul = nameRaw.indexOf(0);
-    const name = dec.decode(nameRaw.subarray(0, nul === -1 ? 100 : nul));
-    const sizeStr = dec.decode(bytes.subarray(off + 124, off + 124 + 11)).replace(/[^\d]/g, "");
-    const size = parseInt(sizeStr, 8) || 0;
-    const typeflag = String.fromCharCode(bytes[off + 156] || 0);
-    if ((typeflag === "0" || typeflag === "\0") && size > 0) {
-      files.push({ name, data: bytes.subarray(off + 512, off + 512 + size) });
-    }
-    off += 512 + Math.ceil(size / 512) * 512;
-  }
-  return files;
-}
-
-// --- "Fetch cross sections" -- fetches whichever required nuclides
-// aren't already in the in-memory storage. Re-runs cleanly after the
-// material editor adds new nuclides.
+// --- "Fetch cross sections" ---
+//
+// The fetch itself lives in the wasm binding (`fetchNuclearData`): it
+// reads the model's nuclides and material temperatures, fetches each
+// nuclide's published section objects, and ranges `reactions.arrow` and
+// `energy.arrow` to the batches of the temperature each material is at,
+// so one temperature of six is what comes down the wire. Photon data
+// follows per element when the model has photons in flight. Anything the
+// store already holds (embedded at export, or fetched earlier) is skipped,
+// so this re-runs cleanly after the material editor adds a nuclide.
+const LIBRARY_URL = default_library_url();
 const dlBtn = document.getElementById("dl");
 const status = document.getElementById("status");
 dlBtn.onclick = async () => {
   status.classList.remove("err");
-  // Build a combined work list: neutron data is per-nuclide, photon data
-  // per-element. Each fetches /<kind>/<name>.arrow.tar and registers files
-  // under /<name>.arrow/ (the tar's internal prefix is stripped either way).
-  const reqNuc = sim.model_required_nuclides().split(",").filter(Boolean);
-  const reqEl = sim.model_required_elements().split(",").filter(Boolean);
-  const jobs = [
-    ...reqNuc.filter((n) => !loadedNuclides.has(n)).map((name) => ({ name, kind: "neutron" })),
-    ...reqEl.filter((e) => !loadedElements.has(e)).map((name) => ({ name, kind: "photon" })),
-  ];
-  if (jobs.length === 0) {
+  if (refreshSimGate().length === 0) {
     status.textContent = "All required cross sections already loaded.";
-    refreshSimGate();
     return;
   }
   dlBtn.disabled = true;
-  for (let i = 0; i < jobs.length; i++) {
-    const { name, kind } = jobs[i];
-    status.textContent = `Fetching ${name} (${kind}) (${i + 1}/${jobs.length})…`;
-    try {
-      const url = `https://yamc-data.xsplot.com/endf-b8.1/${kind}/${encodeURIComponent(name)}.arrow.tar`;
-      const resp = await fetch(url);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const buf = new Uint8Array(await resp.arrayBuffer());
-      const prefixRe = new RegExp(`^${name.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}\\.arrow/?`);
-      for (const { name: tarName, data } of parseTar(buf)) {
-        const rel = tarName.replace(prefixRe, "");
-        sim.add_file(`/${name}.arrow/${rel}`, data);
-      }
-      if (kind === "photon") loadedElements.add(name);
-      else loadedNuclides.add(name);
-    } catch (e) {
-      status.textContent = `Failed on ${name}: ${e.message}`;
-      status.classList.add("err");
-      refreshSimGate();
-      return;
-    }
+  try {
+    const summary = JSON.parse(
+      await sim.fetchNuclearData(LIBRARY_URL, (message) => { status.textContent = `${message}…`; })
+    );
+    const mb = (summary.bytes / 1e6).toFixed(1);
+    const parts = [`${summary.nuclides.length} nuclide(s)`];
+    if (summary.elements.length) parts.push(`${summary.elements.length} element(s)`);
+    status.textContent =
+      `Loaded ${parts.join(" and ")}: ${mb} MB in ${summary.requests} request(s), `
+      + `${sim.file_count()} file(s) in memory.`;
+  } catch (e) {
+    status.textContent = `Failed: ${e instanceof Error ? e.message : String(e)}`;
+    status.classList.add("err");
+  } finally {
+    refreshSimGate();
   }
-  status.textContent =
-    `Loaded ${sim.file_count()} files (${loadedNuclides.size} nuclide(s), ${loadedElements.size} element(s)).`;
-  dlBtn.textContent = "Fetch cross sections";
-  refreshSimGate();
 };
 
 // Initial gate evaluation -- Simulate stays disabled until fetch runs.
