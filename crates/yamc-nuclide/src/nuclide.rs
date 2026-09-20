@@ -227,9 +227,8 @@ pub struct FastXSGrid {
     pub inv_log_delta: f64,
     /// Pre-computed cross-sections at each energy point: [total, absorption, scattering, fission]
     pub xs: Vec<[f64; 4]>,
-    /// Energy grid for this temperature. `fast_xs.arrow` ships its own copy of
-    /// the nuclide's union grid; where the two agree this is a zero-copy view of
-    /// the nuclide's, and otherwise a copy of the accelerator's own column.
+    /// Energy grid for this temperature: a shared view of the nuclide's union
+    /// grid, never a copy.
     pub energy: F64Buffer,
     /// MT numbers of scattering reactions, parallel to `scatter_mt_reactions`.
     /// Length = `n_scatter_mts`. `scatter_mt_xs` is indexed by energy-major

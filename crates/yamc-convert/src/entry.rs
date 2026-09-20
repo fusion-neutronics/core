@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use endf::ace::MetastableScheme;
 use endf::{IncidentNeutron, IncidentPhoton, Material};
 
-use crate::{distributions, fast_xs, fission_nu, nuclide, products, reactions};
+use crate::{distributions, fission_nu, nuclide, products, reactions};
 
 /// Where the evaluation comes from.
 pub enum Source<'a> {
@@ -374,8 +374,9 @@ fn write_version(dir: &Path, provenance: &Provenance) -> Result<(), Box<dyn Erro
 /// Write the full transport data set.
 ///
 /// Every section `NEUTRON_SECTIONS` names: the three an activation run reads,
-/// plus the products, their secondary distributions, the lookup accelerator,
-/// and the two fissile-only sections.
+/// plus the products, their secondary distributions, and the two fissile-only
+/// sections. The transport lookup is not among them: the loader builds it from
+/// the reactions.
 ///
 /// ENDF only. An ACE table is one temperature, carries no MT 901 heating and
 /// no MF=1/MT=458, so a transport conversion from one would be missing the
@@ -413,7 +414,6 @@ pub fn convert_neutron_transport(
     nuclide::write_urr(&data, &dir)?;
     products::write_products(&data, &dir)?;
     distributions::write_distributions(&data, &dir)?;
-    fast_xs::write_fast_xs(&data, &dir)?;
     fission_nu::write_total_nu(&data, &dir)?;
     if let Some(release) = &release {
         fission_nu::write_fission_photon(release, &dir)?;

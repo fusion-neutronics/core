@@ -150,11 +150,10 @@ fn same_label(wanted: &BTreeSet<String>, label: &str) -> bool {
 ///
 /// With `wanted` labels and an index in `version.json`, `reactions.arrow` and
 /// `energy.arrow` come as the spans of those labels' batches; every other
-/// section is fetched whole, since none of them is written per temperature
-/// (`fast_xs.arrow` holds one row per temperature in a single batch and cannot
-/// be ranged yet). Without an index, or with no `wanted` (every temperature),
-/// both are fetched whole, which is what data published before the index
-/// existed looks like and is not an error.
+/// section is fetched whole, since none of them has a temperature axis. Without
+/// an index, or with no `wanted` (every temperature), both are fetched whole,
+/// which is what data published before the index existed looks like and is not
+/// an error.
 ///
 /// An error is a request the index cannot serve: labels the nuclide's
 /// temperature list carries but no batch is published at, which is a broken
@@ -321,8 +320,12 @@ mod tests {
         let names: Vec<&str> = plan.iter().map(|s| s.name).collect();
         assert!(!names.contains(&"version.json"));
         assert!(!names.contains(&"nuclide.arrow"));
-        assert!(names.contains(&"fast_xs.arrow"));
+        assert!(names.contains(&"products.arrow"));
         assert!(names.contains(&"distributions.arrow"));
+        assert!(
+            !names.contains(&"fast_xs.arrow"),
+            "the transport lookup is built, not fetched"
+        );
 
         let reactions = plan.iter().find(|s| s.name == REACTIONS).unwrap();
         // The schema, then the 294K batch of each of the three MTs. They are

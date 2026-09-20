@@ -53,9 +53,9 @@ fn flat_correlated_sampler_matches_the_reference_implementation() {
     // not a sampler regression and the two should not fail alike.
     //
     // Deliberately catching every read error, not just that one. Enumerating the
-    // sections here was tried and got it wrong (MT 91's law needs fast_xs.arrow
-    // too, not just products and distributions), and a list that has to track
-    // the loader's requirements will drift out of step with them again. Other
+    // sections here was tried and got it wrong (the list named one section the
+    // loader no longer reads), and a list that has to track the loader's
+    // requirements will drift out of step with them again. Other
     // tests cover the loader itself; this one is about the sampler.
     let nuclide = match read_nuclide_from_arrow(std::path::Path::new(&path), &LoadScope::full()) {
         Ok(nuclide) => nuclide,
