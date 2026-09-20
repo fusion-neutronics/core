@@ -1,8 +1,8 @@
 //! Arrow IPC format reader for neutron nuclear data.
 //!
-//! Reads a `.arrow/` directory containing pre-computed nuclear data in Apache Arrow IPC format.
-//! This replaces the HDF5 reader and provides near-zero load times since the FastXSGrid
-//! is pre-computed by the Python converter.
+//! Reads a `.arrow/` directory of nuclear data in Apache Arrow IPC format and
+//! builds the transport lookup ([`FastXSGrid`]) from the reactions it read, see
+//! [`crate::fast_xs`].
 
 use crate::buffer::F64Buffer;
 use crate::fission_photon::{FissionPhotonRelease, ReleaseFunction};
@@ -19,8 +19,8 @@ use crate::secondary_kalbach;
 use crate::urr::{UrrData, UrrInterpolation, UrrXsSet};
 
 use crate::arrow_helpers::{
-    borrow_f64_list, borrow_i32_list, borrow_nested_f64_list, get_bool, get_f64, get_f64_list,
-    get_i32, get_i32_list, get_str, get_str_list, read_arrow_file, try_get_f64, try_get_f64_list,
+    borrow_f64_list, borrow_nested_f64_list, get_bool, get_f64, get_f64_list, get_i32,
+    get_i32_list, get_str, get_str_list, read_arrow_file, try_get_f64, try_get_f64_list,
     try_get_i32, try_get_i32_list, try_get_str,
 };
 
@@ -28,7 +28,7 @@ use arrow_array::cast::AsArray;
 use arrow_array::{Array, RecordBatch};
 use arrow_buffer::ScalarBuffer;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
@@ -148,8 +148,8 @@ fn read_fission_photon_release(
 /// before, leaving the phase-by-phase batch drops below still effective.
 ///
 /// Used for `nuclide.arrow` and `reactions.arrow`, whose bytes are almost
-/// entirely the grids and cross sections an unfiltered load keeps. `fast_xs.arrow`
-/// deliberately never shares; see [`build_fast_xs_from_arrow`].
+/// entirely the grids and cross sections an unfiltered load keeps. The transport
+/// lookup built afterwards shares the nuclide's grid and owns everything else.
 fn adopt(values: &ScalarBuffer<f64>, share: bool) -> F64Buffer {
     if share {
         F64Buffer::share(values.clone())
@@ -162,7 +162,7 @@ fn adopt(values: &ScalarBuffer<f64>, share: bool) -> F64Buffer {
 ///
 /// `urr.arrow`, `fission_photon.arrow` and the nu tables are optional already,
 /// each handled where it is read.
-const TRANSPORT_SECTIONS: [&str; 3] = ["products.arrow", "distributions.arrow", "fast_xs.arrow"];
+const TRANSPORT_SECTIONS: [&str; 2] = ["products.arrow", "distributions.arrow"];
 
 /// The `format_version` this build reads.
 ///
@@ -223,8 +223,8 @@ fn reactions_path(dir: &Path, scope: &LoadScope) -> std::path::PathBuf {
 ///
 /// The `.absent` markers a hosted directory carries play no part here. They are
 /// a download-cache record of a settled 404 (`url_cache.rs`) and this reader
-/// never consults them, which is why writing `fast_xs.arrow.absent` by hand
-/// changes nothing.
+/// never consults them, which is why writing `distributions.arrow.absent` by
+/// hand changes nothing.
 fn narrow_to_present_sections(dir: &Path, scope: &LoadScope) -> Result<LoadScope, Box<dyn Error>> {
     if !scope.wants_transport_sections() {
         return Ok(scope.clone());
@@ -481,8 +481,8 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
         .collect();
 
     // Phase 1: Read reactions + products + distributions, build reactions_per_temp,
-    // then drop the Arrow batches before loading the much larger fast_xs.arrow.
-    // This avoids having ~117 MB (reactions) + 308 MB (fast_xs) live simultaneously.
+    // then drop the Arrow batches before building the transport lookup, so the
+    // reactions batch (~117 MB on U238) is not resident beside the built matrices.
     //
     // Under an XsOnly scope the products and distributions are skipped outright:
     // they describe what comes OUT of a reaction, which only transport samples.
@@ -627,45 +627,37 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
         }
 
         fissionable = has_fission;
-        // reactions_batch, products_map drop here -- freeing ~117 MB before fast_xs load
+        // reactions_batch, products_map drop here -- freeing ~117 MB before the build
     }
 
-    // Phase 2: Read fast_xs.arrow (308 MB for U238) -- reactions batch is already freed.
-    //
-    // This is the single largest section (61% of the TENDL-2025 library on disk)
-    // and it is purely a transport lookup accelerator, so an XsOnly load leaves
-    // the vector EMPTY rather than filling it with defaults. A default grid would
-    // answer every lookup with zero; an empty one cannot be indexed at all, and
-    // the scope recorded on the nuclide keeps transport from ever trying.
+    // Phase 2: build the transport lookup for each loaded temperature from the
+    // reactions just read (`crate::fast_xs`). Built rather than read: it is
+    // derived data, and deriving it is faster than decoding the file that used
+    // to carry it. An XsOnly load leaves the vector EMPTY rather than filling
+    // it with defaults. A default grid would answer every lookup with zero; an
+    // empty one cannot be indexed at all, and the scope recorded on the nuclide
+    // keeps transport from ever trying.
     let mut fast_xs_grids: Vec<FastXSGrid> = Vec::new();
     if scope.wants_transport_sections() {
-        let fast_xs_batch = read_arrow_file(&dir.join("fast_xs.arrow"))?;
-
         for (temp_idx, temp_key) in loaded_temps.iter().enumerate() {
-            let fast_row = find_temp_row(&fast_xs_batch, temp_key);
-            let temp_reactions = &reactions_per_temp[temp_idx];
-
-            match fast_row {
-                Some(row) => {
-                    let fast_grid = build_fast_xs_from_arrow(
-                        &fast_xs_batch,
-                        row,
-                        temp_reactions,
-                        energy_map.get(temp_key),
-                        photon_release.as_ref(),
-                        temp_key,
-                    )
-                    // Every rejection out of the builder should name the nuclide
-                    // it came from, not only the temperature.
-                    .map_err(|e| format!("{}: {e}", dir.display()))?;
-                    fast_xs_grids.push(fast_grid);
-                }
-                None => {
-                    fast_xs_grids.push(FastXSGrid::default());
-                }
-            }
+            let grid = energy_map.get(temp_key).ok_or_else(|| {
+                format!(
+                    "{}: {name} has reactions at {temp_key} K but no union energy grid at \
+                     that temperature to build the transport lookup on",
+                    dir.display()
+                )
+            })?;
+            let fast_grid = FastXSGrid::build(
+                grid,
+                &reactions_per_temp[temp_idx],
+                photon_release.as_ref(),
+                &format!("{name} at {temp_key} K"),
+            )
+            // Every rejection out of the builder should name the directory it
+            // came from, not only the nuclide and temperature.
+            .map_err(|e| format!("{}: {e}", dir.display()))?;
+            fast_xs_grids.push(fast_grid);
         }
-        // fast_xs_batch drops here -- freeing ~308 MB before URR/nu loads
     }
 
     // Phase 3: Read small optional files. Both are transport-only: URR tables
@@ -811,401 +803,15 @@ fn build_products_map(
     Ok(())
 }
 
-// =============================================================================
-// Fast XS grid construction from pre-computed Arrow data
-// =============================================================================
-
+/// The row of a per-temperature batch (one row per temperature, a `temperature`
+/// column spelling it as the file does, `"294K"`) for `temp_key`, spelled as the
+/// loader keys temperatures (`"294"`).
 fn find_temp_row(batch: &RecordBatch, temp_key: &str) -> Option<usize> {
     let col = batch.column_by_name("temperature")?;
     let str_arr = col.as_string::<i32>();
-    // Try exact match first, then try with "K" suffix (Arrow files store "294K")
     (0..str_arr.len()).find(|&i| {
         let v = str_arr.value(i);
         v == temp_key || crate::temperature::strip_k(v) == temp_key
-    })
-}
-
-/// Narrow the on-disk `int32` log-grid index to the `u32` the runtime keeps,
-/// checking the invariants [`FastXSGrid::lookup`] relies on and does not clamp.
-///
-/// The column is `int32` on disk and the values are only ever slice indices, so
-/// the width says nothing true and the sign is a liability: `v as usize` turns a
-/// negative into ~1.8e19 and the first symptom is a panic inside a cross-section
-/// lookup. The quieter failure is worse. An entry that is in range but out of
-/// order makes `partition_point` return 0, `saturating_sub(1)` pins `i_grid` to
-/// `i_low`, and the lookup interpolates between the wrong pair of grid points:
-/// a plausible-looking wrong cross section. Both are rejected here, once, at
-/// load. Issue #482.
-///
-/// Deliberately NOT checked: that the last entry is `n_energy - 1`. Only the
-/// Rust converter forces that; the Python writer's `searchsorted` rounding
-/// leaves it short, as 38,232 of the 41,382 published rows are.
-fn log_grid_index_u32(
-    values: &[i32],
-    n_energy: usize,
-    temp_key: &str,
-) -> Result<Vec<u32>, Box<dyn Error>> {
-    if n_energy > 0 && values.len() < 2 {
-        return Err(format!(
-            "log_grid_index at {temp_key} K has {} entries; the lookup reads a \
-             bin and its successor, so it needs at least 2",
-            values.len()
-        )
-        .into());
-    }
-    let mut out = Vec::with_capacity(values.len());
-    let mut previous = 0i32;
-    for (i, &v) in values.iter().enumerate() {
-        if v < 0 {
-            return Err(format!(
-                "log_grid_index[{i}] at {temp_key} K is {v}; a grid index cannot be negative"
-            )
-            .into());
-        }
-        if n_energy > 0 && v as usize >= n_energy {
-            return Err(format!(
-                "log_grid_index[{i}] at {temp_key} K is {v}, past the {n_energy}-point \
-                 energy grid it indexes"
-            )
-            .into());
-        }
-        if i > 0 && v < previous {
-            return Err(format!(
-                "log_grid_index at {temp_key} K decreases at {i}: {previous} then {v}. \
-                 A bracket that runs backwards silently interpolates between the \
-                 wrong pair of grid points"
-            )
-            .into());
-        }
-        previous = v;
-        out.push(v as u32);
-    }
-    Ok(out)
-}
-
-fn build_fast_xs_from_arrow(
-    batch: &RecordBatch,
-    row: usize,
-    temp_reactions: &HashMap<i32, Arc<Reaction>>,
-    // The nuclide's union grid for this temperature, so the accelerator can
-    // point at it rather than keep a second copy of the same numbers.
-    nuclide_grid: Option<&F64Buffer>,
-    // Fission energy release for the delayed-photon scaling (issue #369). `None`
-    // when the evaluation has none, or the published file predates the section;
-    // the scaling then stays empty and every consumer takes its `f = 1.0` branch,
-    // exactly as before.
-    photon_release: Option<&FissionPhotonRelease>,
-    // Names the temperature in a log-grid-index rejection, since one bad row
-    // should say which of the nuclide's temperatures it is.
-    temp_key: &str,
-) -> Result<FastXSGrid, Box<dyn Error>> {
-    let log_e_min = get_f64(batch, "log_e_min", row)?;
-    let inv_log_delta = get_f64(batch, "inv_log_delta", row)?;
-
-    // Nothing here shares out of `batch`, at any scope. `xs`, `scatter_mt_xs`
-    // and `fission_mt_xs` are reshaped or column-selected on the way in and so
-    // have to be rebuilt regardless; sharing the narrower columns alongside them
-    // would keep the whole section resident (308 MB on U238, see phase 2 above)
-    // *and* keep the rebuilds, for a net loss. The views below are read sources
-    // only, which is still a win: they replace the intermediate `Vec` each
-    // rebuild used to copy first.
-    let xs_flat = borrow_f64_list(batch, "xs", row)?;
-    let xs_shape = get_i32_list(batch, "xs_shape", row)?;
-    let energy_col = borrow_f64_list(batch, "energy", row)?;
-    // The one exception, and it does not touch `batch`: `fast_xs.arrow` repeats
-    // the nuclide's union grid for this temperature, so where the two agree,
-    // point at the grid the nuclide holds for its whole lifetime anyway rather
-    // than keeping a second copy. The comparison is a memcmp over the grid.
-    let energy = match nuclide_grid {
-        Some(grid) if grid.as_slice() == energy_col.as_ref() => grid.clone(),
-        _ => F64Buffer::from_slice(&energy_col),
-    };
-
-    // Below the grid read because the range check needs its length. `energy` is
-    // `energy_col.len()` long either way, whether it aliased the nuclide grid or
-    // copied the column.
-    let log_grid_index = log_grid_index_u32(
-        &borrow_i32_list(batch, "log_grid_index", row)?,
-        energy_col.len(),
-        temp_key,
-    )?;
-
-    let n_energy = if !xs_shape.is_empty() {
-        xs_shape[0] as usize
-    } else {
-        energy.len()
-    };
-    let n_xs_cols = if xs_shape.len() >= 2 {
-        xs_shape[1] as usize
-    } else {
-        4
-    };
-
-    // Reshape xs from flat [n_energy * 4] to Vec<[f64; 4]>
-    let mut xs = Vec::with_capacity(n_energy);
-    for i in 0..n_energy {
-        let base = i * n_xs_cols;
-        let mut arr = [0.0f64; 4];
-        for j in 0..4.min(n_xs_cols) {
-            if base + j < xs_flat.len() {
-                arr[j] = xs_flat[base + j];
-            }
-        }
-        xs.push(arr);
-    }
-
-    // Build scatter_mt_xs with Arc<Reaction> pointers
-    let scatter_mt_numbers = get_i32_list(batch, "scatter_mt_numbers", row)?;
-    // Read as a view: the buffer below selects columns out of it, so the
-    // intermediate never needed to be a copy.
-    let scatter_xs_flat = borrow_f64_list(batch, "scatter_mt_xs", row)?;
-    let scatter_shape = get_i32_list(batch, "scatter_mt_shape", row)?;
-    let n_scatter_energies = if !scatter_shape.is_empty() {
-        scatter_shape[0] as usize
-    } else {
-        n_energy
-    };
-
-    // Pick the non-redundant MT columns and rebuild a flat row-major
-    // [n_scatter_energies, n_kept_mts] buffer by selecting only those
-    // columns from the disk layout. The disk buffer is already row-major;
-    // we just need to drop redundant-reaction columns.
-    let mut scatter_mt_numbers_out: Vec<i32> = Vec::new();
-    let mut scatter_mt_reactions: Vec<Arc<Reaction>> = Vec::new();
-    let mut scatter_kept_cols: Vec<usize> = Vec::new();
-    let n_scatter_mts = scatter_mt_numbers.len();
-    for (mt_idx, &mt) in scatter_mt_numbers.iter().enumerate() {
-        if let Some(reaction) = temp_reactions.get(&mt) {
-            // Skip redundant reactions (e.g. MT 16 when level-specific MT 875-890 exist)
-            if reaction.redundant {
-                continue;
-            }
-            scatter_mt_numbers_out.push(mt);
-            scatter_mt_reactions.push(Arc::clone(reaction));
-            scatter_kept_cols.push(mt_idx);
-        }
-    }
-    let n_scatter_kept = scatter_kept_cols.len();
-    let scatter_mt_xs: F64Buffer =
-        if !scatter_xs_flat.is_empty() && n_scatter_mts > 0 && n_scatter_kept > 0 {
-            let mut out = Vec::with_capacity(n_scatter_energies * n_scatter_kept);
-            for i in 0..n_scatter_energies {
-                for &col in &scatter_kept_cols {
-                    let idx = i * n_scatter_mts + col;
-                    out.push(scatter_xs_flat.get(idx).copied().unwrap_or(0.0));
-                }
-            }
-            out.into()
-        } else {
-            F64Buffer::default()
-        };
-    let elastic_idx = scatter_mt_numbers_out.iter().position(|&mt| mt == 2);
-    // Canonical non-elastic walk order (issue #111): the permutation of the
-    // non-elastic scatter columns into `INELASTIC_MT_SLOTS` order, so the
-    // per-collision cumulative walk visits reactions in the same sequence the
-    // GPU kernel sweeps its per-MT slots in.
-    let inelastic_walk_order =
-        FastXSGrid::build_inelastic_walk_order(&scatter_mt_numbers_out, elastic_idx);
-
-    // Build fission_mt_xs flat buffer (same pattern as scatter)
-    let fission_mt_numbers = get_i32_list(batch, "fission_mt_numbers", row)?;
-    let fission_xs_flat = borrow_f64_list(batch, "fission_mt_xs", row)?;
-    let fission_shape = get_i32_list(batch, "fission_mt_shape", row)?;
-    let n_fission_energies = if !fission_shape.is_empty() {
-        fission_shape[0] as usize
-    } else {
-        n_energy
-    };
-    let has_partial_fission = get_bool(batch, "has_partial_fission", row)?;
-
-    let mut fission_mt_numbers_out: Vec<i32> = Vec::new();
-    let mut fission_mt_reactions: Vec<Arc<Reaction>> = Vec::new();
-    let mut fission_kept_cols: Vec<usize> = Vec::new();
-    let n_fission_mts = fission_mt_numbers.len();
-    for (mt_idx, &mt) in fission_mt_numbers.iter().enumerate() {
-        if let Some(reaction) = temp_reactions.get(&mt) {
-            if reaction.redundant {
-                continue;
-            }
-            fission_mt_numbers_out.push(mt);
-            fission_mt_reactions.push(Arc::clone(reaction));
-            fission_kept_cols.push(mt_idx);
-        }
-    }
-    let n_fission_kept = fission_kept_cols.len();
-    let fission_mt_xs: F64Buffer =
-        if !fission_xs_flat.is_empty() && n_fission_mts > 0 && n_fission_kept > 0 {
-            let mut out = Vec::with_capacity(n_fission_energies * n_fission_kept);
-            for i in 0..n_fission_energies {
-                for &col in &fission_kept_cols {
-                    let idx = i * n_fission_mts + col;
-                    out.push(fission_xs_flat.get(idx).copied().unwrap_or(0.0));
-                }
-            }
-            out.into()
-        } else {
-            F64Buffer::default()
-        };
-
-    let reaction_absorption = temp_reactions.get(&101).map(Arc::clone);
-
-    let xs_ngamma = F64Buffer::from_slice(&borrow_f64_list(batch, "xs_ngamma", row)?);
-    let photon_prod = F64Buffer::from_slice(&borrow_f64_list(batch, "photon_prod", row)?);
-
-    // photon_rxn_xs - compute from reactions (not in Arrow). Build per-MT
-    // temporaries then flatten row-major at the end.
-    let mut photon_rxn_mt_numbers: Vec<i32> = Vec::new();
-    let mut photon_rxn_xs_perrx: Vec<Vec<f64>> = Vec::new();
-    let mut photon_rxn_reactions: Vec<Arc<Reaction>> = Vec::new();
-    {
-        let mut sorted_mts: Vec<i32> = temp_reactions.keys().copied().collect();
-        sorted_mts.sort();
-
-        for mt in &sorted_mts {
-            let reaction = &temp_reactions[mt];
-            let has_photon_products = reaction
-                .products
-                .iter()
-                .any(|p| p.is_particle_type(&ParticleType::Photon));
-            if !has_photon_products {
-                continue;
-            }
-            let xs_vec: Vec<f64> = energy
-                .iter()
-                .map(|&e| reaction.cross_section_at(e).unwrap_or(0.0))
-                .collect();
-            if xs_vec.iter().any(|&x| x > 0.0) {
-                photon_rxn_mt_numbers.push(*mt);
-                photon_rxn_xs_perrx.push(xs_vec);
-                photon_rxn_reactions.push(Arc::clone(reaction));
-            }
-        }
-    }
-
-    // absorption_mt_xs - compute from reactions (not in Arrow). Per-MT
-    // temporaries then flatten row-major at the end.
-    let mut absorption_mt_numbers: Vec<i32> = Vec::new();
-    let mut absorption_mt_xs_perrx: Vec<Vec<f64>> = Vec::new();
-    {
-        let mut covered: HashSet<i32> = HashSet::new();
-        for mt in &scatter_mt_numbers_out {
-            covered.insert(*mt);
-        }
-        for mt in &fission_mt_numbers_out {
-            covered.insert(*mt);
-        }
-        for mt in &photon_rxn_mt_numbers {
-            covered.insert(*mt);
-        }
-        if !xs_ngamma.is_empty() {
-            covered.insert(102);
-        }
-        covered.extend(&[1, 4, 101, 1001]);
-
-        let mut sorted_mts: Vec<i32> = temp_reactions.keys().copied().collect();
-        sorted_mts.sort();
-
-        for mt in &sorted_mts {
-            if covered.contains(mt) {
-                continue;
-            }
-            let reaction = &temp_reactions[mt];
-            let xs_vec: Vec<f64> = energy
-                .iter()
-                .map(|&e| reaction.cross_section_at(e).unwrap_or(0.0))
-                .collect();
-            if xs_vec.iter().any(|&x| x > 0.0) {
-                absorption_mt_numbers.push(*mt);
-                absorption_mt_xs_perrx.push(xs_vec);
-            }
-        }
-    }
-
-    // Delayed-photon scaling f(E) = (prompt + delayed) / prompt, one value per
-    // point of the nuclide's own energy grid (issue #369). Applied to FISSION
-    // photon production only, which is what OpenMC's
-    // `settings::delayed_photon_scaling` does (`physics.cpp`): a fission also
-    // releases photons from the fission products' decay, and the prompt photon
-    // production in the evaluation does not include them.
-    //
-    // Empty when the evaluation has no `fission_energy_release` data (Fe56) or the
-    // published file predates the columns, in which case every consumer takes its
-    // `f = 1.0` branch and nothing changes.
-    let delayed_photon_scaling: F64Buffer = match photon_release {
-        Some(release) => energy.iter().map(|&e| release.scaling(e)).collect(),
-        _ => F64Buffer::default(),
-    };
-
-    // If photon_prod from Arrow is all zeros but we have photon-producing reactions,
-    // recompute it (converter may not have computed it).
-    let photon_prod = if !photon_rxn_xs_perrx.is_empty()
-        && (photon_prod.is_empty() || photon_prod.iter().all(|&x| x == 0.0))
-    {
-        use crate::nuclide::is_fission_mt;
-        use crate::particle_type::ParticleType;
-        let n = energy.len();
-        let mut pp = vec![0.0f64; n];
-        for (j, mt) in photon_rxn_mt_numbers.iter().enumerate() {
-            let xs_vec = &photon_rxn_xs_perrx[j];
-            let reaction = &photon_rxn_reactions[j];
-            for (i, &e) in energy.iter().enumerate() {
-                let rxn_xs = xs_vec[i];
-                if rxn_xs <= 0.0 {
-                    continue;
-                }
-                let f = if is_fission_mt(*mt) && !delayed_photon_scaling.is_empty() {
-                    delayed_photon_scaling[i]
-                } else {
-                    1.0
-                };
-                for product in &reaction.products {
-                    if product.is_particle_type(&ParticleType::Photon) {
-                        let y = product
-                            .product_yield
-                            .as_ref()
-                            .map(|yld| yld.evaluate(e))
-                            .unwrap_or(1.0);
-                        pp[i] += f * rxn_xs * y;
-                    }
-                }
-            }
-        }
-        pp.into()
-    } else {
-        photon_prod
-    };
-
-    // Flatten the Rust-computed per-MT XS vectors to row-major for storage.
-    let n_e = energy.len();
-    let photon_rxn_xs: F64Buffer =
-        crate::nuclide::flatten_row_major(&photon_rxn_xs_perrx, n_e).into();
-    let absorption_mt_xs: F64Buffer =
-        crate::nuclide::flatten_row_major(&absorption_mt_xs_perrx, n_e).into();
-
-    Ok(FastXSGrid {
-        log_grid_index,
-        log_e_min,
-        inv_log_delta,
-        xs,
-        energy,
-        scatter_mt_numbers: scatter_mt_numbers_out,
-        scatter_mt_xs,
-        scatter_mt_reactions,
-        elastic_idx,
-        inelastic_walk_order,
-        reaction_absorption,
-        fission_mt_numbers: fission_mt_numbers_out,
-        fission_mt_xs,
-        fission_mt_reactions,
-        has_partial_fission,
-        xs_ngamma,
-        photon_prod,
-        photon_rxn_mt_numbers,
-        photon_rxn_xs,
-        photon_rxn_reactions,
-        absorption_mt_numbers,
-        absorption_mt_xs,
-        delayed_photon_scaling,
     })
 }
 
@@ -2128,75 +1734,6 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    /// The published shape: monotone, in range, and stopping short of the last
-    /// grid point. 38,232 of the 41,382 published rows end short, so a validator
-    /// that demanded `n_energy - 1` would reject 92% of the data.
-    #[test]
-    fn accepts_a_monotone_table_that_stops_short_of_the_last_point() {
-        let table = [0, 0, 1, 3, 3, 7];
-        let out = log_grid_index_u32(&table, 64, "294").expect("valid table");
-        assert_eq!(out, vec![0u32, 0, 1, 3, 3, 7]);
-    }
-
-    /// An index equal to `n_energy - 1` is the tight upper bound: `i_high` is
-    /// `entry + 1`, an exclusive bound, so it may reach `n_energy` exactly.
-    #[test]
-    fn accepts_the_last_grid_point() {
-        let out = log_grid_index_u32(&[0, 63], 64, "294").expect("valid table");
-        assert_eq!(out, vec![0u32, 63]);
-    }
-
-    #[test]
-    fn rejects_a_negative_entry() {
-        let err = log_grid_index_u32(&[0, -1, 4], 64, "294").expect_err("negative index");
-        let msg = err.to_string();
-        assert!(msg.contains("log_grid_index[1]"), "{msg}");
-        assert!(msg.contains("294"), "{msg}");
-        assert!(msg.contains("cannot be negative"), "{msg}");
-    }
-
-    /// `n_energy` itself is out of range: it would make `i_high` one past the
-    /// end of the grid and panic in the lookup's slice.
-    #[test]
-    fn rejects_an_entry_at_the_grid_length() {
-        let err = log_grid_index_u32(&[0, 1, 64], 64, "900").expect_err("index past the grid");
-        let msg = err.to_string();
-        assert!(msg.contains("log_grid_index[2]"), "{msg}");
-        assert!(msg.contains("64-point"), "{msg}");
-        assert!(msg.contains("900"), "{msg}");
-    }
-
-    /// The quiet one: in range, out of order. No panic, just a bracket that
-    /// excludes the energy and a lookup between the wrong pair of points.
-    #[test]
-    fn rejects_a_decrease() {
-        let err = log_grid_index_u32(&[0, 5, 4, 9], 64, "294").expect_err("non-monotonic table");
-        let msg = err.to_string();
-        assert!(msg.contains("decreases at 2"), "{msg}");
-        assert!(msg.contains("5 then 4"), "{msg}");
-    }
-
-    /// `lookup` reads `bin` and `bin + 1` after clamping to `len() - 2`, which
-    /// underflows on a 1-entry table.
-    #[test]
-    fn rejects_a_table_too_short_to_index() {
-        let err = log_grid_index_u32(&[0], 64, "294").expect_err("single-entry table");
-        assert!(err.to_string().contains("needs at least 2"), "{err}");
-    }
-
-    /// An empty grid means the accelerator is never indexed, so an empty table
-    /// is not a problem to report.
-    #[test]
-    fn passes_an_empty_table_through_for_an_empty_grid() {
-        assert!(log_grid_index_u32(&[], 0, "294")
-            .expect("empty is fine")
-            .is_empty());
-        assert_eq!(
-            log_grid_index_u32(&[7], 0, "294").expect("no grid, no range to check"),
-            vec![7u32]
-        );
-    }
-
     /// Same shape as the helper in `url_cache.rs`: a directory of touched
     /// section files, since `narrow_to_present_sections` decides on presence
     /// alone and never opens one.
@@ -2275,7 +1812,6 @@ mod tests {
             .expect_err("a half-written directory should not load")
             .to_string();
         assert!(err.contains("distributions.arrow"), "{err}");
-        assert!(err.contains("fast_xs.arrow"), "{err}");
         assert!(!err.contains("products.arrow"), "{err}");
     }
 

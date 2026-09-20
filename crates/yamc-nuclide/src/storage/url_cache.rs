@@ -808,7 +808,6 @@ pub const NEUTRON_SECTIONS: &[(&str, bool)] = &[
     ("reactions.arrow", true),
     ("products.arrow", true),
     ("distributions.arrow", true),
-    ("fast_xs.arrow", true),
     ("urr.arrow", false),
     ("total_nu.arrow", false),
     ("fission_photon.arrow", false),
@@ -829,7 +828,6 @@ const NEUTRON_SECTIONS_WITH_COVARIANCE: &[(&str, bool)] = &[
     ("reactions.arrow", true),
     ("products.arrow", true),
     ("distributions.arrow", true),
-    ("fast_xs.arrow", true),
     ("urr.arrow", false),
     ("total_nu.arrow", false),
     ("fission_photon.arrow", false),
@@ -911,10 +909,9 @@ const REACTIONS: &str = "reactions.arrow";
 /// partial written under the canonical name would satisfy every completeness
 /// gate here forever, and a later transport load would top up the other
 /// sections and never refetch it. Downstream that is silent rather than loud:
-/// `build_fast_xs_from_arrow` drops any MT missing from the reactions map with
-/// a bare `if let Some(..)`, so a nuclide can come back with no elastic
-/// scattering, no `fissionable` flag and no MT 101 absorption, and nothing
-/// anywhere says so.
+/// the transport lookup is built from whatever reactions the table holds, so a
+/// nuclide can come back with no elastic scattering, no `fissionable` flag and
+/// no MT 101 absorption, and nothing anywhere says so.
 ///
 /// Under `subset/` the canonical name stays absent until the whole object is
 /// fetched, so that gate keeps working untouched. The file inside is still
@@ -2120,7 +2117,6 @@ mod tests {
             "energy.arrow",
             "products.arrow",
             "distributions.arrow",
-            "fast_xs.arrow",
         ] {
             dir.touch(name);
         }
@@ -2329,7 +2325,6 @@ mod tests {
             [
                 "products.arrow",
                 "distributions.arrow",
-                "fast_xs.arrow",
                 "urr.arrow",
                 "total_nu.arrow",
                 "fission_photon.arrow"
@@ -2389,8 +2384,8 @@ mod tests {
             "an activation fetch should splice its MTs into subset/"
         );
         assert!(
-            !narrow.join("fast_xs.arrow").exists(),
-            "an activation fetch must not pull the transport accelerator"
+            !narrow.join("distributions.arrow").exists(),
+            "an activation fetch must not pull the transport sections"
         );
         // `nuclide.arrow` is the additive-ness probe rather than the reactions
         // table: a full fetch supersedes the spliced `subset/` with the whole
@@ -2410,7 +2405,7 @@ mod tests {
         )
         .expect("full fetch");
         assert_eq!(narrow, full, "the same cache dir should be reused");
-        assert!(full.join("fast_xs.arrow").exists(), "topped up");
+        assert!(full.join("distributions.arrow").exists(), "topped up");
         assert!(
             full.join("reactions.arrow").exists(),
             "a full fetch wants every MT, so it takes the whole reactions table"

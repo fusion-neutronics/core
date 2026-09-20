@@ -68,7 +68,7 @@ fn reaction_grids_are_views_of_the_nuclide_grid() {
 }
 
 /// The `fast_xs` accelerator points at the nuclide's grid rather than keeping
-/// the second copy `fast_xs.arrow` ships.
+/// a copy of it.
 #[test]
 fn fast_xs_grids_share_the_nuclide_grid() {
     let Some(nuclide) = load("Fe56", &LoadScope::full()) else {

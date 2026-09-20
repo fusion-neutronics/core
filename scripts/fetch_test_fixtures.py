@@ -67,7 +67,6 @@ NEUTRON_SECTIONS = [
     ("reactions.arrow", True),
     ("products.arrow", False),
     ("distributions.arrow", False),
-    ("fast_xs.arrow", False),
     ("urr.arrow", False),
     ("total_nu.arrow", False),
     ("fission_photon.arrow", False),

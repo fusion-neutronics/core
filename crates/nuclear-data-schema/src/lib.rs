@@ -47,7 +47,6 @@ pub fn all_sections() -> Vec<(&'static str, Schema)> {
         ("distributions.arrow", distributions()),
         ("element.arrow", element()),
         ("energy.arrow", energy()),
-        ("fast_xs.arrow", fast_xs()),
         ("fission_photon.arrow", fission_photon()),
         ("fission_yields/aliases.arrow", fission_yields_aliases()),
         (
@@ -480,28 +479,6 @@ pub fn element() -> Schema {
     .with_metadata(meta([("filetype", "data_photon"), ("version", "5.0")]))
 }
 
-/// `fast_xs.arrow`
-pub fn fast_xs() -> Schema {
-    Schema::new(vec![
-        utf8("temperature", true),
-        f64("log_e_min", true),
-        f64("inv_log_delta", true),
-        i32s("log_grid_index", true),
-        f64s("xs", true),
-        i32s("xs_shape", true),
-        f64s("energy", true),
-        i32s("scatter_mt_numbers", true),
-        f64s("scatter_mt_xs", true),
-        i32s("scatter_mt_shape", true),
-        i32s("fission_mt_numbers", true),
-        f64s("fission_mt_xs", true),
-        i32s("fission_mt_shape", true),
-        boolean("has_partial_fission", true),
-        f64s("xs_ngamma", true),
-        f64s("photon_prod", true),
-    ])
-}
-
 /// `fission_photon.arrow`
 pub fn fission_photon() -> Schema {
     Schema::new(vec![
@@ -669,7 +646,7 @@ mod tests {
         let sections = all_sections();
         assert_eq!(
             sections.len(),
-            21,
+            20,
             "section count changed; update the manifest"
         );
         let mut paths: Vec<&str> = sections.iter().map(|(p, _)| *p).collect();

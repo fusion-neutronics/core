@@ -60,9 +60,9 @@ use crate::temperature::{self, TemperatureSource};
 
 /// Bins in the logarithmic lookup index.
 ///
-/// The same 8000 the converter writes (`yamc-convert/src/fast_xs.rs`), fixed
-/// rather than scaled to the grid, so a synthesised temperature's accelerator
-/// has the same shape as a converted one.
+/// Fixed rather than scaled to the grid (the published data used 8000 for a
+/// 631-point H1 grid and an 80,222-point U235 one alike), so every
+/// temperature's accelerator has the same shape, synthesised or built.
 const LOG_BINS: usize = 8000;
 
 /// Relative spacing below which two grid energies are the same point.

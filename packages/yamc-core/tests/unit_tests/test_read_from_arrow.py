@@ -47,7 +47,7 @@ def test_a_full_nuclide_reads_back_full():
     narrows a "full" request to cross-sections-only, on the theory that this is
     a cross-sections-only conversion. A gate that asks for "full" and looks
     only at whether the call returned has therefore checked nothing about
-    distributions, products or fast_xs.
+    distributions or products.
     """
     summary = yamc.read_nuclide_from_arrow(str(_NUCLIDE))
 
