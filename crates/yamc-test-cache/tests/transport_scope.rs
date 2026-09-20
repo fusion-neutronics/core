@@ -16,7 +16,7 @@
 use std::path::Path;
 
 /// The sections a conversion writes that an activation load does not need.
-const TRANSPORT_ONLY: [&str; 3] = ["products.arrow", "distributions.arrow", "fast_xs.arrow"];
+const TRANSPORT_ONLY: [&str; 2] = ["products.arrow", "distributions.arrow"];
 
 /// Copy `src` into a new directory, dropping the names in `skip`.
 fn copy_without(src: &Path, dst: &Path, skip: &[&str]) {

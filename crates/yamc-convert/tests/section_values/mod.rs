@@ -37,7 +37,6 @@ use endf::{IncidentNeutron, IncidentPhoton, Material};
 // ---------------------------------------------------------------------------
 
 /// The Li6 ACE table. One temperature, a real 721-point grid, 18 parsed MTs.
-/// The only vendored input that reaches `write_fast_xs`.
 pub const LI6_ACE: &[u8] = include_bytes!("../../../endf/fixtures/Li6.ace.xz");
 /// The only vendored source of a non-empty `IncidentNeutron::urr`.
 pub const URR_ACE: &[u8] = include_bytes!("../../../endf/fixtures/synthetic-urr.ace.xz");

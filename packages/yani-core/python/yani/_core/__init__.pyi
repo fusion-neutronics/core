@@ -2854,7 +2854,7 @@ def read_nuclide_from_arrow(path: builtins.str, scope: builtins.str = 'full') ->
         ``"full"`` request to ``"xs"`` rather than failing it, on the theory
         that it is a cross-sections-only conversion. A gate that asks for
         ``"full"`` and does not check what it got will pass a directory with no
-        distributions, no products and no ``fast_xs``.
+        distributions and no products.
     
     Raises
     ------

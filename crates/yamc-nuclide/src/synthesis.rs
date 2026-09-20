@@ -151,14 +151,15 @@ fn covered_by_its_own_levels(mt: i32, partials: &BTreeMap<i32, Vec<f64>>) -> boo
 /// The neutron-emitting channels other than elastic, summed.
 ///
 /// MT 3 is this plus fission plus disappearance, and the `scattering` column of
-/// fast_xs.arrow is this plus elastic. Both callers take the sum from here so a
-/// change to the rules cannot leave the two disagreeing, the same reason the
-/// sets above come from the ENDF rules rather than from a hand-written copy.
+/// the transport lookup is this plus elastic. Both callers take the sum from
+/// here so a change to the rules cannot leave the two disagreeing, the same
+/// reason the sets above come from the ENDF rules rather than from a
+/// hand-written copy.
 ///
 /// Exposed rather than inlined into [`synthesize`] because the difference is
-/// not only tidiness: fast_xs.arrow used to reach the same quantity as
+/// not only tidiness: the lookup used to reach the same quantity as
 /// `MT 3 - MT 27`, which cancels the absorption back out and loses the low bits
-/// of everything smaller than it. See `fast_xs::write_fast_xs`.
+/// of everything smaller than it. See [`crate::fast_xs`].
 pub fn non_elastic_scattering(partials: &BTreeMap<i32, Vec<f64>>, n_energy: usize) -> Vec<f64> {
     let mut out = vec![0.0; n_energy];
     for (&mt, xs) in partials {
@@ -264,7 +265,7 @@ mod tests {
 
     /// A huge absorption must not round away the scattering beside it.
     ///
-    /// `scattering` in fast_xs.arrow was once reached as MT 2 + MT 3 - MT 27,
+    /// The lookup's `scattering` was once reached as MT 2 + MT 3 - MT 27,
     /// which cancels the absorption back out through an intermediate the size
     /// of MT 3. These are TENDL-2025 Mo86's partials at 1.125e-5 eV: 2e12 barns
     /// of (n,p) and (n,alpha) against 37.8 barns of elastic, where that

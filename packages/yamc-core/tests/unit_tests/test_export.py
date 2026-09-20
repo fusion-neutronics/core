@@ -33,7 +33,6 @@ def _make_fake_nuclide(cache_dir: Path, name: str, payload: bytes = b"<arrow-dat
         "reactions.arrow",
         "distributions.arrow",
         "products.arrow",
-        "fast_xs.arrow",
         "version.json",
     ):
         (nuc_dir / fname).write_bytes(payload + f":{name}:{fname}".encode())

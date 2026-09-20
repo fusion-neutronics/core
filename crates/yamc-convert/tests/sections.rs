@@ -730,7 +730,6 @@ fn a_transport_conversion_loads_under_a_full_scope() {
         "reactions.arrow",
         "products.arrow",
         "distributions.arrow",
-        "fast_xs.arrow",
         "version.json",
     ] {
         assert!(out.join(f).is_file(), "{f} was not written");

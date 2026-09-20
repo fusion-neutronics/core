@@ -19,10 +19,10 @@
 //! side is that a conversion which finished satisfies the rule.
 //!
 //! One correction the port had to make: the Python rule had a single neutron
-//! set, `(nuclide, fast_xs, reactions)`, from the days when a neutron
-//! conversion meant one thing. The Rust converter has two neutron scopes and
-//! `fast_xs.arrow` belongs only to the wider one, so conflating them would
-//! call every cross-section-only directory incomplete.
+//! set from the days when a neutron conversion meant one thing. The Rust
+//! converter has two neutron scopes and the products and distributions belong
+//! only to the wider one, so conflating them would call every
+//! cross-section-only directory incomplete.
 
 use std::path::{Path, PathBuf};
 
@@ -46,7 +46,6 @@ const NEUTRON_TRANSPORT_REQUIRED_TABLES: &[&str] = &[
     "reactions.arrow",
     "products.arrow",
     "distributions.arrow",
-    "fast_xs.arrow",
 ];
 
 /// Tables every complete photon directory has.
@@ -110,8 +109,8 @@ fn a_finished_neutron_xs_conversion_is_complete() {
     // to make to the Python rule. Holding a cross-section directory to the
     // transport set would reject every one of them.
     assert!(
-        !dir.join("fast_xs.arrow").is_file(),
-        "convert_neutron_xs wrote fast_xs.arrow, so the two neutron scopes now \
+        !dir.join("products.arrow").is_file() && !dir.join("distributions.arrow").is_file(),
+        "convert_neutron_xs wrote transport sections, so the two neutron scopes now \
          have the same required set and this test's split is stale"
     );
 }

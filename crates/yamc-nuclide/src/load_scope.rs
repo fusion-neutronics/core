@@ -1,10 +1,11 @@
 //! Which subset of a nuclide's Arrow data a caller needs (issue #389).
 //!
 //! `Material.transmute()` runs no transport, so it reads only the union energy
-//! grid and the per-MT cross sections of the reactions its chain names. On the
-//! TENDL-2025 conversion that is about 21% of the per-nuclide data by size:
-//! `fast_xs.arrow` alone is 61% of the library and is a transport lookup
-//! accelerator the activation path never touches.
+//! grid and the per-MT cross sections of the reactions its chain names. The
+//! products and their secondary distributions, which only transport samples,
+//! are the bulk of the rest of a nuclide directory, and the transport lookup is
+//! built from the reactions rather than read, so an activation load neither
+//! fetches nor builds it.
 //!
 //! A `LoadScope` says what to fetch and parse, and is recorded on the resulting
 //! [`Nuclide`](crate::nuclide::Nuclide) so the global cache can tell whether an
@@ -23,10 +24,10 @@ pub enum SectionScope {
     Full,
     /// `nuclide.arrow` (the union energy grid) and `reactions.arrow` only.
     ///
-    /// Skips the secondary distributions, the product tables, the `fast_xs`
-    /// accelerator, URR tables, fission nu and fission-photon release. The
-    /// reactions that survive carry no products, which is why a nuclide loaded
-    /// this way must never reach transport.
+    /// Skips the secondary distributions, the product tables, URR tables,
+    /// fission nu and fission-photon release, and builds no transport lookup.
+    /// The reactions that survive carry no products, which is why a nuclide
+    /// loaded this way must never reach transport.
     XsOnly,
 }
 
