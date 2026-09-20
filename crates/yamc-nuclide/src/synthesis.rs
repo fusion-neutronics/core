@@ -2,8 +2,11 @@
 //!
 //! An evaluation gives the partial channels; a transport code wants the sums.
 //! MT 1 (total), 3 (non-elastic), 4 (inelastic), 27 (absorption) and 101
-//! (disappearance) are therefore synthesized at conversion time rather than at
-//! every simulation start.
+//! (disappearance) are therefore synthesized from the partials, once by the
+//! converter when it writes `reactions.arrow`, and again by the loader when it
+//! builds the transport lookup ([`crate::fast_xs`]) from the reactions it has
+//! read back. One module for both, so the two cannot disagree about which
+//! channels a sum holds.
 //!
 //! The sets below are taken from the ENDF summation rules in [`endf::data`]
 //! rather than written out here. That is not tidiness: a hand-written copy of
@@ -21,6 +24,12 @@ use endf::data::sum_rule;
 /// The MTs this module builds. Excluded from every sum, since summing a sum
 /// double counts.
 pub const SYNTHETIC_MTS: [i32; 5] = [1, 3, 4, 27, 101];
+
+/// The MT numbers a fission column may hold.
+///
+/// MT 18 is the total, 19 to 21 and 38 the first, second, third and fourth
+/// chance partials. An evaluation gives either the total or the partials.
+pub const FISSION_MTS: [i32; 5] = [18, 19, 20, 21, 38];
 
 /// Channels that emit a neutron and are not level inelastic.
 ///

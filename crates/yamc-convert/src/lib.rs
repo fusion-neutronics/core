@@ -8,9 +8,10 @@
 //! Writes the full transport section set: `nuclide`, `reactions`, `products`,
 //! `distributions`, `fast_xs`, `urr`, `total_nu` and `fission_photon` for
 //! neutrons, and `element`, `subshells`, `compton` and `bremsstrahlung` for
-//! photons. [`synthesis`] is the part that is independently checkable without
-//! a second implementation: the redundant MTs it builds must reproduce the
-//! evaluation's own total.
+//! photons. The redundant MTs come from `yamc_nuclide::synthesis`, shared with
+//! the loader, and are independently checkable without a second
+//! implementation: the sums it builds must reproduce the evaluation's own
+//! total.
 
 pub mod covariance;
 pub mod distributions;
@@ -26,5 +27,4 @@ pub mod products;
 pub mod reaction_ranges;
 pub mod reactions;
 pub mod sections;
-pub mod synthesis;
 pub mod univariate_flat;

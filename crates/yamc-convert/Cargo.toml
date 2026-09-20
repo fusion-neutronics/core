@@ -14,6 +14,10 @@ path = "src/lib.rs"
 [dependencies]
 endf = { path = "../endf" }
 nuclear-data-schema = { path = "../nuclear-data-schema" }
+# The redundant-MT sums (`yamc_nuclide::synthesis`) are shared with the
+# loader, which builds the transport lookup from them at load time. No
+# features: the sums need the ENDF summation rules and nothing of the reader.
+yamc-nuclide = { path = "../yamc-nuclide", default-features = false }
 arrow-array = "60"
 arrow-schema = "60"
 arrow-ipc = { version = "60", features = ["lz4"] }
@@ -26,7 +30,8 @@ yamc-test-cache = { path = "../yamc-test-cache" }
 lzma-rs = "0.3"
 tempfile = "3"
 # The reader is the only judge that matters: a conversion can satisfy every
-# schema and still produce something yamc refuses to load.
+# schema and still produce something yamc refuses to load. The tests need the
+# reader itself, which the library dependency above deliberately leaves out.
 yamc-nuclide = { path = "../yamc-nuclide", default-features = false, features = [
     "arrow",
     # The ranged-download test drives the real loader against a local origin.

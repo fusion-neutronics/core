@@ -35,14 +35,9 @@ use std::error::Error;
 use std::path::Path;
 
 use endf::IncidentNeutron;
+use yamc_nuclide::synthesis::{self, FISSION_MTS, SYNTHETIC_MTS};
 
 use crate::sections::*;
-
-/// The MT numbers `fission_mt_numbers` may hold.
-///
-/// MT 18 is the total, 19 to 21 and 38 the first, second, third and fourth
-/// chance partials. An evaluation gives either the total or the partials.
-pub const FISSION_MTS: [i32; 5] = [18, 19, 20, 21, 38];
 
 /// The number of bins in the logarithmic index. Fixed, not scaled to the grid:
 /// the published data uses 8000 for a 631-point H1 grid and for an
@@ -61,7 +56,7 @@ fn emits_neutron(rx: &endf::Reaction) -> bool {
 /// A reaction's cross section on the full energy grid, zero below threshold.
 fn on_grid(rx: &endf::Reaction, temperature: &str, n_energy: usize) -> Option<Vec<f64>> {
     let xs = rx.xs.get(temperature)?;
-    Some(crate::synthesis::on_grid(
+    Some(synthesis::on_grid(
         &xs.y,
         xs.threshold_idx.unwrap_or(0),
         n_energy,
@@ -229,10 +224,10 @@ pub fn write_fast_xs(data: &IncidentNeutron, dir: &Path) -> Result<(), Box<dyn E
         let partials: BTreeMap<i32, Vec<f64>> = data
             .reactions
             .iter()
-            .filter(|(mt, _)| !crate::synthesis::SYNTHETIC_MTS.contains(mt))
+            .filter(|(mt, _)| !SYNTHETIC_MTS.contains(mt))
             .filter_map(|(&mt, rx)| on_grid(rx, temperature, n_energy).map(|c| (mt, c)))
             .collect();
-        let mut synthesized = crate::synthesis::synthesize(&partials, n_energy);
+        let mut synthesized = synthesis::synthesize(&partials, n_energy);
         let mut derive = |mt: i32| -> Vec<f64> {
             synthesized
                 .remove(&mt)
@@ -269,7 +264,7 @@ pub fn write_fast_xs(data: &IncidentNeutron, dir: &Path) -> Result<(), Box<dyn E
         //
         // Every nuclide with a large thermal absorption was losing precision
         // here, not only the two that crossed the check's tolerance.
-        let non_elastic_scatter = crate::synthesis::non_elastic_scattering(&partials, n_energy);
+        let non_elastic_scatter = synthesis::non_elastic_scattering(&partials, n_energy);
         let scattering: Vec<f64> = (0..n_energy)
             .map(|i| elastic[i] + non_elastic_scatter[i])
             .collect();

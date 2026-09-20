@@ -570,7 +570,7 @@ fn reaction_rows_are_every_parsed_mt_then_the_synthesized_ones() {
     // first-batch read would check MT 1 alone.
     let batch = section(dir.path(), "reactions.arrow");
 
-    let mut synthetic: Vec<i32> = yamc_convert::synthesis::SYNTHETIC_MTS
+    let mut synthetic: Vec<i32> = yamc_nuclide::synthesis::SYNTHETIC_MTS
         .iter()
         .copied()
         .filter(|mt| !data.reactions.contains_key(mt))
@@ -1584,7 +1584,7 @@ fn constructed_synthesized_rows_are_redundant_so_the_rest_sum_to_the_total() {
     // default; the sum above
     // is the assertion that does not depend on it.
     assert_eq!(plain, vec![2, 16, 18, 51, 102, 103]);
-    assert_eq!(redundant, yamc_convert::synthesis::SYNTHETIC_MTS.to_vec());
+    assert_eq!(redundant, yamc_nuclide::synthesis::SYNTHETIC_MTS.to_vec());
 
     // The other two literals on those rows, pinned and not endorsed: there is
     // no parsed side and no consumer rule to check them against.
