@@ -415,17 +415,17 @@ fn the_synthesized_total_reproduces_the_evaluated_total() {
 
     let mut partials = std::collections::BTreeMap::new();
     for (&mt, rx) in &data.reactions {
-        if yamc_convert::synthesis::SYNTHETIC_MTS.contains(&mt) {
+        if yamc_nuclide::synthesis::SYNTHETIC_MTS.contains(&mt) {
             continue;
         }
         if let Some(xs) = rx.xs.get(&temperature) {
             partials.insert(
                 mt,
-                yamc_convert::synthesis::on_grid(&xs.y, xs.threshold_idx.unwrap_or(0), grid.len()),
+                yamc_nuclide::synthesis::on_grid(&xs.y, xs.threshold_idx.unwrap_or(0), grid.len()),
             );
         }
     }
-    let built = yamc_convert::synthesis::synthesize(&partials, grid.len());
+    let built = yamc_nuclide::synthesis::synthesize(&partials, grid.len());
     let mine = &built[&1];
 
     let evaluated = data
@@ -433,7 +433,7 @@ fn the_synthesized_total_reproduces_the_evaluated_total() {
         .get(&1)
         .and_then(|rx| rx.xs.get(&temperature))
         .expect("the ACE table carries its own MT 1");
-    let theirs = yamc_convert::synthesis::on_grid(
+    let theirs = yamc_nuclide::synthesis::on_grid(
         &evaluated.y,
         evaluated.threshold_idx.unwrap_or(0),
         grid.len(),

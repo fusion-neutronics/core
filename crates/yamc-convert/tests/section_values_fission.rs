@@ -587,7 +587,7 @@ fn total_nu_columns_are_the_products_own_fields_on_every_fission_mt() {
     // satisfied by narrowing the constant. Pinned so a sixth fission MT has to
     // arrive in the loop below as well as in the writer.
     let fission_mts = [18, 19, 20, 21, 38];
-    assert_eq!(yamc_convert::fast_xs::FISSION_MTS, fission_mts);
+    assert_eq!(yamc_nuclide::synthesis::FISSION_MTS, fission_mts);
 
     for mt in fission_mts {
         // Two regions: histogram up to the second point, then linear-linear to

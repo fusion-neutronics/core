@@ -41,7 +41,7 @@ use arrow_ipc::reader::FileReader;
 use endf::IncidentNeutron;
 
 use crate::sections::*;
-use crate::synthesis;
+use yamc_nuclide::synthesis;
 
 /// Every reaction's cross section on the nuclide's full energy grid, by MT,
 /// for one temperature. Excludes the redundant MTs, which are rebuilt.

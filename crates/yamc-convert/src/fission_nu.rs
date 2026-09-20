@@ -10,8 +10,8 @@ use endf::fission_energy::Component;
 use endf::product::Yield;
 use endf::{FissionEnergyRelease, IncidentNeutron};
 
-use crate::fast_xs::FISSION_MTS;
 use crate::sections::*;
+use yamc_nuclide::synthesis::FISSION_MTS;
 
 /// Write `total_nu.arrow`, if the evaluation gives a total nu-bar.
 ///

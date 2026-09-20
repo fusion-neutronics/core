@@ -50,8 +50,8 @@ use std::collections::BTreeMap;
 
 use arrow_array::RecordBatch;
 use endf::IncidentNeutron;
-use yamc_convert::fast_xs::{write_fast_xs, FISSION_MTS};
-use yamc_convert::synthesis;
+use yamc_convert::fast_xs::write_fast_xs;
+use yamc_nuclide::synthesis::{self, FISSION_MTS};
 
 /// The number of bins in the logarithmic index, as `fast_xs.rs:50` fixes it.
 /// Duplicated rather than imported because the writer's constant is private,

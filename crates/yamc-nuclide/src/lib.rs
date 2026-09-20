@@ -13,6 +13,7 @@ pub mod config;
 pub mod covariance;
 pub mod data;
 pub mod delayed_neutrons;
+pub mod fast_xs;
 pub mod fission_photon;
 pub mod group_structures;
 pub mod interpolation;
@@ -22,6 +23,7 @@ pub mod nuclide_registry;
 pub mod particle_type;
 pub mod reaction;
 pub mod reaction_product;
+pub mod synthesis;
 pub mod temperature;
 pub mod urr;
 
