@@ -194,7 +194,7 @@ fn parse_aux_into(data: &mut PhotonData, text: &str) -> Result<()> {
 }
 
 impl PhotonData {
-    /// Read `BREMX.DAT` and resample its cross sections onto the common grid.
+    /// Read the Seltzer-Berger bremsstrahlung table and resample its cross sections onto the common grid.
     ///
     /// The file gives the scaled cross sections on 57 tabulated electron
     /// energies. They are interpolated with a not-a-knot cubic spline in log
@@ -212,8 +212,8 @@ impl PhotonData {
         };
 
         // The counts sit at fixed offsets in the header.
-        let n = number(37, "the electron energy count in BREMX.DAT")? as usize;
-        let k = number(38, "the photon energy count in BREMX.DAT")? as usize;
+        let n = number(37, "the electron energy count in the bremsstrahlung table")? as usize;
+        let k = number(38, "the photon energy count in the bremsstrahlung table")? as usize;
         let mut p = 39;
 
         // 200 points from 1 keV to 1 GeV, matching `np.logspace(3, 9, 200)`.
@@ -225,12 +225,15 @@ impl PhotonData {
         // Tabulated energies are in MeV; the spline runs in log eV.
         let mut logx = Vec::with_capacity(n);
         for i in 0..n {
-            logx.push((number(p + i, "an electron energy in BREMX.DAT")? * EV_PER_MEV).ln());
+            logx.push(
+                (number(p + i, "an electron energy in the bremsstrahlung table")? * EV_PER_MEV)
+                    .ln(),
+            );
         }
         p += n;
 
         self.photon_energy = (0..k)
-            .map(|i| number(p + i, "a photon energy in BREMX.DAT"))
+            .map(|i| number(p + i, "a photon energy in the bremsstrahlung table"))
             .collect::<Result<_>>()?;
         p += k;
 
@@ -240,7 +243,10 @@ impl PhotonData {
             let mut y = vec![vec![0.0; k]; n];
             for (row, values) in y.iter_mut().enumerate() {
                 for (col, value) in values.iter_mut().enumerate() {
-                    *value = number(p + row * k + col, "a cross section in BREMX.DAT")? * 1.0e-3;
+                    *value = number(
+                        p + row * k + col,
+                        "a cross section in the bremsstrahlung table",
+                    )? * 1.0e-3;
                 }
             }
             p += n * k;
@@ -262,7 +268,7 @@ impl PhotonData {
 
             self.bremsstrahlung
                 .get_mut(&z)
-                .ok_or_else(|| bad("BREMX.DAT covers an element the density data does not"))?
+                .ok_or_else(|| bad("the Seltzer-Berger bremsstrahlung table covers an element the density data does not"))?
                 .dcs = dcs;
         }
         Ok(())
