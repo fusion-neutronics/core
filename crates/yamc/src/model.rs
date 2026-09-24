@@ -1775,6 +1775,12 @@ impl Model {
                 })
                 .collect();
 
+        // The transmutation tally's per-history statistics, when on, keep a
+        // scratch vector per rayon worker the same way; size it for this pool.
+        if let Some(dep_tallies) = &transmutation_tallies {
+            dep_tallies.prepare_history_workers(n_rayon_threads)?;
+        }
+
         // Per-tally convergence history (aggregate statistics versus number
         // of histories), recorded at each batch checkpoint from the per-worker
         // aggregate accumulators. Installed onto each tally after the loop.
@@ -2332,6 +2338,11 @@ impl Model {
                                 // No-op when no tally uses per-history Welford
                                 // (zero-sized scratch ⇒ touched_bins empty).
                                 welford_worker.finish_history();
+                                // Same boundary for the transmutation tally's
+                                // per-history statistics; a no-op when off.
+                                if let Some(dep_tallies) = transport_ctx.transmutation_tallies {
+                                    dep_tallies.finish_history();
+                                }
                                 // Lock automatically released at end of scope.
 
                                 // Return state for the next iteration

@@ -1031,4 +1031,153 @@ mod tests {
         let material = fe56();
         assert_eq!(peak_cross_section(&material, "Cs137"), 20.0);
     }
+
+    /// The statistical uncertainty the transmutation tally's per-history
+    /// covariance predicts must match the actual spread between independent
+    /// transport runs (issue #140, item 1).
+    ///
+    /// Sixteen runs of a 14 MeV point source in an Fe56 sphere, on two
+    /// threads so the per-worker scratch and the stripe fold both run for
+    /// real. Each run's covariance predicts the variance of its own means;
+    /// the scatter of those means across runs measures it. With 16 runs the
+    /// measured variance is a chi-squared on 15 degrees of freedom, so the
+    /// ratio lands in [0.42, 1.83] 95% of the time; the bounds below are a
+    /// little wider and the seeds fixed, so this is deterministic.
+    ///
+    /// Two quantities are checked: the total track length, which is the sum
+    /// over every bin and so rests almost entirely on the cross-bin
+    /// covariance, and the fast-band track length above 1 MeV.
+    #[test]
+    fn history_covariance_predicts_the_run_to_run_spread() {
+        use crate::geo::{BoundaryType, HalfspaceType, Region, Surface};
+        use crate::geometry::cell::Cell;
+        use crate::geometry::Geometry;
+        use yamc_source::distribution::angular::AngularDistribution;
+        use yamc_source::distribution::energy::Discrete;
+        use yamc_source::distribution::spatial::Point;
+        use yamc_source::source::{
+            ParticleSource, Source, SourceEnergyDistribution, SourceSpatialDistribution,
+        };
+
+        const RUNS: u64 = 16;
+        const PARTICLES: usize = 1500;
+
+        let Some(fe56_path) = yamc_test_cache::transport_nuclide("Fe56") else {
+            eprintln!("skipping -- Fe56 transport fixture absent");
+            return;
+        };
+        let mut material = Material::new(
+            HashMap::from([("Fe56".to_string(), 1.0)]),
+            "atom",
+            "g/cc",
+            Some(7.874),
+        )
+        .unwrap();
+        material.set_temperature("294");
+        material
+            .read_nuclear_data(&HashMap::from([("Fe56".to_string(), fe56_path)]), None)
+            .unwrap();
+        material.set_material_id(1);
+        material.transmutable = true;
+        let chain: HashMap<String, ChainNuclide> = HashMap::from([(
+            "Fe56".to_string(),
+            ChainNuclide {
+                name: "Fe56".to_string(),
+                half_life: None,
+                decay_energy: 0.0,
+                reactions: vec![yani::ChainReaction {
+                    kind: "(n,gamma)".to_string(),
+                    target: Some("Fe57".to_string()),
+                    branching: 1.0,
+                    q_value: None,
+                }],
+                decays: vec![],
+                fission_yields: None,
+                sources: Vec::new(),
+                half_life_uncertainty: None,
+                decay_energy_uncertainty: None,
+            },
+        )]);
+
+        let mut predicted = Vec::new();
+        let mut means = Vec::new();
+        for run in 0..RUNS {
+            let sphere = Arc::new(Surface::sphere(
+                0.0,
+                0.0,
+                0.0,
+                10.0,
+                Some(1),
+                Some(BoundaryType::Vacuum),
+            ));
+            let region = Region::new_from_halfspace(HalfspaceType::Below(sphere));
+            let cell = Cell::new(Some(1), region, None, Some(0));
+            let geometry = Geometry::new(vec![cell], vec![Arc::new(material.clone())]).unwrap();
+            let source = ParticleSource::Neutron(Source {
+                space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
+                angle: AngularDistribution::Isotropic,
+                energy: SourceEnergyDistribution::Discrete(
+                    Discrete::new(vec![1.406e7], vec![1.0]).unwrap(),
+                ),
+                strength: 1.0,
+            });
+            let mut model = Model::new(geometry, vec![source], vec![]);
+            model.verbose = crate::model::Verbose::silent();
+
+            let cells: HashMap<u32, Vec<usize>> = HashMap::from([(1u32, vec![0usize])]);
+            let for_init: HashMap<u32, &Material> = HashMap::from([(1u32, &material)]);
+            let tallies = Arc::new(
+                TransmutationTallies::new(
+                    &cells,
+                    &for_init,
+                    &chain,
+                    &yani::BranchTable::new(),
+                    &HashMap::new(),
+                )
+                .with_history_statistics(),
+            );
+            let settings = crate::model::TransportSettings {
+                total_particles: Some(PARTICLES),
+                seed: 1000 + run,
+                threads: Some(2),
+                ..Default::default()
+            };
+            model
+                .run_internal::<NoOpTracker>(&settings, None, Some(Arc::clone(&tallies)), false)
+                .unwrap();
+
+            let cov = tallies.moment_covariance(1).unwrap();
+            assert_eq!(cov.n_histories, PARTICLES as u64);
+            let b = cov.n_bins();
+            let total: Vec<f64> = (0..cov.dim()).map(|i| (i < b) as u8 as f64).collect();
+            let fast: Vec<f64> = (0..cov.dim())
+                .map(|i| (i < b && cov.grid[i] >= 1.0e6) as u8 as f64)
+                .collect();
+            let (m_total, v_total) = cov.linear_combination(&total);
+            let (m_fast, v_fast) = cov.linear_combination(&fast);
+
+            // The folded total is the tally's own flux numerator.
+            let flux_tl = tallies.get_flux(1, 1.0, 1.0);
+            assert!(
+                (m_total - flux_tl).abs() <= 1e-9 * flux_tl,
+                "summed s0 {m_total:e} vs flux track length {flux_tl:e}"
+            );
+            predicted.push([v_total, v_fast]);
+            means.push([m_total, m_fast]);
+        }
+
+        let n = RUNS as f64;
+        for (q, name) in [(0, "total"), (1, "fast")] {
+            let avg = means.iter().map(|m| m[q]).sum::<f64>() / n;
+            let measured = means.iter().map(|m| (m[q] - avg).powi(2)).sum::<f64>() / (n - 1.0);
+            let expected = predicted.iter().map(|p| p[q]).sum::<f64>() / n;
+            let ratio = measured / expected;
+            eprintln!("{name}: measured / predicted variance = {ratio:.3}");
+            assert!(
+                (0.35..=2.2).contains(&ratio),
+                "{name}: run-to-run variance {measured:e} against predicted {expected:e} \
+                 (ratio {ratio:.3})"
+            );
+        }
+    }
 }
