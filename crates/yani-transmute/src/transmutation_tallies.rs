@@ -22,7 +22,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use super::history_statistics::{HistoryStatistics, MomentCovariance};
+use super::history_statistics::{
+    fold_covariance, HistoryCovariance, HistoryStatistics, RateCovariance, RateLabel,
+};
 use super::material_transmute::curve_interp;
 use super::{mt_to_reaction_type, reaction_type_to_mt};
 use yamc_materials::material::Material;
@@ -542,14 +544,15 @@ impl TransmutationTallies {
         }
     }
 
-    /// Also accumulate the per-history covariance of each material's flux
-    /// moments, so the rates folded from them carry a statistical uncertainty
-    /// (see [`MomentCovariance`]).
+    /// Also accumulate the per-history covariance of each material's tally
+    /// (see [`HistoryCovariance`]), so every rate it reports carries a
+    /// statistical uncertainty and a correlation with every other.
     ///
-    /// Off unless asked for. It costs `~(2 * 626)^2 / 2` doubles per
-    /// transmutable material, about 6 MB, plus a sparse outer product per
-    /// history, and none of it touches the sums the means are built from, so
-    /// the means are bit-identical with it on or off.
+    /// Off unless asked for. It costs `(626 + Y + R)^2 / 2` doubles per
+    /// transmutable material, for `Y` yield channels and `R` scored
+    /// nuclide-MT pairs (about 2 MB with no rates, 5 MB at `R = 500`), plus
+    /// a sparse outer product per history. None of it touches the sums the
+    /// means are built from, so the means are bit-identical with it on or off.
     ///
     /// A run that scores this tally must call
     /// [`prepare_history_workers`](Self::prepare_history_workers) before
@@ -558,9 +561,16 @@ impl TransmutationTallies {
     pub fn with_history_statistics(mut self) -> Self {
         let mut ids: Vec<u32> = self.materials.keys().copied().collect();
         ids.sort_unstable();
-        let materials: Vec<(u32, usize)> = ids
+        let materials: Vec<(u32, usize, usize)> = ids
             .iter()
-            .map(|id| (*id, self.materials[id].yield_channels.len()))
+            .map(|id| {
+                let m = &self.materials[id];
+                (
+                    *id,
+                    m.yield_channels.len(),
+                    m.nuclide_names.len() * m.mt_numbers.len(),
+                )
+            })
             .collect();
         self.statistics = Some(HistoryStatistics::new(
             base_spectrum_grid(),
@@ -597,10 +607,10 @@ impl TransmutationTallies {
         }
     }
 
-    /// The per-history mean and covariance of `material_id`'s flux-moment
-    /// vector, over every source particle accumulated so far. `None` when
-    /// history statistics are off or the material is not tallied.
-    pub fn moment_covariance(&self, material_id: u32) -> Option<MomentCovariance> {
+    /// The per-history mean and covariance of `material_id`'s tally vector,
+    /// over every source particle accumulated so far. `None` when history
+    /// statistics are off or the material is not tallied.
+    pub fn history_covariance(&self, material_id: u32) -> Option<HistoryCovariance> {
         let stats = self.statistics.as_ref()?;
         let mat_data = self.materials.get(&material_id)?;
         let n = mat_data.total_particles.load(Ordering::Relaxed) as u64;
@@ -609,7 +619,186 @@ impl TransmutationTallies {
             .iter()
             .map(|c| (c.parent.clone(), c.kind.clone(), c.target.clone()))
             .collect();
-        stats.extract(material_id, n, labels)
+        let rates = mat_data
+            .nuclide_names
+            .iter()
+            .flat_map(|name| {
+                mat_data
+                    .mt_numbers
+                    .iter()
+                    .map(move |&mt| (name.clone(), mt))
+            })
+            .collect();
+        stats.extract(material_id, n, labels, rates)
+    }
+
+    /// The statistical covariance of every rate this material's tally
+    /// reports, the totals of [`get_reaction_rates`](Self::get_reaction_rates)
+    /// and the partials of [`get_partial_rates`](Self::get_partial_rates),
+    /// normalized the same way. `None` when history statistics are off or the
+    /// material is not tallied.
+    ///
+    /// The totals and the MF=9 yields are entries of the history vector
+    /// themselves, so their covariances are exact. The MF=10 partials are
+    /// folded from the spectrum, like their means, and get their covariance as
+    /// `a_i^T Sigma a_j / n` (see [`HistoryCovariance`]). Their fold weights
+    /// come from the tally itself: in each base-grid bin, the curve averaged
+    /// over the flux the union-grid moments say that bin actually saw, then
+    /// scaled so the fold reproduces the partial exactly. So the fold decides
+    /// only how a partial's fluctuation is spread over the spectrum, never the
+    /// partial itself. What it cannot see is a fluctuation in the shape of the
+    /// spectrum inside one base bin (50 per decade), which matters only where
+    /// the curve changes a lot across one bin; the branching curves are smooth.
+    pub fn get_reaction_rate_covariance(
+        &self,
+        material_id: u32,
+        volume: f64,
+        source_rate: f64,
+    ) -> Option<RateCovariance> {
+        let moments = self.history_covariance(material_id)?;
+        let mat_data = self.materials.get(&material_id)?;
+        let n = moments.n_histories;
+        if n == 0 || volume <= 0.0 {
+            return Some(RateCovariance::from_parts(
+                Vec::new(),
+                Vec::new(),
+                n,
+                Vec::new(),
+            ));
+        }
+        // Rates are raw sums times `to_rate`. The weights act on the vector's
+        // MEANS, which are already per source particle, so they carry
+        // `per_mean` instead.
+        let to_rate = source_rate / (n as f64 * volume * 1.0e24);
+        let per_mean = source_rate / (volume * 1.0e24);
+
+        // Fine-grid flux per bin and its flux-weighted energy, and which base
+        // bin each fine bin sits in.
+        let base = &moments.grid;
+        let s0 = mat_data
+            .moment_s0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let s1 = mat_data
+            .moment_s1
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let centroid: Vec<f64> = self
+            .union_grid
+            .iter()
+            .zip(s0.iter().zip(&s1))
+            .map(|(&edge, (&m0, &m1))| if m0 > 0.0 { edge + m1 / m0 } else { edge })
+            .collect();
+        let base_of: Vec<usize> = self
+            .union_grid
+            .iter()
+            .map(|&e| base.partition_point(|&b| b <= e).max(1) - 1)
+            .collect();
+        let mut base_s0 = vec![0.0; base.len()];
+        for (g, &c) in base_of.iter().enumerate() {
+            base_s0[c] += s0[g];
+        }
+
+        // One weight row from a cross section evaluated at the fine centroids,
+        // scaled so it folds to `raw_sum`, the tally's own `sum(sigma * TL)`.
+        let row_for = |sigma: &dyn Fn(f64) -> f64, raw_sum: f64| -> Vec<(usize, f64)> {
+            let mut per_base = vec![0.0; base.len()];
+            for (g, &m0) in s0.iter().enumerate() {
+                if m0 > 0.0 {
+                    per_base[base_of[g]] += sigma(centroid[g]) * m0;
+                }
+            }
+            // Folding per_base / base_s0 against the base s0 sums gives back
+            // sum(per_base), so that is the normalization.
+            let folded: f64 = per_base.iter().sum();
+            if folded <= 0.0 {
+                return Vec::new();
+            }
+            let k = raw_sum / folded * per_mean;
+            per_base
+                .iter()
+                .enumerate()
+                .filter(|(c, v)| **v > 0.0 && base_s0[*c] > 0.0)
+                .map(|(c, v)| (moments.s0_index(c), v / base_s0[c] * k))
+                .collect()
+        };
+
+        let mut labels = Vec::new();
+        let mut rates = Vec::new();
+        let mut rows: Vec<Vec<(usize, f64)>> = Vec::new();
+
+        // Reaction totals, scored directly: an exact entry each. Only those
+        // `get_reaction_rates` reports, which is every pair that scored.
+        let sums = mat_data
+            .sum_means
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let n_mts = mat_data.mt_numbers.len();
+        for (nuc_idx, name) in mat_data.nuclide_names.iter().enumerate() {
+            for (mt_idx, &mt) in mat_data.mt_numbers.iter().enumerate() {
+                let j = nuc_idx * n_mts + mt_idx;
+                let (Some(kind), true) = (mt_to_reaction_type(mt), sums[j] > 0.0) else {
+                    continue;
+                };
+                labels.push(RateLabel {
+                    nuclide: name.clone(),
+                    kind: kind.to_string(),
+                    target: None,
+                });
+                rates.push(sums[j] * to_rate);
+                rows.push(vec![(moments.rate_index(j), per_mean)]);
+            }
+        }
+
+        // MF=10 partials, folded from the moments for the mean as well.
+        let mut suffix_s0 = vec![0.0; s0.len() + 1];
+        for g in (0..s0.len()).rev() {
+            suffix_s0[g] = suffix_s0[g + 1] + s0[g];
+        }
+        for c in &self.moment_curves {
+            let exact = fold_curve_from_moments(
+                &c.energy,
+                &c.values,
+                &self.union_grid,
+                &s0,
+                &s1,
+                &suffix_s0,
+            );
+            labels.push(RateLabel {
+                nuclide: c.parent.clone(),
+                kind: c.kind.clone(),
+                target: Some(c.target.clone()),
+            });
+            rates.push(exact * to_rate);
+            let sigma = |e: f64| curve_interp(&c.energy, &c.values, e);
+            rows.push(if exact > 0.0 {
+                row_for(&sigma, exact)
+            } else {
+                Vec::new()
+            });
+        }
+
+        // MF=9 yields: scored directly, so the weight is exact.
+        let ysums = mat_data
+            .yield_sums
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        for (k, (ch, &sum)) in mat_data.yield_channels.iter().zip(&ysums).enumerate() {
+            labels.push(RateLabel {
+                nuclide: ch.parent.clone(),
+                kind: ch.kind.clone(),
+                target: Some(ch.target.clone()),
+            });
+            rates.push(sum * to_rate);
+            rows.push(vec![(moments.yield_index(k), per_mean)]);
+        }
+
+        let covariance = fold_covariance(&moments, &rows);
+        Some(RateCovariance::from_parts(labels, rates, n, covariance))
     }
 
     /// Score a track segment in a transmutable material.
@@ -655,7 +844,7 @@ impl TransmutationTallies {
                 (energy - grid[g]) * track_length,
             );
             if let Some(h) = &mut history {
-                h.add_moments(g, energy, track_length);
+                h.add_track_length(g, track_length);
             }
         }
 
@@ -677,6 +866,9 @@ impl TransmutationTallies {
                         if xs > 0.0 {
                             let bin_idx = nuc_idx * n_mts + mt_idx;
                             atomic_add_f64(&mat_data.batch_accum[bin_idx], xs * track_length);
+                            if let Some(h) = &mut history {
+                                h.add_rate(bin_idx, xs * track_length);
+                            }
 
                             // Split this segment's fission rate across the
                             // nuclide's tabulated yield energies (issue #379),
@@ -1885,19 +2077,18 @@ mod tests {
         }
     }
 
-    /// Each history's coarse moment vector, computed directly from its
-    /// segments: the reference the accumulator has to reproduce.
+    /// Each history's vector, computed directly from its segments: the
+    /// reference the accumulator has to reproduce. The bare material scores
+    /// no rates and there are no yield channels, so only the spectrum part is
+    /// non-zero; the fixture's one (U238, MT 102) rate entry stays zero.
     fn reference_vectors(histories: &[Vec<(f64, f64)>]) -> Vec<Vec<f64>> {
         let grid = base_spectrum_grid();
-        let b = grid.len();
         histories
             .iter()
             .map(|h| {
-                let mut x = vec![0.0; 2 * b];
+                let mut x = vec![0.0; grid.len() + 1];
                 for &(e, tl) in h {
-                    let c = grid.partition_point(|&g| g <= e) - 1;
-                    x[c] += tl;
-                    x[b + c] += (e - grid[c]) * tl;
+                    x[grid.partition_point(|&g| g <= e) - 1] += tl;
                 }
                 x
             })
@@ -1922,18 +2113,19 @@ mod tests {
         run_histories(&t, &histories, &material);
         t.accumulate_batch(histories.len());
 
-        let cov = t.moment_covariance(7).expect("statistics are on");
+        let cov = t.history_covariance(7).expect("statistics are on");
         let xs = reference_vectors(&histories);
         let n = xs.len() as f64;
         let dim = xs[0].len();
-        assert_eq!(cov.dim(), dim, "no yield channels in this fixture");
+        assert_eq!(cov.dim(), dim, "base bins, no yields, one rate entry");
+        assert_eq!(cov.rate_channels, vec![("U238".to_string(), 102)]);
         assert_eq!(cov.n_histories, histories.len() as u64);
 
         let mean: Vec<f64> = (0..dim)
             .map(|i| xs.iter().map(|x| x[i]).sum::<f64>() / n)
             .collect();
         let touched: Vec<usize> = (0..dim).filter(|&i| mean[i] != 0.0).collect();
-        assert!(touched.len() > 100, "histories should spread over the grid");
+        assert!(touched.len() > 50, "histories should spread over the grid");
         for &i in &touched {
             let rel = (cov.mean[i] - mean[i]).abs() / mean[i].abs();
             assert!(rel < 1e-12, "mean[{i}] off by {rel:e}");
@@ -1969,41 +2161,32 @@ mod tests {
         assert!((var - t_var).abs() < 1e-9 * t_var, "{var:e} vs {t_var:e}");
     }
 
-    /// The coarse moments are sums of the fine ones, not approximations of
-    /// them: summing the union-grid means over each base bin must give the
+    /// The coarse track lengths are sums of the fine ones, not approximations
+    /// of them: summing the union-grid means over each base bin must give the
     /// statistics' means.
     #[test]
-    fn coarse_moments_are_sums_of_the_fine_ones() {
+    fn coarse_track_lengths_are_sums_of_the_fine_ones() {
         let histories = synthetic_histories(200);
         let t = stats_tally(&moment_branch(), 1);
         run_histories(&t, &histories, &bare_material());
         t.accumulate_batch(histories.len());
 
-        let cov = t.moment_covariance(7).unwrap();
+        let cov = t.history_covariance(7).unwrap();
         let base = base_spectrum_grid();
         let mat = &t.materials[&7];
         let s0 = mat.moment_s0.lock().unwrap();
-        let s1 = mat.moment_s1.lock().unwrap();
         let n = histories.len() as f64;
-        let mut coarse0 = vec![0.0; base.len()];
-        let mut coarse1 = vec![0.0; base.len()];
+        let mut coarse = vec![0.0; base.len()];
         for (g, &edge) in t.union_grid.iter().enumerate() {
-            let c = base.partition_point(|&b| b <= edge) - 1;
-            coarse0[c] += s0[g];
-            // Re-reference the fine first moment to the coarse bin's edge.
-            coarse1[c] += s1[g] + (edge - base[c]) * s0[g];
+            coarse[base.partition_point(|&b| b <= edge) - 1] += s0[g];
         }
-        for c in 0..base.len() {
-            for (fine, coarse) in [
-                (coarse0[c], cov.mean[c]),
-                (coarse1[c], cov.mean[base.len() + c]),
-            ] {
-                let expected = fine / n;
-                assert!(
-                    (coarse - expected).abs() <= 1e-10 * expected.abs().max(1e-300),
-                    "bin {c}: {coarse:e} vs {expected:e}"
-                );
-            }
+        for (c, fine) in coarse.iter().enumerate() {
+            let expected = fine / n;
+            assert!(
+                (cov.mean[c] - expected).abs() <= 1e-10 * expected.abs().max(1e-300),
+                "bin {c}: {} vs {expected:e}",
+                cov.mean[c]
+            );
         }
     }
 
@@ -2020,7 +2203,7 @@ mod tests {
             run_histories(t, &histories, &material);
             t.accumulate_batch(histories.len());
         }
-        assert!(off.moment_covariance(7).is_none());
+        assert!(off.history_covariance(7).is_none());
 
         let bits = |t: &TransmutationTallies| {
             let mut v: Vec<u64> = Vec::new();
@@ -2074,8 +2257,8 @@ mod tests {
         });
         parallel.accumulate_batch(histories.len());
 
-        let a = serial.moment_covariance(7).unwrap();
-        let b = parallel.moment_covariance(7).unwrap();
+        let a = serial.history_covariance(7).unwrap();
+        let b = parallel.history_covariance(7).unwrap();
         for i in 0..a.dim() {
             assert!((a.mean[i] - b.mean[i]).abs() <= 1e-12 * a.mean[i].abs());
             for j in i..a.dim() {
@@ -2145,8 +2328,8 @@ mod tests {
         };
         rank0.reduce_across_ranks(&ops);
 
-        let a = whole.moment_covariance(7).unwrap();
-        let b = rank0.moment_covariance(7).unwrap();
+        let a = whole.history_covariance(7).unwrap();
+        let b = rank0.history_covariance(7).unwrap();
         assert_eq!(a.n_histories, b.n_histories);
         for i in 0..a.dim() {
             assert!((a.mean[i] - b.mean[i]).abs() <= 1e-12 * a.mean[i].abs());
@@ -2169,14 +2352,14 @@ mod tests {
         run_histories(&t, &histories, &bare_material());
         t.accumulate_batch(histories.len());
         assert!(t
-            .moment_covariance(7)
+            .history_covariance(7)
             .unwrap()
             .mean
             .iter()
             .any(|m| *m != 0.0));
 
         t.reset();
-        let cleared = t.moment_covariance(7).unwrap();
+        let cleared = t.history_covariance(7).unwrap();
         assert_eq!(cleared.n_histories, 0);
         assert!(cleared.mean.iter().all(|m| *m == 0.0));
 
@@ -2184,5 +2367,93 @@ mod tests {
         assert!(t.prepare_history_workers(1).is_ok());
         let err = t.prepare_history_workers(3).unwrap_err();
         assert!(err.contains("sized for 2"), "{err}");
+    }
+
+    /// The folded rate covariance against the covariance of the rates
+    /// themselves, accumulated history by history. The MF=10 partials of the
+    /// moment branch are exact continuous-energy curves, so each history's
+    /// own contribution to every partial rate can be computed directly and the
+    /// two-pass covariance of those is the reference. The fold only sees the
+    /// spectrum per base bin, so agreement is to the size of a cross section's
+    /// change across one bin, not to rounding.
+    #[test]
+    fn rate_covariance_matches_the_per_history_rates() {
+        let branch = moment_branch();
+        let histories = synthetic_histories(4000);
+        let t = stats_tally(&branch, 1);
+        let material = bare_material();
+        run_histories(&t, &histories, &material);
+        t.accumulate_batch(histories.len());
+
+        let (volume, source_rate) = (2.0, 1.0e12);
+        let rc = t
+            .get_reaction_rate_covariance(7, volume, source_rate)
+            .expect("statistics are on");
+        let per_mean = source_rate / (volume * 1.0e24);
+        let n = histories.len() as f64;
+
+        // The rates are the ones the accessor reports.
+        let partials = t.get_partial_rates(7, volume, source_rate);
+        for (i, l) in rc.labels.iter().enumerate() {
+            let target = l.target.as_deref().unwrap();
+            let expected = partials[&l.nuclide][&l.kind]
+                .iter()
+                .find(|(tg, _)| tg == target)
+                .unwrap()
+                .1;
+            assert!(
+                (rc.rates[i] - expected).abs() <= 1e-12 * expected.abs(),
+                "{l:?}: {} vs {expected}",
+                rc.rates[i]
+            );
+        }
+
+        // Each history's own score in every partial.
+        let curves: Vec<(&[f64], &[f64])> = t
+            .moment_curves
+            .iter()
+            .map(|c| (c.energy.as_slice(), c.values.as_slice()))
+            .collect();
+        let x: Vec<Vec<f64>> = histories
+            .iter()
+            .map(|h| {
+                curves
+                    .iter()
+                    .map(|(e, v)| h.iter().map(|&(en, tl)| curve_interp(e, v, en) * tl).sum())
+                    .collect()
+            })
+            .collect();
+        let m = curves.len();
+        let mean: Vec<f64> = (0..m)
+            .map(|i| x.iter().map(|r| r[i]).sum::<f64>() / n)
+            .collect();
+        let reference = |i: usize, j: usize| {
+            x.iter()
+                .map(|r| (r[i] - mean[i]) * (r[j] - mean[j]))
+                .sum::<f64>()
+                / (n - 1.0)
+                / n
+                * per_mean
+                * per_mean
+        };
+        for i in 0..m {
+            for j in i..m {
+                let r = reference(i, j);
+                let scale = (reference(i, i) * reference(j, j)).sqrt();
+                let err = (rc.covariance(i, j) - r).abs() / scale;
+                assert!(
+                    err < 0.01,
+                    "cov[{i}][{j}]: {:e} vs {r:e}",
+                    rc.covariance(i, j)
+                );
+            }
+        }
+    }
+
+    /// Off by default here too: no statistics, no covariance.
+    #[test]
+    fn rate_covariance_needs_history_statistics() {
+        let t = one_bin_tally_with_branch(&moment_branch());
+        assert!(t.get_reaction_rate_covariance(7, 2.0, 1.0e12).is_none());
     }
 }

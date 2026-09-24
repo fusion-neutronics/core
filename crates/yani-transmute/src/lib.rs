@@ -121,7 +121,7 @@ pub fn load_configured_chain() -> Result<yani::LoadedChain, Box<dyn std::error::
     )
 }
 pub use derived::{Estimate, LineEstimate};
-pub use history_statistics::{MomentCovariance, YieldChannelLabel};
+pub use history_statistics::{HistoryCovariance, RateCovariance, RateLabel, YieldChannelLabel};
 pub use multigroup::{
     compute_multigroup_reaction_rates, reaction_rate_spectrum, scale_rates, EnergyGroups,
 };
