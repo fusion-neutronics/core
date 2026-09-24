@@ -15,7 +15,9 @@
 //!
 //! # Why the fixture is built rather than downloaded
 //!
-//! Nothing published carries `covariance.arrow` yet, so the Li6 directory is
+//! The Li6 directory carries a locally written `covariance.arrow` rather than
+//! a downloaded one, so that this needs no network and asserts on an
+//! evaluation in the tree rather than on whatever the CDN currently holds. It is
 //! copied out of the cache and the real converter writes the section into it
 //! from the committed ENDF evaluation. Every other nuclide is used as cached,
 //! which means they have no covariance and contribute nothing to the spread.

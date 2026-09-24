@@ -1,11 +1,14 @@
 //! Nuclear-data uncertainty on `Material.transmute`, end to end.
 //!
-//! Nothing published carries `covariance.arrow` yet, so the fixture is built:
-//! a cached Fe56 directory is copied and the real converter writes the MF=33
-//! section into it from the committed ENDF evaluation. The trimmed Fe56 fixture
-//! keeps covariance for MT=103, which is `(n,p)` to Mn56 -- the dominant
-//! activation channel of irradiated iron, so the one nuclide whose sigma is
-//! worth asserting on is exactly the one the evaluation covers.
+//! The fixture is built rather than downloaded: a cached Fe56 directory is
+//! copied and the real converter writes the MF=33 section into it from the
+//! committed ENDF evaluation. The published libraries do now carry
+//! `covariance.arrow`, but a test that fetched it would assert on whatever the
+//! CDN currently holds and would need a network, so the section is produced
+//! here from an evaluation that is in the tree. The trimmed Fe56 fixture keeps
+//! covariance for MT=103, which is `(n,p)` to Mn56, the dominant activation
+//! channel of irradiated iron, so the one nuclide whose sigma is worth
+//! asserting on is exactly the one the evaluation covers.
 //!
 //! Self-skips when the nuclear-data fixtures are missing, the way every other
 //! test that needs them does.
