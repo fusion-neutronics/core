@@ -50,6 +50,7 @@ __all__ = [
     "set_transmutation_decay_data",
     "set_transmutation_fission_yields",
     "set_transmutation_reactions",
+    "transmute",
 ]
 
 @typing.final
@@ -106,9 +107,9 @@ class DataUncertainty:
     MF=33 covariance folded against this material's own spectrum. Half-lives,
     decay branching ratios, fission yields and the isomeric-branching overlay
     are held at their evaluated values; they carry uncertainties of their own
-    that this does not propagate. ``TransmutationResults.data_uncertainty_info``
-    says so per run, along with any nuclide whose evaluation carries no
-    covariance at all.
+    that this does not propagate.
+    ``TransmutationResults.get_data_uncertainty_info`` says so per material,
+    along with any nuclide whose evaluation carries no covariance at all.
     
     Args:
         seed (int): Base seed. A given nuclide's perturbation in a given replica
@@ -845,7 +846,7 @@ class Material:
                 nothing is read, folded or sampled: the inventories are
                 bit-identical either way. Read the sigmas with
                 ``get_nuclide_uncertainty``, and what was and was not covered
-                with ``data_uncertainty_info``.
+                with ``get_data_uncertainty_info(id)``.
         
             self_shielding_chord (float, optional): Mean chord length ``4V/S`` of
                 this material's lump, in cm, which is twice the thickness for a
@@ -855,7 +856,7 @@ class Material:
                 default) and nothing is shielded: the rates are bit-identical to
                 a run without it, and no shape is inferred from a geometry this
                 material does not have. Read what was done with
-                ``self_shielding_info``.
+                ``get_self_shielding_info(id)``.
         
                 The flux inside the lump comes from a slowing-down solve, which
                 assumes nothing about resonances being narrow. The cheaper
@@ -1856,9 +1857,16 @@ class TransmutationResults:
         Timesteps used [s].
         """
     @property
-    def source_rates(self) -> builtins.list[builtins.float]:
+    def collapse_reuse(self) -> typing.Optional[dict]:
         r"""
-        Source rates used [n/cm^2/s].
+        How much of the multigroup collapse work was shared, or ``None`` for a
+        transport-coupled solve, which does none.
+        
+        A dict with ``performed``, the collapses actually run, and
+        ``requested``, one per distinct spectrum per material. Materials with
+        the same spectrum, composition, temperature and shielding collapse to
+        the same rates and share one, so ``performed`` below ``requested`` is
+        the saving ``transmute`` made over solving them one at a time.
         """
     @property
     def num_steps(self) -> builtins.int:
@@ -1866,75 +1874,25 @@ class TransmutationResults:
         Number of transmutation steps.
         """
     @property
-    def data_uncertainty_info(self) -> typing.Optional[dict]:
-        r"""
-        What the nuclear-data uncertainty covered, and what it did not.
-        
-        ``None`` when the transmutation was run without ``data_uncertainty``.
-        Otherwise a dict whose job is to make gaps visible rather than let them
-        read as confidence:
-        
-        - ``perturbed`` / ``no_covariance_data``: which nuclides had usable
-          MF=33 covariance and which had none.
-        - ``rate_fraction_covered_total``: the share of the production this run
-          drove that a covariance actually spans, weighted by rate and by parent
-          density. Read this before any sigma here. It is a different and much
-          sharper question than how many nuclides carry MF=33: an evaluation can
-          state covariance for every isotope in the material and none for the
-          channel making the product of interest, and the count then reads as
-          full coverage while the ensemble perturbs almost nothing.
-        - ``rate_fraction_covered``: per nuclide and channel, the share of the
-          reaction rate the covariance grid actually spans. Below one means part
-          of the rate carries no stated uncertainty and the sigma is diluted.
-        - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
-          covariance blocks that were present but not consumed.
-        - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
-          covariance was not positive semi-definite and had to be repaired.
-        - ``rates_floored`` / ``rates_sampled``: samples that went negative and
-          were truncated at zero, which biases the mean upward when common.
-        - ``not_perturbed``: the sources this does not propagate at all.
-        - ``samples`` / ``converged``: how many replicas ran, and whether the
-          sigmas settled or the cap was hit.
-        """
-    @property
-    def self_shielding_info(self) -> typing.Optional[dict]:
-        r"""
-        What the self-shielding did, or ``None`` if the run was not shielded.
-        
-        Always present. ``chord_cm`` of ``None`` means the run was dilute and
-        nothing was corrected; otherwise it says how: the ``method`` and
-        ``chord_cm`` used, which nuclides were ``shielded``, which were
-        ``not_shielded`` and why, and ``strongest_factor``, the smallest factor
-        any group average was multiplied by. A run reporting ``1.0`` there
-        shielded nothing in practice, which is a different statement from not
-        having tried.
-        
-        ``would_shield`` is the other direction, and is filled only on a dilute
-        run: nuclides whose own resonances are structured enough to have
-        suppressed a reaction, each mapped to how strongly.
-        
-        It is an indicator, not a correction and not a bound. There is no
-        geometry in it: the weight is ``1 / (1 + N * sigma_x)`` on that one
-        reaction and that nuclide's own density, which fixes the background at
-        1/cm, while the correction proper uses ``1 / chord_cm`` against the
-        material's total. So the number scales with how strongly a nuclide's own
-        resonances could bite without predicting what a given lump would see,
-        and it can sit either side of the real factor: a lump thinner than a
-        centimetre of chord shields less, and a material whose other nuclides
-        dominate the total at the resonance dips the flux further than this one
-        reaction can express.
-        
-        On the FNS tungsten foil, ``would_shield`` reads 0.634 for W186 while
-        the slowing-down correction on the same foil and spectrum saturates at
-        0.730 from a millimetre of chord upward. Read it as "this answer may be
-        high, and this is a resonance absorber", which is the warning a dilute
-        run should carry rather than silence. Read the size of the effect off a
-        shielded run, by asking for one.
-        """
-    @property
     def material_ids(self) -> builtins.list[builtins.int]:
         r"""
         List of material IDs that were transmuted.
+        """
+    def get_source_rates(self, material_id: builtins.int) -> typing.Optional[builtins.list[builtins.float]]:
+        r"""
+        The rate each step drove a material at, one per timestep, zero for a
+        cooldown.
+        
+        A spectrum solve (``Material.transmute``, ``transmute``) gives each
+        material's own flux magnitude in n/cm^2/s, which differs between
+        materials given their own schedules. ``Model.simulate_transmutation``
+        gives the source strength in n/s, the same for every material.
+        
+        Args:
+            material_id: Material ID number.
+        
+        Returns:
+            List of rates, or None if the material is not in the results.
         """
     def get_nuclide_evolution(self, material_id: builtins.int, nuclide: builtins.str) -> typing.Optional[builtins.list[builtins.float]]:
         r"""
@@ -1982,7 +1940,8 @@ class TransmutationResults:
         
             A nuclide whose evaluation carries no covariance also reports 0.0.
             That is not a claim of certainty -- check
-            ``data_uncertainty_info["no_covariance_data"]``, which lists exactly
+            ``get_data_uncertainty_info(material_id)["no_covariance_data"]``,
+            which lists exactly
             those nuclides.
         """
     def get_nuclide_uncertainty_evolution(self, material_id: builtins.int, nuclide: builtins.str) -> typing.Optional[builtins.list[builtins.float]]:
@@ -2127,6 +2086,80 @@ class TransmutationResults:
         Raises:
             ValueError: if the material has no ``volume`` in cm^3.
         """
+    def get_data_uncertainty_info(self, material_id: builtins.int) -> typing.Optional[dict]:
+        r"""
+        What the nuclear-data uncertainty covered for one material, and what it
+        did not.
+        
+        ``None`` when the transmutation was run without ``data_uncertainty``, or
+        the material is not in the results.
+        Otherwise a dict whose job is to make gaps visible rather than let them
+        read as confidence:
+        
+        - ``perturbed`` / ``no_covariance_data``: which nuclides had usable
+          MF=33 covariance and which had none.
+        - ``rate_fraction_covered_total``: the share of the production this run
+          drove that a covariance actually spans, weighted by rate and by parent
+          density. Read this before any sigma here. It is a different and much
+          sharper question than how many nuclides carry MF=33: an evaluation can
+          state covariance for every isotope in the material and none for the
+          channel making the product of interest, and the count then reads as
+          full coverage while the ensemble perturbs almost nothing.
+        - ``rate_fraction_covered``: per nuclide and channel, the share of the
+          reaction rate the covariance grid actually spans. Below one means part
+          of the rate carries no stated uncertainty and the sigma is diluted.
+        - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
+          covariance blocks that were present but not consumed.
+        - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
+          covariance was not positive semi-definite and had to be repaired.
+        - ``rates_floored`` / ``rates_sampled``: samples that went negative and
+          were truncated at zero, which biases the mean upward when common.
+        - ``not_perturbed``: the sources this does not propagate at all.
+        - ``samples`` / ``converged``: how many replicas ran, and whether the
+          sigmas settled or the cap was hit.
+        
+        Args:
+            material_id: Material ID number.
+        """
+    def get_self_shielding_info(self, material_id: builtins.int) -> typing.Optional[dict]:
+        r"""
+        What the self-shielding did for one material.
+        
+        Present for every material of a spectrum solve, shielded or not, and
+        ``None`` for a transport-coupled solve or a material not in the
+        results. ``chord_cm`` of ``None`` means the run was dilute and
+        nothing was corrected; otherwise it says how: the ``method`` and
+        ``chord_cm`` used, which nuclides were ``shielded``, which were
+        ``not_shielded`` and why, and ``strongest_factor``, the smallest factor
+        any group average was multiplied by. A run reporting ``1.0`` there
+        shielded nothing in practice, which is a different statement from not
+        having tried.
+        
+        ``would_shield`` is the other direction, and is filled only on a dilute
+        run: nuclides whose own resonances are structured enough to have
+        suppressed a reaction, each mapped to how strongly.
+        
+        It is an indicator, not a correction and not a bound. There is no
+        geometry in it: the weight is ``1 / (1 + N * sigma_x)`` on that one
+        reaction and that nuclide's own density, which fixes the background at
+        1/cm, while the correction proper uses ``1 / chord_cm`` against the
+        material's total. So the number scales with how strongly a nuclide's own
+        resonances could bite without predicting what a given lump would see,
+        and it can sit either side of the real factor: a lump thinner than a
+        centimetre of chord shields less, and a material whose other nuclides
+        dominate the total at the resonance dips the flux further than this one
+        reaction can express.
+        
+        On the FNS tungsten foil, ``would_shield`` reads 0.634 for W186 while
+        the slowing-down correction on the same foil and spectrum saturates at
+        0.730 from a millimetre of chord upward. Read it as "this answer may be
+        high, and this is a resonance absorber", which is the warning a dilute
+        run should carry rather than silence. Read the size of the effect off a
+        shielded run, by asking for one.
+        
+        Args:
+            material_id: Material ID number.
+        """
     def get_material_nuclides(self, material_id: builtins.int, step: builtins.int) -> typing.Optional[builtins.dict[builtins.str, builtins.float]]:
         r"""
         Get material composition at a specific timestep as a dict.
@@ -2194,7 +2227,7 @@ class TransmutationResults:
         Args:
             material_id: Material ID number.
             step: Schedule step index, the same index as ``timesteps`` and
-                ``source_rates``. This is one less than the ``step`` the
+                ``get_source_rates``. This is one less than the ``step`` the
                 composition getters take, where 0 is the initial composition.
         
         Returns:
@@ -2920,5 +2953,72 @@ def set_transmutation_reactions(value: typing.Optional[builtins.str | typing.Lit
     a material with no reaction rates. A rate that then needs it is refused
     when the burnup matrix is built, naming the nuclide and the reaction,
     rather than being solved as though the reaction produced nothing.
+    """
+
+def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | typing.Sequence[PulseSchedule], data_uncertainty: typing.Optional[DataUncertainty] = None, self_shielding_chord: typing.Optional[builtins.float] = None, self_shielding_shape: SphereLump | CubeLump | FoilLump | CylinderLump | WireLump | None = None) -> TransmutationResults:
+    r"""
+    Transmute several materials over one timeline in one call.
+    
+    The plural of ``Material.transmute``, for a mesh from a transport run, a
+    component broken into regions, or a sweep over compositions. The answer for
+    each material is exactly what ``material.transmute(schedule)`` gives it, and
+    the result is one ``TransmutationResults`` keyed by each material's ``id``,
+    the same shape ``Model.simulate_transmutation`` returns.
+    
+    What a Python loop would repeat is done once instead: the chain is read
+    once, each nuclide's cross sections are decoded once and shared by every
+    material that needs them, and a multigroup collapse runs once for every
+    distinct combination of spectrum, composition, temperature and shielding.
+    Cells of one steel that saw the same spectrum share a collapse, whatever
+    their flux magnitudes. ``results.collapse_reuse`` says how many collapses
+    were shared. The materials' solves then run in parallel.
+    
+    Args:
+        materials (list[Material]): The materials, each with a distinct ``id``,
+            since the results are keyed by it. As with ``Material.transmute``,
+            the cross sections each needs are loaded into it and kept, and the
+            composition is not modified.
+        schedules (PulseSchedule | list[PulseSchedule]): One schedule for every
+            material, or one per material in the same order. Each material's
+            schedule carries its own spectra (the pulse sources) and flux
+            magnitudes (the pulse rates), which is how each cell of a mesh gets
+            its own flux. They must share one timeline, the same durations and
+            irradiation on the same steps, because the result has one series of
+            times.
+        data_uncertainty (DataUncertainty, optional): Nuclear-data uncertainty,
+            applied to every material as ``Material.transmute`` applies it to
+            one. The same seed perturbs a nuclide's cross sections the same way
+            in every material, which is right: one evaluation is uncertain in
+            one way wherever it is used.
+        self_shielding_chord (float, optional): One chord length ``4V/S`` in cm,
+            for every material. See ``Material.transmute``.
+        self_shielding_shape (SphereLump | CubeLump | FoilLump | CylinderLump | WireLump, optional):
+            One lump shape for every material, turned into a chord through each
+            material's own ``volume``. Give this or ``self_shielding_chord``,
+            not both.
+    
+    Returns:
+        TransmutationResults: Keyed by each material's ``id``. Per material,
+            ``get_source_rates(id)`` gives its flux magnitudes and
+            ``get_self_shielding_info(id)`` its shielding report.
+    
+    Raises:
+        ValueError: If two materials share an id, the timelines differ, the
+            number of schedules does not match the number of materials, or
+            any single material would fail ``Material.transmute``, in which
+            case the message names the material.
+        TypeError: If ``schedules`` is neither a PulseSchedule nor a list of
+            them, or the same Material object is given twice.
+    
+    Examples:
+        >>> schedules = [
+        ...     yani.PulseSchedule([
+        ...         yani.Pulse(rate=flux[i], duration=(1, "y"), source=spectra[i]),
+        ...         yani.Cooldown(duration=(1, "d")),
+        ...     ])
+        ...     for i in range(len(cells))
+        ... ]
+        >>> results = yani.transmute(cells, schedules)
+        >>> results.get_final_material(cells[3].id)
     """
 

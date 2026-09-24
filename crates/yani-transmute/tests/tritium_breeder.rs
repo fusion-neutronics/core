@@ -192,7 +192,11 @@ fn tritium_production_carries_a_nuclear_data_uncertainty() {
     let sigma = results
         .get_nuclide_uncertainty(id, "H3", 1)
         .expect("uncertainty was requested");
-    let info = results.uncertainty_info.clone().expect("info is reported");
+    let info = results
+        .uncertainty_info
+        .get(&0)
+        .cloned()
+        .expect("info is reported");
 
     println!(
         "\n| sources | H3 [atom/b-cm] | sigma | rel |\n\
@@ -245,7 +249,7 @@ fn the_uncovered_blanket_nuclides_are_named() {
             sources: vec![Source::CrossSections],
         }),
     );
-    let info = results.uncertainty_info.expect("info");
+    let info = results.uncertainty_info.get(&0).cloned().expect("info");
 
     assert!(
         info.has_gaps(),

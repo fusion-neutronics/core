@@ -37,6 +37,7 @@ from yani._core import (  # noqa: F811
     Pulse as Pulse,
     PulseSchedule as PulseSchedule,
     TransmutationResults as TransmutationResults,
+    transmute as transmute,
     get_cross_section_data as _get_cross_section_data,
     get_transmutation_branch_ratios as _get_transmutation_branch_ratios,
     get_transmutation_decay_data as _get_transmutation_decay_data,
