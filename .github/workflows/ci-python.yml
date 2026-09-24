@@ -535,10 +535,55 @@ jobs:
           PY="$(command -v python3 || command -v python)"
           "$PY" scripts/check_binary_paths.py packages/yani-core/dist/*.whl
 
+      # The cross-compiled row cannot be imported here, so this is what stands
+      # in for it: the extension's ELF header must name the architecture the
+      # wheel's filename claims. maturin targeting the host by mistake would
+      # otherwise ship an x86_64 binary inside an aarch64-tagged wheel, which
+      # pip would install happily and Python would fail to load.
+      - name: A cross-compiled wheel must carry the architecture it claims
+        if: matrix.native != true
+        shell: bash
+        env:
+          # The row's own target, so adding another cross-compiled row needs no
+          # change here beyond a MACHINES entry.
+          TARGET: ${{ matrix.target }}
+        run: |
+          PY="$(command -v python3 || command -v python)"
+          "$PY" - "$(echo packages/yani-core/dist/yani_core-*.whl)" <<'ARCH'
+          import os, sys, zipfile
+          # e_machine values from the ELF spec, for the targets built here.
+          MACHINES = {0x3E: "x86_64", 0xB7: "aarch64"}
+          ALIASES = {"aarch64": "aarch64", "aarch64-unknown-linux-gnu": "aarch64",
+                     "x86_64": "x86_64", "x86_64-unknown-linux-gnu": "x86_64"}
+          target = os.environ["TARGET"]
+          if target not in ALIASES:
+              sys.exit(f"::error::no ELF machine known for target {target!r}; "
+                       f"add it to ALIASES and MACHINES")
+          EXPECTED = ALIASES[target]
+          wheel = sys.argv[1]
+          with zipfile.ZipFile(wheel) as zf:
+              sos = [n for n in zf.namelist() if n.endswith(".so")]
+              if not sos:
+                  sys.exit(f"{wheel} carries no .so to check")
+              for name in sos:
+                  head = zf.read(name)[:20]
+                  if head[:4] != b"\x7fELF":
+                      sys.exit(f"{name} is not an ELF object")
+                  machine = int.from_bytes(head[18:20], "little")
+                  got = MACHINES.get(machine, hex(machine))
+                  print(f"{name}: {got}")
+                  if got != EXPECTED:
+                      sys.exit(
+                          f"::error::{name} is {got}, but the wheel is built for "
+                          f"{EXPECTED}. maturin targeted the host instead of the "
+                          f"requested target.")
+          print(f"{wheel} is {EXPECTED} throughout")
+          ARCH
+
       # Cross-compiled rows are skipped here, not weakened: pip refuses a wheel
       # whose platform tag does not match the runner, so there is no way to
       # import an aarch64 build on an x86_64 host without QEMU. The step above
-      # still inspects those wheels, since reading bytes needs no interpreter.
+      # checks what can be checked without one.
       - name: The wheel must carry none of the transport stack
         if: matrix.native
         shell: bash
