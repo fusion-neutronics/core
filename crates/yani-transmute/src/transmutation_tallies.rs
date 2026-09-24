@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+use super::history_statistics::{HistoryStatistics, MomentCovariance};
 use super::material_transmute::curve_interp;
 use super::{mt_to_reaction_type, reaction_type_to_mt};
 use yamc_materials::material::Material;
@@ -183,6 +184,10 @@ pub struct TransmutationTallies {
     /// just the material's nuclides: their fold needs no per-nuclide transport
     /// data, so products that build up during a step are covered too).
     moment_curves: Vec<MomentCurve>,
+    /// Per-history covariance of the flux moments, when asked for with
+    /// [`TransmutationTallies::with_history_statistics`]. `None` on the default
+    /// path, which then allocates nothing for it and scores exactly as before.
+    statistics: Option<HistoryStatistics>,
 }
 
 /// A malformed curve (empty or mismatched grids) would panic in `curve_interp`
@@ -533,7 +538,78 @@ impl TransmutationTallies {
             materials: mat_data,
             union_grid,
             moment_curves,
+            statistics: None,
         }
+    }
+
+    /// Also accumulate the per-history covariance of each material's flux
+    /// moments, so the rates folded from them carry a statistical uncertainty
+    /// (see [`MomentCovariance`]).
+    ///
+    /// Off unless asked for. It costs `~(2 * 626)^2 / 2` doubles per
+    /// transmutable material, about 6 MB, plus a sparse outer product per
+    /// history, and none of it touches the sums the means are built from, so
+    /// the means are bit-identical with it on or off.
+    ///
+    /// A run that scores this tally must call
+    /// [`prepare_history_workers`](Self::prepare_history_workers) before
+    /// transport and [`finish_history`](Self::finish_history) after each
+    /// source history.
+    pub fn with_history_statistics(mut self) -> Self {
+        let mut ids: Vec<u32> = self.materials.keys().copied().collect();
+        ids.sort_unstable();
+        let materials: Vec<(u32, usize)> = ids
+            .iter()
+            .map(|id| (*id, self.materials[id].yield_channels.len()))
+            .collect();
+        self.statistics = Some(HistoryStatistics::new(
+            base_spectrum_grid(),
+            &self.union_grid,
+            &materials,
+        ));
+        self
+    }
+
+    /// Whether [`with_history_statistics`](Self::with_history_statistics) is on.
+    pub fn has_history_statistics(&self) -> bool {
+        self.statistics.is_some()
+    }
+
+    /// Size the per-worker history scratch for a transport run on `n_workers`
+    /// rayon threads. Call single-threaded before transport. A no-op when
+    /// history statistics are off, and when repeated for no more workers than
+    /// the first call, so a tally reused across transmutation steps is fine;
+    /// more workers than the first call is an error.
+    pub fn prepare_history_workers(&self, n_workers: usize) -> Result<(), String> {
+        match &self.statistics {
+            Some(stats) => stats.prepare_workers(n_workers),
+            None => Ok(()),
+        }
+    }
+
+    /// Close the source history running on the calling worker thread, after
+    /// every particle it produced has finished. A no-op when history
+    /// statistics are off.
+    #[inline]
+    pub fn finish_history(&self) {
+        if let Some(stats) = &self.statistics {
+            stats.finish_history();
+        }
+    }
+
+    /// The per-history mean and covariance of `material_id`'s flux-moment
+    /// vector, over every source particle accumulated so far. `None` when
+    /// history statistics are off or the material is not tallied.
+    pub fn moment_covariance(&self, material_id: u32) -> Option<MomentCovariance> {
+        let stats = self.statistics.as_ref()?;
+        let mat_data = self.materials.get(&material_id)?;
+        let n = mat_data.total_particles.load(Ordering::Relaxed) as u64;
+        let labels = mat_data
+            .yield_channels
+            .iter()
+            .map(|c| (c.parent.clone(), c.kind.clone(), c.target.clone()))
+            .collect();
+        stats.extract(material_id, n, labels)
     }
 
     /// Score a track segment in a transmutable material.
@@ -557,6 +633,10 @@ impl TransmutationTallies {
 
         let temperature = material.temperature();
         let n_mts = mat_data.mt_numbers.len();
+        let mut history = self
+            .statistics
+            .as_ref()
+            .and_then(|s| s.history(material_id));
 
         // Score flux (total track length)
         atomic_add_f64(&mat_data.flux_batch_accum, track_length);
@@ -574,6 +654,9 @@ impl TransmutationTallies {
                 &mat_data.moment_s1_batch[g],
                 (energy - grid[g]) * track_length,
             );
+            if let Some(h) = &mut history {
+                h.add_moments(g, energy, track_length);
+            }
         }
 
         // Score σ*TL for each nuclide/MT pair
@@ -642,6 +725,9 @@ impl TransmutationTallies {
             };
             if contrib > 0.0 {
                 atomic_add_f64(&mat_data.yield_batch[ch_idx], contrib * track_length);
+                if let Some(h) = &mut history {
+                    h.add_yield(ch_idx, contrib * track_length);
+                }
             }
         }
     }
@@ -992,6 +1078,9 @@ impl TransmutationTallies {
                 accum.store(0, Ordering::Relaxed);
             }
         }
+        if let Some(stats) = &self.statistics {
+            stats.reset();
+        }
     }
 
     /// Sum every rank's accumulators into a global total, on every rank
@@ -1022,7 +1111,9 @@ impl TransmutationTallies {
         mat_ids.sort_unstable();
 
         // Pack: per material, sum_means ++ [flux_sum_means] ++ moment_s0 ++
-        // moment_s1 ++ yield_sums ++ fy_sums.
+        // moment_s1 ++ yield_sums ++ fy_sums, then the history statistics'
+        // raw sums when they are on. Those are sums of per-history products,
+        // so they add across ranks like everything else here.
         let mut packed: Vec<f64> = Vec::new();
         for id in &mat_ids {
             let mat_data = &self.materials[id];
@@ -1067,6 +1158,9 @@ impl TransmutationTallies {
                     .unwrap_or_else(|p| p.into_inner())
                     .clone(),
             );
+            if let Some(stats) = &self.statistics {
+                stats.pack(*id, &mut packed);
+            }
         }
 
         mpi_ctx.reduce_sum_f64(&mut packed, 0);
@@ -1116,6 +1210,9 @@ impl TransmutationTallies {
                 let n = f.len();
                 f.copy_from_slice(&packed[off..off + n]);
                 off += n;
+            }
+            if let Some(stats) = &self.statistics {
+                off = stats.unpack(*id, &packed, off);
             }
         }
         debug_assert_eq!(off, packed.len(), "pack / unpack layout must agree");
@@ -1347,6 +1444,7 @@ mod tests {
             materials,
             union_grid,
             moment_curves,
+            statistics: None,
         }
     }
 
@@ -1736,5 +1834,355 @@ mod tests {
         }
         // Strictly ascending, so `partition_point` gives one bin per energy.
         assert!(grid.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    // ---- Per-history statistics (issue #140, item 1) ----
+
+    /// Deterministic pseudo-random histories: `(energy [eV], track length)`
+    /// segments, log-uniform in energy from 1e-3 eV to 20 MeV so they cross
+    /// many base bins and both halves of the moment branch's union grid.
+    /// Every seventh history scores nothing, so the implicit zeros count.
+    fn synthetic_histories(n: usize) -> Vec<Vec<(f64, f64)>> {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        (0..n)
+            .map(|h| {
+                if h % 7 == 3 {
+                    return Vec::new();
+                }
+                let n_seg = 1 + (next() * 6.0) as usize;
+                (0..n_seg)
+                    .map(|_| {
+                        let e = 10f64.powf(-3.0 + next() * (7.301 + 3.0));
+                        (e, 0.1 + 3.0 * next())
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn bare_material() -> Material {
+        Material::new(
+            HashMap::from([("U238".to_string(), 1.0)]),
+            "atom",
+            "sum",
+            None,
+        )
+        .unwrap()
+    }
+
+    fn run_histories(t: &TransmutationTallies, histories: &[Vec<(f64, f64)>], material: &Material) {
+        for h in histories {
+            for &(e, tl) in h {
+                t.score(7, e, tl, material);
+            }
+            t.finish_history();
+        }
+    }
+
+    /// Each history's coarse moment vector, computed directly from its
+    /// segments: the reference the accumulator has to reproduce.
+    fn reference_vectors(histories: &[Vec<(f64, f64)>]) -> Vec<Vec<f64>> {
+        let grid = base_spectrum_grid();
+        let b = grid.len();
+        histories
+            .iter()
+            .map(|h| {
+                let mut x = vec![0.0; 2 * b];
+                for &(e, tl) in h {
+                    let c = grid.partition_point(|&g| g <= e) - 1;
+                    x[c] += tl;
+                    x[b + c] += (e - grid[c]) * tl;
+                }
+                x
+            })
+            .collect()
+    }
+
+    fn stats_tally(branch: &BranchTable, workers: usize) -> TransmutationTallies {
+        let t = one_bin_tally_with_branch(branch).with_history_statistics();
+        t.prepare_history_workers(workers).unwrap();
+        t
+    }
+
+    /// The accumulated mean and covariance must equal a two-pass computation
+    /// over the full per-history vectors, zeros of the empty histories
+    /// included. The moment branch makes the union grid finer than the base
+    /// grid, so this also checks the fine-to-coarse bin map.
+    #[test]
+    fn history_covariance_matches_two_pass() {
+        let histories = synthetic_histories(400);
+        let t = stats_tally(&moment_branch(), 1);
+        let material = bare_material();
+        run_histories(&t, &histories, &material);
+        t.accumulate_batch(histories.len());
+
+        let cov = t.moment_covariance(7).expect("statistics are on");
+        let xs = reference_vectors(&histories);
+        let n = xs.len() as f64;
+        let dim = xs[0].len();
+        assert_eq!(cov.dim(), dim, "no yield channels in this fixture");
+        assert_eq!(cov.n_histories, histories.len() as u64);
+
+        let mean: Vec<f64> = (0..dim)
+            .map(|i| xs.iter().map(|x| x[i]).sum::<f64>() / n)
+            .collect();
+        let touched: Vec<usize> = (0..dim).filter(|&i| mean[i] != 0.0).collect();
+        assert!(touched.len() > 100, "histories should spread over the grid");
+        for &i in &touched {
+            let rel = (cov.mean[i] - mean[i]).abs() / mean[i].abs();
+            assert!(rel < 1e-12, "mean[{i}] off by {rel:e}");
+            for &j in &touched {
+                let two_pass: f64 = xs
+                    .iter()
+                    .map(|x| (x[i] - mean[i]) * (x[j] - mean[j]))
+                    .sum::<f64>()
+                    / (n - 1.0);
+                let scale = (cov.covariance(i, i) * cov.covariance(j, j)).sqrt();
+                let err = (cov.covariance(i, j) - two_pass).abs();
+                assert!(
+                    err <= 1e-9 * scale.max(1e-300),
+                    "cov[{i}][{j}] = {:e}, two-pass {two_pass:e}",
+                    cov.covariance(i, j)
+                );
+            }
+        }
+        // A bin nothing reached has no mean and no covariance.
+        let untouched = (0..dim).find(|i| mean[*i] == 0.0).unwrap();
+        assert_eq!(cov.mean[untouched], 0.0);
+        assert_eq!(cov.covariance(untouched, touched[0]), 0.0);
+
+        // The quadratic form is the variance of the folded total, which here
+        // is the total track length per history.
+        let mut w = vec![0.0; dim];
+        w[..cov.n_bins()].fill(1.0);
+        let (total, var) = cov.linear_combination(&w);
+        let totals: Vec<f64> = xs.iter().map(|x| x[..cov.n_bins()].iter().sum()).collect();
+        let t_mean = totals.iter().sum::<f64>() / n;
+        let t_var = totals.iter().map(|v| (v - t_mean).powi(2)).sum::<f64>() / (n - 1.0) / n;
+        assert!((total - t_mean).abs() < 1e-12 * t_mean);
+        assert!((var - t_var).abs() < 1e-9 * t_var, "{var:e} vs {t_var:e}");
+    }
+
+    /// The coarse moments are sums of the fine ones, not approximations of
+    /// them: summing the union-grid means over each base bin must give the
+    /// statistics' means.
+    #[test]
+    fn coarse_moments_are_sums_of_the_fine_ones() {
+        let histories = synthetic_histories(200);
+        let t = stats_tally(&moment_branch(), 1);
+        run_histories(&t, &histories, &bare_material());
+        t.accumulate_batch(histories.len());
+
+        let cov = t.moment_covariance(7).unwrap();
+        let base = base_spectrum_grid();
+        let mat = &t.materials[&7];
+        let s0 = mat.moment_s0.lock().unwrap();
+        let s1 = mat.moment_s1.lock().unwrap();
+        let n = histories.len() as f64;
+        let mut coarse0 = vec![0.0; base.len()];
+        let mut coarse1 = vec![0.0; base.len()];
+        for (g, &edge) in t.union_grid.iter().enumerate() {
+            let c = base.partition_point(|&b| b <= edge) - 1;
+            coarse0[c] += s0[g];
+            // Re-reference the fine first moment to the coarse bin's edge.
+            coarse1[c] += s1[g] + (edge - base[c]) * s0[g];
+        }
+        for c in 0..base.len() {
+            for (fine, coarse) in [
+                (coarse0[c], cov.mean[c]),
+                (coarse1[c], cov.mean[base.len() + c]),
+            ] {
+                let expected = fine / n;
+                assert!(
+                    (coarse - expected).abs() <= 1e-10 * expected.abs().max(1e-300),
+                    "bin {c}: {coarse:e} vs {expected:e}"
+                );
+            }
+        }
+    }
+
+    /// Off by default, and turning it on must not move a single mean by one
+    /// bit: the statistics sit beside the sums, never in them.
+    #[test]
+    fn history_statistics_leave_the_means_bit_identical() {
+        let histories = synthetic_histories(150);
+        let material = bare_material();
+        let off = one_bin_tally_with_branch(&moment_branch());
+        assert!(!off.has_history_statistics());
+        let on = stats_tally(&moment_branch(), 1);
+        for t in [&off, &on] {
+            run_histories(t, &histories, &material);
+            t.accumulate_batch(histories.len());
+        }
+        assert!(off.moment_covariance(7).is_none());
+
+        let bits = |t: &TransmutationTallies| {
+            let mut v: Vec<u64> = Vec::new();
+            let mut partial: Vec<(String, String, String, f64)> = t
+                .get_partial_rates(7, 2.0, 1.0e12)
+                .into_iter()
+                .flat_map(|(p, kinds)| {
+                    kinds.into_iter().flat_map(move |(k, targets)| {
+                        let p = p.clone();
+                        targets
+                            .into_iter()
+                            .map(move |(tg, r)| (p.clone(), k.clone(), tg, r))
+                    })
+                })
+                .collect();
+            partial.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
+            v.extend(partial.iter().map(|x| x.3.to_bits()));
+            v.push(t.get_flux(7, 2.0, 1.0e12).to_bits());
+            let mat = &t.materials[&7];
+            v.extend(mat.moment_s0.lock().unwrap().iter().map(|x| x.to_bits()));
+            v.extend(mat.moment_s1.lock().unwrap().iter().map(|x| x.to_bits()));
+            v
+        };
+        assert_eq!(bits(&off), bits(&on));
+    }
+
+    /// Histories spread over worker threads must give the statistics one
+    /// worker gives, whichever thread ran which history.
+    #[test]
+    fn history_statistics_are_thread_invariant() {
+        use rayon::prelude::*;
+        let histories = synthetic_histories(600);
+        let material = bare_material();
+
+        let serial = stats_tally(&moment_branch(), 1);
+        run_histories(&serial, &histories, &material);
+        serial.accumulate_batch(histories.len());
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let parallel = stats_tally(&moment_branch(), 4);
+        pool.install(|| {
+            histories.par_iter().for_each(|h| {
+                for &(e, tl) in h {
+                    parallel.score(7, e, tl, &material);
+                }
+                parallel.finish_history();
+            })
+        });
+        parallel.accumulate_batch(histories.len());
+
+        let a = serial.moment_covariance(7).unwrap();
+        let b = parallel.moment_covariance(7).unwrap();
+        for i in 0..a.dim() {
+            assert!((a.mean[i] - b.mean[i]).abs() <= 1e-12 * a.mean[i].abs());
+            for j in i..a.dim() {
+                let scale = (a.covariance(i, i) * a.covariance(j, j)).sqrt();
+                assert!(
+                    (a.covariance(i, j) - b.covariance(i, j)).abs() <= 1e-9 * scale.max(1e-300),
+                    "cov[{i}][{j}]: {:e} vs {:e}",
+                    a.covariance(i, j),
+                    b.covariance(i, j)
+                );
+            }
+        }
+    }
+
+    /// A stand-in for MPI across two ranks: `reduce_sum_f64` adds the other
+    /// rank's packed buffer, which is what the allreduce leaves on root.
+    struct TwoRanks {
+        other: Mutex<Vec<f64>>,
+        record: bool,
+    }
+
+    impl CollectiveOps for TwoRanks {
+        fn size(&self) -> i32 {
+            2
+        }
+        fn reduce_sum_f64(&self, local: &mut [f64], _root: i32) {
+            let mut other = self.other.lock().unwrap();
+            if self.record {
+                *other = local.to_vec();
+            } else {
+                for (l, o) in local.iter_mut().zip(other.iter()) {
+                    *l += o;
+                }
+            }
+        }
+        fn broadcast_f64(&self, _data: &mut [f64], _root: i32) {}
+    }
+
+    /// Histories split across two ranks and reduced must give the statistics
+    /// of one rank running them all. Each rank counts the global particle
+    /// total, as `Model::run_internal` passes it.
+    #[test]
+    fn history_statistics_reduce_across_ranks() {
+        let histories = synthetic_histories(300);
+        let material = bare_material();
+        let (first, second) = histories.split_at(137);
+
+        let whole = stats_tally(&moment_branch(), 1);
+        run_histories(&whole, &histories, &material);
+        whole.accumulate_batch(histories.len());
+
+        let rank0 = stats_tally(&moment_branch(), 1);
+        let rank1 = stats_tally(&moment_branch(), 1);
+        run_histories(&rank0, first, &material);
+        run_histories(&rank1, second, &material);
+        rank0.accumulate_batch(histories.len());
+        rank1.accumulate_batch(histories.len());
+
+        let ops = TwoRanks {
+            other: Mutex::new(Vec::new()),
+            record: true,
+        };
+        rank1.reduce_across_ranks(&ops);
+        let ops = TwoRanks {
+            other: ops.other,
+            record: false,
+        };
+        rank0.reduce_across_ranks(&ops);
+
+        let a = whole.moment_covariance(7).unwrap();
+        let b = rank0.moment_covariance(7).unwrap();
+        assert_eq!(a.n_histories, b.n_histories);
+        for i in 0..a.dim() {
+            assert!((a.mean[i] - b.mean[i]).abs() <= 1e-12 * a.mean[i].abs());
+            for j in i..a.dim() {
+                let scale = (a.covariance(i, i) * a.covariance(j, j)).sqrt();
+                assert!(
+                    (a.covariance(i, j) - b.covariance(i, j)).abs() <= 1e-9 * scale.max(1e-300)
+                );
+            }
+        }
+    }
+
+    /// `reset` starts a new step from nothing, and a later run on more
+    /// threads than the scratch was sized for is refused rather than
+    /// scored into a slot that does not exist.
+    #[test]
+    fn history_statistics_reset_and_worker_sizing() {
+        let histories = synthetic_histories(50);
+        let t = stats_tally(&BranchTable::new(), 2);
+        run_histories(&t, &histories, &bare_material());
+        t.accumulate_batch(histories.len());
+        assert!(t
+            .moment_covariance(7)
+            .unwrap()
+            .mean
+            .iter()
+            .any(|m| *m != 0.0));
+
+        t.reset();
+        let cleared = t.moment_covariance(7).unwrap();
+        assert_eq!(cleared.n_histories, 0);
+        assert!(cleared.mean.iter().all(|m| *m == 0.0));
+
+        assert!(t.prepare_history_workers(2).is_ok());
+        assert!(t.prepare_history_workers(1).is_ok());
+        let err = t.prepare_history_workers(3).unwrap_err();
+        assert!(err.contains("sized for 2"), "{err}");
     }
 }

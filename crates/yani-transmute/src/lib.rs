@@ -16,6 +16,7 @@ pub mod covariance_fold;
 pub mod covariance_sample;
 pub mod derived;
 pub mod flux_uncertainty;
+mod history_statistics;
 mod material_transmute;
 pub mod multigroup;
 mod results;
@@ -120,6 +121,7 @@ pub fn load_configured_chain() -> Result<yani::LoadedChain, Box<dyn std::error::
     )
 }
 pub use derived::{Estimate, LineEstimate};
+pub use history_statistics::{MomentCovariance, YieldChannelLabel};
 pub use multigroup::{
     compute_multigroup_reaction_rates, reaction_rate_spectrum, scale_rates, EnergyGroups,
 };
