@@ -3,8 +3,11 @@
 /// Solves the matrix exponential: N(t) = exp(A*t) * N(0)
 /// where A is the transmutation matrix containing decay constants and reaction rates.
 ///
-/// Provides both CRAM16 (order 16, 8 conjugate pairs) and CRAM48 (order 48,
-/// 24 conjugate pairs). CRAM48 is the default and recommended solver.
+/// Provides CRAM48 (order 48, 24 conjugate pairs) and CRAM50 (order 50, 25
+/// conjugate pairs). CRAM48 is the default: see `docs/cram_order.md` for the
+/// measurement, which is that order 50 approximates `exp` about 100x better in
+/// exact arithmetic and identically in `f64`, because both orders already sit
+/// thirty decades below what double precision can represent.
 ///
 /// Both dense and sparse variants are provided. The sparse variants use
 /// `faer`'s sparse LU solver with symbolic factorization reuse across poles.
@@ -404,6 +407,123 @@ pub fn cram48_sparse(
     cram_solve_sparse(triplets, n, n0, dt, &alpha, &theta, alpha0)
 }
 
+/// CRAM-50 coefficients, in the incomplete partial fraction form the solvers
+/// above use: `r(x) = alpha0 * prod_j (1 + 2 Re(alpha_j / (x - theta_j)))`.
+///
+/// Derived from the order-50 Remez fit published by ojschumann/CRAM-Coefficients
+/// (MIT) by `tools/gen_cram_coefficients.py`.
+///
+/// What validates that script is running it on the same repository's order-48
+/// fit: it returns CRAM48's `alpha0` exactly and CRAM48's `theta` set to
+/// 3.8e-16 relative. Its `alpha` values differ, and are meant to, because
+/// which of the numerator's zeros is paired with which pole is a free choice
+/// that changes each residue but not their product. Evaluated as a solver, the
+/// two pairings agree to 6.5e-16 on an 8-state operator and 1.4e-15 on a
+/// 64-state one, both being a `scipy.linalg.expm` reference's own distance
+/// from either.
+///
+/// `alpha0` is also the fit's equioscillation error, so it is the sup-norm
+/// distance from `exp` on the negative real axis: 2.6e-49 here against 2.3e-47
+/// for order 48.
+#[allow(clippy::excessive_precision)]
+const CRAM50_ALPHA: [Complex64; 25] = [
+    Complex64::new(9.099822148848911e+1, -4.976124681972842e+3),
+    Complex64::new(9.843761775243927e+1, -1.727794073747888e+3),
+    Complex64::new(1.040131606637341e+2, -1.072810168300123e+3),
+    Complex64::new(1.085025697574969e+2, -7.891101326434142e+2),
+    Complex64::new(1.122078718138076e+2, -6.292982383637185e+2),
+    Complex64::new(1.152857918837728e+2, -5.258045107828242e+2),
+    Complex64::new(1.178299166725429e+2, -4.526131950165122e+2),
+    Complex64::new(1.199006936796952e+2, -3.975747360804335e+2),
+    Complex64::new(1.215388833863405e+2, -3.542539458916996e+2),
+    Complex64::new(1.227716368684685e+2, -3.189212760897860e+2),
+    Complex64::new(3.816311305749629e+2, -2.854234273973180e+3),
+    Complex64::new(3.891894017978763e+2, -2.622746012254581e+3),
+    Complex64::new(4.067958566077792e+2, -2.472068709595486e+3),
+    Complex64::new(4.363434490514059e+2, -2.388890621589339e+3),
+    Complex64::new(4.811699533361329e+2, -2.367526120190799e+3),
+    Complex64::new(5.468592391923163e+2, -2.409114614957346e+3),
+    Complex64::new(6.427951768888173e+2, -2.522567324140902e+3),
+    Complex64::new(7.852976317706137e+2, -2.727954548657263e+3),
+    Complex64::new(1.004406997598629e+3, -3.064605282204829e+3),
+    Complex64::new(1.360042490001865e+3, -3.610365551506925e+3),
+    Complex64::new(1.985814449615187e+3, -4.532069750001164e+3),
+    Complex64::new(3.231450712528201e+3, -6.242028326514138e+3),
+    Complex64::new(6.272017644811304e+3, -1.003067076309934e+4),
+    Complex64::new(1.733404767609378e+4, -2.215109895348737e+4),
+    Complex64::new(1.557354293252597e+5, -1.556314503433846e+5),
+];
+
+#[allow(clippy::excessive_precision)]
+const CRAM50_THETA: [Complex64; 25] = [
+    Complex64::new(1.979891017167342e+1, 1.194283678484009e+0),
+    Complex64::new(1.964703237734323e+1, 3.583388146322734e+0),
+    Complex64::new(1.934264958437410e+1, 5.974112724349937e+0),
+    Complex64::new(1.888449383344206e+1, 8.367567098597698e+0),
+    Complex64::new(1.827062859865962e+1, 1.076490664039407e+1),
+    Complex64::new(1.749840522575265e+1, 1.316735331587150e+1),
+    Complex64::new(1.656440120200920e+1, 1.557621948383077e+1),
+    Complex64::new(1.546433665791058e+1, 1.799293580676581e+1),
+    Complex64::new(1.419296391647753e+1, 2.041908487487087e+1),
+    Complex64::new(1.274392269813073e+1, 2.285644270465998e+1),
+    Complex64::new(1.110955040733506e+1, 2.530703111919886e+1),
+    Complex64::new(9.280632206080266e+0, 2.777318530671113e+1),
+    Complex64::new(7.246068368100012e+0, 3.025764286231720e+1),
+    Complex64::new(4.992425056850458e+0, 3.276366382446692e+1),
+    Complex64::new(2.503316206058939e+0, 3.529519649721995e+1),
+    Complex64::new(-2.414669866371945e-1, 3.785711285876475e+1),
+    Complex64::new(-3.267217349565869e+0, 4.045555339217471e+1),
+    Complex64::new(-6.606203908286869e+0, 4.309845118046344e+1),
+    Complex64::new(-1.030063508300579e+1, 4.579636474045886e+1),
+    Complex64::new(-1.440755663879706e+1, 4.856387667331966e+1),
+    Complex64::new(-1.900753228736765e+1, 5.142211493426360e+1),
+    Complex64::new(-2.422153678172154e+1, 5.440374881404600e+1),
+    Complex64::new(-3.024850044753999e+1, 5.756430831801445e+1),
+    Complex64::new(-3.746790671171524e+1, 6.101376658786506e+1),
+    Complex64::new(-4.685195185007194e+1, 6.504637951541609e+1),
+];
+
+const CRAM50_ALPHA0: f64 = 2.61710125008585e-49;
+
+/// Solve the matrix exponential N(t) = exp(A*dt) * N(0) using CRAM50.
+///
+/// Order 50 rather than the default order 48. The rational approximation is
+/// about 100x closer to `exp`, and that is not reachable in double precision:
+/// the recurrence's accumulator climbs to `1/alpha0`, about 3.8e48 here, before
+/// the final scaling brings it back to O(1), so a relative perturbation of one
+/// machine epsilon in any coefficient survives into the answer at that same
+/// relative size. Both orders therefore land on the same `f64` floor, and this
+/// one costs a 25th linear solve per step to get there. See
+/// `docs/cram_order.md`.
+///
+/// # Arguments
+/// * `a` - Transmutation matrix (n x n, row-major, flattened)
+/// * `n` - Matrix dimension (number of nuclides)
+/// * `n0` - Initial nuclide densities [atoms/barn-cm]
+/// * `dt` - Time step [s]
+pub fn cram50(a: &[f64], n: usize, n0: &[f64], dt: f64) -> Result<Vec<f64>, String> {
+    cram_solve(a, n, n0, dt, &CRAM50_ALPHA, &CRAM50_THETA, CRAM50_ALPHA0)
+}
+
+/// Sparse CRAM50. See [`cram50`] for why order 50 buys no accuracy in `f64`,
+/// and [`cram48_sparse`] for the factorization reuse.
+pub fn cram50_sparse(
+    triplets: &[(usize, usize, f64)],
+    n: usize,
+    n0: &[f64],
+    dt: f64,
+) -> Result<Vec<f64>, String> {
+    cram_solve_sparse(
+        triplets,
+        n,
+        n0,
+        dt,
+        &CRAM50_ALPHA,
+        &CRAM50_THETA,
+        CRAM50_ALPHA0,
+    )
+}
+
 // ----------------------------- Tests -----------------------------
 
 #[cfg(test)]
@@ -578,5 +698,83 @@ mod tests {
         let n0 = vec![1.0, 2.0];
         let result = cram48_sparse(&triplets, 2, &n0, 0.0).unwrap();
         assert_eq!(result, n0);
+    }
+    /// Order 50 and order 48 are two approximations to the same function, both
+    /// converged far below what f64 can represent, so on a real operator they
+    /// must agree to round-off. A disagreement here means a transcription
+    /// error in one of the coefficient tables, which is the failure this
+    /// guards: a wrong digit in one of 100 numbers would otherwise show up as
+    /// a plausible-looking inventory.
+    #[test]
+    fn cram50_agrees_with_cram48_on_a_stiff_chain() {
+        // A -> B -> C with nine decades between the two decay constants, which
+        // is the shape that makes a burnup operator stiff.
+        let n = 3;
+        let mut a = vec![0.0; n * n];
+        let (l0, l1) = (1.0e-2_f64, 1.0e-11_f64);
+        a[0] = -l0;
+        a[n] = l0;
+        a[n + 1] = -l1;
+        a[2 * n + 1] = l1;
+        let n0 = vec![1.0, 0.0, 0.0];
+
+        for dt in [1.0e0, 1.0e3, 1.0e7, 1.0e11] {
+            let y48 = cram48(&a, n, &n0, dt).unwrap();
+            let y50 = cram50(&a, n, &n0, dt).unwrap();
+
+            // Scaled by the largest population, not by each component. Both
+            // solvers carry the same accumulator dynamic range, so a component
+            // many decades below the largest one is round-off in both and
+            // holds no significant figures to compare. Dividing by such a
+            // component compares two noise values and fails on nothing.
+            let scale = y48
+                .iter()
+                .fold(0.0_f64, |m, v| m.max(v.abs()))
+                .max(f64::MIN_POSITIVE);
+            for (x48, x50) in y48.iter().zip(y50.iter()) {
+                assert!(
+                    (x48 - x50).abs() / scale < 1.0e-12,
+                    "dt={dt:e}: cram48 {x48:e} vs cram50 {x50:e} (scale {scale:e})"
+                );
+            }
+        }
+    }
+
+    /// The sparse path must agree with the dense one at order 50 for the same
+    /// reason it does at order 48: same coefficients, different factorization.
+    #[test]
+    fn cram50_sparse_agrees_with_dense() {
+        let n = 3;
+        let mut a = vec![0.0; n * n];
+        let triplets = vec![
+            (0, 0, -1.0e-3),
+            (1, 0, 1.0e-3),
+            (1, 1, -1.0e-6),
+            (2, 1, 1.0e-6),
+        ];
+        for &(r, c, v) in &triplets {
+            a[r * n + c] = v;
+        }
+        let n0 = vec![1.0, 0.0, 0.0];
+        let dense = cram50(&a, n, &n0, 1.0e5).unwrap();
+        let sparse = cram50_sparse(&triplets, n, &n0, 1.0e5).unwrap();
+        let scale = dense
+            .iter()
+            .fold(0.0_f64, |m, v| m.max(v.abs()))
+            .max(f64::MIN_POSITIVE);
+        for (d, s) in dense.iter().zip(sparse.iter()) {
+            assert!(
+                (d - s).abs() / scale < 1.0e-12,
+                "{d:e} vs {s:e} (scale {scale:e})"
+            );
+        }
+    }
+
+    /// A zero step is the identity at every order.
+    #[test]
+    fn cram50_zero_dt_is_identity() {
+        let a = vec![-1.0, 0.0, 1.0, -2.0];
+        let n0 = vec![1.0, 2.0];
+        assert_eq!(cram50(&a, 2, &n0, 0.0).unwrap(), n0);
     }
 }
