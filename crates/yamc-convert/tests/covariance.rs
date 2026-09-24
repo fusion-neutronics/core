@@ -299,8 +299,9 @@ fn an_evaluation_without_mf33_writes_nothing() {
 ///
 /// This lives here rather than in `yamc-nuclide` because the dependency points
 /// this way: the converter dev-depends on the loader precisely so a conversion
-/// can be judged by its real consumer. Nothing published carries this section
-/// yet, so the file under test has to be written first.
+/// can be judged by its real consumer. The file under test is written here
+/// rather than downloaded, so the assertion is against an evaluation in the
+/// tree rather than against whatever the CDN currently serves.
 #[test]
 fn the_loader_reads_back_what_the_converter_writes() {
     use yamc_nuclide::covariance::expand::{expand_ni, Scale};
