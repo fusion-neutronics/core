@@ -3,7 +3,7 @@ name = "yamc-source"
 version = "0.1.0"
 edition = "2021"
 description = "Particle source specifications and spatial/energy/angle distribution samplers for yamc"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "yamc_source"

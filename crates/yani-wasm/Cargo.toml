@@ -3,7 +3,7 @@ name = "yani-wasm"
 version = "0.1.0"
 edition = "2021"
 description = "WebAssembly bindings for yani -- transmutation and activation in the browser"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "yani_wasm"

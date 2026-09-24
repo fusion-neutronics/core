@@ -3,7 +3,7 @@ name = "yani-decay"
 version = "0.1.0"
 edition = "2021"
 description = "Decay-chain observables for yani -- chain enumeration, Bateman activity evolution, activity and decay heat, D1S time-correction factors"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "yani_decay"

@@ -3,7 +3,7 @@ name = "yamc-convert"
 version = "0.1.0"
 edition = "2021"
 description = "Convert ENDF and ACE evaluations into the transport Arrow format yamc reads"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "yamc_convert"

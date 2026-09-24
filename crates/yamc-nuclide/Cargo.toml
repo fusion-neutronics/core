@@ -3,7 +3,7 @@ name = "yamc-nuclide"
 version = "0.1.0"
 edition = "2021"
 description = "Evaluated neutron nuclear data for yamc -- Nuclide, Reaction, and reaction-product sampling"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "yamc_nuclide"

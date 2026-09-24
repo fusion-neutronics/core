@@ -15,7 +15,7 @@ name = "yamm"
 version = "0.1.7"
 edition = "2021"
 description = "Yet Another Mesh Maker -- CDT surface mesher + conformal tet mesher (pyo3-free)"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [lib]
 crate-type = ["rlib"]
