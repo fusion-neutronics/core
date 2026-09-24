@@ -3,7 +3,7 @@ name = "yamt"
 version = "0.1.0"
 edition = "2021"
 description = "Yet Another Mesh Transport -- pure-Rust geometry for mesh-based particle transport"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

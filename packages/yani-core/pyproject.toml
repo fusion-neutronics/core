@@ -11,8 +11,8 @@ dynamic = ["version"]
 description = "Transmutation and activation without transport: a material, an irradiation schedule and a neutron spectrum in, inventories out"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
-license-files = ["LICENSE", "THIRD-PARTY-LICENSES.html"]
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-LICENSES.html"]
 dependencies = []
 
 # No [project.urls]. This is the compiled distribution, not the one to install,

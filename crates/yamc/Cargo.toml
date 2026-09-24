@@ -3,7 +3,7 @@ name = "yamc"
 version = "0.3.0"
 edition = "2021"
 description = "Yet Another Monte Carlo code for neutron transport simulations"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 exclude = [
     "*.py",
     "examples/python/",

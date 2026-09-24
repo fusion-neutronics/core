@@ -3,7 +3,7 @@ name = "yani"
 version = "0.1.0"
 edition = "2021"
 description = "Yet Another Nuclide Inventory -- CRAM matrix exponential for nuclear transmutation"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [lib]
 crate-type = ["rlib"]

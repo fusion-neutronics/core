@@ -3,7 +3,7 @@ name = "yamc-element"
 version = "0.1.0"
 edition = "2021"
 description = "Evaluated photon nuclear data for yamc -- Element, photon interaction cross-sections, atomic transitions"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "yamc_element"
