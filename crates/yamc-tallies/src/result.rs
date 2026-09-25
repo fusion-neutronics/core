@@ -81,6 +81,11 @@ pub struct TallyResult {
     /// (log-spaced histogram of `|total|`). Empty when no per-history
     /// sampling occurred. Stored raw so it can be merged and inspected.
     pub score_pdf: crate::welford::ScorePdf,
+    /// Raw per-history products of the bin scores, packed upper triangle, when
+    /// the tally asked for its covariance. The merge state behind
+    /// [`TallyResult::covariance`], carried like `m2` so combined results keep
+    /// it. Not written by the Arrow result writer.
+    pub comoment: Option<Vec<f64>>,
     /// Snapshots of the tally's aggregate statistics versus number of
     /// histories, for convergence/trend inspection. Empty unless the run
     /// recorded them; not merged across `combine_results`.
@@ -109,6 +114,23 @@ pub struct TallyResult {
 }
 
 impl TallyResult {
+    /// Covariance of the bin means, `num_bins x num_bins` row-major, when the
+    /// tally asked for it. Its diagonal is `standard_deviation` squared, and
+    /// its off-diagonal terms are the correlations a per-bin standard
+    /// deviation cannot carry: bins scored by the same histories move
+    /// together.
+    pub fn covariance(&self) -> Option<Vec<f64>> {
+        let stats = crate::welford::WelfordTallyStats {
+            mean: self.mean.clone(),
+            m2: self.m2.clone(),
+            n_histories: self.n_histories,
+            agg: self.agg,
+            score_pdf: crate::welford::ScorePdf::default(),
+            comoment: self.comoment.clone(),
+        };
+        stats.covariance_of_mean()
+    }
+
     /// Number of scalar bins (product of `shape`).
     pub fn num_bins(&self) -> usize {
         self.shape.iter().product()

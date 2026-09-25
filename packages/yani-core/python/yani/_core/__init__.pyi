@@ -238,7 +238,29 @@ class DoseResult:
     @property
     def std_dev(self) -> typing.Any:
         r"""
-        Standard error on `mean`, same shape.
+        Standard error on `mean`, same shape: the transport's statistical
+        uncertainty alone.
+        """
+    @property
+    def data_std_dev(self) -> typing.Optional[typing.Any]:
+        r"""
+        The nuclear-data uncertainty on `mean`, same shape, when
+        ``time_correct_tally`` was given ``data_uncertainty``; ``None``
+        otherwise. From the half-lives behind the time-correction factors.
+        """
+    @property
+    def total_std_dev(self) -> typing.Optional[typing.Any]:
+        r"""
+        `std_dev` and `data_std_dev` in quadrature, when both exist. They are
+        independent: one is the transport's sampling, the other the evaluated
+        half-lives.
+        """
+    @property
+    def data_uncertainty_info(self) -> typing.Optional[typing.Any]:
+        r"""
+        What the nuclear-data uncertainty covered, when asked for: the
+        half-lives sampled, those with no stated sigma, the replica count and
+        whether it settled.
         """
     @property
     def by_nuclide(self) -> typing.Any:
@@ -1619,7 +1641,7 @@ class PulseSchedule:
         Number of steps in the schedule.
         """
     def __repr__(self) -> builtins.str: ...
-    def time_correct_tally(self, results: typing.Any, steps: typing.Optional[typing.Any] = None) -> DoseResult:
+    def time_correct_tally(self, results: typing.Any, steps: typing.Optional[typing.Any] = None, data_uncertainty: typing.Optional[DataUncertainty] = None) -> DoseResult:
         r"""
         Time-correct a decay-photon tally into shutdown dose rate(s).
         
@@ -1637,8 +1659,20 @@ class PulseSchedule:
         The transmutation network is assembled from the configured per-subsection
         sources (``yani.transmutation_decay_data`` etc.).
         
+            data_uncertainty (DataUncertainty, optional): Also propagate the
+                nuclear-data uncertainty of the time correction. Only the
+                ``"half_life"`` source acts on it: a time-correction factor is an
+                activity over the schedule, and the tally's in-line photon yield
+                is per decay, so the half-lives enter through the correction and
+                nowhere else. Each replica draws every half-life feeding an
+                emitter once and uses it for every campaign, so one evaluation
+                is one uncertainty; the draws are those a transmutation with the
+                same seed makes. Read ``.data_std_dev`` and ``.total_std_dev``.
+        
         Returns:
-            DoseResult with ``.mean`` / ``.std_dev`` / ``.by_nuclide`` / ``.times``.
+            DoseResult with ``.mean`` / ``.std_dev`` / ``.by_nuclide`` / ``.times``,
+            and ``.data_std_dev`` / ``.total_std_dev`` /
+            ``.data_uncertainty_info`` when ``data_uncertainty`` was given.
         """
 
 @typing.final

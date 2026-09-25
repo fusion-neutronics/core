@@ -592,7 +592,29 @@ class DoseResult:
     @property
     def std_dev(self) -> typing.Any:
         r"""
-        Standard error on `mean`, same shape.
+        Standard error on `mean`, same shape: the transport's statistical
+        uncertainty alone.
+        """
+    @property
+    def data_std_dev(self) -> typing.Optional[typing.Any]:
+        r"""
+        The nuclear-data uncertainty on `mean`, same shape, when
+        ``time_correct_tally`` was given ``data_uncertainty``; ``None``
+        otherwise. From the half-lives behind the time-correction factors.
+        """
+    @property
+    def total_std_dev(self) -> typing.Optional[typing.Any]:
+        r"""
+        `std_dev` and `data_std_dev` in quadrature, when both exist. They are
+        independent: one is the transport's sampling, the other the evaluated
+        half-lives.
+        """
+    @property
+    def data_uncertainty_info(self) -> typing.Optional[typing.Any]:
+        r"""
+        What the nuclear-data uncertainty covered, when asked for: the
+        half-lives sampled, those with no stated sigma, the replica count and
+        whether it settled.
         """
     @property
     def by_nuclide(self) -> typing.Any:
@@ -3079,7 +3101,7 @@ class PulseSchedule:
         Number of steps in the schedule.
         """
     def __repr__(self) -> builtins.str: ...
-    def time_correct_tally(self, results: typing.Any, steps: typing.Optional[typing.Any] = None) -> DoseResult:
+    def time_correct_tally(self, results: typing.Any, steps: typing.Optional[typing.Any] = None, data_uncertainty: typing.Optional[DataUncertainty] = None) -> DoseResult:
         r"""
         Time-correct a decay-photon tally into shutdown dose rate(s).
         
@@ -3097,8 +3119,20 @@ class PulseSchedule:
         The transmutation network is assembled from the configured per-subsection
         sources (``yamc.transmutation_decay_data`` etc.).
         
+            data_uncertainty (DataUncertainty, optional): Also propagate the
+                nuclear-data uncertainty of the time correction. Only the
+                ``"half_life"`` source acts on it: a time-correction factor is an
+                activity over the schedule, and the tally's in-line photon yield
+                is per decay, so the half-lives enter through the correction and
+                nowhere else. Each replica draws every half-life feeding an
+                emitter once and uses it for every campaign, so one evaluation
+                is one uncertainty; the draws are those a transmutation with the
+                same seed makes. Read ``.data_std_dev`` and ``.total_std_dev``.
+        
         Returns:
-            DoseResult with ``.mean`` / ``.std_dev`` / ``.by_nuclide`` / ``.times``.
+            DoseResult with ``.mean`` / ``.std_dev`` / ``.by_nuclide`` / ``.times``,
+            and ``.data_std_dev`` / ``.total_std_dev`` /
+            ``.data_uncertainty_info`` when ``data_uncertainty`` was given.
         """
 
 @typing.final
@@ -4049,6 +4083,17 @@ class Tally:
                 before a simulation has run.
         """
     @property
+    def covariance(self) -> typing.Optional[builtins.list[builtins.list[builtins.float]]]:
+        r"""
+        Covariance of the bin means, a ``num_bins x num_bins`` nested list in the
+        same bin order as :attr:`mean`, or ``None`` unless the tally was built
+        with ``covariance=True`` and a simulation has run.
+        
+        Its diagonal is ``standard_deviation`` squared. For an energy-binned
+        flux tally it is what ``Pulse(flux_covariance=...)`` takes, so a
+        transmutation gets the spectrum's error with its correlations.
+        """
+    @property
     def relative_error(self) -> builtins.list[builtins.float]:
         r"""
         Per-bin relative error (``standard_deviation / mean``, 0 where the
@@ -4057,7 +4102,7 @@ class Tally:
         Returns:
             list[float]: Relative error per bin.
         """
-    def __new__(cls, scores: typing.Sequence[builtins.str | builtins.int] | None = None, name: typing.Optional[builtins.str] = None, id: typing.Optional[builtins.int] = None, nuclides: typing.Optional[typing.Sequence[builtins.str]] = None, response: str | typing.Sequence[str] | Material | None = None, cells: Cell | typing.Sequence[Cell] | None = None, materials: Material | typing.Sequence[Material] | None = None, mesh: RegularRectangularMesh | RegularCylindricalMesh | None = None, unstructured_mesh: tuple[MeshGeometry, builtins.float] | None = None, energy_bins: typing.Optional[typing.Sequence[builtins.float]] = None, energy_group_structure: typing.Optional[builtins.str] = None, energy_function: tuple[typing.Sequence[builtins.float], typing.Sequence[builtins.float], builtins.str] | None = None, dose_coefficients: tuple[builtins.str, builtins.str] | tuple[builtins.str, builtins.str, builtins.str] | None = None, particle: typing.Optional[builtins.str] = None, parent_nuclides: typing.Optional[typing.Sequence[builtins.str]] = None, estimator: typing.Optional[builtins.str] = None) -> Tally:
+    def __new__(cls, scores: typing.Sequence[builtins.str | builtins.int] | None = None, name: typing.Optional[builtins.str] = None, id: typing.Optional[builtins.int] = None, nuclides: typing.Optional[typing.Sequence[builtins.str]] = None, response: str | typing.Sequence[str] | Material | None = None, cells: Cell | typing.Sequence[Cell] | None = None, materials: Material | typing.Sequence[Material] | None = None, mesh: RegularRectangularMesh | RegularCylindricalMesh | None = None, unstructured_mesh: tuple[MeshGeometry, builtins.float] | None = None, energy_bins: typing.Optional[typing.Sequence[builtins.float]] = None, energy_group_structure: typing.Optional[builtins.str] = None, energy_function: tuple[typing.Sequence[builtins.float], typing.Sequence[builtins.float], builtins.str] | None = None, dose_coefficients: tuple[builtins.str, builtins.str] | tuple[builtins.str, builtins.str, builtins.str] | None = None, particle: typing.Optional[builtins.str] = None, parent_nuclides: typing.Optional[typing.Sequence[builtins.str]] = None, estimator: typing.Optional[builtins.str] = None, covariance: builtins.bool = False) -> Tally:
         r"""
         Create a new Tally.
         
@@ -4090,6 +4135,14 @@ class Tally:
             dose_coefficients (tuple, optional): (particle, geometry[, data_source]) for dose
             particle (str, optional): "neutron" or "photon"
             parent_nuclides (list[str], optional): Nuclides for D1S parent binning
+            covariance (bool): Also accumulate the covariance of the bin means,
+                history by history, read back as :attr:`covariance`. Off by
+                default. A per-bin ``standard_deviation`` treats the bins as
+                independent, which they are not: bins scored by the same
+                histories move together, so anything summed over them, a
+                reaction rate over a spectrum, inherits an understated error
+                from the standard deviations alone. Meant for spectra: it is
+                limited to 2048 bins, and CPU only.
         
         Notes:
             ``cells`` and ``materials`` are mutually exclusive -- a single tally
@@ -4206,6 +4259,15 @@ class TallyResult:
     def particles_per_chunk(self) -> builtins.int:
         r"""
         Source particles per batch.
+        """
+    @property
+    def covariance(self) -> typing.Optional[builtins.list[builtins.list[builtins.float]]]:
+        r"""
+        Covariance of the bin means, a ``num_bins x num_bins`` nested list in
+        the same bin order as ``mean``, or ``None`` unless the tally was built
+        with ``covariance=True``. Its diagonal is ``standard_deviation``
+        squared; for an energy-binned flux tally it is what
+        ``Pulse(flux_covariance=...)`` takes.
         """
     @property
     def m2(self) -> builtins.list[builtins.float]:
