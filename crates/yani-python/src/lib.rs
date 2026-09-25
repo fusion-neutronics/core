@@ -67,6 +67,7 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
     m.add_class::<material::PyDoseCoefficients>()?;
     m.add_class::<material::PyPhotonCoefficients>()?;
     m.add_class::<material::PyMaterial>()?;
+    m.add_class::<material::PyClearanceResult>()?;
     m.add_class::<material::PyEnriched>()?;
     m.add_function(wrap_pyfunction!(material::enriched, m)?)?;
     m.add_class::<material::PyNuclide>()?;

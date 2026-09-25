@@ -56,6 +56,9 @@ yani-convert = { path = "../yani-convert" }
 yamc-convert = { path = "../yamc-convert" }
 yani-transmute = { path = "../yani-transmute", features = ["arrow", "download"] }
 yani-decay = { path = "../yani-decay" }
+# Clearance indexes for Material. Only here, not in yani-decay, so the wasm
+# build and the transport crates do not carry the regulatory tables.
+radiological-material-clearance-finder = "0.2"
 
 [features]
 default = ["download-tls"]

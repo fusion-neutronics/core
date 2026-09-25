@@ -1,6 +1,7 @@
 //! Nuclear material wrappers: materials, nuclides, reactions, chains, data, dose.
 
 mod chain;
+mod clearance;
 mod collection;
 mod data;
 mod dose;
@@ -12,6 +13,7 @@ mod reaction;
 mod reaction_product;
 
 pub use chain::*;
+pub use clearance::PyClearanceResult;
 pub use collection::*;
 pub use data::*;
 pub use dose::*;

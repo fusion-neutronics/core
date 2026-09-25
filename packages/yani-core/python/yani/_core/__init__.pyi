@@ -9,6 +9,7 @@ from . import sources as sources
 from . import _decay_photons as _decay_photons
 from . import materials as materials
 __all__ = [
+    "ClearanceResult",
     "Cooldown",
     "DataUncertainty",
     "DoseCoefficients",
@@ -73,6 +74,139 @@ class AngleDistribution:
         r"""
         Sample scattering cosine (mu) for a given incoming energy
         """
+
+@typing.final
+class ClearanceResult:
+    r"""
+    The outcome of assessing a material against one clearance limit set.
+    
+    Every regulation here uses the same arithmetic: each radionuclide's
+    activity divided by its tabulated limit, summed. The material meets the
+    limits when that sum, ``index``, is below ``threshold``. The per-nuclide
+    dicts are ordered largest first.
+    
+    Examples:
+        >>> result = material.clearance_index("UK_EPR16_out_of_scope")
+        >>> result.clearable
+        False
+        >>> result.dominant(2)
+        [('Co60', 11.2...), ('Cs137', 0.029...)]
+        >>> print(result)
+    """
+    @property
+    def limit_set(self) -> builtins.str:
+        r"""
+        Name of the limit set assessed against.
+        """
+    @property
+    def index(self) -> builtins.float:
+        r"""
+        The sum of activity-to-limit ratios.
+        """
+    @property
+    def threshold(self) -> builtins.float:
+        r"""
+        The value the index must stay below, normally 1.
+        """
+    @property
+    def units(self) -> builtins.str:
+        r"""
+        Activity units the comparison was made in: ``"Bq/g"``, ``"Ci/m3"`` or
+        ``"Bq"``.
+        """
+    @property
+    def clearable(self) -> builtins.bool:
+        r"""
+        Whether the material meets this set's limits.
+        """
+    @property
+    def out_of_scope(self) -> builtins.bool:
+        r"""
+        Whether the regulation excludes this material outright, which for the
+        UK sets means every radionuclide present is shorter lived than 100 s.
+        """
+    @property
+    def by_nuclide(self) -> dict[str, float]:
+        r"""
+        Each nuclide's contribution to the index, largest first.
+        """
+    @property
+    def activities(self) -> dict[str, float]:
+        r"""
+        Each nuclide's activity in ``units``, largest first.
+        """
+    @property
+    def limits_used(self) -> dict[str, float]:
+        r"""
+        The limit applied to each nuclide, after any metal, per-gram, dynamic or
+        secular equilibrium adjustment.
+        """
+    @property
+    def defaulted(self) -> builtins.list[builtins.str]:
+        r"""
+        Nuclides that took the set's catch-all limit because the table does
+        not list them.
+        """
+    @property
+    def excluded(self) -> dict[str, str]:
+        r"""
+        Nuclide to the reason its activity was left out, which is always that a
+        parent's limit already accounts for it in full.
+        """
+    @property
+    def credited(self) -> dict[str, float]:
+        r"""
+        Nuclide to the activity a parent accounted for, where the parent could
+        only support part of it. The remainder was assessed against the
+        nuclide's own limit.
+        """
+    @property
+    def uncovered(self) -> dict[str, float]:
+        r"""
+        Activity present with no limit and no catch-all, so absent from the
+        index entirely. The number to check before trusting a comfortable index.
+        """
+    @property
+    def unlimited(self) -> builtins.list[builtins.str]:
+        r"""
+        Nuclides present that the source explicitly places no limit on.
+        """
+    @property
+    def uncovered_activity(self) -> builtins.float:
+        r"""
+        Total activity with no limit, in ``units``.
+        """
+    @property
+    def uncovered_fraction(self) -> builtins.float:
+        r"""
+        Share of total activity that falls outside the sum, from 0 to 1.
+        """
+    @property
+    def material_name(self) -> builtins.str:
+        r"""
+        The material's name, carried through for reporting.
+        """
+    def assessed_activity(self, nuclide: builtins.str) -> builtins.float:
+        r"""
+        The activity actually charged against the limit for one nuclide: its
+        total activity, less any part a parent accounted for.
+        
+        Args:
+            nuclide (str): Nuclide name, such as ``"Co60"``.
+        """
+    def dominant(self, count: builtins.int = 10) -> builtins.list[tuple[builtins.str, builtins.float]]:
+        r"""
+        The nuclides contributing most to the index, largest first.
+        
+        Args:
+            count (int): How many to return.
+        """
+    def to_dict(self) -> dict[str, object]:
+        r"""
+        A JSON-serialisable copy of the result.
+        """
+    def __str__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str: ...
 
 @typing.final
 class Cooldown:
@@ -754,6 +888,83 @@ class Material:
             {'Co60': 380.088...}
             >>> activated.contact_dose(dose_quantity='effective')
             380.728...
+        """
+    def clearance_index(self, limit_set: builtins.str, *, metal: builtins.bool = False, apply_default_limit: builtins.bool = True, exclude_daughters: builtins.bool = True) -> ClearanceResult:
+        r"""
+        Clearance index of the current inventory against one regulatory limit set.
+        
+        Each radionuclide's activity is divided by its limit in the set and the
+        ratios are summed; the material meets the limits when the sum is below
+        the set's threshold, normally 1. The limit sets cover UK, German, US, EU
+        and IAEA clearance, exemption and disposal tables, and come from the
+        ``radiological-material-clearance-finder`` crate, whose documentation
+        describes each one and where its numbers come from.
+        
+        Half-lives come from the configured transmutation chain, the same ones
+        ``activity()`` and ``decay_heat()`` use, so a nuclide the chain calls
+        stable contributes nothing. Specific activities (Bq/g) need nothing
+        beyond the composition, and the volumetric US sets (Ci/m3) use the mass
+        density the atom densities imply. Only the total activity sets (Bq)
+        need ``material.volume``.
+        
+        Stable isotopes have to stay in the material: they are most of its
+        mass, and so most of the Bq/g denominator.
+        
+        Args:
+            limit_set (str): Name of the limit set, such as
+                ``"UK_EPR16_out_of_scope"`` or ``"StrlSchV_unrestricted"``.
+                ``clearance_indices()`` assesses against every set at once.
+            metal (bool): Whether the material is activated metal, which
+                changes some NRC limits and adds others.
+            apply_default_limit (bool): Whether to apply the set's catch-all
+                limit to nuclides its table does not list. The UK regulations
+                define one, so leaving this on is what they say.
+            exclude_daughters (bool): Whether to leave out daughters whose
+                parent's limit already covers them, as the regulation's own
+                table directs. Turning it off double counts them.
+        
+        Returns:
+            ClearanceResult: The index, whether it clears, each nuclide's
+            contribution, and any activity no limit in the set covers.
+        
+        Raises:
+            KeyError: If no limit set has that name.
+            ValueError: If the set is in Bq and the material has no volume.
+        
+        Examples:
+            >>> result = material.clearance_index("UK_EPR16_out_of_scope")
+            >>> result.index
+            11.24...
+            >>> result.clearable
+            False
+        """
+    def clearance_indices(self, limit_sets: typing.Optional[typing.Sequence[builtins.str]] = None, *, metal: builtins.bool = False, apply_default_limit: builtins.bool = True, exclude_daughters: builtins.bool = True) -> builtins.dict[builtins.str, ClearanceResult]:
+        r"""
+        Clearance indexes of the current inventory against many limit sets.
+        
+        The same assessment as ``clearance_index()``, once per set. Sets the
+        material cannot be assessed against are skipped rather than raising,
+        which in practice means the total activity sets (Bq) when the material
+        has no ``volume``.
+        
+        Args:
+            limit_sets (list[str] | None): Names of the limit sets. ``None``
+                (the default) assesses against every available set, which is
+                also the way to see their names.
+            metal (bool): As for ``clearance_index()``.
+            apply_default_limit (bool): As for ``clearance_index()``.
+            exclude_daughters (bool): As for ``clearance_index()``.
+        
+        Returns:
+            dict[str, ClearanceResult]: Results keyed by limit set name.
+        
+        Raises:
+            KeyError: If a named limit set does not exist.
+        
+        Examples:
+            >>> results = material.clearance_indices()
+            >>> [name for name, r in results.items() if r.clearable]
+            ['Fetter', 'NRC_long', ...]
         """
     def mean_free_path_neutron(self, energy: builtins.float) -> typing.Optional[builtins.float]:
         r"""

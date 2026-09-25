@@ -28,6 +28,7 @@ final = results.get_final_material(steel.id or 0)
 print(final.activity(), "Bq")
 print(final.decay_heat(), "W")
 print(final.contact_dose(), "Gy/h")
+print(final.clearance_index("UK_EPR16_out_of_scope").index)
 ```
 
 ## Relationship to yamc
@@ -47,8 +48,8 @@ stack; pick `yamc` when the spectrum should come from a transport solve.
 
 - One stepper (`ForwardEulerStepper`, beginning-of-step rates). No
   predictor-corrector.
-- No pathway analysis, no sensitivity or uncertainty propagation, no clearance
-  indices or ingestion/inhalation dose.
+- No pathway analysis, no sensitivity or uncertainty propagation, and no
+  ingestion/inhalation dose.
 - Cross sections are read from the continuous-energy library and collapsed
   against your spectrum, so this reads transport-format data files even though
   it runs no transport. Only the sections activation needs are read (issue
