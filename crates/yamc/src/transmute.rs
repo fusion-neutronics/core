@@ -1032,23 +1032,16 @@ mod tests {
         assert_eq!(peak_cross_section(&material, "Cs137"), 20.0);
     }
 
-    /// The statistical uncertainty the transmutation tally's per-history
-    /// covariance predicts must match the actual spread between independent
-    /// transport runs (issue #140, item 1).
-    ///
-    /// Sixteen runs of a 14 MeV point source in an Fe56 sphere, on two
-    /// threads so the per-worker scratch and the stripe fold both run for
-    /// real. Each run's covariance predicts the variance of its own means;
-    /// the scatter of those means across runs measures it. With 16 runs the
-    /// measured variance is a chi-squared on 15 degrees of freedom, so the
-    /// ratio lands in [0.42, 1.83] 95% of the time; the bounds below are a
-    /// little wider and the seeds fixed, so this is deterministic.
-    ///
-    /// Two quantities are checked: the total track length, which is the sum
-    /// over every bin and so rests almost entirely on the cross-bin
-    /// covariance, and the fast-band track length above 1 MeV.
-    #[test]
-    fn history_covariance_predicts_the_run_to_run_spread() {
+    /// `RUNS` independent transport runs of a 14 MeV point source in a 10 cm
+    /// Fe56 sphere, each with its own history-statistics tally carrying
+    /// `reactions` (kind, product), on two threads so the per-worker scratch
+    /// and the stripe fold both run for real. `None` without the Fe56
+    /// transport fixture.
+    fn fe56_statistics_runs(
+        runs: u64,
+        particles: usize,
+        reactions: &[(&str, &str)],
+    ) -> Option<(Material, Vec<Arc<TransmutationTallies>>)> {
         use crate::geo::{BoundaryType, HalfspaceType, Region, Surface};
         use crate::geometry::cell::Cell;
         use crate::geometry::Geometry;
@@ -1059,12 +1052,9 @@ mod tests {
             ParticleSource, Source, SourceEnergyDistribution, SourceSpatialDistribution,
         };
 
-        const RUNS: u64 = 16;
-        const PARTICLES: usize = 1500;
-
         let Some(fe56_path) = yamc_test_cache::transport_nuclide("Fe56") else {
             eprintln!("skipping -- Fe56 transport fixture absent");
-            return;
+            return None;
         };
         let mut material = Material::new(
             HashMap::from([("Fe56".to_string(), 1.0)]),
@@ -1085,12 +1075,15 @@ mod tests {
                 name: "Fe56".to_string(),
                 half_life: None,
                 decay_energy: 0.0,
-                reactions: vec![yani::ChainReaction {
-                    kind: "(n,gamma)".to_string(),
-                    target: Some("Fe57".to_string()),
-                    branching: 1.0,
-                    q_value: None,
-                }],
+                reactions: reactions
+                    .iter()
+                    .map(|(kind, target)| yani::ChainReaction {
+                        kind: kind.to_string(),
+                        target: Some(target.to_string()),
+                        branching: 1.0,
+                        q_value: None,
+                    })
+                    .collect(),
                 decays: vec![],
                 fission_yields: None,
                 sources: Vec::new(),
@@ -1099,9 +1092,8 @@ mod tests {
             },
         )]);
 
-        let mut predicted = Vec::new();
-        let mut means = Vec::new();
-        for run in 0..RUNS {
+        let mut out = Vec::new();
+        for run in 0..runs {
             let sphere = Arc::new(Surface::sphere(
                 0.0,
                 0.0,
@@ -1137,7 +1129,7 @@ mod tests {
                 .with_history_statistics(),
             );
             let settings = crate::model::TransportSettings {
-                total_particles: Some(PARTICLES),
+                total_particles: Some(particles),
                 seed: 1000 + run,
                 threads: Some(2),
                 ..Default::default()
@@ -1145,8 +1137,44 @@ mod tests {
             model
                 .run_internal::<NoOpTracker>(&settings, None, Some(Arc::clone(&tallies)), false)
                 .unwrap();
+            out.push(tallies);
+        }
+        Some((material, out))
+    }
 
-            let cov = tallies.moment_covariance(1).unwrap();
+    /// Measured over predicted variance, from each run's predicted variance
+    /// of a quantity and the quantity's value in each run.
+    fn spread_ratio(values: &[f64], predicted: &[f64]) -> f64 {
+        let n = values.len() as f64;
+        let avg = values.iter().sum::<f64>() / n;
+        let measured = values.iter().map(|v| (v - avg).powi(2)).sum::<f64>() / (n - 1.0);
+        measured / (predicted.iter().sum::<f64>() / n)
+    }
+
+    /// With 16 runs the measured variance is a chi-squared on 15 degrees of
+    /// freedom over its expectation, so a correct prediction lands in
+    /// [0.42, 1.83] 95% of the time. The bounds are a little wider and the
+    /// seeds fixed, so the tests below are deterministic.
+    const SPREAD_BOUNDS: std::ops::RangeInclusive<f64> = 0.35..=2.2;
+
+    /// The statistical uncertainty the transmutation tally's per-history
+    /// covariance predicts must match the actual spread between independent
+    /// transport runs (issue #140, item 1).
+    ///
+    /// Two quantities are checked: the total track length, which is the sum
+    /// over every bin and so rests almost entirely on the cross-bin
+    /// covariance, and the fast-band track length above 1 MeV.
+    #[test]
+    fn history_covariance_predicts_the_run_to_run_spread() {
+        const PARTICLES: usize = 1500;
+        let Some((_, runs)) = fe56_statistics_runs(16, PARTICLES, &[("(n,gamma)", "Fe57")]) else {
+            return;
+        };
+
+        let mut predicted = [Vec::new(), Vec::new()];
+        let mut means = [Vec::new(), Vec::new()];
+        for tallies in &runs {
+            let cov = tallies.history_covariance(1).unwrap();
             assert_eq!(cov.n_histories, PARTICLES as u64);
             let b = cov.n_bins();
             let total: Vec<f64> = (0..cov.dim()).map(|i| (i < b) as u8 as f64).collect();
@@ -1162,22 +1190,83 @@ mod tests {
                 (m_total - flux_tl).abs() <= 1e-9 * flux_tl,
                 "summed s0 {m_total:e} vs flux track length {flux_tl:e}"
             );
-            predicted.push([v_total, v_fast]);
-            means.push([m_total, m_fast]);
+            for (q, (m, v)) in [(m_total, v_total), (m_fast, v_fast)]
+                .into_iter()
+                .enumerate()
+            {
+                means[q].push(m);
+                predicted[q].push(v);
+            }
         }
-
-        let n = RUNS as f64;
         for (q, name) in [(0, "total"), (1, "fast")] {
-            let avg = means.iter().map(|m| m[q]).sum::<f64>() / n;
-            let measured = means.iter().map(|m| (m[q] - avg).powi(2)).sum::<f64>() / (n - 1.0);
-            let expected = predicted.iter().map(|p| p[q]).sum::<f64>() / n;
-            let ratio = measured / expected;
+            let ratio = spread_ratio(&means[q], &predicted[q]);
             eprintln!("{name}: measured / predicted variance = {ratio:.3}");
             assert!(
-                (0.35..=2.2).contains(&ratio),
-                "{name}: run-to-run variance {measured:e} against predicted {expected:e} \
-                 (ratio {ratio:.3})"
+                SPREAD_BOUNDS.contains(&ratio),
+                "{name}: measured over predicted variance {ratio:.3}"
             );
         }
+    }
+
+    /// Every reaction rate's predicted sigma must match its run-to-run
+    /// spread, over rates spanning a 1/v capture, threshold reactions from a
+    /// few MeV up, and one near the 14 MeV source. The rates reported must be
+    /// the accessor's, and a rate difference must get its variance from the
+    /// cross terms too: two fast threshold rates scored by the same histories
+    /// are positively correlated, and their difference is checked against the
+    /// runs as well.
+    #[test]
+    fn rate_covariance_predicts_the_run_to_run_spread() {
+        const REACTIONS: &[(&str, &str)] = &[
+            ("(n,gamma)", "Fe57"),
+            ("(n,p)", "Mn56"),
+            ("(n,a)", "Cr53"),
+            ("(n,2n)", "Fe55"),
+        ];
+        let (volume, source_rate) = (4.0 / 3.0 * std::f64::consts::PI * 1000.0, 1.0e14);
+        let Some((_, runs)) = fe56_statistics_runs(16, 1500, REACTIONS) else {
+            return;
+        };
+
+        let kinds: Vec<&str> = REACTIONS.iter().map(|(k, _)| *k).collect();
+        let mut values = vec![Vec::new(); kinds.len() + 1];
+        let mut predicted = vec![Vec::new(); kinds.len() + 1];
+        let mut correlation = Vec::new();
+        for tallies in &runs {
+            let rc = tallies
+                .get_reaction_rate_covariance(1, volume, source_rate)
+                .unwrap();
+            let rates = tallies.get_reaction_rates(1, volume, source_rate);
+            let idx: Vec<usize> = kinds
+                .iter()
+                .map(|k| rc.index_of("Fe56", k, None).expect("every tallied rate"))
+                .collect();
+            for (q, &i) in idx.iter().enumerate() {
+                let expected = rates["Fe56"][kinds[q]];
+                assert!((rc.rates[i] - expected).abs() <= 1e-12 * expected);
+                values[q].push(rc.rates[i]);
+                predicted[q].push(rc.covariance(i, i));
+            }
+            // (n,p) minus (n,a): its variance needs the cross term.
+            let (p, a) = (idx[1], idx[2]);
+            values[kinds.len()].push(rc.rates[p] - rc.rates[a]);
+            predicted[kinds.len()]
+                .push(rc.covariance(p, p) + rc.covariance(a, a) - 2.0 * rc.covariance(p, a));
+            correlation.push(rc.correlation(p, a));
+        }
+        for (q, name) in kinds.iter().chain(&["(n,p) - (n,a)"]).enumerate() {
+            let ratio = spread_ratio(&values[q], &predicted[q]);
+            eprintln!("{name}: measured / predicted variance = {ratio:.3}");
+            assert!(
+                SPREAD_BOUNDS.contains(&ratio),
+                "{name}: measured over predicted variance {ratio:.3}"
+            );
+        }
+        let mean_corr = correlation.iter().sum::<f64>() / correlation.len() as f64;
+        eprintln!("corr((n,p), (n,a)) = {mean_corr:.3}");
+        assert!(
+            mean_corr > 0.2,
+            "fast threshold rates should correlate, got {mean_corr:.3}"
+        );
     }
 }

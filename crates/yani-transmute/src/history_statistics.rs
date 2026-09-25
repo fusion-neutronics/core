@@ -1,4 +1,4 @@
-//! Per-history covariance of the transmutation tally's flux moments.
+//! Per-history covariance of the transmutation tally.
 //!
 //! [`TransmutationTallies`](crate::TransmutationTallies) accumulates raw sums
 //! and nothing else, so a reaction rate comes out of transport with no
@@ -9,26 +9,33 @@
 //!
 //! # What the covariance is on
 //!
-//! Not on the rates. Every rate the tally reports is a linear function of the
-//! flux moments, so the covariance goes on the moment vector
+//! One vector per history,
 //!
 //! ```text
-//! s = (s0_0 .. s0_{B-1}, s1_0 .. s1_{B-1}, y_0 .. y_{Y-1})
+//! x = (s0_0 .. s0_{B-1}, y_0 .. y_{Y-1}, r_0 .. r_{R-1})
 //! ```
 //!
-//! and any rate's variance follows as `a^T Sigma_s a` for the fold weights `a`
-//! of that rate. That scales with the grid rather than with the nuclide count,
-//! and covers nuclides the tally never scored.
+//! - `s0_c`, the track length in base-grid bin `c`, so any rate folded from
+//!   the spectrum (the MF=10 partials, or a nuclide the tally does not score)
+//!   gets its covariance as `a^T Sigma a` for its fold weights `a`;
+//! - `y_k`, each MF=9 yield channel, scored directly;
+//! - `r_j`, each `sum(sigma * TL)` the tally scores for a nuclide and MT.
 //!
-//! The moments here are taken on the fixed base spectrum grid, not on the full
+//! The scored rates are in the vector themselves rather than folded from the
+//! spectrum because a fold cannot get them right. A resonance makes a cross
+//! section vary by orders of magnitude inside one bin while the flux dips at
+//! the resonance, so weighting every track in the bin by one averaged cross
+//! section misstates how the rate fluctuates. For Fe56 capture it overstated
+//! the variance about threefold against independent runs, where the smooth
+//! MF=10 curves fold to within a fraction of a percent. Scored directly, the
+//! rates' covariance is exact, resonances and all.
+//!
+//! The spectrum is taken on the fixed base spectrum grid, not on the full
 //! union grid the means use. The union grid grows with every branch-curve
 //! breakpoint and its square is the memory cost, so the covariance is coarsened
 //! to the base grid while the means stay exactly where they are. Each union bin
-//! lies inside one base bin (the base edges are part of the union grid), and
-//! `s1` is taken relative to the base bin's own lower edge, so the coarse
-//! moments are exact sums of the fine ones rather than an approximation of
-//! them. What coarsening gives up is resolution in the covariance, not
-//! accuracy in any mean.
+//! lies inside one base bin (the base edges are part of the union grid), so
+//! the coarse `s0` are exact sums of the fine ones.
 //!
 //! # Why raw product sums, not Welford co-moments
 //!
@@ -247,6 +254,8 @@ pub(crate) struct HistoryStatistics {
     /// Material id -> its position in `blocks` and in each worker's scratch.
     slot_of: std::collections::HashMap<u32, usize>,
     blocks: Vec<Block>,
+    /// MF=9 yield channels per slot, which is where its scored rates start.
+    n_yields: Vec<usize>,
     /// One scratch set per rayon worker, sized by
     /// [`HistoryStatistics::prepare_workers`] before transport starts.
     workers: OnceLock<Box<[Mutex<Vec<Scratch>>]>>,
@@ -260,29 +269,37 @@ pub(crate) struct History<'a> {
 }
 
 impl History<'_> {
-    /// A segment of weighted length `tl` at `energy`, landing in union-grid
-    /// bin `union_bin`.
+    /// A segment of weighted length `tl` landing in union-grid bin
+    /// `union_bin`.
     #[inline]
-    pub(crate) fn add_moments(&mut self, union_bin: usize, energy: f64, tl: f64) {
+    pub(crate) fn add_track_length(&mut self, union_bin: usize, tl: f64) {
         let c = self.stats.base_bin[union_bin] as usize;
-        let n_bins = self.stats.grid.len();
-        let edge = self.stats.grid[c];
-        let s = &mut self.scratch[self.slot];
-        s.add(c, tl);
-        s.add(n_bins + c, (energy - edge) * tl);
+        self.scratch[self.slot].add(c, tl);
     }
 
     /// A contribution to MF=9 yield channel `k`.
     #[inline]
     pub(crate) fn add_yield(&mut self, k: usize, value: f64) {
-        let n_bins = self.stats.grid.len();
-        self.scratch[self.slot].add(2 * n_bins + k, value);
+        let at = self.stats.grid.len() + k;
+        self.scratch[self.slot].add(at, value);
+    }
+
+    /// A contribution to scored rate `j`, the tally's `nuclide * n_mts + mt`
+    /// accumulator index.
+    #[inline]
+    pub(crate) fn add_rate(&mut self, j: usize, value: f64) {
+        let at = self.stats.grid.len() + self.stats.n_yields[self.slot] + j;
+        self.scratch[self.slot].add(at, value);
     }
 }
 
 impl HistoryStatistics {
-    /// `materials` is `(material id, number of MF=9 yield channels)`.
-    pub(crate) fn new(base_grid: Vec<f64>, union_grid: &[f64], materials: &[(u32, usize)]) -> Self {
+    /// `materials` is `(material id, MF=9 yield channels, scored rates)`.
+    pub(crate) fn new(
+        base_grid: Vec<f64>,
+        union_grid: &[f64],
+        materials: &[(u32, usize, usize)],
+    ) -> Self {
         let base_bin = union_grid
             .iter()
             .map(|&e| (base_grid.partition_point(|&b| b <= e).max(1) - 1) as u32)
@@ -290,15 +307,18 @@ impl HistoryStatistics {
         let n_bins = base_grid.len();
         let mut slot_of = std::collections::HashMap::new();
         let mut blocks = Vec::with_capacity(materials.len());
-        for (slot, &(id, n_yields)) in materials.iter().enumerate() {
+        let mut n_yields = Vec::with_capacity(materials.len());
+        for (slot, &(id, yields, rates)) in materials.iter().enumerate() {
             slot_of.insert(id, slot);
-            blocks.push(Block::new(2 * n_bins + n_yields));
+            blocks.push(Block::new(n_bins + yields + rates));
+            n_yields.push(yields);
         }
         HistoryStatistics {
             grid: base_grid,
             base_bin,
             slot_of,
             blocks,
+            n_yields,
             workers: OnceLock::new(),
         }
     }
@@ -399,7 +419,8 @@ impl HistoryStatistics {
         material_id: u32,
         n_histories: u64,
         yield_channels: Vec<YieldChannelLabel>,
-    ) -> Option<MomentCovariance> {
+        rate_channels: Vec<(String, i32)>,
+    ) -> Option<HistoryCovariance> {
         let block = &self.blocks[*self.slot_of.get(&material_id)?];
         let (sum, prod) = block.gather();
         let dim = block.dim;
@@ -419,9 +440,10 @@ impl HistoryStatistics {
                 }
             }
         }
-        Some(MomentCovariance {
+        Some(HistoryCovariance {
             grid: self.grid.clone(),
             yield_channels,
+            rate_channels,
             n_histories,
             mean,
             covariance,
@@ -433,23 +455,26 @@ impl HistoryStatistics {
 /// kind, final-state target)`.
 pub type YieldChannelLabel = (String, String, String);
 
-/// The per-history mean and covariance of one material's flux-moment vector.
+/// The per-history mean and covariance of one material's tally vector.
 ///
-/// The vector is laid out as `(s0_c, s1_c, y_k)`: the track length in base-grid
-/// bin `c`, the first moment `sum((E - grid[c]) * TL)` in that bin, and the
-/// MF=9 yield channels in the order of
-/// [`yield_channels`](Self::yield_channels). Everything is per source particle
-/// and unnormalized, in the units the tally scores (cm, eV cm, b cm), so a
-/// quantity folded from it converts to a rate by the same
+/// The vector is laid out as `(s0_c, y_k, r_j)`: the track length in base-grid
+/// bin `c`, the MF=9 yield channels in the order of
+/// [`yield_channels`](Self::yield_channels), and the scored `sum(sigma * TL)`
+/// per nuclide and MT in the order of [`rate_channels`](Self::rate_channels).
+/// Everything is per source particle and unnormalized, in the units the tally
+/// scores (cm, b cm), so a quantity from it converts to a rate by the same
 /// `source_rate / (volume * 1e24)` the rates use, and its variance by that
 /// factor squared.
 #[derive(Debug, Clone)]
-pub struct MomentCovariance {
+pub struct HistoryCovariance {
     /// Base-grid edges [eV]. Bin `c` is `[grid[c], grid[c+1])`; the last bin
     /// runs to infinity.
     pub grid: Vec<f64>,
-    /// The MF=9 yield channels at the end of the vector, in order.
+    /// The MF=9 yield channels, in order.
     pub yield_channels: Vec<YieldChannelLabel>,
+    /// The scored rates, `(nuclide, MT)`, in order, including pairs that
+    /// scored nothing.
+    pub rate_channels: Vec<(String, i32)>,
     /// Source histories the statistics cover, histories that scored nothing
     /// in this material included.
     pub n_histories: u64,
@@ -459,8 +484,8 @@ pub struct MomentCovariance {
     covariance: Vec<f64>,
 }
 
-impl MomentCovariance {
-    /// Length of the moment vector.
+impl HistoryCovariance {
+    /// Length of the vector.
     pub fn dim(&self) -> usize {
         self.mean.len()
     }
@@ -475,14 +500,14 @@ impl MomentCovariance {
         c
     }
 
-    /// Index of `s1` for bin `c`.
-    pub fn s1_index(&self, c: usize) -> usize {
-        self.n_bins() + c
-    }
-
     /// Index of MF=9 yield channel `k`.
     pub fn yield_index(&self, k: usize) -> usize {
-        2 * self.n_bins() + k
+        self.n_bins() + k
+    }
+
+    /// Index of scored rate `j`, in the order of `rate_channels`.
+    pub fn rate_index(&self, j: usize) -> usize {
+        self.n_bins() + self.yield_channels.len() + j
     }
 
     /// Sample covariance of entries `i` and `j` of a single history's vector.
@@ -540,6 +565,125 @@ impl MomentCovariance {
         };
         (mean, var)
     }
+}
+
+/// Which rate a row of a [`RateCovariance`] is.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RateLabel {
+    /// Chain nuclide the rate belongs to.
+    pub nuclide: String,
+    /// Reaction kind in the chain's spelling, e.g. `(n,gamma)`.
+    pub kind: String,
+    /// Final state for an isomeric partial rate; `None` for a reaction total.
+    pub target: Option<String>,
+}
+
+/// The statistical covariance of a material's tallied reaction rates.
+///
+/// Every rate here is the one the tally reports: the totals of
+/// `get_reaction_rates` and the final-state partials of `get_partial_rates`,
+/// in 1/s per atom. The covariance is of those estimates, so its diagonal is
+/// each rate's variance and `std_dev` its one-sigma statistical uncertainty.
+/// The off-diagonal terms are why this is a matrix: rates scored by the same
+/// histories move together, and an inventory built from them inherits that.
+#[derive(Debug, Clone)]
+pub struct RateCovariance {
+    /// One per rate, in the order of `rates`.
+    pub labels: Vec<RateLabel>,
+    /// The rates [1/s], equal to what the rate accessors return.
+    pub rates: Vec<f64>,
+    /// Source histories the statistics cover.
+    pub n_histories: u64,
+    /// Covariance of the rate estimates [1/s^2], packed upper triangle.
+    covariance: Vec<f64>,
+}
+
+impl RateCovariance {
+    pub(crate) fn from_parts(
+        labels: Vec<RateLabel>,
+        rates: Vec<f64>,
+        n_histories: u64,
+        covariance: Vec<f64>,
+    ) -> Self {
+        debug_assert_eq!(covariance.len(), row_start(rates.len(), rates.len()));
+        RateCovariance {
+            labels,
+            rates,
+            n_histories,
+            covariance,
+        }
+    }
+
+    /// Number of rates.
+    pub fn len(&self) -> usize {
+        self.rates.len()
+    }
+
+    /// Whether there are no rates.
+    pub fn is_empty(&self) -> bool {
+        self.rates.is_empty()
+    }
+
+    /// Position of a rate, or `None` when it is not tallied.
+    pub fn index_of(&self, nuclide: &str, kind: &str, target: Option<&str>) -> Option<usize> {
+        self.labels
+            .iter()
+            .position(|l| l.nuclide == nuclide && l.kind == kind && l.target.as_deref() == target)
+    }
+
+    /// Covariance of rate estimates `i` and `j` [1/s^2].
+    pub fn covariance(&self, i: usize, j: usize) -> f64 {
+        let (i, j) = if i <= j { (i, j) } else { (j, i) };
+        self.covariance[row_start(i, self.len()) + (j - i)]
+    }
+
+    /// One-sigma statistical uncertainty of rate `i` [1/s].
+    pub fn std_dev(&self, i: usize) -> f64 {
+        self.covariance(i, i).max(0.0).sqrt()
+    }
+
+    /// Correlation coefficient of rates `i` and `j`; zero when either has no
+    /// spread.
+    pub fn correlation(&self, i: usize, j: usize) -> f64 {
+        let d = self.std_dev(i) * self.std_dev(j);
+        if d > 0.0 {
+            self.covariance(i, j) / d
+        } else {
+            0.0
+        }
+    }
+}
+
+/// `W Sigma W^T / n` for sparse weight rows over a moment covariance, packed
+/// upper triangle. Each row is `(moment index, weight)` pairs.
+pub(crate) fn fold_covariance(stats: &HistoryCovariance, rows: &[Vec<(usize, f64)>]) -> Vec<f64> {
+    let m = rows.len();
+    let mut out = vec![0.0; row_start(m, m)];
+    if stats.n_histories == 0 {
+        return out;
+    }
+    let n = stats.n_histories as f64;
+    // Sigma w_j for every row once, as a dense vector over the moments, so the
+    // pairwise step is a sparse dot product.
+    let dim = stats.dim();
+    let sigma_w: Vec<Vec<f64>> = rows
+        .iter()
+        .map(|row| {
+            let mut v = vec![0.0; dim];
+            for (k, vk) in v.iter_mut().enumerate() {
+                *vk = row.iter().map(|&(j, w)| w * stats.covariance(k, j)).sum();
+            }
+            v
+        })
+        .collect();
+    for i in 0..m {
+        let base = row_start(i, m);
+        for j in i..m {
+            let c: f64 = rows[i].iter().map(|&(k, w)| w * sigma_w[j][k]).sum();
+            out[base + (j - i)] = c / n;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
