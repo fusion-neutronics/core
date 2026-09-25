@@ -155,7 +155,7 @@ fn run(threads: usize, uncertainty: bool) -> Answer {
             }
         }
 
-        let info = results.uncertainty_info.as_ref();
+        let info = results.uncertainty_info.get(&0);
         Answer {
             densities,
             replicas,

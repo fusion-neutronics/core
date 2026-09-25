@@ -508,7 +508,7 @@ fn replica_chain(
         .filter_map(|name| {
             let mut cn = chain.get(name)?.clone();
             if let Some(t) = half_lives.get(name) {
-                cn.half_life = Some(*t);
+                crate::uncertainty::set_half_life(&mut cn, *t);
             }
             Some((name.clone(), cn))
         })
@@ -603,8 +603,8 @@ mod tests {
 
     /// One material, one step, and `replicas` inventories after it.
     fn results(nominal: &[(&str, f64)], replicas: &[Vec<(&str, f64)>]) -> TransmutationResults {
-        let mut results = TransmutationResults::new(vec![1.0], vec![0.0]);
-        results.add_initial(7, material(nominal));
+        let mut results = TransmutationResults::new(vec![1.0]);
+        results.add_initial(7, material(nominal), vec![0.0]);
         results.add_step(7, material(nominal));
         let mut ensemble = Ensemble::new(1);
         for replica in replicas {
@@ -793,8 +793,8 @@ mod tests {
     /// distinguishable from a measured zero.
     #[test]
     fn a_run_without_uncertainty_reports_none_rather_than_zero() {
-        let mut results = TransmutationResults::new(vec![1.0], vec![0.0]);
-        results.add_initial(7, material(&[("Fe56", 1.0)]));
+        let mut results = TransmutationResults::new(vec![1.0]);
+        results.add_initial(7, material(&[("Fe56", 1.0)]), vec![0.0]);
         results.add_step(7, material(&[("Fe56", 1.0)]));
 
         assert_eq!(results.activity_uncertainty(7, 1, &chain()), Ok(None));

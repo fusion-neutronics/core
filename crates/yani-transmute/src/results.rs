@@ -21,8 +21,13 @@ pub struct TransmutationResults {
     /// Timesteps used [s]
     pub timesteps: Vec<f64>,
 
-    /// Source rates used [n/s]
-    pub source_rates: Vec<f64>,
+    /// Material ID -> the rate each step was driven at, indexed as
+    /// `timesteps`, zero for a decay-only step. A transport-coupled solve
+    /// stores its source strength [n/s], the same series for every material;
+    /// a spectrum solve stores each material's own flux magnitude
+    /// [n/cm^2/s], which differs between materials when each is given its own
+    /// schedule.
+    pub source_rates: HashMap<u32, Vec<f64>>,
 
     /// Material ID -> per-step per-edge reaction rates, indexed as
     /// `timesteps`: entry i is the rates the solve drove step i with, so it is
@@ -45,18 +50,21 @@ pub struct TransmutationResults {
     /// composition, which carries no uncertainty.
     pub uncertainty: HashMap<u32, crate::uncertainty::Ensemble>,
 
-    /// What was perturbed and what was not, when uncertainty was asked for.
+    /// Material ID -> what was perturbed and what was not, when uncertainty
+    /// was asked for.
     ///
-    /// `None` on the default path. Present and possibly full of gaps
+    /// Empty on the default path. Present and possibly full of gaps
     /// otherwise: a nuclide with no covariance data must be reportable rather
     /// than showing up as a confidently small sigma.
-    pub uncertainty_info: Option<crate::uncertainty::Info>,
+    pub uncertainty_info: HashMap<u32, crate::uncertainty::Info>,
 
-    /// What the self-shielding did, or `None` when the run was not shielded.
+    /// Material ID -> what the self-shielding did, or would have done.
     ///
-    /// `None` and "shielded, but nothing moved" are different claims, and only
-    /// this tells them apart.
-    pub shielding_info: Option<crate::self_shielding::ShieldingInfo>,
+    /// A spectrum solve records one for every material whether or not it was
+    /// shielded, since "not shielded" and "shielded, but nothing moved" are
+    /// different claims and only this tells them apart. Empty for a
+    /// transport-coupled solve, which does no multigroup collapse.
+    pub shielding_info: HashMap<u32, crate::self_shielding::ShieldingInfo>,
 
     /// The chain the solve was driven with, for deriving routes afterwards.
     ///
@@ -71,13 +79,37 @@ pub struct TransmutationResults {
     /// `None` on results built by hand, which is what the tests do.
     pub chain: Option<std::sync::Arc<HashMap<String, yani::ChainNuclide>>>,
 
-    /// What the multigroup collapse was driven with, for re-deriving an
-    /// energy-resolved view of a rate afterwards.
+    /// Material ID -> what its multigroup collapse was driven with, for
+    /// re-deriving an energy-resolved view of a rate afterwards.
     ///
-    /// `None` when there was no multigroup collapse: a transport-coupled solve
+    /// Empty when there was no multigroup collapse: a transport-coupled solve
     /// scores its rates at the collision energy and keeps no group structure to
     /// resolve them onto, and results built by hand have no spectrum at all.
-    pub collapse: Option<CollapseInputs>,
+    pub collapse: HashMap<u32, CollapseInputs>,
+
+    /// How many multigroup collapses a spectrum solve performed against how
+    /// many its materials asked for. `None` for a transport-coupled solve.
+    pub collapse_reuse: Option<CollapseReuse>,
+
+    /// Material ID -> the statistical covariance of its transport-tallied
+    /// rates, per source particle (unit source rate), when a transport run was
+    /// asked for statistical uncertainty. Scale by a step's source rate for
+    /// that step's rates, and by its square for their covariance.
+    pub rate_covariance: HashMap<u32, crate::history_statistics::RateCovariance>,
+}
+
+/// How much of a spectrum solve's collapse work was shared.
+///
+/// Materials with the same spectrum, composition, temperature and shielding
+/// collapse to the same rates, so a solve over many of them collapses each
+/// distinct combination once. `performed` below `requested` is that saving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CollapseReuse {
+    /// Collapses actually run.
+    pub performed: usize,
+    /// Collapses the materials' schedules named, one per distinct spectrum per
+    /// material.
+    pub requested: usize,
 }
 
 /// The spectra a solve collapsed against, and how its steps used them.
@@ -91,9 +123,9 @@ pub struct CollapseInputs {
     /// One entry per distinct spectrum: group boundaries [eV], ascending and
     /// one longer than the flux, and the flux shape the collapse weighted with.
     ///
-    /// The shape is normalized, so the magnitude of a step's flux is its entry
-    /// in [`TransmutationResults::source_rates`], exactly as the solve applies
-    /// it.
+    /// The shape is normalized, so the magnitude of a step's flux is the
+    /// material's entry in [`TransmutationResults::source_rates`], exactly as
+    /// the solve applies it.
     pub spectra: Vec<(Vec<f64>, Vec<f64>)>,
 
     /// Which spectrum each schedule step used, indexed as
@@ -186,8 +218,8 @@ impl ProductionRoute {
 }
 
 impl TransmutationResults {
-    /// Create a new empty results structure.
-    pub fn new(timesteps: Vec<f64>, source_rates: Vec<f64>) -> Self {
+    /// Create a new empty results structure over one timeline.
+    pub fn new(timesteps: Vec<f64>) -> Self {
         let mut times = Vec::with_capacity(timesteps.len() + 1);
         times.push(0.0);
         let mut cumulative = 0.0;
@@ -200,22 +232,36 @@ impl TransmutationResults {
             materials: HashMap::new(),
             times,
             timesteps,
-            source_rates,
+            source_rates: HashMap::new(),
             reaction_rates: HashMap::new(),
             uncertainty: HashMap::new(),
-            uncertainty_info: None,
-            shielding_info: None,
+            uncertainty_info: HashMap::new(),
+            shielding_info: HashMap::new(),
             chain: None,
-            collapse: None,
+            collapse: HashMap::new(),
+            collapse_reuse: None,
+            rate_covariance: HashMap::new(),
         }
     }
 
-    /// Add initial material state.
-    pub fn add_initial(&mut self, material_id: u32, material: Material) {
+    /// Add a material's initial state and the rate each step drives it at,
+    /// one per timestep.
+    pub fn add_initial(&mut self, material_id: u32, material: Material, source_rates: Vec<f64>) {
+        debug_assert_eq!(
+            source_rates.len(),
+            self.timesteps.len(),
+            "one source rate per timestep"
+        );
         self.materials
             .entry(material_id)
             .or_default()
             .push(material);
+        self.source_rates.insert(material_id, source_rates);
+    }
+
+    /// The rate each step drove `material_id` at, indexed as `timesteps`.
+    pub fn get_source_rates(&self, material_id: u32) -> Option<&[f64]> {
+        self.source_rates.get(&material_id).map(|r| r.as_slice())
     }
 
     /// Add material state after a timestep.
@@ -288,10 +334,10 @@ impl TransmutationResults {
         kind: &str,
         step: usize,
     ) -> Option<RateSpectrum> {
-        let inputs = self.collapse.as_ref()?;
+        let inputs = self.collapse.get(&material_id)?;
         let spectrum = (*inputs.step_spectrum.get(step)?)?;
         let (boundaries, flux) = inputs.spectra.get(spectrum)?;
-        let source_rate = self.source_rates.get(step).copied()?;
+        let source_rate = self.get_source_rates(material_id)?.get(step).copied()?;
         // The collapse is done once from the initial composition and scaled per
         // step, so this is the material it read, and `source_rate` is the
         // scaling the step applied.
@@ -767,8 +813,8 @@ mod tests {
         .expect("tungsten");
         m.name = Some("foil".to_string());
 
-        let mut results = TransmutationResults::new(vec![300.0], vec![1.0e10]);
-        results.add_initial(7, m);
+        let mut results = TransmutationResults::new(vec![300.0]);
+        results.add_initial(7, m, vec![1.0e10]);
         let mut irradiation = EdgeRates::new();
         irradiation.insert(
             "W186".to_string(),
@@ -802,8 +848,8 @@ mod tests {
     /// answer rather than a failure.
     #[test]
     fn production_routes_are_empty_for_an_unreachable_product() {
-        let mut results = TransmutationResults::new(vec![300.0], vec![1.0e10]);
-        results.add_initial(7, material("initial"));
+        let mut results = TransmutationResults::new(vec![300.0]);
+        results.add_initial(7, material("initial"), vec![1.0e10]);
         results.add_step_rates(7, EdgeRates::new());
         results.add_step(7, material("after"));
         results.chain = Some(std::sync::Arc::new(HashMap::new()));
@@ -817,8 +863,8 @@ mod tests {
     /// per-step view has to skip it or every step is off by one.
     #[test]
     fn step_materials_skips_the_initial_composition() {
-        let mut results = TransmutationResults::new(vec![1.0, 2.0], vec![0.0, 0.0]);
-        results.add_initial(7, material("initial"));
+        let mut results = TransmutationResults::new(vec![1.0, 2.0]);
+        results.add_initial(7, material("initial"), vec![0.0, 0.0]);
         results.add_step(7, material("after-one"));
         results.add_step(7, material("after-two"));
 
@@ -830,7 +876,7 @@ mod tests {
 
     #[test]
     fn step_materials_is_empty_for_an_unknown_material() {
-        let results = TransmutationResults::new(vec![1.0], vec![0.0]);
+        let results = TransmutationResults::new(vec![1.0]);
         assert!(results.step_materials(7).is_empty());
     }
 
@@ -838,8 +884,8 @@ mod tests {
     /// composition, which the slice must not report as a step.
     #[test]
     fn step_materials_is_empty_when_nothing_was_stepped() {
-        let mut results = TransmutationResults::new(Vec::new(), Vec::new());
-        results.add_initial(7, material("initial"));
+        let mut results = TransmutationResults::new(Vec::new());
+        results.add_initial(7, material("initial"), Vec::new());
         assert!(results.step_materials(7).is_empty());
     }
 
@@ -847,8 +893,8 @@ mod tests {
     /// left out entirely rather than reported at 1.0.
     #[test]
     fn isomeric_branching_normalises_splits_and_omits_single_product_channels() {
-        let mut results = TransmutationResults::new(vec![1.0], vec![1.0e14]);
-        results.add_initial(7, material("initial"));
+        let mut results = TransmutationResults::new(vec![1.0]);
+        results.add_initial(7, material("initial"), vec![1.0e14]);
 
         let mut irradiation = EdgeRates::new();
         irradiation.insert(
@@ -909,8 +955,8 @@ mod tests {
     /// highest per-atom rate in the foil and W180 is 0.12% of it (issue #6).
     #[test]
     fn isomeric_branching_orders_by_production_not_by_rate() {
-        let mut results = TransmutationResults::new(vec![1.0], vec![1.0e14]);
-        results.add_initial(7, tungsten_foil());
+        let mut results = TransmutationResults::new(vec![1.0]);
+        results.add_initial(7, tungsten_foil(), vec![1.0e14]);
 
         let mut irradiation = EdgeRates::new();
         // The higher rate, on the isotope there is almost none of.
@@ -956,8 +1002,8 @@ mod tests {
     /// A decay-only step splits nothing, and says so rather than being absent.
     #[test]
     fn isomeric_branching_is_empty_for_a_decay_only_step() {
-        let mut results = TransmutationResults::new(vec![1.0], vec![0.0]);
-        results.add_initial(7, material("initial"));
+        let mut results = TransmutationResults::new(vec![1.0]);
+        results.add_initial(7, material("initial"), vec![0.0]);
         results.add_step_rates(7, EdgeRates::new());
         results.add_step(7, material("after"));
         assert!(results
@@ -971,8 +1017,8 @@ mod tests {
     /// material index, so the two must stay in step with each other.
     #[test]
     fn rates_and_step_materials_share_an_index() {
-        let mut results = TransmutationResults::new(vec![1.0, 2.0], vec![1.0e14, 0.0]);
-        results.add_initial(7, material("initial"));
+        let mut results = TransmutationResults::new(vec![1.0, 2.0]);
+        results.add_initial(7, material("initial"), vec![1.0e14, 0.0]);
 
         let mut irradiation = EdgeRates::new();
         irradiation.insert(
@@ -1007,14 +1053,14 @@ mod tests {
     /// a spectrum it invented.
     #[test]
     fn a_rate_from_no_spectrum_has_no_spectrum() {
-        let mut results = TransmutationResults::new(vec![1.0], vec![1.0e14]);
-        results.add_initial(7, material("initial"));
+        let mut results = TransmutationResults::new(vec![1.0]);
+        results.add_initial(7, material("initial"), vec![1.0e14]);
         results.add_step_rates(7, EdgeRates::new());
         results.add_step(7, material("after"));
 
         // This is the transport-coupled case: the rates are scored at the
         // collision energy and no spectrum is kept.
-        assert!(results.collapse.is_none());
+        assert!(results.collapse.is_empty());
         assert!(results
             .get_reaction_rate_spectrum(7, "Fe56", "(n,gamma)", 0)
             .is_none());
@@ -1024,13 +1070,16 @@ mod tests {
     /// and the step after it must still be answerable.
     #[test]
     fn a_decay_only_step_has_no_rate_spectrum() {
-        let mut results = TransmutationResults::new(vec![1.0, 2.0], vec![0.0, 1.0e14]);
-        results.add_initial(7, material("initial"));
-        results.collapse = Some(CollapseInputs {
-            spectra: vec![(vec![1.0e-5, 1.0e5, 2.0e7], vec![1.0, 1.0])],
-            step_spectrum: vec![None, Some(0)],
-            shielding: None,
-        });
+        let mut results = TransmutationResults::new(vec![1.0, 2.0]);
+        results.add_initial(7, material("initial"), vec![0.0, 1.0e14]);
+        results.collapse.insert(
+            7,
+            CollapseInputs {
+                spectra: vec![(vec![1.0e-5, 1.0e5, 2.0e7], vec![1.0, 1.0])],
+                step_spectrum: vec![None, Some(0)],
+                shielding: None,
+            },
+        );
 
         assert!(results
             .get_reaction_rate_spectrum(7, "Fe56", "(n,gamma)", 0)

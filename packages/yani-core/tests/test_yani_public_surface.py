@@ -67,7 +67,7 @@ def test_all_is_defined_and_matches_the_module():
 def test_the_transmutation_surface_is_intact():
     for name in ("Material", "Enriched", "enriched", "Pulse", "Cooldown",
                  "PulseSchedule", "NeutronSource", "TransmutationResults",
-                 "convert_transmutation", "data", "materials", "shapes",
+                 "convert_transmutation", "transmute", "data", "materials", "shapes",
                  "sources"):
         assert name in yani.__all__, f"yani no longer advertises {name}"
 

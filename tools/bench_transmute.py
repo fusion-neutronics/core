@@ -195,7 +195,7 @@ def inventory_of(results, material, uncertainty: bool) -> dict:
             if sigma is not None:
                 sigmas[name] = float(sigma).hex()
         out["sigmas"] = sigmas
-        info = results.data_uncertainty_info or {}
+        info = results.get_data_uncertainty_info(material_id) or {}
         out["samples"] = info.get("samples")
         out["converged"] = info.get("converged")
     return out

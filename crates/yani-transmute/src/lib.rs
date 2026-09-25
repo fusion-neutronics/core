@@ -22,6 +22,7 @@ pub mod multigroup;
 mod results;
 mod schedule;
 pub mod self_shielding;
+pub mod statistical;
 mod transmutation;
 mod transmutation_stepper;
 mod transmutation_tallies;
@@ -61,7 +62,8 @@ pub use yani::{
 
 pub use material_transmute::{
     activation_mts, apply_coupled_branching, preload_activation_data, transmute_material,
-    transmute_material_shielded, MultigroupSpectrum, TransmuteStep,
+    transmute_material_shielded, transmute_materials, transport_replicas, MultigroupSpectrum,
+    TransmuteCase, TransmuteStep, TransportTallied,
 };
 
 /// Load the transmutation chain assembled from the configured per-subsection
@@ -125,7 +127,7 @@ pub use history_statistics::{HistoryCovariance, RateCovariance, RateLabel, Yield
 pub use multigroup::{
     compute_multigroup_reaction_rates, reaction_rate_spectrum, scale_rates, EnergyGroups,
 };
-pub use results::{CollapseInputs, RateSpectrum, TransmutationResults};
+pub use results::{CollapseInputs, CollapseReuse, RateSpectrum, TransmutationResults};
 pub use schedule::{duration_to_seconds, Schedule, ScheduleStep};
 pub use self_shielding::{Shape, Shielding, ShieldingInfo};
 pub use transmutation::TransmutationDriver;

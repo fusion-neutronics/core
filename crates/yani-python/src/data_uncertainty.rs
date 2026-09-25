@@ -26,13 +26,19 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///   data's own standard deviation. A replica's half-lives are used in its
 ///   solve AND in the activity, decay heat and dose evaluated from it, so a
 ///   saturated activity (``lambda N = R``) is correctly insensitive to its
-///   own half-life rather than inheriting the density's spread.
+///   own half-life rather than inheriting the density's spread;
+/// - ``"statistical"``: the Monte Carlo uncertainty of transport-tallied
+///   reaction rates, from their per-history covariance. It applies to
+///   ``Model.simulate_transmutation``, as ``"flux_spectrum"`` applies only to
+///   ``Material.transmute``; each call ignores the other's, and the report's
+///   ``sources`` lists what actually applied.
 ///
 /// Decay branching ratios, fission yields and the isomeric-branching overlay
 /// are held at their evaluated values; they carry uncertainties of their own
-/// that this does not propagate. ``TransmutationResults.data_uncertainty_info``
-/// says so per run, along with any nuclide whose evaluation carries no
-/// covariance and any unstable nuclide whose half-life has no stated sigma.
+/// that this does not propagate.
+/// ``TransmutationResults.get_data_uncertainty_info`` says so per material,
+/// along with any nuclide whose evaluation carries no covariance and any
+/// unstable nuclide whose half-life has no stated sigma.
 ///
 /// Args:
 ///     seed (int): Base seed. A given nuclide's perturbation in a given replica
@@ -224,6 +230,9 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     )?;
     d.set_item("half_lives_floored", info.half_lives_floored)?;
     d.set_item("half_lives_sampled", info.half_lives_sampled)?;
+    d.set_item("statistical_rates", info.statistical_rates)?;
+    d.set_item("statistical_floored", info.statistical_floored)?;
+    d.set_item("statistical_sampled", info.statistical_sampled)?;
     d.set_item("not_perturbed", info.not_perturbed.clone())?;
     d.set_item("sources", info.sources.clone())?;
     d.set_item("has_gaps", info.has_gaps())?;

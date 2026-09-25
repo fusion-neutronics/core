@@ -63,6 +63,13 @@ pub enum Source {
     /// insensitive to its own half-life (`N ~ R / lambda`, so `A ~ R`), and
     /// inflate its uncertainty.
     HalfLife,
+    /// The Monte Carlo statistical uncertainty of transport-tallied reaction
+    /// rates, from their per-history covariance (issue #140, item 1).
+    ///
+    /// Applies to `Model.simulate_transmutation`, whose rates come from
+    /// transport; a spectrum run's rates are a deterministic collapse with no
+    /// sampling error, so it has nothing to perturb there.
+    Statistical,
 }
 
 impl Source {
@@ -77,6 +84,7 @@ impl Source {
         Source::CrossSections,
         Source::FluxSpectrum,
         Source::HalfLife,
+        Source::Statistical,
     ];
 
     /// The name used in the API and in the coverage report.
@@ -85,6 +93,7 @@ impl Source {
             Source::CrossSections => "cross_sections",
             Source::FluxSpectrum => "flux_spectrum",
             Source::HalfLife => "half_life",
+            Source::Statistical => "statistical",
         }
     }
 
@@ -233,6 +242,12 @@ pub struct Info {
     /// where it describes the evaluation.
     pub half_lives_floored: usize,
     pub half_lives_sampled: usize,
+    /// Tallied rates sampled statistically, the totals and partials together;
+    /// zero off the transport path or with the source off.
+    pub statistical_rates: usize,
+    /// Statistically drawn rates that came out negative and were floored.
+    pub statistical_floored: usize,
+    pub statistical_sampled: usize,
     /// Sources deliberately NOT perturbed, for the record.
     pub not_perturbed: Vec<String>,
     /// Which sources this run perturbed, by name.
@@ -582,10 +597,36 @@ pub(crate) fn with_half_lives(
     let mut out = chain.clone();
     for (name, t) in sampled {
         if let Some(cn) = out.get_mut(name) {
-            cn.half_life = Some(*t);
+            set_half_life(cn, *t);
         }
     }
     out
+}
+
+/// Give a chain nuclide a different half-life, and everything stored in the
+/// chain as a function of it.
+///
+/// Decay-source intensities are stored per atom per second, which is the
+/// emission probability per decay times the decay constant (Co60's 1332 keV
+/// line is `0.9998 * ln2 / T`). The per-decay probability is the decay
+/// scheme's and does not change with the half-life, so the stored intensity
+/// scales as `T_nominal / T`. Leaving it would evaluate a replica's photon
+/// emission as `N_k lambda y` instead of `N_k lambda_k y`: at saturation
+/// `N_k ~ 1 / lambda_k`, so the photon rate would inherit the half-life's
+/// whole spread, which is the inconsistent-lambda inflation the per-replica
+/// half-lives exist to prevent.
+pub(crate) fn set_half_life(cn: &mut yani::ChainNuclide, half_life: f64) {
+    if let Some(nominal) = cn.half_life.filter(|t| *t > 0.0 && half_life > 0.0) {
+        let scale = nominal / half_life;
+        for source in &mut cn.sources {
+            let yani::DecaySourceDistribution::Discrete { intensities, .. } =
+                &mut source.distribution;
+            for i in intensities.iter_mut() {
+                *i *= scale;
+            }
+        }
+    }
+    cn.half_life = Some(half_life);
 }
 
 #[cfg(test)]

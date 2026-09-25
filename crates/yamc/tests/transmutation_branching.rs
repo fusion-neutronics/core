@@ -164,6 +164,7 @@ fn run(
             branch,
             Default::default(),
             &settings,
+            None,
         )
         .unwrap();
     let final_mat = results.get_final_material(1).expect("material 1 present");

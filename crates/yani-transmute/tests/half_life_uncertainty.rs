@@ -97,7 +97,7 @@ fn run(sources: Vec<Source>) -> Option<(yani_transmute::TransmutationResults, f6
 fn info_of(results: &yani_transmute::TransmutationResults) -> &yani_transmute::uncertainty::Info {
     results
         .uncertainty_info
-        .as_ref()
+        .get(&0)
         .expect("uncertainty was asked for")
 }
 
@@ -158,6 +158,28 @@ fn a_saturated_activity_is_insensitive_to_its_own_half_life() {
         "after cooling the activity moves by lambda t times the half-life sigma: \
          {cooled:.4} against {:.4}",
         lambda_t * RELATIVE_SIGMA
+    );
+
+    // Mn56's photon lines are its activity times a per-decay probability, so
+    // at saturation they are as insensitive to its half-life as the activity
+    // is. The chain stores the lines per atom per second, which scales with
+    // the decay constant; a replica's half-life has to carry through to them.
+    assert!(
+        !chain["Mn56"].sources.is_empty(),
+        "the fixture carries Mn56's lines"
+    );
+    let lines = results
+        .photon_spectrum_uncertainty(0, 1, &chain)
+        .expect("volume is set")
+        .expect("uncertainty was asked for");
+    let strongest = lines
+        .iter()
+        .max_by(|a, b| a.estimate.nominal.total_cmp(&b.estimate.nominal))
+        .expect("Mn56 emits");
+    let line = relative(&strongest.estimate);
+    assert!(
+        line < 0.02 * RELATIVE_SIGMA,
+        "a saturated emitter's photon rate barely moves: {line:.2e}"
     );
 
     // The initial iron is stable, so step 0 has no spread to show.

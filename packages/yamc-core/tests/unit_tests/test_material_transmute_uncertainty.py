@@ -86,7 +86,7 @@ def test_without_the_option_there_is_no_uncertainty_to_read():
     assert results.get_decay_heat_uncertainty(mid, 1, by_nuclide=True) is None
     assert results.get_contact_dose_uncertainty(mid, 1) is None
     assert results.get_decay_photon_spectrum_uncertainty(mid, 1) is None
-    assert results.data_uncertainty_info is None
+    assert results.get_data_uncertainty_info(iron.id or 0) is None
 
 
 def test_the_default_signature_is_unchanged():
@@ -106,7 +106,7 @@ def test_asking_on_data_without_covariance_reports_it_rather_than_a_zero():
     )
     mid = iron.id or 0
 
-    info = results.data_uncertainty_info
+    info = results.get_data_uncertainty_info(iron.id or 0)
     assert info is not None, "asking for uncertainty must produce a report"
 
     # The committed fixtures carry no covariance.arrow, so nothing can be
@@ -129,7 +129,7 @@ def test_the_report_names_what_is_never_perturbed():
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8),
     )
-    not_perturbed = results.data_uncertainty_info["not_perturbed"]
+    not_perturbed = results.get_data_uncertainty_info(iron.id or 0)["not_perturbed"]
     joined = " ".join(not_perturbed)
     for source in ("fission yield", "branching"):
         assert source in joined, f"{source!r} missing from {not_perturbed}"
@@ -230,7 +230,7 @@ def test_the_report_says_which_sources_were_on():
             seed=1, samples=8, sources=["cross_sections"]
         ),
     )
-    assert results.data_uncertainty_info["sources"] == ["cross_sections"]
+    assert results.get_data_uncertainty_info(iron.id or 0)["sources"] == ["cross_sections"]
 
 
 # --- flux spectrum uncertainty (issue #559) -----------------------------------
@@ -301,7 +301,7 @@ def test_a_flux_error_moves_the_inventory_without_any_covariance():
     assert mean > 0.0
     assert spread > 0.0, "a 10% flux error must move Mn56"
 
-    info = results.data_uncertainty_info
+    info = results.get_data_uncertainty_info(iron.id or 0)
     assert info["spectra_with_flux_sigma"] == 1
     assert info["spectra_without_flux_sigma"] == 0
 
@@ -319,7 +319,7 @@ def test_a_spectrum_without_an_error_is_reported_not_assumed_exact():
             seed=1, samples=8, sources=["flux_spectrum"]
         ),
     )
-    info = results.data_uncertainty_info
+    info = results.get_data_uncertainty_info(iron.id or 0)
     assert info["spectra_without_flux_sigma"] == 1
     assert info["spectra_with_flux_sigma"] == 0
     assert info["has_gaps"] is True
@@ -372,12 +372,13 @@ def test_no_covariance_gives_an_absent_spread_rather_than_a_confident_zero():
 
     This deliberately differs from ``get_nuclide_uncertainty``, which reports
     0.0 in the same situation and leans on
-    ``data_uncertainty_info["no_covariance_data"]`` to be checked alongside it.
+    ``get_data_uncertainty_info(id)["no_covariance_data"]`` to be checked
+    alongside it.
     A zero-width band drawn around a decay heat is a claim of exactness that
     nobody would check; `None` cannot be plotted by accident.
     """
     results, mid = _uncertain_results()
-    assert results.data_uncertainty_info["samples"] == 0
+    assert results.get_data_uncertainty_info(mid)["samples"] == 0
 
     estimate = results.get_activity_uncertainty(mid, 1)
     assert estimate.replicas == 0
@@ -516,7 +517,7 @@ def test_leaving_half_lives_out_is_reported():
             seed=1, samples=8, sources=["cross_sections"]
         ),
     )
-    info = results.data_uncertainty_info
+    info = results.get_data_uncertainty_info(iron.id or 0)
     assert "half-life" in info["not_perturbed"]
     assert info["half_lives_perturbed"] == []
     assert info["half_lives_sampled"] == 0
@@ -528,7 +529,7 @@ def test_asking_for_half_lives_reports_which_were_sampled():
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["half_life"]),
     )
-    info = results.data_uncertainty_info
+    info = results.get_data_uncertainty_info(iron.id or 0)
     assert "half-life" not in info["not_perturbed"]
     # Every reachable unstable nuclide is in exactly one of the two lists.
     assert not set(info["half_lives_perturbed"]) & set(info["no_half_life_uncertainty"])
