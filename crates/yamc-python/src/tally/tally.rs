@@ -106,6 +106,14 @@ impl PyTally {
     ///     dose_coefficients (tuple, optional): (particle, geometry[, data_source]) for dose
     ///     particle (str, optional): "neutron" or "photon"
     ///     parent_nuclides (list[str], optional): Nuclides for D1S parent binning
+    ///     covariance (bool): Also accumulate the covariance of the bin means,
+    ///         history by history, read back as :attr:`covariance`. Off by
+    ///         default. A per-bin ``standard_deviation`` treats the bins as
+    ///         independent, which they are not: bins scored by the same
+    ///         histories move together, so anything summed over them, a
+    ///         reaction rate over a spectrum, inherits an understated error
+    ///         from the standard deviations alone. Meant for spectra: it is
+    ///         limited to 2048 bins, and CPU only.
     ///
     /// Notes:
     ///     ``cells`` and ``materials`` are mutually exclusive -- a single tally
@@ -123,7 +131,7 @@ impl PyTally {
         mesh=None, unstructured_mesh=None,
         energy_bins=None, energy_group_structure=None, energy_function=None,
         dose_coefficients=None, particle=None, parent_nuclides=None,
-        estimator=None,
+        estimator=None, covariance=false,
     ))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -160,6 +168,7 @@ impl PyTally {
         particle: Option<String>,
         parent_nuclides: Option<Vec<String>>,
         estimator: Option<String>,
+        covariance: bool,
     ) -> PyResult<Self> {
         let estimator_value = match estimator.as_deref() {
             None => yamc_tallies::Estimator::default(),
@@ -516,6 +525,7 @@ impl PyTally {
         tally.multiply_density = multiply_density;
         tally.overlay_material = overlay_material;
         tally.estimator = estimator_value;
+        tally.covariance = covariance;
 
         if let Some(scores) = scores {
             tally.set_scores_mixed(parse_scores_arg(scores)?);
@@ -1034,6 +1044,21 @@ impl PyTally {
     #[getter]
     pub fn standard_deviation(&self) -> Vec<f64> {
         self.inner.get_std_dev()
+    }
+
+    /// Covariance of the bin means, a ``num_bins x num_bins`` nested list in the
+    /// same bin order as :attr:`mean`, or ``None`` unless the tally was built
+    /// with ``covariance=True`` and a simulation has run.
+    ///
+    /// Its diagonal is ``standard_deviation`` squared. For an energy-binned
+    /// flux tally it is what ``Pulse(flux_covariance=...)`` takes, so a
+    /// transmutation gets the spectrum's error with its correlations.
+    #[getter]
+    pub fn covariance(&self) -> Option<Vec<Vec<f64>>> {
+        let n = self.inner.num_bins();
+        self.inner
+            .get_covariance()
+            .map(|c| c.chunks(n).map(|row| row.to_vec()).collect())
     }
 
     /// Per-bin relative error (``standard_deviation / mean``, 0 where the

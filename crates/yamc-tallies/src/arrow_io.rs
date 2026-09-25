@@ -370,6 +370,9 @@ pub fn read_simulation_results_arrow(path: &Path) -> Result<SimulationResults, S
             // Arrow; a reloaded result reports them as empty.
             agg: crate::welford::AggMoments::ZERO,
             score_pdf: crate::welford::ScorePdf::default(),
+            // Nor is the covariance's merge state: a reloaded result carries
+            // none, and combining it with one that does is refused.
+            comoment: None,
             convergence_history: Vec::new(),
             shape,
             dim_labels,

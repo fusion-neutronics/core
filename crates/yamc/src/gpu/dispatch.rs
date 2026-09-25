@@ -103,6 +103,11 @@ pub enum GpuDispatchError {
     /// keeps the requested technique honest instead of silently
     /// ignoring it.
     VarianceReductionUnsupported,
+    /// A tally asked for its covariance, which needs per-history state the
+    /// GPU kernels do not keep.
+    TallyCovarianceUnsupported {
+        tally_index: usize,
+    },
     /// Energy filter must define at least one bin (i.e. `bins.len() >=
     /// 2`). Lifted as of slice F: arbitrary bin edges (VITAMIN-J,
     /// EALF, custom) are passed straight through to the kernel.
@@ -216,6 +221,11 @@ impl std::fmt::Display for GpuDispatchError {
                 "compute='gpu' does not support variance_reduction (the kernel runs \
                  analog transport). Remove the variance_reduction entries or run on \
                  the CPU."
+            ),
+            Self::TallyCovarianceUnsupported { tally_index } => write!(
+                f,
+                "compute='gpu' tally {tally_index}: covariance=True needs the per-history \
+                 scores the GPU kernels do not keep. Run it on the CPU."
             ),
             Self::EnergyBinsTooFew { tally_index } => write!(
                 f,
@@ -719,6 +729,9 @@ fn run_on_gpu_dispatch(
             #[allow(unreachable_patterns)]
             _ => return Err(GpuDispatchError::VarianceReductionUnsupported),
         }
+    }
+    if let Some(tally_index) = model.tallies.iter().position(|t| t.covariance) {
+        return Err(GpuDispatchError::TallyCovarianceUnsupported { tally_index });
     }
     // The GPU kernels always surface-track. Unlike variance_reduction (a
     // hard reject), a non-Surface tracking_mode still yields an unbiased
@@ -1761,6 +1774,9 @@ fn install_grouped_stats(
             n_histories: n,
             agg: aggs.map_or(AggMoments::ZERO, |a| a[group]),
             score_pdf: yamc_tallies::welford::ScorePdf::default(),
+            // No per-history state on the GPU; a tally asking for its
+            // covariance is refused before dispatch.
+            comoment: None,
         });
         t += n_scores;
         group += 1;
