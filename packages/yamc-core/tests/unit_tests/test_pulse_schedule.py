@@ -223,3 +223,37 @@ def test_simulate_transmutation_rejects_multiple_distinct_sources():
     ])
     with pytest.raises(ValueError, match="multiple distinct Pulse sources"):
         model.simulate_transmutation(method="coupled", schedule=sched, total_particles=1)
+
+
+# --- nuclear-data uncertainty on the time correction (issue #140, item 5) ----
+#
+# The numbers are pinned in Rust (yani-transmute/tests/d1s_uncertainty.rs).
+# Here: the switch, the shapes, and the quadrature.
+
+def test_no_data_uncertainty_unless_asked(dp_result):
+    dose = _sched(_dt_source()).time_correct_tally(dp_result)
+    assert dose.data_std_dev is None
+    assert dose.total_std_dev is None
+    assert dose.data_uncertainty_info is None
+
+
+def test_the_time_correction_carries_the_half_life_uncertainty(dp_result):
+    sched = _sched(_dt_source())
+    dose = sched.time_correct_tally(
+        dp_result,
+        data_uncertainty=yamc.DataUncertainty(seed=1, samples=64, sources=["half_life"]),
+    )
+    std = np.array(dose.std_dev)
+    data = np.array(dose.data_std_dev)
+    total = np.array(dose.total_std_dev)
+    assert data.shape == std.shape == total.shape
+    # Statistical and nuclear-data uncertainties are independent.
+    assert np.allclose(total, np.sqrt(std**2 + data**2))
+    info = dose.data_uncertainty_info
+    assert info["sources"] == ["half_life"]
+    assert info["samples"] == 64
+    if info["half_lives_perturbed"]:
+        # After two weeks' cooling the dose hangs on the emitters' half-lives.
+        assert data[-1].max() > 0.0
+    else:
+        assert not data.any()

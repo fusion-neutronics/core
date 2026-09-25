@@ -57,7 +57,7 @@ fn one_group(edges: [f64; 2]) -> MultigroupSpectrum {
     MultigroupSpectrum {
         boundaries: edges.to_vec(),
         masses: vec![1.0],
-        relative_std_dev: None,
+        flux_error: None,
     }
 }
 
@@ -80,7 +80,11 @@ fn would_shield(spectra: &[MultigroupSpectrum]) -> Vec<(String, f64)> {
         None,
     )
     .expect("transmute");
-    let info = results.shielding_info.expect("a report either way");
+    let info = results
+        .shielding_info
+        .get(&0)
+        .cloned()
+        .expect("a report either way");
     let mut out: Vec<(String, f64)> = info.would_shield.into_iter().collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out

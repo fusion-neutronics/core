@@ -380,6 +380,17 @@ pub fn decay_nuclides() -> Schema {
         // the same as stating zero (issue #515).
         f64("half_life_uncertainty", true),
         f64("decay_energy_uncertainty", true),
+        // The decay energy split into its recoverable-heat components (ENDF
+        // MT=457 light particle, electromagnetic, heavy particle) with each
+        // one's sigma. Nullable and last for the same reason: a file written
+        // before them still reads, with no split. Null is "not given", not
+        // zero (issue #140).
+        f64("decay_energy_beta", true),
+        f64("decay_energy_beta_uncertainty", true),
+        f64("decay_energy_gamma", true),
+        f64("decay_energy_gamma_uncertainty", true),
+        f64("decay_energy_alpha", true),
+        f64("decay_energy_alpha_uncertainty", true),
     ])
     .with_metadata(meta([
         ("filetype", "transmutation-decay"),

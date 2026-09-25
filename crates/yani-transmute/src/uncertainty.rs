@@ -5,12 +5,14 @@
 //! the same solve again. That is exact to all orders in the matrix exponential:
 //! nothing is linearized, and the solver is not touched at all, only its input.
 //!
-//! What is perturbed is the **activation cross sections**, through the MF=33
-//! covariance folded against this material's own spectrum. Half-lives, decay
+//! What can be perturbed ([`Source`]): the **activation cross sections**,
+//! through the MF=33 covariance folded against this material's own spectrum;
+//! the **flux spectrum**, from a per-bin sigma the caller supplies; and the
+//! **half-lives**, from the evaluation's own standard deviation. Decay
 //! branching ratios, fission yields and the isomeric-branching overlay are held
-//! at their nominal values; they carry their own uncertainties and are out of
-//! scope here (issue #515). [`Info`] says so per run rather than leaving it to
-//! be inferred from a small sigma.
+//! at their nominal values; they carry their own uncertainties and are not
+//! propagated yet (issue #140). [`Info`] says so per run rather than leaving it
+//! to be inferred from a small sigma.
 //!
 //! # Cost
 //!
@@ -51,23 +53,57 @@ pub enum Source {
     /// own input. It contributes only where a sigma was actually given, which
     /// a spectrum from a published reference set does not have.
     FluxSpectrum,
+    /// Half-lives, from the decay sublibrary's own standard deviation on each
+    /// (the uncertainty on the MT=457 `T1/2`).
+    ///
+    /// A replica's half-lives are used everywhere that replica's decay
+    /// constants appear: in the solve and in the activity, decay heat and dose
+    /// evaluated from its inventory. Using the nominal value in either place
+    /// would break the cancellation that makes a saturated activity nearly
+    /// insensitive to its own half-life (`N ~ R / lambda`, so `A ~ R`), and
+    /// inflate its uncertainty.
+    HalfLife,
+    /// The Monte Carlo statistical uncertainty of transport-tallied reaction
+    /// rates, from their per-history covariance (issue #140, item 1).
+    ///
+    /// Applies to `Model.simulate_transmutation`, whose rates come from
+    /// transport; a spectrum run's rates are a deterministic collapse with no
+    /// sampling error, so it has nothing to perturb there.
+    Statistical,
+    /// Mean decay energies, from the decay data's sigma on each
+    /// recoverable-heat component (beta, gamma, alpha), or on the total where
+    /// the data carries no split.
+    ///
+    /// A decay energy does not enter the Bateman matrix, so the inventory is
+    /// untouched: it moves the decay heat evaluated from each replica, and
+    /// nothing else.
+    DecayEnergy,
 }
 
 impl Source {
     /// Every source this build can actually perturb.
     ///
-    /// Four more inputs feed the matrix and are held at nominal: half-life,
-    /// decay branching, fission yields and the isomeric-branching overlay. The
-    /// first three have published uncertainties this build does not read yet
-    /// (issue #515); the fourth has none in ENDF-6 at all, so it could only
-    /// ever carry an assumed value.
-    pub const IMPLEMENTED: &'static [Source] = &[Source::CrossSections, Source::FluxSpectrum];
+    /// Three more inputs feed the matrix and are held at nominal: decay
+    /// branching, fission yields and the isomeric-branching overlay. The first
+    /// two have published uncertainties this build does not read yet (issue
+    /// #140); the third has none in ENDF-6 at all, so it could only ever carry
+    /// an assumed value.
+    pub const IMPLEMENTED: &'static [Source] = &[
+        Source::CrossSections,
+        Source::FluxSpectrum,
+        Source::HalfLife,
+        Source::Statistical,
+        Source::DecayEnergy,
+    ];
 
     /// The name used in the API and in the coverage report.
     pub fn name(self) -> &'static str {
         match self {
             Source::CrossSections => "cross_sections",
             Source::FluxSpectrum => "flux_spectrum",
+            Source::HalfLife => "half_life",
+            Source::Statistical => "statistical",
+            Source::DecayEnergy => "decay_energy",
         }
     }
 
@@ -81,9 +117,9 @@ impl Source {
                 let have: Vec<&str> = Source::IMPLEMENTED.iter().map(|s| s.name()).collect();
                 format!(
                     "unknown uncertainty source {name:?}; this build can perturb {have:?}. \
-                     Half-life, decay branching and fission yields carry published \
-                     uncertainties that are not read yet (issue #515), and reaction \
-                     branching has none in ENDF-6 to read."
+                     Decay branching and fission yields carry published uncertainties \
+                     that are not read yet (issue #140), and reaction branching has \
+                     none in ENDF-6 to read."
                 )
             })
     }
@@ -110,6 +146,12 @@ pub struct DataUncertainty {
     /// guess. Sources are independent, so the total sigma must not DECREASE as
     /// the set grows; that is a property worth testing.
     pub sources: Vec<Source>,
+    /// Also say where the uncertainty comes from ([`Attribution`]).
+    ///
+    /// Off by default because it costs further solves: one ensemble per
+    /// source, and one deterministic solve per contributor. It changes no
+    /// number the run otherwise reports.
+    pub attribution: bool,
 }
 
 impl Default for DataUncertainty {
@@ -118,6 +160,7 @@ impl Default for DataUncertainty {
             seed: 1,
             samples: None,
             sources: Source::IMPLEMENTED.to_vec(),
+            attribution: false,
         }
     }
 }
@@ -202,6 +245,31 @@ pub struct Info {
     /// Sampled flux bins that went negative and were floored at zero.
     pub flux_bins_floored: usize,
     pub flux_bins_sampled: usize,
+    /// Unstable nuclides the material can reach whose half-life was perturbed.
+    pub half_lives_perturbed: BTreeSet<String>,
+    /// Unstable nuclides the material can reach whose evaluation states no
+    /// half-life uncertainty, so their half-life was held at nominal.
+    ///
+    /// Not a claim that the half-life is exact: the evaluation said nothing.
+    pub no_half_life_uncertainty: BTreeSet<String>,
+    /// Sampled half-lives that came out non-positive and were floored.
+    ///
+    /// Only possible where the stated sigma is a large share of the half-life
+    /// itself; a count well above zero says the Gaussian is being used past
+    /// where it describes the evaluation.
+    pub half_lives_floored: usize,
+    pub half_lives_sampled: usize,
+    /// Reachable unstable nuclides whose decay energy was perturbed.
+    pub decay_energies_perturbed: BTreeSet<String>,
+    /// Reachable unstable nuclides with a decay energy but no stated sigma on
+    /// it, held at nominal. Not a claim that it is exact.
+    pub no_decay_energy_uncertainty: BTreeSet<String>,
+    /// Tallied rates sampled statistically, the totals and partials together;
+    /// zero off the transport path or with the source off.
+    pub statistical_rates: usize,
+    /// Statistically drawn rates that came out negative and were floored.
+    pub statistical_floored: usize,
+    pub statistical_sampled: usize,
     /// Sources deliberately NOT perturbed, for the record.
     pub not_perturbed: Vec<String>,
     /// Which sources this run perturbed, by name.
@@ -222,7 +290,6 @@ impl Info {
             matrices_clipped: clipping.matrices_clipped,
             worst_relative_clip: clipping.worst_relative_clip,
             not_perturbed: [
-                "half-life",
                 "decay branching ratio",
                 "fission yield",
                 "isomeric branching (MF=9/MF=10)",
@@ -255,6 +322,8 @@ impl Info {
             || !self.unsupported_layouts.is_empty()
             || self.malformed_blocks > 0
             || self.spectra_without_flux_sigma > 0
+            || !self.no_half_life_uncertainty.is_empty()
+            || !self.no_decay_energy_uncertainty.is_empty()
     }
 }
 
@@ -303,6 +372,52 @@ pub struct Ensemble {
     moments: Vec<HashMap<String, Moments>>,
     /// `[replica][step][nuclide]`.
     samples: Vec<Vec<HashMap<String, f64>>>,
+    /// `[replica]`: the half-lives [s] that replica was solved with, for the
+    /// nuclides whose half-life was perturbed. Empty maps when half-lives were
+    /// not perturbed.
+    half_lives: Vec<HashMap<String, f64>>,
+    /// Where the uncertainty comes from, when it was asked for.
+    pub attribution: Option<Attribution>,
+    /// The seed decay energies are drawn from, per replica and nuclide, when
+    /// they were perturbed. They do not change the inventory, so they are
+    /// drawn where decay heat is evaluated rather than stored.
+    pub decay_energy_seed: Option<u64>,
+}
+
+/// Where an inventory's uncertainty comes from (issue #140, item 4).
+///
+/// Two levels, which answer different questions:
+///
+/// - `by_source` is exact: the ensemble re-run with each source alone, so a
+///   nuclide's statistical and nuclear-data variances are measured the same
+///   way the total is. Sources are independent, so they sum to the total up to
+///   interaction and sampling noise, which is the unattributed residual.
+/// - `contributors` is first order: within the cross sections and the
+///   half-lives, one deterministic solve per nuclide (and per reaction) gives
+///   its sensitivity, and its variance is that squared against its own
+///   stated uncertainty. It says which evaluation to look at, not the total,
+///   which is always the resampled one.
+#[derive(Debug, Clone, Default)]
+pub struct Attribution {
+    /// Source name -> `[step][nuclide]` variance, from that source alone.
+    pub by_source: BTreeMap<String, Vec<HashMap<String, f64>>>,
+    /// First-order contributions, the largest-reaching first.
+    pub contributors: Vec<Contributor>,
+}
+
+/// One first-order contribution to the inventory variance.
+#[derive(Debug, Clone)]
+pub struct Contributor {
+    /// The source it belongs to, e.g. `cross_sections`.
+    pub source: String,
+    /// The nuclide whose data it is.
+    pub nuclide: String,
+    /// The reaction, for one cross-section channel alone; `None` for the
+    /// nuclide's whole evaluation (every channel with its correlations) or for
+    /// a half-life.
+    pub reaction: Option<String>,
+    /// `[step][nuclide]` variance it contributes, only where it is non-zero.
+    pub variance: Vec<HashMap<String, f64>>,
 }
 
 impl Ensemble {
@@ -310,11 +425,28 @@ impl Ensemble {
         Self {
             moments: vec![HashMap::new(); n_steps],
             samples: Vec::new(),
+            half_lives: Vec::new(),
+            attribution: None,
+            decay_energy_seed: None,
         }
     }
 
-    /// Record one replica's per-step inventories.
+    /// Record one replica's per-step inventories, solved with nominal
+    /// half-lives.
+    #[cfg(test)]
     pub(crate) fn push(&mut self, per_step: Vec<HashMap<String, f64>>) {
+        self.push_with_half_lives(per_step, HashMap::new());
+    }
+
+    /// Record one replica's per-step inventories and the perturbed half-lives
+    /// it was solved with, so a quantity derived from its inventory uses them
+    /// too.
+    pub(crate) fn push_with_half_lives(
+        &mut self,
+        per_step: Vec<HashMap<String, f64>>,
+        half_lives: HashMap<String, f64>,
+    ) {
+        self.half_lives.push(half_lives);
         for (step, densities) in per_step.iter().enumerate() {
             let Some(slot) = self.moments.get_mut(step) else {
                 continue;
@@ -376,6 +508,14 @@ impl Ensemble {
                     .unwrap_or(0.0)
             })
             .collect()
+    }
+
+    /// The perturbed half-lives [s] each replica was solved with, by replica.
+    ///
+    /// Empty maps when half-lives were not perturbed. A nuclide absent from a
+    /// replica's map kept its nominal half-life there.
+    pub fn half_lives(&self) -> &[HashMap<String, f64>] {
+        &self.half_lives
     }
 
     /// Every replica's full inventory at `step`.
@@ -455,6 +595,157 @@ pub(crate) fn settled(previous: &BTreeMap<String, f64>, current: &BTreeMap<Strin
 /// The per-step nuclide densities of one replica.
 pub(crate) fn densities_of(materials: &[Material]) -> Vec<HashMap<String, f64>> {
     materials.iter().map(|m| m.nuclides.clone()).collect()
+}
+
+/// Keeps the half-life streams clear of the per-nuclide cross-section streams,
+/// which are keyed on the same name hash without it.
+const HALF_LIFE_STREAM: u32 = 0x4A1F_11FE;
+
+/// The unstable nuclides of `chain` split into those with a stated half-life
+/// sigma, as `(name, half-life, sigma)`, and those without.
+pub(crate) fn half_life_candidates(
+    chain: &HashMap<String, yani::ChainNuclide>,
+) -> (Vec<(String, f64, f64)>, BTreeSet<String>) {
+    let mut with = Vec::new();
+    let mut without = BTreeSet::new();
+    for (name, cn) in chain {
+        let Some(t) = cn.half_life.filter(|t| *t > 0.0) else {
+            continue;
+        };
+        match cn.half_life_uncertainty.filter(|s| *s > 0.0) {
+            Some(sigma) => with.push((name.clone(), t, sigma)),
+            None => {
+                without.insert(name.clone());
+            }
+        }
+    }
+    with.sort_by(|a, b| a.0.cmp(&b.0));
+    (with, without)
+}
+
+/// One replica's half-lives: `T + sigma z` per nuclide, from a stream keyed on
+/// `(seed, replica, nuclide)`.
+///
+/// Keyed on the name, like the cross sections, so a nuclide draws the same
+/// half-life in every spectrum and every material of a run: one evaluation is
+/// uncertain in one way wherever it is used. A draw at or below zero is
+/// floored at a millionth of the nominal and counted.
+pub(crate) fn sample_half_lives(
+    candidates: &[(String, f64, f64)],
+    base_seed: u64,
+    replica: u64,
+    floored: &mut usize,
+) -> HashMap<String, f64> {
+    let replica_seed = yamc_rng::history_seed(base_seed, replica);
+    candidates
+        .iter()
+        .map(|(name, t, sigma)| {
+            let seed = yamc_rng::secondary_seed(
+                replica_seed,
+                crate::covariance_sample::name_ordinal(name) ^ HALF_LIFE_STREAM,
+            );
+            let mut state = yamc_rng::expand_seed(seed);
+            let z = crate::covariance_sample::standard_normals(&mut state, 1)[0];
+            let mut sampled = t + sigma * z;
+            if sampled <= 0.0 {
+                *floored += 1;
+                sampled = t * 1.0e-6;
+            }
+            (name.clone(), sampled)
+        })
+        .collect()
+}
+
+/// Keeps the decay-energy streams clear of every other per-nuclide stream.
+const DECAY_ENERGY_STREAM: u32 = 0xDEC4_E6E1;
+
+/// One replica's decay energy for one nuclide, and its components, drawn
+/// from each component's own sigma, or from the total's where the data gives
+/// no split. `None` when there is nothing to perturb. A draw below zero is
+/// floored at zero.
+pub(crate) fn sample_decay_energy(
+    cn: &yani::ChainNuclide,
+    base_seed: u64,
+    replica: u64,
+) -> Option<(f64, [Option<yani::DecayEnergyComponent>; 3])> {
+    let replica_seed = yamc_rng::history_seed(base_seed, replica);
+    let seed = yamc_rng::secondary_seed(
+        replica_seed,
+        crate::covariance_sample::name_ordinal(&cn.name) ^ DECAY_ENERGY_STREAM,
+    );
+    let mut state = yamc_rng::expand_seed(seed);
+    let with_sigma = cn
+        .decay_energy_components
+        .iter()
+        .any(|c| c.is_some_and(|c| c.uncertainty.is_some_and(|s| s > 0.0)));
+    if with_sigma {
+        let z = crate::covariance_sample::standard_normals(&mut state, 3);
+        let mut parts = cn.decay_energy_components;
+        let mut total = 0.0;
+        for (part, z) in parts.iter_mut().zip(z) {
+            if let Some(p) = part {
+                if let Some(sigma) = p.uncertainty.filter(|s| *s > 0.0) {
+                    p.energy = (p.energy + sigma * z).max(0.0);
+                }
+                total += p.energy;
+            }
+        }
+        return Some((total, parts));
+    }
+    let sigma = cn.decay_energy_uncertainty.filter(|s| *s > 0.0)?;
+    let z = crate::covariance_sample::standard_normals(&mut state, 1)[0];
+    Some((
+        (cn.decay_energy + sigma * z).max(0.0),
+        cn.decay_energy_components,
+    ))
+}
+
+/// Whether a nuclide's decay energy carries a sigma to sample from.
+pub(crate) fn has_decay_energy_sigma(cn: &yani::ChainNuclide) -> bool {
+    cn.decay_energy_components
+        .iter()
+        .any(|c| c.is_some_and(|c| c.uncertainty.is_some_and(|s| s > 0.0)))
+        || cn.decay_energy_uncertainty.is_some_and(|s| s > 0.0)
+}
+
+/// `chain` with the half-lives of `sampled` substituted.
+pub(crate) fn with_half_lives(
+    chain: &HashMap<String, yani::ChainNuclide>,
+    sampled: &HashMap<String, f64>,
+) -> HashMap<String, yani::ChainNuclide> {
+    let mut out = chain.clone();
+    for (name, t) in sampled {
+        if let Some(cn) = out.get_mut(name) {
+            set_half_life(cn, *t);
+        }
+    }
+    out
+}
+
+/// Give a chain nuclide a different half-life, and everything stored in the
+/// chain as a function of it.
+///
+/// Decay-source intensities are stored per atom per second, which is the
+/// emission probability per decay times the decay constant (Co60's 1332 keV
+/// line is `0.9998 * ln2 / T`). The per-decay probability is the decay
+/// scheme's and does not change with the half-life, so the stored intensity
+/// scales as `T_nominal / T`. Leaving it would evaluate a replica's photon
+/// emission as `N_k lambda y` instead of `N_k lambda_k y`: at saturation
+/// `N_k ~ 1 / lambda_k`, so the photon rate would inherit the half-life's
+/// whole spread, which is the inconsistent-lambda inflation the per-replica
+/// half-lives exist to prevent.
+pub(crate) fn set_half_life(cn: &mut yani::ChainNuclide, half_life: f64) {
+    if let Some(nominal) = cn.half_life.filter(|t| *t > 0.0 && half_life > 0.0) {
+        let scale = nominal / half_life;
+        for source in &mut cn.sources {
+            let yani::DecaySourceDistribution::Discrete { intensities, .. } =
+                &mut source.distribution;
+            for i in intensities.iter_mut() {
+                *i *= scale;
+            }
+        }
+    }
+    cn.half_life = Some(half_life);
 }
 
 #[cfg(test)]

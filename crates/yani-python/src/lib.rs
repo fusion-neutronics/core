@@ -37,6 +37,7 @@ pub mod particle;
 pub mod read;
 mod shapes;
 pub mod transmutation_results;
+pub mod transmute;
 
 pub use transmutation_results::PyTransmutationResults;
 
@@ -75,6 +76,7 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
     m.add_class::<material::PyChain>()?;
     m.add_class::<element::PyElement>()?;
     m.add_class::<PyTransmutationResults>()?;
+    m.add_function(wrap_pyfunction!(transmute::transmute, m)?)?;
     m.add_class::<transmutation_results::PyEstimate>()?;
     m.add_class::<transmutation_results::PyLineEstimate>()?;
     m.add_class::<data_uncertainty::PyDataUncertainty>()?;

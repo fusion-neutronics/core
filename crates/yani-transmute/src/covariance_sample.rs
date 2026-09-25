@@ -180,6 +180,15 @@ impl Sampler {
         self.factors.is_empty()
     }
 
+    /// The nuclides carrying a factor, with each one's reaction kinds and its
+    /// row-major factor `L` (`L L^T` the relative covariance of those kinds'
+    /// rates), for first-order attribution.
+    pub(crate) fn factors(&self) -> impl Iterator<Item = (&String, &[String], &[f64])> {
+        self.factors
+            .iter()
+            .map(|(name, f)| (name, f.kinds.as_slice(), f.l.as_slice()))
+    }
+
     /// The relative perturbations one replica applies, per nuclide and kind.
     ///
     /// Separated from [`Sampler::perturb`] so a test can look at the deviates
@@ -254,7 +263,7 @@ impl Sampler {
 /// explicitly not stable across releases. The seed contract promises the same
 /// answer on every platform and every build, and a hash that may change is not
 /// compatible with that.
-fn name_ordinal(name: &str) -> u32 {
+pub(crate) fn name_ordinal(name: &str) -> u32 {
     let mut h: u32 = 0x811c_9dc5;
     for b in name.as_bytes() {
         h ^= *b as u32;

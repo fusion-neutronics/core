@@ -1395,6 +1395,29 @@ impl PyModel {
     ///         Because the budget is applied afresh to each timestep, a
     ///         time-bounded transmutation is non-deterministic in history count.
     ///
+    ///     data_uncertainty (DataUncertainty, optional): Uncertainty on the
+    ///         inventories, by resampling and re-solving, as
+    ///         ``Material.transmute`` does. ``method="independent"`` only: the
+    ///         coupled method re-runs transport every step, and propagating its
+    ///         step-to-step noise is out of scope, so asking with it raises.
+    ///         The sources that apply here:
+    ///
+    ///         - ``"statistical"``: the Monte Carlo uncertainty of the tallied
+    ///           reaction rates, from their per-history covariance, so the
+    ///           correlations between rates scored by the same histories are
+    ///           kept. Each rate's own sigma is read with
+    ///           ``get_reaction_rate_uncertainty``;
+    ///         - ``"cross_sections"``: the ENDF MF=33 covariance, folded against
+    ///           the spectrum the tally actually saw;
+    ///         - ``"half_life"``: the decay data's half-life sigmas.
+    ///
+    ///         ``"flux_spectrum"`` does not apply: there is no supplied spectrum,
+    ///         and the flux's error is the statistical one. The sources are
+    ///         independent, so ``sources=["statistical"]`` isolates the
+    ///         transport's contribution and the default gives the total. Omit
+    ///         it and nothing extra is tallied or solved: the inventories are
+    ///         bit-identical either way.
+    ///
     /// Returns:
     ///     TransmutationResults object containing material compositions at each timestep.
     ///
@@ -1406,7 +1429,11 @@ impl PyModel {
     ///     >>> results = model.simulate_transmutation(
     ///     ...     method="coupled", schedule=schedule, total_particles=1000)
     ///     >>> co60 = results.get_nuclide_evolution(1, "Co60")
-    #[pyo3(signature = (method, schedule, total_particles=None, seed=1, threads=None, max_runtime=None, compute="cpu"))]
+    ///     >>> results = model.simulate_transmutation(
+    ///     ...     method="independent", schedule=schedule, total_particles=100_000,
+    ///     ...     data_uncertainty=yamc.DataUncertainty(seed=1))
+    ///     >>> results.get_nuclide_uncertainty(1, "Co60", 1)
+    #[pyo3(signature = (method, schedule, total_particles=None, seed=1, threads=None, max_runtime=None, compute="cpu", data_uncertainty=None))]
     pub fn simulate_transmutation(
         &mut self,
         method: String,
@@ -1416,6 +1443,7 @@ impl PyModel {
         threads: Option<usize>,
         max_runtime: Option<pyo3::Py<pyo3::types::PyAny>>,
         compute: &str,
+        data_uncertainty: Option<yani_python::data_uncertainty::PyDataUncertainty>,
         py: Python<'_>,
     ) -> PyResult<PyTransmutationResults> {
         // As on `generate_weight_windows`: present so the answer is a sentence
@@ -1492,9 +1520,18 @@ impl PyModel {
             let branch = loaded.branch;
             let parts = loaded.parts;
             // Release GIL during long-running transport computation
+            let uncertainty = data_uncertainty.map(|u| u.inner);
             let result: Result<TransmutationResults, String> = py.detach(|| {
                 self.inner
-                    .transmute(&method, &core_schedule, chain, branch, parts, &settings)
+                    .transmute(
+                        &method,
+                        &core_schedule,
+                        chain,
+                        branch,
+                        parts,
+                        &settings,
+                        uncertainty.as_ref(),
+                    )
                     .map_err(|e| e.to_string())
             });
             match result {

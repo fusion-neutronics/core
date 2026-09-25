@@ -25,8 +25,8 @@ pub mod decay_photons;
 
 pub use contact_dose::{contact_dose_by_nuclide, contact_dose_total, DoseQuantity};
 pub use decay::{
-    activity_by_nuclide, activity_total, decay_heat_by_nuclide, decay_heat_total,
-    decay_photon_lines, total,
+    activity_by_nuclide, activity_total, decay_heat_by_nuclide, decay_heat_component_by_nuclide,
+    decay_heat_total, decay_photon_lines, total,
 };
 pub use decay_chain::{
     build_emitter_paths, descendant_paths, evolve_chain_activity, DecayChainPath,

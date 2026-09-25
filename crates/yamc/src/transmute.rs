@@ -82,6 +82,12 @@ impl Model {
     ///   threads, `max_runtime`). Every transport step uses the same settings,
     ///   so `total_particles` / `max_runtime` are applied afresh to each
     ///   step's transport solve (a per-step budget, not a whole-run one).
+    /// * `uncertainty` - Resample the single transport of independent mode
+    ///   and re-solve (see [`yani_transmute::transport_replicas`]): the
+    ///   statistical covariance of the tallied rates, the MF=33 covariance
+    ///   folded against the tallied spectrum, and the half-lives. `None` is
+    ///   the default path, bit-identical to a build without it; with the
+    ///   coupled method it is an error.
     ///
     /// Product cross sections are loaded for the material's whole reachable
     /// closure (`yani::reachable_nuclides`) and then narrowed to the products
@@ -94,6 +100,7 @@ impl Model {
     ///
     /// # Returns
     /// TransmutationResults containing material compositions at each timestep
+    #[allow(clippy::too_many_arguments)]
     pub fn transmute(
         &mut self,
         method: &str,
@@ -102,6 +109,7 @@ impl Model {
         branch: Arc<yani::BranchTable>,
         parts: yani::ChainParts,
         settings: &crate::model::TransportSettings,
+        uncertainty: Option<&yani_transmute::uncertainty::DataUncertainty>,
     ) -> Result<TransmutationResults, Box<dyn std::error::Error>> {
         // Validate method
         let is_independent = match method {
@@ -114,6 +122,20 @@ impl Model {
                 .into())
             }
         };
+        // Coupled mode re-runs transport every step, so its rates carry noise
+        // that feeds forward through the compositions; resampling one step's
+        // rates would not describe that, and a number that quietly means
+        // something else is worse than none.
+        if uncertainty.is_some() && !is_independent {
+            return Err(
+                "data_uncertainty is supported with method=\"independent\" only: \
+                        the coupled method re-runs transport every step, and propagating \
+                        its step-to-step statistical noise is out of scope"
+                    .into(),
+            );
+        }
+        let want_statistics =
+            uncertainty.is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::Statistical));
 
         // Expand the schedule into per-step timesteps / source rates. The
         // schedule guarantees at least one step, and equal lengths by
@@ -480,16 +502,25 @@ impl Model {
         // Create flux-weighted transmutation tallies. Normalization is by the
         // true total source-particle count, accumulated chunk by chunk during
         // transport (issue #128), so no particle count is needed up front.
-        let dep_tallies = Arc::new(TransmutationTallies::new(
-            &transmutable_cells,
-            &materials_for_init,
-            &chain,
-            &branch,
-            &carried,
-        ));
+        let dep_tallies = {
+            let tallies = TransmutationTallies::new(
+                &transmutable_cells,
+                &materials_for_init,
+                &chain,
+                &branch,
+                &carried,
+            );
+            // The per-history covariance the statistical source samples from.
+            // Off otherwise, so the default run allocates nothing for it.
+            Arc::new(if want_statistics {
+                tallies.with_history_statistics()
+            } else {
+                tallies
+            })
+        };
 
         // Initialize results
-        let mut results = TransmutationResults::new(timesteps.to_vec(), source_rates.to_vec());
+        let mut results = TransmutationResults::new(timesteps.to_vec());
 
         // Track full compositions (including all chain products) across steps.
         // The cell material only has transport nuclides (with HDF5 data),
@@ -524,7 +555,7 @@ impl Model {
                 }
             }
 
-            results.add_initial(mat_id, initial_material.clone());
+            results.add_initial(mat_id, initial_material.clone(), source_rates.to_vec());
             full_compositions.insert(mat_id, initial_material);
         }
 
@@ -533,6 +564,15 @@ impl Model {
         // Re-extracted per step in coupled mode, once up front in independent
         // mode; empty for every material with nothing fissionable in it.
         let mut fy_weights: HashMap<u32, FissionYieldWeights> = HashMap::new();
+
+        let mut tallied: HashMap<u32, yani_transmute::TransportTallied> = HashMap::new();
+        // The initial compositions the replicas start from, sum mode, with
+        // the nuclear data the fold reads.
+        let initial_for_replicas: HashMap<u32, Material> = if uncertainty.is_some() {
+            full_compositions.clone()
+        } else {
+            HashMap::new()
+        };
 
         // Independent mode: run transport ONCE and extract micro rates (per-source-particle).
         // These are scaled by each step's source_rate during transmutation.
@@ -550,6 +590,40 @@ impl Model {
 
             // Extract rates with source_rate=1.0 to get per-source-particle micro rates
             let mut micro_rates: HashMap<u32, ReactionRates> = HashMap::new();
+            // With uncertainty asked for, everything the replicas resample,
+            // at the same unit source rate.
+            if let Some(request) = uncertainty {
+                for (&mat_id, cell_indices) in &transmutable_cells {
+                    let slot = self.geometry.cells()[cell_indices[0]]
+                        .material_idx
+                        .expect("transmutable cell must have a material");
+                    let material = self.geometry.materials()[slot as usize].as_ref();
+                    let volume = material.volume.unwrap_or(1.0);
+                    let Some(spectrum) = dep_tallies.flux_spectrum(mat_id) else {
+                        continue;
+                    };
+                    let statistics =
+                        if request.wants(yani_transmute::uncertainty::Source::Statistical) {
+                            dep_tallies.get_reaction_rate_covariance(mat_id, volume, 1.0)
+                        } else {
+                            None
+                        };
+                    tallied.insert(
+                        mat_id,
+                        yani_transmute::TransportTallied {
+                            rates: dep_tallies.get_reaction_rates(mat_id, volume, 1.0),
+                            partials: if branch.is_empty() {
+                                HashMap::new()
+                            } else {
+                                dep_tallies.get_partial_rates(mat_id, volume, 1.0)
+                            },
+                            fy_weights: dep_tallies.get_fission_yield_weights(mat_id),
+                            spectrum,
+                            statistics,
+                        },
+                    );
+                }
+            }
             for (&mat_id, cell_indices) in &transmutable_cells {
                 let slot = self.geometry.cells()[cell_indices[0]]
                     .material_idx
@@ -959,6 +1033,31 @@ impl Model {
             transmutation_loop_start.elapsed().as_secs_f64()
         );
 
+        // Uncertainty: resample what the single transport produced and re-solve
+        // the same schedule, per material, independently of the nominal loop
+        // above, which is untouched and so bit-identical either way.
+        if let Some(request) = uncertainty {
+            for (mat_id, material) in &initial_for_replicas {
+                let Some(transport) = tallied.get(mat_id) else {
+                    continue;
+                };
+                let (ensemble, info) = yani_transmute::transport_replicas(
+                    material,
+                    transport,
+                    &timesteps,
+                    &source_rates,
+                    &chain,
+                    parts,
+                    request,
+                )?;
+                results.uncertainty.insert(*mat_id, ensemble);
+                results.uncertainty_info.insert(*mat_id, info);
+                if let Some(c) = transport.statistics.clone() {
+                    results.rate_covariance.insert(*mat_id, c);
+                }
+            }
+        }
+
         Ok(results)
     }
 }
@@ -1089,6 +1188,7 @@ mod tests {
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         )]);
 

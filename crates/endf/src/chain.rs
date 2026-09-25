@@ -736,6 +736,18 @@ pub struct Nuclide {
     /// between them. `None` where the evaluation stated none, which is not
     /// zero.
     pub decay_energy_uncertainty: Option<f64>,
+    /// `decay_energy` split into its three recoverable-heat components, in
+    /// [`crate::decay::DECAY_HEAT_ENERGY_NAMES`] order: light particles (beta
+    /// and conversion or Auger electrons), electromagnetic (gammas and x-rays)
+    /// and heavy particles (alphas, protons, neutrons, fragments). Each is
+    /// `(energy [eV], sigma [eV])`, the sigma `None` where the evaluation
+    /// stated none. `None` for a component the evaluation did not give, which
+    /// is not the same as one it gave as zero.
+    ///
+    /// The components have different uncertainties and different consumers:
+    /// a decay heat split into its parts, or a gamma-only heat for shielding,
+    /// cannot be recovered from the total.
+    pub decay_energy_components: [Option<(f64, Option<f64>)>; 3],
     /// Where `decay_energy` came from: [`DECAY_ENERGY_EVALUATED`] for an
     /// evaluated decay scheme, [`DECAY_ENERGY_PLACEHOLDER`] for the Q/3
     /// stand-in some libraries write for nuclides nobody has evaluated (see
@@ -956,6 +968,7 @@ impl Chain {
                 .push((nuclide.name.clone(), nuclide.decay_energy, energy));
             nuclide.decay_energy = energy;
             nuclide.decay_energy_uncertainty = (sigma > 0.0).then_some(sigma);
+            nuclide.decay_energy_components = components_of(candidate);
             nuclide.decay_energy_source = Some(format!("filled:{library}"));
         }
         Ok(report)
@@ -1042,6 +1055,7 @@ impl Chain {
                 let (energy, energy_sigma) = data.decay_energy();
                 nuclide.decay_energy = energy;
                 nuclide.decay_energy_uncertainty = (energy_sigma > 0.0).then_some(energy_sigma);
+                nuclide.decay_energy_components = components_of(data);
                 nuclide.decay_energy_source = Some(
                     if data.mean_energy_placeholder {
                         DECAY_ENERGY_PLACEHOLDER
@@ -1409,6 +1423,13 @@ pub fn replace_missing_fpy(
     }
 
     "U235".to_string()
+}
+
+/// A decay's three recoverable-heat components, `(energy, sigma)` each, the
+/// sigma `None` where the evaluation wrote zero (the format's "not stated").
+fn components_of(data: &crate::decay::Decay) -> [Option<(f64, Option<f64>)>; 3] {
+    data.decay_energy_components()
+        .map(|c| c.map(|(energy, sigma)| (energy, (sigma > 0.0).then_some(sigma))))
 }
 
 #[cfg(test)]

@@ -755,6 +755,7 @@ mod tests {
             fission_yields: None,
             sources: Vec::new(),
             decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
         }
     }
 
@@ -1000,6 +1001,7 @@ mod tests {
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
         chain.insert("B".to_string(), nuclide("B", None, vec![], vec![]));
@@ -1053,6 +1055,7 @@ mod tests {
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
         chain.insert("Xe".to_string(), nuclide("Xe", None, vec![], vec![]));
@@ -1360,6 +1363,7 @@ mod tests {
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
         for name in &["U2", "Th", "He4", "Xe", "Cs"] {
@@ -1485,6 +1489,7 @@ mod tests {
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
         chain.insert("Xe".to_string(), nuclide("Xe", None, vec![], vec![]));
@@ -1546,6 +1551,7 @@ mod tests {
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
         for name in ["B", "C"] {

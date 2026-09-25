@@ -352,6 +352,7 @@ fn entry_from_result(r: &Arc<TallyResult>, run_offset: usize) -> Result<Entry, S
             n_histories: r.n_histories,
             agg: r.agg,
             score_pdf: r.score_pdf.clone(),
+            comoment: r.comoment.clone(),
         },
         total_count: r.total_count.clone(),
         shape: r.shape.clone(),
@@ -433,6 +434,7 @@ fn finish_entry(
         aggregate_figure_of_merit: 0.0,
         agg: entry.stats.agg,
         score_pdf: entry.stats.score_pdf,
+        comoment: entry.stats.comoment,
         // Per-run series is not merged across combine_results.
         convergence_history: Vec::new(),
         shape: entry.shape,
@@ -492,6 +494,7 @@ mod tests {
             aggregate_figure_of_merit: 0.0,
             agg: crate::welford::AggMoments::ZERO,
             score_pdf: crate::welford::ScorePdf::default(),
+            comoment: None,
             convergence_history: Vec::new(),
             shape: vec![1],
             dim_labels: vec!["score".into()],

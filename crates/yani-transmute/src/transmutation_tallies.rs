@@ -801,6 +801,35 @@ impl TransmutationTallies {
         Some(RateCovariance::from_parts(labels, rates, n, covariance))
     }
 
+    /// The flux shape this material's tally saw, on the union grid, as a
+    /// multigroup spectrum: each bin's track length. `None` when the material
+    /// is not tallied or nothing was scored.
+    ///
+    /// For folding MF=33 covariance against the transport spectrum, which is
+    /// relative and so needs only the shape. The union grid's last bin runs to
+    /// infinity; it is closed at ten times its lower edge, which for the base
+    /// grid is 300 MeV and holds no flux in any fixed-source problem this code
+    /// runs.
+    pub fn flux_spectrum(&self, material_id: u32) -> Option<crate::MultigroupSpectrum> {
+        let mat_data = self.materials.get(&material_id)?;
+        let s0 = mat_data
+            .moment_s0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if s0.iter().all(|v| *v <= 0.0) {
+            return None;
+        }
+        let mut boundaries = self.union_grid.clone();
+        let last = *boundaries.last()?;
+        boundaries.push(if last > 0.0 { last * 10.0 } else { 1.0 });
+        Some(crate::MultigroupSpectrum {
+            boundaries,
+            masses: s0,
+            flux_error: None,
+        })
+    }
+
     /// Score a track segment in a transmutable material.
     ///
     /// For each nuclide/MT pair tracked in this material, looks up σ(E)
@@ -1601,6 +1630,7 @@ mod tests {
                     sources: Vec::new(),
                     half_life_uncertainty: None,
                     decay_energy_uncertainty: None,
+                    decay_energy_components: Default::default(),
                 },
             );
         }
@@ -1919,6 +1949,7 @@ mod tests {
                     sources: Vec::new(),
                     half_life_uncertainty: None,
                     decay_energy_uncertainty: None,
+                    decay_energy_components: Default::default(),
                 },
             );
         }

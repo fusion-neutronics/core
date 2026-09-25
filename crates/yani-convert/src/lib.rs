@@ -212,12 +212,19 @@ pub fn write_decay(
     let mut decay_energies = Vec::new();
     let mut half_life_sigmas = Vec::new();
     let mut decay_energy_sigmas = Vec::new();
+    // [component][nuclide], (energy, sigma).
+    let mut component_energies: [Vec<Option<f64>>; 3] = Default::default();
+    let mut component_sigmas: [Vec<Option<f64>>; 3] = Default::default();
     for n in &chain.nuclides {
         names.push(n.name.clone());
         half_lives.push(n.half_life);
         decay_energies.push(n.decay_energy);
         half_life_sigmas.push(n.half_life_uncertainty);
         decay_energy_sigmas.push(n.decay_energy_uncertainty);
+        for (c, part) in n.decay_energy_components.iter().enumerate() {
+            component_energies[c].push(part.map(|(e, _)| e));
+            component_sigmas[c].push(part.and_then(|(_, s)| s));
+        }
     }
     write_section(
         &dir.join("nuclides.arrow"),
@@ -228,6 +235,12 @@ pub fn write_decay(
             floats(&decay_energies),
             opt_floats(&half_life_sigmas),
             opt_floats(&decay_energy_sigmas),
+            opt_floats(&component_energies[0]),
+            opt_floats(&component_sigmas[0]),
+            opt_floats(&component_energies[1]),
+            opt_floats(&component_sigmas[1]),
+            opt_floats(&component_energies[2]),
+            opt_floats(&component_sigmas[2]),
         ],
     )?;
 

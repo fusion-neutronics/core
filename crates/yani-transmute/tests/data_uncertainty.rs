@@ -95,7 +95,7 @@ fn spectra() -> Vec<MultigroupSpectrum> {
     vec![MultigroupSpectrum {
         boundaries: GROUPS.to_vec(),
         masses: FLUX.iter().map(|f| f / total).collect(),
-        relative_std_dev: None,
+        flux_error: None,
     }]
 }
 
@@ -154,7 +154,11 @@ fn mn56_gets_a_nuclear_data_uncertainty() {
          mean {mean:e}, sigma {sigma:e}"
     );
 
-    let info = results.uncertainty_info.expect("info is reported");
+    let info = results
+        .uncertainty_info
+        .get(&0)
+        .cloned()
+        .expect("info is reported");
     assert!(
         info.perturbed.contains("Fe56"),
         "Fe56 carries the covariance, so it must be the perturbed nuclide"
@@ -213,7 +217,7 @@ fn nothing_is_allocated_when_uncertainty_is_not_requested() {
 
     let results = run(&mut material, None);
     assert!(results.uncertainty.is_empty(), "no ensemble is built");
-    assert!(results.uncertainty_info.is_none(), "no report is made");
+    assert!(results.uncertainty_info.is_empty(), "no report is made");
     assert_eq!(results.get_nuclide_uncertainty(id, "Mn56", 1), None);
 }
 
@@ -284,7 +288,11 @@ fn nuclides_without_covariance_are_named_in_the_report() {
             ..Default::default()
         }),
     );
-    let info = results.uncertainty_info.expect("info is reported");
+    let info = results
+        .uncertainty_info
+        .get(&0)
+        .cloned()
+        .expect("info is reported");
 
     assert!(
         !info.perturbed.is_empty(),
@@ -298,7 +306,9 @@ fn nuclides_without_covariance_are_named_in_the_report() {
         "a nuclide cannot be both perturbed and lacking data"
     );
     assert!(
-        info.not_perturbed.iter().any(|s| s.contains("half-life")),
+        info.not_perturbed
+            .iter()
+            .any(|s| s.contains("decay branching")),
         "the sources this does not propagate must be stated: {:?}",
         info.not_perturbed
     );
@@ -364,7 +374,11 @@ fn the_adaptive_driver_converges_and_says_so() {
             ..Default::default()
         }),
     );
-    let info = results.uncertainty_info.expect("info is reported");
+    let info = results
+        .uncertainty_info
+        .get(&0)
+        .cloned()
+        .expect("info is reported");
     assert!(
         info.samples >= 128,
         "at least the minimum: {}",
@@ -399,6 +413,7 @@ fn a_source_switched_off_contributes_nothing() {
             seed: 4,
             samples: Some(64),
             sources: vec![Source::CrossSections],
+            attribution: false,
         }),
     );
     let without = run(
@@ -407,6 +422,7 @@ fn a_source_switched_off_contributes_nothing() {
             seed: 4,
             samples: Some(64),
             sources: vec![],
+            attribution: false,
         }),
     );
 
@@ -424,7 +440,7 @@ fn a_source_switched_off_contributes_nothing() {
         .expect("requested");
     assert_eq!(on, all, "an empty set is every source, not no source");
 
-    let info = with.uncertainty_info.expect("info");
+    let info = with.uncertainty_info.get(&0).cloned().expect("info");
     assert_eq!(info.sources, vec!["cross_sections".to_string()]);
 }
 
@@ -452,6 +468,7 @@ fn adding_a_source_never_decreases_the_uncertainty() {
                 seed: 8,
                 samples: Some(96),
                 sources,
+                attribution: false,
             }),
         )
         .get_nuclide_uncertainty(id, "Mn56", 1)
@@ -487,7 +504,9 @@ fn a_flux_error_moves_the_inventory_on_its_own() {
     let spectra = vec![MultigroupSpectrum {
         boundaries: GROUPS.to_vec(),
         masses: FLUX.iter().map(|f| f / total).collect(),
-        relative_std_dev: Some(vec![0.10; FLUX.len()]),
+        flux_error: Some(yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(
+            vec![0.10; FLUX.len()],
+        )),
     }];
 
     let results = transmute_material(
@@ -501,6 +520,7 @@ fn a_flux_error_moves_the_inventory_on_its_own() {
             seed: 77,
             samples: Some(256),
             sources: vec![Source::FluxSpectrum],
+            attribution: false,
         }),
     )
     .expect("transmute");
@@ -522,7 +542,7 @@ fn a_flux_error_moves_the_inventory_on_its_own() {
         100.0 * rel
     );
 
-    let info = results.uncertainty_info.expect("info");
+    let info = results.uncertainty_info.get(&0).cloned().expect("info");
     assert_eq!(info.spectra_with_flux_sigma, 1);
     assert_eq!(info.spectra_without_flux_sigma, 0);
     assert!(info.flux_bins_sampled > 0);
@@ -553,11 +573,12 @@ fn a_spectrum_without_an_error_is_reported_not_assumed_exact() {
             seed: 5,
             samples: Some(32),
             sources: vec![Source::FluxSpectrum],
+            attribution: false,
         }),
     )
     .expect("transmute");
 
-    let info = results.uncertainty_info.clone().expect("info");
+    let info = results.uncertainty_info.get(&0).cloned().expect("info");
     assert_eq!(info.spectra_without_flux_sigma, 1);
     assert_eq!(info.spectra_with_flux_sigma, 0);
     assert!(
@@ -587,7 +608,9 @@ fn the_inventory_spread_scales_with_the_flux_error() {
         let spectra = vec![MultigroupSpectrum {
             boundaries: GROUPS.to_vec(),
             masses: FLUX.iter().map(|f| f / total).collect(),
-            relative_std_dev: Some(vec![rel; FLUX.len()]),
+            flux_error: Some(yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(
+                vec![rel; FLUX.len()],
+            )),
         }];
         transmute_material(
             &mut material,
@@ -600,6 +623,7 @@ fn the_inventory_spread_scales_with_the_flux_error() {
                 seed: 31,
                 samples: Some(256),
                 sources: vec![Source::FluxSpectrum],
+                attribution: false,
             }),
         )
         .expect("transmute")
@@ -613,5 +637,54 @@ fn the_inventory_spread_scales_with_the_flux_error() {
         large > small * 2.0,
         "tripling the flux error should roughly triple the inventory spread, \
          got {small:e} -> {large:e}"
+    );
+}
+
+/// Attribution with the cross-section source alone: the first-order
+/// contribution of Fe56's evaluation, every channel with its correlations,
+/// must account for Mn56's variance, since Mn56 is made from Fe56 alone. And
+/// each of Fe56's channels is reported on its own too.
+#[test]
+fn the_cross_section_attribution_names_the_evaluation() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let Some(dir) = fe56_with_covariance(tmp.path()) else {
+        return skip("the_cross_section_attribution_names_the_evaluation");
+    };
+    let mut material = iron(&dir);
+    let id = material.material_id.unwrap_or(0);
+    let results = run(
+        &mut material,
+        Some(&DataUncertainty {
+            seed: 1,
+            samples: Some(512),
+            sources: vec![yani_transmute::uncertainty::Source::CrossSections],
+            attribution: true,
+        }),
+    );
+    let b = results
+        .uncertainty_breakdown(id, "Mn56", 1)
+        .expect("attribution was asked for");
+    assert!(b.variance > 0.0);
+    // One source: it is the total.
+    assert_eq!(b.by_source["cross_sections"], b.variance);
+    let block = b
+        .contributors
+        .iter()
+        .find(|(s, n, r, _)| s == "cross_sections" && n == "Fe56" && r.is_none())
+        .expect("Fe56's evaluation contributes")
+        .3;
+    assert!(
+        (block / b.variance - 1.0).abs() < 0.15,
+        "first order {block:.3e} against the resampled {:.3e}",
+        b.variance
+    );
+    assert!(
+        b.contributors
+            .iter()
+            .any(|(s, n, r, _)| s == "cross_sections"
+                && n == "Fe56"
+                && r.as_deref() == Some("(n,p)")),
+        "the channel making Mn56 is named: {:?}",
+        b.contributors
     );
 }

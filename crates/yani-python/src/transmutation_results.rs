@@ -200,10 +200,126 @@ impl PyTransmutationResults {
         self.inner.timesteps.clone()
     }
 
-    /// Source rates used [n/cm^2/s].
+    /// The rate each step drove a material at, one per timestep, zero for a
+    /// cooldown.
+    ///
+    /// A spectrum solve (``Material.transmute``, ``transmute``) gives each
+    /// material's own flux magnitude in n/cm^2/s, which differs between
+    /// materials given their own schedules. ``Model.simulate_transmutation``
+    /// gives the source strength in n/s, the same for every material.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///
+    /// Returns:
+    ///     List of rates, or None if the material is not in the results.
+    fn get_source_rates(&self, material_id: u32) -> Option<Vec<f64>> {
+        self.inner.get_source_rates(material_id).map(|r| r.to_vec())
+    }
+
+    /// Where a nuclide's uncertainty at one step comes from.
+    ///
+    /// Present when the run was asked for it with
+    /// ``DataUncertainty(attribution=True)``, and ``None`` otherwise. A dict:
+    ///
+    /// - ``variance``: the total, resampled, the square of
+    ///   ``get_nuclide_uncertainty``;
+    /// - ``by_source``: each source alone, resampled the same way, so this
+    ///   says how much is statistical and how much is each kind of nuclear
+    ///   data. The sources are independent and these sum to the total;
+    /// - ``unattributed``: what that sum leaves, interaction and sampling
+    ///   noise, small when the attribution holds;
+    /// - ``contributors``: first order, a list of ``(source, nuclide,
+    ///   reaction, variance)``, largest reach first. Within the cross sections
+    ///   a nuclide's whole evaluation has ``reaction`` of ``None`` and each
+    ///   channel alone names it; a half-life has ``None``. It says which
+    ///   evaluation to look at; the total is the resampled one.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     nuclide: Nuclide name.
+    ///     step: As in ``get_nuclide_uncertainty``: 0 is the initial
+    ///         composition, which carries none.
+    fn get_uncertainty_breakdown<'py>(
+        &self,
+        py: Python<'py>,
+        material_id: u32,
+        nuclide: &str,
+        step: usize,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(b) = self.inner.uncertainty_breakdown(material_id, nuclide, step) else {
+            return Ok(None);
+        };
+        let d = PyDict::new(py);
+        d.set_item("variance", b.variance)?;
+        let by = PyDict::new(py);
+        for (name, v) in &b.by_source {
+            by.set_item(name, v)?;
+        }
+        d.set_item("by_source", by)?;
+        d.set_item("unattributed", b.unattributed)?;
+        d.set_item("contributors", b.contributors)?;
+        Ok(Some(d))
+    }
+
+    /// The statistical uncertainty of each transport-tallied reaction rate
+    /// at one step.
+    ///
+    /// Present for ``Model.simulate_transmutation`` run with
+    /// ``data_uncertainty`` including the ``"statistical"`` source, and
+    /// ``None`` otherwise. Each entry is ``(nuclide, reaction, target, rate,
+    /// std_dev)`` in 1/s per atom: a reaction total has ``target`` of ``None``,
+    /// an isomeric partial names its final state. The rates are the tally's,
+    /// scaled by the step's source rate, exactly as the step's solve used them
+    /// before the branching fold.
+    ///
+    /// The rates are correlated, having been scored by the same histories,
+    /// and the inventory sigmas are computed with those correlations. These
+    /// standard deviations alone do not carry them.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     step: Schedule step index, as in ``get_reaction_rates``.
+    fn get_reaction_rate_uncertainty(
+        &self,
+        material_id: u32,
+        step: usize,
+    ) -> Option<Vec<(String, String, Option<String>, f64, f64)>> {
+        let covariance = self.inner.rate_covariance.get(&material_id)?;
+        let rate = *self.inner.get_source_rates(material_id)?.get(step)?;
+        Some(
+            (0..covariance.len())
+                .map(|i| {
+                    let label = &covariance.labels[i];
+                    (
+                        label.nuclide.clone(),
+                        label.kind.clone(),
+                        label.target.clone(),
+                        covariance.rates[i] * rate,
+                        covariance.std_dev(i) * rate,
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// How much of the multigroup collapse work was shared, or ``None`` for a
+    /// transport-coupled solve, which does none.
+    ///
+    /// A dict with ``performed``, the collapses actually run, and
+    /// ``requested``, one per distinct spectrum per material. Materials with
+    /// the same spectrum, composition, temperature and shielding collapse to
+    /// the same rates and share one, so ``performed`` below ``requested`` is
+    /// the saving ``transmute`` made over solving them one at a time.
     #[getter]
-    fn source_rates(&self) -> Vec<f64> {
-        self.inner.source_rates.clone()
+    fn collapse_reuse<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(reuse) = self.inner.collapse_reuse else {
+            return Ok(None);
+        };
+        let d = PyDict::new(py);
+        d.set_item("performed", reuse.performed)?;
+        d.set_item("requested", reuse.requested)?;
+        Ok(Some(d))
     }
 
     /// Number of transmutation steps.
@@ -258,7 +374,8 @@ impl PyTransmutationResults {
     ///
     ///     A nuclide whose evaluation carries no covariance also reports 0.0.
     ///     That is not a claim of certainty -- check
-    ///     ``data_uncertainty_info["no_covariance_data"]``, which lists exactly
+    ///     ``get_data_uncertainty_info(material_id)["no_covariance_data"]``,
+    ///     which lists exactly
     ///     those nuclides.
     fn get_nuclide_uncertainty(&self, material_id: u32, nuclide: &str, step: usize) -> Option<f64> {
         self.inner
@@ -471,9 +588,11 @@ impl PyTransmutationResults {
             .map(|lines| lines.into_iter().map(PyLineEstimate::from).collect()))
     }
 
-    /// What the nuclear-data uncertainty covered, and what it did not.
+    /// What the nuclear-data uncertainty covered for one material, and what it
+    /// did not.
     ///
-    /// ``None`` when the transmutation was run without ``data_uncertainty``.
+    /// ``None`` when the transmutation was run without ``data_uncertainty``, or
+    /// the material is not in the results.
     /// Otherwise a dict whose job is to make gaps visible rather than let them
     /// read as confidence:
     ///
@@ -495,20 +614,37 @@ impl PyTransmutationResults {
     ///   covariance was not positive semi-definite and had to be repaired.
     /// - ``rates_floored`` / ``rates_sampled``: samples that went negative and
     ///   were truncated at zero, which biases the mean upward when common.
+    /// - ``half_lives_perturbed`` / ``no_half_life_uncertainty``: with the
+    ///   ``"half_life"`` source, which reachable unstable nuclides had their
+    ///   half-life sampled and which state no sigma to sample from.
+    ///   ``half_lives_floored`` / ``half_lives_sampled`` count draws that came
+    ///   out non-positive and had to be floored.
+    /// - ``statistical_rates``: with the ``"statistical"`` source on a
+    ///   transport run, how many tallied rates were sampled from their
+    ///   covariance; ``statistical_floored`` / ``statistical_sampled`` count
+    ///   draws that came out negative and were floored.
     /// - ``not_perturbed``: the sources this does not propagate at all.
     /// - ``samples`` / ``converged``: how many replicas ran, and whether the
     ///   sigmas settled or the cap was hit.
-    #[getter]
-    fn data_uncertainty_info<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
-        match &self.inner.uncertainty_info {
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    fn get_data_uncertainty_info<'py>(
+        &self,
+        py: Python<'py>,
+        material_id: u32,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        match self.inner.uncertainty_info.get(&material_id) {
             None => Ok(None),
             Some(info) => Ok(Some(crate::data_uncertainty::info_to_dict(py, info)?)),
         }
     }
 
-    /// What the self-shielding did, or ``None`` if the run was not shielded.
+    /// What the self-shielding did for one material.
     ///
-    /// Always present. ``chord_cm`` of ``None`` means the run was dilute and
+    /// Present for every material of a spectrum solve, shielded or not, and
+    /// ``None`` for a transport-coupled solve or a material not in the
+    /// results. ``chord_cm`` of ``None`` means the run was dilute and
     /// nothing was corrected; otherwise it says how: the ``method`` and
     /// ``chord_cm`` used, which nuclides were ``shielded``, which were
     /// ``not_shielded`` and why, and ``strongest_factor``, the smallest factor
@@ -537,9 +673,15 @@ impl PyTransmutationResults {
     /// high, and this is a resonance absorber", which is the warning a dilute
     /// run should carry rather than silence. Read the size of the effect off a
     /// shielded run, by asking for one.
-    #[getter]
-    fn self_shielding_info<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
-        let Some(info) = &self.inner.shielding_info else {
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    fn get_self_shielding_info<'py>(
+        &self,
+        py: Python<'py>,
+        material_id: u32,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(info) = self.inner.shielding_info.get(&material_id) else {
             return Ok(None);
         };
         let d = PyDict::new(py);
@@ -645,7 +787,7 @@ impl PyTransmutationResults {
     /// Args:
     ///     material_id: Material ID number.
     ///     step: Schedule step index, the same index as ``timesteps`` and
-    ///         ``source_rates``. This is one less than the ``step`` the
+    ///         ``get_source_rates``. This is one less than the ``step`` the
     ///         composition getters take, where 0 is the initial composition.
     ///
     /// Returns:

@@ -155,6 +155,60 @@ fn yani_reads_what_the_converter_writes() {
     let _ = std::fs::remove_dir_all(&c.dir);
 }
 
+/// The decay energy's split into its recoverable-heat components survives,
+/// with each component's own sigma, and the components sum to the total the
+/// chain has always carried (issue #140, item 2).
+///
+/// A component the evaluation does not give must come back absent rather than
+/// as zero, and a stated sigma must not come back as "none stated".
+#[test]
+fn the_decay_energy_split_survives() {
+    let c = convert("split");
+    let (back, _branch) = yani::parse_chain_parts(
+        &c.dir.join("decay"),
+        Some(&c.dir.join("reactions")),
+        Some(&c.dir.join("fission_yields")),
+        None,
+    )
+    .expect("yani reads the converted chain");
+
+    let mut split = 0;
+    for written in &c.chain.nuclides {
+        let read = &back[&written.name];
+        for (w, r) in written
+            .decay_energy_components
+            .iter()
+            .zip(&read.decay_energy_components)
+        {
+            match (w, r) {
+                (None, None) => {}
+                (Some((energy, sigma)), Some(part)) => {
+                    assert_eq!(part.energy, *energy, "{}", written.name);
+                    assert_eq!(part.uncertainty, *sigma, "{} sigma", written.name);
+                }
+                _ => panic!("{}: a component appeared or vanished", written.name),
+            }
+        }
+        if read.decay_energy_components.iter().any(Option::is_some) {
+            split += 1;
+            let sum: f64 = read
+                .decay_energy_components
+                .iter()
+                .flatten()
+                .map(|p| p.energy)
+                .sum();
+            assert!(
+                (sum - read.decay_energy).abs() <= 1e-9 * read.decay_energy.abs().max(1.0),
+                "{}: components sum to {sum}, total is {}",
+                written.name,
+                read.decay_energy
+            );
+        }
+    }
+    assert!(split > 0, "no nuclide in the fixtures carries a split");
+    let _ = std::fs::remove_dir_all(&c.dir);
+}
+
 /// Q survives, which the previous writer could not manage.
 ///
 /// `reactions/reactions.arrow` declares Q non-nullable, and the value only

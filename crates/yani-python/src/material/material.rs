@@ -800,17 +800,26 @@ impl PyMaterial {
     ///     per (str | None): ``None`` (default) for the total, which needs
     ///         ``volume``; ``"cm3"`` for W/cm³, which needs nothing; ``"g"``
     ///         for W/g, which needs only ``density``.
+    ///     component (str | None): ``None`` (default) for the whole decay heat;
+    ///         ``"beta"``, ``"gamma"`` or ``"alpha"`` for one recoverable-heat
+    ///         component alone (the ENDF MT=457 light-particle, electromagnetic
+    ///         and heavy-particle energies). The gamma heat is the part that
+    ///         leaves a thin component; the beta and alpha heat stays put.
+    ///         Raises if a nuclide making decay heat carries no split, which
+    ///         data converted before the split does, rather than understating
+    ///         the component by its share.
     ///
     /// Returns:
     ///     float | dict[str, float]: Decay heat, in W when ``per`` is ``None``,
     ///     W/cm³ when it is ``"cm3"`` and W/g when it is ``"g"``. The unit of a
     ///     ``by_nuclide`` dict's values is the same.
-    #[pyo3(signature = (*, by_nuclide=false, per=None))]
+    #[pyo3(signature = (*, by_nuclide=false, per=None, component=None))]
     fn decay_heat(
         &self,
         py: Python<'_>,
         by_nuclide: bool,
         per: Option<&str>,
+        component: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let volume = self.scale_for(per, "decay_heat")?;
         let atom_densities = self
@@ -819,7 +828,36 @@ impl PyMaterial {
             .map_err(PyValueError::new_err)?;
         let chain = crate::distribution::resolve_chain()?.chain;
 
-        let heats = yani_decay::decay_heat_by_nuclide(&atom_densities, volume, &chain);
+        let heats = match component {
+            None => yani_decay::decay_heat_by_nuclide(&atom_densities, volume, &chain),
+            Some(name) => {
+                let index = yani::DECAY_ENERGY_COMPONENTS
+                    .iter()
+                    .position(|c| *c == name)
+                    .ok_or_else(|| {
+                        PyValueError::new_err(format!(
+                            "component must be one of {:?} or None, got {name:?}",
+                            yani::DECAY_ENERGY_COMPONENTS
+                        ))
+                    })?;
+                yani_decay::decay_heat_component_by_nuclide(&atom_densities, volume, &chain, index)
+                    .map_err(|missing| {
+                        PyValueError::new_err(format!(
+                            "no decay-energy split for {} nuclide(s) that make decay heat \
+                         ({}{}); the transmutation data was converted before the split \
+                         was carried, so their {name} heat is unknown",
+                            missing.len(),
+                            missing
+                                .iter()
+                                .take(8)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            if missing.len() > 8 { ", ..." } else { "" },
+                        ))
+                    })?
+            }
+        };
 
         if by_nuclide {
             let breakdown = PyDict::new(py);
@@ -1202,7 +1240,7 @@ impl PyMaterial {
     ///         nothing is read, folded or sampled: the inventories are
     ///         bit-identical either way. Read the sigmas with
     ///         ``get_nuclide_uncertainty``, and what was and was not covered
-    ///         with ``data_uncertainty_info``.
+    ///         with ``get_data_uncertainty_info(id)``.
     ///
     ///     self_shielding_chord (float, optional): Mean chord length ``4V/S`` of
     ///         this material's lump, in cm, which is twice the thickness for a
@@ -1212,7 +1250,7 @@ impl PyMaterial {
     ///         default) and nothing is shielded: the rates are bit-identical to
     ///         a run without it, and no shape is inferred from a geometry this
     ///         material does not have. Read what was done with
-    ///         ``self_shielding_info``.
+    ///         ``get_self_shielding_info(id)``.
     ///
     ///         The flux inside the lump comes from a slowing-down solve, which
     ///         assumes nothing about resonances being narrow. The cheaper
@@ -1272,33 +1310,11 @@ impl PyMaterial {
         let (spectra, steps) = sched.transmute_plan(py)?;
 
         let loaded = crate::distribution::resolve_chain()?;
-
-        // A chord or a shape, never both: they would be two statements of the
-        // same length, and nothing good comes of deciding which one wins.
-        let chord = match (self_shielding_chord, self_shielding_shape.as_ref()) {
-            (Some(_), Some(_)) => {
-                return Err(PyValueError::new_err(
-                    "give self_shielding_chord or self_shielding_shape, not both: a shape \
-                     already determines the chord",
-                ))
-            }
-            (Some(chord), None) => Some(chord),
-            (None, Some(shape)) => {
-                let shape = crate::shapes::shape_of(shape)?;
-                Some(
-                    shape
-                        .chord_cm(self.internal.volume)
-                        .map_err(PyValueError::new_err)?,
-                )
-            }
-            (None, None) => None,
-        };
-        let shielding = match chord {
-            Some(chord) => {
-                Some(yani_transmute::Shielding::new(chord).map_err(PyValueError::new_err)?)
-            }
-            None => None,
-        };
+        let shielding = shielding_request(
+            &self.internal,
+            self_shielding_chord,
+            self_shielding_shape.as_ref(),
+        )?;
 
         // Everything the solve needs, owned and free of the GIL, before it is
         // released. `sched` is a `PyRef` and must go first; the chain is three
@@ -1399,4 +1415,38 @@ impl PyMaterial {
             .map_err(PyValueError::new_err)?;
         Ok(PyMaterial { internal: result })
     }
+}
+
+/// The self-shielding request for `material`, from a chord or a shape.
+///
+/// A chord or a shape, never both: they would be two statements of the same
+/// length, and nothing good comes of deciding which one wins. A shape turns
+/// into a chord through the material's own volume, so one shape given to many
+/// materials gives each its own chord.
+pub(crate) fn shielding_request(
+    material: &yamc_materials::material::Material,
+    chord: Option<f64>,
+    shape: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<yani_transmute::Shielding>> {
+    let chord = match (chord, shape) {
+        (Some(_), Some(_)) => {
+            return Err(PyValueError::new_err(
+                "give self_shielding_chord or self_shielding_shape, not both: a shape \
+                 already determines the chord",
+            ))
+        }
+        (Some(chord), None) => Some(chord),
+        (None, Some(shape)) => {
+            let shape = crate::shapes::shape_of(shape)?;
+            Some(
+                shape
+                    .chord_cm(material.volume)
+                    .map_err(PyValueError::new_err)?,
+            )
+        }
+        (None, None) => None,
+    };
+    chord
+        .map(|c| yani_transmute::Shielding::new(c).map_err(PyValueError::new_err))
+        .transpose()
 }
