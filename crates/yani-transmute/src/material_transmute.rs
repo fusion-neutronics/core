@@ -165,7 +165,283 @@ pub fn transmute_material_shielded(
     uncertainty: Option<&DataUncertainty>,
     shielding: Option<&Shielding>,
 ) -> Result<TransmutationResults, Box<dyn std::error::Error>> {
-    // Validate spectra.
+    transmute_materials(
+        vec![TransmuteCase {
+            material,
+            spectra: spectra.to_vec(),
+            steps: steps.to_vec(),
+            shielding: shielding.copied(),
+        }],
+        chain,
+        branch,
+        parts,
+        uncertainty,
+    )
+}
+
+/// One material's part of a [`transmute_materials`] solve: the material, the
+/// spectra its irradiation steps reference, its timeline, and whether its
+/// collapse is self-shielded.
+pub struct TransmuteCase<'a> {
+    /// Loaded with the cross sections it needs, as [`transmute_material`] does.
+    pub material: &'a mut Material,
+    /// Distinct multigroup spectra this material's steps reference.
+    pub spectra: Vec<MultigroupSpectrum>,
+    /// The timeline. Every case must share the step durations and which steps
+    /// irradiate; the rates and spectra are the case's own.
+    pub steps: Vec<TransmuteStep>,
+    /// Self-shielding for this material's collapse, `None` for dilute.
+    pub shielding: Option<Shielding>,
+}
+
+/// Transmute several materials over one timeline in one call.
+///
+/// Each material gets its own spectra and flux magnitudes, which is what a mesh
+/// from a transport run needs, and they share the timeline, so the result has
+/// one series of times and is keyed by each material's `material_id` exactly as
+/// the transport-coupled path's is.
+///
+/// Work that is a property of the network rather than of one material is done
+/// once: the chain is shared, a nuclide's cross sections are decoded once and
+/// shared by every material that needs them, and a multigroup collapse is run
+/// once for every distinct combination of spectrum, composition, temperature,
+/// loaded data and shielding. Materials that repeat a combination, cells of
+/// one steel that saw the same spectrum, reuse it, with identical results
+/// including the reports. [`TransmutationResults::collapse_reuse`] says how
+/// many were shared. The per-material step solves then run in parallel.
+///
+/// Errors if two materials share an id, since the result could not tell them
+/// apart, or if the timelines differ. A single material with no id answers to
+/// 0, as [`transmute_material`] always has.
+pub fn transmute_materials(
+    mut cases: Vec<TransmuteCase<'_>>,
+    chain: Arc<HashMap<String, yani::ChainNuclide>>,
+    branch: &BranchTable,
+    parts: yani::ChainParts,
+    uncertainty: Option<&DataUncertainty>,
+) -> Result<TransmutationResults, Box<dyn std::error::Error>> {
+    if cases.is_empty() {
+        return Err("no materials to transmute".into());
+    }
+    let plural = cases.len() > 1;
+    // Errors name the material only when there is more than one to confuse.
+    let named = |c: usize, id: u32, e: Box<dyn std::error::Error>| -> Box<dyn std::error::Error> {
+        if plural {
+            format!("material {id} (position {c}): {e}").into()
+        } else {
+            e
+        }
+    };
+
+    let ids: Vec<u32> = cases
+        .iter()
+        .map(|case| case.material.material_id.unwrap_or(0))
+        .collect();
+    if plural {
+        let mut seen: HashMap<u32, usize> = HashMap::new();
+        for (c, &id) in ids.iter().enumerate() {
+            if let Some(first) = seen.insert(id, c) {
+                return Err(format!(
+                    "materials at positions {first} and {c} both have id {id}; the results \
+                     are keyed by material id, so give each material a distinct one"
+                )
+                .into());
+            }
+        }
+    }
+
+    for (c, case) in cases.iter().enumerate() {
+        validate_case(&case.spectra, &case.steps).map_err(|e| named(c, ids[c], e))?;
+    }
+    for (c, case) in cases.iter().enumerate().skip(1) {
+        check_same_timeline(&cases[0].steps, &case.steps)
+            .map_err(|e| format!("material {} (position {c}): {e}", ids[c]))?;
+    }
+
+    // Per material: the chain must drive something, the data is loaded into
+    // the caller's material, and the solve starts from its sum-mode copy.
+    let mut initial: Vec<Material> = Vec::with_capacity(cases.len());
+    for (c, case) in cases.iter_mut().enumerate() {
+        check_chain_drives(case.material, &case.steps, &chain).map_err(|e| named(c, ids[c], e))?;
+        preload_activation_data(
+            case.material,
+            &chain,
+            branch,
+            uncertainty,
+            case.shielding.as_ref(),
+        )
+        .map_err(|e| named(c, ids[c], e))?;
+        let mut current = case.material.clone();
+        if current.density_units != DensityUnits::Sum {
+            current = current
+                .to_sum_mode()
+                .map_err(|e| named(c, ids[c], e.into()))?;
+        }
+        initial.push(current);
+    }
+
+    // Collapse once per distinct combination, at unit total flux (masses are
+    // normalized, so this is the rate per n/cm^2/s). Each step then scales its
+    // spectrum's rates by its `rate`.
+    //
+    // When an isomeric-branching overlay is supplied, fold it against the same
+    // spectrum shape here (rate-compute time): this injects the `(n,n')`
+    // metastable-production rates and yields a per-spectrum chain whose
+    // isomeric branching ratios are flux-weighted rather than fixed. Branching
+    // fractions are magnitude-independent, so the per-step `scale_rates` (which
+    // scales only the rates) leaves them correct.
+    //
+    // The report is merged across a material's spectra rather than assigned,
+    // so a schedule naming two spectra reports both spectra's nuclides (issue
+    // #576).
+    let mut shared_spectra: Vec<MultigroupSpectrum> = Vec::new();
+    let mut per_spectrum: Vec<PerSpectrum> = Vec::new();
+    let mut shared_info: Vec<ShieldingInfo> = Vec::new();
+    let mut known: HashMap<CollapseKey, usize> = HashMap::new();
+    let mut requested = 0usize;
+    let mut case_steps: Vec<Vec<TransmuteStep>> = Vec::with_capacity(cases.len());
+    let mut case_shared: Vec<Vec<usize>> = Vec::with_capacity(cases.len());
+    let mut case_info: Vec<ShieldingInfo> = Vec::with_capacity(cases.len());
+    for (c, case) in cases.iter().enumerate() {
+        let current = &initial[c];
+        let shielding = case.shielding.as_ref();
+        let mut to_shared = Vec::with_capacity(case.spectra.len());
+        let mut info = ShieldingInfo::default();
+        for s in &case.spectra {
+            requested += 1;
+            let key = CollapseKey::new(current, s, shielding);
+            let g = match known.get(&key) {
+                Some(&g) => g,
+                None => {
+                    let (entry, entry_info) = collapse_one(current, s, &chain, branch, shielding)
+                        .map_err(|e| named(c, ids[c], e))?;
+                    per_spectrum.push(entry);
+                    shared_info.push(entry_info);
+                    shared_spectra.push(s.clone());
+                    known.insert(key, per_spectrum.len() - 1);
+                    per_spectrum.len() - 1
+                }
+            };
+            info.merge(shared_info[g].clone());
+            to_shared.push(g);
+        }
+        case_steps.push(
+            case.steps
+                .iter()
+                .map(|st| TransmuteStep {
+                    dt: st.dt,
+                    irradiation: st.irradiation.map(|(idx, rate)| (to_shared[idx], rate)),
+                })
+                .collect(),
+        );
+        case_info.push(info);
+        case_shared.push(to_shared);
+    }
+
+    // The step solves are independent, one per material.
+    // The nominal steps index the shared collapses. The replicas fold and
+    // factorize every spectrum they are handed and count its coverage, so
+    // they get this material's own spectra, in its own indexing.
+    let solve = |c: usize| {
+        let replicas = uncertainty.map(|request| Replicas {
+            spectra: &cases[c].spectra,
+            steps: &cases[c].steps,
+            per_spectrum: case_shared[c]
+                .iter()
+                .map(|&g| per_spectrum[g].clone())
+                .collect(),
+            request,
+            shielding: cases[c].shielding.as_ref(),
+        });
+        solve_case(
+            &initial[c],
+            &case_steps[c],
+            &per_spectrum,
+            &chain,
+            parts,
+            replicas,
+        )
+        .map_err(|e| {
+            let e: Box<dyn std::error::Error> = named(c, ids[c], e);
+            e.to_string()
+        })
+    };
+    let outcomes: Vec<Result<CaseOutcome, String>> = {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use rayon::prelude::*;
+            if plural {
+                (0..cases.len()).into_par_iter().map(solve).collect()
+            } else {
+                (0..cases.len()).map(solve).collect()
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            (0..cases.len()).map(solve).collect()
+        }
+    };
+
+    let mut results = TransmutationResults::new(cases[0].steps.iter().map(|st| st.dt).collect());
+    for (c, outcome) in outcomes.into_iter().enumerate() {
+        let outcome = outcome?;
+        let id = ids[c];
+        let case = &cases[c];
+        results.add_initial(
+            id,
+            initial[c].clone(),
+            case.steps
+                .iter()
+                .map(|st| st.irradiation.map_or(0.0, |(_, rate)| rate))
+                .collect(),
+        );
+        for (state, rates) in outcome.states.into_iter().zip(outcome.rates) {
+            results.add_step_rates(id, rates);
+            results.add_step(id, state);
+        }
+        if let Some((ensemble, info)) = outcome.uncertainty {
+            results.uncertainty.insert(id, ensemble);
+            results.uncertainty_info.insert(id, info);
+        }
+        // Recorded whether or not shielding ran: "not shielded" and "shielded
+        // and nothing moved" are different claims, and a dilute run that
+        // should have been shielded is the case #564 is about.
+        results.shielding_info.insert(id, case_info[c].clone());
+        // The spectra it collapsed against, for re-deriving an energy-resolved
+        // view of a rate afterwards: a few KB of stored spectrum rather than
+        // the tens of MB the whole breakdown would be (yani#27).
+        results.collapse.insert(
+            id,
+            crate::results::CollapseInputs {
+                spectra: case
+                    .spectra
+                    .iter()
+                    .map(|s| (s.boundaries.clone(), s.masses.clone()))
+                    .collect(),
+                step_spectrum: case
+                    .steps
+                    .iter()
+                    .map(|st| st.irradiation.map(|(idx, _)| idx))
+                    .collect(),
+                shielding: case.shielding,
+            },
+        );
+    }
+    results.collapse_reuse = Some(crate::results::CollapseReuse {
+        performed: per_spectrum.len(),
+        requested,
+    });
+    // Kept so routes can be derived from the same topology the solve used,
+    // rather than from whatever a second load of the chain path returns.
+    results.chain = Some(Arc::clone(&chain));
+    Ok(results)
+}
+
+/// The spectra and steps of one material, checked before anything is loaded.
+fn validate_case(
+    spectra: &[MultigroupSpectrum],
+    steps: &[TransmuteStep],
+) -> Result<(), Box<dyn std::error::Error>> {
     for (i, s) in spectra.iter().enumerate() {
         if s.boundaries.len() != s.masses.len() + 1 {
             return Err(format!(
@@ -203,7 +479,6 @@ pub fn transmute_material_shielded(
             return Err(format!("spectrum {i}: masses must be finite and non-negative").into());
         }
     }
-    // Validate steps.
     for (i, st) in steps.iter().enumerate() {
         if st.dt < 0.0 {
             return Err(format!("step {i}: dt = {} is negative", st.dt).into());
@@ -221,148 +496,228 @@ pub fn transmute_material_shielded(
             }
         }
     }
+    Ok(())
+}
 
-    // A chain that can drive none of this material's nuclides. Every reaction
-    // it holds has a parent the material does not contain, so the irradiation
-    // produces nothing and the schedule solves to the composition it started
-    // with. That is a silent zero: no step fails, no rate is negative, and the
-    // mistake surfaces only as a decay heat of exactly zero much later, which
-    // names neither the chain nor what it was built for.
-    //
-    // It happens whenever chains are scoped per material and two of them share
-    // a path, since the second conversion replaces the first and leaves a
-    // directory whose name still says otherwise. The manifest now records the
-    // parents each subsection covers; this is the check that acts on them.
-    //
-    // Stronger than the membership check in `preload_activation_data`, which
-    // asks whether any of the material's nuclides appear in the chain at all.
-    // Appearing is not enough: a nuclide can be in the chain purely as somebody
-    // else's product, carrying no reactions of its own, and a material made
-    // only of those is exactly as undrivable as one that is absent. The two
-    // guards are kept separate because that one must also cover the decay-only
-    // path, where having no reactions is not a fault.
-    //
-    // Only when something is actually irradiated. A decay-only schedule drives
-    // no reactions by construction, and a chain holding none of this material's
-    // parents is the right chain for it.
-    if steps.iter().any(|st| st.irradiation.is_some()) {
-        let has_reactions =
-            |name: &String| chain.get(name).is_some_and(|cn| !cn.reactions.is_empty());
-        // Already sorted by `get_nuclides`, which the message relies on.
-        let held = material.get_nuclides();
-        if !held.iter().any(has_reactions) {
-            let mut parents: Vec<&str> = chain
-                .values()
-                .filter(|cn| !cn.reactions.is_empty())
-                .map(|cn| cn.name.as_str())
-                .collect();
-            parents.sort_unstable();
-            let covers = if parents.is_empty() {
-                "nothing".to_string()
-            } else {
-                parents.join(" ")
+/// The result has one series of times, so every material must step through
+/// the same durations and irradiate on the same steps. The rates and spectra
+/// are each material's own.
+fn check_same_timeline(first: &[TransmuteStep], other: &[TransmuteStep]) -> Result<(), String> {
+    if first.len() != other.len() {
+        return Err(format!(
+            "its schedule has {} steps and the first material's has {}; every material \
+             must share one timeline",
+            other.len(),
+            first.len()
+        ));
+    }
+    for (i, (a, b)) in first.iter().zip(other).enumerate() {
+        if a.dt != b.dt {
+            return Err(format!(
+                "step {i} lasts {} s and the first material's lasts {} s; every material \
+                 must share one timeline",
+                b.dt, a.dt
+            ));
+        }
+        if a.irradiation.is_some() != b.irradiation.is_some() {
+            let what = |st: &TransmuteStep| {
+                if st.irradiation.is_some() {
+                    "an irradiation"
+                } else {
+                    "a cooldown"
+                }
             };
             return Err(format!(
-                "this chain drives none of the material's nuclides, so the irradiation would \
-                 produce nothing and every step would return the starting composition.\n  \
-                 material holds: {}\n  chain has reactions for: {covers}\n\
-                 A chain is scoped to the nuclides it was built from, so build one for this \
-                 material rather than reusing one built for another.",
-                held.join(" "),
-            )
-            .into());
+                "step {i} is {} and the first material's is {}; every material must \
+                 irradiate on the same steps",
+                what(b),
+                what(a)
+            ));
         }
     }
+    Ok(())
+}
 
-    // Load nuclear data for all chain nuclides (not just initial composition)
-    // so reaction rates can be computed for daughter products. Into the
-    // CALLER's material, so a second call on it finds the data already there.
-    preload_activation_data(material, &chain, branch, uncertainty, shielding)?;
-
-    let mut current_material = material.clone();
-    if current_material.density_units != DensityUnits::Sum {
-        current_material = current_material.to_sum_mode()?;
+/// A chain that can drive none of this material's nuclides.
+///
+/// Every reaction it holds has a parent the material does not contain, so the
+/// irradiation produces nothing and the schedule solves to the composition it
+/// started with. That is a silent zero: no step fails, no rate is negative,
+/// and the mistake surfaces only as a decay heat of exactly zero much later,
+/// which names neither the chain nor what it was built for.
+///
+/// It happens whenever chains are scoped per material and two of them share a
+/// path, since the second conversion replaces the first and leaves a directory
+/// whose name still says otherwise. The manifest now records the parents each
+/// subsection covers; this is the check that acts on them.
+///
+/// Stronger than the membership check in `preload_activation_data`, which asks
+/// whether any of the material's nuclides appear in the chain at all.
+/// Appearing is not enough: a nuclide can be in the chain purely as somebody
+/// else's product, carrying no reactions of its own, and a material made only
+/// of those is exactly as undrivable as one that is absent. The two guards are
+/// kept separate because that one must also cover the decay-only path, where
+/// having no reactions is not a fault.
+///
+/// Only when something is actually irradiated. A decay-only schedule drives no
+/// reactions by construction, and a chain holding none of this material's
+/// parents is the right chain for it.
+fn check_chain_drives(
+    material: &Material,
+    steps: &[TransmuteStep],
+    chain: &HashMap<String, ChainNuclide>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !steps.iter().any(|st| st.irradiation.is_some()) {
+        return Ok(());
     }
+    let has_reactions = |name: &String| chain.get(name).is_some_and(|cn| !cn.reactions.is_empty());
+    // Already sorted by `get_nuclides`, which the message relies on.
+    let held = material.get_nuclides();
+    if held.iter().any(has_reactions) {
+        return Ok(());
+    }
+    let mut parents: Vec<&str> = chain
+        .values()
+        .filter(|cn| !cn.reactions.is_empty())
+        .map(|cn| cn.name.as_str())
+        .collect();
+    parents.sort_unstable();
+    let covers = if parents.is_empty() {
+        "nothing".to_string()
+    } else {
+        parents.join(" ")
+    };
+    Err(format!(
+        "this chain drives none of the material's nuclides, so the irradiation would \
+         produce nothing and every step would return the starting composition.\n  \
+         material holds: {}\n  chain has reactions for: {covers}\n\
+         A chain is scoped to the nuclides it was built from, so build one for this \
+         material rather than reusing one built for another.",
+        held.join(" "),
+    )
+    .into())
+}
 
-    // Collapse reaction rates once per distinct spectrum from the initial
-    // material, at unit total flux (masses are normalized, so this is the rate
-    // per n/cm^2/s). Each step then scales its spectrum's rates by its `rate`.
-    //
-    // When an isomeric-branching overlay is supplied, fold it against the same
-    // spectrum shape here (rate-compute time): this injects the `(n,n')`
-    // metastable-production rates and yields a per-spectrum chain whose
-    // isomeric branching ratios are flux-weighted rather than fixed. Branching
-    // fractions are magnitude-independent, so the per-step `scale_rates` (which
-    // scales only the rates) leaves them correct.
-    //
-    // The report is merged across spectra rather than assigned. It used to be
-    // `shielding_info = info` inside this closure, so a schedule naming two
-    // spectra reported only the second one's nuclides -- and #564's whole point
-    // is that report naming what a dilute run did not correct for (issue #576).
-    let mut shielding_info = ShieldingInfo::default();
-    let mut per_spectrum: Vec<PerSpectrum> = Vec::with_capacity(spectra.len());
-    for s in spectra {
-        // Where an evaluation ends the cross section is unknown, and the fold
-        // treats it as zero. A sliver of flux there is a rounding matter; more
-        // than that and every rate on the nuclide would be understated by data
-        // that does not exist, so the run stops and says which nuclide and how
-        // much rather than answering as if it knew.
-        let above = crate::multigroup::spectrum_above_evaluation(
-            &current_material,
-            &s.masses,
-            &s.boundaries,
-        );
-        if let Some((name, top, fraction)) = above
+/// Everything a collapse reads, so two materials with equal keys collapse to
+/// identical rates, fission-yield weights, folded chain and shielding report.
+///
+/// The composition is in it although a dilute collapse does not read the
+/// densities for the rates themselves: the report's would-shield indicator
+/// does, and a shielded collapse depends on them outright. The loaded data is
+/// compared by identity, so two materials share only when they hold the same
+/// decoded nuclides, which the shared cache makes the normal case.
+#[derive(PartialEq, Eq, Hash)]
+struct CollapseKey {
+    boundaries: Vec<u64>,
+    masses: Vec<u64>,
+    relative_std_dev: Option<Vec<u64>>,
+    temperature: String,
+    composition: Vec<(String, u64)>,
+    data: Vec<(String, usize)>,
+    chord: Option<u64>,
+}
+
+impl CollapseKey {
+    fn new(material: &Material, s: &MultigroupSpectrum, shielding: Option<&Shielding>) -> Self {
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<u64>>();
+        let mut composition: Vec<(String, u64)> = material
+            .nuclides
             .iter()
-            .find(|(_, _, fraction)| *fraction > crate::multigroup::ABOVE_EVALUATION_TOLERANCE)
-        {
-            return Err(format!(
-                "{:.3}% of the spectrum lies above {top:.4e} eV, the last energy point in \
-                 {name}'s evaluation. No cross section exists there, so the rates on {name} \
-                 would be understated by that share. Cut the spectrum at the evaluation's \
-                 top energy, or use a library evaluated to higher energy.",
-                fraction * 100.0
-            )
-            .into());
+            .map(|(n, d)| (n.clone(), d.to_bits()))
+            .collect();
+        composition.sort_unstable();
+        let mut data: Vec<(String, usize)> = material
+            .nuclide_data
+            .iter()
+            .map(|(n, nd)| (n.clone(), Arc::as_ptr(nd) as usize))
+            .collect();
+        data.sort_unstable();
+        CollapseKey {
+            boundaries: bits(&s.boundaries),
+            masses: bits(&s.masses),
+            relative_std_dev: s.relative_std_dev.as_deref().map(bits),
+            temperature: material.temperature().to_string(),
+            composition,
+            data,
+            chord: shielding.map(|sh| sh.chord_cm.to_bits()),
         }
-        let (mut rates, fy_weights, info) = compute_multigroup_reaction_rates_shielded(
-            &current_material,
-            &chain,
-            &s.masses,
-            &s.boundaries,
-            1.0,
-            shielding,
-        );
-        shielding_info.merge(info);
-        let folded_chain =
-            fold_branching_into_chain(&current_material, &chain, branch, s, &mut rates);
-        per_spectrum.push((rates, fy_weights, folded_chain));
     }
-    // Left sequential deliberately: the collapse inside it is already a
-    // per-nuclide `par_iter`, so a second level of parallelism here would only
-    // contend with it.
+}
 
+/// One collapse: the rates, yield weights and folded chain for one spectrum
+/// against one material, and what the shielding did.
+fn collapse_one(
+    material: &Material,
+    s: &MultigroupSpectrum,
+    chain: &Arc<HashMap<String, ChainNuclide>>,
+    branch: &BranchTable,
+    shielding: Option<&Shielding>,
+) -> Result<(PerSpectrum, ShieldingInfo), Box<dyn std::error::Error>> {
+    // Where an evaluation ends the cross section is unknown, and the fold
+    // treats it as zero. A sliver of flux there is a rounding matter; more
+    // than that and every rate on the nuclide would be understated by data
+    // that does not exist, so the run stops and says which nuclide and how
+    // much rather than answering as if it knew.
+    let above = crate::multigroup::spectrum_above_evaluation(material, &s.masses, &s.boundaries);
+    if let Some((name, top, fraction)) = above
+        .iter()
+        .find(|(_, _, fraction)| *fraction > crate::multigroup::ABOVE_EVALUATION_TOLERANCE)
+    {
+        return Err(format!(
+            "{:.3}% of the spectrum lies above {top:.4e} eV, the last energy point in \
+             {name}'s evaluation. No cross section exists there, so the rates on {name} \
+             would be understated by that share. Cut the spectrum at the evaluation's \
+             top energy, or use a library evaluated to higher energy.",
+            fraction * 100.0
+        )
+        .into());
+    }
+    let (mut rates, fy_weights, info) = compute_multigroup_reaction_rates_shielded(
+        material,
+        chain,
+        &s.masses,
+        &s.boundaries,
+        1.0,
+        shielding,
+    );
+    let folded_chain = fold_branching_into_chain(material, chain, branch, s, &mut rates);
+    Ok(((rates, fy_weights, folded_chain), info))
+}
+
+/// What one material's step solve produces.
+struct CaseOutcome {
+    /// The state after each step.
+    states: Vec<Material>,
+    /// The per-edge rates each step was solved with.
+    rates: Vec<yani::EdgeRates>,
+    /// The perturbed ensemble and its report, when uncertainty was asked for.
+    uncertainty: Option<(Ensemble, Info)>,
+}
+
+/// One material's inputs to the uncertainty replicas, in its own indexing.
+struct Replicas<'a> {
+    spectra: &'a [MultigroupSpectrum],
+    steps: &'a [TransmuteStep],
+    per_spectrum: Vec<PerSpectrum>,
+    request: &'a DataUncertainty,
+    shielding: Option<&'a Shielding>,
+}
+
+/// One material's timeline, stepped from `initial` with steps whose spectrum
+/// indices point into the shared `per_spectrum`.
+fn solve_case(
+    initial: &Material,
+    steps: &[TransmuteStep],
+    per_spectrum: &[PerSpectrum],
+    chain: &Arc<HashMap<String, ChainNuclide>>,
+    parts: yani::ChainParts,
+    replicas: Option<Replicas<'_>>,
+) -> Result<CaseOutcome, Box<dyn std::error::Error>> {
     let stepper = ForwardEulerStepper;
     let no_fission: FissionYieldWeights = HashMap::new();
-
-    // Keyed by the material's own id, the way `TransmutationResults` is keyed
-    // throughout. A material that was never given one answers to 0, which is
-    // unambiguous here: this entry point transmutes exactly one material.
-    let material_id = current_material.material_id.unwrap_or(0);
-    let mut results = TransmutationResults::new(
-        steps.iter().map(|st| st.dt).collect(),
-        steps
-            .iter()
-            .map(|st| st.irradiation.map_or(0.0, |(_, rate)| rate))
-            .collect(),
-    );
-    results.add_initial(material_id, current_material.clone());
-
-    // The state every replica starts from: the same composition the nominal run
-    // starts from, with the same nuclear data already loaded. Captured before
-    // the step loop, which mutates `current_material` in place.
-    let initial = current_material.clone();
-
+    let mut current_material = initial.clone();
+    let mut states = Vec::with_capacity(steps.len());
+    let mut edge_rates = Vec::with_capacity(steps.len());
     for st in steps {
         // The fission-yield weights are a normalized shape, so `scale_rates`
         // (which carries the magnitude) leaves them correct as they are.
@@ -374,7 +729,7 @@ pub fn transmute_material_shielded(
             ),
             // Decay-only step: no reaction rates, so the base chain suffices
             // and no fission rate can demand a fold.
-            None => (HashMap::new(), &no_fission, &chain),
+            None => (HashMap::new(), &no_fission, chain),
         };
         current_material = stepper.step(
             &current_material,
@@ -389,53 +744,29 @@ pub fn transmute_material_shielded(
         // from the same chain and rates the step was solved with, isomeric
         // overlay included, so a decay-only step records an empty map (issue
         // #505).
-        results.add_step_rates(material_id, per_edge_rates(step_chain, &step_rates));
-        results.add_step(material_id, current_material.clone());
+        edge_rates.push(per_edge_rates(step_chain, &step_rates));
+        states.push(current_material.clone());
     }
 
-    if let Some(request) = uncertainty {
-        let (ensemble, info) = run_replicas(
-            &initial,
-            spectra,
-            steps,
-            &per_spectrum,
-            &chain,
+    let uncertainty = match replicas {
+        Some(r) => Some(run_replicas(
+            initial,
+            r.spectra,
+            r.steps,
+            &r.per_spectrum,
+            chain,
             parts,
             &stepper,
-            request,
-            shielding,
-        )?;
-        results.uncertainty.insert(material_id, ensemble);
-        results.uncertainty_info = Some(info);
-    }
-
-    // Recorded whether or not shielding ran: "not shielded" and "shielded and
-    // nothing moved" are different claims, and a dilute run that should have
-    // been shielded is the case #564 is about.
-    results.shielding_info = Some(shielding_info);
-
-    // Kept so routes can be derived from the same topology the solve used,
-    // rather than from whatever a second load of the chain path returns.
-    results.chain = Some(Arc::clone(&chain));
-
-    // And the spectra it collapsed against, for the same reason: an
-    // energy-resolved view of a rate is a statement about the spectrum that
-    // drove it, and re-deriving one channel's breakdown on demand costs a few
-    // KB of stored spectrum rather than the tens of MB the whole breakdown
-    // would (yani#27).
-    results.collapse = Some(crate::results::CollapseInputs {
-        spectra: spectra
-            .iter()
-            .map(|s| (s.boundaries.clone(), s.masses.clone()))
-            .collect(),
-        step_spectrum: steps
-            .iter()
-            .map(|st| st.irradiation.map(|(idx, _)| idx))
-            .collect(),
-        shielding: shielding.copied(),
-    });
-
-    Ok(results)
+            r.request,
+            r.shielding,
+        )?),
+        None => None,
+    };
+    Ok(CaseOutcome {
+        states,
+        rates: edge_rates,
+        uncertainty,
+    })
 }
 
 /// What one replica produces, and nothing else.

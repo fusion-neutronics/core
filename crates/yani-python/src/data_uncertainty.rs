@@ -20,9 +20,9 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 /// MF=33 covariance folded against this material's own spectrum. Half-lives,
 /// decay branching ratios, fission yields and the isomeric-branching overlay
 /// are held at their evaluated values; they carry uncertainties of their own
-/// that this does not propagate. ``TransmutationResults.data_uncertainty_info``
-/// says so per run, along with any nuclide whose evaluation carries no
-/// covariance at all.
+/// that this does not propagate.
+/// ``TransmutationResults.get_data_uncertainty_info`` says so per material,
+/// along with any nuclide whose evaluation carries no covariance at all.
 ///
 /// Args:
 ///     seed (int): Base seed. A given nuclide's perturbation in a given replica

@@ -1085,7 +1085,7 @@ impl PyMaterial {
     ///         nothing is read, folded or sampled: the inventories are
     ///         bit-identical either way. Read the sigmas with
     ///         ``get_nuclide_uncertainty``, and what was and was not covered
-    ///         with ``data_uncertainty_info``.
+    ///         with ``get_data_uncertainty_info(id)``.
     ///
     ///     self_shielding_chord (float, optional): Mean chord length ``4V/S`` of
     ///         this material's lump, in cm, which is twice the thickness for a
@@ -1095,7 +1095,7 @@ impl PyMaterial {
     ///         default) and nothing is shielded: the rates are bit-identical to
     ///         a run without it, and no shape is inferred from a geometry this
     ///         material does not have. Read what was done with
-    ///         ``self_shielding_info``.
+    ///         ``get_self_shielding_info(id)``.
     ///
     ///         The flux inside the lump comes from a slowing-down solve, which
     ///         assumes nothing about resonances being narrow. The cheaper
@@ -1155,33 +1155,11 @@ impl PyMaterial {
         let (spectra, steps) = sched.transmute_plan(py)?;
 
         let loaded = crate::distribution::resolve_chain()?;
-
-        // A chord or a shape, never both: they would be two statements of the
-        // same length, and nothing good comes of deciding which one wins.
-        let chord = match (self_shielding_chord, self_shielding_shape.as_ref()) {
-            (Some(_), Some(_)) => {
-                return Err(PyValueError::new_err(
-                    "give self_shielding_chord or self_shielding_shape, not both: a shape \
-                     already determines the chord",
-                ))
-            }
-            (Some(chord), None) => Some(chord),
-            (None, Some(shape)) => {
-                let shape = crate::shapes::shape_of(shape)?;
-                Some(
-                    shape
-                        .chord_cm(self.internal.volume)
-                        .map_err(PyValueError::new_err)?,
-                )
-            }
-            (None, None) => None,
-        };
-        let shielding = match chord {
-            Some(chord) => {
-                Some(yani_transmute::Shielding::new(chord).map_err(PyValueError::new_err)?)
-            }
-            None => None,
-        };
+        let shielding = shielding_request(
+            &self.internal,
+            self_shielding_chord,
+            self_shielding_shape.as_ref(),
+        )?;
 
         // Everything the solve needs, owned and free of the GIL, before it is
         // released. `sched` is a `PyRef` and must go first; the chain is three
@@ -1282,4 +1260,38 @@ impl PyMaterial {
             .map_err(PyValueError::new_err)?;
         Ok(PyMaterial { internal: result })
     }
+}
+
+/// The self-shielding request for `material`, from a chord or a shape.
+///
+/// A chord or a shape, never both: they would be two statements of the same
+/// length, and nothing good comes of deciding which one wins. A shape turns
+/// into a chord through the material's own volume, so one shape given to many
+/// materials gives each its own chord.
+pub(crate) fn shielding_request(
+    material: &yamc_materials::material::Material,
+    chord: Option<f64>,
+    shape: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<yani_transmute::Shielding>> {
+    let chord = match (chord, shape) {
+        (Some(_), Some(_)) => {
+            return Err(PyValueError::new_err(
+                "give self_shielding_chord or self_shielding_shape, not both: a shape \
+                 already determines the chord",
+            ))
+        }
+        (Some(chord), None) => Some(chord),
+        (None, Some(shape)) => {
+            let shape = crate::shapes::shape_of(shape)?;
+            Some(
+                shape
+                    .chord_cm(material.volume)
+                    .map_err(PyValueError::new_err)?,
+            )
+        }
+        (None, None) => None,
+    };
+    chord
+        .map(|c| yani_transmute::Shielding::new(c).map_err(PyValueError::new_err))
+        .transpose()
 }

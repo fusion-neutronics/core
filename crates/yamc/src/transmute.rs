@@ -489,7 +489,7 @@ impl Model {
         ));
 
         // Initialize results
-        let mut results = TransmutationResults::new(timesteps.to_vec(), source_rates.to_vec());
+        let mut results = TransmutationResults::new(timesteps.to_vec());
 
         // Track full compositions (including all chain products) across steps.
         // The cell material only has transport nuclides (with HDF5 data),
@@ -524,7 +524,7 @@ impl Model {
                 }
             }
 
-            results.add_initial(mat_id, initial_material.clone());
+            results.add_initial(mat_id, initial_material.clone(), source_rates.to_vec());
             full_compositions.insert(mat_id, initial_material);
         }
 

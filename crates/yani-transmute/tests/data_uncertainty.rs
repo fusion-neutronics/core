@@ -154,7 +154,11 @@ fn mn56_gets_a_nuclear_data_uncertainty() {
          mean {mean:e}, sigma {sigma:e}"
     );
 
-    let info = results.uncertainty_info.expect("info is reported");
+    let info = results
+        .uncertainty_info
+        .get(&0)
+        .cloned()
+        .expect("info is reported");
     assert!(
         info.perturbed.contains("Fe56"),
         "Fe56 carries the covariance, so it must be the perturbed nuclide"
@@ -213,7 +217,7 @@ fn nothing_is_allocated_when_uncertainty_is_not_requested() {
 
     let results = run(&mut material, None);
     assert!(results.uncertainty.is_empty(), "no ensemble is built");
-    assert!(results.uncertainty_info.is_none(), "no report is made");
+    assert!(results.uncertainty_info.is_empty(), "no report is made");
     assert_eq!(results.get_nuclide_uncertainty(id, "Mn56", 1), None);
 }
 
@@ -284,7 +288,11 @@ fn nuclides_without_covariance_are_named_in_the_report() {
             ..Default::default()
         }),
     );
-    let info = results.uncertainty_info.expect("info is reported");
+    let info = results
+        .uncertainty_info
+        .get(&0)
+        .cloned()
+        .expect("info is reported");
 
     assert!(
         !info.perturbed.is_empty(),
@@ -364,7 +372,11 @@ fn the_adaptive_driver_converges_and_says_so() {
             ..Default::default()
         }),
     );
-    let info = results.uncertainty_info.expect("info is reported");
+    let info = results
+        .uncertainty_info
+        .get(&0)
+        .cloned()
+        .expect("info is reported");
     assert!(
         info.samples >= 128,
         "at least the minimum: {}",
@@ -424,7 +436,7 @@ fn a_source_switched_off_contributes_nothing() {
         .expect("requested");
     assert_eq!(on, all, "an empty set is every source, not no source");
 
-    let info = with.uncertainty_info.expect("info");
+    let info = with.uncertainty_info.get(&0).cloned().expect("info");
     assert_eq!(info.sources, vec!["cross_sections".to_string()]);
 }
 
@@ -522,7 +534,7 @@ fn a_flux_error_moves_the_inventory_on_its_own() {
         100.0 * rel
     );
 
-    let info = results.uncertainty_info.expect("info");
+    let info = results.uncertainty_info.get(&0).cloned().expect("info");
     assert_eq!(info.spectra_with_flux_sigma, 1);
     assert_eq!(info.spectra_without_flux_sigma, 0);
     assert!(info.flux_bins_sampled > 0);
@@ -557,7 +569,7 @@ fn a_spectrum_without_an_error_is_reported_not_assumed_exact() {
     )
     .expect("transmute");
 
-    let info = results.uncertainty_info.clone().expect("info");
+    let info = results.uncertainty_info.get(&0).cloned().expect("info");
     assert_eq!(info.spectra_without_flux_sigma, 1);
     assert_eq!(info.spectra_with_flux_sigma, 0);
     assert!(
