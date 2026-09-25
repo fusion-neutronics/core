@@ -517,7 +517,7 @@ fn replica_chain(
         .filter_map(|name| {
             let mut cn = chain.get(name)?.clone();
             if let Some(t) = half_lives.get(name) {
-                cn.half_life = Some(*t);
+                crate::uncertainty::set_half_life(&mut cn, *t);
             }
             if let Some((seed, replica)) = decay_energy {
                 if let Some((total, parts)) =

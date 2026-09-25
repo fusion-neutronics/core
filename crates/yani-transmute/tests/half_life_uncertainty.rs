@@ -161,6 +161,28 @@ fn a_saturated_activity_is_insensitive_to_its_own_half_life() {
         lambda_t * RELATIVE_SIGMA
     );
 
+    // Mn56's photon lines are its activity times a per-decay probability, so
+    // at saturation they are as insensitive to its half-life as the activity
+    // is. The chain stores the lines per atom per second, which scales with
+    // the decay constant; a replica's half-life has to carry through to them.
+    assert!(
+        !chain["Mn56"].sources.is_empty(),
+        "the fixture carries Mn56's lines"
+    );
+    let lines = results
+        .photon_spectrum_uncertainty(0, 1, &chain)
+        .expect("volume is set")
+        .expect("uncertainty was asked for");
+    let strongest = lines
+        .iter()
+        .max_by(|a, b| a.estimate.nominal.total_cmp(&b.estimate.nominal))
+        .expect("Mn56 emits");
+    let line = relative(&strongest.estimate);
+    assert!(
+        line < 0.02 * RELATIVE_SIGMA,
+        "a saturated emitter's photon rate barely moves: {line:.2e}"
+    );
+
     // The initial iron is stable, so step 0 has no spread to show.
     let initial = results.activity_uncertainty(0, 0, &chain).unwrap().unwrap();
     assert_eq!(initial.std_dev, Some(0.0));
