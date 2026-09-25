@@ -91,6 +91,50 @@ pub fn decay_heat_by_nuclide(
     heats
 }
 
+/// One component of each nuclide's decay heat [W]: its activity times that
+/// component's mean energy (`component` indexes
+/// [`yani::DECAY_ENERGY_COMPONENTS`]: beta, gamma, alpha).
+///
+/// The components answer questions the total cannot: the gamma heat is what
+/// leaves a thin component and deposits in its neighbours, the beta and alpha
+/// heat stays where it is made, and each has its own uncertainty.
+///
+/// `Err` names every nuclide that makes decay heat but whose data carries no
+/// split, which a file written before the split does for every nuclide.
+/// Reporting a component heat without them would understate it by an unknown
+/// amount, so there is no partial answer.
+pub fn decay_heat_component_by_nuclide(
+    atom_densities: &HashMap<String, f64>,
+    volume: f64,
+    chain: &HashMap<String, ChainNuclide>,
+    component: usize,
+) -> Result<HashMap<String, f64>, Vec<String>> {
+    let mut heats = HashMap::new();
+    let mut missing = Vec::new();
+    for (nuclide, activity) in activity_by_nuclide(atom_densities, volume, chain) {
+        let Some(cn) = chain.get(&nuclide) else {
+            continue;
+        };
+        if cn.decay_energy <= 0.0 {
+            continue;
+        }
+        let Some(part) = cn.decay_energy_components.get(component).copied().flatten() else {
+            missing.push(nuclide);
+            continue;
+        };
+        let heat = activity * part.energy * EV_TO_J;
+        if heat > 0.0 {
+            heats.insert(nuclide, heat);
+        }
+    }
+    if missing.is_empty() {
+        Ok(heats)
+    } else {
+        missing.sort();
+        Err(missing)
+    }
+}
+
 /// Total decay heat of a material inventory [W]. See [`decay_heat_by_nuclide`].
 pub fn decay_heat_total(
     atom_densities: &HashMap<String, f64>,
@@ -170,6 +214,7 @@ mod tests {
             sources: vec![],
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
         }
     }
 
@@ -263,5 +308,43 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["Mn56"]
         );
+    }
+
+    /// The components of a split decay energy sum to the whole decay heat,
+    /// and each is its own share of it.
+    #[test]
+    fn component_heats_sum_to_the_decay_heat() {
+        let mut chain = test_chain();
+        let parts = [0.8e6, 1.6e6, 0.12264e6];
+        let mn56 = chain.get_mut("Mn56").unwrap();
+        mn56.decay_energy = parts.iter().sum();
+        for (slot, energy) in mn56.decay_energy_components.iter_mut().zip(parts) {
+            *slot = Some(yani::DecayEnergyComponent {
+                energy,
+                uncertainty: None,
+            });
+        }
+        let densities = HashMap::from([("Mn56".to_string(), 1.0e-12)]);
+        let whole = decay_heat_total(&densities, 2.0, &chain);
+        let by_part: Vec<f64> = (0..3)
+            .map(|c| total(&decay_heat_component_by_nuclide(&densities, 2.0, &chain, c).unwrap()))
+            .collect();
+        assert!((by_part.iter().sum::<f64>() - whole).abs() < 1e-12 * whole);
+        assert!((by_part[1] / whole - 1.6e6 / mn56_total(&chain)).abs() < 1e-12);
+    }
+
+    fn mn56_total(chain: &HashMap<String, ChainNuclide>) -> f64 {
+        chain["Mn56"].decay_energy
+    }
+
+    /// Data without the split cannot give a component, and says which
+    /// nuclides it could not split rather than reporting a partial heat.
+    #[test]
+    fn a_component_heat_without_the_split_names_what_is_missing() {
+        let chain = test_chain();
+        let densities = HashMap::from([("Mn56".to_string(), 1.0e-12), ("Fe56".to_string(), 1.0)]);
+        let err = decay_heat_component_by_nuclide(&densities, 2.0, &chain, 1).unwrap_err();
+        // Fe56 is stable and makes no heat, so only Mn56 is missing.
+        assert_eq!(err, vec!["Mn56".to_string()]);
     }
 }

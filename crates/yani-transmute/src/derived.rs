@@ -300,26 +300,34 @@ impl TransmutationResults {
                 .unwrap_or_default()
         };
         let half_lives = ensemble.half_lives();
+        let decay_energy_seed = ensemble.decay_energy_seed;
+        let no_half_lives = HashMap::new();
         let per_replica = inventories
             .into_iter()
             .enumerate()
-            .map(
-                |(k, inventory)| match half_lives.get(k).filter(|h| !h.is_empty()) {
-                    // A replica solved with perturbed half-lives is evaluated
-                    // with them too: its activity is lambda_k N_k, never
-                    // lambda N_k, or the cancellation that makes a saturated
-                    // activity insensitive to its own half-life is lost. So even
-                    // step 0 has a spread then, the initial radionuclides' own.
-                    Some(sampled) => {
-                        evaluate(inventory, volume, &replica_chain(chain, inventory, sampled))
-                    }
-                    // Without them every replica evaluates to exactly what the
-                    // nominal chain gives, which at step 0 is the nominal value
-                    // itself: a measured zero spread, not the unmeasured one an
-                    // empty ensemble would report.
-                    None => evaluate(inventory, volume, chain),
-                },
-            )
+            .map(|(k, inventory)| {
+                let sampled = half_lives.get(k).filter(|h| !h.is_empty());
+                if sampled.is_none() && decay_energy_seed.is_none() {
+                    // Every replica evaluates to exactly what the nominal
+                    // chain gives, which at step 0 is the nominal value
+                    // itself: a measured zero spread, not the unmeasured one
+                    // an empty ensemble would report.
+                    return evaluate(inventory, volume, chain);
+                }
+                // A replica solved with perturbed half-lives is evaluated with
+                // them too: its activity is lambda_k N_k, never lambda N_k, or
+                // the cancellation that makes a saturated activity insensitive
+                // to its own half-life is lost. So even step 0 has a spread
+                // then, the initial radionuclides' own. Its decay energies are
+                // drawn for it here, since they never entered the solve.
+                let chain_k = replica_chain(
+                    chain,
+                    inventory,
+                    sampled.unwrap_or(&no_half_lives),
+                    decay_energy_seed.map(|seed| (seed, k as u64)),
+                );
+                evaluate(inventory, volume, &chain_k)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Some((nominal, per_replica)))
     }
@@ -502,6 +510,7 @@ fn replica_chain(
     chain: &HashMap<String, ChainNuclide>,
     inventory: &HashMap<String, f64>,
     half_lives: &HashMap<String, f64>,
+    decay_energy: Option<(u64, u64)>,
 ) -> HashMap<String, ChainNuclide> {
     inventory
         .keys()
@@ -509,6 +518,14 @@ fn replica_chain(
             let mut cn = chain.get(name)?.clone();
             if let Some(t) = half_lives.get(name) {
                 crate::uncertainty::set_half_life(&mut cn, *t);
+            }
+            if let Some((seed, replica)) = decay_energy {
+                if let Some((total, parts)) =
+                    crate::uncertainty::sample_decay_energy(&cn, seed, replica)
+                {
+                    cn.decay_energy = total;
+                    cn.decay_energy_components = parts;
+                }
             }
             Some((name.clone(), cn))
         })
@@ -536,6 +553,7 @@ mod tests {
                 half_life_uncertainty: None,
                 decay_energy: 2_503_000.0,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
                 reactions: vec![],
                 decays: vec![],
                 fission_yields: None,
@@ -556,6 +574,7 @@ mod tests {
                 half_life_uncertainty: None,
                 decay_energy: 0.0,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
                 reactions: vec![],
                 decays: vec![],
                 fission_yields: None,
@@ -579,6 +598,7 @@ mod tests {
                         half_life_uncertainty: None,
                         decay_energy: 2_522_640.3,
                         decay_energy_uncertainty: None,
+                        decay_energy_components: Default::default(),
                         reactions: vec![],
                         decays: vec![],
                         fission_yields: None,

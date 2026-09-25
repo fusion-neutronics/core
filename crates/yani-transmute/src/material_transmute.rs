@@ -37,18 +37,18 @@ type PerSpectrum = (
 pub struct MultigroupSpectrum {
     pub boundaries: Vec<f64>,
     pub masses: Vec<f64>,
-    /// Per-group RELATIVE standard deviation of the flux, when the caller knows
-    /// it (issue #559).
+    /// The flux's stated error, when the caller knows it (issues #559, #140).
     ///
-    /// Relative rather than absolute because `masses` is a normalized shape and
-    /// the pulse `rate` carries the magnitude, so an absolute sigma would be in
-    /// units this struct no longer has. A relative one is invariant under that
-    /// split and is what the perturbation multiplies by.
+    /// Relative rather than absolute, as a per-group standard deviation or a
+    /// full covariance, because `masses` is a normalized shape and the pulse
+    /// `rate` carries the magnitude, so an absolute error would be in units
+    /// this struct no longer has. A relative one is invariant under that split
+    /// and is what the perturbation multiplies by.
     ///
     /// `None` is the common case and is NOT zero. A spectrum taken from a
     /// published reference set has no stated error, and that has to stay
     /// distinguishable from one measured to be exact.
-    pub relative_std_dev: Option<Vec<f64>>,
+    pub flux_error: Option<crate::flux_uncertainty::FluxError>,
 }
 
 /// One step of a standalone-transmutation timeline.
@@ -610,7 +610,7 @@ fn check_chain_drives(
 struct CollapseKey {
     boundaries: Vec<u64>,
     masses: Vec<u64>,
-    relative_std_dev: Option<Vec<u64>>,
+    flux_error: Option<Vec<u64>>,
     temperature: String,
     composition: Vec<(String, u64)>,
     data: Vec<(String, usize)>,
@@ -635,7 +635,7 @@ impl CollapseKey {
         CollapseKey {
             boundaries: bits(&s.boundaries),
             masses: bits(&s.masses),
-            relative_std_dev: s.relative_std_dev.as_deref().map(bits),
+            flux_error: s.flux_error.as_ref().map(|e| e.key_bits()),
             temperature: material.temperature().to_string(),
             composition,
             data,
@@ -1216,6 +1216,7 @@ fn run_replicas(
         _ => true,
     };
     let want_statistical = transport && request.wants(crate::uncertainty::Source::Statistical);
+    let statistical_in = statistical;
     let statistical = statistical.filter(|s| want_statistical && !s.rates.is_empty());
 
     // One fold and one factorization per distinct spectrum, not per replica.
@@ -1264,10 +1265,14 @@ fn run_replicas(
     // the report says so.
     let want_flux = !transport && request.wants(crate::uncertainty::Source::FluxSpectrum);
     let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
-    let mut per_group: Vec<Option<(Vec<f64>, crate::flux_uncertainty::PerGroupRates)>> =
-        Vec::with_capacity(per_spectrum.len());
+    let mut per_group: Vec<
+        Option<(
+            crate::flux_uncertainty::FluxError,
+            crate::flux_uncertainty::PerGroupRates,
+        )>,
+    > = Vec::with_capacity(per_spectrum.len());
     for (idx, spectrum) in spectra.iter().enumerate() {
-        match spectrum.relative_std_dev.as_ref().filter(|_| want_flux) {
+        match spectrum.flux_error.as_ref().filter(|_| want_flux) {
             Some(relative) => {
                 flux_coverage.spectra_with_sigma += 1;
                 per_group.push(Some((
@@ -1330,10 +1335,45 @@ fn run_replicas(
         None
     };
 
+    // Decay energies: no solve reads them, so they are drawn where decay heat
+    // is evaluated from each replica. Here only who has a sigma to draw from.
+    let want_decay_energy = request.wants(crate::uncertainty::Source::DecayEnergy);
+    let (decay_energy_perturbed, no_decay_energy_sigma) = if want_decay_energy {
+        let seeds: Vec<&str> = initial
+            .nuclides
+            .keys()
+            .chain(initial.nuclide_data.keys())
+            .map(|s| s.as_str())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let mut with = std::collections::BTreeSet::new();
+        let mut without = std::collections::BTreeSet::new();
+        for name in yani::reachable_nuclides(chain, &seeds) {
+            let Some(cn) = chain.get(&name) else { continue };
+            if cn.half_life.is_none_or(|t| t <= 0.0) || cn.decay_energy <= 0.0 {
+                continue;
+            }
+            if crate::uncertainty::has_decay_energy_sigma(cn) {
+                with.insert(name);
+            } else {
+                without.insert(name);
+            }
+        }
+        (with, without)
+    } else {
+        Default::default()
+    };
+
     let mut info = Info::from_fold(&coverage, &clipping);
     if half_life.is_none() {
         info.not_perturbed.insert(0, "half-life".to_string());
     }
+    if !want_decay_energy {
+        info.not_perturbed.insert(0, "decay energy".to_string());
+    }
+    info.decay_energies_perturbed = decay_energy_perturbed.clone();
+    info.no_decay_energy_uncertainty = no_decay_energy_sigma;
     if let Some(h) = &half_life {
         info.half_lives_perturbed = h.candidates.iter().map(|(n, _, _)| n.clone()).collect();
         info.no_half_life_uncertainty = h.without.clone();
@@ -1352,6 +1392,9 @@ fn run_replicas(
         info.statistical_rates = st.rates.len();
     }
     let mut ensemble = Ensemble::new(steps.len());
+    if !decay_energy_perturbed.is_empty() {
+        ensemble.decay_energy_seed = Some(request.seed);
+    }
 
     // Nothing to perturb means nothing to sample. The ensemble stays empty and
     // every sigma reads zero, with `info` saying why: no covariance data, not a
@@ -1364,6 +1407,23 @@ fn run_replicas(
     {
         info.converged = true;
         info.add_flux_coverage(&flux_coverage);
+        // Decay energies alone leave every inventory at nominal, but the
+        // decay heat of each still moves, so the replicas are the nominal
+        // inventory repeated: no solve beyond the one.
+        if !decay_energy_perturbed.is_empty() {
+            let nominal = densities_of(
+                &replica_steps(initial, steps, per_spectrum, chain, parts, stepper)
+                    .map_err(|e| e.to_string())?,
+            );
+            for _ in 0..request.samples.unwrap_or(MIN_SAMPLES) {
+                ensemble.push_with_half_lives(nominal.clone(), HashMap::new());
+            }
+            ensemble.fold_absences();
+            info.samples = ensemble.replicas();
+        }
+        if request.attribution {
+            ensemble.attribution = Some(Default::default());
+        }
         return Ok((ensemble, info));
     }
 
@@ -1532,7 +1592,299 @@ fn run_replicas(
     if target.is_some() {
         info.converged = true;
     }
+
+    if request.attribution {
+        let applied: Vec<crate::uncertainty::Source> = info
+            .sources
+            .iter()
+            .filter_map(|n| crate::uncertainty::Source::parse(n).ok())
+            .collect();
+        let mut by_source = std::collections::BTreeMap::new();
+        if applied.len() == 1 {
+            by_source.insert(
+                info.sources[0].clone(),
+                variances_of(&ensemble, steps.len()),
+            );
+        } else {
+            for &source in &applied {
+                let alone = DataUncertainty {
+                    seed: request.seed,
+                    samples: request.samples,
+                    sources: vec![source],
+                    attribution: false,
+                };
+                let (sub, _) = run_replicas(
+                    initial,
+                    spectra,
+                    steps,
+                    per_spectrum,
+                    chain,
+                    parts,
+                    stepper,
+                    &alone,
+                    shielding,
+                    statistical_in,
+                )?;
+                by_source.insert(source.name().to_string(), variances_of(&sub, steps.len()));
+            }
+        }
+        let contributors = first_order_contributors(
+            initial,
+            steps,
+            per_spectrum,
+            chain,
+            parts,
+            stepper,
+            applied
+                .contains(&crate::uncertainty::Source::CrossSections)
+                .then_some(samplers.as_slice()),
+            half_life.as_ref(),
+        )?;
+        ensemble.attribution = Some(crate::uncertainty::Attribution {
+            by_source,
+            contributors,
+        });
+    }
     Ok((ensemble, info))
+}
+
+/// Each step's per-nuclide variance in an ensemble.
+fn variances_of(ensemble: &Ensemble, n_steps: usize) -> Vec<HashMap<String, f64>> {
+    (0..n_steps)
+        .map(|step| {
+            ensemble
+                .std_dev_at(step)
+                .into_iter()
+                .filter(|(_, s)| *s > 0.0)
+                .map(|(n, s)| (n, s * s))
+                .collect()
+        })
+        .collect()
+}
+
+/// Relative step for the first-order sensitivities. Small enough that the
+/// response is linear to well within what a variance share is read to, large
+/// enough to stand clear of the solver's own rounding.
+const SENSITIVITY_STEP: f64 = 1.0e-3;
+
+/// First-order contributions to the inventory variance, one deterministic
+/// solve per contributor.
+///
+/// Cross sections: each nuclide's evaluation (its channels with their
+/// correlations, `w^T w` with `w = L^T s` over the factor its sampler uses)
+/// and each channel alone. Half-lives: each nuclide the solve populates, as
+/// `(s sigma_T / T)^2`. A half-life of a nuclide that never appears in the
+/// inventory cannot move it, which keeps this to the nuclides that matter
+/// even in a fission chain.
+#[allow(clippy::too_many_arguments)]
+fn first_order_contributors(
+    initial: &Material,
+    steps: &[TransmuteStep],
+    per_spectrum: &[PerSpectrum],
+    chain: &Arc<HashMap<String, ChainNuclide>>,
+    parts: yani::ChainParts,
+    stepper: &ForwardEulerStepper,
+    samplers: Option<&[Sampler]>,
+    half_life: Option<&HalfLifeSampling>,
+) -> Result<Vec<crate::uncertainty::Contributor>, Box<dyn std::error::Error>> {
+    use crate::uncertainty::Contributor;
+    let solve = |ps: &[PerSpectrum], base: &Arc<HashMap<String, ChainNuclide>>| {
+        replica_steps(initial, steps, ps, base, parts, stepper)
+            .map(|m| densities_of(&m))
+            .map_err(|e| e.to_string())
+    };
+    let nominal = solve(per_spectrum, chain)?;
+    // (N' - N) / h, per step and nuclide, over the union of both inventories.
+    let sensitivity = |perturbed: &[HashMap<String, f64>]| -> Vec<HashMap<String, f64>> {
+        nominal
+            .iter()
+            .zip(perturbed)
+            .map(|(a, b)| {
+                a.keys()
+                    .chain(b.keys())
+                    .map(|n| {
+                        let d = b.get(n).copied().unwrap_or(0.0) - a.get(n).copied().unwrap_or(0.0);
+                        (n.clone(), d / SENSITIVITY_STEP)
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+
+    let mut out: Vec<Contributor> = Vec::new();
+
+    // Cross sections: one solve per (spectrum, nuclide, channel).
+    if let Some(samplers) = samplers {
+        type Job = (usize, String, usize, String);
+        let mut jobs: Vec<Job> = Vec::new();
+        for (a, sampler) in samplers.iter().enumerate() {
+            for (name, kinds, _) in sampler.factors() {
+                for (i, kind) in kinds.iter().enumerate() {
+                    let rate = per_spectrum[a].0.get(name).and_then(|r| r.get(kind));
+                    if rate.is_some_and(|r| *r > 0.0) {
+                        jobs.push((a, name.clone(), i, kind.clone()));
+                    }
+                }
+            }
+        }
+        let run = |(a, name, _, kind): &Job| -> Result<Vec<HashMap<String, f64>>, String> {
+            let mut ps: Vec<PerSpectrum> = per_spectrum.to_vec();
+            if let Some(r) = ps[*a].0.get_mut(name).and_then(|r| r.get_mut(kind)) {
+                *r *= 1.0 + SENSITIVITY_STEP;
+            }
+            Ok(sensitivity(&solve(&ps, chain)?))
+        };
+        let results: Vec<Result<Vec<HashMap<String, f64>>, String>> = {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use rayon::prelude::*;
+                jobs.par_iter().map(run).collect()
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                jobs.iter().map(run).collect()
+            }
+        };
+        // w[nuclide or (nuclide, kind)][step][output] -> vector over the
+        // factor's columns, accumulated over spectra (they share the deviate).
+        type PerStep = Vec<HashMap<String, Vec<f64>>>;
+        let mut block: HashMap<String, PerStep> = HashMap::new();
+        let mut channel: HashMap<(String, String), PerStep> = HashMap::new();
+        for ((a, name, i, kind), sens) in jobs.iter().zip(results) {
+            let sens = sens?;
+            let (_, kinds, l) = samplers[*a]
+                .factors()
+                .find(|(n, _, _)| *n == name)
+                .expect("the job came from this factor");
+            let n = kinds.len();
+            let row = &l[i * n..(i + 1) * n];
+            for target in [
+                block
+                    .entry(name.clone())
+                    .or_insert_with(|| vec![HashMap::new(); steps.len()]),
+                channel
+                    .entry((name.clone(), kind.clone()))
+                    .or_insert_with(|| vec![HashMap::new(); steps.len()]),
+            ] {
+                for (step, per) in sens.iter().enumerate() {
+                    for (out_name, s) in per {
+                        if *s == 0.0 {
+                            continue;
+                        }
+                        let w = target[step]
+                            .entry(out_name.clone())
+                            .or_insert_with(|| vec![0.0; n]);
+                        if w.len() < n {
+                            w.resize(n, 0.0);
+                        }
+                        for (wj, lj) in w.iter_mut().zip(row) {
+                            *wj += s * lj;
+                        }
+                    }
+                }
+            }
+        }
+        let collapse = |w: PerStep| -> Vec<HashMap<String, f64>> {
+            w.into_iter()
+                .map(|per| {
+                    per.into_iter()
+                        .map(|(k, v)| (k, v.iter().map(|x| x * x).sum::<f64>()))
+                        .filter(|(_, v)| *v > 0.0)
+                        .collect()
+                })
+                .collect()
+        };
+        for (name, w) in block {
+            out.push(Contributor {
+                source: "cross_sections".to_string(),
+                nuclide: name,
+                reaction: None,
+                variance: collapse(w),
+            });
+        }
+        for ((name, kind), w) in channel {
+            out.push(Contributor {
+                source: "cross_sections".to_string(),
+                nuclide: name,
+                reaction: Some(kind),
+                variance: collapse(w),
+            });
+        }
+    }
+
+    // Half-lives: one solve per populated nuclide with a stated sigma.
+    if let Some(h) = half_life {
+        let populated: HashSet<&str> = nominal
+            .iter()
+            .flat_map(|m| m.keys())
+            .chain(initial.nuclides.keys())
+            .map(|s| s.as_str())
+            .collect();
+        let jobs: Vec<&(String, f64, f64)> = h
+            .candidates
+            .iter()
+            .filter(|(n, _, _)| populated.contains(n.as_str()))
+            .collect();
+        let run =
+            |(name, t, _): &&(String, f64, f64)| -> Result<Vec<HashMap<String, f64>>, String> {
+                let sampled = HashMap::from([(name.clone(), t * (1.0 + SENSITIVITY_STEP))]);
+                let base = Arc::new(crate::uncertainty::with_half_lives(&h.base, &sampled));
+                let ps: Vec<PerSpectrum> = per_spectrum
+                    .iter()
+                    .zip(&h.folded)
+                    .map(|((r, w, _), folded)| {
+                        (
+                            r.clone(),
+                            w.clone(),
+                            Arc::new(crate::uncertainty::with_half_lives(folded, &sampled)),
+                        )
+                    })
+                    .collect();
+                Ok(sensitivity(&solve(&ps, &base)?))
+            };
+        let results: Vec<Result<Vec<HashMap<String, f64>>, String>> = {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use rayon::prelude::*;
+                jobs.par_iter().map(run).collect()
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                jobs.iter().map(run).collect()
+            }
+        };
+        for ((name, t, sigma), sens) in jobs.into_iter().zip(results) {
+            let rel = sigma / t;
+            let variance = sens?
+                .into_iter()
+                .map(|per| {
+                    per.into_iter()
+                        .map(|(k, s)| (k, (s * rel) * (s * rel)))
+                        .filter(|(_, v)| *v > 0.0)
+                        .collect()
+                })
+                .collect();
+            out.push(Contributor {
+                source: "half_life".to_string(),
+                nuclide: name.clone(),
+                reaction: None,
+                variance,
+            });
+        }
+    }
+
+    // Largest reach first: by the variance summed over the last step.
+    let reach = |c: &Contributor| -> f64 { c.variance.last().map_or(0.0, |m| m.values().sum()) };
+    out.retain(|c| c.variance.iter().any(|m| !m.is_empty()));
+    out.sort_by(|a, b| {
+        reach(b)
+            .partial_cmp(&reach(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                (&a.source, &a.nuclide, &a.reaction).cmp(&(&b.source, &b.nuclide, &b.reaction))
+            })
+    });
+    Ok(out)
 }
 
 /// Merge one spectrum's coverage into the run's.
@@ -2062,6 +2414,7 @@ mod tests {
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
         let chain = Arc::new(map);
@@ -2081,7 +2434,7 @@ mod tests {
         let spectrum = MultigroupSpectrum {
             boundaries: vec![1.0, 1.0e8],
             masses: vec![1.0],
-            relative_std_dev: None,
+            flux_error: None,
         };
         let mut rates: ReactionRates = HashMap::new();
         let folded =
@@ -2122,7 +2475,7 @@ mod tests {
         let spectrum = MultigroupSpectrum {
             boundaries: vec![1.0, 1.0e8],
             masses: vec![1.0],
-            relative_std_dev: None,
+            flux_error: None,
         };
         let fr =
             fold_state_fractions(&dummy_material(), "X", "(n,2n)", &curves, &spectrum).unwrap();
@@ -2140,7 +2493,7 @@ mod tests {
         let spectrum = MultigroupSpectrum {
             boundaries: vec![1.0, 1.0e8],
             masses: vec![1.0],
-            relative_std_dev: None,
+            flux_error: None,
         };
         let mut rates: ReactionRates = HashMap::new();
         let folded =
@@ -2178,6 +2531,7 @@ mod tests {
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
         Arc::new(map)
@@ -2205,6 +2559,7 @@ mod tests {
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
         let chain = Arc::new(map);

@@ -498,7 +498,7 @@ fn parse_spectra(json: &str) -> Result<Vec<MultigroupSpectrum>, String> {
         out.push(MultigroupSpectrum {
             boundaries,
             masses: values.iter().map(|v| v / total).collect(),
-            relative_std_dev: None,
+            flux_error: None,
         });
     }
     Ok(out)

@@ -138,6 +138,21 @@ pub struct CollapseInputs {
     pub shielding: Option<crate::self_shielding::Shielding>,
 }
 
+/// Where one nuclide's variance at one step comes from.
+///
+/// `variance` is the resampled total. `by_source` is each source alone, also
+/// resampled, and `unattributed` what their sum leaves: interaction between
+/// sources and sampling noise, small when the attribution is sound.
+/// `contributors` is first order, `(source, nuclide, reaction, variance)`,
+/// largest reach first; see [`crate::uncertainty::Attribution`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UncertaintyBreakdown {
+    pub variance: f64,
+    pub by_source: std::collections::BTreeMap<String, f64>,
+    pub unattributed: f64,
+    pub contributors: Vec<(String, String, Option<String>, f64)>,
+}
+
 /// One channel's reaction rate, resolved onto the spectrum's own groups.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RateSpectrum {
@@ -281,6 +296,55 @@ impl TransmutationResults {
             .entry(material_id)
             .or_default()
             .push(rates);
+    }
+
+    /// Where one nuclide's uncertainty at `step` comes from, when the run
+    /// asked for attribution.
+    ///
+    /// `step` is indexed like [`Self::get_material`]: 0 is the initial
+    /// composition, which carries none. `None` when the run did not ask, or
+    /// the material or nuclide is not in it.
+    pub fn uncertainty_breakdown(
+        &self,
+        material_id: u32,
+        nuclide: &str,
+        step: usize,
+    ) -> Option<UncertaintyBreakdown> {
+        let ensemble = self.uncertainty.get(&material_id)?;
+        let attribution = ensemble.attribution.as_ref()?;
+        if step == 0 {
+            return Some(UncertaintyBreakdown::default());
+        }
+        let i = step - 1;
+        let sigma = ensemble.std_dev_at(i).get(nuclide).copied().unwrap_or(0.0);
+        let variance = sigma * sigma;
+        let by_source: std::collections::BTreeMap<String, f64> = attribution
+            .by_source
+            .iter()
+            .map(|(name, per_step)| {
+                let v = per_step
+                    .get(i)
+                    .and_then(|m| m.get(nuclide))
+                    .copied()
+                    .unwrap_or(0.0);
+                (name.clone(), v)
+            })
+            .collect();
+        let unattributed = variance - by_source.values().sum::<f64>();
+        let contributors = attribution
+            .contributors
+            .iter()
+            .filter_map(|c| {
+                let v = *c.variance.get(i)?.get(nuclide)?;
+                Some((c.source.clone(), c.nuclide.clone(), c.reaction.clone(), v))
+            })
+            .collect();
+        Some(UncertaintyBreakdown {
+            variance,
+            by_source,
+            unattributed,
+            contributors,
+        })
     }
 
     /// Per-edge reaction rates for one material over one step.
@@ -775,6 +839,7 @@ mod tests {
                     half_life_uncertainty: None,
                     decay_energy: 0.0,
                     decay_energy_uncertainty: None,
+                    decay_energy_components: Default::default(),
                     reactions,
                     decays,
                     fission_yields: None,

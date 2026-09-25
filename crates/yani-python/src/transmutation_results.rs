@@ -217,6 +217,51 @@ impl PyTransmutationResults {
         self.inner.get_source_rates(material_id).map(|r| r.to_vec())
     }
 
+    /// Where a nuclide's uncertainty at one step comes from.
+    ///
+    /// Present when the run was asked for it with
+    /// ``DataUncertainty(attribution=True)``, and ``None`` otherwise. A dict:
+    ///
+    /// - ``variance``: the total, resampled, the square of
+    ///   ``get_nuclide_uncertainty``;
+    /// - ``by_source``: each source alone, resampled the same way, so this
+    ///   says how much is statistical and how much is each kind of nuclear
+    ///   data. The sources are independent and these sum to the total;
+    /// - ``unattributed``: what that sum leaves, interaction and sampling
+    ///   noise, small when the attribution holds;
+    /// - ``contributors``: first order, a list of ``(source, nuclide,
+    ///   reaction, variance)``, largest reach first. Within the cross sections
+    ///   a nuclide's whole evaluation has ``reaction`` of ``None`` and each
+    ///   channel alone names it; a half-life has ``None``. It says which
+    ///   evaluation to look at; the total is the resampled one.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     nuclide: Nuclide name.
+    ///     step: As in ``get_nuclide_uncertainty``: 0 is the initial
+    ///         composition, which carries none.
+    fn get_uncertainty_breakdown<'py>(
+        &self,
+        py: Python<'py>,
+        material_id: u32,
+        nuclide: &str,
+        step: usize,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(b) = self.inner.uncertainty_breakdown(material_id, nuclide, step) else {
+            return Ok(None);
+        };
+        let d = PyDict::new(py);
+        d.set_item("variance", b.variance)?;
+        let by = PyDict::new(py);
+        for (name, v) in &b.by_source {
+            by.set_item(name, v)?;
+        }
+        d.set_item("by_source", by)?;
+        d.set_item("unattributed", b.unattributed)?;
+        d.set_item("contributors", b.contributors)?;
+        Ok(Some(d))
+    }
+
     /// The statistical uncertainty of each transport-tallied reaction rate
     /// at one step.
     ///

@@ -307,6 +307,7 @@ mod tests {
                 sources: vec![],
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
 
@@ -329,6 +330,7 @@ mod tests {
                 }],
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
 
@@ -350,6 +352,7 @@ mod tests {
                 sources: vec![],
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
 
@@ -372,6 +375,7 @@ mod tests {
                 }],
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
 
@@ -388,6 +392,7 @@ mod tests {
                 sources: vec![],
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
 
@@ -669,6 +674,7 @@ mod tests {
                 sources: vec![],
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
         c.insert(
@@ -688,6 +694,7 @@ mod tests {
                 sources: vec![],
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
         c.insert(
@@ -708,6 +715,7 @@ mod tests {
                 }],
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
         Arc::new(c)

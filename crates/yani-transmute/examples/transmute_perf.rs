@@ -127,7 +127,9 @@ fn run(
     let spectra = vec![MultigroupSpectrum {
         boundaries: boundaries.to_vec(),
         masses: flux.iter().map(|f| f / total).collect(),
-        relative_std_dev: Some(vec![0.05; flux.len()]),
+        flux_error: Some(yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(
+            vec![0.05; flux.len()],
+        )),
     }];
     let steps = vec![
         TransmuteStep {

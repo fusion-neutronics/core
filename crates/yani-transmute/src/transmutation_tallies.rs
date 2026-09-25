@@ -826,7 +826,7 @@ impl TransmutationTallies {
         Some(crate::MultigroupSpectrum {
             boundaries,
             masses: s0,
-            relative_std_dev: None,
+            flux_error: None,
         })
     }
 
@@ -1630,6 +1630,7 @@ mod tests {
                     sources: Vec::new(),
                     half_life_uncertainty: None,
                     decay_energy_uncertainty: None,
+                    decay_energy_components: Default::default(),
                 },
             );
         }
@@ -1948,6 +1949,7 @@ mod tests {
                     sources: Vec::new(),
                     half_life_uncertainty: None,
                     decay_energy_uncertainty: None,
+                    decay_energy_components: Default::default(),
                 },
             );
         }

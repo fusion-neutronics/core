@@ -78,6 +78,7 @@ fn stable(name: &str) -> ChainNuclide {
         sources: Vec::new(),
         half_life_uncertainty: None,
         decay_energy_uncertainty: None,
+        decay_energy_components: Default::default(),
     }
 }
 
@@ -109,6 +110,7 @@ fn synthetic_chain() -> Arc<HashMap<String, ChainNuclide>> {
             sources: Vec::new(),
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
         },
     );
     map.insert("Li7".to_string(), stable("Li7"));
@@ -281,6 +283,7 @@ fn coupled_branching_folds_parents_outside_material() {
             sources: Vec::new(),
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
         },
     );
     // Li7 has a grafted (n,n') metastable channel; its production rate can
@@ -303,6 +306,7 @@ fn coupled_branching_folds_parents_outside_material() {
             sources: Vec::new(),
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
         },
     );
     map.insert("Li7_m1".to_string(), stable("Li7_m1"));

@@ -131,7 +131,7 @@ fn spectra() -> Vec<MultigroupSpectrum> {
     vec![MultigroupSpectrum {
         boundaries: GROUPS.to_vec(),
         masses: FLUX.iter().map(|f| f / total).collect(),
-        relative_std_dev: None,
+        flux_error: None,
     }]
 }
 
@@ -185,6 +185,7 @@ fn tritium_production_carries_a_nuclear_data_uncertainty() {
             seed: 20260825,
             samples: Some(256),
             sources: vec![Source::CrossSections],
+            attribution: false,
         }),
     );
 
@@ -249,6 +250,7 @@ fn the_uncovered_blanket_nuclides_are_named() {
             seed: 1,
             samples: Some(32),
             sources: vec![Source::CrossSections],
+            attribution: false,
         }),
     );
     let info = results.uncertainty_info.get(&0).cloned().expect("info");
@@ -296,6 +298,7 @@ fn the_baseline_row_has_no_uncertainty_and_says_why() {
             seed: 2,
             samples: Some(32),
             sources: vec![Source::CrossSections],
+            attribution: false,
         }),
     );
     assert_eq!(
@@ -325,7 +328,9 @@ fn flux_and_cross_sections_combine() {
     let with_sigma = vec![MultigroupSpectrum {
         boundaries: GROUPS.to_vec(),
         masses: FLUX.iter().map(|f| f / total).collect(),
-        relative_std_dev: Some(vec![0.05; FLUX.len()]),
+        flux_error: Some(yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(
+            vec![0.05; FLUX.len()],
+        )),
     }];
 
     let mut sigma_of = |sources: Vec<Source>| {
@@ -340,6 +345,7 @@ fn flux_and_cross_sections_combine() {
                 seed: 20260826,
                 samples: Some(256),
                 sources,
+                attribution: false,
             }),
         )
         .expect("transmute");

@@ -77,6 +77,7 @@ fn stable(name: &str) -> ChainNuclide {
         sources: Vec::new(),
         half_life_uncertainty: None,
         decay_energy_uncertainty: None,
+        decay_energy_components: Default::default(),
     }
 }
 
@@ -102,6 +103,7 @@ fn li6_chain() -> HashMap<String, ChainNuclide> {
             sources: Vec::new(),
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
         },
     );
     for name in ["Li7", "He4", "He6", "He5", "Li5"] {

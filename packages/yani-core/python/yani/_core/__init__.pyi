@@ -118,7 +118,12 @@ class DataUncertainty:
       reaction rates, from their per-history covariance. It applies to
       ``Model.simulate_transmutation``, as ``"flux_spectrum"`` applies only to
       ``Material.transmute``; each call ignores the other's, and the report's
-      ``sources`` lists what actually applied.
+      ``sources`` lists what actually applied;
+    - ``"decay_energy"``: each nuclide's mean decay energy, from the sigma the
+      decay data gives each recoverable-heat component (beta, gamma, alpha),
+      or the total's where it gives no split. It moves decay heat only: a decay
+      energy never enters the solve, so the inventory and activity are
+      untouched.
     
     Decay branching ratios, fission yields and the isomeric-branching overlay
     are held at their evaluated values; they carry uncertainties of their own
@@ -146,6 +151,11 @@ class DataUncertainty:
             being ignored. A source that has not landed yet must not look like
             one that contributed nothing. ``DataUncertainty.available_sources()``
             lists what there is.
+        attribution (bool): Also say where the uncertainty comes from, read
+            with ``TransmutationResults.get_uncertainty_breakdown``. Off by
+            default because it costs further solves: one ensemble per source,
+            each source alone, and one deterministic solve per contributor. It
+            changes none of the numbers the run otherwise reports.
     
     Examples:
         >>> results = iron.transmute(
@@ -162,8 +172,13 @@ class DataUncertainty:
     @property
     def samples(self) -> typing.Optional[builtins.int]: ...
     @property
+    def attribution(self) -> builtins.bool:
+        r"""
+        Whether the run also says where the uncertainty comes from.
+        """
+    @property
     def sources(self) -> builtins.list[builtins.str]: ...
-    def __new__(cls, seed: builtins.int = 1, samples: typing.Optional[builtins.int] = None, sources: typing.Optional[typing.Sequence[builtins.str]] = None) -> DataUncertainty: ...
+    def __new__(cls, seed: builtins.int = 1, samples: typing.Optional[builtins.int] = None, sources: typing.Optional[typing.Sequence[builtins.str]] = None, attribution: builtins.bool = False) -> DataUncertainty: ...
     @staticmethod
     def available_sources() -> builtins.list[builtins.str]:
         r"""
@@ -674,7 +689,7 @@ class Material:
             Bq/cm³ when it is ``"cm3"`` and Bq/g when it is ``"g"``. The unit of
             a ``by_nuclide`` dict's values is the same.
         """
-    def decay_heat(self, *, by_nuclide: builtins.bool = False, per: typing.Optional[builtins.str] = None) -> typing.Any:
+    def decay_heat(self, *, by_nuclide: builtins.bool = False, per: typing.Optional[builtins.str] = None, component: typing.Optional[builtins.str] = None) -> typing.Any:
         r"""
         Calculate decay heat from the current material inventory.
         
@@ -688,6 +703,14 @@ class Material:
             per (str | None): ``None`` (default) for the total, which needs
                 ``volume``; ``"cm3"`` for W/cm³, which needs nothing; ``"g"``
                 for W/g, which needs only ``density``.
+            component (str | None): ``None`` (default) for the whole decay heat;
+                ``"beta"``, ``"gamma"`` or ``"alpha"`` for one recoverable-heat
+                component alone (the ENDF MT=457 light-particle, electromagnetic
+                and heavy-particle energies). The gamma heat is the part that
+                leaves a thin component; the beta and alpha heat stays put.
+                Raises if a nuclide making decay heat carries no split, which
+                data converted before the split does, rather than understating
+                the component by its share.
         
         Returns:
             float | dict[str, float]: Decay heat, in W when ``per`` is ``None``,
@@ -1516,6 +1539,11 @@ class Pulse:
         The per-bin flux standard deviation, or ``None`` if none was given.
         """
     @property
+    def flux_covariance(self) -> typing.Optional[builtins.list[builtins.list[builtins.float]]]:
+        r"""
+        The flux covariance, or ``None`` if none was given.
+        """
+    @property
     def rate(self) -> builtins.float:
         r"""
         Source emission rate in particles/second.
@@ -1525,7 +1553,7 @@ class Pulse:
         r"""
         Pulse duration in seconds.
         """
-    def __new__(cls, rate: builtins.float, duration: typing.Any, source: typing.Optional[typing.Any] = None, flux_std_dev: typing.Optional[typing.Sequence[builtins.float]] = None) -> Pulse:
+    def __new__(cls, rate: builtins.float, duration: typing.Any, source: typing.Optional[typing.Any] = None, flux_std_dev: typing.Optional[typing.Sequence[builtins.float]] = None, flux_covariance: typing.Optional[typing.Sequence[typing.Sequence[builtins.float]]] = None) -> Pulse:
         r"""
         Create an irradiation pulse.
         
@@ -1551,6 +1579,19 @@ class Pulse:
                 contributes nothing and says so in
                 ``data_uncertainty_info["spectra_without_flux_sigma"]`` rather
                 than reading as a flux known exactly.
+        
+                Treats the bins as independent. A spectrum from a Monte Carlo
+                tally is not: its bins are scored by the same histories and
+                move together, and a per-bin sigma then understates the error
+                of every rate that sums over a band. Give ``flux_covariance``
+                instead when the correlations are known.
+            flux_covariance: The full covariance of the ``Histogram`` values, a
+                square matrix (nested lists or a 2-D array) with one row and
+                column per bin, in the square of their units. The alternative
+                to ``flux_std_dev``, whose diagonal it contains: give one or
+                the other. It must be symmetric and positive semi-definite, and
+                is checked. Each replica's flux perturbation is drawn through
+                its factor, so correlated bins move together.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -1909,6 +1950,32 @@ class TransmutationResults:
         
         Returns:
             List of rates, or None if the material is not in the results.
+        """
+    def get_uncertainty_breakdown(self, material_id: builtins.int, nuclide: builtins.str, step: builtins.int) -> typing.Optional[dict]:
+        r"""
+        Where a nuclide's uncertainty at one step comes from.
+        
+        Present when the run was asked for it with
+        ``DataUncertainty(attribution=True)``, and ``None`` otherwise. A dict:
+        
+        - ``variance``: the total, resampled, the square of
+          ``get_nuclide_uncertainty``;
+        - ``by_source``: each source alone, resampled the same way, so this
+          says how much is statistical and how much is each kind of nuclear
+          data. The sources are independent and these sum to the total;
+        - ``unattributed``: what that sum leaves, interaction and sampling
+          noise, small when the attribution holds;
+        - ``contributors``: first order, a list of ``(source, nuclide,
+          reaction, variance)``, largest reach first. Within the cross sections
+          a nuclide's whole evaluation has ``reaction`` of ``None`` and each
+          channel alone names it; a half-life has ``None``. It says which
+          evaluation to look at; the total is the resampled one.
+        
+        Args:
+            material_id: Material ID number.
+            nuclide: Nuclide name.
+            step: As in ``get_nuclide_uncertainty``: 0 is the initial
+                composition, which carries none.
         """
     def get_reaction_rate_uncertainty(self, material_id: builtins.int, step: builtins.int) -> typing.Optional[builtins.list[tuple[builtins.str, builtins.str, typing.Optional[builtins.str], builtins.float, builtins.float]]]:
         r"""

@@ -127,7 +127,9 @@ pub use history_statistics::{HistoryCovariance, RateCovariance, RateLabel, Yield
 pub use multigroup::{
     compute_multigroup_reaction_rates, reaction_rate_spectrum, scale_rates, EnergyGroups,
 };
-pub use results::{CollapseInputs, CollapseReuse, RateSpectrum, TransmutationResults};
+pub use results::{
+    CollapseInputs, CollapseReuse, RateSpectrum, TransmutationResults, UncertaintyBreakdown,
+};
 pub use schedule::{duration_to_seconds, Schedule, ScheduleStep};
 pub use self_shielding::{Shape, Shielding, ShieldingInfo};
 pub use transmutation::TransmutationDriver;
