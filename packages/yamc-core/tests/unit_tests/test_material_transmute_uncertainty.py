@@ -653,3 +653,20 @@ def test_the_breakdown_says_which_source_carries_the_variance():
     assert b["unattributed"] == 0.0
     assert isinstance(b["contributors"], list)
     assert results.get_uncertainty_breakdown(mid, "Mn56", 0)["variance"] == 0.0
+
+
+# --- decay energy (issue #140, item 2) -----------------------------------------
+#
+# The component split and its uncertainty are pinned in Rust
+# (yani-convert/tests/round_trip.rs, yani-decay, and
+# yani-transmute/tests/decay_energy_uncertainty.rs). Here: the source is
+# offered, and a component heat refuses data that carries no split.
+
+def test_decay_energy_is_an_available_source():
+    assert "decay_energy" in yamc.DataUncertainty.available_sources()
+
+
+def test_a_component_is_named_or_refused():
+    iron = _iron()
+    with pytest.raises(ValueError, match="component must be one of"):
+        iron.decay_heat(component="neutrino")

@@ -12,8 +12,8 @@ pub mod reactions;
 pub use chain::{
     fission_yield_interp_weights, load_chain, load_chain_parts, populated_nuclides,
     reachable_nuclides, reduce_chain, BranchCurve, BranchQuantity, BranchTable, ChainNuclide,
-    ChainParts, ChainReaction, DecaySource, DecaySourceDistribution, FissionYield, FissionYieldSet,
-    LoadedChain,
+    ChainParts, ChainReaction, DecayEnergyComponent, DecaySource, DecaySourceDistribution,
+    FissionYield, FissionYieldSet, LoadedChain, DECAY_ENERGY_COMPONENTS,
 };
 pub use chain_arrow::{
     export_chain_arrow, export_chain_parts, parse_chain_arrow, parse_chain_parts,

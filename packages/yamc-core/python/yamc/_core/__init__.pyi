@@ -472,7 +472,12 @@ class DataUncertainty:
       reaction rates, from their per-history covariance. It applies to
       ``Model.simulate_transmutation``, as ``"flux_spectrum"`` applies only to
       ``Material.transmute``; each call ignores the other's, and the report's
-      ``sources`` lists what actually applied.
+      ``sources`` lists what actually applied;
+    - ``"decay_energy"``: each nuclide's mean decay energy, from the sigma the
+      decay data gives each recoverable-heat component (beta, gamma, alpha),
+      or the total's where it gives no split. It moves decay heat only: a decay
+      energy never enters the solve, so the inventory and activity are
+      untouched.
     
     Decay branching ratios, fission yields and the isomeric-branching overlay
     are held at their evaluated values; they carry uncertainties of their own
@@ -1361,7 +1366,7 @@ class Material:
             Bq/cm³ when it is ``"cm3"`` and Bq/g when it is ``"g"``. The unit of
             a ``by_nuclide`` dict's values is the same.
         """
-    def decay_heat(self, *, by_nuclide: builtins.bool = False, per: typing.Optional[builtins.str] = None) -> typing.Any:
+    def decay_heat(self, *, by_nuclide: builtins.bool = False, per: typing.Optional[builtins.str] = None, component: typing.Optional[builtins.str] = None) -> typing.Any:
         r"""
         Calculate decay heat from the current material inventory.
         
@@ -1375,6 +1380,14 @@ class Material:
             per (str | None): ``None`` (default) for the total, which needs
                 ``volume``; ``"cm3"`` for W/cm³, which needs nothing; ``"g"``
                 for W/g, which needs only ``density``.
+            component (str | None): ``None`` (default) for the whole decay heat;
+                ``"beta"``, ``"gamma"`` or ``"alpha"`` for one recoverable-heat
+                component alone (the ENDF MT=457 light-particle, electromagnetic
+                and heavy-particle energies). The gamma heat is the part that
+                leaves a thin component; the beta and alpha heat stays put.
+                Raises if a nuclide making decay heat carries no split, which
+                data converted before the split does, rather than understating
+                the component by its share.
         
         Returns:
             float | dict[str, float]: Decay heat, in W when ``per`` is ``None``,

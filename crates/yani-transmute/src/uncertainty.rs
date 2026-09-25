@@ -70,6 +70,14 @@ pub enum Source {
     /// transport; a spectrum run's rates are a deterministic collapse with no
     /// sampling error, so it has nothing to perturb there.
     Statistical,
+    /// Mean decay energies, from the decay data's sigma on each
+    /// recoverable-heat component (beta, gamma, alpha), or on the total where
+    /// the data carries no split.
+    ///
+    /// A decay energy does not enter the Bateman matrix, so the inventory is
+    /// untouched: it moves the decay heat evaluated from each replica, and
+    /// nothing else.
+    DecayEnergy,
 }
 
 impl Source {
@@ -85,6 +93,7 @@ impl Source {
         Source::FluxSpectrum,
         Source::HalfLife,
         Source::Statistical,
+        Source::DecayEnergy,
     ];
 
     /// The name used in the API and in the coverage report.
@@ -94,6 +103,7 @@ impl Source {
             Source::FluxSpectrum => "flux_spectrum",
             Source::HalfLife => "half_life",
             Source::Statistical => "statistical",
+            Source::DecayEnergy => "decay_energy",
         }
     }
 
@@ -249,6 +259,11 @@ pub struct Info {
     /// where it describes the evaluation.
     pub half_lives_floored: usize,
     pub half_lives_sampled: usize,
+    /// Reachable unstable nuclides whose decay energy was perturbed.
+    pub decay_energies_perturbed: BTreeSet<String>,
+    /// Reachable unstable nuclides with a decay energy but no stated sigma on
+    /// it, held at nominal. Not a claim that it is exact.
+    pub no_decay_energy_uncertainty: BTreeSet<String>,
     /// Tallied rates sampled statistically, the totals and partials together;
     /// zero off the transport path or with the source off.
     pub statistical_rates: usize,
@@ -308,6 +323,7 @@ impl Info {
             || self.malformed_blocks > 0
             || self.spectra_without_flux_sigma > 0
             || !self.no_half_life_uncertainty.is_empty()
+            || !self.no_decay_energy_uncertainty.is_empty()
     }
 }
 
@@ -362,6 +378,10 @@ pub struct Ensemble {
     half_lives: Vec<HashMap<String, f64>>,
     /// Where the uncertainty comes from, when it was asked for.
     pub attribution: Option<Attribution>,
+    /// The seed decay energies are drawn from, per replica and nuclide, when
+    /// they were perturbed. They do not change the inventory, so they are
+    /// drawn where decay heat is evaluated rather than stored.
+    pub decay_energy_seed: Option<u64>,
 }
 
 /// Where an inventory's uncertainty comes from (issue #140, item 4).
@@ -407,6 +427,7 @@ impl Ensemble {
             samples: Vec::new(),
             half_lives: Vec::new(),
             attribution: None,
+            decay_energy_seed: None,
         }
     }
 
@@ -633,6 +654,58 @@ pub(crate) fn sample_half_lives(
             (name.clone(), sampled)
         })
         .collect()
+}
+
+/// Keeps the decay-energy streams clear of every other per-nuclide stream.
+const DECAY_ENERGY_STREAM: u32 = 0xDEC4_E6E1;
+
+/// One replica's decay energy for one nuclide, and its components, drawn
+/// from each component's own sigma, or from the total's where the data gives
+/// no split. `None` when there is nothing to perturb. A draw below zero is
+/// floored at zero.
+pub(crate) fn sample_decay_energy(
+    cn: &yani::ChainNuclide,
+    base_seed: u64,
+    replica: u64,
+) -> Option<(f64, [Option<yani::DecayEnergyComponent>; 3])> {
+    let replica_seed = yamc_rng::history_seed(base_seed, replica);
+    let seed = yamc_rng::secondary_seed(
+        replica_seed,
+        crate::covariance_sample::name_ordinal(&cn.name) ^ DECAY_ENERGY_STREAM,
+    );
+    let mut state = yamc_rng::expand_seed(seed);
+    let with_sigma = cn
+        .decay_energy_components
+        .iter()
+        .any(|c| c.is_some_and(|c| c.uncertainty.is_some_and(|s| s > 0.0)));
+    if with_sigma {
+        let z = crate::covariance_sample::standard_normals(&mut state, 3);
+        let mut parts = cn.decay_energy_components;
+        let mut total = 0.0;
+        for (part, z) in parts.iter_mut().zip(z) {
+            if let Some(p) = part {
+                if let Some(sigma) = p.uncertainty.filter(|s| *s > 0.0) {
+                    p.energy = (p.energy + sigma * z).max(0.0);
+                }
+                total += p.energy;
+            }
+        }
+        return Some((total, parts));
+    }
+    let sigma = cn.decay_energy_uncertainty.filter(|s| *s > 0.0)?;
+    let z = crate::covariance_sample::standard_normals(&mut state, 1)[0];
+    Some((
+        (cn.decay_energy + sigma * z).max(0.0),
+        cn.decay_energy_components,
+    ))
+}
+
+/// Whether a nuclide's decay energy carries a sigma to sample from.
+pub(crate) fn has_decay_energy_sigma(cn: &yani::ChainNuclide) -> bool {
+    cn.decay_energy_components
+        .iter()
+        .any(|c| c.is_some_and(|c| c.uncertainty.is_some_and(|s| s > 0.0)))
+        || cn.decay_energy_uncertainty.is_some_and(|s| s > 0.0)
 }
 
 /// `chain` with the half-lives of `sampled` substituted.

@@ -31,7 +31,12 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///   reaction rates, from their per-history covariance. It applies to
 ///   ``Model.simulate_transmutation``, as ``"flux_spectrum"`` applies only to
 ///   ``Material.transmute``; each call ignores the other's, and the report's
-///   ``sources`` lists what actually applied.
+///   ``sources`` lists what actually applied;
+/// - ``"decay_energy"``: each nuclide's mean decay energy, from the sigma the
+///   decay data gives each recoverable-heat component (beta, gamma, alpha),
+///   or the total's where it gives no split. It moves decay heat only: a decay
+///   energy never enters the solve, so the inventory and activity are
+///   untouched.
 ///
 /// Decay branching ratios, fission yields and the isomeric-branching overlay
 /// are held at their evaluated values; they carry uncertainties of their own
@@ -247,6 +252,20 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     )?;
     d.set_item("half_lives_floored", info.half_lives_floored)?;
     d.set_item("half_lives_sampled", info.half_lives_sampled)?;
+    d.set_item(
+        "decay_energies_perturbed",
+        info.decay_energies_perturbed
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    d.set_item(
+        "no_decay_energy_uncertainty",
+        info.no_decay_energy_uncertainty
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
     d.set_item("statistical_rates", info.statistical_rates)?;
     d.set_item("statistical_floored", info.statistical_floored)?;
     d.set_item("statistical_sampled", info.statistical_sampled)?;

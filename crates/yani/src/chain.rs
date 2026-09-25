@@ -248,6 +248,20 @@ pub struct DecaySource {
     pub distribution: DecaySourceDistribution,
 }
 
+/// The names of a nuclide's decay-energy components, in the order
+/// [`ChainNuclide::decay_energy_components`] stores them.
+pub const DECAY_ENERGY_COMPONENTS: [&str; 3] = ["beta", "gamma", "alpha"];
+
+/// One recoverable-heat component of a decay energy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DecayEnergyComponent {
+    /// Mean energy per decay [eV].
+    pub energy: f64,
+    /// The evaluation's standard deviation on it [eV], `None` where it
+    /// stated none, which is not zero.
+    pub uncertainty: Option<f64>,
+}
+
 /// A nuclide in the transmutation chain
 #[derive(Clone, Debug)]
 pub struct ChainNuclide {
@@ -268,6 +282,15 @@ pub struct ChainNuclide {
     /// heat is `activity * decay_energy`, so this scales the reported watts
     /// directly rather than diluting through a chain (issue #515).
     pub decay_energy_uncertainty: Option<f64>,
+    /// `decay_energy` split into its recoverable-heat components, in
+    /// [`DECAY_ENERGY_COMPONENTS`] order (beta, gamma, alpha), each with the
+    /// evaluation's own sigma. `None` for a component the data does not give,
+    /// including every component of a file that predates the split.
+    ///
+    /// The ENDF MT=457 components behind the names: light particles (beta,
+    /// conversion and Auger electrons), electromagnetic (gammas and x-rays),
+    /// heavy particles (alphas, protons, neutrons, fission fragments).
+    pub decay_energy_components: [Option<DecayEnergyComponent>; 3],
     /// Neutron-induced reactions
     pub reactions: Vec<ChainReaction>,
     /// Radioactive decay modes
@@ -860,6 +883,7 @@ mod tests {
             fission_yields: None,
             sources: Vec::new(),
             decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
         }
     }
 

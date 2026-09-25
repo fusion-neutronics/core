@@ -183,6 +183,7 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
                     half_life_uncertainty,
                     decay_energy,
                     decay_energy_uncertainty,
+                    decay_energy_components: Default::default(),
                     reactions: Vec::new(),
                     decays: Vec::new(),
                     fission_yields: None,
@@ -337,6 +338,7 @@ fn ensure_nuclide<'a>(
             fission_yields: None,
             sources: Vec::new(),
             decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
         })
 }
 
@@ -455,9 +457,38 @@ pub fn parse_chain_parts_from_bytes(
                 .index_of("decay_energy_uncertainty")
                 .ok()
                 .and_then(|idx| batch.column(idx).as_any().downcast_ref::<Float64Array>());
+            // The component split, optional: a file written before it reads
+            // with every component absent.
+            let optional = |name: &str| {
+                batch
+                    .schema()
+                    .index_of(name)
+                    .ok()
+                    .and_then(|idx| batch.column(idx).as_any().downcast_ref::<Float64Array>())
+            };
+            let components: Vec<(Option<&Float64Array>, Option<&Float64Array>)> =
+                crate::chain::DECAY_ENERGY_COMPONENTS
+                    .iter()
+                    .map(|c| {
+                        (
+                            optional(&format!("decay_energy_{c}")),
+                            optional(&format!("decay_energy_{c}_uncertainty")),
+                        )
+                    })
+                    .collect();
             for i in 0..batch.num_rows() {
                 let name = names.value(i).to_string();
                 let nuc = ensure_nuclide(&mut chain, &name);
+                for (c, (energy, sigma)) in components.iter().enumerate() {
+                    nuc.decay_energy_components[c] = energy
+                        .filter(|column| !column.is_null(i))
+                        .map(|column| crate::chain::DecayEnergyComponent {
+                            energy: column.value(i),
+                            uncertainty: sigma
+                                .filter(|column| !column.is_null(i))
+                                .map(|column| column.value(i)),
+                        });
+                }
                 nuc.half_life_uncertainty = half_life_sigmas
                     .filter(|column| !column.is_null(i))
                     .map(|column| column.value(i));
@@ -795,9 +826,18 @@ pub fn export_chain_parts<P: AsRef<Path>>(
         let mut de_b = Float64Builder::new();
         let mut hl_sigma_b = Float64Builder::new();
         let mut de_sigma_b = Float64Builder::new();
+        let mut component_b: [(Float64Builder, Float64Builder); 3] = Default::default();
         for name in &names {
             let nuc = &chain[*name];
             name_b.append_value(&nuc.name);
+            for (part, (energy_b, sigma_b)) in nuc
+                .decay_energy_components
+                .iter()
+                .zip(component_b.iter_mut())
+            {
+                energy_b.append_option(part.map(|p| p.energy));
+                sigma_b.append_option(part.and_then(|p| p.uncertainty));
+            }
             match nuc.half_life {
                 Some(h) => hl_b.append_value(h),
                 None => hl_b.append_null(),
@@ -815,16 +855,18 @@ pub fn export_chain_parts<P: AsRef<Path>>(
             }
         }
         let schema = Arc::new(section_schema("decay/nuclides.arrow"));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(name_b.finish()),
-                Arc::new(hl_b.finish()),
-                Arc::new(de_b.finish()),
-                Arc::new(hl_sigma_b.finish()),
-                Arc::new(de_sigma_b.finish()),
-            ],
-        )?;
+        let mut columns: Vec<ArrayRef> = vec![
+            Arc::new(name_b.finish()),
+            Arc::new(hl_b.finish()),
+            Arc::new(de_b.finish()),
+            Arc::new(hl_sigma_b.finish()),
+            Arc::new(de_sigma_b.finish()),
+        ];
+        for (energy_b, sigma_b) in component_b.iter_mut() {
+            columns.push(Arc::new(energy_b.finish()));
+            columns.push(Arc::new(sigma_b.finish()));
+        }
+        let batch = RecordBatch::try_new(schema.clone(), columns)?;
         write_arrow_file(&decay_dir.join("nuclides.arrow"), schema, batch)?;
     }
 
@@ -1256,6 +1298,7 @@ mod tests {
                 half_life_uncertainty: Some(1.21e4),
                 decay_energy: 2.5e6,
                 decay_energy_uncertainty: Some(3.4e3),
+                decay_energy_components: Default::default(),
                 reactions: Vec::new(),
                 decays: Vec::new(),
                 fission_yields: None,
@@ -1274,6 +1317,7 @@ mod tests {
                 fission_yields: None,
                 sources: Vec::new(),
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
 
@@ -1331,6 +1375,7 @@ mod tests {
                 }],
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
 
