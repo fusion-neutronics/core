@@ -168,7 +168,7 @@ mod tests {
         );
         let s = StatisticalRates::new(&rc);
         let n = 20000;
-        let mut xs = vec![Vec::with_capacity(n); 3];
+        let mut xs: Vec<Vec<f64>> = (0..3).map(|_| Vec::with_capacity(n)).collect();
         for r in 0..n as u64 {
             let (totals, partials, floored) = s.sample(3, r);
             assert_eq!(floored, 0);
@@ -192,8 +192,8 @@ mod tests {
         assert!((cov_of(&xs[1], &xs[1]) / b - 1.0).abs() < 0.04);
         assert!((cov_of(&xs[0], &xs[1]) / c - 1.0).abs() < 0.08);
         // The dependent rate follows the other two exactly.
-        for k in 0..n {
-            assert!((xs[2][k] - xs[0][k] - xs[1][k]).abs() < 1e-9);
+        for ((sum, a), b) in xs[2].iter().zip(&xs[0]).zip(&xs[1]) {
+            assert!((sum - a - b).abs() < 1e-9);
         }
     }
 
