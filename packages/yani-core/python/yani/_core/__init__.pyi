@@ -2955,7 +2955,7 @@ def set_transmutation_reactions(value: typing.Optional[builtins.str | typing.Lit
     rather than being solved as though the reaction produced nothing.
     """
 
-def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | typing.Sequence[PulseSchedule], data_uncertainty: typing.Optional[DataUncertainty] = None, self_shielding_chord: typing.Optional[builtins.float] = None, self_shielding_shape: SphereLump | CubeLump | FoilLump | CylinderLump | WireLump | None = None) -> TransmutationResults:
+def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | typing.Sequence[PulseSchedule], data_uncertainty: typing.Optional[DataUncertainty] = None, self_shielding_chord: typing.Optional[builtins.float] = None, self_shielding_shape: shapes.SphereLump | shapes.CubeLump | shapes.FoilLump | shapes.CylinderLump | shapes.WireLump | None = None) -> TransmutationResults:
     r"""
     Transmute several materials over one timeline in one call.
     

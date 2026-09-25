@@ -114,10 +114,29 @@ fn assert_same_material(plural: &TransmutationResults, single: &TransmutationRes
 /// share a spectrum and a composition share one collapse.
 #[test]
 fn each_material_matches_its_own_solve() {
-    let (Some(a), Some(b), Some(c)) = (iron(1, 8.5e-2), iron(2, 8.5e-2), iron(3, 8.5e-2)) else {
+    // One load, cloned, so the three hold the same `Arc` per nuclide. The
+    // collapse key compares loaded data by pointer, and the process-wide
+    // nuclide cache hands out a *new* `Arc` when a later request widens the
+    // load scope (a sibling test asking for covariance is enough). Loading
+    // three times would leave whether they match up to which tests ran in
+    // between, and the reuse asserted below is what this test is about.
+    let Some(base) = iron(1, 8.5e-2) else {
         eprintln!("skipping -- Fe56 fixture absent");
         return;
     };
+    let same_steel = |id: u32| {
+        let mut m = base.clone();
+        m.set_material_id(id);
+        m
+    };
+    let (a, b, c) = (same_steel(1), same_steel(2), same_steel(3));
+    // The precondition for the reuse below, so a future split back into three
+    // loads fails here with a reason rather than intermittently on the count.
+    assert!(
+        Arc::ptr_eq(&a.nuclide_data["Fe56"], &b.nuclide_data["Fe56"])
+            && Arc::ptr_eq(&a.nuclide_data["Fe56"], &c.nuclide_data["Fe56"]),
+        "clones must share one decoded Fe56"
+    );
     let fast = spectrum(&[0.0, 0.1, 0.3, 0.6]);
     let soft = spectrum(&[0.5, 0.3, 0.2, 0.0]);
 

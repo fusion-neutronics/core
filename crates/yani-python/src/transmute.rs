@@ -81,8 +81,10 @@ pub fn transmute(
     schedules: &Bound<'_, PyAny>,
     data_uncertainty: Option<crate::data_uncertainty::PyDataUncertainty>,
     self_shielding_chord: Option<f64>,
+    // Qualified, because the generator files the lump classes under the
+    // `shapes` submodule: the bare names do not resolve in the root stub.
     #[gen_stub(override_type(
-        type_repr = "SphereLump | CubeLump | FoilLump | CylinderLump | WireLump | None"
+        type_repr = "shapes.SphereLump | shapes.CubeLump | shapes.FoilLump | shapes.CylinderLump | shapes.WireLump | None"
     ))]
     self_shielding_shape: Option<Bound<'_, PyAny>>,
 ) -> PyResult<PyTransmutationResults> {

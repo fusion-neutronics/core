@@ -8,7 +8,6 @@ type forces: one timeline, one id per material.
 
 import pytest
 import yamc
-import yani
 
 NUC_DATA = "tests"
 DAY = 86400.0
@@ -53,12 +52,11 @@ def _same(a, b, material_id):
         ), f"material {material_id} differs at step {step}"
 
 
-def test_both_packages_export_it():
-    # Each wheel carries its own copy of the bindings, so these are two
-    # functions of one name rather than one object.
-    assert callable(yamc.transmute) and callable(yani.transmute)
+def test_the_package_exports_it():
+    # Only this wheel: yani is not installed alongside yamc, and it carries
+    # its own copy of the bindings, asserted by the yani surface test.
+    assert callable(yamc.transmute)
     assert "transmute" in yamc.__all__
-    assert "transmute" in yani.__all__
 
 
 def test_each_material_matches_its_own_transmute():
