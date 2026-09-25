@@ -306,7 +306,9 @@ fn nuclides_without_covariance_are_named_in_the_report() {
         "a nuclide cannot be both perturbed and lacking data"
     );
     assert!(
-        info.not_perturbed.iter().any(|s| s.contains("half-life")),
+        info.not_perturbed
+            .iter()
+            .any(|s| s.contains("decay branching")),
         "the sources this does not propagate must be stated: {:?}",
         info.not_perturbed
     );

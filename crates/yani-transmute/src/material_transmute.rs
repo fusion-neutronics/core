@@ -785,6 +785,11 @@ struct ReplicaOutcome {
     /// them would erase them.
     flux_bins_sampled: usize,
     flux_bins_floored: usize,
+    /// The half-lives this replica was solved with, for the nuclides whose
+    /// half-life was perturbed; empty when none were.
+    half_lives: HashMap<String, f64>,
+    /// Half-life draws that came out non-positive and were floored.
+    half_lives_floored: usize,
 }
 
 /// Load the cross sections a transport-free solve of this material needs, into
@@ -1067,6 +1072,20 @@ fn replica_steps(
     Ok(out)
 }
 
+/// What the half-life source needs for a run: the nuclides to perturb, those
+/// with no stated sigma, and the chains pruned to what the material can reach,
+/// ready to receive a replica's half-lives.
+struct HalfLifeSampling {
+    /// `(name, half-life, sigma)` for the reachable nuclides with a sigma.
+    candidates: Vec<(String, f64, f64)>,
+    /// Reachable unstable nuclides whose evaluation states no sigma.
+    without: std::collections::BTreeSet<String>,
+    /// The base chain, pruned.
+    base: HashMap<String, ChainNuclide>,
+    /// Each spectrum's folded chain, pruned, in `per_spectrum` order.
+    folded: Vec<HashMap<String, ChainNuclide>>,
+}
+
 /// Fold the covariance, factorize it, and re-solve until the sigmas settle.
 ///
 /// Replicas are added in blocks and convergence is judged between blocks on the
@@ -1158,7 +1177,54 @@ fn run_replicas(
         }
     }
 
+    // Half-lives: sampled per replica from the evaluation's stated sigma, and
+    // substituted into every chain the replica is solved with, the base one
+    // for cooldowns and each spectrum's folded one for irradiations, so one
+    // replica has one set of decay constants throughout. Only the nuclides
+    // this material can reach are carried into those chains: the stepper walks
+    // a subset of that closure, so pruning to it changes nothing, and it keeps
+    // the per-replica copy to the part of a 3800-nuclide chain the solve uses.
+    let half_life = if request.wants(crate::uncertainty::Source::HalfLife) {
+        let seeds: Vec<&str> = initial
+            .nuclides
+            .keys()
+            .chain(initial.nuclide_data.keys())
+            .map(|s| s.as_str())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let mut reach = yani::reachable_nuclides(chain, &seeds);
+        for (_, _, folded_chain) in per_spectrum {
+            reach.extend(yani::reachable_nuclides(folded_chain, &seeds));
+        }
+        let prune = |c: &HashMap<String, ChainNuclide>| -> HashMap<String, ChainNuclide> {
+            c.iter()
+                .filter(|(name, _)| reach.contains(*name))
+                .map(|(name, cn)| (name.clone(), cn.clone()))
+                .collect()
+        };
+        let base = prune(chain);
+        let (candidates, without) = crate::uncertainty::half_life_candidates(&base);
+        let folded: Vec<HashMap<String, ChainNuclide>> =
+            per_spectrum.iter().map(|(_, _, c)| prune(c)).collect();
+        Some(HalfLifeSampling {
+            candidates,
+            without,
+            base,
+            folded,
+        })
+    } else {
+        None
+    };
+
     let mut info = Info::from_fold(&coverage, &clipping);
+    if half_life.is_none() {
+        info.not_perturbed.insert(0, "half-life".to_string());
+    }
+    if let Some(h) = &half_life {
+        info.half_lives_perturbed = h.candidates.iter().map(|(n, _, _)| n.clone()).collect();
+        info.no_half_life_uncertainty = h.without.clone();
+    }
     info.sources = request
         .sources
         .iter()
@@ -1175,7 +1241,11 @@ fn run_replicas(
     // Nothing to perturb means nothing to sample. The ensemble stays empty and
     // every sigma reads zero, with `info` saying why: no covariance data, not a
     // confident zero.
-    if samplers.iter().all(Sampler::is_empty) && per_group.iter().all(Option::is_none) {
+    let no_half_lives = half_life.as_ref().is_none_or(|h| h.candidates.is_empty());
+    if samplers.iter().all(Sampler::is_empty)
+        && per_group.iter().all(Option::is_none)
+        && no_half_lives
+    {
         info.converged = true;
         info.add_flux_coverage(&flux_coverage);
         return Ok((ensemble, info));
@@ -1197,6 +1267,16 @@ fn run_replicas(
     let one_replica = |replica: u64| -> Result<ReplicaOutcome, String> {
         let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
         let mut truncations = crate::covariance_sample::Truncations::default();
+        let mut half_lives_floored = 0usize;
+        let sampled_half_lives = match &half_life {
+            Some(h) if !h.candidates.is_empty() => crate::uncertainty::sample_half_lives(
+                &h.candidates,
+                request.seed,
+                replica,
+                &mut half_lives_floored,
+            ),
+            _ => HashMap::new(),
+        };
 
         // Every spectrum's rates are perturbed by the SAME replica index,
         // so a nuclide irradiated under two spectra in one schedule moves
@@ -1224,18 +1304,32 @@ fn run_replicas(
             let (rates, t) = samplers[idx].perturb(&rates, request.seed, replica);
             truncations.floored += t.floored;
             truncations.sampled += t.sampled;
-            perturbed.push((rates, weights.clone(), Arc::clone(folded_chain)));
+            let folded_chain = match &half_life {
+                Some(h) if !sampled_half_lives.is_empty() => Arc::new(
+                    crate::uncertainty::with_half_lives(&h.folded[idx], &sampled_half_lives),
+                ),
+                _ => Arc::clone(folded_chain),
+            };
+            perturbed.push((rates, weights.clone(), folded_chain));
         }
+        let base_chain = match &half_life {
+            Some(h) if !sampled_half_lives.is_empty() => Arc::new(
+                crate::uncertainty::with_half_lives(&h.base, &sampled_half_lives),
+            ),
+            _ => Arc::clone(chain),
+        };
 
         // `Box<dyn Error>` is not `Send`, so it cannot come back out of a
         // parallel map; the driver puts the message back into one.
-        let materials = replica_steps(initial, steps, &perturbed, chain, parts, stepper)
+        let materials = replica_steps(initial, steps, &perturbed, &base_chain, parts, stepper)
             .map_err(|e| e.to_string())?;
         Ok(ReplicaOutcome {
             densities: densities_of(&materials),
             truncations,
             flux_bins_sampled: flux_coverage.bins_sampled,
             flux_bins_floored: flux_coverage.bins_floored,
+            half_lives: sampled_half_lives,
+            half_lives_floored,
         })
     };
 
@@ -1264,7 +1358,9 @@ fn run_replicas(
             info.add_truncations(&outcome.truncations);
             flux_coverage.bins_sampled += outcome.flux_bins_sampled;
             flux_coverage.bins_floored += outcome.flux_bins_floored;
-            ensemble.push(outcome.densities);
+            info.half_lives_sampled += outcome.half_lives.len();
+            info.half_lives_floored += outcome.half_lives_floored;
+            ensemble.push_with_half_lives(outcome.densities, outcome.half_lives);
         }
         replica = block_end as u64;
 
