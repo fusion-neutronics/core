@@ -495,6 +495,11 @@ impl PyTransmutationResults {
     ///   covariance was not positive semi-definite and had to be repaired.
     /// - ``rates_floored`` / ``rates_sampled``: samples that went negative and
     ///   were truncated at zero, which biases the mean upward when common.
+    /// - ``half_lives_perturbed`` / ``no_half_life_uncertainty``: with the
+    ///   ``"half_life"`` source, which reachable unstable nuclides had their
+    ///   half-life sampled and which state no sigma to sample from.
+    ///   ``half_lives_floored`` / ``half_lives_sampled`` count draws that came
+    ///   out non-positive and had to be floored.
     /// - ``not_perturbed``: the sources this does not propagate at all.
     /// - ``samples`` / ``converged``: how many replicas ran, and whether the
     ///   sigmas settled or the cap was hit.

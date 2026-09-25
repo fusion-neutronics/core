@@ -5,12 +5,14 @@
 //! the same solve again. That is exact to all orders in the matrix exponential:
 //! nothing is linearized, and the solver is not touched at all, only its input.
 //!
-//! What is perturbed is the **activation cross sections**, through the MF=33
-//! covariance folded against this material's own spectrum. Half-lives, decay
+//! What can be perturbed ([`Source`]): the **activation cross sections**,
+//! through the MF=33 covariance folded against this material's own spectrum;
+//! the **flux spectrum**, from a per-bin sigma the caller supplies; and the
+//! **half-lives**, from the evaluation's own standard deviation. Decay
 //! branching ratios, fission yields and the isomeric-branching overlay are held
-//! at their nominal values; they carry their own uncertainties and are out of
-//! scope here (issue #515). [`Info`] says so per run rather than leaving it to
-//! be inferred from a small sigma.
+//! at their nominal values; they carry their own uncertainties and are not
+//! propagated yet (issue #140). [`Info`] says so per run rather than leaving it
+//! to be inferred from a small sigma.
 //!
 //! # Cost
 //!
@@ -51,23 +53,38 @@ pub enum Source {
     /// own input. It contributes only where a sigma was actually given, which
     /// a spectrum from a published reference set does not have.
     FluxSpectrum,
+    /// Half-lives, from the decay sublibrary's own standard deviation on each
+    /// (the uncertainty on the MT=457 `T1/2`).
+    ///
+    /// A replica's half-lives are used everywhere that replica's decay
+    /// constants appear: in the solve and in the activity, decay heat and dose
+    /// evaluated from its inventory. Using the nominal value in either place
+    /// would break the cancellation that makes a saturated activity nearly
+    /// insensitive to its own half-life (`N ~ R / lambda`, so `A ~ R`), and
+    /// inflate its uncertainty.
+    HalfLife,
 }
 
 impl Source {
     /// Every source this build can actually perturb.
     ///
-    /// Four more inputs feed the matrix and are held at nominal: half-life,
-    /// decay branching, fission yields and the isomeric-branching overlay. The
-    /// first three have published uncertainties this build does not read yet
-    /// (issue #515); the fourth has none in ENDF-6 at all, so it could only
-    /// ever carry an assumed value.
-    pub const IMPLEMENTED: &'static [Source] = &[Source::CrossSections, Source::FluxSpectrum];
+    /// Three more inputs feed the matrix and are held at nominal: decay
+    /// branching, fission yields and the isomeric-branching overlay. The first
+    /// two have published uncertainties this build does not read yet (issue
+    /// #140); the third has none in ENDF-6 at all, so it could only ever carry
+    /// an assumed value.
+    pub const IMPLEMENTED: &'static [Source] = &[
+        Source::CrossSections,
+        Source::FluxSpectrum,
+        Source::HalfLife,
+    ];
 
     /// The name used in the API and in the coverage report.
     pub fn name(self) -> &'static str {
         match self {
             Source::CrossSections => "cross_sections",
             Source::FluxSpectrum => "flux_spectrum",
+            Source::HalfLife => "half_life",
         }
     }
 
@@ -81,9 +98,9 @@ impl Source {
                 let have: Vec<&str> = Source::IMPLEMENTED.iter().map(|s| s.name()).collect();
                 format!(
                     "unknown uncertainty source {name:?}; this build can perturb {have:?}. \
-                     Half-life, decay branching and fission yields carry published \
-                     uncertainties that are not read yet (issue #515), and reaction \
-                     branching has none in ENDF-6 to read."
+                     Decay branching and fission yields carry published uncertainties \
+                     that are not read yet (issue #140), and reaction branching has \
+                     none in ENDF-6 to read."
                 )
             })
     }
@@ -202,6 +219,20 @@ pub struct Info {
     /// Sampled flux bins that went negative and were floored at zero.
     pub flux_bins_floored: usize,
     pub flux_bins_sampled: usize,
+    /// Unstable nuclides the material can reach whose half-life was perturbed.
+    pub half_lives_perturbed: BTreeSet<String>,
+    /// Unstable nuclides the material can reach whose evaluation states no
+    /// half-life uncertainty, so their half-life was held at nominal.
+    ///
+    /// Not a claim that the half-life is exact: the evaluation said nothing.
+    pub no_half_life_uncertainty: BTreeSet<String>,
+    /// Sampled half-lives that came out non-positive and were floored.
+    ///
+    /// Only possible where the stated sigma is a large share of the half-life
+    /// itself; a count well above zero says the Gaussian is being used past
+    /// where it describes the evaluation.
+    pub half_lives_floored: usize,
+    pub half_lives_sampled: usize,
     /// Sources deliberately NOT perturbed, for the record.
     pub not_perturbed: Vec<String>,
     /// Which sources this run perturbed, by name.
@@ -222,7 +253,6 @@ impl Info {
             matrices_clipped: clipping.matrices_clipped,
             worst_relative_clip: clipping.worst_relative_clip,
             not_perturbed: [
-                "half-life",
                 "decay branching ratio",
                 "fission yield",
                 "isomeric branching (MF=9/MF=10)",
@@ -255,6 +285,7 @@ impl Info {
             || !self.unsupported_layouts.is_empty()
             || self.malformed_blocks > 0
             || self.spectra_without_flux_sigma > 0
+            || !self.no_half_life_uncertainty.is_empty()
     }
 }
 
@@ -303,6 +334,10 @@ pub struct Ensemble {
     moments: Vec<HashMap<String, Moments>>,
     /// `[replica][step][nuclide]`.
     samples: Vec<Vec<HashMap<String, f64>>>,
+    /// `[replica]`: the half-lives [s] that replica was solved with, for the
+    /// nuclides whose half-life was perturbed. Empty maps when half-lives were
+    /// not perturbed.
+    half_lives: Vec<HashMap<String, f64>>,
 }
 
 impl Ensemble {
@@ -310,11 +345,26 @@ impl Ensemble {
         Self {
             moments: vec![HashMap::new(); n_steps],
             samples: Vec::new(),
+            half_lives: Vec::new(),
         }
     }
 
-    /// Record one replica's per-step inventories.
+    /// Record one replica's per-step inventories, solved with nominal
+    /// half-lives.
+    #[cfg(test)]
     pub(crate) fn push(&mut self, per_step: Vec<HashMap<String, f64>>) {
+        self.push_with_half_lives(per_step, HashMap::new());
+    }
+
+    /// Record one replica's per-step inventories and the perturbed half-lives
+    /// it was solved with, so a quantity derived from its inventory uses them
+    /// too.
+    pub(crate) fn push_with_half_lives(
+        &mut self,
+        per_step: Vec<HashMap<String, f64>>,
+        half_lives: HashMap<String, f64>,
+    ) {
+        self.half_lives.push(half_lives);
         for (step, densities) in per_step.iter().enumerate() {
             let Some(slot) = self.moments.get_mut(step) else {
                 continue;
@@ -376,6 +426,14 @@ impl Ensemble {
                     .unwrap_or(0.0)
             })
             .collect()
+    }
+
+    /// The perturbed half-lives [s] each replica was solved with, by replica.
+    ///
+    /// Empty maps when half-lives were not perturbed. A nuclide absent from a
+    /// replica's map kept its nominal half-life there.
+    pub fn half_lives(&self) -> &[HashMap<String, f64>] {
+        &self.half_lives
     }
 
     /// Every replica's full inventory at `step`.
@@ -455,6 +513,79 @@ pub(crate) fn settled(previous: &BTreeMap<String, f64>, current: &BTreeMap<Strin
 /// The per-step nuclide densities of one replica.
 pub(crate) fn densities_of(materials: &[Material]) -> Vec<HashMap<String, f64>> {
     materials.iter().map(|m| m.nuclides.clone()).collect()
+}
+
+/// Keeps the half-life streams clear of the per-nuclide cross-section streams,
+/// which are keyed on the same name hash without it.
+const HALF_LIFE_STREAM: u32 = 0x4A1F_11FE;
+
+/// The unstable nuclides of `chain` split into those with a stated half-life
+/// sigma, as `(name, half-life, sigma)`, and those without.
+pub(crate) fn half_life_candidates(
+    chain: &HashMap<String, yani::ChainNuclide>,
+) -> (Vec<(String, f64, f64)>, BTreeSet<String>) {
+    let mut with = Vec::new();
+    let mut without = BTreeSet::new();
+    for (name, cn) in chain {
+        let Some(t) = cn.half_life.filter(|t| *t > 0.0) else {
+            continue;
+        };
+        match cn.half_life_uncertainty.filter(|s| *s > 0.0) {
+            Some(sigma) => with.push((name.clone(), t, sigma)),
+            None => {
+                without.insert(name.clone());
+            }
+        }
+    }
+    with.sort_by(|a, b| a.0.cmp(&b.0));
+    (with, without)
+}
+
+/// One replica's half-lives: `T + sigma z` per nuclide, from a stream keyed on
+/// `(seed, replica, nuclide)`.
+///
+/// Keyed on the name, like the cross sections, so a nuclide draws the same
+/// half-life in every spectrum and every material of a run: one evaluation is
+/// uncertain in one way wherever it is used. A draw at or below zero is
+/// floored at a millionth of the nominal and counted.
+pub(crate) fn sample_half_lives(
+    candidates: &[(String, f64, f64)],
+    base_seed: u64,
+    replica: u64,
+    floored: &mut usize,
+) -> HashMap<String, f64> {
+    let replica_seed = yamc_rng::history_seed(base_seed, replica);
+    candidates
+        .iter()
+        .map(|(name, t, sigma)| {
+            let seed = yamc_rng::secondary_seed(
+                replica_seed,
+                crate::covariance_sample::name_ordinal(name) ^ HALF_LIFE_STREAM,
+            );
+            let mut state = yamc_rng::expand_seed(seed);
+            let z = crate::covariance_sample::standard_normals(&mut state, 1)[0];
+            let mut sampled = t + sigma * z;
+            if sampled <= 0.0 {
+                *floored += 1;
+                sampled = t * 1.0e-6;
+            }
+            (name.clone(), sampled)
+        })
+        .collect()
+}
+
+/// `chain` with the half-lives of `sampled` substituted.
+pub(crate) fn with_half_lives(
+    chain: &HashMap<String, yani::ChainNuclide>,
+    sampled: &HashMap<String, f64>,
+) -> HashMap<String, yani::ChainNuclide> {
+    let mut out = chain.clone();
+    for (name, t) in sampled {
+        if let Some(cn) = out.get_mut(name) {
+            cn.half_life = Some(*t);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
