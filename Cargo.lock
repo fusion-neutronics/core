@@ -3866,9 +3866,9 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "radiological-material-clearance-finder"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eba516aff7d600163d17ab600036de5fc2ea07d2bbe004282f1b24b75a35edd4"
+checksum = "c5dde677db92be3ceb7a166bc7116a6eb05237fd10833318c0a59271e218657b"
 dependencies = [
  "roxmltree",
  "serde",
