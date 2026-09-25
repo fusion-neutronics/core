@@ -759,6 +759,7 @@ fn solve_case(
             &stepper,
             r.request,
             r.shielding,
+            None,
         )?),
         None => None,
     };
@@ -790,6 +791,8 @@ struct ReplicaOutcome {
     half_lives: HashMap<String, f64>,
     /// Half-life draws that came out non-positive and were floored.
     half_lives_floored: usize,
+    /// Statistically drawn rates that came out negative and were floored.
+    statistical_floored: usize,
 }
 
 /// Load the cross sections a transport-free solve of this material needs, into
@@ -1072,6 +1075,101 @@ fn replica_steps(
     Ok(out)
 }
 
+/// A transport run's tallied rates with their statistical covariance, and
+/// the unfolded chain their branching is refined from.
+pub(crate) struct TransportStatistics {
+    rates: crate::statistical::StatisticalRates,
+    base_chain: Arc<HashMap<String, ChainNuclide>>,
+}
+
+/// One material's independent-mode transport result, per source particle.
+///
+/// What `Model::transmute` extracts from its single transport, and everything
+/// [`transport_replicas`] needs to resample it.
+pub struct TransportTallied {
+    /// Reaction totals per atom per source particle, [1/s] at unit source rate.
+    pub rates: ReactionRates,
+    /// Isomeric partials at the same normalization.
+    pub partials: PartialRates,
+    /// Fission-yield spectrum weights.
+    pub fy_weights: FissionYieldWeights,
+    /// The tallied flux shape, for folding MF=33 covariance against. Its
+    /// magnitude does not matter; the fold is relative.
+    pub spectrum: MultigroupSpectrum,
+    /// The statistical covariance of `rates` and `partials`, when the tally
+    /// carried history statistics.
+    pub statistics: Option<crate::history_statistics::RateCovariance>,
+}
+
+/// Uncertainty on an independent-mode transport transmutation (issue #140,
+/// item 3), by resampling and re-solving exactly as [`transmute_material`]
+/// does, with the tally's spectrum standing in for the supplied one.
+///
+/// The sources that apply: `statistical`, the Monte Carlo covariance of the
+/// tallied rates; `cross_sections`, the MF=33 covariance folded against the
+/// tally's own flux shape; and `half_life`. `flux_spectrum` does not: there is
+/// no supplied spectrum, and the flux's error is the statistical one.
+///
+/// `source_rates` scale the per-source-particle rates per step, which is how
+/// independent mode scales them. The coupled method re-runs transport per step
+/// and is not covered: its step-to-step noise propagation is out of scope.
+pub fn transport_replicas(
+    initial: &Material,
+    tallied: &TransportTallied,
+    timesteps: &[f64],
+    source_rates: &[f64],
+    chain: &Arc<HashMap<String, ChainNuclide>>,
+    parts: yani::ChainParts,
+    request: &DataUncertainty,
+) -> Result<(Ensemble, Info), Box<dyn std::error::Error>> {
+    let mut initial = initial.clone();
+    if request.wants(crate::uncertainty::Source::CrossSections) {
+        initial.ensure_covariance_loaded()?;
+    }
+    // The nominal the replicas scatter around: the same branching fold the
+    // step loop applies, at unit source rate, since fractions do not depend on
+    // the magnitude.
+    let mut rates = tallied.rates.clone();
+    let folded = if tallied.partials.is_empty() {
+        Arc::clone(chain)
+    } else {
+        apply_coupled_branching(chain, &tallied.partials, &mut rates)
+    };
+    let per_spectrum: Vec<PerSpectrum> = vec![(rates, tallied.fy_weights.clone(), folded)];
+    let steps: Vec<TransmuteStep> = timesteps
+        .iter()
+        .zip(source_rates)
+        .map(|(&dt, &rate)| TransmuteStep {
+            dt,
+            irradiation: (rate > 0.0).then_some((0, rate)),
+        })
+        .collect();
+    let statistics = tallied.statistics.as_ref().map(|c| TransportStatistics {
+        rates: crate::statistical::StatisticalRates::new(c),
+        base_chain: Arc::clone(chain),
+    });
+    let no_statistics = TransportStatistics {
+        rates: crate::statistical::StatisticalRates::new(
+            &crate::history_statistics::RateCovariance::empty(),
+        ),
+        base_chain: Arc::clone(chain),
+    };
+    run_replicas(
+        &initial,
+        std::slice::from_ref(&tallied.spectrum),
+        &steps,
+        &per_spectrum,
+        chain,
+        parts,
+        &ForwardEulerStepper,
+        request,
+        None,
+        // Always the transport path, even with no statistics to sample: that
+        // is what keeps `flux_spectrum` out of it.
+        Some(statistics.as_ref().unwrap_or(&no_statistics)),
+    )
+}
+
 /// What the half-life source needs for a run: the nuclides to perturb, those
 /// with no stated sigma, and the chains pruned to what the material can reach,
 /// ready to receive a replica's half-lives.
@@ -1104,7 +1202,22 @@ fn run_replicas(
     stepper: &ForwardEulerStepper,
     request: &DataUncertainty,
     shielding: Option<&Shielding>,
+    statistical: Option<&TransportStatistics>,
 ) -> Result<(Ensemble, Info), Box<dyn std::error::Error>> {
+    // The two paths each have one source the other lacks. A transport run has
+    // tallied rates with a statistical covariance and no caller-supplied flux
+    // error (its flux error IS the statistical one); a spectrum run has the
+    // reverse. Each ignores the other's, and the report lists only what
+    // applied.
+    let transport = statistical.is_some();
+    let applies = |s: crate::uncertainty::Source| match s {
+        crate::uncertainty::Source::Statistical => transport,
+        crate::uncertainty::Source::FluxSpectrum => !transport,
+        _ => true,
+    };
+    let want_statistical = transport && request.wants(crate::uncertainty::Source::Statistical);
+    let statistical = statistical.filter(|s| want_statistical && !s.rates.is_empty());
+
     // One fold and one factorization per distinct spectrum, not per replica.
     // The fold is relativized, so the per-step `scale_rates` leaves it correct:
     // a relative covariance does not move when the flux magnitude does.
@@ -1149,7 +1262,7 @@ fn run_replicas(
     // per-bin sigma, which a spectrum lifted from a published reference set
     // does not have. Where it is absent the spectrum contributes nothing and
     // the report says so.
-    let want_flux = request.wants(crate::uncertainty::Source::FluxSpectrum);
+    let want_flux = !transport && request.wants(crate::uncertainty::Source::FluxSpectrum);
     let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
     let mut per_group: Vec<Option<(Vec<f64>, crate::flux_uncertainty::PerGroupRates)>> =
         Vec::with_capacity(per_spectrum.len());
@@ -1225,16 +1338,18 @@ fn run_replicas(
         info.half_lives_perturbed = h.candidates.iter().map(|(n, _, _)| n.clone()).collect();
         info.no_half_life_uncertainty = h.without.clone();
     }
-    info.sources = request
-        .sources
+    let requested: &[crate::uncertainty::Source] = if request.sources.is_empty() {
+        crate::uncertainty::Source::IMPLEMENTED
+    } else {
+        &request.sources
+    };
+    info.sources = requested
         .iter()
+        .filter(|s| applies(**s))
         .map(|s| s.name().to_string())
         .collect();
-    if info.sources.is_empty() {
-        info.sources = crate::uncertainty::Source::IMPLEMENTED
-            .iter()
-            .map(|s| s.name().to_string())
-            .collect();
+    if let Some(st) = statistical {
+        info.statistical_rates = st.rates.len();
     }
     let mut ensemble = Ensemble::new(steps.len());
 
@@ -1245,6 +1360,7 @@ fn run_replicas(
     if samplers.iter().all(Sampler::is_empty)
         && per_group.iter().all(Option::is_none)
         && no_half_lives
+        && statistical.is_none()
     {
         info.converged = true;
         info.add_flux_coverage(&flux_coverage);
@@ -1268,6 +1384,20 @@ fn run_replicas(
         let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
         let mut truncations = crate::covariance_sample::Truncations::default();
         let mut half_lives_floored = 0usize;
+        // A statistical draw of the whole tallied rate vector, the partials
+        // re-folded into the branching the way the nominal was, so an
+        // isomeric split moves with the rates it is made of.
+        let mut statistical_floored = 0usize;
+        let drawn = statistical.map(|st| {
+            let (mut totals, partials, floored) = st.rates.sample(request.seed, replica);
+            statistical_floored = floored;
+            let chain_k = if partials.is_empty() {
+                Arc::clone(&st.base_chain)
+            } else {
+                apply_coupled_branching(&st.base_chain, &partials, &mut totals)
+            };
+            (totals, chain_k)
+        });
         let sampled_half_lives = match &half_life {
             Some(h) if !h.candidates.is_empty() => crate::uncertainty::sample_half_lives(
                 &h.candidates,
@@ -1288,6 +1418,12 @@ fn run_replicas(
             // against the nominal per-group terms; the cross-section one is
             // multiplicative on the resulting rate, and the two sources are
             // independent so the order does not change the distribution.
+            // A transport run has one spectrum, the tally's own, whose rates
+            // and branching this replica drew statistically.
+            let (rates, folded_chain) = match (&drawn, idx) {
+                (Some((totals, chain_k)), 0) => (totals, chain_k),
+                _ => (rates, folded_chain),
+            };
             let rates = match &per_group[idx] {
                 Some((relative, terms)) => {
                     let delta = crate::flux_uncertainty::flux_deviates(
@@ -1305,9 +1441,13 @@ fn run_replicas(
             truncations.floored += t.floored;
             truncations.sampled += t.sampled;
             let folded_chain = match &half_life {
-                Some(h) if !sampled_half_lives.is_empty() => Arc::new(
-                    crate::uncertainty::with_half_lives(&h.folded[idx], &sampled_half_lives),
-                ),
+                // The pruned nominal chain, unless this replica drew its own
+                // branching, which then carries the half-lives instead.
+                Some(h) if !sampled_half_lives.is_empty() => Arc::new(if drawn.is_some() {
+                    crate::uncertainty::with_half_lives(folded_chain, &sampled_half_lives)
+                } else {
+                    crate::uncertainty::with_half_lives(&h.folded[idx], &sampled_half_lives)
+                }),
                 _ => Arc::clone(folded_chain),
             };
             perturbed.push((rates, weights.clone(), folded_chain));
@@ -1330,6 +1470,7 @@ fn run_replicas(
             flux_bins_floored: flux_coverage.bins_floored,
             half_lives: sampled_half_lives,
             half_lives_floored,
+            statistical_floored,
         })
     };
 
@@ -1360,6 +1501,10 @@ fn run_replicas(
             flux_coverage.bins_floored += outcome.flux_bins_floored;
             info.half_lives_sampled += outcome.half_lives.len();
             info.half_lives_floored += outcome.half_lives_floored;
+            info.statistical_floored += outcome.statistical_floored;
+            if statistical.is_some() {
+                info.statistical_sampled += info.statistical_rates;
+            }
             ensemble.push_with_half_lives(outcome.densities, outcome.half_lives);
         }
         replica = block_end as u64;

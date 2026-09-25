@@ -599,6 +599,11 @@ pub struct RateCovariance {
 }
 
 impl RateCovariance {
+    /// No rates at all.
+    pub(crate) fn empty() -> Self {
+        Self::from_parts(Vec::new(), Vec::new(), 0, Vec::new())
+    }
+
     pub(crate) fn from_parts(
         labels: Vec<RateLabel>,
         rates: Vec<f64>,

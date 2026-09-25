@@ -467,7 +467,12 @@ class DataUncertainty:
       data's own standard deviation. A replica's half-lives are used in its
       solve AND in the activity, decay heat and dose evaluated from it, so a
       saturated activity (``lambda N = R``) is correctly insensitive to its
-      own half-life rather than inheriting the density's spread.
+      own half-life rather than inheriting the density's spread;
+    - ``"statistical"``: the Monte Carlo uncertainty of transport-tallied
+      reaction rates, from their per-history covariance. It applies to
+      ``Model.simulate_transmutation``, as ``"flux_spectrum"`` applies only to
+      ``Material.transmute``; each call ignores the other's, and the report's
+      ``sources`` lists what actually applied.
     
     Decay branching ratios, fission yields and the isomeric-branching overlay
     are held at their evaluated values; they carry uncertainties of their own
@@ -2297,7 +2302,7 @@ class Model:
         Returns:
             A :class:`GeometrySliceData` -- also supports tuple unpacking.
         """
-    def simulate_transmutation(self, method: builtins.str, schedule: typing.Any, total_particles: typing.Optional[builtins.int] = None, seed: builtins.int = 1, threads: typing.Optional[builtins.int] = None, max_runtime: typing.Optional[typing.Any] = None, compute: builtins.str = 'cpu') -> TransmutationResults:
+    def simulate_transmutation(self, method: builtins.str, schedule: typing.Any, total_particles: typing.Optional[builtins.int] = None, seed: builtins.int = 1, threads: typing.Optional[builtins.int] = None, max_runtime: typing.Optional[typing.Any] = None, compute: builtins.str = 'cpu', data_uncertainty: typing.Optional[DataUncertainty] = None) -> TransmutationResults:
         r"""
         Run transport-transmutation calculation.
         
@@ -2344,6 +2349,29 @@ class Model:
                 Because the budget is applied afresh to each timestep, a
                 time-bounded transmutation is non-deterministic in history count.
         
+            data_uncertainty (DataUncertainty, optional): Uncertainty on the
+                inventories, by resampling and re-solving, as
+                ``Material.transmute`` does. ``method="independent"`` only: the
+                coupled method re-runs transport every step, and propagating its
+                step-to-step noise is out of scope, so asking with it raises.
+                The sources that apply here:
+        
+                - ``"statistical"``: the Monte Carlo uncertainty of the tallied
+                  reaction rates, from their per-history covariance, so the
+                  correlations between rates scored by the same histories are
+                  kept. Each rate's own sigma is read with
+                  ``get_reaction_rate_uncertainty``;
+                - ``"cross_sections"``: the ENDF MF=33 covariance, folded against
+                  the spectrum the tally actually saw;
+                - ``"half_life"``: the decay data's half-life sigmas.
+        
+                ``"flux_spectrum"`` does not apply: there is no supplied spectrum,
+                and the flux's error is the statistical one. The sources are
+                independent, so ``sources=["statistical"]`` isolates the
+                transport's contribution and the default gives the total. Omit
+                it and nothing extra is tallied or solved: the inventories are
+                bit-identical either way.
+        
         Returns:
             TransmutationResults object containing material compositions at each timestep.
         
@@ -2355,6 +2383,10 @@ class Model:
             >>> results = model.simulate_transmutation(
             ...     method="coupled", schedule=schedule, total_particles=1000)
             >>> co60 = results.get_nuclide_evolution(1, "Co60")
+            >>> results = model.simulate_transmutation(
+            ...     method="independent", schedule=schedule, total_particles=100_000,
+            ...     data_uncertainty=yamc.DataUncertainty(seed=1))
+            >>> results.get_nuclide_uncertainty(1, "Co60", 1)
         """
     def to_vtkhdf(self, filename: builtins.str, **kwargs: typing.Any) -> None:
         r"""Write to a VTK-HDF file for ParaView. Requires h5py (pip install yamc[viz])."""
@@ -4517,6 +4549,27 @@ class TransmutationResults:
         Returns:
             List of rates, or None if the material is not in the results.
         """
+    def get_reaction_rate_uncertainty(self, material_id: builtins.int, step: builtins.int) -> typing.Optional[builtins.list[tuple[builtins.str, builtins.str, typing.Optional[builtins.str], builtins.float, builtins.float]]]:
+        r"""
+        The statistical uncertainty of each transport-tallied reaction rate
+        at one step.
+        
+        Present for ``Model.simulate_transmutation`` run with
+        ``data_uncertainty`` including the ``"statistical"`` source, and
+        ``None`` otherwise. Each entry is ``(nuclide, reaction, target, rate,
+        std_dev)`` in 1/s per atom: a reaction total has ``target`` of ``None``,
+        an isomeric partial names its final state. The rates are the tally's,
+        scaled by the step's source rate, exactly as the step's solve used them
+        before the branching fold.
+        
+        The rates are correlated, having been scored by the same histories,
+        and the inventory sigmas are computed with those correlations. These
+        standard deviations alone do not carry them.
+        
+        Args:
+            material_id: Material ID number.
+            step: Schedule step index, as in ``get_reaction_rates``.
+        """
     def get_nuclide_evolution(self, material_id: builtins.int, nuclide: builtins.str) -> typing.Optional[builtins.list[builtins.float]]:
         r"""
         Get the evolution of a specific nuclide over all timesteps.
@@ -4742,6 +4795,10 @@ class TransmutationResults:
           half-life sampled and which state no sigma to sample from.
           ``half_lives_floored`` / ``half_lives_sampled`` count draws that came
           out non-positive and had to be floored.
+        - ``statistical_rates``: with the ``"statistical"`` source on a
+          transport run, how many tallied rates were sampled from their
+          covariance; ``statistical_floored`` / ``statistical_sampled`` count
+          draws that came out negative and were floored.
         - ``not_perturbed``: the sources this does not propagate at all.
         - ``samples`` / ``converged``: how many replicas ran, and whether the
           sigmas settled or the cap was hit.

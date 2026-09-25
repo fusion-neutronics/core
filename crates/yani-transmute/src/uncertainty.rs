@@ -63,6 +63,13 @@ pub enum Source {
     /// insensitive to its own half-life (`N ~ R / lambda`, so `A ~ R`), and
     /// inflate its uncertainty.
     HalfLife,
+    /// The Monte Carlo statistical uncertainty of transport-tallied reaction
+    /// rates, from their per-history covariance (issue #140, item 1).
+    ///
+    /// Applies to `Model.simulate_transmutation`, whose rates come from
+    /// transport; a spectrum run's rates are a deterministic collapse with no
+    /// sampling error, so it has nothing to perturb there.
+    Statistical,
 }
 
 impl Source {
@@ -77,6 +84,7 @@ impl Source {
         Source::CrossSections,
         Source::FluxSpectrum,
         Source::HalfLife,
+        Source::Statistical,
     ];
 
     /// The name used in the API and in the coverage report.
@@ -85,6 +93,7 @@ impl Source {
             Source::CrossSections => "cross_sections",
             Source::FluxSpectrum => "flux_spectrum",
             Source::HalfLife => "half_life",
+            Source::Statistical => "statistical",
         }
     }
 
@@ -233,6 +242,12 @@ pub struct Info {
     /// where it describes the evaluation.
     pub half_lives_floored: usize,
     pub half_lives_sampled: usize,
+    /// Tallied rates sampled statistically, the totals and partials together;
+    /// zero off the transport path or with the source off.
+    pub statistical_rates: usize,
+    /// Statistically drawn rates that came out negative and were floored.
+    pub statistical_floored: usize,
+    pub statistical_sampled: usize,
     /// Sources deliberately NOT perturbed, for the record.
     pub not_perturbed: Vec<String>,
     /// Which sources this run perturbed, by name.

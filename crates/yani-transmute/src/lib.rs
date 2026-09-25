@@ -22,6 +22,7 @@ pub mod multigroup;
 mod results;
 mod schedule;
 pub mod self_shielding;
+pub mod statistical;
 mod transmutation;
 mod transmutation_stepper;
 mod transmutation_tallies;
@@ -61,8 +62,8 @@ pub use yani::{
 
 pub use material_transmute::{
     activation_mts, apply_coupled_branching, preload_activation_data, transmute_material,
-    transmute_material_shielded, transmute_materials, MultigroupSpectrum, TransmuteCase,
-    TransmuteStep,
+    transmute_material_shielded, transmute_materials, transport_replicas, MultigroupSpectrum,
+    TransmuteCase, TransmuteStep, TransportTallied,
 };
 
 /// Load the transmutation chain assembled from the configured per-subsection

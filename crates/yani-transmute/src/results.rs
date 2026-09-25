@@ -90,6 +90,12 @@ pub struct TransmutationResults {
     /// How many multigroup collapses a spectrum solve performed against how
     /// many its materials asked for. `None` for a transport-coupled solve.
     pub collapse_reuse: Option<CollapseReuse>,
+
+    /// Material ID -> the statistical covariance of its transport-tallied
+    /// rates, per source particle (unit source rate), when a transport run was
+    /// asked for statistical uncertainty. Scale by a step's source rate for
+    /// that step's rates, and by its square for their covariance.
+    pub rate_covariance: HashMap<u32, crate::history_statistics::RateCovariance>,
 }
 
 /// How much of a spectrum solve's collapse work was shared.
@@ -234,6 +240,7 @@ impl TransmutationResults {
             chain: None,
             collapse: HashMap::new(),
             collapse_reuse: None,
+            rate_covariance: HashMap::new(),
         }
     }
 

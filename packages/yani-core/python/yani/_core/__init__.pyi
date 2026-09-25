@@ -113,7 +113,12 @@ class DataUncertainty:
       data's own standard deviation. A replica's half-lives are used in its
       solve AND in the activity, decay heat and dose evaluated from it, so a
       saturated activity (``lambda N = R``) is correctly insensitive to its
-      own half-life rather than inheriting the density's spread.
+      own half-life rather than inheriting the density's spread;
+    - ``"statistical"``: the Monte Carlo uncertainty of transport-tallied
+      reaction rates, from their per-history covariance. It applies to
+      ``Model.simulate_transmutation``, as ``"flux_spectrum"`` applies only to
+      ``Material.transmute``; each call ignores the other's, and the report's
+      ``sources`` lists what actually applied.
     
     Decay branching ratios, fission yields and the isomeric-branching overlay
     are held at their evaluated values; they carry uncertainties of their own
@@ -1905,6 +1910,27 @@ class TransmutationResults:
         Returns:
             List of rates, or None if the material is not in the results.
         """
+    def get_reaction_rate_uncertainty(self, material_id: builtins.int, step: builtins.int) -> typing.Optional[builtins.list[tuple[builtins.str, builtins.str, typing.Optional[builtins.str], builtins.float, builtins.float]]]:
+        r"""
+        The statistical uncertainty of each transport-tallied reaction rate
+        at one step.
+        
+        Present for ``Model.simulate_transmutation`` run with
+        ``data_uncertainty`` including the ``"statistical"`` source, and
+        ``None`` otherwise. Each entry is ``(nuclide, reaction, target, rate,
+        std_dev)`` in 1/s per atom: a reaction total has ``target`` of ``None``,
+        an isomeric partial names its final state. The rates are the tally's,
+        scaled by the step's source rate, exactly as the step's solve used them
+        before the branching fold.
+        
+        The rates are correlated, having been scored by the same histories,
+        and the inventory sigmas are computed with those correlations. These
+        standard deviations alone do not carry them.
+        
+        Args:
+            material_id: Material ID number.
+            step: Schedule step index, as in ``get_reaction_rates``.
+        """
     def get_nuclide_evolution(self, material_id: builtins.int, nuclide: builtins.str) -> typing.Optional[builtins.list[builtins.float]]:
         r"""
         Get the evolution of a specific nuclide over all timesteps.
@@ -2130,6 +2156,10 @@ class TransmutationResults:
           half-life sampled and which state no sigma to sample from.
           ``half_lives_floored`` / ``half_lives_sampled`` count draws that came
           out non-positive and had to be floored.
+        - ``statistical_rates``: with the ``"statistical"`` source on a
+          transport run, how many tallied rates were sampled from their
+          covariance; ``statistical_floored`` / ``statistical_sampled`` count
+          draws that came out negative and were floored.
         - ``not_perturbed``: the sources this does not propagate at all.
         - ``samples`` / ``converged``: how many replicas ran, and whether the
           sigmas settled or the cap was hit.

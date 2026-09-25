@@ -217,6 +217,47 @@ impl PyTransmutationResults {
         self.inner.get_source_rates(material_id).map(|r| r.to_vec())
     }
 
+    /// The statistical uncertainty of each transport-tallied reaction rate
+    /// at one step.
+    ///
+    /// Present for ``Model.simulate_transmutation`` run with
+    /// ``data_uncertainty`` including the ``"statistical"`` source, and
+    /// ``None`` otherwise. Each entry is ``(nuclide, reaction, target, rate,
+    /// std_dev)`` in 1/s per atom: a reaction total has ``target`` of ``None``,
+    /// an isomeric partial names its final state. The rates are the tally's,
+    /// scaled by the step's source rate, exactly as the step's solve used them
+    /// before the branching fold.
+    ///
+    /// The rates are correlated, having been scored by the same histories,
+    /// and the inventory sigmas are computed with those correlations. These
+    /// standard deviations alone do not carry them.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     step: Schedule step index, as in ``get_reaction_rates``.
+    fn get_reaction_rate_uncertainty(
+        &self,
+        material_id: u32,
+        step: usize,
+    ) -> Option<Vec<(String, String, Option<String>, f64, f64)>> {
+        let covariance = self.inner.rate_covariance.get(&material_id)?;
+        let rate = *self.inner.get_source_rates(material_id)?.get(step)?;
+        Some(
+            (0..covariance.len())
+                .map(|i| {
+                    let label = &covariance.labels[i];
+                    (
+                        label.nuclide.clone(),
+                        label.kind.clone(),
+                        label.target.clone(),
+                        covariance.rates[i] * rate,
+                        covariance.std_dev(i) * rate,
+                    )
+                })
+                .collect(),
+        )
+    }
+
     /// How much of the multigroup collapse work was shared, or ``None`` for a
     /// transport-coupled solve, which does none.
     ///
@@ -533,6 +574,10 @@ impl PyTransmutationResults {
     ///   half-life sampled and which state no sigma to sample from.
     ///   ``half_lives_floored`` / ``half_lives_sampled`` count draws that came
     ///   out non-positive and had to be floored.
+    /// - ``statistical_rates``: with the ``"statistical"`` source on a
+    ///   transport run, how many tallied rates were sampled from their
+    ///   covariance; ``statistical_floored`` / ``statistical_sampled`` count
+    ///   draws that came out negative and were floored.
     /// - ``not_perturbed``: the sources this does not propagate at all.
     /// - ``samples`` / ``converged``: how many replicas ran, and whether the
     ///   sigmas settled or the cap was hit.
