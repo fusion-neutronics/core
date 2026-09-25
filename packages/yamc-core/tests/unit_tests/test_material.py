@@ -284,6 +284,69 @@ def test_activity_requires_volume():
 
 
 # ---------------------------------------------------------------------------
+# Clearance index
+# ---------------------------------------------------------------------------
+
+# A trace of Co60 in iron, in atoms/(barn·cm). UK EPR 2016 limits Co60 to
+# 0.1 Bq/g, so its ratio is just its specific activity over 0.1.
+_ACTIVATED_IRON = {"Fe56": 0.0849, "Co60": 1.0e-10}
+
+
+def test_clearance_index_uses_the_chain_half_lives():
+    """The ratio comes from the same chain half-life activity() uses."""
+    mat = Material.from_atom_densities(_ACTIVATED_IRON)
+    result = mat.clearance_index("UK_EPR16_out_of_scope")
+    bq_per_g = mat.activity(per="g", by_nuclide=True)["Co60"]
+
+    assert result.limits_used["Co60"] == 0.1
+    assert result.by_nuclide["Co60"] == pytest.approx(bq_per_g / 0.1, rel=1e-6)
+    assert result.index == pytest.approx(bq_per_g / 0.1, rel=1e-6)
+    assert result.units == "Bq/g"
+    assert not result.clearable
+
+
+def test_clearance_index_of_a_stable_material_is_zero():
+    result = Material.from_atom_densities({"Fe56": 0.0849}).clearance_index("UK_EPR16_out_of_scope")
+    assert result.index == 0.0
+    assert result.clearable
+
+
+def test_clearance_indices_needs_a_volume_only_for_the_total_activity_sets():
+    """Atom densities fix the mass density, so the Ci/m3 sets need nothing more."""
+    without_volume = Material.from_atom_densities(_ACTIVATED_IRON).clearance_indices()
+    assert without_volume["NRC_long"].units == "Ci/m3"
+    assert "StrlSchV_exemption_activity" not in without_volume
+
+    with_volume = Material.from_atom_densities(_ACTIVATED_IRON, volume=1000.0).clearance_indices()
+    assert with_volume["StrlSchV_exemption_activity"].units == "Bq"
+
+
+def test_clearance_indices_can_be_restricted_to_named_sets():
+    results = Material.from_atom_densities(_ACTIVATED_IRON).clearance_indices(
+        ["UK_EPR16_out_of_scope", "EU_BSS_clearance"]
+    )
+    assert set(results) == {"UK_EPR16_out_of_scope", "EU_BSS_clearance"}
+
+
+def test_clearance_index_names_the_available_sets_for_an_unknown_one():
+    with pytest.raises(KeyError, match="Available"):
+        Material.from_atom_densities(_ACTIVATED_IRON).clearance_index("NOT_A_SET")
+
+
+def test_clearance_result_serialises():
+    import json
+
+    mat = Material.from_atom_densities(_ACTIVATED_IRON)
+    mat.name = "activated iron"
+    result = mat.clearance_index("UK_EPR16_out_of_scope")
+    payload = json.loads(json.dumps(result.to_dict()))
+    assert payload["material"] == "activated iron"
+    assert payload["clearable"] is False
+    assert result.dominant(1)[0][0] == "Co60"
+    assert "NOT CLEARABLE" in str(result)
+
+
+# ---------------------------------------------------------------------------
 # Contact dose rate
 # ---------------------------------------------------------------------------
 

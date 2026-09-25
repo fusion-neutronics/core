@@ -994,6 +994,123 @@ impl PyMaterial {
         }
     }
 
+    /// Clearance index of the current inventory against one regulatory limit set.
+    ///
+    /// Each radionuclide's activity is divided by its limit in the set and the
+    /// ratios are summed; the material meets the limits when the sum is below
+    /// the set's threshold, normally 1. The limit sets cover UK, German, US, EU
+    /// and IAEA clearance, exemption and disposal tables, and come from the
+    /// ``radiological-material-clearance-finder`` crate, whose documentation
+    /// describes each one and where its numbers come from.
+    ///
+    /// Half-lives come from the configured transmutation chain, the same ones
+    /// ``activity()`` and ``decay_heat()`` use, so a nuclide the chain calls
+    /// stable contributes nothing. Specific activities (Bq/g) need nothing
+    /// beyond the composition, and the volumetric US sets (Ci/m3) use the mass
+    /// density the atom densities imply. Only the total activity sets (Bq)
+    /// need ``material.volume``.
+    ///
+    /// Stable isotopes have to stay in the material: they are most of its
+    /// mass, and so most of the Bq/g denominator.
+    ///
+    /// Args:
+    ///     limit_set (str): Name of the limit set, such as
+    ///         ``"UK_EPR16_out_of_scope"`` or ``"StrlSchV_unrestricted"``.
+    ///         ``clearance_indices()`` assesses against every set at once.
+    ///     metal (bool): Whether the material is activated metal, which
+    ///         changes some NRC limits and adds others.
+    ///     apply_default_limit (bool): Whether to apply the set's catch-all
+    ///         limit to nuclides its table does not list. The UK regulations
+    ///         define one, so leaving this on is what they say.
+    ///     exclude_daughters (bool): Whether to leave out daughters whose
+    ///         parent's limit already covers them, as the regulation's own
+    ///         table directs. Turning it off double counts them.
+    ///
+    /// Returns:
+    ///     ClearanceResult: The index, whether it clears, each nuclide's
+    ///     contribution, and any activity no limit in the set covers.
+    ///
+    /// Raises:
+    ///     KeyError: If no limit set has that name.
+    ///     ValueError: If the set is in Bq and the material has no volume.
+    ///
+    /// Examples:
+    ///     >>> result = material.clearance_index("UK_EPR16_out_of_scope")
+    ///     >>> result.index
+    ///     11.24...
+    ///     >>> result.clearable
+    ///     False
+    #[pyo3(signature = (limit_set, *, metal=false, apply_default_limit=true, exclude_daughters=true))]
+    fn clearance_index(
+        &self,
+        limit_set: &str,
+        metal: bool,
+        apply_default_limit: bool,
+        exclude_daughters: bool,
+    ) -> PyResult<super::clearance::PyClearanceResult> {
+        use radiological_material_clearance_finder as clearance;
+        let chain = crate::distribution::resolve_chain()?.chain;
+        let inventory = super::clearance::inventory(&self.internal, &chain)?;
+        let set = clearance::get_limit_set(limit_set).map_err(super::clearance::to_py_err)?;
+        let options = super::clearance::options(metal, apply_default_limit, exclude_daughters);
+        let inner = clearance::clearance_index(&inventory, &set, options)
+            .map_err(super::clearance::to_py_err)?;
+        Ok(super::clearance::PyClearanceResult { inner })
+    }
+
+    /// Clearance indexes of the current inventory against many limit sets.
+    ///
+    /// The same assessment as ``clearance_index()``, once per set. Sets the
+    /// material cannot be assessed against are skipped rather than raising,
+    /// which in practice means the total activity sets (Bq) when the material
+    /// has no ``volume``.
+    ///
+    /// Args:
+    ///     limit_sets (list[str] | None): Names of the limit sets. ``None``
+    ///         (the default) assesses against every available set, which is
+    ///         also the way to see their names.
+    ///     metal (bool): As for ``clearance_index()``.
+    ///     apply_default_limit (bool): As for ``clearance_index()``.
+    ///     exclude_daughters (bool): As for ``clearance_index()``.
+    ///
+    /// Returns:
+    ///     dict[str, ClearanceResult]: Results keyed by limit set name.
+    ///
+    /// Raises:
+    ///     KeyError: If a named limit set does not exist.
+    ///
+    /// Examples:
+    ///     >>> results = material.clearance_indices()
+    ///     >>> [name for name, r in results.items() if r.clearable]
+    ///     ['Fetter', 'NRC_long', ...]
+    #[pyo3(signature = (limit_sets=None, *, metal=false, apply_default_limit=true, exclude_daughters=true))]
+    fn clearance_indices(
+        &self,
+        limit_sets: Option<Vec<String>>,
+        metal: bool,
+        apply_default_limit: bool,
+        exclude_daughters: bool,
+    ) -> PyResult<HashMap<String, super::clearance::PyClearanceResult>> {
+        use radiological_material_clearance_finder as clearance;
+        let chain = crate::distribution::resolve_chain()?.chain;
+        let inventory = super::clearance::inventory(&self.internal, &chain)?;
+        let names: Option<Vec<&str>> = limit_sets
+            .as_ref()
+            .map(|names| names.iter().map(String::as_str).collect());
+        let options = super::clearance::options(metal, apply_default_limit, exclude_daughters);
+        let results = clearance::clearance_indices(&inventory, names.as_deref(), options)
+            .map_err(super::clearance::to_py_err)?;
+        Ok(results
+            .into_iter()
+            .map(|inner| {
+                (
+                    inner.limit_set.clone(),
+                    super::clearance::PyClearanceResult { inner },
+                )
+            })
+            .collect())
+    }
+
     /// Compute neutron mean free path at a given energy.
     ///
     /// Args:
