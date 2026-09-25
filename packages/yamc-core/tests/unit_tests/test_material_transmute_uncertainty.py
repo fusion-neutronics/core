@@ -102,7 +102,7 @@ def test_asking_on_data_without_covariance_reports_it_rather_than_a_zero():
     iron = _iron()
     results = iron.transmute(
         schedule=_schedule(),
-        data_uncertainty=yamc.DataUncertainty(seed=1, samples=8),
+        data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["cross_sections"]),
     )
     mid = iron.id or 0
 
@@ -131,7 +131,7 @@ def test_the_report_names_what_is_never_perturbed():
     )
     not_perturbed = results.data_uncertainty_info["not_perturbed"]
     joined = " ".join(not_perturbed)
-    for source in ("half-life", "fission yield", "branching"):
+    for source in ("fission yield", "branching"):
         assert source in joined, f"{source!r} missing from {not_perturbed}"
 
 
@@ -198,12 +198,12 @@ def test_naming_a_source_that_does_not_exist_yet_raises():
 
     Adding sources one at a time and watching the inventory sigma grow only
     means something if asking for a source that has not landed is an error. A
-    silently ignored ``half_life`` would look exactly like a ``half_life`` that
-    contributed nothing, which is the one confusion this whole feature exists
-    to prevent.
+    silently ignored ``fission_yield`` would look exactly like a
+    ``fission_yield`` that contributed nothing, which is the one confusion this
+    whole feature exists to prevent.
     """
-    with pytest.raises(ValueError, match="half_life"):
-        yamc.DataUncertainty(sources=["half_life"])
+    with pytest.raises(ValueError, match="fission_yield"):
+        yamc.DataUncertainty(sources=["fission_yield"])
 
     with pytest.raises(ValueError, match="cross_sections"):
         # The message must name what IS available, not just what is not.
@@ -339,10 +339,13 @@ def test_a_spectrum_without_an_error_is_reported_not_assumed_exact():
 
 
 def _uncertain_results():
+    # Cross sections only: the fixtures carry no covariance, so nothing is
+    # sampled, which is the case these tests are about. The published decay
+    # data does carry half-life sigmas, so the default sources would sample.
     iron = _iron()
     results = iron.transmute(
         schedule=_schedule(),
-        data_uncertainty=yamc.DataUncertainty(seed=1, samples=8),
+        data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["cross_sections"]),
     )
     return results, iron.id or 0
 
@@ -492,3 +495,42 @@ def test_the_contact_dose_by_nuclide_is_a_dict_of_estimates():
     assert set(breakdown) == set(on_the_material)
     for nuclide, dose in on_the_material.items():
         assert breakdown[nuclide].nominal == dose
+
+
+# --- half-life uncertainty ----------------------------------------------------
+#
+# The numerical rules (a saturated activity insensitive to its own half-life,
+# the lambda t sensitivity after cooling) are pinned in Rust, in
+# crates/yani-transmute/tests/half_life_uncertainty.rs. Here: the source is
+# offered, and leaving it out is reported.
+
+def test_half_life_is_an_available_source():
+    assert "half_life" in yamc.DataUncertainty.available_sources()
+
+
+def test_leaving_half_lives_out_is_reported():
+    iron = _iron()
+    results = iron.transmute(
+        schedule=_schedule(),
+        data_uncertainty=yamc.DataUncertainty(
+            seed=1, samples=8, sources=["cross_sections"]
+        ),
+    )
+    info = results.data_uncertainty_info
+    assert "half-life" in info["not_perturbed"]
+    assert info["half_lives_perturbed"] == []
+    assert info["half_lives_sampled"] == 0
+
+
+def test_asking_for_half_lives_reports_which_were_sampled():
+    iron = _iron()
+    results = iron.transmute(
+        schedule=_schedule(),
+        data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["half_life"]),
+    )
+    info = results.data_uncertainty_info
+    assert "half-life" not in info["not_perturbed"]
+    # Every reachable unstable nuclide is in exactly one of the two lists.
+    assert not set(info["half_lives_perturbed"]) & set(info["no_half_life_uncertainty"])
+    assert info["half_lives_perturbed"] or info["no_half_life_uncertainty"]
+

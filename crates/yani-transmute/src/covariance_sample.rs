@@ -254,7 +254,7 @@ impl Sampler {
 /// explicitly not stable across releases. The seed contract promises the same
 /// answer on every platform and every build, and a hash that may change is not
 /// compatible with that.
-fn name_ordinal(name: &str) -> u32 {
+pub(crate) fn name_ordinal(name: &str) -> u32 {
     let mut h: u32 = 0x811c_9dc5;
     for b in name.as_bytes() {
         h ^= *b as u32;

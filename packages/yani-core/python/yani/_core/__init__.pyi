@@ -102,13 +102,23 @@ class DataUncertainty:
     Pass one to :meth:`Material.transmute` and the result carries a standard
     deviation on every nuclide density alongside the mean.
     
-    What it covers is the **activation cross sections**, sampled from the ENDF
-    MF=33 covariance folded against this material's own spectrum. Half-lives,
-    decay branching ratios, fission yields and the isomeric-branching overlay
+    What it can cover, by source (``DataUncertainty.available_sources()``):
+    
+    - ``"cross_sections"``: the activation cross sections, sampled from the
+      ENDF MF=33 covariance folded against this material's own spectrum;
+    - ``"flux_spectrum"``: the spectrum itself, from the per-bin
+      ``flux_std_dev`` given on a ``Pulse``;
+    - ``"half_life"``: every reachable nuclide's half-life, from the decay
+      data's own standard deviation. A replica's half-lives are used in its
+      solve AND in the activity, decay heat and dose evaluated from it, so a
+      saturated activity (``lambda N = R``) is correctly insensitive to its
+      own half-life rather than inheriting the density's spread.
+    
+    Decay branching ratios, fission yields and the isomeric-branching overlay
     are held at their evaluated values; they carry uncertainties of their own
     that this does not propagate. ``TransmutationResults.data_uncertainty_info``
     says so per run, along with any nuclide whose evaluation carries no
-    covariance at all.
+    covariance and any unstable nuclide whose half-life has no stated sigma.
     
     Args:
         seed (int): Base seed. A given nuclide's perturbation in a given replica
@@ -1892,6 +1902,11 @@ class TransmutationResults:
           covariance was not positive semi-definite and had to be repaired.
         - ``rates_floored`` / ``rates_sampled``: samples that went negative and
           were truncated at zero, which biases the mean upward when common.
+        - ``half_lives_perturbed`` / ``no_half_life_uncertainty``: with the
+          ``"half_life"`` source, which reachable unstable nuclides had their
+          half-life sampled and which state no sigma to sample from.
+          ``half_lives_floored`` / ``half_lives_sampled`` count draws that came
+          out non-positive and had to be floored.
         - ``not_perturbed``: the sources this does not propagate at all.
         - ``samples`` / ``converged``: how many replicas ran, and whether the
           sigmas settled or the cap was hit.
