@@ -62,6 +62,7 @@ fn mn56_relative_sigma(error: FluxError) -> Option<f64> {
         seed: 2,
         samples: Some(1024),
         sources: vec![Source::FluxSpectrum],
+        attribution: false,
     };
     let results = transmute_material(
         &mut material,

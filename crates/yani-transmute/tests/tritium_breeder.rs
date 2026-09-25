@@ -185,6 +185,7 @@ fn tritium_production_carries_a_nuclear_data_uncertainty() {
             seed: 20260825,
             samples: Some(256),
             sources: vec![Source::CrossSections],
+            attribution: false,
         }),
     );
 
@@ -249,6 +250,7 @@ fn the_uncovered_blanket_nuclides_are_named() {
             seed: 1,
             samples: Some(32),
             sources: vec![Source::CrossSections],
+            attribution: false,
         }),
     );
     let info = results.uncertainty_info.get(&0).cloned().expect("info");
@@ -296,6 +298,7 @@ fn the_baseline_row_has_no_uncertainty_and_says_why() {
             seed: 2,
             samples: Some(32),
             sources: vec![Source::CrossSections],
+            attribution: false,
         }),
     );
     assert_eq!(
@@ -342,6 +345,7 @@ fn flux_and_cross_sections_combine() {
                 seed: 20260826,
                 samples: Some(256),
                 sources,
+                attribution: false,
             }),
         )
         .expect("transmute");

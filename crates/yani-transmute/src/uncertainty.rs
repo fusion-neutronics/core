@@ -136,6 +136,12 @@ pub struct DataUncertainty {
     /// guess. Sources are independent, so the total sigma must not DECREASE as
     /// the set grows; that is a property worth testing.
     pub sources: Vec<Source>,
+    /// Also say where the uncertainty comes from ([`Attribution`]).
+    ///
+    /// Off by default because it costs further solves: one ensemble per
+    /// source, and one deterministic solve per contributor. It changes no
+    /// number the run otherwise reports.
+    pub attribution: bool,
 }
 
 impl Default for DataUncertainty {
@@ -144,6 +150,7 @@ impl Default for DataUncertainty {
             seed: 1,
             samples: None,
             sources: Source::IMPLEMENTED.to_vec(),
+            attribution: false,
         }
     }
 }
@@ -353,6 +360,44 @@ pub struct Ensemble {
     /// nuclides whose half-life was perturbed. Empty maps when half-lives were
     /// not perturbed.
     half_lives: Vec<HashMap<String, f64>>,
+    /// Where the uncertainty comes from, when it was asked for.
+    pub attribution: Option<Attribution>,
+}
+
+/// Where an inventory's uncertainty comes from (issue #140, item 4).
+///
+/// Two levels, which answer different questions:
+///
+/// - `by_source` is exact: the ensemble re-run with each source alone, so a
+///   nuclide's statistical and nuclear-data variances are measured the same
+///   way the total is. Sources are independent, so they sum to the total up to
+///   interaction and sampling noise, which is the unattributed residual.
+/// - `contributors` is first order: within the cross sections and the
+///   half-lives, one deterministic solve per nuclide (and per reaction) gives
+///   its sensitivity, and its variance is that squared against its own
+///   stated uncertainty. It says which evaluation to look at, not the total,
+///   which is always the resampled one.
+#[derive(Debug, Clone, Default)]
+pub struct Attribution {
+    /// Source name -> `[step][nuclide]` variance, from that source alone.
+    pub by_source: BTreeMap<String, Vec<HashMap<String, f64>>>,
+    /// First-order contributions, the largest-reaching first.
+    pub contributors: Vec<Contributor>,
+}
+
+/// One first-order contribution to the inventory variance.
+#[derive(Debug, Clone)]
+pub struct Contributor {
+    /// The source it belongs to, e.g. `cross_sections`.
+    pub source: String,
+    /// The nuclide whose data it is.
+    pub nuclide: String,
+    /// The reaction, for one cross-section channel alone; `None` for the
+    /// nuclide's whole evaluation (every channel with its correlations) or for
+    /// a half-life.
+    pub reaction: Option<String>,
+    /// `[step][nuclide]` variance it contributes, only where it is non-zero.
+    pub variance: Vec<HashMap<String, f64>>,
 }
 
 impl Ensemble {
@@ -361,6 +406,7 @@ impl Ensemble {
             moments: vec![HashMap::new(); n_steps],
             samples: Vec::new(),
             half_lives: Vec::new(),
+            attribution: None,
         }
     }
 

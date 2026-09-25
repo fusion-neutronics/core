@@ -617,3 +617,39 @@ def test_correlated_bins_move_the_inventory_more_than_independent_ones():
     independent, correlated = spread(0.0), spread(1.0)
     assert correlated == pytest.approx(0.10, rel=0.1)
     assert independent < 0.9 * correlated
+
+
+# --- attribution (issue #140, item 4) -------------------------------------------
+#
+# The numbers are pinned in Rust (tests/uncertainty_attribution.rs, and the
+# cross-section case in tests/data_uncertainty.rs). Here: the switch and the
+# shape of what comes back.
+
+def test_attribution_is_off_unless_asked():
+    assert yamc.DataUncertainty().attribution is False
+    iron = _iron()
+    sigma = [0.10 * f for f in MULTIGROUP_FLUX]
+    results = iron.transmute(
+        schedule=yamc.PulseSchedule([_pulse(sigma)]),
+        data_uncertainty=yamc.DataUncertainty(seed=1, samples=16, sources=["flux_spectrum"]),
+    )
+    assert results.get_uncertainty_breakdown(iron.id or 0, "Mn56", 1) is None
+
+
+def test_the_breakdown_says_which_source_carries_the_variance():
+    iron = _iron()
+    sigma = [0.10 * f for f in MULTIGROUP_FLUX]
+    results = iron.transmute(
+        schedule=yamc.PulseSchedule([_pulse(sigma)]),
+        data_uncertainty=yamc.DataUncertainty(
+            seed=1, samples=64, sources=["flux_spectrum"], attribution=True
+        ),
+    )
+    mid = iron.id or 0
+    b = results.get_uncertainty_breakdown(mid, "Mn56", 1)
+    assert b["variance"] == pytest.approx(results.get_nuclide_uncertainty(mid, "Mn56", 1) ** 2)
+    # One source: it carries everything, and nothing is left over.
+    assert b["by_source"] == {"flux_spectrum": b["variance"]}
+    assert b["unattributed"] == 0.0
+    assert isinstance(b["contributors"], list)
+    assert results.get_uncertainty_breakdown(mid, "Mn56", 0)["variance"] == 0.0

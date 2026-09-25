@@ -85,6 +85,7 @@ fn run(data: &str, shielding: Option<&Shielding>, with_sigma: bool) -> Transmuta
         // Only the flux, so nothing here needs MF=33 covariance and the
         // ensemble's spread is the flux sigma alone.
         sources: vec![Source::FluxSpectrum],
+        attribution: false,
     };
     transmute_material_shielded(
         &mut iron(data),
@@ -238,6 +239,7 @@ fn an_unperturbed_shielded_replica_is_the_nominal_run() {
         seed: 1,
         samples: Some(2),
         sources: vec![Source::FluxSpectrum],
+        attribution: false,
     };
     let results = transmute_material_shielded(
         &mut iron(&data),

@@ -500,6 +500,11 @@ class DataUncertainty:
             being ignored. A source that has not landed yet must not look like
             one that contributed nothing. ``DataUncertainty.available_sources()``
             lists what there is.
+        attribution (bool): Also say where the uncertainty comes from, read
+            with ``TransmutationResults.get_uncertainty_breakdown``. Off by
+            default because it costs further solves: one ensemble per source,
+            each source alone, and one deterministic solve per contributor. It
+            changes none of the numbers the run otherwise reports.
     
     Examples:
         >>> results = iron.transmute(
@@ -516,8 +521,13 @@ class DataUncertainty:
     @property
     def samples(self) -> typing.Optional[builtins.int]: ...
     @property
+    def attribution(self) -> builtins.bool:
+        r"""
+        Whether the run also says where the uncertainty comes from.
+        """
+    @property
     def sources(self) -> builtins.list[builtins.str]: ...
-    def __new__(cls, seed: builtins.int = 1, samples: typing.Optional[builtins.int] = None, sources: typing.Optional[typing.Sequence[builtins.str]] = None) -> DataUncertainty: ...
+    def __new__(cls, seed: builtins.int = 1, samples: typing.Optional[builtins.int] = None, sources: typing.Optional[typing.Sequence[builtins.str]] = None, attribution: builtins.bool = False) -> DataUncertainty: ...
     @staticmethod
     def available_sources() -> builtins.list[builtins.str]:
         r"""
@@ -4566,6 +4576,32 @@ class TransmutationResults:
         
         Returns:
             List of rates, or None if the material is not in the results.
+        """
+    def get_uncertainty_breakdown(self, material_id: builtins.int, nuclide: builtins.str, step: builtins.int) -> typing.Optional[dict]:
+        r"""
+        Where a nuclide's uncertainty at one step comes from.
+        
+        Present when the run was asked for it with
+        ``DataUncertainty(attribution=True)``, and ``None`` otherwise. A dict:
+        
+        - ``variance``: the total, resampled, the square of
+          ``get_nuclide_uncertainty``;
+        - ``by_source``: each source alone, resampled the same way, so this
+          says how much is statistical and how much is each kind of nuclear
+          data. The sources are independent and these sum to the total;
+        - ``unattributed``: what that sum leaves, interaction and sampling
+          noise, small when the attribution holds;
+        - ``contributors``: first order, a list of ``(source, nuclide,
+          reaction, variance)``, largest reach first. Within the cross sections
+          a nuclide's whole evaluation has ``reaction`` of ``None`` and each
+          channel alone names it; a half-life has ``None``. It says which
+          evaluation to look at; the total is the resampled one.
+        
+        Args:
+            material_id: Material ID number.
+            nuclide: Nuclide name.
+            step: As in ``get_nuclide_uncertainty``: 0 is the initial
+                composition, which carries none.
         """
     def get_reaction_rate_uncertainty(self, material_id: builtins.int, step: builtins.int) -> typing.Optional[builtins.list[tuple[builtins.str, builtins.str, typing.Optional[builtins.str], builtins.float, builtins.float]]]:
         r"""

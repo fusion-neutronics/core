@@ -59,6 +59,11 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///         being ignored. A source that has not landed yet must not look like
 ///         one that contributed nothing. ``DataUncertainty.available_sources()``
 ///         lists what there is.
+///     attribution (bool): Also say where the uncertainty comes from, read
+///         with ``TransmutationResults.get_uncertainty_breakdown``. Off by
+///         default because it costs further solves: one ensemble per source,
+///         each source alone, and one deterministic solve per contributor. It
+///         changes none of the numbers the run otherwise reports.
 ///
 /// Examples:
 ///     >>> results = iron.transmute(
@@ -82,8 +87,13 @@ pub struct PyDataUncertainty {
 #[pymethods]
 impl PyDataUncertainty {
     #[new]
-    #[pyo3(signature = (seed = 1, samples = None, sources = None))]
-    fn new(seed: u64, samples: Option<usize>, sources: Option<Vec<String>>) -> PyResult<Self> {
+    #[pyo3(signature = (seed = 1, samples = None, sources = None, attribution = false))]
+    fn new(
+        seed: u64,
+        samples: Option<usize>,
+        sources: Option<Vec<String>>,
+        attribution: bool,
+    ) -> PyResult<Self> {
         if samples == Some(0) {
             return Err(PyValueError::new_err(
                 "samples must be at least 1; pass samples=None to let the solver \
@@ -110,6 +120,7 @@ impl PyDataUncertainty {
                 seed,
                 samples,
                 sources,
+                attribution,
             },
         })
     }
@@ -134,6 +145,12 @@ impl PyDataUncertainty {
     #[getter]
     fn samples(&self) -> Option<usize> {
         self.inner.samples
+    }
+
+    /// Whether the run also says where the uncertainty comes from.
+    #[getter]
+    fn attribution(&self) -> bool {
+        self.inner.attribution
     }
 
     #[getter]

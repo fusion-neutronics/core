@@ -180,6 +180,15 @@ impl Sampler {
         self.factors.is_empty()
     }
 
+    /// The nuclides carrying a factor, with each one's reaction kinds and its
+    /// row-major factor `L` (`L L^T` the relative covariance of those kinds'
+    /// rates), for first-order attribution.
+    pub(crate) fn factors(&self) -> impl Iterator<Item = (&String, &[String], &[f64])> {
+        self.factors
+            .iter()
+            .map(|(name, f)| (name, f.kinds.as_slice(), f.l.as_slice()))
+    }
+
     /// The relative perturbations one replica applies, per nuclide and kind.
     ///
     /// Separated from [`Sampler::perturb`] so a test can look at the deviates

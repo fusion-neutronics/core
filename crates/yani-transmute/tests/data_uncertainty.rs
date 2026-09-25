@@ -413,6 +413,7 @@ fn a_source_switched_off_contributes_nothing() {
             seed: 4,
             samples: Some(64),
             sources: vec![Source::CrossSections],
+            attribution: false,
         }),
     );
     let without = run(
@@ -421,6 +422,7 @@ fn a_source_switched_off_contributes_nothing() {
             seed: 4,
             samples: Some(64),
             sources: vec![],
+            attribution: false,
         }),
     );
 
@@ -466,6 +468,7 @@ fn adding_a_source_never_decreases_the_uncertainty() {
                 seed: 8,
                 samples: Some(96),
                 sources,
+                attribution: false,
             }),
         )
         .get_nuclide_uncertainty(id, "Mn56", 1)
@@ -517,6 +520,7 @@ fn a_flux_error_moves_the_inventory_on_its_own() {
             seed: 77,
             samples: Some(256),
             sources: vec![Source::FluxSpectrum],
+            attribution: false,
         }),
     )
     .expect("transmute");
@@ -569,6 +573,7 @@ fn a_spectrum_without_an_error_is_reported_not_assumed_exact() {
             seed: 5,
             samples: Some(32),
             sources: vec![Source::FluxSpectrum],
+            attribution: false,
         }),
     )
     .expect("transmute");
@@ -618,6 +623,7 @@ fn the_inventory_spread_scales_with_the_flux_error() {
                 seed: 31,
                 samples: Some(256),
                 sources: vec![Source::FluxSpectrum],
+                attribution: false,
             }),
         )
         .expect("transmute")
@@ -631,5 +637,54 @@ fn the_inventory_spread_scales_with_the_flux_error() {
         large > small * 2.0,
         "tripling the flux error should roughly triple the inventory spread, \
          got {small:e} -> {large:e}"
+    );
+}
+
+/// Attribution with the cross-section source alone: the first-order
+/// contribution of Fe56's evaluation, every channel with its correlations,
+/// must account for Mn56's variance, since Mn56 is made from Fe56 alone. And
+/// each of Fe56's channels is reported on its own too.
+#[test]
+fn the_cross_section_attribution_names_the_evaluation() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let Some(dir) = fe56_with_covariance(tmp.path()) else {
+        return skip("the_cross_section_attribution_names_the_evaluation");
+    };
+    let mut material = iron(&dir);
+    let id = material.material_id.unwrap_or(0);
+    let results = run(
+        &mut material,
+        Some(&DataUncertainty {
+            seed: 1,
+            samples: Some(512),
+            sources: vec![yani_transmute::uncertainty::Source::CrossSections],
+            attribution: true,
+        }),
+    );
+    let b = results
+        .uncertainty_breakdown(id, "Mn56", 1)
+        .expect("attribution was asked for");
+    assert!(b.variance > 0.0);
+    // One source: it is the total.
+    assert_eq!(b.by_source["cross_sections"], b.variance);
+    let block = b
+        .contributors
+        .iter()
+        .find(|(s, n, r, _)| s == "cross_sections" && n == "Fe56" && r.is_none())
+        .expect("Fe56's evaluation contributes")
+        .3;
+    assert!(
+        (block / b.variance - 1.0).abs() < 0.15,
+        "first order {block:.3e} against the resampled {:.3e}",
+        b.variance
+    );
+    assert!(
+        b.contributors
+            .iter()
+            .any(|(s, n, r, _)| s == "cross_sections"
+                && n == "Fe56"
+                && r.as_deref() == Some("(n,p)")),
+        "the channel making Mn56 is named: {:?}",
+        b.contributors
     );
 }
