@@ -62,7 +62,7 @@ fn run(sources: Vec<Source>) -> Option<(yani_transmute::TransmutationResults, f6
     let spectrum = MultigroupSpectrum {
         boundaries: vec![1.0e6, 2.0e7],
         masses: vec![1.0],
-        relative_std_dev: None,
+        flux_error: None,
     };
     let steps = vec![
         TransmuteStep {

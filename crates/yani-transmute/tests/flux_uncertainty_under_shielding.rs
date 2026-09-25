@@ -68,7 +68,12 @@ fn run(data: &str, shielding: Option<&Shielding>, with_sigma: bool) -> Transmuta
     let spectra = vec![MultigroupSpectrum {
         boundaries: GROUPS.to_vec(),
         masses: FLUX.iter().map(|f| f / total).collect(),
-        relative_std_dev: with_sigma.then(|| vec![RELATIVE_SIGMA; FLUX.len()]),
+        flux_error: with_sigma.then(|| {
+            yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(vec![
+                RELATIVE_SIGMA;
+                FLUX.len()
+            ])
+        }),
     }];
     let steps = vec![TransmuteStep {
         dt: 86400.0,
@@ -221,7 +226,9 @@ fn an_unperturbed_shielded_replica_is_the_nominal_run() {
         masses: FLUX.iter().map(|f| f / total).collect(),
         // A flux the caller states is exact still requests the source, so the
         // per-group terms are built and used, with every deviate zero.
-        relative_std_dev: Some(vec![0.0; FLUX.len()]),
+        flux_error: Some(yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(
+            vec![0.0; FLUX.len()],
+        )),
     }];
     let steps = vec![TransmuteStep {
         dt: 86400.0,

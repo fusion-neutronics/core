@@ -50,7 +50,7 @@ fn spectrum(masses: &[f64]) -> MultigroupSpectrum {
     MultigroupSpectrum {
         boundaries: vec![1.0e-5, 1.0e2, 1.0e5, 1.0e6, 2.0e7],
         masses: masses.to_vec(),
-        relative_std_dev: None,
+        flux_error: None,
     }
 }
 
@@ -248,7 +248,9 @@ fn uncertainty_matches_each_materials_own_solve() {
         return;
     };
     let with_sigma = |masses: &[f64], sigma: f64| MultigroupSpectrum {
-        relative_std_dev: Some(vec![sigma; masses.len()]),
+        flux_error: Some(yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(
+            vec![sigma; masses.len()],
+        )),
         ..spectrum(masses)
     };
     let fast = with_sigma(&[0.0, 0.1, 0.3, 0.6], 0.05);

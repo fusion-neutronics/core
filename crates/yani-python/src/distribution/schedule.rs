@@ -59,12 +59,21 @@ pub struct PyPulse {
     source: Option<Py<PyAny>>,
     rate: f64,
     duration_seconds: f64,
-    /// Per-bin standard deviation of the flux, when the caller knows it.
+    /// The flux's stated error, when the caller knows it: a per-bin standard
+    /// deviation or a full covariance, against the `Histogram`'s own values.
     ///
     /// Lives here rather than on `Histogram` because `Histogram` is a shared
     /// transport source distribution and this is an activation-only concern.
     /// It also sits beside `rate`, which is the other half of the flux.
-    flux_std_dev: Option<Vec<f64>>,
+    flux_error: Option<FluxErrorInput>,
+}
+
+/// A pulse's flux error as given, before the spectrum it is relative to is
+/// known.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum FluxErrorInput {
+    StdDev(Vec<f64>),
+    Covariance(Vec<Vec<f64>>),
 }
 
 #[gen_stub_pymethods]
@@ -94,13 +103,27 @@ impl PyPulse {
     ///         contributes nothing and says so in
     ///         ``data_uncertainty_info["spectra_without_flux_sigma"]`` rather
     ///         than reading as a flux known exactly.
+    ///
+    ///         Treats the bins as independent. A spectrum from a Monte Carlo
+    ///         tally is not: its bins are scored by the same histories and
+    ///         move together, and a per-bin sigma then understates the error
+    ///         of every rate that sums over a band. Give ``flux_covariance``
+    ///         instead when the correlations are known.
+    ///     flux_covariance: The full covariance of the ``Histogram`` values, a
+    ///         square matrix (nested lists or a 2-D array) with one row and
+    ///         column per bin, in the square of their units. The alternative
+    ///         to ``flux_std_dev``, whose diagonal it contains: give one or
+    ///         the other. It must be symmetric and positive semi-definite, and
+    ///         is checked. Each replica's flux perturbation is drawn through
+    ///         its factor, so correlated bins move together.
     #[new]
-    #[pyo3(signature = (rate, duration, source=None, flux_std_dev=None))]
+    #[pyo3(signature = (rate, duration, source=None, flux_std_dev=None, flux_covariance=None))]
     fn new(
         rate: f64,
         duration: &Bound<'_, PyAny>,
         source: Option<&Bound<'_, PyAny>>,
         flux_std_dev: Option<Vec<f64>>,
+        flux_covariance: Option<Vec<Vec<f64>>>,
     ) -> PyResult<Self> {
         // Validate any source is a neutron source (activation is by neutrons),
         // but keep the original object so identity grouping works across steps.
@@ -112,24 +135,35 @@ impl PyPulse {
         if rate < 0.0 {
             return Err(PyValueError::new_err("rate must be non-negative"));
         }
+        if flux_std_dev.is_some() && flux_covariance.is_some() {
+            return Err(PyValueError::new_err(
+                "give flux_std_dev or flux_covariance, not both: the covariance's \
+                 diagonal already states each bin's standard deviation",
+            ));
+        }
+        if (flux_std_dev.is_some() || flux_covariance.is_some()) && source.is_none() {
+            return Err(PyValueError::new_err(
+                "a flux error needs a source: it is the error on that source's \
+                 Histogram values, and a sourceless pulse has no flux",
+            ));
+        }
         if let Some(sigma) = &flux_std_dev {
-            if source.is_none() {
-                return Err(PyValueError::new_err(
-                    "flux_std_dev needs a source: it is the error on that source's \
-                     Histogram values, and a sourceless pulse has no flux",
-                ));
-            }
             if sigma.iter().any(|s| *s < 0.0) {
                 return Err(PyValueError::new_err(
                     "flux_std_dev entries must be non-negative",
                 ));
             }
         }
+        let flux_error = match (flux_std_dev, flux_covariance) {
+            (Some(sigma), None) => Some(FluxErrorInput::StdDev(sigma)),
+            (None, Some(cov)) => Some(FluxErrorInput::Covariance(cov)),
+            _ => None,
+        };
         Ok(PyPulse {
             source: source.map(|s| s.clone().unbind()),
             rate,
             duration_seconds: parse_duration(duration)?,
-            flux_std_dev,
+            flux_error,
         })
     }
 
@@ -142,7 +176,19 @@ impl PyPulse {
     /// The per-bin flux standard deviation, or ``None`` if none was given.
     #[getter]
     fn flux_std_dev(&self) -> Option<Vec<f64>> {
-        self.flux_std_dev.clone()
+        match &self.flux_error {
+            Some(FluxErrorInput::StdDev(sigma)) => Some(sigma.clone()),
+            _ => None,
+        }
+    }
+
+    /// The flux covariance, or ``None`` if none was given.
+    #[getter]
+    fn flux_covariance(&self) -> Option<Vec<Vec<f64>>> {
+        match &self.flux_error {
+            Some(FluxErrorInput::Covariance(cov)) => Some(cov.clone()),
+            _ => None,
+        }
     }
 
     /// Source emission rate in particles/second.
@@ -338,8 +384,8 @@ pub struct PyPulseSchedule {
     /// here (not in the core) because source identity is only needed for the
     /// decay-photon SDR grouping in `time_correct_tally`.
     sources: Vec<Option<Py<PyAny>>>,
-    /// Per-step flux sigma, parallel to `sources`.
-    flux_std_dev: Vec<Option<Vec<f64>>>,
+    /// Per-step flux error, parallel to `sources`.
+    flux_error: Vec<Option<FluxErrorInput>>,
 }
 
 #[gen_stub_pymethods]
@@ -350,13 +396,13 @@ impl PyPulseSchedule {
     fn new(steps: &Bound<'_, PyAny>) -> PyResult<Self> {
         let mut core_steps = Vec::new();
         let mut sources: Vec<Option<Py<PyAny>>> = Vec::new();
-        let mut flux_std_dev: Vec<Option<Vec<f64>>> = Vec::new();
+        let mut flux_error: Vec<Option<FluxErrorInput>> = Vec::new();
         for item in steps.try_iter()? {
             let item = item?;
             if let Ok(pulse) = item.cast::<PyPulse>() {
                 let p = pulse.borrow();
                 sources.push(p.source.as_ref().map(|s| s.clone_ref(item.py())));
-                flux_std_dev.push(p.flux_std_dev.clone());
+                flux_error.push(p.flux_error.clone());
                 core_steps.push(yani_transmute::ScheduleStep {
                     rate: p.rate,
                     dt: p.duration_seconds,
@@ -364,7 +410,7 @@ impl PyPulseSchedule {
                 });
             } else if let Ok(cool) = item.cast::<PyCooldown>() {
                 sources.push(None);
-                flux_std_dev.push(None);
+                flux_error.push(None);
                 core_steps.push(yani_transmute::ScheduleStep {
                     rate: 0.0,
                     dt: cool.borrow().duration_seconds,
@@ -380,7 +426,7 @@ impl PyPulseSchedule {
         Ok(PyPulseSchedule {
             schedule,
             sources,
-            flux_std_dev,
+            flux_error,
         })
     }
 
@@ -612,7 +658,7 @@ impl PyPulseSchedule {
         use yani_transmute::TransmuteStep;
         let core_steps = self.schedule.steps();
         let mut spectra: Vec<yani_transmute::MultigroupSpectrum> = Vec::new();
-        let mut distinct: Vec<(Py<PyAny>, Option<Vec<f64>>)> = Vec::new();
+        let mut distinct: Vec<(Py<PyAny>, Option<FluxErrorInput>)> = Vec::new();
         let mut steps: Vec<TransmuteStep> = Vec::with_capacity(self.sources.len());
 
         for (i, src_opt) in self.sources.iter().enumerate() {
@@ -620,7 +666,7 @@ impl PyPulseSchedule {
             match src_opt {
                 Some(src) => {
                     let src_b = src.bind(py);
-                    let sigma = self.flux_std_dev[i].as_ref();
+                    let sigma = self.flux_error[i].as_ref();
                     // Keyed on the source AND its stated error: two pulses may
                     // share a spectrum object and give it different errors, and
                     // collapsing those onto one spectrum would silently apply
@@ -725,7 +771,7 @@ impl PyPulseSchedule {
 /// normalized to masses (only the shape matters; `rate` carries the magnitude).
 fn histogram_spectrum(
     src: &Bound<'_, PyAny>,
-    flux_std_dev: Option<&Vec<f64>>,
+    flux_error: Option<&FluxErrorInput>,
 ) -> PyResult<yani_transmute::MultigroupSpectrum> {
     use yamc_source::source::{ParticleSource, SourceEnergyDistribution};
     let ns = src.cast::<PyNeutronSource>().map_err(|_| {
@@ -754,26 +800,35 @@ fn histogram_spectrum(
             // relativized against those rather than against `masses`: the two
             // differ by the normalization, which divides out of a relative
             // error but not an absolute one.
-            let relative_std_dev = match flux_std_dev {
+            let flux_error = match flux_error {
                 None => None,
-                Some(sigma) => Some(
-                    yani_transmute::flux_uncertainty::relative_std_dev(probs, sigma).ok_or_else(
-                        || {
-                            PyValueError::new_err(format!(
-                                "flux_std_dev has {} entries but the pulse source's Histogram \
-                                 has {} bins; they must line up, since each entry is the error \
-                                 on the bin beside it",
-                                sigma.len(),
-                                probs.len(),
-                            ))
-                        },
-                    )?,
+                Some(FluxErrorInput::StdDev(sigma)) => {
+                    Some(yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(
+                        yani_transmute::flux_uncertainty::relative_std_dev(probs, sigma)
+                            .ok_or_else(|| {
+                                PyValueError::new_err(format!(
+                                    "flux_std_dev has {} entries but the pulse source's \
+                                     Histogram has {} bins; they must line up, since each \
+                                     entry is the error on the bin beside it",
+                                    sigma.len(),
+                                    probs.len(),
+                                ))
+                            })?,
+                    ))
+                }
+                Some(FluxErrorInput::Covariance(cov)) => Some(
+                    yani_transmute::flux_uncertainty::FluxError::RelativeCovariance(
+                        yani_transmute::flux_uncertainty::RelativeFluxCovariance::from_absolute(
+                            probs, cov,
+                        )
+                        .map_err(PyValueError::new_err)?,
+                    ),
                 ),
             };
             Ok(yani_transmute::MultigroupSpectrum {
                 boundaries: h.boundaries().to_vec(),
                 masses,
-                relative_std_dev,
+                flux_error,
             })
         }
         _ => Err(PyValueError::new_err(

@@ -59,7 +59,7 @@ fn spectra() -> Vec<MultigroupSpectrum> {
         masses: FLUX.iter().map(|f| f / total).collect(),
         // This spectrum is a fixture with no stated error, which is the common
         // case and is not the same as one measured to be exact.
-        relative_std_dev: None,
+        flux_error: None,
     }]
 }
 

@@ -826,7 +826,7 @@ impl TransmutationTallies {
         Some(crate::MultigroupSpectrum {
             boundaries,
             masses: s0,
-            relative_std_dev: None,
+            flux_error: None,
         })
     }
 

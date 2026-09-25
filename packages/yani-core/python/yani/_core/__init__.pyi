@@ -1516,6 +1516,11 @@ class Pulse:
         The per-bin flux standard deviation, or ``None`` if none was given.
         """
     @property
+    def flux_covariance(self) -> typing.Optional[builtins.list[builtins.list[builtins.float]]]:
+        r"""
+        The flux covariance, or ``None`` if none was given.
+        """
+    @property
     def rate(self) -> builtins.float:
         r"""
         Source emission rate in particles/second.
@@ -1525,7 +1530,7 @@ class Pulse:
         r"""
         Pulse duration in seconds.
         """
-    def __new__(cls, rate: builtins.float, duration: typing.Any, source: typing.Optional[typing.Any] = None, flux_std_dev: typing.Optional[typing.Sequence[builtins.float]] = None) -> Pulse:
+    def __new__(cls, rate: builtins.float, duration: typing.Any, source: typing.Optional[typing.Any] = None, flux_std_dev: typing.Optional[typing.Sequence[builtins.float]] = None, flux_covariance: typing.Optional[typing.Sequence[typing.Sequence[builtins.float]]] = None) -> Pulse:
         r"""
         Create an irradiation pulse.
         
@@ -1551,6 +1556,19 @@ class Pulse:
                 contributes nothing and says so in
                 ``data_uncertainty_info["spectra_without_flux_sigma"]`` rather
                 than reading as a flux known exactly.
+        
+                Treats the bins as independent. A spectrum from a Monte Carlo
+                tally is not: its bins are scored by the same histories and
+                move together, and a per-bin sigma then understates the error
+                of every rate that sums over a band. Give ``flux_covariance``
+                instead when the correlations are known.
+            flux_covariance: The full covariance of the ``Histogram`` values, a
+                square matrix (nested lists or a 2-D array) with one row and
+                column per bin, in the square of their units. The alternative
+                to ``flux_std_dev``, whose diagonal it contains: give one or
+                the other. It must be symmetric and positive semi-definite, and
+                is checked. Each replica's flux perturbation is drawn through
+                its factor, so correlated bins move together.
         """
     def __repr__(self) -> builtins.str: ...
 

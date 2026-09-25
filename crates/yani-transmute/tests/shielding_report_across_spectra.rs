@@ -57,7 +57,7 @@ fn one_group(edges: [f64; 2]) -> MultigroupSpectrum {
     MultigroupSpectrum {
         boundaries: edges.to_vec(),
         masses: vec![1.0],
-        relative_std_dev: None,
+        flux_error: None,
     }
 }
 

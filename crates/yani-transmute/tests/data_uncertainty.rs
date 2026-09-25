@@ -95,7 +95,7 @@ fn spectra() -> Vec<MultigroupSpectrum> {
     vec![MultigroupSpectrum {
         boundaries: GROUPS.to_vec(),
         masses: FLUX.iter().map(|f| f / total).collect(),
-        relative_std_dev: None,
+        flux_error: None,
     }]
 }
 
@@ -501,7 +501,9 @@ fn a_flux_error_moves_the_inventory_on_its_own() {
     let spectra = vec![MultigroupSpectrum {
         boundaries: GROUPS.to_vec(),
         masses: FLUX.iter().map(|f| f / total).collect(),
-        relative_std_dev: Some(vec![0.10; FLUX.len()]),
+        flux_error: Some(yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(
+            vec![0.10; FLUX.len()],
+        )),
     }];
 
     let results = transmute_material(
@@ -601,7 +603,9 @@ fn the_inventory_spread_scales_with_the_flux_error() {
         let spectra = vec![MultigroupSpectrum {
             boundaries: GROUPS.to_vec(),
             masses: FLUX.iter().map(|f| f / total).collect(),
-            relative_std_dev: Some(vec![rel; FLUX.len()]),
+            flux_error: Some(yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(
+                vec![rel; FLUX.len()],
+            )),
         }];
         transmute_material(
             &mut material,

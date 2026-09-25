@@ -66,7 +66,9 @@ fn spectra(with_sigma: bool) -> Vec<MultigroupSpectrum> {
     vec![MultigroupSpectrum {
         boundaries: GROUPS.to_vec(),
         masses: FLUX.iter().map(|f| f / total).collect(),
-        relative_std_dev: with_sigma.then(|| vec![0.05; FLUX.len()]),
+        flux_error: with_sigma.then(|| {
+            yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(vec![0.05; FLUX.len()])
+        }),
     }]
 }
 

@@ -67,7 +67,7 @@ fn spectrum() -> MultigroupSpectrum {
     MultigroupSpectrum {
         boundaries: vec![1.0e-5, 1.0e6, 2.0e7],
         masses: vec![0.5, 0.5],
-        relative_std_dev: None,
+        flux_error: None,
     }
 }
 

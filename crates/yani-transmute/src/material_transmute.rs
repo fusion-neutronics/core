@@ -37,18 +37,18 @@ type PerSpectrum = (
 pub struct MultigroupSpectrum {
     pub boundaries: Vec<f64>,
     pub masses: Vec<f64>,
-    /// Per-group RELATIVE standard deviation of the flux, when the caller knows
-    /// it (issue #559).
+    /// The flux's stated error, when the caller knows it (issues #559, #140).
     ///
-    /// Relative rather than absolute because `masses` is a normalized shape and
-    /// the pulse `rate` carries the magnitude, so an absolute sigma would be in
-    /// units this struct no longer has. A relative one is invariant under that
-    /// split and is what the perturbation multiplies by.
+    /// Relative rather than absolute, as a per-group standard deviation or a
+    /// full covariance, because `masses` is a normalized shape and the pulse
+    /// `rate` carries the magnitude, so an absolute error would be in units
+    /// this struct no longer has. A relative one is invariant under that split
+    /// and is what the perturbation multiplies by.
     ///
     /// `None` is the common case and is NOT zero. A spectrum taken from a
     /// published reference set has no stated error, and that has to stay
     /// distinguishable from one measured to be exact.
-    pub relative_std_dev: Option<Vec<f64>>,
+    pub flux_error: Option<crate::flux_uncertainty::FluxError>,
 }
 
 /// One step of a standalone-transmutation timeline.
@@ -610,7 +610,7 @@ fn check_chain_drives(
 struct CollapseKey {
     boundaries: Vec<u64>,
     masses: Vec<u64>,
-    relative_std_dev: Option<Vec<u64>>,
+    flux_error: Option<Vec<u64>>,
     temperature: String,
     composition: Vec<(String, u64)>,
     data: Vec<(String, usize)>,
@@ -635,7 +635,7 @@ impl CollapseKey {
         CollapseKey {
             boundaries: bits(&s.boundaries),
             masses: bits(&s.masses),
-            relative_std_dev: s.relative_std_dev.as_deref().map(bits),
+            flux_error: s.flux_error.as_ref().map(|e| e.key_bits()),
             temperature: material.temperature().to_string(),
             composition,
             data,
@@ -1264,10 +1264,14 @@ fn run_replicas(
     // the report says so.
     let want_flux = !transport && request.wants(crate::uncertainty::Source::FluxSpectrum);
     let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
-    let mut per_group: Vec<Option<(Vec<f64>, crate::flux_uncertainty::PerGroupRates)>> =
-        Vec::with_capacity(per_spectrum.len());
+    let mut per_group: Vec<
+        Option<(
+            crate::flux_uncertainty::FluxError,
+            crate::flux_uncertainty::PerGroupRates,
+        )>,
+    > = Vec::with_capacity(per_spectrum.len());
     for (idx, spectrum) in spectra.iter().enumerate() {
-        match spectrum.relative_std_dev.as_ref().filter(|_| want_flux) {
+        match spectrum.flux_error.as_ref().filter(|_| want_flux) {
             Some(relative) => {
                 flux_coverage.spectra_with_sigma += 1;
                 per_group.push(Some((
@@ -2081,7 +2085,7 @@ mod tests {
         let spectrum = MultigroupSpectrum {
             boundaries: vec![1.0, 1.0e8],
             masses: vec![1.0],
-            relative_std_dev: None,
+            flux_error: None,
         };
         let mut rates: ReactionRates = HashMap::new();
         let folded =
@@ -2122,7 +2126,7 @@ mod tests {
         let spectrum = MultigroupSpectrum {
             boundaries: vec![1.0, 1.0e8],
             masses: vec![1.0],
-            relative_std_dev: None,
+            flux_error: None,
         };
         let fr =
             fold_state_fractions(&dummy_material(), "X", "(n,2n)", &curves, &spectrum).unwrap();
@@ -2140,7 +2144,7 @@ mod tests {
         let spectrum = MultigroupSpectrum {
             boundaries: vec![1.0, 1.0e8],
             masses: vec![1.0],
-            relative_std_dev: None,
+            flux_error: None,
         };
         let mut rates: ReactionRates = HashMap::new();
         let folded =

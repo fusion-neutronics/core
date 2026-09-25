@@ -131,7 +131,7 @@ fn spectra() -> Vec<MultigroupSpectrum> {
     vec![MultigroupSpectrum {
         boundaries: GROUPS.to_vec(),
         masses: FLUX.iter().map(|f| f / total).collect(),
-        relative_std_dev: None,
+        flux_error: None,
     }]
 }
 
@@ -325,7 +325,9 @@ fn flux_and_cross_sections_combine() {
     let with_sigma = vec![MultigroupSpectrum {
         boundaries: GROUPS.to_vec(),
         masses: FLUX.iter().map(|f| f / total).collect(),
-        relative_std_dev: Some(vec![0.05; FLUX.len()]),
+        flux_error: Some(yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(
+            vec![0.05; FLUX.len()],
+        )),
     }];
 
     let mut sigma_of = |sources: Vec<Source>| {
