@@ -335,3 +335,81 @@ fn coupled_branching_folds_parents_outside_material() {
     let li7m = nuclides.get("Li7_m1").copied().unwrap_or(0.0);
     assert_eq!(li7m, 0.0, "no overlay must mean no (n,n') production");
 }
+
+/// Li6 capture shaped as ENDF/B-VIII.1 gives In115's: the base chain carries
+/// the ground state at 1.0 and the isomer grafted at 0.0.
+fn isomer_only_chain() -> Arc<HashMap<String, ChainNuclide>> {
+    let mut map = (*synthetic_chain()).clone();
+    let li6 = map.get_mut("Li6").expect("Li6");
+    for rx in &mut li6.reactions {
+        rx.branching = if rx.target.as_deref() == Some("Li7") {
+            1.0
+        } else {
+            0.0
+        };
+    }
+    Arc::new(map)
+}
+
+fn only_the_isomer(curve: BranchCurve) -> Arc<BranchTable> {
+    let mut branch = BranchTable::new();
+    branch
+        .entry("Li6".to_string())
+        .or_default()
+        .insert("(n,gamma)".to_string(), vec![curve]);
+    Arc::new(branch)
+}
+
+/// An overlay listing only the isomer, the ground state being the remainder.
+/// A flat MF=9 yield of 0.2 is the isomer's share exactly, the yield channel
+/// and the total being scored against the same `sigma * TL`. Normalized over
+/// the one listed state, and then confined to the zero mass its grafted edge
+/// carried, it used to make no Li7_m1 at all.
+#[test]
+fn coupled_isomer_only_yield_is_a_share_of_the_tallied_total() {
+    let branch = only_the_isomer(BranchCurve {
+        target: "Li7_m1".to_string(),
+        quantity: BranchQuantity::Yield,
+        energy: vec![1.0e-5, 1.0e9],
+        values: vec![0.2, 0.2],
+    });
+    let f = meta_fraction(&run(isomer_only_chain(), branch));
+    assert!(
+        (f - 0.2).abs() < 1e-9,
+        "expected the flat 0.2 yield as the isomer's share, got {f}"
+    );
+}
+
+/// The MF=10 form: a partial at 0.2 of Li6's own capture cross section, on
+/// that cross section's grid, is 0.2 of the tallied total, and Li7 keeps the
+/// other 0.8.
+#[test]
+fn coupled_isomer_only_partial_is_a_share_of_the_tallied_total() {
+    let mut li6 = Material::new(
+        HashMap::from([("Li6".to_string(), 1.0)]),
+        "atom",
+        "g/cc",
+        Some(0.5),
+    )
+    .unwrap();
+    li6.set_temperature("294");
+    li6.read_nuclear_data(
+        &HashMap::from([("Li6".to_string(), "tests/Li6.arrow".to_string())]),
+        None,
+    )
+    .unwrap();
+    let capture = &li6.nuclide_data["Li6"]
+        .reactions_for_temp("294")
+        .expect("Li6 at 294 K")[&102];
+    let branch = only_the_isomer(BranchCurve {
+        target: "Li7_m1".to_string(),
+        quantity: BranchQuantity::CrossSection,
+        energy: capture.energy.to_vec(),
+        values: capture.cross_section.iter().map(|x| 0.2 * x).collect(),
+    });
+    let f = meta_fraction(&run(isomer_only_chain(), branch));
+    assert!(
+        (f - 0.2).abs() < 1e-9,
+        "expected 0.2 of the capture total as the isomer's share, got {f}"
+    );
+}
