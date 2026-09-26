@@ -37,6 +37,14 @@ pub struct ChainReaction {
     /// Without it, loading a chain and re-exporting it silently returned a
     /// `reactions/reactions.arrow` with no Q column at all.
     pub q_value: Option<f64>,
+    /// The evaluation's standard deviation on `branching`, on a decay mode.
+    ///
+    /// Read as stored in `decay/decay_modes.arrow`, which holds the MT=457
+    /// dBR literally. So `Some(0.0)` is the format's "not stated", exactly as
+    /// `None` is (a reaction, or a file that predates the column), and both
+    /// must be read as not stated rather than as an exact ratio. Kept
+    /// literally so that re-exporting a chain writes back what it read.
+    pub branching_uncertainty: Option<f64>,
 }
 
 impl ChainReaction {
@@ -893,6 +901,7 @@ mod tests {
             target: target.map(|s| s.to_string()),
             branching,
             q_value: None,
+            branching_uncertainty: None,
         }
     }
 

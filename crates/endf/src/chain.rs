@@ -704,6 +704,14 @@ pub struct DecayPath {
     /// is where the target is dropped.
     pub target: Option<String>,
     pub branching_ratio: f64,
+    /// The evaluation's dBR on `branching_ratio`, exactly as MT=457 writes it.
+    ///
+    /// A 0.0 is kept as 0.0. It is how the format says "not stated", and it
+    /// is stored rather than turned into something else so the chain carries
+    /// the tape and not an interpretation of it; a consumer must read it as
+    /// not stated, never as a ratio known to be exact.
+    /// [`normalise_branch_ratios`] leaves it as evaluated.
+    pub branching_ratio_uncertainty: f64,
 }
 
 /// One neutron-induced path out of a nuclide.
@@ -1074,7 +1082,7 @@ impl Chain {
                 );
 
                 let mut ratios: Vec<f64> = Vec::new();
-                let mut ids: Vec<(String, Option<String>)> = Vec::new();
+                let mut ids: Vec<(String, Option<String>, f64)> = Vec::new();
                 for mode in &data.modes {
                     let daughter = mode.daughter();
                     let target = match &daughter {
@@ -1082,15 +1090,17 @@ impl Chain {
                         Some(d) => replace_missing(d, &decay_data),
                         None => None,
                     };
-                    ratios.push(mode.branching_ratio.0);
-                    ids.push((mode.modes.join(","), target));
+                    let (ratio, sigma) = mode.branching_ratio;
+                    ratios.push(ratio);
+                    ids.push((mode.modes.join(","), target, sigma));
                 }
                 normalise_branch_ratios(&mut ratios);
-                for (ratio, (kind, target)) in ratios.into_iter().zip(ids) {
+                for (ratio, (kind, target, sigma)) in ratios.into_iter().zip(ids) {
                     nuclide.decay_modes.push(DecayPath {
                         kind,
                         target,
                         branching_ratio: ratio,
+                        branching_ratio_uncertainty: sigma,
                     });
                 }
             }
@@ -1530,6 +1540,7 @@ mod tests {
                     kind: "beta-".to_string(),
                     target: Some(target.to_string()),
                     branching_ratio: 1.0,
+                    branching_ratio_uncertainty: 0.0,
                 });
             }
             chain.nuclides.push(n);

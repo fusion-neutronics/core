@@ -248,12 +248,14 @@ pub fn write_decay(
     let mut kind = Vec::new();
     let mut target = Vec::new();
     let mut branching = Vec::new();
+    let mut branching_sigmas = Vec::new();
     for n in &chain.nuclides {
         for d in &n.decay_modes {
             nuc.push(n.name.clone());
             kind.push(d.kind.clone());
             target.push(d.target.clone());
             branching.push(d.branching_ratio);
+            branching_sigmas.push(d.branching_ratio_uncertainty);
         }
     }
     write_section(
@@ -264,6 +266,7 @@ pub fn write_decay(
             strings(&kind),
             opt_strings(&target),
             floats(&branching),
+            floats(&branching_sigmas),
         ],
     )?;
 

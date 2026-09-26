@@ -366,6 +366,11 @@ pub fn decay_decay_modes() -> Schema {
         utf8("type", false),
         utf8("target", true),
         f64("branching_ratio", false),
+        // The evaluation's dBR, as MT=457 writes it. Nullable and last, so a
+        // file written without it still reads. A 0.0 is the format's "not
+        // stated" and is stored as 0.0; readers take null and 0.0 alike as
+        // not stated, never as an exact ratio (issue #140).
+        f64("branching_ratio_uncertainty", true),
     ])
 }
 

@@ -120,6 +120,32 @@ def test_reactions_carry_q(converted):
     assert any(v != 0.0 for v in q), "every Q is zero, which is not real data"
 
 
+def test_decay_mode_sigmas_are_stored_as_the_tape_gives_them(converted):
+    """The dBR of every decay mode is in the file, and a 0.0 stays a 0.0.
+
+    MT=457 writes 0.0 for an uncertainty it does not state. The file keeps
+    that number rather than a null standing in for it, and readers take both
+    as "not stated". Read with pyarrow, so this checks the file itself.
+    """
+    pytest.importorskip("pyarrow")
+    import pyarrow.ipc as ipc
+
+    out, _ = converted
+    modes = ipc.open_file(out / "decay" / "decay_modes.arrow").read_all()
+    assert modes.schema.names[-1] == "branching_ratio_uncertainty"
+    assert modes.column("branching_ratio_uncertainty").null_count == 0
+    dbr = {}
+    for nuclide, sigma in zip(
+        modes.column("nuclide").to_pylist(),
+        modes.column("branching_ratio_uncertainty").to_pylist(),
+    ):
+        dbr.setdefault(nuclide, []).append(sigma)
+    # Cs137's two modes carry one stated number each; In116_m1's one mode
+    # states none.
+    assert dbr["Cs137"] == [1.999988e-3, 1.999988e-3]
+    assert dbr["In116_m1"] == [0.0]
+
+
 def test_missing_inputs_are_refused(tmp_path):
     """A partial chain is a wrong chain, not a smaller one."""
     with pytest.raises(ValueError, match="decay_files"):
