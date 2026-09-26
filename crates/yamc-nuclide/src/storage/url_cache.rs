@@ -301,16 +301,16 @@ pub fn expand_keyword_to_subsection_url(keyword: &str, subsection: &str) -> Opti
 
 /// Section files published in each transmutation subsection dir (option-D),
 /// `(filename, required)`. The primary section is required; auxiliary sections
-/// and `provenance.json` are optional and 404 cleanly. Mirrors the filenames
-/// the yani chain loader reads. Returns an empty slice for an unknown
-/// subsection (callers gate on [`keyword_transmutation_subsections`] first).
+/// and `provenance.json` are optional and 404 cleanly. Lists the files each
+/// subsection can publish; the yani chain loader reads the ones it
+/// understands. Returns an empty slice for an unknown subsection (callers gate
+/// on [`keyword_transmutation_subsections`] first).
 ///
 /// `branching_covariance.arrow` is the optional MF=40 covariance of the
-/// isomeric branching. A library without one answers 404, which settles as a
-/// `branching_covariance.arrow.absent` marker (see [`download_sections`]), so
-/// every reader has to treat a missing file as "no covariance" rather than as
-/// an incomplete download. As of 2026-09-26 every published branching folder
-/// answers 404 for it.
+/// isomeric branching (#140). A library without one answers 404, which settles
+/// as a `branching_covariance.arrow.absent` marker (see [`download_sections`]),
+/// so a missing file means "no covariance" rather than an incomplete download.
+/// As of 2026-09-26 every published branching folder answers 404 for it.
 #[cfg(feature = "download")]
 fn transmutation_sections(subsection: &str) -> &'static [(&'static str, bool)] {
     match subsection {
@@ -587,6 +587,21 @@ impl Published {
     }
 }
 
+/// The kind [`download_and_cache`] judges its directories by.
+///
+/// Named once per download path rather than at each of its checks, so the
+/// choice is made in one place and `each_download_path_reads_its_own_table`
+/// can pin it. Nothing else would catch a swap: while both tables carry the
+/// same stamp for a keyword, no cached directory is current against one and
+/// stale against the other.
+#[cfg(feature = "download")]
+const NUCLIDE_CACHE_KIND: Published = Published::CrossSections;
+
+/// The kind [`download_and_cache_subsection`] judges its directories by (see
+/// [`NUCLIDE_CACHE_KIND`]).
+#[cfg(feature = "download")]
+const SUBSECTION_CACHE_KIND: Published = Published::Transmutation;
+
 /// The `data_version` this build expects for `source`'s `published` data, if
 /// it pins one.
 #[cfg(feature = "download")]
@@ -793,7 +808,7 @@ pub fn download_and_cache(
     // rather than hitting forever (issue #366); it is a local `version.json`
     // read, so the offline zero-round-trip property is unchanged.
     if have_all_sections(&local_path, sections, subset)
-        && cache_is_current(&local_path, source, Published::CrossSections)
+        && cache_is_current(&local_path, source, NUCLIDE_CACHE_KIND)
     {
         return Ok(local_path);
     }
@@ -804,7 +819,7 @@ pub fn download_and_cache(
     let path_lock = get_path_lock(&local_path);
     let _guard = path_lock.lock().unwrap_or_else(|p| p.into_inner());
     if have_all_sections(&local_path, sections, subset)
-        && cache_is_current(&local_path, source, Published::CrossSections)
+        && cache_is_current(&local_path, source, NUCLIDE_CACHE_KIND)
     {
         return Ok(local_path);
     }
@@ -812,7 +827,7 @@ pub fn download_and_cache(
     // A stale directory has to go before the top-up, not after: the top-up only
     // fetches sections that are not already resolved, so a complete stale copy
     // would fetch nothing at all.
-    evict_if_stale(&local_path, source, Published::CrossSections)?;
+    evict_if_stale(&local_path, source, NUCLIDE_CACHE_KIND)?;
 
     // Cache miss. If we ship an index of available nuclides for this
     // library and the requested name isn't in it, fail fast -- saves a
@@ -828,11 +843,11 @@ pub fn download_and_cache(
 
     download_sections(url, &local_path, sections, source, nuclide_name, subset)?;
 
-    if !cache_is_current(&local_path, source, Published::CrossSections) {
+    if !cache_is_current(&local_path, source, NUCLIDE_CACHE_KIND) {
         return Err(stale_after_download_error(
             source,
             &local_path,
-            Published::CrossSections,
+            NUCLIDE_CACHE_KIND,
         ));
     }
 
@@ -856,17 +871,17 @@ fn download_and_cache_subsection(
     let cache_dir = get_cache_dir()?;
     let local_path = cache_dir.join(cache_name);
 
-    if local_path.exists() && cache_is_current(&local_path, source, Published::Transmutation) {
+    if local_path.exists() && cache_is_current(&local_path, source, SUBSECTION_CACHE_KIND) {
         return Ok(local_path);
     }
 
     let path_lock = get_path_lock(&local_path);
     let _guard = path_lock.lock().unwrap_or_else(|p| p.into_inner());
-    if local_path.exists() && cache_is_current(&local_path, source, Published::Transmutation) {
+    if local_path.exists() && cache_is_current(&local_path, source, SUBSECTION_CACHE_KIND) {
         return Ok(local_path);
     }
 
-    evict_if_stale(&local_path, source, Published::Transmutation)?;
+    evict_if_stale(&local_path, source, SUBSECTION_CACHE_KIND)?;
 
     // `None`, and load-bearing rather than incidental: the chain's `reactions`
     // subsection publishes a file that is also called `reactions.arrow`, and it
@@ -874,11 +889,11 @@ fn download_and_cache_subsection(
     // subset here would try to range into it.
     download_sections(url, &local_path, sections, source, cache_name, None)?;
 
-    if !cache_is_current(&local_path, source, Published::Transmutation) {
+    if !cache_is_current(&local_path, source, SUBSECTION_CACHE_KIND) {
         return Err(stale_after_download_error(
             source,
             &local_path,
-            Published::Transmutation,
+            SUBSECTION_CACHE_KIND,
         ));
     }
 
@@ -2645,8 +2660,20 @@ mod tests {
         );
     }
 
-    /// A subsection stamped with the chain pin is current against it, which is
-    /// the check `download_and_cache_subsection` makes on every load.
+    /// Both tables pin the same stamp for every chain keyword today, so no
+    /// cached directory tells the two apart, and a download path reading the
+    /// wrong one would pass every other test here. Each path takes its kind
+    /// from one const, so pinning the consts is what catches a swap.
+    #[test]
+    fn each_download_path_reads_its_own_table() {
+        assert_eq!(NUCLIDE_CACHE_KIND, Published::CrossSections);
+        assert_eq!(SUBSECTION_CACHE_KIND, Published::Transmutation);
+    }
+
+    /// A subsection stamped with the chain pin is current against it, judged
+    /// by the same `cache_is_current(.., SUBSECTION_CACHE_KIND)` call that
+    /// `download_and_cache_subsection` gates its cache hit on. That function
+    /// itself is not called: it resolves the real cache directory.
     #[test]
     fn a_chain_stamp_is_current_against_the_transmutation_pin() {
         let expected = expected_data_version("endf-b8.1", Published::Transmutation);
@@ -2659,11 +2686,7 @@ mod tests {
         )
         .expect("write provenance");
         assert!(data_version_matches(&dir, expected));
-        assert!(cache_is_current(
-            &dir,
-            "endf-b8.1",
-            Published::Transmutation
-        ));
+        assert!(cache_is_current(&dir, "endf-b8.1", SUBSECTION_CACHE_KIND));
         let _ = fs::remove_dir_all(&dir);
     }
 
