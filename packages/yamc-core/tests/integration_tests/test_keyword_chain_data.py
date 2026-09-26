@@ -52,6 +52,11 @@ def _try_endf_b81():
     try:
         _radionuclides(["Fe54"])
     except Exception as e:  # pragma: no cover - offline + empty cache
+        # A data_version error means the origin answered and its stamp is not
+        # the one this build pins: a publishing or pinning mistake to fail on,
+        # not the missing network the skip below is for.
+        if "data_version" in str(e):
+            raise
         return False, str(e)
     return True, ""
 
