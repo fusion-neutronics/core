@@ -621,7 +621,10 @@ impl TransmutationResults {
             };
             if used < reaction_depth {
                 for rx in &node.reactions {
-                    let Some(target) = rx.target.as_deref() else {
+                    // A reaction back into its own parent makes nothing: the
+                    // solve's loss and gain for it cancel, and a route through
+                    // it would count the parent as its own product.
+                    let Some(target) = rx.produced_target(&here) else {
                         continue;
                     };
                     let Some(rate) = edge_rate(&here, &rx.kind, target) else {
@@ -922,6 +925,82 @@ mod tests {
             .get_production_routes(7, "Pu239", 0, 1, 3)
             .expect("a known material and step")
             .is_empty());
+    }
+
+    /// ENDF/B-VIII.1's Pu245 (n,p) leads back to Pu245, through an Np245 with
+    /// no decay data. It makes nothing, so it is neither a route to Pu245 nor a
+    /// first step on a longer one.
+    #[test]
+    fn production_routes_do_not_pass_through_a_reaction_into_its_own_parent() {
+        use std::sync::Arc;
+        let rx = |kind: &str, target: &str| yani::ChainReaction {
+            kind: kind.to_string(),
+            target: Some(target.to_string()),
+            branching: 1.0,
+            q_value: Some(0.0),
+        };
+        let nuclide = |name: &str, reactions: Vec<yani::ChainReaction>| yani::ChainNuclide {
+            name: name.to_string(),
+            half_life: None,
+            half_life_uncertainty: None,
+            decay_energy: 0.0,
+            decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
+            reactions,
+            decays: Vec::new(),
+            fission_yields: None,
+            sources: Vec::new(),
+        };
+        let chain = Arc::new(HashMap::from([
+            (
+                "Pu245".to_string(),
+                nuclide(
+                    "Pu245",
+                    vec![rx("(n,p)", "Pu245"), rx("(n,gamma)", "Pu246")],
+                ),
+            ),
+            ("Pu246".to_string(), nuclide("Pu246", Vec::new())),
+        ]));
+
+        let mut m = Material::new(
+            HashMap::from([("Pu245".to_string(), 1.0)]),
+            "atom",
+            "g/cm3",
+            Some(19.8),
+        )
+        .expect("plutonium");
+        m.name = Some("sample".to_string());
+        let mut results = TransmutationResults::new(vec![300.0]);
+        results.add_initial(7, m, vec![1.0e10]);
+        let mut irradiation = EdgeRates::new();
+        irradiation.insert(
+            "Pu245".to_string(),
+            HashMap::from([
+                (
+                    "(n,p)".to_string(),
+                    vec![(Some("Pu245".to_string()), 1.0e-12)],
+                ),
+                (
+                    "(n,gamma)".to_string(),
+                    vec![(Some("Pu246".to_string()), 1.0e-10)],
+                ),
+            ]),
+        );
+        results.add_step_rates(7, irradiation);
+        results.add_step(7, material("after"));
+        results.chain = Some(chain);
+
+        assert!(results
+            .get_production_routes(7, "Pu245", 0, 2, 3)
+            .expect("routes")
+            .is_empty());
+        let text: Vec<String> = results
+            .get_production_routes(7, "Pu246", 0, 2, 3)
+            .expect("routes")
+            .iter()
+            .map(|r| r.text())
+            .collect();
+        assert_eq!(text, vec!["Pu245(n,gamma)Pu246"]);
     }
 
     /// The initial composition sits at index 0 and is not a step, so the

@@ -116,6 +116,36 @@ fn should_graft(
     target != parent && target_is_nuclide && (kind == "(n,n')" || kind_present)
 }
 
+/// The nuclide a decay mode of `parent` leaves in the chain, or `None` where
+/// the chain models no product.
+///
+/// Only the product is dropped. The branching ratio is evaluated data and is
+/// kept, so the parent is still removed at its full decay constant and a
+/// branch with no product takes its share of the atoms out of the chain.
+///
+/// A mode ending in spontaneous fission leaves fission fragments. The chain
+/// carries no spontaneous-fission product yields (out of scope here), so
+/// nothing it makes is modelled. What the file stores as its target is not a
+/// daughter either: `sf` moves neither Z nor A in the chain build's mode table,
+/// so the target is the parent itself (Cf252 sf -> Cf252, 115 parents in
+/// ENDF/B-VIII.1), the ground state of an isomer (Am242_m2 sf -> Am242), the
+/// intermediate of a delayed fission (Tl180 ec/beta+,sf -> Hg180), or wherever
+/// `replace_missing` walked to from an absent one (Ds279_m1 sf -> Fm259). Read
+/// as an edge, the first put the branch back on the parent's own diagonal, so
+/// Cf252 was removed at 0.969 of its decay constant; the rest made atoms that
+/// fission does not make. OpenMC's matrix skips every mode containing `sf`.
+///
+/// Any other mode naming its own parent is a `replace_missing` artifact too:
+/// Es258's EC daughter Cf258 has no decay data, and the walk from it by beta-
+/// lands back on Es258. A decay cannot return a nucleus to itself, so that edge
+/// goes the same way, where OpenMC keeps it.
+fn modelled_decay_target(parent: &str, kind: &str, target: Option<&str>) -> Option<String> {
+    if kind.split(',').any(|mode| mode == "sf") {
+        return None;
+    }
+    target.filter(|t| *t != parent).map(str::to_string)
+}
+
 /// Parse a transmutation chain from a `.chain.arrow/` directory.
 pub fn parse_chain_arrow<P: AsRef<Path>>(
     dir: P,
@@ -202,14 +232,13 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
             let targets = col::<StringArray>(&batch, "target")?;
             let branching = col::<Float64Array>(&batch, "branching_ratio")?;
             for i in 0..batch.num_rows() {
-                if let Some(nuc) = chain.get_mut(nuclides.value(i)) {
+                let parent = nuclides.value(i);
+                if let Some(nuc) = chain.get_mut(parent) {
+                    let kind = types.value(i);
+                    let target = (!targets.is_null(i)).then(|| targets.value(i));
                     nuc.decays.push(ChainReaction {
-                        kind: types.value(i).to_string(),
-                        target: if targets.is_null(i) {
-                            None
-                        } else {
-                            Some(targets.value(i).to_string())
-                        },
+                        kind: kind.to_string(),
+                        target: modelled_decay_target(parent, kind, target),
                         branching: branching.value(i),
                         q_value: None,
                     });
@@ -519,14 +548,13 @@ pub fn parse_chain_parts_from_bytes(
             let targets = col::<StringArray>(&batch, "target")?;
             let branching = col::<Float64Array>(&batch, "branching_ratio")?;
             for i in 0..batch.num_rows() {
-                let nuc = ensure_nuclide(&mut chain, nuclides.value(i));
+                let parent = nuclides.value(i);
+                let kind = types.value(i);
+                let target = (!targets.is_null(i)).then(|| targets.value(i));
+                let nuc = ensure_nuclide(&mut chain, parent);
                 nuc.decays.push(ChainReaction {
-                    kind: types.value(i).to_string(),
-                    target: if targets.is_null(i) {
-                        None
-                    } else {
-                        Some(targets.value(i).to_string())
-                    },
+                    kind: kind.to_string(),
+                    target: modelled_decay_target(parent, kind, target),
                     branching: branching.value(i),
                     q_value: None,
                 });
@@ -800,9 +828,15 @@ pub fn parse_chain_parts(
 
 /// Write a transmutation chain to the v2 split-subsection layout under `dir`:
 /// `decay/` (nuclides + decay_modes + sources), `reactions/`, and
-/// `fission_yields/`, plus a `manifest.json`. This is the inverse of
-/// [`parse_chain_parts`] (Q values are not tracked in-memory, so they are not
-/// written; parse ignores them too).
+/// `fission_yields/`, plus a `manifest.json`. Reading it back with
+/// [`parse_chain_parts`] gives the same chain.
+///
+/// It is not a copy of the file the chain was read from, though. The reader
+/// drops the target of every decay mode the chain models no product for (any
+/// mode involving spontaneous fission, and one whose stored target is its own
+/// parent: see `modelled_decay_target`), so those rows are written with a null
+/// target where the source file names the parent, a ground state or a
+/// `replace_missing` stand-in. Their branching ratios are written unchanged.
 pub fn export_chain_parts<P: AsRef<Path>>(
     chain: &HashMap<String, ChainNuclide>,
     dir: P,
@@ -1502,5 +1536,30 @@ mod tests {
         assert!(!should_graft("(n,2n)", "Rh102_m1", "Ag107", true, false));
         // A target with no decay node is not a chain nuclide: never graft.
         assert!(!should_graft("(n,2n)", "Zz999_m1", "Ag107", false, true));
+    }
+
+    #[test]
+    fn decay_target_policy() {
+        use super::modelled_decay_target as target;
+        // An ordinary mode keeps its daughter, and one with none stays without.
+        assert_eq!(
+            target("Cf252", "alpha", Some("Cm248")).as_deref(),
+            Some("Cm248")
+        );
+        assert_eq!(target("He5", "alpha", None), None);
+        // An isomer's transition to its own ground state is not a self-edge.
+        assert_eq!(
+            target("W185_m1", "IT", Some("W185")).as_deref(),
+            Some("W185")
+        );
+        // Spontaneous fission names no product, however its target was
+        // written: the parent, an isomer's ground state, a delayed fission's
+        // intermediate, or a replace_missing substitute.
+        assert_eq!(target("Cf252", "sf", Some("Cf252")), None);
+        assert_eq!(target("Am242_m2", "sf", Some("Am242")), None);
+        assert_eq!(target("Tl180", "ec/beta+,sf", Some("Hg180")), None);
+        assert_eq!(target("Ds279_m1", "sf", Some("Fm259")), None);
+        // Any other mode back into its own parent is a replace_missing loop.
+        assert_eq!(target("Es258", "ec/beta+", Some("Es258")), None);
     }
 }

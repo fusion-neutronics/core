@@ -93,8 +93,10 @@ pub fn precompute_decay_photon_data(
             let mut photon_prod = vec![0.0f64; n_energy];
 
             for reaction in &chain_nuclide.reactions {
-                let target_name = match &reaction.target {
-                    Some(t) => t.as_str(),
+                // A reaction back into its own parent (Pu245 (n,p)) leaves the
+                // parent's count unchanged, so it makes no emitter to channel.
+                let target_name = match reaction.produced_target(nuc_name) {
+                    Some(t) => t,
                     None => continue,
                 };
 
@@ -803,6 +805,76 @@ mod tests {
             }
         }
         assert_eq!(n, 1000, "one daughter photon per collision");
+    }
+
+    #[test]
+    fn test_decay_photon_skips_a_reaction_into_its_own_parent() {
+        // ENDF/B-VIII.1's Pu245 (n,p) names Pu245 itself, through an Np245 with
+        // no decay data. Here Fe56's cross sections stand in for an unstable
+        // emitter carrying such an (n,p) and an (n,gamma) to DaughterB. The
+        // (n,p) leaves the parent's count where it was, so it gets no channel
+        // and DaughterB's is the only one.
+        if !td("Fe56.arrow").exists() {
+            eprintln!("Skipping: Fe56.arrow not found");
+            return;
+        }
+
+        use yani::chain::{ChainReaction, DecaySource, DecaySourceDistribution};
+
+        let nuclide = yamc_nuclide::nuclide_loader::load_nuclide(
+            td("Fe56.arrow"),
+            &yamc_nuclide::LoadScope::full(),
+        )
+        .expect("Failed to load Fe56.arrow");
+
+        let rx = |kind: &str, target: &str| ChainReaction {
+            kind: kind.to_string(),
+            target: Some(target.to_string()),
+            branching: 1.0,
+            q_value: None,
+        };
+        let emitter = |name: &str, reactions: Vec<ChainReaction>| ChainNuclide {
+            name: name.to_string(),
+            half_life: Some(3600.0),
+            decay_energy: 0.0,
+            reactions,
+            decays: vec![],
+            fission_yields: None,
+            sources: vec![DecaySource {
+                particle: "photon".to_string(),
+                distribution: DecaySourceDistribution::Discrete {
+                    energies: vec![1000000.0],
+                    intensities: vec![1.0e-3],
+                },
+            }],
+            half_life_uncertainty: None,
+            decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
+        };
+        let chain = HashMap::from([
+            (
+                "Fe56".to_string(),
+                emitter(
+                    "Fe56",
+                    vec![rx("(n,p)", "Fe56"), rx("(n,gamma)", "DaughterB")],
+                ),
+            ),
+            ("DaughterB".to_string(), emitter("DaughterB", vec![])),
+        ]);
+
+        let mut nuclides: HashMap<String, Arc<Nuclide>> = HashMap::new();
+        nuclides.insert("Fe56".to_string(), Arc::new(nuclide));
+        let mut registry = yamc_nuclide::nuclide_registry::NuclideRegistry::new();
+        let decay_photon_data = precompute_decay_photon_data(&chain, &nuclides, &mut registry);
+
+        let fe56_id = registry.lookup("Fe56").expect("Fe56 makes DaughterB");
+        let temp = &decay_photon_data[fe56_id.get() as usize - 1][0];
+        let targets: Vec<&str> = temp
+            .channels
+            .iter()
+            .map(|c| c.target_name.as_str())
+            .collect();
+        assert_eq!(targets, vec!["DaughterB"]);
     }
 
     #[test]

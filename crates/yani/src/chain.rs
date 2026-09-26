@@ -17,7 +17,13 @@ type ChainCache = RwLock<HashMap<String, Arc<ChainMap>>>;
 pub struct ChainReaction {
     /// Reaction type name, e.g. "(n,gamma)", "(n,fission)", "beta-", "alpha"
     pub kind: String,
-    /// Target nuclide produced (if any)
+    /// Target nuclide produced (if any).
+    ///
+    /// On a decay mode read from a chain file this is also `None` where the
+    /// chain models no product: any mode involving spontaneous fission, and a
+    /// mode whose stored target is its own parent. The reader decides this, so
+    /// every consumer treats the branch as removing the parent and making
+    /// nothing, rather than each one having to recognise `sf`.
     pub target: Option<String>,
     /// Branching ratio for this channel
     pub branching: f64,
@@ -31,6 +37,26 @@ pub struct ChainReaction {
     /// Without it, loading a chain and re-exporting it silently returned a
     /// `reactions/reactions.arrow` with no Q column at all.
     pub q_value: Option<f64>,
+}
+
+impl ChainReaction {
+    /// The nuclide this channel of `parent` makes, or `None` where it makes
+    /// none.
+    ///
+    /// That is [`target`](Self::target) unless the target is `parent` itself.
+    /// A reaction can name its own parent: ENDF/B-VIII.1's Pu245 (n,p) goes to
+    /// an Np245 with no decay data, which `replace_missing` walks back to Pu245
+    /// by beta-, and TENDL has some ninety more (n,p) rows like it. Such a
+    /// channel leaves the parent's count where it was, so anything asking what
+    /// a reaction produces (production routes, product bounds, D1S emitters)
+    /// reads it as producing nothing. The Bateman matrix reads `target` instead:
+    /// it charges the rate as loss and adds it back as gain, and the two cancel.
+    ///
+    /// Decay modes never name their parent here, because the chain reader has
+    /// already dropped those targets.
+    pub fn produced_target(&self, parent: &str) -> Option<&str> {
+        self.target.as_deref().filter(|t| *t != parent)
+    }
 }
 
 /// The physical quantity tabulated in an isomeric-branching curve.
@@ -594,7 +620,10 @@ where
             if frac <= 0.0 {
                 continue;
             }
-            if let Some(target) = &rx.target {
+            // A reaction back into its own parent moves no atoms, so it is not
+            // an edge: taking it as one would feed the parent's bound from
+            // itself.
+            if let Some(target) = rx.produced_target(name) {
                 if chain.contains_key(target) {
                     edges.push((name, target, frac));
                 }
@@ -1057,6 +1086,40 @@ mod tests {
             kept.contains("Fe56"),
             "decay daughter dropped though decay needs no cross section: {kept:?}"
         );
+    }
+
+    #[test]
+    fn populated_does_not_feed_a_parent_from_its_own_reaction() {
+        // ENDF/B-VIII.1's Pu245 (n,p) leads back to Pu245, through an Np245
+        // with no decay data. Over one second at these rates (n,p) touches
+        // every atom and (n,gamma) makes 2e-30 of Pu246, under the floor. Fed
+        // from itself Pu245 would climb to the ceiling of 8, and Pu246 to
+        // 1.6e-29 with it, over the floor.
+        let chain: HashMap<String, ChainNuclide> = [
+            nuc(
+                "Pu245",
+                None,
+                vec![
+                    rx("(n,p)", Some("Pu245"), 1.0),
+                    rx("(n,gamma)", Some("Pu246"), 1.0),
+                ],
+                vec![],
+            ),
+            nuc("Pu246", None, vec![], vec![]),
+        ]
+        .into_iter()
+        .map(|n| (n.name.clone(), n))
+        .collect();
+        let seeds: HashMap<String, f64> = [("Pu245".to_string(), 1.0)].into_iter().collect();
+        let kept = populated_nuclides(&chain, &seeds, 1.0, 1e-29, |_, kind| {
+            if kind == "(n,p)" {
+                1.0
+            } else {
+                2e-30
+            }
+        });
+        assert!(kept.contains("Pu245"), "{kept:?}");
+        assert!(!kept.contains("Pu246"), "{kept:?}");
     }
 
     #[test]

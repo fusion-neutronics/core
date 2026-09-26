@@ -141,13 +141,18 @@ fn walk(
 pub fn build_emitter_paths(
     chain: &HashMap<String, ChainNuclide>,
 ) -> HashMap<String, DecayChainPath> {
-    // Roots = unstable nuclides that appear as a neutron-reaction target.
+    // Roots = unstable nuclides that a neutron reaction produces. A reaction
+    // back into its own parent produces nothing, so it makes no root.
     let mut roots: Vec<String> = HashSet::<String>::from_iter(
         chain
-            .values()
-            .flat_map(|n| n.reactions.iter())
-            .filter_map(|r| r.target.clone())
-            .filter(|t| chain.get(t).and_then(|c| c.half_life).is_some()),
+            .iter()
+            .flat_map(|(name, n)| {
+                n.reactions
+                    .iter()
+                    .filter_map(move |r| r.produced_target(name))
+            })
+            .filter(|t| chain.get(*t).and_then(|c| c.half_life).is_some())
+            .map(str::to_string),
     )
     .into_iter()
     .collect();
@@ -434,6 +439,30 @@ mod tests {
         // Root A is discovered as a reaction target; emitter is B.
         assert!(map.contains_key("B"));
         assert_eq!(map["B"].lambdas.len(), 2);
+    }
+
+    #[test]
+    fn build_emitter_paths_takes_no_root_from_a_reaction_into_its_own_parent() {
+        // X --(n,g)--> P --> A --> B, and A also has an (n,p) back into itself,
+        // as ENDF/B-VIII.1's Pu245 does. That reaction produces nothing, so B is
+        // still reached from P and its TCF carries P's buildup. Taken as a root,
+        // A would give B the shorter path A -> B.
+        let mut chain = beta_parent_chain();
+        let rx = |kind: &str, target: &str| ChainReaction {
+            kind: kind.to_string(),
+            target: Some(target.to_string()),
+            branching: 1.0,
+            q_value: None,
+        };
+        chain.get_mut("X").unwrap().reactions = vec![rx("(n,gamma)", "P")];
+        chain.get_mut("A").unwrap().reactions = vec![rx("(n,p)", "A")];
+        chain.insert(
+            "P".to_string(),
+            nuc("P", Some(7200.0), vec![], vec![rx("beta-", "A")], vec![]),
+        );
+
+        let map = build_emitter_paths(&chain);
+        assert_eq!(map["B"].lambdas.len(), 3);
     }
 
     #[test]

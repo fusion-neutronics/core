@@ -362,6 +362,11 @@ where
         if let Some(half_life) = nuc.half_life {
             if half_life > 0.0 {
                 let lambda = ln2 / half_life;
+                // The whole decay constant, whatever the modes lead to. A mode
+                // with no target (spontaneous fission, or a stored self-target:
+                // the chain reader's `modelled_decay_target`) removes its share
+                // of the parent and adds no residual nucleus. Any light
+                // particle it emits is still added below.
                 loss += lambda;
                 for decay in &nuc.decays {
                     if let Some(target) = &decay.target {
@@ -403,6 +408,9 @@ where
                 }
                 loss += rate;
                 for rx in rx_list {
+                    // `target` rather than `produced_target`: a reaction back
+                    // into its own parent is charged to `loss` above, and
+                    // adding it back here is what makes it cancel.
                     if let Some(target) = &rx.target {
                         if let Some(&row) = index.get(target.as_str()) {
                             sink(row, col, rx.branching * rate);
