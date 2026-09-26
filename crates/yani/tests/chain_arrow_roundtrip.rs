@@ -44,6 +44,26 @@ fn arrow_writer_roundtrip() {
     }
 
     let mut original = parse_chain_arrow(&src).expect("parse source arrow");
+    // The fixture predates the interpolation column, so its continua state no
+    // law, and the round trip has to keep saying so rather than invent one.
+    let continua: Vec<&DecaySourceDistribution> = original
+        .values()
+        .flat_map(|n| &n.sources)
+        .map(|s| &s.distribution)
+        .filter(|d| matches!(d, DecaySourceDistribution::Tabular { .. }))
+        .collect();
+    assert_eq!(
+        continua.len(),
+        276 + 276 + 287,
+        "photon, electron and neutron continua"
+    );
+    assert!(continua.iter().all(|d| matches!(
+        d,
+        DecaySourceDistribution::Tabular {
+            interpolation: None,
+            ..
+        }
+    )));
 
     let tmp =
         std::env::temp_dir().join(format!("yani_chain_roundtrip_{}.arrow", std::process::id()));
@@ -108,27 +128,9 @@ fn arrow_writer_roundtrip() {
             }
         }
 
-        assert_eq!(a.sources.len(), b.sources.len(), "{name}: source count");
-        for (x, y) in a.sources.iter().zip(&b.sources) {
-            assert_eq!(x.particle, y.particle);
-            let (xe, xi) = match &x.distribution {
-                DecaySourceDistribution::Discrete {
-                    energies,
-                    intensities,
-                } => (energies, intensities),
-            };
-            let (ye, yi) = match &y.distribution {
-                DecaySourceDistribution::Discrete {
-                    energies,
-                    intensities,
-                } => (energies, intensities),
-            };
-            assert_eq!(xe.len(), ye.len());
-            for i in 0..xe.len() {
-                assert!(approx_eq(xe[i], ye[i], 1e-12), "{name} src energy[{i}]");
-                assert!(approx_eq(xi[i], yi[i], 1e-12), "{name} src intensity[{i}]");
-            }
-        }
+        // Exactly, the kind and the law included: a continuum that came back
+        // as lines would be read in the wrong units (issue #163).
+        assert_eq!(a.sources, b.sources, "{name}: sources");
 
         match (&a.fission_yields, &b.fission_yields) {
             (Some(x), Some(y)) => {

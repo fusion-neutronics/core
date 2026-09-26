@@ -10,8 +10,8 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow_array::builder::{Float64Builder, ListBuilder, StringBuilder};
-use arrow_array::{Array, ArrayRef, Float64Array, ListArray, RecordBatch, StringArray};
+use arrow_array::builder::{Float64Builder, Int32Builder, ListBuilder, StringBuilder};
+use arrow_array::{Array, ArrayRef, Float64Array, Int32Array, ListArray, RecordBatch, StringArray};
 use arrow_ipc::reader::FileReader;
 use arrow_ipc::writer::FileWriter;
 use arrow_schema::{DataType, Field, Schema};
@@ -29,6 +29,7 @@ use crate::chain::{
     BranchCurve, BranchQuantity, BranchTable, ChainNuclide, ChainParts, ChainReaction, DecaySource,
     DecaySourceDistribution, FissionYield, FissionYieldSet,
 };
+use crate::continuum::Interpolation;
 
 fn read_arrow_bytes(bytes: &[u8]) -> Result<Vec<RecordBatch>, Box<dyn Error>> {
     let reader = FileReader::try_new(std::io::Cursor::new(bytes), None)?;
@@ -94,6 +95,63 @@ fn list_str(list: &ListArray, i: usize) -> Result<Vec<String>, Box<dyn Error>> {
         .downcast_ref::<StringArray>()
         .ok_or("list<str> inner type mismatch")?;
     Ok((0..strs.len()).map(|j| strs.value(j).to_string()).collect())
+}
+
+/// One `sources.arrow` row as a distribution, from its `type` and, for a
+/// continuum, its ENDF `interpolation` code.
+///
+/// The type decides the units, so it is never guessed: a `tabular` row holds
+/// a density per eV, and reading it as lines is issue #163. A continuum with
+/// no code keeps `None`, which is what a file written before the column says.
+fn source_distribution(
+    nuclide: &str,
+    kind: &str,
+    code: Option<i32>,
+    energies: Vec<f64>,
+    intensities: Vec<f64>,
+) -> Result<DecaySourceDistribution, Box<dyn Error>> {
+    match (kind, code) {
+        ("discrete", None) => Ok(DecaySourceDistribution::Discrete {
+            energies,
+            intensities,
+        }),
+        ("discrete", Some(code)) => Err(format!(
+            "sources.arrow: a discrete row of {nuclide} carries interpolation code {code}, \
+             which only a tabular row can have"
+        )
+        .into()),
+        ("tabular", code) => {
+            let interpolation = code
+                .map(|code| {
+                    Interpolation::from_endf_code(code).ok_or_else(|| {
+                        format!(
+                            "sources.arrow: a tabular row of {nuclide} carries interpolation \
+                             code {code}, which is not an ENDF law (1 to 5)"
+                        )
+                    })
+                })
+                .transpose()?;
+            Ok(DecaySourceDistribution::Tabular {
+                energies,
+                intensities,
+                interpolation,
+            })
+        }
+        (other, _) => Err(format!(
+            "sources.arrow: a row of {nuclide} has type '{other}', expected 'discrete' or 'tabular'"
+        )
+        .into()),
+    }
+}
+
+/// The `interpolation` column of a `sources.arrow` batch, absent from a file
+/// written before it.
+fn interpolation_codes(batch: &RecordBatch) -> Option<&Int32Array> {
+    batch
+        .schema()
+        .index_of("interpolation")
+        .ok()
+        .and_then(|idx| batch.column(idx).as_any().downcast_ref::<Int32Array>())
 }
 
 /// Whether a branching row `(kind, target)` should be grafted onto `parent`.
@@ -275,14 +333,15 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
         }
     }
 
-    // sources.arrow -- optional. Both "discrete" and "tabular" types map to
-    // DecaySourceDistribution::Discrete; the Arrow chain format stores them the
-    // same way and does not distinguish between them.
+    // sources.arrow -- optional. The type column says whether a row is lines
+    // or a continuum, which are different units.
     let sources_path = dir.join("sources.arrow");
     if sources_path.exists() {
         for batch in read_arrow_file(&sources_path)? {
             let nuclides = col::<StringArray>(&batch, "nuclide")?;
             let particles = col::<StringArray>(&batch, "particle")?;
+            let types = col::<StringArray>(&batch, "type")?;
+            let codes = interpolation_codes(&batch);
             let energies_col = col::<ListArray>(&batch, "energies")?;
             let intensities_col = col::<ListArray>(&batch, "intensities")?;
             for i in 0..batch.num_rows() {
@@ -293,12 +352,16 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
                     if energies.is_empty() || energies.len() != intensities.len() {
                         continue;
                     }
+                    let code = codes.filter(|c| !c.is_null(i)).map(|c| c.value(i));
                     nuc.sources.push(DecaySource {
                         particle: particles.value(i).to_string(),
-                        distribution: DecaySourceDistribution::Discrete {
+                        distribution: source_distribution(
+                            &nuc.name,
+                            types.value(i),
+                            code,
                             energies,
                             intensities,
-                        },
+                        )?,
                     });
                 }
             }
@@ -567,6 +630,8 @@ pub fn parse_chain_parts_from_bytes(
         for batch in read_section_bytes(bytes, "decay/sources.arrow", "decay/sources.arrow")? {
             let nuclides = col::<StringArray>(&batch, "nuclide")?;
             let particles = col::<StringArray>(&batch, "particle")?;
+            let types = col::<StringArray>(&batch, "type")?;
+            let codes = interpolation_codes(&batch);
             let energies_col = col::<ListArray>(&batch, "energies")?;
             let intensities_col = col::<ListArray>(&batch, "intensities")?;
             for i in 0..batch.num_rows() {
@@ -575,13 +640,18 @@ pub fn parse_chain_parts_from_bytes(
                 if energies.is_empty() || energies.len() != intensities.len() {
                     continue;
                 }
+                let code = codes.filter(|c| !c.is_null(i)).map(|c| c.value(i));
+                let distribution = source_distribution(
+                    nuclides.value(i),
+                    types.value(i),
+                    code,
+                    energies,
+                    intensities,
+                )?;
                 let nuc = ensure_nuclide(&mut chain, nuclides.value(i));
                 nuc.sources.push(DecaySource {
                     particle: particles.value(i).to_string(),
-                    distribution: DecaySourceDistribution::Discrete {
-                        energies,
-                        intensities,
-                    },
+                    distribution,
                 });
             }
         }
@@ -826,6 +896,58 @@ pub fn parse_chain_parts(
     parse_chain_parts_from_bytes(&parts)
 }
 
+/// The columns of a `sources.arrow`, one row per decay source.
+#[derive(Default)]
+struct SourceColumns {
+    nuclide: StringBuilder,
+    particle: StringBuilder,
+    kind: StringBuilder,
+    energies: ListBuilder<Float64Builder>,
+    intensities: ListBuilder<Float64Builder>,
+    interpolation: Int32Builder,
+}
+
+impl SourceColumns {
+    fn push(&mut self, nuclide: &str, source: &DecaySource) {
+        let (kind, energies, intensities, code) = match &source.distribution {
+            DecaySourceDistribution::Discrete {
+                energies,
+                intensities,
+            } => ("discrete", energies, intensities, None),
+            DecaySourceDistribution::Tabular {
+                energies,
+                intensities,
+                interpolation,
+            } => (
+                "tabular",
+                energies,
+                intensities,
+                interpolation.map(Interpolation::endf_code),
+            ),
+        };
+        self.nuclide.append_value(nuclide);
+        self.particle.append_value(&source.particle);
+        self.kind.append_value(kind);
+        self.energies.values().append_slice(energies);
+        self.energies.append(true);
+        self.intensities.values().append_slice(intensities);
+        self.intensities.append(true);
+        // Null where the chain states no law, so a round trip cannot invent one.
+        self.interpolation.append_option(code);
+    }
+
+    fn finish(mut self) -> Vec<ArrayRef> {
+        vec![
+            Arc::new(self.nuclide.finish()),
+            Arc::new(self.particle.finish()),
+            Arc::new(self.kind.finish()),
+            Arc::new(self.energies.finish()),
+            Arc::new(self.intensities.finish()),
+            Arc::new(self.interpolation.finish()),
+        ]
+    }
+}
+
 /// Write a transmutation chain to the v2 split-subsection layout under `dir`:
 /// `decay/` (nuclides + decay_modes + sources), `reactions/`, and
 /// `fission_yields/`, plus a `manifest.json`. Reading it back with
@@ -962,45 +1084,15 @@ pub fn export_chain_parts<P: AsRef<Path>>(
 
     // decay/sources.arrow
     {
-        let mut nuc_b = StringBuilder::new();
-        let mut particle_b = StringBuilder::new();
-        let mut energies_b = ListBuilder::new(Float64Builder::new());
-        let mut intensities_b = ListBuilder::new(Float64Builder::new());
-        // DecaySourceDistribution has one variant, so the type is fixed. It is
-        // still written, because the section declares the column and a reader
-        // is entitled to expect it.
-        let mut type_b = StringBuilder::new();
+        let mut columns = SourceColumns::default();
         for name in &names {
             let nuc = &chain[*name];
             for s in &nuc.sources {
-                nuc_b.append_value(&nuc.name);
-                particle_b.append_value(&s.particle);
-                type_b.append_value("discrete");
-                let DecaySourceDistribution::Discrete {
-                    energies,
-                    intensities,
-                } = &s.distribution;
-                for e in energies {
-                    energies_b.values().append_value(*e);
-                }
-                energies_b.append(true);
-                for i in intensities {
-                    intensities_b.values().append_value(*i);
-                }
-                intensities_b.append(true);
+                columns.push(&nuc.name, s);
             }
         }
         let schema = Arc::new(section_schema("decay/sources.arrow"));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(nuc_b.finish()),
-                Arc::new(particle_b.finish()),
-                Arc::new(type_b.finish()),
-                Arc::new(energies_b.finish()),
-                Arc::new(intensities_b.finish()),
-            ],
-        )?;
+        let batch = RecordBatch::try_new(schema.clone(), columns.finish())?;
         write_arrow_file(&decay_dir.join("sources.arrow"), schema, batch)?;
     }
 
@@ -1189,57 +1281,18 @@ pub fn export_chain_arrow<P: AsRef<Path>>(
         write_arrow_file(&dir.join("reactions.arrow"), schema, batch)?;
     }
 
-    // sources.arrow
+    // sources.arrow, in the declared column order: the flat reader needs the
+    // type as much as the split one does.
     {
-        let mut nuc_b = StringBuilder::new();
-        let mut particle_b = StringBuilder::new();
-        let mut energies_b = ListBuilder::new(Float64Builder::new());
-        let mut intensities_b = ListBuilder::new(Float64Builder::new());
+        let mut columns = SourceColumns::default();
         for name in &names {
             let nuc = &chain[*name];
             for s in &nuc.sources {
-                nuc_b.append_value(&nuc.name);
-                particle_b.append_value(&s.particle);
-                match &s.distribution {
-                    DecaySourceDistribution::Discrete {
-                        energies,
-                        intensities,
-                    } => {
-                        for e in energies {
-                            energies_b.values().append_value(*e);
-                        }
-                        energies_b.append(true);
-                        for i in intensities {
-                            intensities_b.values().append_value(*i);
-                        }
-                        intensities_b.append(true);
-                    }
-                }
+                columns.push(&nuc.name, s);
             }
         }
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("nuclide", DataType::Utf8, false),
-            Field::new("particle", DataType::Utf8, false),
-            Field::new(
-                "energies",
-                DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
-                false,
-            ),
-            Field::new(
-                "intensities",
-                DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
-                false,
-            ),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(nuc_b.finish()),
-                Arc::new(particle_b.finish()),
-                Arc::new(energies_b.finish()),
-                Arc::new(intensities_b.finish()),
-            ],
-        )?;
+        let schema = Arc::new(section_schema("decay/sources.arrow"));
+        let batch = RecordBatch::try_new(schema.clone(), columns.finish())?;
         write_arrow_file(&dir.join("sources.arrow"), schema, batch)?;
     }
 
@@ -1400,13 +1453,41 @@ mod tests {
                     q_value: None,
                 }],
                 fission_yields: None,
-                sources: vec![DecaySource {
-                    particle: "photon".to_string(),
-                    distribution: DecaySourceDistribution::Discrete {
-                        energies: vec![1.17e6, 1.33e6],
-                        intensities: vec![1.0, 1.0],
+                // Lines, and a continuum under each state its law can be in:
+                // stated either way, and not stated at all.
+                sources: vec![
+                    DecaySource {
+                        particle: "photon".to_string(),
+                        distribution: DecaySourceDistribution::Discrete {
+                            energies: vec![1.17e6, 1.33e6],
+                            intensities: vec![1.0, 1.0],
+                        },
                     },
-                }],
+                    DecaySource {
+                        particle: "photon".to_string(),
+                        distribution: DecaySourceDistribution::Tabular {
+                            energies: vec![1.0e4, 1.0e5, 1.0e6],
+                            intensities: vec![2.0e-7, 1.0e-7, 0.0],
+                            interpolation: Some(crate::Interpolation::Histogram),
+                        },
+                    },
+                    DecaySource {
+                        particle: "photon".to_string(),
+                        distribution: DecaySourceDistribution::Tabular {
+                            energies: vec![0.0, 1.4e5, 1.0e7],
+                            intensities: vec![0.0, 9.0e-7, 0.0],
+                            interpolation: Some(crate::Interpolation::LinearLinear),
+                        },
+                    },
+                    DecaySource {
+                        particle: "neutron".to_string(),
+                        distribution: DecaySourceDistribution::Tabular {
+                            energies: vec![1.0e3, 1.0e6],
+                            intensities: vec![1.0e-9, 1.0e-10],
+                            interpolation: None,
+                        },
+                    },
+                ],
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
                 decay_energy_components: Default::default(),
@@ -1458,8 +1539,10 @@ mod tests {
         )
         .expect("round trips");
         let co60 = back.get("Co60").expect("Co60 survives the round trip");
-        assert_eq!(co60.sources.len(), 1);
-        assert_eq!(co60.sources[0].particle, "photon");
+        assert_eq!(
+            co60.sources, chain["Co60"].sources,
+            "every source comes back as what it was, the law and its absence included"
+        );
 
         // Q has to come back, not just be declared. Dropping it here is
         // invisible to every other assertion: the file still parses, the chain
@@ -1473,6 +1556,80 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `sources.arrow` row whose type or law the reader cannot place is
+    /// refused, not read as lines: that default is what put every continuum
+    /// at about 1e-4 of its rate (issue #163).
+    #[test]
+    fn a_source_row_the_reader_cannot_place_is_refused() {
+        use arrow_array::builder::{Float64Builder, Int32Builder, ListBuilder, StringBuilder};
+        use arrow_array::{ArrayRef, RecordBatch};
+        use std::sync::Arc;
+
+        let write = |kind: &str, code: Option<i32>| -> String {
+            let dir = std::env::temp_dir().join(format!(
+                "yani-bad-source-{kind}-{code:?}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            let mut chain = std::collections::HashMap::new();
+            chain.insert(
+                "Cf252".to_string(),
+                crate::ChainNuclide {
+                    name: "Cf252".to_string(),
+                    half_life: Some(8.35e7),
+                    half_life_uncertainty: None,
+                    decay_energy: 6.2e6,
+                    decay_energy_uncertainty: None,
+                    decay_energy_components: Default::default(),
+                    reactions: Vec::new(),
+                    decays: Vec::new(),
+                    fission_yields: None,
+                    sources: Vec::new(),
+                },
+            );
+            super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+
+            let mut nuclide = StringBuilder::new();
+            let mut particle = StringBuilder::new();
+            let mut kind_b = StringBuilder::new();
+            let mut energies = ListBuilder::new(Float64Builder::new());
+            let mut intensities = ListBuilder::new(Float64Builder::new());
+            let mut interpolation = Int32Builder::new();
+            nuclide.append_value("Cf252");
+            particle.append_value("photon");
+            kind_b.append_value(kind);
+            energies.values().append_slice(&[1.0e5, 1.0e6]);
+            energies.append(true);
+            intensities.values().append_slice(&[1.0e-9, 0.0]);
+            intensities.append(true);
+            interpolation.append_option(code);
+            let schema = Arc::new(super::section_schema("decay/sources.arrow"));
+            let columns: Vec<ArrayRef> = vec![
+                Arc::new(nuclide.finish()),
+                Arc::new(particle.finish()),
+                Arc::new(kind_b.finish()),
+                Arc::new(energies.finish()),
+                Arc::new(intensities.finish()),
+                Arc::new(interpolation.finish()),
+            ];
+            let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+            super::write_arrow_file(&dir.join("decay/sources.arrow"), schema, batch).unwrap();
+
+            let result = parse_chain_parts(&dir.join("decay"), None, None, None);
+            let _ = std::fs::remove_dir_all(&dir);
+            match result {
+                Ok(_) => String::new(),
+                Err(e) => e.to_string(),
+            }
+        };
+
+        assert_eq!(write("tabular", Some(2)), "", "a stated law reads");
+        assert_eq!(write("tabular", None), "", "an unstated law reads, as None");
+        assert!(write("tabular", Some(7)).contains("not an ENDF law"));
+        assert!(write("discrete", Some(1)).contains("only a tabular row"));
+        assert!(write("mixture", None).contains("expected 'discrete' or 'tabular'"));
     }
 
     /// A chain directory in the retired flat layout must be refused, not read

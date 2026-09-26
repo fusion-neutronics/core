@@ -63,11 +63,26 @@ def test_chain_photon_sources():
 
     mn56 = sources["Mn56"]
     assert len(mn56) >= 1
-    energies, intensities = mn56[0]
+    kind, energies, intensities, interpolation = mn56[0]
+    assert kind == "discrete"
+    assert interpolation is None, "a line has no law between points"
     assert len(energies) == len(intensities)
     assert len(energies) > 0
     assert all(e > 0 for e in energies)
     assert all(i > 0 for i in intensities)
+
+
+def test_chain_photon_continua_are_tagged():
+    """A continuum says it is one, so its per-eV values are never read as lines.
+
+    Sm158 in ENDF/B-VIII.1 has no photon lines, only a continuum. This fixture
+    predates the interpolation column, so its law comes back unstated.
+    """
+    sm158 = yamc.TransmutationChain(CHAIN_FILE).photon_sources["Sm158"]
+    assert [row[0] for row in sm158] == ["tabular"]
+    kind, energies, densities, interpolation = sm158[0]
+    assert interpolation is None
+    assert len(energies) == len(densities) > 100
 
 
 def test_load_nonexistent_chain():

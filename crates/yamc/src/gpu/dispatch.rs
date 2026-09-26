@@ -178,6 +178,12 @@ pub enum GpuDispatchError {
         launched: usize,
         max_steps: u32,
     },
+    /// A D1S emitter reached by the model has a photon continuum. The kernel
+    /// samples decay photon lines only, so the continuum's photons would be
+    /// dropped rather than transported.
+    DecayPhotonContinuumUnsupported {
+        emitter: String,
+    },
     /// More than `Model::max_lost_particles` histories ended in no cell, i.e.
     /// the geometry does not cover the space particles reached (issue #289).
     /// The GPU twin of the CPU's `handle_lost_particle` abort: same cause, same
@@ -282,6 +288,11 @@ impl std::fmt::Display for GpuDispatchError {
                  completion. Raise gpu_max_steps_per_particle (the default is 100000), or run on \
                  the CPU.",
                 100.0 * *truncated as f64 / (*launched).max(1) as f64
+            ),
+            Self::DecayPhotonContinuumUnsupported { emitter } => write!(
+                f,
+                "compute='gpu' D1S samples decay photon lines only, and {emitter} also emits a \
+                 photon continuum, which would be dropped. Run D1S with compute='cpu'."
             ),
             Self::MaxLostParticlesExceeded { count, max, .. } => write!(
                 f,
@@ -4895,6 +4906,7 @@ fn build_decay_photon_inputs(
     n_material_slots: usize,
 ) -> Result<yamc_gpu::neutron::transport::DecayPhotonInputs, GpuDispatchError> {
     use yamc_gpu::neutron::transport::{DecayPhotonInputs, MaterialDecayTable};
+    use yamc_physics::photon::decay_photon_production::DecayPhotonSpectrum;
 
     let n_grid = log_energy_grid.len();
     let energy_grid: Vec<f64> = log_energy_grid.iter().map(|&le| le.exp()).collect();
@@ -4937,7 +4949,16 @@ fn build_decay_photon_inputs(
             let src_grid = &fast_grid.energy;
 
             for ch in &decay_nuc.channels {
-                if ch.yield_constant <= 0.0 || ch.energies.is_empty() {
+                let DecayPhotonSpectrum::Lines {
+                    energies,
+                    intensities,
+                } = &ch.spectrum
+                else {
+                    return Err(GpuDispatchError::DecayPhotonContinuumUnsupported {
+                        emitter: ch.target_name.clone(),
+                    });
+                };
+                if ch.yield_constant <= 0.0 || energies.is_empty() {
                     continue;
                 }
                 // Macroscopic weighted reaction xs on the master grid:
@@ -4956,18 +4977,18 @@ fn build_decay_photon_inputs(
                 }
 
                 // Cumulative intensity CDF (normalized to 1.0 at the last line).
-                let total: f64 = ch.intensities.iter().sum();
+                let total: f64 = intensities.iter().sum();
                 if total <= 0.0 {
                     continue;
                 }
                 let e_base = table.ch_energies.len() as u32;
                 let mut cum = 0.0_f64;
-                for (&e, &inten) in ch.energies.iter().zip(ch.intensities.iter()) {
+                for (&e, &inten) in energies.iter().zip(intensities.iter()) {
                     cum += inten;
                     table.ch_energies.push(e);
                     table.ch_intensity_cdf.push(cum / total);
                 }
-                let e_count = ch.energies.len() as u32;
+                let e_count = energies.len() as u32;
 
                 table.ch_xs.extend_from_slice(&row);
                 table.ch_parent_id.push(ch.target_id.get() as u32);
