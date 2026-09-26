@@ -117,6 +117,23 @@ def test_chain_isomer_decays_to_its_ground_state():
     assert decays["Ta182_m1"] == [("IT", "Ta182", 1.0)]
 
 
+def test_chain_spontaneous_fission_names_no_daughter():
+    """A fission branch keeps its ratio and names no product.
+
+    The file stores Cf252's sf target as Cf252 itself, and an isomer's as its
+    ground state. Neither is made: fission products of sf are not in the chain.
+    """
+    decays = yamc.TransmutationChain(CHAIN_FILE).decays
+
+    assert decays["Cf252"] == [("alpha", "Cm248", 0.96908), ("sf", None, 0.03092)]
+    assert ("sf", None) in [(kind, target) for kind, target, _ in decays["Am242_m2"]]
+    for name, modes in decays.items():
+        for kind, target, _ in modes:
+            assert target != name, f"{name} {kind}"
+            if "sf" in kind.split(","):
+                assert target is None, f"{name} {kind} -> {target}"
+
+
 def test_chain_absent_target_is_none_not_the_string():
     """A channel with no named product carries None, in both getters.
 

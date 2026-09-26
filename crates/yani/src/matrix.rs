@@ -362,6 +362,10 @@ where
         if let Some(half_life) = nuc.half_life {
             if half_life > 0.0 {
                 let lambda = ln2 / half_life;
+                // The whole decay constant, whatever the modes lead to. A mode
+                // with no target (spontaneous fission, among others: the chain
+                // reader's `modelled_decay_target`) removes its share of the
+                // parent and adds nothing.
                 loss += lambda;
                 for decay in &nuc.decays {
                     if let Some(target) = &decay.target {

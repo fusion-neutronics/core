@@ -694,6 +694,11 @@ pub struct DecayPath {
     /// The chain of modes, joined with commas as the chain format writes it.
     pub kind: String,
     /// The nuclide left behind. `None` where the product is a bare neutron.
+    ///
+    /// Written as [`crate::decay::DecayMode::daughter`] gives it, as OpenMC's
+    /// chain does, so on spontaneous fission it is the parent's own Z and A
+    /// rather than a product. The ratio is kept as evaluated; yani's reader
+    /// is where the target is dropped.
     pub target: Option<String>,
     pub branching_ratio: f64,
 }

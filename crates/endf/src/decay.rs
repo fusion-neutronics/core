@@ -142,8 +142,11 @@ pub struct DecayMode {
 impl DecayMode {
     /// The nuclide this mode leaves behind.
     ///
-    /// `None` when the parent's name cannot be read, or when a mode in the
-    /// chain has no single daughter; spontaneous fission does not.
+    /// `None` when the parent's name cannot be read. A mode with no single
+    /// daughter (spontaneous fission, or an unknown mode) moves neither
+    /// number, so on `sf` this is the parent's own Z and A at the daughter
+    /// state: Cf252 sf gives Cf252. That names no product, and yani's chain
+    /// reader treats it as none.
     pub fn daughter(&self) -> Option<String> {
         let (symbol, a) = split_nuclide_name(&self.parent)?;
         let mut z = ATOMIC_SYMBOL.iter().position(|&s| s == symbol)? as i64;

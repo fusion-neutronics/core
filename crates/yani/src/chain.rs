@@ -17,7 +17,13 @@ type ChainCache = RwLock<HashMap<String, Arc<ChainMap>>>;
 pub struct ChainReaction {
     /// Reaction type name, e.g. "(n,gamma)", "(n,fission)", "beta-", "alpha"
     pub kind: String,
-    /// Target nuclide produced (if any)
+    /// Target nuclide produced (if any).
+    ///
+    /// On a decay mode read from a chain file this is also `None` where the
+    /// chain models no product: any mode involving spontaneous fission, and a
+    /// mode whose stored target is its own parent. The reader decides this, so
+    /// every consumer treats the branch as removing the parent and making
+    /// nothing, rather than each one having to recognise `sf`.
     pub target: Option<String>,
     /// Branching ratio for this channel
     pub branching: f64,

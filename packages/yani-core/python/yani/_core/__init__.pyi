@@ -2085,11 +2085,14 @@ class TransmutationChain:
             one parent summing to 1. Modes carry the evaluation's own
             spellings: ``"beta-"``, ``"ec/beta+"``, ``"alpha"``, ``"IT"``,
             ``"sf"``, ``"p"``, ``"n"``, and multi-particle emissions written as
-            ``"beta-,n"``. ``daughter`` is the parent itself on ``"sf"``, whose
-            products come from the fission yields rather than from the edge, and
-            ``None`` where the mode's product is outside the chain. Stable
-            nuclides have no decay modes and are omitted, as they are from
-            :attr:`half_lives`.
+            ``"beta-,n"``. ``daughter`` is ``None`` where the chain models no
+            product: on any mode involving spontaneous fission (``"sf"``,
+            ``"ec/beta+,sf"``), whose fission products the chain does not
+            carry, on a mode whose stored daughter is the parent itself, and where
+            the mode's product is outside the chain. The branching is kept, so a
+            parent still decays at its full half-life and that share of it
+            leaves the chain. Stable nuclides have no decay modes and are
+            omitted, as they are from :attr:`half_lives`.
         """
     @property
     def photon_sources(self) -> typing.Any:
