@@ -43,8 +43,17 @@
 //! `R_i` (the denominator) and not the sum (the numerator), and the relative
 //! uncertainty comes out smaller than the covariance grid alone would suggest.
 //! That is the honest answer rather than a bug, but it is also invisible, which
-//! is why [`Coverage`] records the fraction of each rate the covariance grid
-//! actually covered.
+//! is why [`Coverage`] records the fraction of each rate that carries a stated
+//! uncertainty.
+//!
+//! Spanning an energy is not the same as stating an uncertainty there. A grid
+//! can run across the whole range with a variance of zero on some intervals,
+//! and rate from those intervals dilutes exactly as rate from outside the grid
+//! does. ENDF/B-VIII.1 W186 `(n,gamma)` is the case: its one self-covariance
+//! block starts with a single interval, 1e-5 eV to 10 keV, whose variance is
+//! zero, because the evaluation puts the resonance-range uncertainty in MF=32.
+//! Nearly all of a capture rate comes from there, so the coverage counts only
+//! rate from energies whose stated variance is nonzero.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -111,16 +120,23 @@ pub struct Coverage {
     pub unsupported_layouts: BTreeMap<i64, usize>,
     /// Blocks whose arrays did not match their own declared sizes.
     pub malformed: usize,
-    /// Per (nuclide, kind), the fraction of the rate the covariance grid spans.
+    /// Per (nuclide, kind), the share of the rate that comes from energies
+    /// where the evaluation states a nonzero variance for that reaction.
     ///
-    /// Below one means part of the rate comes from energies the evaluation
-    /// gives no covariance for, so the relative uncertainty is diluted by
-    /// exactly that much.
+    /// Exactly: the rate integrated over the energies where the diagonal of the
+    /// reaction's own covariance, summed over every self-covariance block the
+    /// fold consumed, is nonzero, divided by the rate. Rate from an interval a
+    /// grid spans with a variance of zero counts as uncovered, the same as rate
+    /// from outside every grid, because neither carries a stated uncertainty.
+    /// Below one, the relative uncertainty is diluted by exactly that much.
+    ///
+    /// Every channel a consumed block names has an entry, so a channel whose
+    /// blocks state no variance anywhere reads zero rather than being absent.
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
-    /// Production this spectrum drove through a channel a covariance spans, and
-    /// the production it drove in total. Both are per barn-cm per second, and
-    /// both are weighted by the parent's own density, so a channel on a trace
-    /// isotope counts for what it actually made.
+    /// Production this spectrum drove from energies where a covariance states a
+    /// nonzero variance, and the production it drove in total. Both are per
+    /// barn-cm per second, and both are weighted by the parent's own density,
+    /// so a channel on a trace isotope counts for what it actually made.
     ///
     /// Kept as two sums rather than as their ratio because sums merge and a
     /// ratio does not: the fold runs per nuclide and a schedule can name more
@@ -132,7 +148,8 @@ pub struct Coverage {
 }
 
 impl Coverage {
-    /// Share of the production this run drove that carries a stated covariance.
+    /// Share of the production this run drove from energies where a covariance
+    /// states a nonzero variance.
     ///
     /// The number to read before any sigma from this fold. Counting nuclides
     /// with MF=33 answers a different and much weaker question: an evaluation
@@ -263,19 +280,10 @@ impl FluxDensity<'_> {
     }
 }
 
-/// Reaction `i`'s partial rates over one block's grid, and their total.
-///
-/// The total is NOT the reaction's full rate: it is only the part the grid
-/// spans, which is what the coverage fraction is measured against.
+/// Reaction `i`'s partial rates over one block's grid.
 struct Partials {
     /// Per interval, in 1/s.
     per_interval: Vec<f64>,
-}
-
-impl Partials {
-    fn total(&self) -> f64 {
-        self.per_interval.iter().sum()
-    }
 }
 
 /// The partial rates of `reaction` over the intervals of `grid`.
@@ -309,6 +317,101 @@ fn contract(block: &ExpandedBlock, row: &Partials, col: &Partials) -> f64 {
         }
     }
     total
+}
+
+/// The interval of `grid` that holds all of `[a, b]`, if one does.
+fn interval_holding(grid: &[f64], a: f64, b: f64) -> Option<usize> {
+    let k = grid.partition_point(|&e| e <= a).checked_sub(1)?;
+    (k + 1 < grid.len() && b <= grid[k + 1]).then_some(k)
+}
+
+/// Where one self-covariance block states a variance: its matrix on the
+/// diagonal `E = E'`, over the energies where that is nonzero.
+struct Diagonal {
+    scale: Scale,
+    /// `(lo, hi, variance)`, ascending and disjoint, with the zeros left out.
+    pieces: Vec<(f64, f64, f64)>,
+}
+
+impl Diagonal {
+    /// Read from the matrix rather than from the layout, so every `lb` is read
+    /// alike. An energy sits in one row interval and one column interval at
+    /// once, which on the square layouts is the same index and on the
+    /// rectangular ones (`lb` 3 and 6) is wherever the two grids overlap.
+    fn of(block: &ExpandedBlock) -> Self {
+        let mut edges: Vec<f64> = block
+            .row_energies
+            .iter()
+            .chain(&block.col_energies)
+            .copied()
+            .collect();
+        edges.sort_by(f64::total_cmp);
+        edges.dedup();
+        let pieces = edges
+            .windows(2)
+            .filter_map(|w| {
+                let i = interval_holding(&block.row_energies, w[0], w[1])?;
+                let j = interval_holding(&block.col_energies, w[0], w[1])?;
+                let variance = block.get(i, j);
+                (variance != 0.0).then_some((w[0], w[1], variance))
+            })
+            .collect();
+        Self {
+            scale: block.scale,
+            pieces,
+        }
+    }
+
+    /// The variance stated over `[a, b]`, which lies inside one piece or
+    /// outside all of them because `a` and `b` are adjacent edges of a grid
+    /// that includes every piece's own.
+    fn over(&self, a: f64, b: f64) -> f64 {
+        match self.pieces.partition_point(|p| p.0 <= a).checked_sub(1) {
+            Some(k) if b <= self.pieces[k].1 => self.pieces[k].2,
+            _ => 0.0,
+        }
+    }
+}
+
+/// The part of `reaction`'s rate, in 1/s, from energies where its own blocks
+/// state a nonzero variance.
+///
+/// Walked on the union of the blocks' edges, so every cell lies inside one
+/// piece of each block or outside it, and a cell counts when the variances
+/// stated over it sum to something nonzero. Summed rather than tested one by
+/// one because the blocks of one subsection add: two that cancel state no
+/// variance. Relative and absolute blocks are summed apart, having different
+/// units.
+///
+/// For one block that states a variance on every interval, this adds the
+/// same partial rates, in the same order, as the fold weights that block's
+/// covariance with, so the result is bit-identical to their sum.
+fn rate_with_stated_variance(
+    flux: &FluxDensity,
+    reaction: &Reaction,
+    diagonals: &[Diagonal],
+) -> f64 {
+    let mut edges: Vec<f64> = diagonals
+        .iter()
+        .flat_map(|d| d.pieces.iter().flat_map(|&(lo, hi, _)| [lo, hi]))
+        .collect();
+    edges.sort_by(f64::total_cmp);
+    edges.dedup();
+    let mut covered = 0.0;
+    for w in edges.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let (mut relative, mut absolute) = (0.0, 0.0);
+        for d in diagonals {
+            match d.scale {
+                Scale::Relative => relative += d.over(a, b),
+                Scale::Absolute => absolute += d.over(a, b),
+            }
+        }
+        if relative != 0.0 || absolute != 0.0 {
+            covered += BARN_TO_CM2 * flux.integrate_xs(reaction, a, b);
+        }
+    }
+    covered
 }
 
 /// The activation MTs of a chain nuclide, paired with the kind that names them.
@@ -354,9 +457,11 @@ fn fold_nuclide(
     // Absolute covariance, in (1/s)^2, before relativizing.
     let mut absolute = vec![0.0; n * n];
     let mut used = 0;
-    // Per MT, the largest span of rate any block covered. Blocks may overlap,
-    // so this is a bound on coverage rather than a sum over blocks.
-    let mut covered_rate: BTreeMap<i32, f64> = BTreeMap::new();
+    // Per MT named by a consumed block, the variance each of its own blocks
+    // states. Kept block by block rather than summed onto one grid, because
+    // the blocks need not share a grid; `rate_with_stated_variance` walks them
+    // together.
+    let mut variances: BTreeMap<i32, Vec<Diagonal>> = BTreeMap::new();
 
     for block in blocks {
         if block.is_cross_material() {
@@ -409,11 +514,13 @@ fn fold_nuclide(
             absolute[j * n + i] += contribution;
         }
 
-        if expanded.scale == Scale::Relative {
-            let e = covered_rate.entry(row_mt).or_insert(0.0);
-            *e = e.max(row.total().abs());
-            let e = covered_rate.entry(col_mt).or_insert(0.0);
-            *e = e.max(col.total().abs());
+        // Only a reaction's own blocks state its variance. A cross block
+        // correlates two reactions and gives neither a variance, so it names
+        // both channels and covers neither.
+        variances.entry(col_mt).or_default();
+        let own = variances.entry(row_mt).or_default();
+        if row_mt == col_mt {
+            own.push(Diagonal::of(&expanded));
         }
         used += 1;
     }
@@ -438,14 +545,19 @@ fn fold_nuclide(
     }
 
     for (kind, mt) in kinds {
-        if let (Some(&covered), Some(&full)) = (covered_rate.get(mt), rates.get(kind)) {
-            if full != 0.0 {
-                coverage.rate_fraction_covered.insert(
-                    (nuclide.to_string(), kind.clone()),
-                    (covered / full).min(1.0),
-                );
-            }
+        let (Some(diagonals), Some(reaction), Some(&full)) =
+            (variances.get(mt), reactions.get(mt), rates.get(kind))
+        else {
+            continue;
+        };
+        if full == 0.0 {
+            continue;
         }
+        let covered = rate_with_stated_variance(flux, reaction, diagonals);
+        coverage.rate_fraction_covered.insert(
+            (nuclide.to_string(), kind.clone()),
+            (covered / full).min(1.0),
+        );
     }
 
     coverage.covered.insert(nuclide.to_string());
@@ -634,6 +746,228 @@ mod coverage_total_tests {
             ..Default::default()
         };
         assert_eq!(c.rate_fraction_total(), Some(1.0));
+    }
+}
+
+#[cfg(test)]
+mod stated_variance_tests {
+    use super::*;
+    use endf::mf::covariance::NiSubsection;
+
+    /// Uneven groups with no boundary at 10 keV, so the covariance edge there
+    /// falls inside a group and the overlap is exercised rather than avoided.
+    const BOUNDARIES: [f64; 8] = [1.0e-5, 0.625, 10.0, 1.0e3, 1.0e5, 1.0e6, 1.4e7, 2.0e7];
+    const FLUX: [f64; 7] = [1.0, 3.0, 7.0, 2.0, 11.0, 5.0, 13.0];
+
+    fn flux() -> FluxDensity<'static> {
+        FluxDensity {
+            boundaries: &BOUNDARIES,
+            flux: &FLUX,
+        }
+    }
+
+    /// A falling cross section, so where the rate comes from matters.
+    fn reaction(mt: i32) -> Reaction {
+        Reaction {
+            cross_section: vec![100.0, 1.0, 0.1].into(),
+            threshold_idx: 0,
+            energy: vec![1.0e-5, 1.0e4, 2.0e7].into(),
+            mt_number: mt,
+            q_value: 0.0,
+            products: vec![],
+            scatter_in_cm: false,
+            redundant: false,
+        }
+    }
+
+    fn block(mt: i32, mt1: i32, ni: NiSubsection) -> CovarianceBlock {
+        CovarianceBlock {
+            mt,
+            subsection_idx: 0,
+            block_idx: 0,
+            mat1: 0,
+            mt1,
+            xmf1: 0.0,
+            xlfs1: 0.0,
+            mtl: 0,
+            data: CovarianceData::Ni(ni),
+        }
+    }
+
+    /// `lb = 5`, `ls = 1`: the upper triangle, row by row.
+    fn lb5(energies: &[f64], upper: &[f64]) -> NiSubsection {
+        NiSubsection {
+            lb: 5,
+            ls: 1,
+            ne: energies.len() as i64,
+            ek: energies.to_vec(),
+            fkk: upper.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    /// `lb = 1` or `lb = 8`: one variance per interval.
+    fn diagonal(lb: i64, energies: &[f64], variances: &[f64]) -> NiSubsection {
+        NiSubsection {
+            lb,
+            ek: energies.to_vec(),
+            fk: variances.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    /// The rate the collapse would give over `[a, b]`.
+    fn rate(a: f64, b: f64) -> f64 {
+        BARN_TO_CM2 * flux().integrate_xs(&reaction(102), a, b)
+    }
+
+    /// Fold `blocks` for `(n,gamma)` and `(n,2n)` against the rates the
+    /// collapse would give, returning the report.
+    fn fold(blocks: &[CovarianceBlock], scale_rate: f64) -> Coverage {
+        let (capture, n2n) = (reaction(102), reaction(16));
+        let reactions: BTreeMap<i32, &Reaction> = BTreeMap::from([(102, &capture), (16, &n2n)]);
+        let kinds = vec![("(n,2n)".to_string(), 16), ("(n,gamma)".to_string(), 102)];
+        let full = rate(1.0e-5, 2.0e7) * scale_rate;
+        let rates = BTreeMap::from([
+            ("(n,2n)".to_string(), full),
+            ("(n,gamma)".to_string(), full),
+        ]);
+        let mut coverage = Coverage::default();
+        fold_nuclide(
+            &flux(),
+            blocks,
+            &reactions,
+            &kinds,
+            &rates,
+            "W186",
+            &mut coverage,
+        )
+        .expect("the blocks are usable");
+        coverage
+    }
+
+    fn fraction(coverage: &Coverage, kind: &str) -> f64 {
+        coverage.rate_fraction_covered[&("W186".to_string(), kind.to_string())]
+    }
+
+    /// ENDF/B-VIII.1 W186 `(n,gamma)` in miniature: one block over the whole
+    /// range whose first interval, the resonance range up to 10 keV, has a
+    /// variance of zero. Spanning that interval states nothing about it, so
+    /// the rate from there is uncovered, where it used to read as covered.
+    #[test]
+    fn a_zero_variance_resonance_range_reads_as_uncovered() {
+        let grid = [1.0e-5, 1.0e4, 2.0e7];
+        let c = fold(&[block(102, 102, lb5(&grid, &[0.0, 0.0, 0.01]))], 1.0);
+
+        let expected = rate(1.0e4, 2.0e7) / rate(1.0e-5, 2.0e7);
+        let got = fraction(&c, "(n,gamma)");
+        assert!(
+            (got - expected).abs() <= 1.0e-12 * expected,
+            "only the rate above 10 keV carries a variance: {got} against {expected}"
+        );
+        assert!(got < 0.5, "most of this rate is below 10 keV: {got}");
+    }
+
+    /// A block that is zero everywhere is still the evaluation's statement
+    /// about the channel, so it reads as zero coverage rather than as no entry.
+    #[test]
+    fn an_all_zero_block_reads_zero_rather_than_absent() {
+        let grid = [1.0e-5, 1.0e4, 2.0e7];
+        let c = fold(&[block(102, 102, lb5(&grid, &[0.0, 0.0, 0.0]))], 1.0);
+        assert_eq!(fraction(&c, "(n,gamma)"), 0.0);
+    }
+
+    /// A block with a variance on every interval reads exactly what the sum of
+    /// the partial rates it is weighted with gives, to the bit. That is what
+    /// the coverage was before zero variances were excluded, so a channel
+    /// whose covariance is stated everywhere does not move.
+    #[test]
+    fn a_block_with_variance_everywhere_is_unchanged() {
+        let grid = [1.0e-5, 0.5, 1.0e4, 3.0e6, 2.0e7];
+        let upper = [
+            0.04, 0.01, 0.0, 0.0, //
+            0.02, 0.005, 0.0, //
+            0.03, 0.01, //
+            0.05,
+        ];
+        let c = fold(&[block(102, 102, lb5(&grid, &upper))], 1.0);
+
+        let partials = partial_rates(&flux(), &reaction(102), &grid, Scale::Relative);
+        let sum: f64 = partials.per_interval.iter().sum();
+        let before = (sum / rate(1.0e-5, 2.0e7)).min(1.0);
+        assert_eq!(fraction(&c, "(n,gamma)").to_bits(), before.to_bits());
+    }
+
+    /// A cross block correlates two reactions and states a variance for
+    /// neither, so the channel it alone names is not covered by it.
+    #[test]
+    fn a_cross_block_names_a_channel_without_covering_it() {
+        let grid = [1.0e-5, 1.0e4, 2.0e7];
+        let cross = NiSubsection {
+            lb: 6,
+            er: vec![1.0e6, 2.0e7],
+            ec: grid.to_vec(),
+            fkl: vec![0.0, 0.001],
+            ..Default::default()
+        };
+        let c = fold(
+            &[
+                block(102, 102, lb5(&grid, &[0.01, 0.0, 0.01])),
+                block(16, 102, cross),
+            ],
+            1.0,
+        );
+        assert_eq!(fraction(&c, "(n,2n)"), 0.0);
+        assert!((fraction(&c, "(n,gamma)") - 1.0).abs() < 1.0e-12);
+    }
+
+    /// Blocks of one subsection add, so coverage is where their summed
+    /// variance is nonzero: the union of what each states, less anywhere two
+    /// cancel exactly.
+    #[test]
+    fn blocks_on_different_grids_cover_their_union() {
+        let overlapping = [
+            block(102, 102, diagonal(1, &[1.0e-5, 1.0, 1.0e3], &[0.0, 0.01])),
+            block(102, 102, diagonal(8, &[1.0e2, 1.0e5], &[0.02])),
+        ];
+        let c = fold(&overlapping, 1.0);
+        let expected = rate(1.0, 1.0e5) / rate(1.0e-5, 2.0e7);
+        let got = fraction(&c, "(n,gamma)");
+        assert!(
+            (got - expected).abs() <= 1.0e-12 * expected,
+            "{got} against {expected}"
+        );
+
+        // A negative variance cancelling the first block above 1 keV. Not
+        // physical, but it is what summing the blocks means.
+        let cancelling = [
+            block(102, 102, diagonal(1, &[1.0, 1.0e3, 1.0e5], &[0.01, 0.02])),
+            block(102, 102, diagonal(8, &[1.0e3, 1.0e5], &[-0.02])),
+        ];
+        let c = fold(&cancelling, 1.0);
+        let expected = rate(1.0, 1.0e3) / rate(1.0e-5, 2.0e7);
+        let got = fraction(&c, "(n,gamma)");
+        assert!(
+            (got - expected).abs() <= 1.0e-12 * expected,
+            "{got} against {expected}"
+        );
+    }
+
+    /// A rectangular block on a reaction with itself states its variance where
+    /// its row and column grids overlap, read off the matrix there.
+    #[test]
+    fn a_rectangular_diagonal_is_read_where_the_grids_overlap() {
+        let expanded = ExpandedBlock {
+            row_energies: vec![1.0, 10.0, 100.0],
+            col_energies: vec![5.0, 50.0],
+            values: vec![0.3, 0.7],
+            scale: Scale::Relative,
+        };
+        let d = Diagonal::of(&expanded);
+        assert_eq!(d.pieces, vec![(5.0, 10.0, 0.3), (10.0, 50.0, 0.7)]);
+        assert_eq!(d.over(10.0, 50.0), 0.7);
+        assert_eq!(d.over(50.0, 100.0), 0.0);
+        assert_eq!(d.over(1.0, 5.0), 0.0);
     }
 }
 

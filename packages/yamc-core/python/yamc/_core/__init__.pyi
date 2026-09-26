@@ -5115,15 +5115,20 @@ class TransmutationResults:
         - ``perturbed`` / ``no_covariance_data``: which nuclides had usable
           MF=33 covariance and which had none.
         - ``rate_fraction_covered_total``: the share of the production this run
-          drove that a covariance actually spans, weighted by rate and by parent
-          density. Read this before any sigma here. It is a different and much
-          sharper question than how many nuclides carry MF=33: an evaluation can
-          state covariance for every isotope in the material and none for the
-          channel making the product of interest, and the count then reads as
-          full coverage while the ensemble perturbs almost nothing.
+          drove from energies where a covariance states a nonzero variance,
+          weighted by rate and by parent density. Read this before any sigma
+          here. It is a different and much sharper question than how many
+          nuclides carry MF=33: an evaluation can state covariance for every
+          isotope in the material and none for the channel making the product
+          of interest, and the count then reads as full coverage while the
+          ensemble perturbs almost nothing.
         - ``rate_fraction_covered``: per nuclide and channel, the share of the
-          reaction rate the covariance grid actually spans. Below one means part
-          of the rate carries no stated uncertainty and the sigma is diluted.
+          reaction rate from energies where the evaluation states a nonzero
+          variance for it. Below one means part of the rate carries no stated
+          uncertainty and the sigma is diluted. An interval the covariance grid
+          spans with a variance of zero counts as uncovered: ENDF/B-VIII.1 W186
+          ``(n,gamma)`` states zero from 1e-5 eV to 10 keV, where nearly all of
+          its capture rate is.
         - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
           covariance blocks that were present but not consumed.
         - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose

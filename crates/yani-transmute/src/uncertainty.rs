@@ -211,13 +211,16 @@ pub struct Info {
     pub unsupported_layouts: BTreeMap<i64, usize>,
     /// Blocks whose arrays disagreed with their own declared sizes.
     pub malformed_blocks: usize,
-    /// Per (nuclide, reaction kind), the share of the rate the covariance grid
-    /// spans. Below one means part of the rate carries no stated uncertainty
-    /// and the sigma is diluted accordingly.
+    /// Per (nuclide, reaction kind), the share of the rate that comes from
+    /// energies where the evaluation states a nonzero variance for that
+    /// reaction. Below one means part of the rate carries no stated
+    /// uncertainty and the sigma is diluted accordingly. An interval a
+    /// covariance grid spans with a variance of zero counts as uncovered: it
+    /// states no uncertainty either.
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
-    /// Share of the production this run drove that carries a stated covariance,
-    /// weighted by rate and by parent density, or `None` for a decay-only
-    /// schedule that drove none.
+    /// Share of the production this run drove from energies where a covariance
+    /// states a nonzero variance, weighted by rate and by parent density, or
+    /// `None` for a decay-only schedule that drove none.
     ///
     /// The number to read before any sigma here, and not the same question as
     /// how many nuclides carry MF=33: an evaluation can state covariance for

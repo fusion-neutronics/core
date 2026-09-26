@@ -688,3 +688,37 @@ fn the_cross_section_attribution_names_the_evaluation() {
         b.contributors
     );
 }
+
+/// Fe56 `(n,p)` shows the zero-variance rule on a real evaluation. Its MT=103
+/// grid runs from 1e-5 eV, but the variance is zero on every interval below
+/// 4.3 MeV, so the sliver of rate between the 2.97 MeV threshold and there is
+/// not covered and the share falls just short of one, where spanning the grid
+/// alone would call it fully covered.
+#[test]
+fn fe56_np_is_not_covered_where_its_variance_is_zero() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let Some(dir) = fe56_with_covariance(tmp.path()) else {
+        return skip("fe56_np_is_not_covered_where_its_variance_is_zero");
+    };
+    let mut material = iron(&dir);
+    let results = run(
+        &mut material,
+        Some(&DataUncertainty {
+            seed: 1,
+            samples: Some(32),
+            sources: vec![yani_transmute::uncertainty::Source::CrossSections],
+            ..Default::default()
+        }),
+    );
+    let info = results
+        .uncertainty_info
+        .get(&0)
+        .cloned()
+        .expect("info is reported");
+
+    let np = info.rate_fraction_covered[&("Fe56".to_string(), "(n,p)".to_string())];
+    assert!(
+        np > 0.9999 && np < 1.0,
+        "Fe56 (n,p) is covered above 4.3 MeV only, which is nearly all of its rate: {np}"
+    );
+}
