@@ -1835,8 +1835,8 @@ const SENSITIVITY_STEP: f64 = 1.0e-3;
 /// and each channel alone. Half-lives: each nuclide the solve populates, as
 /// `(s sigma_T / T)^2`. A half-life of a nuclide that never appears in the
 /// inventory cannot move it, which keeps this to the nuclides that matter
-/// even in a fission chain. Isomeric split: each parent's MF=40 and each
-/// partial alone, as the cross sections are, over the MF=40 factor.
+/// even in a fission chain. Isomeric split: each populated parent's MF=40 and
+/// each partial alone, as the cross sections are, over the MF=40 factor.
 #[allow(clippy::too_many_arguments)]
 fn first_order_contributors(
     initial: &Material,
@@ -1858,6 +1858,15 @@ fn first_order_contributors(
             .map_err(|e| e.to_string())
     };
     let nominal = solve(per_spectrum, chain)?;
+    // A nuclide's data act only through its own atoms, and one the nominal
+    // solve never holds above the density floor has none to speak of, so the
+    // per-nuclide jobs below are kept to the nuclides it does hold.
+    let populated: HashSet<&str> = nominal
+        .iter()
+        .flat_map(|m| m.keys())
+        .chain(initial.nuclides.keys())
+        .map(|s| s.as_str())
+        .collect();
     // (N' - N) / h, per step and nuclide, over the union of both inventories.
     let sensitivity = |perturbed: &[HashMap<String, f64>]| -> Vec<HashMap<String, f64>> {
         nominal
@@ -1976,26 +1985,28 @@ fn first_order_contributors(
         }
     }
 
-    // Isomeric split: one solve per (spectrum, parent, partial). On the
-    // transport path the nominal split came from the tallied partials, not
-    // from a multigroup fold, so a job scales the tallied partial and re-folds
-    // exactly as the nominal was folded, and a step of zero is the nominal.
+    // Isomeric split: one solve per (spectrum, populated parent, partial). On
+    // the transport path the nominal split came from the tallied partials,
+    // not from a multigroup fold, so a job scales the tallied partial and
+    // re-folds exactly as the nominal was folded, and a step of zero is the
+    // nominal.
     if let Some(iso) = isomeric {
         type Job = (usize, String, usize);
-        let jobs: Vec<Job> = match transport {
-            Some(st) => iso
-                .jobs()
-                .into_iter()
-                .filter(|(_, parent, i)| {
-                    let (kind, target) = iso.key(parent, *i);
-                    st.partials
-                        .get(parent)
-                        .and_then(|k| k.get(kind))
-                        .is_some_and(|list| list.iter().any(|(t, r)| t == target && *r > 0.0))
-                })
-                .collect(),
-            None => iso.jobs(),
-        };
+        let jobs: Vec<Job> = iso
+            .jobs()
+            .into_iter()
+            .filter(|(_, parent, _)| populated.contains(parent.as_str()))
+            .filter(|(_, parent, i)| {
+                let Some(st) = transport else {
+                    return true;
+                };
+                let (kind, target) = iso.key(parent, *i);
+                st.partials
+                    .get(parent)
+                    .and_then(|k| k.get(kind))
+                    .is_some_and(|list| list.iter().any(|(t, r)| t == target && *r > 0.0))
+            })
+            .collect();
         let run = |(a, parent, i): &Job| -> Result<Vec<HashMap<String, f64>>, String> {
             let ps: Vec<PerSpectrum> = match (transport, chains) {
                 (Some(st), _) => {
@@ -2102,12 +2113,6 @@ fn first_order_contributors(
     // Half-lives: one solve per populated nuclide with a stated sigma.
     if let Some(h) = half_life {
         let chains = chains.expect("the half-life source prunes its chains");
-        let populated: HashSet<&str> = nominal
-            .iter()
-            .flat_map(|m| m.keys())
-            .chain(initial.nuclides.keys())
-            .map(|s| s.as_str())
-            .collect();
         let jobs: Vec<&(String, f64, f64)> = h
             .candidates
             .iter()
