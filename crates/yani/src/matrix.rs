@@ -407,6 +407,9 @@ where
                 }
                 loss += rate;
                 for rx in rx_list {
+                    // `target` rather than `produced_target`: a reaction back
+                    // into its own parent is charged to `loss` above, and
+                    // adding it back here is what makes it cancel.
                     if let Some(target) = &rx.target {
                         if let Some(&row) = index.get(target.as_str()) {
                             sink(row, col, rx.branching * rate);

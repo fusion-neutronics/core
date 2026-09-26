@@ -39,6 +39,26 @@ pub struct ChainReaction {
     pub q_value: Option<f64>,
 }
 
+impl ChainReaction {
+    /// The nuclide this channel of `parent` makes, or `None` where it makes
+    /// none.
+    ///
+    /// That is [`target`](Self::target) unless the target is `parent` itself.
+    /// A reaction can name its own parent: ENDF/B-VIII.1's Pu245 (n,p) goes to
+    /// an Np245 with no decay data, which `replace_missing` walks back to Pu245
+    /// by beta-, and TENDL has some ninety more (n,p) rows like it. Such a
+    /// channel leaves the parent's count where it was, so anything asking what
+    /// a reaction produces (production routes, product bounds, D1S emitters)
+    /// reads it as producing nothing. The Bateman matrix reads `target` instead:
+    /// it charges the rate as loss and adds it back as gain, and the two cancel.
+    ///
+    /// Decay modes never name their parent here, because the chain reader has
+    /// already dropped those targets.
+    pub fn produced_target(&self, parent: &str) -> Option<&str> {
+        self.target.as_deref().filter(|t| *t != parent)
+    }
+}
+
 /// The physical quantity tabulated in an isomeric-branching curve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BranchQuantity {
@@ -600,11 +620,10 @@ where
             if frac <= 0.0 {
                 continue;
             }
-            // A reaction back into its own parent (Pu245 (n,p), whose Np245
-            // `replace_missing` returns to Pu245) moves no atoms, so it is not
+            // A reaction back into its own parent moves no atoms, so it is not
             // an edge: taking it as one would feed the parent's bound from
             // itself.
-            if let Some(target) = rx.target.as_ref().filter(|t| *t != name) {
+            if let Some(target) = rx.produced_target(name) {
                 if chain.contains_key(target) {
                     edges.push((name, target, frac));
                 }

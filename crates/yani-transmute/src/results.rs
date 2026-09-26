@@ -621,17 +621,12 @@ impl TransmutationResults {
             };
             if used < reaction_depth {
                 for rx in &node.reactions {
-                    let Some(target) = rx.target.as_deref() else {
+                    // A reaction back into its own parent makes nothing: the
+                    // solve's loss and gain for it cancel, and a route through
+                    // it would count the parent as its own product.
+                    let Some(target) = rx.produced_target(&here) else {
                         continue;
                     };
-                    // A reaction back into its own parent makes nothing: Pu245
-                    // (n,p) goes to an Np245 with no decay data, which
-                    // `replace_missing` sends back to Pu245. The solve's loss
-                    // and gain for it cancel, and a route through it would
-                    // count the parent as its own product.
-                    if target == here {
-                        continue;
-                    }
                     let Some(rate) = edge_rate(&here, &rx.kind, target) else {
                         continue;
                     };

@@ -36,8 +36,10 @@ pub fn get_radionuclides_from_chain(
         };
 
         for reaction in &chain_nuclide.reactions {
-            let target_name = match &reaction.target {
-                Some(t) => t.as_str(),
+            // A reaction back into its own parent (Pu245 (n,p)) leaves the
+            // parent's count unchanged, so it activates nothing.
+            let target_name = match reaction.produced_target(nuc_name) {
+                Some(t) => t,
                 None => continue,
             };
             // Walk the decay chain from the produced target, collecting every
@@ -429,6 +431,51 @@ mod tests {
         let result =
             get_radionuclides_from_chain(&["Fe56".to_string(), "Co59".to_string()], &chain);
         assert!(!result.contains(&"Ni60".to_string()));
+    }
+
+    /// ENDF/B-VIII.1's Pu245 (n,p) names Pu245 itself, through an Np245 with no
+    /// decay data. That reaction leaves the Pu245 count where it was, so it
+    /// makes Pu245 no emitter even though Pu245 emits photons.
+    #[test]
+    fn test_radionuclides_skip_a_reaction_into_its_own_parent() {
+        let rx = |kind: &str, target: &str| ChainReaction {
+            kind: kind.to_string(),
+            target: Some(target.to_string()),
+            branching: 1.0,
+            q_value: None,
+        };
+        let emitter = |name: &str, half_life: f64, reactions: Vec<ChainReaction>| ChainNuclide {
+            name: name.to_string(),
+            half_life: Some(half_life),
+            decay_energy: 0.0,
+            reactions,
+            decays: vec![],
+            fission_yields: None,
+            sources: vec![DecaySource {
+                particle: "photon".to_string(),
+                distribution: DecaySourceDistribution::Discrete {
+                    energies: vec![3.3e5],
+                    intensities: vec![1.0e-5],
+                },
+            }],
+            half_life_uncertainty: None,
+            decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
+        };
+        let chain = Arc::new(HashMap::from([
+            (
+                "Pu245".to_string(),
+                emitter(
+                    "Pu245",
+                    37800.0,
+                    vec![rx("(n,p)", "Pu245"), rx("(n,gamma)", "Pu246")],
+                ),
+            ),
+            ("Pu246".to_string(), emitter("Pu246", 936576.0, vec![])),
+        ]));
+
+        let result = get_radionuclides_from_chain(&["Pu245".to_string()], &chain);
+        assert_eq!(result, vec!["Pu246"]);
     }
 
     // --- time_correction_factors tests ---
