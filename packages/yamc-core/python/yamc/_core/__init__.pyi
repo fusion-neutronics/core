@@ -4729,7 +4729,14 @@ class TransmutationChain:
             dict[str, list[tuple[str, str | None, float]]]: nuclide name ->
             list of (reaction_type, target, branching_ratio). ``target`` is
             ``None`` for a channel that names no single product, which in
-            practice means fission.
+            practice means fission. ``target`` can also be the parent itself,
+            where the evaluation's product has no decay data and the chain
+            builder stepped from it to a nuclide that has: ENDF/B-VIII.1's
+            Pu245 ``(n,p)`` makes Np245, which has none, and the beta- step
+            from it lands back on Pu245. Such a channel leaves the parent's
+            count unchanged and makes no product, so a production-route walk
+            should skip it, as :meth:`TransmutationResults.get_production_routes`
+            does.
         """
     @property
     def decays(self) -> typing.Any:
