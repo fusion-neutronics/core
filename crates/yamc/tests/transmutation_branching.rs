@@ -380,11 +380,9 @@ fn coupled_isomer_only_yield_is_a_share_of_the_tallied_total() {
     );
 }
 
-/// The MF=10 form: a partial at 0.2 of Li6's own capture cross section, on
-/// that cross section's grid, is 0.2 of the tallied total, and Li7 keeps the
-/// other 0.8.
-#[test]
-fn coupled_isomer_only_partial_is_a_share_of_the_tallied_total() {
+/// An MF=10 partial at 0.2 of Li6's own capture cross section, on that cross
+/// section's grid up to `top` [eV].
+fn fifth_of_the_capture(top: f64) -> BranchCurve {
     let mut li6 = Material::new(
         HashMap::from([("Li6".to_string(), 1.0)]),
         "atom",
@@ -401,12 +399,42 @@ fn coupled_isomer_only_partial_is_a_share_of_the_tallied_total() {
     let capture = &li6.nuclide_data["Li6"]
         .reactions_for_temp("294")
         .expect("Li6 at 294 K")[&102];
-    let branch = only_the_isomer(BranchCurve {
+    let (energy, values): (Vec<f64>, Vec<f64>) = capture
+        .energy
+        .iter()
+        .zip(capture.cross_section.iter())
+        .filter(|(e, _)| **e <= top)
+        .map(|(e, x)| (*e, 0.2 * x))
+        .unzip();
+    BranchCurve {
         target: "Li7_m1".to_string(),
         quantity: BranchQuantity::CrossSection,
-        energy: capture.energy.to_vec(),
-        values: capture.cross_section.iter().map(|x| 0.2 * x).collect(),
-    });
+        energy,
+        values,
+    }
+}
+
+/// The MF=10 form: a partial at 0.2 of Li6's capture cross section, on that
+/// cross section's grid, is 0.2 of the tallied total, and Li7 keeps the other
+/// 0.8.
+#[test]
+fn coupled_isomer_only_partial_is_a_share_of_the_tallied_total() {
+    let branch = only_the_isomer(fifth_of_the_capture(f64::INFINITY));
+    let f = meta_fraction(&run(isomer_only_chain(), branch));
+    assert!(
+        (f - 0.2).abs() < 1e-9,
+        "expected 0.2 of the capture total as the isomer's share, got {f}"
+    );
+}
+
+/// The same partial stopping at 10 keV, under a 1 MeV source whose flux runs
+/// on above it. Past its last point an isomer-only partial follows the tallied
+/// total at the share it ends on, so the isomer is still 0.2 of the capture.
+/// Held flat at its 10 keV value while the capture falls five-fold above it,
+/// it came to more than the whole capture, and the isomer took all of it.
+#[test]
+fn coupled_isomer_only_partial_follows_the_total_past_its_last_point() {
+    let branch = only_the_isomer(fifth_of_the_capture(1.0e4));
     let f = meta_fraction(&run(isomer_only_chain(), branch));
     assert!(
         (f - 0.2).abs() < 1e-9,

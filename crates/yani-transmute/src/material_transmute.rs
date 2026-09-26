@@ -2058,7 +2058,7 @@ struct Split {
 /// state but the ground and the listed ones to carry any branching. Anything
 /// else, a list naming the ground state included, keeps the among-listed split
 /// every full list has always had.
-fn remainder_state<'a>(
+pub(crate) fn remainder_state<'a>(
     nuc: &ChainNuclide,
     kind: &str,
     listed: impl Iterator<Item = &'a str> + Clone,
@@ -2211,7 +2211,10 @@ fn refine_chain(
 ///     rates are zero (e.g. flux entirely below threshold) the base split is
 ///     kept, matching the fold's `None` behaviour. Rates for metastable states
 ///     alone are divided by the reaction's tallied total instead, and the
-///     ground state keeps the rest (see `remainder_state`).
+///     ground state keeps the rest (see `remainder_state`). Their duplicate
+///     entries sum: the tally reports such an MF=10 partial as its fold up to
+///     its last breakpoint and, above it, its share of the total, scored
+///     directly.
 pub fn apply_coupled_branching(
     chain: &Arc<HashMap<String, ChainNuclide>>,
     partial_rates: &PartialRates,
@@ -2312,8 +2315,9 @@ fn fold_curve_rate(energy: &[f64], values: &[f64], spectrum: &MultigroupSpectrum
 /// ground state is the remainder (see [`remainder_state`]), so each fraction is
 /// the state's share of the whole reaction and they are not normalized: the
 /// partial's rate over `sigma_MT` folded the same way,
-/// `f_s = integral(sigma_s * phi) / integral(sigma_MT * phi)`, or the yield
-/// weighted as above over the same integral with a unit yield,
+/// `f_s = integral(sigma_s * phi) / integral(sigma_MT * phi)`, with `sigma_s`
+/// following `sigma_MT` past its last energy (see [`along_the_total`]), or the
+/// yield weighted as above over the same integral with a unit yield,
 /// `f_s = integral(y_s * sigma_MT * phi) / integral(sigma_MT * phi)`. Both need
 /// the transport cross section and return `None` without it.
 fn fold_state_fractions(
@@ -2335,19 +2339,24 @@ fn fold_state_fractions(
     // are not all of it.
     let mut whole: Option<f64> = None;
     if !cross.is_empty() {
+        let reaction = if of_whole {
+            Some(transport_reaction(material, parent, kind)?)
+        } else {
+            None
+        };
         for c in &cross {
-            per.push((
-                c.target.clone(),
-                fold_curve_rate(&c.energy, &c.values, spectrum),
-            ));
+            let rate = match reaction {
+                Some(r) => {
+                    let (energy, values) =
+                        along_the_total(&c.energy, &c.values, &r.energy, &r.cross_section);
+                    fold_curve_rate(&energy, &values, spectrum)
+                }
+                None => fold_curve_rate(&c.energy, &c.values, spectrum),
+            };
+            per.push((c.target.clone(), rate));
         }
-        if of_whole {
-            let reaction = transport_reaction(material, parent, kind)?;
-            whole = Some(fold_curve_rate(
-                &reaction.energy,
-                &reaction.cross_section,
-                spectrum,
-            ));
+        if let Some(r) = reaction {
+            whole = Some(fold_curve_rate(&r.energy, &r.cross_section, spectrum));
         }
     } else {
         // Yield curves (MF=9): weight by the reaction's transport cross section
@@ -2403,6 +2412,53 @@ fn fold_state_fractions(
         return None;
     }
     Some(per.into_iter().map(|(t, v)| (t, v / total)).collect())
+}
+
+/// An isomer-only MF=10 partial continued past its last tabulated energy along
+/// the transport total, at the share of that total it ends on.
+///
+/// `curve_interp` holds every curve flat above its last point. In a full list
+/// that is harmless: every partial in the ratio is held alike, so the split
+/// they end on carries on. A lone isomer's share is taken of the transport
+/// total instead, which goes on changing wherever its grid runs further.
+/// ENDF/B-VIII.1's In115 (n,2n) partial stops at 20 MeV at 1.19 b, and held
+/// there against TENDL-2025's (n,2n), which falls to nothing by 30 MeV, it made
+/// the isomer all of a 20-40 MeV group. So above the last energy `E_l` the
+/// partial is `sigma_s(E_l) / sigma_MT(E_l) * sigma_MT(E)`, on the total's own
+/// grid points, which is piecewise linear and folds exactly. With no total at
+/// `E_l` there is no share to hold, and the partial ends there.
+///
+/// Below `E_l` the curve is the partial's own, point for point, so a spectrum
+/// that stops short of `E_l` folds it bit for bit as before.
+fn along_the_total(
+    energy: &[f64],
+    values: &[f64],
+    total_energy: &[f64],
+    total: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
+    let mut e = energy.to_vec();
+    let mut v = values.to_vec();
+    let (Some(&e_last), Some(&v_last)) = (energy.last(), values.last()) else {
+        return (e, v);
+    };
+    let t_last = if total_energy.is_empty() {
+        0.0
+    } else {
+        curve_interp(total_energy, total, e_last)
+    };
+    if t_last > 0.0 {
+        let share = v_last / t_last;
+        let from = total_energy.partition_point(|&x| x <= e_last);
+        e.extend_from_slice(&total_energy[from..]);
+        v.extend(total[from..].iter().map(|t| share * t));
+    } else {
+        // A step to zero one ulp up rather than at `E_l` itself: a repeated
+        // last point would make `curve_interp` read zero AT `E_l`, and the
+        // trapezoid ending there would lose half its last segment.
+        e.push(e_last.next_up());
+        v.push(0.0);
+    }
+    (e, v)
 }
 
 /// The parent's transport cross section for `kind`, at the material's
@@ -3103,6 +3159,97 @@ mod tests {
         );
         assert_eq!(branching_of(&folded, "(n,2n)", "In114_m1"), 0.0);
         assert_eq!(branching_of(&folded, "(n,2n)", "In114"), 1.0);
+    }
+
+    /// In115 (n,2n) folded over `spectrum` from one isomer-only partial and
+    /// the given transport total, as `(In114_m1, In114)`.
+    fn n2n_split(
+        total: (&[f64], &[f64]),
+        partial: (&[f64], &[f64]),
+        spectrum: MultigroupSpectrum,
+    ) -> (f64, f64) {
+        let material = indium(vec![reaction(16, total.0.to_vec(), total.1.to_vec())]);
+        let mut branch = BranchTable::new();
+        branch.entry("In115".to_string()).or_default().insert(
+            "(n,2n)".to_string(),
+            vec![curve(
+                "In114_m1",
+                BranchQuantity::CrossSection,
+                partial.0,
+                partial.1,
+            )],
+        );
+        let mut rates: ReactionRates = HashMap::new();
+        let folded =
+            fold_branching_into_chain(&material, &indium_chain(), &branch, &spectrum, &mut rates);
+        (
+            branching_of(&folded, "(n,2n)", "In114_m1"),
+            branching_of(&folded, "(n,2n)", "In114"),
+        )
+    }
+
+    /// The share is a ratio of rate integrals, not an average of ratios. The
+    /// partial runs 0.3 to 1.5 b under a total of 1 to 3 b, so its ratio to the
+    /// total goes from 0.3 to 0.5, and two groups hold 1/4 and 3/4 of the flux.
+    /// Group averages 0.6 and 1.2 b over 1.5 and 2.5 b give
+    /// `(0.25 * 0.6 + 0.75 * 1.2) / (0.25 * 1.5 + 0.75 * 2.5) = 7/15`, where a
+    /// flux-weighted average of the per-group ratios would give 0.46.
+    #[test]
+    fn an_isomer_only_partial_is_a_ratio_of_rate_integrals() {
+        let (m, g) = n2n_split(
+            (&[1.0e7, 2.0e7], &[1.0, 3.0]),
+            (&[1.0e7, 2.0e7], &[0.3, 1.5]),
+            MultigroupSpectrum {
+                boundaries: vec![1.0e7, 1.5e7, 2.0e7],
+                masses: vec![0.25, 0.75],
+                flux_error: None,
+            },
+        );
+        assert!((m - 7.0 / 15.0).abs() < 1e-12, "In114_m1 {m}");
+        assert!((g - 8.0 / 15.0).abs() < 1e-12, "In114 {g}");
+    }
+
+    /// Past its last energy an isomer-only partial follows the transport total
+    /// at the share it ends on, not its own last value. Here it ends at 20 MeV
+    /// on 1.6 b, 0.8 of a 2 b total that then falls to nothing by 30 MeV, as
+    /// ENDF/B-VIII.1's In115 (n,2n) partial against TENDL-2025's total does.
+    /// Held flat it was 1.6 b over a 20-30 MeV average of 1 b, and the isomer
+    /// took everything.
+    #[test]
+    fn an_isomer_only_partial_follows_the_total_past_its_last_energy() {
+        let total: (&[f64], &[f64]) = (&[1.0e7, 2.0e7, 3.0e7], &[2.0, 2.0, 0.0]);
+        let partial: (&[f64], &[f64]) = (&[1.0e7, 2.0e7], &[1.0, 1.6]);
+        let spectrum = |boundaries: Vec<f64>, masses: Vec<f64>| MultigroupSpectrum {
+            boundaries,
+            masses,
+            flux_error: None,
+        };
+        // Wholly above: the share it ends on.
+        let (m, g) = n2n_split(total, partial, spectrum(vec![2.0e7, 3.0e7], vec![1.0]));
+        assert!((m - 0.8).abs() < 1e-12, "In114_m1 {m}");
+        assert!((g - 0.2).abs() < 1e-12, "In114 {g}");
+        // 80% below, where the partial averages 1.3 b, and 20% above:
+        // `(0.8 * 1.3 + 0.2 * 0.8 * 1.0) / (0.8 * 2.0 + 0.2 * 1.0) = 2/3`.
+        let (m, _) = n2n_split(
+            total,
+            partial,
+            spectrum(vec![1.0e7, 2.0e7, 3.0e7], vec![0.8, 0.2]),
+        );
+        assert!((m - 2.0 / 3.0).abs() < 1e-12, "In114_m1 {m}");
+        // One group across the last energy: 1.45 b on its lower half and
+        // `0.8 * 1.5` on its upper, over a total of 2 and 1.5 b.
+        let (m, _) = n2n_split(total, partial, spectrum(vec![1.5e7, 2.5e7], vec![1.0]));
+        assert!((m - 53.0 / 70.0).abs() < 1e-12, "In114_m1 {m}");
+
+        // A total that is zero where the partial ends leaves no share to hold,
+        // and the partial ends there.
+        let (m, g) = n2n_split(
+            (&[1.0e7, 2.0e7, 2.5e7], &[2.0, 0.0, 1.0]),
+            partial,
+            spectrum(vec![2.0e7, 3.0e7], vec![1.0]),
+        );
+        assert!(m < 1e-12, "In114_m1 {m}");
+        assert!((g - 1.0).abs() < 1e-12, "In114 {g}");
     }
 
     /// A partial above the transport total, as ENDF/B-VIII.1's Pt (n,d)
