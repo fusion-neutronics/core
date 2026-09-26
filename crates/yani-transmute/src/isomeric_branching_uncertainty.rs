@@ -196,6 +196,8 @@ pub(crate) struct IsomericSpectrum {
     /// split given by MF=9 yields keeps its nominal fractions.
     nominal: Fractions,
     sampler: Sampler,
+    /// The partials each replica's draw moves, see [`draws`].
+    draws: usize,
 }
 
 /// What the report says about the isomeric source.
@@ -362,11 +364,13 @@ impl IsomericSampling {
             }
             let sampler = Sampler::with_stream(&folded, ISOMERIC_BRANCHING_STREAM);
             report.matrices_clipped += sampler.clipping.matrices_clipped;
+            let draws = draws(&sampler, &partials);
             spectra_out.push(IsomericSpectrum {
                 partials,
                 wholes,
                 nominal,
                 sampler,
+                draws,
             });
         }
 
@@ -464,8 +468,8 @@ impl IsomericSampling {
         sampled: &mut usize,
     ) -> Fractions {
         let spectrum = &self.spectra[idx];
-        let (perturbed, t) = spectrum.sampler.perturb(&spectrum.partials, seed, replica);
-        *sampled += t.sampled;
+        let (perturbed, _) = spectrum.sampler.perturb(&spectrum.partials, seed, replica);
+        *sampled += spectrum.draws;
         self.fractions_from(idx, &perturbed, rates)
     }
 
@@ -595,8 +599,8 @@ impl IsomericSampling {
                 }
             }
         }
-        let (perturbed, t) = spectrum.sampler.perturb(&tallied, seed, replica);
-        *sampled += t.sampled;
+        let (perturbed, _) = spectrum.sampler.perturb(&tallied, seed, replica);
+        *sampled += draws(&spectrum.sampler, &tallied);
         for (name, by_label) in &tallied {
             let parent = &self.parents[name];
             for (l, rate) in by_label {
@@ -672,6 +676,31 @@ impl IsomericSampling {
             crate::material_transmute::refine_chain(base, &fractions),
         )
     }
+}
+
+/// How many of `rates`' partials one draw under `sampler` moves: those with a
+/// rate and a non-zero row in their parent's factor. A label at no rate, below
+/// threshold or with no total to take a share of, keeps its place in the
+/// factor and is not a draw, and neither is one whose MF=40 grid misses where
+/// its rate is.
+fn draws(sampler: &Sampler, rates: &ReactionRates) -> usize {
+    sampler
+        .factors()
+        .map(|(name, labels, l)| {
+            let n = labels.len();
+            labels
+                .iter()
+                .enumerate()
+                .filter(|(i, label)| {
+                    rates
+                        .get(name)
+                        .and_then(|r| r.get(*label))
+                        .is_some_and(|r| *r > 0.0)
+                        && l[i * n..(i + 1) * n].iter().any(|v| *v != 0.0)
+                })
+                .count()
+        })
+        .sum()
 }
 
 /// Whether a reaction's list shares it among fewer than two of the states the
@@ -1129,6 +1158,8 @@ mod tests {
         );
         assert_eq!(bare.spectra[0].partials["Pb208"][&labels[0]], 0.0);
         assert!(bare.report.channels_perturbed.contains("Pb208 (n,n')"));
+        // A label at no rate keeps its place and is not a draw.
+        assert_eq!(bare.spectra[0].draws, 1);
 
         let Some(path) = yamc_test_cache::nuclide("Pb208") else {
             eprintln!("skipping the loaded half -- Pb208 fixture absent");
@@ -1147,6 +1178,7 @@ mod tests {
         );
         assert_eq!(loaded.parents["Pb208"].labels, labels);
         assert!(loaded.spectra[0].partials["Pb208"][&labels[0]] > 0.0);
+        assert_eq!(loaded.spectra[0].draws, 2);
         let (_, l_bare) = bare.factor(0, "Pb208").expect("the (n,n') partial");
         let (_, l_loaded) = loaded.factor(0, "Pb208").expect("both partials");
         let sigma = |l: &[f64]| l[2..4].iter().map(|v| v * v).sum::<f64>().sqrt();
@@ -1408,8 +1440,10 @@ mod tests {
                 .sum::<f64>()
                 .sqrt()
         };
-        // Below threshold the (n,2n) partials have no rate, and no row.
+        // Below threshold the (n,2n) partials have no rate, and no row, and
+        // are not draws.
         assert!(l_b[..2 * n].iter().all(|v| *v == 0.0));
+        assert_eq!((iso.spectra[0].draws, iso.spectra[1].draws), (3, 1));
         assert!(sigma(l_a, i) > 0.0 && sigma(l_b, i) > 0.0);
         for replica in 0..64 {
             let a = iso.spectra[0].sampler.deviates(9, replica)["Nb93"][i] / sigma(l_a, i);

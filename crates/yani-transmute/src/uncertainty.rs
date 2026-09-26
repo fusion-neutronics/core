@@ -266,7 +266,8 @@ pub struct Info {
     pub isomeric_blocks_skipped: BTreeMap<String, usize>,
     /// MF=40 matrices that were not positive semi-definite and were repaired.
     pub isomeric_matrices_clipped: usize,
-    /// Individual partial-rate draws applied.
+    /// Individual partial-rate draws applied: one per replica for each partial
+    /// with a rate and a non-zero MF=40 sigma.
     pub isomeric_partials_sampled: usize,
     /// Spectra that carried a per-bin flux sigma, and those that did not.
     ///

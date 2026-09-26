@@ -2486,7 +2486,8 @@ class TransmutationResults:
           ``"Parent kind target"``), ``isomeric_blocks_skipped`` the MF=40
           blocks present but not used, by reason, ``isomeric_matrices_clipped``
           the MF=40 matrices repaired, and ``isomeric_partials_sampled`` the
-          partial-rate draws applied.
+          partial-rate draws applied, one per replica for each partial with a
+          rate and a non-zero MF=40 sigma.
         - ``rates_floored`` / ``rates_sampled``: samples that went negative and
           were truncated at zero, which biases the mean upward when common.
         - ``half_lives_perturbed`` / ``no_half_life_uncertainty``: with the
