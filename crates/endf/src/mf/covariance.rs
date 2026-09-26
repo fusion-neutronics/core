@@ -436,4 +436,44 @@ mod tests {
         assert_eq!(ni.ek, vec![1.0, 2.0, 3.0]);
         assert_eq!(ni.fkk, vec![10.0, 20.0]);
     }
+
+    /// MF=40 wraps MF=33 sub-subsections in a per-product-state CONT, so what
+    /// has to come out is the state's own keys (QM, QI, IZAP, LFS) and the
+    /// block beneath them, with the partner state in XMF1 and XLFS1.
+    #[test]
+    fn mf40_reads_a_product_state_and_its_blocks() {
+        // HEAD with NS=1; the Nb92_m1 state of (n,2n), LFS=1, NL=1; one
+        // MF=33-format subsection correlating it with itself (XMF1=10,
+        // XLFS1=1, MT1=16) holding one LB=5 LS=1 block on three energies.
+        let text = line([f(41093.0), f(92.10827), i(0), i(0), i(1), i(0)])
+            + &line([f(-8830870.0), f(-8966370.0), i(41092), i(1), i(0), i(1)])
+            + &line([f(10.0), f(1.0), i(0), i(16), i(0), i(1)])
+            + &line([f(0.0), f(0.0), i(1), i(5), i(6), i(3)])
+            + &line([f(1.0e-5), f(1.0e7), f(2.0e7), f(0.04), f(0.01), f(0.09)]);
+
+        let d = parse_mf40(&mut Reader::new(&text)).unwrap();
+        assert_eq!(d.za, 41093);
+        assert_eq!(d.ns, 1);
+        assert_eq!(d.subsections.len(), 1);
+
+        let state = &d.subsections[0];
+        assert_eq!(state.qm, -8830870.0);
+        assert_eq!(state.qi, -8966370.0);
+        assert_eq!(state.izap, 41092);
+        assert_eq!(state.lfs, 1);
+        assert_eq!(state.nl, 1);
+        assert_eq!(state.subsubsections.len(), 1);
+
+        let sub = &state.subsubsections[0];
+        assert_eq!(sub.xmf1, 10.0);
+        assert_eq!(sub.xlfs1, 1.0);
+        assert_eq!(sub.mat1, 0);
+        assert_eq!(sub.mt1, 16);
+        assert!(sub.nc_subsections.is_empty());
+        assert_eq!(sub.ni_subsections.len(), 1);
+        let ni = &sub.ni_subsections[0];
+        assert_eq!((ni.lb, ni.ls, ni.nt, ni.ne), (5, 1, 6, 3));
+        assert_eq!(ni.ek, vec![1.0e-5, 1.0e7, 2.0e7]);
+        assert_eq!(ni.fkk, vec![0.04, 0.01, 0.09]);
+    }
 }
