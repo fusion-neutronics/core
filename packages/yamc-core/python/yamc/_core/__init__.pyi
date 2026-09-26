@@ -4806,6 +4806,12 @@ class TransmutationChain:
         Write the chain to a split (v2) chain directory with `decay/`,
         `reactions/` and `fission_yields/` subsection subdirs.
         
+        Decay modes the chain models no product for (any mode involving
+        spontaneous fission, and a mode whose stored daughter is the parent
+        itself) are written with no target, as :attr:`decays` reports them.
+        Loading the export gives the same chain, but for those rows the file
+        does not repeat the target the source file stored.
+        
         Args:
             path (str): Output directory path.
         """

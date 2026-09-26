@@ -695,9 +695,12 @@ pub struct DecayPath {
     pub kind: String,
     /// The nuclide left behind. `None` where the product is a bare neutron.
     ///
-    /// Written as [`crate::decay::DecayMode::daughter`] gives it, as OpenMC's
-    /// chain does, so on spontaneous fission it is the parent's own Z and A
-    /// rather than a product. The ratio is kept as evaluated; yani's reader
+    /// This is [`crate::decay::DecayMode::daughter`], or `replace_missing`'s
+    /// stand-in when that daughter has no decay data. So on spontaneous
+    /// fission it is usually the parent's own Z and A rather than a product,
+    /// and sometimes a substitute (Ds279_m1 sf -> Fm259). OpenMC's chain
+    /// agrees where the daughter is present, and writes no target for an sf
+    /// daughter that is absent. The ratio is kept as evaluated; yani's reader
     /// is where the target is dropped.
     pub target: Option<String>,
     pub branching_ratio: f64,

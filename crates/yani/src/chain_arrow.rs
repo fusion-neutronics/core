@@ -828,9 +828,15 @@ pub fn parse_chain_parts(
 
 /// Write a transmutation chain to the v2 split-subsection layout under `dir`:
 /// `decay/` (nuclides + decay_modes + sources), `reactions/`, and
-/// `fission_yields/`, plus a `manifest.json`. This is the inverse of
-/// [`parse_chain_parts`] (Q values are not tracked in-memory, so they are not
-/// written; parse ignores them too).
+/// `fission_yields/`, plus a `manifest.json`. Reading it back with
+/// [`parse_chain_parts`] gives the same chain.
+///
+/// It is not a copy of the file the chain was read from, though. The reader
+/// drops the target of every decay mode the chain models no product for (any
+/// mode involving spontaneous fission, and one whose stored target is its own
+/// parent: see `modelled_decay_target`), so those rows are written with a null
+/// target where the source file names the parent, a ground state or a
+/// `replace_missing` stand-in. Their branching ratios are written unchanged.
 pub fn export_chain_parts<P: AsRef<Path>>(
     chain: &HashMap<String, ChainNuclide>,
     dir: P,

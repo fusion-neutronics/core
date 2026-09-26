@@ -135,6 +135,8 @@ fn an_isomer_that_fissions_does_not_feed_its_ground_state() {
     );
 }
 
+/// A control rather than a regression test: Co60's one mode, beta- to Ni60,
+/// reads the same with or without the sf change, so this passes on both.
 #[test]
 fn a_nuclide_with_no_fission_mode_decays_as_before() {
     let chain = chain();
