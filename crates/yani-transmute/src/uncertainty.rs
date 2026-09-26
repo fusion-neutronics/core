@@ -218,6 +218,13 @@ pub struct Info {
     /// covariance grid spans with a variance of zero counts as uncovered: it
     /// states no uncertainty either.
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
+    /// Per (nuclide, reaction kind), where the partial rates the covariance
+    /// was weighted with add up to more than the rate it was divided by, their
+    /// ratio to it. Each is a channel whose relative sigma is overstated,
+    /// because the two were computed different ways; a self-shielded rate
+    /// against dilute partials is one. Such a channel reads one in
+    /// `rate_fraction_covered`.
+    pub partials_above_rate: BTreeMap<(String, String), f64>,
     /// Share of the production this run drove from energies where a covariance
     /// states a nonzero variance, weighted by rate and by parent density, or
     /// `None` for a decay-only schedule that drove none.
@@ -289,6 +296,7 @@ impl Info {
             unsupported_layouts: coverage.unsupported_layouts.clone(),
             malformed_blocks: coverage.malformed,
             rate_fraction_covered: coverage.rate_fraction_covered.clone(),
+            partials_above_rate: coverage.partials_above_rate.clone(),
             rate_fraction_covered_total: coverage.rate_fraction_total(),
             matrices_clipped: clipping.matrices_clipped,
             worst_relative_clip: clipping.worst_relative_clip,
@@ -317,13 +325,15 @@ impl Info {
         self.flux_bins_sampled = c.bins_sampled;
     }
 
-    /// Whether anything was left out that a reader should know about.
+    /// Whether anything was left out, or is inconsistent, that a reader should
+    /// know about.
     pub fn has_gaps(&self) -> bool {
         !self.no_covariance_data.is_empty()
             || self.skipped_cross_material > 0
             || self.skipped_nc > 0
             || !self.unsupported_layouts.is_empty()
             || self.malformed_blocks > 0
+            || !self.partials_above_rate.is_empty()
             || self.spectra_without_flux_sigma > 0
             || !self.no_half_life_uncertainty.is_empty()
             || !self.no_decay_energy_uncertainty.is_empty()

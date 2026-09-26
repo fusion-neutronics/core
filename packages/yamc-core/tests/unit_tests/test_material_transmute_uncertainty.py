@@ -135,6 +135,24 @@ def test_the_report_names_what_is_never_perturbed():
         assert source in joined, f"{source!r} missing from {not_perturbed}"
 
 
+def test_coverage_is_a_share_and_a_dilute_run_has_no_partials_above_the_rate():
+    """Every coverage entry is a share, and nothing on a dilute run exceeds one.
+
+    On an unshielded collapse the fold's partial rates and the rate they are
+    divided by are the same integral, so ``partials_above_rate`` must be empty;
+    an entry there is a channel whose sigma is overstated.
+    """
+    iron = _iron()
+    results = iron.transmute(
+        schedule=_schedule(),
+        data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["cross_sections"]),
+    )
+    info = results.get_data_uncertainty_info(iron.id or 0)
+    assert info["partials_above_rate"] == {}
+    for channel, share in info["rate_fraction_covered"].items():
+        assert 0.0 <= share <= 1.0, f"{channel} reads {share}"
+
+
 def test_the_means_are_unchanged_by_asking_for_uncertainty():
     """Bit-identical, not merely close: the nominal pass is untouched."""
     iron = _iron()

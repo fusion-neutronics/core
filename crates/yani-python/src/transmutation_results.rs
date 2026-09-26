@@ -613,6 +613,11 @@ impl PyTransmutationResults {
     ///   spans with a variance of zero counts as uncovered: ENDF/B-VIII.1 W186
     ///   ``(n,gamma)`` states zero from 1e-5 eV to 10 keV, where nearly all of
     ///   its capture rate is.
+    /// - ``partials_above_rate``: per nuclide and channel, where the partial
+    ///   rates the covariance was weighted with add up to more than the rate
+    ///   it was divided by, their ratio to it. Each entry is a channel whose
+    ///   sigma is overstated, a self-shielded rate against dilute partials
+    ///   being one cause; it reads one in ``rate_fraction_covered``.
     /// - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
     ///   covariance blocks that were present but not consumed.
     /// - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose

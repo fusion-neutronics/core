@@ -722,3 +722,41 @@ fn fe56_np_is_not_covered_where_its_variance_is_zero() {
         "Fe56 (n,p) is covered above 4.3 MeV only, which is nearly all of its rate: {np}"
     );
 }
+
+/// On a dilute collapse the fold's partial rates and the rate they are divided
+/// by are the same integral, so no channel may report partials above its rate,
+/// and every share the fold reports lies in [0, 1].
+#[test]
+fn a_dilute_fold_reports_no_partials_above_the_rate() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let Some(dir) = fe56_with_covariance(tmp.path()) else {
+        return skip("a_dilute_fold_reports_no_partials_above_the_rate");
+    };
+    let mut material = iron(&dir);
+    let results = run(
+        &mut material,
+        Some(&DataUncertainty {
+            seed: 1,
+            samples: Some(32),
+            sources: vec![yani_transmute::uncertainty::Source::CrossSections],
+            ..Default::default()
+        }),
+    );
+    let info = results
+        .uncertainty_info
+        .get(&0)
+        .cloned()
+        .expect("info is reported");
+
+    assert!(
+        info.partials_above_rate.is_empty(),
+        "a dilute fold is consistent: {:?}",
+        info.partials_above_rate
+    );
+    for (key, fraction) in &info.rate_fraction_covered {
+        assert!(
+            (0.0..=1.0).contains(fraction),
+            "{key:?} reads {fraction}, which is not a share"
+        );
+    }
+}

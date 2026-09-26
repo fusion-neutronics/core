@@ -132,7 +132,20 @@ pub struct Coverage {
     ///
     /// Every channel a consumed block names has an entry, so a channel whose
     /// blocks state no variance anywhere reads zero rather than being absent.
+    /// At most one; a channel whose partial rates exceed its rate reads one
+    /// here and is listed in [`Coverage::partials_above_rate`].
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
+    /// Per (nuclide, kind), where the partial rates the covariance was weighted
+    /// with add up to more than the rate it was divided by, their ratio to it.
+    ///
+    /// A share of a rate cannot exceed the rate, and this is past rounding, so
+    /// an entry means the numerator and the denominator of the relative
+    /// covariance were computed two different ways: the channel's relative
+    /// sigma is overstated. The partials are the dilute cross section against
+    /// a flux that is flat within each group, so any rate computed otherwise,
+    /// a self-shielded collapse among them, can land here. Reported rather
+    /// than clamped away, since the clamp is what used to hide it.
+    pub partials_above_rate: BTreeMap<(String, String), f64>,
     /// Production this spectrum drove from energies where a covariance states a
     /// nonzero variance, and the production it drove in total. Both are per
     /// barn-cm per second, and both are weighted by the parent's own density,
@@ -170,10 +183,11 @@ impl Coverage {
 
     /// Fold one nuclide's report into this one.
     ///
-    /// Every field is order-free: the sets union, the counters sum, and
+    /// Every field is order-free: the sets union, the counters sum,
     /// `rate_fraction_covered` is keyed by (nuclide, kind) and takes the
-    /// smaller claim. That is what lets the fold below run per nuclide in
-    /// parallel and merge afterwards (issue #576, finding 5c).
+    /// smaller claim, and `partials_above_rate` takes the larger excess. That
+    /// is what lets the fold below run per nuclide in parallel and merge
+    /// afterwards (issue #576, finding 5c).
     pub fn absorb(&mut self, other: Coverage) {
         self.covered.extend(other.covered);
         self.without_data.extend(other.without_data);
@@ -189,17 +203,24 @@ impl Coverage {
                 .and_modify(|f| *f = f.min(fraction))
                 .or_insert(fraction);
         }
+        for (key, ratio) in other.partials_above_rate {
+            self.partials_above_rate
+                .entry(key)
+                .and_modify(|r| *r = r.max(ratio))
+                .or_insert(ratio);
+        }
         self.covered_production += other.covered_production;
         self.total_production += other.total_production;
     }
 
-    /// Whether anything at all was skipped or missing.
+    /// Whether anything at all was skipped, missing or inconsistent.
     pub fn has_gaps(&self) -> bool {
         !self.without_data.is_empty()
             || self.skipped_cross_material > 0
             || self.skipped_nc > 0
             || !self.unsupported_layouts.is_empty()
             || self.malformed > 0
+            || !self.partials_above_rate.is_empty()
     }
 }
 
@@ -318,6 +339,15 @@ fn contract(block: &ExpandedBlock, row: &Partials, col: &Partials) -> f64 {
     }
     total
 }
+
+/// How far above one a channel's covered rate over its rate may sit and still
+/// be rounding.
+///
+/// On a dilute collapse the two add the same terms grouped differently, and on
+/// CCFE-709 they agree to a few parts in 1e15. This sits six orders of
+/// magnitude above that, and an excess below it would move a relative sigma
+/// by less than a part in a billion.
+const PARTIALS_ROUNDING: f64 = 1.0e-9;
 
 /// The interval of `grid` that holds all of `[a, b]`, if one does.
 fn interval_holding(grid: &[f64], a: f64, b: f64) -> Option<usize> {
@@ -553,11 +583,12 @@ fn fold_nuclide(
         if full == 0.0 {
             continue;
         }
-        let covered = rate_with_stated_variance(flux, reaction, diagonals);
-        coverage.rate_fraction_covered.insert(
-            (nuclide.to_string(), kind.clone()),
-            (covered / full).min(1.0),
-        );
+        let ratio = rate_with_stated_variance(flux, reaction, diagonals) / full;
+        let key = (nuclide.to_string(), kind.clone());
+        if ratio > 1.0 + PARTIALS_ROUNDING {
+            coverage.partials_above_rate.insert(key.clone(), ratio);
+        }
+        coverage.rate_fraction_covered.insert(key, ratio.min(1.0));
     }
 
     coverage.covered.insert(nuclide.to_string());
@@ -866,6 +897,7 @@ mod stated_variance_tests {
             "only the rate above 10 keV carries a variance: {got} against {expected}"
         );
         assert!(got < 0.5, "most of this rate is below 10 keV: {got}");
+        assert!(c.partials_above_rate.is_empty());
     }
 
     /// A block that is zero everywhere is still the evaluation's statement
@@ -896,6 +928,10 @@ mod stated_variance_tests {
         let sum: f64 = partials.per_interval.iter().sum();
         let before = (sum / rate(1.0e-5, 2.0e7)).min(1.0);
         assert_eq!(fraction(&c, "(n,gamma)").to_bits(), before.to_bits());
+        assert!(
+            c.partials_above_rate.is_empty(),
+            "a dilute fold is consistent"
+        );
     }
 
     /// A cross block correlates two reactions and states a variance for
@@ -968,6 +1004,34 @@ mod stated_variance_tests {
         assert_eq!(d.over(10.0, 50.0), 0.7);
         assert_eq!(d.over(50.0, 100.0), 0.0);
         assert_eq!(d.over(1.0, 5.0), 0.0);
+    }
+
+    /// Partials above the rate are an inconsistency between the numerator and
+    /// the denominator, not a coverage of more than all of it. The share reads
+    /// one and the excess is reported, where it used to be clamped silently.
+    #[test]
+    fn partials_above_the_rate_are_reported_not_clamped_away() {
+        let grid = [1.0e-5, 1.0e4, 2.0e7];
+        // Half the rate the partials sum to, as a shielded collapse would give
+        // against dilute partials.
+        let c = fold(&[block(102, 102, lb5(&grid, &[0.01, 0.0, 0.01]))], 0.5);
+        let key = ("W186".to_string(), "(n,gamma)".to_string());
+        assert_eq!(fraction(&c, "(n,gamma)"), 1.0);
+        let ratio = c.partials_above_rate[&key];
+        assert!((ratio - 2.0).abs() < 1.0e-12, "{ratio}");
+        assert!(
+            c.has_gaps(),
+            "an overstated sigma is something to know about"
+        );
+
+        // Across spectra the larger excess is the one kept.
+        let mut merged = Coverage::default();
+        merged.absorb(c.clone());
+        merged.absorb(Coverage {
+            partials_above_rate: BTreeMap::from([(key.clone(), 1.5)]),
+            ..Default::default()
+        });
+        assert_eq!(merged.partials_above_rate[&key], ratio);
     }
 }
 
