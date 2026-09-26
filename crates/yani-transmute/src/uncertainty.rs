@@ -427,11 +427,11 @@ pub struct Ensemble {
 ///   nuclide's statistical and nuclear-data variances are measured the same
 ///   way the total is. Sources are independent, so they sum to the total up to
 ///   interaction and sampling noise, which is the unattributed residual.
-/// - `contributors` is first order: within the cross sections and the
-///   half-lives, one deterministic solve per nuclide (and per reaction) gives
-///   its sensitivity, and its variance is that squared against its own
-///   stated uncertainty. It says which evaluation to look at, not the total,
-///   which is always the resampled one.
+/// - `contributors` is first order: within the cross sections, the isomeric
+///   split and the half-lives, one deterministic solve per nuclide (and per
+///   reaction or partial) gives its sensitivity, and its variance is that
+///   squared against its own stated uncertainty. It says which evaluation to
+///   look at, not the total, which is always the resampled one.
 #[derive(Debug, Clone, Default)]
 pub struct Attribution {
     /// Source name -> `[step][nuclide]` variance, from that source alone.
