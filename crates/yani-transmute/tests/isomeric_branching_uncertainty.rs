@@ -40,6 +40,7 @@ fn chain() -> Arc<HashMap<String, ChainNuclide>> {
     };
     let pb208 = chain.get_mut("Pb208").expect("Pb208 in the chain");
     pb208.reactions.push(edge("(n,2n)", "Pb207_m1", 0.0));
+    pb208.reactions.push(edge("(n,np)", "Tl207_m1", 0.0));
     let co58 = chain.get_mut("Co58").expect("Co58 in the chain");
     co58.reactions.push(edge("(n,n')", "Co58_m1", 1.0));
     Arc::new(chain)
@@ -118,8 +119,10 @@ fn covariance(rows: &[BranchingCovarianceRow]) -> tempfile::TempDir {
     dir
 }
 
-/// Pb208 (n,2n) at f = 0.25, optionally with an (n,gamma) split MF=9 gives.
-fn lead_overlay(covariance: Option<&Path>, with_capture: bool) -> BranchTable {
+/// Pb208 (n,2n) at f = 0.25, optionally with two lists MF=9 gives: (n,np)
+/// split between Tl207 and Tl207_m1, and (n,gamma) to Pb209 alone, which is
+/// no split at all.
+fn lead_overlay(covariance: Option<&Path>, with_yields: bool) -> BranchTable {
     let mut branch = BranchTable::new();
     let kinds = branch.entry("Pb208".to_string()).or_default();
     kinds.insert(
@@ -129,7 +132,14 @@ fn lead_overlay(covariance: Option<&Path>, with_capture: bool) -> BranchTable {
             curve("Pb207_m1", BranchQuantity::CrossSection, 7.4e6, 0.5),
         ],
     );
-    if with_capture {
+    if with_yields {
+        kinds.insert(
+            "(n,np)".to_string(),
+            vec![
+                curve("Tl207", BranchQuantity::Yield, 1.0e-5, 0.9),
+                curve("Tl207_m1", BranchQuantity::Yield, 1.0e-5, 0.1),
+            ],
+        );
         kinds.insert(
             "(n,gamma)".to_string(),
             vec![curve("Pb209", BranchQuantity::Yield, 1.0e-5, 1.0)],
@@ -356,13 +366,17 @@ fn the_report_names_what_had_no_covariance() {
     )
     .expect("transmute");
     let info = &results.uncertainty_info[&0];
-    // MF=9 yields have no covariance format.
+    // MF=9 yields have no covariance format. A list naming one state has no
+    // split to be without one.
     assert!(
         info.no_isomeric_branching_uncertainty
-            .contains("Pb208 (n,gamma)"),
+            .contains("Pb208 (n,np)"),
         "{:?}",
         info.no_isomeric_branching_uncertainty
     );
+    assert!(!info
+        .no_isomeric_branching_uncertainty
+        .contains("Pb208 (n,gamma)"));
     // The ground's partial has no block, and moves only as the isomer's does.
     assert!(info
         .isomeric_partials_without_covariance
@@ -384,7 +398,7 @@ fn the_report_names_what_had_no_covariance() {
     .expect("transmute");
     let info = &bare.uncertainty_info[&0];
     assert!(info.isomeric_channels_perturbed.is_empty());
-    for channel in ["Pb208 (n,2n)", "Pb208 (n,gamma)"] {
+    for channel in ["Pb208 (n,2n)", "Pb208 (n,np)"] {
         assert!(
             info.no_isomeric_branching_uncertainty.contains(channel),
             "{channel}: {:?}",

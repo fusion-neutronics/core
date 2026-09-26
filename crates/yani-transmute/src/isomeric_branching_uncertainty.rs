@@ -15,11 +15,11 @@
 //!
 //! A parent's partials are sampled as one vector, one deviate per partial,
 //! labelled `"kind target"`. The labels are every partial the branch table has
-//! a usable MF=40 block for, sorted, and they do not depend on the spectrum:
-//! a partial below threshold in one spectrum keeps its place with a zero row.
-//! Nor on the material: an isomer-only list whose transport total a material
-//! does not load keeps its places the same way.
-//! That is what makes one MF=40 partial move together across the spectra of a
+//! a usable MF=40 block for in a list with a split to move, sorted, and they do
+//! not depend on the spectrum: a partial below threshold in one spectrum keeps
+//! its place with a zero row. Nor on the material: an isomer-only list whose
+//! transport total a material does not load keeps its places the same way. That
+//! is what makes one MF=40 partial move together across the spectra of a
 //! schedule, as one evaluation must, the way MF=33's kinds come from the
 //! chain's topology rather than from which rates are non-zero.
 //!
@@ -32,7 +32,7 @@
 //! correlation is positive. No library publishes an MF=40 x MF=33 correlation
 //! either, so the two sources draw from separate streams.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -237,9 +237,13 @@ impl IsomericSampling {
     ) -> Self {
         let mut report = IsomericReport::default();
         let mut parents: BTreeMap<String, Parent> = BTreeMap::new();
-        // Every overlay channel the material can drive, for the report. One
-        // whose split MF=9 yields give has no partials, and no channel here.
+        // Every overlay channel with a split the material can drive, for the
+        // report. One whose split MF=9 yields give has no partials, and no
+        // channel here.
         let mut overlay: Vec<(String, String)> = Vec::new();
+        // Overlay lists with no split to move, which the report treats as
+        // reactions no overlay splits.
+        let mut unsplit: HashSet<(&str, &str)> = HashSet::new();
         let mut names: Vec<&String> = branch
             .keys()
             .filter(|p| chain.contains_key(*p) && reach.contains_key(*p))
@@ -250,14 +254,24 @@ impl IsomericSampling {
             kinds.sort();
             let mut channels = Vec::new();
             for kind in kinds {
+                let curves = &branch[parent][kind];
+                if one_state(&chain[parent], kind, curves) {
+                    unsplit.insert((parent.as_str(), kind.as_str()));
+                    continue;
+                }
                 overlay.push((parent.clone(), kind.clone()));
-                if let Some(channel) = channel(material, chain, parent, kind, &branch[parent][kind])
-                {
+                if let Some(channel) = channel(material, chain, parent, kind, curves) {
                     channels.push(channel);
                 }
             }
             let blocks = covariance.and_then(|c| c.by_parent.get(parent));
-            let plan = plan(parent, channels, blocks, &mut report.blocks_skipped);
+            let plan = plan(
+                parent,
+                channels,
+                |kind| unsplit.contains(&(parent.as_str(), kind)),
+                blocks,
+                &mut report.blocks_skipped,
+            );
             parents.insert(parent.clone(), plan);
         }
 
@@ -391,7 +405,7 @@ impl IsomericSampling {
                 }
             }
         }
-        // A split the chain fixes, on a reaction no overlay carries, is held at
+        // A split the chain fixes, on a reaction no overlay splits, is held at
         // the chain's number with nothing to sample it from. Without an overlay
         // that is every isomeric split the material drives, and it is said so
         // rather than left to read as exact.
@@ -402,7 +416,9 @@ impl IsomericSampling {
                 };
                 let overlaid = branch.get(parent);
                 for (kind, rate) in kinds {
-                    if *rate <= 0.0 || overlaid.is_some_and(|k| k.contains_key(kind)) {
+                    let split = overlaid.is_some_and(|k| k.contains_key(kind))
+                        && !unsplit.contains(&(parent.as_str(), kind.as_str()));
+                    if *rate <= 0.0 || split {
                         continue;
                     }
                     let to_an_isomer = cn.reactions.iter().any(|r| {
@@ -658,6 +674,36 @@ impl IsomericSampling {
     }
 }
 
+/// Whether a reaction's list shares it among fewer than two of the states the
+/// chain takes it to, so that there is no split for MF=40 to move: one state
+/// keeps all the mass the list covers in every replica, whatever its partial
+/// does, and with none there is no mass to split. 451 of TENDL-2017's MF=10
+/// lists with MF=40 name one state, a ground state each time (Os192 (n,3n)
+/// lists Os190 alone). Of those lists besides `(n,n')` whose parent the
+/// ENDF/B-VIII.1 chain has, 11574 of 12587 are for a reaction that chain does
+/// not carry for the parent at all. An `(n,n')` list, or one of isomers whose
+/// ground state takes the rest (see `remainder_state`), always has a split:
+/// there a partial sets the rate or a share of the whole.
+fn one_state(nuc: &ChainNuclide, kind: &str, curves: &[yani::BranchCurve]) -> bool {
+    if kind == "(n,n')"
+        || remainder_state(nuc, kind, curves.iter().map(|c| c.target.as_str())).is_some()
+    {
+        return false;
+    }
+    // The among-listed split re-partitions only the mass on the chain's own
+    // edges, so a listed state the chain does not go to takes none of it.
+    let carried: BTreeSet<&str> = curves
+        .iter()
+        .map(|c| c.target.as_str())
+        .filter(|t| {
+            nuc.reactions
+                .iter()
+                .any(|r| r.kind == kind && r.target.as_deref() == Some(*t))
+        })
+        .collect();
+    carried.len() < 2
+}
+
 /// A reaction's partials, if its split is made of any: the MF=10 curves of
 /// the reaction, grouped by target in the table's order. `None` for a split
 /// only MF=9 yields give. The material decides only how an isomer-only list's
@@ -723,9 +769,12 @@ fn channel(
 }
 
 /// The parent's labels and usable blocks, counting every block it cannot use.
+/// The blocks of a kind `unsplit` names are passed over uncounted, as there
+/// is no split for them to move.
 fn plan(
     parent: &str,
     channels: Vec<Channel>,
+    unsplit: impl Fn(&str) -> bool,
     blocks: Option<&BTreeMap<String, Vec<BranchingCovarianceBlock>>>,
     skipped: &mut BTreeMap<String, usize>,
 ) -> Parent {
@@ -751,6 +800,9 @@ fn plan(
     type Candidate = (String, String, i32, i32, ExpandedBlock, String);
     let mut candidates: Vec<Candidate> = Vec::new();
     for (kind, rows) in blocks.into_iter().flatten() {
+        if unsplit(kind) {
+            continue;
+        }
         for b in rows {
             if b.block.is_cross_material() {
                 skip("cross_material".to_string());
@@ -1145,6 +1197,86 @@ mod tests {
         assert_eq!(
             iso.report.no_uncertainty,
             BTreeSet::from(["Co59 (n,gamma)".to_string()])
+        );
+    }
+
+    /// A list shared among its states that names only one state the chain
+    /// goes to has no split for MF=40 to move: its blocks are passed over
+    /// uncounted, and the channel is neither perturbed nor a gap. Where the
+    /// chain also sends the reaction to an isomer the list leaves alone, that
+    /// split is the chain's own and is named as held, as it is with no overlay.
+    #[test]
+    fn a_list_naming_one_state_has_no_split() {
+        let sample = |reactions: Vec<(&str, &str, f64)>, curves: Vec<BranchCurve>| {
+            let chain = Arc::new(HashMap::from([
+                ("Pb208".to_string(), nuclide("Pb208", reactions)),
+                ("Pb207".to_string(), nuclide("Pb207", vec![])),
+                ("Pb207_m1".to_string(), nuclide("Pb207_m1", vec![])),
+            ]));
+            let mut branch = BranchTable::new();
+            branch
+                .entry("Pb208".to_string())
+                .or_default()
+                .insert("(n,2n)".to_string(), curves);
+            let covariance = BranchingCovariance::from_blocks(vec![
+                self_block("Pb208", "(n,2n)", "Pb207", 0.01),
+                self_block("Pb208", "(n,2n)", "Pb207_m1", 0.01),
+            ]);
+            let spectrum = fourteen_mev();
+            let m = material("Pb208");
+            let mut rates: ReactionRates = HashMap::from([(
+                "Pb208".to_string(),
+                HashMap::from([("(n,2n)".to_string(), 2.0e-24)]),
+            )]);
+            let folded = crate::material_transmute::fold_branching_into_chain(
+                &m, &chain, &branch, &spectrum, &mut rates,
+            );
+            let per_spectrum = vec![(rates, HashMap::new(), folded)];
+            IsomericSampling::new(
+                Some(&covariance),
+                &m,
+                &chain,
+                &chain,
+                &branch,
+                std::slice::from_ref(&spectrum),
+                &per_spectrum,
+                false,
+            )
+        };
+        let no_split = |iso: &IsomericSampling| {
+            assert!(iso.parents["Pb208"].labels.is_empty());
+            assert!(iso.is_empty());
+            assert!(iso.report.channels_perturbed.is_empty());
+            assert!(
+                iso.report.blocks_skipped.is_empty(),
+                "{:?}",
+                iso.report.blocks_skipped
+            );
+        };
+
+        // The ground alone, the shape of TENDL-2017's Os192 (n,3n) to Os190.
+        let alone = sample(vec![("(n,2n)", "Pb207", 1.0)], vec![flat("Pb207", 2.0)]);
+        no_split(&alone);
+        assert!(alone.report.no_uncertainty.is_empty());
+
+        // Two states listed, but the chain goes to one of them, so the other
+        // takes none of the mass and the one keeps all of it.
+        let one_carried = sample(
+            vec![("(n,2n)", "Pb207", 1.0)],
+            vec![flat("Pb207", 1.5), flat("Pb207_m1", 0.5)],
+        );
+        no_split(&one_carried);
+        assert!(one_carried.report.no_uncertainty.is_empty());
+
+        // The ground alone beside a chain split to the isomer.
+        let beside = sample(
+            vec![("(n,2n)", "Pb207", 0.75), ("(n,2n)", "Pb207_m1", 0.25)],
+            vec![flat("Pb207", 2.0)],
+        );
+        no_split(&beside);
+        assert_eq!(
+            beside.report.no_uncertainty,
+            BTreeSet::from(["Pb208 (n,2n)".to_string()])
         );
     }
 

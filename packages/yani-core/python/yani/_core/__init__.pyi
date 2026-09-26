@@ -2476,7 +2476,7 @@ class TransmutationResults:
           channels with a rate that had none to perturb it with: a split MF=9
           yields give, a channel without MF=40, a branching library without the
           covariance file, or a split to an isomer the chain fixes on a
-          reaction no overlay carries, which with no overlay is every one. A
+          reaction no overlay splits, which with no overlay is every one. A
           run that sampled no split at all lists
           ``"isomeric branching (MF=9/MF=10)"`` in ``not_perturbed``, as with
           the source off. ``isomeric_partials_without_covariance`` names the

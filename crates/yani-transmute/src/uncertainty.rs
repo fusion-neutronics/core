@@ -248,7 +248,7 @@ pub struct Info {
     /// at nominal: a split given by MF=9 yields, a channel the evaluation gives
     /// no MF=40 for, a branching library without the covariance file, or a
     /// split to a metastable state the chain fixes on a reaction no overlay
-    /// carries, which with no overlay is every one. Not a claim that the split
+    /// splits, which with no overlay is every one. Not a claim that the split
     /// is exact.
     pub no_isomeric_branching_uncertainty: BTreeSet<String>,
     /// Product states of a perturbed channel whose own partial has no MF=40,
