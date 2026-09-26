@@ -269,6 +269,27 @@ impl IsomericSampling {
         let mut covered: BTreeMap<(String, String), f64> = BTreeMap::new();
         // Which (parent, label) had a rate and a fold in some spectrum.
         let mut sampled: BTreeSet<(String, String)> = BTreeSet::new();
+        // The blocks' views borrow only what `plan` fixed, so one set serves
+        // every spectrum.
+        let views: BTreeMap<&String, Vec<PartialBlock>> = parents
+            .iter()
+            .map(|(name, parent)| {
+                let blocks = parent
+                    .blocks
+                    .iter()
+                    .map(|b| PartialBlock {
+                        row: b.row,
+                        col: b.col,
+                        row_lfs: b.row_lfs,
+                        col_lfs: b.col_lfs,
+                        row_curve: pieces(&b.row_own, &parent.curves[b.row]),
+                        col_curve: pieces(&b.col_own, &parent.curves[b.col]),
+                        expanded: &b.expanded,
+                    })
+                    .collect();
+                (name, blocks)
+            })
+            .collect();
         for (idx, spectrum) in spectra.iter().enumerate() {
             let mut nominal = Fractions::new();
             if any_label && !transport {
@@ -307,25 +328,12 @@ impl IsomericSampling {
                     continue;
                 }
                 let label_rates: Vec<f64> = parent.labels.iter().map(|l| rates[l]).collect();
-                let blocks: Vec<PartialBlock> = parent
-                    .blocks
-                    .iter()
-                    .map(|b| PartialBlock {
-                        row: b.row,
-                        col: b.col,
-                        row_lfs: b.row_lfs,
-                        col_lfs: b.col_lfs,
-                        row_curve: pieces(&b.row_own, &parent.curves[b.row]),
-                        col_curve: pieces(&b.col_own, &parent.curves[b.col]),
-                        expanded: &b.expanded,
-                    })
-                    .collect();
                 let (cov, coverage) = fold_partial_covariance(
                     &spectrum.boundaries,
                     &spectrum.masses,
                     &parent.labels,
                     &label_rates,
-                    &blocks,
+                    &views[name],
                 );
                 for (l, fraction) in coverage.rate_fraction_covered {
                     sampled.insert((name.clone(), l.clone()));
@@ -713,7 +721,7 @@ fn plan(
             .and_then(|b| Some((b.energy.clone()?, b.values.clone()?)))
     };
 
-    type Candidate = (String, String, i32, i32, ExpandedBlock, String, String);
+    type Candidate = (String, String, i32, i32, ExpandedBlock, String);
     let mut candidates: Vec<Candidate> = Vec::new();
     for (kind, rows) in blocks.into_iter().flatten() {
         for b in rows {
@@ -764,14 +772,13 @@ fn plan(
                 b.lfs1,
                 expanded,
                 target1.to_string(),
-                b.nuclide.clone(),
             ));
         }
     }
 
     let mut keys: Vec<(String, String)> = candidates
         .iter()
-        .flat_map(|(kind, target, _, _, _, target1, _)| {
+        .flat_map(|(kind, target, _, _, _, target1)| {
             [
                 (kind.clone(), target.clone()),
                 (kind.clone(), target1.clone()),
@@ -795,17 +802,15 @@ fn plan(
     };
     let usable = candidates
         .into_iter()
-        .map(
-            |(kind, target, lfs, lfs1, expanded, target1, _)| UsableBlock {
-                row: index(&kind, &target),
-                col: index(&kind, &target1),
-                row_lfs: lfs,
-                col_lfs: lfs1,
-                row_own: own(&kind, &target, lfs),
-                col_own: own(&kind, &target1, lfs1),
-                expanded,
-            },
-        )
+        .map(|(kind, target, lfs, lfs1, expanded, target1)| UsableBlock {
+            row: index(&kind, &target),
+            col: index(&kind, &target1),
+            row_lfs: lfs,
+            col_lfs: lfs1,
+            row_own: own(&kind, &target, lfs),
+            col_own: own(&kind, &target1, lfs1),
+            expanded,
+        })
         .collect();
     Parent {
         labels,
