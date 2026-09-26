@@ -10,8 +10,9 @@
 //!
 //! The synthetic case always runs and checks the split exactly, in what
 //! `get_isomeric_branching` reports and in the inventory. The ENDF/B-VIII.1
-//! case self-skips unless the In115 fixture and the library's four chain
-//! subsections are in the cache.
+//! case reads the In115 fixture, the chain fixture and the branching
+//! subsection, all of which `scripts/fetch_test_fixtures.py` fetches, and
+//! self-skips on a machine that has not run it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -236,13 +237,20 @@ fn endf_b8_1_in115_makes_its_isomers() {
         eprintln!("skipping -- In115 fixture absent");
         return;
     };
-    let sub = |s: &str| {
-        yamc_test_cache::root().join(format!(
-            "{}-transmutation-{s}.arrow",
-            yamc_test_cache::LIBRARY
-        ))
-    };
-    let dirs = ["decay", "reactions", "fission_yields", "branching"].map(sub);
+    // Where scripts/fetch_test_fixtures.py puts them: the chain fixture's
+    // three subsections, and the branching subsection in its own cache entry.
+    let chain_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../yamc/tests/transmutation-endf-b8.1-sfr.arrow");
+    let branching = yamc_test_cache::root().join(format!(
+        "{}-transmutation-branching.arrow",
+        yamc_test_cache::LIBRARY
+    ));
+    let dirs = [
+        chain_fixture.join("decay"),
+        chain_fixture.join("reactions"),
+        chain_fixture.join("fission_yields"),
+        branching,
+    ];
     if let Some(missing) = dirs.iter().find(|d| !d.is_dir()) {
         eprintln!("skipping -- {} absent", missing.display());
         return;
