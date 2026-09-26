@@ -2208,8 +2208,10 @@ fn refine_chain(
 /// exactly from the tally's union-grid flux moments (every chain parent,
 /// including products that build up during the step) and MF=9 yields are
 /// scored directly at the collision energies (`y_s(E) * sigma_MT(E) * TL`,
-/// material nuclides), so no group approximation enters any split. Semantics
-/// per kind mirror `fold_branching_into_chain`:
+/// material nuclides), as is an isomer-only MF=10 partial on a material
+/// nuclide above its last breakpoint, where it follows the transport total at
+/// the share it ends on and its fold stops, so no group approximation enters
+/// any split. Semantics per kind mirror `fold_branching_into_chain`:
 ///
 ///   * `(n,n')`: the summed metastable partial rate is injected into `rates`
 ///     (there is no transport total for MT 4) and the grafted channels get the

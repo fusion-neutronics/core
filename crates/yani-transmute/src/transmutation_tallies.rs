@@ -9,7 +9,10 @@
 /// for any piecewise-linear curve, for every chain parent (including products
 /// that build up during a step). MF=9 yields, which weight the parent's
 /// transport cross section, are scored directly at the collision energy for
-/// the material's own nuclides.
+/// the material's own nuclides. So is an isomer-only MF=10 partial on one of
+/// them above its last breakpoint: it follows the transport total there, at
+/// the share it ends on, which the moments cannot fold, so its fold stops at
+/// that breakpoint and the rest is a yield channel (`build_tail_channels`).
 ///
 /// That grid also always carries a base log-spaced spectrum, whether or not an
 /// overlay is configured, so the same two moments answer a second question:
@@ -57,11 +60,14 @@ pub trait CollectiveOps {
     fn broadcast_f64(&self, data: &mut [f64], root_rank: i32);
 }
 
-/// An MF=9 yield channel scored directly at the collision energy (issue #218):
-/// the yield times the parent's transport cross section, `y_s(E) * sigma_MT(E)`.
-/// Only built for the material's own nuclides (the lookup needs their loaded
-/// cross sections; parents outside the material keep their base split, as the
-/// multigroup fold also did).
+/// A channel scored directly at the collision energy (issue #218): its curve
+/// times the parent's transport cross section, `c(E) * sigma_MT(E)`. The curve
+/// is an MF=9 yield `y_s(E)`, or, with `tail`, the share of that cross section
+/// an isomer-only MF=10 partial ends on, from its last breakpoint up (see
+/// [`build_tail_channels`]). Only built for the material's own nuclides (the
+/// lookup needs their loaded cross sections; parents outside the material keep
+/// their base split for a yield, as the multigroup fold also did, and a flat
+/// tail for a partial).
 struct YieldChannel {
     /// Chain nuclide the curve belongs to.
     parent: String,
