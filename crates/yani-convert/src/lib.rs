@@ -33,7 +33,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow_array::builder::{Float64Builder, ListBuilder, StringBuilder};
+use arrow_array::builder::{Float64Builder, Int32Builder, ListBuilder, StringBuilder};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::writer::{FileWriter, IpcWriteOptions};
 use arrow_ipc::CompressionType;
@@ -114,7 +114,13 @@ pub struct SourceRow {
     /// `"discrete"` or `"tabular"`.
     pub kind: String,
     pub energies: Vec<f64>,
+    /// Per atom per second: a line's emission rate on a `discrete` row, the
+    /// emission-rate density per eV at each energy on a `tabular` one.
     pub intensities: Vec<f64>,
+    /// The ENDF interpolation code a `tabular` row is read with, `None` on a
+    /// `discrete` one. Without it the continuum has no integral: the same
+    /// points read as a histogram and as linear-linear give different totals.
+    pub interpolation: Option<i32>,
 }
 
 /// Flatten one distribution into rows.
@@ -130,12 +136,14 @@ fn flatten(particle: &str, dist: &endf::univariate::Univariate) -> Vec<SourceRow
             kind: "discrete".to_string(),
             energies: d.x.clone(),
             intensities: d.p.clone(),
+            interpolation: None,
         }],
         Univariate::Tabular(t) => vec![SourceRow {
             particle: particle.to_string(),
             kind: "tabular".to_string(),
             energies: t.x.clone(),
             intensities: t.p.clone(),
+            interpolation: Some(t.interpolation.endf_code()),
         }],
         Univariate::Mixture(m) => m
             .probability
@@ -272,6 +280,7 @@ pub fn write_decay(
     let mut kind = Vec::new();
     let mut energies = Vec::new();
     let mut intensities = Vec::new();
+    let mut interpolation = Int32Builder::new();
     for (name, rows) in sources {
         for row in rows {
             nuc.push(name.clone());
@@ -279,6 +288,7 @@ pub fn write_decay(
             kind.push(row.kind.clone());
             energies.push(row.energies.clone());
             intensities.push(row.intensities.clone());
+            interpolation.append_option(row.interpolation);
         }
     }
     write_section(
@@ -290,6 +300,7 @@ pub fn write_decay(
             strings(&kind),
             list_of(&energies),
             list_of(&intensities),
+            Arc::new(interpolation.finish()),
         ],
     )?;
     Ok(())

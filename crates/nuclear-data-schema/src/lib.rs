@@ -406,6 +406,13 @@ pub fn decay_sources() -> Schema {
         utf8("type", false),
         f64s("energies", false),
         f64s("intensities", false),
+        // The ENDF interpolation code (INT) a `tabular` row's density is read
+        // with between its points, null on a `discrete` row. A continuum's
+        // integral depends on it, and the libraries use more than one: JEFF-4.0
+        // gives 16 photon continua as linear-linear beside 44 histograms.
+        // Nullable and last, so a file written before it still reads; there a
+        // continuum states no law and cannot be integrated (issue #163).
+        i32("interpolation", true),
     ])
 }
 
