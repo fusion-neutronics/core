@@ -1393,107 +1393,6 @@ pub fn cached_entry_path(source: &str, nuclide: &str) -> Option<PathBuf> {
     Some(cache_root()?.join(generate_cache_name(source, nuclide)))
 }
 
-#[cfg(test)]
-mod cache_root_tests {
-    use super::{cache_root, cache_root_from, generate_cache_name, home_dir};
-    use std::collections::HashMap;
-    use std::ffi::OsString;
-    use std::path::PathBuf;
-
-    /// A fixed environment, so these say nothing about the machine they run on.
-    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
-        let map: HashMap<String, String> = pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        move |key| map.get(key).filter(|v| !v.is_empty()).map(OsString::from)
-    }
-
-    fn home(path: &str) -> Option<PathBuf> {
-        Some(PathBuf::from(path))
-    }
-
-    #[test]
-    fn the_root_hangs_off_the_home_directory() {
-        assert_eq!(
-            cache_root_from(env(&[]), home("/home/someone")),
-            Some(PathBuf::from("/home/someone/.cache/yamc"))
-        );
-    }
-
-    /// The Windows spelling, which is the shape issue #544 was about. Only the
-    /// join is ours: which variable produced the home is `etcetera`'s business,
-    /// and taking it back off it is what broke a process with no exported HOME.
-    #[test]
-    fn a_windows_home_joins_the_same_way() {
-        assert_eq!(
-            cache_root_from(env(&[]), home("C:/Users/runneradmin")),
-            Some(PathBuf::from("C:/Users/runneradmin/.cache/yamc"))
-        );
-    }
-
-    /// The override names the cache root itself, with no `.cache/yamc`
-    /// appended: it is a cache directory, not a home directory to derive one
-    /// from. And it wins over a home that resolves perfectly well, which is
-    /// what makes it usable for an isolated test cache.
-    #[test]
-    fn the_override_wins_verbatim() {
-        assert_eq!(
-            cache_root_from(
-                env(&[("YAMC_CACHE_DIR", "/tmp/isolated")]),
-                home("/home/someone")
-            ),
-            Some(PathBuf::from("/tmp/isolated"))
-        );
-    }
-
-    /// An empty variable is an unset one. A shell that exports
-    /// `YAMC_CACHE_DIR=` would otherwise name the empty path, and the cache
-    /// would land relative to the working directory.
-    #[test]
-    fn an_empty_override_is_no_override() {
-        assert_eq!(
-            cache_root_from(env(&[("YAMC_CACHE_DIR", "")]), home("/home/someone")),
-            Some(PathBuf::from("/home/someone/.cache/yamc"))
-        );
-    }
-
-    /// No home and no override is a machine with nowhere to put a cache, which
-    /// a caller must be able to tell from a machine whose cache is empty.
-    #[test]
-    fn no_home_and_no_override_resolves_nothing() {
-        assert_eq!(cache_root_from(env(&[]), None), None);
-    }
-
-    /// And the override still answers without a home, which is the case it
-    /// exists for: a container or a service account.
-    #[test]
-    fn the_override_answers_without_a_home() {
-        assert_eq!(
-            cache_root_from(env(&[("YAMC_CACHE_DIR", "/srv/cache")]), None),
-            Some(PathBuf::from("/srv/cache"))
-        );
-    }
-
-    #[test]
-    fn an_entry_sits_directly_under_the_root() {
-        let root = cache_root_from(env(&[("YAMC_CACHE_DIR", "/tmp/isolated")]), None).unwrap();
-        assert_eq!(
-            root.join(generate_cache_name("endf-b8.1", "Fe58")),
-            PathBuf::from("/tmp/isolated/endf-b8.1-Fe58.arrow")
-        );
-    }
-
-    /// `etcetera` resolves a home on every platform CI runs on, including the
-    /// Windows runner where `HOME` is unset and `USERPROFILE` carries it. A
-    /// `HOME`-only read is what returned nothing there (issue #544).
-    #[test]
-    fn this_machine_has_a_home_and_therefore_a_cache_root() {
-        assert!(home_dir().is_some(), "no home directory resolved");
-        assert!(cache_root().is_some());
-    }
-}
-
 /// Get the cache directory for yamc, creating it if it does not exist.
 #[cfg(feature = "download")]
 pub fn get_cache_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -2569,5 +2468,106 @@ mod tests {
         assert!(data_version_matches(&dir, Some("2026-08-09.1")));
         assert!(!data_version_matches(&dir, Some("2026-06-13.1")));
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod cache_root_tests {
+    use super::{cache_root, cache_root_from, generate_cache_name, home_dir};
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    /// A fixed environment, so these say nothing about the machine they run on.
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |key| map.get(key).filter(|v| !v.is_empty()).map(OsString::from)
+    }
+
+    fn home(path: &str) -> Option<PathBuf> {
+        Some(PathBuf::from(path))
+    }
+
+    #[test]
+    fn the_root_hangs_off_the_home_directory() {
+        assert_eq!(
+            cache_root_from(env(&[]), home("/home/someone")),
+            Some(PathBuf::from("/home/someone/.cache/yamc"))
+        );
+    }
+
+    /// The Windows spelling, which is the shape issue #544 was about. Only the
+    /// join is ours: which variable produced the home is `etcetera`'s business,
+    /// and taking it back off it is what broke a process with no exported HOME.
+    #[test]
+    fn a_windows_home_joins_the_same_way() {
+        assert_eq!(
+            cache_root_from(env(&[]), home("C:/Users/runneradmin")),
+            Some(PathBuf::from("C:/Users/runneradmin/.cache/yamc"))
+        );
+    }
+
+    /// The override names the cache root itself, with no `.cache/yamc`
+    /// appended: it is a cache directory, not a home directory to derive one
+    /// from. And it wins over a home that resolves perfectly well, which is
+    /// what makes it usable for an isolated test cache.
+    #[test]
+    fn the_override_wins_verbatim() {
+        assert_eq!(
+            cache_root_from(
+                env(&[("YAMC_CACHE_DIR", "/tmp/isolated")]),
+                home("/home/someone")
+            ),
+            Some(PathBuf::from("/tmp/isolated"))
+        );
+    }
+
+    /// An empty variable is an unset one. A shell that exports
+    /// `YAMC_CACHE_DIR=` would otherwise name the empty path, and the cache
+    /// would land relative to the working directory.
+    #[test]
+    fn an_empty_override_is_no_override() {
+        assert_eq!(
+            cache_root_from(env(&[("YAMC_CACHE_DIR", "")]), home("/home/someone")),
+            Some(PathBuf::from("/home/someone/.cache/yamc"))
+        );
+    }
+
+    /// No home and no override is a machine with nowhere to put a cache, which
+    /// a caller must be able to tell from a machine whose cache is empty.
+    #[test]
+    fn no_home_and_no_override_resolves_nothing() {
+        assert_eq!(cache_root_from(env(&[]), None), None);
+    }
+
+    /// And the override still answers without a home, which is the case it
+    /// exists for: a container or a service account.
+    #[test]
+    fn the_override_answers_without_a_home() {
+        assert_eq!(
+            cache_root_from(env(&[("YAMC_CACHE_DIR", "/srv/cache")]), None),
+            Some(PathBuf::from("/srv/cache"))
+        );
+    }
+
+    #[test]
+    fn an_entry_sits_directly_under_the_root() {
+        let root = cache_root_from(env(&[("YAMC_CACHE_DIR", "/tmp/isolated")]), None).unwrap();
+        assert_eq!(
+            root.join(generate_cache_name("endf-b8.1", "Fe58")),
+            PathBuf::from("/tmp/isolated/endf-b8.1-Fe58.arrow")
+        );
+    }
+
+    /// `etcetera` resolves a home on every platform CI runs on, including the
+    /// Windows runner where `HOME` is unset and `USERPROFILE` carries it. A
+    /// `HOME`-only read is what returned nothing there (issue #544).
+    #[test]
+    fn this_machine_has_a_home_and_therefore_a_cache_root() {
+        assert!(home_dir().is_some(), "no home directory resolved");
+        assert!(cache_root().is_some());
     }
 }
