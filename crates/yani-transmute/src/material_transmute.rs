@@ -2142,10 +2142,13 @@ fn refine_chain(
                         None => {}
                     }
                 }
-                // Shares past the whole, a partial above the transport total
-                // (one library's branching over another's cross sections can
-                // give that), are scaled to fit and leave the ground nothing,
-                // so the reaction still makes one product per reaction.
+                // Shares past the whole, a partial above the transport total,
+                // are scaled to fit and leave the ground nothing, so the
+                // reaction still makes one product per reaction. One library's
+                // branching over another's cross sections can give that, and
+                // so can one evaluation alone: ENDF/B-VIII.1's own In115
+                // (n,2n) In114_m1 partial passes its MF=3 at about 18.1 MeV
+                // and is 1.18 of it at 20 MeV.
                 let (scale, left) = if listed > 1.0 {
                     (mass / listed, 0.0)
                 } else {
