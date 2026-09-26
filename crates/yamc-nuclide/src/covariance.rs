@@ -95,3 +95,34 @@ impl CovarianceBlock {
         self.mat1 != 0
     }
 }
+
+/// One block of `branching/branching_covariance.arrow`: an MF=40 covariance of
+/// one product state's MF=10 partial with another's, keyed to the
+/// `branching.arrow` row it belongs to.
+///
+/// The block is a [`CovarianceBlock`] exactly as `covariance.arrow` reads,
+/// because MF=40 writes its sub-subsections in MF=33's format. Its `xmf1` and
+/// `xlfs1` name the partner state; `lfs1` is `xlfs1` as the level number it is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BranchingCovarianceBlock {
+    /// The parent, as in `branching.arrow`.
+    pub nuclide: String,
+    /// The chain reaction kind.
+    pub reaction: String,
+    /// The chain nuclide this block's product state resolved to.
+    pub target: String,
+    /// That state's level, as MF=40 numbers it.
+    pub lfs: i32,
+    /// The chain nuclide the partner state resolved to, `None` when the
+    /// converter could not resolve it.
+    pub target1: Option<String>,
+    /// The partner state's level.
+    pub lfs1: i32,
+    /// This state's own MF=10 partial, when several states share `target` and
+    /// the `branching.arrow` curve is their sum; `None` means that curve is
+    /// this state's own.
+    pub energy: Option<Vec<f64>>,
+    pub values: Option<Vec<f64>>,
+    /// The block itself.
+    pub block: CovarianceBlock,
+}

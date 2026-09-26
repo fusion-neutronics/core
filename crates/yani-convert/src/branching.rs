@@ -18,16 +18,21 @@
 //!   state, and the physical production is their sum. Merging on the union grid
 //!   under the consumer's own conventions is what makes folding the merged
 //!   curve equal folding the originals.
+//!
+//! MF=40, the covariance of those MF=10 partials, is written beside it as
+//! `branching_covariance.arrow` when the evaluation carries any: one row per
+//! block, keyed to the `branching.arrow` row it is the covariance of.
 
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::Path;
 
 use endf::function::Tabulated1D;
+use endf::mf::covariance::{Mf33Subsection, Mf40Subsection};
 use endf::radionuclide_production::{LevelRoute, RadionuclideProduction};
 use endf::Material;
 
-use crate::{list_of, strings, write_section};
+use crate::{ints, list_of, opt_list_of, opt_strings, strings, write_section};
 
 /// Relative tolerance for resampling a non-lin-lin region.
 pub const DEFAULT_LINEARIZE_TOL: f64 = 1e-3;
@@ -59,6 +64,34 @@ pub struct BranchingRow {
     pub quantity: String,
     pub energy: Vec<f64>,
     pub values: Vec<f64>,
+}
+
+/// One MF=40 sub-subsection, keyed to the `branching.arrow` row whose partial
+/// it is the covariance of. The writer expands it to one row per block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BranchingCovarianceRow {
+    /// The parent, as in `branching.arrow`.
+    pub nuclide: String,
+    /// The chain kind the MT maps to.
+    pub reaction: String,
+    /// The chain nuclide this row's product state resolved to.
+    pub target: String,
+    /// That state's level, as MF=40 numbers it.
+    pub lfs: i32,
+    /// The chain nuclide the partner state (`subsection.xlfs1`) resolved to,
+    /// `None` when it could not be: a partner in another reaction, or a level
+    /// the section does not describe.
+    pub target1: Option<String>,
+    /// This state's own linearized MF=10 partial, only when several MF=10
+    /// states resolved to `target` and `branching.arrow` carries their sum.
+    pub energy: Option<Vec<f64>>,
+    pub values: Option<Vec<f64>>,
+    /// The MT the section belongs to.
+    pub mt: i32,
+    /// Which sub-subsection of the state, in tape order.
+    pub subsection_idx: usize,
+    /// The blocks, with `mat1` written as 0 when it named this evaluation.
+    pub subsection: Mf33Subsection,
 }
 
 /// Whether every interpolation region is lin-lin (ENDF law 2).
@@ -300,6 +333,24 @@ pub struct BranchingStats {
     /// partials sum to 95% of MF=3 at 14 MeV and 84% at 20 MeV, is the case
     /// that prompted the check.
     pub partial_sum_mismatches: Vec<String>,
+    /// MF=40 sections read, one per evaluation and MT with a chain kind.
+    pub mf40_sections: usize,
+    /// Covariance blocks written, all of them and the NI ones by `lb`.
+    pub mf40_blocks: usize,
+    pub mf40_blocks_by_lb: BTreeMap<i64, usize>,
+    /// NC blocks written. MF=40 is not expected to carry any; one appearing
+    /// is a tape the fold cannot use, which is worth seeing here first.
+    pub mf40_nc_blocks: usize,
+    /// MF=40 product states with no MF=10 state to be the covariance of, one
+    /// line each. Skipped: there is no partial for them to perturb.
+    pub mf40_unmatched_states: Vec<String>,
+    /// MF=40 product states whose split is given by MF=9 yields, which have no
+    /// covariance format of their own. Skipped.
+    pub mf40_on_yield_channels: usize,
+    /// Sub-subsections whose MAT1 named this evaluation itself, written as 0
+    /// so the reader does not take them for a cross-material correlation
+    /// (JEFF-4.0 U235 MT4 writes its own MAT there).
+    pub mf40_own_mat_normalised: usize,
 }
 
 /// The value of `t` at `e`, zero outside its tabulated range.
@@ -442,6 +493,7 @@ pub struct BranchingExtractor {
     tol_ev: f64,
     linearize_tol: f64,
     rows: Vec<BranchingRow>,
+    covariance: Vec<BranchingCovarianceRow>,
     stats: BranchingStats,
     metastable: std::collections::BTreeSet<String>,
 }
@@ -456,8 +508,27 @@ pub struct BranchingExtractor {
 #[derive(Debug, Clone, Default)]
 pub struct BranchingPartial {
     rows: Vec<BranchingRow>,
+    covariance: Vec<BranchingCovarianceRow>,
     stats: BranchingStats,
     metastable: std::collections::BTreeSet<String>,
+}
+
+/// What [`BranchingExtractor::finish`] hands back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Extracted {
+    /// `branching.arrow`, duplicate targets merged.
+    pub rows: Vec<BranchingRow>,
+    /// `branching_covariance.arrow`, one entry per MF=40 sub-subsection.
+    pub covariance: Vec<BranchingCovarianceRow>,
+    pub stats: BranchingStats,
+}
+
+/// One MF=10 state of an evaluation, as the MF=40 match needs it.
+struct Mf10State {
+    target: String,
+    /// The linearized partial, `None` for a state MF=9 gives instead.
+    curve: Option<(Vec<f64>, Vec<f64>)>,
+    excitation: f64,
 }
 
 impl BranchingExtractor {
@@ -470,6 +541,7 @@ impl BranchingExtractor {
             tol_ev,
             linearize_tol,
             rows: Vec::new(),
+            covariance: Vec::new(),
             stats: BranchingStats::default(),
             metastable: Default::default(),
         }
@@ -493,6 +565,11 @@ impl BranchingExtractor {
         );
         let mut out = BranchingPartial::default();
         let (rows, stats, metastable) = (&mut out.rows, &mut out.stats, &mut out.metastable);
+        // Every state's resolved target and partial, for the MF=40 match below,
+        // and how many MF=10 states each (kind, target) sums, across every MT
+        // of the evaluation, as `merge_duplicates` sums them.
+        let mut states_by_mt: BTreeMap<i32, BTreeMap<(i64, i64), Mf10State>> = BTreeMap::new();
+        let mut summed: BTreeMap<(String, String), usize> = BTreeMap::new();
 
         // The evaluation names itself in MF=1/451, which is the same route
         // Chain::from_endf takes, so parent names match the reactions
@@ -563,12 +640,17 @@ impl BranchingExtractor {
                         ));
                     }
                 }
+                let mut curve = None;
                 for (quantity, tab) in [("yield", &s.yields), ("cross_section", &s.cross_section)] {
                     let Some(tab) = tab else { continue };
                     if !is_linear(tab) {
                         stats.linearized_curves += 1;
                     }
                     let (energy, values) = linearize(tab, linearize_tol);
+                    if quantity == "cross_section" {
+                        curve = Some((energy.clone(), values.clone()));
+                        *summed.entry((rtype.clone(), target.clone())).or_insert(0) += 1;
+                    }
                     rows.push(BranchingRow {
                         nuclide: parent.clone(),
                         reaction: rtype.clone(),
@@ -579,10 +661,93 @@ impl BranchingExtractor {
                     });
                     emitted_any = true;
                 }
+                states_by_mt.entry(*mt).or_default().insert(
+                    (s.zap, s.lfs),
+                    Mf10State {
+                        target,
+                        curve,
+                        excitation: s.excitation_energy(),
+                    },
+                );
             }
         }
         if emitted_any {
             stats.parents_with_data += 1;
+        }
+
+        let empty = BTreeMap::new();
+        for (mf, mt) in material.sections() {
+            if mf != 40 {
+                continue;
+            }
+            // MT 18 and anything else without a chain kind, as the rows above.
+            let (Some(rtype), Some(mf40)) = (mt2type.get(&(mt as i64)), material.mf40(mt)) else {
+                continue;
+            };
+            stats.mf40_sections += 1;
+            let states = states_by_mt.get(&mt).unwrap_or(&empty);
+            // Each state resolved once, so a block's partner is found by level.
+            let matched: Vec<Option<&Mf10State>> = mf40
+                .subsections
+                .iter()
+                .map(|sub| match_mf40_state(sub, mt, meta.za, states, isomers, tol_ev))
+                .collect();
+            for (sub, state) in mf40.subsections.iter().zip(&matched) {
+                let Some(state) = state else {
+                    stats.mf40_unmatched_states.push(format!(
+                        "{parent} MT{mt}: IZAP {} LFS {} at {:.1} keV has no MF=10 state",
+                        sub.izap,
+                        sub.lfs,
+                        (sub.qm - sub.qi) / 1.0e3
+                    ));
+                    continue;
+                };
+                let Some((energy, values)) = &state.curve else {
+                    stats.mf40_on_yield_channels += 1;
+                    continue;
+                };
+                let merged = summed
+                    .get(&(rtype.clone(), state.target.clone()))
+                    .is_some_and(|&n| n > 1);
+                for (subsection_idx, ss) in sub.subsubsections.iter().enumerate() {
+                    let mut subsection = ss.clone();
+                    if subsection.mat1 == material.mat as i64 {
+                        subsection.mat1 = 0;
+                        stats.mf40_own_mat_normalised += 1;
+                    }
+                    // A partner in this reaction's MF=10 (XMF1 of 10, or 0 for
+                    // "this file"), found among this section's own states.
+                    let same_reaction = subsection.mt1 == 0 || subsection.mt1 == mt as i64;
+                    let partial = subsection.xmf1 == 0.0 || subsection.xmf1 == 10.0;
+                    let target1 = (same_reaction && partial)
+                        .then(|| {
+                            mf40.subsections
+                                .iter()
+                                .zip(&matched)
+                                .find(|(other, _)| other.lfs as f64 == subsection.xlfs1)
+                                .and_then(|(_, m)| m.map(|m| m.target.clone()))
+                        })
+                        .flatten();
+                    stats.mf40_nc_blocks += subsection.nc_subsections.len();
+                    for ni in &subsection.ni_subsections {
+                        *stats.mf40_blocks_by_lb.entry(ni.lb).or_insert(0) += 1;
+                    }
+                    stats.mf40_blocks +=
+                        subsection.nc_subsections.len() + subsection.ni_subsections.len();
+                    out.covariance.push(BranchingCovarianceRow {
+                        nuclide: parent.clone(),
+                        reaction: rtype.clone(),
+                        target: state.target.clone(),
+                        lfs: sub.lfs as i32,
+                        target1,
+                        energy: merged.then(|| energy.clone()),
+                        values: merged.then(|| values.clone()),
+                        mt,
+                        subsection_idx,
+                        subsection,
+                    });
+                }
+            }
         }
         out
     }
@@ -595,6 +760,7 @@ impl BranchingExtractor {
     /// because [`Self::finish`] is what sets them.
     pub fn absorb(&mut self, partial: BranchingPartial) {
         self.rows.extend(partial.rows);
+        self.covariance.extend(partial.covariance);
         self.metastable.extend(partial.metastable);
         let stats = partial.stats;
         self.stats.parents += stats.parents;
@@ -607,15 +773,78 @@ impl BranchingExtractor {
         self.stats
             .partial_sum_mismatches
             .extend(stats.partial_sum_mismatches);
+        self.stats.mf40_sections += stats.mf40_sections;
+        self.stats.mf40_blocks += stats.mf40_blocks;
+        for (lb, n) in stats.mf40_blocks_by_lb {
+            *self.stats.mf40_blocks_by_lb.entry(lb).or_insert(0) += n;
+        }
+        self.stats.mf40_nc_blocks += stats.mf40_nc_blocks;
+        self.stats
+            .mf40_unmatched_states
+            .extend(stats.mf40_unmatched_states);
+        self.stats.mf40_on_yield_channels += stats.mf40_on_yield_channels;
+        self.stats.mf40_own_mat_normalised += stats.mf40_own_mat_normalised;
     }
 
-    /// The rows and statistics, with duplicate target groups merged.
-    pub fn finish(mut self) -> (Vec<BranchingRow>, BranchingStats) {
+    /// The rows, the covariance and the statistics, with duplicate target
+    /// groups merged.
+    pub fn finish(mut self) -> Extracted {
         let (rows, merged) = merge_duplicates(self.rows);
         self.stats.merged_duplicate_groups = merged;
         self.stats.metastable_targets = self.metastable.into_iter().collect();
-        (rows, self.stats)
+        Extracted {
+            rows,
+            covariance: self.covariance,
+            stats: self.stats,
+        }
     }
+}
+
+/// The MF=10 state one MF=40 product state is the covariance of.
+///
+/// By (IZAP, LFS) first, which is how MF=9 and MF=10 are joined. The two
+/// files need not number a level alike, though: ENDF/B-VIII.1 Pb204 MT4 gives
+/// the 2.186 MeV isomer as LFS=21 in MF=10 and LFS=1 in MF=40, with the same
+/// QI. So failing that, the state is resolved through the isomer table from
+/// its own QM - QI, as the rows are, and matched by the chain nuclide it lands
+/// on; among several states landing there, the one nearest in excitation.
+/// IZAP=0 on MT 4 is the target itself (JEFF-4.0 U235 writes it so).
+fn match_mf40_state<'a>(
+    sub: &Mf40Subsection,
+    mt: i32,
+    za: i64,
+    states: &'a BTreeMap<(i64, i64), Mf10State>,
+    isomers: &endf::radionuclide_production::IsomerTable,
+    tol_ev: f64,
+) -> Option<&'a Mf10State> {
+    let izap = if sub.izap == 0 && mt == 4 {
+        za
+    } else {
+        sub.izap
+    };
+    if let Some(state) = states.get(&(izap, sub.lfs)) {
+        return Some(state);
+    }
+    let (z, a) = (izap / 1000, izap % 1000);
+    let excitation = sub.qm - sub.qi;
+    let resolved = endf::radionuclide_production::resolve_level(
+        z,
+        a,
+        sub.lfs,
+        Some(excitation),
+        isomers,
+        tol_ev,
+    );
+    let target = endf::gnds_name(z as u32, a as u32, resolved.liso as u32);
+    states
+        .iter()
+        .filter(|((zap, _), state)| *zap == izap && state.target == target)
+        .map(|(_, state)| state)
+        .min_by(|x, y| {
+            (x.excitation - excitation)
+                .abs()
+                .total_cmp(&(y.excitation - excitation).abs())
+        })
 }
 
 /// Extract branching rows for each parent's neutron evaluation.
@@ -628,7 +857,7 @@ pub fn extract_branching(
     decay: &[Material],
     tol_ev: f64,
     linearize_tol: f64,
-) -> Result<(Vec<BranchingRow>, BranchingStats), Box<dyn Error>> {
+) -> Result<Extracted, Box<dyn Error>> {
     let mut extractor = BranchingExtractor::new(decay, tol_ev, linearize_tol);
     for material in neutron {
         extractor.add(material);
@@ -657,6 +886,67 @@ pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn 
             list_of(&values),
         ],
     )
+}
+
+/// Write `branching/branching_covariance.arrow`, one row per block, and say
+/// whether a file was written.
+///
+/// With no rows there is no file, which is how the section says "no MF=40";
+/// no `.absent` marker is written, since that is a download-cache record of a
+/// settled 404 rather than anything a conversion produces. A file an earlier
+/// run left in `dir` is removed instead: [`write_branching`] replaces
+/// `branching.arrow` on every run and the upload copies the directory whole,
+/// so a stale covariance would otherwise ship beside a fresh branching curve
+/// it no longer describes.
+pub fn write_branching_covariance(
+    rows: &[BranchingCovarianceRow],
+    dir: &Path,
+) -> Result<bool, Box<dyn Error>> {
+    let path = dir.join("branching_covariance.arrow");
+    if rows.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(format!("{}: {e}", path.display()).into()),
+        };
+    }
+    std::fs::create_dir_all(dir)?;
+
+    // The key repeats once per block of its sub-subsection, and the blocks
+    // themselves are `covariance.arrow`'s columns, built by the same writer.
+    let mut blocks = yamc_convert::covariance::CovarianceRows::default();
+    let mut nuclide = Vec::new();
+    let mut reaction = Vec::new();
+    let mut target = Vec::new();
+    let mut lfs = Vec::new();
+    let mut target1 = Vec::new();
+    let mut energy = Vec::new();
+    let mut values = Vec::new();
+    for row in rows {
+        // MF=40 has no lumped-reaction MTL, so it is written as 0.
+        let n = blocks.push_subsection(row.mt, row.subsection_idx, 0, &row.subsection);
+        for _ in 0..n {
+            nuclide.push(row.nuclide.clone());
+            reaction.push(row.reaction.clone());
+            target.push(row.target.clone());
+            lfs.push(row.lfs);
+            target1.push(row.target1.clone());
+            energy.push(row.energy.clone());
+            values.push(row.values.clone());
+        }
+    }
+    let mut columns = vec![
+        strings(&nuclide),
+        strings(&reaction),
+        strings(&target),
+        ints(&lfs),
+        opt_strings(&target1),
+        opt_list_of(&energy),
+        opt_list_of(&values),
+    ];
+    columns.extend(blocks.columns());
+    write_section(&path, "branching/branching_covariance.arrow", columns)?;
+    Ok(true)
 }
 
 #[cfg(test)]

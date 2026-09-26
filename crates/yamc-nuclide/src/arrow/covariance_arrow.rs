@@ -16,12 +16,13 @@
 use std::error::Error;
 use std::path::Path;
 
+use arrow_array::Array;
 use endf::mf::covariance::{NcSubsection, NiSubsection};
 
 use crate::arrow::arrow_helpers::{
-    get_str, read_arrow_file, try_get_f64, try_get_f64_list, try_get_i32,
+    get_str, read_arrow_file, try_get_f64, try_get_f64_list, try_get_i32, try_get_str,
 };
-use crate::covariance::{CovarianceBlock, CovarianceData};
+use crate::covariance::{BranchingCovarianceBlock, CovarianceBlock, CovarianceData};
 
 /// A nullable `int32` column read as the parser's `i64`, with null as zero.
 ///
@@ -95,32 +96,90 @@ pub fn read_covariance(
 
     let mut blocks = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
-        let kind = get_str(&batch, "kind", row)?;
-        let data = match kind.as_str() {
-            "ni" => CovarianceData::Ni(ni_from_row(&batch, row)),
-            "nc" => CovarianceData::Nc(nc_from_row(&batch, row)),
-            other => {
-                return Err(format!(
-                    "{nuclide} covariance.arrow row {row}: unknown kind {other:?}; \
-                     expected \"ni\" or \"nc\""
-                )
-                .into())
-            }
-        };
-        blocks.push(CovarianceBlock {
-            mt: try_get_i32(&batch, "mt", row).ok_or_else(|| {
-                format!("{nuclide} covariance.arrow row {row}: mt is null, and it is the key")
-            })?,
-            subsection_idx: int_or_zero(&batch, "subsection_idx", row) as i32,
-            block_idx: int_or_zero(&batch, "block_idx", row) as i32,
-            mat1: int_or_zero(&batch, "mat1", row) as i32,
-            mt1: int_or_zero(&batch, "mt1", row) as i32,
-            xmf1: float_or_zero(&batch, "xmf1", row),
-            xlfs1: float_or_zero(&batch, "xlfs1", row),
-            mtl: int_or_zero(&batch, "mtl", row) as i32,
-            data,
-        });
+        blocks.push(block_from_row(
+            &batch,
+            row,
+            &format!("{nuclide} covariance.arrow"),
+        )?);
     }
 
     Ok(Some(blocks))
+}
+
+/// One row's block, in the columns `covariance.arrow` and
+/// `branching_covariance.arrow` share. `what` names the file in errors.
+fn block_from_row(
+    batch: &arrow_array::RecordBatch,
+    row: usize,
+    what: &str,
+) -> Result<CovarianceBlock, Box<dyn Error>> {
+    let kind = get_str(batch, "kind", row)?;
+    let data = match kind.as_str() {
+        "ni" => CovarianceData::Ni(ni_from_row(batch, row)),
+        "nc" => CovarianceData::Nc(nc_from_row(batch, row)),
+        other => {
+            return Err(format!(
+                "{what} row {row}: unknown kind {other:?}; expected \"ni\" or \"nc\""
+            )
+            .into())
+        }
+    };
+    Ok(CovarianceBlock {
+        mt: try_get_i32(batch, "mt", row)
+            .ok_or_else(|| format!("{what} row {row}: mt is null, and it is the key"))?,
+        subsection_idx: int_or_zero(batch, "subsection_idx", row) as i32,
+        block_idx: int_or_zero(batch, "block_idx", row) as i32,
+        mat1: int_or_zero(batch, "mat1", row) as i32,
+        mt1: int_or_zero(batch, "mt1", row) as i32,
+        xmf1: float_or_zero(batch, "xmf1", row),
+        xlfs1: float_or_zero(batch, "xlfs1", row),
+        mtl: int_or_zero(batch, "mtl", row) as i32,
+        data,
+    })
+}
+
+/// A nullable `list<double>` column, with null as `None` rather than empty.
+fn optional_list(batch: &arrow_array::RecordBatch, col: &str, row: usize) -> Option<Vec<f64>> {
+    let present = batch.column_by_name(col).is_some_and(|c| !c.is_null(row));
+    present.then(|| try_get_f64_list(batch, col, row))
+}
+
+/// Read `branching/branching_covariance.arrow`, the MF=40 covariance of the
+/// isomeric branching partials, from its path.
+///
+/// Unlike [`read_covariance`] there is no absent case: the chain loader records
+/// the path only when the file is there, and the caller reads it only when an
+/// uncertainty run asked for the isomeric split. A file that cannot be read,
+/// or whose columns are not the declared ones, is therefore an error rather
+/// than a silence the caller would mistake for "no covariance".
+pub fn read_branching_covariance(
+    path: &Path,
+) -> Result<Vec<BranchingCovarianceBlock>, Box<dyn Error>> {
+    const SECTION: &str = "branching/branching_covariance.arrow";
+    let batch = read_arrow_file(path)?;
+    nuclear_data_schema::check_batch(SECTION, batch.schema().as_ref())
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let what = path.display().to_string();
+
+    let mut blocks = Vec::with_capacity(batch.num_rows());
+    for row in 0..batch.num_rows() {
+        let key = |col: &str| -> Result<String, Box<dyn Error>> {
+            try_get_str(&batch, col, row)
+                .ok_or_else(|| format!("{what} row {row}: {col} is null, and it is the key").into())
+        };
+        let block = block_from_row(&batch, row, &what)?;
+        blocks.push(BranchingCovarianceBlock {
+            nuclide: key("nuclide")?,
+            reaction: key("reaction")?,
+            target: key("target")?,
+            lfs: try_get_i32(&batch, "lfs", row)
+                .ok_or_else(|| format!("{what} row {row}: lfs is null, and it is the key"))?,
+            target1: try_get_str(&batch, "target1", row),
+            lfs1: block.xlfs1 as i32,
+            energy: optional_list(&batch, "energy", row),
+            values: optional_list(&batch, "values", row),
+            block,
+        });
+    }
+    Ok(blocks)
 }

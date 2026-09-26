@@ -21,7 +21,7 @@
 use std::error::Error;
 use std::path::Path;
 
-use endf::mf::covariance::{Mf33, NcSubsection, NiSubsection};
+use endf::mf::covariance::{Mf33, Mf33Subsection, NcSubsection, NiSubsection};
 use endf::Material;
 
 use crate::sections::{float_lists_or_null, ints, opt_floats, opt_ints, strings, write_section};
@@ -32,8 +32,13 @@ use crate::sections::{float_lists_or_null, ints, opt_floats, opt_ints, strings, 
 /// is the shape [`write_section`] wants and building it directly avoids a
 /// transpose whose only job would be to reintroduce the column order the schema
 /// already fixes.
+///
+/// Public because `branching/branching_covariance.arrow` is the same blocks
+/// with a key in front: MF=40 writes its sub-subsections in MF=33's format, and
+/// the transmutation converter builds those rows here rather than through a
+/// second copy of this layout.
 #[derive(Default)]
-struct Rows {
+pub struct CovarianceRows {
     mt: Vec<i32>,
     subsection_idx: Vec<i32>,
     block_idx: Vec<i32>,
@@ -87,7 +92,7 @@ fn narrow(v: i64) -> i32 {
     v.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
-impl Rows {
+impl CovarianceRows {
     /// The columns every row carries, whatever its kind.
     #[allow(clippy::too_many_arguments)]
     fn push_common(
@@ -194,12 +199,64 @@ impl Rows {
         self.wei.push(s.wei.clone());
     }
 
-    fn is_empty(&self) -> bool {
+    /// One MF=33-format subsection's blocks, in tape order, returning how
+    /// many rows that was.
+    ///
+    /// NC blocks precede NI blocks within a subsection because that is the
+    /// order they appear on the tape and the order the parser reads them, so
+    /// `block_idx` is a running index over both rather than one per kind.
+    pub fn push_subsection(
+        &mut self,
+        mt: i32,
+        subsection_idx: usize,
+        mtl: i64,
+        sub: &Mf33Subsection,
+    ) -> usize {
+        let mut block_idx = 0;
+        for block in &sub.nc_subsections {
+            self.push_common(
+                mt,
+                subsection_idx,
+                block_idx,
+                "nc",
+                sub.mat1,
+                sub.mt1,
+                sub.xmf1,
+                sub.xlfs1,
+                mtl,
+            );
+            self.push_nc(block);
+            block_idx += 1;
+        }
+        for block in &sub.ni_subsections {
+            self.push_common(
+                mt,
+                subsection_idx,
+                block_idx,
+                "ni",
+                sub.mat1,
+                sub.mt1,
+                sub.xmf1,
+                sub.xlfs1,
+                mtl,
+            );
+            self.push_ni(block);
+            block_idx += 1;
+        }
+        block_idx
+    }
+
+    pub fn is_empty(&self) -> bool {
         self.mt.is_empty()
     }
 
+    /// Rows accumulated so far.
+    pub fn len(&self) -> usize {
+        self.mt.len()
+    }
+
     /// The columns in the schema's own order.
-    fn columns(&self) -> Vec<arrow_array::ArrayRef> {
+    pub fn columns(&self) -> Vec<arrow_array::ArrayRef> {
         vec![
             ints(&self.mt),
             ints(&self.subsection_idx),
@@ -259,44 +316,11 @@ fn covariance_mts(material: &Material) -> Vec<i32> {
 
 /// Accumulate one MF=33 section's blocks, in tape order.
 ///
-/// NC blocks precede NI blocks within a subsection because that is the order
-/// they appear on the tape and the order the parser reads them, so `block_idx`
-/// is a running index over both rather than one per kind. Two subsections of
-/// one section may name the same (MAT1, MT1), which is why the position is
-/// carried explicitly instead of being recovered from the keys.
-fn push_section(rows: &mut Rows, mt: i32, mf33: &Mf33) {
+/// Two subsections of one section may name the same (MAT1, MT1), which is why
+/// the position is carried explicitly instead of being recovered from the keys.
+fn push_section(rows: &mut CovarianceRows, mt: i32, mf33: &Mf33) {
     for (subsection_idx, sub) in mf33.subsections.iter().enumerate() {
-        let mut block_idx = 0;
-        for block in &sub.nc_subsections {
-            rows.push_common(
-                mt,
-                subsection_idx,
-                block_idx,
-                "nc",
-                sub.mat1,
-                sub.mt1,
-                sub.xmf1,
-                sub.xlfs1,
-                mf33.mtl,
-            );
-            rows.push_nc(block);
-            block_idx += 1;
-        }
-        for block in &sub.ni_subsections {
-            rows.push_common(
-                mt,
-                subsection_idx,
-                block_idx,
-                "ni",
-                sub.mat1,
-                sub.mt1,
-                sub.xmf1,
-                sub.xlfs1,
-                mf33.mtl,
-            );
-            rows.push_ni(block);
-            block_idx += 1;
-        }
+        rows.push_subsection(mt, subsection_idx, mf33.mtl, sub);
     }
 }
 
@@ -309,7 +333,7 @@ fn push_section(rows: &mut Rows, mt: i32, mf33: &Mf33) {
 /// a download-cache record of a settled 404 rather than anything a conversion
 /// produces.
 pub fn write_covariance(material: &Material, dir: &Path) -> Result<bool, Box<dyn Error>> {
-    let mut rows = Rows::default();
+    let mut rows = CovarianceRows::default();
     for mt in covariance_mts(material) {
         if let Some(mf33) = material.mf33(mt) {
             push_section(&mut rows, mt, mf33);

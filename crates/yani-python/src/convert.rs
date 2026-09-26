@@ -189,7 +189,17 @@ pub fn convert_transmutation(
 ///     level index pointed at another isomer), and ``partial_sum_mismatches``
 ///     (one line per reaction whose MF=10 partial cross sections do not sum to
 ///     its MF=3 total, or whose MF=9 yields do not sum to one, within two
-///     percent below 20 MeV).
+///     percent below 20 MeV). The MF=40 production covariance written to
+///     ``branching/branching_covariance.arrow`` is counted by
+///     ``mf40_sections`` (sections read), ``mf40_blocks`` (blocks written),
+///     ``mf40_blocks_by_lb`` (the NI blocks by layout), ``mf40_nc_blocks``,
+///     ``mf40_unmatched_states`` (one line per MF=40 product state with no
+///     MF=10 state to be the covariance of, skipped),
+///     ``mf40_on_yield_channels`` (states whose split MF=9 yields give, which
+///     have no covariance format, skipped) and ``mf40_own_mat_normalised``
+///     (sub-subsections whose MAT1 named the evaluation itself, written as 0).
+///     An evaluation set without MF=40 writes no covariance file, and removes
+///     one an earlier conversion left there.
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
@@ -249,6 +259,13 @@ pub fn convert_branching(
     out.set_item("level_routes", stats.level_routes)?;
     out.set_item("flagged_levels", stats.flagged_levels)?;
     out.set_item("partial_sum_mismatches", stats.partial_sum_mismatches)?;
+    out.set_item("mf40_sections", stats.mf40_sections)?;
+    out.set_item("mf40_blocks", stats.mf40_blocks)?;
+    out.set_item("mf40_blocks_by_lb", stats.mf40_blocks_by_lb)?;
+    out.set_item("mf40_nc_blocks", stats.mf40_nc_blocks)?;
+    out.set_item("mf40_unmatched_states", stats.mf40_unmatched_states)?;
+    out.set_item("mf40_on_yield_channels", stats.mf40_on_yield_channels)?;
+    out.set_item("mf40_own_mat_normalised", stats.mf40_own_mat_normalised)?;
     Ok(out.unbind())
 }
 

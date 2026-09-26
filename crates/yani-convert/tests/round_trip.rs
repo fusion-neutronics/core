@@ -811,12 +811,11 @@ fn absorbing_partials_in_file_order_matches_adding_one_at_a_time() {
         merged.absorb(partial);
     }
 
-    let (rows_one_at_a_time, stats_one_at_a_time) = sequential.finish();
-    let (rows_merged, stats_merged) = merged.finish();
+    let one_at_a_time = sequential.finish();
+    let merged = merged.finish();
     assert!(
-        !rows_one_at_a_time.is_empty(),
+        !one_at_a_time.rows.is_empty(),
         "the fixtures produced no branching rows, so this proves nothing"
     );
-    assert_eq!(rows_merged, rows_one_at_a_time);
-    assert_eq!(stats_merged, stats_one_at_a_time);
+    assert_eq!(merged, one_at_a_time);
 }

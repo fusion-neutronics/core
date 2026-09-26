@@ -38,6 +38,10 @@ pub mod reaction_ranges;
 pub fn all_sections() -> Vec<(&'static str, Schema)> {
     vec![
         ("branching/branching.arrow", branching_branching()),
+        (
+            "branching/branching_covariance.arrow",
+            branching_branching_covariance(),
+        ),
         ("bremsstrahlung.arrow", bremsstrahlung()),
         ("compton.arrow", compton()),
         ("covariance.arrow", covariance()),
@@ -228,6 +232,50 @@ pub fn branching_branching() -> Schema {
     ])
     .with_metadata(meta([
         ("filetype", "transmutation-branching"),
+        ("version", "2.0"),
+    ]))
+}
+
+/// `branching/branching_covariance.arrow`
+///
+/// MF=40: the covariance of the MF=10 partial cross sections `branching.arrow`
+/// carries, the uncertainty of an isomeric split. Optional, like
+/// `covariance.arrow` and for the same reasons: a library without MF=40 writes
+/// no such file, a branching directory published before it has none, and a
+/// reader treats absence as "no covariance", never as an error.
+///
+/// One row per covariance block, keyed first by the `branching.arrow` row the
+/// block belongs to and then exactly as `covariance.arrow` is. `nuclide` is the
+/// parent and `reaction` the chain kind, as in `branching.arrow`; `target` is
+/// the chain nuclide the row's product state resolved to, and `lfs` that
+/// state's level as the tape numbers it in MF=40. The partner state is the
+/// block's own `xlfs1` (with `xmf1` saying it is an MF=10 partial), resolved
+/// to a chain nuclide in `target1`, which is null when the partner could not
+/// be resolved. There is no separate partner column: a second copy of the
+/// partner's level could only disagree with `xlfs1`.
+///
+/// `energy` and `values` are this state's own linearized MF=10 partial, and
+/// are written only when several MF=10 states resolved to one target, which
+/// `branching.arrow` then carries as their sum. A relative covariance of one
+/// state has to be weighted by that state's own partial to fold exactly; null
+/// means the `branching.arrow` curve for (`nuclide`, `reaction`, `target`) is
+/// that state's own.
+///
+/// Every column after `values` is [`covariance`]'s, verbatim and in order, so
+/// one writer and one reader serve both files.
+pub fn branching_branching_covariance() -> Schema {
+    let mut fields = vec![
+        utf8("nuclide", false),
+        utf8("reaction", false),
+        utf8("target", false),
+        i32("lfs", false),
+        utf8("target1", true),
+        f64s("energy", true),
+        f64s("values", true),
+    ];
+    fields.extend(covariance().fields().iter().map(|f| f.as_ref().clone()));
+    Schema::new(fields).with_metadata(meta([
+        ("filetype", "transmutation-branching_covariance"),
         ("version", "2.0"),
     ]))
 }
@@ -657,7 +705,7 @@ mod tests {
         let sections = all_sections();
         assert_eq!(
             sections.len(),
-            20,
+            21,
             "section count changed; update the manifest"
         );
         let mut paths: Vec<&str> = sections.iter().map(|(p, _)| *p).collect();
