@@ -2035,8 +2035,10 @@ struct Split {
     /// The ground state, when the overlay lists only metastable states and the
     /// ground takes what they leave (see [`remainder_state`]). `fractions` are
     /// then each listed state's share of the whole reaction. `None` when they
-    /// are shares among the listed states, which between them are all the
-    /// reaction makes.
+    /// are shares among the listed states, which re-partition only the mass
+    /// those states already carry in the chain (see [`refine_chain`]): a list
+    /// may cover only some of the chain's targets, as ENDF/B-VIII.1's La139
+    /// (n,d3He) lists Xe135 and Xe135_m1 where the chain goes to Xe134.
     remainder: Option<String>,
 }
 
