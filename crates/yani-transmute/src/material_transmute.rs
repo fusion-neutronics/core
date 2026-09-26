@@ -1085,12 +1085,13 @@ fn replica_steps(
 
 /// A transport run's tallied rates with their statistical covariance, and
 /// the unfolded chain their branching is refined from.
-pub(crate) struct TransportStatistics {
+pub(crate) struct TransportStatistics<'a> {
     rates: crate::statistical::StatisticalRates,
     base_chain: Arc<HashMap<String, ChainNuclide>>,
     /// The tallied isomeric partials, from which the nominal split was folded
-    /// and which the isomeric source perturbs.
-    partials: PartialRates,
+    /// and which the isomeric source perturbs. Borrowed, so a run that does
+    /// not ask for that source copies nothing for it.
+    partials: &'a PartialRates,
 }
 
 /// One material's independent-mode transport result, per source particle.
@@ -1159,14 +1160,14 @@ pub fn transport_replicas(
     let statistics = tallied.statistics.as_ref().map(|c| TransportStatistics {
         rates: crate::statistical::StatisticalRates::new(c),
         base_chain: Arc::clone(chain),
-        partials: tallied.partials.clone(),
+        partials: &tallied.partials,
     });
     let no_statistics = TransportStatistics {
         rates: crate::statistical::StatisticalRates::new(
             &crate::history_statistics::RateCovariance::empty(),
         ),
         base_chain: Arc::clone(chain),
-        partials: tallied.partials.clone(),
+        partials: &tallied.partials,
     };
     run_replicas(
         &initial,
@@ -1283,7 +1284,7 @@ fn run_replicas(
     stepper: &ForwardEulerStepper,
     request: &DataUncertainty,
     shielding: Option<&Shielding>,
-    statistical: Option<&TransportStatistics>,
+    statistical: Option<&TransportStatistics<'_>>,
 ) -> Result<(Ensemble, Info), Box<dyn std::error::Error>> {
     // The two paths each have one source the other lacks. A transport run has
     // tallied rates with a statistical covariance and no caller-supplied flux
@@ -1849,7 +1850,7 @@ fn first_order_contributors(
     half_life: Option<&HalfLifeSampling>,
     chains: Option<&ReplicaChains>,
     isomeric: Option<&IsomericSampling>,
-    transport: Option<&TransportStatistics>,
+    transport: Option<&TransportStatistics<'_>>,
 ) -> Result<Vec<crate::uncertainty::Contributor>, Box<dyn std::error::Error>> {
     use crate::uncertainty::Contributor;
     let solve = |ps: &[PerSpectrum], base: &Arc<HashMap<String, ChainNuclide>>| {
@@ -2184,7 +2185,7 @@ fn first_order_contributors(
 /// scaled by `scale`, built with the same `apply_coupled_branching` call the
 /// nominal was, so a scale of one reproduces the nominal bit for bit.
 fn transport_isomeric_job(
-    st: &TransportStatistics,
+    st: &TransportStatistics<'_>,
     nominal: &PerSpectrum,
     parent: &str,
     kind: &str,
@@ -3286,7 +3287,7 @@ mod tests {
                 &crate::history_statistics::RateCovariance::empty(),
             ),
             base_chain: Arc::clone(&chain),
-            partials,
+            partials: &partials,
         };
 
         let job = transport_isomeric_job(&st, &nominal, "Pb208", "(n,2n)", "Pb207_m1", 1.0);
