@@ -1626,9 +1626,10 @@ impl TransmutationTallies {
     /// the total above it (see `build_tail_channels`), one entry.
     /// Zero-rate targets are kept (a zero fraction is information: the flux
     /// never reached that state's threshold); kinds whose targets are all zero
-    /// are kept too and resolved by the caller (base split preserved). Returns
-    /// an empty map when the material is unknown, nothing was scored, or no
-    /// branching overlay is configured.
+    /// are kept too and resolved by the caller, which keeps the base split, or
+    /// for isomers listed alone over a tallied total gives them nothing and the
+    /// ground state the reaction. Returns an empty map when the material is
+    /// unknown, nothing was scored, or no branching overlay is configured.
     pub fn get_partial_rates(
         &self,
         material_id: u32,

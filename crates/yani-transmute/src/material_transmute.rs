@@ -2211,7 +2211,9 @@ fn refine_chain(
 ///     rates are zero (e.g. flux entirely below threshold) the base split is
 ///     kept, matching the fold's `None` behaviour. Rates for metastable states
 ///     alone are divided by the reaction's tallied total instead, and the
-///     ground state keeps the rest (see `remainder_state`).
+///     ground state keeps the rest (see `remainder_state`), all of it when
+///     those rates are zero; only with no tallied total is the base split
+///     kept.
 pub fn apply_coupled_branching(
     chain: &Arc<HashMap<String, ChainNuclide>>,
     partial_rates: &PartialRates,
@@ -2247,33 +2249,33 @@ pub fn apply_coupled_branching(
                     }
                 }
             } else {
-                let total: f64 = per_target.iter().map(|(_, r)| r).sum();
-                if total > 0.0 {
-                    let remainder = remainder_state(
-                        &chain[parent],
-                        kind,
-                        per_target.iter().map(|(t, _)| t.as_str()),
-                    );
-                    // Listed isomers alone are shares of the reaction's tallied
-                    // total, which the partials are normalized exactly like. A
-                    // reaction with no tallied total makes nothing to split.
-                    let whole = match &remainder {
-                        Some(_) => match rates.get(parent).and_then(|r| r.get(kind)) {
-                            Some(&w) if w > 0.0 => w,
-                            _ => continue,
-                        },
-                        None => total,
-                    };
-                    let m = refine
-                        .entry(parent.clone())
-                        .or_default()
-                        .entry(kind.clone())
-                        .or_default();
-                    for (t, r) in per_target {
-                        *m.fractions.entry(t.clone()).or_insert(0.0) += r / whole;
-                    }
-                    m.remainder = remainder;
+                let remainder = remainder_state(
+                    &chain[parent],
+                    kind,
+                    per_target.iter().map(|(t, _)| t.as_str()),
+                );
+                // Listed isomers alone are shares of the reaction's tallied
+                // total, which the partials are normalized exactly like, so it
+                // is that total, not theirs, that has to be there: partials
+                // that are all zero under a live reaction, the flux lying
+                // between its threshold and theirs, make the isomers nothing
+                // and the ground all of it, as the spectrum fold has them.
+                let whole = match &remainder {
+                    Some(_) => rates.get(parent).and_then(|r| r.get(kind)).copied(),
+                    None => Some(per_target.iter().map(|(_, r)| r).sum()),
+                };
+                let Some(whole) = whole.filter(|&w| w > 0.0) else {
+                    continue;
+                };
+                let m = refine
+                    .entry(parent.clone())
+                    .or_default()
+                    .entry(kind.clone())
+                    .or_default();
+                for (t, r) in per_target {
+                    *m.fractions.entry(t.clone()).or_insert(0.0) += r / whole;
                 }
+                m.remainder = remainder;
             }
         }
     }
@@ -3440,5 +3442,83 @@ mod tests {
         let mut rates: ReactionRates = HashMap::new();
         let folded = apply_coupled_branching(&chain, &partials, &mut rates);
         assert!(Arc::ptr_eq(&chain, &folded));
+    }
+
+    /// Isomer-only partials that are all zero under a live reaction, the flux
+    /// lying between the total's threshold and the partial's, give the isomer
+    /// nothing and the ground all of the reaction, on both paths and whatever
+    /// split the base chain carried. The coupled path used to gate on the
+    /// partials' own sum and keep the base split. A full list of zeros, and a
+    /// reaction with no tallied total, still keep it.
+    #[test]
+    fn zero_isomer_only_rates_give_the_ground_the_reaction() {
+        let mut chain = (*indium_chain()).clone();
+        for rx in chain
+            .get_mut("In115")
+            .unwrap()
+            .reactions
+            .iter_mut()
+            .filter(|r| r.kind == "(n,2n)")
+        {
+            rx.branching = 0.5;
+        }
+        let chain = Arc::new(chain);
+        let ground_takes_all = |folded: &HashMap<String, ChainNuclide>| {
+            assert_eq!(branching_of(folded, "(n,2n)", "In114_m1"), 0.0);
+            assert_eq!(branching_of(folded, "(n,2n)", "In114"), 1.0);
+        };
+
+        // The spectrum path: one group at 11 to 13 MeV, above the total's
+        // threshold and below the partial's.
+        let material = indium(vec![reaction(16, vec![1.0e7, 3.0e7], vec![2.0, 2.0])]);
+        let mut branch = BranchTable::new();
+        branch.entry("In115".to_string()).or_default().insert(
+            "(n,2n)".to_string(),
+            vec![curve(
+                "In114_m1",
+                BranchQuantity::CrossSection,
+                &[1.5e7, 2.0e7],
+                &[0.0, 1.6],
+            )],
+        );
+        let spectrum = MultigroupSpectrum {
+            boundaries: vec![1.1e7, 1.3e7],
+            masses: vec![1.0],
+            flux_error: None,
+        };
+        let mut rates: ReactionRates = HashMap::new();
+        ground_takes_all(&fold_branching_into_chain(
+            &material, &chain, &branch, &spectrum, &mut rates,
+        ));
+
+        // The coupled path, over the same reaction's tallied total.
+        let only = |targets: &[&str]| -> PartialRates {
+            let rates = targets.iter().map(|t| (t.to_string(), 0.0)).collect();
+            HashMap::from([(
+                "In115".to_string(),
+                HashMap::from([("(n,2n)".to_string(), rates)]),
+            )])
+        };
+        let tallied = || -> ReactionRates {
+            HashMap::from([(
+                "In115".to_string(),
+                HashMap::from([("(n,2n)".to_string(), 2.0e-24)]),
+            )])
+        };
+        ground_takes_all(&apply_coupled_branching(
+            &chain,
+            &only(&["In114_m1"]),
+            &mut tallied(),
+        ));
+        let full = only(&["In114", "In114_m1"]);
+        assert!(Arc::ptr_eq(
+            &chain,
+            &apply_coupled_branching(&chain, &full, &mut tallied())
+        ));
+        let mut untallied: ReactionRates = HashMap::new();
+        assert!(Arc::ptr_eq(
+            &chain,
+            &apply_coupled_branching(&chain, &only(&["In114_m1"]), &mut untallied)
+        ));
     }
 }
