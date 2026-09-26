@@ -5,14 +5,10 @@
 //! the same solve again. That is exact to all orders in the matrix exponential:
 //! nothing is linearized, and the solver is not touched at all, only its input.
 //!
-//! What can be perturbed ([`Source`]): the **activation cross sections**,
-//! through the MF=33 covariance folded against this material's own spectrum;
-//! the **flux spectrum**, from a per-bin sigma the caller supplies; and the
-//! **half-lives**, from the evaluation's own standard deviation. Decay
-//! branching ratios, fission yields and the isomeric-branching overlay are held
-//! at their nominal values; they carry their own uncertainties and are not
-//! propagated yet (issue #140). [`Info`] says so per run rather than leaving it
-//! to be inferred from a small sigma.
+//! What can be perturbed is [`Source::IMPLEMENTED`], each source documented on
+//! its variant. [`Info`] says per run what was perturbed, what carried no
+//! stated uncertainty, and what was held at nominal, rather than leaving it to
+//! be inferred from a small sigma.
 //!
 //! # Cost
 //!
@@ -46,6 +42,23 @@ use crate::covariance_sample::{Clipping, Truncations};
 pub enum Source {
     /// Activation cross sections, from ENDF MF=33 covariance (issue #514).
     CrossSections,
+    /// The isomeric split of a reaction, from the ENDF MF=40 covariance of the
+    /// MF=10 partial cross sections the branching overlay folds (issue #140).
+    ///
+    /// Each parent's MF=40 is folded exactly against the spectrum, as MF=33
+    /// is, giving the covariance of its partial rates. A replica perturbs them
+    /// lognormally, turns them into fractions and applies those to the
+    /// reaction's transport total, which MF=33 perturbs, so the cross sections
+    /// set how much reacts and MF=40 only how it splits. `(n,n')` is the
+    /// exception: it has no transport total, its rate is the sum of its MF=10
+    /// partials, and MF=40 moves that production rate itself.
+    ///
+    /// The partials are sampled independently of each other because the data
+    /// state no covariance between product states, and independently of MF=33
+    /// because no MF=40 x MF=33 correlation is published. A split given by
+    /// MF=9 yields has no covariance format, so it stays at nominal and is
+    /// reported as such.
+    IsomericBranching,
     /// The supplied flux spectrum, from a per-bin standard deviation the caller
     /// provides (issue #559).
     ///
@@ -81,15 +94,11 @@ pub enum Source {
 }
 
 impl Source {
-    /// Every source this build can actually perturb.
-    ///
-    /// Three more inputs feed the matrix and are held at nominal: decay
-    /// branching, fission yields and the isomeric-branching overlay. The first
-    /// two have published uncertainties this build does not read yet (issue
-    /// #140); the third has none in ENDF-6 at all, so it could only ever carry
-    /// an assumed value.
+    /// Every source this build can perturb. [`Info::not_perturbed`] lists what
+    /// a run held at nominal.
     pub const IMPLEMENTED: &'static [Source] = &[
         Source::CrossSections,
+        Source::IsomericBranching,
         Source::FluxSpectrum,
         Source::HalfLife,
         Source::Statistical,
@@ -100,6 +109,7 @@ impl Source {
     pub fn name(self) -> &'static str {
         match self {
             Source::CrossSections => "cross_sections",
+            Source::IsomericBranching => "isomeric_branching",
             Source::FluxSpectrum => "flux_spectrum",
             Source::HalfLife => "half_life",
             Source::Statistical => "statistical",
@@ -115,12 +125,7 @@ impl Source {
             .find(|s| s.name() == name)
             .ok_or_else(|| {
                 let have: Vec<&str> = Source::IMPLEMENTED.iter().map(|s| s.name()).collect();
-                format!(
-                    "unknown uncertainty source {name:?}; this build can perturb {have:?}. \
-                     Decay branching and fission yields carry published uncertainties \
-                     that are not read yet (issue #140), and reaction branching has \
-                     none in ENDF-6 to read."
-                )
+                format!("unknown uncertainty source {name:?}; this build can perturb {have:?}.")
             })
     }
 }
@@ -235,6 +240,31 @@ pub struct Info {
     /// the cross section, and the truncation biases the mean upward.
     pub rates_floored: usize,
     pub rates_sampled: usize,
+    /// Overlay channels whose isomeric split was perturbed from MF=40, as
+    /// `"Parent kind"` (`"Nb93 (n,2n)"`).
+    pub isomeric_channels_perturbed: BTreeSet<String>,
+    /// Overlay channels with a rate whose split carried no usable MF=40, held
+    /// at nominal: a split given by MF=9 yields, a channel the evaluation gives
+    /// no MF=40 for, or a branching library without the covariance file. Not a
+    /// claim that the split is exact.
+    pub no_isomeric_branching_uncertainty: BTreeSet<String>,
+    /// Product states of a perturbed channel whose own partial has no MF=40,
+    /// as `"Parent kind target"` (`"Ag116 (n,n') Ag116_m2"`). They move only
+    /// as the others' shares move around them.
+    pub isomeric_partials_without_covariance: BTreeSet<String>,
+    /// Per (parent, `"kind target"`), the share of the partial rate the MF=40
+    /// grids span, the smallest over the run's spectra, as
+    /// `rate_fraction_covered` is for MF=33.
+    pub isomeric_rate_fraction_covered: BTreeMap<(String, String), f64>,
+    /// MF=40 blocks present but not consumed, by reason: `cross_material`,
+    /// `cross_reaction` (a partner in another reaction), `nc`, `lb_<n>` for a
+    /// layout not implemented, `malformed`, and `unmatched` (a state or partner
+    /// the branching curves do not have).
+    pub isomeric_blocks_skipped: BTreeMap<String, usize>,
+    /// MF=40 matrices that were not positive semi-definite and were repaired.
+    pub isomeric_matrices_clipped: usize,
+    /// Individual partial-rate draws applied.
+    pub isomeric_partials_sampled: usize,
     /// Spectra that carried a per-bin flux sigma, and those that did not.
     ///
     /// A spectrum taken from a published reference set has no stated error, so
@@ -292,7 +322,6 @@ impl Info {
             not_perturbed: [
                 "decay branching ratio",
                 "fission yield",
-                "isomeric branching (MF=9/MF=10)",
                 "cross-material covariance (MAT1 != 0)",
             ]
             .iter()
@@ -321,6 +350,9 @@ impl Info {
             || self.skipped_nc > 0
             || !self.unsupported_layouts.is_empty()
             || self.malformed_blocks > 0
+            || !self.no_isomeric_branching_uncertainty.is_empty()
+            || !self.isomeric_partials_without_covariance.is_empty()
+            || !self.isomeric_blocks_skipped.is_empty()
             || self.spectra_without_flux_sigma > 0
             || !self.no_half_life_uncertainty.is_empty()
             || !self.no_decay_energy_uncertainty.is_empty()
@@ -414,7 +446,8 @@ pub struct Contributor {
     pub nuclide: String,
     /// The reaction, for one cross-section channel alone; `None` for the
     /// nuclide's whole evaluation (every channel with its correlations) or for
-    /// a half-life.
+    /// a half-life. For `isomeric_branching`, `"kind target"` names one
+    /// partial, and `None` is the parent's whole MF=40.
     pub reaction: Option<String>,
     /// `[step][nuclide]` variance it contributes, only where it is non-zero.
     pub variance: Vec<HashMap<String, f64>>,

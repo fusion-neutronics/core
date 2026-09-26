@@ -243,6 +243,33 @@ impl FluxDensity<'_> {
         total
     }
 
+    /// `∫_a^b σ(E) ψ(E) dE` for a lin-lin curve, in barn n/cm^2/s.
+    ///
+    /// The curve read exactly as the branching fold reads it
+    /// (`curve_group_average`: zero below its first point, flat above its
+    /// last), so the integrals over a partition of the spectrum sum to what
+    /// `fold_curve_rate` folds the whole curve to, and a relative covariance
+    /// weighted by them is relative to that same rate.
+    fn integrate_curve(&self, energy: &[f64], values: &[f64], a: f64, b: f64) -> f64 {
+        if a >= b {
+            return 0.0;
+        }
+        let mut total = 0.0;
+        for g in self.overlapping(a, b) {
+            let (glo, ghi) = (self.boundaries[g], self.boundaries[g + 1]);
+            let lo = a.max(glo);
+            let hi = b.min(ghi);
+            if lo >= hi || ghi <= glo {
+                continue;
+            }
+            let density = self.flux[g] / (ghi - glo);
+            total += crate::material_transmute::curve_group_average(energy, values, lo, hi)
+                * (hi - lo)
+                * density;
+        }
+        total
+    }
+
     /// `∫_a^b ψ(E) dE`, in n/cm^2/s. Needed only by absolute (`lb = 0`) blocks,
     /// whose covariance multiplies the flux rather than the rate.
     fn integrate_flux(&self, a: f64, b: f64) -> f64 {
@@ -587,6 +614,149 @@ pub fn fold_rate_covariance(
     (out, coverage)
 }
 
+/// A partial cross section as the branching fold reads it: one lin-lin curve,
+/// or several that are summed, as duplicate curves for one target are.
+pub(crate) type Pieces<'a> = &'a [(&'a [f64], &'a [f64])];
+
+/// One MF=40 block ready to fold against a spectrum: its matrix, and the two
+/// product states it correlates, as indices into the parent's labels with the
+/// partial each is weighted by.
+///
+/// Built once per run. Nothing here depends on the flux, so a block that
+/// cannot be used is known to be unusable before any spectrum is seen, and is
+/// counted once rather than once per spectrum.
+pub(crate) struct PartialBlock<'a> {
+    pub(crate) row: usize,
+    pub(crate) col: usize,
+    /// The two states' levels, so a target made of several states is covered
+    /// by the sum over its states rather than by the largest one.
+    pub(crate) row_lfs: i32,
+    pub(crate) col_lfs: i32,
+    pub(crate) row_curve: Vec<(&'a [f64], &'a [f64])>,
+    pub(crate) col_curve: Vec<(&'a [f64], &'a [f64])>,
+    pub(crate) expanded: &'a ExpandedBlock,
+}
+
+/// What an MF=40 fold against one spectrum covered: per label, the share of
+/// its partial rate the covariance grids span. Only labels with a rate there
+/// appear, since a share of nothing is not a statement about the data.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IsomericCoverage {
+    pub rate_fraction_covered: BTreeMap<String, f64>,
+}
+
+/// The partial rates of a curve over the intervals of `grid`.
+fn curve_partial_rates(flux: &FluxDensity, curve: Pieces, grid: &[f64], scale: Scale) -> Partials {
+    let n = grid.len().saturating_sub(1);
+    let mut per_interval = Vec::with_capacity(n);
+    for k in 0..n {
+        let v = match scale {
+            Scale::Relative => {
+                BARN_TO_CM2
+                    * curve
+                        .iter()
+                        .map(|(e, v)| flux.integrate_curve(e, v, grid[k], grid[k + 1]))
+                        .sum::<f64>()
+            }
+            Scale::Absolute => BARN_TO_CM2 * flux.integrate_flux(grid[k], grid[k + 1]),
+        };
+        per_interval.push(v);
+    }
+    Partials { per_interval }
+}
+
+/// Fold one parent's MF=40 blocks against a spectrum into the relative
+/// covariance of its isomeric partial rates.
+///
+/// The same exact fold as MF=33's, on the partials instead of the reaction
+/// totals: each block contracts against the per-interval rates of its two
+/// states' own MF=10 curves, and the sum is relativized by `rates`, the full
+/// partial rate of each label as the branching fold computes it. The result's
+/// `kinds` are exactly `labels`, whatever the rates, so a label keeps its
+/// deviate in every spectrum of a schedule. A label with no rate in this
+/// spectrum keeps a zero row and column, which samples as no change.
+///
+/// `None` when no label has a rate here, or there is no block to fold.
+pub(crate) fn fold_partial_covariance(
+    boundaries: &[f64],
+    masses: &[f64],
+    labels: &[String],
+    rates: &[f64],
+    blocks: &[PartialBlock],
+) -> (Option<RateCovariance>, IsomericCoverage) {
+    let mut coverage = IsomericCoverage::default();
+    let n = labels.len();
+    if blocks.is_empty()
+        || masses.is_empty()
+        || boundaries.len() != masses.len() + 1
+        || !rates.iter().any(|r| *r > 0.0)
+    {
+        return (None, coverage);
+    }
+    let flux = FluxDensity {
+        boundaries,
+        flux: masses,
+    };
+
+    let mut absolute = vec![0.0; n * n];
+    // Per (label, state), the largest span of rate any block covered.
+    let mut covered: BTreeMap<(usize, i32), f64> = BTreeMap::new();
+    for b in blocks {
+        let row = curve_partial_rates(
+            &flux,
+            &b.row_curve,
+            &b.expanded.row_energies,
+            b.expanded.scale,
+        );
+        let col = curve_partial_rates(
+            &flux,
+            &b.col_curve,
+            &b.expanded.col_energies,
+            b.expanded.scale,
+        );
+        let contribution = contract(b.expanded, &row, &col);
+        absolute[b.row * n + b.col] += contribution;
+        if b.row != b.col || b.row_lfs != b.col_lfs {
+            // A cross-state block is stored once; its transpose is the
+            // partner's block with this one, which the tape does not repeat.
+            absolute[b.col * n + b.row] += contribution;
+        }
+        if b.expanded.scale == Scale::Relative {
+            let e = covered.entry((b.row, b.row_lfs)).or_insert(0.0);
+            *e = e.max(row.total().abs());
+            let e = covered.entry((b.col, b.col_lfs)).or_insert(0.0);
+            *e = e.max(col.total().abs());
+        }
+    }
+
+    let mut relative = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            if rates[i] > 0.0 && rates[j] > 0.0 {
+                relative[i * n + j] = absolute[i * n + j] / (rates[i] * rates[j]);
+            }
+        }
+    }
+    let mut by_label = vec![0.0; n];
+    for ((i, _), c) in covered {
+        by_label[i] += c;
+    }
+    for (i, label) in labels.iter().enumerate() {
+        if rates[i] > 0.0 {
+            coverage
+                .rate_fraction_covered
+                .insert(label.clone(), (by_label[i] / rates[i]).min(1.0));
+        }
+    }
+    (
+        Some(RateCovariance {
+            kinds: labels.to_vec(),
+            relative,
+        }),
+        coverage,
+    )
+}
+
 #[cfg(test)]
 mod coverage_total_tests {
     use super::*;
@@ -724,5 +894,106 @@ mod integration_range_tests {
                 "integrate_flux over ({a}, {b})"
             );
         }
+    }
+
+    fn spectrum() -> (Vec<f64>, Vec<f64>) {
+        (
+            vec![1.0e-5, 0.625, 10.0, 1.0e3, 1.0e5, 1.0e6, 1.4e7, 2.0e7],
+            vec![1.0, 3.0, 7.0, 2.0, 11.0, 5.0, 13.0],
+        )
+    }
+
+    /// The per-interval partial rates of a curve sum to the rate the branching
+    /// fold gives it, so a covariance relativized by that rate is relative to
+    /// the rate that is perturbed.
+    #[test]
+    fn partial_curve_rates_sum_to_the_folded_rate() {
+        let (boundaries, flux) = spectrum();
+        let density = FluxDensity {
+            boundaries: &boundaries,
+            flux: &flux,
+        };
+        // A threshold partial with a kink, so no interval is trivially flat.
+        let energy = [9.0e6, 1.3e7, 1.6e7, 2.0e7];
+        let values = [0.0, 0.4, 0.45, 0.3];
+        let grid = [1.0e-5, 8.9e6, 1.3e7, 1.6e7, 2.0e7];
+        let pieces: &[(&[f64], &[f64])] = &[(&energy, &values)];
+        let partials = curve_partial_rates(&density, pieces, &grid, Scale::Relative);
+        let folded = crate::material_transmute::fold_curve_rate(
+            &energy,
+            &values,
+            &crate::MultigroupSpectrum {
+                boundaries: boundaries.clone(),
+                masses: flux.clone(),
+                flux_error: None,
+            },
+        );
+        let sum = partials.total();
+        assert!(
+            (sum - folded).abs() <= 1e-12 * folded,
+            "{sum} against {folded}"
+        );
+    }
+
+    /// A flat 10% block over the whole of a curve is a relative variance of
+    /// 0.01 on its rate; one spanning half the rate gives the variance of that
+    /// half, and says it covered half.
+    #[test]
+    fn a_flat_block_gives_its_own_variance() {
+        let (boundaries, flux) = spectrum();
+        let energy = [1.0e-5, 2.0e7];
+        let values = [1.0, 1.0];
+        let rate = crate::material_transmute::fold_curve_rate(
+            &energy,
+            &values,
+            &crate::MultigroupSpectrum {
+                boundaries: boundaries.clone(),
+                masses: flux.clone(),
+                flux_error: None,
+            },
+        );
+        let expanded = |grid: Vec<f64>| ExpandedBlock {
+            row_energies: grid.clone(),
+            col_energies: grid,
+            values: vec![0.01],
+            scale: Scale::Relative,
+        };
+        let block = |expanded| PartialBlock {
+            row: 0,
+            col: 0,
+            row_lfs: 1,
+            col_lfs: 1,
+            row_curve: vec![(&energy[..], &values[..])],
+            col_curve: vec![(&energy[..], &values[..])],
+            expanded,
+        };
+        let labels = vec!["(n,2n) X_m1".to_string()];
+        let (spanning, top) = (expanded(vec![1.0e-5, 2.0e7]), expanded(vec![1.4e7, 2.0e7]));
+
+        let (whole, coverage) =
+            fold_partial_covariance(&boundaries, &flux, &labels, &[rate], &[block(&spanning)]);
+        let whole = whole.expect("a block to fold");
+        assert_eq!(whole.kinds, labels);
+        assert!(
+            (whole.get(0, 0) - 0.01).abs() < 1e-14,
+            "{}",
+            whole.get(0, 0)
+        );
+        assert!((coverage.rate_fraction_covered[&labels[0]] - 1.0).abs() < 1e-12);
+
+        // Group 6 [1.4e7, 2e7] carries 13 of the 42 units; a block over it
+        // alone covers that share and is diluted by its square.
+        let (part, coverage) =
+            fold_partial_covariance(&boundaries, &flux, &labels, &[rate], &[block(&top)]);
+        let share = 13.0 / 42.0;
+        let got = part.expect("a block to fold").get(0, 0);
+        assert!((got - 0.01 * share * share).abs() < 1e-14, "{got}");
+        assert!((coverage.rate_fraction_covered[&labels[0]] - share).abs() < 1e-12);
+
+        // No rate here, nothing to fold.
+        let (none, coverage) =
+            fold_partial_covariance(&boundaries, &flux, &labels, &[0.0], &[block(&spanning)]);
+        assert!(none.is_none());
+        assert!(coverage.rate_fraction_covered.is_empty());
     }
 }

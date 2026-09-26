@@ -6384,6 +6384,7 @@ dependencies = [
  "yamc-rng",
  "yamc-test-cache",
  "yani",
+ "yani-convert",
  "yani-decay",
 ]
 

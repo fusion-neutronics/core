@@ -18,6 +18,7 @@ pub mod d1s_uncertainty;
 pub mod derived;
 pub mod flux_uncertainty;
 mod history_statistics;
+mod isomeric_branching_uncertainty;
 mod material_transmute;
 pub mod multigroup;
 mod results;

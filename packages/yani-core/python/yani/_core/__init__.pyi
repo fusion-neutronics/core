@@ -241,6 +241,16 @@ class DataUncertainty:
     
     - ``"cross_sections"``: the activation cross sections, sampled from the
       ENDF MF=33 covariance folded against this material's own spectrum;
+    - ``"isomeric_branching"``: how a reaction splits between a product's
+      ground and metastable states, from the ENDF MF=40 covariance of the
+      MF=10 partial cross sections the branching overlay folds, folded against
+      the same spectrum. The partials are perturbed and split the reaction's
+      total, which ``"cross_sections"`` perturbs, so MF=40 moves the split and
+      not the total; ``(n,n')`` has no total of its own, so there MF=40 moves
+      the isomer's production rate itself. The data state no covariance between
+      product states and none with MF=33, so neither is assumed. A split given
+      by MF=9 yields has no covariance format and stays at nominal, reported
+      in ``no_isomeric_branching_uncertainty``;
     - ``"flux_spectrum"``: the spectrum itself, from the per-bin
       ``flux_std_dev`` given on a ``Pulse``;
     - ``"half_life"``: every reachable nuclide's half-life, from the decay
@@ -259,12 +269,9 @@ class DataUncertainty:
       energy never enters the solve, so the inventory and activity are
       untouched.
     
-    Decay branching ratios, fission yields and the isomeric-branching overlay
-    are held at their evaluated values; they carry uncertainties of their own
-    that this does not propagate.
+    Anything a run did not perturb is listed in the report's ``not_perturbed``.
     ``TransmutationResults.get_data_uncertainty_info`` says so per material,
-    along with any nuclide whose evaluation carries no covariance and any
-    unstable nuclide whose half-life has no stated sigma.
+    along with every input whose evaluation states no uncertainty.
     
     Args:
         seed (int): Base seed. A given nuclide's perturbation in a given replica
@@ -1111,10 +1118,9 @@ class Material:
                 steps directly, so its step 0 is the first step.
         
             data_uncertainty (DataUncertainty, optional): Ask for nuclear-data
-                uncertainty on the result. The activation cross sections are
-                sampled from their ENDF MF=33 covariance, folded against this
-                material's own spectrum, and the schedule is re-solved until the
-                reported standard deviations settle. Omit it (the default) and
+                uncertainty on the result. Every source ``DataUncertainty`` names
+                is sampled, and the schedule is re-solved until the reported
+                standard deviations settle. Omit it (the default) and
                 nothing is read, folded or sampled: the inventories are
                 bit-identical either way. Read the sigmas with
                 ``get_nuclide_uncertainty``, and what was and was not covered
@@ -2214,7 +2220,9 @@ class TransmutationResults:
           reaction, variance)``, largest reach first. Within the cross sections
           a nuclide's whole evaluation has ``reaction`` of ``None`` and each
           channel alone names it; a half-life has ``None``. It says which
-          evaluation to look at; the total is the resampled one.
+          evaluation to look at; the total is the resampled one. For
+          ``isomeric_branching``, ``reaction`` is ``"<kind> <target>"``, one
+          MF=10 partial, and ``None`` is the parent's whole MF=40.
         
         Args:
             material_id: Material ID number.
@@ -2461,6 +2469,19 @@ class TransmutationResults:
           covariance blocks that were present but not consumed.
         - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
           covariance was not positive semi-definite and had to be repaired.
+        - ``isomeric_channels_perturbed`` / ``no_isomeric_branching_uncertainty``:
+          with the ``"isomeric_branching"`` source, the overlay channels
+          (``"Nb93 (n,2n)"``) whose split was perturbed from MF=40, and those
+          with a rate that had none to perturb it with: a split MF=9 yields
+          give, a channel without MF=40, or a branching library without the
+          covariance file. ``isomeric_partials_without_covariance`` names the
+          product states of a perturbed channel that have no MF=40 of their own
+          (``"Ag116 (n,n') Ag116_m2"``), ``isomeric_rate_fraction_covered`` the
+          share of each partial rate the MF=40 grids span (keyed
+          ``"Parent kind target"``), ``isomeric_blocks_skipped`` the MF=40
+          blocks present but not used, by reason, ``isomeric_matrices_clipped``
+          the MF=40 matrices repaired, and ``isomeric_partials_sampled`` the
+          partial-rate draws applied.
         - ``rates_floored`` / ``rates_sampled``: samples that went negative and
           were truncated at zero, which biases the mean upward when common.
         - ``half_lives_perturbed`` / ``no_half_life_uncertainty``: with the
@@ -2806,7 +2827,17 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         level index pointed at another isomer), and ``partial_sum_mismatches``
         (one line per reaction whose MF=10 partial cross sections do not sum to
         its MF=3 total, or whose MF=9 yields do not sum to one, within two
-        percent below 20 MeV).
+        percent below 20 MeV). The MF=40 production covariance written to
+        ``branching/branching_covariance.arrow`` is counted by
+        ``mf40_sections`` (sections read), ``mf40_blocks`` (blocks written),
+        ``mf40_blocks_by_lb`` (the NI blocks by layout), ``mf40_nc_blocks``,
+        ``mf40_unmatched_states`` (one line per MF=40 product state with no
+        MF=10 state to be the covariance of, skipped),
+        ``mf40_on_yield_channels`` (states whose split MF=9 yields give, which
+        have no covariance format, skipped) and ``mf40_own_mat_normalised``
+        (sub-subsections whose MAT1 named the evaluation itself, written as 0).
+        An evaluation set without MF=40 writes no covariance file, and removes
+        one an earlier conversion left there.
     """
 
 def convert_neutron_transport(input_path: builtins.str, output_dir: builtins.str, njoy_exec: builtins.str = 'njoy', temperatures: typing.Optional[typing.Sequence[builtins.float]] = None, library: builtins.str = '', data_version: builtins.str = '', created_utc: typing.Optional[builtins.str] = None, covariance: builtins.bool = False) -> builtins.str:
@@ -3345,9 +3376,8 @@ def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | t
             times.
         data_uncertainty (DataUncertainty, optional): Nuclear-data uncertainty,
             applied to every material as ``Material.transmute`` applies it to
-            one. The same seed perturbs a nuclide's cross sections the same way
-            in every material, which is right: one evaluation is uncertain in
-            one way wherever it is used.
+            one. The same seed perturbs a given evaluation the same way in every
+            material.
         self_shielding_chord (float, optional): One chord length ``4V/S`` in cm,
             for every material. See ``Material.transmute``.
         self_shielding_shape (SphereLump | CubeLump | FoilLump | CylinderLump | WireLump, optional):

@@ -1,5 +1,6 @@
 use crate::covariance_fold::fold_rate_covariance;
 use crate::covariance_sample::Sampler;
+use crate::isomeric_branching_uncertainty::IsomericSampling;
 use crate::multigroup::{compute_multigroup_reaction_rates_shielded, scale_rates};
 use crate::results::TransmutationResults;
 use crate::self_shielding::{Shielding, ShieldingInfo};
@@ -21,7 +22,7 @@ use yani::{
 ///
 /// The three travel together because they are computed together, once per
 /// distinct spectrum, and every step and every replica reads all three.
-type PerSpectrum = (
+pub(crate) type PerSpectrum = (
     ReactionRates,
     FissionYieldWeights,
     Arc<HashMap<String, ChainNuclide>>,
@@ -352,6 +353,7 @@ pub fn transmute_materials(
                 .collect(),
             request,
             shielding: cases[c].shielding.as_ref(),
+            branch,
         });
         solve_case(
             &initial[c],
@@ -701,6 +703,9 @@ struct Replicas<'a> {
     per_spectrum: Vec<PerSpectrum>,
     request: &'a DataUncertainty,
     shielding: Option<&'a Shielding>,
+    /// The overlay the folded chains were built from, which the isomeric
+    /// source re-folds per replica.
+    branch: &'a BranchTable,
 }
 
 /// One material's timeline, stepped from `initial` with steps whose spectrum
@@ -755,6 +760,7 @@ fn solve_case(
             r.steps,
             &r.per_spectrum,
             chain,
+            r.branch,
             parts,
             &stepper,
             r.request,
@@ -793,6 +799,8 @@ struct ReplicaOutcome {
     half_lives_floored: usize,
     /// Statistically drawn rates that came out negative and were floored.
     statistical_floored: usize,
+    /// Isomeric partial-rate draws applied.
+    isomeric_partials_sampled: usize,
 }
 
 /// Load the cross sections a transport-free solve of this material needs, into
@@ -1080,6 +1088,9 @@ fn replica_steps(
 pub(crate) struct TransportStatistics {
     rates: crate::statistical::StatisticalRates,
     base_chain: Arc<HashMap<String, ChainNuclide>>,
+    /// The tallied isomeric partials, from which the nominal split was folded
+    /// and which the isomeric source perturbs.
+    partials: PartialRates,
 }
 
 /// One material's independent-mode transport result, per source particle.
@@ -1105,20 +1116,21 @@ pub struct TransportTallied {
 /// item 3), by resampling and re-solving exactly as [`transmute_material`]
 /// does, with the tally's spectrum standing in for the supplied one.
 ///
-/// The sources that apply: `statistical`, the Monte Carlo covariance of the
-/// tallied rates; `cross_sections`, the MF=33 covariance folded against the
-/// tally's own flux shape; and `half_life`. `flux_spectrum` does not: there is
-/// no supplied spectrum, and the flux's error is the statistical one.
+/// Every source in [`crate::uncertainty::Source::IMPLEMENTED`] applies except
+/// `flux_spectrum`: there is no supplied spectrum, and the flux's error is the
+/// statistical one. Covariances are folded against the tally's own flux shape.
 ///
 /// `source_rates` scale the per-source-particle rates per step, which is how
 /// independent mode scales them. The coupled method re-runs transport per step
 /// and is not covered: its step-to-step noise propagation is out of scope.
+#[allow(clippy::too_many_arguments)]
 pub fn transport_replicas(
     initial: &Material,
     tallied: &TransportTallied,
     timesteps: &[f64],
     source_rates: &[f64],
     chain: &Arc<HashMap<String, ChainNuclide>>,
+    branch: &BranchTable,
     parts: yani::ChainParts,
     request: &DataUncertainty,
 ) -> Result<(Ensemble, Info), Box<dyn std::error::Error>> {
@@ -1147,12 +1159,14 @@ pub fn transport_replicas(
     let statistics = tallied.statistics.as_ref().map(|c| TransportStatistics {
         rates: crate::statistical::StatisticalRates::new(c),
         base_chain: Arc::clone(chain),
+        partials: tallied.partials.clone(),
     });
     let no_statistics = TransportStatistics {
         rates: crate::statistical::StatisticalRates::new(
             &crate::history_statistics::RateCovariance::empty(),
         ),
         base_chain: Arc::clone(chain),
+        partials: tallied.partials.clone(),
     };
     run_replicas(
         &initial,
@@ -1160,6 +1174,7 @@ pub fn transport_replicas(
         &steps,
         &per_spectrum,
         chain,
+        branch,
         parts,
         &ForwardEulerStepper,
         request,
@@ -1170,18 +1185,83 @@ pub fn transport_replicas(
     )
 }
 
-/// What the half-life source needs for a run: the nuclides to perturb, those
-/// with no stated sigma, and the chains pruned to what the material can reach,
-/// ready to receive a replica's half-lives.
+/// What the half-life source needs for a run: the nuclides to perturb and
+/// those with no stated sigma.
 struct HalfLifeSampling {
     /// `(name, half-life, sigma)` for the reachable nuclides with a sigma.
     candidates: Vec<(String, f64, f64)>,
     /// Reachable unstable nuclides whose evaluation states no sigma.
     without: std::collections::BTreeSet<String>,
-    /// The base chain, pruned.
-    base: HashMap<String, ChainNuclide>,
-    /// Each spectrum's folded chain, pruned, in `per_spectrum` order.
-    folded: Vec<HashMap<String, ChainNuclide>>,
+}
+
+/// The chains a replica edits, pruned once to what the material can reach.
+///
+/// Only the nuclides this material can reach are carried: the stepper walks a
+/// subset of that closure, so pruning to it changes nothing, and it keeps each
+/// replica's copy to the part of a 3800-nuclide chain the solve uses.
+struct ReplicaChains {
+    /// The base chain, for cooldowns, and the one the isomeric split is
+    /// refined from.
+    base: Arc<HashMap<String, ChainNuclide>>,
+    /// Each spectrum's folded chain, in `per_spectrum` order.
+    folded: Vec<Arc<HashMap<String, ChainNuclide>>>,
+}
+
+/// Prune the base chain and every spectrum's folded chain to the closure the
+/// material reaches through either.
+fn replica_chains(
+    initial: &Material,
+    chain: &Arc<HashMap<String, ChainNuclide>>,
+    per_spectrum: &[PerSpectrum],
+) -> ReplicaChains {
+    let seeds: Vec<&str> = initial
+        .nuclides
+        .keys()
+        .chain(initial.nuclide_data.keys())
+        .map(|s| s.as_str())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let mut reach = yani::reachable_nuclides(chain, &seeds);
+    for (_, _, folded_chain) in per_spectrum {
+        reach.extend(yani::reachable_nuclides(folded_chain, &seeds));
+    }
+    let prune = |c: &HashMap<String, ChainNuclide>| -> Arc<HashMap<String, ChainNuclide>> {
+        Arc::new(
+            c.iter()
+                .filter(|(name, _)| reach.contains(*name))
+                .map(|(name, cn)| (name.clone(), cn.clone()))
+                .collect(),
+        )
+    };
+    ReplicaChains {
+        base: prune(chain),
+        folded: per_spectrum.iter().map(|(_, _, c)| prune(c)).collect(),
+    }
+}
+
+/// One replica's edits to the chain's nuclear data, applied to a copy.
+#[derive(Default)]
+struct ChainEdits {
+    /// Perturbed half-lives [s].
+    half_lives: HashMap<String, f64>,
+}
+
+impl ChainEdits {
+    fn is_empty(&self) -> bool {
+        self.half_lives.is_empty()
+    }
+
+    /// `chain` with every edit made.
+    fn apply(&self, chain: &HashMap<String, ChainNuclide>) -> HashMap<String, ChainNuclide> {
+        let mut out = chain.clone();
+        for (name, t) in &self.half_lives {
+            if let Some(cn) = out.get_mut(name) {
+                crate::uncertainty::set_half_life(cn, *t);
+            }
+        }
+        out
+    }
 }
 
 /// Fold the covariance, factorize it, and re-solve until the sigmas settle.
@@ -1198,6 +1278,7 @@ fn run_replicas(
     steps: &[TransmuteStep],
     per_spectrum: &[PerSpectrum],
     chain: &Arc<HashMap<String, ChainNuclide>>,
+    branch: &BranchTable,
     parts: yani::ChainParts,
     stepper: &ForwardEulerStepper,
     request: &DataUncertainty,
@@ -1295,44 +1376,53 @@ fn run_replicas(
         }
     }
 
+    // The sources that edit the chain rather than the rates work on copies
+    // pruned once to what the material can reach, so each replica copies only
+    // the part of the chain its solve walks.
+    let want_half_life = request.wants(crate::uncertainty::Source::HalfLife);
+    let want_isomeric = request.wants(crate::uncertainty::Source::IsomericBranching);
+    let edits_chain = want_half_life || want_isomeric;
+    let chains = edits_chain.then(|| replica_chains(initial, chain, per_spectrum));
+
     // Half-lives: sampled per replica from the evaluation's stated sigma, and
     // substituted into every chain the replica is solved with, the base one
     // for cooldowns and each spectrum's folded one for irradiations, so one
-    // replica has one set of decay constants throughout. Only the nuclides
-    // this material can reach are carried into those chains: the stepper walks
-    // a subset of that closure, so pruning to it changes nothing, and it keeps
-    // the per-replica copy to the part of a 3800-nuclide chain the solve uses.
-    let half_life = if request.wants(crate::uncertainty::Source::HalfLife) {
-        let seeds: Vec<&str> = initial
-            .nuclides
-            .keys()
-            .chain(initial.nuclide_data.keys())
-            .map(|s| s.as_str())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        let mut reach = yani::reachable_nuclides(chain, &seeds);
-        for (_, _, folded_chain) in per_spectrum {
-            reach.extend(yani::reachable_nuclides(folded_chain, &seeds));
+    // replica has one set of decay constants throughout.
+    let half_life = match (&chains, want_half_life) {
+        (Some(c), true) => {
+            let (candidates, without) = crate::uncertainty::half_life_candidates(&c.base);
+            Some(HalfLifeSampling {
+                candidates,
+                without,
+            })
         }
-        let prune = |c: &HashMap<String, ChainNuclide>| -> HashMap<String, ChainNuclide> {
-            c.iter()
-                .filter(|(name, _)| reach.contains(*name))
-                .map(|(name, cn)| (name.clone(), cn.clone()))
-                .collect()
-        };
-        let base = prune(chain);
-        let (candidates, without) = crate::uncertainty::half_life_candidates(&base);
-        let folded: Vec<HashMap<String, ChainNuclide>> =
-            per_spectrum.iter().map(|(_, _, c)| prune(c)).collect();
-        Some(HalfLifeSampling {
-            candidates,
-            without,
-            base,
-            folded,
-        })
-    } else {
-        None
+        _ => None,
+    };
+
+    // Isomeric split: MF=40 folded against each spectrum once, for the parents
+    // the material reaches. The covariance file is opened only here, and only
+    // because the source was asked for; a branching library without one
+    // perturbs nothing and the report names every channel that went without.
+    let isomeric = match (&chains, want_isomeric) {
+        (Some(c), true) => {
+            let covariance = match branch.covariance_path() {
+                Some(path) => {
+                    Some(crate::isomeric_branching_uncertainty::load_branching_covariance(path)?)
+                }
+                None => None,
+            };
+            Some(IsomericSampling::new(
+                covariance.as_deref(),
+                initial,
+                chain,
+                &c.base,
+                branch,
+                spectra,
+                per_spectrum,
+                transport,
+            ))
+        }
+        _ => None,
     };
 
     // Decay energies: no solve reads them, so they are drawn where decay heat
@@ -1369,6 +1459,23 @@ fn run_replicas(
     if half_life.is_none() {
         info.not_perturbed.insert(0, "half-life".to_string());
     }
+    match &isomeric {
+        None => info
+            .not_perturbed
+            .insert(0, "isomeric branching (MF=9/MF=10)".to_string()),
+        Some(iso) => {
+            info.not_perturbed.push(
+                "isomeric-branching x cross-section correlation (none published)".to_string(),
+            );
+            let r = &iso.report;
+            info.isomeric_channels_perturbed = r.channels_perturbed.clone();
+            info.no_isomeric_branching_uncertainty = r.no_uncertainty.clone();
+            info.isomeric_partials_without_covariance = r.partials_without_covariance.clone();
+            info.isomeric_rate_fraction_covered = r.rate_fraction_covered.clone();
+            info.isomeric_blocks_skipped = r.blocks_skipped.clone();
+            info.isomeric_matrices_clipped = r.matrices_clipped;
+        }
+    }
     if !want_decay_energy {
         info.not_perturbed.insert(0, "decay energy".to_string());
     }
@@ -1400,10 +1507,12 @@ fn run_replicas(
     // every sigma reads zero, with `info` saying why: no covariance data, not a
     // confident zero.
     let no_half_lives = half_life.as_ref().is_none_or(|h| h.candidates.is_empty());
+    let no_isomeric = isomeric.as_ref().is_none_or(IsomericSampling::is_empty);
     if samplers.iter().all(Sampler::is_empty)
         && per_group.iter().all(Option::is_none)
         && no_half_lives
         && statistical.is_none()
+        && no_isomeric
     {
         info.converged = true;
         info.add_flux_coverage(&flux_coverage);
@@ -1427,6 +1536,10 @@ fn run_replicas(
         return Ok((ensemble, info));
     }
 
+    // On the transport path the isomeric source perturbs the tallied partials,
+    // which then re-fold the split the way the statistical draw does.
+    let transport_isomeric = statistical_in.is_some() && !no_isomeric;
+
     let target = request.samples;
     let cap = target.unwrap_or(MAX_SAMPLES);
     let mut previous_probe = std::collections::BTreeMap::new();
@@ -1444,28 +1557,50 @@ fn run_replicas(
         let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
         let mut truncations = crate::covariance_sample::Truncations::default();
         let mut half_lives_floored = 0usize;
+        let mut isomeric_partials_sampled = 0usize;
         // A statistical draw of the whole tallied rate vector, the partials
         // re-folded into the branching the way the nominal was, so an
-        // isomeric split moves with the rates it is made of.
+        // isomeric split moves with the rates it is made of. The isomeric
+        // source perturbs the same tallied partials, drawn or nominal, before
+        // they are folded.
         let mut statistical_floored = 0usize;
-        let drawn = statistical.map(|st| {
-            let (mut totals, partials, floored) = st.rates.sample(request.seed, replica);
-            statistical_floored = floored;
-            let chain_k = if partials.is_empty() {
-                Arc::clone(&st.base_chain)
-            } else {
-                apply_coupled_branching(&st.base_chain, &partials, &mut totals)
-            };
-            (totals, chain_k)
-        });
-        let sampled_half_lives = match &half_life {
-            Some(h) if !h.candidates.is_empty() => crate::uncertainty::sample_half_lives(
-                &h.candidates,
-                request.seed,
-                replica,
-                &mut half_lives_floored,
-            ),
-            _ => HashMap::new(),
+        let drawn = match statistical_in {
+            Some(st) if statistical.is_some() || transport_isomeric => {
+                let (mut totals, mut partials) = match statistical {
+                    Some(st) => {
+                        let (totals, partials, floored) = st.rates.sample(request.seed, replica);
+                        statistical_floored = floored;
+                        (totals, partials)
+                    }
+                    None => (per_spectrum[0].0.clone(), st.partials.clone()),
+                };
+                if let Some(iso) = isomeric.as_ref().filter(|_| transport_isomeric) {
+                    iso.scale_tallied_partials(
+                        &mut partials,
+                        request.seed,
+                        replica,
+                        &mut isomeric_partials_sampled,
+                    );
+                }
+                let chain_k = if partials.is_empty() {
+                    Arc::clone(&st.base_chain)
+                } else {
+                    apply_coupled_branching(&st.base_chain, &partials, &mut totals)
+                };
+                Some((totals, chain_k))
+            }
+            _ => None,
+        };
+        let edits = ChainEdits {
+            half_lives: match &half_life {
+                Some(h) if !h.candidates.is_empty() => crate::uncertainty::sample_half_lives(
+                    &h.candidates,
+                    request.seed,
+                    replica,
+                    &mut half_lives_floored,
+                ),
+                _ => HashMap::new(),
+            },
         };
 
         // Every spectrum's rates are perturbed by the SAME replica index,
@@ -1484,7 +1619,7 @@ fn run_replicas(
                 (Some((totals, chain_k)), 0) => (totals, chain_k),
                 _ => (rates, folded_chain),
             };
-            let rates = match &per_group[idx] {
+            let mut rates = match &per_group[idx] {
                 Some((relative, terms)) => {
                     let delta = crate::flux_uncertainty::flux_deviates(
                         relative,
@@ -1497,25 +1632,41 @@ fn run_replicas(
                 }
                 None => rates.clone(),
             };
+            // The isomeric split re-folded from this replica's partials, onto
+            // the pruned chain. It may rescale an (n,n') rate, which has no
+            // transport total and is its partials' sum. A transport replica
+            // re-folded its tallied partials above instead.
+            let fractions = match (&isomeric, &drawn) {
+                (Some(iso), None) if iso.perturbs(idx) => Some(iso.replica_fractions(
+                    idx,
+                    request.seed,
+                    replica,
+                    &mut rates,
+                    &mut isomeric_partials_sampled,
+                )),
+                _ => None,
+            };
             let (rates, t) = samplers[idx].perturb(&rates, request.seed, replica);
             truncations.floored += t.floored;
             truncations.sampled += t.sampled;
-            let folded_chain = match &half_life {
-                // The pruned nominal chain, unless this replica drew its own
-                // branching, which then carries the half-lives instead.
-                Some(h) if !sampled_half_lives.is_empty() => Arc::new(if drawn.is_some() {
-                    crate::uncertainty::with_half_lives(folded_chain, &sampled_half_lives)
-                } else {
-                    crate::uncertainty::with_half_lives(&h.folded[idx], &sampled_half_lives)
-                }),
+            // The folded chain this replica irradiates with: its own split if
+            // it drew one, else the pruned nominal, with its own nuclear data.
+            let source = match (&fractions, &chains) {
+                (Some(fractions), Some(c)) => refine_chain(&c.base, fractions),
+                (None, Some(c)) if !edits.is_empty() && drawn.is_none() => {
+                    Arc::clone(&c.folded[idx])
+                }
                 _ => Arc::clone(folded_chain),
+            };
+            let folded_chain = if edits.is_empty() {
+                source
+            } else {
+                Arc::new(edits.apply(&source))
             };
             perturbed.push((rates, weights.clone(), folded_chain));
         }
-        let base_chain = match &half_life {
-            Some(h) if !sampled_half_lives.is_empty() => Arc::new(
-                crate::uncertainty::with_half_lives(&h.base, &sampled_half_lives),
-            ),
+        let base_chain = match &chains {
+            Some(c) if !edits.is_empty() => Arc::new(edits.apply(&c.base)),
             _ => Arc::clone(chain),
         };
 
@@ -1528,9 +1679,10 @@ fn run_replicas(
             truncations,
             flux_bins_sampled: flux_coverage.bins_sampled,
             flux_bins_floored: flux_coverage.bins_floored,
-            half_lives: sampled_half_lives,
+            half_lives: edits.half_lives,
             half_lives_floored,
             statistical_floored,
+            isomeric_partials_sampled,
         })
     };
 
@@ -1562,6 +1714,7 @@ fn run_replicas(
             info.half_lives_sampled += outcome.half_lives.len();
             info.half_lives_floored += outcome.half_lives_floored;
             info.statistical_floored += outcome.statistical_floored;
+            info.isomeric_partials_sampled += outcome.isomeric_partials_sampled;
             if statistical.is_some() {
                 info.statistical_sampled += info.statistical_rates;
             }
@@ -1619,6 +1772,7 @@ fn run_replicas(
                     steps,
                     per_spectrum,
                     chain,
+                    branch,
                     parts,
                     stepper,
                     &alone,
@@ -1639,6 +1793,9 @@ fn run_replicas(
                 .contains(&crate::uncertainty::Source::CrossSections)
                 .then_some(samplers.as_slice()),
             half_life.as_ref(),
+            chains.as_ref(),
+            isomeric.as_ref().filter(|i| !i.is_empty()),
+            statistical_in,
         )?;
         ensemble.attribution = Some(crate::uncertainty::Attribution {
             by_source,
@@ -1675,7 +1832,8 @@ const SENSITIVITY_STEP: f64 = 1.0e-3;
 /// and each channel alone. Half-lives: each nuclide the solve populates, as
 /// `(s sigma_T / T)^2`. A half-life of a nuclide that never appears in the
 /// inventory cannot move it, which keeps this to the nuclides that matter
-/// even in a fission chain.
+/// even in a fission chain. Isomeric split: each parent's MF=40 and each
+/// partial alone, as the cross sections are, over the MF=40 factor.
 #[allow(clippy::too_many_arguments)]
 fn first_order_contributors(
     initial: &Material,
@@ -1686,6 +1844,9 @@ fn first_order_contributors(
     stepper: &ForwardEulerStepper,
     samplers: Option<&[Sampler]>,
     half_life: Option<&HalfLifeSampling>,
+    chains: Option<&ReplicaChains>,
+    isomeric: Option<&IsomericSampling>,
+    transport: Option<&TransportStatistics>,
 ) -> Result<Vec<crate::uncertainty::Contributor>, Box<dyn std::error::Error>> {
     use crate::uncertainty::Contributor;
     let solve = |ps: &[PerSpectrum], base: &Arc<HashMap<String, ChainNuclide>>| {
@@ -1812,8 +1973,132 @@ fn first_order_contributors(
         }
     }
 
+    // Isomeric split: one solve per (spectrum, parent, partial). On the
+    // transport path the nominal split came from the tallied partials, not
+    // from a multigroup fold, so a job scales the tallied partial and re-folds
+    // exactly as the nominal was folded, and a step of zero is the nominal.
+    if let Some(iso) = isomeric {
+        type Job = (usize, String, usize);
+        let jobs: Vec<Job> = match transport {
+            Some(st) => iso
+                .jobs()
+                .into_iter()
+                .filter(|(_, parent, i)| {
+                    let (kind, target) = iso.key(parent, *i);
+                    st.partials
+                        .get(parent)
+                        .and_then(|k| k.get(kind))
+                        .is_some_and(|list| list.iter().any(|(t, r)| t == target && *r > 0.0))
+                })
+                .collect(),
+            None => iso.jobs(),
+        };
+        let run = |(a, parent, i): &Job| -> Result<Vec<HashMap<String, f64>>, String> {
+            let ps: Vec<PerSpectrum> = match (transport, chains) {
+                (Some(st), _) => {
+                    let (kind, target) = iso.key(parent, *i);
+                    vec![transport_isomeric_job(
+                        st,
+                        &per_spectrum[0],
+                        parent,
+                        kind,
+                        target,
+                        1.0 + SENSITIVITY_STEP,
+                    )]
+                }
+                (None, Some(c)) => {
+                    let mut ps = per_spectrum.to_vec();
+                    ps[*a] = iso.scaled(
+                        *a,
+                        parent,
+                        *i,
+                        1.0 + SENSITIVITY_STEP,
+                        &per_spectrum[*a],
+                        &c.base,
+                    );
+                    ps
+                }
+                (None, None) => unreachable!("the isomeric source prunes its chains"),
+            };
+            Ok(sensitivity(&solve(&ps, chain)?))
+        };
+        let results: Vec<Result<Vec<HashMap<String, f64>>, String>> = {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use rayon::prelude::*;
+                jobs.par_iter().map(run).collect()
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                jobs.iter().map(run).collect()
+            }
+        };
+        // As for the cross sections: w over the factor's columns, summed over
+        // the spectra, which share one deviate per partial.
+        type PerStep = Vec<HashMap<String, Vec<f64>>>;
+        let mut whole: HashMap<String, PerStep> = HashMap::new();
+        let mut partial: HashMap<(String, String), PerStep> = HashMap::new();
+        for ((a, parent, i), sens) in jobs.iter().zip(results) {
+            let sens = sens?;
+            let (labels, l) = iso
+                .factor(*a, parent)
+                .expect("the job came from this factor");
+            let n = labels.len();
+            let row = &l[i * n..(i + 1) * n];
+            for target in [
+                whole
+                    .entry(parent.clone())
+                    .or_insert_with(|| vec![HashMap::new(); steps.len()]),
+                partial
+                    .entry((parent.clone(), labels[*i].clone()))
+                    .or_insert_with(|| vec![HashMap::new(); steps.len()]),
+            ] {
+                for (step, per) in sens.iter().enumerate() {
+                    for (out_name, s) in per {
+                        if *s == 0.0 {
+                            continue;
+                        }
+                        let w = target[step]
+                            .entry(out_name.clone())
+                            .or_insert_with(|| vec![0.0; n]);
+                        for (wj, lj) in w.iter_mut().zip(row) {
+                            *wj += s * lj;
+                        }
+                    }
+                }
+            }
+        }
+        let collapse = |w: PerStep| -> Vec<HashMap<String, f64>> {
+            w.into_iter()
+                .map(|per| {
+                    per.into_iter()
+                        .map(|(k, v)| (k, v.iter().map(|x| x * x).sum::<f64>()))
+                        .filter(|(_, v)| *v > 0.0)
+                        .collect()
+                })
+                .collect()
+        };
+        for (name, w) in whole {
+            out.push(Contributor {
+                source: "isomeric_branching".to_string(),
+                nuclide: name,
+                reaction: None,
+                variance: collapse(w),
+            });
+        }
+        for ((name, label), w) in partial {
+            out.push(Contributor {
+                source: "isomeric_branching".to_string(),
+                nuclide: name,
+                reaction: Some(label),
+                variance: collapse(w),
+            });
+        }
+    }
+
     // Half-lives: one solve per populated nuclide with a stated sigma.
     if let Some(h) = half_life {
+        let chains = chains.expect("the half-life source prunes its chains");
         let populated: HashSet<&str> = nominal
             .iter()
             .flat_map(|m| m.keys())
@@ -1828,10 +2113,10 @@ fn first_order_contributors(
         let run =
             |(name, t, _): &&(String, f64, f64)| -> Result<Vec<HashMap<String, f64>>, String> {
                 let sampled = HashMap::from([(name.clone(), t * (1.0 + SENSITIVITY_STEP))]);
-                let base = Arc::new(crate::uncertainty::with_half_lives(&h.base, &sampled));
+                let base = Arc::new(crate::uncertainty::with_half_lives(&chains.base, &sampled));
                 let ps: Vec<PerSpectrum> = per_spectrum
                     .iter()
-                    .zip(&h.folded)
+                    .zip(&chains.folded)
                     .map(|((r, w, _), folded)| {
                         (
                             r.clone(),
@@ -1885,6 +2170,34 @@ fn first_order_contributors(
             })
     });
     Ok(out)
+}
+
+/// The transport path's rates and folded chain with one tallied partial
+/// scaled by `scale`, built with the same `apply_coupled_branching` call the
+/// nominal was, so a scale of one reproduces the nominal bit for bit.
+fn transport_isomeric_job(
+    st: &TransportStatistics,
+    nominal: &PerSpectrum,
+    parent: &str,
+    kind: &str,
+    target: &str,
+    scale: f64,
+) -> PerSpectrum {
+    let mut partials = st.partials.clone();
+    if let Some(list) = partials.get_mut(parent).and_then(|k| k.get_mut(kind)) {
+        for (t, r) in list.iter_mut() {
+            if t == target {
+                *r *= scale;
+            }
+        }
+    }
+    let mut rates = nominal.0.clone();
+    let folded = if partials.is_empty() {
+        Arc::clone(&st.base_chain)
+    } else {
+        apply_coupled_branching(&st.base_chain, &partials, &mut rates)
+    };
+    (rates, nominal.1.clone(), folded)
 }
 
 /// Merge one spectrum's coverage into the run's.
@@ -1953,7 +2266,7 @@ pub(crate) fn fold_branching_into_chain(
 /// daughter rather than something the material is made of, and `Err` refused.
 type LoadOutcome = Result<Option<(String, std::sync::Arc<yamc_nuclide::Nuclide>)>, String>;
 
-fn build_fold_refine(
+pub(crate) fn build_fold_refine(
     material: &Material,
     chain: &Arc<HashMap<String, ChainNuclide>>,
     branch: &BranchTable,
@@ -2025,13 +2338,13 @@ fn build_fold_refine(
 }
 
 /// `parent -> reaction kind -> folded split`.
-type Fractions = HashMap<String, HashMap<String, Split>>;
+pub(crate) type Fractions = HashMap<String, HashMap<String, Split>>;
 
 /// One reaction's folded fractions, and what they are fractions of.
-#[derive(Default)]
-struct Split {
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Split {
     /// `target -> fraction`.
-    fractions: HashMap<String, f64>,
+    pub(crate) fractions: HashMap<String, f64>,
     /// The ground state, when the overlay lists only metastable states and the
     /// ground takes what they leave (see [`remainder_state`]). `fractions` are
     /// then each listed state's share of the whole reaction. `None` when they
@@ -2039,7 +2352,7 @@ struct Split {
     /// those states already carry in the chain (see [`refine_chain`]): a list
     /// may cover only some of the chain's targets, as ENDF/B-VIII.1's La139
     /// (n,d3He) lists Xe135 and Xe135_m1 where the chain goes to Xe134.
-    remainder: Option<String>,
+    pub(crate) remainder: Option<String>,
 }
 
 /// The ground state that takes the rest of a reaction whose overlay lists only
@@ -2099,7 +2412,7 @@ pub(crate) fn remainder_state<'a>(
 /// A split with a [`Split::remainder`] sets each listed state to its share of
 /// the reaction's mass and the ground state to what is left. Every other split
 /// re-partitions the mass its listed states already carry.
-fn refine_chain(
+pub(crate) fn refine_chain(
     chain: &Arc<HashMap<String, ChainNuclide>>,
     refine: &Fractions,
 ) -> Arc<HashMap<String, ChainNuclide>> {
@@ -2296,7 +2609,11 @@ pub fn apply_coupled_branching(
 /// Flux-weighted reaction rate (base, unit flux) of a partial cross-section
 /// curve: `(sum_g groupavg_g * mass_g) * 1e-24`, matching the convention in
 /// `compute_multigroup_reaction_rates`.
-fn fold_curve_rate(energy: &[f64], values: &[f64], spectrum: &MultigroupSpectrum) -> f64 {
+pub(crate) fn fold_curve_rate(
+    energy: &[f64],
+    values: &[f64],
+    spectrum: &MultigroupSpectrum,
+) -> f64 {
     let mut sigma_phi = 0.0;
     for g in 0..spectrum.masses.len() {
         let sigma_g = curve_group_average(
@@ -2439,7 +2756,7 @@ fn fold_state_fractions(
 ///
 /// Below `E_l` the curve is the partial's own, point for point, so a spectrum
 /// that stops short of `E_l` folds it bit for bit as before.
-fn along_the_total(
+pub(crate) fn along_the_total(
     energy: &[f64],
     values: &[f64],
     total_energy: &[f64],
@@ -2472,7 +2789,7 @@ fn along_the_total(
 
 /// The parent's transport cross section for `kind`, at the material's
 /// temperature, or `None` when it is not loaded.
-fn transport_reaction<'a>(
+pub(crate) fn transport_reaction<'a>(
     material: &'a Material,
     parent: &str,
     kind: &str,
@@ -2539,7 +2856,7 @@ fn curve_xs_product_group_average(
 /// Mirrors `multigroup::group_averaged_xs` but for an arbitrary branching curve:
 /// integrates the linear interpolant (zero below the first grid point, flat
 /// above the last) and divides by the group width.
-fn curve_group_average(energy: &[f64], values: &[f64], e_lo: f64, e_hi: f64) -> f64 {
+pub(crate) fn curve_group_average(energy: &[f64], values: &[f64], e_lo: f64, e_hi: f64) -> f64 {
     if e_lo >= e_hi || energy.is_empty() {
         return 0.0;
     }
@@ -2910,6 +3227,136 @@ mod tests {
     }
 
     /// Empty partial rates return the original chain Arc untouched.
+    /// A transport-path isomeric attribution job with no step is the nominal,
+    /// bit for bit, in the rates, the folded split and the inventory: it
+    /// re-folds the tallied partials with the call the nominal was folded
+    /// with, so a sensitivity divides a real response by the step rather than
+    /// the gap between a multigroup fold and the tally.
+    #[test]
+    fn a_transport_isomeric_job_with_no_step_is_the_nominal() {
+        let edge = |target: &str, branching: f64| ChainReaction {
+            kind: "(n,2n)".to_string(),
+            target: Some(target.to_string()),
+            branching,
+            q_value: None,
+        };
+        let plain = |name: &str, reactions: Vec<ChainReaction>| ChainNuclide {
+            name: name.to_string(),
+            half_life: None,
+            decay_energy: 0.0,
+            reactions,
+            decays: vec![],
+            fission_yields: None,
+            sources: Vec::new(),
+            half_life_uncertainty: None,
+            decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
+        };
+        let chain = Arc::new(HashMap::from([
+            (
+                "Pb208".to_string(),
+                plain("Pb208", vec![edge("Pb207", 1.0), edge("Pb207_m1", 0.0)]),
+            ),
+            ("Pb207".to_string(), plain("Pb207", vec![])),
+            ("Pb207_m1".to_string(), plain("Pb207_m1", vec![])),
+        ]));
+        let mut partials: PartialRates = HashMap::new();
+        partials.entry("Pb208".to_string()).or_default().insert(
+            "(n,2n)".to_string(),
+            vec![
+                ("Pb207".to_string(), 3.0e-24),
+                ("Pb207_m1".to_string(), 1.0e-24),
+            ],
+        );
+        let mut rates: ReactionRates = HashMap::from([(
+            "Pb208".to_string(),
+            HashMap::from([("(n,2n)".to_string(), 4.0e-24)]),
+        )]);
+        let folded = apply_coupled_branching(&chain, &partials, &mut rates);
+        let nominal: PerSpectrum = (rates, HashMap::new(), folded);
+        let st = TransportStatistics {
+            rates: crate::statistical::StatisticalRates::new(
+                &crate::history_statistics::RateCovariance::empty(),
+            ),
+            base_chain: Arc::clone(&chain),
+            partials,
+        };
+
+        let job = transport_isomeric_job(&st, &nominal, "Pb208", "(n,2n)", "Pb207_m1", 1.0);
+        assert_eq!(
+            job.0["Pb208"]["(n,2n)"].to_bits(),
+            nominal.0["Pb208"]["(n,2n)"].to_bits()
+        );
+        for (a, b) in job.2["Pb208"]
+            .reactions
+            .iter()
+            .zip(&nominal.2["Pb208"].reactions)
+        {
+            assert_eq!(
+                a.branching.to_bits(),
+                b.branching.to_bits(),
+                "{:?}",
+                a.target
+            );
+        }
+
+        let material = Material::new(
+            HashMap::from([("Pb208".to_string(), 3.3e-2)]),
+            "atom",
+            "sum",
+            None,
+        )
+        .unwrap();
+        let steps = [TransmuteStep {
+            dt: 3600.0,
+            irradiation: Some((0, 1.0e14)),
+        }];
+        let solve = |ps: &[PerSpectrum]| {
+            densities_of(
+                &replica_steps(
+                    &material,
+                    &steps,
+                    ps,
+                    &chain,
+                    Default::default(),
+                    &ForwardEulerStepper,
+                )
+                .unwrap(),
+            )
+        };
+        let (at_zero, nominal_inventory) = (solve(&[job]), solve(std::slice::from_ref(&nominal)));
+        assert_eq!(at_zero.len(), nominal_inventory.len());
+        for (a, b) in at_zero.iter().zip(&nominal_inventory) {
+            assert_eq!(a.len(), b.len());
+            for (name, n) in a {
+                assert_eq!(n.to_bits(), b[name].to_bits(), "{name}");
+            }
+        }
+
+        // And a step does move the isomer, by (1 - f) of it.
+        let moved = transport_isomeric_job(
+            &st,
+            &nominal,
+            "Pb208",
+            "(n,2n)",
+            "Pb207_m1",
+            1.0 + SENSITIVITY_STEP,
+        );
+        let isomer = |c: &HashMap<String, ChainNuclide>| {
+            c["Pb208"]
+                .reactions
+                .iter()
+                .find(|r| r.target.as_deref() == Some("Pb207_m1"))
+                .unwrap()
+                .branching
+        };
+        let relative = isomer(&moved.2) / isomer(&nominal.2) - 1.0;
+        assert!(
+            (relative / SENSITIVITY_STEP - 0.75).abs() < 1e-3,
+            "{relative}"
+        );
+    }
+
     #[test]
     fn apply_partials_empty_is_identity() {
         let chain = split_chain();

@@ -1407,6 +1407,9 @@ impl PyModel {
     ///           correlations between rates scored by the same histories are
     ///           kept. Each rate's own sigma is read with
     ///           ``get_reaction_rate_uncertainty``;
+    ///         - ``"isomeric_branching"``: the MF=40 covariance of the isomeric
+    ///           partials, folded against the tally's flux shape, scaling the
+    ///           tallied partials before the split is folded from them;
     ///         - ``"cross_sections"``: the ENDF MF=33 covariance, folded against
     ///           the spectrum the tally actually saw;
     ///         - ``"half_life"``: the decay data's half-life sigmas.

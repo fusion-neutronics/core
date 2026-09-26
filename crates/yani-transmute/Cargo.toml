@@ -52,6 +52,10 @@ debug_transmutation = []
 # real converter from the committed ENDF fixture. No cycle: `yamc-convert` does
 # not depend on this crate.
 yamc-convert = { path = "../yamc-convert" }
+# The isomeric-branching tests need a `branching_covariance.arrow`, which they
+# write with the real converter for the same reason. No cycle either:
+# `yani-convert` depends on neither this crate nor anything that does.
+yani-convert = { path = "../yani-convert" }
 lzma-rs = "0.3"
 tempfile = "3"
 # Explicit thread pools for the thread-count determinism test. A dev-dependency

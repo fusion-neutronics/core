@@ -86,11 +86,25 @@ struct Factor {
 pub struct Sampler {
     factors: BTreeMap<String, Factor>,
     pub clipping: Clipping,
+    /// XORed into every name's stream ordinal, so a second source keyed on
+    /// the same nuclide names draws deviates of its own. Zero for the cross
+    /// sections, which keeps their draws what they have always been.
+    stream: u32,
 }
 
 impl Sampler {
-    /// Factorize every nuclide's relative covariance.
+    /// Factorize every nuclide's relative covariance, on the cross-section
+    /// stream.
     pub fn new(covariance: &BTreeMap<String, RateCovariance>) -> Self {
+        Self::with_stream(covariance, 0)
+    }
+
+    /// As [`Sampler::new`], drawing from the streams tagged `stream`.
+    ///
+    /// For a source whose covariance is keyed by the same nuclide names as the
+    /// cross sections': untagged, a parent's MF=40 draw would be its MF=33 draw
+    /// and the two independent evaluations would move together.
+    pub fn with_stream(covariance: &BTreeMap<String, RateCovariance>, stream: u32) -> Self {
         let mut factors = BTreeMap::new();
         let mut clipping = Clipping::default();
 
@@ -172,7 +186,11 @@ impl Sampler {
             factors.insert(name, factor);
         }
 
-        Sampler { factors, clipping }
+        Sampler {
+            factors,
+            clipping,
+            stream,
+        }
     }
 
     /// Whether anything was factorized at all.
@@ -200,7 +218,7 @@ impl Sampler {
             let n = factor.kinds.len();
             // Keyed on the NAME, not on a position, so a nuclide's stream does
             // not move when a different nuclide joins or leaves the material.
-            let seed = yamc_rng::secondary_seed(replica_seed, name_ordinal(name));
+            let seed = yamc_rng::secondary_seed(replica_seed, name_ordinal(name) ^ self.stream);
             let mut state = yamc_rng::expand_seed(seed);
             let z = standard_normals(&mut state, n);
 
@@ -632,6 +650,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Tag zero is the stream the cross sections have always drawn from, so
+    /// adding the tag moved none of their numbers.
+    #[test]
+    fn stream_zero_is_the_old_stream() {
+        let c = cov(&["a", "b"], vec![0.04, 0.01, 0.01, 0.09]);
+        let covariance = BTreeMap::from([("Fe56".to_string(), c)]);
+        let old = Sampler::new(&covariance);
+        let tagged = Sampler::with_stream(&covariance, 0);
+        for replica in 0..16 {
+            let (a, b) = (old.deviates(7, replica), tagged.deviates(7, replica));
+            for (x, y) in a["Fe56"].iter().zip(&b["Fe56"]) {
+                assert_eq!(x.to_bits(), y.to_bits());
+            }
+        }
+    }
+
+    /// A tagged stream for the same name is a different stream: over many
+    /// replicas its deviates are uncorrelated with the untagged ones.
+    #[test]
+    fn a_tagged_stream_is_independent_of_the_cross_section_stream() {
+        let c = cov(&["a"], vec![0.01]);
+        let covariance = BTreeMap::from([("Nb93".to_string(), c)]);
+        let cross_sections = Sampler::new(&covariance);
+        let tagged = Sampler::with_stream(&covariance, 0x150B_4A7C);
+        let n = 20_000;
+        let (mut sx, mut sy, mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        for k in 0..n {
+            let x = cross_sections.deviates(3, k)["Nb93"][0];
+            let y = tagged.deviates(3, k)["Nb93"][0];
+            assert_ne!(x, y);
+            sx += x;
+            sy += y;
+            sxx += x * x;
+            syy += y * y;
+            sxy += x * y;
+        }
+        let nf = n as f64;
+        let cov_xy = sxy / nf - (sx / nf) * (sy / nf);
+        let rho = cov_xy
+            / ((sxx / nf - (sx / nf).powi(2)).sqrt() * (syy / nf - (sy / nf).powi(2)).sqrt());
+        assert!(rho.abs() < 0.03, "rho {rho}");
     }
 
     /// A nuclide with no covariance is passed through untouched.

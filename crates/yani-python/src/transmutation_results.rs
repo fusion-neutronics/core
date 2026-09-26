@@ -233,7 +233,9 @@ impl PyTransmutationResults {
     ///   reaction, variance)``, largest reach first. Within the cross sections
     ///   a nuclide's whole evaluation has ``reaction`` of ``None`` and each
     ///   channel alone names it; a half-life has ``None``. It says which
-    ///   evaluation to look at; the total is the resampled one.
+    ///   evaluation to look at; the total is the resampled one. For
+    ///   ``isomeric_branching``, ``reaction`` is ``"<kind> <target>"``, one
+    ///   MF=10 partial, and ``None`` is the parent's whole MF=40.
     ///
     /// Args:
     ///     material_id: Material ID number.
@@ -612,6 +614,19 @@ impl PyTransmutationResults {
     ///   covariance blocks that were present but not consumed.
     /// - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
     ///   covariance was not positive semi-definite and had to be repaired.
+    /// - ``isomeric_channels_perturbed`` / ``no_isomeric_branching_uncertainty``:
+    ///   with the ``"isomeric_branching"`` source, the overlay channels
+    ///   (``"Nb93 (n,2n)"``) whose split was perturbed from MF=40, and those
+    ///   with a rate that had none to perturb it with: a split MF=9 yields
+    ///   give, a channel without MF=40, or a branching library without the
+    ///   covariance file. ``isomeric_partials_without_covariance`` names the
+    ///   product states of a perturbed channel that have no MF=40 of their own
+    ///   (``"Ag116 (n,n') Ag116_m2"``), ``isomeric_rate_fraction_covered`` the
+    ///   share of each partial rate the MF=40 grids span (keyed
+    ///   ``"Parent kind target"``), ``isomeric_blocks_skipped`` the MF=40
+    ///   blocks present but not used, by reason, ``isomeric_matrices_clipped``
+    ///   the MF=40 matrices repaired, and ``isomeric_partials_sampled`` the
+    ///   partial-rate draws applied.
     /// - ``rates_floored`` / ``rates_sampled``: samples that went negative and
     ///   were truncated at zero, which biases the mean upward when common.
     /// - ``half_lives_perturbed`` / ``no_half_life_uncertainty``: with the

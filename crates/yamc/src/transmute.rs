@@ -83,11 +83,9 @@ impl Model {
     ///   so `total_particles` / `max_runtime` are applied afresh to each
     ///   step's transport solve (a per-step budget, not a whole-run one).
     /// * `uncertainty` - Resample the single transport of independent mode
-    ///   and re-solve (see [`yani_transmute::transport_replicas`]): the
-    ///   statistical covariance of the tallied rates, the MF=33 covariance
-    ///   folded against the tallied spectrum, and the half-lives. `None` is
-    ///   the default path, bit-identical to a build without it; with the
-    ///   coupled method it is an error.
+    ///   and re-solve, for every source [`yani_transmute::transport_replicas`]
+    ///   applies. `None` is the default path, bit-identical to a build without
+    ///   it; with the coupled method it is an error.
     ///
     /// Product cross sections are loaded for the material's whole reachable
     /// closure (`yani::reachable_nuclides`) and then narrowed to the products
@@ -1049,6 +1047,7 @@ impl Model {
                     &timesteps,
                     &source_rates,
                     &chain,
+                    &branch,
                     parts,
                     request,
                 )?;

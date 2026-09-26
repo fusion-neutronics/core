@@ -1233,10 +1233,9 @@ impl PyMaterial {
     ///         steps directly, so its step 0 is the first step.
     ///
     ///     data_uncertainty (DataUncertainty, optional): Ask for nuclear-data
-    ///         uncertainty on the result. The activation cross sections are
-    ///         sampled from their ENDF MF=33 covariance, folded against this
-    ///         material's own spectrum, and the schedule is re-solved until the
-    ///         reported standard deviations settle. Omit it (the default) and
+    ///         uncertainty on the result. Every source ``DataUncertainty`` names
+    ///         is sampled, and the schedule is re-solved until the reported
+    ///         standard deviations settle. Omit it (the default) and
     ///         nothing is read, folded or sampled: the inventories are
     ///         bit-identical either way. Read the sigmas with
     ///         ``get_nuclide_uncertainty``, and what was and was not covered

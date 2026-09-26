@@ -20,6 +20,16 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///
 /// - ``"cross_sections"``: the activation cross sections, sampled from the
 ///   ENDF MF=33 covariance folded against this material's own spectrum;
+/// - ``"isomeric_branching"``: how a reaction splits between a product's
+///   ground and metastable states, from the ENDF MF=40 covariance of the
+///   MF=10 partial cross sections the branching overlay folds, folded against
+///   the same spectrum. The partials are perturbed and split the reaction's
+///   total, which ``"cross_sections"`` perturbs, so MF=40 moves the split and
+///   not the total; ``(n,n')`` has no total of its own, so there MF=40 moves
+///   the isomer's production rate itself. The data state no covariance between
+///   product states and none with MF=33, so neither is assumed. A split given
+///   by MF=9 yields has no covariance format and stays at nominal, reported
+///   in ``no_isomeric_branching_uncertainty``;
 /// - ``"flux_spectrum"``: the spectrum itself, from the per-bin
 ///   ``flux_std_dev`` given on a ``Pulse``;
 /// - ``"half_life"``: every reachable nuclide's half-life, from the decay
@@ -38,12 +48,9 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///   energy never enters the solve, so the inventory and activity are
 ///   untouched.
 ///
-/// Decay branching ratios, fission yields and the isomeric-branching overlay
-/// are held at their evaluated values; they carry uncertainties of their own
-/// that this does not propagate.
+/// Anything a run did not perturb is listed in the report's ``not_perturbed``.
 /// ``TransmutationResults.get_data_uncertainty_info`` says so per material,
-/// along with any nuclide whose evaluation carries no covariance and any
-/// unstable nuclide whose half-life has no stated sigma.
+/// along with every input whose evaluation states no uncertainty.
 ///
 /// Args:
 ///     seed (int): Base seed. A given nuclide's perturbation in a given replica
@@ -229,6 +236,40 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     d.set_item("worst_relative_clip", info.worst_relative_clip)?;
     d.set_item("rates_floored", info.rates_floored)?;
     d.set_item("rates_sampled", info.rates_sampled)?;
+    d.set_item(
+        "isomeric_channels_perturbed",
+        info.isomeric_channels_perturbed
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    d.set_item(
+        "no_isomeric_branching_uncertainty",
+        info.no_isomeric_branching_uncertainty
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    d.set_item(
+        "isomeric_partials_without_covariance",
+        info.isomeric_partials_without_covariance
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    // Keyed "Parent kind target", as rate_fraction_covered is keyed.
+    let isomeric_covered = PyDict::new(py);
+    for ((parent, partial), fraction) in &info.isomeric_rate_fraction_covered {
+        isomeric_covered.set_item(format!("{parent} {partial}"), fraction)?;
+    }
+    d.set_item("isomeric_rate_fraction_covered", isomeric_covered)?;
+    let skipped = PyDict::new(py);
+    for (why, n) in &info.isomeric_blocks_skipped {
+        skipped.set_item(why, n)?;
+    }
+    d.set_item("isomeric_blocks_skipped", skipped)?;
+    d.set_item("isomeric_matrices_clipped", info.isomeric_matrices_clipped)?;
+    d.set_item("isomeric_partials_sampled", info.isomeric_partials_sampled)?;
     d.set_item("spectra_with_flux_sigma", info.spectra_with_flux_sigma)?;
     d.set_item(
         "spectra_without_flux_sigma",
