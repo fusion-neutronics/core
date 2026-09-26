@@ -74,6 +74,23 @@ struct YieldChannel {
     /// Curve grid (incident energy [eV], ascending) and values.
     energy: Vec<f64>,
     values: Vec<f64>,
+    /// Whether this is the part of an isomer-only MF=10 partial above its last
+    /// breakpoint (see [`build_tail_channels`]), which that partial's rate
+    /// carries, rather than an MF=9 yield of its own.
+    tail: bool,
+}
+
+/// How one material scores the part of a moment curve above its last
+/// breakpoint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Tail {
+    /// Folded from the moments with the rest of the curve, held flat (the
+    /// `curve_interp` convention).
+    Flat,
+    /// Scored directly by the yield channel at this index (see
+    /// [`build_tail_channels`]), or by nothing when there is no share of the
+    /// total to hold. The fold stops at the last breakpoint either way.
+    Scored(Option<usize>),
 }
 
 /// A fissionable nuclide of this material whose tabulated fission-yield
@@ -151,9 +168,9 @@ struct MaterialTransmutationData {
     /// isomer-only MF=10 partials above their last breakpoint (see
     /// [`build_tail_channels`]); empty when no branching overlay is configured.
     yield_channels: Vec<YieldChannel>,
-    /// Per moment curve, whether this material scores its part above the last
-    /// breakpoint as a yield channel, so its fold stops at that breakpoint.
-    scored_tails: Vec<bool>,
+    /// Per moment curve, how this material scores its part above the last
+    /// breakpoint.
+    tails: Vec<Tail>,
     /// Per-channel accumulator for the current chunk (f64 as bits), parallel to
     /// `yield_channels`.
     yield_batch: Vec<AtomicU64>,
@@ -384,6 +401,7 @@ fn build_yield_channels(nuclide_names: &[String], branch: &BranchTable) -> Vec<Y
                         mt,
                         energy: c.energy.clone(),
                         values: c.values.clone(),
+                        tail: false,
                     });
                 }
             }
@@ -392,9 +410,10 @@ fn build_yield_channels(nuclide_names: &[String], branch: &BranchTable) -> Vec<Y
     channels
 }
 
-/// For one material, the part of each isomer-only MF=10 partial above its last
-/// breakpoint, scored at the collision energy as a share of the transport
-/// total, and per moment curve whether this material scores it so.
+/// For one material, append to `channels` the part of each isomer-only MF=10
+/// partial above its last breakpoint, scored at the collision energy as a
+/// share of the transport total, and return per moment curve how this material
+/// scores that part.
 ///
 /// Such a partial is a share of its reaction's transport total, and past its
 /// last breakpoint it follows that total at the share it ends on, as the
@@ -413,10 +432,10 @@ fn build_tail_channels(
     curves: &[MomentCurve],
     nuclide_names: &[String],
     material: &Material,
-) -> (Vec<YieldChannel>, Vec<bool>) {
-    let mut channels = Vec::new();
-    let mut scored = vec![false; curves.len()];
-    for (i, c) in curves.iter().enumerate() {
+    channels: &mut Vec<YieldChannel>,
+) -> Vec<Tail> {
+    let mut tails = vec![Tail::Flat; curves.len()];
+    for (c, tail) in curves.iter().zip(&mut tails) {
         if !c.isomer_only || !nuclide_names.contains(&c.parent) {
             continue;
         }
@@ -431,13 +450,14 @@ fn build_tail_channels(
         else {
             continue;
         };
-        scored[i] = true;
+        *tail = Tail::Scored(None);
         let e_last = c.energy[c.energy.len() - 1];
         let share = match reaction.cross_section_at(e_last) {
             Some(total) if total > 0.0 => c.values[c.values.len() - 1] / total,
             _ => continue,
         };
         if share > 0.0 {
+            *tail = Tail::Scored(Some(channels.len()));
             channels.push(YieldChannel {
                 parent: c.parent.clone(),
                 kind: c.kind.clone(),
@@ -452,10 +472,11 @@ fn build_tail_channels(
                 // from its uncollided flux.
                 energy: vec![e_last],
                 values: vec![share],
+                tail: true,
             });
         }
     }
-    (channels, scored)
+    tails
 }
 
 /// Exactly reconstruct `sum(sigma(E_i) * TL_i)` for a piecewise-linear curve
@@ -582,9 +603,12 @@ impl TransmutationTallies {
             let batch_accum: Vec<AtomicU64> = (0..n_bins).map(|_| AtomicU64::new(0)).collect();
 
             let mut yield_channels = build_yield_channels(&nuclide_names, branch);
-            let (tails, scored_tails) =
-                build_tail_channels(&moment_curves, &nuclide_names, material);
-            yield_channels.extend(tails);
+            let tails = build_tail_channels(
+                &moment_curves,
+                &nuclide_names,
+                material,
+                &mut yield_channels,
+            );
             let n_channels = yield_channels.len();
 
             // Fission-yield fold channels (issue #379). Only meaningful when
@@ -623,7 +647,7 @@ impl TransmutationTallies {
                     moment_s0: Mutex::new(vec![0.0; n_moment_bins]),
                     moment_s1: Mutex::new(vec![0.0; n_moment_bins]),
                     yield_channels,
-                    scored_tails,
+                    tails,
                     yield_batch: (0..n_channels).map(|_| AtomicU64::new(0)).collect(),
                     yield_sums: Mutex::new(vec![0.0; n_channels]),
                     fy_channels,
@@ -747,6 +771,9 @@ impl TransmutationTallies {
     /// partial itself. What it cannot see is a fluctuation in the shape of the
     /// spectrum inside one base bin (50 per decade), which matters only where
     /// the curve changes a lot across one bin; the branching curves are smooth.
+    /// An isomer-only partial's part above its last breakpoint is an entry of
+    /// its own (see `build_tail_channels`), so its row is the fold's weights
+    /// up to that breakpoint plus that entry, exactly.
     pub fn get_reaction_rate_covariance(
         &self,
         material_id: u32,
@@ -852,11 +879,17 @@ impl TransmutationTallies {
         }
 
         // MF=10 partials, folded from the moments for the mean as well.
+        let ysums = mat_data
+            .yield_sums
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         let mut suffix_s0 = vec![0.0; s0.len() + 1];
         for g in (0..s0.len()).rev() {
             suffix_s0[g] = suffix_s0[g + 1] + s0[g];
         }
-        for (c, &scored_tail) in self.moment_curves.iter().zip(&mat_data.scored_tails) {
+        for (c, &tail) in self.moment_curves.iter().zip(&mat_data.tails) {
+            let flat_tail = tail == Tail::Flat;
             let exact = fold_curve_from_moments(
                 &c.energy,
                 &c.values,
@@ -864,38 +897,42 @@ impl TransmutationTallies {
                 &s0,
                 &s1,
                 &suffix_s0,
-                !scored_tail,
+                flat_tail,
             );
             labels.push(RateLabel {
                 nuclide: c.parent.clone(),
                 kind: c.kind.clone(),
                 target: Some(c.target.clone()),
             });
-            rates.push(exact * to_rate);
-            // A tail scored as a yield channel is that channel's, below.
+            // A tail scored as a yield channel is that channel's, added below.
             let e_last = c.energy[c.energy.len() - 1];
             let sigma = |e: f64| {
-                if scored_tail && e >= e_last {
+                if !flat_tail && e >= e_last {
                     0.0
                 } else {
                     curve_interp(&c.energy, &c.values, e)
                 }
             };
-            rows.push(if exact > 0.0 {
+            let mut row = if exact > 0.0 {
                 row_for(&sigma, exact)
             } else {
                 Vec::new()
-            });
+            };
+            match tail {
+                Tail::Scored(Some(k)) => {
+                    rates.push((exact + ysums[k]) * to_rate);
+                    row.push((moments.yield_index(k), per_mean));
+                }
+                _ => rates.push(exact * to_rate),
+            }
+            rows.push(row);
         }
 
-        // MF=9 yields and the tails of isomer-only partials: scored directly,
-        // so the weight is exact.
-        let ysums = mat_data
-            .yield_sums
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone();
+        // MF=9 yields: scored directly, so the weight is exact.
         for (k, (ch, &sum)) in mat_data.yield_channels.iter().zip(&ysums).enumerate() {
+            if ch.tail {
+                continue; // its partial's, above
+            }
             labels.push(RateLabel {
                 nuclide: ch.parent.clone(),
                 kind: ch.kind.clone(),
@@ -1033,11 +1070,11 @@ impl TransmutationTallies {
             }
         }
 
-        // Direct continuous-energy scoring of the MF=9 yield channels at the
-        // collision energy (issue #218): the yield weighted by the parent's
-        // transport cross section, using the identical σ(E)·TL machinery as
-        // the totals above so a reaction's final-state partials and its total
-        // see the same flux.
+        // Direct continuous-energy scoring of the MF=9 yield channels, and of
+        // the isomer-only partials' tails, at the collision energy (issue
+        // #218): the yield weighted by the parent's transport cross section,
+        // using the identical σ(E)·TL machinery as the totals above so a
+        // reaction's final-state partials and its total see the same flux.
         for (ch_idx, ch) in mat_data.yield_channels.iter().enumerate() {
             let Some(nd) = material.nuclide_data.get(&ch.parent) else {
                 continue;
@@ -1106,7 +1143,7 @@ impl TransmutationTallies {
                 }
             }
 
-            // Accumulate per-channel MF=9 yields
+            // Accumulate per-channel yields, the MF=9 ones and the tails
             {
                 let mut psums = mat_data
                     .yield_sums
@@ -1584,10 +1621,9 @@ impl TransmutationTallies {
     /// partials is consistent with the tallied totals. MF=10 partials are
     /// folded exactly from the union-grid flux moments (every chain parent);
     /// MF=9 yields come from the directly-scored channels (material nuclides).
-    /// An isomer-only MF=10 partial on one of the material's own nuclides
-    /// comes as two entries for its target, the fold up to its last breakpoint
-    /// and the directly-scored share of the total above it (see
-    /// `build_tail_channels`), which `apply_coupled_branching` sums.
+    /// An isomer-only MF=10 partial on one of the material's own nuclides is
+    /// its fold up to its last breakpoint plus the directly-scored share of
+    /// the total above it (see `build_tail_channels`), one entry.
     /// Zero-rate targets are kept (a zero fraction is information: the flux
     /// never reached that state's threshold); kinds whose targets are all zero
     /// are kept too and resolved by the caller (base split preserved). Returns
@@ -1610,6 +1646,10 @@ impl TransmutationTallies {
         }
         let scale = source_rate / (total_particles as f64 * volume * 1.0e24);
 
+        let ysums = mat_data
+            .yield_sums
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         if !self.moment_curves.is_empty() {
             let s0 = mat_data.moment_s0.lock().unwrap_or_else(|p| p.into_inner());
             let s1 = mat_data.moment_s1.lock().unwrap_or_else(|p| p.into_inner());
@@ -1618,16 +1658,22 @@ impl TransmutationTallies {
             for g in (0..s0.len()).rev() {
                 suffix_s0[g] = suffix_s0[g + 1] + s0[g];
             }
-            for (c, &scored_tail) in self.moment_curves.iter().zip(&mat_data.scored_tails) {
-                let sum = fold_curve_from_moments(
-                    &c.energy,
-                    &c.values,
-                    &self.union_grid,
-                    &s0,
-                    &s1,
-                    &suffix_s0,
-                    !scored_tail,
-                );
+            for (c, &tail) in self.moment_curves.iter().zip(&mat_data.tails) {
+                let fold = |flat_tail: bool| {
+                    fold_curve_from_moments(
+                        &c.energy,
+                        &c.values,
+                        &self.union_grid,
+                        &s0,
+                        &s1,
+                        &suffix_s0,
+                        flat_tail,
+                    )
+                };
+                let sum = match tail {
+                    Tail::Flat => fold(true),
+                    Tail::Scored(k) => fold(false) + k.map_or(0.0, |k| ysums[k]),
+                };
                 out.entry(c.parent.clone())
                     .or_default()
                     .entry(c.kind.clone())
@@ -1636,11 +1682,10 @@ impl TransmutationTallies {
             }
         }
 
-        let ysums = mat_data
-            .yield_sums
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
         for (ch, &sum) in mat_data.yield_channels.iter().zip(ysums.iter()) {
+            if ch.tail {
+                continue; // its partial's, above
+            }
             out.entry(ch.parent.clone())
                 .or_default()
                 .entry(ch.kind.clone())
@@ -1766,7 +1811,7 @@ mod tests {
                 moment_s0: Mutex::new(vec![0.0; n_moment_bins]),
                 moment_s1: Mutex::new(vec![0.0; n_moment_bins]),
                 yield_channels: Vec::new(),
-                scored_tails: vec![false; moment_curves.len()],
+                tails: vec![Tail::Flat; moment_curves.len()],
                 yield_batch: Vec::new(),
                 yield_sums: Mutex::new(Vec::new()),
                 // The fixture tracks only (n,gamma), so nothing fissions.
@@ -2718,8 +2763,9 @@ mod tests {
     /// to its last breakpoint plus, above it, the scored share of the transport
     /// total it ends on, and the split is that over the tallied total. Here the
     /// partial ends at 20 MeV on 1.6 b, 0.8 of a total that falls from 2 b to
-    /// nothing at 30 MeV. The covariance carries the two parts as two entries,
-    /// the fold's row stopping at 20 MeV.
+    /// nothing at 30 MeV. The two parts are reported as one partial, with one
+    /// covariance row: the fold's weights stopping at 20 MeV, and the tail's
+    /// own history entry.
     #[test]
     fn an_isomer_only_partial_scores_its_tail_as_a_share_of_the_total() {
         let (xs_e, xs) = (vec![1.0e7, 2.0e7, 3.0e7], vec![2.0, 2.0, 0.0]);
@@ -2776,15 +2822,16 @@ mod tests {
             per_history(&above),
             per_history(&sigma),
         );
+        let x_partial: Vec<f64> = x_below.iter().zip(&x_above).map(|(b, a)| b + a).collect();
         let sum = |x: &[f64]| x.iter().sum::<f64>() * scale;
 
         let partials = t.get_partial_rates(7, volume, source_rate);
         let parts = &partials["In115"]["(n,2n)"];
-        assert_eq!(parts.len(), 2, "the fold and the tail: {parts:?}");
-        assert!(parts.iter().all(|(target, _)| target == "In114_m1"));
+        assert_eq!(parts.len(), 1, "the fold and the tail, as one: {parts:?}");
+        assert_eq!(parts[0].0, "In114_m1");
         let rel = |a: f64, b: f64| (a - b).abs() / b.abs();
-        assert!(rel(parts[0].1, sum(&x_below)) < 1e-12, "{parts:?}");
-        assert!(rel(parts[1].1, sum(&x_above)) < 1e-12, "{parts:?}");
+        let want = sum(&x_below) + sum(&x_above);
+        assert!(rel(parts[0].1, want) < 1e-12, "{parts:?} vs {want}");
 
         let mut rates = t.get_reaction_rates(7, volume, source_rate);
         let total = rates["In115"]["(n,2n)"];
@@ -2797,25 +2844,22 @@ mod tests {
             .find(|r| r.target.as_deref() == Some("In114_m1"))
             .unwrap()
             .branching;
-        let want = (sum(&x_below) + sum(&x_above)) / sum(&x_total);
+        let want = sum(&x_partial) / sum(&x_total);
         assert!(rel(share, want) < 1e-12, "{share} vs {want}");
 
-        // Two entries under one label, with the rates the accessor reports.
-        // The tail is a history entry of its own, so its variance is exact.
-        // The fold's is its part's alone, to within what one base bin hides:
-        // 20 MeV is not a base-grid edge, so the step to zero there sits
-        // inside a bin, which costs about 3% here. A row reaching past 20 MeV
-        // would spread the fold over bins its part never scores in, and was
-        // 70% out.
+        // One row under the label, with the rate the accessor reports and the
+        // partial's own variance, to within what one base bin hides: 20 MeV is
+        // not a base-grid edge, so the fold's step to zero there sits inside a
+        // bin. The tail is a history entry of its own, so its variance is
+        // exact.
         let rc = t
             .get_reaction_rate_covariance(7, volume, source_rate)
             .expect("statistics are on");
         let at: Vec<usize> = (0..rc.len())
             .filter(|&i| rc.labels[i].target.as_deref() == Some("In114_m1"))
             .collect();
-        assert_eq!(at.len(), 2);
+        assert_eq!(at.len(), 1);
         assert!(rel(rc.rates[at[0]], parts[0].1) < 1e-12);
-        assert!(rel(rc.rates[at[1]], parts[1].1) < 1e-12);
         let per_mean = source_rate / (volume * 1.0e24);
         let variance = |x: &[f64]| {
             let mean = x.iter().sum::<f64>() / n;
@@ -2823,13 +2867,20 @@ mod tests {
                 * per_mean
                 * per_mean
         };
-        for (i, x, tolerance) in [(at[0], &x_below, 0.05), (at[1], &x_above, 1e-12)] {
-            let (got, want) = (rc.covariance(i, i), variance(x));
-            assert!(
-                rel(got, want) < tolerance,
-                "variance {i}: {got:e} vs {want:e}"
-            );
-        }
+        let (got, want) = (rc.covariance(at[0], at[0]), variance(&x_partial));
+        assert!(rel(got, want) < 0.05, "variance: {got:e} vs {want:e}");
+        let moments = t.history_covariance(7).expect("statistics are on");
+        let k = moments
+            .yield_channels
+            .iter()
+            .position(|(_, _, target)| target == "In114_m1")
+            .expect("the tail's entry");
+        let i = moments.yield_index(k);
+        let (got, want) = (
+            moments.covariance_of_mean(i, i) * per_mean * per_mean,
+            variance(&x_above),
+        );
+        assert!(rel(got, want) < 1e-12, "tail variance: {got:e} vs {want:e}");
     }
 
     /// A collision at exactly the partial's last breakpoint, 20 MeV, where

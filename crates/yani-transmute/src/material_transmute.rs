@@ -2211,10 +2211,7 @@ fn refine_chain(
 ///     rates are zero (e.g. flux entirely below threshold) the base split is
 ///     kept, matching the fold's `None` behaviour. Rates for metastable states
 ///     alone are divided by the reaction's tallied total instead, and the
-///     ground state keeps the rest (see `remainder_state`). Their duplicate
-///     entries sum: the tally reports such an MF=10 partial as its fold up to
-///     its last breakpoint and, above it, its share of the total, scored
-///     directly.
+///     ground state keeps the rest (see `remainder_state`).
 pub fn apply_coupled_branching(
     chain: &Arc<HashMap<String, ChainNuclide>>,
     partial_rates: &PartialRates,
