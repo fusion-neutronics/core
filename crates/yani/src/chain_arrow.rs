@@ -795,7 +795,17 @@ pub fn parse_chain_parts(
         load_optional(branch_dir, "branching.arrow", &mut parts.branching)?;
     }
 
-    parse_chain_parts_from_bytes(&parts)
+    let (chain, mut branch) = parse_chain_parts_from_bytes(&parts)?;
+    // The MF=40 covariance is recorded, not read: only an uncertainty run on
+    // the isomeric split opens it. An `.absent` marker, a settled 404 in the
+    // download cache, is not the file.
+    if let Some(branch_dir) = branch_dir {
+        let covariance = branch_dir.join("branching_covariance.arrow");
+        if covariance.is_file() {
+            branch.set_covariance_path(covariance);
+        }
+    }
+    Ok((chain, branch))
 }
 
 /// Write a transmutation chain to the v2 split-subsection layout under `dir`:
@@ -1486,6 +1496,64 @@ mod tests {
         .expect_err("a directory with no decay index must not load")
         .to_string();
         assert!(err.contains("v2 split chain"), "got: {err}");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The covariance path is recorded when the file is there and only then:
+    /// not for a settled-404 marker, and not for a chain built from bytes,
+    /// which has no directory for it to be in.
+    #[test]
+    fn the_covariance_path_is_recorded_only_when_the_file_exists() {
+        let root = std::env::temp_dir().join(format!("yani-branch-cov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut chain: std::collections::HashMap<String, crate::ChainNuclide> =
+            std::collections::HashMap::new();
+        chain.insert(
+            "Nb93".to_string(),
+            crate::ChainNuclide {
+                name: "Nb93".to_string(),
+                half_life: None,
+                half_life_uncertainty: None,
+                decay_energy: 0.0,
+                decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
+                reactions: Vec::new(),
+                decays: Vec::new(),
+                fission_yields: None,
+                sources: Vec::new(),
+            },
+        );
+        super::export_chain_parts(&chain, &root, Some("test")).expect("export succeeds");
+        let with = root.join("with");
+        let marker = root.join("marker");
+        std::fs::create_dir_all(&with).unwrap();
+        std::fs::create_dir_all(&marker).unwrap();
+        // Never opened, so what is in it does not matter here.
+        std::fs::write(with.join("branching_covariance.arrow"), b"not arrow").unwrap();
+        std::fs::write(marker.join("branching_covariance.arrow.absent"), b"").unwrap();
+
+        let load = |branch: &std::path::Path| {
+            parse_chain_parts(&root.join("decay"), None, None, Some(branch))
+                .expect("load succeeds")
+                .1
+        };
+        assert_eq!(
+            load(&with).covariance_path(),
+            Some(with.join("branching_covariance.arrow").as_path())
+        );
+        assert_eq!(load(&marker).covariance_path(), None);
+
+        let mut sections = super::ChainSections::default();
+        sections
+            .insert(
+                "decay",
+                "nuclides.arrow",
+                std::fs::read(root.join("decay/nuclides.arrow")).unwrap(),
+            )
+            .unwrap();
+        let (_, from_bytes) = super::parse_chain_parts_from_bytes(&sections).expect("bytes load");
+        assert_eq!(from_bytes.covariance_path(), None);
 
         std::fs::remove_dir_all(&root).unwrap();
     }

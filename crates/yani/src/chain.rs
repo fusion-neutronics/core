@@ -4,7 +4,7 @@
 /// to avoid re-parsing on repeated transmute() calls.
 use std::collections::HashMap;
 use std::error::Error;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use once_cell::sync::Lazy;
@@ -88,7 +88,52 @@ pub struct BranchCurve {
 /// Isomeric-branching curves keyed by parent nuclide then reaction kind.
 /// `branch_table[parent][kind]` is the list of per-final-state curves for that
 /// reaction. Empty when no `branching/` subsection was supplied.
-pub type BranchTable = HashMap<String, HashMap<String, Vec<BranchCurve>>>;
+///
+/// Dereferences to that map, so it reads like one. It also knows where the
+/// subsection's MF=40 covariance of the partials lives, when the directory it
+/// was loaded from carries `branching_covariance.arrow`. That file is never
+/// opened here: it is large and only an uncertainty run that asks for the
+/// isomeric split reads it, so the table carries the path and nothing else.
+#[derive(Clone, Debug, Default)]
+pub struct BranchTable {
+    curves: HashMap<String, HashMap<String, Vec<BranchCurve>>>,
+    covariance_path: Option<PathBuf>,
+}
+
+impl BranchTable {
+    /// An empty table with no covariance.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Where `branching_covariance.arrow` is, when the subsection has one.
+    ///
+    /// `None` for a subsection without MF=40, for a directory published before
+    /// the file existed, and for a table built from bytes, which is how the
+    /// browser loads a chain.
+    pub fn covariance_path(&self) -> Option<&Path> {
+        self.covariance_path.as_deref()
+    }
+
+    /// Record where the covariance is. Nothing is read.
+    pub fn set_covariance_path(&mut self, path: PathBuf) {
+        self.covariance_path = Some(path);
+    }
+}
+
+impl std::ops::Deref for BranchTable {
+    type Target = HashMap<String, HashMap<String, Vec<BranchCurve>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.curves
+    }
+}
+
+impl std::ops::DerefMut for BranchTable {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.curves
+    }
+}
 
 /// A parsed transmutation chain plus its optional isomeric-branching overlay.
 ///
