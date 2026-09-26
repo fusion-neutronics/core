@@ -1104,8 +1104,8 @@ pub struct TransportTallied {
     pub partials: PartialRates,
     /// Fission-yield spectrum weights.
     pub fy_weights: FissionYieldWeights,
-    /// The tallied flux shape, for folding MF=33 covariance against. Its
-    /// magnitude does not matter; the fold is relative.
+    /// The tallied flux shape, for folding the MF=33 and MF=40 covariances
+    /// against. Its magnitude does not matter; the fold is relative.
     pub spectrum: MultigroupSpectrum,
     /// The statistical covariance of `rates` and `partials`, when the tally
     /// carried history statistics.
@@ -3226,7 +3226,6 @@ mod tests {
         assert!((get("X_m1") - 0.25).abs() < 1e-12, "got {}", get("X_m1"));
     }
 
-    /// Empty partial rates return the original chain Arc untouched.
     /// A transport-path isomeric attribution job with no step is the nominal,
     /// bit for bit, in the rates, the folded split and the inventory: it
     /// re-folds the tallied partials with the call the nominal was folded
@@ -3357,6 +3356,7 @@ mod tests {
         );
     }
 
+    /// Empty partial rates return the original chain Arc untouched.
     #[test]
     fn apply_partials_empty_is_identity() {
         let chain = split_chain();
