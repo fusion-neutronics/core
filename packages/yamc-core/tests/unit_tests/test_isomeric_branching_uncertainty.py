@@ -5,14 +5,20 @@ The numbers are pinned in Rust
 ``branching_covariance.arrow`` is written with the real converter. What is
 pinned here is what a Python caller meets: the source is offered, the report
 carries its keys with the types a caller reads them as, it says what it held
-at nominal, and asking for it moves no mean. These runs have no branching
-overlay, so there is no MF=40 to sample and every split is the chain's own.
+at nominal, and asking for it moves no mean. Most runs here have no branching
+overlay, so there is no MF=40 to sample and every split is the chain's own;
+one converts TENDL-2017 Nb93's MF=10 and MF=40 from the committed fixture and
+samples them.
 """
+
+import lzma
+from pathlib import Path
 
 import pytest
 import yamc
 
 NUC_DATA = "tests"
+FIXTURES = Path(__file__).resolve().parents[4] / "crates" / "endf" / "fixtures"
 DAY = 86400.0
 
 ENERGY_GROUPS = [1e-5, 0.625, 1e5, 2e7]
@@ -125,3 +131,67 @@ def test_the_means_are_unchanged_by_asking_for_it():
     assert a.keys() == b.keys()
     for name in a:
         assert a[name] == b[name], f"{name} moved when the source was switched on"
+
+
+def _nb93_overlay(tmp_path):
+    """TENDL-2017 Nb93's isomeric branching and its MF=40, converted."""
+    inputs = tmp_path / "endf"
+    inputs.mkdir()
+
+    def plain(name):
+        target = inputs / name.removesuffix(".xz")
+        target.write_bytes(lzma.decompress((FIXTURES / name).read_bytes()))
+        return str(target)
+
+    out = tmp_path / "tendl-2017"
+    yamc.convert_branching(
+        neutron_files=[plain("n-041_Nb_093_tendl2017_trimmed.endf.xz")],
+        decay_files=[
+            plain(name)
+            for name in (
+                "dec-041_Nb_092.endf.xz",
+                "dec-041_Nb_092m1.endf.xz",
+                "dec-041_Nb_093m1.endf.xz",
+            )
+        ],
+        output_path=str(out),
+        library="tendl-2017",
+    )
+    assert (out / "branching" / "branching_covariance.arrow").is_file()
+    return out
+
+
+def test_with_mf40_the_split_is_sampled(tmp_path):
+    # Nb93 (n,2n) splits between Nb92 and Nb92_m1 by two MF=10 partials, each
+    # with an MF=40 block of its own, so this run draws them.
+    yamc.transmutation_branch_ratios = str(_nb93_overlay(tmp_path))
+    yamc.cross_section_data = "endf-b8.1"
+    niobium = yamc.Material(
+        composition={"Nb93": 1.0},
+        density=8.57,
+        name="niobium",
+        volume=1.0,
+        temperature=294,
+    )
+    results = niobium.transmute(
+        schedule=_schedule(),
+        data_uncertainty=yamc.DataUncertainty(
+            seed=1, samples=8, sources=["isomeric_branching"]
+        ),
+    )
+    info = results.get_data_uncertainty_info(niobium.id or 0)
+    assert "Nb93 (n,2n)" in info["isomeric_channels_perturbed"]
+    assert info["isomeric_partials_sampled"] > 0
+    assert (
+        "isomeric-branching x cross-section correlation (none published)"
+        in info["not_perturbed"]
+    )
+    assert "isomeric branching (MF=9/MF=10)" not in info["not_perturbed"]
+    # Keyed "Parent kind target" at this boundary, a (parent, label) pair in
+    # Rust.
+    covered = info["isomeric_rate_fraction_covered"]
+    assert 0.0 < covered["Nb93 (n,2n) Nb92_m1"] <= 1.0, covered
+    assert all(isinstance(v, int) for v in info["isomeric_blocks_skipped"].values())
+    assert (
+        results.get_nuclide_uncertainty(niobium.id or 0, "Nb92_m1", 1) > 0.0
+    )
