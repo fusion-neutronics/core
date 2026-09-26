@@ -736,12 +736,14 @@ pub struct Nuclide {
     pub name: String,
     /// Half-life in seconds. `None` for a stable nuclide.
     pub half_life: Option<f64>,
-    /// The evaluation's stated standard deviation on the half-life, in seconds.
+    /// The evaluation's standard deviation on the half-life, in seconds,
+    /// exactly as MT=457 writes it. `None` where there is no half-life.
     ///
-    /// `None` where the evaluation published none, which is NOT zero: an
-    /// unstated uncertainty and one measured to be negligible are different
-    /// claims, and a consumer that cannot tell them apart reports the first
-    /// as confidence (issue #515).
+    /// A 0.0 is kept as 0.0. It is how the format says "not stated" (292 of
+    /// the 3561 half-lives in ENDF/B-VIII.1), and a consumer must read it
+    /// that way: an unstated uncertainty is not one measured to be
+    /// negligible, and reporting the first as the second is confidence the
+    /// evaluation never claimed (issue #515).
     pub half_life_uncertainty: Option<f64>,
     /// Average energy per decay in eV.
     pub decay_energy: f64,
@@ -749,21 +751,23 @@ pub struct Nuclide {
     ///
     /// Quadrature over the three recoverable-heat components, which is what
     /// MT=457 supports: it publishes a sigma per component and no covariance
-    /// between them. `None` where the evaluation stated none, which is not
-    /// zero.
+    /// between them. `None` for a nuclide with no decay scheme. A 0.0 is the
+    /// quadrature of components whose sigmas the tape writes as 0.0, the
+    /// format's "not stated", and is to be read the same way.
     pub decay_energy_uncertainty: Option<f64>,
     /// `decay_energy` split into its three recoverable-heat components, in
     /// [`crate::decay::DECAY_HEAT_ENERGY_NAMES`] order: light particles (beta
     /// and conversion or Auger electrons), electromagnetic (gammas and x-rays)
     /// and heavy particles (alphas, protons, neutrons, fragments). Each is
-    /// `(energy [eV], sigma [eV])`, the sigma `None` where the evaluation
-    /// stated none. `None` for a component the evaluation did not give, which
-    /// is not the same as one it gave as zero.
+    /// `(energy [eV], sigma [eV])` exactly as the tape writes it, so a sigma
+    /// of 0.0 is the format's "not stated" and is kept as 0.0. `None` for a
+    /// component the evaluation did not give, which is not the same as one it
+    /// gave as zero.
     ///
     /// The components have different uncertainties and different consumers:
     /// a decay heat split into its parts, or a gamma-only heat for shielding,
     /// cannot be recovered from the total.
-    pub decay_energy_components: [Option<(f64, Option<f64>)>; 3],
+    pub decay_energy_components: [Option<(f64, f64)>; 3],
     /// Where `decay_energy` came from: [`DECAY_ENERGY_EVALUATED`] for an
     /// evaluated decay scheme, [`DECAY_ENERGY_PLACEHOLDER`] for the Q/3
     /// stand-in some libraries write for nuclides nobody has evaluated (see
@@ -983,8 +987,8 @@ impl Chain {
                 .replaced
                 .push((nuclide.name.clone(), nuclide.decay_energy, energy));
             nuclide.decay_energy = energy;
-            nuclide.decay_energy_uncertainty = (sigma > 0.0).then_some(sigma);
-            nuclide.decay_energy_components = components_of(candidate);
+            nuclide.decay_energy_uncertainty = Some(sigma);
+            nuclide.decay_energy_components = candidate.decay_energy_components();
             nuclide.decay_energy_source = Some(format!("filled:{library}"));
         }
         Ok(report)
@@ -1057,21 +1061,17 @@ impl Chain {
             let half_life = data.half_life.map(|(t, _)| t).unwrap_or(0.0);
             if !data.nuclide.stable && half_life != 0.0 {
                 nuclide.half_life = Some(half_life);
-                // The sigma sits beside the half-life in MF=8 MT=457. A zero
-                // there is how the format says "not stated": an evaluation
-                // that had measured the uncertainty to be zero would be
-                // claiming an exact half-life, which nothing does. Mapping it
-                // straight through would make `Some(0.0)` -- known to be
-                // exact -- out of 292 of the 3562 unstable nuclides in
-                // ENDF/B-8.1, which is the confidence this column exists to
-                // avoid manufacturing.
-                nuclide.half_life_uncertainty = data.half_life.map(|(_, s)| s).filter(|s| *s > 0.0);
+                // The sigmas are kept as the tape writes them, zeros included.
+                // A zero is how MT=457 says "not stated", and it is the
+                // readers' job to take it that way: turning it into a null here
+                // made the published file say something the tape does not.
+                nuclide.half_life_uncertainty = data.half_life.map(|(_, s)| s);
                 // One call, so the value and its sigma cannot come from two
                 // different evaluations of the same quadrature.
                 let (energy, energy_sigma) = data.decay_energy();
                 nuclide.decay_energy = energy;
-                nuclide.decay_energy_uncertainty = (energy_sigma > 0.0).then_some(energy_sigma);
-                nuclide.decay_energy_components = components_of(data);
+                nuclide.decay_energy_uncertainty = Some(energy_sigma);
+                nuclide.decay_energy_components = data.decay_energy_components();
                 nuclide.decay_energy_source = Some(
                     if data.mean_energy_placeholder {
                         DECAY_ENERGY_PLACEHOLDER
@@ -1441,13 +1441,6 @@ pub fn replace_missing_fpy(
     }
 
     "U235".to_string()
-}
-
-/// A decay's three recoverable-heat components, `(energy, sigma)` each, the
-/// sigma `None` where the evaluation wrote zero (the format's "not stated").
-fn components_of(data: &crate::decay::Decay) -> [Option<(f64, Option<f64>)>; 3] {
-    data.decay_energy_components()
-        .map(|c| c.map(|(energy, sigma)| (energy, (sigma > 0.0).then_some(sigma))))
 }
 
 #[cfg(test)]

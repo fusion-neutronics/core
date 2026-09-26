@@ -223,7 +223,7 @@ pub fn write_decay(
         decay_energy_sigmas.push(n.decay_energy_uncertainty);
         for (c, part) in n.decay_energy_components.iter().enumerate() {
             component_energies[c].push(part.map(|(e, _)| e));
-            component_sigmas[c].push(part.and_then(|(_, s)| s));
+            component_sigmas[c].push(part.map(|(_, s)| s));
         }
     }
     write_section(

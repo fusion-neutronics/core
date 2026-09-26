@@ -892,8 +892,8 @@ pub fn export_chain_parts<P: AsRef<Path>>(
                 None => hl_b.append_null(),
             }
             de_b.append_value(nuc.decay_energy);
-            // Null rather than zero where the evaluation stated nothing, so a
-            // round trip cannot turn "unknown" into "known to be exact".
+            // Written back as read: null stays null and a stored 0.0 stays
+            // 0.0, so a round trip changes nothing a reader could tell apart.
             match nuc.half_life_uncertainty {
                 Some(sigma) => hl_sigma_b.append_value(sigma),
                 None => hl_sigma_b.append_null(),

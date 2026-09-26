@@ -184,7 +184,7 @@ fn the_decay_energy_split_survives() {
                 (None, None) => {}
                 (Some((energy, sigma)), Some(part)) => {
                     assert_eq!(part.energy, *energy, "{}", written.name);
-                    assert_eq!(part.uncertainty, *sigma, "{} sigma", written.name);
+                    assert_eq!(part.uncertainty, Some(*sigma), "{} sigma", written.name);
                 }
                 _ => panic!("{}: a component appeared or vanished", written.name),
             }
@@ -331,6 +331,60 @@ fn every_branching_sigma_is_written_as_the_tape_gives_it() {
     assert_eq!(dbr("Cs137"), [Some(1.999988e-3), Some(1.999988e-3)]);
     assert_eq!(dbr("In116"), [Some(6.0e-5), Some(6.0e-5)]);
     assert_eq!(dbr("In116_m1"), [Some(0.0)]);
+    let _ = std::fs::remove_dir_all(&c.dir);
+}
+
+/// Every half-life and decay-energy component sigma in the written file is
+/// the tape's own number, the zeros included.
+///
+/// The converter used to write MT=457's 0.0 ("not stated") as null, which is
+/// an interpretation rather than the data: the file then said something the
+/// tape does not. It now stores the tape's numbers, as the dBR column does.
+#[test]
+fn every_nuclide_sigma_is_written_as_the_tape_gives_it() {
+    let c = convert("literal");
+    let tapes = tapes();
+
+    let nuclides = c.dir.join("decay/nuclides.arrow");
+    let names = string_column(&nuclides, "name");
+    let (half_life_sigmas, _) = float_column(&nuclides, "half_life_uncertainty");
+    let component_sigmas: Vec<Vec<Option<f64>>> = ["beta", "gamma", "alpha"]
+        .iter()
+        .map(|c| float_column(&nuclides, &format!("decay_energy_{c}_uncertainty")).0)
+        .collect();
+    let mut literal_zero_components = 0;
+    for (i, name) in names.iter().enumerate() {
+        let tape = &tapes[name];
+        let unstable = !tape.nuclide.stable && tape.half_life.is_some_and(|(t, _)| t != 0.0);
+        assert_eq!(
+            half_life_sigmas[i],
+            unstable.then(|| tape.half_life.expect("unstable").1),
+            "{name}: the half-life sigma is not the tape's"
+        );
+        let parts = tape.decay_energy_components();
+        for (c, column) in component_sigmas.iter().enumerate() {
+            let expected = if unstable {
+                parts[c].map(|(_, s)| s)
+            } else {
+                None
+            };
+            assert_eq!(column[i], expected, "{name} component {c} sigma");
+            literal_zero_components += usize::from(column[i] == Some(0.0));
+        }
+    }
+    assert!(
+        literal_zero_components > 0,
+        "no component sigma the tape writes as 0.0 (Cs137's alpha is one), so \
+         nothing here shows a zero surviving as a zero"
+    );
+
+    let (back, _) = yani::parse_chain_parts(&c.dir.join("decay"), None, None, None)
+        .expect("yani reads the converted chain");
+    assert_eq!(
+        back["Cs137"].decay_energy_components[2].map(|p| p.uncertainty),
+        Some(Some(0.0)),
+        "Cs137's alpha component is 0.0 +- 0.0 on the tape"
+    );
     let _ = std::fs::remove_dir_all(&c.dir);
 }
 

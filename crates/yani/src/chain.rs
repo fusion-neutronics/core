@@ -291,8 +291,9 @@ pub const DECAY_ENERGY_COMPONENTS: [&str; 3] = ["beta", "gamma", "alpha"];
 pub struct DecayEnergyComponent {
     /// Mean energy per decay [eV].
     pub energy: f64,
-    /// The evaluation's standard deviation on it [eV], `None` where it
-    /// stated none, which is not zero.
+    /// The evaluation's standard deviation on it [eV], as the file stores it.
+    /// `None` and `Some(0.0)` both mean none was stated (0.0 is how MT=457
+    /// writes that), never that the energy is exact.
     pub uncertainty: Option<f64>,
 }
 
@@ -303,18 +304,23 @@ pub struct ChainNuclide {
     pub name: String,
     /// Half-life in seconds (None for stable nuclides)
     pub half_life: Option<f64>,
-    /// The evaluation's standard deviation on the half-life, in seconds.
+    /// The evaluation's standard deviation on the half-life, in seconds, as
+    /// the file stores it.
     ///
-    /// `None` where none was published or the file predates the column,
-    /// which is not the same as zero (issue #515).
+    /// `None` where the file has no value or predates the column, and
+    /// `Some(0.0)` where the evaluation wrote 0.0, which is how MT=457 says
+    /// "not stated". Both are an unstated sigma and neither is zero: every
+    /// consumer takes a sigma only when it is positive (issue #515).
     pub half_life_uncertainty: Option<f64>,
     /// Mean decay energy released per decay [eV].
     pub decay_energy: f64,
     /// The evaluation's standard deviation on `decay_energy`, in eV.
     ///
-    /// `None` where none was published or the file predates the column. Decay
-    /// heat is `activity * decay_energy`, so this scales the reported watts
-    /// directly rather than diluting through a chain (issue #515).
+    /// `None` where the file has no value or predates the column; `Some(0.0)`
+    /// where every component's sigma was written as 0.0. Both mean not
+    /// stated, as for `half_life_uncertainty`. Decay heat is
+    /// `activity * decay_energy`, so this scales the reported watts directly
+    /// rather than diluting through a chain (issue #515).
     pub decay_energy_uncertainty: Option<f64>,
     /// `decay_energy` split into its recoverable-heat components, in
     /// [`DECAY_ENERGY_COMPONENTS`] order (beta, gamma, alpha), each with the

@@ -146,6 +146,19 @@ def test_decay_mode_sigmas_are_stored_as_the_tape_gives_them(converted):
     assert dbr["In116_m1"] == [0.0]
 
 
+def test_nuclide_sigmas_are_stored_as_the_tape_gives_them(converted):
+    """A decay-energy sigma the tape writes as 0.0 is 0.0 in the file too."""
+    pytest.importorskip("pyarrow")
+    import pyarrow.ipc as ipc
+
+    out, _ = converted
+    nuclides = ipc.open_file(out / "decay" / "nuclides.arrow").read_all()
+    row = nuclides.column("name").to_pylist().index("Cs137")
+    # Cs137 emits no heavy particles: the tape gives 0.0 +- 0.0.
+    assert nuclides.column("decay_energy_alpha")[row].as_py() == 0.0
+    assert nuclides.column("decay_energy_alpha_uncertainty")[row].as_py() == 0.0
+
+
 def test_missing_inputs_are_refused(tmp_path):
     """A partial chain is a wrong chain, not a smaller one."""
     with pytest.raises(ValueError, match="decay_files"):
