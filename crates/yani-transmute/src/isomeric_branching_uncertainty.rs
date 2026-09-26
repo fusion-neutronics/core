@@ -17,6 +17,8 @@
 //! labelled `"kind target"`. The labels are every partial the branch table has
 //! a usable MF=40 block for, sorted, and they do not depend on the spectrum:
 //! a partial below threshold in one spectrum keeps its place with a zero row.
+//! Nor on the material: an isomer-only list whose transport total a material
+//! does not load keeps its places the same way.
 //! That is what makes one MF=40 partial move together across the spectra of a
 //! schedule, as one evaluation must, the way MF=33's kinds come from the
 //! chain's topology rather than from which rates are non-zero.
@@ -132,12 +134,17 @@ enum Form {
         ground: String,
         whole: (Vec<f64>, Vec<f64>),
     },
+    /// Metastable states only, with no transport total loaded to take shares
+    /// of. The nominal fold leaves the chain's split in place and so does
+    /// every replica, but the states keep their labels, at no rate, so which
+    /// deviate a parent's partial draws does not depend on the material.
+    NoTotal,
 }
 
 /// One product state of a reaction, with the curves the fold reads for it:
 /// one normally, several where the table carries duplicates for one target,
 /// each continued along the transport total for an isomer-only list as the
-/// fold continues it.
+/// fold continues it, and none where there is no total to continue along.
 struct State {
     target: String,
     label: String,
@@ -484,6 +491,7 @@ impl IsomericSampling {
                         }
                         split.remainder = Some(ground.clone());
                     }
+                    Form::NoTotal => continue,
                 }
                 fractions
                     .entry(name.clone())
@@ -617,8 +625,9 @@ impl IsomericSampling {
 
 /// A reaction's partials, if its split is made of any: the MF=10 curves of
 /// the reaction, grouped by target in the table's order. `None` for a split
-/// only MF=9 yields give, and for an isomer-only list whose transport total is
-/// not loaded, which the nominal fold leaves at the base split.
+/// only MF=9 yields give. The material decides only how an isomer-only list's
+/// curves are continued, never which states there are, so a parent has the
+/// same labels in every material.
 fn channel(
     material: &Material,
     chain: &Arc<HashMap<String, ChainNuclide>>,
@@ -643,13 +652,13 @@ fn channel(
             kind,
             curves.iter().map(|c| c.target.as_str()),
         ) {
-            Some(ground) => {
-                let r = transport_reaction(material, parent, kind)?;
-                Form::OfWhole {
+            Some(ground) => match transport_reaction(material, parent, kind) {
+                Some(r) => Form::OfWhole {
                     ground,
                     whole: (r.energy.to_vec(), r.cross_section.to_vec()),
-                }
-            }
+                },
+                None => Form::NoTotal,
+            },
             None => Form::Among,
         }
     };
@@ -657,16 +666,17 @@ fn channel(
     for c in cross {
         let curve = match &form {
             Form::OfWhole { whole, .. } => {
-                along_the_total(&c.energy, &c.values, &whole.0, &whole.1)
+                Some(along_the_total(&c.energy, &c.values, &whole.0, &whole.1))
             }
-            _ => (c.energy.clone(), c.values.clone()),
+            Form::NoTotal => None,
+            _ => Some((c.energy.clone(), c.values.clone())),
         };
         match states.iter_mut().find(|s| s.target == c.target) {
-            Some(s) => s.curves.push(curve),
+            Some(s) => s.curves.extend(curve),
             None => states.push(State {
                 target: c.target.clone(),
                 label: label(kind, &c.target),
-                curves: vec![curve],
+                curves: curve.into_iter().collect(),
             }),
         }
     }
@@ -970,6 +980,100 @@ mod tests {
         // A scale of one is the nominal split.
         let (_, _, same) = iso.scaled(0, "Pb208", 0, 1.0, &per_spectrum[0], &chain);
         assert!((branching(&same, "Pb207_m1") - 0.25).abs() < 1e-15);
+    }
+
+    /// A parent's labels come from the branch table and its MF=40, not from
+    /// what the material loads, so each partial draws the same deviate in
+    /// every material. Reached without its cross sections, Pb208 has no
+    /// (n,2n) total for its isomer-only list to take a share of, and that
+    /// label stays at no rate; loaded, the same label has one. (n,n') Pb208_m1
+    /// is label 1 either way.
+    #[test]
+    fn a_parents_labels_do_not_depend_on_what_the_material_loads() {
+        let chain = Arc::new(HashMap::from([
+            (
+                "Pb208".to_string(),
+                nuclide(
+                    "Pb208",
+                    vec![
+                        ("(n,2n)", "Pb207", 1.0),
+                        ("(n,2n)", "Pb207_m1", 0.0),
+                        ("(n,n')", "Pb208_m1", 1.0),
+                    ],
+                ),
+            ),
+            ("Pb207".to_string(), nuclide("Pb207", vec![])),
+            ("Pb207_m1".to_string(), nuclide("Pb207_m1", vec![])),
+            ("Pb208_m1".to_string(), nuclide("Pb208_m1", vec![])),
+        ]));
+        let mut branch = BranchTable::new();
+        let kinds = branch.entry("Pb208".to_string()).or_default();
+        kinds.insert("(n,2n)".to_string(), vec![flat("Pb207_m1", 0.5)]);
+        kinds.insert("(n,n')".to_string(), vec![flat("Pb208_m1", 0.3)]);
+        let mut inelastic = self_block("Pb208", "(n,n')", "Pb208_m1", 0.01);
+        inelastic.block.mt = 4;
+        inelastic.block.mt1 = 4;
+        let covariance = BranchingCovariance::from_blocks(vec![
+            self_block("Pb208", "(n,2n)", "Pb207_m1", 0.01),
+            inelastic,
+        ]);
+        let spectrum = fourteen_mev();
+        let sample = |m: &Material, mut rates: ReactionRates| {
+            let folded = crate::material_transmute::fold_branching_into_chain(
+                m, &chain, &branch, &spectrum, &mut rates,
+            );
+            let per_spectrum = vec![(rates, HashMap::new(), folded)];
+            IsomericSampling::new(
+                Some(&covariance),
+                m,
+                &chain,
+                &chain,
+                &branch,
+                std::slice::from_ref(&spectrum),
+                &per_spectrum,
+                false,
+            )
+        };
+        let labels = ["(n,2n) Pb207_m1", "(n,n') Pb208_m1"].map(String::from);
+
+        let bare = sample(&material("Pb208"), HashMap::new());
+        assert_eq!(bare.parents["Pb208"].labels, labels);
+        assert!(
+            bare.report.blocks_skipped.is_empty(),
+            "{:?}",
+            bare.report.blocks_skipped
+        );
+        assert_eq!(bare.spectra[0].partials["Pb208"][&labels[0]], 0.0);
+        assert!(bare.report.channels_perturbed.contains("Pb208 (n,n')"));
+
+        let Some(path) = yamc_test_cache::nuclide("Pb208") else {
+            eprintln!("skipping the loaded half -- Pb208 fixture absent");
+            return;
+        };
+        let mut m = material("Pb208");
+        m.set_temperature("294");
+        m.read_nuclear_data(&HashMap::from([("Pb208".to_string(), path)]), None)
+            .expect("read nuclear data");
+        let loaded = sample(
+            &m,
+            HashMap::from([(
+                "Pb208".to_string(),
+                HashMap::from([("(n,2n)".to_string(), 2.0e-24)]),
+            )]),
+        );
+        assert_eq!(loaded.parents["Pb208"].labels, labels);
+        assert!(loaded.spectra[0].partials["Pb208"][&labels[0]] > 0.0);
+        let (_, l_bare) = bare.factor(0, "Pb208").expect("the (n,n') partial");
+        let (_, l_loaded) = loaded.factor(0, "Pb208").expect("both partials");
+        let sigma = |l: &[f64]| l[2..4].iter().map(|v| v * v).sum::<f64>().sqrt();
+        for replica in 0..64 {
+            let a = bare.spectra[0].sampler.deviates(9, replica)["Pb208"][1] / sigma(l_bare);
+            let b = loaded.spectra[0].sampler.deviates(9, replica)["Pb208"][1] / sigma(l_loaded);
+            assert!(
+                (a - b).abs() <= 4.0 * f64::EPSILON * a.abs(),
+                "replica {replica}: {a} against {b}"
+            );
+        }
     }
 
     /// One MF=40 partial draws one deviate per replica in every spectrum of
