@@ -368,9 +368,11 @@ impl YaniSession {
     ///
     /// Returns one entry per step: cumulative time, total activity, decay heat
     /// and contact dose rate, each also broken down by nuclide, the atom
-    /// densities, and the decay photon line spectrum. Everything the plots
-    /// need, in one call, so the host does not pay a boundary crossing per
-    /// series.
+    /// densities, the decay photon line spectrum, and the photon continua
+    /// apart from it (`photon_continua`: per nuclide, energies in eV, rates in
+    /// photons/s/eV, the interpolation law, and the emission rate, null where
+    /// the law is not stated). Everything the plots need, in one call, so the
+    /// host does not pay a boundary crossing per series.
     pub fn run(&mut self, spectra_json: &str, schedule_json: &str) -> Result<String, String> {
         // Taken apart before `material` below borrows the same `self` mutably.
         // The chain itself is an `Arc`, so only the branching overlay is copied.
@@ -418,6 +420,22 @@ impl YaniSession {
             let activity = yani_decay::activity_by_nuclide(&densities, volume, &chain);
             let heat = yani_decay::decay_heat_by_nuclide(&densities, volume, &chain);
             let lines = yani_decay::decay_photon_lines(&densities, volume, &chain);
+            // Apart from the lines, because a continuum's values are per eV. A
+            // continuum whose law the data does not state has no emission
+            // rate, and says so with a null rather than a number.
+            let continua: Vec<serde_json::Value> =
+                yani_decay::decay_photon_continua(&densities, volume, &chain)
+                    .into_iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "nuclide": c.nuclide,
+                            "interpolation": c.interpolation.map(|law| law.name()),
+                            "emission_rate": c.emission_rate().ok(),
+                            "energies": c.energies,
+                            "rates": c.rates,
+                        })
+                    })
+                    .collect();
             // Unlike the three above, this one takes no volume: the slab
             // estimate is intensive. It can fail -- on an element with no
             // attenuation data -- and that propagates rather than reading as
@@ -444,6 +462,7 @@ impl YaniSession {
                 "atoms_per_barn_cm": densities,
                 "photon_energy": lines.iter().map(|(e, _)| *e).collect::<Vec<f64>>(),
                 "photon_intensity": lines.iter().map(|(_, i)| *i).collect::<Vec<f64>>(),
+                "photon_continua": continua,
                 "contact_dose": yani_decay::total(&contact_dose),
                 "contact_dose_by_nuclide": contact_dose,
             }));

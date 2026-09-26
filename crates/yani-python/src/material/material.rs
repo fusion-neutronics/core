@@ -881,6 +881,9 @@ impl PyMaterial {
     /// ascending in energy. Stable nuclides, nuclides the chain does not know
     /// and non-photon sources contribute nothing.
     ///
+    /// Lines only. Part of some decay spectra is a continuum, a density per eV
+    /// rather than a set of lines, and ``decay_photon_continua()`` returns it.
+    ///
     /// The two lists are the ``(x, p)`` pair the source distributions take, so
     /// the spectrum round-trips straight into a photon transport run:
     ///
@@ -906,6 +909,47 @@ impl PyMaterial {
         Ok(lines.into_iter().unzip())
     }
 
+    /// The decay photon continua of the current inventory, one per nuclide
+    /// and continuum, in nuclide-name order.
+    ///
+    /// The part of a decay spectrum ENDF gives as a density over energy rather
+    /// than as lines, which ``decay_photon_spectrum()`` does not include. Each
+    /// continuum keeps its own energy grid and interpolation law, and its
+    /// rates are photons/s/eV (or per cm³ or per g, following ``per``), so
+    /// they are not line rates; ``emission_rate`` is the integral. A material
+    /// whose nuclides have no continuum returns an empty list.
+    ///
+    /// Args:
+    ///     per (str | None): None for the whole material, which needs a
+    ///         ``volume``, or ``'cm3'`` or ``'g'``, as for
+    ///         ``decay_photon_spectrum()``.
+    ///
+    /// Returns:
+    ///     list[PhotonContinuum]: The continua, each with its nuclide,
+    ///     energies, rates, interpolation law and emission rate.
+    ///
+    /// Examples:
+    ///     >>> for continuum in activated.decay_photon_continua():
+    ///     ...     print(continuum.nuclide, continuum.emission_rate)
+    #[pyo3(signature = (*, per=None))]
+    fn decay_photon_continua(
+        &self,
+        per: Option<&str>,
+    ) -> PyResult<Vec<super::photon_continuum::PyPhotonContinuum>> {
+        let volume = self.scale_for(per, "decay_photon_continua")?;
+        let atom_densities = self
+            .internal
+            .get_atoms_per_barn_cm()
+            .map_err(PyValueError::new_err)?;
+        let chain = crate::distribution::resolve_chain()?.chain;
+        Ok(
+            yani_decay::decay_photon_continua(&atom_densities, volume, &chain)
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        )
+    }
+
     /// Contact dose rate from the material's own decay photons.
     ///
     /// The dose someone receives with a hand on the material. It is a slab
@@ -919,11 +963,12 @@ impl PyMaterial {
     /// Per photon line of energy ``E`` and per-atom emission rate ``S`` the
     /// estimate is ``(build_up / 2) * (response(E) / mu_material(E)) * S * E``
     /// for the absorbed dose in air, and the same without the trailing ``E``
-    /// for the effective dose. ``mu_material`` is the material's own linear
-    /// attenuation coefficient, built from the NIST XCOM mass attenuation
-    /// coefficients of the elements present; the response is the NIST-126 mass
-    /// energy-absorption coefficient of air, or the ICRP-116 photon
-    /// effective-dose coefficient for anterior-posterior irradiation.
+    /// for the effective dose. A photon continuum is integrated over energy,
+    /// its density read under the law its data states. ``mu_material`` is the
+    /// material's own linear attenuation coefficient, built from the NIST XCOM
+    /// mass attenuation coefficients of the elements present; the response is
+    /// the NIST-126 mass energy-absorption coefficient of air, or the ICRP-116
+    /// photon effective-dose coefficient for anterior-posterior irradiation.
     ///
     /// Follows the FISPACT-II manual (UKAEA-CCFE-RE(21)02, Appendix C.7.1) for
     /// the absorbed-air quantity and agrees with OpenMC's
@@ -932,7 +977,8 @@ impl PyMaterial {
     /// Bremsstrahlung from decay electrons is not modelled, and nuclides whose
     /// radiation the chain file does not describe contribute nothing. Photon
     /// lines outside the tabulated range (1 keV to 20 MeV for the absorbed-air
-    /// quantity, 10 keV to 20 MeV for the effective dose) are dropped.
+    /// quantity, 10 keV to 20 MeV for the effective dose) are dropped, and a
+    /// continuum is integrated over its part of that range.
     ///
     /// Args:
     ///     dose_quantity (str): ``'absorbed-air'`` for the absorbed dose in air
@@ -947,6 +993,12 @@ impl PyMaterial {
     /// Returns:
     ///     float | dict[str, float]: Contact dose rate in Gy/h
     ///     (``'absorbed-air'``) or Sv/h (``'effective'``).
+    ///
+    /// Raises:
+    ///     ValueError: If a nuclide in the material has a photon continuum
+    ///         whose data states no interpolation law, as transmutation data
+    ///         written before the law was stored does. Its integral is
+    ///         unknown, and leaving it out would understate the dose.
     ///
     /// Examples:
     ///     >>> activated.contact_dose()

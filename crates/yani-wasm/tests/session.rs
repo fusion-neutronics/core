@@ -499,6 +499,12 @@ fn a_transmutation_runs_and_reports_every_series_the_plots_need() {
     let energy = steps[1]["photon_energy"].as_array().unwrap();
     let intensity = steps[1]["photon_intensity"].as_array().unwrap();
     assert_eq!(energy.len(), intensity.len(), "lines must be paired");
+    // Continua come back apart from the lines. Irradiated iron emits none.
+    assert!(
+        steps[1]["photon_continua"].as_array().unwrap().is_empty(),
+        "{:?}",
+        steps[1]["photon_continua"]
+    );
 
     // Contact dose, in Gy/h, from the same inventory. It needs no volume, so
     // the one thing that could silently zero it is the material carrying no

@@ -560,7 +560,9 @@ impl PyTransmutationResults {
     /// not emit counts as a zero in it -- the same rule the densities follow,
     /// and the only one under which two lines' spreads are taken over the same
     /// sample -- and ``LineEstimate.emitting`` reports how many replicas
-    /// emitted it, which is what the zero-fill would otherwise hide.
+    /// emitted it, which is what the zero-fill would otherwise hide. Lines
+    /// only, as there: a photon continuum is not a line and is not reported
+    /// here.
     ///
     ///     >>> lines = results.get_decay_photon_spectrum_uncertainty(mid, step)
     ///     >>> [(l.energy, l.nominal, l.std_dev) for l in lines[:2]]
