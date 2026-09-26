@@ -2148,7 +2148,12 @@ fn refine_chain(
                 // branching over another's cross sections can give that, and
                 // so can one evaluation alone: ENDF/B-VIII.1's own In115
                 // (n,2n) In114_m1 partial passes its MF=3 at about 18.1 MeV
-                // and is 1.18 of it at 20 MeV.
+                // and is 1.18 of it at 20 MeV. The cap cannot tell that from a
+                // list naming a state the evaluation does not mean: the same
+                // library gives Pt194 (n,d) a partial for a 930 keV level of
+                // Ir193, 5.4 times its MF=3 at 14 MeV, which the converter
+                // takes for the 80 keV Ir193_m1 only because Ir193 has no
+                // other isomer, and so all of Pt194 (n,d) goes to Ir193_m1.
                 let (scale, left) = if listed > 1.0 {
                     (mass / listed, 0.0)
                 } else {
@@ -3254,10 +3259,10 @@ mod tests {
         assert!((g - 1.0).abs() < 1e-12, "In114 {g}");
     }
 
-    /// A partial above the transport total, as ENDF/B-VIII.1's Pt (n,d)
-    /// partials are above their own MF=3, cannot all be made: the isomer takes
-    /// the whole reaction and the ground nothing, never more than one product
-    /// per reaction.
+    /// A partial above the transport total, as ENDF/B-VIII.1's In115 (n,2n)
+    /// In114_m1 partial is above its own MF=3 from about 18.1 MeV, cannot all
+    /// be made: the isomer takes the whole reaction and the ground nothing,
+    /// never more than one product per reaction.
     #[test]
     fn isomer_only_shares_past_the_whole_reaction_are_scaled_to_fit() {
         let material = indium(vec![reaction(16, vec![1.0e7, 2.0e7], vec![0.0, 2.0])]);
