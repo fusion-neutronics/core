@@ -56,8 +56,9 @@ pub enum Source {
     /// The partials are sampled independently of each other because the data
     /// state no covariance between product states, and independently of MF=33
     /// because no MF=40 x MF=33 correlation is published. A split given by
-    /// MF=9 yields has no covariance format, so it stays at nominal and is
-    /// reported as such.
+    /// MF=9 yields has no covariance format, and one the chain fixes with no
+    /// overlay behind it has nothing to sample, so both stay at nominal and
+    /// are reported as such.
     IsomericBranching,
     /// The supplied flux spectrum, from a per-bin standard deviation the caller
     /// provides (issue #559).
@@ -243,10 +244,12 @@ pub struct Info {
     /// Overlay channels whose isomeric split was perturbed from MF=40, as
     /// `"Parent kind"` (`"Nb93 (n,2n)"`).
     pub isomeric_channels_perturbed: BTreeSet<String>,
-    /// Overlay channels with a rate whose split carried no usable MF=40, held
+    /// Channels with a rate whose isomeric split carried no usable MF=40, held
     /// at nominal: a split given by MF=9 yields, a channel the evaluation gives
-    /// no MF=40 for, or a branching library without the covariance file. Not a
-    /// claim that the split is exact.
+    /// no MF=40 for, a branching library without the covariance file, or a
+    /// split to a metastable state the chain fixes on a reaction no overlay
+    /// carries, which with no overlay is every one. Not a claim that the split
+    /// is exact.
     pub no_isomeric_branching_uncertainty: BTreeSet<String>,
     /// Product states of a perturbed channel whose own partial has no MF=40,
     /// as `"Parent kind target"` (`"Ag116 (n,n') Ag116_m2"`). They move only

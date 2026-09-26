@@ -1459,22 +1459,26 @@ fn run_replicas(
     if half_life.is_none() {
         info.not_perturbed.insert(0, "half-life".to_string());
     }
-    match &isomeric {
-        None => info
-            .not_perturbed
-            .insert(0, "isomeric branching (MF=9/MF=10)".to_string()),
-        Some(iso) => {
-            info.not_perturbed.push(
-                "isomeric-branching x cross-section correlation (none published)".to_string(),
-            );
-            let r = &iso.report;
-            info.isomeric_channels_perturbed = r.channels_perturbed.clone();
-            info.no_isomeric_branching_uncertainty = r.no_uncertainty.clone();
-            info.isomeric_partials_without_covariance = r.partials_without_covariance.clone();
-            info.isomeric_rate_fraction_covered = r.rate_fraction_covered.clone();
-            info.isomeric_blocks_skipped = r.blocks_skipped.clone();
-            info.isomeric_matrices_clipped = r.matrices_clipped;
-        }
+    // Asked for, the source can still find nothing to sample: no overlay, or
+    // no MF=40 for anything the material drives. Every split then stays at
+    // nominal, which reads as the source being off rather than as a sampled
+    // split whose correlation with MF=33 went unstated.
+    let no_isomeric = isomeric.as_ref().is_none_or(IsomericSampling::is_empty);
+    if no_isomeric {
+        info.not_perturbed
+            .insert(0, "isomeric branching (MF=9/MF=10)".to_string());
+    } else {
+        info.not_perturbed
+            .push("isomeric-branching x cross-section correlation (none published)".to_string());
+    }
+    if let Some(iso) = &isomeric {
+        let r = &iso.report;
+        info.isomeric_channels_perturbed = r.channels_perturbed.clone();
+        info.no_isomeric_branching_uncertainty = r.no_uncertainty.clone();
+        info.isomeric_partials_without_covariance = r.partials_without_covariance.clone();
+        info.isomeric_rate_fraction_covered = r.rate_fraction_covered.clone();
+        info.isomeric_blocks_skipped = r.blocks_skipped.clone();
+        info.isomeric_matrices_clipped = r.matrices_clipped;
     }
     if !want_decay_energy {
         info.not_perturbed.insert(0, "decay energy".to_string());
@@ -1507,7 +1511,6 @@ fn run_replicas(
     // every sigma reads zero, with `info` saying why: no covariance data, not a
     // confident zero.
     let no_half_lives = half_life.as_ref().is_none_or(|h| h.candidates.is_empty());
-    let no_isomeric = isomeric.as_ref().is_none_or(IsomericSampling::is_empty);
     if samplers.iter().all(Sampler::is_empty)
         && per_group.iter().all(Option::is_none)
         && no_half_lives

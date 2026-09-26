@@ -616,10 +616,14 @@ impl PyTransmutationResults {
     ///   covariance was not positive semi-definite and had to be repaired.
     /// - ``isomeric_channels_perturbed`` / ``no_isomeric_branching_uncertainty``:
     ///   with the ``"isomeric_branching"`` source, the overlay channels
-    ///   (``"Nb93 (n,2n)"``) whose split was perturbed from MF=40, and those
-    ///   with a rate that had none to perturb it with: a split MF=9 yields
-    ///   give, a channel without MF=40, or a branching library without the
-    ///   covariance file. ``isomeric_partials_without_covariance`` names the
+    ///   (``"Nb93 (n,2n)"``) whose split was perturbed from MF=40, and the
+    ///   channels with a rate that had none to perturb it with: a split MF=9
+    ///   yields give, a channel without MF=40, a branching library without the
+    ///   covariance file, or a split to an isomer the chain fixes on a
+    ///   reaction no overlay carries, which with no overlay is every one. A
+    ///   run that sampled no split at all lists
+    ///   ``"isomeric branching (MF=9/MF=10)"`` in ``not_perturbed``, as with
+    ///   the source off. ``isomeric_partials_without_covariance`` names the
     ///   product states of a perturbed channel that have no MF=40 of their own
     ///   (``"Ag116 (n,n') Ag116_m2"``), ``isomeric_rate_fraction_covered`` the
     ///   share of each partial rate the MF=40 grids span (keyed

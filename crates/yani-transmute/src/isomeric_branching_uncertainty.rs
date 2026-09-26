@@ -391,6 +391,33 @@ impl IsomericSampling {
                 }
             }
         }
+        // A split the chain fixes, on a reaction no overlay carries, is held at
+        // the chain's number with nothing to sample it from. Without an overlay
+        // that is every isomeric split the material drives, and it is said so
+        // rather than left to read as exact.
+        for (rates, _, _) in per_spectrum {
+            for (parent, kinds) in rates {
+                let Some(cn) = reach.get(parent) else {
+                    continue;
+                };
+                let overlaid = branch.get(parent);
+                for (kind, rate) in kinds {
+                    if *rate <= 0.0 || overlaid.is_some_and(|k| k.contains_key(kind)) {
+                        continue;
+                    }
+                    let to_an_isomer = cn.reactions.iter().any(|r| {
+                        r.kind == *kind
+                            && r.branching > 0.0
+                            && r.target
+                                .as_deref()
+                                .is_some_and(|t| endf::zam(t).is_ok_and(|(_, _, m)| m > 0))
+                    });
+                    if to_an_isomer {
+                        report.no_uncertainty.insert(format!("{parent} {kind}"));
+                    }
+                }
+            }
+        }
         report.rate_fraction_covered = covered;
 
         IsomericSampling {
@@ -1079,6 +1106,46 @@ mod tests {
                 "replica {replica}: {a} against {b}"
             );
         }
+    }
+
+    /// A split the chain fixes, with no overlay to sample it from, is named as
+    /// held at nominal; a reaction to the ground state alone is no split.
+    #[test]
+    fn a_split_the_chain_fixes_is_named_as_held() {
+        let chain = Arc::new(HashMap::from([(
+            "Co59".to_string(),
+            nuclide(
+                "Co59",
+                vec![
+                    ("(n,gamma)", "Co60", 0.444),
+                    ("(n,gamma)", "Co60_m1", 0.556),
+                    ("(n,2n)", "Co58", 1.0),
+                ],
+            ),
+        )]));
+        let rates: ReactionRates = HashMap::from([(
+            "Co59".to_string(),
+            HashMap::from([
+                ("(n,gamma)".to_string(), 1.0e-24),
+                ("(n,2n)".to_string(), 1.0e-26),
+            ]),
+        )]);
+        let per_spectrum = vec![(rates, HashMap::new(), Arc::clone(&chain))];
+        let iso = IsomericSampling::new(
+            None,
+            &material("Co59"),
+            &chain,
+            &chain,
+            &BranchTable::new(),
+            &[fourteen_mev()],
+            &per_spectrum,
+            false,
+        );
+        assert!(iso.is_empty());
+        assert_eq!(
+            iso.report.no_uncertainty,
+            BTreeSet::from(["Co59 (n,gamma)".to_string()])
+        );
     }
 
     /// One MF=40 partial draws one deviate per replica in every spectrum of

@@ -28,8 +28,9 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///   not the total; ``(n,n')`` has no total of its own, so there MF=40 moves
 ///   the isomer's production rate itself. The data state no covariance between
 ///   product states and none with MF=33, so neither is assumed. A split given
-///   by MF=9 yields has no covariance format and stays at nominal, reported
-///   in ``no_isomeric_branching_uncertainty``;
+///   by MF=9 yields has no covariance format, and one the chain fixes with no
+///   overlay behind it has nothing to sample, so both stay at nominal,
+///   reported in ``no_isomeric_branching_uncertainty``;
 /// - ``"flux_spectrum"``: the spectrum itself, from the per-bin
 ///   ``flux_std_dev`` given on a ``Pulse``;
 /// - ``"half_life"``: every reachable nuclide's half-life, from the decay

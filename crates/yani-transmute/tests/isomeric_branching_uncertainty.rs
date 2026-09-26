@@ -391,6 +391,16 @@ fn the_report_names_what_had_no_covariance() {
             info.no_isomeric_branching_uncertainty
         );
     }
+    // Nothing was sampled, so there is no sampled split whose correlation
+    // with MF=33 could go unstated.
+    assert!(info
+        .not_perturbed
+        .iter()
+        .any(|s| s == "isomeric branching (MF=9/MF=10)"));
+    assert!(!info
+        .not_perturbed
+        .iter()
+        .any(|s| s.contains("none published")));
 
     // And with the source off, the split is listed as held at nominal.
     let off = run(
@@ -403,6 +413,54 @@ fn the_report_names_what_had_no_covariance() {
         .not_perturbed
         .iter()
         .any(|s| s == "isomeric branching (MF=9/MF=10)"));
+}
+
+/// With no overlay the chain's own splits are all there is, and nothing
+/// samples them: each one the material drives is named as held at nominal,
+/// and the source reads as having perturbed nothing, not as a sampled split.
+#[test]
+fn without_an_overlay_the_chains_own_splits_are_named_as_held() {
+    let Some(mut lead) = material("Pb208", 3.3e-2) else {
+        eprintln!("skipping -- Pb208 fixture absent");
+        return;
+    };
+    let mut chain = (*chain()).clone();
+    for r in &mut chain.get_mut("Pb208").unwrap().reactions {
+        if r.kind == "(n,2n)" {
+            r.branching = if r.target.as_deref() == Some("Pb207_m1") {
+                0.25
+            } else {
+                0.75
+            };
+        }
+    }
+    let results = transmute_material(
+        &mut lead,
+        &[fourteen_mev()],
+        &one_hour(),
+        Arc::new(chain),
+        &BranchTable::new(),
+        Default::default(),
+        Some(&request(vec![Source::IsomericBranching], false)),
+    )
+    .expect("transmute");
+    let info = &results.uncertainty_info[&0];
+    assert!(info.isomeric_channels_perturbed.is_empty());
+    assert!(
+        info.no_isomeric_branching_uncertainty
+            .contains("Pb208 (n,2n)"),
+        "{:?}",
+        info.no_isomeric_branching_uncertainty
+    );
+    assert!(info
+        .not_perturbed
+        .iter()
+        .any(|s| s == "isomeric branching (MF=9/MF=10)"));
+    assert!(!info
+        .not_perturbed
+        .iter()
+        .any(|s| s.contains("none published")));
+    assert!(info.has_gaps());
 }
 
 #[test]
