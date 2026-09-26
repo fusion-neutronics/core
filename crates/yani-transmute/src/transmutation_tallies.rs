@@ -402,10 +402,9 @@ fn build_yield_channels(nuclide_names: &[String], branch: &BranchTable) -> Vec<Y
 /// that stops at 20 MeV was a share of a total that goes on changing, and
 /// could make the isomer all of the reaction above it. The moments cannot fold
 /// the total, which is not one of their curves, so the part above is a yield
-/// channel: a step from zero to `sigma_s(E_l) / sigma_MT(E_l)` at the last
-/// breakpoint `E_l`, times `sigma_MT(E)`, and the curve's own fold stops at
-/// `E_l`. With no total at `E_l` there is no share to hold, and the fold stops
-/// with no channel.
+/// channel, `sigma_s(E_l) / sigma_MT(E_l)` times `sigma_MT(E)` from the last
+/// breakpoint `E_l` on, and the curve's own fold stops at `E_l`. With no total
+/// at `E_l` there is no share to hold, and the fold stops with no channel.
 ///
 /// Only for the material's own nuclides: they are the only parents with a
 /// tallied total to take a share of. Any other parent's curve keeps its flat
@@ -444,8 +443,15 @@ fn build_tail_channels(
                 kind: c.kind.clone(),
                 target: c.target.clone(),
                 mt,
-                energy: vec![e_last, e_last],
-                values: vec![0.0, share],
+                // One point, which `curve_interp` reads as zero below `E_l`
+                // and the share from `E_l` on, `E_l` included: a collision
+                // there lands in the union bin starting at `E_l`, which the
+                // fold stops short of. A step `[E_l, E_l] -> [0, share]` reads
+                // zero at `E_l`, and a 20 MeV source, where every ENDF/B-VIII.1
+                // and JEFF-4.0 isomer-only partial ends, then made no isomer
+                // from its uncollided flux.
+                energy: vec![e_last],
+                values: vec![share],
             });
         }
     }
@@ -2650,16 +2656,10 @@ mod tests {
         m
     }
 
-    /// An isomer-only MF=10 partial on a material nuclide is its moment fold up
-    /// to its last breakpoint plus, above it, the scored share of the transport
-    /// total it ends on, and the split is that over the tallied total. Here the
-    /// partial ends at 20 MeV on 1.6 b, 0.8 of a total that falls from 2 b to
-    /// nothing at 30 MeV. The covariance carries the two parts as two entries,
-    /// the fold's row stopping at 20 MeV.
-    #[test]
-    fn an_isomer_only_partial_scores_its_tail_as_a_share_of_the_total() {
-        let (xs_e, xs) = (vec![1.0e7, 2.0e7, 3.0e7], vec![2.0, 2.0, 0.0]);
-        let material = indium_n2n(xs_e.clone(), xs.clone());
+    /// The In115 (n,2n) chain with the ground at 1.0 and the isomer grafted at
+    /// 0.0, and an overlay listing In114_m1 alone, from 1 b at 10 MeV to 1.6 b
+    /// at 20 MeV, or with `ground` In114 too, from 1 b to 0.4 b, a full list.
+    fn isomer_only_n2n(ground: bool) -> (HashMap<String, ChainNuclide>, BranchTable) {
         let edge = |target: &str, branching: f64| yani::ChainReaction {
             kind: "(n,2n)".to_string(),
             target: Some(target.to_string()),
@@ -2682,25 +2682,51 @@ mod tests {
                 decay_energy_components: Default::default(),
             },
         );
-        let (p_e, p) = (vec![1.0e7, 2.0e7], vec![1.0, 1.6]);
+        let curve = |target: &str, values: Vec<f64>| yani::BranchCurve {
+            target: target.to_string(),
+            quantity: BranchQuantity::CrossSection,
+            energy: vec![1.0e7, 2.0e7],
+            values,
+        };
+        let mut curves = vec![curve("In114_m1", vec![1.0, 1.6])];
+        if ground {
+            curves.push(curve("In114", vec![1.0, 0.4]));
+        }
         let mut branch = BranchTable::new();
-        branch.entry("In115".to_string()).or_default().insert(
-            "(n,2n)".to_string(),
-            vec![yani::BranchCurve {
-                target: "In114_m1".to_string(),
-                quantity: BranchQuantity::CrossSection,
-                energy: p_e.clone(),
-                values: p.clone(),
-            }],
-        );
-        let t = TransmutationTallies::new(
+        branch
+            .entry("In115".to_string())
+            .or_default()
+            .insert("(n,2n)".to_string(), curves);
+        (chain, branch)
+    }
+
+    fn one_material_tally(
+        material: &Material,
+        chain: &HashMap<String, ChainNuclide>,
+        branch: &BranchTable,
+    ) -> TransmutationTallies {
+        TransmutationTallies::new(
             &HashMap::from([(7u32, vec![0usize])]),
-            &HashMap::from([(7u32, &material)]),
-            &chain,
-            &branch,
+            &HashMap::from([(7u32, material)]),
+            chain,
+            branch,
             &HashMap::new(),
         )
-        .with_history_statistics();
+    }
+
+    /// An isomer-only MF=10 partial on a material nuclide is its moment fold up
+    /// to its last breakpoint plus, above it, the scored share of the transport
+    /// total it ends on, and the split is that over the tallied total. Here the
+    /// partial ends at 20 MeV on 1.6 b, 0.8 of a total that falls from 2 b to
+    /// nothing at 30 MeV. The covariance carries the two parts as two entries,
+    /// the fold's row stopping at 20 MeV.
+    #[test]
+    fn an_isomer_only_partial_scores_its_tail_as_a_share_of_the_total() {
+        let (xs_e, xs) = (vec![1.0e7, 2.0e7, 3.0e7], vec![2.0, 2.0, 0.0]);
+        let material = indium_n2n(xs_e.clone(), xs.clone());
+        let (chain, branch) = isomer_only_n2n(false);
+        let (p_e, p) = (vec![1.0e7, 2.0e7], vec![1.0, 1.6]);
+        let t = one_material_tally(&material, &chain, &branch).with_history_statistics();
         t.prepare_history_workers(1).unwrap();
 
         // Histories spread over 10 to 35 MeV: below the partial's last point,
@@ -2738,7 +2764,7 @@ mod tests {
                 0.0
             }
         };
-        let above = |e: f64| if e > 2.0e7 { 0.8 * sigma(e) } else { 0.0 };
+        let above = |e: f64| if e >= 2.0e7 { 0.8 * sigma(e) } else { 0.0 };
         let per_history = |f: &dyn Fn(f64) -> f64| -> Vec<f64> {
             histories
                 .iter()
@@ -2804,5 +2830,39 @@ mod tests {
                 "variance {i}: {got:e} vs {want:e}"
             );
         }
+    }
+
+    /// A collision at exactly the partial's last breakpoint, 20 MeV, where
+    /// every ENDF/B-VIII.1 and JEFF-4.0 isomer-only partial ends, is the
+    /// tail's, at the share the partial ends on, 1.6 b of 2 b. It used to fall
+    /// between the fold, which stops short of it, and the tail, which read zero
+    /// there, so a 20 MeV source made no isomer from its uncollided flux. A
+    /// full list, the ground listed too, gives the same 0.8 there, and the
+    /// split is continuous across the breakpoint.
+    #[test]
+    fn an_isomer_only_partial_counts_a_collision_at_its_last_breakpoint() {
+        let material = indium_n2n(vec![1.0e7, 2.0e7, 3.0e7], vec![2.0, 2.0, 0.0]);
+        let isomer_share = |ground: bool, e: f64| {
+            let (chain, branch) = isomer_only_n2n(ground);
+            let t = one_material_tally(&material, &chain, &branch);
+            t.score(7, e, 1.0, &material);
+            t.accumulate_batch(1);
+            let partials = t.get_partial_rates(7, 1.0, 1.0);
+            let mut rates = t.get_reaction_rates(7, 1.0, 1.0);
+            let folded =
+                crate::apply_coupled_branching(&std::sync::Arc::new(chain), &partials, &mut rates);
+            folded["In115"]
+                .reactions
+                .iter()
+                .find(|r| r.target.as_deref() == Some("In114_m1"))
+                .unwrap()
+                .branching
+        };
+        for e in [2.0e7_f64.next_down(), 2.0e7, 2.0e7_f64.next_up()] {
+            let got = isomer_share(false, e);
+            assert!((got - 0.8).abs() < 1e-12, "at {e:e} eV: {got}");
+        }
+        let full = isomer_share(true, 2.0e7);
+        assert!((full - 0.8).abs() < 1e-12, "full list: {full}");
     }
 }
