@@ -600,7 +600,11 @@ where
             if frac <= 0.0 {
                 continue;
             }
-            if let Some(target) = &rx.target {
+            // A reaction back into its own parent (Pu245 (n,p), whose Np245
+            // `replace_missing` returns to Pu245) moves no atoms, so it is not
+            // an edge: taking it as one would feed the parent's bound from
+            // itself.
+            if let Some(target) = rx.target.as_ref().filter(|t| *t != name) {
                 if chain.contains_key(target) {
                     edges.push((name, target, frac));
                 }
@@ -1063,6 +1067,40 @@ mod tests {
             kept.contains("Fe56"),
             "decay daughter dropped though decay needs no cross section: {kept:?}"
         );
+    }
+
+    #[test]
+    fn populated_does_not_feed_a_parent_from_its_own_reaction() {
+        // ENDF/B-VIII.1's Pu245 (n,p) leads back to Pu245, through an Np245
+        // with no decay data. Over one second at these rates (n,p) touches
+        // every atom and (n,gamma) makes 2e-30 of Pu246, under the floor. Fed
+        // from itself Pu245 would climb to the ceiling of 8, and Pu246 to
+        // 1.6e-29 with it, over the floor.
+        let chain: HashMap<String, ChainNuclide> = [
+            nuc(
+                "Pu245",
+                None,
+                vec![
+                    rx("(n,p)", Some("Pu245"), 1.0),
+                    rx("(n,gamma)", Some("Pu246"), 1.0),
+                ],
+                vec![],
+            ),
+            nuc("Pu246", None, vec![], vec![]),
+        ]
+        .into_iter()
+        .map(|n| (n.name.clone(), n))
+        .collect();
+        let seeds: HashMap<String, f64> = [("Pu245".to_string(), 1.0)].into_iter().collect();
+        let kept = populated_nuclides(&chain, &seeds, 1.0, 1e-29, |_, kind| {
+            if kind == "(n,p)" {
+                1.0
+            } else {
+                2e-30
+            }
+        });
+        assert!(kept.contains("Pu245"), "{kept:?}");
+        assert!(!kept.contains("Pu246"), "{kept:?}");
     }
 
     #[test]
