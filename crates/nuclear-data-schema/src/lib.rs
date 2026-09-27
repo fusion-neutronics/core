@@ -38,6 +38,10 @@ pub mod reaction_ranges;
 pub fn all_sections() -> Vec<(&'static str, Schema)> {
     vec![
         ("branching/branching.arrow", branching_branching()),
+        (
+            "branching/branching_covariance.arrow",
+            branching_branching_covariance(),
+        ),
         ("bremsstrahlung.arrow", bremsstrahlung()),
         ("compton.arrow", compton()),
         ("covariance.arrow", covariance()),
@@ -228,6 +232,76 @@ pub fn branching_branching() -> Schema {
     ])
     .with_metadata(meta([
         ("filetype", "transmutation-branching"),
+        ("version", "2.0"),
+    ]))
+}
+
+/// `branching/branching_covariance.arrow`
+///
+/// MF=40, the covariance of the radionuclide production cross sections that
+/// `branching.arrow` carries as MF=10 partials: the stated uncertainty of an
+/// isomeric split. Optional, like `covariance.arrow` and for the same reasons:
+/// a library without MF=40 writes no such file, a branching directory published
+/// before it has none, and a reader treats absence as "no covariance", never as
+/// an error.
+///
+/// A lossless dump of every MF=40 section of every evaluation, not a selection.
+/// One row per covariance block, which is one NC or NI block of one
+/// sub-subsection of one product state. Every tape value is written as the tape
+/// gives it: nothing is normalised, and a state the converter could not place
+/// in the chain is still written, with a null `target`.
+///
+/// The first columns are the converter's key, the rest are the tape's:
+///
+/// * `nuclide` is the parent, named as `branching.arrow` names it.
+///   `reaction` is the chain kind the section's MT maps to, null for an MT
+///   with none (TENDL writes MF=40 for MT 18 with IZAP 0).
+/// * `target` is the chain nuclide the product state (`izap`, `lfs`) is the
+///   partial of, which is the `target` of the `branching.arrow` row for
+///   (`nuclide`, `reaction`). Null when no MF=9 or MF=10 state of that MT
+///   matched it. `target1` is the same for the partner state the block
+///   correlates this one with, level `xlfs1` of reaction `mt1`, null when the
+///   partner is in another material, is not an MF=10 partial, or matched
+///   nothing.
+/// * `energy` and `values` are this state's own linearized MF=10 partial, and
+///   are written only when several MF=10 states resolved to one target, which
+///   `branching.arrow` then carries as their sum. A relative covariance of one
+///   state has to be weighted by that state's own partial to fold exactly; null
+///   means the `branching.arrow` curve for (`nuclide`, `reaction`, `target`) is
+///   that state's own.
+/// * `mat` is the evaluation's MAT, so a reader can tell a `mat1` naming the
+///   evaluation itself (JEFF-4.0 U235 MT 4 writes its own 9228 there) from a
+///   correlation with another material.
+/// * `za`, `awr` and `lis` are the section HEAD. `state_idx` is the product
+///   state's position in the section and `qm`, `qi`, `izap` and `lfs` its CONT,
+///   verbatim: JEFF-4.0 U235 MT 4 writes IZAP 0 for the target itself, and
+///   ENDF/B-VIII.1 Pb204 MT 4 numbers its isomer LFS 1 here and 21 in MF=10.
+///
+/// Every column after `lfs` is [`covariance`]'s, verbatim and in order, so one
+/// writer and one reader serve both files. `subsection_idx` there is the
+/// sub-subsection's position within its product state, and `mtl` is always
+/// null, since MF=40 has no lumped-reaction flag.
+pub fn branching_branching_covariance() -> Schema {
+    let mut fields = vec![
+        utf8("nuclide", false),
+        utf8("reaction", true),
+        utf8("target", true),
+        utf8("target1", true),
+        f64s("energy", true),
+        f64s("values", true),
+        i32("mat", false),
+        i32("za", false),
+        f64("awr", false),
+        i32("lis", false),
+        i32("state_idx", false),
+        f64("qm", false),
+        f64("qi", false),
+        i32("izap", false),
+        i32("lfs", false),
+    ];
+    fields.extend(covariance().fields().iter().map(|f| f.as_ref().clone()));
+    Schema::new(fields).with_metadata(meta([
+        ("filetype", "transmutation-branching_covariance"),
         ("version", "2.0"),
     ]))
 }
@@ -657,7 +731,7 @@ mod tests {
         let sections = all_sections();
         assert_eq!(
             sections.len(),
-            20,
+            21,
             "section count changed; update the manifest"
         );
         let mut paths: Vec<&str> = sections.iter().map(|(p, _)| *p).collect();
