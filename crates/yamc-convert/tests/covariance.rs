@@ -334,7 +334,7 @@ fn every_one_table_block_runs_to_20_mev() {
 /// the loader reads it back and `expand_ni` lays it out, summed.
 ///
 /// `lb = 0` is left out: it is absolute, in barns squared, and relativizing it
-/// needs the cross section. On these tapes it is 1e-10 b² or less.
+/// needs the cross section. On these tapes it is 1e-10 barns squared or less.
 fn relative_variance_at(blocks: &[CovarianceBlock], mt: i32, energy: f64) -> f64 {
     use yamc_nuclide::covariance::expand::{expand_ni, Scale};
 

@@ -114,7 +114,7 @@ fn cr52_np_folds_to_the_tapes_sigma_at_14_mev() {
 
     // The tape's relative components on the interval holding 14.1 MeV: LB=1
     // on [4, 20] MeV, LB=1 on [14, 16] MeV and LB=8 on [14, 16] MeV. The
-    // LB=0 block is absolute, 1.1e-14 b^2 on [4, 20] MeV, and relativizes by
+    // LB=0 block is absolute, 1.1e-14 barns squared on [4, 20] MeV, and relativizes by
     // the group's own cross section; it is eleven orders of magnitude smaller.
     let sigma_eff = rates["Cr52"]["(n,p)"] / 1.0e-24;
     let want = 1.125e-2 + 1.8e-2 + 1.5842e-5 + 1.1e-14 / (sigma_eff * sigma_eff);

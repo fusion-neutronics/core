@@ -112,6 +112,15 @@ fn intervals(grid: &[f64]) -> usize {
     grid.len().saturating_sub(1)
 }
 
+/// Whether an `lb` 0 to 4 block's two tables hold exactly the pairs its
+/// `np` and `lt` declare.
+fn tables_match_header(s: &NiSubsection) -> bool {
+    let (Ok(first), Ok(second)) = (usize::try_from(s.np - s.lt), usize::try_from(s.lt)) else {
+        return false;
+    };
+    s.ek.len() == first && s.fk.len() == first && s.el.len() == second && s.fl.len() == second
+}
+
 /// Expand one NI block.
 ///
 /// # Layouts
@@ -131,15 +140,18 @@ fn intervals(grid: &[f64]) -> usize {
 /// its meaning is not the same and guessing would put numbers in a covariance
 /// matrix on the strength of a shared record shape.
 ///
-/// `lb` 0 to 2 have one table (`lt = 0`), so one that arrives with a second is
-/// malformed rather than folded on its first table alone, which would drop
-/// whatever the second holds. A block the parser split wrongly arrives exactly
-/// this way: every `lb` 0 to 2 block in a `covariance.arrow` converted before
-/// <https://github.com/shimwell/endf-python/issues/25> was fixed has the upper
-/// part of its only table in `el`/`fl`.
+/// `lb` 0 to 4 store `np - lt` (E, F) pairs in the first table and `lt` in
+/// the second (ENDF-102 section 33.2.2.2), and a block whose tables are not
+/// exactly those lengths is malformed rather than expanded from whatever it
+/// holds. `lb` 0 to 2 have one table, so `lt` must also be 0. A block split
+/// at the wrong place arrives exactly this way: every `lb` 0 to 2 block in a
+/// `covariance.arrow` converted before fusion-neutronics/core#166 was fixed
+/// has the upper part of its only table in `el`/`fl`, and folding `ek` alone
+/// would drop it without a word.
 pub fn expand_ni(s: &NiSubsection) -> Result<ExpandedBlock, Unsupported> {
     match s.lb {
-        0..=2 if s.lt != 0 || !s.el.is_empty() || !s.fl.is_empty() => Err(Unsupported::Malformed),
+        0..=4 if !tables_match_header(s) => Err(Unsupported::Malformed),
+        0..=2 if s.lt != 0 => Err(Unsupported::Malformed),
         0 => diagonal(s, Scale::Absolute),
         1 => diagonal(s, Scale::Relative),
         2 => outer_product(s),
@@ -366,12 +378,27 @@ mod tests {
         }
     }
 
+    /// An `lb` 0 to 4 block as a tape carries it: the tests write one `F` per
+    /// interval, and a tape pairs every boundary with an `F`, the last one
+    /// zero, and states both tables' lengths in `np` and `lt`.
+    fn on_tape(mut s: NiSubsection) -> NiSubsection {
+        if !s.ek.is_empty() {
+            s.fk.push(0.0);
+        }
+        if !s.el.is_empty() {
+            s.fl.push(0.0);
+        }
+        s.lt = s.el.len() as i64;
+        s.np = (s.ek.len() + s.el.len()) as i64;
+        s
+    }
+
     #[test]
     fn lb0_is_a_diagonal_on_the_absolute_scale() {
         let mut s = ni(0);
         s.ek = vec![1.0, 10.0, 100.0];
         s.fk = vec![0.04, 0.09];
-        let e = expand_ni(&s).expect("lb=0 expands");
+        let e = expand_ni(&on_tape(s)).expect("lb=0 expands");
         assert_eq!(e.scale, Scale::Absolute);
         assert_eq!(e.values, vec![0.04, 0.0, 0.0, 0.09]);
     }
@@ -381,7 +408,7 @@ mod tests {
         let mut s = ni(1);
         s.ek = vec![1.0, 10.0, 100.0];
         s.fk = vec![0.04, 0.09];
-        let e = expand_ni(&s).expect("lb=1 expands");
+        let e = expand_ni(&on_tape(s)).expect("lb=1 expands");
         assert_eq!(e.scale, Scale::Relative);
         assert_eq!(e.values, vec![0.04, 0.0, 0.0, 0.09]);
     }
@@ -391,7 +418,7 @@ mod tests {
         let mut s = ni(2);
         s.ek = vec![1.0, 10.0, 100.0];
         s.fk = vec![2.0, 3.0];
-        let e = expand_ni(&s).expect("lb=2 expands");
+        let e = expand_ni(&on_tape(s)).expect("lb=2 expands");
         assert_eq!(e.values, vec![4.0, 6.0, 6.0, 9.0]);
     }
 
@@ -402,7 +429,7 @@ mod tests {
         s.fk = vec![2.0, 3.0];
         s.el = vec![1.0, 50.0, 500.0, 5000.0];
         s.fl = vec![5.0, 7.0, 11.0];
-        let e = expand_ni(&s).expect("lb=3 expands");
+        let e = expand_ni(&on_tape(s)).expect("lb=3 expands");
         assert_eq!((e.n_rows(), e.n_cols()), (2, 3));
         assert_eq!(e.values, vec![10.0, 14.0, 22.0, 15.0, 21.0, 33.0]);
     }
@@ -416,7 +443,7 @@ mod tests {
         // Three second-table intervals, two inside the first of those.
         s.el = vec![1.0, 10.0, 100.0, 1000.0];
         s.fl = vec![1.0, 2.0, 3.0];
-        let e = expand_ni(&s).expect("lb=4 expands");
+        let e = expand_ni(&on_tape(s)).expect("lb=4 expands");
         assert_eq!(e.row_energies, vec![1.0, 10.0, 100.0, 1000.0]);
         assert_eq!(e.col_energies, e.row_energies);
         // fk[k] * fl[l] * fl[l'] where one first-table interval holds both:
@@ -426,7 +453,8 @@ mod tests {
     }
 
     /// The only LB=4 block on any tape (FENDL-3.2d Ni58 MT=103) has the same
-    /// grid in both tables and `fk = -1`: it subtracts `fl²` on the diagonal.
+    /// grid in both tables and a negative `fk` in every interval (mostly -1,
+    /// down to -0.21 near 14 MeV): it subtracts `|fk|·fl²` on the diagonal.
     /// Squaring `fk`, or taking `fl` as the weight, turns that into an addition.
     #[test]
     fn lb4_keeps_the_sign_of_a_negative_weight() {
@@ -435,7 +463,7 @@ mod tests {
         s.fk = vec![-1.0, -0.21];
         s.el = s.ek.clone();
         s.fl = vec![0.1, 0.2];
-        let e = expand_ni(&s).expect("lb=4 expands");
+        let e = expand_ni(&on_tape(s)).expect("lb=4 expands");
         assert_eq!(e.n_rows(), 2);
         assert_eq!(e.get(0, 0), -(0.1 * 0.1));
         assert_eq!(e.get(1, 1), -0.21 * 0.2 * 0.2);
@@ -451,7 +479,7 @@ mod tests {
         s.fk = vec![1.0, 2.0];
         s.el = vec![1.0, 100.0];
         s.fl = vec![3.0];
-        let e = expand_ni(&s).expect("lb=4 expands");
+        let e = expand_ni(&on_tape(s)).expect("lb=4 expands");
         assert_eq!(e.row_energies, vec![1.0, 50.0, 100.0]);
         assert_eq!(e.values, vec![9.0, 0.0, 0.0, 18.0]);
     }
@@ -465,7 +493,7 @@ mod tests {
         s.fk = vec![2.0];
         s.el = vec![5.0, 20.0];
         s.fl = vec![0.5];
-        let e = expand_ni(&s).expect("lb=4 expands");
+        let e = expand_ni(&on_tape(s)).expect("lb=4 expands");
         assert_eq!(e.row_energies, vec![5.0, 10.0]);
         assert_eq!(e.values, vec![2.0 * 0.5 * 0.5]);
     }
@@ -477,17 +505,41 @@ mod tests {
     fn lb0_to_2_with_a_second_table_is_malformed_not_truncated() {
         for lb in 0..=2 {
             let mut s = ni(lb);
+            s.np = 3;
             s.ek = vec![1.0e-5, 8.0e5];
             s.fk = vec![0.0];
             s.el = vec![1.125e-2, 0.0];
             s.fl = vec![2.0e7];
             assert_eq!(expand_ni(&s), Err(Unsupported::Malformed), "lb={lb}");
 
+            // Tables that agree with the header, but a second table the
+            // layout does not have.
             let mut s = ni(lb);
-            s.lt = 1;
             s.ek = vec![1.0, 10.0];
             s.fk = vec![0.5, 0.0];
+            s.el = vec![1.0];
+            s.fl = vec![0.0];
+            s.lt = 1;
+            s.np = 3;
             assert_eq!(expand_ni(&s), Err(Unsupported::Malformed), "lb={lb}, lt=1");
+        }
+    }
+
+    /// A split that disagrees with `np` and `lt` is caught for the two-table
+    /// layouts too, not only where it leaves a stray second table.
+    #[test]
+    fn lb3_and_lb4_tables_that_disagree_with_the_header_are_malformed() {
+        for lb in 3..=4 {
+            // np = 5, lt = 1 puts four pairs in the first table; the old
+            // NT - NP split put 2.5 pairs there.
+            let mut s = ni(lb);
+            s.np = 5;
+            s.lt = 1;
+            s.ek = vec![1.0, 10.0];
+            s.fk = vec![0.5, 0.2];
+            s.el = vec![100.0, 1000.0, 10.0];
+            s.fl = vec![0.0, 0.1, 0.0];
+            assert_eq!(expand_ni(&s), Err(Unsupported::Malformed), "lb={lb}");
         }
     }
 
@@ -498,7 +550,7 @@ mod tests {
         s.fk = vec![1.0];
         s.el = vec![1.0, 10.0];
         s.fl = vec![1.0];
-        assert_eq!(expand_ni(&s), Err(Unsupported::Malformed));
+        assert_eq!(expand_ni(&on_tape(s)), Err(Unsupported::Malformed));
     }
 
     #[test]

@@ -156,10 +156,12 @@ pub fn parse_mf33_subsection(reader: &mut Reader) -> Result<Mf33Subsection> {
                 subsub.lt = list.cont.l1;
                 subsub.np = list.cont.n2;
                 // The first table holds NP - LT pairs and the second LT
-                // (ENDF-102 section 33.2.2.2). Both readers used to split at
-                // NT - NP, which is right only when LT = NP / 2: with LT = 0
-                // it moved the upper half of the only table into `el`/`fl`.
-                // See <https://github.com/shimwell/endf-python/issues/25>.
+                // (ENDF-102 section 33.2.2.2). This parser and endf-python's
+                // mf33.py, the golden reader, both used to split at NT - NP,
+                // which is right only when LT = NP / 2: with LT = 0 it moved
+                // the upper half of the only table into `el`/`fl`. See
+                // fusion-neutronics/core#166 and
+                // <https://github.com/shimwell/endf-python/issues/25>.
                 let split = (2 * (subsub.np - subsub.lt)).clamp(0, v.len() as i64) as usize;
                 let (k, l) = v.split_at(split);
                 subsub.ek = column(k, 0, 2);
@@ -445,8 +447,7 @@ mod tests {
     }
 
     /// LB 0 to 4 split at 2*(NP - LT) values. Splitting at NT - NP agrees only
-    /// when LT = NP / 2; see
-    /// <https://github.com/shimwell/endf-python/issues/25>.
+    /// when LT = NP / 2; see fusion-neutronics/core#166.
     #[test]
     fn mf33_lb1_keeps_its_one_table_whole() {
         // LT=0, LB=1, NT=6, NP=3: one table. NP is odd, so the old split also
