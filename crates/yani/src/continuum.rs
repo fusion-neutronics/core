@@ -133,6 +133,13 @@ impl<'a> Continuum<'a> {
             Some(Interpolation::LinearLinear) => true,
             Some(other) => return Err(UnreadableContinuum::Unsupported(other)),
         };
+        // The chain readers refuse a row whose lists differ in length, so a
+        // mismatch here is a caller building one by hand.
+        debug_assert_eq!(
+            energies.len(),
+            densities.len(),
+            "a continuum pairs each energy with one density"
+        );
         let n = energies.len().min(densities.len());
         Ok(Continuum {
             energies: &energies[..n],

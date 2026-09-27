@@ -113,6 +113,15 @@ fn source_distribution(
     energies: Vec<f64>,
     intensities: Vec<f64>,
 ) -> Result<DecaySourceDistribution, Box<dyn Error>> {
+    if energies.len() != intensities.len() {
+        return Err(format!(
+            "sources.arrow: a row of {nuclide} has {} energies and {} intensities, \
+             which must pair one to one",
+            energies.len(),
+            intensities.len()
+        )
+        .into());
+    }
     match (kind, code) {
         ("discrete", None) => Ok(DecaySourceDistribution::Discrete {
             energies,
@@ -354,8 +363,9 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
                 if let Some(nuc) = chain.get_mut(nuclides.value(i)) {
                     let energies = list_f64(energies_col, i)?;
                     let intensities = list_f64(intensities_col, i)?;
-                    // Skip sources with no data.
-                    if energies.is_empty() || energies.len() != intensities.len() {
+                    // Skip sources with no data. A row with data on one side
+                    // only is malformed, and source_distribution refuses it.
+                    if energies.is_empty() && intensities.is_empty() {
                         continue;
                     }
                     let code = codes.filter(|c| !c.is_null(i)).map(|c| c.value(i));
@@ -643,7 +653,7 @@ pub fn parse_chain_parts_from_bytes(
             for i in 0..batch.num_rows() {
                 let energies = list_f64(energies_col, i)?;
                 let intensities = list_f64(intensities_col, i)?;
-                if energies.is_empty() || energies.len() != intensities.len() {
+                if energies.is_empty() && intensities.is_empty() {
                     continue;
                 }
                 let code = codes.filter(|c| !c.is_null(i)).map(|c| c.value(i));

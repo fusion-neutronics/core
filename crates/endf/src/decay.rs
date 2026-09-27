@@ -602,8 +602,13 @@ impl Decay {
                         what: "a continuous decay spectrum with more than one interpolation region",
                     });
                 }
-                let interpolation =
-                    Interpolation::from_endf_code(f.interpolation.first().copied().unwrap_or(2))?;
+                // The law is stored and integrated under downstream, so a
+                // TAB1 that states none is refused rather than read as
+                // linear-linear.
+                let code = f.interpolation.first().copied().ok_or(Error::Unsupported {
+                    what: "a continuous decay spectrum with no interpolation region",
+                })?;
+                let interpolation = Interpolation::from_endf_code(code)?;
                 let norm = spectrum.continuous_normalization.0;
                 dists.push(Univariate::Tabular(Tabular::new(
                     f.x.clone(),
