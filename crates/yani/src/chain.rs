@@ -140,10 +140,13 @@ pub struct BranchState {
     /// `near_energy`, `level_index`, `single_isomer`, `no_isomers` or
     /// `unresolved`.
     pub level_route: String,
-    /// The level's excitation energy in eV.
+    /// The level's excitation energy in eV, as the evaluation writes it. For
+    /// an excited level (`lfs` > 0) a zero means the evaluation did not state
+    /// it, and a negative value is a sentinel, not an energy.
     pub level_energy: f64,
     /// `level_energy` less the excitation energy of the state it was booked
-    /// to, in eV; `None` where that isomer's energy is unknown.
+    /// to, in eV; `None` where that isomer's energy is unknown or
+    /// `level_energy` is not a stated energy.
     pub level_energy_difference: Option<f64>,
     /// The evaluation's MF=3 for `mt` on the curve's `energy` nodes, in barns:
     /// the tape's value where a node is one of its points and its own law

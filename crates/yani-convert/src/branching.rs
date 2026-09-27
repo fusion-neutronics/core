@@ -90,11 +90,15 @@ pub struct StateFacts {
     /// How the level was matched to the row's target.
     pub level_route: LevelRoute,
     /// The level's excitation energy in eV, as
-    /// [`RadionuclideProduction::excitation_energy`] reads it.
+    /// [`RadionuclideProduction::excitation_energy`] reads it, kept literally.
+    /// For an excited level (LFS > 0) a zero means the evaluation did not
+    /// state it (JENDL-5's Cd116 MT=107 writes ELFS = 0.0), and a negative
+    /// value is a sentinel (TENDL-2017's Pu237 MT=44 writes -2^31).
     pub level_energy: f64,
     /// `level_energy` less the excitation energy of the state the level was
     /// booked to (zero for the ground state), in eV. `None` when that isomer's
-    /// energy is unknown to the decay data.
+    /// energy is unknown to the decay data, or when `level_energy` is not a
+    /// stated energy (zero for an excited level, or negative).
     pub level_energy_difference: Option<f64>,
     /// The evaluation's own MF=3 for `mt`, as stated. `None` when the file
     /// has no MF=3 section for that MT, even where it gives the same total
@@ -174,6 +178,17 @@ fn tape_limits(curve: &Tabulated1D, e: f64) -> (Option<f64>, Option<f64>) {
         None
     };
     (value, value)
+}
+
+/// A level's energy less that of the state it was booked to, `None` where
+/// either is unknown.
+///
+/// An excited level (LFS > 0) at zero, or any level below zero, is an energy
+/// the evaluation left unstated (an ELFS of 0.0, or a -2^31 sentinel), so it
+/// is not compared: a difference of zero would read as an exact match.
+fn level_energy_difference(lfs: i64, level_energy: f64, booked: Option<f64>) -> Option<f64> {
+    let stated = level_energy > 0.0 || (lfs == 0 && level_energy == 0.0);
+    booked.filter(|_| stated).map(|e| level_energy - e)
 }
 
 /// A curve sampled on `energy`, `None` where the tape states nothing there.
@@ -728,7 +743,8 @@ impl BranchingExtractor {
                         .and_then(|table| table.get(&liso))
                         .and_then(|isomer| isomer.e_iso)
                 };
-                let level_energy_difference = booked_energy.map(|e| level_energy - e);
+                let level_energy_difference =
+                    level_energy_difference(s.lfs, level_energy, booked_energy);
                 if liso > 0 {
                     metastable.insert(target.clone());
                 }
@@ -933,7 +949,9 @@ pub fn extract_branching(
 /// not a copy of MF=3: an item is null where MF=3 is not tabulated, where a
 /// log law meets a zero, and on a single node where MF=3 alone jumps (see
 /// [`sampled_on`]), and the whole entry is null where the file has no MF=3
-/// section for the MT.
+/// section for the MT. `level_energy` is written as the tape gives it: for an
+/// excited level a zero means the evaluation did not state the energy, and a
+/// negative value is a sentinel; `level_energy_difference` is null for both.
 pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn Error>> {
     std::fs::create_dir_all(dir)?;
     let nuclide: Vec<String> = rows.iter().map(|r| r.nuclide.clone()).collect();
@@ -1184,6 +1202,18 @@ mod tests {
         );
         // A row jump where the tape is continuous takes the one value twice.
         assert_eq!(sampled_on(&curve, &[3.0, 3.0]), [Some(5.0), Some(5.0)]);
+    }
+
+    /// An excited level the evaluation gives no energy for is not compared
+    /// with the state it was booked to. JENDL-5's Cd116 MT=107 LFS=1 writes
+    /// ELFS = 0.0 and TENDL-2017's Pu237 MT=44 LFS=1 writes -2^31.
+    #[test]
+    fn an_unstated_level_energy_has_no_difference() {
+        assert_eq!(level_energy_difference(1, 0.0, Some(0.0)), None);
+        assert_eq!(level_energy_difference(1, -2.147484e9, Some(0.0)), None);
+        assert_eq!(level_energy_difference(0, 0.0, Some(0.0)), Some(0.0));
+        assert_eq!(level_energy_difference(1, 100.0, Some(90.0)), Some(10.0));
+        assert_eq!(level_energy_difference(1, 100.0, None), None);
     }
 
     /// A step jump in the sum survives the merge as a duplicated breakpoint.
