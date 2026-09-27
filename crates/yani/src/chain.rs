@@ -109,6 +109,45 @@ pub struct BranchCurve {
     pub energy: Vec<f64>,
     /// Curve values on `energy`: fraction (Yield) or barns (CrossSection).
     pub values: Vec<f64>,
+    /// The evaluated production states summed into this curve, in the order
+    /// they were summed. Empty for a subsection written before these facts
+    /// were stored.
+    pub states: Vec<BranchState>,
+    /// The parent evaluation's MF=1 account of what it was normalised to
+    /// (TENDL's "Normalization to other libraries" block), verbatim.
+    pub normalisation: Option<String>,
+}
+
+/// What the evaluation states about one production state behind a
+/// [`BranchCurve`], as the converter recorded it.
+///
+/// Facts only, carried for whoever decides what a list means: nothing in the
+/// fold or the matrix reads them, so a curve's rates are the same with or
+/// without them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BranchState {
+    /// The MT the state was listed under.
+    pub mt: i32,
+    /// The final state's level number (LFS); 0 is the ground state.
+    pub lfs: i32,
+    /// MF=8's LMF for the state, `None` where MF=8 does not name it.
+    pub lmf: Option<i32>,
+    /// Whether the same MT and file also list the product's ground state. A
+    /// list without it gives isomers only.
+    pub list_complete: bool,
+    /// How the level was matched to the target: `ground`, `energy`,
+    /// `near_energy`, `level_index`, `single_isomer`, `no_isomers` or
+    /// `unresolved`.
+    pub level_route: String,
+    /// The level's excitation energy in eV.
+    pub level_energy: f64,
+    /// `level_energy` less the excitation energy of the state it was booked
+    /// to, in eV; `None` where that isomer's energy is unknown.
+    pub level_energy_difference: Option<f64>,
+    /// The evaluation's MF=3 for `mt` on the curve's `energy` nodes, in barns:
+    /// `None` where the file has no MF=3 for the MT, and a `None` item where
+    /// MF=3 is not tabulated at that node.
+    pub mf3_cross_section: Option<Vec<Option<f64>>>,
 }
 
 /// Isomeric-branching curves keyed by parent nuclide then reaction kind.

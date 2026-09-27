@@ -11,7 +11,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow_array::builder::{Float64Builder, ListBuilder, StringBuilder};
-use arrow_array::{Array, ArrayRef, Float64Array, ListArray, RecordBatch, StringArray};
+use arrow_array::{
+    Array, ArrayRef, BooleanArray, Float64Array, Int32Array, ListArray, RecordBatch, StringArray,
+};
 use arrow_ipc::reader::FileReader;
 use arrow_ipc::writer::FileWriter;
 use arrow_schema::{DataType, Field, Schema};
@@ -26,8 +28,8 @@ fn section_schema(path: &str) -> Schema {
 }
 
 use crate::chain::{
-    BranchCurve, BranchQuantity, BranchTable, ChainNuclide, ChainParts, ChainReaction, DecaySource,
-    DecaySourceDistribution, FissionYield, FissionYieldSet,
+    BranchCurve, BranchQuantity, BranchState, BranchTable, ChainNuclide, ChainParts, ChainReaction,
+    DecaySource, DecaySourceDistribution, FissionYield, FissionYieldSet,
 };
 
 fn read_arrow_bytes(bytes: &[u8]) -> Result<Vec<RecordBatch>, Box<dyn Error>> {
@@ -94,6 +96,154 @@ fn list_str(list: &ListArray, i: usize) -> Result<Vec<String>, Box<dyn Error>> {
         .downcast_ref::<StringArray>()
         .ok_or("list<str> inner type mismatch")?;
     Ok((0..strs.len()).map(|j| strs.value(j).to_string()).collect())
+}
+
+/// The per-state columns of `branching/branching.arrow`, when the file has
+/// them. A subsection written before they existed has none, and its curves
+/// carry no states; one with some but not all is not a file this converter
+/// wrote, and is refused.
+struct BranchStateColumns<'a> {
+    mt: &'a ListArray,
+    lfs: &'a ListArray,
+    lmf: &'a ListArray,
+    list_complete: &'a ListArray,
+    level_route: &'a ListArray,
+    level_energy: &'a ListArray,
+    level_energy_difference: &'a ListArray,
+    mf3_cross_section: &'a ListArray,
+    normalisation: &'a StringArray,
+}
+
+const BRANCH_STATE_COLUMNS: [&str; 9] = [
+    "mt",
+    "lfs",
+    "lmf",
+    "list_complete",
+    "level_route",
+    "level_energy",
+    "level_energy_difference",
+    "mf3_cross_section",
+    "normalisation",
+];
+
+impl<'a> BranchStateColumns<'a> {
+    fn from_batch(batch: &'a RecordBatch) -> Result<Option<Self>, Box<dyn Error>> {
+        let schema = batch.schema();
+        let present: Vec<&str> = BRANCH_STATE_COLUMNS
+            .into_iter()
+            .filter(|name| schema.index_of(name).is_ok())
+            .collect();
+        if present.is_empty() {
+            return Ok(None);
+        }
+        if present.len() != BRANCH_STATE_COLUMNS.len() {
+            return Err(format!(
+                "branching.arrow has the state columns {present:?} but not all of \
+                 {BRANCH_STATE_COLUMNS:?}; it was not written by one converter"
+            )
+            .into());
+        }
+        Ok(Some(BranchStateColumns {
+            mt: col(batch, "mt")?,
+            lfs: col(batch, "lfs")?,
+            lmf: col(batch, "lmf")?,
+            list_complete: col(batch, "list_complete")?,
+            level_route: col(batch, "level_route")?,
+            level_energy: col(batch, "level_energy")?,
+            level_energy_difference: col(batch, "level_energy_difference")?,
+            mf3_cross_section: col(batch, "mf3_cross_section")?,
+            normalisation: col(batch, "normalisation")?,
+        }))
+    }
+
+    /// Row `i`'s states and normalisation text.
+    ///
+    /// `nodes` is the row's energy grid length, which every sampled MF=3 must
+    /// match.
+    fn row(
+        &self,
+        i: usize,
+        nodes: usize,
+    ) -> Result<(Vec<BranchState>, Option<String>), Box<dyn Error>> {
+        fn items<T: 'static + Array + Clone>(
+            list: &ListArray,
+            i: usize,
+            name: &str,
+        ) -> Result<T, Box<dyn Error>> {
+            if list.is_null(i) {
+                return Err(format!("branching.arrow {name} is null on row {i}").into());
+            }
+            list.value(i)
+                .as_any()
+                .downcast_ref::<T>()
+                .cloned()
+                .ok_or_else(|| format!("branching.arrow {name} has an unexpected item type").into())
+        }
+        let mt: Int32Array = items(self.mt, i, "mt")?;
+        let lfs: Int32Array = items(self.lfs, i, "lfs")?;
+        let lmf: Int32Array = items(self.lmf, i, "lmf")?;
+        let complete: BooleanArray = items(self.list_complete, i, "list_complete")?;
+        let route: StringArray = items(self.level_route, i, "level_route")?;
+        let energy: Float64Array = items(self.level_energy, i, "level_energy")?;
+        let difference: Float64Array =
+            items(self.level_energy_difference, i, "level_energy_difference")?;
+        let mf3: ListArray = items(self.mf3_cross_section, i, "mf3_cross_section")?;
+        let n = mt.len();
+        let lengths = [
+            lfs.len(),
+            lmf.len(),
+            complete.len(),
+            route.len(),
+            energy.len(),
+            difference.len(),
+            mf3.len(),
+        ];
+        if lengths.iter().any(|&len| len != n) {
+            return Err(format!(
+                "branching.arrow row {i} has {n} states in mt but {lengths:?} in the other state columns"
+            )
+            .into());
+        }
+        let option = |array: &dyn Array, j: usize| !array.is_null(j);
+        let mut states = Vec::with_capacity(n);
+        for j in 0..n {
+            let mf3_cross_section = if mf3.is_null(j) {
+                None
+            } else {
+                let values = mf3.value(j);
+                let values = values
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or("branching.arrow mf3_cross_section has an unexpected item type")?;
+                if values.len() != nodes {
+                    return Err(format!(
+                        "branching.arrow row {i} state {j}: mf3_cross_section has {} values \
+                         on {nodes} energy nodes",
+                        values.len()
+                    )
+                    .into());
+                }
+                Some(
+                    (0..values.len())
+                        .map(|k| option(values, k).then(|| values.value(k)))
+                        .collect(),
+                )
+            };
+            states.push(BranchState {
+                mt: mt.value(j),
+                lfs: lfs.value(j),
+                lmf: option(&lmf, j).then(|| lmf.value(j)),
+                list_complete: complete.value(j),
+                level_route: route.value(j).to_string(),
+                level_energy: energy.value(j),
+                level_energy_difference: option(&difference, j).then(|| difference.value(j)),
+                mf3_cross_section,
+            });
+        }
+        let normalisation =
+            (!self.normalisation.is_null(i)).then(|| self.normalisation.value(i).to_string());
+        Ok((states, normalisation))
+    }
 }
 
 /// Whether a branching row `(kind, target)` should be grafted onto `parent`.
@@ -702,6 +852,7 @@ pub fn parse_chain_parts_from_bytes(
                 let quantities = col::<StringArray>(&batch, "quantity")?;
                 let energy_col = col::<ListArray>(&batch, "energy")?;
                 let values_col = col::<ListArray>(&batch, "values")?;
+                let state_cols = BranchStateColumns::from_batch(&batch)?;
                 for i in 0..batch.num_rows() {
                     let parent = nuclides.value(i);
                     if !chain.contains_key(parent) {
@@ -719,6 +870,10 @@ pub fn parse_chain_parts_from_bytes(
                     if energy.is_empty() || energy.len() != values.len() {
                         continue;
                     }
+                    let (states, normalisation) = match &state_cols {
+                        Some(columns) => columns.row(i, energy.len())?,
+                        None => (Vec::new(), None),
+                    };
 
                     // Graft the metastable-production channel when the base
                     // chain lacks it (see the block comment above and
@@ -751,6 +906,8 @@ pub fn parse_chain_parts_from_bytes(
                             quantity,
                             energy,
                             values,
+                            states,
+                            normalisation,
                         });
                 }
             }
