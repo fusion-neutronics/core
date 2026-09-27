@@ -7,6 +7,7 @@ use std::error::Error;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use arrow_array::RecordBatch;
 use once_cell::sync::Lazy;
 
 type ChainMap = HashMap<String, ChainNuclide>;
@@ -114,7 +115,56 @@ pub struct BranchCurve {
 /// Isomeric-branching curves keyed by parent nuclide then reaction kind.
 /// `branch_table[parent][kind]` is the list of per-final-state curves for that
 /// reaction. Empty when no `branching/` subsection was supplied.
-pub type BranchTable = HashMap<String, HashMap<String, Vec<BranchCurve>>>;
+///
+/// Dereferences to that map, so it reads like one. It also holds the
+/// subsection's `branching_covariance.arrow`, the MF=40 covariance of the MF=10
+/// partials, when the subsection carries one. That is kept as the file's record
+/// batches, schema-checked and otherwise as written: it is every MF=40 block of
+/// the library, not only those of this chain's parents, and turning a row into
+/// a covariance block is the covariance reader's job (`yamc-nuclide`), which
+/// this crate does not depend on. Nothing here reads it, so the curves and every
+/// nominal result are what they are without it.
+#[derive(Clone, Debug, Default)]
+pub struct BranchTable {
+    curves: HashMap<String, HashMap<String, Vec<BranchCurve>>>,
+    covariance: Option<Vec<RecordBatch>>,
+}
+
+impl BranchTable {
+    /// An empty table with no covariance.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The rows of `branching_covariance.arrow`, when the subsection has one.
+    ///
+    /// `None` for a library without MF=40 (JENDL-5.0), for a subsection
+    /// published before the file existed, and for a bytes-fed host that did not
+    /// hand the file over. None of those is an error: there is simply no
+    /// stated covariance of the isomeric split.
+    pub fn covariance(&self) -> Option<&[RecordBatch]> {
+        self.covariance.as_deref()
+    }
+
+    /// Attach the covariance batches read from the subsection.
+    pub fn set_covariance(&mut self, batches: Vec<RecordBatch>) {
+        self.covariance = Some(batches);
+    }
+}
+
+impl std::ops::Deref for BranchTable {
+    type Target = HashMap<String, HashMap<String, Vec<BranchCurve>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.curves
+    }
+}
+
+impl std::ops::DerefMut for BranchTable {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.curves
+    }
+}
 
 /// A parsed transmutation chain plus its optional isomeric-branching overlay.
 ///

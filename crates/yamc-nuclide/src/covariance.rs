@@ -95,3 +95,50 @@ impl CovarianceBlock {
         self.mat1 != 0
     }
 }
+
+/// One block of `branching/branching_covariance.arrow`: an MF=40 covariance of
+/// one product state's MF=10 partial with another's, with the key the
+/// converter put in front of it.
+///
+/// Every tape value is as the tape gives it, so `mat1` may name the evaluation
+/// itself: compare it with `mat`, not with zero, before taking a block for a
+/// cross-material one (JEFF-4.0 U235 MT 4). `izap` may be 0 for the target
+/// itself on MT 4, and `lfs` need not be MF=10's number for the same level;
+/// `target` is where the converter matched it.
+///
+/// The block is a [`CovarianceBlock`] exactly as `covariance.arrow` reads,
+/// because MF=40 writes its sub-subsections in MF=33's format. Its `xmf1`,
+/// `xlfs1`, `mat1` and `mt1` name the partner state, and its `subsection_idx`
+/// is the sub-subsection's position within the product state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BranchingCovarianceBlock {
+    /// The parent, as in `branching.arrow`.
+    pub nuclide: String,
+    /// The chain reaction kind of the section's MT, `None` for an MT with none.
+    pub reaction: Option<String>,
+    /// The chain nuclide this block's product state is the partial of, `None`
+    /// when the converter matched it to no MF=9 or MF=10 state.
+    pub target: Option<String>,
+    /// The chain nuclide the partner state resolved to, `None` when the
+    /// converter could not resolve it.
+    pub target1: Option<String>,
+    /// This state's own MF=10 partial, when several states share `target` and
+    /// the `branching.arrow` curve is their sum; `None` means that curve is
+    /// this state's own.
+    pub energy: Option<Vec<f64>>,
+    pub values: Option<Vec<f64>>,
+    /// The evaluation's own MAT.
+    pub mat: i32,
+    /// The section HEAD.
+    pub za: i32,
+    pub awr: f64,
+    pub lis: i32,
+    /// The product state's position in the section, and its CONT.
+    pub state_idx: i32,
+    pub qm: f64,
+    pub qi: f64,
+    pub izap: i32,
+    pub lfs: i32,
+    /// The block itself.
+    pub block: CovarianceBlock,
+}
