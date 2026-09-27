@@ -182,21 +182,9 @@ pub fn decay_photon_lines(
         let Some(chain_nuclide) = chain.get(name.as_str()) else {
             continue;
         };
-        for source in &chain_nuclide.sources {
-            if source.particle != "photon" {
-                continue;
-            }
-            let DecaySourceDistribution::Discrete {
-                energies,
-                intensities,
-            } = &source.distribution
-            else {
-                continue;
-            };
-            for (energy, intensity) in energies.iter().zip(intensities) {
-                if *intensity > 0.0 {
-                    *lines.entry(energy.to_bits()).or_insert(0.0) += atoms * intensity;
-                }
+        for (energy, intensity) in chain_nuclide.photon_lines() {
+            if intensity > 0.0 {
+                *lines.entry(energy.to_bits()).or_insert(0.0) += atoms * intensity;
             }
         }
     }
