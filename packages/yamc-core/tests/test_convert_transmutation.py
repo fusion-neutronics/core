@@ -207,5 +207,6 @@ def test_branching_covariance_is_written_beside_the_curves(tmp_path):
     assert stats["mf40_blocks"] == 4
     assert stats["mf40_blocks_by_lb"] == {5: 4}
     assert stats["mf40_nc_blocks"] == 0
+    assert stats["mf40_cross_state_blocks"] == 0
     assert stats["mf40_unmatched_states"] == []
     assert stats["mf40_without_blocks"] == []

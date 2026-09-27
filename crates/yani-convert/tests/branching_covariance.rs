@@ -157,6 +157,7 @@ fn mf40_is_written_beside_branching_for_nb93() {
     assert_eq!(stats.mf40_states_without_chain_kind, 0);
     assert_eq!(stats.mf40_on_yield_channels, 0);
     assert_eq!(stats.mf40_mat1_naming_itself, 0);
+    assert_eq!(stats.mf40_cross_state_blocks, 0);
     assert!(stats.mf40_without_blocks.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -220,6 +221,72 @@ fn every_block_round_trips_exactly() {
         }
     }
     assert_eq!(blocks.len(), expected);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A block between two states, in the LB=6 layout, as JEFF-4.0 U235 MT 4
+/// correlates its ground with its 77 eV isomer. Here Nb93's (n,n') ground
+/// gains a second sub-subsection pairing it with the isomer (XLFS1 1). The
+/// rectangular block reads back exactly, and its partner resolves to the
+/// isomer while the row's own state stays the ground.
+#[test]
+fn a_cross_state_lb6_block_round_trips() {
+    let tape = text(NB93);
+    // The ground state's CONT, now with two sub-subsections.
+    let tape = edit(
+        tape,
+        " 0.000000+0 0.000000+0      41093          0          0          1412540  4    2",
+        " 0.000000+0 0.000000+0      41093          0          0          2412540  4    2",
+    );
+    // After the ground's self block: XMF1 10, XLFS1 1, MT1 4, one NI block,
+    // then LB=6 with NER 3 and NT 10, so NEC 3 and a 2 x 2 matrix.
+    let last = " 6.391090-2 6.091560-2 5.715220-2 5.814100-2 5.464040-2 5.147370-2412540  4   24";
+    let lines = [
+        last,
+        " 1.000000+1 1.000000+0          0          4          0          1",
+        " 0.000000+0 0.000000+0          0          6         10          3",
+        " 1.000000-5 1.000000+6 2.000000+7 1.000000-5 5.000000+6 2.000000+7",
+        " 1.000000-2-2.000000-3 3.000000-3 4.000000-3",
+    ];
+    let inserted: Vec<String> = std::iter::once(last.to_string())
+        .chain(lines[1..].iter().map(|l| format!("{l:<66}412540  4   24")))
+        .collect();
+    let tape = edit(tape, last, &inserted.join("\n"));
+    let nb93 = material(&tape);
+    let out = extract(std::slice::from_ref(&nb93), &nb_decay());
+    assert_eq!(out.stats.mf40_cross_state_blocks, 1);
+    assert_eq!(out.stats.mf40_blocks_by_lb.get(&6), Some(&1));
+    assert_eq!(out.stats.mf40_blocks, 5);
+
+    let dir = scratch("cross-state");
+    write_branching_covariance(&out.covariance, &dir).expect("writes");
+    let blocks = read_back(&dir);
+    let b = blocks
+        .iter()
+        .find(|b| b.block.mt == 4 && b.lfs == 0 && b.block.subsection_idx == 1)
+        .expect("the cross-state block");
+    let tape_block = &nb93.mf40(4).expect("MF=40 MT 4").subsections[0].subsubsections[1];
+    assert_eq!(
+        b.block.data,
+        CovarianceData::Ni(tape_block.ni_subsections[0].clone())
+    );
+    let CovarianceData::Ni(ni) = &b.block.data else {
+        panic!("an NI block");
+    };
+    assert_eq!((ni.lb, ni.nt, ni.ner, ni.nec), (6, 10, 3, 3));
+    assert_eq!(ni.er, [1.0e-5, 1.0e6, 2.0e7]);
+    assert_eq!(ni.ec, [1.0e-5, 5.0e6, 2.0e7]);
+    assert_eq!(ni.fkl, [1.0e-2, -2.0e-3, 3.0e-3, 4.0e-3]);
+    assert_eq!((b.block.mt1, b.block.xmf1, b.block.xlfs1), (4, 10.0, 1.0));
+    assert_ne!(b.block.xlfs1, b.lfs as f64);
+    assert_eq!(b.target.as_deref(), Some("Nb93"));
+    assert_eq!(b.target1.as_deref(), Some("Nb93_m1"));
+    // The ground's self block is untouched beside it.
+    let own = blocks
+        .iter()
+        .find(|b| b.block.mt == 4 && b.lfs == 0 && b.block.subsection_idx == 0)
+        .expect("the self block");
+    assert_eq!(own.target1.as_deref(), Some("Nb93"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -392,7 +459,8 @@ fn tape_values_are_written_literally() {
 }
 
 /// A state that matches nothing, and a section whose MT has no chain kind, are
-/// still written, with the key they could not be given left null.
+/// still written, with the key they could not be given left null. A partner
+/// in an MT with MF=10 but no MF=40 section is still resolved.
 #[test]
 fn states_with_no_chain_row_are_still_written() {
     let tape = text(NB93);
@@ -403,7 +471,8 @@ fn states_with_no_chain_row_are_still_written() {
         "-8.830870+6-8.966370+6      41091          1          0          1412540 16   10",
     );
     // MF=40 MT 4 moved to MT 18, which has no chain kind. Its MT1 still says
-    // 4, a reaction with no MF=40 section left to find the partner in.
+    // 4, a reaction with no MF=40 section left to find the partner in, so the
+    // partner is found among MT 4's MF=10 states instead.
     let tape: String = tape
         .lines()
         .map(|line| {
@@ -433,7 +502,20 @@ fn states_with_no_chain_row_are_still_written() {
     assert_eq!(fission.len(), 2);
     assert!(fission
         .iter()
-        .all(|b| b.reaction.is_none() && b.target.is_none() && b.target1.is_none()));
+        .all(|b| b.reaction.is_none() && b.target.is_none()));
+    for b in fission {
+        let partner = if b.block.xlfs1 == 0.0 {
+            "Nb93"
+        } else {
+            "Nb93_m1"
+        };
+        assert_eq!(
+            b.target1.as_deref(),
+            Some(partner),
+            "XLFS1 {}",
+            b.block.xlfs1
+        );
+    }
     let moved = blocks
         .iter()
         .find(|b| b.izap == 41091)

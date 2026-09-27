@@ -82,10 +82,15 @@ pub struct BranchingCovarianceRow {
     /// when no MF=9 or MF=10 state of the MT matched it.
     pub target: Option<String>,
     /// The chain nuclide the partner state resolved to, `None` when it is in
-    /// another material, is not an MF=10 partial, or matched nothing.
+    /// another material, XMF1 is not 10, or no single state of MT1 at level
+    /// XLFS1 is found (see `partner_target`). Several levels can resolve to
+    /// one chain nuclide, so (`target`, `target1`) does not identify the pair
+    /// of states: (`mt`, `lfs`, `mt1`, `xlfs1`) does.
     pub target1: Option<String>,
-    /// This state's own linearized MF=10 partial, only when several MF=10
-    /// states resolved to `target` and `branching.arrow` carries their sum.
+    /// This state's own MF=10 partial, linearized exactly as `branching.arrow`
+    /// has it, only when several MF=10 states resolved to `target` and
+    /// `branching.arrow` carries their sum. Always `None` for a state MF=9
+    /// gives as a yield, which has no MF=10 partial.
     pub energy: Option<Vec<f64>>,
     pub values: Option<Vec<f64>>,
     /// The evaluation's own MAT.
@@ -361,13 +366,20 @@ pub struct BranchingStats {
     /// IZAP 0). Written, with a null `reaction` and `target`.
     pub mf40_states_without_chain_kind: usize,
     /// MF=40 product states matched to a state whose split MF=9 yields give
-    /// rather than an MF=10 partial. Written; the covariance is still of the
-    /// production cross section, not of the yield.
+    /// rather than an MF=10 partial. Written, with a null `energy` and
+    /// `values` since there is no MF=10 partial to give; the covariance is
+    /// still of the production cross section, not of the yield.
     pub mf40_on_yield_channels: usize,
     /// Sub-subsections whose MAT1 names the evaluation itself (JEFF-4.0 U235
     /// MT 4 writes its own MAT there). Written as the tape gives it, so a
     /// reader has to compare `mat1` with `mat` rather than with zero.
     pub mf40_mat1_naming_itself: usize,
+    /// Blocks correlating two different states (MT1 or XLFS1 other than the
+    /// state's own), rather than a state with itself. JEFF-4.0 U235 MT 4,
+    /// ground with its 77 eV isomer, is the one published case, and both its
+    /// states resolve to U235: a reader has to key on (`mt`, `lfs`, `mt1`,
+    /// `xlfs1`), not on (`target`, `target1`), to tell it from a self block.
+    pub mf40_cross_state_blocks: usize,
     /// Product states with no sub-subsection and sub-subsections with no
     /// block, one line each. They hold no number and have no row, so they are
     /// the one part of MF=40 the file cannot show; none of the published
@@ -771,23 +783,32 @@ impl BranchingExtractor {
                     }
                     // The partner is an MF=10 partial of this evaluation when
                     // MAT1 is 0 (or, as JEFF-4.0 U235 writes it, this MAT) and
-                    // XMF1 is 10 (or 0, "this file"); MT1 of 0 is this MT, as
-                    // MF=33 reads it. It is then found among the states of
-                    // MT1's own MF=40 section, by level.
+                    // XMF1 is 10; MT1 of 0 is this MT, as MF=33 reads it. Any
+                    // other XMF1 is left unresolved rather than read as MF=10.
                     let partner_mt = if ss.mt1 == 0 { mt } else { ss.mt1 as i32 };
                     let in_this_material = ss.mat1 == 0 || ss.mat1 == own_mat;
-                    let partial = ss.xmf1 == 0.0 || ss.xmf1 == 10.0;
-                    let target1 = (in_this_material && partial)
+                    let target1 = (in_this_material && ss.xmf1 == 10.0)
                         .then(|| {
-                            let (_, partner) = mf40.iter().find(|(m, _)| *m == partner_mt)?;
-                            partner
-                                .subsections
-                                .iter()
-                                .zip(&matched[&partner_mt])
-                                .find(|(other, _)| other.lfs as f64 == ss.xlfs1)
-                                .and_then(|(_, m)| m.map(|m| m.target.clone()))
+                            partner_target(
+                                sub,
+                                mt,
+                                meta.za,
+                                partner_mt,
+                                ss.xlfs1,
+                                &mf40,
+                                &matched,
+                                &states_by_mt,
+                            )
                         })
                         .flatten();
+                    // A block between two different states, rather than a
+                    // state's covariance with itself. JEFF-4.0 U235 MT 4
+                    // correlates its ground (LFS 0) with the 77 eV isomer
+                    // (XLFS1 1), both of which resolve to U235.
+                    if partner_mt != mt || ss.xlfs1 != sub.lfs as f64 {
+                        stats.mf40_cross_state_blocks +=
+                            ss.nc_subsections.len() + ss.ni_subsections.len();
+                    }
                     stats.mf40_nc_blocks += ss.nc_subsections.len();
                     for ni in &ss.ni_subsections {
                         *stats.mf40_blocks_by_lb.entry(ni.lb).or_insert(0) += 1;
@@ -852,6 +873,7 @@ impl BranchingExtractor {
         self.stats.mf40_states_without_chain_kind += stats.mf40_states_without_chain_kind;
         self.stats.mf40_on_yield_channels += stats.mf40_on_yield_channels;
         self.stats.mf40_mat1_naming_itself += stats.mf40_mat1_naming_itself;
+        self.stats.mf40_cross_state_blocks += stats.mf40_cross_state_blocks;
         self.stats
             .mf40_without_blocks
             .extend(stats.mf40_without_blocks);
@@ -890,11 +912,7 @@ fn match_mf40_state<'a>(
     isomers: &endf::radionuclide_production::IsomerTable,
     tol_ev: f64,
 ) -> Option<&'a ProductionState> {
-    let izap = if sub.izap == 0 && mt == 4 {
-        za
-    } else {
-        sub.izap
-    };
+    let izap = mf40_zap(sub, mt, za);
     if let Some(state) = states.get(&(izap, sub.lfs)) {
         return Some(state);
     }
@@ -918,6 +936,67 @@ fn match_mf40_state<'a>(
                 .abs()
                 .total_cmp(&(y.excitation - excitation).abs())
         })
+}
+
+/// The chain target of a block's partner state, level `xlfs1` of `partner_mt`
+/// in this evaluation.
+///
+/// Found among the states of `partner_mt`'s own MF=40 section when it has one,
+/// so the partner is matched as its own row's `target` was, and otherwise
+/// among that MT's MF=9 and MF=10 states, whose LFS is the one XLFS1 names.
+/// MF=40 gives no IZAP for the partner, so where several products of the MT
+/// share the level the row's own IZAP is taken when the partner is in the
+/// same MT, and the partner is otherwise left unresolved rather than guessed.
+#[allow(clippy::too_many_arguments)]
+fn partner_target(
+    sub: &Mf40Subsection,
+    mt: i32,
+    za: i64,
+    partner_mt: i32,
+    xlfs1: f64,
+    mf40: &[(i32, &Mf40)],
+    matched: &BTreeMap<i32, Vec<Option<&ProductionState>>>,
+    states_by_mt: &BTreeMap<i32, BTreeMap<(i64, i64), ProductionState>>,
+) -> Option<String> {
+    let own_zap = mf40_zap(sub, mt, za);
+    let pick = |candidates: Vec<(i64, Option<&ProductionState>)>| {
+        let own = candidates
+            .iter()
+            .find(|(zap, _)| partner_mt == mt && *zap == own_zap);
+        match (own, candidates.as_slice()) {
+            (Some((_, state)), _) | (None, [(_, state)]) => state.map(|s| s.target.clone()),
+            _ => None,
+        }
+    };
+    if let Some((_, section)) = mf40.iter().find(|(m, _)| *m == partner_mt) {
+        return pick(
+            section
+                .subsections
+                .iter()
+                .zip(&matched[&partner_mt])
+                .filter(|(other, _)| other.lfs as f64 == xlfs1)
+                .map(|(other, state)| (mf40_zap(other, partner_mt, za), *state))
+                .collect(),
+        );
+    }
+    pick(
+        states_by_mt
+            .get(&partner_mt)?
+            .iter()
+            .filter(|((_, lfs), _)| *lfs as f64 == xlfs1)
+            .map(|((zap, _), state)| (*zap, Some(state)))
+            .collect(),
+    )
+}
+
+/// The product ZA of an MF=40 state, with MT 4's IZAP of 0 (JEFF-4.0 U235)
+/// read as the target itself.
+fn mf40_zap(sub: &Mf40Subsection, mt: i32, za: i64) -> i64 {
+    if sub.izap == 0 && mt == 4 {
+        za
+    } else {
+        sub.izap
+    }
 }
 
 /// Extract branching rows for each parent's neutron evaluation.

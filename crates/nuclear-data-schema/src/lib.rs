@@ -260,15 +260,24 @@ pub fn branching_branching() -> Schema {
 ///   partial of, which is the `target` of the `branching.arrow` row for
 ///   (`nuclide`, `reaction`). Null when no MF=9 or MF=10 state of that MT
 ///   matched it. `target1` is the same for the partner state the block
-///   correlates this one with, level `xlfs1` of reaction `mt1`, null when the
-///   partner is in another material, is not an MF=10 partial, or matched
-///   nothing.
-/// * `energy` and `values` are this state's own linearized MF=10 partial, and
-///   are written only when several MF=10 states resolved to one target, which
-///   `branching.arrow` then carries as their sum. A relative covariance of one
-///   state has to be weighted by that state's own partial to fold exactly; null
-///   means the `branching.arrow` curve for (`nuclide`, `reaction`, `target`) is
-///   that state's own.
+///   correlates this one with, level `xlfs1` of reaction `mt1`, found among
+///   the states of `mt1`'s MF=40 section, or of its MF=9 and MF=10 states when
+///   it has no MF=40 section. Null when the partner is in another material,
+///   `xmf1` is not 10, or no single state at that level is found (MF=40 gives
+///   no IZAP for the partner, so a level several products share is resolved
+///   only by this row's own IZAP, in the same MT). Several levels can resolve
+///   to one chain nuclide: JEFF-4.0 U235 MT 4 correlates its ground (LFS 0)
+///   with its 77 eV isomer (XLFS1 1), both U235. So a consumer keys a block
+///   on (`mt`, `lfs`, `mt1`, `xlfs1`), never on (`target`, `target1`).
+/// * `energy` and `values` are this state's own MF=10 partial, linearized
+///   by the converter exactly as `branching.arrow` has it (the tape's own
+///   points when every region is lin-lin), and are written only when several MF=10 states
+///   resolved to one target, which `branching.arrow` then carries as their
+///   sum. A relative covariance of one state has to be weighted by that
+///   state's own partial to fold exactly. Null for an MF=10 state means the
+///   `branching.arrow` cross section for (`nuclide`, `reaction`, `target`) is
+///   that state's own. A state MF=9 gives as a yield has no MF=10 partial, so
+///   is always null here, whether or not its yield row is merged with another.
 /// * `mat` is the evaluation's MAT, so a reader can tell a `mat1` naming the
 ///   evaluation itself (JEFF-4.0 U235 MT 4 writes its own 9228 there) from a
 ///   correlation with another material.

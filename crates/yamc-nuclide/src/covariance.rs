@@ -109,7 +109,14 @@ impl CovarianceBlock {
 /// The block is a [`CovarianceBlock`] exactly as `covariance.arrow` reads,
 /// because MF=40 writes its sub-subsections in MF=33's format. Its `xmf1`,
 /// `xlfs1`, `mat1` and `mt1` name the partner state, and its `subsection_idx`
-/// is the sub-subsection's position within the product state.
+/// is the sub-subsection's position within the product state. Its `mtl` is
+/// always 0 and means nothing here: MF=40 has no lumped-reaction flag, and the
+/// file stores the column as null.
+///
+/// Several levels can resolve to one chain nuclide, so (`target`, `target1`)
+/// does not identify the pair of states a block correlates: key on (`mt`,
+/// `lfs`, `mt1`, `xlfs1`). JEFF-4.0 U235 MT 4 has a block between its ground
+/// (LFS 0) and its 77 eV isomer (XLFS1 1), and both resolve to U235.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BranchingCovarianceBlock {
     /// The parent, as in `branching.arrow`.
@@ -119,12 +126,15 @@ pub struct BranchingCovarianceBlock {
     /// The chain nuclide this block's product state is the partial of, `None`
     /// when the converter matched it to no MF=9 or MF=10 state.
     pub target: Option<String>,
-    /// The chain nuclide the partner state resolved to, `None` when the
-    /// converter could not resolve it.
+    /// The chain nuclide the partner state resolved to, `None` when it is in
+    /// another material, `xmf1` is not 10, or the converter found no single
+    /// state of `mt1` at level `xlfs1`.
     pub target1: Option<String>,
-    /// This state's own MF=10 partial, when several states share `target` and
-    /// the `branching.arrow` curve is their sum; `None` means that curve is
-    /// this state's own.
+    /// This state's own MF=10 partial, linearized as `branching.arrow` has
+    /// it, when several MF=10 states share `target` and the `branching.arrow`
+    /// cross section is their sum. `None` for an MF=10 state means that cross
+    /// section is this state's own; a state MF=9 gives as a yield is always
+    /// `None`, having no MF=10 partial.
     pub energy: Option<Vec<f64>>,
     pub values: Option<Vec<f64>>,
     /// The evaluation's own MAT.

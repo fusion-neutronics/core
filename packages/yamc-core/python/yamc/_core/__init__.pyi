@@ -5841,9 +5841,13 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         per product state that matches no MF=9 or MF=10 state, written with no
         target), ``mf40_states_without_chain_kind`` (states of an MT with no
         chain reaction, such as MT 18, written with no reaction),
-        ``mf40_on_yield_channels`` (states matched to a split MF=9 yields
-        give), ``mf40_mat1_naming_itself`` (sub-subsections whose MAT1 is the
-        evaluation's own MAT, written as given) and ``mf40_without_blocks``
+        ``mf40_on_yield_channels`` (states matched to a level whose production
+        MF=9 gives as a yield rather than an MF=10 cross section),
+        ``mf40_mat1_naming_itself`` (sub-subsections whose MAT1 is the
+        evaluation's own MAT, written as given), ``mf40_cross_state_blocks``
+        (blocks correlating two different states rather than one state with
+        itself; key them on MT, LFS, MT1 and XLFS1, since both states can
+        resolve to one target) and ``mf40_without_blocks``
         (one line per state or sub-subsection holding no block, the only part
         of MF=40 the file cannot show). An evaluation set without MF=40
         writes no covariance file, and removes one an earlier conversion left
