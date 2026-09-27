@@ -789,12 +789,22 @@ fn streaming_the_neutron_files_writes_the_same_tree_as_holding_them() {
 /// The rows, the flagged levels and the partial-sum lines are all ordered, and
 /// the counters are sums, so a merge that lost the order or forgot a statistic
 /// would change the written subsection without changing anything else.
+/// TENDL-2017 Nb93 is added for its MF=40, so the covariance rows and the
+/// MF=40 statistics are merged too.
 #[test]
 fn absorbing_partials_in_file_order_matches_adding_one_at_a_time() {
     use yani_convert::branching::{BranchingExtractor, DEFAULT_LINEARIZE_TOL};
 
-    let decay = materials(DECAY);
-    let neutron = materials(NEUTRON);
+    let mut decay = materials(DECAY);
+    decay.extend(materials(&[
+        fixture!("dec-041_Nb_092.endf.xz"),
+        fixture!("dec-041_Nb_092m1.endf.xz"),
+        fixture!("dec-041_Nb_093m1.endf.xz"),
+    ]));
+    let mut neutron = materials(NEUTRON);
+    neutron.extend(materials(&[fixture!(
+        "n-041_Nb_093_tendl2017_trimmed.endf.xz"
+    )]));
     let build = || BranchingExtractor::new(&decay, 3000.0, DEFAULT_LINEARIZE_TOL);
 
     let mut sequential = build();
@@ -816,6 +826,10 @@ fn absorbing_partials_in_file_order_matches_adding_one_at_a_time() {
     assert!(
         !one_at_a_time.rows.is_empty(),
         "the fixtures produced no branching rows, so this proves nothing"
+    );
+    assert!(
+        !one_at_a_time.covariance.is_empty(),
+        "the fixtures produced no MF=40 rows, so the covariance merge is unproven"
     );
     assert_eq!(merged, one_at_a_time);
 }
