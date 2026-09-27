@@ -335,6 +335,44 @@ fn a_mat1_naming_the_own_mat_reads_back_as_this_evaluation() {
     }
 }
 
+/// A `covariance.arrow` written before the `mat` column existed still reads.
+///
+/// Every published file is like that until it is regenerated. With no own MAT
+/// to compare against, a `mat1` naming it cannot be shown to be this
+/// evaluation, so those blocks stay another's (skipped and reported, as
+/// before), and only `mat1 = 0` ones are this evaluation's.
+#[test]
+fn a_file_without_the_mat_column_reads_with_no_own_mat() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let material = material(BE9_ENDF, tmp.path(), "Be9");
+    assert!(yamc_convert::covariance::write_covariance(&material, tmp.path()).expect("writes"));
+    let path = tmp.path().join("covariance.arrow");
+    let batch = read_back(&path);
+    let schema = batch.schema();
+    let (mat, _) = schema.column_with_name("mat").expect("the writer adds mat");
+    assert_eq!(mat, schema.fields().len() - 1, "mat is appended last");
+    let keep: Vec<usize> = (0..mat).collect();
+    let old = batch.project(&keep).expect("projects");
+    let file = std::fs::File::create(&path).expect("section opens");
+    let mut writer =
+        arrow_ipc::writer::FileWriter::try_new(file, &old.schema()).expect("writer opens");
+    writer.write(&old).expect("batch writes");
+    writer.finish().expect("section finishes");
+
+    let blocks = yamc_nuclide::arrow::covariance_arrow::read_covariance(tmp.path(), "Be9")
+        .expect("reads")
+        .expect("the file is there");
+    assert_eq!(blocks.len(), batch.num_rows());
+    assert!(blocks.iter().all(|b| b.mat == 0));
+    let named: Vec<_> = blocks.iter().filter(|b| b.mat1 == 425).collect();
+    assert_eq!(named.len(), 260);
+    assert!(named.iter().all(|b| b.is_cross_material()));
+    assert!(blocks
+        .iter()
+        .filter(|b| b.mat1 == 0)
+        .all(|b| b.is_same_evaluation()));
+}
+
 /// An evaluation with no MF=33 writes no file at all.
 ///
 /// Absence is how this section says "no covariance", and the reader is required
