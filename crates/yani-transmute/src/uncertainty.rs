@@ -213,12 +213,15 @@ pub struct Info {
     pub malformed_blocks: usize,
     /// Per (nuclide, reaction kind), the share of the dilute rate over the
     /// flux range that comes from energies where the evaluation states a
-    /// nonzero variance for that reaction. Below one means part of the rate
-    /// carries no stated uncertainty and the sigma is diluted accordingly. An
-    /// interval a covariance grid spans with a variance of zero counts as
+    /// nonzero variance for that reaction. Below one means part of the dilute
+    /// rate carries no stated uncertainty, so it dilutes the relative sigma.
+    /// An interval a covariance grid spans with a variance of zero counts as
     /// uncovered: it states no uncertainty either. In [0, 1] whatever rate the
-    /// covariance is divided by; see [`Info::partials_above_rate`] for when
-    /// that rate disagrees.
+    /// covariance is divided by, and a share of the dilute rate only: on a
+    /// self-shielded or tallied run the covered share of the rate actually
+    /// used is not computed. See [`Info::partials_above_rate`] for when that
+    /// rate disagrees with the partials. No entry for a channel whose dilute
+    /// rate over the flux range is zero.
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
     /// Per (nuclide, reaction kind), where the partial rates a relative
     /// covariance block was weighted with, zero variance intervals included,
@@ -227,9 +230,16 @@ pub struct Info {
     /// computed different ways; a self-shielded rate against dilute partials
     /// is one. Its `rate_fraction_covered` is unaffected.
     pub partials_above_rate: BTreeMap<(String, String), f64>,
-    /// Share of the production this run drove from energies where a covariance
-    /// states a nonzero variance, weighted by rate and by parent density, or
-    /// `None` for a decay-only schedule that drove none.
+    /// Mean of the per-channel shares in [`Info::rate_fraction_covered`],
+    /// weighted by the production each channel drove (the rate this run used
+    /// times parent density), or `None` for a decay-only schedule that drove
+    /// none.
+    ///
+    /// On a dilute run that is the share of the production driven from
+    /// energies where a covariance states a nonzero variance. On a
+    /// self-shielded or tallied run it is not: the shares are of the dilute
+    /// rate, and shielding moves rate out of the resonance range, where
+    /// capture blocks often state zero. That covered share is not computed.
     ///
     /// The number to read before any sigma here, and not the same question as
     /// how many nuclides carry MF=33: an evaluation can state covariance for

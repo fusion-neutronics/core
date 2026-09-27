@@ -598,9 +598,13 @@ impl PyTransmutationResults {
     ///
     /// - ``perturbed`` / ``no_covariance_data``: which nuclides had usable
     ///   MF=33 covariance and which had none.
-    /// - ``rate_fraction_covered_total``: the share of the production this run
-    ///   drove from energies where a covariance states a nonzero variance,
-    ///   weighted by rate and by parent density. Read this before any sigma
+    /// - ``rate_fraction_covered_total``: the per-channel shares below,
+    ///   averaged with each channel weighted by the production it drove (the
+    ///   rate this run used times parent density). On a dilute run that is
+    ///   the share of the production driven from energies where a covariance
+    ///   states a nonzero variance; on a self-shielded or tallied run it is
+    ///   not, since the shares are of the dilute rate, and the covered share
+    ///   of the shielded production is not computed. Read this before any sigma
     ///   here. It is a different and much sharper question than how many
     ///   nuclides carry MF=33: an evaluation can state covariance for every
     ///   isotope in the material and none for the channel making the product
@@ -608,16 +612,19 @@ impl PyTransmutationResults {
     ///   ensemble perturbs almost nothing.
     /// - ``rate_fraction_covered``: per nuclide and channel, the share of the
     ///   dilute reaction rate from energies where the evaluation states a
-    ///   nonzero variance for it. Below one means part of the rate carries no
-    ///   stated uncertainty and the sigma is diluted. An interval the
-    ///   covariance grid spans with a variance of zero counts as uncovered:
-    ///   ENDF/B-VIII.1 W186 ``(n,gamma)`` states zero from 1e-5 eV to 10 keV,
-    ///   where nearly all of its capture rate is.
+    ///   nonzero variance for it. Below one means part of the dilute rate
+    ///   carries no stated uncertainty and dilutes the sigma; on a shielded
+    ///   or tallied run the dilution applied differs from this share. An
+    ///   interval the covariance grid spans with a variance of zero counts as
+    ///   uncovered: ENDF/B-VIII.1 W186 ``(n,gamma)`` states zero from 1e-5 eV
+    ///   to 10 keV, where nearly all of its capture rate is.
     /// - ``partials_above_rate``: per nuclide and channel, where the partial
     ///   rates the covariance was weighted with, zero variance intervals
     ///   included, add up to more than the rate it was divided by, their
     ///   ratio to it. Each entry is a channel whose sigma is overstated, a
-    ///   self-shielded rate against dilute partials being one cause. The
+    ///   self-shielded rate against dilute partials being one cause, and the
+    ///   ``1/E`` within-group weight with a covariance edge inside a group
+    ///   another. The
     ///   share in ``rate_fraction_covered`` is measured against the dilute
     ///   rate, so it is unaffected.
     /// - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:

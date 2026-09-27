@@ -120,28 +120,40 @@ pub struct Coverage {
     pub unsupported_layouts: BTreeMap<i64, usize>,
     /// Blocks whose arrays did not match their own declared sizes.
     pub malformed: usize,
-    /// Per (nuclide, kind), the share of the rate that comes from energies
-    /// where the evaluation states a nonzero variance for that reaction.
+    /// Per (nuclide, kind), the share of the dilute rate that comes from
+    /// energies where the evaluation states a nonzero variance for that
+    /// reaction.
     ///
     /// Exactly: the dilute rate integrated over the energies where the diagonal
     /// of the reaction's own covariance, summed over every self-covariance
     /// block the fold consumed, is nonzero, divided by the dilute rate over the
     /// whole flux range. Rate from an interval a grid spans with a variance of
     /// zero counts as uncovered, the same as rate from outside every grid,
-    /// because neither carries a stated uncertainty. Below one, the relative
-    /// uncertainty is diluted by that much.
+    /// because neither carries a stated uncertainty. Below one, part of the
+    /// dilute rate enters the relative covariance's denominator and not its
+    /// numerator; how much that lowers the relative sigma also depends on how
+    /// the stated variance is spread over the covered part, so the share is
+    /// not itself a dilution factor.
     ///
     /// Both integrals are the fold's own, the dilute cross section against the
     /// flux the partial rates are weighted with, and the numerator adds a
     /// subset of the denominator's terms in the same order. So the share lies
     /// in [0, 1] without a clamp, and it does not depend on how the rate the
-    /// covariance is divided by was computed: a self-shielded or a tallied rate
-    /// that disagrees with the partials shows up in
-    /// [`Coverage::partials_above_rate`] and does not move the share. On a
-    /// dilute collapse the denominator is that rate to a few parts in 1e15.
+    /// covariance is divided by was computed. It describes the dilute rate
+    /// only: on a self-shielded or a tallied rate, the share of THAT rate
+    /// coming from covered energies is not computed (the fold has only the
+    /// dilute cross section to split a rate by energy with), and the dilution
+    /// the fold then applies differs from this share; where the partials add
+    /// up to more than that rate, [`Coverage::partials_above_rate`] lists it.
+    /// On a dilute collapse under the flat-within-group weight, the denominator
+    /// is that rate to a few parts in 1e15. Under the `1/E` weight it is only
+    /// where no covariance edge cuts a group, for the reason given on
+    /// [`Coverage::partials_above_rate`].
     ///
-    /// Every channel a consumed block names has an entry, so a channel whose
-    /// blocks state no variance anywhere reads zero rather than being absent.
+    /// Every channel a consumed block names has an entry, unless its dilute
+    /// rate over the flux range is zero (a threshold above the spectrum's top
+    /// edge), which has no share to report. So a channel whose blocks state no
+    /// variance anywhere reads zero rather than being absent.
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
     /// Per (nuclide, kind), where the partial rates the covariance was weighted
     /// with add up to more than the rate it was divided by, their ratio to it.
@@ -154,18 +166,37 @@ pub struct Coverage {
     /// covariance were computed two different ways: the channel's relative
     /// sigma is overstated. The partials are the dilute cross section against
     /// a flux that is flat within each group, so any rate computed otherwise,
-    /// a self-shielded collapse among them, can land here. Reported rather
-    /// than clamped away, since the clamp is what used to hide it.
+    /// a self-shielded or a tallied one among them, can land here. Reported
+    /// rather than clamped away, since the clamp is what used to hide it.
+    ///
+    /// Under the `1/E` within-group weight (`Weighting::OneOverE`) a dilute
+    /// run can land here too. A partial over the part of a group a covariance
+    /// edge cuts off is that part's own lethargy average times its share of
+    /// the group's energy width, and those parts do not add up to the group's
+    /// lethargy average times its flux, which is what the collapse gives. The
+    /// error is the partials' and can be large: Fe56 `(n,p)` on three groups
+    /// with its 4.3 MeV edge inside the fast one sums to about ten times its
+    /// rate. Where no covariance edge falls inside a group the two agree.
     ///
     /// Absolute (`lb = 0`) blocks weight with partial fluxes rather than
     /// partial rates, which have no rate to compare with, so they are not
     /// checked. Absence from this map therefore says the relative blocks are
     /// consistent, not that an absolute one is.
     pub partials_above_rate: BTreeMap<(String, String), f64>,
-    /// Production this spectrum drove from energies where a covariance states a
-    /// nonzero variance, and the production it drove in total. Both are per
-    /// barn-cm per second, and both are weighted by the parent's own density,
-    /// so a channel on a trace isotope counts for what it actually made.
+    /// The production this spectrum drove, each channel's weighted by its
+    /// share in [`Coverage::rate_fraction_covered`], and the production it
+    /// drove in total. Both are per barn-cm per second, and both are weighted
+    /// by the parent's own density, so a channel on a trace isotope counts for
+    /// what it actually made.
+    ///
+    /// Each channel's production is the rate this run used, which may be
+    /// self-shielded or tallied, while its share is of the dilute rate. On a
+    /// dilute collapse the covered sum is exactly the production from energies
+    /// where a covariance states a nonzero variance. Otherwise it is that
+    /// production only if the rate kept the dilute rate's distribution in
+    /// energy, which shielding does not: it depresses the resonance range,
+    /// where capture blocks often state zero. The covered share of a shielded
+    /// or tallied production is not computed.
     ///
     /// Kept as two sums rather than as their ratio because sums merge and a
     /// ratio does not: the fold runs per nuclide and a schedule can name more
@@ -177,8 +208,13 @@ pub struct Coverage {
 }
 
 impl Coverage {
-    /// Share of the production this run drove from energies where a covariance
-    /// states a nonzero variance.
+    /// The production-weighted mean of the per-channel dilute shares, weighted
+    /// by the rate this run used and by parent density.
+    ///
+    /// On a dilute run that is the share of the production driven from
+    /// energies where a covariance states a nonzero variance. On a
+    /// self-shielded or tallied run it is not, for the reason given on
+    /// [`Coverage::covered_production`].
     ///
     /// The number to read before any sigma from this fold. Counting nuclides
     /// with MF=33 answers a different and much weaker question: an evaluation
@@ -367,8 +403,10 @@ fn contract(block: &ExpandedBlock, row: &Partials, col: &Partials) -> f64 {
 /// How far above one a channel's summed partial rates over its rate may sit
 /// and still be rounding.
 ///
-/// On a dilute collapse the two add the same terms grouped differently, and on
-/// CCFE-709 they agree to a few parts in 1e15. This sits six orders of
+/// On a dilute collapse under the flat-within-group weight the two add the
+/// same terms grouped differently, and on CCFE-709 they agree to a few parts
+/// in 1e15. Under the `1/E` weight they need not, see
+/// `Coverage::partials_above_rate`. This sits six orders of
 /// magnitude above that, and an excess below it would move a relative sigma
 /// by less than a part in a billion.
 const PARTIALS_ROUNDING: f64 = 1.0e-9;
@@ -744,7 +782,8 @@ pub fn fold_rate_covariance(
     }
 
     // How much of the production this spectrum drove is covered, weighted by
-    // rate and by the parent's own density. Done here rather than per nuclide
+    // rate and by the parent's own density. The share is of the dilute rate
+    // whatever `rates` is, see `Coverage::covered_production`. Done here rather than per nuclide
     // because it is a property of the material: the per-nuclide fold knows its
     // own rates but not how many atoms of it there are, and a channel on a
     // 0.1%-abundance isotope must not count the same as one on the bulk.
@@ -1002,6 +1041,24 @@ mod stated_variance_tests {
             (got - before).abs() <= 1.0e-14 * before,
             "{got} against {before}"
         );
+    }
+
+    /// A threshold above the spectrum's top edge drives no dilute rate, so
+    /// there is no share to report, even though its block states a variance.
+    #[test]
+    fn a_channel_with_no_dilute_rate_has_no_share() {
+        let above = Reaction {
+            cross_section: vec![0.0, 0.0, 1.0].into(),
+            energy: vec![1.0e-5, 2.5e7, 3.0e7].into(),
+            ..reaction(16)
+        };
+        let d = Diagonal::of(&ExpandedBlock {
+            row_energies: vec![2.5e7, 3.0e7],
+            col_energies: vec![2.5e7, 3.0e7],
+            values: vec![0.01],
+            scale: Scale::Relative,
+        });
+        assert_eq!(stated_variance_share(&flux(), &above, &[d]), None);
     }
 
     /// A cross block correlates two reactions and states a variance for
