@@ -26,13 +26,14 @@ fn routes_are_counted_and_nothing_here_is_flagged() {
         material(fixture!("dec-049_In_116m1.endf.xz")),
         material(fixture!("dec-049_In_116m2.endf.xz")),
     ];
-    let (rows, stats) = yani_convert::branching::extract_branching(
-        &neutron,
-        &decay,
-        endf::radionuclide_production::ISOMER_ENERGY_TOLERANCE,
-        yani_convert::branching::DEFAULT_LINEARIZE_TOL,
-    )
-    .expect("branching extracts");
+    let yani_convert::branching::Extracted { rows, stats, .. } =
+        yani_convert::branching::extract_branching(
+            &neutron,
+            &decay,
+            endf::radionuclide_production::ISOMER_ENERGY_TOLERANCE,
+            yani_convert::branching::DEFAULT_LINEARIZE_TOL,
+        )
+        .expect("branching extracts");
     assert!(!rows.is_empty());
     assert_eq!(stats.metastable_targets, vec!["In116_m1".to_string()]);
     assert_eq!(stats.level_routes.get("energy"), Some(&1));

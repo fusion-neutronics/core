@@ -33,7 +33,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow_array::builder::{Float64Builder, ListBuilder, StringBuilder};
+use arrow_array::builder::{Float64Builder, Int32Builder, ListBuilder, StringBuilder};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::writer::{FileWriter, IpcWriteOptions};
 use arrow_ipc::CompressionType;
@@ -160,6 +160,28 @@ pub(crate) fn list_of(values: &[Vec<f64>]) -> ArrayRef {
         b.values().append_slice(row);
         b.append(true);
     }
+    Arc::new(b.finish())
+}
+
+/// A nullable `list<double>` column, `None` written as a null rather than as
+/// an empty list, so a reader can tell "not given" from "given and empty".
+pub(crate) fn opt_list_of(values: &[Option<Vec<f64>>]) -> ArrayRef {
+    let mut b = ListBuilder::new(Float64Builder::new());
+    for row in values {
+        match row {
+            Some(row) => {
+                b.values().append_slice(row);
+                b.append(true);
+            }
+            None => b.append_null(),
+        }
+    }
+    Arc::new(b.finish())
+}
+
+pub(crate) fn ints(values: &[i32]) -> ArrayRef {
+    let mut b = Int32Builder::new();
+    b.append_slice(values);
     Arc::new(b.finish())
 }
 
@@ -941,9 +963,14 @@ pub fn convert_branching_files(
     for partial in partials {
         extractor.absorb(partial);
     }
-    let (rows, stats) = extractor.finish();
+    let branching::Extracted {
+        rows,
+        covariance,
+        stats,
+    } = extractor.finish();
     let dir = out.join("branching");
     branching::write_branching(&rows, &dir)?;
+    branching::write_branching_covariance(&covariance, &dir)?;
     write_provenance(
         &dir,
         "branching",

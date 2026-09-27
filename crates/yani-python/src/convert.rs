@@ -189,7 +189,21 @@ pub fn convert_transmutation(
 ///     level index pointed at another isomer), and ``partial_sum_mismatches``
 ///     (one line per reaction whose MF=10 partial cross sections do not sum to
 ///     its MF=3 total, or whose MF=9 yields do not sum to one, within two
-///     percent below 20 MeV).
+///     percent below 20 MeV). The MF=40 production covariance, written as the
+///     tape gives it to ``branching/branching_covariance.arrow``, is counted
+///     by ``mf40_sections`` (sections read, whatever the MT),
+///     ``mf40_blocks`` (blocks written), ``mf40_blocks_by_lb`` (the NI blocks
+///     by layout), ``mf40_nc_blocks``, ``mf40_unmatched_states`` (one line
+///     per product state that matches no MF=9 or MF=10 state, written with no
+///     target), ``mf40_states_without_chain_kind`` (states of an MT with no
+///     chain reaction, such as MT 18, written with no reaction),
+///     ``mf40_on_yield_channels`` (states matched to a split MF=9 yields
+///     give), ``mf40_mat1_naming_itself`` (sub-subsections whose MAT1 is the
+///     evaluation's own MAT, written as given) and ``mf40_without_blocks``
+///     (one line per state or sub-subsection holding no block, the only part
+///     of MF=40 the file cannot show). An evaluation set without MF=40
+///     writes no covariance file, and removes one an earlier conversion left
+///     there.
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
@@ -249,6 +263,18 @@ pub fn convert_branching(
     out.set_item("level_routes", stats.level_routes)?;
     out.set_item("flagged_levels", stats.flagged_levels)?;
     out.set_item("partial_sum_mismatches", stats.partial_sum_mismatches)?;
+    out.set_item("mf40_sections", stats.mf40_sections)?;
+    out.set_item("mf40_blocks", stats.mf40_blocks)?;
+    out.set_item("mf40_blocks_by_lb", stats.mf40_blocks_by_lb)?;
+    out.set_item("mf40_nc_blocks", stats.mf40_nc_blocks)?;
+    out.set_item("mf40_unmatched_states", stats.mf40_unmatched_states)?;
+    out.set_item(
+        "mf40_states_without_chain_kind",
+        stats.mf40_states_without_chain_kind,
+    )?;
+    out.set_item("mf40_on_yield_channels", stats.mf40_on_yield_channels)?;
+    out.set_item("mf40_mat1_naming_itself", stats.mf40_mat1_naming_itself)?;
+    out.set_item("mf40_without_blocks", stats.mf40_without_blocks)?;
     Ok(out.unbind())
 }
 
