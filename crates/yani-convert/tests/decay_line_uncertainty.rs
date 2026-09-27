@@ -3,10 +3,11 @@
 //! Issue #163: the sigmas were parsed and then dropped where
 //! `decay/sources.arrow` was written, and the gamma and x-ray spectra were
 //! merged into one row, which lost which normalisation each line shares. These
-//! tests read three real evaluations that between them state all of it: a
+//! tests read four real evaluations that between them state all of it: a
 //! JENDL-5.0 normalisation sigma kept apart from the lines (Sn111), a JEFF-4.0
-//! continuum normalisation sigma (Cf252), and an ENDF/B-VIII.1 nuclide that
-//! emits both gammas and x-rays (In116m1).
+//! continuum normalisation sigma (Cf252), an ENDF/B-VIII.1 nuclide that
+//! emits both gammas and x-rays (In116m1), and a JEFF-4.0 one whose lines
+//! coincide and repeat (Ac227).
 
 use endf::chain::Chain;
 use endf::{Decay, Material};
@@ -194,6 +195,40 @@ fn gamma_and_xray_spectra_are_separate_rows_that_merge_to_the_old_one() {
         panic!("both photon spectra are lines, so they merge into one");
     };
     let (energies, intensities): (Vec<f64>, Vec<f64>) = in116m1.photon_lines().into_iter().unzip();
+    assert_eq!(energies, merged.x);
+    assert_eq!(intensities, merged.p);
+}
+
+/// JEFF-4.0 Ac227 has a gamma and an x-ray line at the same energy, and
+/// energies that repeat within one spectrum. Those are the lines whose sums
+/// depend on the order they are added in, so this is where the split rows
+/// read back through `photon_lines` must still give `Decay::sources` exactly.
+#[test]
+fn coincident_and_repeated_lines_merge_to_the_old_row_bit_for_bit() {
+    let (decay, ac227) = converted(fixture!("dec-089_Ac_227.jeff40.endf.xz"), "Ac227", "ac227");
+    let energies_of = |radiation: &str| -> Vec<f64> {
+        let rows = photon_rows(&ac227, radiation);
+        assert_eq!(rows.len(), 1, "{radiation}");
+        let DecaySourceDistribution::Discrete { energies, .. } = &rows[0].distribution else {
+            panic!("{radiation} is lines");
+        };
+        energies.clone()
+    };
+    let (gamma, xray) = (energies_of("gamma"), energies_of("xray"));
+    assert!(
+        gamma.iter().any(|e| xray.contains(e)),
+        "the fixture has a gamma and an x-ray line at one energy"
+    );
+    let repeats = |e: &[f64]| (1..e.len()).any(|i| e[..i].contains(&e[i]));
+    assert!(
+        repeats(&gamma) || repeats(&xray),
+        "the fixture repeats an energy within a spectrum"
+    );
+
+    let endf::univariate::Univariate::Discrete(merged) = &decay.sources().unwrap()["photon"] else {
+        panic!("both photon spectra are lines, so they merge into one");
+    };
+    let (energies, intensities): (Vec<f64>, Vec<f64>) = ac227.photon_lines().into_iter().unzip();
     assert_eq!(energies, merged.x);
     assert_eq!(intensities, merged.p);
 }
