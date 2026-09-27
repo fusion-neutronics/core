@@ -1925,7 +1925,11 @@ fn merge_coverage(
 ///   * every other reaction that has branching curves has its ground/metastable
 ///     split replaced by the flux-weighted (energy-dependent) fractions,
 ///     leaving the transport total rate in `rates` untouched (only the split
-///     changes, so a library total-rate difference cannot leak in).
+///     changes, so a library total-rate difference cannot leak in). Curves
+///     listing only metastable states are each a share of the whole reaction,
+///     and the ground state keeps the rest (see [`remainder_state`]); an MF=10
+///     partial's share is its rate over the transport total's, so there the
+///     total does enter the split, as the evaluation gives nothing else.
 pub(crate) fn fold_branching_into_chain(
     material: &Material,
     chain: &Arc<HashMap<String, ChainNuclide>>,
@@ -1992,31 +1996,109 @@ fn build_fold_refine(
                         // Duplicate curves for the same target (real in TENDL,
                         // e.g. two LFS levels mapped to one chain nuclide) must
                         // sum, not overwrite.
-                        *m.entry(t).or_insert(0.0) += r / total;
+                        *m.fractions.entry(t).or_insert(0.0) += r / total;
                     }
                 }
-            } else if let Some(fr) = fold_state_fractions(material, parent, kind, curves, spectrum)
-            {
-                let m = refine
-                    .entry(parent.clone())
-                    .or_default()
-                    .entry(kind.clone())
-                    .or_default();
-                for (t, f) in fr {
-                    *m.entry(t).or_insert(0.0) += f;
+            } else {
+                let remainder = remainder_state(
+                    &chain[parent],
+                    kind,
+                    curves.iter().map(|c| c.target.as_str()),
+                );
+                let of_whole = remainder.is_some();
+                if let Some(fr) =
+                    fold_state_fractions(material, parent, kind, curves, spectrum, of_whole)
+                {
+                    let m = refine
+                        .entry(parent.clone())
+                        .or_default()
+                        .entry(kind.clone())
+                        .or_default();
+                    for (t, f) in fr {
+                        *m.fractions.entry(t).or_insert(0.0) += f;
+                    }
+                    m.remainder = remainder;
                 }
             }
         }
     }
 }
 
-/// `parent -> reaction kind -> (target -> new branching fraction)`.
-type Fractions = HashMap<String, HashMap<String, HashMap<String, f64>>>;
+/// `parent -> reaction kind -> folded split`.
+type Fractions = HashMap<String, HashMap<String, Split>>;
+
+/// One reaction's folded fractions, and what they are fractions of.
+#[derive(Default)]
+struct Split {
+    /// `target -> fraction`.
+    fractions: HashMap<String, f64>,
+    /// The ground state, when the overlay lists only metastable states and the
+    /// ground takes what they leave (see [`remainder_state`]). `fractions` are
+    /// then each listed state's share of the whole reaction. `None` when they
+    /// are shares among the listed states, which re-partition only the mass
+    /// those states already carry in the chain (see [`refine_chain`]): a list
+    /// may cover only some of the chain's targets, as ENDF/B-VIII.1's La139
+    /// (n,d3He) lists Xe135 and Xe135_m1 where the chain goes to Xe134.
+    remainder: Option<String>,
+}
+
+/// The ground state that takes the rest of a reaction whose overlay lists only
+/// metastable states, or `None` when the listed states are the whole split.
+///
+/// An evaluation may give only the isomer and leave the ground state as the
+/// remainder: ENDF/B-VIII.1 lists In116_m1 alone for In115 (n,gamma) (MF=9)
+/// and In114_m1 alone for In115 (n,2n) (MF=10). Each listed fraction is then
+/// that state's share of the whole reaction. Normalizing over the listed states
+/// hands a lone isomer everything, and re-partitioning only the mass they carry
+/// then hands a grafted one, which carries none, nothing: that is how In115
+/// capture came to make no In116_m1.
+///
+/// `Some(ground)` needs every listed target to be a metastable state of one
+/// product, the chain to carry that product's ground state for `kind`, and no
+/// state but the ground and the listed ones to carry any branching. Anything
+/// else, a list naming the ground state included, keeps the among-listed split
+/// every full list has always had.
+pub(crate) fn remainder_state<'a>(
+    nuc: &ChainNuclide,
+    kind: &str,
+    listed: impl Iterator<Item = &'a str> + Clone,
+) -> Option<String> {
+    let mut ground: Option<String> = None;
+    for target in listed.clone() {
+        let (z, a, m) = endf::zam(target).ok()?;
+        if m == 0 {
+            return None;
+        }
+        let g = endf::gnds_name(z, a, 0);
+        if ground.as_ref().is_some_and(|prev| *prev != g) {
+            return None;
+        }
+        ground = Some(g);
+    }
+    let ground = ground?;
+    let mut carried = false;
+    for rx in nuc
+        .reactions
+        .iter()
+        .filter(|r| r.kind == kind && r.branching > 0.0)
+    {
+        match rx.target.as_deref() {
+            Some(t) if t == ground => carried = true,
+            Some(t) if listed.clone().any(|l| l == t) => {}
+            _ => return None,
+        }
+    }
+    carried.then_some(ground)
+}
 
 /// Rewrite the chain's branching splits from per-target fractions. Shared by
 /// the multigroup fold (`fold_branching_into_chain`) and the coupled path
 /// (`apply_coupled_branching`); returns the original chain untouched (no
 /// clone) when there is nothing to refine.
+///
+/// A split with a [`Split::remainder`] sets each listed state to its share of
+/// the reaction's mass and the ground state to what is left. Every other split
+/// re-partitions the mass its listed states already carry.
 fn refine_chain(
     chain: &Arc<HashMap<String, ChainNuclide>>,
     refine: &Fractions,
@@ -2031,7 +2113,8 @@ fn refine_chain(
             Some(n) => n,
             None => continue,
         };
-        for (kind, tmap) in kinds {
+        for (kind, split) in kinds {
+            let tmap = &split.fractions;
             if kind.as_str() == "(n,n')" {
                 // Grafted self-inelastic channels: the folded fraction is the
                 // share of the total (n,n') rate (base branchings are 1.0
@@ -2040,6 +2123,50 @@ fn refine_chain(
                     if let Some(t) = &rx.target {
                         if let Some(&f) = tmap.get(t) {
                             rx.branching = f;
+                        }
+                    }
+                }
+            } else if let Some(ground) = &split.remainder {
+                // Only metastable states are listed and the ground takes the
+                // rest, so each fraction is a share of the whole reaction.
+                // `remainder_state` checked that nothing but the ground and the
+                // listed states carries mass, so their mass is the reaction's.
+                let mut mass = 0.0;
+                let mut ground_mass = 0.0;
+                let mut listed = 0.0;
+                for rx in nuc.reactions.iter().filter(|r| &r.kind == kind) {
+                    mass += rx.branching;
+                    match &rx.target {
+                        Some(t) if t == ground => ground_mass += rx.branching,
+                        Some(t) => listed += tmap.get(t).copied().unwrap_or(0.0),
+                        None => {}
+                    }
+                }
+                // Shares past the whole, a partial above the transport total,
+                // are scaled to fit and leave the ground nothing, so the
+                // reaction still makes one product per reaction. One library's
+                // branching over another's cross sections can give that, and
+                // so can one evaluation alone: ENDF/B-VIII.1's own In115
+                // (n,2n) In114_m1 partial passes its MF=3 at about 18.1 MeV
+                // and is 1.18 of it at 20 MeV. The cap cannot tell that from a
+                // list naming a state the evaluation does not mean: the same
+                // library gives Pt194 (n,d) a partial for a 930 keV level of
+                // Ir193, 5.4 times its MF=3 at 14 MeV, which the converter
+                // takes for the 80 keV Ir193_m1 only because Ir193 has no
+                // other isomer, and so all of Pt194 (n,d) goes to Ir193_m1.
+                let (scale, left) = if listed > 1.0 {
+                    (mass / listed, 0.0)
+                } else {
+                    (mass, mass * (1.0 - listed))
+                };
+                if ground_mass > 0.0 {
+                    for rx in nuc.reactions.iter_mut().filter(|r| &r.kind == kind) {
+                        if let Some(t) = &rx.target {
+                            if t == ground {
+                                rx.branching = rx.branching / ground_mass * left;
+                            } else if let Some(&f) = tmap.get(t) {
+                                rx.branching = f * scale;
+                            }
                         }
                     }
                 }
@@ -2081,8 +2208,10 @@ fn refine_chain(
 /// exactly from the tally's union-grid flux moments (every chain parent,
 /// including products that build up during the step) and MF=9 yields are
 /// scored directly at the collision energies (`y_s(E) * sigma_MT(E) * TL`,
-/// material nuclides), so no group approximation enters any split. Semantics
-/// per kind mirror `fold_branching_into_chain`:
+/// material nuclides), as is an isomer-only MF=10 partial on a material
+/// nuclide above its last breakpoint, where it follows the transport total at
+/// the share it ends on and its fold stops, so no group approximation enters
+/// any split. Semantics per kind mirror `fold_branching_into_chain`:
 ///
 ///   * `(n,n')`: the summed metastable partial rate is injected into `rates`
 ///     (there is no transport total for MT 4) and the grafted channels get the
@@ -2090,7 +2219,11 @@ fn refine_chain(
 ///   * other kinds: the per-target rates are normalized to fractions and the
 ///     base branching mass on the covered targets is re-partitioned; when all
 ///     rates are zero (e.g. flux entirely below threshold) the base split is
-///     kept, matching the fold's `None` behaviour.
+///     kept, matching the fold's `None` behaviour. Rates for metastable states
+///     alone are divided by the reaction's tallied total instead, and the
+///     ground state keeps the rest (see `remainder_state`), all of it when
+///     those rates are zero; only with no tallied total is the base split
+///     kept.
 pub fn apply_coupled_branching(
     chain: &Arc<HashMap<String, ChainNuclide>>,
     partial_rates: &PartialRates,
@@ -2122,21 +2255,37 @@ pub fn apply_coupled_branching(
                     for (t, r) in positive {
                         // Duplicate curves for the same target sum, not
                         // overwrite (real in TENDL branching data).
-                        *m.entry(t.clone()).or_insert(0.0) += r / total;
+                        *m.fractions.entry(t.clone()).or_insert(0.0) += r / total;
                     }
                 }
             } else {
-                let total: f64 = per_target.iter().map(|(_, r)| r).sum();
-                if total > 0.0 {
-                    let m = refine
-                        .entry(parent.clone())
-                        .or_default()
-                        .entry(kind.clone())
-                        .or_default();
-                    for (t, r) in per_target {
-                        *m.entry(t.clone()).or_insert(0.0) += r / total;
-                    }
+                let remainder = remainder_state(
+                    &chain[parent],
+                    kind,
+                    per_target.iter().map(|(t, _)| t.as_str()),
+                );
+                // Listed isomers alone are shares of the reaction's tallied
+                // total, which the partials are normalized exactly like, so it
+                // is that total, not theirs, that has to be there: partials
+                // that are all zero under a live reaction, the flux lying
+                // between its threshold and theirs, make the isomers nothing
+                // and the ground all of it, as the spectrum fold has them.
+                let whole = match &remainder {
+                    Some(_) => rates.get(parent).and_then(|r| r.get(kind)).copied(),
+                    None => Some(per_target.iter().map(|(_, r)| r).sum()),
+                };
+                let Some(whole) = whole.filter(|&w| w > 0.0) else {
+                    continue;
+                };
+                let m = refine
+                    .entry(parent.clone())
+                    .or_default()
+                    .entry(kind.clone())
+                    .or_default();
+                for (t, r) in per_target {
+                    *m.fractions.entry(t.clone()).or_insert(0.0) += r / whole;
                 }
+                m.remainder = remainder;
             }
         }
     }
@@ -2170,12 +2319,23 @@ fn fold_curve_rate(energy: &[f64], values: &[f64], spectrum: &MultigroupSpectrum
 /// reaction's transport cross section `sigma_MT(E)` so the fraction is a proper
 /// reaction-rate average rather than a bare flux average; returns `None` (keep
 /// the base fixed split) when that transport cross section is unavailable.
+///
+/// With `of_whole` the curves are the reaction's metastable states only and the
+/// ground state is the remainder (see [`remainder_state`]), so each fraction is
+/// the state's share of the whole reaction and they are not normalized: the
+/// partial's rate over `sigma_MT` folded the same way,
+/// `f_s = integral(sigma_s * phi) / integral(sigma_MT * phi)`, with `sigma_s`
+/// following `sigma_MT` past its last energy (see [`along_the_total`]), or the
+/// yield weighted as above over the same integral with a unit yield,
+/// `f_s = integral(y_s * sigma_MT * phi) / integral(sigma_MT * phi)`. Both need
+/// the transport cross section and return `None` without it.
 fn fold_state_fractions(
     material: &Material,
     parent: &str,
     kind: &str,
     curves: &[yani::BranchCurve],
     spectrum: &MultigroupSpectrum,
+    of_whole: bool,
 ) -> Option<Vec<(String, f64)>> {
     let cross: Vec<&yani::BranchCurve> = curves
         .iter()
@@ -2184,12 +2344,28 @@ fn fold_state_fractions(
     let n_groups = spectrum.masses.len();
 
     let mut per: Vec<(String, f64)> = Vec::new();
+    // The whole reaction on the same footing as `per`, when the listed states
+    // are not all of it.
+    let mut whole: Option<f64> = None;
     if !cross.is_empty() {
+        let reaction = if of_whole {
+            Some(transport_reaction(material, parent, kind)?)
+        } else {
+            None
+        };
         for c in &cross {
-            per.push((
-                c.target.clone(),
-                fold_curve_rate(&c.energy, &c.values, spectrum),
-            ));
+            let rate = match reaction {
+                Some(r) => {
+                    let (energy, values) =
+                        along_the_total(&c.energy, &c.values, &r.energy, &r.cross_section);
+                    fold_curve_rate(&energy, &values, spectrum)
+                }
+                None => fold_curve_rate(&c.energy, &c.values, spectrum),
+            };
+            per.push((c.target.clone(), rate));
+        }
+        if let Some(r) = reaction {
+            whole = Some(fold_curve_rate(&r.energy, &r.cross_section, spectrum));
         }
     } else {
         // Yield curves (MF=9): weight by the reaction's transport cross section
@@ -2201,16 +2377,8 @@ fn fold_state_fractions(
         // `<y>_g * <sigma>_g` drops; it matters when a flux group is coarse
         // relative to structure in `y` or `sigma` (e.g. a broad thermal group
         // over a 1/v capture whose isomeric yield varies across the group).
-        use crate::reaction_type_to_mt;
-        let mt = reaction_type_to_mt(kind)?;
-        let nd = material.nuclide_data.get(parent)?;
-        let temperature = if material.temperature().is_empty() {
-            crate::default_temperature(nd)?
-        } else {
-            material.temperature().to_string()
-        };
-        let reactions = nd.reactions_for_temp(&temperature)?;
-        let reaction = reactions.get(&mt)?;
+        let reaction = transport_reaction(material, parent, kind)?;
+        let sigma_at = |e: f64| reaction.cross_section_at(e).unwrap_or(0.0);
         for c in curves {
             if c.quantity != BranchQuantity::Yield {
                 continue;
@@ -2221,7 +2389,7 @@ fn fold_state_fractions(
                     &c.energy,
                     &c.values,
                     &reaction.energy,
-                    |e| reaction.cross_section_at(e).unwrap_or(0.0),
+                    sigma_at,
                     spectrum.boundaries[g],
                     spectrum.boundaries[g + 1],
                 );
@@ -2229,13 +2397,96 @@ fn fold_state_fractions(
             }
             per.push((c.target.clone(), num));
         }
+        if of_whole {
+            // A unit yield, one at every energy, integrated exactly as the
+            // listed yields are, so a share is a ratio of like integrals.
+            let mut sum = 0.0;
+            for g in 0..n_groups {
+                let prod = curve_xs_product_group_average(
+                    &[0.0],
+                    &[1.0],
+                    &reaction.energy,
+                    sigma_at,
+                    spectrum.boundaries[g],
+                    spectrum.boundaries[g + 1],
+                );
+                sum += prod * spectrum.masses[g];
+            }
+            whole = Some(sum);
+        }
     }
 
-    let total: f64 = per.iter().map(|(_, v)| v).sum();
+    let total: f64 = whole.unwrap_or_else(|| per.iter().map(|(_, v)| v).sum());
     if total <= 0.0 {
         return None;
     }
     Some(per.into_iter().map(|(t, v)| (t, v / total)).collect())
+}
+
+/// An isomer-only MF=10 partial continued past its last tabulated energy along
+/// the transport total, at the share of that total it ends on.
+///
+/// `curve_interp` holds every curve flat above its last point. In a full list
+/// that is harmless: every partial in the ratio is held alike, so the split
+/// they end on carries on. A lone isomer's share is taken of the transport
+/// total instead, which goes on changing wherever its grid runs further.
+/// ENDF/B-VIII.1's In115 (n,2n) partial stops at 20 MeV at 1.19 b, and held
+/// there against TENDL-2025's (n,2n), which falls to nothing by 30 MeV, it made
+/// the isomer all of a 20-40 MeV group. So above the last energy `E_l` the
+/// partial is `sigma_s(E_l) / sigma_MT(E_l) * sigma_MT(E)`, on the total's own
+/// grid points, which is piecewise linear and folds exactly. With no total at
+/// `E_l` there is no share to hold, and the partial ends there.
+///
+/// Below `E_l` the curve is the partial's own, point for point, so a spectrum
+/// that stops short of `E_l` folds it bit for bit as before.
+fn along_the_total(
+    energy: &[f64],
+    values: &[f64],
+    total_energy: &[f64],
+    total: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
+    let mut e = energy.to_vec();
+    let mut v = values.to_vec();
+    let (Some(&e_last), Some(&v_last)) = (energy.last(), values.last()) else {
+        return (e, v);
+    };
+    let t_last = if total_energy.is_empty() {
+        0.0
+    } else {
+        curve_interp(total_energy, total, e_last)
+    };
+    if t_last > 0.0 {
+        let share = v_last / t_last;
+        let from = total_energy.partition_point(|&x| x <= e_last);
+        e.extend_from_slice(&total_energy[from..]);
+        v.extend(total[from..].iter().map(|t| share * t));
+    } else {
+        // A step to zero one ulp up rather than at `E_l` itself: a repeated
+        // last point would make `curve_interp` read zero AT `E_l`, and the
+        // trapezoid ending there would lose half its last segment.
+        e.push(e_last.next_up());
+        v.push(0.0);
+    }
+    (e, v)
+}
+
+/// The parent's transport cross section for `kind`, at the material's
+/// temperature, or `None` when it is not loaded.
+fn transport_reaction<'a>(
+    material: &'a Material,
+    parent: &str,
+    kind: &str,
+) -> Option<&'a yamc_nuclide::reaction::Reaction> {
+    let mt = reaction_type_to_mt(kind)?;
+    let nd = material.nuclide_data.get(parent)?;
+    let temperature = if material.temperature().is_empty() {
+        crate::default_temperature(nd)?
+    } else {
+        material.temperature().to_string()
+    };
+    nd.reactions_for_temp(&temperature)?
+        .get(&mt)
+        .map(|r| r.as_ref())
 }
 
 /// Group-average the product `curve(E) * sigma(E)` over `[e_lo, e_hi]`.
@@ -2341,6 +2592,8 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use yamc_materials::material::Material;
+    use yamc_nuclide::nuclide::Nuclide;
+    use yamc_nuclide::reaction::Reaction;
     use yani::{BranchCurve, BranchQuantity, ChainNuclide, ChainReaction};
 
     /// A minimal material (no cross-section data); enough for the (n,n') path,
@@ -2483,8 +2736,8 @@ mod tests {
             masses: vec![1.0],
             flux_error: None,
         };
-        let fr =
-            fold_state_fractions(&dummy_material(), "X", "(n,2n)", &curves, &spectrum).unwrap();
+        let fr = fold_state_fractions(&dummy_material(), "X", "(n,2n)", &curves, &spectrum, false)
+            .unwrap();
         let get = |t: &str| fr.iter().find(|(x, _)| x == t).unwrap().1;
         assert!((get("X_g") - 0.75).abs() < 1e-9, "{:?}", fr);
         assert!((get("X_m1") - 0.25).abs() < 1e-9, "{:?}", fr);
@@ -2671,5 +2924,617 @@ mod tests {
         let folded = apply_coupled_branching(&chain, &partials, &mut rates);
         assert!(Arc::ptr_eq(&chain, &folded));
         assert!(rates.is_empty());
+    }
+
+    /// A transport reaction on its own grid, for the folds that divide by one.
+    fn reaction(mt: i32, energy: Vec<f64>, cross_section: Vec<f64>) -> Reaction {
+        Reaction {
+            cross_section: cross_section.into(),
+            threshold_idx: 0,
+            energy: energy.into(),
+            mt_number: mt,
+            q_value: 0.0,
+            products: vec![],
+            scatter_in_cm: false,
+            redundant: false,
+        }
+    }
+
+    /// In115 with only the given transport reactions loaded, at 294 K.
+    fn indium(reactions: Vec<Reaction>) -> Material {
+        let temperature = "294".to_string();
+        let by_mt: HashMap<i32, Arc<Reaction>> = reactions
+            .into_iter()
+            .map(|r| (r.mt_number, Arc::new(r)))
+            .collect();
+        let nuclide = Nuclide {
+            name: Some("In115".to_string()),
+            element: None,
+            atomic_symbol: Some("In".to_string()),
+            atomic_number: Some(49),
+            neutron_number: Some(66),
+            mass_number: Some(115),
+            atomic_weight_ratio: Some(113.9),
+            library: None,
+            energy: None,
+            reactions: vec![by_mt],
+            fissionable: false,
+            available_temperatures: vec![temperature.clone()],
+            loaded_temperatures: vec![temperature.clone()],
+            data_path: None,
+            fission_nu: None,
+            fast_xs: vec![],
+            urr_data: vec![],
+            urr_present: false,
+            fission_photon_release: None,
+            covariance: None,
+            elastic_flat_cache: Default::default(),
+            fission_chi_flat_cache: Default::default(),
+            delayed_neutron_cache: Default::default(),
+            inelastic_angle_flat_cache: Default::default(),
+            load_scope: Default::default(),
+        };
+        let mut m = Material::new(
+            HashMap::from([("In115".to_string(), 1.0e-3)]),
+            "atom",
+            "sum",
+            None,
+        )
+        .unwrap();
+        m.set_temperature(&temperature);
+        m.nuclide_data
+            .insert("In115".to_string(), Arc::new(nuclide));
+        m
+    }
+
+    /// In115 as the ENDF/B-VIII.1 overlay leaves it: each reaction's ground
+    /// state at 1.0 from the base chain and its isomer grafted at 0.0.
+    fn indium_chain() -> Arc<HashMap<String, ChainNuclide>> {
+        let edge = |kind: &str, target: &str, branching: f64| ChainReaction {
+            kind: kind.to_string(),
+            target: Some(target.to_string()),
+            branching,
+            q_value: None,
+        };
+        let mut map: HashMap<String, ChainNuclide> = HashMap::new();
+        map.insert(
+            "In115".to_string(),
+            ChainNuclide {
+                name: "In115".to_string(),
+                half_life: None,
+                decay_energy: 0.0,
+                reactions: vec![
+                    edge("(n,gamma)", "In116", 1.0),
+                    edge("(n,gamma)", "In116_m1", 0.0),
+                    edge("(n,2n)", "In114", 1.0),
+                    edge("(n,2n)", "In114_m1", 0.0),
+                ],
+                decays: vec![],
+                fission_yields: None,
+                sources: Vec::new(),
+                half_life_uncertainty: None,
+                decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
+            },
+        );
+        Arc::new(map)
+    }
+
+    fn curve(
+        target: &str,
+        quantity: BranchQuantity,
+        energy: &[f64],
+        values: &[f64],
+    ) -> BranchCurve {
+        BranchCurve {
+            target: target.to_string(),
+            quantity,
+            energy: energy.to_vec(),
+            values: values.to_vec(),
+        }
+    }
+
+    fn branching_of(chain: &HashMap<String, ChainNuclide>, kind: &str, target: &str) -> f64 {
+        chain["In115"]
+            .reactions
+            .iter()
+            .find(|r| r.kind == kind && r.target.as_deref() == Some(target))
+            .unwrap()
+            .branching
+    }
+
+    /// The ground state takes the rest only where every listed state is an
+    /// isomer of one product whose ground the chain carries, and nothing else
+    /// carries mass.
+    #[test]
+    fn remainder_state_is_the_ground_of_an_isomer_only_list() {
+        let chain = indium_chain();
+        let rem = |kind: &str, listed: &[&str]| {
+            remainder_state(&chain["In115"], kind, listed.iter().copied())
+        };
+        assert_eq!(rem("(n,gamma)", &["In116_m1"]).as_deref(), Some("In116"));
+        assert_eq!(
+            rem("(n,gamma)", &["In116_m1", "In116_m2"]).as_deref(),
+            Some("In116")
+        );
+        // A list naming the ground state is the whole split.
+        assert_eq!(rem("(n,gamma)", &["In116", "In116_m1"]), None);
+        // Isomers of two products are not one reaction's states.
+        assert_eq!(rem("(n,gamma)", &["In116_m1", "Cd116_m1"]), None);
+        // The ground this list implies is not what the chain carries.
+        assert_eq!(rem("(n,2n)", &["In113_m1"]), None);
+        // Names that are not GNDS names say nothing about ground and isomer.
+        assert_eq!(
+            remainder_state(&split_chain()["X"], "(n,2n)", ["X_m1"].into_iter()),
+            None
+        );
+    }
+
+    /// Case (b), ENDF/B-VIII.1 In115 (n,gamma): MF=9 lists In116_m1 alone, at a
+    /// flat 0.79. Normalized over the listed states that was 1.0, and then the
+    /// grafted edge's zero mass made it 0: In116_m1 was never produced. The
+    /// share is the weighted yield itself, whatever shape the capture cross
+    /// section has, and In116 keeps the rest.
+    #[test]
+    fn an_isomer_only_yield_is_its_weighted_yield() {
+        let material = indium(vec![reaction(102, vec![1.0e-5, 1.0e7], vec![100.0, 1.0])]);
+        let mut branch = BranchTable::new();
+        branch.entry("In115".to_string()).or_default().insert(
+            "(n,gamma)".to_string(),
+            vec![curve(
+                "In116_m1",
+                BranchQuantity::Yield,
+                &[1.0e-5, 2.0e7],
+                &[0.79, 0.79],
+            )],
+        );
+        let spectrum = MultigroupSpectrum {
+            boundaries: vec![1.0e-5, 1.0, 1.0e3, 1.0e7],
+            masses: vec![0.5, 0.3, 0.2],
+            flux_error: None,
+        };
+        let mut rates: ReactionRates = HashMap::new();
+        let folded =
+            fold_branching_into_chain(&material, &indium_chain(), &branch, &spectrum, &mut rates);
+        let m = branching_of(&folded, "(n,gamma)", "In116_m1");
+        let g = branching_of(&folded, "(n,gamma)", "In116");
+        assert!((m - 0.79).abs() < 1e-12, "In116_m1 {m}");
+        assert!((g - 0.21).abs() < 1e-12, "In116 {g}");
+        assert!(rates.is_empty(), "only the split moves, never the rate");
+    }
+
+    /// An energy-dependent yield is weighted by the flux and the cross section
+    /// and not renormalized: a linear 0.2 to 0.6 yield under a flat cross
+    /// section averages 0.3 and 0.5 over two groups holding 1/4 and 3/4 of the
+    /// flux, 0.45 in all.
+    #[test]
+    fn an_isomer_only_yield_is_weighted_not_renormalized() {
+        let material = indium(vec![reaction(102, vec![0.0, 1.0e8], vec![2.0, 2.0])]);
+        let mut branch = BranchTable::new();
+        branch.entry("In115".to_string()).or_default().insert(
+            "(n,gamma)".to_string(),
+            vec![curve(
+                "In116_m1",
+                BranchQuantity::Yield,
+                &[0.0, 1.0e8],
+                &[0.2, 0.6],
+            )],
+        );
+        let spectrum = MultigroupSpectrum {
+            boundaries: vec![0.0, 5.0e7, 1.0e8],
+            masses: vec![0.25, 0.75],
+            flux_error: None,
+        };
+        let mut rates: ReactionRates = HashMap::new();
+        let folded =
+            fold_branching_into_chain(&material, &indium_chain(), &branch, &spectrum, &mut rates);
+        let m = branching_of(&folded, "(n,gamma)", "In116_m1");
+        let g = branching_of(&folded, "(n,gamma)", "In116");
+        assert!((m - 0.45).abs() < 1e-12, "In116_m1 {m}");
+        assert!((g - 0.55).abs() < 1e-12, "In116 {g}");
+    }
+
+    /// Case (a), ENDF/B-VIII.1 In115 (n,2n): MF=10 lists In114_m1 alone. Its
+    /// share is its partial rate over the transport total's, here a partial at
+    /// 3/4 of the (n,2n) cross section, and In114 keeps the other quarter.
+    #[test]
+    fn an_isomer_only_partial_is_a_share_of_the_transport_total() {
+        let material = indium(vec![reaction(16, vec![1.0e7, 2.0e7], vec![0.0, 2.0])]);
+        let mut branch = BranchTable::new();
+        branch.entry("In115".to_string()).or_default().insert(
+            "(n,2n)".to_string(),
+            vec![curve(
+                "In114_m1",
+                BranchQuantity::CrossSection,
+                &[1.0e7, 2.0e7],
+                &[0.0, 1.5],
+            )],
+        );
+        let spectrum = MultigroupSpectrum {
+            boundaries: vec![1.0e6, 1.2e7, 2.0e7],
+            masses: vec![0.5, 0.5],
+            flux_error: None,
+        };
+        let mut rates: ReactionRates = HashMap::new();
+        let folded =
+            fold_branching_into_chain(&material, &indium_chain(), &branch, &spectrum, &mut rates);
+        let m = branching_of(&folded, "(n,2n)", "In114_m1");
+        let g = branching_of(&folded, "(n,2n)", "In114");
+        assert!((m - 0.75).abs() < 1e-12, "In114_m1 {m}");
+        assert!((g - 0.25).abs() < 1e-12, "In114 {g}");
+
+        // Without the transport total there is nothing to take a share of, so
+        // the base split stands, as it does for a yield.
+        let folded = fold_branching_into_chain(
+            &indium(vec![]),
+            &indium_chain(),
+            &branch,
+            &spectrum,
+            &mut rates,
+        );
+        assert_eq!(branching_of(&folded, "(n,2n)", "In114_m1"), 0.0);
+        assert_eq!(branching_of(&folded, "(n,2n)", "In114"), 1.0);
+    }
+
+    /// In115 (n,2n) folded over `spectrum` from one isomer-only partial and
+    /// the given transport total, as `(In114_m1, In114)`.
+    fn n2n_split(
+        total: (&[f64], &[f64]),
+        partial: (&[f64], &[f64]),
+        spectrum: MultigroupSpectrum,
+    ) -> (f64, f64) {
+        let material = indium(vec![reaction(16, total.0.to_vec(), total.1.to_vec())]);
+        let mut branch = BranchTable::new();
+        branch.entry("In115".to_string()).or_default().insert(
+            "(n,2n)".to_string(),
+            vec![curve(
+                "In114_m1",
+                BranchQuantity::CrossSection,
+                partial.0,
+                partial.1,
+            )],
+        );
+        let mut rates: ReactionRates = HashMap::new();
+        let folded =
+            fold_branching_into_chain(&material, &indium_chain(), &branch, &spectrum, &mut rates);
+        (
+            branching_of(&folded, "(n,2n)", "In114_m1"),
+            branching_of(&folded, "(n,2n)", "In114"),
+        )
+    }
+
+    /// The share is a ratio of rate integrals, not an average of ratios. The
+    /// partial runs 0.3 to 1.5 b under a total of 1 to 3 b, so its ratio to the
+    /// total goes from 0.3 to 0.5, and two groups hold 1/4 and 3/4 of the flux.
+    /// Group averages 0.6 and 1.2 b over 1.5 and 2.5 b give
+    /// `(0.25 * 0.6 + 0.75 * 1.2) / (0.25 * 1.5 + 0.75 * 2.5) = 7/15`, where a
+    /// flux-weighted average of the per-group ratios would give 0.46.
+    #[test]
+    fn an_isomer_only_partial_is_a_ratio_of_rate_integrals() {
+        let (m, g) = n2n_split(
+            (&[1.0e7, 2.0e7], &[1.0, 3.0]),
+            (&[1.0e7, 2.0e7], &[0.3, 1.5]),
+            MultigroupSpectrum {
+                boundaries: vec![1.0e7, 1.5e7, 2.0e7],
+                masses: vec![0.25, 0.75],
+                flux_error: None,
+            },
+        );
+        assert!((m - 7.0 / 15.0).abs() < 1e-12, "In114_m1 {m}");
+        assert!((g - 8.0 / 15.0).abs() < 1e-12, "In114 {g}");
+    }
+
+    /// Past its last energy an isomer-only partial follows the transport total
+    /// at the share it ends on, not its own last value. Here it ends at 20 MeV
+    /// on 1.6 b, 0.8 of a 2 b total that then falls to nothing by 30 MeV, as
+    /// ENDF/B-VIII.1's In115 (n,2n) partial against TENDL-2025's total does.
+    /// Held flat it was 1.6 b over a 20-30 MeV average of 1 b, and the isomer
+    /// took everything.
+    #[test]
+    fn an_isomer_only_partial_follows_the_total_past_its_last_energy() {
+        let total: (&[f64], &[f64]) = (&[1.0e7, 2.0e7, 3.0e7], &[2.0, 2.0, 0.0]);
+        let partial: (&[f64], &[f64]) = (&[1.0e7, 2.0e7], &[1.0, 1.6]);
+        let spectrum = |boundaries: Vec<f64>, masses: Vec<f64>| MultigroupSpectrum {
+            boundaries,
+            masses,
+            flux_error: None,
+        };
+        // Wholly above: the share it ends on.
+        let (m, g) = n2n_split(total, partial, spectrum(vec![2.0e7, 3.0e7], vec![1.0]));
+        assert!((m - 0.8).abs() < 1e-12, "In114_m1 {m}");
+        assert!((g - 0.2).abs() < 1e-12, "In114 {g}");
+        // 80% below, where the partial averages 1.3 b, and 20% above:
+        // `(0.8 * 1.3 + 0.2 * 0.8 * 1.0) / (0.8 * 2.0 + 0.2 * 1.0) = 2/3`.
+        let (m, _) = n2n_split(
+            total,
+            partial,
+            spectrum(vec![1.0e7, 2.0e7, 3.0e7], vec![0.8, 0.2]),
+        );
+        assert!((m - 2.0 / 3.0).abs() < 1e-12, "In114_m1 {m}");
+        // One group across the last energy: 1.45 b on its lower half and
+        // `0.8 * 1.5` on its upper, over a total of 2 and 1.5 b.
+        let (m, _) = n2n_split(total, partial, spectrum(vec![1.5e7, 2.5e7], vec![1.0]));
+        assert!((m - 53.0 / 70.0).abs() < 1e-12, "In114_m1 {m}");
+
+        // A total that is zero where the partial ends leaves no share to hold,
+        // and the partial ends there.
+        let (m, g) = n2n_split(
+            (&[1.0e7, 2.0e7, 2.5e7], &[2.0, 0.0, 1.0]),
+            partial,
+            spectrum(vec![2.0e7, 3.0e7], vec![1.0]),
+        );
+        assert!(m < 1e-12, "In114_m1 {m}");
+        assert!((g - 1.0).abs() < 1e-12, "In114 {g}");
+    }
+
+    /// A partial above the transport total, as ENDF/B-VIII.1's In115 (n,2n)
+    /// In114_m1 partial is above its own MF=3 from about 18.1 MeV, cannot all
+    /// be made: the isomer takes the whole reaction and the ground nothing,
+    /// never more than one product per reaction.
+    #[test]
+    fn isomer_only_shares_past_the_whole_reaction_are_scaled_to_fit() {
+        let material = indium(vec![reaction(16, vec![1.0e7, 2.0e7], vec![0.0, 2.0])]);
+        let mut branch = BranchTable::new();
+        branch.entry("In115".to_string()).or_default().insert(
+            "(n,2n)".to_string(),
+            vec![curve(
+                "In114_m1",
+                BranchQuantity::CrossSection,
+                &[1.0e7, 2.0e7],
+                &[0.0, 4.0],
+            )],
+        );
+        let spectrum = MultigroupSpectrum {
+            boundaries: vec![1.0e6, 2.0e7],
+            masses: vec![1.0],
+            flux_error: None,
+        };
+        let mut rates: ReactionRates = HashMap::new();
+        let folded =
+            fold_branching_into_chain(&material, &indium_chain(), &branch, &spectrum, &mut rates);
+        assert_eq!(branching_of(&folded, "(n,2n)", "In114_m1"), 1.0);
+        assert_eq!(branching_of(&folded, "(n,2n)", "In114"), 0.0);
+    }
+
+    /// A list naming the ground state splits exactly as it always has, to the
+    /// bit, with the transport total loaded and ignored: the rates normalized
+    /// over the listed states, and the mass they carry re-partitioned by them.
+    #[test]
+    fn a_list_naming_the_ground_state_splits_exactly_as_before() {
+        let material = indium(vec![
+            reaction(16, vec![1.0e7, 2.0e7], vec![0.0, 2.0]),
+            reaction(102, vec![1.0e-5, 1.0e7], vec![100.0, 1.0]),
+        ]);
+        let spectrum = MultigroupSpectrum {
+            boundaries: vec![1.0e-5, 1.0, 1.2e7, 2.0e7],
+            masses: vec![0.3, 0.3, 0.4],
+            flux_error: None,
+        };
+        let partials = [
+            curve(
+                "In114",
+                BranchQuantity::CrossSection,
+                &[1.0e7, 1.5e7, 2.0e7],
+                &[0.0, 0.1, 0.3],
+            ),
+            curve(
+                "In114_m1",
+                BranchQuantity::CrossSection,
+                &[1.0e7, 2.0e7],
+                &[0.0, 1.3],
+            ),
+        ];
+        let yields = [
+            curve(
+                "In116",
+                BranchQuantity::Yield,
+                &[1.0e-5, 2.0e7],
+                &[0.2, 0.4],
+            ),
+            curve(
+                "In116_m1",
+                BranchQuantity::Yield,
+                &[1.0e-5, 2.0e7],
+                &[0.8, 0.6],
+            ),
+        ];
+        let mut branch = BranchTable::new();
+        let kinds = branch.entry("In115".to_string()).or_default();
+        kinds.insert("(n,2n)".to_string(), partials.to_vec());
+        kinds.insert("(n,gamma)".to_string(), yields.to_vec());
+        let mut rates: ReactionRates = HashMap::new();
+        let folded =
+            fold_branching_into_chain(&material, &indium_chain(), &branch, &spectrum, &mut rates);
+
+        // The pre-existing arithmetic, spelled out: fractions over the listed
+        // states, then `(f / f_sum) * base_sum` with the base 1.0 and 0.0.
+        let before = |weights: [f64; 2]| {
+            let total = weights[0] + weights[1];
+            let f = [weights[0] / total, weights[1] / total];
+            let f_sum = f[0] + f[1];
+            let base_sum = 1.0 + 0.0;
+            [(f[0] / f_sum) * base_sum, (f[1] / f_sum) * base_sum]
+        };
+        let rate = |c: &BranchCurve| fold_curve_rate(&c.energy, &c.values, &spectrum);
+        let expected = before([rate(&partials[0]), rate(&partials[1])]);
+        assert_eq!(
+            branching_of(&folded, "(n,2n)", "In114").to_bits(),
+            expected[0].to_bits()
+        );
+        assert_eq!(
+            branching_of(&folded, "(n,2n)", "In114_m1").to_bits(),
+            expected[1].to_bits()
+        );
+
+        let capture = &material.nuclide_data["In115"].reactions[0][&102];
+        let weight = |c: &BranchCurve| {
+            let mut num = 0.0;
+            for g in 0..spectrum.masses.len() {
+                num += curve_xs_product_group_average(
+                    &c.energy,
+                    &c.values,
+                    &capture.energy,
+                    |e| capture.cross_section_at(e).unwrap_or(0.0),
+                    spectrum.boundaries[g],
+                    spectrum.boundaries[g + 1],
+                ) * spectrum.masses[g];
+            }
+            num
+        };
+        let expected = before([weight(&yields[0]), weight(&yields[1])]);
+        assert_eq!(
+            branching_of(&folded, "(n,gamma)", "In116").to_bits(),
+            expected[0].to_bits()
+        );
+        assert_eq!(
+            branching_of(&folded, "(n,gamma)", "In116_m1").to_bits(),
+            expected[1].to_bits()
+        );
+
+        // And the coupled path, with a tallied total present to be ignored.
+        let mut partial_rates: PartialRates = HashMap::new();
+        partial_rates
+            .entry("In115".to_string())
+            .or_default()
+            .insert(
+                "(n,2n)".to_string(),
+                vec![
+                    ("In114".to_string(), 3.0e-24),
+                    ("In114_m1".to_string(), 1.1e-24),
+                ],
+            );
+        let mut rates: ReactionRates = HashMap::from([(
+            "In115".to_string(),
+            HashMap::from([("(n,2n)".to_string(), 7.0e-24)]),
+        )]);
+        let folded = apply_coupled_branching(&indium_chain(), &partial_rates, &mut rates);
+        let expected = before([3.0e-24, 1.1e-24]);
+        assert_eq!(
+            branching_of(&folded, "(n,2n)", "In114").to_bits(),
+            expected[0].to_bits()
+        );
+        assert_eq!(
+            branching_of(&folded, "(n,2n)", "In114_m1").to_bits(),
+            expected[1].to_bits()
+        );
+    }
+
+    /// The coupled path: a tallied partial for the isomer alone is a share of
+    /// the reaction's tallied total, MF=9 (`y * sigma_MT` scored) and MF=10
+    /// (the partial folded) alike, and the ground state keeps the rest.
+    #[test]
+    fn coupled_isomer_only_rates_are_shares_of_the_tallied_total() {
+        let chain = indium_chain();
+        let mut partials: PartialRates = HashMap::new();
+        let kinds = partials.entry("In115".to_string()).or_default();
+        kinds.insert(
+            "(n,gamma)".to_string(),
+            vec![("In116_m1".to_string(), 0.79 * 4.0e-22)],
+        );
+        kinds.insert(
+            "(n,2n)".to_string(),
+            vec![("In114_m1".to_string(), 0.9 * 2.0e-25)],
+        );
+        let totals = HashMap::from([(
+            "In115".to_string(),
+            HashMap::from([
+                ("(n,gamma)".to_string(), 4.0e-22),
+                ("(n,2n)".to_string(), 2.0e-25),
+            ]),
+        )]);
+        let mut rates = totals.clone();
+        let folded = apply_coupled_branching(&chain, &partials, &mut rates);
+        assert_eq!(rates, totals, "only the split moves, never the rate");
+        let near = |kind: &str, target: &str, want: f64| {
+            let got = branching_of(&folded, kind, target);
+            assert!((got - want).abs() < 1e-12, "{kind} {target}: {got}");
+        };
+        near("(n,gamma)", "In116_m1", 0.79);
+        near("(n,gamma)", "In116", 0.21);
+        near("(n,2n)", "In114_m1", 0.9);
+        near("(n,2n)", "In114", 0.1);
+
+        // No tallied total, no reaction to split: the chain is left alone.
+        let mut rates: ReactionRates = HashMap::new();
+        let folded = apply_coupled_branching(&chain, &partials, &mut rates);
+        assert!(Arc::ptr_eq(&chain, &folded));
+    }
+
+    /// Isomer-only partials that are all zero under a live reaction, the flux
+    /// lying between the total's threshold and the partial's, give the isomer
+    /// nothing and the ground all of the reaction, on both paths and whatever
+    /// split the base chain carried. The coupled path used to gate on the
+    /// partials' own sum and keep the base split. A full list of zeros, and a
+    /// reaction with no tallied total, still keep it.
+    #[test]
+    fn zero_isomer_only_rates_give_the_ground_the_reaction() {
+        let mut chain = (*indium_chain()).clone();
+        for rx in chain
+            .get_mut("In115")
+            .unwrap()
+            .reactions
+            .iter_mut()
+            .filter(|r| r.kind == "(n,2n)")
+        {
+            rx.branching = 0.5;
+        }
+        let chain = Arc::new(chain);
+        let ground_takes_all = |folded: &HashMap<String, ChainNuclide>| {
+            assert_eq!(branching_of(folded, "(n,2n)", "In114_m1"), 0.0);
+            assert_eq!(branching_of(folded, "(n,2n)", "In114"), 1.0);
+        };
+
+        // The spectrum path: one group at 11 to 13 MeV, above the total's
+        // threshold and below the partial's.
+        let material = indium(vec![reaction(16, vec![1.0e7, 3.0e7], vec![2.0, 2.0])]);
+        let mut branch = BranchTable::new();
+        branch.entry("In115".to_string()).or_default().insert(
+            "(n,2n)".to_string(),
+            vec![curve(
+                "In114_m1",
+                BranchQuantity::CrossSection,
+                &[1.5e7, 2.0e7],
+                &[0.0, 1.6],
+            )],
+        );
+        let spectrum = MultigroupSpectrum {
+            boundaries: vec![1.1e7, 1.3e7],
+            masses: vec![1.0],
+            flux_error: None,
+        };
+        let mut rates: ReactionRates = HashMap::new();
+        ground_takes_all(&fold_branching_into_chain(
+            &material, &chain, &branch, &spectrum, &mut rates,
+        ));
+
+        // The coupled path, over the same reaction's tallied total.
+        let only = |targets: &[&str]| -> PartialRates {
+            let rates = targets.iter().map(|t| (t.to_string(), 0.0)).collect();
+            HashMap::from([(
+                "In115".to_string(),
+                HashMap::from([("(n,2n)".to_string(), rates)]),
+            )])
+        };
+        let tallied = || -> ReactionRates {
+            HashMap::from([(
+                "In115".to_string(),
+                HashMap::from([("(n,2n)".to_string(), 2.0e-24)]),
+            )])
+        };
+        ground_takes_all(&apply_coupled_branching(
+            &chain,
+            &only(&["In114_m1"]),
+            &mut tallied(),
+        ));
+        let full = only(&["In114", "In114_m1"]);
+        assert!(Arc::ptr_eq(
+            &chain,
+            &apply_coupled_branching(&chain, &full, &mut tallied())
+        ));
+        let mut untallied: ReactionRates = HashMap::new();
+        assert!(Arc::ptr_eq(
+            &chain,
+            &apply_coupled_branching(&chain, &only(&["In114_m1"]), &mut untallied)
+        ));
     }
 }

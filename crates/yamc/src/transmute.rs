@@ -759,10 +759,12 @@ impl Model {
             // continuous-energy splits (issue #218). MF=10 partials are folded
             // from the tally's union-grid flux moments (covering products that
             // build up during the step too), MF=9 yields are scored directly
-            // at the collision energies, and the (n,n') metastable production
-            // rates are injected from the same folds. When no branching
-            // subsection is configured the overlay is empty and the physics is
-            // identical to before.
+            // at the collision energies, as is an isomer-only partial on a
+            // material nuclide above its last breakpoint, where it follows the
+            // transport total at the share it ends on, and the (n,n')
+            // metastable production rates are injected from the same folds.
+            // When no branching subsection is configured the overlay is empty
+            // and the physics is identical to before.
             let mut folded_chains: HashMap<u32, Arc<HashMap<String, ChainNuclide>>> =
                 HashMap::new();
             if source_rate > 0.0 && !branch.is_empty() {
