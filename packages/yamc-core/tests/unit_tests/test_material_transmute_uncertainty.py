@@ -148,12 +148,15 @@ def test_coverage_is_a_share_and_a_dilute_run_has_no_partials_above_the_rate():
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["cross_sections"]),
     )
     info = results.get_data_uncertainty_info(iron.id or 0)
-    # Without covariance both checks below pass on empty maps, so a fixture
-    # without it is skipped, visibly, rather than passed unexamined. The
-    # fetched fixtures carry no covariance.arrow (the tests above rely on
-    # that), so this runs only against a cache that has one; the same checks
-    # are pinned on a built fixture in crates/yani-transmute/tests/
-    # data_uncertainty.rs.
+    # The key and its conversion are checked on every run: without covariance
+    # it is an empty dict, which is valid.
+    assert isinstance(info["partials_above_rate"], dict)
+    # Without covariance the checks below pass on empty maps, so a fixture
+    # without it is skipped, visibly, rather than passed unexamined. Whether
+    # the Fe56 fixture carries covariance.arrow depends on the cache: the URL
+    # cache fetches it on demand once uncertainty is asked for. The same
+    # checks are pinned on a built fixture in
+    # crates/yani-transmute/tests/data_uncertainty.rs.
     if "Fe56" not in info["perturbed"]:
         pytest.skip("the Fe56 fixture carries no covariance.arrow")
     assert info["rate_fraction_covered"], "the fold consumed no covariance"
