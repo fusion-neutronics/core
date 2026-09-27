@@ -20,8 +20,9 @@ use crate::mf::mf8::{IsomerLevel, Mf8};
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RadionuclideProduction {
     /// `1000*Z + A` of the product nuclide, `-1` for fission, or `0` where
-    /// the evaluation does not say; see [`product_zap`]. [`Self::nuclide`]
-    /// reads it.
+    /// the evaluation does not say. A zero IZAP in MF=9 or MF=10 is replaced
+    /// by the product the one MF=8 subsection for the same level (and LMF)
+    /// names, when there is exactly one. [`Self::nuclide`] reads it.
     pub zap: i64,
     /// Level number of the final state; 0 is the ground state.
     pub lfs: i64,
@@ -121,13 +122,15 @@ pub fn radionuclide_production(material: &Material) -> BTreeMap<i32, Vec<Radionu
 
 /// The product ZA of one MF=9 or MF=10 subsection.
 ///
-/// IZAP as the subsection states it, except where it is zero. The field joined
-/// MF=9 and MF=10 in the 2009 revision of the format (ENDF-102's revision
-/// history: "Added final product identifier, IZAP" for both files); before
-/// that the product was named in MF=8 alone, and an evaluation written to the
-/// older layout leaves the field zero. FENDL-3.2d's Al27, a JEFF-3.1.1
-/// evaluation, is one: its MF=9 (n,2n) and (n,alpha) yields carry IZAP = 0,
-/// and the MF=8 subsections for the same final states name Al26 and Na24.
+/// IZAP as the subsection states it, except where it is zero. The field is a
+/// late addition to MF=9 and MF=10: ENDF-102's table of updates for the
+/// 2004 revision lists "Added final product identifier, IZAP" for both files,
+/// and the July 2010 revision again lists "Addition of the IZAP parameters in
+/// Files 9 and 10". Before that the product was named in MF=8 alone, and an
+/// evaluation written to the older layout leaves the field zero. FENDL-3.2d's
+/// Al27, the JEFF-3.1.1 file of a 1997 LANL evaluation, is one: its MF=9
+/// (n,2n) and (n,alpha) yields carry IZAP = 0, and the MF=8 subsections for
+/// the same final states name Al26 and Na24.
 /// So zero is read as "not stated here", and the product is the one the MF=8
 /// subsection for the same final state (LFS) names, provided that
 /// subsection points at this file (LMF) and is the only one that does. Where
@@ -528,11 +531,14 @@ mod tests {
             + &record("", mf, 0)
     }
 
-    /// FENDL-3.2d's Al27 (a JEFF-3.1.1 evaluation) writes its MF=9 to the
+    /// FENDL-3.2d's Al27 (JEFF-3.1.1's file) writes its MF=9 to the
     /// layout before IZAP joined MF=9 and MF=10, so the field is zero and
-    /// MF=8 is what names the product. The (n,2n) records here are the
-    /// tape's; the other reactions are the cases around it: an IZAP of zero
-    /// that MF=8 does not resolve, one it resolves ambiguously, and fission.
+    /// MF=8 is what names the product. The (n,2n) MF=8 records here are the
+    /// tape's, and the MF=9 Q values are zero, so the isomer's level energy
+    /// can only come from MF=8. The other reactions are the cases around it:
+    /// an IZAP of zero that MF=8 does not resolve, one it resolves
+    /// ambiguously, one whose MF=8 subsection for the level points at MF=10
+    /// rather than MF=9, and fission.
     #[test]
     fn a_zero_izap_takes_the_product_mf8_names() {
         let text = record(" tape", 0, 0)
@@ -544,6 +550,7 @@ mod tests {
                     + &mf8_sub(" 1.302600+4", " 2.284000+5", 9, 1, 16)),
             )
             + &section(8, 18, 1, &mf8_sub("-1.000000+0", " 0.000000+0", 10, 0, 18))
+            + &section(8, 22, 1, &mf8_sub(" 1.102300+4", " 0.000000+0", 10, 0, 22))
             + &section(
                 8,
                 103,
@@ -553,6 +560,7 @@ mod tests {
             )
             + &record("", 0, 0)
             + &section(9, 16, 2, &(tab1(0, 0, 9, 16) + &tab1(0, 1, 9, 16)))
+            + &section(9, 22, 1, &tab1(0, 0, 9, 22))
             + &section(9, 103, 1, &tab1(0, 0, 9, 103))
             + &section(9, 107, 1, &tab1(0, 0, 9, 107))
             + &record("", 0, 0)
@@ -564,7 +572,8 @@ mod tests {
         let production = radionuclide_production(&m);
 
         // Al26 in both final states, and the level energy is MF=8's 228.4 keV
-        // rather than the QM - QI the subsection would otherwise fall back on.
+        // rather than the zero QM - QI the subsection would otherwise fall
+        // back on.
         let n2n = &production[&16];
         assert_eq!(n2n.len(), 2);
         assert_eq!((n2n[0].zap, n2n[0].lfs), (13026, 0));
@@ -578,6 +587,10 @@ mod tests {
         assert_eq!(production[&103][0].nuclide(), None);
         assert_eq!(production[&107][0].zap, 0);
         assert_eq!(production[&107][0].nuclide(), None);
+
+        // An MF=8 subsection for the level that points at MF=10 says nothing
+        // about the MF=9 subsection, so its product is not taken either.
+        assert_eq!(production[&22][0].zap, 0);
 
         // Fission is kept as the file states it, and names no nuclide.
         assert_eq!(production[&18][0].zap, -1);
