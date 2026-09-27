@@ -211,19 +211,21 @@ pub struct Info {
     pub unsupported_layouts: BTreeMap<i64, usize>,
     /// Blocks whose arrays disagreed with their own declared sizes.
     pub malformed_blocks: usize,
-    /// Per (nuclide, reaction kind), the share of the rate that comes from
-    /// energies where the evaluation states a nonzero variance for that
-    /// reaction. Below one means part of the rate carries no stated
-    /// uncertainty and the sigma is diluted accordingly. An interval a
-    /// covariance grid spans with a variance of zero counts as uncovered: it
-    /// states no uncertainty either.
+    /// Per (nuclide, reaction kind), the share of the dilute rate over the
+    /// flux range that comes from energies where the evaluation states a
+    /// nonzero variance for that reaction. Below one means part of the rate
+    /// carries no stated uncertainty and the sigma is diluted accordingly. An
+    /// interval a covariance grid spans with a variance of zero counts as
+    /// uncovered: it states no uncertainty either. In [0, 1] whatever rate the
+    /// covariance is divided by; see [`Info::partials_above_rate`] for when
+    /// that rate disagrees.
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
-    /// Per (nuclide, reaction kind), where the partial rates the covariance
-    /// was weighted with add up to more than the rate it was divided by, their
-    /// ratio to it. Each is a channel whose relative sigma is overstated,
-    /// because the two were computed different ways; a self-shielded rate
-    /// against dilute partials is one. Such a channel reads one in
-    /// `rate_fraction_covered`.
+    /// Per (nuclide, reaction kind), where the partial rates a relative
+    /// covariance block was weighted with, zero variance intervals included,
+    /// add up to more than the rate it was divided by, their ratio to it. Each
+    /// is a channel whose relative sigma is overstated, because the two were
+    /// computed different ways; a self-shielded rate against dilute partials
+    /// is one. Its `rate_fraction_covered` is unaffected.
     pub partials_above_rate: BTreeMap<(String, String), f64>,
     /// Share of the production this run drove from energies where a covariance
     /// states a nonzero variance, weighted by rate and by parent density, or

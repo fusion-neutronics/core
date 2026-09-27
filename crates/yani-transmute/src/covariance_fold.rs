@@ -123,28 +123,44 @@ pub struct Coverage {
     /// Per (nuclide, kind), the share of the rate that comes from energies
     /// where the evaluation states a nonzero variance for that reaction.
     ///
-    /// Exactly: the rate integrated over the energies where the diagonal of the
-    /// reaction's own covariance, summed over every self-covariance block the
-    /// fold consumed, is nonzero, divided by the rate. Rate from an interval a
-    /// grid spans with a variance of zero counts as uncovered, the same as rate
-    /// from outside every grid, because neither carries a stated uncertainty.
-    /// Below one, the relative uncertainty is diluted by exactly that much.
+    /// Exactly: the dilute rate integrated over the energies where the diagonal
+    /// of the reaction's own covariance, summed over every self-covariance
+    /// block the fold consumed, is nonzero, divided by the dilute rate over the
+    /// whole flux range. Rate from an interval a grid spans with a variance of
+    /// zero counts as uncovered, the same as rate from outside every grid,
+    /// because neither carries a stated uncertainty. Below one, the relative
+    /// uncertainty is diluted by that much.
+    ///
+    /// Both integrals are the fold's own, the dilute cross section against the
+    /// flux the partial rates are weighted with, and the numerator adds a
+    /// subset of the denominator's terms in the same order. So the share lies
+    /// in [0, 1] without a clamp, and it does not depend on how the rate the
+    /// covariance is divided by was computed: a self-shielded or a tallied rate
+    /// that disagrees with the partials shows up in
+    /// [`Coverage::partials_above_rate`] and does not move the share. On a
+    /// dilute collapse the denominator is that rate to a few parts in 1e15.
     ///
     /// Every channel a consumed block names has an entry, so a channel whose
     /// blocks state no variance anywhere reads zero rather than being absent.
-    /// At most one; a channel whose partial rates exceed its rate reads one
-    /// here and is listed in [`Coverage::partials_above_rate`].
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
     /// Per (nuclide, kind), where the partial rates the covariance was weighted
     /// with add up to more than the rate it was divided by, their ratio to it.
     ///
-    /// A share of a rate cannot exceed the rate, and this is past rounding, so
-    /// an entry means the numerator and the denominator of the relative
+    /// The sum is every partial rate of one relative block's grid, zero
+    /// variance intervals included, since the fold weights with all of them;
+    /// the largest such sum over the channel's blocks is the one compared. A
+    /// part of a rate cannot exceed the rate, and this is past rounding, so an
+    /// entry means the numerator and the denominator of the relative
     /// covariance were computed two different ways: the channel's relative
     /// sigma is overstated. The partials are the dilute cross section against
     /// a flux that is flat within each group, so any rate computed otherwise,
     /// a self-shielded collapse among them, can land here. Reported rather
     /// than clamped away, since the clamp is what used to hide it.
+    ///
+    /// Absolute (`lb = 0`) blocks weight with partial fluxes rather than
+    /// partial rates, which have no rate to compare with, so they are not
+    /// checked. Absence from this map therefore says the relative blocks are
+    /// consistent, not that an absolute one is.
     pub partials_above_rate: BTreeMap<(String, String), f64>,
     /// Production this spectrum drove from energies where a covariance states a
     /// nonzero variance, and the production it drove in total. Both are per
@@ -307,6 +323,14 @@ struct Partials {
     per_interval: Vec<f64>,
 }
 
+impl Partials {
+    /// Every interval's partial, zero variance or not, since the fold weights
+    /// the block with all of them.
+    fn total(&self) -> f64 {
+        self.per_interval.iter().sum()
+    }
+}
+
 /// The partial rates of `reaction` over the intervals of `grid`.
 fn partial_rates(flux: &FluxDensity, reaction: &Reaction, grid: &[f64], scale: Scale) -> Partials {
     let n = grid.len().saturating_sub(1);
@@ -340,8 +364,8 @@ fn contract(block: &ExpandedBlock, row: &Partials, col: &Partials) -> f64 {
     total
 }
 
-/// How far above one a channel's covered rate over its rate may sit and still
-/// be rounding.
+/// How far above one a channel's summed partial rates over its rate may sit
+/// and still be rounding.
 ///
 /// On a dilute collapse the two add the same terms grouped differently, and on
 /// CCFE-709 they agree to a few parts in 1e15. This sits six orders of
@@ -403,33 +427,42 @@ impl Diagonal {
     }
 }
 
-/// The part of `reaction`'s rate, in 1/s, from energies where its own blocks
-/// state a nonzero variance.
+/// The share of `reaction`'s dilute rate over the flux range that comes from
+/// energies where its own blocks state a nonzero variance, or `None` when that
+/// rate is zero.
 ///
-/// Walked on the union of the blocks' edges, so every cell lies inside one
-/// piece of each block or outside it, and a cell counts when the variances
-/// stated over it sum to something nonzero. Summed rather than tested one by
-/// one because the blocks of one subsection add: two that cancel state no
-/// variance. Relative and absolute blocks are summed apart, having different
+/// Walked on the union of the blocks' edges and the flux range's two ends, so
+/// every cell lies inside one piece of each block or outside it, and a cell
+/// counts when the variances stated over it sum to something nonzero. Summed
+/// rather than tested one by one because the blocks of one subsection add, so
+/// two whose tape values cancel exactly, bit for bit, state no variance there.
+/// No tolerance is applied: values that cancel only to rounding count as
+/// stated, since calling them zero would be a judgement the tape does not
+/// make. Relative and absolute blocks are summed apart, having different
 /// units.
 ///
-/// For one block that states a variance on every interval, this adds the
-/// same partial rates, in the same order, as the fold weights that block's
-/// covariance with, so the result is bit-identical to their sum.
-fn rate_with_stated_variance(
+/// The covered sum adds a subset of the total's terms in the same order, and
+/// rounded addition of terms that are not negative is monotone, so the share
+/// cannot exceed one. A block that states a variance on every interval across
+/// the whole flux range therefore reads exactly one.
+fn stated_variance_share(
     flux: &FluxDensity,
     reaction: &Reaction,
     diagonals: &[Diagonal],
-) -> f64 {
+) -> Option<f64> {
+    let (&lo, &hi) = (flux.boundaries.first()?, flux.boundaries.last()?);
     let mut edges: Vec<f64> = diagonals
         .iter()
         .flat_map(|d| d.pieces.iter().flat_map(|&(lo, hi, _)| [lo, hi]))
+        .chain([lo, hi])
         .collect();
     edges.sort_by(f64::total_cmp);
     edges.dedup();
-    let mut covered = 0.0;
+    let (mut covered, mut total) = (0.0, 0.0);
     for w in edges.windows(2) {
         let (a, b) = (w[0], w[1]);
+        let rate = flux.integrate_xs(reaction, a, b);
+        total += rate;
         let (mut relative, mut absolute) = (0.0, 0.0);
         for d in diagonals {
             match d.scale {
@@ -438,10 +471,10 @@ fn rate_with_stated_variance(
             }
         }
         if relative != 0.0 || absolute != 0.0 {
-            covered += BARN_TO_CM2 * flux.integrate_xs(reaction, a, b);
+            covered += rate;
         }
     }
-    covered
+    (total != 0.0).then(|| covered / total)
 }
 
 /// The activation MTs of a chain nuclide, paired with the kind that names them.
@@ -489,9 +522,14 @@ fn fold_nuclide(
     let mut used = 0;
     // Per MT named by a consumed block, the variance each of its own blocks
     // states. Kept block by block rather than summed onto one grid, because
-    // the blocks need not share a grid; `rate_with_stated_variance` walks them
+    // the blocks need not share a grid; `stated_variance_share` walks them
     // together.
     let mut variances: BTreeMap<i32, Vec<Diagonal>> = BTreeMap::new();
+    // Per MT, the largest sum of partial rates any relative block weighted it
+    // with, zero variance intervals included. The consistency check against
+    // the rate, and not the share: it is what the covariance's numerator was
+    // built from, whatever the block states.
+    let mut weighted_rate: BTreeMap<i32, f64> = BTreeMap::new();
 
     for block in blocks {
         if block.is_cross_material() {
@@ -552,6 +590,13 @@ fn fold_nuclide(
         if row_mt == col_mt {
             own.push(Diagonal::of(&expanded));
         }
+        if expanded.scale == Scale::Relative {
+            for (mt, partials) in [(row_mt, &row), (col_mt, &col)] {
+                let sum = partials.total().abs();
+                let e = weighted_rate.entry(mt).or_insert(0.0);
+                *e = e.max(sum);
+            }
+        }
         used += 1;
     }
 
@@ -575,20 +620,18 @@ fn fold_nuclide(
     }
 
     for (kind, mt) in kinds {
-        let (Some(diagonals), Some(reaction), Some(&full)) =
-            (variances.get(mt), reactions.get(mt), rates.get(kind))
-        else {
+        let (Some(diagonals), Some(reaction)) = (variances.get(mt), reactions.get(mt)) else {
             continue;
         };
-        if full == 0.0 {
-            continue;
-        }
-        let ratio = rate_with_stated_variance(flux, reaction, diagonals) / full;
         let key = (nuclide.to_string(), kind.clone());
-        if ratio > 1.0 + PARTIALS_ROUNDING {
-            coverage.partials_above_rate.insert(key.clone(), ratio);
+        if let Some(share) = stated_variance_share(flux, reaction, diagonals) {
+            coverage.rate_fraction_covered.insert(key.clone(), share);
         }
-        coverage.rate_fraction_covered.insert(key, ratio.min(1.0));
+        if let (Some(&weighted), Some(&full)) = (weighted_rate.get(mt), rates.get(kind)) {
+            if full != 0.0 && weighted / full > 1.0 + PARTIALS_ROUNDING {
+                coverage.partials_above_rate.insert(key, weighted / full);
+            }
+        }
     }
 
     coverage.covered.insert(nuclide.to_string());
@@ -898,6 +941,15 @@ mod stated_variance_tests {
         );
         assert!(got < 0.5, "most of this rate is below 10 keV: {got}");
         assert!(c.partials_above_rate.is_empty());
+
+        // Against half the rate, as a shielded collapse would give, the
+        // partials the fold weighted with sum to twice it. The zero variance
+        // interval is among them, so the check must see it even though the
+        // share leaves it out, and the share itself does not move.
+        let c = fold(&[block(102, 102, lb5(&grid, &[0.0, 0.0, 0.01]))], 0.5);
+        let ratio = c.partials_above_rate[&("W186".to_string(), "(n,gamma)".to_string())];
+        assert!((ratio - 2.0).abs() < 1.0e-12, "{ratio}");
+        assert_eq!(fraction(&c, "(n,gamma)").to_bits(), got.to_bits());
     }
 
     /// A block that is zero everywhere is still the evaluation's statement
@@ -909,12 +961,12 @@ mod stated_variance_tests {
         assert_eq!(fraction(&c, "(n,gamma)"), 0.0);
     }
 
-    /// A block with a variance on every interval reads exactly what the sum of
-    /// the partial rates it is weighted with gives, to the bit. That is what
-    /// the coverage was before zero variances were excluded, so a channel
-    /// whose covariance is stated everywhere does not move.
+    /// A block with a variance on every interval across the whole flux range
+    /// reads exactly one, where the old share, its partials over the rate,
+    /// read one to rounding. So a channel whose covariance is stated
+    /// everywhere does not move.
     #[test]
-    fn a_block_with_variance_everywhere_is_unchanged() {
+    fn a_block_with_variance_everywhere_reads_one() {
         let grid = [1.0e-5, 0.5, 1.0e4, 3.0e6, 2.0e7];
         let upper = [
             0.04, 0.01, 0.0, 0.0, //
@@ -925,12 +977,30 @@ mod stated_variance_tests {
         let c = fold(&[block(102, 102, lb5(&grid, &upper))], 1.0);
 
         let partials = partial_rates(&flux(), &reaction(102), &grid, Scale::Relative);
-        let sum: f64 = partials.per_interval.iter().sum();
-        let before = (sum / rate(1.0e-5, 2.0e7)).min(1.0);
-        assert_eq!(fraction(&c, "(n,gamma)").to_bits(), before.to_bits());
+        let before = partials.total() / rate(1.0e-5, 2.0e7);
+        assert_eq!(fraction(&c, "(n,gamma)"), 1.0);
+        assert!((before - 1.0).abs() < 1.0e-15, "{before}");
         assert!(
             c.partials_above_rate.is_empty(),
             "a dilute fold is consistent"
+        );
+    }
+
+    /// A block stated on every interval of a grid that spans part of the
+    /// range reads what the old share did, its partials over the rate, to
+    /// rounding: the two differ only in how the same integral is grouped.
+    #[test]
+    fn a_block_with_variance_on_part_of_the_range_is_unchanged() {
+        let grid = [1.0, 1.0e3, 1.0e6];
+        let c = fold(&[block(102, 102, lb5(&grid, &[0.01, 0.002, 0.03]))], 1.0);
+
+        let partials = partial_rates(&flux(), &reaction(102), &grid, Scale::Relative);
+        let before = partials.total() / rate(1.0e-5, 2.0e7);
+        let got = fraction(&c, "(n,gamma)");
+        assert!(before < 1.0);
+        assert!(
+            (got - before).abs() <= 1.0e-14 * before,
+            "{got} against {before}"
         );
     }
 
@@ -975,7 +1045,8 @@ mod stated_variance_tests {
         );
 
         // A negative variance cancelling the first block above 1 keV. Not
-        // physical, but it is what summing the blocks means.
+        // physical, but it is what summing the blocks means. The two tape
+        // values cancel bit for bit, which is the only cancellation counted.
         let cancelling = [
             block(102, 102, diagonal(1, &[1.0, 1.0e3, 1.0e5], &[0.01, 0.02])),
             block(102, 102, diagonal(8, &[1.0e3, 1.0e5], &[-0.02])),
@@ -1007,8 +1078,9 @@ mod stated_variance_tests {
     }
 
     /// Partials above the rate are an inconsistency between the numerator and
-    /// the denominator, not a coverage of more than all of it. The share reads
-    /// one and the excess is reported, where it used to be clamped silently.
+    /// the denominator, not a coverage of more than all of it. The excess is
+    /// reported, where it used to be clamped silently, and the share, measured
+    /// against the fold's own dilute integral, reads what it would anyway.
     #[test]
     fn partials_above_the_rate_are_reported_not_clamped_away() {
         let grid = [1.0e-5, 1.0e4, 2.0e7];

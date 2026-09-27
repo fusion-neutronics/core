@@ -148,6 +148,10 @@ def test_coverage_is_a_share_and_a_dilute_run_has_no_partials_above_the_rate():
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["cross_sections"]),
     )
     info = results.get_data_uncertainty_info(iron.id or 0)
+    # Without covariance both checks below pass on empty maps, so a fixture
+    # that lost its covariance must fail here rather than pass unexamined.
+    assert "Fe56" in info["perturbed"], info["no_covariance_data"]
+    assert info["rate_fraction_covered"], "the fold consumed no covariance"
     assert info["partials_above_rate"] == {}
     for channel, share in info["rate_fraction_covered"].items():
         assert 0.0 <= share <= 1.0, f"{channel} reads {share}"
