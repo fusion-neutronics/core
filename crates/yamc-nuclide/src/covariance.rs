@@ -113,6 +113,15 @@ impl CovarianceBlock {
 /// always 0 and means nothing here: MF=40 has no lumped-reaction flag, and the
 /// file stores the column as null.
 ///
+/// So [`CovarianceBlock`]'s own helpers, which read MF=33's conventions, are
+/// wrong on it and are not to be called through `block`: `partner_mt` reads
+/// an MT1 of 0 as this MT, which the manual gives no meaning in MF=40;
+/// `is_diagonal` never compares XLFS1 with the state's LFS, so it takes the
+/// rectangular ground-to-isomer block of JEFF-4.0 U235 MT 4 for a self block;
+/// and `is_cross_material` takes JEFF-4.0 U235's MAT1 of its own 9228 for
+/// another material. Use [`BranchingCovarianceBlock::is_self_block`] and
+/// [`BranchingCovarianceBlock::is_cross_material`] instead.
+///
 /// Several levels can resolve to one chain nuclide, so (`target`, `target1`)
 /// does not identify the pair of states a block correlates: key on (`mt`,
 /// `lfs`, `mt1`, `xlfs1`). JEFF-4.0 U235 MT 4 has a block between its ground
@@ -155,4 +164,26 @@ pub struct BranchingCovarianceBlock {
     pub lfs: i32,
     /// The block itself.
     pub block: CovarianceBlock,
+}
+
+impl BranchingCovarianceBlock {
+    /// Whether this block is its product state's covariance with itself: an
+    /// MF=10 partial of this evaluation (MAT1 0 or `mat`, XMF1 10) at this
+    /// state's own MT and level.
+    ///
+    /// MT1 is compared as written, so an MT1 of 0 is not read as this MT, and
+    /// the level is XLFS1 against `lfs`, both as the tape numbers them. That
+    /// is the rule the converter resolves `target1` by.
+    pub fn is_self_block(&self) -> bool {
+        !self.is_cross_material()
+            && self.block.xmf1 == 10.0
+            && self.block.mt1 == self.block.mt
+            && self.block.xlfs1 == self.lfs as f64
+    }
+
+    /// Whether the partner state is in another evaluation: MAT1 is neither 0
+    /// nor this evaluation's own MAT, which JEFF-4.0 U235 MT 4 writes there.
+    pub fn is_cross_material(&self) -> bool {
+        self.block.mat1 != 0 && self.block.mat1 != self.mat
+    }
 }

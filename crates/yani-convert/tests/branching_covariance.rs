@@ -140,6 +140,7 @@ fn mf40_is_written_beside_branching_for_nb93() {
             // covariance with itself.
             assert_eq!(b.target1.as_deref(), Some(target));
             assert_eq!(b.block.xlfs1, b.lfs as f64);
+            assert!(b.is_self_block() && !b.is_cross_material());
             // One state per target, so the branching.arrow curve is its own.
             assert!(b.energy.is_none() && b.values.is_none());
         }
@@ -284,12 +285,104 @@ fn a_cross_state_lb6_block_round_trips() {
     assert_ne!(b.block.xlfs1, b.lfs as f64);
     assert_eq!(b.target.as_deref(), Some("Nb93"));
     assert_eq!(b.target1.as_deref(), Some("Nb93_m1"));
+    // MF=33's helper takes it for a self block, never having compared XLFS1
+    // with LFS; MF=40's does not.
+    assert!(b.block.is_diagonal());
+    assert!(!b.is_self_block());
     // The ground's self block is untouched beside it.
     let own = blocks
         .iter()
         .find(|b| b.block.mt == 4 && b.lfs == 0 && b.block.subsection_idx == 0)
         .expect("the self block");
     assert_eq!(own.target1.as_deref(), Some("Nb93"));
+    assert!(own.is_self_block());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An NC block, which none of the published libraries has in MF=40, round
+/// trips beside the NI block it precedes. Here the (n,n') ground's self
+/// sub-subsection gains an LTY=0 block ahead of its LB=5 one: the two share
+/// the sub-subsection's key, `block_idx` runs over both, NC first, as the
+/// tape orders them, and `mtl` is null on both.
+#[test]
+fn an_nc_block_round_trips_ahead_of_its_ni_block() {
+    let tape = text(NB93);
+    let own = " 1.000000+1 0.000000+0          0          4          0          1412540  4    3";
+    let with_nc = [
+        " 1.000000+1 0.000000+0          0          4          1          1",
+        " 0.000000+0 0.000000+0          0          0          0          0",
+        " 1.000000+6 2.000000+7          0          0          4          2",
+        " 1.000000+0 1.600000+1-1.000000+0 2.200000+1",
+    ]
+    .map(|l| format!("{l:<66}412540  4    3"));
+    let tape = edit(tape, own, &with_nc.join("\n"));
+    let nb93 = material(&tape);
+    let out = extract(std::slice::from_ref(&nb93), &nb_decay());
+    assert_eq!(out.stats.mf40_nc_blocks, 1);
+    assert_eq!(out.stats.mf40_blocks, 5);
+
+    let dir = scratch("nc");
+    write_branching_covariance(&out.covariance, &dir).expect("writes");
+    let blocks = read_back(&dir);
+    assert_eq!(blocks.len(), 5);
+    let of: Vec<_> = blocks
+        .iter()
+        .filter(|b| b.block.mt == 4 && b.lfs == 0 && b.block.subsection_idx == 0)
+        .collect();
+    assert_eq!(of.len(), 2);
+    let tape_sub = &nb93.mf40(4).expect("MF=40 MT 4").subsections[0].subsubsections[0];
+    let (nc, ni) = (of[0], of[1]);
+    assert_eq!((nc.block.block_idx, ni.block.block_idx), (0, 1));
+    assert_eq!(
+        nc.block.data,
+        CovarianceData::Nc(tape_sub.nc_subsections[0].clone())
+    );
+    assert_eq!(
+        ni.block.data,
+        CovarianceData::Ni(tape_sub.ni_subsections[0].clone())
+    );
+    let CovarianceData::Nc(data) = &nc.block.data else {
+        panic!("an NC block");
+    };
+    assert_eq!((data.lty, data.e1, data.e2, data.nci), (0, 1.0e6, 2.0e7, 2));
+    assert_eq!(data.ci, [1.0, -1.0]);
+    assert_eq!(data.xmti, [16.0, 22.0]);
+    for b in [nc, ni] {
+        assert_eq!(
+            (
+                b.state_idx,
+                b.block.xmf1,
+                b.block.xlfs1,
+                b.block.mat1,
+                b.block.mt1
+            ),
+            (0, 10.0, 0.0, 0, 4)
+        );
+        assert_eq!(
+            (b.target.as_deref(), b.target1.as_deref()),
+            (Some("Nb93"), Some("Nb93"))
+        );
+        assert!(b.is_self_block());
+    }
+
+    // The kinds and the null MTL as they sit in the file.
+    let file = std::fs::File::open(dir.join("branching_covariance.arrow")).expect("the file");
+    let reader = arrow_ipc::reader::FileReader::try_new(file, None).expect("arrow");
+    let (mut kinds, mut rows, mut null_mtl) = (Vec::new(), 0, 0);
+    for batch in reader {
+        let batch = batch.expect("a batch");
+        let kind = batch
+            .column_by_name("kind")
+            .expect("kind")
+            .as_any()
+            .downcast_ref::<arrow_array::StringArray>()
+            .expect("utf8");
+        kinds.extend(kind.iter().map(|k| k.expect("kind is set").to_string()));
+        rows += batch.num_rows();
+        null_mtl += batch.column_by_name("mtl").expect("mtl").null_count();
+    }
+    assert_eq!(kinds.iter().filter(|k| *k == "nc").count(), 1);
+    assert_eq!(null_mtl, rows, "MF=40 has no MTL");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -514,6 +607,10 @@ fn tape_values_are_written_literally() {
     assert_eq!(b.izap, 0, "IZAP is the tape's");
     assert_eq!(b.block.mat1, NB93_MAT, "MAT1 is the tape's");
     assert_eq!(b.mat, NB93_MAT);
+    // A MAT1 naming the evaluation itself is not another material, whatever
+    // MF=33's helper, which compares with zero, says.
+    assert!(b.block.is_cross_material());
+    assert!(!b.is_cross_material() && b.is_self_block());
     assert_eq!(b.target.as_deref(), Some("Nb93_m1"));
     assert_eq!(b.target1.as_deref(), Some("Nb93_m1"));
     let _ = std::fs::remove_dir_all(&dir);
