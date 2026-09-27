@@ -102,8 +102,8 @@ pub struct StateFacts {
     pub level_energy_difference: Option<f64>,
     /// The evaluation's own MF=3 for `mt`, as stated. `None` when the file
     /// has no MF=3 section for that MT, even where it gives the same total
-    /// through component MTs. Shared between the states of one MT, since a TENDL MT=102
-    /// section can run to thousands of points.
+    /// through component MTs. Shared between the states of one MT, since a
+    /// TENDL MT=102 section can run to thousands of points.
     pub mf3: Option<Arc<Tabulated1D>>,
 }
 
@@ -489,10 +489,9 @@ pub struct BranchingStats {
     /// is the copy a build log prints.
     pub list_facts: Vec<String>,
     /// How many lists there are of each kind: `"MF=10 complete"`,
-    /// `"MF=10 isomers only"`, the same for MF=9, `"no MF=3 section for the
-    /// MT"` and
-    /// `"normalised"` (a `norm` line of the MF=1 normalisation block names the
-    /// MT).
+    /// `"MF=10 isomers only"`, the same for MF=9,
+    /// `"no MF=3 section for the MT"` and `"normalised"` (a `norm` line of the
+    /// MF=1 normalisation block names the MT).
     pub list_counts: BTreeMap<String, usize>,
 }
 
@@ -985,6 +984,9 @@ pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn 
     for row in rows {
         for state in &row.states {
             mt.values().append_value(state.mt);
+            // LFS and LMF are held as the ENDF reader's i64 but stored as
+            // Int32 like MT, which the reader's BranchState matches; a value
+            // that does not fit fails the write rather than wrapping.
             lfs.values().append_value(i32::try_from(state.lfs)?);
             lmf.values()
                 .append_option(state.lmf.map(i32::try_from).transpose()?);
