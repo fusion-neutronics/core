@@ -552,6 +552,36 @@ fn an_mf40_state_at_no_mf10_excitation_is_unmatched() {
     assert_eq!(row.qi, -1.083087e7, "QI is the tape's");
 }
 
+/// An (IZAP, LFS) that MF=10 also gives is not taken on the key alone: the
+/// two files can number levels differently, so the level has to agree in
+/// excitation too. Here the (n,2n) isomer keeps LFS 1 in MF=40 but moves to
+/// 2 MeV, where MF=10's LFS 1 is at 135.5 keV. It is not matched to it, nor,
+/// the fallback being held to the same tolerance, to anything else.
+#[test]
+fn an_mf40_state_matching_an_mf10_key_at_another_level_is_unmatched() {
+    let tape = text(NB93);
+    let tape = edit(
+        tape,
+        "-8.830870+6-8.966370+6      41092          1          0          1412540 16   10",
+        "-8.830870+6-1.083087+7      41092          1          0          1412540 16   10",
+    );
+    let out = extract(&[material(&tape)], &nb_decay());
+    assert_eq!(
+        out.stats.mf40_unmatched_states.len(),
+        1,
+        "{:?}",
+        out.stats.mf40_unmatched_states
+    );
+    assert!(out.stats.mf40_unmatched_states[0].contains("IZAP 41092 LFS 1"));
+    let row = out
+        .covariance
+        .iter()
+        .find(|r| r.reaction.as_deref() == Some("(n,2n)") && r.lfs == 1)
+        .expect("the state is still written");
+    assert_eq!(row.target, None);
+    assert_eq!(row.qi, -1.083087e7, "QI is the tape's");
+}
+
 /// An MT1 of 0 has no meaning the manual gives in MF=40, so its partner is not
 /// read as this MT: `target1` is null and the tape's 0 is kept.
 #[test]

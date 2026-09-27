@@ -912,8 +912,9 @@ impl BranchingExtractor {
 
 /// The MF=9 or MF=10 state one MF=40 product state is the covariance of.
 ///
-/// By (IZAP, LFS) first, which is how MF=9 and MF=10 are joined. The two
-/// files need not number a level alike, though: ENDF/B-VIII.1 Pb204 MT4 gives
+/// By (IZAP, LFS) first, which is how MF=9 and MF=10 are joined, provided
+/// the two states' excitations agree within `tol_ev`. The two files need not
+/// number a level alike, though: ENDF/B-VIII.1 Pb204 MT4 gives
 /// the 2.186 MeV isomer as LFS=21 in MF=10 and LFS=1 in MF=40, with the same
 /// QI. So failing that, the state is resolved through the isomer table from
 /// its own QM - QI, as the rows are, and matched by the chain nuclide it lands
@@ -934,11 +935,12 @@ fn match_mf40_state<'a>(
     tol_ev: f64,
 ) -> Option<&'a ProductionState> {
     let izap = mf40_zap(sub, mt, za);
-    if let Some(state) = states.get(&(izap, sub.lfs)) {
+    let excitation = sub.qm - sub.qi;
+    let near = |state: &ProductionState| (state.excitation - excitation).abs() <= tol_ev;
+    if let Some(state) = states.get(&(izap, sub.lfs)).filter(|state| near(state)) {
         return Some(state);
     }
     let (z, a) = (izap / 1000, izap % 1000);
-    let excitation = sub.qm - sub.qi;
     let resolved = endf::radionuclide_production::resolve_level(
         z,
         a,
@@ -957,7 +959,7 @@ fn match_mf40_state<'a>(
                 .abs()
                 .total_cmp(&(y.excitation - excitation).abs())
         })
-        .filter(|state| (state.excitation - excitation).abs() <= tol_ev)
+        .filter(|state| near(state))
 }
 
 /// The chain target of a block's partner state, level `xlfs1` of `partner_mt`
