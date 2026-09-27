@@ -16,9 +16,8 @@
 //!   at all: it would have to expand every alias into a full copy of its
 //!   parent's yields and lose the relationship.
 //! * `yani::export_chain_parts` exists to round-trip a chain yani already
-//!   holds. That is a different job from converting an evaluation, and reusing
-//!   it would have meant widening the in-memory type to carry fields the solver
-//!   never reads.
+//!   holds. That is a different job from converting an evaluation, and the
+//!   fields above are exactly the ones such a round trip has no source for.
 //!
 //! Decay source spectra are the one thing [`endf::Chain`] does not carry, so
 //! they are read from the same decay evaluations separately and joined by

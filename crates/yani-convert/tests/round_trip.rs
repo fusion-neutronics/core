@@ -962,3 +962,49 @@ fn fission_yield_evaluations_are_written_verbatim() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An evaluation with cumulative yields (MT=459) and no independent ones
+/// (MT=454) is refused on purpose. The chain is built from the independent
+/// yields, so there would be no nominal row for the cumulative ones to belong
+/// to, and a reader refuses such a row. Converting anyway would mean dropping
+/// the MT=459 data without a word. No local library has such a tape.
+#[test]
+fn cumulative_yields_without_independent_ones_are_refused() {
+    let mut blobs = DECAY.to_vec();
+    blobs.push(fixture!("dec-092_U_235.endf.xz"));
+    let decay = materials(&blobs);
+    let fpy = materials(FPY);
+    let mut q_values = endf::chain::q_values(&materials(NEUTRON));
+    q_values
+        .entry("U235".to_string())
+        .or_default()
+        .insert(18, 1.9e8);
+    let mut chain = Chain::from_endf(&decay, &fpy, &q_values, &endf::chain::DEFAULT_REACTIONS)
+        .expect("chain builds");
+
+    // What a tape with no MT=454 section gives: no nominal yields, and an
+    // evaluation that holds only the cumulative ones.
+    let u235 = chain
+        .nuclides
+        .iter_mut()
+        .find(|n| n.name == "U235")
+        .expect("U235 is in the chain");
+    u235.yield_data.clear();
+    let evaluation = u235.yield_evaluation.as_mut().expect("U235 has yields");
+    evaluation.independent.clear();
+    evaluation.independent_interpolation.clear();
+
+    let dir = std::env::temp_dir().join(format!(
+        "yani-convert-cumulative-only-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let err = yani_convert::write_fission_yields(&chain, &dir)
+        .expect_err("cumulative-only yields must not convert")
+        .to_string();
+    assert!(
+        err.starts_with("U235: cumulative yields at") && err.contains("have no independent yields"),
+        "got: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1944,6 +1944,26 @@ mod tests {
         );
     }
 
+    /// Optional, so a library published before the evaluated yields existed
+    /// settles as `.absent` on a 404 rather than failing every download.
+    #[test]
+    fn the_fission_yields_subsection_lists_its_evaluated_yields_as_optional() {
+        let sections = transmutation_sections("fission_yields");
+        assert!(
+            sections.contains(&("fission_yields.arrow", true)),
+            "{sections:?}"
+        );
+        assert!(
+            sections.contains(&("evaluated_yields.arrow", false)),
+            "{sections:?}"
+        );
+        assert_eq!(
+            sections.last(),
+            Some(&("provenance.json", false)),
+            "provenance.json stays last, as in every other subsection"
+        );
+    }
+
     #[test]
     fn resolve_subsection_fails_fast_on_unavailable_subsection() {
         // TENDL is neutron-only: no decay subsection. Must fail before any
