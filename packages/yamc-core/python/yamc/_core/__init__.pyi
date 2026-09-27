@@ -5836,7 +5836,14 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         percent below 20 MeV), and ``skipped_states`` (one line per production
         state that names no single product nuclide, and so gives no row:
         fission, an IZAP of zero that no single MF=8 subsection resolves, or
-        any other ZAP whose Z or A is not positive).
+        any other ZAP whose Z or A is not positive), ``list_facts`` (one line
+        per production list, a parent's MT in MF=9 or MF=10: whether the ground
+        state is listed, whether the file has the MF=3, each state's LFS, LMF,
+        target, route and level energy difference, and the MF=1 normalisation
+        lines naming the MT) and ``list_counts`` (how many lists are complete
+        or isomers only in each file, have no MF=3, or are normalised). The
+        same facts are stored per row in ``branching.arrow``; they change no
+        rate.
     """
 
 def convert_neutron_transport(input_path: builtins.str, output_dir: builtins.str, njoy_exec: builtins.str = 'njoy', temperatures: typing.Optional[typing.Sequence[builtins.float]] = None, library: builtins.str = '', data_version: builtins.str = '', created_utc: typing.Optional[builtins.str] = None, covariance: builtins.bool = False) -> builtins.str:
