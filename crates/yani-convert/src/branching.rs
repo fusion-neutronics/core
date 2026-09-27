@@ -158,17 +158,18 @@ fn tape_limits(curve: &Tabulated1D, e: f64) -> (Option<f64>, Option<f64>) {
     let first = curve.x.partition_point(|&x| x < e);
     let past = curve.x.partition_point(|&x| x <= e);
     if first < past {
-        return (Some(curve.y[first]), Some(curve.y[past - 1]));
+        // A histogram bin holds its start value up to its end, so arriving
+        // at the point from the left gives the previous point's value.
+        let left = if first > 0 && bin_law(curve, first - 1) == 1 {
+            curve.y[first - 1]
+        } else {
+            curve.y[first]
+        };
+        return (Some(left), Some(curve.y[past - 1]));
     }
-    // Strictly inside the bin from `first - 1` to `first`. The region is the
-    // first one whose last point lies beyond the bin's start, as in `eval`.
+    // Strictly inside the bin from `first - 1` to `first`.
     let bin = first - 1;
-    let law = curve
-        .breakpoints
-        .iter()
-        .zip(&curve.interpolation)
-        .find(|(&b, _)| (bin as i64) < b as i64 - 1)
-        .map_or(*curve.interpolation.last().unwrap_or(&2), |(_, &law)| law);
+    let law = bin_law(curve, bin);
     let (x0, y0, x1, y1) = (curve.x[bin], curve.y[bin], curve.x[first], curve.y[first]);
     let value = if matches!(law, 4 | 5) && y0 == 0.0 && y1 == 0.0 {
         Some(0.0)
@@ -189,6 +190,17 @@ fn tape_limits(curve: &Tabulated1D, e: f64) -> (Option<f64>, Option<f64>) {
 fn level_energy_difference(lfs: i64, level_energy: f64, booked: Option<f64>) -> Option<f64> {
     let stated = level_energy > 0.0 || (lfs == 0 && level_energy == 0.0);
     booked.filter(|_| stated).map(|e| level_energy - e)
+}
+
+/// The interpolation law of the bin from point `bin` to the next: that of the
+/// first region whose last point lies beyond the bin's start, as in `eval`.
+fn bin_law(curve: &Tabulated1D, bin: usize) -> i32 {
+    curve
+        .breakpoints
+        .iter()
+        .zip(&curve.interpolation)
+        .find(|(&b, _)| (bin as i64) < b as i64 - 1)
+        .map_or(*curve.interpolation.last().unwrap_or(&2), |(_, &law)| law)
 }
 
 /// A curve sampled on `energy`, `None` where the tape states nothing there.
@@ -1202,6 +1214,20 @@ mod tests {
         );
         // A row jump where the tape is continuous takes the one value twice.
         assert_eq!(sampled_on(&curve, &[3.0, 3.0]), [Some(5.0), Some(5.0)]);
+    }
+
+    /// Under a histogram law every point where the value changes is a jump:
+    /// the tape's left limit there is the previous point's value. JENDL-5's
+    /// Eu151 MT=107 has such a region.
+    #[test]
+    fn a_histogram_step_is_a_jump_of_the_tape() {
+        let curve = tab(vec![1.0, 2.0, 3.0], vec![4.0, 6.0, 6.0], 1);
+        assert_eq!(tape_limits(&curve, 2.0), (Some(4.0), Some(6.0)));
+        assert_eq!(
+            sampled_on(&curve, &[1.5, 2.0, 2.0, 2.5]),
+            [Some(4.0), Some(4.0), Some(6.0), Some(6.0)]
+        );
+        assert_eq!(sampled_on(&curve, &[2.0, 3.0]), [None, Some(6.0)]);
     }
 
     /// An excited level the evaluation gives no energy for is not compared
