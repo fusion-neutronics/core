@@ -164,6 +164,13 @@ def test_branching_subsection(tmp_path):
 
     assert stats["parents"] >= 2, f"only {stats['parents']} parents read"
     assert (out / "branching" / "branching.arrow").is_file()
+    # The per-list facts reach Python: In115 lists only the isomer, so every
+    # list it gives is isomers only, and each has a line of its own.
+    counts = stats["list_counts"]
+    assert counts.get("MF=10 isomers only", 0) >= 1, counts
+    assert len(stats["list_facts"]) == sum(
+        n for kind, n in counts.items() if kind.startswith("MF=")
+    ), stats["list_facts"]
 
     # The branching call must merge into the manifest, not overwrite it. A
     # library advertising one subsection while shipping four is a real failure
