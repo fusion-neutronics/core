@@ -68,6 +68,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use endf::mf::covariance::NiSubsection;
 use yamc_materials::Material;
 use yamc_nuclide::covariance::expand::{expand_ni, ExpandedBlock, Scale, Unsupported};
 use yamc_nuclide::covariance::{CovarianceBlock, CovarianceData};
@@ -768,23 +769,54 @@ fn mirrored_pairs(
         .collect()
 }
 
+/// This evaluation's explicit (`row`, `col`) blocks.
+fn orientation(
+    blocks: &[CovarianceBlock],
+    row: i32,
+    col: i32,
+) -> impl Iterator<Item = &NiSubsection> {
+    blocks.iter().filter_map(move |blk| match &blk.data {
+        CovarianceData::Ni(ni)
+            if blk.is_same_evaluation() && blk.mt == row && blk.partner_mt() == col =>
+        {
+            Some(ni)
+        }
+        _ => None,
+    })
+}
+
+/// Whether every one of this evaluation's explicit (`row`, `col`) blocks
+/// expands, so that copy of a mirrored pair can stand for the pair.
+fn orientation_expands(blocks: &[CovarianceBlock], row: i32, col: i32) -> bool {
+    orientation(blocks, row, col).all(|ni| expand_ni(ni).is_ok())
+}
+
+/// Count the (`row`, `col`) blocks that do not expand into the coverage, as
+/// the fold does for the blocks it reaches.
+fn count_unexpandable(blocks: &[CovarianceBlock], row: i32, col: i32, coverage: &mut Coverage) {
+    for ni in orientation(blocks, row, col) {
+        match expand_ni(ni) {
+            Ok(_) => {}
+            Err(Unsupported::Layout(lb)) => {
+                *coverage.unsupported_layouts.entry(lb).or_insert(0) += 1;
+            }
+            Err(Unsupported::Malformed) => coverage.malformed += 1,
+        }
+    }
+}
+
 /// The largest difference between the (`a`, `b`) blocks and the transpose of
 /// the (`b`, `a`) ones, relative to the largest entry of either, with `a < b`,
 /// the worse of the relative and the absolute blocks.
 ///
 /// Each orientation's blocks are summed, since blocks of one pair add, and the
 /// sums are compared cell by cell on the union of every grid either uses, one
-/// scale at a time. A block that does not expand has no numbers to compare
-/// and is left out here; the fold reports it on its own.
+/// scale at a time. Called only when every block of both orientations
+/// expands ([`orientation_expands`]).
 fn mirror_mismatch(blocks: &[CovarianceBlock], a: i32, b: i32) -> f64 {
     let expanded = |row: i32, col: i32| -> Vec<ExpandedBlock> {
-        blocks
-            .iter()
-            .filter(|blk| blk.is_same_evaluation() && blk.mt == row && blk.partner_mt() == col)
-            .filter_map(|blk| match &blk.data {
-                CovarianceData::Ni(ni) => expand_ni(ni).ok(),
-                CovarianceData::Nc(_) => None,
-            })
+        orientation(blocks, row, col)
+            .filter_map(|ni| expand_ni(ni).ok())
             .filter(|e| !e.is_empty())
             .collect()
     };
@@ -907,16 +939,37 @@ fn fold_nuclide(
         _ => false,
     };
 
-    // A pair stored in both orientations is folded from the lower MT's
-    // section only, after checking the other copy says the same.
+    // A pair stored in both orientations is folded from one copy only: the
+    // lower MT's section, unless a block of it does not expand and the other
+    // copy's all do. Only two copies that both expand have numbers to
+    // compare, so a copy that does not expand is a layout gap, not a
+    // disagreement.
     let mirrored = mirrored_pairs(blocks, &index);
+    let drives = |mt: i32| reactions.contains_key(&mt);
+    let mut skipped_copy: BTreeSet<(i32, i32)> = BTreeSet::new();
     for &(a, b) in &mirrored {
-        let mismatch = mirror_mismatch(blocks, a, b);
-        if mismatch > MIRROR_ROUNDING {
-            let kind = |mt| kinds[index[&mt]].0.clone();
-            coverage
-                .mirrored_disagree
-                .insert((nuclide.to_string(), kind(a), kind(b)), mismatch);
+        let (lower_expands, higher_expands) = (
+            orientation_expands(blocks, a, b),
+            orientation_expands(blocks, b, a),
+        );
+        if lower_expands || !higher_expands {
+            skipped_copy.insert((b, a));
+        } else {
+            skipped_copy.insert((a, b));
+        }
+        if lower_expands && higher_expands {
+            let mismatch = mirror_mismatch(blocks, a, b);
+            if mismatch > MIRROR_ROUNDING {
+                let kind = |mt| kinds[index[&mt]].0.clone();
+                coverage
+                    .mirrored_disagree
+                    .insert((nuclide.to_string(), kind(a), kind(b)), mismatch);
+            }
+        } else if !higher_expands && drives(a) && drives(b) {
+            // Neither copy expands. The fold reports the lower one's blocks;
+            // the higher one's are skipped before it expands them, so they
+            // are reported here.
+            count_unexpandable(blocks, b, a, coverage);
         }
     }
 
@@ -960,7 +1013,7 @@ fn fold_nuclide(
         let (Some(row_rx), Some(col_rx)) = (reactions.get(&row_mt), reactions.get(&col_mt)) else {
             continue;
         };
-        if row_mt > col_mt && mirrored.contains(&(col_mt, row_mt)) {
+        if skipped_copy.contains(&(row_mt, col_mt)) {
             continue;
         }
 
@@ -1271,7 +1324,6 @@ mod coverage_total_tests {
 #[cfg(test)]
 mod stated_variance_tests {
     use super::*;
-    use endf::mf::covariance::NiSubsection;
 
     /// Uneven groups with no boundary at 10 keV, so the covariance edge there
     /// falls inside a group and the overlap is exercised rather than avoided.
@@ -1706,7 +1758,6 @@ mod integration_range_tests {
 #[cfg(test)]
 mod shielded_split_tests {
     use super::*;
-    use endf::mf::covariance::NiSubsection;
 
     /// Three groups, the middle one cut at 1 keV by the covariance grid below,
     /// so the split of a shielded group term between two intervals is what
@@ -1891,7 +1942,6 @@ mod same_evaluation_tests {
     //! in the lower or the higher MT's section, or in both.
 
     use super::*;
-    use endf::mf::covariance::NiSubsection;
 
     /// FENDL-3.2d Pt194's MAT.
     const MAT: i32 = 7837;
@@ -2076,8 +2126,9 @@ mod same_evaluation_tests {
     }
 
     /// ENDF/B-VIII.1 Np237 writes some pairs only from the higher MT's
-    /// section, (n,3n) with (n,2n) and capture with fission among them. `rᵀ C r'` is a number, so the block fills the same two cells
-    /// as the same numbers written from the lower MT's side.
+    /// section, (n,3n) with (n,2n) and capture with fission among them.
+    /// `rᵀ C r'` is a number, so the block fills the same two cells as the
+    /// same numbers written from the lower MT's side.
     #[test]
     fn a_pair_written_from_the_higher_mt_folds_like_its_transpose() {
         let lower = relative(&[own(16), own(102), cross(16, MAT, 102)]);
@@ -2133,6 +2184,60 @@ mod same_evaluation_tests {
         let mismatch = coverage.mirrored_disagree[&key];
         assert!((mismatch - 0.1).abs() < 1.0e-12, "{mismatch}");
         assert!(coverage.has_gaps());
+    }
+
+    /// `block` with its layout changed to one the fold does not expand.
+    fn unexpandable(mut block: CovarianceBlock) -> CovarianceBlock {
+        let CovarianceData::Ni(ni) = &mut block.data else {
+            unreachable!()
+        };
+        ni.lb = 9;
+        block
+    }
+
+    /// A higher-MT copy that does not expand has no numbers to compare. It
+    /// is a layout gap, not a disagreement, and the lower copy is folded.
+    #[test]
+    fn an_unexpandable_higher_copy_is_a_layout_gap() {
+        let once = relative(&[own(16), own(102), cross(16, MAT, 102)]);
+        let (both, coverage) = fold(&[
+            own(16),
+            own(102),
+            cross(16, MAT, 102),
+            unexpandable(transposed(102, MAT, 16)),
+        ]);
+        assert_eq!(both.expect("usable").relative, once);
+        assert!(coverage.mirrored_disagree.is_empty());
+        assert_eq!(coverage.unsupported_layouts, BTreeMap::from([(9, 1)]));
+    }
+
+    /// When the lower copy does not expand, the higher one stands for the
+    /// pair, and no gap is left.
+    #[test]
+    fn an_unexpandable_lower_copy_gives_way_to_the_higher() {
+        let higher = relative(&[own(16), own(102), transposed(102, MAT, 16)]);
+        let (both, coverage) = fold(&[
+            own(16),
+            own(102),
+            unexpandable(cross(16, MAT, 102)),
+            transposed(102, MAT, 16),
+        ]);
+        assert_eq!(both.expect("usable").relative, higher);
+        assert!(coverage.mirrored_disagree.is_empty());
+        assert!(coverage.unsupported_layouts.is_empty());
+    }
+
+    /// When neither copy expands, both are counted as layout gaps.
+    #[test]
+    fn two_unexpandable_copies_are_both_counted() {
+        let (_, coverage) = fold(&[
+            own(16),
+            own(102),
+            unexpandable(cross(16, MAT, 102)),
+            unexpandable(transposed(102, MAT, 16)),
+        ]);
+        assert!(coverage.mirrored_disagree.is_empty());
+        assert_eq!(coverage.unsupported_layouts, BTreeMap::from([(9, 2)]));
     }
 
     /// A committed trimmed tape, converted and read back as a run reads it.
