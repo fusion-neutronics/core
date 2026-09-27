@@ -736,14 +736,14 @@ pub(crate) fn with_half_lives(
 /// emission as `N_k lambda y` instead of `N_k lambda_k y`: at saturation
 /// `N_k ~ 1 / lambda_k`, so the photon rate would inherit the half-life's
 /// whole spread, which is the inconsistent-lambda inflation the per-replica
-/// half-lives exist to prevent.
+/// half-lives exist to prevent. Each line's intensity sigma is stored in the
+/// same units and scales with it, so its ratio to the intensity stays the
+/// tape's.
 pub(crate) fn set_half_life(cn: &mut yani::ChainNuclide, half_life: f64) {
     if let Some(nominal) = cn.half_life.filter(|t| *t > 0.0 && half_life > 0.0) {
         let scale = nominal / half_life;
         for source in &mut cn.sources {
-            for i in source.distribution.intensities_mut().iter_mut() {
-                *i *= scale;
-            }
+            source.scale_rates(scale);
         }
     }
     cn.half_life = Some(half_life);
@@ -815,6 +815,55 @@ mod tests {
             (per_decay[1] - 3.0e-6 * 9.9e5).abs() < 1e-14,
             "{per_decay:?}"
         );
+    }
+
+    /// A line's intensity sigma is a rate like the intensity, so a new
+    /// half-life moves both and leaves the tape's dRI/RI. The normalisation
+    /// and the energy sigmas are per decay and stay.
+    #[test]
+    fn a_half_life_rescales_the_intensity_sigmas_with_the_lines() {
+        let lambda = std::f64::consts::LN_2 / 318.0;
+        let stated = yani::DecaySourceUncertainty {
+            normalization: Some(0.27),
+            normalization_uncertainty: Some(0.01),
+            intensity_uncertainties: Some(vec![0.27 * 0.02 * lambda]),
+            energy_uncertainties: Some(vec![30.0]),
+            covariance: None,
+        };
+        let mut cn = yani::ChainNuclide {
+            name: "W187".to_string(),
+            half_life: Some(318.0),
+            half_life_uncertainty: None,
+            decay_energy: 0.0,
+            decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
+            reactions: vec![],
+            decays: vec![],
+            fission_yields: None,
+            sources: vec![yani::DecaySource {
+                particle: "photon".to_string(),
+                radiation: Some("gamma".to_string()),
+                distribution: yani::DecaySourceDistribution::Discrete {
+                    energies: vec![6.858e5],
+                    intensities: vec![0.27 * 0.5 * lambda],
+                },
+                uncertainty: Some(std::sync::Arc::new(stated.clone())),
+            }],
+        };
+        let shared = cn.sources[0].uncertainty.clone().unwrap();
+        set_half_life(&mut cn, 636.0);
+        let scaled = cn.sources[0].uncertainty.as_deref().unwrap();
+        let lambda_k = std::f64::consts::LN_2 / 636.0;
+        let sigma = scaled.intensity_uncertainties.as_ref().unwrap()[0];
+        assert!((sigma / lambda_k - 0.27 * 0.02).abs() < 1e-15, "{sigma}");
+        assert_eq!(scaled.normalization, stated.normalization);
+        assert_eq!(
+            scaled.normalization_uncertainty,
+            stated.normalization_uncertainty
+        );
+        assert_eq!(scaled.energy_uncertainties, stated.energy_uncertainties);
+        // The nominal chain the replica was cloned from keeps its own sigmas.
+        assert_eq!(*shared, stated);
     }
 
     #[test]

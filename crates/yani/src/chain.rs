@@ -332,6 +332,31 @@ pub struct DecaySource {
     pub uncertainty: Option<Arc<DecaySourceUncertainty>>,
 }
 
+impl DecaySource {
+    /// Multiply the stored rates, and the sigmas stated in the same units,
+    /// by `factor`.
+    ///
+    /// The rates are a per-decay yield times the decay constant, so a new
+    /// half-life rescales them, and each line's intensity sigma is the
+    /// per-decay sigma times the same constant. The normalisation and the
+    /// energy sigmas are per decay and do not move.
+    pub fn scale_rates(&mut self, factor: f64) {
+        for value in self.distribution.intensities_mut() {
+            *value *= factor;
+        }
+        let stated = self
+            .uncertainty
+            .as_ref()
+            .is_some_and(|u| u.intensity_uncertainties.is_some());
+        if stated {
+            let uncertainty = Arc::make_mut(self.uncertainty.as_mut().expect("checked above"));
+            for sigma in uncertainty.intensity_uncertainties.iter_mut().flatten() {
+                *sigma *= factor;
+            }
+        }
+    }
+}
+
 /// The uncertainties an evaluation states for one decay source, as ENDF
 /// MT=457 writes them.
 ///
