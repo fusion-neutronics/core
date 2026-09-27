@@ -621,12 +621,11 @@ impl PyTransmutationResults {
     /// - ``partials_above_rate``: per nuclide and channel, where the partial
     ///   rates the covariance was weighted with, zero variance intervals
     ///   included, add up to more than the rate it was divided by, their
-    ///   ratio to it. Each entry is a channel whose sigma is overstated, a
-    ///   self-shielded rate against dilute partials being one cause, and the
-    ///   ``1/E`` within-group weight with a covariance edge inside a group
-    ///   another. The
-    ///   share in ``rate_fraction_covered`` is measured against the dilute
-    ///   rate, so it is unaffected.
+    ///   ratio to it. Each entry is a channel whose sigma is overstated. Two
+    ///   known causes: a self-shielded rate against dilute partials, and the
+    ///   ``1/E`` within-group weight with a covariance edge inside a group.
+    ///   The share in ``rate_fraction_covered`` is measured against the
+    ///   dilute rate, so it is unaffected.
     /// - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
     ///   covariance blocks that were present but not consumed.
     /// - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose

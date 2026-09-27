@@ -406,9 +406,9 @@ fn contract(block: &ExpandedBlock, row: &Partials, col: &Partials) -> f64 {
 /// On a dilute collapse under the flat-within-group weight the two add the
 /// same terms grouped differently, and on CCFE-709 they agree to a few parts
 /// in 1e15. Under the `1/E` weight they need not, see
-/// `Coverage::partials_above_rate`. This sits six orders of
-/// magnitude above that, and an excess below it would move a relative sigma
-/// by less than a part in a billion.
+/// `Coverage::partials_above_rate`. This sits six orders of magnitude above
+/// that, and an excess below it would move a relative sigma by less than a
+/// part in a billion.
 const PARTIALS_ROUNDING: f64 = 1.0e-9;
 
 /// The interval of `grid` that holds all of `[a, b]`, if one does.
@@ -783,10 +783,11 @@ pub fn fold_rate_covariance(
 
     // How much of the production this spectrum drove is covered, weighted by
     // rate and by the parent's own density. The share is of the dilute rate
-    // whatever `rates` is, see `Coverage::covered_production`. Done here rather than per nuclide
-    // because it is a property of the material: the per-nuclide fold knows its
-    // own rates but not how many atoms of it there are, and a channel on a
-    // 0.1%-abundance isotope must not count the same as one on the bulk.
+    // whatever `rates` is, see `Coverage::covered_production`. Done here
+    // rather than per nuclide because it is a property of the material: the
+    // per-nuclide fold knows its own rates but not how many atoms of it there
+    // are, and a channel on a 0.1%-abundance isotope must not count the same
+    // as one on the bulk.
     //
     // Weighted by rate rather than counted per channel for the same reason the
     // per-channel fraction exists: a channel with no covariance costs nothing
