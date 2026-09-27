@@ -688,6 +688,30 @@ pub fn normalise_branch_ratios(branch_ratios: &mut [f64]) {
     branch_ratios[i] = max - total + 1.0;
 }
 
+/// A parent's decay paths: each mode's target, its ratio normalised with
+/// [`normalise_branch_ratios`], and the tape's dBR beside it untouched.
+fn decay_paths(data: &Decay, decay_data: &BTreeMap<String, Decay>) -> Vec<DecayPath> {
+    let mut ratios: Vec<f64> = data.modes.iter().map(|m| m.branching_ratio.0).collect();
+    normalise_branch_ratios(&mut ratios);
+    data.modes
+        .iter()
+        .zip(ratios)
+        .map(|(mode, ratio)| {
+            let target = match mode.daughter() {
+                Some(d) if decay_data.contains_key(&d) => Some(d),
+                Some(d) => replace_missing(&d, decay_data),
+                None => None,
+            };
+            DecayPath {
+                kind: mode.modes.join(","),
+                target,
+                branching_ratio: ratio,
+                branching_ratio_uncertainty: mode.branching_ratio.1,
+            }
+        })
+        .collect()
+}
+
 /// One decay path out of a nuclide.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DecayPath {
@@ -710,7 +734,11 @@ pub struct DecayPath {
     /// is stored rather than turned into something else so the chain carries
     /// the tape and not an interpretation of it; a consumer must read it as
     /// not stated, never as a ratio known to be exact.
-    /// [`normalise_branch_ratios`] leaves it as evaluated.
+    ///
+    /// It is the tape's dBR on the tape's BR. [`normalise_branch_ratios`]
+    /// leaves it as evaluated, but where the parent's ratios do not sum to one
+    /// it moves the residual into `branching_ratio` on the parent's largest
+    /// mode, so on that one row the two no longer come from the same number.
     pub branching_ratio_uncertainty: f64,
 }
 
@@ -751,9 +779,10 @@ pub struct Nuclide {
     ///
     /// Quadrature over the three recoverable-heat components, which is what
     /// MT=457 supports: it publishes a sigma per component and no covariance
-    /// between them. `None` for a nuclide with no decay scheme. A 0.0 is the
-    /// quadrature of components whose sigmas the tape writes as 0.0, the
-    /// format's "not stated", and is to be read the same way.
+    /// between them. `None` where there is no half-life, or where the tape
+    /// gives none of the three components. A 0.0 is the quadrature of
+    /// components whose sigmas the tape writes as 0.0, the format's "not
+    /// stated", and is to be read the same way.
     pub decay_energy_uncertainty: Option<f64>,
     /// `decay_energy` split into its three recoverable-heat components, in
     /// [`crate::decay::DECAY_HEAT_ENERGY_NAMES`] order: light particles (beta
@@ -1070,8 +1099,14 @@ impl Chain {
                 // different evaluations of the same quadrature.
                 let (energy, energy_sigma) = data.decay_energy();
                 nuclide.decay_energy = energy;
-                nuclide.decay_energy_uncertainty = Some(energy_sigma);
                 nuclide.decay_energy_components = data.decay_energy_components();
+                // With no component on the tape the quadrature is of nothing,
+                // and its 0.0 would be a number the evaluation never wrote.
+                nuclide.decay_energy_uncertainty = nuclide
+                    .decay_energy_components
+                    .iter()
+                    .any(Option::is_some)
+                    .then_some(energy_sigma);
                 nuclide.decay_energy_source = Some(
                     if data.mean_energy_placeholder {
                         DECAY_ENERGY_PLACEHOLDER
@@ -1081,28 +1116,7 @@ impl Chain {
                     .to_string(),
                 );
 
-                let mut ratios: Vec<f64> = Vec::new();
-                let mut ids: Vec<(String, Option<String>, f64)> = Vec::new();
-                for mode in &data.modes {
-                    let daughter = mode.daughter();
-                    let target = match &daughter {
-                        Some(d) if decay_data.contains_key(d) => Some(d.clone()),
-                        Some(d) => replace_missing(d, &decay_data),
-                        None => None,
-                    };
-                    let (ratio, sigma) = mode.branching_ratio;
-                    ratios.push(ratio);
-                    ids.push((mode.modes.join(","), target, sigma));
-                }
-                normalise_branch_ratios(&mut ratios);
-                for (ratio, (kind, target, sigma)) in ratios.into_iter().zip(ids) {
-                    nuclide.decay_modes.push(DecayPath {
-                        kind,
-                        target,
-                        branching_ratio: ratio,
-                        branching_ratio_uncertainty: sigma,
-                    });
-                }
+                nuclide.decay_modes = decay_paths(data, &decay_data);
             }
 
             let mut fissionable = false;
@@ -1511,6 +1525,36 @@ mod tests {
         let mut br: Vec<f64> = Vec::new();
         normalise_branch_ratios(&mut br);
         assert!(br.is_empty());
+    }
+
+    #[test]
+    fn a_renormalised_ratio_keeps_the_tapes_dbr() {
+        // JEFF-4.0's Er152 as evaluated: 0.1 +- 0.04 and 0.91 +- 0.04, which
+        // sum to 1.01. The ratio moves, the sigma must not.
+        let mode = |modes: Vec<&'static str>, ratio| crate::decay::DecayMode {
+            parent: "Er152".to_string(),
+            modes,
+            branching_ratio: ratio,
+            ..Default::default()
+        };
+        let data = Decay {
+            modes: vec![
+                mode(vec!["ec/beta+"], (0.1, 0.04)),
+                mode(vec!["alpha"], (0.91, 0.04)),
+            ],
+            ..Default::default()
+        };
+        let paths = decay_paths(&data, &BTreeMap::new());
+        let ratios: Vec<f64> = paths.iter().map(|p| p.branching_ratio).collect();
+        assert_eq!(ratios[0], 0.1, "the smaller branch is as evaluated");
+        assert!((ratios[1] - 0.9).abs() < 1e-12, "the residual is on alpha");
+        let sigmas: Vec<f64> = paths
+            .iter()
+            .map(|p| p.branching_ratio_uncertainty)
+            .collect();
+        assert_eq!(sigmas, [0.04, 0.04]);
+        assert_eq!(paths[0].kind, "ec/beta+");
+        assert_eq!(paths[1].kind, "alpha");
     }
 
     #[test]

@@ -180,6 +180,17 @@ fn placeholder_decay_energies_are_labelled_and_fillable() {
     );
     // The half-life is still this chain's own.
     assert_eq!(sn111.half_life, Some(2118.0));
+    // The energy's sigmas are the filling tape's, as it writes them, zeros
+    // included.
+    let candidate = endf::decay::Decay::from_material(&jendl[0]).unwrap();
+    assert_eq!(
+        sn111.decay_energy_uncertainty,
+        Some(candidate.decay_energy().1)
+    );
+    assert_eq!(
+        sn111.decay_energy_components,
+        candidate.decay_energy_components()
+    );
 
     // Filling again finds nothing left to fill, and an evaluated record is
     // never touched.

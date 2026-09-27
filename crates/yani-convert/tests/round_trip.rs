@@ -334,8 +334,8 @@ fn every_branching_sigma_is_written_as_the_tape_gives_it() {
     let _ = std::fs::remove_dir_all(&c.dir);
 }
 
-/// Every half-life and decay-energy component sigma in the written file is
-/// the tape's own number, the zeros included.
+/// Every half-life, decay-energy and decay-energy component sigma in the
+/// written file is the tape's own number, the zeros included.
 ///
 /// The converter used to write MT=457's 0.0 ("not stated") as null, which is
 /// an interpretation rather than the data: the file then said something the
@@ -348,6 +348,7 @@ fn every_nuclide_sigma_is_written_as_the_tape_gives_it() {
     let nuclides = c.dir.join("decay/nuclides.arrow");
     let names = string_column(&nuclides, "name");
     let (half_life_sigmas, _) = float_column(&nuclides, "half_life_uncertainty");
+    let (energy_sigmas, _) = float_column(&nuclides, "decay_energy_uncertainty");
     let component_sigmas: Vec<Vec<Option<f64>>> = ["beta", "gamma", "alpha"]
         .iter()
         .map(|c| float_column(&nuclides, &format!("decay_energy_{c}_uncertainty")).0)
@@ -362,6 +363,13 @@ fn every_nuclide_sigma_is_written_as_the_tape_gives_it() {
             "{name}: the half-life sigma is not the tape's"
         );
         let parts = tape.decay_energy_components();
+        // The total's sigma is the quadrature of the tape's own component
+        // sigmas, and there is none where the tape gives no component.
+        assert_eq!(
+            energy_sigmas[i],
+            (unstable && parts.iter().any(Option::is_some)).then(|| tape.decay_energy().1),
+            "{name}: the decay-energy sigma is not the tape's"
+        );
         for (c, column) in component_sigmas.iter().enumerate() {
             let expected = if unstable {
                 parts[c].map(|(_, s)| s)
