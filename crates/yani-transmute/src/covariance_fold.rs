@@ -1008,13 +1008,17 @@ pub fn fold_rate_covariance(
     //
     // Weighted by rate rather than counted per channel for the same reason the
     // per-channel fraction exists: a channel with no covariance costs nothing
-    // if nothing went through it.
+    // if nothing went through it. Summed in `names` order and in sorted kind
+    // order, as the fold above is, so the totals are the same bits every run
+    // rather than depending on the hash maps' iteration order.
     let densities = material.get_atoms_per_barn_cm().unwrap_or_default();
-    for (nuclide, kinds) in rates {
+    for nuclide in names {
         let density = densities.get(nuclide).copied().unwrap_or(0.0);
         if density <= 0.0 {
             continue;
         }
+        let mut kinds: Vec<(&String, &f64)> = rates[nuclide].iter().collect();
+        kinds.sort_by(|a, b| a.0.cmp(b.0));
         for (kind, rate) in kinds {
             let production = density * rate;
             coverage.total_production += production;
