@@ -245,11 +245,15 @@ pub fn branching_branching() -> Schema {
 /// before it has none, and a reader treats absence as "no covariance", never as
 /// an error.
 ///
-/// A lossless dump of every MF=40 section of every evaluation, not a selection.
-/// One row per covariance block, which is one NC or NI block of one
+/// Every covariance block of every MF=40 section of every evaluation, not a
+/// selection. One row per block, which is one NC or NI block of one
 /// sub-subsection of one product state. Every tape value is written as the tape
 /// gives it: nothing is normalised, and a state the converter could not place
-/// in the chain is still written, with a null `target`.
+/// in the chain is still written, with a null `target`. A product state with
+/// no sub-subsection (NL 0), or a sub-subsection with no block (NC and NI 0),
+/// holds no number and so has no row; the converter lists each one in its
+/// `mf40_without_blocks` statistic instead. None of the published libraries
+/// has one.
 ///
 /// The first columns are the converter's key, the rest are the tape's:
 ///

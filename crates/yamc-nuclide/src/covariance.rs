@@ -117,6 +117,10 @@ impl CovarianceBlock {
 /// does not identify the pair of states a block correlates: key on (`mt`,
 /// `lfs`, `mt1`, `xlfs1`). JEFF-4.0 U235 MT 4 has a block between its ground
 /// (LFS 0) and its 77 eV isomer (XLFS1 1), and both resolve to U235.
+///
+/// A product state with no sub-subsection, or a sub-subsection with no block,
+/// has no block here: it holds no number, and the converter lists it in its
+/// `mf40_without_blocks` statistic rather than in the file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BranchingCovarianceBlock {
     /// The parent, as in `branching.arrow`.
