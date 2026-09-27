@@ -660,6 +660,17 @@ impl Decay {
                     what: "a decay radiation type with no source particle",
                 })?;
 
+            // The parser reads a lines covariance whenever LCOV says so, even
+            // for a spectrum with no lines (LCON=1). There is no row to carry
+            // it, so it is refused rather than dropped.
+            if spectrum.continuous_flag == ContinuousFlag::Continuous
+                && spectrum.discrete_covariance.is_some()
+            {
+                return Err(Error::Unsupported {
+                    what: "a lines covariance on a decay spectrum that has no lines",
+                });
+            }
+
             if spectrum.continuous_flag != ContinuousFlag::Continuous {
                 let norm = spectrum.discrete_normalization.0;
                 let lines = &spectrum.discrete;
@@ -1056,6 +1067,28 @@ mod tests {
         );
         assert_eq!(continuum.intensity_uncertainties, None);
         assert_eq!(find("xray", false).covariance, None);
+    }
+
+    /// A lines covariance on a continuum-only spectrum has no entry to ride
+    /// on, so it is an error rather than lost.
+    #[test]
+    fn a_lines_covariance_with_no_lines_is_refused() {
+        const CF252: &[u8] = include_bytes!("../fixtures/dec-098_Cf_252.jeff40.endf.xz");
+        let mut d = decay(CF252);
+        let gamma = d.spectra.get_mut("gamma").unwrap();
+        gamma.continuous_flag = ContinuousFlag::Continuous;
+        gamma.discrete_covariance = Some(DiscreteCovariance {
+            ls: 0,
+            lb: 5,
+            ne: 2,
+            nerp: 2,
+            ek: vec![1.0e5, 2.0e6],
+            fkk: vec![1.0e-4],
+        });
+        assert!(matches!(
+            d.spectrum_sources(),
+            Err(Error::Unsupported { what }) if what.contains("no lines")
+        ));
     }
 
     #[test]
