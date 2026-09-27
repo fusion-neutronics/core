@@ -2618,7 +2618,8 @@ mod tests {
     #[test]
     fn la139_n_d3he_overlay_moves_mass_onto_its_listed_states() {
         let info = endf::chain::reaction_info("(n,d3He)").unwrap();
-        assert_eq!((57 + info.delta_z, 139 + info.delta_a), (54, 135));
+        assert_eq!(57 + info.delta_z, 54, "(n,d3He) on La must land on Xe");
+        let product = format!("Xe{}", 139 + info.delta_a);
 
         let la139 = |product: &str| {
             let rx = |target: &str, branching: f64| ChainReaction {
@@ -2668,7 +2669,8 @@ mod tests {
             split("Xe134"),
             [("Xe134".to_string(), 1.0), ("Xe135_m1".to_string(), 0.0)]
         );
-        let fixed = split("Xe135");
+        let fixed = split(&product);
+        assert_eq!(fixed[0].0, "Xe135");
         assert!((fixed[0].1 - 0.75).abs() < 1e-12, "{fixed:?}");
         assert!((fixed[1].1 - 0.25).abs() < 1e-12, "{fixed:?}");
     }
