@@ -1244,6 +1244,7 @@ fn run_replicas(
                 rates,
                 &spectrum.masses,
                 &spectrum.boundaries,
+                shielding,
             );
             merge_coverage(&mut coverage, spectrum_coverage);
             folded
@@ -1365,7 +1366,7 @@ fn run_replicas(
         Default::default()
     };
 
-    let mut info = Info::from_fold(&coverage, &clipping, shielding.is_none() && !transport);
+    let mut info = Info::from_fold(&coverage, &clipping, !transport);
     if half_life.is_none() {
         info.not_perturbed.insert(0, "half-life".to_string());
     }

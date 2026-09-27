@@ -219,8 +219,8 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
 
     // The one number that says whether the sigmas above are a spread over the
     // answer or over a corner of it. `None` for a decay-only schedule, which
-    // drove no production and so has no share to report, and on a shielded or
-    // transport run, where the share of the production driven is not computed.
+    // drove no production and so has no share to report, and on a transport
+    // run, where the share of the tallied production is not computed.
     d.set_item(
         "rate_fraction_covered_total",
         info.rate_fraction_covered_total,

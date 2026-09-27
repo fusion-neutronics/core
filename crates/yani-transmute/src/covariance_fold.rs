@@ -36,6 +36,17 @@
 //! with `multigroup::group_averaged_xs` over each
 //! overlap rather than a second integrator.
 //!
+//! A self-shielded collapse takes each group average under the nuclide's flux
+//! shape inside the lump instead, `σ_g = ∫_g σ s dE / ∫_g s dE`, so there `ψ`
+//! is `φ_g · s(E) / ∫_g s dE` and the partials are taken under that same shape
+//! with the same walk. Otherwise the fold would weight the covariance with
+//! dilute partials and divide by the shielded rate, which overstates the
+//! relative sigma by about one over the shielding factor wherever a covariance
+//! interval carries both: ENDF/B-VIII.1 Au197 `(n,gamma)` in a 0.1 mm foil
+//! under `1/E` on VITAMIN-J-175 read 4.61% where its shielded rate's sigma is
+//! 1.70%. The shape is the nominal one, as in the collapse: a perturbed cross
+//! section does not change the flux dip it sits in.
+//!
 //! # Where the uncertainty is diluted, and why that is right
 //!
 //! A covariance grid need not span the whole flux range. Rate that comes from
@@ -64,7 +75,8 @@ use yamc_nuclide::reaction::Reaction;
 use yani::reactions::reaction_type_to_mt;
 use yani::{ChainNuclide, ReactionRates};
 
-use crate::multigroup::group_averaged_xs;
+use crate::multigroup::{group_averaged_xs, walk_group, CollapseShapes, GroupTerms};
+use crate::self_shielding::{FluxShape, Shielding};
 
 /// Barns to cm^2, the factor the rate collapse already carries.
 const BARN_TO_CM2: f64 = 1.0e-24;
@@ -120,39 +132,40 @@ pub struct Coverage {
     pub unsupported_layouts: BTreeMap<i64, usize>,
     /// Blocks whose arrays did not match their own declared sizes.
     pub malformed: usize,
-    /// Per (nuclide, kind), the share of the dilute rate that comes from
+    /// Per (nuclide, kind), the share of the fold's own rate that comes from
     /// energies where the evaluation states a nonzero variance for that
     /// reaction.
     ///
-    /// Exactly: the dilute rate integrated over the energies where the diagonal
-    /// of the reaction's own covariance, summed over every self-covariance
-    /// block the fold consumed, is nonzero, divided by the dilute rate over the
-    /// whole flux range. Rate from an interval a grid spans with a variance of
-    /// zero counts as uncovered, the same as rate from outside every grid,
-    /// because neither carries a stated uncertainty. Below one, part of the
-    /// dilute rate enters the relative covariance's denominator and not its
-    /// numerator; how much that lowers the relative sigma also depends on how
-    /// the stated variance is spread over the covered part, so the share is
-    /// not itself a dilution factor.
+    /// The fold's own rate is the cross section against the flux the partial
+    /// rates are weighted with: dilute on a dilute run, and under the
+    /// nuclide's shielded flux shape on a self-shielded one, where it is the
+    /// shielded rate the run used. Exactly: that rate integrated over the
+    /// energies where the diagonal of the reaction's own covariance, summed
+    /// over every self-covariance block the fold consumed, is nonzero, divided
+    /// by that rate over the whole flux range. Rate from an interval a grid
+    /// spans with a variance of zero counts as uncovered, the same as rate
+    /// from outside every grid, because neither carries a stated uncertainty.
+    /// Below one, part of the rate enters the relative covariance's
+    /// denominator and not its numerator; how much that lowers the relative
+    /// sigma also depends on how the stated variance is spread over the
+    /// covered part, so the share is not itself a dilution factor.
     ///
-    /// Both integrals are the fold's own, the dilute cross section against the
-    /// flux the partial rates are weighted with, and the numerator adds a
-    /// subset of the denominator's terms in the same order. So the share lies
-    /// in [0, 1] without a clamp, and it does not depend on how the rate the
-    /// covariance is divided by was computed. It describes the dilute rate
-    /// only: on a self-shielded or a tallied rate, the share of THAT rate
-    /// coming from covered energies is not computed (the fold has only the
-    /// dilute cross section to split a rate by energy with), and the dilution
-    /// the fold then applies differs from this share; where the partials add
-    /// up to more than that rate, [`Coverage::partials_above_rate`] lists it.
-    /// On a dilute collapse under the flat-within-group weight, the denominator
-    /// is that rate to a few parts in 1e15. Under the `1/E` weight it is only
-    /// where no covariance edge cuts a group, for the reason given on
+    /// The numerator adds a subset of the denominator's terms in the same
+    /// order, so the share lies in [0, 1] without a clamp, and it does not
+    /// depend on how the rate the covariance is divided by was computed. On a
+    /// tallied rate, whose within-bin weighting the fold does not have, it is
+    /// the share of the dilute rate over the tally spectrum and not of the
+    /// tallied one, and the dilution the fold then applies differs from it;
+    /// where the partials add up to more than that rate,
+    /// [`Coverage::partials_above_rate`] lists it. On a dilute collapse under
+    /// the flat-within-group weight, and on a shielded one, the denominator is
+    /// the collapsed rate to rounding. Under the `1/E` weight it is only where
+    /// no covariance edge cuts a group, for the reason given on
     /// [`Coverage::partials_above_rate`].
     ///
-    /// Every channel a consumed block names has an entry, unless its dilute
-    /// rate over the flux range is zero (a threshold above the spectrum's top
-    /// edge), which has no share to report. So a channel whose blocks state no
+    /// Every channel a consumed block names has an entry, unless its rate over
+    /// the flux range is zero (a threshold above the spectrum's top edge),
+    /// which has no share to report. So a channel whose blocks state no
     /// variance anywhere reads zero rather than being absent.
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
     /// Per (nuclide, kind), where the partial rates the covariance was weighted
@@ -164,10 +177,10 @@ pub struct Coverage {
     /// part of a rate cannot exceed the rate, and this is past rounding, so an
     /// entry means the numerator and the denominator of the relative
     /// covariance were computed two different ways: the channel's relative
-    /// sigma is overstated. The partials are the dilute cross section against
-    /// a flux that is flat within each group, so any rate computed otherwise,
-    /// a self-shielded or a tallied one among them, can land here. Reported
-    /// rather than clamped away, since the clamp is what used to hide it.
+    /// sigma is overstated. The partials are taken under the within-group
+    /// flux the collapse used, flat or shielded, so a rate computed some other
+    /// way, a tallied one among them, can land here. Reported rather than
+    /// clamped away, since the clamp is what used to hide it.
     ///
     /// Under the `1/E` within-group weight (`Weighting::OneOverE`) a dilute
     /// run can land here too. A partial over the part of a group a covariance
@@ -210,14 +223,16 @@ pub struct Coverage {
     /// by the parent's own density, so a channel on a trace isotope counts for
     /// what it actually made.
     ///
-    /// Each channel's production is the rate this run used, which may be
-    /// self-shielded or tallied, while its share is of the dilute rate. On a
-    /// dilute collapse the covered sum is exactly the production from energies
-    /// where a covariance states a nonzero variance. Otherwise it is that
-    /// production only if the rate kept the dilute rate's distribution in
-    /// energy, which shielding does not: it depresses the resonance range,
-    /// where capture blocks often state zero. The covered share of a shielded
-    /// or tallied production is not computed.
+    /// Each channel's production is the rate this run used, and its share is
+    /// of the fold's own rate. On a dilute or a self-shielded collapse the two
+    /// are one rate, and the covered sum is exactly the production from
+    /// energies where a covariance states a nonzero variance. On a tallied
+    /// rate the share is of the dilute rate over the tally spectrum, so the
+    /// covered sum is that production only if the tallied rate kept the
+    /// dilute rate's distribution in energy, which self-shielding in the
+    /// transport does not: it depresses the resonance range, where capture
+    /// blocks often state zero. The covered share of a tallied production is
+    /// not computed.
     ///
     /// Kept as two sums rather than as their ratio because sums merge and a
     /// ratio does not: the fold runs per nuclide and a schedule can name more
@@ -229,12 +244,12 @@ pub struct Coverage {
 }
 
 impl Coverage {
-    /// The production-weighted mean of the per-channel dilute shares, weighted
-    /// by the rate this run used and by parent density.
+    /// The production-weighted mean of the per-channel shares, weighted by the
+    /// rate this run used and by parent density.
     ///
-    /// On a dilute run that is the share of the production driven from
-    /// energies where a covariance states a nonzero variance. On a
-    /// self-shielded or tallied run it is not, for the reason given on
+    /// On a dilute or a self-shielded spectrum run that is the share of the
+    /// production driven from energies where a covariance states a nonzero
+    /// variance. On a tallied run it is not, for the reason given on
     /// [`Coverage::covered_production`], and the run reports no total there
     /// rather than this figure (`Info::rate_fraction_covered_total`).
     ///
@@ -321,14 +336,20 @@ impl Coverage {
     }
 }
 
-/// The flux density `ψ(E) = φ_g / ΔE_g`, as the group structure and the fluxes.
+/// The flux density the collapse weighted one nuclide's rates with, as the
+/// group structure, the fluxes and, on a shielded run, that nuclide's shape.
 ///
-/// Kept as the two vectors rather than as a function, because every integral
+/// Dilute, `ψ(E) = φ_g / ΔE_g`. Shielded, `ψ(E) = φ_g · s(E) / ∫_g s dE` with
+/// `s` the nuclide's flux shape inside the lump, which is what the collapse's
+/// `σ_g = ∫_g σ s dE / ∫_g s dE` times `φ_g` integrates against.
+///
+/// Kept as the vectors rather than as a function, because every integral
 /// below is over the overlap of an arbitrary interval with the groups, and the
 /// overlap is what the trapezoid integrator needs.
 struct FluxDensity<'a> {
     boundaries: &'a [f64],
     flux: &'a [f64],
+    shape: Option<&'a FluxShape>,
 }
 
 impl FluxDensity<'_> {
@@ -396,6 +417,117 @@ impl FluxDensity<'_> {
         }
         total
     }
+
+    /// `∫ σ(E) ψ(E) dE` over each interval of the ascending `grid`, in barn
+    /// n/cm^2/s.
+    fn xs_over(&self, reaction: &Reaction, grid: &[f64]) -> Vec<f64> {
+        match self.shape {
+            None => grid
+                .windows(2)
+                .map(|w| self.integrate_xs(reaction, w[0], w[1]))
+                .collect(),
+            Some(shape) => self.apportion(
+                reaction,
+                shape,
+                grid,
+                |whole, phi| whole.shielded() * phi,
+                GroupTerms::shielded_integral,
+            ),
+        }
+    }
+
+    /// `∫ ψ(E) dE` over each interval of the ascending `grid`, in n/cm^2/s.
+    ///
+    /// `reaction` matters only on a shielded run, where the shape is integrated
+    /// on the same points the collapse integrated it on for that reaction.
+    fn flux_over(&self, reaction: &Reaction, grid: &[f64]) -> Vec<f64> {
+        match self.shape {
+            None => grid
+                .windows(2)
+                .map(|w| self.integrate_flux(w[0], w[1]))
+                .collect(),
+            Some(shape) => self.apportion(
+                reaction,
+                shape,
+                grid,
+                |_, phi| phi,
+                GroupTerms::shielded_weight,
+            ),
+        }
+    }
+
+    /// Split each group's term of the shielded collapse across the intervals
+    /// of `grid` it overlaps.
+    ///
+    /// `whole` is the group's term as the collapse has it, from its walk of
+    /// the whole group and its flux, and `weight` the integral a part of the
+    /// group carries of it. A group that no edge of `grid` cuts goes whole to
+    /// the interval holding it, so there the partial IS the collapse's term,
+    /// bit for bit. A cut group is split in proportion to its parts' own
+    /// shielded integrals, normalized by their sum rather than by the whole
+    /// group's: inserting an edge adds a point to the trapezoid, and the shape
+    /// there is interpolated in log energy on its own grid rather than along
+    /// the segment the edge splits, so the parts' integrals do not add up to
+    /// the whole group's exactly. Normalized
+    /// by their own sum, the parts partition the collapse's term, and the
+    /// partials over a grid spanning the flux range sum to the shielded rate to
+    /// rounding, which is what the relative covariance divides them by.
+    fn apportion(
+        &self,
+        reaction: &Reaction,
+        shape: &FluxShape,
+        grid: &[f64],
+        whole: impl Fn(&GroupTerms, f64) -> f64,
+        weight: impl Fn(&GroupTerms) -> f64,
+    ) -> Vec<f64> {
+        let n = grid.len().saturating_sub(1);
+        let mut out = vec![0.0; n];
+        if n == 0 {
+            return out;
+        }
+        let mut cuts: Vec<f64> = Vec::new();
+        let mut parts: Vec<f64> = Vec::new();
+        for g in self.overlapping(grid[0], grid[n]) {
+            let (glo, ghi) = (self.boundaries[g], self.boundaries[g + 1]);
+            if ghi <= glo {
+                continue;
+            }
+            let term = whole(
+                &walk_group(reaction, glo, ghi, Some(shape), None),
+                self.flux[g],
+            );
+            if term == 0.0 {
+                continue;
+            }
+            let first = grid.partition_point(|&e| e <= glo);
+            let last = grid.partition_point(|&e| e < ghi);
+            if first >= last {
+                if let Some(k) = interval_holding(grid, glo, ghi) {
+                    out[k] += term;
+                }
+                continue;
+            }
+            cuts.clear();
+            cuts.push(glo);
+            cuts.extend_from_slice(&grid[first..last]);
+            cuts.push(ghi);
+            parts.clear();
+            parts.extend(
+                cuts.windows(2)
+                    .map(|w| weight(&walk_group(reaction, w[0], w[1], Some(shape), None))),
+            );
+            let sum: f64 = parts.iter().sum();
+            if sum <= 0.0 {
+                continue;
+            }
+            for (w, part) in cuts.windows(2).zip(&parts) {
+                if let Some(k) = interval_holding(grid, w[0], w[1]) {
+                    out[k] += term * part / sum;
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Reaction `i`'s partial rates over one block's grid.
@@ -414,20 +546,17 @@ impl Partials {
 
 /// The partial rates of `reaction` over the intervals of `grid`.
 fn partial_rates(flux: &FluxDensity, reaction: &Reaction, grid: &[f64], scale: Scale) -> Partials {
-    let n = grid.len().saturating_sub(1);
-    let mut per_interval = Vec::with_capacity(n);
-    for k in 0..n {
-        let v = match scale {
-            // A relative covariance multiplies the rate, so the weight is the
-            // partial RATE.
-            Scale::Relative => BARN_TO_CM2 * flux.integrate_xs(reaction, grid[k], grid[k + 1]),
-            // An absolute covariance is already in barns squared, so the weight
-            // is the partial FLUX and the cross section must not appear twice.
-            Scale::Absolute => BARN_TO_CM2 * flux.integrate_flux(grid[k], grid[k + 1]),
-        };
-        per_interval.push(v);
+    let integrals = match scale {
+        // A relative covariance multiplies the rate, so the weight is the
+        // partial RATE.
+        Scale::Relative => flux.xs_over(reaction, grid),
+        // An absolute covariance is already in barns squared, so the weight is
+        // the partial FLUX and the cross section must not appear twice.
+        Scale::Absolute => flux.flux_over(reaction, grid),
+    };
+    Partials {
+        per_interval: integrals.into_iter().map(|v| BARN_TO_CM2 * v).collect(),
     }
-    Partials { per_interval }
 }
 
 /// Contract `rᵢᵀ C rⱼ`.
@@ -451,7 +580,9 @@ fn contract(block: &ExpandedBlock, row: &Partials, col: &Partials) -> f64 {
 ///
 /// On a dilute collapse under the flat-within-group weight the two add the
 /// same terms grouped differently, and on CCFE-709 they agree to a few parts
-/// in 1e15. Under the `1/E` weight they need not, see
+/// in 1e15. On a shielded one each group's term is split across the intervals
+/// and the parts add back to it, so the same holds. Under the `1/E` weight
+/// they need not, see
 /// `Coverage::partials_above_rate`. This sits six orders of magnitude above
 /// that, and an excess below it would move a relative sigma by less than a
 /// part in a billion.
@@ -459,10 +590,7 @@ fn contract(block: &ExpandedBlock, row: &Partials, col: &Partials) -> f64 {
 /// It separates rounding from an inconsistency, not a large inconsistency
 /// from a small one: any excess past rounding means the covariance's
 /// numerator and denominator were computed two different ways, and every
-/// such channel is listed with its ratio for the reader to weigh. So until
-/// the fold weights a self-shielded rate with shielded partials (#166 item
-/// 4), a shielded run lists most channels a relative block names, many a few
-/// parts in 1e7 over, and `has_gaps` reads true on it.
+/// such channel is listed with its ratio for the reader to weigh.
 const PARTIALS_ROUNDING: f64 = 1.0e-9;
 
 /// The interval of `grid` that holds all of `[a, b]`, if one does.
@@ -519,9 +647,9 @@ impl Diagonal {
     }
 }
 
-/// The share of `reaction`'s dilute rate over the flux range that comes from
-/// energies where its own blocks state a nonzero variance, or `None` when that
-/// rate is zero.
+/// The share of `reaction`'s rate over the flux range, as the fold integrates
+/// it, that comes from energies where its own blocks state a nonzero variance,
+/// or `None` when that rate is zero.
 ///
 /// Walked on the union of the blocks' edges and the flux range's two ends, so
 /// every cell lies inside one piece of each block or outside it, and a cell
@@ -551,9 +679,8 @@ fn stated_variance_share(
     edges.sort_by(f64::total_cmp);
     edges.dedup();
     let (mut covered, mut total) = (0.0, 0.0);
-    for w in edges.windows(2) {
+    for (w, rate) in edges.windows(2).zip(flux.xs_over(reaction, &edges)) {
         let (a, b) = (w[0], w[1]);
-        let rate = flux.integrate_xs(reaction, a, b);
         total += rate;
         let (mut relative, mut absolute) = (0.0, 0.0);
         for d in diagonals {
@@ -760,16 +887,23 @@ fn fold_nuclide(
 /// Fold every transmutable nuclide's covariance against one spectrum.
 ///
 /// `rates` must be the unit-flux rates from
-/// [`compute_multigroup_reaction_rates`](crate::compute_multigroup_reaction_rates)
-/// for the SAME spectrum, because the relativization divides by them. Relative
-/// covariance is invariant under the per-step `scale_rates`, which is why this
-/// is computed once per distinct spectrum rather than once per step.
+/// [`compute_multigroup_reaction_rates_shielded`](crate::multigroup::compute_multigroup_reaction_rates_shielded)
+/// for the SAME spectrum and the SAME `shielding`, because the relativization
+/// divides by them. Relative covariance is invariant under the per-step
+/// `scale_rates`, which is why this is computed once per distinct spectrum
+/// rather than once per step.
+///
+/// With `shielding`, each nuclide's partial rates are taken under the flux
+/// shape its collapse used, so they sum to the shielded rate they are divided
+/// by. The shape is the nominal one: a perturbed cross section does not
+/// deepen or fill its own flux dip here.
 pub fn fold_rate_covariance(
     material: &Material,
     chain: &std::collections::HashMap<String, ChainNuclide>,
     rates: &ReactionRates,
     multigroup_flux: &[f64],
     group_boundaries: &[f64],
+    shielding: Option<&Shielding>,
 ) -> (BTreeMap<String, RateCovariance>, Coverage) {
     let mut out = BTreeMap::new();
     let mut coverage = Coverage::default();
@@ -777,10 +911,7 @@ pub fn fold_rate_covariance(
     if multigroup_flux.is_empty() || group_boundaries.len() != multigroup_flux.len() + 1 {
         return (out, coverage);
     }
-    let flux = FluxDensity {
-        boundaries: group_boundaries,
-        flux: multigroup_flux,
-    };
+    let shapes = CollapseShapes::new(material, multigroup_flux, group_boundaries, shielding);
 
     // Sorted, so the fold visits nuclides in the same order every run.
     let mut names: Vec<&String> = rates.keys().collect();
@@ -826,6 +957,14 @@ pub fn fold_rate_covariance(
             .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
             .unwrap_or_default();
 
+        // The nuclide's own shape, as its collapse built it; `None` wherever
+        // the collapse averaged dilute, so the two agree nuclide by nuclide.
+        let shape = shapes.as_ref().and_then(|s| s.shape_for(name));
+        let flux = FluxDensity {
+            boundaries: group_boundaries,
+            flux: multigroup_flux,
+            shape: shape.as_ref(),
+        };
         let folded = fold_nuclide(
             &flux,
             blocks,
@@ -860,8 +999,8 @@ pub fn fold_rate_covariance(
     }
 
     // How much of the production this spectrum drove is covered, weighted by
-    // rate and by the parent's own density. The share is of the dilute rate
-    // whatever `rates` is, see `Coverage::covered_production`. Done here
+    // rate and by the parent's own density. The share is of the fold's own
+    // rate whatever `rates` is, see `Coverage::covered_production`. Done here
     // rather than per nuclide because it is a property of the material: the
     // per-nuclide fold knows its own rates but not how many atoms of it there
     // are, and a channel on a 0.1%-abundance isotope must not count the same
@@ -956,6 +1095,7 @@ mod stated_variance_tests {
         FluxDensity {
             boundaries: &BOUNDARIES,
             flux: &FLUX,
+            shape: None,
         }
     }
 
@@ -1062,8 +1202,9 @@ mod stated_variance_tests {
         assert!(c.partials_above_rate.is_empty());
         assert!(c.partials_below_rate.is_empty());
 
-        // Against half the rate, as a shielded collapse would give, the
-        // partials the fold weighted with sum to twice it. The zero variance
+        // Against half the rate, as a rate weighted some other way than the
+        // partials could give, the partials the fold weighted with sum to
+        // twice it. The zero variance
         // interval is among them, so the check must see it even though the
         // share leaves it out, and the share itself does not move.
         let c = fold(&[block(102, 102, lb5(&grid, &[0.0, 0.0, 0.01]))], 0.5);
@@ -1220,12 +1361,12 @@ mod stated_variance_tests {
     /// Partials above the rate are an inconsistency between the numerator and
     /// the denominator, not a coverage of more than all of it. The excess is
     /// reported, where it used to be clamped silently, and the share, measured
-    /// against the fold's own dilute integral, reads what it would anyway.
+    /// against the fold's own integral, reads what it would anyway.
     #[test]
     fn partials_above_the_rate_are_reported_not_clamped_away() {
         let grid = [1.0e-5, 1.0e4, 2.0e7];
-        // Half the rate the partials sum to, as a shielded collapse would give
-        // against dilute partials.
+        // Half the rate the partials sum to, as a tallied rate could give
+        // against partials weighted flat within each group.
         let c = fold(&[block(102, 102, lb5(&grid, &[0.01, 0.0, 0.01]))], 0.5);
         let key = ("W186".to_string(), "(n,gamma)".to_string());
         assert_eq!(fraction(&c, "(n,gamma)"), 1.0);
@@ -1345,6 +1486,7 @@ mod integration_range_tests {
         let density = FluxDensity {
             boundaries: &boundaries,
             flux: &flux,
+            shape: None,
         };
         let reaction = ramp(0.0, 2.0e7, 0.5, 9.0);
 

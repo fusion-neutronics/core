@@ -239,6 +239,18 @@ impl GroupTerms {
         }
     }
 
+    /// `∫ σ φ dE` under the shielded flux shape, the numerator of
+    /// [`GroupTerms::shielded`].
+    pub(crate) fn shielded_integral(&self) -> f64 {
+        self.shielded_num
+    }
+
+    /// `∫ φ dE` under the shielded flux shape, the denominator of
+    /// [`GroupTerms::shielded`].
+    pub(crate) fn shielded_weight(&self) -> f64 {
+        self.shielded_den
+    }
+
     /// The group average under the shielded flux shape, or 0.0 where the shape
     /// integrates to nothing.
     pub(crate) fn shielded(&self) -> f64 {
@@ -978,6 +990,58 @@ impl<'a> CollapseSetup<'a> {
             active: &self.active,
             total_flux: self.total_flux,
         }
+    }
+}
+
+/// The per-nuclide flux shapes a shielded collapse weights its group averages
+/// with, for a consumer that has to integrate against the same flux.
+///
+/// Built from the same [`CollapseSetup`] and [`Collapse::shape_for`] the
+/// collapse uses, so a shape handed out here is the one the rate came from
+/// rather than a second solve that could disagree with it. The covariance fold
+/// is the consumer: its partial rates have to sum to the shielded rate it
+/// divides them by.
+pub(crate) struct CollapseShapes<'a> {
+    material: &'a Material,
+    multigroup_flux: &'a [f64],
+    group_boundaries: &'a [f64],
+    shielding: &'a Shielding,
+    setup: CollapseSetup<'a>,
+}
+
+impl<'a> CollapseShapes<'a> {
+    /// `None` on the dilute path, where no shape is built, and where the
+    /// spectrum carries no flux, which the collapse drives nothing with.
+    pub(crate) fn new(
+        material: &'a Material,
+        multigroup_flux: &'a [f64],
+        group_boundaries: &'a [f64],
+        shielding: Option<&'a Shielding>,
+    ) -> Option<Self> {
+        let shielding = shielding?;
+        let setup = CollapseSetup::new(material, multigroup_flux, Some(shielding))?;
+        Some(Self {
+            material,
+            multigroup_flux,
+            group_boundaries,
+            shielding,
+            setup,
+        })
+    }
+
+    /// The shape `nuclide`'s group averages were taken under, or `None` where
+    /// the collapse took them dilute: no data at the temperature in use, or a
+    /// name the mass number cannot be read from.
+    pub(crate) fn shape_for(&self, nuclide: &str) -> Option<FluxShape> {
+        let context = self.setup.context(
+            self.material,
+            self.multigroup_flux,
+            self.group_boundaries,
+            1.0,
+            Some(self.shielding),
+        );
+        let reactions = context.reactions_for(nuclide)?;
+        context.shape_for(nuclide, reactions).0
     }
 }
 
