@@ -305,12 +305,70 @@ impl DecaySourceDistribution {
 ///
 /// In D1S chain files, nuclides may have source entries describing the decay
 /// gamma spectrum emitted when the nuclide decays.
+///
+/// A decay evaluation gives one spectrum per radiation type, and the chain
+/// keeps each spectrum's lines and its continuum as separate sources: a
+/// nuclide emitting gammas and x-rays has two photon line sources. Each
+/// spectrum has its own normalisation, whose sigma is common to its lines
+/// only, so merging them would lose which sigma belongs to which line. Read
+/// [`ChainNuclide::photon_lines`] for the lines together.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DecaySource {
     /// Particle type emitted (e.g. "photon")
     pub particle: String,
+    /// The ENDF radiation type the source was read from, e.g. `"gamma"` or
+    /// `"xray"`. `None` where the file does not say, as a
+    /// `decay/sources.arrow` written before the column does not.
+    pub radiation: Option<String>,
     /// The energy distribution of emitted particles
     pub distribution: DecaySourceDistribution,
+    /// What the evaluation states about the source's uncertainty, `None`
+    /// where the file carries nothing. Nothing reads it to perturb a result
+    /// yet; it is kept so that nothing the evaluation gives is lost.
+    ///
+    /// Behind an `Arc` for the reason [`ChainNuclide::fission_yields`] is:
+    /// the chain is deep-cloned per transmutation, and these are as many
+    /// numbers again as the lines themselves.
+    pub uncertainty: Option<Arc<DecaySourceUncertainty>>,
+}
+
+/// The uncertainties an evaluation states for one decay source, as ENDF
+/// MT=457 writes them.
+///
+/// Every field is literal: a 0.0 the evaluation wrote stays 0.0. A reader
+/// must take both `None` and 0.0 as "not stated", never as an exact value,
+/// because the libraries write 0.0 for a sigma they did not give. JENDL-5.0,
+/// for one, puts a reference line's sigma in the normalisation and writes
+/// 0.0 on the line.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DecaySourceUncertainty {
+    /// The spectrum's normalisation: FD for lines, FC for a continuum. It
+    /// is already multiplied into the source's intensities.
+    pub normalization: Option<f64>,
+    /// Its sigma, common to every line of the spectrum (fully correlated
+    /// between them).
+    pub normalization_uncertainty: Option<f64>,
+    /// Each line's intensity sigma, in the units of its intensity (decay
+    /// constant times FD times dRI). `None` on a continuum, whose points
+    /// carry no sigma.
+    pub intensity_uncertainties: Option<Vec<f64>>,
+    /// Each line's energy sigma dER [eV]. `None` on a continuum.
+    pub energy_uncertainties: Option<Vec<f64>>,
+    /// The spectrum's covariance, where the evaluation states one.
+    pub covariance: Option<SourceCovariance>,
+}
+
+/// A spectrum's covariance as MT=457 packs it, unpacked no further.
+///
+/// For lines (LB=5) `energies` are the values written before the packed
+/// matrix `values`, and `ls` is its symmetry flag. For a continuum (LB=2)
+/// `values` pair one to one with `energies`, and `ls` is `None`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceCovariance {
+    pub ls: Option<i32>,
+    pub lb: i32,
+    pub energies: Vec<f64>,
+    pub values: Vec<f64>,
 }
 
 /// The names of a nuclide's decay-energy components, in the order
@@ -372,6 +430,44 @@ pub struct ChainNuclide {
     pub fission_yields: Option<Arc<FissionYieldSet>>,
     /// Decay photon sources (empty if nuclide has no decay gamma data)
     pub sources: Vec<DecaySource>,
+}
+
+impl ChainNuclide {
+    /// The nuclide's decay photon lines as one list of `(energy [eV], rate
+    /// per atom [1/s])`, ascending in energy.
+    ///
+    /// Every photon line source contributes, so the gamma and x-ray lines,
+    /// which the chain keeps apart, come back together, and lines at the same
+    /// energy are summed in the order the sources list them. That is exactly
+    /// the merged list `decay/sources.arrow` stored before it kept the spectra
+    /// apart, to the last bit, which is why the line consumers read this
+    /// rather than the sources.
+    pub fn photon_lines(&self) -> Vec<(f64, f64)> {
+        let mut lines: Vec<(f64, f64)> = self
+            .sources
+            .iter()
+            .filter(|source| source.particle == "photon")
+            .filter_map(|source| match &source.distribution {
+                DecaySourceDistribution::Discrete {
+                    energies,
+                    intensities,
+                } => Some(energies.iter().copied().zip(intensities.iter().copied())),
+                DecaySourceDistribution::Tabular { .. } => None,
+            })
+            .flatten()
+            .collect();
+        // Stable, so the lines at one energy stay in source order and are
+        // summed in it.
+        lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+        lines.dedup_by(|later, kept| {
+            let same = later.0 == kept.0;
+            if same {
+                kept.1 += later.1;
+            }
+            same
+        });
+        lines
+    }
 }
 
 /// Global cache for parsed chain files.
@@ -871,6 +967,57 @@ pub fn reduce_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source(particle: &str, distribution: DecaySourceDistribution) -> DecaySource {
+        DecaySource {
+            particle: particle.to_string(),
+            radiation: None,
+            distribution,
+            uncertainty: None,
+        }
+    }
+
+    /// The gamma and x-ray line sources come back as one ascending list,
+    /// a shared energy summed in source order; a continuum and other
+    /// particles stay out.
+    #[test]
+    fn photon_lines_merge_every_photon_line_source() {
+        let lines = |energies: Vec<f64>, intensities: Vec<f64>| DecaySourceDistribution::Discrete {
+            energies,
+            intensities,
+        };
+        let nuclide = ChainNuclide {
+            name: "Xx1".to_string(),
+            half_life: Some(1.0),
+            half_life_uncertainty: None,
+            decay_energy: 0.0,
+            decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
+            reactions: vec![],
+            decays: vec![],
+            fission_yields: None,
+            sources: vec![
+                source(
+                    "photon",
+                    lines(vec![3.0e5, 1.0e5, 3.0e5], vec![0.1, 0.2, 0.3]),
+                ),
+                source(
+                    "photon",
+                    DecaySourceDistribution::Tabular {
+                        energies: vec![1.0e4, 1.0e6],
+                        intensities: vec![1.0, 0.0],
+                        interpolation: Some(Interpolation::Histogram),
+                    },
+                ),
+                source("electron", lines(vec![2.0e5], vec![5.0])),
+                source("photon", lines(vec![3.0e5, 2.0e4], vec![0.7, 0.4])),
+            ],
+        };
+        assert_eq!(
+            nuclide.photon_lines(),
+            vec![(2.0e4, 0.4), (1.0e5, 0.2), (3.0e5, 0.1 + 0.3 + 0.7)]
+        );
+    }
 
     // =========================================================================
     // Ejectile nuclide extraction tests

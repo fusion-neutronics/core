@@ -464,6 +464,8 @@ mod tests {
             fission_yields: None,
             sources: vec![DecaySource {
                 particle: "photon".to_string(),
+                radiation: None,
+                uncertainty: None,
                 distribution: DecaySourceDistribution::Discrete {
                     energies: vec![1_173_228.0, 1_332_492.0],
                     intensities: vec![0.9985 * lambda, 0.9998 * lambda],
@@ -679,6 +681,8 @@ mod tests {
                 "Fe59",
                 vec![DecaySource {
                     particle: "photon".to_string(),
+                    radiation: None,
+                    uncertainty: None,
                     distribution: DecaySourceDistribution::Tabular {
                         energies,
                         intensities: densities,

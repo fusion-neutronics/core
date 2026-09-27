@@ -429,6 +429,8 @@ mod tests {
         sm158.sources = vec![
             yani::DecaySource {
                 particle: "photon".to_string(),
+                radiation: None,
+                uncertainty: None,
                 distribution: DecaySourceDistribution::Discrete {
                     energies: vec![2.0e5],
                     intensities: vec![0.5 * lambda],
@@ -436,6 +438,8 @@ mod tests {
             },
             yani::DecaySource {
                 particle: "photon".to_string(),
+                radiation: None,
+                uncertainty: None,
                 distribution: DecaySourceDistribution::Tabular {
                     energies: vec![1.0e4, 1.0e5, 1.0e6],
                     intensities: vec![2.0e-5 * lambda, 1.0e-6 * lambda, 0.0],
@@ -445,6 +449,8 @@ mod tests {
             // A continuum of another particle is not a photon source.
             yani::DecaySource {
                 particle: "electron".to_string(),
+                radiation: None,
+                uncertainty: None,
                 distribution: DecaySourceDistribution::Tabular {
                     energies: vec![1.0e4, 1.0e6],
                     intensities: vec![1.0e-6 * lambda, 0.0],

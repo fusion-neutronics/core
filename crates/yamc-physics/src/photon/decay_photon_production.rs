@@ -670,6 +670,8 @@ mod tests {
                 fission_yields: None,
                 sources: vec![DecaySource {
                     particle: "photon".to_string(),
+                    radiation: None,
+                    uncertainty: None,
                     distribution: DecaySourceDistribution::Discrete {
                         energies: vec![846764.0, 1810726.0],
                         intensities: vec![7.381e-5, 2.030e-5],
@@ -867,6 +869,8 @@ mod tests {
                 fission_yields: None,
                 sources: vec![DecaySource {
                     particle: "photon".to_string(),
+                    radiation: None,
+                    uncertainty: None,
                     distribution: DecaySourceDistribution::Discrete {
                         energies: vec![1000000.0],
                         intensities: vec![1.0e-3],
@@ -982,6 +986,8 @@ mod tests {
             sources: vec![
                 DecaySource {
                     particle: "photon".to_string(),
+                    radiation: None,
+                    uncertainty: None,
                     distribution: DecaySourceDistribution::Discrete {
                         energies: vec![1.1e6],
                         intensities: vec![0.5 * lambda],
@@ -989,6 +995,8 @@ mod tests {
                 },
                 DecaySource {
                     particle: "photon".to_string(),
+                    radiation: None,
+                    uncertainty: None,
                     distribution: DecaySourceDistribution::Tabular {
                         energies: vec![1.0e4, 1.0e6],
                         intensities: vec![2.0e-6 * lambda, 0.0],
@@ -1103,6 +1111,8 @@ mod tests {
             fission_yields: None,
             sources: vec![DecaySource {
                 particle: "photon".to_string(),
+                radiation: None,
+                uncertainty: None,
                 distribution: DecaySourceDistribution::Discrete {
                     energies: vec![1000000.0],
                     intensities: vec![1.0e-3],

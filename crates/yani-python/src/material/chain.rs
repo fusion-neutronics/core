@@ -221,7 +221,10 @@ impl PyChain {
     /// Decay photon sources of each nuclide that has them (D1S data).
     ///
     /// A source is lines or a continuum, and the two are in different units,
-    /// so each one says which it is.
+    /// so each one says which it is. Each ENDF spectrum is its own source, so
+    /// a nuclide emitting gammas and x-rays has one line source for each
+    /// (their normalisations and its sigma differ), and a line energy can
+    /// appear in both. ``Material.decay_photon_spectrum()`` sums them.
     ///
     /// Returns:
     ///     dict[str, list[tuple[str, list[float], list[float], str | None]]]:

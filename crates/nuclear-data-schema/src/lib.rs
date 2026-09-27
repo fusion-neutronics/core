@@ -413,6 +413,35 @@ pub fn decay_sources() -> Schema {
         // Nullable and last, so a file written before it still reads; there a
         // continuum states no law and cannot be integrated (issue #163).
         i32("interpolation", true),
+        // What MT=457 states about each row's uncertainty, stored as written
+        // so nothing the evaluation gives is lost (issue #163). All nullable
+        // and last, so an older file still reads. A null and a 0.0 both mean
+        // "not stated", never an exact value: evaluations write 0.0 for a
+        // sigma they did not give.
+        //
+        // The radiation type the row was read from ("gamma", "xray", ...).
+        // Each row is one spectrum's lines or its continuum, never a merge of
+        // two, so the rows of one nuclide with the same radiation share one
+        // normalisation.
+        utf8("radiation", true),
+        // FD on a discrete row, FC on a tabular one, and its sigma, as
+        // written. Already multiplied into `intensities`; the sigma is common
+        // to every line of the spectrum.
+        f64("normalization", true),
+        f64("normalization_uncertainty", true),
+        // Per line, in the units of `intensities`: decay constant * FD * dRI.
+        // Null on a tabular row, whose points carry no sigma.
+        f64s("intensity_uncertainties", true),
+        // Per line dER [eV]. Null on a tabular row.
+        f64s("energy_uncertainties", true),
+        // The spectrum's covariance where it states one (LCOV != 0), packed
+        // as the tape packs it: LS and LB, then the energies and the values
+        // (LB=5 packed matrix for lines, LB=2 pairs for a continuum; LS is
+        // null there). No photon spectrum in the libraries yani ships has one.
+        i32("covariance_ls", true),
+        i32("covariance_lb", true),
+        f64s("covariance_energies", true),
+        f64s("covariance_values", true),
     ])
 }
 

@@ -777,6 +777,8 @@ mod tests {
         let lambda = std::f64::consts::LN_2 / 318.0;
         let source = |distribution| yani::DecaySource {
             particle: "photon".to_string(),
+            radiation: None,
+            uncertainty: None,
             distribution,
         };
         let mut cn = yani::ChainNuclide {
