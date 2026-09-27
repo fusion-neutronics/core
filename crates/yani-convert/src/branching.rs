@@ -302,10 +302,9 @@ pub struct BranchingStats {
     pub partial_sum_mismatches: Vec<String>,
     /// The production states of a transmutation reaction that name no single
     /// product nuclide, one line each, and so give no row. Fission (IZAP =
-    /// -1) is one kind; another is a subsection with IZAP = 0 that no single
-    /// MF=8 subsection names either (see
-    /// `endf::radionuclide_production::product_zap`), where the file does not
-    /// say which nuclide it is; the last is any other ZAP whose Z or A is not
+    /// -1) is one kind; another is a subsection with IZAP = 0 whose level no
+    /// single MF=8 subsection names a product for either, where the file does
+    /// not say which nuclide it is; the last is any other ZAP whose Z or A is not
     /// positive, reported with its value. None reaches this list from the six
     /// libraries yani builds from: their fission subsections are all MT=18,
     /// which is no transmutation reaction and is passed over before this, and
