@@ -275,8 +275,12 @@ pub struct Info {
     /// Inputs this run held at their nominal values, for the record.
     ///
     /// Every input the answer depends on and no source here samples, whether
-    /// the data carries an uncertainty for it or not, so that an absent entry
-    /// means the input was perturbed and not that it was forgotten.
+    /// the data carries an uncertainty for it or not. MF=33 blocks that were
+    /// present but could not be used are counted in `skipped_cross_material`,
+    /// `skipped_nc`, `unsupported_layouts` and `malformed_blocks`. A block for
+    /// a reaction the chain does not drive (a partial-level section such as
+    /// MT=600-849) is neither listed nor counted: the chain has no rate for it
+    /// to be the uncertainty of.
     pub not_perturbed: Vec<String>,
     /// Which sources this run perturbed, by name.
     pub sources: Vec<String>,
@@ -300,6 +304,8 @@ impl Info {
                 "fission yield",
                 "isomeric branching (MF=9/MF=10)",
                 "cross-material covariance (MAT1 != 0)",
+                "NC-derived covariance (MF=33 NC)",
+                "lumped-reaction covariance (MF=33 MT=851-870)",
                 "resonance-parameter covariance (MF=32)",
                 "decay photon line energy and intensity (MF=8 MT=457)",
                 "photon attenuation coefficient (XCOM)",
@@ -773,6 +779,8 @@ mod tests {
             "fission yield",
             "isomeric branching (MF=9/MF=10)",
             "cross-material covariance (MAT1 != 0)",
+            "NC-derived covariance (MF=33 NC)",
+            "lumped-reaction covariance (MF=33 MT=851-870)",
             "resonance-parameter covariance (MF=32)",
             "decay photon line energy and intensity (MF=8 MT=457)",
             "photon attenuation coefficient (XCOM)",

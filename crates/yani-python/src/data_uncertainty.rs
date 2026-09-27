@@ -48,9 +48,11 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 /// does not propagate:
 ///
 /// - decay branching ratios, fission yields, and the isomeric-branching
-///   overlay (MF=9/MF=10);
-/// - covariance correlating two evaluations (MAT1 != 0) and the
-///   resonance-parameter covariance (MF=32), so only MF=33 is sampled;
+///   overlay from MF=9/MF=10;
+/// - covariance correlating two evaluations (MAT1 != 0), covariance derived
+///   from other sections (MF=33 NC), the lumped-reaction covariance
+///   (MT=851-870) and the resonance-parameter covariance (MF=32), so only the
+///   explicit MF=33 blocks of each reaction are sampled;
 /// - the self-shielding correction, when ``self_shielding_chord`` or
 ///   ``self_shielding_shape`` is given: the shielded flux is built once from
 ///   the nominal cross sections and reused by every replica;
