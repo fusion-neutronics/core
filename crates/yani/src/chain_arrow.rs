@@ -742,6 +742,7 @@ pub fn parse_chain_parts_from_bytes(
                     }
 
                     branch_table
+                        .curves_mut()
                         .entry(parent.to_string())
                         .or_default()
                         .entry(kind)

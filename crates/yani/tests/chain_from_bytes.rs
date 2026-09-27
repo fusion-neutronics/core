@@ -18,7 +18,7 @@ fn fixture() -> Option<PathBuf> {
     dir.join("decay/nuclides.arrow").exists().then_some(dir)
 }
 
-/// Load the same seven files a filesystem caller would, as bytes.
+/// Load the same eight files a filesystem caller would, as bytes.
 fn sections(root: &Path) -> ChainSections {
     let mut parts = ChainSections::default();
     for (subsection, dir, file) in [
@@ -29,6 +29,7 @@ fn sections(root: &Path) -> ChainSections {
         ("fission_yields", "fission_yields", "fission_yields.arrow"),
         ("fission_yields", "fission_yields", "aliases.arrow"),
         ("branching", "branching", "branching.arrow"),
+        ("branching", "branching", "branching_covariance.arrow"),
     ] {
         let path = root.join(dir).join(file);
         if path.exists() {
@@ -103,9 +104,19 @@ fn bytes_and_paths_load_the_same_chain() {
     }
 
     assert_eq!(
-        branch_from_bytes.len(),
-        branch_from_paths.len(),
+        branch_from_bytes.curves().len(),
+        branch_from_paths.curves().len(),
         "branch tables differ in size",
+    );
+    // The MF=40 covariance, when the fixture carries it, is the same rows by
+    // either route.
+    let rows = |batches: Option<&[arrow_array::RecordBatch]>| {
+        batches.map(|b| b.iter().map(|batch| batch.num_rows()).sum::<usize>())
+    };
+    assert_eq!(
+        rows(branch_from_bytes.covariance()),
+        rows(branch_from_paths.covariance()),
+        "branching covariances differ",
     );
 }
 

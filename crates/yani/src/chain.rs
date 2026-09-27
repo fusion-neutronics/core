@@ -113,13 +113,12 @@ pub struct BranchCurve {
 }
 
 /// Isomeric-branching curves keyed by parent nuclide then reaction kind.
-/// `branch_table[parent][kind]` is the list of per-final-state curves for that
-/// reaction. Empty when no `branching/` subsection was supplied.
+/// `branch_table.curves()[parent][kind]` is the list of per-final-state curves
+/// for that reaction. Empty when no `branching/` subsection was supplied.
 ///
-/// Dereferences to that map, so it reads like one. It also holds the
-/// subsection's `branching_covariance.arrow`, the MF=40 covariance of the MF=10
-/// partials, when the subsection carries one. That is kept as the file's record
-/// batches, schema-checked and otherwise as written: it is every MF=40 block of
+/// The table also holds the subsection's `branching_covariance.arrow`, the
+/// MF=40 covariance of the MF=10 partials, when the subsection carries one.
+/// That is kept as the file's record batches, schema-checked and otherwise as written: it is every MF=40 block of
 /// the library, not only those of this chain's parents, and turning a row into
 /// a covariance block is the covariance reader's job (`yamc-nuclide`), which
 /// this crate does not depend on. Nothing here reads it, so the curves and every
@@ -136,6 +135,16 @@ impl BranchTable {
         Self::default()
     }
 
+    /// The per-final-state curves, `curves[parent][kind]`.
+    pub fn curves(&self) -> &HashMap<String, HashMap<String, Vec<BranchCurve>>> {
+        &self.curves
+    }
+
+    /// The curves, to add to or edit.
+    pub fn curves_mut(&mut self) -> &mut HashMap<String, HashMap<String, Vec<BranchCurve>>> {
+        &mut self.curves
+    }
+
     /// The rows of `branching_covariance.arrow`, when the subsection has one.
     ///
     /// `None` for a library without MF=40 (JENDL-5.0), for a subsection
@@ -149,20 +158,6 @@ impl BranchTable {
     /// Attach the covariance batches read from the subsection.
     pub fn set_covariance(&mut self, batches: Vec<RecordBatch>) {
         self.covariance = Some(batches);
-    }
-}
-
-impl std::ops::Deref for BranchTable {
-    type Target = HashMap<String, HashMap<String, Vec<BranchCurve>>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.curves
-    }
-}
-
-impl std::ops::DerefMut for BranchTable {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.curves
     }
 }
 

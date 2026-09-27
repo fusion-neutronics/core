@@ -510,10 +510,14 @@ fn branching_is_written_and_joins_the_manifest() {
     .expect("yani reads the chain and its branching subsection");
     assert!(!chain.is_empty(), "no chain came back");
     assert!(
-        !branch.is_empty(),
+        !branch.curves().is_empty(),
         "yani read the directory but found no branching curves"
     );
-    let curves: usize = branch.values().map(|by_reaction| by_reaction.len()).sum();
+    let curves: usize = branch
+        .curves()
+        .values()
+        .map(|by_reaction| by_reaction.len())
+        .sum();
     assert!(curves > 0, "the branching table has no curves in it");
 
     let _ = std::fs::remove_dir_all(&dir);
