@@ -380,7 +380,7 @@ pub fn contact_dose_by_nuclide(
                 Continuum::new(energies, intensities, *interpolation).map_err(|why| {
                     format!(
                         "The decay photon continuum of {name} {why}. A contact dose \
-                     without it would be understated by an unknown amount."
+                        without it would be understated by an unknown amount."
                     )
                 })?;
             continua.push((folds.len(), continuum));
