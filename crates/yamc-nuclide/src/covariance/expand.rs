@@ -150,15 +150,17 @@ fn tables_match_header(s: &NiSubsection) -> bool {
 /// `lb` 0 to 4 store `np - lt` (E, F) pairs in the first table and `lt` in
 /// the second (ENDF-102 section 33.2.2.2), and a block whose tables are not
 /// exactly those lengths is malformed rather than expanded from whatever it
-/// holds. `lb` 0 to 2 have one table, so `lt` must also be 0. A block split
-/// at the wrong place arrives exactly this way: every `lb` 0 to 2 block in a
-/// `covariance.arrow` converted before fusion-neutronics/core#166 was fixed
-/// has the upper part of its only table in `el`/`fl`, and folding `ek` alone
-/// would drop it without a word.
+/// holds. `lb` 0 to 2 have one table, so `lt` must be 0, and `lb` 3 and 4
+/// have two, so it must not be. A block split at the wrong place arrives
+/// exactly this way: every `lb` 0 to 2 block in a `covariance.arrow`
+/// converted before fusion-neutronics/core#166 was fixed has the upper part
+/// of its only table in `el`/`fl`, and folding `ek` alone would drop it
+/// without a word.
 pub fn expand_ni(s: &NiSubsection) -> Result<ExpandedBlock, Unsupported> {
     match s.lb {
         0..=4 if !tables_match_header(s) => Err(Unsupported::Malformed),
         0..=2 if s.lt != 0 => Err(Unsupported::Malformed),
+        3..=4 if s.lt == 0 => Err(Unsupported::Malformed),
         0 => diagonal(s, Scale::Absolute),
         1 => diagonal(s, Scale::Relative),
         2 => outer_product(s),
@@ -266,17 +268,17 @@ fn interval_weighted(s: &NiSubsection) -> Result<ExpandedBlock, Unsupported> {
     if !ascending(&s.ek) || !ascending(&s.el) {
         return Err(Unsupported::Malformed);
     }
+    // ENDF-102 requires both tables to cover the block's whole energy range.
+    // Two tables with no range in common state a contribution the formula
+    // makes zero everywhere, which is a broken block rather than a zero one.
     if n_outer == 0 || n_inner == 0 {
-        return Ok(ExpandedBlock {
-            row_energies: Vec::new(),
-            col_energies: Vec::new(),
-            values: Vec::new(),
-            scale: Scale::Relative,
-        });
+        return Err(Unsupported::Malformed);
     }
-
     let lo = s.ek[0].max(s.el[0]);
     let hi = s.ek[n_outer].min(s.el[n_inner]);
+    if lo >= hi {
+        return Err(Unsupported::Malformed);
+    }
     let mut grid: Vec<f64> =
         s.ek.iter()
             .chain(&s.el)
@@ -546,6 +548,33 @@ mod tests {
             s.fl = vec![0.0, 0.1, 0.0];
             assert_eq!(expand_ni(&s), Err(Unsupported::Malformed), "lb={lb}");
         }
+    }
+
+    /// ENDF-102: "For LB=3 and LB=4 we have LT != 0, i.e., two E-tables".
+    /// With `lt = 0` the second table is empty and the block would expand to
+    /// nothing, which the fold would skip without counting it.
+    #[test]
+    fn lb3_and_lb4_without_a_second_table_are_malformed() {
+        for lb in 3..=4 {
+            let mut s = ni(lb);
+            s.ek = vec![1.0, 10.0, 100.0];
+            s.fk = vec![0.5, 0.2];
+            assert_eq!(
+                expand_ni(&on_tape(s)),
+                Err(Unsupported::Malformed),
+                "lb={lb}"
+            );
+        }
+    }
+
+    #[test]
+    fn lb4_tables_with_no_range_in_common_are_malformed() {
+        let mut s = ni(4);
+        s.ek = vec![1.0, 10.0];
+        s.fk = vec![1.0];
+        s.el = vec![10.0, 100.0];
+        s.fl = vec![1.0];
+        assert_eq!(expand_ni(&on_tape(s)), Err(Unsupported::Malformed));
     }
 
     #[test]

@@ -110,7 +110,8 @@ pub struct Coverage {
     /// Blocks whose `lb` layout is not implemented, counted per `lb`.
     pub unsupported_layouts: BTreeMap<i64, usize>,
     /// Blocks whose arrays did not match their own declared sizes or their
-    /// layout, such as an LB=0 to 2 block carrying a second table.
+    /// layout, such as an LB=0 to 2 block carrying a second table or an LB=3
+    /// or 4 block without one.
     pub malformed: usize,
     /// Per (nuclide, kind), the fraction of the rate the covariance grid spans.
     ///
