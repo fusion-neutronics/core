@@ -215,8 +215,12 @@ pub struct Info {
     /// has copies that are not each other's transpose, the largest difference
     /// relative to the largest entry. The lower MT's copy is the one used.
     pub mirrored_disagree: BTreeMap<(String, String, String), f64>,
-    /// NC blocks (covariance derived from other reactions), not consumed.
-    pub skipped_nc: usize,
+    /// Per nuclide, NC blocks (covariance derived from other reactions) that
+    /// could not be derived, not consumed. LTY=0 blocks are derived from the
+    /// reactions they name; what is left is an LTY other than 0, an LTY=0
+    /// block naming a reaction with no cross section, or a circular
+    /// derivation.
+    pub skipped_nc: BTreeMap<String, usize>,
     /// Blocks whose `lb` layout is not implemented, counted per `lb`.
     pub unsupported_layouts: BTreeMap<i64, usize>,
     /// Blocks whose arrays disagreed with their own declared sizes.
@@ -330,7 +334,7 @@ impl Info {
             skipped_cross_material: coverage.skipped_cross_material.clone(),
             skipped_other_file: coverage.skipped_other_file.clone(),
             mirrored_disagree: coverage.mirrored_disagree.clone(),
-            skipped_nc: coverage.skipped_nc,
+            skipped_nc: coverage.skipped_nc.clone(),
             unsupported_layouts: coverage.unsupported_layouts.clone(),
             malformed_blocks: coverage.malformed,
             rate_fraction_covered: coverage.rate_fraction_covered.clone(),
@@ -371,7 +375,7 @@ impl Info {
             || !self.skipped_cross_material.is_empty()
             || !self.skipped_other_file.is_empty()
             || !self.mirrored_disagree.is_empty()
-            || self.skipped_nc > 0
+            || !self.skipped_nc.is_empty()
             || !self.unsupported_layouts.is_empty()
             || self.malformed_blocks > 0
             || !self.partials_above_rate.is_empty()

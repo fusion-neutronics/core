@@ -216,7 +216,11 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
         mirrored.set_item(format!("{nuclide} {a} {b}"), mismatch)?;
     }
     d.set_item("mirrored_disagree", mirrored)?;
-    d.set_item("skipped_nc", info.skipped_nc)?;
+    let nc = PyDict::new(py);
+    for (nuclide, n) in &info.skipped_nc {
+        nc.set_item(nuclide, n)?;
+    }
+    d.set_item("skipped_nc", nc)?;
 
     let layouts = PyDict::new(py);
     for (lb, n) in &info.unsupported_layouts {

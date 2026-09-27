@@ -1892,8 +1892,8 @@ fn first_order_contributors(
 ///
 /// Merges the way [`Coverage::absorb`](crate::covariance_fold::Coverage::absorb)
 /// does. Sets union; the per-nuclide counts (`skipped_cross_material`,
-/// `skipped_other_file`) and `mirrored_disagree` take the larger, since a
-/// nuclide gives the same ones on every spectrum; `skipped_nc`,
+/// `skipped_other_file`, `skipped_nc`) and `mirrored_disagree` take the
+/// larger, since a nuclide gives the same ones on every spectrum;
 /// `unsupported_layouts` and `malformed` add, once per spectrum. A rate
 /// fraction is kept at its SMALLEST over the spectra: a channel well covered
 /// under one spectrum and barely covered under another is only as well covered

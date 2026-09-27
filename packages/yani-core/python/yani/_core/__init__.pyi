@@ -2486,9 +2486,16 @@ class TransmutationResults:
           a covariance edge cuts a group. A grid that stops short of the flux
           range cannot be checked from below, since rate from outside it
           rightly leaves its partials short.
-        - ``skipped_nc``, ``unsupported_layouts``: covariance blocks that were
-          present but not consumed, counted once per spectrum, so a run over
-          several spectra counts the same block once for each.
+        - ``unsupported_layouts``: covariance blocks that were present but not
+          consumed, counted once per spectrum, so a run over several spectra
+          counts the same block once for each.
+        - ``skipped_nc``: per nuclide, NC blocks (a covariance derived from
+          other reactions) that could not be derived. An LTY=0 block is
+          derived from the NI covariances of the reactions it names, cross
+          blocks included, over its own energy range: ENDF/B-VIII.1 O16
+          ``(n,p)`` is stated only that way. Left here are LTY 1 to 4, an
+          LTY=0 block naming a reaction with no cross section, and a circular
+          derivation.
         - ``skipped_cross_material``: per nuclide, blocks on a channel the
           chain drives that correlate it with another evaluation, not
           consumed. A block naming the nuclide's own MAT is its own evaluation
