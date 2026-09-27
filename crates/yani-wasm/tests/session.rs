@@ -640,23 +640,77 @@ fn named_group_structures_come_from_the_wheels_own_tables() {
     assert!(session.group_structure("CCFE-708").is_err());
 }
 
-/// A continuum emitter in data that states no interpolation law, which is
-/// every continuum in a `decay/sources.arrow` written before the column (the
-/// fixture among them). The continuum has no known integral, so the contact
-/// dose cannot be formed and the run fails naming the nuclide, rather than
-/// reporting a dose short by an unknown amount.
-#[test]
-fn a_continuum_without_a_law_fails_the_contact_dose_naming_it() {
-    let _exclusive = exclusive();
-    let Some((mut session, _)) = session_with_chain() else {
-        eprintln!("skipping: run scripts/fetch_test_fixtures.py first");
-        return;
-    };
-    // Sm158 in ENDF/B-VIII.1 emits photons only as a continuum. Decay only,
-    // so no cross sections are needed.
+/// A session on the fixture chain with the law of Sm158's photon continuum
+/// set to `law`, so the test does not depend on whether the fixture was written
+/// before or after `decay/sources.arrow` carried the column. Sm158 in
+/// ENDF/B-VIII.1 emits photons only as a continuum, and its tape states
+/// histogram (INT=1).
+fn session_with_sm158_law(law: Option<yani::Interpolation>) -> Option<YaniSession> {
+    let root = chain_fixture()?;
+    let (mut chain, _) = yani::parse_chain_parts(
+        &root.join("decay"),
+        Some(&root.join("reactions")),
+        Some(&root.join("fission_yields")),
+        None,
+    )
+    .expect("fixture chain parses");
+    let sm158 = chain.get_mut("Sm158").expect("Sm158 is in the fixture");
+    let mut continua = 0;
+    for source in &mut sm158.sources {
+        if source.particle != "photon" {
+            continue;
+        }
+        if let yani::DecaySourceDistribution::Tabular { interpolation, .. } =
+            &mut source.distribution
+        {
+            *interpolation = law;
+            continua += 1;
+        }
+    }
+    assert_eq!(continua, 1, "Sm158 should carry one photon continuum");
+
+    let dir = std::env::temp_dir().join(format!(
+        "yani-wasm-sm158-{}-{}",
+        law.map_or("none", |l| l.name()),
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    yani::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+    let mut session = YaniSession::new();
+    for (subsection, file) in [
+        ("decay", "nuclides.arrow"),
+        ("decay", "decay_modes.arrow"),
+        ("decay", "sources.arrow"),
+        ("reactions", "reactions.arrow"),
+        ("fission_yields", "fission_yields.arrow"),
+        ("fission_yields", "aliases.arrow"),
+    ] {
+        let path = dir.join(subsection).join(file);
+        if path.exists() {
+            session
+                .add_chain_section(subsection, file, std::fs::read(&path).unwrap())
+                .unwrap();
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    session.load_chain().expect("chain loads");
+    // Decay only, so no cross sections are needed.
     session
         .build_material(r#"{"Sm158": 1.0}"#, 7.5, "g/cm3", "atom", 1.0)
         .unwrap();
+    Some(session)
+}
+
+/// A continuum whose data states no interpolation law has no known integral,
+/// so the contact dose cannot be formed and the run fails naming the nuclide,
+/// rather than reporting a dose short by an unknown amount.
+#[test]
+fn a_continuum_without_a_law_fails_the_contact_dose_naming_it() {
+    let _exclusive = exclusive();
+    let Some(mut session) = session_with_sm158_law(None) else {
+        eprintln!("skipping: run scripts/fetch_test_fixtures.py first");
+        return;
+    };
     let error = session
         .run(r#"[]"#, r#"[{"dt": 10.0}]"#)
         .expect_err("the contact dose needs the continuum's law");
@@ -664,4 +718,36 @@ fn a_continuum_without_a_law_fails_the_contact_dose_naming_it() {
         error.contains("Sm158") && error.contains("interpolation"),
         "{error}"
     );
+}
+
+/// With its law stated, the continuum is integrated: the step reports it apart
+/// from the lines with a finite emission rate, and Sm158's contact dose, all
+/// of which comes from the continuum, is positive.
+#[test]
+fn a_continuum_with_a_law_reaches_the_contact_dose() {
+    let _exclusive = exclusive();
+    let Some(mut session) = session_with_sm158_law(Some(yani::Interpolation::Histogram)) else {
+        eprintln!("skipping: run scripts/fetch_test_fixtures.py first");
+        return;
+    };
+    let out = session
+        .run(r#"[]"#, r#"[{"dt": 10.0}]"#)
+        .expect("a stated law integrates");
+    let steps: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
+    let step = &steps[0];
+
+    let continua = step["photon_continua"].as_array().unwrap();
+    let sm158 = continua
+        .iter()
+        .find(|c| c["nuclide"] == "Sm158")
+        .expect("Sm158's continuum is reported");
+    assert_eq!(sm158["interpolation"], "histogram");
+    let emission_rate = sm158["emission_rate"].as_f64().unwrap();
+    assert!(
+        emission_rate.is_finite() && emission_rate > 0.0,
+        "{emission_rate}"
+    );
+
+    let dose = step["contact_dose_by_nuclide"]["Sm158"].as_f64().unwrap();
+    assert!(dose.is_finite() && dose > 0.0, "{dose}");
 }

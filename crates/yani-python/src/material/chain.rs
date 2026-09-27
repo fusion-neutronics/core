@@ -230,8 +230,8 @@ impl PyChain {
     ///     intensity its emission rate per atom [1/s], and its interpolation is
     ///     None. A ``"tabular"`` one is a continuum: each intensity is the
     ///     emission-rate density per atom [1/s/eV] at that energy, read between
-    ///     energies by ``interpolation`` (``"histogram"`` or
-    ///     ``"linear-linear"``, the ENDF laws by name), which is None where the
+    ///     energies by ``interpolation``, the ENDF law by name (e.g.
+    ///     ``"histogram"`` or ``"linear-linear"``), which is None where the
     ///     data states no law.
     #[getter]
     pub fn photon_sources(&self, py: Python) -> Py<PyAny> {

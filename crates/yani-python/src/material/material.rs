@@ -885,14 +885,18 @@ impl PyMaterial {
     /// rather than a set of lines, and ``decay_photon_continua()`` returns it.
     ///
     /// The two lists are the ``(x, p)`` pair the source distributions take, so
-    /// the spectrum round-trips straight into a photon transport run:
+    /// the lines round-trip straight into a photon transport source:
     ///
     ///     >>> energies, rates = activated.decay_photon_spectrum()
     ///     >>> source = PhotonSource(energy=sources.Discrete(energies, rates))
     ///
     /// ``Discrete`` normalizes the weights, so the shape is what transport
-    /// samples; keep ``sum(rates)`` yourself for the absolute emission rate
-    /// (photons/s) that scales the tallies.
+    /// samples. ``sum(rates)`` is the line emission rate (photons/s) only.
+    /// That source leaves out every continuum, which for a continuum emitter
+    /// can be most of its photons (all of them for Sm158 in ENDF/B-VIII.1), so
+    /// the rate that scales the tallies also needs
+    /// ``sum(c.emission_rate for c in activated.decay_photon_continua())``,
+    /// and a complete source needs each continuum added as well.
     ///
     /// Returns:
     ///     tuple[list[float], list[float]]: Line energies (eV) and their
