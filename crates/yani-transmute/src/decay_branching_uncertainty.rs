@@ -25,7 +25,8 @@
 //!
 //! Only the inventory moves. A parent's per-decay emission (its lines and
 //! decay energy) is the decay scheme's and stays nominal, since no correlation
-//! between a ratio and an absolute line intensity is published.
+//! between a ratio and an absolute line intensity is published, and the report
+//! lists it under `not_perturbed`.
 
 use std::collections::{BTreeSet, HashMap};
 

@@ -1438,6 +1438,17 @@ fn run_replicas(
             .not_perturbed
             .insert(0, "decay branching ratio".to_string()),
         Some(b) => {
+            // A drawn ratio moves the inventory only. The parent's own lines
+            // and decay energy per decay stay those of the nominal scheme, so
+            // a photon source or dose spread does not cover this coupling.
+            if !b.two_modes.is_empty() {
+                info.not_perturbed.insert(
+                    0,
+                    "decay emission per branch (line intensities and decay energy \
+                     follow the nominal branching)"
+                        .to_string(),
+                );
+            }
             info.decay_branchings_perturbed =
                 b.two_modes.iter().map(|t| t.parent.clone()).collect();
             info.no_decay_branching_uncertainty = b.without.clone();

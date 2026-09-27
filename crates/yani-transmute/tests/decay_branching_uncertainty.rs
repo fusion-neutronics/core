@@ -265,6 +265,13 @@ fn every_parent_held_at_nominal_is_named_by_why() {
         .not_perturbed
         .iter()
         .any(|s| s == "decay branching ratio"));
+    assert!(
+        info.not_perturbed
+            .iter()
+            .any(|s| s.starts_with("decay emission per branch")),
+        "the nominal per-branch emission must be stated: {:?}",
+        info.not_perturbed
+    );
 
     // What is held at nominal does not move at all.
     for (daughter, parent) in [
@@ -325,6 +332,10 @@ fn switched_off_nothing_is_read() {
         .not_perturbed
         .iter()
         .any(|s| s == "decay branching ratio"));
+    assert!(!info
+        .not_perturbed
+        .iter()
+        .any(|s| s.starts_with("decay emission per branch")));
     assert!(info.decay_branchings_perturbed.is_empty());
     assert!(info.no_decay_branching_uncertainty.is_empty());
     assert_eq!(info.decay_branchings_sampled, 0);
