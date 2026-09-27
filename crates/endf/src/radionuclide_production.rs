@@ -65,6 +65,11 @@ impl RadionuclideProduction {
 /// `(ZAP, LFS)` pair are merged into one entry, and the MF=8 excitation energy
 /// attached where there is one. The tabulated functions are returned exactly
 /// as evaluated.
+///
+/// A state whose ZAP stays zero (IZAP = 0 with no MF=8 subsection to name it)
+/// is keyed by `(0, LFS)` too, so two such subsections at the same LFS in one
+/// file merge and the later curve replaces the earlier. None of the six
+/// surveyed libraries has such a pair.
 pub fn radionuclide_production(material: &Material) -> BTreeMap<i32, Vec<RadionuclideProduction>> {
     let mut by_mt: BTreeMap<i32, BTreeSet<i32>> = BTreeMap::new();
     for &(mf, mt) in material.section_data.keys() {

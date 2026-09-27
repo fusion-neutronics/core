@@ -174,6 +174,9 @@ fn a_zero_izap_mf8_does_not_name_is_skipped_with_its_reason() {
 
     let reaction = endf::Reaction::from_endf(107, &al27).expect("the reaction reads");
     let names: Vec<&str> = reaction.products.iter().map(|p| p.name.as_str()).collect();
-    assert!(names.contains(&"Na24"), "{names:?}");
-    assert!(!names.iter().any(|n| n.starts_with('0')), "{names:?}");
+    assert_eq!(
+        names,
+        ["Na24"],
+        "only the resolved ground state is a product"
+    );
 }
