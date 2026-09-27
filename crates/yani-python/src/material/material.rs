@@ -975,8 +975,10 @@ impl PyMaterial {
     /// photon effective-dose coefficient for anterior-posterior irradiation.
     ///
     /// Follows the FISPACT-II manual (UKAEA-CCFE-RE(21)02, Appendix C.7.1) for
-    /// the absorbed-air quantity and agrees with OpenMC's
-    /// ``Material.get_photon_contact_dose_rate``.
+    /// the absorbed-air quantity. For photon lines it agrees with OpenMC's
+    /// ``Material.get_photon_contact_dose_rate``; a continuum is integrated
+    /// under its evaluated law, which OpenMC does not do, so a continuum
+    /// emitter differs from it by design.
     ///
     /// Bremsstrahlung from decay electrons is not modelled, and nuclides whose
     /// radiation the chain file does not describe contribute nothing. Photon

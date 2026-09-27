@@ -294,6 +294,8 @@ impl Info {
                 "fission yield",
                 "isomeric branching (MF=9/MF=10)",
                 "cross-material covariance (MAT1 != 0)",
+                "decay photon line intensity",
+                "decay photon continuum normalisation",
             ]
             .iter()
             .map(|s| s.to_string())
