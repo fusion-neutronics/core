@@ -769,6 +769,18 @@ pub struct Nuclide {
     /// Fission yields by incident energy in eV. Empty when the nuclide does
     /// not fission, or when its yields are borrowed from another nuclide.
     pub yield_data: BTreeMap<String, FissionYields>,
+    /// The yield evaluation `yield_data` is derived from, exactly as the tape
+    /// gives it: the independent (MT=454) and cumulative (MT=459) yields with
+    /// their DY, every product under its own name and in tape order.
+    ///
+    /// Kept beside `yield_data` rather than folded into it because the
+    /// derivation is not reversible. It maps a product with no decay data onto
+    /// a stand-in and sums products that land on the same name, and the DY of
+    /// such a sum is not stated anywhere: it would need the correlation
+    /// between its parts, which no evaluation publishes. A nuclide that
+    /// borrows its yields carries the evaluation it borrows them from, as it
+    /// carries the yields. `None` where there are no yields.
+    pub yield_evaluation: Option<FissionProductYields>,
     /// The nuclide whose yields stand in for this one's, where the library has
     /// none of its own.
     pub borrowed_yields_from: Option<String>,
@@ -1164,6 +1176,7 @@ impl Chain {
                             }
                             nuclide.yield_data.insert(energy_key(*energy), yields);
                         }
+                        nuclide.yield_evaluation = Some(fpy.clone());
                     }
                     None => {
                         nuclide.borrowed_yields_from =
@@ -1184,8 +1197,10 @@ impl Chain {
             .collect();
         for (i, from) in borrowed {
             if let Some(source) = chain.get(&from) {
-                let yields = source.yield_data.clone();
+                let (yields, evaluation) =
+                    (source.yield_data.clone(), source.yield_evaluation.clone());
                 chain.nuclides[i].yield_data = yields;
+                chain.nuclides[i].yield_evaluation = evaluation;
             }
         }
 

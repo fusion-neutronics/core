@@ -145,6 +145,7 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 | `synthetic-laws.ace` | DLW laws 2, 4, 7, 9, 11, 61 and 66 |
 | `synthetic-denormal.ace` | The float form NJOY writes for a denormal, `6.10562372605-318` |
 | `synthetic-nfy.endf` | MF8 MT=454 and MT=459, the fission product yields |
+| `dec-092_U_235` | MF8 MT=457 decay data: a fissioning parent, so the yields above reach a chain |
 | `synthetic-shapes.endf` | MF2 LRF=2 Breit-Wigner, MF5 LF=12 Madland-Nix, MF6 LANG=2 and LAW=6, MF13 |
 
 ### Fixtures still wanted
