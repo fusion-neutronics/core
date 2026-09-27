@@ -294,10 +294,13 @@ pub fn compton() -> Schema {
 /// the same `(mt, subsection_idx, block_idx)`, and that triple is the key.
 ///
 /// `mt` is the reaction the section belongs to and `mt1`/`mat1` the reaction it
-/// is correlated with, so the diagonal blocks are the rows with `mat1 == 0 &&
-/// (mt1 == 0 || mt1 == mt)`. Those are the only rows for which the matrix is
-/// symmetric in itself: an off-diagonal block's transpose is the (`mt1`, `mt`)
-/// block, not the block itself.
+/// is correlated with. `mat1` is written as the tape has it: ENDF-102 33.3.1
+/// allows both 0 and the evaluation's own MAT (the `mat` column) for this
+/// material, and `xmf1` both 0 and 3 for a cross section. So the diagonal
+/// blocks are the rows with `mat1` either of those, `xmf1` 0 or 3 and `mt1 ==
+/// 0 || mt1 == mt`. Those are the only rows for which the matrix is symmetric
+/// in itself: an off-diagonal block's transpose is the (`mt1`, `mt`) block,
+/// not the block itself.
 ///
 /// The `kind` discriminator selects which columns are populated, the way
 /// `distributions.arrow` uses `type`: `"ni"` for a covariance given explicitly,
@@ -356,6 +359,12 @@ pub fn covariance() -> Schema {
         f64("xlfss", true),
         f64s("ei", true),
         f64s("wei", true),
+        // The evaluation's own MAT, repeated on every row. ENDF-102 33.3.1
+        // lets `mat1` name this material rather than 0, so without it a
+        // reader cannot tell a block within this evaluation from one with
+        // another. Null in a file written before the column existed, and a
+        // reader then knows only `mat1 == 0` as this evaluation.
+        i32("mat", true),
     ])
 }
 

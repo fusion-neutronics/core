@@ -3,7 +3,11 @@
 //! A faithful dump, not a transformation. Every column is a field of
 //! [`endf::mf::covariance::Mf33Subsection`], [`NiSubsection`] or
 //! [`NcSubsection`], written in the parser's own order and units, so reading
-//! the file back reconstructs exactly what the parser produced.
+//! the file back reconstructs exactly what the parser produced. The one
+//! addition is `mat`, the evaluation's own MAT from the tape's control
+//! columns: `mat1` is kept as written, and ENDF-102 33.3.1 lets it name this
+//! material by its MAT rather than by 0, which a reader can only recognise
+//! with the MAT beside it.
 //!
 //! Nothing is reshaped on the way out. `fkk` keeps the format's packed order
 //! with its own `ls` beside it, because `ls=1` is a triangle whose transpose is
@@ -76,6 +80,10 @@ struct Rows {
     xlfss: Vec<Option<f64>>,
     ei: Vec<Vec<f64>>,
     wei: Vec<Vec<f64>>,
+
+    // The evaluation's own MAT, on every row, so a reader can tell a `mat1`
+    // naming this material from one naming another.
+    mat: Vec<Option<i32>>,
 }
 
 /// A count that came off the tape as `i64`, narrowed for the column.
@@ -92,6 +100,7 @@ impl Rows {
     #[allow(clippy::too_many_arguments)]
     fn push_common(
         &mut self,
+        mat: i32,
         mt: i32,
         subsection_idx: usize,
         block_idx: usize,
@@ -111,6 +120,7 @@ impl Rows {
         self.xmf1.push(Some(xmf1));
         self.xlfs1.push(Some(xlfs1));
         self.mtl.push(Some(narrow(mtl)));
+        self.mat.push(Some(mat));
     }
 
     /// Null every `kind = "ni"` column, for a row that is an NC block.
@@ -239,6 +249,7 @@ impl Rows {
             opt_floats(&self.xlfss),
             float_lists_or_null(&self.ei),
             float_lists_or_null(&self.wei),
+            opt_ints(&self.mat),
         ]
     }
 }
@@ -264,11 +275,12 @@ fn covariance_mts(material: &Material) -> Vec<i32> {
 /// is a running index over both rather than one per kind. Two subsections of
 /// one section may name the same (MAT1, MT1), which is why the position is
 /// carried explicitly instead of being recovered from the keys.
-fn push_section(rows: &mut Rows, mt: i32, mf33: &Mf33) {
+fn push_section(rows: &mut Rows, mat: i32, mt: i32, mf33: &Mf33) {
     for (subsection_idx, sub) in mf33.subsections.iter().enumerate() {
         let mut block_idx = 0;
         for block in &sub.nc_subsections {
             rows.push_common(
+                mat,
                 mt,
                 subsection_idx,
                 block_idx,
@@ -284,6 +296,7 @@ fn push_section(rows: &mut Rows, mt: i32, mf33: &Mf33) {
         }
         for block in &sub.ni_subsections {
             rows.push_common(
+                mat,
                 mt,
                 subsection_idx,
                 block_idx,
@@ -312,7 +325,7 @@ pub fn write_covariance(material: &Material, dir: &Path) -> Result<bool, Box<dyn
     let mut rows = Rows::default();
     for mt in covariance_mts(material) {
         if let Some(mf33) = material.mf33(mt) {
-            push_section(&mut rows, mt, mf33);
+            push_section(&mut rows, material.mat, mt, mf33);
         }
     }
 

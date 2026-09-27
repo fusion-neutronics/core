@@ -61,6 +61,9 @@ pub struct CovarianceBlock {
     /// MT this reaction is lumped into, from the section HEAD. `0` when it is
     /// not lumped.
     pub mtl: i32,
+    /// The evaluation's own MAT. `0` when the file does not state it, as one
+    /// written before the column existed does not.
+    pub mat: i32,
     /// The block itself.
     pub data: CovarianceData,
 }

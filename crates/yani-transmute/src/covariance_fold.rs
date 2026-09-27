@@ -1127,6 +1127,7 @@ mod stated_variance_tests {
             xmf1: 0.0,
             xlfs1: 0.0,
             mtl: 0,
+            mat: 0,
             data: CovarianceData::Ni(ni),
         }
     }
@@ -1664,6 +1665,7 @@ mod shielded_split_tests {
             xmf1: 0.0,
             xlfs1: 0.0,
             mtl: 0,
+            mat: 0,
             data: CovarianceData::Ni(NiSubsection {
                 lb: 1,
                 ek: GRID.to_vec(),

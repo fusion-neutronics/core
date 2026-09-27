@@ -118,6 +118,7 @@ pub fn read_covariance(
             xmf1: float_or_zero(&batch, "xmf1", row),
             xlfs1: float_or_zero(&batch, "xlfs1", row),
             mtl: int_or_zero(&batch, "mtl", row) as i32,
+            mat: int_or_zero(&batch, "mat", row) as i32,
             data,
         });
     }

@@ -22,6 +22,14 @@ use endf::Material;
 /// Li6 and Fe56 both carry MF=33; Li6 is the smaller of the two.
 const LI6_ENDF: &[u8] = include_bytes!("../../endf/fixtures/n-003_Li_006_trimmed.endf.xz");
 const FE56_ENDF: &[u8] = include_bytes!("../../endf/fixtures/n-026_Fe_056_trimmed.endf.xz");
+/// JEFF-4.0 Be9's MF=1 MT=451 and MF=33 only. Most of its cross-reaction
+/// blocks name its own MAT (425) as `mat1`, and 130 pairs are stored in both
+/// orientations.
+const BE9_ENDF: &[u8] = include_bytes!("../../endf/fixtures/n-004_Be_009_jeff-4.0_mf33.endf.xz");
+/// ENDF/B-VIII.1 Np237's MF=1 MT=451 and its MF=33 sections for MT 16, 17, 18
+/// and 102. Its cross-reaction blocks name its own MAT (9346), several of them
+/// from the higher MT's section with MT1 below MT.
+const NP237_ENDF: &[u8] = include_bytes!("../../endf/fixtures/n-093_Np_237_mf33.endf.xz");
 /// In115 has no MF=33 at all, which is what "absent" has to be tested against.
 const IN115_ENDF: &[u8] = include_bytes!("../../endf/fixtures/n-049_In-115_trimmed.endf.xz");
 
@@ -174,6 +182,7 @@ fn round_trip(compressed: &[u8], name: &str, expect_mts: &[i32]) {
     let xmf1 = floats(&batch, "xmf1");
     let xlfs1 = floats(&batch, "xlfs1");
     let mtl = ints(&batch, "mtl");
+    let mat = ints(&batch, "mat");
 
     // Every row, keyed the way the schema says it is keyed. A duplicate key
     // would mean two blocks collapsed onto one identity, which is the failure
@@ -220,6 +229,7 @@ fn round_trip(compressed: &[u8], name: &str, expect_mts: &[i32]) {
                 assert_eq!(xmf1.value(row), sub.xmf1, "xmf1 at {key:?}");
                 assert_eq!(xlfs1.value(row), sub.xlfs1, "xlfs1 at {key:?}");
                 assert_eq!(mtl.value(row) as i64, mf33.mtl, "mtl at {key:?}");
+                assert_eq!(mat.value(row), material.mat, "mat at {key:?}");
 
                 match want_kind {
                     "nc" => {
@@ -269,6 +279,23 @@ fn li6_covariance_round_trips_through_the_section() {
 fn fe56_covariance_round_trips_through_the_section() {
     // MT=103 is (n,p).
     round_trip(FE56_ENDF, "fe56", &[103]);
+}
+
+#[test]
+fn be9_covariance_round_trips_through_the_section() {
+    round_trip(
+        BE9_ENDF,
+        "be9",
+        &[
+            1, 2, 102, 103, 104, 105, 107, 875, 876, 877, 878, 879, 880, 881, 882, 883, 884, 885,
+            886, 887, 888, 889, 890,
+        ],
+    );
+}
+
+#[test]
+fn np237_covariance_round_trips_through_the_section() {
+    round_trip(NP237_ENDF, "np237", &[16, 17, 18, 102]);
 }
 
 /// An evaluation with no MF=33 writes no file at all.
