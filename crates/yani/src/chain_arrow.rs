@@ -10,8 +10,8 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow_array::builder::{Float64Builder, ListBuilder, StringBuilder};
-use arrow_array::{Array, ArrayRef, Float64Array, ListArray, RecordBatch, StringArray};
+use arrow_array::builder::{Float64Builder, Int32Builder, ListBuilder, StringBuilder};
+use arrow_array::{Array, ArrayRef, Float64Array, Int32Array, ListArray, RecordBatch, StringArray};
 use arrow_ipc::reader::FileReader;
 use arrow_ipc::writer::FileWriter;
 use arrow_schema::{DataType, Field, Schema};
@@ -27,7 +27,7 @@ fn section_schema(path: &str) -> Schema {
 
 use crate::chain::{
     BranchCurve, BranchQuantity, BranchTable, ChainNuclide, ChainParts, ChainReaction, DecaySource,
-    DecaySourceDistribution, FissionYield, FissionYieldSet,
+    DecaySourceDistribution, EvaluatedYields, FissionYield, FissionYieldSet,
 };
 
 fn read_arrow_bytes(bytes: &[u8]) -> Result<Vec<RecordBatch>, Box<dyn Error>> {
@@ -85,6 +85,18 @@ fn list_f64(list: &ListArray, i: usize) -> Result<Vec<f64>, Box<dyn Error>> {
         .downcast_ref::<Float64Array>()
         .ok_or("list<f64> inner type mismatch")?;
     Ok((0..floats.len()).map(|j| floats.value(j)).collect())
+}
+
+/// A list of floats whose items may be null, as `None`.
+fn list_opt_f64(list: &ListArray, i: usize) -> Result<Vec<Option<f64>>, Box<dyn Error>> {
+    let values = list.value(i);
+    let floats = values
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or("list<f64> inner type mismatch")?;
+    Ok((0..floats.len())
+        .map(|j| (!floats.is_null(j)).then(|| floats.value(j)))
+        .collect())
 }
 
 fn list_str(list: &ListArray, i: usize) -> Result<Vec<String>, Box<dyn Error>> {
@@ -324,6 +336,8 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
                     .push(FissionYield {
                         energy: energies.value(i),
                         products: pairs,
+                        independent: None,
+                        cumulative: None,
                     });
             }
         }
@@ -379,7 +393,8 @@ fn ensure_nuclide<'a>(
 /// - `decay_dir`: `nuclides.arrow` (name, half_life, decay_energy) plus optional
 ///   `decay_modes.arrow` and `sources.arrow`.
 /// - `reactions_dir`: optional `reactions.arrow`.
-/// - `fpy_dir`: optional `fission_yields.arrow` and `aliases.arrow`.
+/// - `fpy_dir`: optional `fission_yields.arrow`, `aliases.arrow` and
+///   `evaluated_yields.arrow`.
 ///
 /// The three directories may come from different libraries. Nuclides that
 /// appear only in the reactions / fission-yields parts are created with no
@@ -449,10 +464,85 @@ impl ChainSections {
     }
 }
 
+/// Attach `fission_yields/evaluated_yields.arrow` to the nominal yields read
+/// from `fission_yields.arrow`, by nuclide and incident energy.
+///
+/// Every row has to land on a nominal one. The evaluated yields ride on
+/// [`FissionYield`], so a row with nowhere to go is either a file written
+/// against different nominal yields or a damaged one, and dropping it would
+/// lose the data the file exists to keep.
+fn attach_evaluated_yields(
+    by_nuclide: &mut HashMap<String, Vec<FissionYield>>,
+    bytes: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    const SECTION: &str = "fission_yields/evaluated_yields.arrow";
+    for batch in read_section_bytes(bytes, SECTION, SECTION)? {
+        let nuclides = col::<StringArray>(&batch, "nuclide")?;
+        let energies = col::<Float64Array>(&batch, "energy")?;
+        let kinds = col::<StringArray>(&batch, "kind")?;
+        let interpolation = col::<Int32Array>(&batch, "interpolation")?;
+        let products_col = col::<ListArray>(&batch, "products")?;
+        let yields_col = col::<ListArray>(&batch, "yields")?;
+        let sigmas_col = col::<ListArray>(&batch, "yield_uncertainties")?;
+        for i in 0..batch.num_rows() {
+            let (nuclide, energy, kind) = (nuclides.value(i), energies.value(i), kinds.value(i));
+            let products = list_str(products_col, i)?;
+            let yields = list_f64(yields_col, i)?;
+            let uncertainties = if sigmas_col.is_null(i) {
+                vec![None; products.len()]
+            } else {
+                list_opt_f64(sigmas_col, i)?
+            };
+            if yields.len() != products.len() || uncertainties.len() != products.len() {
+                return Err(format!(
+                    "{SECTION}: {nuclide} {kind} at {energy} eV has {} products, {} yields \
+                     and {} uncertainties",
+                    products.len(),
+                    yields.len(),
+                    uncertainties.len()
+                )
+                .into());
+            }
+            let entry = by_nuclide
+                .get_mut(nuclide)
+                .and_then(|sets| sets.iter_mut().find(|y| y.energy == energy))
+                .ok_or_else(|| {
+                    format!(
+                        "{SECTION}: {nuclide} at {energy} eV has no row in \
+                         fission_yields/fission_yields.arrow to belong to"
+                    )
+                })?;
+            let slot = match kind {
+                "independent" => &mut entry.independent,
+                "cumulative" => &mut entry.cumulative,
+                other => {
+                    return Err(format!(
+                        "{SECTION}: unknown kind {other:?} for {nuclide} at {energy} eV \
+                         (expected independent or cumulative)"
+                    )
+                    .into())
+                }
+            };
+            if slot.is_some() {
+                return Err(
+                    format!("{SECTION}: {nuclide} has two {kind} rows at {energy} eV").into(),
+                );
+            }
+            *slot = Some(EvaluatedYields {
+                products,
+                yields,
+                uncertainties,
+                interpolation: (!interpolation.is_null(i)).then(|| interpolation.value(i)),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Parse a v2 split chain from bytes, with no filesystem involved.
 ///
 /// The filesystem entry point is [`parse_chain_parts`], which reads the same
-/// seven files and delegates here.
+/// eight files and delegates here.
 pub fn parse_chain_parts_from_bytes(
     parts: &ChainSections,
 ) -> Result<(HashMap<String, ChainNuclide>, BranchTable), Box<dyn Error>> {
@@ -637,8 +727,13 @@ pub fn parse_chain_parts_from_bytes(
                     .push(FissionYield {
                         energy: energies.value(i),
                         products: pairs,
+                        independent: None,
+                        cumulative: None,
                     });
             }
+        }
+        if let Some(bytes) = parts.fission_yields.get("evaluated_yields.arrow") {
+            attach_evaluated_yields(&mut by_nuclide, bytes)?;
         }
         for (name, yields) in by_nuclide {
             // `FissionYieldSet::new` sorts: the rows accumulate in Arrow row
@@ -646,6 +741,16 @@ pub fn parse_chain_parts_from_bytes(
             ensure_nuclide(&mut chain, &name).fission_yields =
                 Some(Arc::new(FissionYieldSet::new(yields)));
         }
+    }
+
+    if parts.fission_yields.contains_key("evaluated_yields.arrow")
+        && !parts.fission_yields.contains_key("fission_yields.arrow")
+    {
+        return Err(
+            "fission_yields/evaluated_yields.arrow was supplied without \
+                    fission_yields/fission_yields.arrow, whose rows it belongs to"
+                .into(),
+        );
     }
 
     // fission_yields/aliases.arrow -- inheritors copy a parent's yields.
@@ -818,6 +923,7 @@ pub fn parse_chain_parts(
     if let Some(fpy_dir) = fpy_dir {
         load_optional(fpy_dir, "fission_yields.arrow", &mut parts.fission_yields)?;
         load_optional(fpy_dir, "aliases.arrow", &mut parts.fission_yields)?;
+        load_optional(fpy_dir, "evaluated_yields.arrow", &mut parts.fission_yields)?;
     }
     if let Some(branch_dir) = branch_dir {
         load_optional(branch_dir, "branching.arrow", &mut parts.branching)?;
@@ -1036,6 +1142,67 @@ pub fn export_chain_parts<P: AsRef<Path>>(
             ],
         )?;
         write_arrow_file(&fy_dir.join("fission_yields.arrow"), schema, batch)?;
+    }
+
+    // fission_yields/evaluated_yields.arrow, written only when the chain
+    // carries evaluated yields, as the converter does. Without it a round trip
+    // would drop them quietly, since a missing optional file reads as "none".
+    {
+        let mut nuc_b = StringBuilder::new();
+        let mut energy_b = Float64Builder::new();
+        let mut kind_b = StringBuilder::new();
+        let mut interpolation_b = Int32Builder::new();
+        let mut products_b = ListBuilder::new(StringBuilder::new());
+        let mut yields_b = ListBuilder::new(Float64Builder::new());
+        let mut sigmas_b = ListBuilder::new(Float64Builder::new());
+        let mut rows = 0usize;
+        for name in &names {
+            let nuc = &chain[*name];
+            let Some(fy) = &nuc.fission_yields else {
+                continue;
+            };
+            for entry in &fy.yields {
+                for (kind, evaluated) in [
+                    ("independent", &entry.independent),
+                    ("cumulative", &entry.cumulative),
+                ] {
+                    let Some(evaluated) = evaluated else {
+                        continue;
+                    };
+                    nuc_b.append_value(&nuc.name);
+                    energy_b.append_value(entry.energy);
+                    kind_b.append_value(kind);
+                    interpolation_b.append_option(evaluated.interpolation);
+                    for p in &evaluated.products {
+                        products_b.values().append_value(p);
+                    }
+                    products_b.append(true);
+                    yields_b.values().append_slice(&evaluated.yields);
+                    yields_b.append(true);
+                    for sigma in &evaluated.uncertainties {
+                        sigmas_b.values().append_option(*sigma);
+                    }
+                    sigmas_b.append(true);
+                    rows += 1;
+                }
+            }
+        }
+        if rows > 0 {
+            let schema = Arc::new(section_schema("fission_yields/evaluated_yields.arrow"));
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(nuc_b.finish()),
+                    Arc::new(energy_b.finish()),
+                    Arc::new(kind_b.finish()),
+                    Arc::new(interpolation_b.finish()),
+                    Arc::new(products_b.finish()),
+                    Arc::new(yields_b.finish()),
+                    Arc::new(sigmas_b.finish()),
+                ],
+            )?;
+            write_arrow_file(&fy_dir.join("evaluated_yields.arrow"), schema, batch)?;
+        }
     }
 
     std::fs::write(
@@ -1473,6 +1640,143 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fissioning nuclide with the given nominal yield energies, the first
+    /// of them carrying evaluated yields when `evaluated` is set.
+    fn fissioning(name: &str, energies: &[f64], evaluated: bool) -> crate::chain::ChainNuclide {
+        use crate::chain::{EvaluatedYields, FissionYield, FissionYieldSet};
+        let yields = energies
+            .iter()
+            .enumerate()
+            .map(|(i, &energy)| FissionYield {
+                energy,
+                // A merged entry: the tape's I135 and I135_m1 summed.
+                products: vec![("I135".to_string(), 0.07), ("Cs137".to_string(), 0.06)],
+                independent: (evaluated && i == 0).then(|| EvaluatedYields {
+                    products: vec!["I135".into(), "I135_m1".into(), "Cs137".into()],
+                    yields: vec![0.05, 0.02, 0.06],
+                    // An evaluator's 0.0 and a null must both come back as
+                    // written, not one turned into the other.
+                    uncertainties: vec![Some(0.001), Some(0.0), None],
+                    interpolation: None,
+                }),
+                cumulative: (evaluated && i == 0).then(|| EvaluatedYields {
+                    products: vec!["Cs137".into()],
+                    yields: vec![0.0619],
+                    uncertainties: vec![Some(3.1e-4)],
+                    interpolation: Some(2),
+                }),
+            })
+            .collect();
+        crate::chain::ChainNuclide {
+            name: name.to_string(),
+            half_life: Some(2.2e16),
+            half_life_uncertainty: None,
+            decay_energy: 0.0,
+            decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
+            reactions: Vec::new(),
+            decays: Vec::new(),
+            fission_yields: Some(std::sync::Arc::new(FissionYieldSet::new(yields))),
+            sources: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn evaluated_yields_round_trip_and_absence_is_none() {
+        let dir = std::env::temp_dir().join(format!("yani-evaluated-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut chain = std::collections::HashMap::new();
+        chain.insert(
+            "U235".to_string(),
+            fissioning("U235", &[0.0253, 5.0e5], true),
+        );
+        chain.insert("Pu239".to_string(), fissioning("Pu239", &[0.0253], false));
+        super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+
+        let path = dir.join("fission_yields/evaluated_yields.arrow");
+        let batches = super::read_arrow_file(&path).expect("evaluated yields written");
+        let declared = nuclear_data_schema::section("fission_yields/evaluated_yields.arrow")
+            .expect("declared");
+        assert_eq!(batches[0].schema().fields(), declared.fields());
+        // One independent and one cumulative row, and nothing for the energy
+        // or the nuclide that carries none.
+        assert_eq!(batches[0].num_rows(), 2);
+
+        let read = |dir: &std::path::Path| {
+            parse_chain_parts(
+                &dir.join("decay"),
+                Some(&dir.join("reactions")),
+                Some(&dir.join("fission_yields")),
+                None,
+            )
+            .map(|(chain, _)| chain)
+        };
+        let back = read(&dir).expect("round trips");
+        for name in ["U235", "Pu239"] {
+            let (written, read) = (
+                &chain[name].fission_yields.as_ref().unwrap().yields,
+                &back[name].fission_yields.as_ref().unwrap().yields,
+            );
+            assert_eq!(written.len(), read.len());
+            for (w, r) in written.iter().zip(read) {
+                assert_eq!(w.energy, r.energy);
+                assert_eq!(w.products, r.products, "{name}: the nominal yields moved");
+                assert_eq!(w.independent, r.independent, "{name} at {} eV", w.energy);
+                assert_eq!(w.cumulative, r.cumulative, "{name} at {} eV", w.energy);
+            }
+        }
+
+        // Without the file the nominal yields read the same and nothing is
+        // evaluated, which is how a library published before it loads.
+        std::fs::remove_file(&path).unwrap();
+        let bare = read(&dir).expect("loads without evaluated yields");
+        let u235 = &bare["U235"].fission_yields.as_ref().unwrap().yields;
+        assert!(u235
+            .iter()
+            .all(|y| y.independent.is_none() && y.cumulative.is_none()));
+        assert_eq!(
+            u235[0].products,
+            back["U235"].fission_yields.as_ref().unwrap().yields[0].products
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An evaluated row with no nominal row to belong to is refused, not
+    /// dropped: it is the data the file exists to keep.
+    #[test]
+    fn an_evaluated_yield_with_no_nominal_row_is_refused() {
+        let root = std::env::temp_dir().join(format!("yani-orphan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let with = std::collections::HashMap::from([(
+            "U235".to_string(),
+            fissioning("U235", &[0.0253], true),
+        )]);
+        let without = std::collections::HashMap::from([(
+            "U235".to_string(),
+            fissioning("U235", &[5.0e5], false),
+        )]);
+        super::export_chain_parts(&with, root.join("a"), None).unwrap();
+        super::export_chain_parts(&without, root.join("b"), None).unwrap();
+        std::fs::copy(
+            root.join("a/fission_yields/evaluated_yields.arrow"),
+            root.join("b/fission_yields/evaluated_yields.arrow"),
+        )
+        .unwrap();
+
+        let err = parse_chain_parts(
+            &root.join("b/decay"),
+            None,
+            Some(&root.join("b/fission_yields")),
+            None,
+        )
+        .expect_err("an orphaned evaluated row must not load")
+        .to_string();
+        assert!(err.contains("U235 at 0.0253 eV has no row"), "got: {err}");
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// A chain directory in the retired flat layout must be refused, not read

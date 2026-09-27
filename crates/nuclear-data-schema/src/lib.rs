@@ -50,6 +50,10 @@ pub fn all_sections() -> Vec<(&'static str, Schema)> {
         ("fission_photon.arrow", fission_photon()),
         ("fission_yields/aliases.arrow", fission_yields_aliases()),
         (
+            "fission_yields/evaluated_yields.arrow",
+            fission_yields_evaluated_yields(),
+        ),
+        (
             "fission_yields/fission_yields.arrow",
             fission_yields_fission_yields(),
         ),
@@ -511,6 +515,45 @@ pub fn fission_yields_aliases() -> Schema {
     ])
 }
 
+/// `fission_yields/evaluated_yields.arrow`
+///
+/// The yield evaluations exactly as the tapes give them, one row per
+/// (fissioning nuclide, incident energy, kind). `kind` is `"independent"`
+/// (MT=454) or `"cumulative"` (MT=459). `products` are named from the tape's
+/// ZAFP and FPS and kept in tape order, including products the decay library
+/// has no data for; `yields` and `yield_uncertainties` are its Y and DY
+/// verbatim, so an evaluator's 0.0 is 0.0 here. A reader treats a null or 0.0
+/// DY as not stated, never as an exact yield. `interpolation` is the ENDF law
+/// from the next lower energy to this one, null at the lowest energy, where the
+/// tape puts LE in that field instead.
+///
+/// A separate file from [`fission_yields_fission_yields`] because that one is
+/// derived and this is not: there a product the decay library lacks is mapped
+/// onto a stand-in, products landing on the same name are summed, and every
+/// energy is padded to one product list. A DY cannot sit beside such a sum
+/// without the correlation of its parts, which no evaluation publishes. Being
+/// a file of its own also keeps it off the wire for a consumer that only
+/// solves: the browser never asks for it, and an older build never reads it.
+///
+/// There is no correlation column because no evaluation publishes yield
+/// correlations (ENDF/B-VIII.1, JEFF-4.0 and JENDL-5.0 carry only MF=8
+/// MT=454/459). One would be appended when an evaluation has one.
+pub fn fission_yields_evaluated_yields() -> Schema {
+    Schema::new(vec![
+        utf8("nuclide", false),
+        f64("energy", false),
+        utf8("kind", false),
+        i32("interpolation", true),
+        utf8s("products", false),
+        f64s("yields", false),
+        f64s("yield_uncertainties", true),
+    ])
+    .with_metadata(meta([
+        ("filetype", "transmutation-fission_yields_evaluated"),
+        ("version", "2.0"),
+    ]))
+}
+
 /// `fission_yields/fission_yields.arrow`
 pub fn fission_yields_fission_yields() -> Schema {
     Schema::new(vec![
@@ -657,7 +700,7 @@ mod tests {
         let sections = all_sections();
         assert_eq!(
             sections.len(),
-            20,
+            21,
             "section count changed; update the manifest"
         );
         let mut paths: Vec<&str> = sections.iter().map(|(p, _)| *p).collect();
