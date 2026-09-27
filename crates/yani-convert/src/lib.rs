@@ -33,7 +33,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow_array::builder::{Float64Builder, ListBuilder, StringBuilder};
+use arrow_array::builder::{Float64Builder, Int32Builder, ListBuilder, StringBuilder};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::writer::{FileWriter, IpcWriteOptions};
 use arrow_ipc::CompressionType;
@@ -159,6 +159,25 @@ pub(crate) fn list_of(values: &[Vec<f64>]) -> ArrayRef {
     for row in values {
         b.values().append_slice(row);
         b.append(true);
+    }
+    Arc::new(b.finish())
+}
+
+pub(crate) fn string_lists(values: &[Vec<String>]) -> ArrayRef {
+    let mut b = ListBuilder::new(StringBuilder::new());
+    for row in values {
+        for v in row {
+            b.values().append_value(v);
+        }
+        b.append(true);
+    }
+    Arc::new(b.finish())
+}
+
+pub(crate) fn opt_ints(values: &[Option<i32>]) -> ArrayRef {
+    let mut b = Int32Builder::new();
+    for v in values {
+        b.append_option(*v);
     }
     Arc::new(b.finish())
 }
@@ -373,23 +392,17 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
         }
     }
 
-    let mut product_lists = ListBuilder::new(StringBuilder::new());
-    for row in &products {
-        for p in row {
-            product_lists.values().append_value(p);
-        }
-        product_lists.append(true);
-    }
     write_section(
         &dir.join("fission_yields.arrow"),
         "fission_yields/fission_yields.arrow",
         vec![
             strings(&nuc),
             floats(&energy),
-            Arc::new(product_lists.finish()),
+            string_lists(&products),
             list_of(&yields),
         ],
     )?;
+    write_evaluated_yields(chain, dir)?;
 
     // Written only when there is something to say, matching the Python
     // converter: a library with no borrowed yields leaves no aliases file.
@@ -401,6 +414,86 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
         )?;
     }
     Ok(())
+}
+
+/// Write `fission_yields/evaluated_yields.arrow`: every yield evaluation
+/// exactly as its tape gives it, both MT=454 and MT=459, with DY.
+///
+/// Nothing here is derived. Where `fission_yields.arrow` maps products onto
+/// the decay library and sums the ones that meet, this keeps the tape's
+/// products, values and uncertainties as they are, so an evaluator's 0.0 DY is
+/// written as 0.0. Only owners get rows: a nuclide that borrows its yields is
+/// in `aliases.arrow`, as it is for the nominal yields.
+///
+/// Every row is at an energy the owner has a nominal row for, since a reader
+/// attaches it there. An evaluation that breaks that (cumulative yields with
+/// no independent ones beside them) is refused rather than written as a file
+/// no reader could load.
+fn write_evaluated_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Error>> {
+    let mut nuc = Vec::new();
+    let mut energy = Vec::new();
+    let mut kind = Vec::new();
+    let mut interpolation = Vec::new();
+    let mut products: Vec<Vec<String>> = Vec::new();
+    let mut yields: Vec<Vec<f64>> = Vec::new();
+    let mut sigmas: Vec<Vec<f64>> = Vec::new();
+
+    for n in &chain.nuclides {
+        if n.borrowed_yields_from.is_some() {
+            continue;
+        }
+        let Some(evaluation) = &n.yield_evaluation else {
+            continue;
+        };
+        let nominal = n.yield_energies();
+        for (label, sets, laws) in [
+            (
+                "independent",
+                &evaluation.independent,
+                &evaluation.independent_interpolation,
+            ),
+            (
+                "cumulative",
+                &evaluation.cumulative,
+                &evaluation.cumulative_interpolation,
+            ),
+        ] {
+            for ((e, set), law) in evaluation.energies.iter().zip(sets).zip(laws) {
+                if !nominal.contains(e) {
+                    return Err(format!(
+                        "{}: {label} yields at {e} eV have no independent yields at \
+                         that energy for the chain to be built from",
+                        n.name
+                    )
+                    .into());
+                }
+                nuc.push(n.name.clone());
+                energy.push(*e);
+                kind.push(label.to_string());
+                interpolation.push(law.map(i32::try_from).transpose()?);
+                products.push(set.iter().map(|p| p.name.clone()).collect());
+                yields.push(set.iter().map(|p| p.yield_.0).collect());
+                sigmas.push(set.iter().map(|p| p.yield_.1).collect());
+            }
+        }
+    }
+
+    if nuc.is_empty() {
+        return Ok(());
+    }
+    write_section(
+        &dir.join("evaluated_yields.arrow"),
+        "fission_yields/evaluated_yields.arrow",
+        vec![
+            strings(&nuc),
+            floats(&energy),
+            strings(&kind),
+            opt_ints(&interpolation),
+            string_lists(&products),
+            list_of(&yields),
+            list_of(&sigmas),
+        ],
+    )
 }
 
 /// Provenance and the chain manifest, matching what the Python converter

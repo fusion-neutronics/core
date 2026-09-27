@@ -820,3 +820,145 @@ fn absorbing_partials_in_file_order_matches_adding_one_at_a_time() {
     assert_eq!(rows_merged, rows_one_at_a_time);
     assert_eq!(stats_merged, stats_one_at_a_time);
 }
+
+/// Both yield evaluations reach the file exactly as the tape gives them, and
+/// the nominal yields the solver reads are the ones they always were.
+///
+/// The decay set is the fixture chain plus U235, so most products have no
+/// decay data and the nominal yields are a derivation the evaluation cannot be
+/// recovered from. That is the case the evaluated file exists for.
+#[test]
+fn fission_yield_evaluations_are_written_verbatim() {
+    use arrow_array::{Array, Float64Array, Int32Array, ListArray, StringArray};
+
+    let mut blobs = DECAY.to_vec();
+    blobs.push(fixture!("dec-092_U_235.endf.xz"));
+    let decay = materials(&blobs);
+    let fpy = materials(FPY);
+    let mut q_values = endf::chain::q_values(&materials(NEUTRON));
+    q_values
+        .entry("U235".to_string())
+        .or_default()
+        .insert(18, 1.9e8);
+    let chain = Chain::from_endf(&decay, &fpy, &q_values, &endf::chain::DEFAULT_REACTIONS)
+        .expect("chain builds");
+    let tape = endf::FissionProductYields::from_material(&fpy[0]).expect("yields parse");
+
+    let dir = std::env::temp_dir().join(format!("yani-convert-evaluated-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    yani_convert::write_decay(&chain, &BTreeMap::new(), &dir.join("decay")).unwrap();
+    yani_convert::write_fission_yields(&chain, &dir.join("fission_yields")).unwrap();
+
+    let read_batch = |file: &str| {
+        let bytes = std::fs::read(dir.join("fission_yields").join(file)).unwrap();
+        let reader =
+            arrow_ipc::reader::FileReader::try_new(std::io::Cursor::new(bytes), None).unwrap();
+        let batches: Vec<_> = reader.map(Result::unwrap).collect();
+        assert_eq!(batches.len(), 1);
+        batches.into_iter().next().unwrap()
+    };
+    let batch = read_batch("evaluated_yields.arrow");
+    let declared =
+        nuclear_data_schema::section("fission_yields/evaluated_yields.arrow").expect("declared");
+    assert_eq!(batch.schema().fields(), declared.fields());
+    let column = |name: &str| batch.column_by_name(name).unwrap().clone();
+    let nuclide = column("nuclide");
+    let nuclide = nuclide.as_any().downcast_ref::<StringArray>().unwrap();
+    let energy = column("energy");
+    let energy = energy.as_any().downcast_ref::<Float64Array>().unwrap();
+    let kind = column("kind");
+    let kind = kind.as_any().downcast_ref::<StringArray>().unwrap();
+    let law = column("interpolation");
+    let law = law.as_any().downcast_ref::<Int32Array>().unwrap();
+    let lists: Vec<ListArray> = ["products", "yields", "yield_uncertainties"]
+        .iter()
+        .map(|c| {
+            column(c)
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .unwrap()
+                .clone()
+        })
+        .collect();
+
+    // Independent rows then cumulative, one per tape energy each.
+    let expected = [
+        (
+            "independent",
+            &tape.independent,
+            &tape.independent_interpolation,
+        ),
+        (
+            "cumulative",
+            &tape.cumulative,
+            &tape.cumulative_interpolation,
+        ),
+    ];
+    let mut row = 0;
+    for (label, sets, laws) in expected {
+        for (i, set) in sets.iter().enumerate() {
+            assert_eq!(nuclide.value(row), "U235");
+            assert_eq!(energy.value(row), tape.energies[i]);
+            assert_eq!(kind.value(row), label);
+            assert_eq!(
+                (!law.is_null(row)).then(|| law.value(row) as i64),
+                laws[i],
+                "{label} law at row {row}"
+            );
+            let products = lists[0].value(row);
+            let products = products.as_any().downcast_ref::<StringArray>().unwrap();
+            let yields = lists[1].value(row);
+            let yields = yields.as_any().downcast_ref::<Float64Array>().unwrap();
+            let sigmas = lists[2].value(row);
+            let sigmas = sigmas.as_any().downcast_ref::<Float64Array>().unwrap();
+            assert_eq!(products.len(), set.len());
+            for (j, p) in set.iter().enumerate() {
+                assert_eq!(products.value(j), p.name);
+                assert_eq!(yields.value(j), p.yield_.0, "{label} {} Y", p.name);
+                assert!(!sigmas.is_null(j));
+                assert_eq!(sigmas.value(j), p.yield_.1, "{label} {} DY", p.name);
+            }
+            row += 1;
+        }
+    }
+    assert_eq!(row, batch.num_rows(), "rows beyond the tape's");
+
+    // The nominal file still holds the derived yields and nothing else.
+    let nominal = read_batch("fission_yields.arrow");
+    let declared =
+        nuclear_data_schema::section("fission_yields/fission_yields.arrow").expect("declared");
+    assert_eq!(nominal.schema().fields(), declared.fields());
+    let u235 = chain.get("U235").unwrap();
+    assert_eq!(nominal.num_rows(), u235.yield_data.len());
+
+    // And yani carries the evaluation on the yields it solves with.
+    let (back, _) = yani::parse_chain_parts(
+        &dir.join("decay"),
+        None,
+        Some(&dir.join("fission_yields")),
+        None,
+    )
+    .expect("yani reads it");
+    let set = back["U235"]
+        .fission_yields
+        .as_ref()
+        .expect("U235 has yields");
+    assert_eq!(set.yields.len(), tape.energies.len());
+    for (i, y) in set.yields.iter().enumerate() {
+        assert_eq!(y.energy, tape.energies[i]);
+        let nominal = &u235.yield_data[&format!("{}", y.energy)];
+        let products: Vec<(String, f64)> = nominal.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        assert_eq!(y.products, products, "nominal yields at {} eV", y.energy);
+        for (evaluated, tape_set) in [
+            (&y.independent, &tape.independent[i]),
+            (&y.cumulative, &tape.cumulative[i]),
+        ] {
+            let evaluated = evaluated.as_ref().expect("both kinds carried");
+            let names: Vec<&str> = tape_set.iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(evaluated.products, names);
+            let sigmas: Vec<Option<f64>> = tape_set.iter().map(|p| Some(p.yield_.1)).collect();
+            assert_eq!(evaluated.uncertainties, sigmas);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
