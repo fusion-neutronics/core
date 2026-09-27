@@ -145,8 +145,12 @@ pub struct BranchState {
     /// to, in eV; `None` where that isomer's energy is unknown.
     pub level_energy_difference: Option<f64>,
     /// The evaluation's MF=3 for `mt` on the curve's `energy` nodes, in barns:
-    /// `None` where the file has no MF=3 for the MT, and a `None` item where
-    /// MF=3 is not tabulated at that node.
+    /// the tape's value where a node is one of its points and its own law
+    /// between them, not a copy of MF=3. `None` where the file has no MF=3
+    /// section for the MT. A `None` item where MF=3 is not tabulated at that
+    /// node, where its log law meets a zero, or where MF=3 jumps at a node
+    /// the curve does not repeat; a repeated node takes MF=3's left limit
+    /// first and its right limit second.
     pub mf3_cross_section: Option<Vec<Option<f64>>>,
 }
 

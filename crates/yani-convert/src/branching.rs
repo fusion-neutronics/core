@@ -134,17 +134,70 @@ pub fn normalisation_block(material: &Material) -> Option<String> {
     Some(body[first..=last].join("\n"))
 }
 
-/// A curve sampled on `energy`: its value inside its tabulated range, under its
-/// own interpolation law between points (so the tape's value wherever a node
-/// is one of its points), and null outside that range, where the file states
-/// nothing.
-fn sampled_on(curve: &Tabulated1D, energy: &[f64]) -> Vec<Option<f64>> {
+/// The tape's own limits of `curve` at `e` from the left and from the right,
+/// `None` for a side the tape states nothing about.
+///
+/// At one of the tape's points these are its stated values, and at a repeated
+/// x (a jump) the first and the last of them. Between points they are the
+/// region's interpolation law, except that a log law over a zero or negative
+/// end states nothing and gives `None`, unless both ends are zero, where the
+/// only value it admits is zero. `Tabulated1D::eval` would give NaN there
+/// (`0 * exp(ln(0/0))`) and returns one side only at a jump, so it is not used.
+fn tape_limits(curve: &Tabulated1D, e: f64) -> (Option<f64>, Option<f64>) {
     let (Some(&lo), Some(&hi)) = (curve.x.first(), curve.x.last()) else {
-        return vec![None; energy.len()];
+        return (None, None);
     };
+    if !(lo..=hi).contains(&e) {
+        return (None, None);
+    }
+    let first = curve.x.partition_point(|&x| x < e);
+    let past = curve.x.partition_point(|&x| x <= e);
+    if first < past {
+        return (Some(curve.y[first]), Some(curve.y[past - 1]));
+    }
+    // Strictly inside the bin from `first - 1` to `first`. The region is the
+    // first one whose last point lies beyond the bin's start, as in `eval`.
+    let bin = first - 1;
+    let law = curve
+        .breakpoints
+        .iter()
+        .zip(&curve.interpolation)
+        .find(|(&b, _)| (bin as i64) < b as i64 - 1)
+        .map_or(*curve.interpolation.last().unwrap_or(&2), |(_, &law)| law);
+    let (x0, y0, x1, y1) = (curve.x[bin], curve.y[bin], curve.x[first], curve.y[first]);
+    let value = if matches!(law, 4 | 5) && y0 == 0.0 && y1 == 0.0 {
+        Some(0.0)
+    } else if law_defined(law, x0, y0, x1, y1) {
+        Some(law_value(law, x0, y0, x1, y1, e)).filter(|v| v.is_finite())
+    } else {
+        None
+    };
+    (value, value)
+}
+
+/// A curve sampled on `energy`, `None` where the tape states nothing there.
+///
+/// Each node takes the tape's own value (see [`tape_limits`]): the stated one
+/// wherever the node is one of the tape's points, the region's law between
+/// them, and none outside the tabulated range. Where `energy` repeats a node
+/// (a jump in the row), the first copy takes the tape's left limit and the
+/// second its right, so a jump the two share is kept whole. A single node on a
+/// jump of the tape alone gets `None` rather than either side, since one
+/// number cannot hold the two values the tape states there.
+fn sampled_on(curve: &Tabulated1D, energy: &[f64]) -> Vec<Option<f64>> {
     energy
         .iter()
-        .map(|&e| (lo..=hi).contains(&e).then(|| curve.eval(e)))
+        .enumerate()
+        .map(|(i, &e)| {
+            let (left, right) = tape_limits(curve, e);
+            let repeats_next = energy.get(i + 1) == Some(&e);
+            let repeats_previous = i > 0 && energy[i - 1] == e;
+            match (repeats_previous, repeats_next) {
+                (false, true) => left,
+                (true, false) => right,
+                _ => left.filter(|_| left == right),
+            }
+        })
         .collect()
 }
 
@@ -862,9 +915,12 @@ pub fn extract_branching(
 /// list item per state in the order the row summed them, and the parent's
 /// [`normalisation_block`]. `mf3_cross_section` holds, per state, the MF=3
 /// for its MT sampled on this row's `energy`, so a reader can set each partial
-/// against the evaluation's own total point by point; an item is null where
-/// MF=3 is not tabulated, and the whole entry is null where the file has no
-/// MF=3 for the MT.
+/// against the evaluation's own total point by point. It is the tape's value
+/// on the nodes the two grids share and the tape's own law between its points,
+/// not a copy of MF=3: an item is null where MF=3 is not tabulated, where a
+/// log law meets a zero, and on a single node where MF=3 alone jumps (see
+/// [`sampled_on`]), and the whole entry is null where the file has no MF=3
+/// section for the MT.
 pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn Error>> {
     std::fs::create_dir_all(dir)?;
     let nuclide: Vec<String> = rows.iter().map(|r| r.nuclide.clone()).collect();
@@ -1073,6 +1129,48 @@ mod tests {
                 want_a + want_b
             );
         }
+    }
+
+    /// JEFF-4.0's Cs134 MT=102 is one log-log region starting (1e-5, 0),
+    /// (308.92, 0), (308.92, 6.01). `Tabulated1D::eval` gives NaN between the
+    /// two zeros; the tape admits only zero there, and states nothing where a
+    /// log law has one zero end.
+    #[test]
+    fn a_log_law_over_zeros_is_zero_or_unstated_never_nan() {
+        let curve = tab(
+            vec![1e-5, 308.92, 308.92, 1000.0, 2000.0],
+            vec![0.0, 0.0, 6.01, 3.0, 0.0],
+            5,
+        );
+        assert!(curve.eval(10.0).is_nan(), "the case this guards against");
+        let sampled = sampled_on(&curve, &[1e-6, 1e-5, 10.0, 500.0, 1500.0, 2000.0, 3000.0]);
+        assert_eq!(sampled[0], None, "below the table");
+        assert_eq!(sampled[1], Some(0.0), "a tape point");
+        assert_eq!(sampled[2], Some(0.0), "between two zeros");
+        let between = sampled[3].expect("both ends positive");
+        let expected = law_value(5, 308.92, 6.01, 1000.0, 3.0, 500.0);
+        assert_eq!(between, expected);
+        assert_eq!(sampled[4], None, "a log law with one zero end");
+        assert_eq!(sampled[5], Some(0.0), "a tape point");
+        assert_eq!(sampled[6], None, "above the table");
+        assert!(sampled.iter().flatten().all(|v| v.is_finite()));
+    }
+
+    /// At a jump of the tape, a row that repeats the node gets the tape's left
+    /// then right values; a row with a single node there gets neither.
+    #[test]
+    fn a_jump_in_mf3_keeps_both_sides_or_none() {
+        let curve = tab(vec![1.0, 2.0, 2.0, 3.0], vec![1.0, 1.0, 5.0, 5.0], 2);
+        assert_eq!(
+            sampled_on(&curve, &[1.5, 2.0, 2.0, 3.0]),
+            [Some(1.0), Some(1.0), Some(5.0), Some(5.0)]
+        );
+        assert_eq!(
+            sampled_on(&curve, &[1.5, 2.0, 3.0]),
+            [Some(1.0), None, Some(5.0)]
+        );
+        // A row jump where the tape is continuous takes the one value twice.
+        assert_eq!(sampled_on(&curve, &[3.0, 3.0]), [Some(5.0), Some(5.0)]);
     }
 
     /// A step jump in the sum survives the merge as a duplicated breakpoint.

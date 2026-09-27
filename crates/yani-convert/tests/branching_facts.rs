@@ -301,18 +301,38 @@ fn the_facts_round_trip_and_leave_the_curves_alone() {
     assert_eq!(sampled.len(), curve.energy.len());
     let (lo, hi) = (mf3.x[0], *mf3.x.last().expect("points"));
     let mut shared_nodes = 0;
-    for (&e, &value) in curve.energy.iter().zip(sampled) {
+    let mut jumps = 0;
+    for (i, (&e, &value)) in curve.energy.iter().zip(sampled).enumerate() {
         if e < lo || e > hi {
             assert_eq!(value, None, "MF=3 states nothing at {e} eV");
             continue;
         }
-        assert_eq!(value, Some(mf3.eval(e)), "at {e} eV");
-        // Where the partial and MF=3 share a node, the value is the tape's.
-        if let Ok(k) = mf3.x.binary_search_by(|x| x.total_cmp(&e)) {
-            assert_eq!(value, Some(mf3.y[k]));
-            shared_nodes += 1;
+        // The tape's points at this energy: more than one is a jump.
+        let first = mf3.x.partition_point(|&x| x < e);
+        let past = mf3.x.partition_point(|&x| x <= e);
+        if first == past {
+            // Between tape points, under MT=16's lin-lin law.
+            assert_eq!(value, Some(mf3.eval(e)), "at {e} eV");
+            continue;
         }
+        // Where the partial and MF=3 share a node, the value is the tape's;
+        // at a jump the row's first copy of the node has the left side and
+        // its second the right.
+        shared_nodes += 1;
+        let repeats_previous = i > 0 && curve.energy[i - 1] == e;
+        let repeats_next = curve.energy.get(i + 1) == Some(&e);
+        let expected = match (repeats_previous, repeats_next) {
+            (false, true) => Some(mf3.y[first]),
+            (true, false) => Some(mf3.y[past - 1]),
+            _ => Some(mf3.y[first]).filter(|&y| y == mf3.y[past - 1]),
+        };
+        if mf3.y[first] != mf3.y[past - 1] {
+            jumps += 1;
+        }
+        assert_eq!(value, expected, "at {e} eV");
     }
+    // Nb93's MF=3 MT=16 drops from 0.2896 b to zero at 30 MeV.
+    assert!(jumps > 0, "the fixture's jump at 30 MeV was not reached");
     assert!(
         shared_nodes > 0,
         "no node in common, so the literal check checked nothing"
