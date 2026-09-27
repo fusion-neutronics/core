@@ -36,8 +36,9 @@ pub enum CovarianceData {
 /// gives each two spellings for "this evaluation's cross section": `mat1` 0 or
 /// the evaluation's own MAT, and `xmf1` 0 or 3. FENDL-3.2d writes its Pt, Re,
 /// Lu, S and O17 cross-reaction blocks with `mat1` equal to their own MAT, and
-/// JEFF-4.0 Be9 several with `xmf1 = 3`. [`CovarianceBlock::is_same_evaluation`]
-/// reads both spellings, so no caller compares `mat1` with 0.
+/// JEFF-4.0 H1 and Li6 write one block each with `xmf1 = 3`.
+/// [`CovarianceBlock::is_same_evaluation`] reads both spellings, so no caller
+/// compares `mat1` with 0.
 ///
 /// # Which blocks are symmetric
 ///
@@ -152,7 +153,8 @@ mod tests {
     }
 
     /// ENDF-102 33.3.1 gives two spellings each for "this material" and "a
-    /// cross section", and FENDL-3.2d and JEFF-4.0 both use the second ones.
+    /// cross section". FENDL-3.2d and JEFF-4.0 write `mat1` as their own MAT,
+    /// and JEFF-4.0 H1 and Li6 write one block each with `xmf1 = 3`.
     #[test]
     fn own_mat_and_xmf1_three_are_this_evaluation() {
         for (mat1, xmf1) in [(0, 0.0), (7837, 0.0), (0, 3.0), (7837, 3.0)] {
