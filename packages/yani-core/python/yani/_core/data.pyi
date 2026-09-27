@@ -15,6 +15,7 @@ __all__ = [
     "mass_attenuation_coefficient",
     "mass_energy_absorption_coefficient",
     "natural_abundance",
+    "natural_abundance_records",
     "element_nuclides",
     "element_names",
     "reaction_names",
@@ -122,6 +123,37 @@ def natural_abundance() -> typing.Any:
     
     Returns:
         dict[str, float]: e.g. ``{"Li6": 0.07589, "Li7": 0.92411, ...}``
+    """
+
+def natural_abundance_records() -> typing.Any:
+    r"""
+    Return the TICE 2013 row behind each natural abundance, by nuclide name.
+    
+    Table 1 of Meija et al., "Isotopic compositions of the elements 2013
+    (IUPAC Technical Report)", Pure Appl. Chem. 88(3), 293-306 (2016),
+    doi:10.1515/pac-2015-0503 (© IUPAC, De Gruyter 2016), as printed.
+    :func:`natural_abundance` gives column 9 where it is a value and the
+    column 6 best measurement where column 9 is an interval.
+    
+    Each value is a dict with keys:
+    
+    - ``representative_value``, ``representative_uncertainty``: column 9. TICE
+      gives no coverage factor for this uncertainty.
+    - ``representative_interval``: column 9 as ``(low, high)`` for the 12
+      elements given an interval instead of a value (H, Li, B, C, N, O, Mg,
+      Si, S, Cl, Br, Tl).
+    - ``observed_interval``: column 4, ``(low, high)`` of natural variation.
+    - ``best_measurement``, ``best_measurement_uncertainty``: column 6.
+    - ``best_measurement_coverage``: column 6 coverage as printed, e.g. ``"2s"``.
+    - ``best_measurement_calibration``: ``"C"``, ``"F"`` or ``"N"``.
+    - ``annotations``: column 5, e.g. ``"g,r"``.
+    
+    ``None`` means the table leaves that field empty ("not stated", never
+    zero). These uncertainties are reference data only: no calculation
+    samples or propagates them.
+    
+    Returns:
+        dict[str, dict[str, Any]]: e.g. ``{"Fe58": {"representative_value": 0.00282, "representative_uncertainty": 0.00012, ...}, ...}``
     """
 
 def element_nuclides() -> typing.Any:

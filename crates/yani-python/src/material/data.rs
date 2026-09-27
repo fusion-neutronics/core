@@ -1,7 +1,10 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3_stub_gen::derive::gen_stub_pyfunction;
-use yamc_nuclide::data::{ELEMENT_NAMES, ELEMENT_NUCLIDES, NATURAL_ABUNDANCE, REACTION_MT};
+use yamc_nuclide::data::{
+    RepresentativeAbundance, ELEMENT_NAMES, ELEMENT_NUCLIDES, NATURAL_ABUNDANCE,
+    NATURAL_ABUNDANCE_RECORDS, REACTION_MT,
+};
 
 /// Return a dict mapping element symbol to its naturally occurring nuclides.
 ///
@@ -33,6 +36,68 @@ pub fn natural_abundance(py: Python) -> Py<PyAny> {
         dict.set_item(*k, v).unwrap();
     }
     dict.into()
+}
+
+/// Return the TICE 2013 row behind each natural abundance, by nuclide name.
+///
+/// Table 1 of Meija et al., "Isotopic compositions of the elements 2013
+/// (IUPAC Technical Report)", Pure Appl. Chem. 88(3), 293-306 (2016),
+/// doi:10.1515/pac-2015-0503 (© IUPAC, De Gruyter 2016), as printed.
+/// :func:`natural_abundance` gives column 9 where it is a value and the
+/// column 6 best measurement where column 9 is an interval.
+///
+/// Each value is a dict with keys:
+///
+/// - ``representative_value``, ``representative_uncertainty``: column 9. TICE
+///   gives no coverage factor for this uncertainty.
+/// - ``representative_interval``: column 9 as ``(low, high)`` for the 12
+///   elements given an interval instead of a value (H, Li, B, C, N, O, Mg,
+///   Si, S, Cl, Br, Tl).
+/// - ``observed_interval``: column 4, ``(low, high)`` of natural variation.
+/// - ``best_measurement``, ``best_measurement_uncertainty``: column 6.
+/// - ``best_measurement_coverage``: column 6 coverage as printed, e.g. ``"2s"``.
+/// - ``best_measurement_calibration``: ``"C"``, ``"F"`` or ``"N"``.
+/// - ``annotations``: column 5, e.g. ``"g,r"``.
+///
+/// ``None`` means the table leaves that field empty ("not stated", never
+/// zero). These uncertainties are reference data only: no calculation
+/// samples or propagates them.
+///
+/// Returns:
+///     dict[str, dict[str, Any]]: e.g. ``{"Fe58": {"representative_value": 0.00282, "representative_uncertainty": 0.00012, ...}, ...}``
+#[gen_stub_pyfunction]
+#[pyfunction]
+pub fn natural_abundance_records(py: Python) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    for (nuclide, record) in NATURAL_ABUNDANCE_RECORDS.iter() {
+        let (value, uncertainty, interval) = match record.representative {
+            RepresentativeAbundance::Value { value, uncertainty } => {
+                (Some(value), uncertainty, None)
+            }
+            RepresentativeAbundance::Interval { low, high } => (None, None, Some((low, high))),
+        };
+        let row = PyDict::new(py);
+        row.set_item("representative_value", value)?;
+        row.set_item("representative_uncertainty", uncertainty)?;
+        row.set_item("representative_interval", interval)?;
+        row.set_item("observed_interval", record.observed_interval)?;
+        row.set_item("best_measurement", record.best_measurement)?;
+        row.set_item(
+            "best_measurement_uncertainty",
+            record.best_measurement_uncertainty,
+        )?;
+        row.set_item(
+            "best_measurement_coverage",
+            record.best_measurement_coverage,
+        )?;
+        row.set_item(
+            "best_measurement_calibration",
+            record.best_measurement_calibration.map(String::from),
+        )?;
+        row.set_item("annotations", record.annotations)?;
+        dict.set_item(*nuclide, row)?;
+    }
+    Ok(dict.into())
 }
 
 /// Return a dict mapping element symbol to full element name.
