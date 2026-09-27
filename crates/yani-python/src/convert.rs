@@ -194,12 +194,12 @@ pub fn convert_transmutation(
 ///     fission, an IZAP of zero that no single MF=8 subsection resolves, or
 ///     any other ZAP whose Z or A is not positive), ``list_facts`` (one line
 ///     per production list, a parent's MT in MF=9 or MF=10: whether the ground
-///     state is listed, whether the file has the MF=3, each state's LFS, LMF,
-///     target, route and level energy difference, and the MF=1 normalisation
-///     lines naming the MT) and ``list_counts`` (how many lists are complete
-///     or isomers only in each file, have no MF=3, or are normalised). The
-///     same facts are stored per row in ``branching.arrow``; they change no
-///     rate.
+///     state is listed, whether the file has an MF=3 section for the MT, each
+///     state's LFS, LMF, target, route and level energy difference, and the
+///     MF=1 normalisation lines naming the MT) and ``list_counts`` (how many
+///     lists are complete or isomers only in each file, have no MF=3 section
+///     for their MT, or are normalised). The same facts are stored per row in
+///     ``branching.arrow``; they change no rate.
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
