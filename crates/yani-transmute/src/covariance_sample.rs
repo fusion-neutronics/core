@@ -4,11 +4,18 @@
 //! per replica. The perturbation is multiplicative and relative:
 //!
 //! ```text
-//! L  = V √Λ        from the eigendecomposition of the relative covariance
-//! z  ~ N(0, I)
-//! δ  = L z
-//! R' = R · (1 + δ)      floored at zero
+//! L   = V √Λ        from the eigendecomposition of the relative covariance
+//! z   ~ N(0, I)
+//! δ   = L z
+//! σ_i = sqrt(Σ_j L_ij²)
+//! s_i = sqrt(ln(1 + σ_i²))
+//! R'  = R · exp(s_i δ_i / σ_i - s_i² / 2)
 //! ```
+//!
+//! Each channel's multiplier is lognormal with mean 1 and variance `σ_i²`, the
+//! evaluation's own two moments, so a sampled rate is never negative and
+//! nothing is floored. [`lognormal_factor`] says what that keeps and what it
+//! does not.
 //!
 //! # Why Jacobi, and not a linear algebra dependency
 //!
@@ -55,18 +62,6 @@ pub struct Clipping {
     /// stated a covariance that is not a covariance, and the sampled spread is
     /// this code's repair rather than the evaluator's number.
     pub worst_relative_clip: f64,
-}
-
-/// How often a sampled rate went negative and was floored.
-///
-/// A negative cross section is unphysical, so the sample is truncated. Frequent
-/// truncation means the Gaussian is being used past the point where it
-/// describes the quantity, and the caller needs that reported rather than
-/// absorbed: truncation biases the mean upward.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Truncations {
-    pub floored: usize,
-    pub sampled: usize,
 }
 
 /// One nuclide's factorized covariance.
@@ -215,7 +210,8 @@ impl Sampler {
         out
     }
 
-    /// Apply one replica's perturbation to a set of unit-flux rates.
+    /// Apply one replica's perturbation to a set of unit-flux rates, and count
+    /// the rates it drew.
     ///
     /// Rates for nuclides or kinds with no covariance are passed through
     /// unchanged. That is deliberate and is what the coverage report is for: an
@@ -226,9 +222,9 @@ impl Sampler {
         rates: &ReactionRates,
         base_seed: u64,
         replica: u64,
-    ) -> (ReactionRates, Truncations) {
+    ) -> (ReactionRates, usize) {
         let deviates = self.deviates(base_seed, replica);
-        let mut truncations = Truncations::default();
+        let mut sampled = 0;
         let mut out = rates.clone();
 
         for (name, factor) in &self.factors {
@@ -239,21 +235,12 @@ impl Sampler {
                 let Some(rate) = nuclide_rates.get_mut(kind) else {
                     continue;
                 };
-                truncations.sampled += 1;
-                let scaled = *rate * lognormal_factor(delta[i], factor.sigma[i]);
-                if scaled < 0.0 {
-                    // Unreachable: the factor is an exponential. Kept as the
-                    // assertion it now is -- a nonzero count here is a bug in
-                    // this function, not a property of the data.
-                    truncations.floored += 1;
-                    *rate = 0.0;
-                } else {
-                    *rate = scaled;
-                }
+                sampled += 1;
+                *rate *= lognormal_factor(delta[i], factor.sigma[i]);
             }
         }
 
-        (out, truncations)
+        (out, sampled)
     }
 }
 
@@ -557,11 +544,11 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_floored_any_more_because_nothing_goes_negative() {
-        // The same case that used to floor: a relative variance of 9, so a
-        // relative sigma of 3. A Gaussian multiplier `1 + delta` is negative
-        // about a third of the time at that width; an exponential one never
-        // is.
+    fn a_wide_sigma_never_draws_a_negative_rate() {
+        // The case that used to floor: a relative variance of 9, so a relative
+        // sigma of 3. A Gaussian multiplier `1 + delta` is negative about a
+        // third of the time at that width; an exponential one never is, which
+        // is why there is no floor left to count.
         let c = cov(&["(n,gamma)"], vec![9.0]);
         let s = Sampler::new(&BTreeMap::from([("Fe56".to_string(), c)]));
         let rates: ReactionRates = std::collections::HashMap::from([(
@@ -569,20 +556,20 @@ mod tests {
             std::collections::HashMap::from([("(n,gamma)".to_string(), 1.0e-8)]),
         )]);
 
-        let mut floored = 0;
+        let mut sampled = 0;
         for k in 0..2000 {
-            let (out, t) = s.perturb(&rates, 9, k);
-            floored += t.floored;
+            let (out, n) = s.perturb(&rates, 9, k);
+            sampled += n;
             assert!(out["Fe56"]["(n,gamma)"] > 0.0, "a rate must stay positive");
         }
-        assert_eq!(floored, 0, "the lognormal draw cannot be floored");
+        assert_eq!(sampled, 2000, "one draw per channel per replica");
     }
 
     #[test]
     fn the_ensemble_mean_is_the_nominal_rate() {
         // The property the old form lost. Truncating at zero threw away the
         // negative tail and kept its probability mass at the boundary, which
-        // pushed the mean up; that is what `rates_floored` was reporting.
+        // pushed the mean up.
         // A relative variance of 0.25, so a relative sigma of 0.5: `cov` takes
         // the covariance matrix, not the standard deviations.
         let c = cov(&["(n,gamma)"], vec![0.25]);
@@ -643,8 +630,8 @@ mod tests {
             "Fe56".to_string(),
             std::collections::HashMap::from([("(n,gamma)".to_string(), 2.5)]),
         )]);
-        let (out, t) = s.perturb(&rates, 1, 0);
+        let (out, sampled) = s.perturb(&rates, 1, 0);
         assert_eq!(out, rates);
-        assert_eq!(t, Truncations::default());
+        assert_eq!(sampled, 0);
     }
 }

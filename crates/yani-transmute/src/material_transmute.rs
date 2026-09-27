@@ -778,8 +778,8 @@ fn solve_case(
 struct ReplicaOutcome {
     /// This replica's inventory at each schedule step.
     densities: Vec<HashMap<String, f64>>,
-    /// Rates the sampler had to truncate, for this replica alone.
-    truncations: crate::covariance_sample::Truncations,
+    /// Cross-section rate draws this replica made.
+    rates_sampled: usize,
     /// The two flux counters a replica actually produces. NOT the whole
     /// `FluxCoverage`: `Info::add_flux_coverage` assigns the spectrum counts,
     /// which are established before the loop, so folding a replica's zeros over
@@ -1442,7 +1442,7 @@ fn run_replicas(
     // them. Only the two counters a replica actually produces come back.
     let one_replica = |replica: u64| -> Result<ReplicaOutcome, String> {
         let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
-        let mut truncations = crate::covariance_sample::Truncations::default();
+        let mut rates_sampled = 0usize;
         let mut half_lives_floored = 0usize;
         // A statistical draw of the whole tallied rate vector, the partials
         // re-folded into the branching the way the nominal was, so an
@@ -1497,9 +1497,8 @@ fn run_replicas(
                 }
                 None => rates.clone(),
             };
-            let (rates, t) = samplers[idx].perturb(&rates, request.seed, replica);
-            truncations.floored += t.floored;
-            truncations.sampled += t.sampled;
+            let (rates, n) = samplers[idx].perturb(&rates, request.seed, replica);
+            rates_sampled += n;
             let folded_chain = match &half_life {
                 // The pruned nominal chain, unless this replica drew its own
                 // branching, which then carries the half-lives instead.
@@ -1525,7 +1524,7 @@ fn run_replicas(
             .map_err(|e| e.to_string())?;
         Ok(ReplicaOutcome {
             densities: densities_of(&materials),
-            truncations,
+            rates_sampled,
             flux_bins_sampled: flux_coverage.bins_sampled,
             flux_bins_floored: flux_coverage.bins_floored,
             half_lives: sampled_half_lives,
@@ -1556,7 +1555,7 @@ fn run_replicas(
 
         for outcome in outcomes {
             let outcome = outcome?;
-            info.add_truncations(&outcome.truncations);
+            info.rates_sampled += outcome.rates_sampled;
             flux_coverage.bins_sampled += outcome.flux_bins_sampled;
             flux_coverage.bins_floored += outcome.flux_bins_floored;
             info.half_lives_sampled += outcome.half_lives.len();

@@ -5144,8 +5144,9 @@ class TransmutationResults:
           covariance blocks that were present but not consumed.
         - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
           covariance was not positive semi-definite and had to be repaired.
-        - ``rates_floored`` / ``rates_sampled``: samples that went negative and
-          were truncated at zero, which biases the mean upward when common.
+        - ``rates_sampled``: cross-section rate draws made. Each is a lognormal
+          multiplier matched to the covariance's mean and variance, so none can
+          go negative and none is floored.
         - ``half_lives_perturbed`` / ``no_half_life_uncertainty``: with the
           ``"half_life"`` source, which reachable unstable nuclides had their
           half-life sampled and which state no sigma to sample from.

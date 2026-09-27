@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use yamc_materials::Material;
 
 use crate::covariance_fold::Coverage;
-use crate::covariance_sample::{Clipping, Truncations};
+use crate::covariance_sample::Clipping;
 
 /// One input to the Bateman matrix that can be perturbed.
 ///
@@ -229,11 +229,11 @@ pub struct Info {
     /// and the worst repair that had to be made.
     pub matrices_clipped: usize,
     pub worst_relative_clip: f64,
-    /// Sampled rates that went negative and were floored at zero.
+    /// Cross-section rate draws made, one per perturbed channel per spectrum
+    /// per replica.
     ///
-    /// A large share means the Gaussian is being used past where it describes
-    /// the cross section, and the truncation biases the mean upward.
-    pub rates_floored: usize,
+    /// Each draw is a lognormal multiplier matched to the channel's mean and
+    /// variance, so none can go negative and there is no floor to count.
     pub rates_sampled: usize,
     /// Spectra that carried a per-bin flux sigma, and those that did not.
     ///
@@ -300,11 +300,6 @@ impl Info {
             .collect(),
             ..Default::default()
         }
-    }
-
-    pub(crate) fn add_truncations(&mut self, t: &Truncations) {
-        self.rates_floored += t.floored;
-        self.rates_sampled += t.sampled;
     }
 
     pub(crate) fn add_flux_coverage(&mut self, c: &crate::flux_uncertainty::FluxCoverage) {

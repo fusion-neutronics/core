@@ -227,7 +227,6 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
 
     d.set_item("matrices_clipped", info.matrices_clipped)?;
     d.set_item("worst_relative_clip", info.worst_relative_clip)?;
-    d.set_item("rates_floored", info.rates_floored)?;
     d.set_item("rates_sampled", info.rates_sampled)?;
     d.set_item("spectra_with_flux_sigma", info.spectra_with_flux_sigma)?;
     d.set_item(
