@@ -532,8 +532,8 @@ pub fn fission_yields_aliases() -> Schema {
 /// onto a stand-in, products landing on the same name are summed, and every
 /// energy is padded to one product list. A DY cannot sit beside such a sum
 /// without the correlation of its parts, which no evaluation publishes. Being
-/// a file of its own also keeps it off the wire for a consumer that only
-/// solves: the browser never asks for it, and an older build never reads it.
+/// a file of its own also means a consumer that never asks for it (the
+/// browser) is not sent it, and an older build never reads it.
 ///
 /// There is no correlation column because no evaluation publishes yield
 /// correlations (ENDF/B-VIII.1, JEFF-4.0 and JENDL-5.0 carry only MF=8

@@ -391,6 +391,11 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
         }
     }
 
+    // Built before anything is written, since it can refuse the chain: a
+    // refusal after fission_yields.arrow is on disk would leave a nominal file
+    // with nothing beside it, which reads as a library published before the
+    // evaluated yields existed.
+    let evaluated = evaluated_yields_columns(chain)?;
     write_section(
         &dir.join("fission_yields.arrow"),
         "fission_yields/fission_yields.arrow",
@@ -401,7 +406,13 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
             list_of(&yields),
         ],
     )?;
-    write_evaluated_yields(chain, dir)?;
+    if let Some(columns) = evaluated {
+        write_section(
+            &dir.join("evaluated_yields.arrow"),
+            "fission_yields/evaluated_yields.arrow",
+            columns,
+        )?;
+    }
 
     // Written only when there is something to say, matching the Python
     // converter: a library with no borrowed yields leaves no aliases file.
@@ -415,8 +426,9 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
     Ok(())
 }
 
-/// Write `fission_yields/evaluated_yields.arrow`: every yield evaluation
-/// exactly as its tape gives it, both MT=454 and MT=459, with DY.
+/// The columns of `fission_yields/evaluated_yields.arrow`: every yield
+/// evaluation exactly as its tape gives it, both MT=454 and MT=459, with DY.
+/// `None` when no nuclide has an evaluation, so no file is written.
 ///
 /// Nothing here is derived. Where `fission_yields.arrow` maps products onto
 /// the decay library and sums the ones that meet, this keeps the tape's
@@ -428,7 +440,7 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
 /// attaches it there. An evaluation that breaks that (cumulative yields with
 /// no independent ones beside them) is refused rather than written as a file
 /// no reader could load.
-fn write_evaluated_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Error>> {
+fn evaluated_yields_columns(chain: &Chain) -> Result<Option<Vec<ArrayRef>>, Box<dyn Error>> {
     let mut nuc = Vec::new();
     let mut energy = Vec::new();
     let mut kind = Vec::new();
@@ -478,21 +490,17 @@ fn write_evaluated_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Error
     }
 
     if nuc.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
-    write_section(
-        &dir.join("evaluated_yields.arrow"),
-        "fission_yields/evaluated_yields.arrow",
-        vec![
-            strings(&nuc),
-            floats(&energy),
-            strings(&kind),
-            opt_ints(&interpolation),
-            string_lists(&products),
-            list_of(&yields),
-            list_of(&sigmas),
-        ],
-    )
+    Ok(Some(vec![
+        strings(&nuc),
+        floats(&energy),
+        strings(&kind),
+        opt_ints(&interpolation),
+        string_lists(&products),
+        list_of(&yields),
+        list_of(&sigmas),
+    ]))
 }
 
 /// Provenance and the chain manifest, matching what the Python converter

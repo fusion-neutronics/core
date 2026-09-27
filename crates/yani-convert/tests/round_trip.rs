@@ -1006,5 +1006,11 @@ fn cumulative_yields_without_independent_ones_are_refused() {
         err.starts_with("U235: cumulative yields at") && err.contains("have no independent yields"),
         "got: {err}"
     );
+    // Refused before anything is written, so no nominal file is left behind
+    // to read as a library without evaluated yields.
+    assert!(
+        !dir.join("fission_yields.arrow").exists(),
+        "a refused conversion left fission_yields.arrow on disk"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
