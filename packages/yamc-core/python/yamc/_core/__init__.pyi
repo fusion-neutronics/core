@@ -4872,9 +4872,13 @@ class TransmutationChain:
         
         A source is lines or a continuum, and the two are in different units,
         so each one says which it is. Each ENDF spectrum is its own source, so
-        a nuclide emitting gammas and x-rays has one line source for each
-        (their normalisations and its sigma differ), and a line energy can
-        appear in both. ``Material.decay_photon_spectrum()`` sums them.
+        a nuclide emitting gammas and x-rays has one line source for each,
+        each with its own normalisation and normalisation sigma. The tuple
+        does not say which radiation a source is, so the gamma and x-ray
+        sources cannot be told apart from Python. Lines are listed as the
+        evaluation writes them: an energy can appear in both sources, and
+        can repeat within one. ``Material.decay_photon_spectrum()`` sums the
+        lines by energy.
         
         Returns:
             dict[str, list[tuple[str, list[float], list[float], str | None]]]:

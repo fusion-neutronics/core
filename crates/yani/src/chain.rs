@@ -360,9 +360,13 @@ impl DecaySource {
 /// The uncertainties an evaluation states for one decay source, as ENDF
 /// MT=457 writes them.
 ///
-/// Every field is literal: a 0.0 the evaluation wrote stays 0.0. A reader
-/// must take both `None` and 0.0 as "not stated", never as an exact value,
-/// because the libraries write 0.0 for a sigma they did not give. JENDL-5.0,
+/// Every field is literal: a 0.0 the evaluation wrote stays 0.0. On the
+/// sigma fields (`normalization_uncertainty`, `intensity_uncertainties` and
+/// `energy_uncertainties`) a reader must take both `None` and 0.0 as "not
+/// stated", never as an exact value, because the libraries write 0.0 for a
+/// sigma they did not give. `normalization` is not a sigma: it is the value
+/// the intensities were scaled by, so a stated 0.0 there means the
+/// intensities are exactly zero as written. JENDL-5.0,
 /// for one, puts a reference line's sigma in the normalisation and writes
 /// 0.0 on the line.
 #[derive(Clone, Debug, Default, PartialEq)]

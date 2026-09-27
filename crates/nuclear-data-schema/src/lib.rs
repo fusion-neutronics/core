@@ -415,18 +415,22 @@ pub fn decay_sources() -> Schema {
         i32("interpolation", true),
         // What MT=457 states about each row's uncertainty, stored as written
         // so nothing the evaluation gives is lost (issue #163). All nullable
-        // and last, so an older file still reads. A null and a 0.0 both mean
-        // "not stated", never an exact value: evaluations write 0.0 for a
-        // sigma they did not give.
+        // and last, so an older file still reads; a file that has them is
+        // refused by a build that predates them (check_batch rejects columns
+        // it does not declare). On the sigma columns a null and a 0.0 both
+        // mean "not stated", never an exact value: evaluations write 0.0 for
+        // a sigma they did not give.
         //
         // The radiation type the row was read from ("gamma", "xray", ...).
         // Each row is one spectrum's lines or its continuum, never a merge of
-        // two, so the rows of one nuclide with the same radiation share one
-        // normalisation.
+        // two. The normalisation belongs to that part alone: the key it is
+        // shared under is (nuclide, radiation, type), so an LCON=2 spectrum
+        // gives a discrete row with FD and a tabular row with its own FC.
         utf8("radiation", true),
-        // FD on a discrete row, FC on a tabular one, and its sigma, as
-        // written. Already multiplied into `intensities`; the sigma is common
-        // to every line of the spectrum.
+        // FD on a discrete row, FC on a tabular one, as written: the value
+        // `intensities` were already scaled by, so a 0.0 here is a stated
+        // zero, not a missing value. Its sigma is common to every line of
+        // the row.
         f64("normalization", true),
         f64("normalization_uncertainty", true),
         // Per line, in the units of `intensities`: decay constant * FD * dRI.

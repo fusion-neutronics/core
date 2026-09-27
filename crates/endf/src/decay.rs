@@ -273,8 +273,10 @@ pub struct DecaySpectrum {
 /// Neither packing is unpacked. For the lines (LB=5) `energies` are the
 /// NERP values written before the packed matrix `values`, and `ls` is the
 /// symmetry flag. For a continuum (LB=2) `values` pairs one to one with
-/// `energies` and there is no `ls`. The record counts NE and NT are the
-/// lengths of the two lists, so nothing else is needed to write it back.
+/// `energies` and there is no `ls`. The LIST header can be rebuilt from the
+/// two lists, so nothing else is needed to write it back: for the lines NERP
+/// is `energies.len()` and NT is `energies.len() + values.len()`, and for a
+/// continuum NE is `energies.len()` and NPL is twice that.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SpectrumCovariance {
     pub ls: Option<i64>,
