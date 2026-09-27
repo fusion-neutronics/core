@@ -4881,6 +4881,27 @@ fn resample_linear_e(src: &[f64], src_grid: &[f64], master_grid: &[f64]) -> Vec<
     out
 }
 
+/// The lines of a D1S channel, the only spectrum the GPU kernel samples. A
+/// continuum is refused rather than packed, because packing its tabulated
+/// points as lines would sample them with the wrong yield.
+#[cfg(not(target_os = "macos"))]
+fn gpu_decay_photon_lines(
+    channel: &yamc_physics::photon::decay_photon_production::DecayPhotonChannel,
+) -> Result<(&[f64], &[f64]), GpuDispatchError> {
+    use yamc_physics::photon::decay_photon_production::DecayPhotonSpectrum;
+    match &channel.spectrum {
+        DecayPhotonSpectrum::Lines {
+            energies,
+            intensities,
+        } => Ok((energies, intensities)),
+        DecayPhotonSpectrum::Continuum { .. } => {
+            Err(GpuDispatchError::DecayPhotonContinuumUnsupported {
+                emitter: channel.target_name.clone(),
+            })
+        }
+    }
+}
+
 /// Build the per-material D1S decay-photon tables for the GPU neutron kernel,
 /// in `geometry.materials` order (the same order `cell_to_material` indexes).
 ///
@@ -4906,7 +4927,6 @@ fn build_decay_photon_inputs(
     n_material_slots: usize,
 ) -> Result<yamc_gpu::neutron::transport::DecayPhotonInputs, GpuDispatchError> {
     use yamc_gpu::neutron::transport::{DecayPhotonInputs, MaterialDecayTable};
-    use yamc_physics::photon::decay_photon_production::DecayPhotonSpectrum;
 
     let n_grid = log_energy_grid.len();
     let energy_grid: Vec<f64> = log_energy_grid.iter().map(|&le| le.exp()).collect();
@@ -4949,15 +4969,7 @@ fn build_decay_photon_inputs(
             let src_grid = &fast_grid.energy;
 
             for ch in &decay_nuc.channels {
-                let DecayPhotonSpectrum::Lines {
-                    energies,
-                    intensities,
-                } = &ch.spectrum
-                else {
-                    return Err(GpuDispatchError::DecayPhotonContinuumUnsupported {
-                        emitter: ch.target_name.clone(),
-                    });
-                };
+                let (energies, intensities) = gpu_decay_photon_lines(ch)?;
                 if ch.yield_constant <= 0.0 || energies.is_empty() {
                     continue;
                 }
@@ -5984,6 +5996,42 @@ mod tests {
         ];
         t.scores = vec![Score::Flux(yamc_tallies::score::FluxScore)];
         Arc::new(t)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_decay_photon_continuum_is_refused_not_packed_as_lines() {
+        use yamc_physics::photon::decay_photon_production::{
+            DecayPhotonChannel, DecayPhotonSpectrum,
+        };
+        let mut registry = yamc_nuclide::nuclide_registry::NuclideRegistry::new();
+        let mut channel = |spectrum| DecayPhotonChannel {
+            xs: vec![1.0, 1.0].into(),
+            target_name: "Cf252".to_string(),
+            target_id: registry.intern("Cf252"),
+            spectrum,
+            yield_constant: 1.0,
+        };
+        let lines = channel(DecayPhotonSpectrum::Lines {
+            energies: vec![1.0e5],
+            intensities: vec![2.0],
+        });
+        assert_eq!(
+            gpu_decay_photon_lines(&lines).unwrap(),
+            (&[1.0e5][..], &[2.0][..])
+        );
+        let continuum = channel(DecayPhotonSpectrum::Continuum {
+            energies: vec![1.0e5, 2.0e5],
+            densities: vec![1.0, 1.0],
+            interpolation: yani::Interpolation::Histogram,
+            cumulative: vec![1.0e5],
+        });
+        match gpu_decay_photon_lines(&continuum).unwrap_err() {
+            GpuDispatchError::DecayPhotonContinuumUnsupported { emitter } => {
+                assert_eq!(emitter, "Cf252");
+            }
+            other => panic!("expected DecayPhotonContinuumUnsupported, got {other}"),
+        }
     }
 
     fn one_cell_geometry() -> crate::geometry::Geometry {
