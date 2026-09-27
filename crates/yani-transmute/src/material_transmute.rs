@@ -1377,9 +1377,18 @@ fn run_replicas(
             .insert(0, "activation cross section (MF=33)".to_string());
     }
     // On the spectrum path a spectrum without a per-bin sigma, or any spectrum
-    // with the source off, is used as given.
-    if !transport && per_group.iter().any(Option::is_none) {
-        info.not_perturbed.insert(0, "flux spectrum".to_string());
+    // with the source off, is used as given. When only some are, the entry
+    // says so, so it never reads as held for a flux that was partly sampled.
+    if !transport {
+        let held = per_group.iter().filter(|g| g.is_none()).count();
+        if held > 0 && held == per_group.len() {
+            info.not_perturbed.insert(0, "flux spectrum".to_string());
+        } else if held > 0 {
+            info.not_perturbed.insert(
+                0,
+                "flux spectrum (spectra without a sigma only)".to_string(),
+            );
+        }
     }
     // With the statistical source off, or nothing tallied to draw, the tallied
     // rates are used as they came out of the one transport.

@@ -663,6 +663,18 @@ fn a_source_switched_off_is_named_as_held() {
     // A spectrum with no sigma is used as given even with its source on.
     let without_sigma = held(&spectra(), vec![Source::FluxSpectrum]);
     assert!(without_sigma.iter().any(|s| s == "flux spectrum"));
+
+    // One spectrum with a sigma and one without: the flux was partly sampled,
+    // so the entry says only the spectra without a sigma were held.
+    let mixed: Vec<MultigroupSpectrum> = with_sigma.iter().cloned().chain(spectra()).collect();
+    let partial = held(&mixed, vec![Source::FluxSpectrum]);
+    assert!(!partial.iter().any(|s| s == "flux spectrum"), "{partial:?}");
+    assert!(
+        partial
+            .iter()
+            .any(|s| s == "flux spectrum (spectra without a sigma only)"),
+        "{partial:?}"
+    );
 }
 
 /// A bigger flux error gives a bigger inventory error.

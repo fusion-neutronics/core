@@ -40,8 +40,9 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///
 /// Each cross-section draw is a lognormal multiplier with the covariance's
 /// own mean and variance, so a sampled rate is never negative and nothing is
-/// floored. The correlations between channels are kept in rank, but come out
-/// weaker than evaluated when the sigmas are large.
+/// floored. The correlated Gaussian deviates are kept (a Gaussian copula), so
+/// the ordering between channels is preserved, but the Pearson correlations
+/// come out weaker than evaluated as the sigmas grow.
 ///
 /// Held at their nominal values, with uncertainties of their own that this
 /// does not propagate:
@@ -62,7 +63,9 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 /// - the material's composition, density, natural isotopic abundances and the
 ///   AME2020 atomic masses used to convert mass fractions;
 /// - any source switched off with ``sources``, or with nothing to act on (a
-///   spectrum given without ``flux_std_dev``).
+///   spectrum given without ``flux_std_dev``). When only some of a material's
+///   spectra have one, the entry is ``"flux spectrum (spectra without a sigma
+///   only)"`` and ``spectra_without_flux_sigma`` gives the count.
 ///
 /// ``TransmutationResults.get_data_uncertainty_info`` lists every one of these
 /// that applied to a material under ``not_perturbed``, along with any nuclide

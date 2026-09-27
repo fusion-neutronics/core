@@ -14,8 +14,8 @@
 //!
 //! Each channel's multiplier is lognormal with mean 1 and variance `σ_i²`, the
 //! evaluation's own two moments after any PSD repair, so a sampled rate is
-//! never negative and nothing is floored. [`lognormal_factor`] says what that keeps and what it
-//! does not.
+//! never negative and nothing is floored. [`lognormal_factor`] says what that
+//! keeps and what it does not.
 //!
 //! # Why Jacobi, and not a linear algebra dependency
 //!
