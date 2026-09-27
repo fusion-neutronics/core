@@ -209,7 +209,8 @@ pub struct Info {
     pub skipped_nc: usize,
     /// Blocks whose `lb` layout is not implemented, counted per `lb`.
     pub unsupported_layouts: BTreeMap<i64, usize>,
-    /// Blocks whose arrays disagreed with their own declared sizes.
+    /// Blocks whose arrays disagreed with their own declared sizes or with
+    /// their layout, such as an LB=0 to 2 block carrying a second table.
     pub malformed_blocks: usize,
     /// Per (nuclide, reaction kind), the share of the rate the covariance grid
     /// spans. Below one means part of the rate carries no stated uncertainty

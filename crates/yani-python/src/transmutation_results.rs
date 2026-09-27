@@ -610,6 +610,9 @@ impl PyTransmutationResults {
     ///   of the rate carries no stated uncertainty and the sigma is diluted.
     /// - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
     ///   covariance blocks that were present but not consumed.
+    /// - ``malformed_blocks``: covariance blocks not consumed because their
+    ///   arrays disagree with their declared sizes or with their layout, such
+    ///   as an LB=0 to 2 block carrying a second energy table.
     /// - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
     ///   covariance was not positive semi-definite and had to be repaired.
     /// - ``rates_floored`` / ``rates_sampled``: samples that went negative and

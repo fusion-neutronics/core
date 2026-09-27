@@ -88,7 +88,8 @@ impl ExpandedBlock {
 pub enum Unsupported {
     /// An `lb` layout this does not implement.
     Layout(i64),
-    /// A block whose arrays do not match the sizes its own header declares.
+    /// A block whose arrays do not match the sizes its own header declares,
+    /// or the layout its `lb` names.
     Malformed,
 }
 
@@ -97,7 +98,10 @@ impl std::fmt::Display for Unsupported {
         match self {
             Unsupported::Layout(lb) => write!(f, "MF=33 LB={lb} is not implemented"),
             Unsupported::Malformed => {
-                write!(f, "the block's arrays do not match its declared sizes")
+                write!(
+                    f,
+                    "the block's arrays do not match its declared sizes or its LB"
+                )
             }
         }
     }
@@ -118,7 +122,7 @@ fn intervals(grid: &[f64]) -> usize {
 /// | 1 | `C[k,k] = fk[k]`, diagonal | relative |
 /// | 2 | `C[k,l] = fk[k]·fk[l]`, fully correlated | relative |
 /// | 3 | `C[k,l] = fk[k]·fl[l]`, first table against second | relative |
-/// | 4 | `C[k,l] = fk[k]·fk[l]·Σ fl[m]` over second-table intervals holding both | relative |
+/// | 4 | `C[u,v] = fk[k]·fl[l(u)]·fl[l(v)]` when one first-table interval `k` holds both, on the union of the two grids | relative |
 /// | 5 | `fkk` as written; `ls=1` an upper triangle, `ls=0` a full matrix | relative |
 /// | 6 | `fkl` on `er` × `ec`, rectangular | relative |
 /// | 8 | `C[k,k] = fk[k]`, diagonal, short-range | relative |
@@ -126,8 +130,16 @@ fn intervals(grid: &[f64]) -> usize {
 /// `lb = 9` is not implemented: the parser reads it with `lb = 8`'s layout, but
 /// its meaning is not the same and guessing would put numbers in a covariance
 /// matrix on the strength of a shared record shape.
+///
+/// `lb` 0 to 2 have one table (`lt = 0`), so one that arrives with a second is
+/// malformed rather than folded on its first table alone, which would drop
+/// whatever the second holds. A block the parser split wrongly arrives exactly
+/// this way: every `lb` 0 to 2 block in a `covariance.arrow` converted before
+/// <https://github.com/shimwell/endf-python/issues/25> was fixed has the upper
+/// part of its only table in `el`/`fl`.
 pub fn expand_ni(s: &NiSubsection) -> Result<ExpandedBlock, Unsupported> {
     match s.lb {
+        0..=2 if s.lt != 0 || !s.el.is_empty() || !s.fl.is_empty() => Err(Unsupported::Malformed),
         0 => diagonal(s, Scale::Absolute),
         1 => diagonal(s, Scale::Relative),
         2 => outer_product(s),
@@ -208,38 +220,76 @@ fn two_table_product(s: &NiSubsection) -> Result<ExpandedBlock, Unsupported> {
     })
 }
 
-/// `lb = 4`: the first table's fractions, correlated only within each of the
-/// second table's intervals.
+/// `lb = 4`: the second table's fractions, fully correlated within each of the
+/// first table's intervals and weighted by that interval's `fk`.
 ///
-/// Two first-table intervals are correlated exactly when some second-table
-/// interval contains both, and the strength is that interval's own `fl`. Where
-/// several do, they add, which is why this accumulates rather than assigns.
+/// ENDF-102 section 33.2.2.2 defines the contribution as
+/// `Σ_{k,l,l'} S_ik S_il S_jk S_jl' · Fk · Fl · Fl'`: two energies are
+/// correlated exactly when one first-table interval holds both, and the
+/// strength is that interval's `Fk` times the second-table fraction each one
+/// falls in. `Fk` is not squared, and it can be negative, which is how an
+/// evaluator takes out part of what another block states; its sign is kept.
+///
+/// The value is constant wherever neither table has a boundary, so the matrix
+/// is written on the union of the two grids, over the range both tables span.
+/// That is still the block's own grid rather than a regridding: every union
+/// interval lies inside one interval of each table, so every entry is exact,
+/// including where a second-table interval straddles a first-table boundary.
+/// Outside the common range one of the `S` factors is zero, and so is the
+/// contribution.
 fn interval_weighted(s: &NiSubsection) -> Result<ExpandedBlock, Unsupported> {
-    let n = intervals(&s.ek);
-    let n_weight = intervals(&s.el);
-    if s.fk.len() < n || s.fl.len() < n_weight {
+    let n_outer = intervals(&s.ek);
+    let n_inner = intervals(&s.el);
+    if s.fk.len() < n_outer || s.fl.len() < n_inner {
         return Err(Unsupported::Malformed);
     }
+    // Both tables are boundaries in ascending order on any tape. Checked
+    // rather than assumed, because the interval lookup below bisects them.
+    let ascending = |t: &[f64]| t.windows(2).all(|w| w[0] <= w[1]);
+    if !ascending(&s.ek) || !ascending(&s.el) {
+        return Err(Unsupported::Malformed);
+    }
+    if n_outer == 0 || n_inner == 0 {
+        return Ok(ExpandedBlock {
+            row_energies: Vec::new(),
+            col_energies: Vec::new(),
+            values: Vec::new(),
+            scale: Scale::Relative,
+        });
+    }
 
-    // Which weighting interval each first-table interval falls in. Membership
-    // is by the interval's own span, so an interval straddling a weighting
-    // boundary belongs to every weighting interval it overlaps.
-    let mut values = vec![0.0; n * n];
-    for m in 0..n_weight {
-        let (lo, hi) = (s.el[m], s.el[m + 1]);
-        let inside: Vec<usize> = (0..n)
-            .filter(|&k| s.ek[k] < hi && s.ek[k + 1] > lo)
+    let lo = s.ek[0].max(s.el[0]);
+    let hi = s.ek[n_outer].min(s.el[n_inner]);
+    let mut grid: Vec<f64> =
+        s.ek.iter()
+            .chain(&s.el)
+            .copied()
+            .filter(|&e| e >= lo && e <= hi)
             .collect();
-        for &k in &inside {
-            for &l in &inside {
-                values[k * n + l] += s.fl[m] * s.fk[k] * s.fk[l];
+    grid.sort_by(f64::total_cmp);
+    grid.dedup();
+    let n = intervals(&grid);
+
+    // The interval of `table` that union interval `u` lies in. Its left edge
+    // is inside the common range, so the index is always a real interval; a
+    // repeated energy in `table` is a zero-width interval, and taking the last
+    // boundary at or below the edge steps over it.
+    let within = |table: &[f64], u: usize| table.partition_point(|&e| e <= grid[u]) - 1;
+    let outer: Vec<usize> = (0..n).map(|u| within(&s.ek, u)).collect();
+    let inner: Vec<f64> = (0..n).map(|u| s.fl[within(&s.el, u)]).collect();
+
+    let mut values = vec![0.0; n * n];
+    for u in 0..n {
+        for v in 0..n {
+            if outer[u] == outer[v] {
+                values[u * n + v] = s.fk[outer[u]] * inner[u] * inner[v];
             }
         }
     }
 
     Ok(ExpandedBlock {
-        row_energies: s.ek.clone(),
-        col_energies: s.ek.clone(),
+        row_energies: grid.clone(),
+        col_energies: grid,
         values,
         scale: Scale::Relative,
     })
@@ -306,8 +356,9 @@ mod tests {
     use super::*;
 
     /// Every layout is checked against a matrix small enough to write out by
-    /// hand, because the fixtures available here use only `lb = 5`: without
-    /// these the other layouts would be code nothing has ever run.
+    /// hand. The real-tape fixtures reach only `lb` 0, 1, 4, 5 and 8 (see
+    /// `yamc-convert/tests/covariance.rs`), so without these the other layouts
+    /// would be code nothing has ever run.
     fn ni(lb: i64) -> NiSubsection {
         NiSubsection {
             lb,
@@ -357,20 +408,97 @@ mod tests {
     }
 
     #[test]
-    fn lb4_correlates_only_within_a_second_table_interval() {
+    fn lb4_weights_the_second_table_by_the_first() {
         let mut s = ni(4);
-        // Three first-table intervals: [1,10), [10,100), [100,1000).
-        s.ek = vec![1.0, 10.0, 100.0, 1000.0];
-        s.fk = vec![1.0, 2.0, 3.0];
-        // One weighting interval covering only the first two.
+        // Two first-table intervals: [1,100) and [100,1000).
+        s.ek = vec![1.0, 100.0, 1000.0];
+        s.fk = vec![0.5, 2.0];
+        // Three second-table intervals, two inside the first of those.
+        s.el = vec![1.0, 10.0, 100.0, 1000.0];
+        s.fl = vec![1.0, 2.0, 3.0];
+        let e = expand_ni(&s).expect("lb=4 expands");
+        assert_eq!(e.row_energies, vec![1.0, 10.0, 100.0, 1000.0]);
+        assert_eq!(e.col_energies, e.row_energies);
+        // fk[k] * fl[l] * fl[l'] where one first-table interval holds both:
+        // the first two intervals share k = 0, and the third is alone in
+        // k = 1, so it correlates only with itself.
+        assert_eq!(e.values, vec![0.5, 1.0, 0.0, 1.0, 2.0, 0.0, 0.0, 0.0, 18.0]);
+    }
+
+    /// The only LB=4 block on any tape (FENDL-3.2d Ni58 MT=103) has the same
+    /// grid in both tables and `fk = -1`: it subtracts `fl²` on the diagonal.
+    /// Squaring `fk`, or taking `fl` as the weight, turns that into an addition.
+    #[test]
+    fn lb4_keeps_the_sign_of_a_negative_weight() {
+        let mut s = ni(4);
+        s.ek = vec![1.0, 10.0, 100.0];
+        s.fk = vec![-1.0, -0.21];
+        s.el = s.ek.clone();
+        s.fl = vec![0.1, 0.2];
+        let e = expand_ni(&s).expect("lb=4 expands");
+        assert_eq!(e.n_rows(), 2);
+        assert_eq!(e.get(0, 0), -(0.1 * 0.1));
+        assert_eq!(e.get(1, 1), -0.21 * 0.2 * 0.2);
+        assert_eq!((e.get(0, 1), e.get(1, 0)), (0.0, 0.0));
+    }
+
+    /// A second-table interval that straddles a first-table boundary is split
+    /// there: each half is correlated only with what shares its own `k`.
+    #[test]
+    fn lb4_splits_an_interval_that_straddles_a_first_table_boundary() {
+        let mut s = ni(4);
+        s.ek = vec![1.0, 50.0, 100.0];
+        s.fk = vec![1.0, 2.0];
         s.el = vec![1.0, 100.0];
+        s.fl = vec![3.0];
+        let e = expand_ni(&s).expect("lb=4 expands");
+        assert_eq!(e.row_energies, vec![1.0, 50.0, 100.0]);
+        assert_eq!(e.values, vec![9.0, 0.0, 0.0, 18.0]);
+    }
+
+    /// Outside the range both tables span, one of the indicator factors is
+    /// zero, so the matrix covers only the common range.
+    #[test]
+    fn lb4_is_written_only_where_both_tables_are_defined() {
+        let mut s = ni(4);
+        s.ek = vec![1.0, 10.0];
+        s.fk = vec![2.0];
+        s.el = vec![5.0, 20.0];
         s.fl = vec![0.5];
         let e = expand_ni(&s).expect("lb=4 expands");
-        assert_eq!(e.n_rows(), 3);
-        // 0.5 * fk[i] * fk[j] for i, j in {0, 1}; the third interval is outside
-        // the weighting interval and so correlates with nothing, itself
-        // included.
-        assert_eq!(e.values, vec![0.5, 1.0, 0.0, 1.0, 2.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(e.row_energies, vec![5.0, 10.0]);
+        assert_eq!(e.values, vec![2.0 * 0.5 * 0.5]);
+    }
+
+    /// What the old parser split made of ENDF/B-VIII.1 Ni58 MT=107's LB=1
+    /// block with NP=3: half a table in each array. Folding `ek` alone would
+    /// have dropped the 10.6% component on [0.8, 20] MeV without a word.
+    #[test]
+    fn lb0_to_2_with_a_second_table_is_malformed_not_truncated() {
+        for lb in 0..=2 {
+            let mut s = ni(lb);
+            s.ek = vec![1.0e-5, 8.0e5];
+            s.fk = vec![0.0];
+            s.el = vec![1.125e-2, 0.0];
+            s.fl = vec![2.0e7];
+            assert_eq!(expand_ni(&s), Err(Unsupported::Malformed), "lb={lb}");
+
+            let mut s = ni(lb);
+            s.lt = 1;
+            s.ek = vec![1.0, 10.0];
+            s.fk = vec![0.5, 0.0];
+            assert_eq!(expand_ni(&s), Err(Unsupported::Malformed), "lb={lb}, lt=1");
+        }
+    }
+
+    #[test]
+    fn lb4_tables_out_of_order_are_malformed() {
+        let mut s = ni(4);
+        s.ek = vec![10.0, 1.0];
+        s.fk = vec![1.0];
+        s.el = vec![1.0, 10.0];
+        s.fl = vec![1.0];
+        assert_eq!(expand_ni(&s), Err(Unsupported::Malformed));
     }
 
     #[test]
