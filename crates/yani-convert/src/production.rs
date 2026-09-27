@@ -52,8 +52,9 @@ pub struct ProductionState {
     /// with `excitation_energy` to identify the state.
     ///
     /// `None` for a state that names no single nuclide: fission, whose
-    /// products are the fission yields' business, or a subsection whose IZAP
-    /// is zero with no MF=8 subsection to name it either.
+    /// products are the fission yields' business, a subsection whose IZAP
+    /// is zero with no single MF=8 subsection to name it either, or any other
+    /// ZAP whose Z or A is not positive.
     pub product: Option<String>,
     /// `"cross_section"` for a state given in MF=10, `"yield"` for MF=9.
     pub source: &'static str,

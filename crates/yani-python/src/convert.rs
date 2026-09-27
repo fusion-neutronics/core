@@ -190,8 +190,9 @@ pub fn convert_transmutation(
 ///     (one line per reaction whose MF=10 partial cross sections do not sum to
 ///     its MF=3 total, or whose MF=9 yields do not sum to one, within two
 ///     percent below 20 MeV), and ``skipped_states`` (one line per production
-///     state that names no single product nuclide, fission or an IZAP of zero
-///     that MF=8 does not resolve, and so gives no row).
+///     state that names no single product nuclide, and so gives no row:
+///     fission, an IZAP of zero that no single MF=8 subsection resolves, or
+///     any other ZAP whose Z or A is not positive).
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
@@ -566,8 +567,9 @@ pub fn convert_photon(
 ///     ``product`` is the product's **ground-state** name even for an excited
 ///     state, because naming the isomer needs decay data to say which
 ///     isomeric ordinal a level is; pair it with ``excitation_energy_eV``.
-///     It is ``None`` for a state naming no single nuclide: fission, or a
-///     subsection whose IZAP is zero with no MF=8 subsection to name it.
+///     It is ``None`` for a state naming no single nuclide: fission, a
+///     subsection whose IZAP is zero with no single MF=8 subsection to name
+///     it, or any other ZAP whose Z or A is not positive.
 ///     ``level_index`` is the evaluation's own LFS and is not comparable
 ///     between libraries: Ir190's 377 keV isomer is level 3 in ENDF/B-VIII.1
 ///     and level 37 in JEFF-4.0. ``source`` is ``"cross_section"`` for MF=10

@@ -302,10 +302,11 @@ pub struct BranchingStats {
     pub partial_sum_mismatches: Vec<String>,
     /// The production states of a transmutation reaction that name no single
     /// product nuclide, one line each, and so give no row. Fission (IZAP =
-    /// -1) is one kind; the other is a subsection with IZAP = 0 that no MF=8
-    /// subsection names either (see
+    /// -1) is one kind; another is a subsection with IZAP = 0 that no single
+    /// MF=8 subsection names either (see
     /// `endf::radionuclide_production::product_zap`), where the file does not
-    /// say which nuclide it is. Neither reaches this list from the six
+    /// say which nuclide it is; the last is any other ZAP whose Z or A is not
+    /// positive, reported with its value. None reaches this list from the six
     /// libraries yani builds from: their fission subsections are all MT=18,
     /// which is no transmutation reaction and is passed over before this, and
     /// the one evaluation writing IZAP = 0 elsewhere, FENDL-3.2d's Al27, is
@@ -534,10 +535,12 @@ impl BranchingExtractor {
             }
             for s in states {
                 let Some((z, a)) = s.nuclide() else {
-                    let why = if s.zap == -1 {
-                        "fission, which leaves no single product"
-                    } else {
-                        "no product named, IZAP = 0 in MF=9/10 and no one MF=8 subsection for the level"
+                    let why = match s.zap {
+                        -1 => "fission, which leaves no single product".to_string(),
+                        0 => "no product named: IZAP = 0 in MF=9/10, and MF=8 has no single \
+                              subsection for the level naming one (none, several, or ZAP = 0)"
+                            .to_string(),
+                        zap => format!("ZAP {zap} names no single nuclide"),
                     };
                     stats
                         .skipped_states
