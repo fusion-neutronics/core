@@ -279,7 +279,7 @@ pub fn flux_deviates(
 
 /// Keeps the flux stream clear of the per-nuclide cross-section streams, which
 /// are keyed on a hash of the nuclide name.
-const FLUX_STREAM: u32 = 0xF10D_5EED;
+pub(crate) const FLUX_STREAM: u32 = 0xF10D_5EED;
 
 /// Apply one replica's flux perturbation to a set of unit-flux rates.
 ///

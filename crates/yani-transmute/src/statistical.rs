@@ -20,7 +20,7 @@ use crate::history_statistics::{RateCovariance, RateLabel};
 use crate::transmutation_tallies::PartialRates;
 
 /// Keeps the statistical stream clear of every other replica stream.
-const STATISTICAL_STREAM: u32 = 0x57A7_1571;
+pub(crate) const STATISTICAL_STREAM: u32 = 0x57A7_1571;
 
 /// Relative size below which a Cholesky pivot is treated as zero. A rate
 /// covariance is positive semi-definite, not definite: a rate equal to a sum of

@@ -317,26 +317,32 @@ mod tests {
 
     #[test]
     fn the_stream_does_not_collide_with_any_other() {
-        assert_eq!(DECAY_BRANCHING_STREAM, 0xDB2A_0C5E);
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../yani/tests/transmutation-endf-b8.1-sfr.arrow");
         let chain = yani::parse_chain_arrow(&path).expect("parse chain");
-        let tags: [u32; 6] = [
+        // Stream 0 is the cross sections, keyed on the bare name ordinal.
+        let tags = [
             0,
-            0x4A1F_11FE,
-            0xDEC4_E6E1,
-            0xDB2A_0C5E,
-            0xF155_10E1,
-            0x150B_4A7C,
+            crate::uncertainty::HALF_LIFE_STREAM,
+            crate::uncertainty::DECAY_ENERGY_STREAM,
+            DECAY_BRANCHING_STREAM,
         ];
         let mut keys = std::collections::HashSet::new();
         for name in chain.keys() {
             for t in tags {
                 let k = name_ordinal(name) ^ t;
                 assert!(keys.insert(k), "{name} collides under tag {t:#x}");
-                assert_ne!(k, 0x57A7_1571, "{name} hits the statistical stream");
+                assert_ne!(
+                    k,
+                    crate::statistical::STATISTICAL_STREAM,
+                    "{name} hits the statistical stream"
+                );
                 for i in 0..64u32 {
-                    assert_ne!(k, 0xF10D_5EED ^ i, "{name} hits flux stream {i}");
+                    assert_ne!(
+                        k,
+                        crate::flux_uncertainty::FLUX_STREAM ^ i,
+                        "{name} hits flux stream {i}"
+                    );
                 }
             }
         }
