@@ -76,7 +76,12 @@ def test_leaving_decay_branching_out_is_reported():
     assert info["decay_branchings_floored"] == 0
 
 
-def test_asking_for_decay_branching_reports_every_category():
+def test_asking_for_decay_branching_reports_disjoint_categories():
+    """Every category key is present and no parent is in two of them.
+
+    Which parent lands in which category is pinned on a synthetic chain in
+    the Rust test, since the local fixture chain need not fill every one.
+    """
     info = _info(["decay_branching"])
     assert "decay branching ratio" not in info["not_perturbed"]
     assert info["sources"] == ["decay_branching"]
