@@ -2819,10 +2819,12 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         energy within a tenth, by level index, as the only isomer, or not at
         all) and ``flagged_levels`` (one line per level that was unresolved,
         matched only by the looser energy pass, or matched by energy while its
-        level index pointed at another isomer), and ``partial_sum_mismatches``
+        level index pointed at another isomer), ``partial_sum_mismatches``
         (one line per reaction whose MF=10 partial cross sections do not sum to
         its MF=3 total, or whose MF=9 yields do not sum to one, within two
-        percent below 20 MeV).
+        percent below 20 MeV), and ``skipped_states`` (one line per production
+        state that names no single product nuclide, fission or an IZAP of zero
+        that MF=8 does not resolve, and so gives no row).
     """
 
 def convert_neutron_transport(input_path: builtins.str, output_dir: builtins.str, njoy_exec: builtins.str = 'njoy', temperatures: typing.Optional[typing.Sequence[builtins.float]] = None, library: builtins.str = '', data_version: builtins.str = '', created_utc: typing.Optional[builtins.str] = None, covariance: builtins.bool = False) -> builtins.str:
@@ -3170,6 +3172,8 @@ def radionuclide_production(neutron_files: typing.Sequence[builtins.str]) -> lis
         ``product`` is the product's **ground-state** name even for an excited
         state, because naming the isomer needs decay data to say which
         isomeric ordinal a level is; pair it with ``excitation_energy_eV``.
+        It is ``None`` for a state naming no single nuclide: fission, or a
+        subsection whose IZAP is zero with no MF=8 subsection to name it.
         ``level_index`` is the evaluation's own LFS and is not comparable
         between libraries: Ir190's 377 keV isomer is level 3 in ENDF/B-VIII.1
         and level 37 in JEFF-4.0. ``source`` is ``"cross_section"`` for MF=10
