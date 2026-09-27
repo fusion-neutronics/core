@@ -92,6 +92,7 @@ pub fn time_correction_factor_ensemble(
         ..Default::default()
     };
     if !request.wants(Source::HalfLife) {
+        out.not_perturbed.insert(0, "half-life".to_string());
         out.converged = true;
         return Ok(out);
     }

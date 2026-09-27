@@ -400,3 +400,23 @@ fn a_d1s_time_correction_lists_the_branching_as_not_perturbed() {
         vec!["decay branching ratio".to_string()]
     );
 }
+
+/// A D1S request without the half-life source says the half-lives were held
+/// at nominal too, as a transmutation report does.
+#[test]
+fn a_d1s_time_correction_without_half_lives_lists_them_as_not_perturbed() {
+    let emitters = vec!["Bi212".to_string()];
+    let ensemble = time_correction_factor_ensemble(
+        &emitters,
+        &[HALF_LIFE],
+        &[vec![1.0e10]],
+        &chain(),
+        &request(vec![Source::DecayBranching], false),
+    )
+    .expect("tcf");
+    assert!(ensemble.sources.is_empty());
+    assert_eq!(
+        ensemble.not_perturbed,
+        vec!["half-life".to_string(), "decay branching ratio".to_string()]
+    );
+}
