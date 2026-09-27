@@ -877,7 +877,7 @@ fn load_optional(dir: &Path, file: &str, into: &mut SectionFiles) -> Result<(), 
 
 /// Parse a v2 split chain from directories on disk.
 ///
-/// Reads the seven section files into [`ChainSections`] and hands them to
+/// Reads the eight section files into [`ChainSections`] and hands them to
 /// [`parse_chain_parts_from_bytes`], which holds the actual parsing. The split
 /// exists so a host without a filesystem can reach the same parser.
 pub fn parse_chain_parts(
@@ -1777,6 +1777,127 @@ mod tests {
         assert!(err.contains("U235 at 0.0253 eV has no row"), "got: {err}");
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The sections of a one-nuclide chain whose first energy carries an
+    /// independent and a cumulative row, with `evaluated_yields.arrow` passed
+    /// through `tamper` before it is handed back as bytes.
+    fn tampered_sections(
+        tamper: impl FnOnce(arrow_array::RecordBatch) -> Vec<arrow_array::RecordBatch>,
+    ) -> super::ChainSections {
+        let dir = std::env::temp_dir().join(format!(
+            "yani-tamper-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let chain = std::collections::HashMap::from([(
+            "U235".to_string(),
+            fissioning("U235", &[0.0253, 5.0e5], true),
+        )]);
+        super::export_chain_parts(&chain, &dir, None).unwrap();
+        let mut parts = super::ChainSections::default();
+        for (subsection, file) in [
+            ("decay", "nuclides.arrow"),
+            ("fission_yields", "fission_yields.arrow"),
+        ] {
+            let bytes = std::fs::read(dir.join(subsection).join(file)).unwrap();
+            parts.insert(subsection, file, bytes).unwrap();
+        }
+        let path = dir.join("fission_yields/evaluated_yields.arrow");
+        let batch = super::read_arrow_file(&path).unwrap().remove(0);
+        let schema = batch.schema();
+        let mut bytes = Vec::new();
+        let mut writer = arrow_ipc::writer::FileWriter::try_new(&mut bytes, &schema).unwrap();
+        for batch in tamper(batch) {
+            writer.write(&batch).unwrap();
+        }
+        writer.finish().unwrap();
+        drop(writer);
+        parts
+            .insert("fission_yields", "evaluated_yields.arrow", bytes)
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        parts
+    }
+
+    /// `batch` with the column `name` replaced by `values`.
+    fn replace_column(
+        batch: arrow_array::RecordBatch,
+        name: &str,
+        values: arrow_array::ArrayRef,
+    ) -> arrow_array::RecordBatch {
+        let index = batch.schema().index_of(name).unwrap();
+        let mut columns = batch.columns().to_vec();
+        columns[index] = values;
+        arrow_array::RecordBatch::try_new(batch.schema(), columns).unwrap()
+    }
+
+    fn refusal(parts: &super::ChainSections) -> String {
+        super::parse_chain_parts_from_bytes(parts)
+            .expect_err("a damaged evaluated_yields.arrow must not load")
+            .to_string()
+    }
+
+    /// A kind the reader does not know would otherwise have nowhere to go, and
+    /// guessing which slot it belongs in would mislabel the data.
+    #[test]
+    fn an_evaluated_yield_of_unknown_kind_is_refused() {
+        let parts = tampered_sections(|batch| {
+            let kinds = arrow_array::StringArray::from(vec!["independent", "fission"]);
+            vec![replace_column(batch, "kind", std::sync::Arc::new(kinds))]
+        });
+        let err = refusal(&parts);
+        assert!(err.contains("unknown kind \"fission\""), "got: {err}");
+    }
+
+    /// Two rows for one slot cannot both be kept, and keeping either would
+    /// silently drop the other.
+    #[test]
+    fn a_duplicated_evaluated_yield_row_is_refused() {
+        let parts = tampered_sections(|batch| vec![batch.clone(), batch]);
+        let err = refusal(&parts);
+        assert!(
+            err.contains("U235 has two independent rows at 0.0253 eV"),
+            "got: {err}"
+        );
+    }
+
+    /// A DY stays aligned with its Y only if the lists are the same length.
+    #[test]
+    fn an_evaluated_yield_with_misaligned_lists_is_refused() {
+        let parts = tampered_sections(|batch| {
+            let mut yields =
+                arrow_array::builder::ListBuilder::new(arrow_array::builder::Float64Builder::new());
+            // The independent row loses its last yield.
+            yields.values().append_slice(&[0.05, 0.02]);
+            yields.append(true);
+            yields.values().append_slice(&[0.0619]);
+            yields.append(true);
+            vec![replace_column(
+                batch,
+                "yields",
+                std::sync::Arc::new(yields.finish()),
+            )]
+        });
+        let err = refusal(&parts);
+        assert!(
+            err.contains("U235 independent at 0.0253 eV has 3 products, 2 yields"),
+            "got: {err}"
+        );
+    }
+
+    /// With no nominal yields supplied at all, every evaluated row is an
+    /// orphan, and the reader says which file is missing.
+    #[test]
+    fn evaluated_yields_without_nominal_yields_are_refused() {
+        let mut parts = tampered_sections(|batch| vec![batch]);
+        parts.fission_yields.remove("fission_yields.arrow");
+        let err = refusal(&parts);
+        assert!(
+            err.contains("supplied without fission_yields/fission_yields.arrow"),
+            "got: {err}"
+        );
     }
 
     /// A chain directory in the retired flat layout must be refused, not read
