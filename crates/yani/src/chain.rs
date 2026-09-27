@@ -44,6 +44,11 @@ pub struct ChainReaction {
     /// `None` is (a reaction, or a file that predates the column), and both
     /// must be read as not stated rather than as an exact ratio. Kept
     /// literally so that re-exporting a chain writes back what it read.
+    ///
+    /// It is the tape's dBR on the tape's BR, while `branching` may not be the
+    /// tape's BR: where a parent's evaluated ratios do not sum to one, the
+    /// converter puts the residual on the parent's largest mode. A consumer
+    /// pairing the two should know that row carries a moved ratio.
     pub branching_uncertainty: Option<f64>,
 }
 
