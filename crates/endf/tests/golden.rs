@@ -2011,6 +2011,11 @@ fn dump_section(d: &mut Dump, path: &str, section: &Section) {
             }
         }
 
+        // The Python reader ignores MF=32, so there is nothing to hold this
+        // to. It stays out of the golden comparison; the unit tests in
+        // `mf/mf32.rs` and the tape walk in `mf32_tapes.rs` cover it instead.
+        Section::Mf32(_) => {}
+
         Section::Unparsed { .. } => {}
     }
 }
@@ -2322,15 +2327,15 @@ fn unported_files_keep_their_text() {
     // Built synthetically rather than taken from a fixture: every file in
     // every fixture on this branch is now ported, and a test that depends on
     // that not being true stops testing anything the moment it stops holding.
-    // MF=32 (resonance parameter covariances) is not parsed by the Python
-    // reader either (its dispatch warns and ignores) so it is a stable
-    // choice rather than one the next commit invalidates.
-    const MF: i32 = 32;
+    // MF=31 (covariances of the fission neutron multiplicity) is not parsed
+    // by the Python reader either (its dispatch warns and ignores) so it is a
+    // stable choice rather than one the next commit invalidates.
+    const MF: i32 = 31;
     let line =
         |body: &str, mat: i32, mf: i32, mt: i32| format!("{body:<66}{mat:>4}{mf:>2}{mt:>3}\n");
     let text = line(" tape id", 1, 0, 0)
-        + &line(" 1.001000+3 9.991673-1          0          0          1          0", 125, MF, 2)
-        + &line(" 0.000000+0 0.000000+0          0          2          1          1", 125, MF, 2)
+        + &line(" 1.001000+3 9.991673-1          0          0          1          0", 125, MF, 452)
+        + &line(" 0.000000+0 0.000000+0          0          2          1          1", 125, MF, 452)
         + &line("", 125, MF, 0)   // SEND
         + &line("", 0, 0, 0); // MEND
 
@@ -2343,10 +2348,14 @@ fn unported_files_keep_their_text() {
         .filter(|(_, s)| matches!(s, Section::Unparsed { .. }))
         .map(|(&k, _)| k)
         .collect();
-    assert_eq!(unparsed, vec![(MF, 2)], "MF={MF} should not have a parser");
+    assert_eq!(
+        unparsed,
+        vec![(MF, 452)],
+        "MF={MF} should not have a parser"
+    );
 
     // The body is kept whole, SEND excluded, so the Python reader can take it.
-    let body = &m.section_text[&(MF, 2)];
+    let body = &m.section_text[&(MF, 452)];
     assert_eq!(body.lines().count(), 2);
     assert!(body.contains("1.001000+3"));
 }
@@ -2358,11 +2367,15 @@ fn unported_files_keep_their_text() {
 /// Kept as an explicit list rather than a remark in a commit message: the test
 /// below fails when a fixture starts covering one of them, which is the moment
 /// the entry should be deleted.
-const UNCOVERED_BY_ANY_FIXTURE: [i32; 1] = [40];
+///
+/// MF=32 is here for a different reason: the Python reader does not parse it,
+/// so a fixture would have no golden to compare against. `mf32_tapes.rs`
+/// walks it on the full libraries instead.
+const UNCOVERED_BY_ANY_FIXTURE: [i32; 2] = [32, 40];
 
 /// The MF files that have a Rust parser at all.
-const PORTED: [i32; 21] = [
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 15, 23, 26, 27, 28, 33, 34, 40,
+const PORTED: [i32; 22] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 15, 23, 26, 27, 28, 32, 33, 34, 40,
 ];
 
 #[test]

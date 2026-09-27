@@ -145,6 +145,35 @@ pub struct Tab2 {
     pub table: Tabulated2D,
 }
 
+/// One line of an INTG record, exactly as written.
+///
+/// `ii` and `jj` are the 1-based row and first column the format puts at the
+/// start of the line, and `kij` holds every packed correlation field on it,
+/// blanks included as zero. The field at position `n` belongs to column
+/// `jj + n`; fields at or past the diagonal (`jj + n >= ii`) are padding the
+/// format tells a reader to ignore, but they are kept here all the same.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IntgLine {
+    pub ii: i64,
+    pub jj: i64,
+    pub kij: Vec<i64>,
+}
+
+/// The layout of one INTG line for each NDIGIT, from the FORMAT statements in
+/// ENDF-102 section 32.2.3: fields per line, the column the first starts at,
+/// and the width of each.
+fn intg_layout(ndigit: i64) -> Result<(usize, usize, usize)> {
+    match ndigit {
+        2 => Ok((18, 11, 3)),
+        3 => Ok((13, 11, 4)),
+        4 => Ok((11, 11, 5)),
+        5 => Ok((9, 11, 6)),
+        // The one layout with no blank column after JJ.
+        6 => Ok((8, 10, 7)),
+        _ => Err(Error::BadNdigit { ndigit }),
+    }
+}
+
 /// A square matrix, used for the correlation matrix an INTG record encodes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Matrix {
@@ -409,6 +438,28 @@ impl<'a> Reader<'a> {
         corr.symmetrize();
         Ok(corr)
     }
+
+    /// One line of an INTG record, read without interpretation.
+    ///
+    /// Unlike [`Reader::intg_record`], which keeps endf-python's layout so the
+    /// two readers agree, this follows the FORMAT statements in ENDF-102
+    /// section 32.2.3 for every NDIGIT, and drops nothing: a row index outside
+    /// the matrix is returned as written for the caller to judge.
+    pub fn intg_line(&mut self, ndigit: i64) -> Result<IntgLine> {
+        let (nrow, start, width) = intg_layout(ndigit)?;
+        let line = self.next_line("a line of an INTG record")?;
+        let kij = (0..nrow)
+            .map(|n| {
+                let o = start + width * n;
+                int_endf(field(line, o, o + width))
+            })
+            .collect();
+        Ok(IntgLine {
+            ii: int_endf(field(line, 0, 5)),
+            jj: int_endf(field(line, 5, 10)),
+            kij,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -522,6 +573,39 @@ mod tests {
         assert_eq!(tab.table.y, vec![2.0, 4.0, 6.0]);
         assert_eq!(tab.table.breakpoints, vec![3]);
         assert_eq!(tab.table.interpolation, vec![2]);
+    }
+
+    #[test]
+    fn reads_an_intg_line_for_every_ndigit() {
+        // One line per NDIGIT, each with its first and last field set, so a
+        // wrong start column or width shows up as a wrong value at either end.
+        // (NDIGIT, fields per line, blank columns after JJ, field width)
+        let cases: [(i64, usize, usize, usize); 5] = [
+            (2, 18, 1, 3),
+            (3, 13, 1, 4),
+            (4, 11, 1, 5),
+            (5, 9, 1, 6),
+            (6, 8, 0, 7),
+        ];
+        for (ndigit, nrow, gap, width) in cases {
+            let big = 10i64.pow(ndigit as u32) - 1;
+            let (first, last) = (-(big / 10), big);
+            let middle = " ".repeat(width * (nrow - 2));
+            let line = format!(
+                "{:>5}{:>5}{}{first:>width$}{middle}{last:>width$}",
+                10,
+                1,
+                " ".repeat(gap)
+            );
+            let mut r = Reader::new(&line);
+            let row = r.intg_line(ndigit).unwrap();
+            assert_eq!((row.ii, row.jj), (10, 1), "NDIGIT={ndigit}");
+            assert_eq!(row.kij.len(), nrow, "NDIGIT={ndigit}");
+            assert_eq!(row.kij[0], first, "NDIGIT={ndigit}");
+            assert_eq!(row.kij[nrow - 1], last, "NDIGIT={ndigit}");
+            assert!(row.kij[1..nrow - 1].iter().all(|&k| k == 0));
+        }
+        assert!(Reader::new("").intg_line(7).is_err());
     }
 
     #[test]
