@@ -22,12 +22,16 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::Path;
+use std::sync::Arc;
 
+use arrow_array::builder::{
+    BooleanBuilder, Float64Builder, Int32Builder, ListBuilder, StringBuilder,
+};
 use endf::function::Tabulated1D;
 use endf::radionuclide_production::{LevelRoute, RadionuclideProduction};
 use endf::Material;
 
-use crate::{list_of, strings, write_section};
+use crate::{list_of, opt_strings, strings, write_section};
 
 /// Relative tolerance for resampling a non-lin-lin region.
 pub const DEFAULT_LINEARIZE_TOL: f64 = 1e-3;
@@ -59,6 +63,89 @@ pub struct BranchingRow {
     pub quantity: String,
     pub energy: Vec<f64>,
     pub values: Vec<f64>,
+    /// The evaluated production states this row is made from, in the order
+    /// they were summed: one, or several when levels (or MTs sharing a
+    /// reaction name) map to the same target.
+    pub states: Vec<StateFacts>,
+    /// The parent evaluation's own account of what it was normalised to, from
+    /// its MF=1 description. See [`normalisation_block`].
+    pub normalisation: Option<String>,
+}
+
+/// What the evaluation states about one production state behind a row.
+///
+/// Facts recorded for whoever decides what the list means, not used to build
+/// the row: nothing here changes `energy` or `values`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StateFacts {
+    /// The MT the state was listed under.
+    pub mt: i32,
+    /// The final state's level number (LFS); 0 is the ground state.
+    pub lfs: i64,
+    /// MF=8's LMF for the state, `None` with no MF=8 subsection for it.
+    pub lmf: Option<i64>,
+    /// Whether the same MT and file (MF=9 or MF=10) also list the ground state
+    /// (LFS = 0) of the same product. A list without it gives isomers only.
+    pub list_complete: bool,
+    /// How the level was matched to the row's target.
+    pub level_route: LevelRoute,
+    /// The level's excitation energy in eV, as
+    /// [`RadionuclideProduction::excitation_energy`] reads it.
+    pub level_energy: f64,
+    /// `level_energy` less the excitation energy of the state the level was
+    /// booked to (zero for the ground state), in eV. `None` when that isomer's
+    /// energy is unknown to the decay data.
+    pub level_energy_difference: Option<f64>,
+    /// The evaluation's own MF=3 for `mt`, as stated. `None` when the file
+    /// has none. Shared between the states of one MT, since a TENDL MT=102
+    /// section can run to thousands of points.
+    pub mf3: Option<Arc<Tabulated1D>>,
+}
+
+/// The heading TENDL writes over the normalisation block of its MF=1
+/// description.
+const NORMALISATION_HEADING: &str = "Normalization to other libraries";
+
+/// The lines of an evaluation's MF=1 description that say what it was
+/// normalised to, verbatim, or `None` when it says nothing.
+///
+/// TENDL-2025 writes the TALYS input it normalised with under a heading of its
+/// own, for example Nb93's
+/// `library irdff2.0` / `norm mt=16 isom=1 width=0.05 ...`, which says the
+/// (n,2n) isomer partial was normalised to IRDFF-II. The block runs from the
+/// heading to the banner (a line of `*`) that starts the next part. It is kept
+/// whole, commented-out lines included, with only its surrounding blank lines
+/// and each line's trailing padding removed; what a line means is left to the
+/// reader. 101 TENDL-2025 evaluations carry one, and so do 11 JEFF-4.0
+/// evaluations taken from TENDL; TENDL-2017, ENDF/B-VIII.1, JENDL-5 and
+/// FENDL-3.2d have none.
+pub fn normalisation_block(material: &Material) -> Option<String> {
+    let description = &material.mf1_mt451()?.description;
+    let start = description
+        .iter()
+        .position(|line| line.trim() == NORMALISATION_HEADING)?;
+    let body: Vec<&str> = description[start + 1..]
+        .iter()
+        .map(|line| line.trim_end())
+        .take_while(|line| !line.starts_with('*'))
+        .collect();
+    let first = body.iter().position(|line| !line.is_empty())?;
+    let last = body.iter().rposition(|line| !line.is_empty())?;
+    Some(body[first..=last].join("\n"))
+}
+
+/// A curve sampled on `energy`: its value inside its tabulated range, under its
+/// own interpolation law between points (so the tape's value wherever a node
+/// is one of its points), and null outside that range, where the file states
+/// nothing.
+fn sampled_on(curve: &Tabulated1D, energy: &[f64]) -> Vec<Option<f64>> {
+    let (Some(&lo), Some(&hi)) = (curve.x.first(), curve.x.last()) else {
+        return vec![None; energy.len()];
+    };
+    energy
+        .iter()
+        .map(|&e| (lo..=hi).contains(&e).then(|| curve.eval(e)))
+        .collect()
 }
 
 /// Whether every interpolation region is lin-lin (ENDF law 2).
@@ -247,9 +334,11 @@ pub fn merge_duplicates(rows: Vec<BranchingRow>) -> (Vec<BranchingRow>, usize) {
             out_x.push(u);
             out_y.push(right);
         }
+        let states: Vec<StateFacts> = group.iter().flat_map(|r| r.states.clone()).collect();
         let mut row = group.into_iter().next().expect("one");
         row.energy = out_x;
         row.values = out_y;
+        row.states = states;
         merged_rows.push(row);
     }
     (merged_rows, merged)
@@ -311,6 +400,18 @@ pub struct BranchingStats {
     /// the one evaluation writing IZAP = 0 elsewhere, FENDL-3.2d's Al27, is
     /// named by its MF=8.
     pub skipped_states: Vec<String>,
+    /// One line per production list (a parent's MT, in MF=9 or MF=10) that
+    /// gave rows: whether the ground state is listed, whether the file has
+    /// the MF=3 the list belongs to, each state's LFS, LMF, target, route and
+    /// level energy difference, and the MF=1 normalisation lines that name
+    /// the MT. The same facts are stored per row in `branching.arrow`; this
+    /// is the copy a build log prints.
+    pub list_facts: Vec<String>,
+    /// How many lists there are of each kind: `"MF=10 complete"`,
+    /// `"MF=10 isomers only"`, the same for MF=9, `"no MF=3"` and
+    /// `"normalised"` (a `norm` line of the MF=1 normalisation block names the
+    /// MT).
+    pub list_counts: BTreeMap<String, usize>,
 }
 
 /// The value of `t` at `e`, zero outside its tabulated range.
@@ -518,12 +619,19 @@ impl BranchingExtractor {
         );
         stats.parents += 1;
         let production = endf::radionuclide_production::radionuclide_production(material);
+        let normalisation = normalisation_block(material);
         let mut emitted_any = false;
 
         for (mt, states) in &production {
             let Some(rtype) = mt2type.get(&(*mt as i64)) else {
                 continue;
             };
+            let mf3 = material
+                .mf3(*mt)
+                .map(|section| Arc::new(section.sigma.clone()));
+            // Per file (MF=9 first, then MF=10): the description of each state
+            // that gave a row, and whether every one had its ground listed.
+            let mut list_lines: [(Vec<String>, bool); 2] = [(Vec::new(), true), (Vec::new(), true)];
             if let Some(sum) = partial_sum(material, *mt, states) {
                 if sum.share > PARTIAL_SUM_TOLERANCE {
                     stats.partial_sum_mismatches.push(format!(
@@ -556,6 +664,16 @@ impl BranchingExtractor {
                 );
                 let liso = resolved.liso;
                 let target = endf::gnds_name(z as u32, a as u32, liso as u32);
+                let level_energy = s.excitation_energy();
+                let booked_energy = if liso == 0 {
+                    Some(0.0)
+                } else {
+                    isomers
+                        .get(&(z, a))
+                        .and_then(|table| table.get(&liso))
+                        .and_then(|isomer| isomer.e_iso)
+                };
+                let level_energy_difference = booked_energy.map(|e| level_energy - e);
                 if liso > 0 {
                     metastable.insert(target.clone());
                 }
@@ -585,12 +703,31 @@ impl BranchingExtractor {
                         ));
                     }
                 }
-                for (quantity, tab) in [("yield", &s.yields), ("cross_section", &s.cross_section)] {
+                for (file, (quantity, tab)) in
+                    [("yield", &s.yields), ("cross_section", &s.cross_section)]
+                        .into_iter()
+                        .enumerate()
+                {
                     let Some(tab) = tab else { continue };
                     if !is_linear(tab) {
                         stats.linearized_curves += 1;
                     }
                     let (energy, values) = linearize(tab, linearize_tol);
+                    let list_complete = states.iter().any(|g| {
+                        g.zap == s.zap
+                            && g.lfs == 0
+                            && [&g.yields, &g.cross_section][file].is_some()
+                    });
+                    let lmf = s.lmf.map_or("none".to_string(), |lmf| lmf.to_string());
+                    let difference = level_energy_difference
+                        .map_or("unknown".to_string(), |d| format!("{:+.3} keV", d / 1.0e3));
+                    let (lines, all_complete) = &mut list_lines[file];
+                    lines.push(format!(
+                        "LFS {} -> {target} (LMF {lmf}, {}, {difference})",
+                        s.lfs,
+                        resolved.route.label()
+                    ));
+                    *all_complete &= list_complete;
                     rows.push(BranchingRow {
                         nuclide: parent.clone(),
                         reaction: rtype.clone(),
@@ -598,9 +735,65 @@ impl BranchingExtractor {
                         quantity: quantity.to_string(),
                         energy,
                         values,
+                        states: vec![StateFacts {
+                            mt: *mt,
+                            lfs: s.lfs,
+                            lmf: s.lmf,
+                            list_complete,
+                            level_route: resolved.route,
+                            level_energy,
+                            level_energy_difference,
+                            mf3: mf3.clone(),
+                        }],
+                        normalisation: normalisation.clone(),
                     });
                     emitted_any = true;
                 }
+            }
+
+            // The build log's copy of the facts just stored, one line per list.
+            let token = format!("mt={mt}");
+            let norm_lines: Vec<&str> = normalisation
+                .iter()
+                .flat_map(|block| block.lines())
+                .filter(|line| {
+                    line.starts_with("library ") || line.split_whitespace().any(|t| t == token)
+                })
+                .collect();
+            // Counted only for a live `norm` line; a commented-out one (`#norm`)
+            // is still printed, since it is in the file.
+            let normalised = norm_lines.iter().any(|line| line.starts_with("norm "));
+            for (file, (lines, complete)) in list_lines.into_iter().enumerate() {
+                if lines.is_empty() {
+                    continue;
+                }
+                let mf = [9, 10][file];
+                let kind = if complete { "complete" } else { "isomers only" };
+                *stats
+                    .list_counts
+                    .entry(format!("MF={mf} {kind}"))
+                    .or_insert(0) += 1;
+                if mf3.is_none() {
+                    *stats.list_counts.entry("no MF=3".to_string()).or_insert(0) += 1;
+                }
+                let mut line = format!(
+                    "{parent} MT{mt} {rtype} MF={mf}: {}, MF=3 {}; {}",
+                    if complete {
+                        "ground listed"
+                    } else {
+                        "isomers only"
+                    },
+                    if mf3.is_some() { "given" } else { "absent" },
+                    lines.join("; ")
+                );
+                if normalised {
+                    *stats
+                        .list_counts
+                        .entry("normalised".to_string())
+                        .or_insert(0) += 1;
+                    line.push_str(&format!("; normalised: {}", norm_lines.join(" | ")));
+                }
+                stats.list_facts.push(line);
             }
         }
         if emitted_any {
@@ -630,6 +823,10 @@ impl BranchingExtractor {
             .partial_sum_mismatches
             .extend(stats.partial_sum_mismatches);
         self.stats.skipped_states.extend(stats.skipped_states);
+        self.stats.list_facts.extend(stats.list_facts);
+        for (kind, n) in stats.list_counts {
+            *self.stats.list_counts.entry(kind).or_insert(0) += n;
+        }
     }
 
     /// The rows and statistics, with duplicate target groups merged.
@@ -660,6 +857,14 @@ pub fn extract_branching(
 }
 
 /// Write the `branching/` subsection.
+///
+/// The columns after `values` are the per-state facts of [`StateFacts`], one
+/// list item per state in the order the row summed them, and the parent's
+/// [`normalisation_block`]. `mf3_cross_section` holds, per state, the MF=3
+/// for its MT sampled on this row's `energy`, so a reader can set each partial
+/// against the evaluation's own total point by point; an item is null where
+/// MF=3 is not tabulated, and the whole entry is null where the file has no
+/// MF=3 for the MT.
 pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn Error>> {
     std::fs::create_dir_all(dir)?;
     let nuclide: Vec<String> = rows.iter().map(|r| r.nuclide.clone()).collect();
@@ -668,6 +873,48 @@ pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn 
     let quantity: Vec<String> = rows.iter().map(|r| r.quantity.clone()).collect();
     let energy: Vec<Vec<f64>> = rows.iter().map(|r| r.energy.clone()).collect();
     let values: Vec<Vec<f64>> = rows.iter().map(|r| r.values.clone()).collect();
+    let normalisation: Vec<Option<String>> = rows.iter().map(|r| r.normalisation.clone()).collect();
+
+    let mut mt = ListBuilder::new(Int32Builder::new());
+    let mut lfs = ListBuilder::new(Int32Builder::new());
+    let mut lmf = ListBuilder::new(Int32Builder::new());
+    let mut list_complete = ListBuilder::new(BooleanBuilder::new());
+    let mut level_route = ListBuilder::new(StringBuilder::new());
+    let mut level_energy = ListBuilder::new(Float64Builder::new());
+    let mut level_energy_difference = ListBuilder::new(Float64Builder::new());
+    let mut mf3 = ListBuilder::new(ListBuilder::new(Float64Builder::new()));
+    for row in rows {
+        for state in &row.states {
+            mt.values().append_value(state.mt);
+            lfs.values().append_value(i32::try_from(state.lfs)?);
+            lmf.values()
+                .append_option(state.lmf.map(i32::try_from).transpose()?);
+            list_complete.values().append_value(state.list_complete);
+            level_route.values().append_value(state.level_route.label());
+            level_energy.values().append_value(state.level_energy);
+            level_energy_difference
+                .values()
+                .append_option(state.level_energy_difference);
+            match &state.mf3 {
+                Some(curve) => {
+                    for value in sampled_on(curve, &row.energy) {
+                        mf3.values().values().append_option(value);
+                    }
+                    mf3.values().append(true);
+                }
+                None => mf3.values().append(false),
+            }
+        }
+        mt.append(true);
+        lfs.append(true);
+        lmf.append(true);
+        list_complete.append(true);
+        level_route.append(true);
+        level_energy.append(true);
+        level_energy_difference.append(true);
+        mf3.append(true);
+    }
+
     write_section(
         &dir.join("branching.arrow"),
         "branching/branching.arrow",
@@ -678,6 +925,15 @@ pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn 
             strings(&quantity),
             list_of(&energy),
             list_of(&values),
+            Arc::new(mt.finish()),
+            Arc::new(lfs.finish()),
+            Arc::new(lmf.finish()),
+            Arc::new(list_complete.finish()),
+            Arc::new(level_route.finish()),
+            Arc::new(level_energy.finish()),
+            Arc::new(level_energy_difference.finish()),
+            Arc::new(mf3.finish()),
+            opt_strings(&normalisation),
         ],
     )
 }
@@ -777,6 +1033,8 @@ mod tests {
             quantity: "cross_section".to_string(),
             energy,
             values,
+            states: Vec::new(),
+            normalisation: None,
         }
     }
 
