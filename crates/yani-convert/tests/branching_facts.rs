@@ -130,7 +130,7 @@ fn each_row_records_the_states_it_was_summed_from() {
         .expect("a line for (n,2n)");
     assert_eq!(
         line,
-        "Nb93 MT16 (n,2n) MF=10: ground listed, MF=3 given; \
+        "Nb93 MT16 (n,2n) MF=10: ground listed, MF=3 section for MT=16; \
          LFS 0 -> Nb92 (LMF 10, ground, +0.000 keV); \
          LFS 1 -> Nb92_m1 (LMF 10, energy, +0.000 keV); \
          normalised: library irdff2.0 | \

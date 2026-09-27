@@ -97,7 +97,8 @@ pub struct StateFacts {
     /// energy is unknown to the decay data.
     pub level_energy_difference: Option<f64>,
     /// The evaluation's own MF=3 for `mt`, as stated. `None` when the file
-    /// has none. Shared between the states of one MT, since a TENDL MT=102
+    /// has no MF=3 section for that MT, even where it gives the same total
+    /// through component MTs. Shared between the states of one MT, since a TENDL MT=102
     /// section can run to thousands of points.
     pub mf3: Option<Arc<Tabulated1D>>,
 }
@@ -461,7 +462,8 @@ pub struct BranchingStats {
     /// is the copy a build log prints.
     pub list_facts: Vec<String>,
     /// How many lists there are of each kind: `"MF=10 complete"`,
-    /// `"MF=10 isomers only"`, the same for MF=9, `"no MF=3"` and
+    /// `"MF=10 isomers only"`, the same for MF=9, `"no MF=3 section for the
+    /// MT"` and
     /// `"normalised"` (a `norm` line of the MF=1 normalisation block names the
     /// MT).
     pub list_counts: BTreeMap<String, usize>,
@@ -826,17 +828,28 @@ impl BranchingExtractor {
                     .list_counts
                     .entry(format!("MF={mf} {kind}"))
                     .or_insert(0) += 1;
+                // Only the section for this MT is looked for. An evaluation
+                // can give the same total through component MTs instead (Ag115
+                // in ENDF/B-VIII.1 has MT=600-649 and no MT=103), and those are
+                // not summed into one here.
                 if mf3.is_none() {
-                    *stats.list_counts.entry("no MF=3".to_string()).or_insert(0) += 1;
+                    *stats
+                        .list_counts
+                        .entry("no MF=3 section for the MT".to_string())
+                        .or_insert(0) += 1;
                 }
                 let mut line = format!(
-                    "{parent} MT{mt} {rtype} MF={mf}: {}, MF=3 {}; {}",
+                    "{parent} MT{mt} {rtype} MF={mf}: {}, {}; {}",
                     if complete {
                         "ground listed"
                     } else {
                         "isomers only"
                     },
-                    if mf3.is_some() { "given" } else { "absent" },
+                    if mf3.is_some() {
+                        format!("MF=3 section for MT={mt}")
+                    } else {
+                        format!("no MF=3 section for MT={mt}")
+                    },
                     lines.join("; ")
                 );
                 if normalised {
