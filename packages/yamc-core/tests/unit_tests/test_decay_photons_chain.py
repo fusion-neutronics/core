@@ -75,13 +75,14 @@ def test_chain_photon_sources():
 def test_chain_photon_continua_are_tagged():
     """A continuum says it is one, so its per-eV values are never read as lines.
 
-    Sm158 in ENDF/B-VIII.1 has no photon lines, only a continuum. This fixture
-    predates the interpolation column, so its law comes back unstated.
+    Sm158 in ENDF/B-VIII.1 has no photon lines, only a continuum. Its law is
+    unstated in data written before the interpolation column and histogram
+    (the only law ENDF/B-VIII.1 uses for decay continua) in data written after.
     """
     sm158 = yamc.TransmutationChain(CHAIN_FILE).photon_sources["Sm158"]
     assert [row[0] for row in sm158] == ["tabular"]
     kind, energies, densities, interpolation = sm158[0]
-    assert interpolation is None
+    assert interpolation in (None, "histogram")
     assert len(energies) == len(densities) > 100
 
 

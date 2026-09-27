@@ -44,26 +44,19 @@ fn arrow_writer_roundtrip() {
     }
 
     let mut original = parse_chain_arrow(&src).expect("parse source arrow");
-    // The fixture predates the interpolation column, so its continua state no
-    // law, and the round trip has to keep saying so rather than invent one.
-    let continua: Vec<&DecaySourceDistribution> = original
+    // The exact source comparison below proves that each continuum's law, or
+    // its absence, survives the round trip. Only the count is pinned here, so
+    // that a reader that drops continua cannot pass by comparing empty sets.
+    let continua = original
         .values()
         .flat_map(|n| &n.sources)
-        .map(|s| &s.distribution)
-        .filter(|d| matches!(d, DecaySourceDistribution::Tabular { .. }))
-        .collect();
+        .filter(|s| matches!(s.distribution, DecaySourceDistribution::Tabular { .. }))
+        .count();
     assert_eq!(
-        continua.len(),
+        continua,
         276 + 276 + 287,
         "photon, electron and neutron continua"
     );
-    assert!(continua.iter().all(|d| matches!(
-        d,
-        DecaySourceDistribution::Tabular {
-            interpolation: None,
-            ..
-        }
-    )));
 
     let tmp =
         std::env::temp_dir().join(format!("yani_chain_roundtrip_{}.arrow", std::process::id()));

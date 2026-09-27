@@ -72,11 +72,14 @@ fn col<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> Result<&'a T, Box<
         .schema()
         .index_of(name)
         .map_err(|_| format!("column '{name}' not found"))?;
-    batch
-        .column(idx)
-        .as_any()
-        .downcast_ref::<T>()
-        .ok_or_else(|| format!("column '{name}' has unexpected array type").into())
+    let column = batch.column(idx);
+    column.as_any().downcast_ref::<T>().ok_or_else(|| {
+        format!(
+            "column '{name}' has unexpected array type {}",
+            column.data_type()
+        )
+        .into()
+    })
 }
 
 fn list_f64(list: &ListArray, i: usize) -> Result<Vec<f64>, Box<dyn Error>> {
@@ -146,12 +149,15 @@ fn source_distribution(
 
 /// The `interpolation` column of a `sources.arrow` batch, absent from a file
 /// written before it.
-fn interpolation_codes(batch: &RecordBatch) -> Option<&Int32Array> {
-    batch
-        .schema()
-        .index_of("interpolation")
-        .ok()
-        .and_then(|idx| batch.column(idx).as_any().downcast_ref::<Int32Array>())
+///
+/// A column that is present with another type is an error, not an absent one:
+/// read as absent it would turn every stated law into "no law" and blame the
+/// file's age for it.
+fn interpolation_codes(batch: &RecordBatch) -> Result<Option<&Int32Array>, Box<dyn Error>> {
+    match batch.schema().index_of("interpolation") {
+        Err(_) => Ok(None),
+        Ok(_) => col::<Int32Array>(batch, "interpolation").map(Some),
+    }
 }
 
 /// Whether a branching row `(kind, target)` should be grafted onto `parent`.
@@ -341,7 +347,7 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
             let nuclides = col::<StringArray>(&batch, "nuclide")?;
             let particles = col::<StringArray>(&batch, "particle")?;
             let types = col::<StringArray>(&batch, "type")?;
-            let codes = interpolation_codes(&batch);
+            let codes = interpolation_codes(&batch)?;
             let energies_col = col::<ListArray>(&batch, "energies")?;
             let intensities_col = col::<ListArray>(&batch, "intensities")?;
             for i in 0..batch.num_rows() {
@@ -631,7 +637,7 @@ pub fn parse_chain_parts_from_bytes(
             let nuclides = col::<StringArray>(&batch, "nuclide")?;
             let particles = col::<StringArray>(&batch, "particle")?;
             let types = col::<StringArray>(&batch, "type")?;
-            let codes = interpolation_codes(&batch);
+            let codes = interpolation_codes(&batch)?;
             let energies_col = col::<ListArray>(&batch, "energies")?;
             let intensities_col = col::<ListArray>(&batch, "intensities")?;
             for i in 0..batch.num_rows() {
@@ -1560,7 +1566,7 @@ mod tests {
 
     /// A `sources.arrow` row whose type or law the reader cannot place is
     /// refused, not read as lines: that default is what put every continuum
-    /// at about 1e-4 of its rate (issue #163).
+    /// low by a factor of about its grid spacing in eV (issue #163).
     #[test]
     fn a_source_row_the_reader_cannot_place_is_refused() {
         use arrow_array::builder::{Float64Builder, Int32Builder, ListBuilder, StringBuilder};
@@ -1630,6 +1636,36 @@ mod tests {
         assert!(write("tabular", Some(7)).contains("not an ENDF law"));
         assert!(write("discrete", Some(1)).contains("only a tabular row"));
         assert!(write("mixture", None).contains("expected 'discrete' or 'tabular'"));
+    }
+
+    /// An `interpolation` column of the wrong type is an error naming the
+    /// type. Read as absent, it would make every stated law "no law" and the
+    /// later error would blame the file for predating the column.
+    #[test]
+    fn a_mistyped_interpolation_column_is_not_read_as_absent() {
+        use arrow_array::{ArrayRef, Int32Array, Int64Array, RecordBatch};
+        use std::sync::Arc;
+
+        let batch =
+            |column: ArrayRef| RecordBatch::try_from_iter([("interpolation", column)]).unwrap();
+        let pyarrow_default = batch(Arc::new(Int64Array::from(vec![Some(1)])));
+        let message = super::interpolation_codes(&pyarrow_default)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.contains("'interpolation'") && message.contains("Int64"),
+            "{message}"
+        );
+
+        let stated = batch(Arc::new(Int32Array::from(vec![Some(1)])));
+        assert!(super::interpolation_codes(&stated).unwrap().is_some());
+
+        let older = RecordBatch::try_from_iter([(
+            "type",
+            Arc::new(arrow_array::StringArray::from(vec!["tabular"])) as ArrayRef,
+        )])
+        .unwrap();
+        assert!(super::interpolation_codes(&older).unwrap().is_none());
     }
 
     /// A chain directory in the retired flat layout must be refused, not read

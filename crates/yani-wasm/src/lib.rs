@@ -420,21 +420,11 @@ impl YaniSession {
             let activity = yani_decay::activity_by_nuclide(&densities, volume, &chain);
             let heat = yani_decay::decay_heat_by_nuclide(&densities, volume, &chain);
             let lines = yani_decay::decay_photon_lines(&densities, volume, &chain);
-            // Apart from the lines, because a continuum's values are per eV. A
-            // continuum whose law the data does not state has no emission
-            // rate, and says so with a null rather than a number.
+            // Apart from the lines, because a continuum's values are per eV.
             let continua: Vec<serde_json::Value> =
                 yani_decay::decay_photon_continua(&densities, volume, &chain)
-                    .into_iter()
-                    .map(|c| {
-                        serde_json::json!({
-                            "nuclide": c.nuclide,
-                            "interpolation": c.interpolation.map(|law| law.name()),
-                            "emission_rate": c.emission_rate().ok(),
-                            "energies": c.energies,
-                            "rates": c.rates,
-                        })
-                    })
+                    .iter()
+                    .map(continuum_json)
                     .collect();
             // Unlike the three above, this one takes no volume: the slab
             // estimate is intensive. It can fail -- on an element with no
@@ -469,6 +459,20 @@ impl YaniSession {
         }
         Ok(serde_json::Value::Array(out).to_string())
     }
+}
+
+/// One entry of a step's `photon_continua`: energies in eV, rates in
+/// photons/s/eV and the emission rate in photons/s, all for the whole
+/// material. A continuum whose law the data does not state has no emission
+/// rate, and says so with a null rather than a number.
+fn continuum_json(continuum: &yani_decay::PhotonContinuum) -> serde_json::Value {
+    serde_json::json!({
+        "nuclide": continuum.nuclide,
+        "interpolation": continuum.interpolation.map(|law| law.name()),
+        "emission_rate": continuum.emission_rate().ok(),
+        "energies": continuum.energies,
+        "rates": continuum.rates,
+    })
 }
 
 impl YaniSession {
@@ -555,4 +559,37 @@ fn parse_steps(json: &str, spectra: usize) -> Result<Vec<TransmuteStep>, String>
         out.push(TransmuteStep { dt, irradiation });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::continuum_json;
+    use yani::Interpolation;
+    use yani_decay::PhotonContinuum;
+
+    /// A stated law gives the integral, an unstated one a null: never a sum
+    /// of the per-eV values, and never a zero that reads as "emits nothing".
+    #[test]
+    fn a_continuum_reports_its_integral_or_a_null() {
+        let continuum = |interpolation| PhotonContinuum {
+            nuclide: "Sm158".to_string(),
+            energies: vec![1.0e5, 2.0e5, 4.0e5],
+            rates: vec![3.0e-2, 1.0e-2, 0.0],
+            interpolation,
+        };
+
+        let stated = continuum_json(&continuum(Some(Interpolation::Histogram)));
+        assert_eq!(stated["nuclide"], "Sm158");
+        assert_eq!(stated["interpolation"], "histogram");
+        assert_eq!(stated["energies"], serde_json::json!([1.0e5, 2.0e5, 4.0e5]));
+        assert_eq!(stated["rates"], serde_json::json!([3.0e-2, 1.0e-2, 0.0]));
+        // 3e-2 over 1e5 eV plus 1e-2 over 2e5 eV.
+        let rate = stated["emission_rate"].as_f64().unwrap();
+        assert!((rate - 5.0e3).abs() <= 5.0e3 * 1e-15, "{rate}");
+
+        let unstated = continuum_json(&continuum(None));
+        assert!(unstated["interpolation"].is_null());
+        assert!(unstated["emission_rate"].is_null());
+        assert_eq!(unstated["rates"], stated["rates"]);
+    }
 }

@@ -639,3 +639,29 @@ fn named_group_structures_come_from_the_wheels_own_tables() {
     // A typo must name the alternatives rather than silently becoming one.
     assert!(session.group_structure("CCFE-708").is_err());
 }
+
+/// A continuum emitter in data that states no interpolation law, which is
+/// every continuum in a `decay/sources.arrow` written before the column (the
+/// fixture among them). The continuum has no known integral, so the contact
+/// dose cannot be formed and the run fails naming the nuclide, rather than
+/// reporting a dose short by an unknown amount.
+#[test]
+fn a_continuum_without_a_law_fails_the_contact_dose_naming_it() {
+    let _exclusive = exclusive();
+    let Some((mut session, _)) = session_with_chain() else {
+        eprintln!("skipping: run scripts/fetch_test_fixtures.py first");
+        return;
+    };
+    // Sm158 in ENDF/B-VIII.1 emits photons only as a continuum. Decay only,
+    // so no cross sections are needed.
+    session
+        .build_material(r#"{"Sm158": 1.0}"#, 7.5, "g/cm3", "atom", 1.0)
+        .unwrap();
+    let error = session
+        .run(r#"[]"#, r#"[{"dt": 10.0}]"#)
+        .expect_err("the contact dose needs the continuum's law");
+    assert!(
+        error.contains("Sm158") && error.contains("interpolation"),
+        "{error}"
+    );
+}

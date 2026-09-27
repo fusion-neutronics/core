@@ -4,7 +4,8 @@
 //! linear-linear continuum, the spontaneous-fission photons, with FC = 0.249957
 //! photons per decay. That continuum is nearly all of the nuclide's photon
 //! emission, and before issue #163 both chain readers took its per-eV values
-//! for line intensities, which put it at about 1e-5 of its rate.
+//! for line intensities, which put it low by a factor of about its grid
+//! spacing in eV (roughly 2e5 here).
 
 use endf::chain::Chain;
 use endf::{Decay, Material};
@@ -75,7 +76,8 @@ fn the_continuum_arrives_as_a_continuum_with_its_law() {
 
 /// Photons per decay from the continuum: FC times the integral of RP, as the
 /// endf crate's own integral of the tape's TAB1 gives it. Summing the per-eV
-/// values instead, as the readers did, gives about 1e-5 of that.
+/// values instead, as the readers did, gives less by a factor of about the grid
+/// spacing in eV.
 #[test]
 fn the_continuum_emits_what_the_evaluation_states() {
     let decay = Decay::from_material(&material()).expect("decay data");
