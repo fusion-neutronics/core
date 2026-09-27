@@ -20,6 +20,8 @@ use std::collections::HashMap;
 /// the last line wins, matching the previous explicit-`insert` ordering.
 /// `.parse::<f64>()` of the exact decimal literal reproduces the same f64
 /// the inline literal did (both round to nearest), so values are unchanged.
+/// Columns after the value are ignored: `natural_abundance.txt` carries the
+/// rest of its TICE row there, read by [`NATURAL_ABUNDANCE_RECORDS`].
 fn parse_f64_table(data: &'static str) -> HashMap<&'static str, f64> {
     data.lines()
         .filter_map(|line| {
@@ -63,11 +65,124 @@ pub static ELEMENT_NUCLIDES: Lazy<HashMap<&'static str, Vec<&'static str>>> = La
 /// element) for stable isotopes.
 ///
 /// Each key is a nuclide name (e.g. `"Fe56"`) and the value is its natural
-/// abundance by atom fraction. Values are sourced from standard reference
-/// compilations (rounded as needed). Elements with a single stable isotope are
-/// assigned 1.0.
+/// abundance by atom fraction, from Table 1 of Meija et al., "Isotopic
+/// compositions of the elements 2013 (IUPAC Technical Report)", Pure Appl.
+/// Chem. 88(3), 293-306 (2016), doi:10.1515/pac-2015-0503 (© IUPAC, De Gruyter
+/// 2016). The value is column 9, the representative abundance, except for the
+/// 12 elements where column 9 is an interval (H, Li, B, C, N, O, Mg, Si, S, Cl,
+/// Br, Tl), which have no single value there and take the column 6 best
+/// measurement instead. Mononuclidic elements are 1.0. The rest of each row,
+/// uncertainties included, is in [`NATURAL_ABUNDANCE_RECORDS`].
+///
+/// Regenerate with: python scripts/gen_natural_abundance.py
 pub static NATURAL_ABUNDANCE: Lazy<HashMap<&'static str, f64>> =
     Lazy::new(|| parse_f64_table(include_str!("natural_abundance.txt")));
+
+/// Column 9 of TICE 2013: the representative isotopic abundance.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RepresentativeAbundance {
+    /// A value, with the uncertainty printed after it. TICE says the
+    /// uncertainty covers the probable variation between materials as well as
+    /// measurement error, and gives no coverage factor for it. `None` for a
+    /// mononuclidic element, which the table prints as a bare 1.
+    Value { value: f64, uncertainty: Option<f64> },
+    /// The interval `[low, high]` that the 12 elements with interval atomic
+    /// weights are given in place of a value. It is the observed range in
+    /// normal materials, not a probability distribution.
+    Interval { low: f64, high: f64 },
+}
+
+/// One isotope's row of TICE 2013 Table 1, as printed.
+///
+/// Every field is published data; nothing is derived. `None` means the table
+/// leaves the field empty, which is "not stated", never zero.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NaturalAbundanceRecord {
+    /// Column 9.
+    pub representative: RepresentativeAbundance,
+    /// Column 4: the observed interval `(low, high)` of natural variation,
+    /// given only where one has been reliably established.
+    pub observed_interval: Option<(f64, f64)>,
+    /// Column 6: the best measurement of the abundance, made on a single
+    /// terrestrial material.
+    pub best_measurement: f64,
+    /// Column 6 uncertainty, at the coverage in `best_measurement_coverage`.
+    pub best_measurement_uncertainty: Option<f64>,
+    /// Column 6 coverage as printed: the factor k, then `s` (standard
+    /// deviation), `se` (standard error) or `uc` (combined uncertainty), e.g.
+    /// `"2s"`. The table prints `"n/a"` for C and N, and `"9uc"` for Mg.
+    pub best_measurement_coverage: Option<&'static str>,
+    /// Column 6 calibration flag: `'C'` fully, `'F'` partially, `'N'` not
+    /// calibrated.
+    pub best_measurement_calibration: Option<char>,
+    /// Column 5 annotations for the element, comma separated from `g`
+    /// (geologically exceptional specimens), `m` (modified commercial
+    /// material) and `r` (range prevents a more precise value).
+    pub annotations: Option<&'static str>,
+}
+
+/// Parse `natural_abundance.txt` into its full TICE 2013 rows. The columns are
+/// the ones `scripts/gen_natural_abundance.py` writes, `-` for an empty field.
+fn parse_abundance_records(data: &'static str) -> HashMap<&'static str, NaturalAbundanceRecord> {
+    fn field(cell: &'static str) -> Option<&'static str> {
+        (cell != "-").then_some(cell)
+    }
+    fn number(cell: &'static str) -> Option<f64> {
+        field(cell).map(|c| c.parse::<f64>().expect("malformed f64 in natural_abundance.txt"))
+    }
+    fn pair(low: &'static str, high: &'static str) -> Option<(f64, f64)> {
+        match (number(low), number(high)) {
+            (Some(low), Some(high)) => Some((low, high)),
+            (None, None) => None,
+            _ => panic!("natural_abundance.txt has an interval with one bound"),
+        }
+    }
+    data.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let cells: Vec<&'static str> = line.split_whitespace().collect();
+            let [nuclide, _abundance, rep_value, rep_uncertainty, rep_low, rep_high, interval_low, interval_high, best, best_uncertainty, coverage, calibration, annotations] =
+                cells[..]
+            else {
+                panic!("natural_abundance.txt line {line:?} does not have 13 columns");
+            };
+            let representative = match (number(rep_value), pair(rep_low, rep_high)) {
+                (Some(value), None) => RepresentativeAbundance::Value {
+                    value,
+                    uncertainty: number(rep_uncertainty),
+                },
+                (None, Some((low, high))) => RepresentativeAbundance::Interval { low, high },
+                _ => panic!("{nuclide}: column 9 must be exactly one of a value or an interval"),
+            };
+            let record = NaturalAbundanceRecord {
+                representative,
+                observed_interval: pair(interval_low, interval_high),
+                best_measurement: number(best).expect("every row has a column 6 value"),
+                best_measurement_uncertainty: number(best_uncertainty),
+                best_measurement_coverage: field(coverage),
+                best_measurement_calibration: field(calibration).map(|c| {
+                    let mut chars = c.chars();
+                    let flag = chars.next().expect("non-empty calibration flag");
+                    assert!(chars.next().is_none(), "{nuclide}: calibration flag {c:?}");
+                    flag
+                }),
+                annotations: field(annotations),
+            };
+            (nuclide, record)
+        })
+        .collect()
+}
+
+/// The full TICE 2013 row behind each entry of [`NATURAL_ABUNDANCE`], keyed
+/// the same way: the representative value or interval, the observed interval,
+/// and the best measurement with its uncertainty, coverage and calibration.
+///
+/// Read-only reference data. Nothing in yamc samples or propagates these
+/// uncertainties; turning them into a distribution needs choices TICE does not
+/// make (a coverage factor for column 9, correlations between isotopes, how to
+/// treat an interval).
+pub static NATURAL_ABUNDANCE_RECORDS: Lazy<HashMap<&'static str, NaturalAbundanceRecord>> =
+    Lazy::new(|| parse_abundance_records(include_str!("natural_abundance.txt")));
 
 /// Atomic masses in unified atomic mass units (u) from the AME2020
 /// evaluation (Huang et al., Chinese Physics C45, 2021).
@@ -244,7 +359,10 @@ pub static REACTION_MT: Lazy<HashMap<&'static str, i32>> = Lazy::new(|| {
 
 #[cfg(test)]
 mod tests {
-    use super::{ATOMIC_MASS, NATURAL_ABUNDANCE, REACTION_MT};
+    use super::{
+        RepresentativeAbundance, ATOMIC_MASS, NATURAL_ABUNDANCE, NATURAL_ABUNDANCE_RECORDS,
+        REACTION_MT,
+    };
 
     #[test]
     fn atomic_mass_table_loads_from_embedded_data() {
@@ -257,8 +375,7 @@ mod tests {
 
     #[test]
     fn natural_abundance_table_loads_from_embedded_data() {
-        // The source had Li6/Li7 inserted twice; the HashMap keeps the last
-        // (more precise) value, so 291 lines collapse to 289 unique keys.
+        // Every isotope TICE 2013 lists for a normal material, one row each.
         assert_eq!(NATURAL_ABUNDANCE.len(), 289);
         assert_eq!(NATURAL_ABUNDANCE["Fe56"], 0.91754);
         assert_eq!(NATURAL_ABUNDANCE["Li6"], 0.07589);
@@ -347,6 +464,104 @@ mod tests {
                 "{symbol} abundances sum to {sum}, not 1"
             );
         }
+    }
+
+    /// The value every lookup uses is the one the TICE row says it is:
+    /// column 9 where that is a value, the column 6 best measurement where
+    /// column 9 is an interval. Equality is exact, so this also pins that the
+    /// uncertainty columns did not shift any central value.
+    #[test]
+    fn the_lookup_value_is_the_tice_value_its_row_names() {
+        assert_eq!(NATURAL_ABUNDANCE_RECORDS.len(), NATURAL_ABUNDANCE.len());
+        let (mut representative, mut interval, mut mononuclidic) = (0, 0, 0);
+        for (nuclide, &abundance) in NATURAL_ABUNDANCE.iter() {
+            let record = NATURAL_ABUNDANCE_RECORDS[nuclide];
+            let expected = match record.representative {
+                RepresentativeAbundance::Value { value, uncertainty: None } => {
+                    assert_eq!(value, 1.0, "{nuclide}: only a mononuclidic 1 has no uncertainty");
+                    assert_eq!(record.best_measurement, 1.0, "{nuclide}");
+                    mononuclidic += 1;
+                    value
+                }
+                RepresentativeAbundance::Value { value, uncertainty: Some(_) } => {
+                    representative += 1;
+                    value
+                }
+                RepresentativeAbundance::Interval { low, high } => {
+                    // TICE: for these elements columns 4 and 9 are identical.
+                    assert_eq!(record.observed_interval, Some((low, high)), "{nuclide}");
+                    interval += 1;
+                    record.best_measurement
+                }
+            };
+            assert_eq!(abundance.to_bits(), expected.to_bits(), "{nuclide}");
+        }
+        assert_eq!((representative, interval, mononuclidic), (239, 29, 21));
+    }
+
+    #[test]
+    fn the_best_measurements_of_each_element_sum_to_one() {
+        let mut by_element: std::collections::HashMap<String, f64> =
+            std::collections::HashMap::new();
+        for (nuclide, record) in NATURAL_ABUNDANCE_RECORDS.iter() {
+            let symbol: String = nuclide.chars().take_while(|c| c.is_alphabetic()).collect();
+            *by_element.entry(symbol).or_insert(0.0) += record.best_measurement;
+        }
+        for (symbol, sum) in &by_element {
+            // Printed to 4 to 9 decimals; Sn's rounds to 1.00002.
+            assert!((sum - 1.0).abs() < 5.0e-5, "{symbol} column 6 sums to {sum}");
+        }
+    }
+
+    /// Rows read off the printed table.
+    #[test]
+    fn tice_rows_match_the_printed_table() {
+        let fe58 = NATURAL_ABUNDANCE_RECORDS["Fe58"];
+        assert_eq!(
+            fe58.representative,
+            RepresentativeAbundance::Value { value: 0.00282, uncertainty: Some(0.00012) }
+        );
+        assert_eq!(fe58.observed_interval, Some((0.00281, 0.00282)));
+        assert_eq!(fe58.best_measurement, 0.002819);
+        assert_eq!(fe58.best_measurement_uncertainty, Some(0.000027));
+        assert_eq!(fe58.best_measurement_coverage, Some("2s"));
+        assert_eq!(fe58.best_measurement_calibration, Some('C'));
+        assert_eq!(fe58.annotations, None);
+
+        let w186 = NATURAL_ABUNDANCE_RECORDS["W186"];
+        assert_eq!(
+            w186.representative,
+            RepresentativeAbundance::Value { value: 0.2843, uncertainty: Some(0.0019) }
+        );
+        assert_eq!(w186.observed_interval, None);
+        assert_eq!(w186.best_measurement, 0.284259);
+        assert_eq!(w186.best_measurement_uncertainty, Some(0.000062));
+        assert_eq!(w186.best_measurement_coverage, Some("1s"));
+        assert_eq!(w186.best_measurement_calibration, Some('N'));
+
+        let li6 = NATURAL_ABUNDANCE_RECORDS["Li6"];
+        assert_eq!(li6.representative, RepresentativeAbundance::Interval { low: 0.019, high: 0.078 });
+        assert_eq!(li6.best_measurement, 0.07589);
+        assert_eq!(li6.best_measurement_uncertainty, Some(0.00024));
+        assert_eq!(li6.annotations, Some("m"));
+
+        // Printed as 4.6 x 10^-10, the one bound not in fixed notation.
+        assert_eq!(NATURAL_ABUNDANCE_RECORDS["He3"].observed_interval, Some((4.6e-10, 0.000041)));
+        assert_eq!(NATURAL_ABUNDANCE_RECORDS["He3"].annotations, Some("g,r"));
+        assert_eq!(NATURAL_ABUNDANCE_RECORDS["Mg24"].best_measurement_coverage, Some("9uc"));
+        assert_eq!(NATURAL_ABUNDANCE_RECORDS["N14"].best_measurement_coverage, Some("n/a"));
+
+        let co59 = NATURAL_ABUNDANCE_RECORDS["Co59"];
+        assert_eq!(co59.representative, RepresentativeAbundance::Value { value: 1.0, uncertainty: None });
+        assert_eq!(co59.best_measurement_uncertainty, None);
+        assert_eq!(co59.best_measurement_coverage, None);
+        assert_eq!(co59.best_measurement_calibration, None);
+
+        // TICE's "Ta 180" row, under the isomer name the nuclear data uses.
+        assert_eq!(
+            NATURAL_ABUNDANCE_RECORDS["Ta180_m1"].representative,
+            RepresentativeAbundance::Value { value: 0.0001201, uncertainty: Some(0.0000032) }
+        );
     }
 
 }
