@@ -120,7 +120,11 @@ impl Source {
             .find(|s| s.name() == name)
             .ok_or_else(|| {
                 let have: Vec<&str> = Source::IMPLEMENTED.iter().map(|s| s.name()).collect();
-                format!("unknown uncertainty source {name:?}; this build can perturb {have:?}.")
+                format!(
+                    "unknown uncertainty source {name:?}; this build can perturb {have:?}. \
+                     Fission yields carry published uncertainties that are not read yet \
+                     (issue #140), and reaction branching has none in ENDF-6 to read."
+                )
             })
     }
 }
@@ -624,7 +628,7 @@ pub(crate) fn densities_of(materials: &[Material]) -> Vec<HashMap<String, f64>> 
 
 /// Keeps the half-life streams clear of the per-nuclide cross-section streams,
 /// which are keyed on the same name hash without it.
-const HALF_LIFE_STREAM: u32 = 0x4A1F_11FE;
+pub(crate) const HALF_LIFE_STREAM: u32 = 0x4A1F_11FE;
 
 /// The unstable nuclides of `chain` split into those with a stated half-life
 /// sigma, as `(name, half-life, sigma)`, and those without.
@@ -682,7 +686,7 @@ pub(crate) fn sample_half_lives(
 }
 
 /// Keeps the decay-energy streams clear of every other per-nuclide stream.
-const DECAY_ENERGY_STREAM: u32 = 0xDEC4_E6E1;
+pub(crate) const DECAY_ENERGY_STREAM: u32 = 0xDEC4_E6E1;
 
 /// One replica's decay energy for one nuclide, and its components, drawn
 /// from each component's own sigma, or from the total's where the data gives
