@@ -1233,9 +1233,11 @@ impl PyMaterial {
     ///         steps directly, so its step 0 is the first step.
     ///
     ///     data_uncertainty (DataUncertainty, optional): Ask for nuclear-data
-    ///         uncertainty on the result. Every source ``DataUncertainty`` names
-    ///         is sampled, and the schedule is re-solved until the reported
-    ///         standard deviations settle. Omit it (the default) and
+    ///         uncertainty on the result. Each source ``DataUncertainty`` names
+    ///         is sampled where it applies (``statistical`` needs a transport
+    ///         run, ``flux_spectrum`` a supplied flux sigma), and the schedule
+    ///         is re-solved until the reported standard deviations settle.
+    ///         Omit it (the default) and
     ///         nothing is read, folded or sampled: the inventories are
     ///         bit-identical either way. Read the sigmas with
     ///         ``get_nuclide_uncertainty``, and what was and was not covered
