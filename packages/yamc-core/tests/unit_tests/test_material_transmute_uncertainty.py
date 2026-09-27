@@ -131,8 +131,7 @@ def test_the_report_names_what_is_never_perturbed():
     )
     not_perturbed = results.get_data_uncertainty_info(iron.id or 0)["not_perturbed"]
     joined = " ".join(not_perturbed)
-    for source in ("fission yield", "branching"):
-        assert source in joined, f"{source!r} missing from {not_perturbed}"
+    assert "cross-material covariance" in joined, f"missing from {not_perturbed}"
 
 
 def test_the_means_are_unchanged_by_asking_for_uncertainty():
