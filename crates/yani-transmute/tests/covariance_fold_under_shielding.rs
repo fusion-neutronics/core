@@ -140,7 +140,9 @@ fn variance(folded: &BTreeMap<String, RateCovariance>, kind: &str) -> f64 {
 /// every rate the same relative variance `v`, whatever its shape in energy,
 /// exactly when the partial rates sum to the rate. So `v` back, to rounding,
 /// is that sum checked. The grid's interior edges all fall inside groups,
-/// which is where the shielded partials have to split a group's term.
+/// which is where the shielded partials have to split a group's term. How a
+/// cut group is shared between intervals does not reach this sum; the unit
+/// tests in `covariance_fold.rs` check the split itself.
 #[test]
 fn the_shielded_partials_sum_to_the_shielded_rate() {
     let Some(data) = yamc_test_cache::nuclide("Fe56") else {
@@ -167,16 +169,13 @@ fn the_shielded_partials_sum_to_the_shielded_rate() {
         &GROUPS,
         Some(&shielding),
     );
-    let mut checked = 0;
     for (_, kind) in CHANNELS {
         let got = variance(&folded, kind);
         assert!(
             (got / V - 1.0).abs() < 1.0e-12,
             "{kind}: shielded partials over the shielded rate give {got}, not {V}"
         );
-        checked += 1;
     }
-    assert!(checked >= 3, "expected several channels, got {checked}");
     assert!(
         coverage.partials_above_rate.is_empty(),
         "{:?}",

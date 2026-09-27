@@ -1519,3 +1519,182 @@ mod integration_range_tests {
     }
 }
 
+#[cfg(test)]
+mod shielded_split_tests {
+    use super::*;
+    use endf::mf::covariance::NiSubsection;
+
+    /// Three groups, the middle one cut at 1 keV by the covariance grid below,
+    /// so the split of a shielded group term between two intervals is what
+    /// the partials depend on.
+    const BOUNDARIES: [f64; 4] = [1.0e-5, 0.625, 1.0e5, 2.0e7];
+    const FLUX: [f64; 3] = [2.0, 3.0, 5.0];
+    const GRID: [f64; 5] = [1.0e-5, 0.625, 1.0e3, 1.0e5, 2.0e7];
+    const CUT: f64 = 1.0e3;
+
+    /// A dip between 100 eV and 10 keV, deepest at 1 keV, so the shielded
+    /// split of the middle group differs from both the dilute split and a
+    /// split by width.
+    fn shape() -> FluxShape {
+        FluxShape::from_points(
+            vec![2.0e7, 1.0e4, 1.0e3, 1.0e2, 1.0e-5],
+            vec![1.0, 1.0, 0.2, 1.0, 1.0],
+        )
+    }
+
+    /// A cross section with points on both sides of the cut, so both parts of
+    /// the middle group see the dip.
+    fn capture() -> Reaction {
+        Reaction {
+            cross_section: vec![100.0, 10.0, 30.0, 50.0, 20.0, 1.0, 0.1].into(),
+            threshold_idx: 0,
+            energy: vec![1.0e-5, 1.0, 50.0, 500.0, 5.0e3, 5.0e4, 2.0e7].into(),
+            mt_number: 102,
+            q_value: 0.0,
+            products: vec![],
+            scatter_in_cm: false,
+            redundant: false,
+        }
+    }
+
+    /// The partials over `GRID` built from independent walks: each group's
+    /// term as the collapse has it, and the cut group's term shared between
+    /// its two parts in proportion to `weight` of each part's own walk.
+    fn expected(
+        whole: impl Fn(&GroupTerms, f64) -> f64,
+        weight: impl Fn(&GroupTerms) -> f64,
+    ) -> [f64; 4] {
+        let (shape, xs) = (shape(), capture());
+        let walk = |a: f64, b: f64| walk_group(&xs, a, b, Some(&shape), None);
+        let group = |g: usize| whole(&walk(BOUNDARIES[g], BOUNDARIES[g + 1]), FLUX[g]);
+        let below = weight(&walk(BOUNDARIES[1], CUT));
+        let above = weight(&walk(CUT, BOUNDARIES[2]));
+        let middle = group(1);
+        [
+            group(0),
+            middle * below / (below + above),
+            middle * above / (below + above),
+            group(2),
+        ]
+        .map(|v| BARN_TO_CM2 * v)
+    }
+
+    fn close(got: &[f64], want: &[f64]) {
+        assert_eq!(got.len(), want.len());
+        for (k, (g, w)) in got.iter().zip(want).enumerate() {
+            assert!(
+                (g - w).abs() <= 1.0e-14 * w.abs(),
+                "interval {k}: {g} against {w}"
+            );
+        }
+    }
+
+    /// A relative block weights with the partial rate: the cut group's
+    /// shielded rate term, shared by its parts' shielded `∫ σ φ dE`.
+    #[test]
+    fn a_cut_group_splits_its_shielded_rate_by_its_parts_shielded_integrals() {
+        let shape = shape();
+        let flux = FluxDensity {
+            boundaries: &BOUNDARIES,
+            flux: &FLUX,
+            shape: Some(&shape),
+        };
+        let got = partial_rates(&flux, &capture(), &GRID, Scale::Relative).per_interval;
+        let want = expected(|t, phi| t.shielded() * phi, GroupTerms::shielded_integral);
+        close(&got, &want);
+
+        // The dip moves the split away from the dilute one, so the weighting
+        // above is what the check sees.
+        let dilute = FluxDensity {
+            boundaries: &BOUNDARIES,
+            flux: &FLUX,
+            shape: None,
+        };
+        let d = partial_rates(&dilute, &capture(), &GRID, Scale::Relative).per_interval;
+        let (shielded_share, dilute_share) = (got[1] / (got[1] + got[2]), d[1] / (d[1] + d[2]));
+        assert!(
+            (shielded_share / dilute_share - 1.0).abs() > 0.05,
+            "{shielded_share} against {dilute_share}"
+        );
+    }
+
+    /// An absolute block weights with the partial flux: the cut group's flux,
+    /// shared by its parts' shielded `∫ φ dE`.
+    #[test]
+    fn a_cut_group_splits_its_flux_by_its_parts_shielded_weights() {
+        let shape = shape();
+        let flux = FluxDensity {
+            boundaries: &BOUNDARIES,
+            flux: &FLUX,
+            shape: Some(&shape),
+        };
+        let got = partial_rates(&flux, &capture(), &GRID, Scale::Absolute).per_interval;
+        let want = expected(|_, phi| phi, GroupTerms::shielded_weight);
+        close(&got, &want);
+        // Split by the shape rather than by width.
+        let by_width = (CUT - BOUNDARIES[1]) / (BOUNDARIES[2] - BOUNDARIES[1]);
+        let share = got[1] / (got[1] + got[2]);
+        assert!(
+            (share / by_width - 1.0).abs() > 0.05,
+            "{share} against {by_width}"
+        );
+    }
+
+    /// Uncorrelated variances on the two sides of the cut give
+    /// `(v_below r_below² + v_above r_above²) / R²` with the independent split
+    /// above, so a variance on either side counts in proportion to that side's
+    /// shielded share and not to where the whole group's term sits.
+    #[test]
+    fn uncorrelated_variances_either_side_of_a_cut_weight_with_the_shielded_split() {
+        let shape = shape();
+        let flux = FluxDensity {
+            boundaries: &BOUNDARIES,
+            flux: &FLUX,
+            shape: Some(&shape),
+        };
+        let r = expected(|t, phi| t.shielded() * phi, GroupTerms::shielded_integral);
+        let rate: f64 = r.iter().sum();
+        let variances = [0.0, 0.04, 0.01, 0.0];
+        let block = CovarianceBlock {
+            mt: 102,
+            subsection_idx: 0,
+            block_idx: 0,
+            mat1: 0,
+            mt1: 102,
+            xmf1: 0.0,
+            xlfs1: 0.0,
+            mtl: 0,
+            data: CovarianceData::Ni(NiSubsection {
+                lb: 1,
+                ek: GRID.to_vec(),
+                fk: variances.to_vec(),
+                ..Default::default()
+            }),
+        };
+        let xs = capture();
+        let reactions = BTreeMap::from([(102, &xs)]);
+        let kinds = vec![("(n,gamma)".to_string(), 102)];
+        let rates = BTreeMap::from([("(n,gamma)".to_string(), rate)]);
+        let mut coverage = Coverage::default();
+        let folded = fold_nuclide(
+            &flux,
+            &[block],
+            &reactions,
+            &kinds,
+            &rates,
+            "Au197",
+            &mut coverage,
+        )
+        .expect("the block is usable");
+
+        let want: f64 = variances
+            .iter()
+            .zip(&r)
+            .map(|(v, r)| v * r * r)
+            .sum::<f64>()
+            / (rate * rate);
+        let got = folded.get(0, 0);
+        assert!((got / want - 1.0).abs() < 1.0e-12, "{got} against {want}");
+        assert!(coverage.partials_above_rate.is_empty());
+    }
+}

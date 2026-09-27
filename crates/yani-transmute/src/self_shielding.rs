@@ -313,6 +313,15 @@ impl FluxShape {
     }
 }
 
+#[cfg(test)]
+impl FluxShape {
+    /// A shape stated point by point, `energy` descending, for tests that need
+    /// a known shape rather than one solved for from a material.
+    pub(crate) fn from_points(energy: Vec<f64>, phi: Vec<f64>) -> Self {
+        Self { energy, phi }
+    }
+}
+
 /// Mixture total cross section, sampled on demand.
 ///
 /// The flux depression is driven by everything in the material, not by the
