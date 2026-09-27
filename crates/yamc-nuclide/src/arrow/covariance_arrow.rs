@@ -157,19 +157,21 @@ pub fn branching_covariance_blocks(
 ) -> Result<Vec<BranchingCovarianceBlock>, Box<dyn Error>> {
     const WHAT: &str = "branching/branching_covariance.arrow";
     let mut blocks = Vec::with_capacity(batches.iter().map(|b| b.num_rows()).sum());
-    for batch in batches {
+    for (batch_idx, batch) in batches.iter().enumerate() {
+        // Row numbers in errors are within the batch, so the batch is named.
+        let what = format!("{WHAT} batch {batch_idx}");
         for row in 0..batch.num_rows() {
             let int = |col: &str| -> Result<i32, Box<dyn Error>> {
                 try_get_i32(batch, col, row)
-                    .ok_or_else(|| format!("{WHAT} row {row}: {col} is null").into())
+                    .ok_or_else(|| format!("{what} row {row}: {col} is null").into())
             };
             let float = |col: &str| -> Result<f64, Box<dyn Error>> {
                 try_get_f64(batch, col, row)
-                    .ok_or_else(|| format!("{WHAT} row {row}: {col} is null").into())
+                    .ok_or_else(|| format!("{what} row {row}: {col} is null").into())
             };
             blocks.push(BranchingCovarianceBlock {
                 nuclide: try_get_str(batch, "nuclide", row).ok_or_else(|| {
-                    format!("{WHAT} row {row}: nuclide is null, and it is the key")
+                    format!("{what} row {row}: nuclide is null, and it is the key")
                 })?,
                 reaction: try_get_str(batch, "reaction", row),
                 target: try_get_str(batch, "target", row),
@@ -185,7 +187,7 @@ pub fn branching_covariance_blocks(
                 qi: float("qi")?,
                 izap: int("izap")?,
                 lfs: int("lfs")?,
-                block: block_from_row(batch, row, WHAT)?,
+                block: block_from_row(batch, row, &what)?,
             });
         }
     }
