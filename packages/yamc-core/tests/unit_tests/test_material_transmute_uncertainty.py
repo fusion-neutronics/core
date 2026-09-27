@@ -135,7 +135,7 @@ def test_the_report_names_what_is_never_perturbed():
         "fission yield",
         "branching",
         "resonance-parameter covariance (MF=32)",
-        "decay photon line intensity",
+        "decay photon line energy and intensity (MF=8 MT=457)",
         "photon attenuation coefficient (XCOM)",
         "air energy-absorption coefficient (NIST SRD 126)",
         "fluence-to-dose coefficient (ICRP-116)",
@@ -143,11 +143,15 @@ def test_the_report_names_what_is_never_perturbed():
         "material composition",
         "material density",
         "natural isotopic abundance",
+        "atomic mass (AME2020)",
     ):
         assert source in joined, f"{source!r} missing from {not_perturbed}"
     # A dilute spectrum run has no shielding and no tally to hold fixed.
     assert "self-shielding correction" not in not_perturbed
-    assert "tallied flux" not in not_perturbed
+    assert "flux response to perturbed cross sections (one transport)" not in not_perturbed
+    assert "tallied-rate statistics" not in not_perturbed
+    # Every default source is on, so none is listed as switched off.
+    assert "activation cross section (MF=33)" not in not_perturbed
 
 
 def test_a_shielded_run_reports_its_shielding_held_at_nominal():

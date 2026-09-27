@@ -1372,6 +1372,21 @@ fn run_replicas(
     if !want_decay_energy {
         info.not_perturbed.insert(0, "decay energy".to_string());
     }
+    if !cross_sections {
+        info.not_perturbed
+            .insert(0, "activation cross section (MF=33)".to_string());
+    }
+    // On the spectrum path a spectrum without a per-bin sigma, or any spectrum
+    // with the source off, is used as given.
+    if !transport && per_group.iter().any(Option::is_none) {
+        info.not_perturbed.insert(0, "flux spectrum".to_string());
+    }
+    // With the statistical source off, or nothing tallied to draw, the tallied
+    // rates are used as they came out of the one transport.
+    if transport && statistical.is_none() {
+        info.not_perturbed
+            .insert(0, "tallied-rate statistics".to_string());
+    }
     // The shielded flux shape is built once from the nominal cross sections
     // and every replica reuses it, so a perturbed capture never deepens its
     // own flux dip.
@@ -1380,9 +1395,12 @@ fn run_replicas(
             .push("self-shielding correction".to_string());
     }
     // One transport, no transport per replica: the flux the tally saw is the
-    // flux every replica is solved in, whatever its cross sections were.
+    // flux every replica is solved in, whatever its cross sections were. The
+    // tallied values may still be drawn statistically; what is held is how
+    // the flux would answer a perturbed cross section.
     if transport {
-        info.not_perturbed.push("tallied flux".to_string());
+        info.not_perturbed
+            .push("flux response to perturbed cross sections (one transport)".to_string());
     }
     info.decay_energies_perturbed = decay_energy_perturbed.clone();
     info.no_decay_energy_uncertainty = no_decay_energy_sigma;

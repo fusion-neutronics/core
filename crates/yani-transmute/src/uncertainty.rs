@@ -301,7 +301,7 @@ impl Info {
                 "isomeric branching (MF=9/MF=10)",
                 "cross-material covariance (MAT1 != 0)",
                 "resonance-parameter covariance (MF=32)",
-                "decay photon line intensity",
+                "decay photon line energy and intensity (MF=8 MT=457)",
                 "photon attenuation coefficient (XCOM)",
                 "air energy-absorption coefficient (NIST SRD 126)",
                 "fluence-to-dose coefficient (ICRP-116)",
@@ -309,6 +309,7 @@ impl Info {
                 "material composition",
                 "material density",
                 "natural isotopic abundance",
+                "atomic mass (AME2020)",
             ]
             .iter()
             .map(|s| s.to_string())
@@ -773,7 +774,7 @@ mod tests {
             "isomeric branching (MF=9/MF=10)",
             "cross-material covariance (MAT1 != 0)",
             "resonance-parameter covariance (MF=32)",
-            "decay photon line intensity",
+            "decay photon line energy and intensity (MF=8 MT=457)",
             "photon attenuation coefficient (XCOM)",
             "air energy-absorption coefficient (NIST SRD 126)",
             "fluence-to-dose coefficient (ICRP-116)",
@@ -781,6 +782,7 @@ mod tests {
             "material composition",
             "material density",
             "natural isotopic abundance",
+            "atomic mass (AME2020)",
         ] {
             assert!(
                 info.not_perturbed.iter().any(|s| s == held),
@@ -788,9 +790,17 @@ mod tests {
                 info.not_perturbed
             );
         }
-        // Only a shielded or a transport run holds these, so the fold alone
-        // must not claim them.
-        for conditional in ["self-shielding correction", "tallied flux"] {
+        // These depend on the run and the sources asked for, so the fold
+        // alone must not claim them.
+        for conditional in [
+            "self-shielding correction",
+            "flux response to perturbed cross sections (one transport)",
+            "tallied-rate statistics",
+            "flux spectrum",
+            "activation cross section (MF=33)",
+            "half-life",
+            "decay energy",
+        ] {
             assert!(!info.not_perturbed.iter().any(|s| s == conditional));
         }
     }

@@ -637,8 +637,9 @@ impl PyTransmutationResults {
     ///   draws that came out negative and were floored.
     /// - ``not_perturbed``: every input this run held at its nominal value,
     ///   such as the MF=32 resonance-parameter covariance, the photon and dose
-    ///   data, the material composition, and, where they applied, the
-    ///   self-shielding correction and the tallied flux.
+    ///   data, the material composition, any source switched off, and, where
+    ///   they applied, the self-shielding correction and the flux's response
+    ///   to a perturbed cross section on a transport run.
     /// - ``samples`` / ``converged``: how many replicas ran, and whether the
     ///   sigmas settled or the cap was hit.
     ///

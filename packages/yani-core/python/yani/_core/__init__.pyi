@@ -261,28 +261,34 @@ class DataUncertainty:
     
     Each cross-section draw is a lognormal multiplier with the covariance's
     own mean and variance, so a sampled rate is never negative and nothing is
-    floored.
+    floored. The correlations between channels are kept in rank, but come out
+    weaker than evaluated when the sigmas are large.
     
     Held at their nominal values, with uncertainties of their own that this
     does not propagate:
     
-    - decay branching ratios, fission yields and the isomeric-branching
+    - decay branching ratios, fission yields, and the isomeric-branching
       overlay (MF=9/MF=10);
     - covariance correlating two evaluations (MAT1 != 0) and the
       resonance-parameter covariance (MF=32), so only MF=33 is sampled;
     - the self-shielding correction, when ``self_shielding_chord`` or
       ``self_shielding_shape`` is given: the shielded flux is built once from
       the nominal cross sections and reused by every replica;
-    - on a transport run, the tallied flux, which does not respond to a
-      perturbed cross section;
-    - decay photon line intensities, photon attenuation (XCOM), air energy
-      absorption (NIST SRD 126), the ICRP-116 fluence-to-dose coefficients and
-      the contact-dose build-up factor;
-    - the material's composition, density and natural isotopic abundances.
+    - on a transport run, the flux's response to a perturbed cross section:
+      there is one transport, not one per replica. The tallied values
+      themselves are still drawn by the ``"statistical"`` source;
+    - decay photon line energies and intensities (MF=8 MT=457), photon
+      attenuation (XCOM), air energy absorption (NIST SRD 126), the ICRP-116
+      fluence-to-dose coefficients and the contact-dose build-up factor;
+    - the material's composition, density, natural isotopic abundances and the
+      AME2020 atomic masses used to convert mass fractions;
+    - any source switched off with ``sources``, or with nothing to act on (a
+      spectrum given without ``flux_std_dev``).
     
-    ``TransmutationResults.get_data_uncertainty_info`` lists these per material
-    under ``not_perturbed``, along with any nuclide whose evaluation carries no
-    covariance and any unstable nuclide whose half-life has no stated sigma.
+    ``TransmutationResults.get_data_uncertainty_info`` lists every one of these
+    that applied to a material under ``not_perturbed``, along with any nuclide
+    whose evaluation carries no covariance and any unstable nuclide whose
+    half-life has no stated sigma.
     
     Args:
         seed (int): Base seed. A given nuclide's perturbation in a given replica
@@ -2520,8 +2526,9 @@ class TransmutationResults:
           draws that came out negative and were floored.
         - ``not_perturbed``: every input this run held at its nominal value,
           such as the MF=32 resonance-parameter covariance, the photon and dose
-          data, the material composition, and, where they applied, the
-          self-shielding correction and the tallied flux.
+          data, the material composition, any source switched off, and, where
+          they applied, the self-shielding correction and the flux's response
+          to a perturbed cross section on a transport run.
         - ``samples`` / ``converged``: how many replicas ran, and whether the
           sigmas settled or the cap was hit.
         
