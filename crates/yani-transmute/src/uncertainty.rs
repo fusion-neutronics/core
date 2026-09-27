@@ -203,8 +203,18 @@ pub struct Info {
     pub perturbed: BTreeSet<String>,
     /// Nuclides with rates but no usable covariance, so no stated uncertainty.
     pub no_covariance_data: BTreeSet<String>,
-    /// Blocks correlating with another evaluation (`mat1 != 0`), not consumed.
-    pub skipped_cross_material: usize,
+    /// Per nuclide, blocks correlating one of its channels with a reaction of
+    /// another evaluation, not consumed. A `mat1` naming the nuclide's own MAT
+    /// is its own evaluation and is folded, and a block on a reaction the
+    /// chain does not drive is not counted.
+    pub skipped_cross_material: BTreeMap<String, usize>,
+    /// Per nuclide, blocks correlating one of its channels with a quantity
+    /// that is not a cross section (`xmf1` other than 0 or 3), not consumed.
+    pub skipped_other_file: BTreeMap<String, usize>,
+    /// Per (nuclide, kind, kind), where a pair stored in both orientations
+    /// has copies that are not each other's transpose, the largest difference
+    /// relative to the largest entry. The lower MT's copy is the one used.
+    pub mirrored_disagree: BTreeMap<(String, String, String), f64>,
     /// NC blocks (covariance derived from other reactions), not consumed.
     pub skipped_nc: usize,
     /// Blocks whose `lb` layout is not implemented, counted per `lb`.
@@ -317,7 +327,9 @@ impl Info {
         Self {
             perturbed: coverage.covered.clone(),
             no_covariance_data: coverage.without_data.clone(),
-            skipped_cross_material: coverage.skipped_cross_material,
+            skipped_cross_material: coverage.skipped_cross_material.clone(),
+            skipped_other_file: coverage.skipped_other_file.clone(),
+            mirrored_disagree: coverage.mirrored_disagree.clone(),
             skipped_nc: coverage.skipped_nc,
             unsupported_layouts: coverage.unsupported_layouts.clone(),
             malformed_blocks: coverage.malformed,
@@ -331,7 +343,7 @@ impl Info {
                 "decay branching ratio",
                 "fission yield",
                 "isomeric branching (MF=9/MF=10)",
-                "cross-material covariance (MAT1 != 0)",
+                "covariance with another evaluation (MAT1 naming another material)",
             ]
             .iter()
             .map(|s| s.to_string())
@@ -356,7 +368,9 @@ impl Info {
     /// know about.
     pub fn has_gaps(&self) -> bool {
         !self.no_covariance_data.is_empty()
-            || self.skipped_cross_material > 0
+            || !self.skipped_cross_material.is_empty()
+            || !self.skipped_other_file.is_empty()
+            || !self.mirrored_disagree.is_empty()
             || self.skipped_nc > 0
             || !self.unsupported_layouts.is_empty()
             || self.malformed_blocks > 0

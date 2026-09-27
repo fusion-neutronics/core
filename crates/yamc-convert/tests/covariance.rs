@@ -298,6 +298,43 @@ fn np237_covariance_round_trips_through_the_section() {
     round_trip(NP237_ENDF, "np237", &[16, 17, 18, 102]);
 }
 
+/// A `mat1` naming the evaluation's own MAT reads back as this evaluation.
+///
+/// JEFF-4.0 Be9 writes 260 of its blocks that way, and ENDF/B-VIII.1 Np237
+/// its cross-reaction blocks. The tape's `mat1` is kept as written, so what
+/// makes them this evaluation's is the `mat` column beside it.
+#[test]
+fn a_mat1_naming_the_own_mat_reads_back_as_this_evaluation() {
+    for (compressed, name, mat, own_named) in
+        [(BE9_ENDF, "Be9", 425, 260), (NP237_ENDF, "Np237", 9346, 0)]
+    {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let material = material(compressed, tmp.path(), name);
+        assert_eq!(material.mat, mat);
+        assert!(yamc_convert::covariance::write_covariance(&material, tmp.path()).expect("writes"));
+        let blocks = yamc_nuclide::arrow::covariance_arrow::read_covariance(tmp.path(), name)
+            .expect("reads")
+            .expect("the file is there");
+
+        let named = blocks.iter().filter(|b| b.mat1 == mat).count();
+        if own_named > 0 {
+            assert_eq!(named, own_named, "{name} blocks with mat1 == {mat}");
+        } else {
+            assert!(named > 0, "{name} has blocks with mat1 == {mat}");
+        }
+        for b in &blocks {
+            assert_eq!(b.mat, mat, "{name} mat on every row");
+            assert!(
+                b.is_same_evaluation() && !b.is_cross_material(),
+                "{name} MT {} x {} (mat1 {}) is this evaluation's",
+                b.mt,
+                b.mt1,
+                b.mat1
+            );
+        }
+    }
+}
+
 /// An evaluation with no MF=33 writes no file at all.
 ///
 /// Absence is how this section says "no covariance", and the reader is required

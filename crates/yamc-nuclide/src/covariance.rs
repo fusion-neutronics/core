@@ -30,9 +30,19 @@ pub enum CovarianceData {
 
 /// One covariance block: the covariance of `mt` with `mt1`, on one grid.
 ///
+/// # Which blocks are this evaluation's own
+///
+/// `mat1` and `xmf1` are kept as the tape wrote them, and ENDF-102 33.3.1
+/// gives each two spellings for "this evaluation's cross section": `mat1` 0 or
+/// the evaluation's own MAT, and `xmf1` 0 or 3. FENDL-3.2d writes its Pt, Re,
+/// Lu, S and O17 cross-reaction blocks with `mat1` equal to their own MAT, and
+/// JEFF-4.0 Be9 several with `xmf1 = 3`. [`CovarianceBlock::is_same_evaluation`]
+/// reads both spellings, so no caller compares `mat1` with 0.
+///
 /// # Which blocks are symmetric
 ///
-/// Only the ones with `mat1 == 0 && (mt1 == 0 || mt1 == mt)`. An off-diagonal
+/// Only the diagonal ones, a reaction with itself within this evaluation
+/// ([`CovarianceBlock::is_diagonal`]). An off-diagonal
 /// block's transpose is the (`mt1`, `mt`) block, not itself, so nothing here
 /// may be mirrored on the assumption that a covariance matrix is symmetric. The
 /// same caution applies one level down, inside an `Ni` block: `ls == 1` is an
@@ -50,11 +60,12 @@ pub struct CovarianceBlock {
     /// Which block within that subsection, in tape order: NC blocks first,
     /// then NI, as one running index.
     pub block_idx: i32,
-    /// The material `mt1` belongs to. `0` means this evaluation.
+    /// The material `mt1` belongs to. `0`, or [`CovarianceBlock::mat`], means
+    /// this evaluation.
     pub mat1: i32,
     /// The reaction this one is correlated with. `0` means `mt` itself.
     pub mt1: i32,
-    /// MF of the second quantity, when it is not a cross section.
+    /// MF of the second quantity. `0` and `3` both mean a cross section.
     pub xmf1: f64,
     /// Final excited state of the second quantity.
     pub xlfs1: f64,
@@ -62,7 +73,8 @@ pub struct CovarianceBlock {
     /// not lumped.
     pub mtl: i32,
     /// The evaluation's own MAT. `0` when the file does not state it, as one
-    /// written before the column existed does not.
+    /// written before the column existed does not, and then only `mat1 == 0`
+    /// can be told to be this evaluation.
     pub mat: i32,
     /// The block itself.
     pub data: CovarianceData,
@@ -86,15 +98,104 @@ impl CovarianceBlock {
     /// The only blocks for which the matrix is symmetric in itself, and the
     /// only ones a variance can be read off directly.
     pub fn is_diagonal(&self) -> bool {
-        self.mat1 == 0 && self.partner_mt() == self.mt
+        self.is_same_evaluation() && self.partner_mt() == self.mt
+    }
+
+    /// Whether `mt1` is a cross section of this same evaluation.
+    ///
+    /// `mat1` names this material when it is 0 or this evaluation's own MAT,
+    /// and `xmf1` names a cross section when it is 0 or 3 (ENDF-102 33.3.1).
+    /// `xlfs1` must be 0, since a final excited state belongs to an MF=10
+    /// partner and not to a cross section.
+    pub fn is_same_evaluation(&self) -> bool {
+        let this_material = self.mat1 == 0 || (self.mat != 0 && self.mat1 == self.mat);
+        this_material && self.names_cross_section()
     }
 
     /// Whether this block correlates with a reaction in ANOTHER evaluation.
     ///
     /// Not consumed today: using it would mean sampling two nuclides' cross
     /// sections from one joint distribution, and the fold is per nuclide.
-    /// Counted and reported rather than silently dropped.
+    /// Counted and reported rather than silently dropped. A block from a file
+    /// without the evaluation's own MAT reads as this whenever `mat1 != 0`,
+    /// since nothing then says that `mat1` is this material.
     pub fn is_cross_material(&self) -> bool {
-        self.mat1 != 0
+        self.mat1 != 0 && self.mat1 != self.mat
+    }
+
+    /// Whether the second quantity is a cross section (`xmf1` 0 or 3, with no
+    /// final state), rather than, say, an MF=10 isomer production.
+    pub fn names_cross_section(&self) -> bool {
+        (self.xmf1 == 0.0 || self.xmf1 == 3.0) && self.xlfs1 == 0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cross-reaction block of MAT 7837 (FENDL-3.2d Pt194) on `mt`, naming
+    /// `mat1` and `xmf1` as a tape might.
+    fn block(mat: i32, mat1: i32, xmf1: f64) -> CovarianceBlock {
+        CovarianceBlock {
+            mt: 16,
+            subsection_idx: 0,
+            block_idx: 0,
+            mat1,
+            mt1: 102,
+            xmf1,
+            xlfs1: 0.0,
+            mtl: 0,
+            mat,
+            data: CovarianceData::Ni(NiSubsection::default()),
+        }
+    }
+
+    /// ENDF-102 33.3.1 gives two spellings each for "this material" and "a
+    /// cross section", and FENDL-3.2d and JEFF-4.0 both use the second ones.
+    #[test]
+    fn own_mat_and_xmf1_three_are_this_evaluation() {
+        for (mat1, xmf1) in [(0, 0.0), (7837, 0.0), (0, 3.0), (7837, 3.0)] {
+            let b = block(7837, mat1, xmf1);
+            assert!(b.is_same_evaluation(), "mat1 {mat1}, xmf1 {xmf1}");
+            assert!(!b.is_cross_material(), "mat1 {mat1}, xmf1 {xmf1}");
+        }
+    }
+
+    #[test]
+    fn another_mat_is_another_evaluation() {
+        let b = block(7837, 9228, 0.0);
+        assert!(b.is_cross_material());
+        assert!(!b.is_same_evaluation());
+    }
+
+    /// A file written before the `mat` column has no own MAT, so a nonzero
+    /// `mat1` cannot be shown to be this material and stays another's.
+    #[test]
+    fn without_the_own_mat_only_zero_is_this_material() {
+        assert!(block(0, 0, 0.0).is_same_evaluation());
+        let b = block(0, 7837, 0.0);
+        assert!(b.is_cross_material());
+        assert!(!b.is_same_evaluation());
+    }
+
+    /// An MF=10 partner is this material but not a cross section, so the
+    /// block is neither folded as one nor counted as another evaluation's.
+    #[test]
+    fn another_file_is_neither() {
+        let b = block(7837, 7837, 10.0);
+        assert!(!b.is_same_evaluation());
+        assert!(!b.is_cross_material());
+        assert!(!b.names_cross_section());
+    }
+
+    /// Diagonal needs the same evaluation as well as the same reaction.
+    #[test]
+    fn a_diagonal_block_may_name_its_own_mat() {
+        let mut b = block(7837, 7837, 0.0);
+        b.mt1 = 16;
+        assert!(b.is_diagonal());
+        b.mat = 0;
+        assert!(!b.is_diagonal());
     }
 }
