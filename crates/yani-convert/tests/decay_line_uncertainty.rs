@@ -197,3 +197,88 @@ fn gamma_and_xray_spectra_are_separate_rows_that_merge_to_the_old_one() {
     assert_eq!(energies, merged.x);
     assert_eq!(intensities, merged.p);
 }
+
+/// No library ships a photon covariance, so one is set by hand on the JEFF-4.0
+/// Cf252 gamma spectrum's rows (LCOV=3: its lines and its continuum). What
+/// `write_decay` writes, yani reads back as written, with LS on the lines
+/// only. The two lists differ in length so a swap of the columns shows.
+#[test]
+fn a_stated_covariance_round_trips_through_the_file() {
+    let decay = [material(fixture!("dec-098_Cf_252.jeff40.endf.xz"))];
+    let chain = Chain::from_endf(
+        &decay,
+        &[],
+        &endf::chain::q_values(&[]),
+        &endf::chain::DEFAULT_REACTIONS,
+    )
+    .expect("chain builds");
+    let mut sources = yani_convert::decay_sources(&decay).expect("sources read");
+    let lines = endf::SpectrumCovariance {
+        ls: Some(1),
+        lb: 5,
+        energies: vec![1.0e5, 2.0e6],
+        values: vec![1.0e-4, 2.0e-5, 3.0e-4],
+    };
+    let continuum = endf::SpectrumCovariance {
+        ls: None,
+        lb: 2,
+        energies: vec![0.0, 5.0e6, 1.0e7],
+        values: vec![0.01, 0.02, 0.0],
+    };
+    let mut set = 0;
+    for row in sources.get_mut("Cf252").expect("Cf252 has sources") {
+        if row.radiation == "gamma" {
+            row.covariance = Some(if row.kind == "discrete" {
+                lines.clone()
+            } else {
+                continuum.clone()
+            });
+            set += 1;
+        }
+    }
+    assert_eq!(set, 2, "the gamma spectrum has lines and a continuum");
+
+    let dir = std::env::temp_dir().join(format!("yani-convert-covariance-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    yani_convert::write_decay(&chain, &sources, &dir.join("decay")).expect("decay written");
+    let (back, _branch) =
+        yani::parse_chain_parts(&dir.join("decay"), None, None, None).expect("yani reads it");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let covariance = |tabular: bool| {
+        let rows: Vec<&DecaySource> = photon_rows(&back["Cf252"], "gamma")
+            .into_iter()
+            .filter(|s| {
+                matches!(s.distribution, DecaySourceDistribution::Tabular { .. }) == tabular
+            })
+            .collect();
+        assert_eq!(rows.len(), 1);
+        rows[0]
+            .uncertainty
+            .as_deref()
+            .expect("stated")
+            .covariance
+            .clone()
+    };
+    assert_eq!(
+        covariance(false),
+        Some(yani::SourceCovariance {
+            ls: Some(1),
+            lb: 5,
+            energies: lines.energies.clone(),
+            values: lines.values.clone(),
+        })
+    );
+    assert_eq!(
+        covariance(true),
+        Some(yani::SourceCovariance {
+            ls: None,
+            lb: 2,
+            energies: continuum.energies.clone(),
+            values: continuum.values.clone(),
+        })
+    );
+    for row in photon_rows(&back["Cf252"], "xray") {
+        assert_eq!(row.uncertainty.as_deref().expect("stated").covariance, None);
+    }
+}
