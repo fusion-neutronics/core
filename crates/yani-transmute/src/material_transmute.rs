@@ -2837,4 +2837,152 @@ mod tests {
         assert!(Arc::ptr_eq(&chain, &folded));
         assert!(rates.is_empty());
     }
+
+    /// A transport replica that draws its own rates builds its own folded
+    /// chain from the unpruned base, and the decay branching edits must land
+    /// on that chain too: Bi212 decays under irradiation here, so its
+    /// daughters come out of the folded chain, not the base one.
+    #[test]
+    fn transport_replicas_apply_decay_branching_to_a_drawn_chain() {
+        use crate::history_statistics::{RateCovariance, RateLabel};
+        use crate::uncertainty::Source;
+
+        const N0: f64 = 1.0e-3;
+        const HALF_LIFE: f64 = 3600.0;
+        const SIGMA: f64 = 0.02;
+        const SAMPLES: usize = 256;
+        let reaction = |kind: &str, target: &str, b: f64, sigma: Option<f64>| ChainReaction {
+            kind: kind.to_string(),
+            target: Some(target.to_string()),
+            branching: b,
+            q_value: None,
+            branching_uncertainty: sigma,
+        };
+        let nuclide = |name: &str,
+                       half_life: Option<f64>,
+                       reactions: Vec<ChainReaction>,
+                       decays: Vec<ChainReaction>| ChainNuclide {
+            name: name.to_string(),
+            half_life,
+            decay_energy: 0.0,
+            reactions,
+            decays,
+            fission_yields: None,
+            sources: Vec::new(),
+            half_life_uncertainty: None,
+            decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
+        };
+        let mut map: HashMap<String, ChainNuclide> = HashMap::new();
+        map.insert(
+            "Fe56".to_string(),
+            nuclide(
+                "Fe56",
+                None,
+                vec![reaction("(n,p)", "Mn56", 1.0, None)],
+                Vec::new(),
+            ),
+        );
+        map.insert(
+            "Bi212".to_string(),
+            nuclide(
+                "Bi212",
+                Some(HALF_LIFE),
+                Vec::new(),
+                vec![
+                    reaction("beta-", "Po212", 0.6406, Some(SIGMA)),
+                    reaction("alpha", "Tl208", 0.3594, Some(SIGMA)),
+                ],
+            ),
+        );
+        for stable in ["Mn56", "Po212", "Tl208"] {
+            map.insert(
+                stable.to_string(),
+                nuclide(stable, None, Vec::new(), Vec::new()),
+            );
+        }
+        let chain = Arc::new(map);
+
+        let mut material = Material::new(
+            HashMap::from([("Fe56".to_string(), 1.0), ("Bi212".to_string(), 1.0)]),
+            "atom",
+            "sum",
+            None,
+        )
+        .unwrap();
+        material.nuclides.insert("Fe56".to_string(), 1.0e-2);
+        material.nuclides.insert("Bi212".to_string(), N0);
+        material.set_temperature("294");
+
+        let rate = 1.0e-6;
+        let tallied = TransportTallied {
+            rates: HashMap::from([(
+                "Fe56".to_string(),
+                HashMap::from([("(n,p)".to_string(), rate)]),
+            )]),
+            partials: HashMap::new(),
+            fy_weights: HashMap::new(),
+            spectrum: MultigroupSpectrum {
+                boundaries: vec![1.0e-5, 2.0e7],
+                masses: vec![1.0],
+                flux_error: None,
+            },
+            statistics: Some(RateCovariance::from_parts(
+                vec![RateLabel {
+                    nuclide: "Fe56".to_string(),
+                    kind: "(n,p)".to_string(),
+                    target: None,
+                }],
+                vec![rate],
+                1000,
+                vec![(0.1 * rate).powi(2)],
+            )),
+        };
+        let request = DataUncertainty {
+            seed: 5,
+            samples: Some(SAMPLES),
+            sources: vec![Source::Statistical, Source::DecayBranching],
+            attribution: false,
+        };
+        let (ensemble, info) = transport_replicas(
+            &material,
+            &tallied,
+            &[HALF_LIFE],
+            &[1.0],
+            &chain,
+            Default::default(),
+            &request,
+        )
+        .unwrap();
+
+        assert!(info.decay_branchings_perturbed.contains("Bi212"));
+        assert_eq!(info.decay_branchings_sampled, SAMPLES);
+        // The statistical draw ran, so each replica solved its own chain.
+        let mn = ensemble.samples_at(0, "Mn56");
+        assert!(mn.iter().any(|v| v.to_bits() != mn[0].to_bits()));
+
+        let po = ensemble.samples_at(0, "Po212");
+        let tl = ensemble.samples_at(0, "Tl208");
+        let std_dev = |x: &[f64]| {
+            let m = x.iter().sum::<f64>() / x.len() as f64;
+            (x.iter().map(|v| (v - m).powi(2)).sum::<f64>() / (x.len() - 1) as f64).sqrt()
+        };
+        // One half-life: each daughter holds `r N0 / 2`. Sampling error on a
+        // sigma from 256 replicas is about 4.5%.
+        let want = SIGMA * N0 / 2.0;
+        for (name, x) in [("Po212", &po), ("Tl208", &tl)] {
+            let got = std_dev(x);
+            assert!(
+                (got / want - 1.0).abs() < 0.15,
+                "{name} spreads by {got:e}, the stated sigma gives {want:e}"
+            );
+        }
+        for (x, y) in po.iter().zip(&tl) {
+            assert!(
+                ((x + y) / (po[0] + tl[0]) - 1.0).abs() < 1e-12,
+                "the pair's total moved: {}",
+                x + y
+            );
+        }
+    }
 }
