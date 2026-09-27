@@ -90,8 +90,11 @@ pub struct StateFacts {
     /// How the level was matched to the row's target.
     pub level_route: LevelRoute,
     /// The level's excitation energy in eV, as
-    /// [`RadionuclideProduction::excitation_energy`] reads it, kept literally.
-    /// For an excited level (LFS > 0) a zero means the evaluation did not
+    /// [`RadionuclideProduction::excitation_energy`] reads it: MF=8's ELFS,
+    /// kept literally, where MF=8 names the state (`lmf` is `Some`, as both
+    /// come from the same MF=8 subsection), and QM - QI of the MF=9/10
+    /// subsection otherwise, which is computed from the tape rather than read
+    /// off it. For an excited level (LFS > 0) a zero means the evaluation did not
     /// state it (JENDL-5's Cd116 MT=107 writes ELFS = 0.0), and a negative
     /// value is a sentinel (TENDL-2017's Pu237 MT=44 writes -2^31).
     pub level_energy: f64,
@@ -960,9 +963,11 @@ pub fn extract_branching(
 /// not a copy of MF=3: an item is null where MF=3 is not tabulated, where a
 /// log law meets a zero, and on a single node where MF=3 alone jumps (see
 /// [`sampled_on`]), and the whole entry is null where the file has no MF=3
-/// section for the MT. `level_energy` is written as the tape gives it: for an
-/// excited level a zero means the evaluation did not state the energy, and a
-/// negative value is a sentinel; `level_energy_difference` is null for both.
+/// section for the MT. `level_energy` is MF=8's ELFS as the tape gives it
+/// where `lmf` is not null, and QM - QI of the MF=9/10 subsection where it is
+/// (see [`StateFacts::level_energy`]): for an excited level a zero means the
+/// evaluation did not state the energy, and a negative value is a sentinel;
+/// `level_energy_difference` is null for both.
 pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn Error>> {
     std::fs::create_dir_all(dir)?;
     let nuclide: Vec<String> = rows.iter().map(|r| r.nuclide.clone()).collect();

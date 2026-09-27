@@ -129,6 +129,18 @@ const BRANCH_STATE_COLUMNS: [&str; 9] = [
     "normalisation",
 ];
 
+/// The `level_route` labels the converter writes, one per
+/// `endf::radionuclide_production::LevelRoute`.
+const LEVEL_ROUTES: [&str; 7] = [
+    "ground",
+    "energy",
+    "near_energy",
+    "level_index",
+    "single_isomer",
+    "no_isomers",
+    "unresolved",
+];
+
 impl<'a> BranchStateColumns<'a> {
     fn from_batch(batch: &'a RecordBatch) -> Result<Option<Self>, Box<dyn Error>> {
         let schema = batch.schema();
@@ -225,6 +237,27 @@ impl<'a> BranchStateColumns<'a> {
         if lengths.iter().any(|&len| len != n) {
             return Err(format!(
                 "branching.arrow row {i} has {n} states in mt but {lengths:?} in the other state columns"
+            )
+            .into());
+        }
+        // A null here would read as 0, false or "", which a reader would take
+        // for a stated value; only lmf, the difference and MF=3 may be unstated.
+        let required: [(&str, &dyn Array); 5] = [
+            ("mt", &mt),
+            ("lfs", &lfs),
+            ("list_complete", &complete),
+            ("level_route", &route),
+            ("level_energy", &energy),
+        ];
+        if let Some((name, _)) = required.iter().find(|(_, items)| items.null_count() > 0) {
+            return Err(format!(
+                "branching.arrow row {i} has a null item in {name}, which every state states"
+            )
+            .into());
+        }
+        if let Some(label) = route.iter().flatten().find(|l| !LEVEL_ROUTES.contains(l)) {
+            return Err(format!(
+                "branching.arrow row {i} has level_route {label:?}, not one of {LEVEL_ROUTES:?}"
             )
             .into());
         }
@@ -1569,6 +1602,30 @@ mod tests {
             err.contains("mf3_cross_section has 2 values on 3 energy nodes"),
             "{err}"
         );
+
+        let mut null_item = state_columns(1, 1, 3);
+        let mut complete = ListBuilder::new(BooleanBuilder::new());
+        complete.values().append_null();
+        complete.append(true);
+        null_item
+            .iter_mut()
+            .find(|(name, _)| *name == "list_complete")
+            .expect("list_complete")
+            .1 = Arc::new(complete.finish());
+        let err = read_row(null_item, 3).unwrap_err();
+        assert!(err.contains("null item in list_complete"), "{err}");
+
+        let mut unknown_route = state_columns(1, 1, 3);
+        let mut route = ListBuilder::new(StringBuilder::new());
+        route.values().append_value("nearest");
+        route.append(true);
+        unknown_route
+            .iter_mut()
+            .find(|(name, _)| *name == "level_route")
+            .expect("level_route")
+            .1 = Arc::new(route.finish());
+        let err = read_row(unknown_route, 3).unwrap_err();
+        assert!(err.contains("level_route \"nearest\""), "{err}");
     }
 
     /// A row whose state lists are all null states no facts and reads as no

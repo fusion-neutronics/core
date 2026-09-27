@@ -140,9 +140,12 @@ pub struct BranchState {
     /// `near_energy`, `level_index`, `single_isomer`, `no_isomers` or
     /// `unresolved`.
     pub level_route: String,
-    /// The level's excitation energy in eV, as the evaluation writes it. For
-    /// an excited level (`lfs` > 0) a zero means the evaluation did not state
-    /// it, and a negative value is a sentinel, not an energy.
+    /// The level's excitation energy in eV. Where MF=8 names the state (`lmf`
+    /// is `Some`) it is MF=8's ELFS as the tape writes it; otherwise it is
+    /// QM - QI of the MF=9/10 subsection, a difference of two tape values and
+    /// not a tape value itself. For an excited level (`lfs` > 0) a zero means
+    /// the evaluation did not state it, and a negative value is a sentinel,
+    /// not an energy.
     pub level_energy: f64,
     /// `level_energy` less the excitation energy of the state it was booked
     /// to, in eV; `None` where that isomer's energy is unknown or
