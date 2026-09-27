@@ -203,9 +203,12 @@ pub fn convert_transmutation(
 ///     evaluation's own MAT, written as given), ``mf40_cross_state_blocks``
 ///     (blocks correlating two different states rather than one state with
 ///     itself; key them on MT, LFS, MT1 and XLFS1, since both states can
-///     resolve to one target) and ``mf40_without_blocks``
+///     resolve to one target), ``mf40_without_blocks``
 ///     (one line per state or sub-subsection holding no block, the only part
-///     of MF=40 the file cannot show). An evaluation set without MF=40
+///     of MF=40 the file cannot show) and ``mf40_partner_by_own_izap`` (one
+///     line per sub-subsection whose partner target was taken from the row's
+///     own IZAP, because several products share the partner's level and
+///     MF=40 names no IZAP for it). An evaluation set without MF=40
 ///     writes no covariance file, and removes one an earlier conversion left
 ///     there.
 #[gen_stub_pyfunction]
@@ -280,6 +283,7 @@ pub fn convert_branching(
     out.set_item("mf40_mat1_naming_itself", stats.mf40_mat1_naming_itself)?;
     out.set_item("mf40_cross_state_blocks", stats.mf40_cross_state_blocks)?;
     out.set_item("mf40_without_blocks", stats.mf40_without_blocks)?;
+    out.set_item("mf40_partner_by_own_izap", stats.mf40_partner_by_own_izap)?;
     Ok(out.unbind())
 }
 

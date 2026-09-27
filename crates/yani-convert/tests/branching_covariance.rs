@@ -159,6 +159,9 @@ fn mf40_is_written_beside_branching_for_nb93() {
     assert_eq!(stats.mf40_mat1_naming_itself, 0);
     assert_eq!(stats.mf40_cross_state_blocks, 0);
     assert!(stats.mf40_without_blocks.is_empty());
+    // One product per level in each MT, so no partner rests on the own-IZAP
+    // reading.
+    assert!(stats.mf40_partner_by_own_izap.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -417,6 +420,64 @@ fn an_mf40_state_matches_mf10_by_excitation_when_lfs_differs() {
     );
     assert_eq!(row.target1.as_deref(), Some("Nb92_m1"));
     assert!(row.energy.is_none(), "still one state per target");
+}
+
+/// The excitation fallback does not reach past `tol_ev`. Here the (n,2n)
+/// Nb92_m1 state is renumbered 7 and moved to 2 MeV in MF=40 alone, a level
+/// MF=10 does not give. Nb92 has one isomer, so the level resolves to Nb92_m1
+/// without regard to energy; the 135.5 keV MF=10 partial it lands on is
+/// another level's, so the state is left unmatched and counted.
+#[test]
+fn an_mf40_state_at_no_mf10_excitation_is_unmatched() {
+    let tape = text(NB93);
+    let tape = edit(
+        tape,
+        "-8.830870+6-8.966370+6      41092          1          0          1412540 16   10",
+        "-8.830870+6-1.083087+7      41092          7          0          1412540 16   10",
+    );
+    let tape = edit(
+        tape,
+        " 1.000000+1 1.000000+0          0         16          0          1412540 16   11",
+        " 1.000000+1 7.000000+0          0         16          0          1412540 16   11",
+    );
+    let out = extract(&[material(&tape)], &nb_decay());
+    assert_eq!(
+        out.stats.mf40_unmatched_states.len(),
+        1,
+        "{:?}",
+        out.stats.mf40_unmatched_states
+    );
+    assert!(out.stats.mf40_unmatched_states[0].contains("IZAP 41092 LFS 7"));
+    let row = out
+        .covariance
+        .iter()
+        .find(|r| r.reaction.as_deref() == Some("(n,2n)") && r.lfs == 7)
+        .expect("the state is still written");
+    assert_eq!(row.target, None);
+    assert_eq!(row.target1, None, "its partner is itself, also unmatched");
+    assert!(row.energy.is_none() && row.values.is_none());
+    assert_eq!(row.qi, -1.083087e7, "QI is the tape's");
+}
+
+/// An MT1 of 0 has no meaning the manual gives in MF=40, so its partner is not
+/// read as this MT: `target1` is null and the tape's 0 is kept.
+#[test]
+fn an_mt1_of_zero_leaves_the_partner_unresolved() {
+    let tape = text(NB93);
+    let tape = edit(
+        tape,
+        " 1.000000+1 1.000000+0          0         16          0          1412540 16   11",
+        " 1.000000+1 1.000000+0          0          0          0          1412540 16   11",
+    );
+    let out = extract(&[material(&tape)], &nb_decay());
+    let row = out
+        .covariance
+        .iter()
+        .find(|r| r.reaction.as_deref() == Some("(n,2n)") && r.lfs == 1)
+        .expect("the (n,2n) isomer");
+    assert_eq!(row.subsection.mt1, 0);
+    assert_eq!(row.target.as_deref(), Some("Nb92_m1"));
+    assert_eq!(row.target1, None);
 }
 
 /// JEFF-4.0 U235 MT 4 writes IZAP 0 for the target itself and its own MAT as

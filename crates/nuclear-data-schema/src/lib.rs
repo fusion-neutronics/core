@@ -263,12 +263,15 @@ pub fn branching_branching() -> Schema {
 ///   correlates this one with, level `xlfs1` of reaction `mt1`, found among
 ///   the states of `mt1`'s MF=40 section, or of its MF=9 and MF=10 states when
 ///   it has no MF=40 section. Null when the partner is in another material,
-///   `xmf1` is not 10, or no single state at that level is found (MF=40 gives
-///   no IZAP for the partner, so a level several products share is resolved
-///   only by this row's own IZAP, in the same MT). Several levels can resolve
-///   to one chain nuclide: JEFF-4.0 U235 MT 4 correlates its ground (LFS 0)
-///   with its 77 eV isomer (XLFS1 1), both U235. So a consumer keys a block
-///   on (`mt`, `lfs`, `mt1`, `xlfs1`), never on (`target`, `target1`).
+///   `xmf1` is not 10, `mt1` is 0 (which the manual gives no meaning in
+///   MF=40), or no single state at that level is found (MF=40 gives no IZAP
+///   for the partner, so a level several products share is resolved only by
+///   this row's own IZAP, in the same MT, and the converter's
+///   `mf40_partner_by_own_izap` statistic lists each time it was). Several
+///   levels can resolve to one chain nuclide: JEFF-4.0 U235 MT 4 correlates
+///   its ground (LFS 0) with its 77 eV isomer (XLFS1 1), both U235. So a
+///   consumer keys a block on (`mt`, `lfs`, `mt1`, `xlfs1`), never on
+///   (`target`, `target1`).
 /// * `energy` and `values` are this state's own MF=10 partial, linearized
 ///   by the converter exactly as `branching.arrow` has it (the tape's own
 ///   points when every region is lin-lin), and are written only when several MF=10 states

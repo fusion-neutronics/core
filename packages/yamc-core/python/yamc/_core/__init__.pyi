@@ -5847,9 +5847,12 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         evaluation's own MAT, written as given), ``mf40_cross_state_blocks``
         (blocks correlating two different states rather than one state with
         itself; key them on MT, LFS, MT1 and XLFS1, since both states can
-        resolve to one target) and ``mf40_without_blocks``
+        resolve to one target), ``mf40_without_blocks``
         (one line per state or sub-subsection holding no block, the only part
-        of MF=40 the file cannot show). An evaluation set without MF=40
+        of MF=40 the file cannot show) and ``mf40_partner_by_own_izap`` (one
+        line per sub-subsection whose partner target was taken from the row's
+        own IZAP, because several products share the partner's level and
+        MF=40 names no IZAP for it). An evaluation set without MF=40
         writes no covariance file, and removes one an earlier conversion left
         there.
     """
