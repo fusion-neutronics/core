@@ -86,6 +86,11 @@ pub enum UnreadableContinuum {
     NoLaw,
     /// A law other than histogram or linear-linear.
     Unsupported(Interpolation),
+    /// The energy and density lists differ in length, so some value has no
+    /// partner.
+    UnpairedLists { energies: usize, densities: usize },
+    /// An energy lies below the one before it; the tabulation must ascend.
+    Descending { index: usize },
 }
 
 impl fmt::Display for UnreadableContinuum {
@@ -95,12 +100,24 @@ impl fmt::Display for UnreadableContinuum {
                 f,
                 "states no interpolation law, so its integral is not known. The chain's \
                  decay/sources.arrow was written before the interpolation column existed: \
-                 regenerate it with a current converter, or re-download the transmutation data"
+                 regenerate it with a current converter, or use a transmutation data release \
+                 whose decay/sources.arrow carries that column"
             ),
             UnreadableContinuum::Unsupported(law) => write!(
                 f,
                 "is tabulated {}, a law this build does not integrate",
                 law.name()
+            ),
+            UnreadableContinuum::UnpairedLists {
+                energies,
+                densities,
+            } => write!(
+                f,
+                "pairs {energies} energies with {densities} densities, so it has no single reading"
+            ),
+            UnreadableContinuum::Descending { index } => write!(
+                f,
+                "has energy {index} below the one before it; a continuum is tabulated ascending"
             ),
         }
     }
@@ -133,17 +150,21 @@ impl<'a> Continuum<'a> {
             Some(Interpolation::LinearLinear) => true,
             Some(other) => return Err(UnreadableContinuum::Unsupported(other)),
         };
-        // The chain readers refuse a row whose lists differ in length, so a
-        // mismatch here is a caller building one by hand.
-        debug_assert_eq!(
-            energies.len(),
-            densities.len(),
-            "a continuum pairs each energy with one density"
-        );
-        let n = energies.len().min(densities.len());
+        // The chain readers refuse unpaired rows, but the distribution types
+        // have public fields, so a hand-built continuum is checked here too:
+        // trimming or reading an unsorted table would give a wrong integral.
+        if energies.len() != densities.len() {
+            return Err(UnreadableContinuum::UnpairedLists {
+                energies: energies.len(),
+                densities: densities.len(),
+            });
+        }
+        if let Some(i) = energies.windows(2).position(|w| w[1] < w[0]) {
+            return Err(UnreadableContinuum::Descending { index: i + 1 });
+        }
         Ok(Continuum {
-            energies: &energies[..n],
-            densities: &densities[..n],
+            energies,
+            densities,
             linear,
         })
     }
@@ -332,5 +353,30 @@ mod tests {
         );
         let message = UnreadableContinuum::NoLaw.to_string();
         assert!(message.contains("interpolation column"), "{message}");
+    }
+
+    #[test]
+    fn an_unpaired_or_descending_table_is_refused() {
+        assert_eq!(
+            Continuum::new(
+                &[1.0, 2.0, 3.0],
+                &[1.0, 2.0],
+                Some(Interpolation::Histogram)
+            )
+            .unwrap_err(),
+            UnreadableContinuum::UnpairedLists {
+                energies: 3,
+                densities: 2
+            }
+        );
+        assert_eq!(
+            Continuum::new(
+                &[1.0, 3.0, 2.0],
+                &[1.0, 2.0, 3.0],
+                Some(Interpolation::Histogram)
+            )
+            .unwrap_err(),
+            UnreadableContinuum::Descending { index: 2 }
+        );
     }
 }
