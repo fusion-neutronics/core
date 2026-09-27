@@ -300,6 +300,17 @@ pub struct BranchingStats {
     /// partials sum to 95% of MF=3 at 14 MeV and 84% at 20 MeV, is the case
     /// that prompted the check.
     pub partial_sum_mismatches: Vec<String>,
+    /// The production states of a transmutation reaction that name no single
+    /// product nuclide, one line each, and so give no row. Fission (IZAP =
+    /// -1) is one kind; the other is a subsection with IZAP = 0 that no MF=8
+    /// subsection names either (see
+    /// `endf::radionuclide_production::product_zap`), where the file does not
+    /// say which nuclide it is. Neither reaches this list from the six
+    /// libraries yani builds from: their fission subsections are all MT=18,
+    /// which is no transmutation reaction and is passed over before this, and
+    /// the one evaluation writing IZAP = 0 elsewhere, FENDL-3.2d's Al27, is
+    /// named by its MF=8.
+    pub skipped_states: Vec<String>,
 }
 
 /// The value of `t` at `e`, zero outside its tabulated range.
@@ -522,8 +533,17 @@ impl BranchingExtractor {
                 }
             }
             for s in states {
-                let z = s.zap / 1000;
-                let a = s.zap % 1000;
+                let Some((z, a)) = s.nuclide() else {
+                    let why = if s.zap == -1 {
+                        "fission, which leaves no single product"
+                    } else {
+                        "no product named, IZAP = 0 in MF=9/10 and no one MF=8 subsection for the level"
+                    };
+                    stats
+                        .skipped_states
+                        .push(format!("{parent} MT{mt} level {}: {why}", s.lfs));
+                    continue;
+                };
                 let resolved = endf::radionuclide_production::resolve_level(
                     z,
                     a,
@@ -607,6 +627,7 @@ impl BranchingExtractor {
         self.stats
             .partial_sum_mismatches
             .extend(stats.partial_sum_mismatches);
+        self.stats.skipped_states.extend(stats.skipped_states);
     }
 
     /// The rows and statistics, with duplicate target groups merged.
