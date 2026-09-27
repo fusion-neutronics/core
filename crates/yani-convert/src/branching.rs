@@ -32,8 +32,10 @@ use endf::function::Tabulated1D;
 use endf::mf::covariance::{Mf33Subsection, Mf40, Mf40Subsection};
 use endf::radionuclide_production::{LevelRoute, RadionuclideProduction};
 use endf::Material;
+use yamc_convert::covariance::narrow;
+use yamc_convert::sections::ints;
 
-use crate::{floats, ints, list_of, opt_list_of, opt_strings, strings, write_section};
+use crate::{floats, list_of, opt_list_of, opt_strings, strings, write_section};
 
 /// Relative tolerance for resampling a non-lin-lin region.
 pub const DEFAULT_LINEARIZE_TOL: f64 = 1e-3;
@@ -1042,12 +1044,6 @@ pub fn write_branching_covariance(
     columns.extend(blocks.columns());
     write_section(&path, "branching/branching_covariance.arrow", columns)?;
     Ok(true)
-}
-
-/// A tape integer narrowed for an `int32` column, saturating so a corrupt
-/// value cannot become a plausible small one.
-fn narrow(v: i64) -> i32 {
-    v.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
 #[cfg(test)]

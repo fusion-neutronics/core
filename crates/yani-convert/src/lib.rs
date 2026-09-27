@@ -33,7 +33,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow_array::builder::{Float64Builder, Int32Builder, ListBuilder, StringBuilder};
+use arrow_array::builder::{Float64Builder, ListBuilder, StringBuilder};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::writer::{FileWriter, IpcWriteOptions};
 use arrow_ipc::CompressionType;
@@ -176,12 +176,6 @@ pub(crate) fn opt_list_of(values: &[Option<Vec<f64>>]) -> ArrayRef {
             None => b.append_null(),
         }
     }
-    Arc::new(b.finish())
-}
-
-pub(crate) fn ints(values: &[i32]) -> ArrayRef {
-    let mut b = Int32Builder::new();
-    b.append_slice(values);
     Arc::new(b.finish())
 }
 

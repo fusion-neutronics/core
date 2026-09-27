@@ -88,7 +88,7 @@ pub struct CovarianceRows {
 /// Saturating rather than wrapping: these are ENDF counts and flags, none of
 /// which can legitimately exceed `i32`, and a corrupt tape should not silently
 /// become a plausible small number.
-fn narrow(v: i64) -> i32 {
+pub fn narrow(v: i64) -> i32 {
     v.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
