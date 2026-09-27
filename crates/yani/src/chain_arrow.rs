@@ -101,7 +101,10 @@ fn list_str(list: &ListArray, i: usize) -> Result<Vec<String>, Box<dyn Error>> {
 /// The per-state columns of `branching/branching.arrow`, when the file has
 /// them. A subsection written before they existed has none, and its curves
 /// carry no states; one with some but not all is not a file this converter
-/// wrote, and is refused.
+/// wrote, and is refused. The columns are nullable at row level too: a row
+/// whose state lists are all null states no facts and reads as no states
+/// (its normalisation still read), and a row with only some of them null is
+/// refused.
 struct BranchStateColumns<'a> {
     mt: &'a ListArray,
     lfs: &'a ListArray,
@@ -165,14 +168,35 @@ impl<'a> BranchStateColumns<'a> {
         i: usize,
         nodes: usize,
     ) -> Result<(Vec<BranchState>, Option<String>), Box<dyn Error>> {
+        let normalisation =
+            (!self.normalisation.is_null(i)).then(|| self.normalisation.value(i).to_string());
+        let lists = [
+            self.mt,
+            self.lfs,
+            self.lmf,
+            self.list_complete,
+            self.level_route,
+            self.level_energy,
+            self.level_energy_difference,
+            self.mf3_cross_section,
+        ];
+        let nulls = lists.iter().filter(|list| list.is_null(i)).count();
+        if nulls == lists.len() {
+            return Ok((Vec::new(), normalisation));
+        }
+        if nulls > 0 {
+            return Err(format!(
+                "branching.arrow row {i} has {nulls} of its {} state columns null; \
+                 they are null together or not at all",
+                lists.len()
+            )
+            .into());
+        }
         fn items<T: 'static + Array + Clone>(
             list: &ListArray,
             i: usize,
             name: &str,
         ) -> Result<T, Box<dyn Error>> {
-            if list.is_null(i) {
-                return Err(format!("branching.arrow {name} is null on row {i}").into());
-            }
             list.value(i)
                 .as_any()
                 .downcast_ref::<T>()
@@ -240,8 +264,6 @@ impl<'a> BranchStateColumns<'a> {
                 mf3_cross_section,
             });
         }
-        let normalisation =
-            (!self.normalisation.is_null(i)).then(|| self.normalisation.value(i).to_string());
         Ok((states, normalisation))
     }
 }
@@ -1547,6 +1569,36 @@ mod tests {
             err.contains("mf3_cross_section has 2 values on 3 energy nodes"),
             "{err}"
         );
+    }
+
+    /// A row whose state lists are all null states no facts and reads as no
+    /// states; one with only some of them null is refused.
+    #[test]
+    fn a_row_with_null_state_lists_reads_as_no_states() {
+        fn nulled(names: &[&str]) -> Vec<(&'static str, ArrayRef)> {
+            state_columns(1, 1, 3)
+                .into_iter()
+                .map(|(name, array)| {
+                    if names.contains(&name) {
+                        (name, arrow_array::new_null_array(array.data_type(), 1))
+                    } else {
+                        (name, array)
+                    }
+                })
+                .collect()
+        }
+        let all: Vec<&str> = super::BRANCH_STATE_COLUMNS[..8].to_vec();
+        let batch = RecordBatch::try_from_iter(nulled(&all)).expect("batch");
+        let (states, normalisation) = BranchStateColumns::from_batch(&batch)
+            .expect("columns")
+            .expect("state columns present")
+            .row(0, 3)
+            .expect("an all-null row reads");
+        assert!(states.is_empty());
+        assert_eq!(normalisation, None);
+
+        let err = read_row(nulled(&["lmf"]), 3).unwrap_err();
+        assert!(err.contains("null together or not at all"), "{err}");
     }
 
     /// Everything export_chain_parts writes must match the declared schema, and
