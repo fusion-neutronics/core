@@ -468,10 +468,10 @@ impl FluxDensity<'_> {
     /// group's: inserting an edge adds a point to the trapezoid, and the shape
     /// there is interpolated in log energy on its own grid rather than along
     /// the segment the edge splits, so the parts' integrals do not add up to
-    /// the whole group's exactly. Normalized
-    /// by their own sum, the parts partition the collapse's term, and the
-    /// partials over a grid spanning the flux range sum to the shielded rate to
-    /// rounding, which is what the relative covariance divides them by.
+    /// the whole group's exactly. Normalized by their own sum, the parts
+    /// partition the collapse's term, and the partials over a grid spanning
+    /// the flux range sum to the shielded rate to rounding, which is what the
+    /// relative covariance divides them by.
     fn apportion(
         &self,
         reaction: &Reaction,
@@ -1208,9 +1208,9 @@ mod stated_variance_tests {
 
         // Against half the rate, as a rate weighted some other way than the
         // partials could give, the partials the fold weighted with sum to
-        // twice it. The zero variance
-        // interval is among them, so the check must see it even though the
-        // share leaves it out, and the share itself does not move.
+        // twice it. The zero variance interval is among them, so the check
+        // must see it even though the share leaves it out, and the share
+        // itself does not move.
         let c = fold(&[block(102, 102, lb5(&grid, &[0.0, 0.0, 0.01]))], 0.5);
         let ratio = c.partials_above_rate[&("W186".to_string(), "(n,gamma)".to_string())];
         assert!((ratio - 2.0).abs() < 1.0e-12, "{ratio}");
@@ -1518,3 +1518,4 @@ mod integration_range_tests {
         }
     }
 }
+
