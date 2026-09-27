@@ -339,15 +339,18 @@ fn coupled_branching_folds_parents_outside_material() {
 /// A metastable the overlay grafts onto the chain enters it at branching 0.0,
 /// the loader's placeholder for "the fold decides". The product bound that
 /// picks which nuclides to score runs on the chain as loaded, before any fold,
-/// so it must still see that edge: here Li6 capture feeds a grafted Li7_m1
-/// whose own capture makes Li8. If the bound read the placeholder, Li7_m1
+/// so it must still see that edge: here Li6 capture feeds a grafted Li7_m2
+/// whose own capture makes Li8. If the bound read the placeholder, Li7_m2
 /// would be left unscored, its capture rate would be zero and no Li8 could
 /// appear, although the overlay puts a quarter of every Li6 capture there.
 #[test]
 fn coupled_bound_keeps_grafted_metastable_reactions() {
     // Li7 cross sections stand in for the metastable's own: what matters is
     // that it has a capture channel to score, not what that channel's data is.
-    yamc_nuclide::Config::global().set_cross_section("Li7_m1", Some("tests/Li7.arrow"));
+    // The mapping is process-global and the product preload has no per-call
+    // path, so the metastable is named Li7_m2, which no other test in this
+    // binary uses, rather than the Li7_m1 the tests running beside it share.
+    yamc_nuclide::Config::global().set_cross_section("Li7_m2", Some("tests/Li7.arrow"));
 
     let mut map = HashMap::new();
     map.insert(
@@ -366,7 +369,7 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
                 // Exactly what `parse_chain_parts_from_bytes` grafts.
                 ChainReaction {
                     kind: "(n,gamma)".to_string(),
-                    target: Some("Li7_m1".to_string()),
+                    target: Some("Li7_m2".to_string()),
                     branching: 0.0,
                     q_value: None,
                 },
@@ -380,15 +383,23 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
         },
     );
     map.insert("Li7".to_string(), stable("Li7"));
-    let mut li7m = stable("Li7_m1");
+    let mut li7m = stable("Li7_m2");
     li7m.reactions.push(ChainReaction {
         kind: "(n,gamma)".to_string(),
         target: Some("Li8".to_string()),
         branching: 1.0,
         q_value: None,
     });
-    map.insert("Li7_m1".to_string(), li7m);
+    map.insert("Li7_m2".to_string(), li7m);
     map.insert("Li8".to_string(), stable("Li8"));
+
+    // The same flat 3:1 partials as `synthetic_branch`, onto Li7_m2.
+    let mut branch = (*synthetic_branch()).clone();
+    for c in branch.get_mut("Li6").unwrap().get_mut("(n,gamma)").unwrap() {
+        if c.target == "Li7_m1" {
+            c.target = "Li7_m2".to_string();
+        }
+    }
 
     let mut model = li6_model();
     let schedule = Schedule::new(vec![ScheduleStep {
@@ -406,7 +417,7 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
             "coupled",
             &schedule,
             Arc::new(map),
-            synthetic_branch(),
+            Arc::new(branch),
             Default::default(),
             &settings,
             None,
@@ -415,14 +426,14 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
     let nuclides = &results.get_final_material(1).expect("material 1").nuclides;
 
     let li7 = nuclides.get("Li7").copied().unwrap_or(0.0);
-    let li7m = nuclides.get("Li7_m1").copied().unwrap_or(0.0);
+    let li7m = nuclides.get("Li7_m2").copied().unwrap_or(0.0);
     assert!(
         (li7m / (li7 + li7m) - 0.25).abs() < 1e-9,
-        "the fold must still route a quarter of Li6 capture to Li7_m1: Li7 {li7:e}, Li7_m1 {li7m:e}"
+        "the fold must still route a quarter of Li6 capture to Li7_m2: Li7 {li7:e}, Li7_m2 {li7m:e}"
     );
     let li8 = nuclides.get("Li8").copied().unwrap_or(0.0);
     assert!(
         li8 > 0.0,
-        "Li7_m1 capture must be scored, so Li8 must appear; got {li8:e} beside Li7_m1 {li7m:e}"
+        "Li7_m2 capture must be scored, so Li8 must appear; got {li8:e} beside Li7_m2 {li7m:e}"
     );
 }
