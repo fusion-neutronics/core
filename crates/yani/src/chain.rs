@@ -637,7 +637,13 @@ where
                     }
                 }
             }
-            let frac = (reaction_rate(name, &rx.kind) * total_time).min(1.0) * branching;
+            // Tested before the product: an unbounded overlay branching is
+            // infinite, and a channel that never runs must not turn it into NaN.
+            let reacted = (reaction_rate(name, &rx.kind) * total_time).min(1.0);
+            if reacted <= 0.0 {
+                continue;
+            }
+            let frac = reacted * branching;
             if frac <= 0.0 {
                 continue;
             }
@@ -770,6 +776,14 @@ where
 /// is what is returned: exact for a spectrum concentrated there, never below
 /// the fold for any other. Targets without a curve are left out, since the
 /// fold never touches their branching.
+///
+/// That argument needs every curve non-negative, which nothing upstream
+/// checks, so a selected curve with a negative point gives the loose bound
+/// instead. For `(n,n')` that is 1.0: the fold drops non-positive rates before
+/// normalising, so each share stays within the unit interval. Any other kind
+/// normalises by a sum that negative curves can cancel toward zero, so no
+/// finite value bounds its re-split and the edge is bounded by infinity, kept
+/// whenever its reaction runs at all.
 fn overlay_branching_bounds<'a>(
     parent: &str,
     cn: &'a ChainNuclide,
@@ -798,6 +812,7 @@ fn overlay_branching_bounds<'a>(
             .filter(|c| c.quantity == quantity)
             .collect()
     };
+    let negative = selected.iter().any(|c| c.values.iter().any(|&v| v < 0.0));
 
     let mut bounds = HashMap::new();
     if kind == "(n,n')" {
@@ -809,9 +824,13 @@ fn overlay_branching_bounds<'a>(
                 .copied()
                 .filter(|o| o.target == c.target)
                 .collect();
-            bounds
-                .entry(c.target.as_str())
-                .or_insert_with(|| largest_share(&own, &selected));
+            bounds.entry(c.target.as_str()).or_insert_with(|| {
+                if negative {
+                    1.0
+                } else {
+                    largest_share(&own, &selected)
+                }
+            });
         }
         return bounds;
     }
@@ -847,9 +866,13 @@ fn overlay_branching_bounds<'a>(
             .copied()
             .filter(|c| c.target == target)
             .collect();
-        bounds
-            .entry(target)
-            .or_insert_with(|| largest_share(&own, &denominator) * mass);
+        bounds.entry(target).or_insert_with(|| {
+            if negative {
+                f64::INFINITY
+            } else {
+                largest_share(&own, &denominator) * mass
+            }
+        });
     }
     bounds
 }
@@ -1622,6 +1645,55 @@ mod tests {
         let bounds = overlay_branching_bounds("Rh103", &cn, "(n,n')", &curves);
         assert_eq!(bounds["Rh103_m1"], 0.25);
         assert_eq!(bounds["Rh103_m2"], 0.75);
+    }
+
+    #[test]
+    fn negative_curves_give_the_loose_overlay_bound() {
+        // Curves of 2 and -1 fold to shares of 2 and -1, so the re-split puts
+        // twice the chain's mass on Li7: neither the pointwise ratio nor the
+        // mass bounds that, and only an unbounded edge stays a bound.
+        let (chain, mut branch) = grafted_capture();
+        let curves = branch.get_mut("Li6").unwrap().get_mut("(n,gamma)").unwrap();
+        curves[0].values = vec![2.0, 2.0];
+        curves[1].values = vec![-1.0, -1.0];
+        let bounds = overlay_branching_bounds(
+            "Li6",
+            &chain["Li6"],
+            "(n,gamma)",
+            &branch["Li6"]["(n,gamma)"],
+        );
+        assert_eq!(bounds["Li7"], f64::INFINITY);
+        assert_eq!(bounds["Li7_m1"], f64::INFINITY);
+
+        // An unbounded edge whose reaction never runs is no edge, not NaN.
+        let seeds: HashMap<String, f64> = [("Li6".to_string(), 1.0)].into_iter().collect();
+        let idle = populated_nuclides(&chain, &branch, &seeds, 1.0, 1e-22, |_, _| 0.0);
+        assert!(
+            !idle.contains("Li7") && !idle.contains("Li7_m1"),
+            "{idle:?}"
+        );
+        let running = populated_nuclides(&chain, &branch, &seeds, 1.0, 1e-22, |_, _| 1e-10);
+        assert!(running.contains("Li7_m1"), "{running:?}");
+
+        // The (n,n') fold drops non-positive rates before normalising, so its
+        // shares stay within one however the curves go.
+        let cn = nuc(
+            "Rh103",
+            None,
+            vec![
+                rx("(n,n')", Some("Rh103_m1"), 0.0),
+                rx("(n,n')", Some("Rh103_m2"), 0.0),
+            ],
+            vec![],
+        );
+        let cs = BranchQuantity::CrossSection;
+        let curves = vec![
+            curve("Rh103_m1", cs, &[1e5, 2e7], &[1.0, -1.0]),
+            curve("Rh103_m2", cs, &[1e5, 2e7], &[3.0, 3.0]),
+        ];
+        let bounds = overlay_branching_bounds("Rh103", &cn, "(n,n')", &curves);
+        assert_eq!(bounds["Rh103_m1"], 1.0);
+        assert_eq!(bounds["Rh103_m2"], 1.0);
     }
 
     #[test]
