@@ -4,45 +4,43 @@
 //! whose other tests collapse rates in parallel, it would change their
 //! answers under them.
 //!
-//! The fixture is the one `data_uncertainty.rs` builds: cached Fe56 with the
-//! committed evaluation's MF=33 written into it. Its `(n,p)` covariance has an
-//! edge at 4.3 MeV, inside the fast group, which is the case the weight
-//! affects. Self-skips when the nuclear-data fixtures are missing.
+//! The fixture is the one `data_uncertainty.rs` uses, shared from `common`:
+//! cached Fe56 with the committed evaluation's MF=33 written into it. Its
+//! `(n,p)` covariance has an edge at 4.3 MeV, inside the fast group, which is
+//! the case the weight affects. Self-skips when the nuclear-data fixtures are
+//! missing.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+mod common;
+use common::fe56_with_covariance;
 
 use yamc_materials::Material;
 use yani_transmute::multigroup::{set_within_group_weight, Weighting};
 use yani_transmute::uncertainty::{DataUncertainty, Source};
 use yani_transmute::{transmute_material, MultigroupSpectrum, TransmuteStep};
 
-const FE56_ENDF: &[u8] = include_bytes!("../../endf/fixtures/n-026_Fe_056_trimmed.endf.xz");
-
 const GROUPS: [f64; 4] = [1.0e-5, 0.625, 1.0e5, 2.0e7];
 const FLUX: [f64; 3] = [1.0e12, 5.0e12, 1.0e14];
 
-fn fe56_with_covariance(tmp: &Path) -> Option<PathBuf> {
-    let cached = PathBuf::from(yamc_test_cache::nuclide("Fe56")?);
-    let dir = tmp.join("Fe56.arrow");
-    std::fs::create_dir_all(&dir).expect("mkdir");
-    for entry in std::fs::read_dir(&cached).expect("read cached Fe56") {
-        let entry = entry.expect("dir entry");
-        if entry.path().is_file() {
-            std::fs::copy(entry.path(), dir.join(entry.file_name())).expect("copy section");
-        }
+/// Sets the process-wide within-group weight and puts the flat default back
+/// when dropped, so a failing assertion cannot leave `1/E` set for a test
+/// added to this binary later.
+struct WeightGuard;
+
+impl WeightGuard {
+    fn set(weight: Weighting) -> Self {
+        set_within_group_weight(weight);
+        WeightGuard
     }
-    let evaluation = tmp.join("fe56.endf");
-    let mut raw = Vec::new();
-    lzma_rs::xz_decompress(&mut &FE56_ENDF[..], &mut raw).expect("fixture decompresses");
-    std::fs::write(&evaluation, raw).expect("write evaluation");
-    let material = endf::Material::from_file(&evaluation).expect("Fe56 parses");
-    assert!(
-        yamc_convert::covariance::write_covariance(&material, &dir).expect("covariance writes"),
-        "the fixture must carry MF=33 for this test to mean anything"
-    );
-    Some(dir)
+}
+
+impl Drop for WeightGuard {
+    fn drop(&mut self) {
+        set_within_group_weight(Weighting::FlatInEnergy);
+    }
 }
 
 fn fold_info(data: &Path) -> yani_transmute::uncertainty::Info {
@@ -119,9 +117,10 @@ fn a_one_over_e_fold_with_an_edge_inside_a_group_is_reported() {
         flat.partials_above_rate
     );
 
-    set_within_group_weight(Weighting::OneOverE);
-    let one_over_e = fold_info(&dir);
-    set_within_group_weight(Weighting::FlatInEnergy);
+    let one_over_e = {
+        let _weight = WeightGuard::set(Weighting::OneOverE);
+        fold_info(&dir)
+    };
 
     let ratio = one_over_e.partials_above_rate[&key];
     assert!(ratio > 5.0, "{ratio}");
