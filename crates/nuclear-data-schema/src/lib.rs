@@ -320,10 +320,11 @@ pub fn covariance() -> Schema {
         // when it is not lumped. Per section rather than per block, so it
         // repeats across a section's rows.
         i32("mtl", true),
-        // kind = "ni". `lb` selects which of the rest are populated: 0-4 use
-        // `lt`, `np` and both (E, F) tables; 5 uses `ls`, `ne`, `ek` and `fkk`;
-        // 6 uses `ner`, `nec`, `er`, `ec` and `fkl`; 8 and 9 use `lt`, `np` and
-        // the first table only.
+        // kind = "ni". `lb` selects which of the rest are populated: 0-2 use
+        // `lt` (always 0), `np` and the first (E, F) table, `ek`/`fk`; 3 and 4
+        // add the second, `el`/`fl`, of `lt` pairs; 5 uses `ls`, `ne`, `ek`
+        // and `fkk`; 6 uses `ner`, `nec`, `er`, `ec` and `fkl`; 8 and 9 use
+        // `lt`, `np` and the first table only.
         i32("lb", true),
         i32("ls", true),
         i32("lt", true),
