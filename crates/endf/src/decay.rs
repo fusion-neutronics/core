@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use crate::data::{gnds_name, ATOMIC_SYMBOL};
 use crate::error::{Error, Result};
 use crate::material::Material;
-use crate::mf::mf8::WithUncertainty;
+use crate::mf::mf8::{ContinuousCovariance, DiscreteCovariance, WithUncertainty};
 use crate::univariate::{combine_distributions, Discrete, Interpolation, Tabular, Univariate};
 
 /// Each decay mode's name, and what it does to the mass and atomic numbers.
@@ -261,6 +261,55 @@ pub struct DecaySpectrum {
     pub continuous: Option<crate::function::Tabulated1D>,
     /// The decay chain the continuum comes from.
     pub continuous_from_mode: Vec<&'static str>,
+    /// The covariance of the lines' intensities (LCOV 2 or 3), as written.
+    pub discrete_covariance: Option<DiscreteCovariance>,
+    /// The covariance of the continuum (LCOV 1 or 3), as written.
+    pub continuous_covariance: Option<ContinuousCovariance>,
+}
+
+/// A covariance an evaluation states for one spectrum's lines or continuum,
+/// as MF=8 MT=457 writes it.
+///
+/// Neither packing is unpacked. For the lines (LB=5) `energies` are the
+/// NERP values written before the packed matrix `values`, and `ls` is the
+/// symmetry flag. For a continuum (LB=2) `values` pairs one to one with
+/// `energies` and there is no `ls`. The record counts NE and NT are the
+/// lengths of the two lists, so nothing else is needed to write it back.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SpectrumCovariance {
+    pub ls: Option<i64>,
+    pub lb: i64,
+    pub energies: Vec<f64>,
+    pub values: Vec<f64>,
+}
+
+/// One spectrum's lines, or its continuum, as an emission rate per atom,
+/// with the uncertainties its evaluation gives for them.
+///
+/// A spectrum with both lines and a continuum (LCON=2) gives one of each.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpectrumSource {
+    /// The radiation type, e.g. `"gamma"` or `"xray"`.
+    pub radiation: &'static str,
+    /// The particle it emits, e.g. `"photon"`.
+    pub particle: &'static str,
+    /// The lines as a [`Discrete`], or the continuum as a [`Tabular`], in
+    /// emitted particles per atom per second.
+    pub distribution: Univariate,
+    /// FD for lines, FC for a continuum, with its sigma, as written. It is
+    /// already multiplied into `distribution`; its sigma is common to every
+    /// line of the spectrum.
+    pub normalization: WithUncertainty,
+    /// Each line's intensity sigma in the units of its intensity:
+    /// `lambda * FD * dRI`, which is the tape's dRI and nothing else, since
+    /// the nominal intensity is `lambda * FD * RI`. `None` on a continuum,
+    /// which states no per-point sigma.
+    pub intensity_uncertainties: Option<Vec<f64>>,
+    /// Each line's energy sigma dER, in eV. `None` on a continuum.
+    pub energy_uncertainties: Option<Vec<f64>>,
+    /// The spectrum's covariance, where the evaluation states one. No
+    /// photon spectrum in ENDF/B-VIII.1, JEFF-4.0 or JENDL-5.0 does.
+    pub covariance: Option<SpectrumCovariance>,
 }
 
 /// Radioactive decay data for one nuclide.
@@ -501,6 +550,8 @@ impl Decay {
                         .continuous
                         .as_ref()
                         .map_or_else(Vec::new, |c| decay_modes(c.rtyp)),
+                    discrete_covariance: spectrum.discrete_covariance.clone(),
+                    continuous_covariance: spectrum.continuous_covariance.clone(),
                 },
             );
         }
@@ -564,13 +615,40 @@ impl Decay {
     /// The spectra are intensities per decay; multiplying by the decay
     /// constant makes them rates. Lines and continua of the same particle are
     /// combined, so a nuclide that emits both gammas and x-rays gives one
-    /// photon distribution.
+    /// photon distribution. [`spectrum_sources`](Self::spectrum_sources)
+    /// keeps them apart, with their uncertainties.
     pub fn sources(&self) -> Result<BTreeMap<&'static str, Univariate>> {
+        let mut by_particle: BTreeMap<&'static str, Vec<Univariate>> = BTreeMap::new();
+        for source in self.spectrum_sources()? {
+            by_particle
+                .entry(source.particle)
+                .or_default()
+                .push(source.distribution);
+        }
+
+        let mut sources = BTreeMap::new();
+        for (particle, dists) in by_particle {
+            let probs = vec![1.0; dists.len()];
+            sources.insert(particle, combine_distributions(&dists, &probs)?);
+        }
+        Ok(sources)
+    }
+
+    /// Every spectrum's lines and continuum as emission rates per atom, one
+    /// entry each, in radiation-type order with the lines before the
+    /// continuum.
+    ///
+    /// Nothing is merged, sorted or dropped: the lines are in the order the
+    /// evaluation lists them, a repeated energy stays repeated, and each
+    /// entry carries its own spectrum's normalisation. That keeps which lines
+    /// share an FD, and so a common sigma, which [`sources`](Self::sources)
+    /// loses when it merges the gamma and x-ray spectra.
+    pub fn spectrum_sources(&self) -> Result<Vec<SpectrumSource>> {
         let Some((decay_constant, _)) = self.decay_constant() else {
-            return Ok(BTreeMap::new());
+            return Ok(Vec::new());
         };
 
-        let mut by_particle: BTreeMap<&'static str, Vec<Univariate>> = BTreeMap::new();
+        let mut out = Vec::new();
         for (radiation, spectrum) in &self.spectra {
             let particle = SOURCE_PARTICLES
                 .iter()
@@ -579,18 +657,40 @@ impl Decay {
                 .ok_or(Error::Unsupported {
                     what: "a decay radiation type with no source particle",
                 })?;
-            let dists = by_particle.entry(particle).or_default();
 
             if spectrum.continuous_flag != ContinuousFlag::Continuous {
                 let norm = spectrum.discrete_normalization.0;
-                dists.push(Univariate::Discrete(Discrete::new(
-                    spectrum.discrete.iter().map(|d| d.energy.0).collect(),
-                    spectrum
-                        .discrete
-                        .iter()
-                        .map(|d| decay_constant * norm * d.intensity.0)
-                        .collect(),
-                )));
+                let lines = &spectrum.discrete;
+                out.push(SpectrumSource {
+                    radiation,
+                    particle,
+                    distribution: Univariate::Discrete(Discrete::new(
+                        lines.iter().map(|d| d.energy.0).collect(),
+                        lines
+                            .iter()
+                            .map(|d| decay_constant * norm * d.intensity.0)
+                            .collect(),
+                    )),
+                    normalization: spectrum.discrete_normalization,
+                    // Scaled exactly as the intensity is, so the ratio to it
+                    // is the tape's dRI/RI.
+                    intensity_uncertainties: Some(
+                        lines
+                            .iter()
+                            .map(|d| decay_constant * norm * d.intensity.1)
+                            .collect(),
+                    ),
+                    energy_uncertainties: Some(lines.iter().map(|d| d.energy.1).collect()),
+                    covariance: spectrum
+                        .discrete_covariance
+                        .as_ref()
+                        .map(|c| SpectrumCovariance {
+                            ls: Some(c.ls),
+                            lb: c.lb,
+                            energies: c.ek.clone(),
+                            values: c.fkk.clone(),
+                        }),
+                });
             }
 
             if spectrum.continuous_flag != ContinuousFlag::Discrete {
@@ -610,20 +710,29 @@ impl Decay {
                 })?;
                 let interpolation = Interpolation::from_endf_code(code)?;
                 let norm = spectrum.continuous_normalization.0;
-                dists.push(Univariate::Tabular(Tabular::new(
-                    f.x.clone(),
-                    f.y.iter().map(|&y| decay_constant * norm * y).collect(),
-                    interpolation,
-                )));
+                out.push(SpectrumSource {
+                    radiation,
+                    particle,
+                    distribution: Univariate::Tabular(Tabular::new(
+                        f.x.clone(),
+                        f.y.iter().map(|&y| decay_constant * norm * y).collect(),
+                        interpolation,
+                    )),
+                    normalization: spectrum.continuous_normalization,
+                    intensity_uncertainties: None,
+                    energy_uncertainties: None,
+                    covariance: spectrum.continuous_covariance.as_ref().map(|c| {
+                        SpectrumCovariance {
+                            ls: None,
+                            lb: c.lb,
+                            energies: c.ek.clone(),
+                            values: c.fk.clone(),
+                        }
+                    }),
+                });
             }
         }
-
-        let mut sources = BTreeMap::new();
-        for (particle, dists) in by_particle {
-            let probs = vec![1.0; dists.len()];
-            sources.insert(particle, combine_distributions(&dists, &probs)?);
-        }
-        Ok(sources)
+        Ok(out)
     }
 }
 
@@ -853,6 +962,98 @@ mod tests {
         let first = &d.spectra["gamma"].discrete[0];
         let i = photons.x.iter().position(|&e| e == first.energy.0).unwrap();
         assert_eq!(photons.p[i], lambda * norm * first.intensity.0);
+    }
+
+    /// Each spectrum is its own entry with its own normalisation, and the
+    /// per-line sigmas are the tape's, scaled exactly as the intensities.
+    #[test]
+    fn each_spectrum_is_a_source_of_its_own_with_its_sigmas() {
+        let d = decay(IN116M1);
+        let sources = d.spectrum_sources().unwrap();
+        let photons: Vec<&SpectrumSource> =
+            sources.iter().filter(|s| s.particle == "photon").collect();
+        assert_eq!(
+            photons.iter().map(|s| s.radiation).collect::<Vec<_>>(),
+            ["gamma", "xray"]
+        );
+        let (lambda, _) = d.decay_constant().unwrap();
+        for source in photons {
+            let spectrum = &d.spectra[source.radiation];
+            assert_eq!(source.normalization, spectrum.discrete_normalization);
+            let Univariate::Discrete(lines) = &source.distribution else {
+                panic!("{} is lines", source.radiation);
+            };
+            let norm = spectrum.discrete_normalization.0;
+            let sigmas = source.intensity_uncertainties.as_ref().unwrap();
+            let energy_sigmas = source.energy_uncertainties.as_ref().unwrap();
+            for (i, line) in spectrum.discrete.iter().enumerate() {
+                assert_eq!(lines.x[i], line.energy.0);
+                assert_eq!(lines.p[i], lambda * norm * line.intensity.0);
+                assert_eq!(sigmas[i], lambda * norm * line.intensity.1);
+                assert_eq!(energy_sigmas[i], line.energy.1);
+            }
+            assert_eq!(source.covariance, None);
+        }
+    }
+
+    /// No library ships a photon covariance, so this one is set by hand, as
+    /// LCOV=3 on the JEFF-4.0 Cf252 gamma spectrum, which has both lines and
+    /// a continuum. Each is carried unpacked on its own entry, with no LS on
+    /// the continuum's.
+    #[test]
+    fn a_stated_covariance_is_carried_as_written() {
+        const CF252: &[u8] = include_bytes!("../fixtures/dec-098_Cf_252.jeff40.endf.xz");
+        let mut d = decay(CF252);
+        let gamma = d.spectra.get_mut("gamma").unwrap();
+        assert_eq!(gamma.continuous_flag, ContinuousFlag::Both);
+        gamma.discrete_covariance = Some(DiscreteCovariance {
+            ls: 1,
+            lb: 5,
+            ne: 5,
+            nerp: 2,
+            ek: vec![1.0e5, 2.0e6],
+            fkk: vec![1.0e-4, 2.0e-5, 3.0e-4],
+        });
+        gamma.continuous_covariance = Some(ContinuousCovariance {
+            lb: 2,
+            ek: vec![0.0, 1.0e7],
+            fk: vec![0.01, 0.0],
+        });
+        let sources = d.spectrum_sources().unwrap();
+        let find = |radiation: &str, tabular: bool| {
+            sources
+                .iter()
+                .find(|s| {
+                    s.radiation == radiation
+                        && matches!(s.distribution, Univariate::Tabular(_)) == tabular
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            find("gamma", false).covariance,
+            Some(SpectrumCovariance {
+                ls: Some(1),
+                lb: 5,
+                energies: vec![1.0e5, 2.0e6],
+                values: vec![1.0e-4, 2.0e-5, 3.0e-4],
+            })
+        );
+        let continuum = find("gamma", true);
+        assert_eq!(
+            continuum.covariance,
+            Some(SpectrumCovariance {
+                ls: None,
+                lb: 2,
+                energies: vec![0.0, 1.0e7],
+                values: vec![0.01, 0.0],
+            })
+        );
+        assert_eq!(
+            continuum.normalization,
+            d.spectra["gamma"].continuous_normalization
+        );
+        assert_eq!(continuum.intensity_uncertainties, None);
+        assert_eq!(find("xray", false).covariance, None);
     }
 
     #[test]
