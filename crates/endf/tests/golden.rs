@@ -2167,6 +2167,30 @@ fn is_interpolated(path: &str) -> bool {
         || path.contains("/removal_xs/")
 }
 
+/// Whether `path` is the CDF of a tabular distribution under a log law.
+///
+/// Those CDFs integrate the density with `ln` and `exp_m1`, and neither the
+/// Rust nor the Python result is fixed by the arithmetic alone: each takes the
+/// platform's transcendental functions, which are not correctly rounded and
+/// differ in the last bit between glibc, the MSVC runtime and NumPy's SIMD
+/// kernels (NumPy picks its kernel by CPU, so the golden itself depends on the
+/// machine that wrote it). The operation order already matches the Python
+/// exactly; what is left is that last-bit noise, so these are compared to
+/// 1e-12 relative. Unlike the check in [`compare`] for the other computed
+/// paths there is no floor of 1 on the scale: a CDF of a spectrum in
+/// particles per eV can sit near 1e-20, where an absolute 1e-12 would pass
+/// anything. Histogram and linear-linear CDFs use no transcendental function
+/// and stay exact.
+fn is_log_law_cdf(path: &str, theirs: &BTreeMap<String, Value>) -> bool {
+    let Some(prefix) = path.strip_suffix("/cdf") else {
+        return false;
+    };
+    matches!(
+        theirs.get(&format!("{prefix}/interpolation")),
+        Some(Value::Text(law)) if law.contains("log")
+    )
+}
+
 fn compare(name: &str, ours: &BTreeMap<String, Value>, theirs: &BTreeMap<String, Value>) {
     let ours_keys: BTreeSet<&String> = ours.keys().collect();
     let theirs_keys: BTreeSet<&String> = theirs.keys().collect();
@@ -2185,6 +2209,18 @@ fn compare(name: &str, ours: &BTreeMap<String, Value>, theirs: &BTreeMap<String,
 
     for (path, want) in theirs {
         let got = &ours[path];
+        if let (Value::Floats(a), Value::Floats(b)) = (got, want) {
+            if is_log_law_cdf(path, theirs) {
+                assert_eq!(a.len(), b.len(), "{name}: {path} length");
+                for (i, (&got, &want)) in a.iter().zip(b).enumerate() {
+                    assert!(
+                        (got - want).abs() <= EVAL_TOL * want.abs(),
+                        "{name}: {path}[{i}]: rust {got} != python {want}"
+                    );
+                }
+                continue;
+            }
+        }
         assert_eq!(
             got.kind(),
             want.kind(),
