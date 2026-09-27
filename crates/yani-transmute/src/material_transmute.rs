@@ -2427,7 +2427,7 @@ mod tests {
                 quantity: BranchQuantity::CrossSection,
                 energy: vec![1.0, 1.0e8],
                 values: vec![0.1, 0.1], // flat 0.1 barn
-                states: Vec::new(),
+                states: Default::default(),
                 normalisation: None,
             }],
         );
@@ -2466,7 +2466,7 @@ mod tests {
                 quantity: BranchQuantity::CrossSection,
                 energy: vec![1.0, 1.0e8],
                 values: vec![3.0, 3.0],
-                states: Vec::new(),
+                states: Default::default(),
                 normalisation: None,
             },
             BranchCurve {
@@ -2474,7 +2474,7 @@ mod tests {
                 quantity: BranchQuantity::CrossSection,
                 energy: vec![1.0, 1.0e8],
                 values: vec![1.0, 1.0],
-                states: Vec::new(),
+                states: Default::default(),
                 normalisation: None,
             },
         ];

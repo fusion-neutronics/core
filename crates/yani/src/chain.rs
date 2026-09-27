@@ -111,8 +111,9 @@ pub struct BranchCurve {
     pub values: Vec<f64>,
     /// The evaluated production states summed into this curve, in the order
     /// they were summed. Empty for a subsection written before these facts
-    /// were stored.
-    pub states: Vec<BranchState>,
+    /// were stored. Shared, since nothing in the solve reads them and a
+    /// session copies its branch table on every run.
+    pub states: Arc<[BranchState]>,
     /// The parent evaluation's MF=1 account of what it was normalised to
     /// (TENDL's "Normalization to other libraries" block), verbatim.
     pub normalisation: Option<String>,

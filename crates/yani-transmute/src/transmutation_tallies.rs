@@ -1746,7 +1746,7 @@ mod tests {
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![1.0e6, 3.0e6, 5.0e6],
                     values: vec![0.0, 2.0, 1.0],
-                    states: Vec::new(),
+                    states: Default::default(),
                     normalisation: None,
                 },
                 yani::BranchCurve {
@@ -1754,7 +1754,7 @@ mod tests {
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![1.0e5, 3.0e6],
                     values: vec![0.5, 0.5],
-                    states: Vec::new(),
+                    states: Default::default(),
                     normalisation: None,
                 },
             ],
@@ -1768,7 +1768,7 @@ mod tests {
                 quantity: BranchQuantity::CrossSection,
                 energy: vec![5.0e5, 2.0e6, 4.0e6],
                 values: vec![0.1, 0.3, 0.2],
-                states: Vec::new(),
+                states: Default::default(),
                 normalisation: None,
             }],
         );
@@ -1880,7 +1880,7 @@ mod tests {
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![1.0, 2.0],
                     values: vec![1.0, 1.0],
-                    states: Vec::new(),
+                    states: Default::default(),
                     normalisation: None,
                 },
                 yani::BranchCurve {
@@ -1888,7 +1888,7 @@ mod tests {
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![1.0, 2.0],
                     values: vec![1.0, 1.0],
-                    states: Vec::new(),
+                    states: Default::default(),
                     normalisation: None,
                 },
             ],
@@ -1901,7 +1901,7 @@ mod tests {
                     quantity: BranchQuantity::Yield,
                     energy: vec![1.0, 2.0],
                     values: vec![0.9, 0.9],
-                    states: Vec::new(),
+                    states: Default::default(),
                     normalisation: None,
                 },
                 yani::BranchCurve {
@@ -1909,7 +1909,7 @@ mod tests {
                     quantity: BranchQuantity::Yield,
                     energy: vec![1.0, 2.0],
                     values: vec![0.1, 0.1],
-                    states: Vec::new(),
+                    states: Default::default(),
                     normalisation: None,
                 },
             ],
@@ -1922,7 +1922,7 @@ mod tests {
                 quantity: BranchQuantity::Yield,
                 energy: vec![1.0, 2.0],
                 values: vec![1.0, 1.0],
-                states: Vec::new(),
+                states: Default::default(),
                 normalisation: None,
             }],
         );
@@ -1935,7 +1935,7 @@ mod tests {
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![],
                     values: vec![],
-                    states: Vec::new(),
+                    states: Default::default(),
                     normalisation: None,
                 },
                 yani::BranchCurve {
@@ -1943,7 +1943,7 @@ mod tests {
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![1.0, 2.0],
                     values: vec![1.0], // mismatched lengths
-                    states: Vec::new(),
+                    states: Default::default(),
                     normalisation: None,
                 },
                 yani::BranchCurve {
@@ -1951,7 +1951,7 @@ mod tests {
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![1.0, 2.0],
                     values: vec![1.0, 1.0],
-                    states: Vec::new(),
+                    states: Default::default(),
                     normalisation: None,
                 },
             ],

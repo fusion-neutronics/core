@@ -906,7 +906,7 @@ pub fn parse_chain_parts_from_bytes(
                             quantity,
                             energy,
                             values,
-                            states,
+                            states: states.into(),
                             normalisation,
                         });
                 }
