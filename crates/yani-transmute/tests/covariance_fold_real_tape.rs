@@ -3,11 +3,13 @@
 //! ENDF/B-VIII.1 Cr52 states its (n,p) covariance in LB=0, LB=1 and LB=8
 //! blocks that run to 20 MeV. A narrow group at 14.1 MeV lies inside one
 //! interval of every one of them, so the folded relative variance of the rate
-//! is the tape's own diagonal there, whatever the cross section does inside the
-//! group. That makes this a check on the whole path from the tape to the fold
-//! rather than on the fold's arithmetic alone: the old LB=0 to 4 split cut the
-//! two LB=1 tables off at 3.3 and 8 MeV, and the same fold gave 0.4%, the LB=8
-//! block on its own.
+//! is the tape's own numbers there, whatever the cross section does inside the
+//! group: the LB=1 values as written, and the absolute LB=0 and LB=8 values
+//! divided by the group's cross section squared, LB=8 also scaled by the
+//! width ratio ENDF-102 gives it. That makes this a check on the whole path
+//! from the tape to the fold rather than on the fold's arithmetic alone: the
+//! old LB=0 to 4 split cut the two LB=1 tables off at 3.3 and 8 MeV, and the
+//! same fold gave 0.4%, the LB=8 block on its own misread as relative.
 //!
 //! The fixture is built the way `data_uncertainty.rs` builds Fe56: the cached
 //! Cr52 directory is copied and the real converter writes `covariance.arrow`
@@ -113,11 +115,14 @@ fn cr52_np_folds_to_the_tapes_sigma_at_14_mev() {
     );
 
     // The tape's relative components on the interval holding 14.1 MeV: LB=1
-    // on [4, 20] MeV, LB=1 on [14, 16] MeV and LB=8 on [14, 16] MeV. The
-    // LB=0 block is absolute, 1.1e-14 barns squared on [4, 20] MeV, and relativizes by
-    // the group's own cross section; it is eleven orders of magnitude smaller.
+    // on [4, 20] MeV and LB=1 on [14, 16] MeV. The LB=0 block is absolute,
+    // 1.1e-14 barns squared on [4, 20] MeV, and relativizes by the group's own
+    // cross section; it is eleven orders of magnitude smaller. The LB=8 block
+    // is absolute too, 1.5842e-5 barns squared on [14, 16] MeV, and ENDF-102
+    // scales it by 2 MeV / 0.2 MeV for an average over this group.
     let sigma_eff = rates["Cr52"]["(n,p)"] / 1.0e-24;
-    let want = 1.125e-2 + 1.8e-2 + 1.5842e-5 + 1.1e-14 / (sigma_eff * sigma_eff);
+    let short_range = 1.5842e-5 * (2.0e6 / 0.2e6);
+    let want = 1.125e-2 + 1.8e-2 + (1.1e-14 + short_range) / (sigma_eff * sigma_eff);
     let got = cov.get(i, i);
     assert!(
         (got - want).abs() <= 1e-9 * want,

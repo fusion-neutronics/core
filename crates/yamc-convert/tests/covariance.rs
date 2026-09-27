@@ -333,8 +333,9 @@ fn every_one_table_block_runs_to_20_mev() {
 /// The relative variance every diagonal block of `mt` states at `energy`, as
 /// the loader reads it back and `expand_ni` lays it out, summed.
 ///
-/// `lb = 0` is left out: it is absolute, in barns squared, and relativizing it
-/// needs the cross section. On these tapes it is 1e-10 barns squared or less.
+/// `lb = 0` and `lb = 8` are left out: both are absolute, in barns squared, and
+/// relativizing them needs the cross section (and for `lb = 8` the width it is
+/// averaged over too). The yani-transmute fold test checks Cr52's `lb = 8`.
 fn relative_variance_at(blocks: &[CovarianceBlock], mt: i32, energy: f64) -> f64 {
     use yamc_nuclide::covariance::expand::{expand_ni, Scale};
 
@@ -348,7 +349,7 @@ fn relative_variance_at(blocks: &[CovarianceBlock], mt: i32, energy: f64) -> f64
             continue;
         };
         let e = expand_ni(ni).expect("every block on these tapes expands");
-        if e.scale == Scale::Absolute {
+        if e.scale != Scale::Relative {
             continue;
         }
         if let (Some(i), Some(j)) = (interval(&e.row_energies), interval(&e.col_energies)) {
@@ -363,7 +364,7 @@ fn relative_variance_at(blocks: &[CovarianceBlock], mt: i32, energy: f64) -> f64
 /// holding 14.1 MeV, so each term can be found in the evaluation.
 ///
 /// Before the split was fixed these read 0.0% for Ni58 (n,a) and (n,np), and
-/// 0.4% for Cr52 (n,p) (the LB=8 block alone). Ni58 (n,p) read 20.6%: its LB=1
+/// nothing at all for Cr52's relative blocks. Ni58 (n,p) read 20.6%: its LB=1
 /// block was lost and its LB=4 block had the two tables swapped, which turned
 /// a subtraction into an addition.
 #[test]
@@ -402,12 +403,11 @@ fn the_14_mev_sigmas_are_the_tapes_own() {
             relative_variance_at(&ni58, 103, e),
             3.4236e-2 - 0.21 * 0.18503 * 0.18503 + 6.4705e-3,
         ),
-        // (n,p): LB=1 on [4, 20] MeV, LB=1 on [14, 16] MeV and LB=8 on
-        // [14, 16] MeV.
+        // (n,p): LB=1 on [4, 20] MeV and LB=1 on [14, 16] MeV.
         (
             "Cr52 (n,p)",
             relative_variance_at(&cr52, 103, e),
-            1.125e-2 + 1.8e-2 + 1.5842e-5,
+            1.125e-2 + 1.8e-2,
         ),
     ];
     for (what, got, want) in cases {

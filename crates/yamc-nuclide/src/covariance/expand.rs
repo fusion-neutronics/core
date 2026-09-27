@@ -23,10 +23,10 @@
 //!
 //! # Relative versus absolute
 //!
-//! `lb = 0` is an absolute covariance in barns squared; every other layout is
-//! relative. The distinction is carried out on [`Scale`] rather than resolved
-//! here, because relativizing needs the cross section and this module
-//! deliberately does not have it.
+//! `lb = 0` is an absolute covariance in barns squared and `lb = 8` an absolute
+//! short-range variance; every other layout is relative. The distinction is
+//! carried out on [`Scale`] rather than resolved here, because relativizing
+//! needs the cross section and this module deliberately does not have it.
 
 use endf::mf::covariance::NiSubsection;
 
@@ -38,6 +38,13 @@ pub enum Scale {
     Relative,
     /// Absolute covariance, in barns squared. `lb = 0` only.
     Absolute,
+    /// Absolute short-range variance, in barns squared, of the cross section
+    /// averaged over the block's own interval. `lb = 8` only.
+    ///
+    /// Not [`Scale::Absolute`] because it does not hold for a narrower average:
+    /// ENDF-102 section 33.2.2.2 gives `Var = Fk · ΔEk / ΔEj` for an interval
+    /// `ΔEj` inside `ΔEk`, and zero covariance between any two such intervals.
+    ShortRange,
 }
 
 /// A block's covariance as a matrix, on its own row and column grids.
@@ -134,7 +141,7 @@ fn tables_match_header(s: &NiSubsection) -> bool {
 /// | 4 | `C[u,v] = fk[k]·fl[l(u)]·fl[l(v)]` when one first-table interval `k` holds both, on the union of the two grids | relative |
 /// | 5 | `fkk` as written; `ls=1` an upper triangle, `ls=0` a full matrix | relative |
 /// | 6 | `fkl` on `er` × `ec`, rectangular | relative |
-/// | 8 | `C[k,k] = fk[k]`, diagonal, short-range | relative |
+/// | 8 | `C[k,k] = fk[k]`, diagonal, short-range | short-range absolute |
 ///
 /// `lb = 9` is not implemented: the parser reads it with `lb = 8`'s layout, but
 /// its meaning is not the same and guessing would put numbers in a covariance
@@ -159,12 +166,10 @@ pub fn expand_ni(s: &NiSubsection) -> Result<ExpandedBlock, Unsupported> {
         4 => interval_weighted(s),
         5 => explicit(s),
         6 => rectangular(s),
-        // Short-range self-scaling. Its magnitude is defined relative to the
-        // width of the interval the cross section is averaged over, and the
-        // fold integrates over the evaluation's own intervals, so the ratio is
-        // one and the contribution is `fk` on the diagonal. Averaging over
-        // anything wider would give less; this is the fine-grid value.
-        8 => diagonal(s, Scale::Relative),
+        // Short-range, in barns squared. What it contributes depends on the
+        // width of the interval the cross section is averaged over, which is
+        // the fold's to apply; see `Scale::ShortRange`.
+        8 => diagonal(s, Scale::ShortRange),
         other => Err(Unsupported::Layout(other)),
     }
 }
@@ -587,13 +592,15 @@ mod tests {
         assert_eq!(e.get(1, 2), 6.0);
     }
 
+    /// ENDF-102 section 33.2.2.2: the `Fk` of `lb = 8` "have the dimension
+    /// of squared cross sections".
     #[test]
-    fn lb8_is_a_relative_diagonal() {
+    fn lb8_is_a_short_range_absolute_diagonal() {
         let mut s = ni(8);
         s.ek = vec![1.0, 10.0, 100.0];
         s.fk = vec![0.01, 0.02];
         let e = expand_ni(&s).expect("lb=8 expands");
-        assert_eq!(e.scale, Scale::Relative);
+        assert_eq!(e.scale, Scale::ShortRange);
         assert_eq!(e.values, vec![0.01, 0.0, 0.0, 0.02]);
     }
 

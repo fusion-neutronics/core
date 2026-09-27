@@ -262,6 +262,26 @@ impl FluxDensity<'_> {
         }
         total
     }
+
+    /// `∫_a^b ψ(E)² dE`, in (n/cm^2/s)^2 per eV. Needed only by short-range
+    /// (`lb = 8`) blocks; see [`partial_rates`].
+    fn integrate_density_squared(&self, a: f64, b: f64) -> f64 {
+        if a >= b {
+            return 0.0;
+        }
+        let mut total = 0.0;
+        for g in self.overlapping(a, b) {
+            let (glo, ghi) = (self.boundaries[g], self.boundaries[g + 1]);
+            let lo = a.max(glo);
+            let hi = b.min(ghi);
+            if lo >= hi || ghi <= glo {
+                continue;
+            }
+            let density = self.flux[g] / (ghi - glo);
+            total += density * density * (hi - lo);
+        }
+        total
+    }
 }
 
 /// Reaction `i`'s partial rates over one block's grid, and their total.
@@ -291,6 +311,19 @@ fn partial_rates(flux: &FluxDensity, reaction: &Reaction, grid: &[f64], scale: S
             // An absolute covariance is already in barns squared, so the weight
             // is the partial FLUX and the cross section must not appear twice.
             Scale::Absolute => BARN_TO_CM2 * flux.integrate_flux(grid[k], grid[k + 1]),
+            // A short-range variance `Fk` on `ΔEk` is `Fk·ΔEk/ΔEj` for the
+            // average over any `ΔEj` inside it, with nothing correlating two
+            // such intervals (ENDF-102 section 33.2.2.2). Cut `ΔEk` at the
+            // flux-group boundaries, where `ψ` is constant, and the partial
+            // rate over each piece `j` is that average times `ψ_j·ΔEj`, so
+            // the rate's variance is `Fk·ΔEk·Σ_j ψ_j²·ΔEj`. The block is
+            // diagonal, so the weight is the square root of what multiplies
+            // `Fk`. That is exact for any flux grid, and a flat flux over the
+            // whole interval gives `Fk·Φk²`, the absolute diagonal.
+            Scale::ShortRange => {
+                let (lo, hi) = (grid[k], grid[k + 1]);
+                BARN_TO_CM2 * ((hi - lo) * flux.integrate_density_squared(lo, hi)).sqrt()
+            }
         };
         per_interval.push(v);
     }
@@ -725,5 +758,31 @@ mod integration_range_tests {
                 "integrate_flux over ({a}, {b})"
             );
         }
+    }
+
+    /// An `lb = 8` variance `Fk` on `[0, 10]`, folded against a flux that is
+    /// not flat inside it: 1 n/cm^2/s in each of `[0, 2]` and `[2, 10]`. ENDF-102
+    /// gives each group's average `Fk·10/2` and `Fk·10/8`, uncorrelated, so
+    /// the rate variance is `Fk·10/2·1² + Fk·10/8·1² = 6.25·Fk` (times the
+    /// barn factor twice). The absolute diagonal would say `Fk·2² = 4·Fk`.
+    #[test]
+    fn a_short_range_variance_scales_with_the_width_of_each_flux_group() {
+        let boundaries = vec![0.0, 2.0, 10.0];
+        let flux = vec![1.0, 1.0];
+        let density = FluxDensity {
+            boundaries: &boundaries,
+            flux: &flux,
+        };
+        let fk = 0.3;
+        let block = ExpandedBlock {
+            row_energies: vec![0.0, 10.0],
+            col_energies: vec![0.0, 10.0],
+            values: vec![fk],
+            scale: Scale::ShortRange,
+        };
+        let reaction = ramp(0.0, 10.0, 1.0, 1.0);
+        let w = partial_rates(&density, &reaction, &block.row_energies, block.scale);
+        let got = contract(&block, &w, &w) / (BARN_TO_CM2 * BARN_TO_CM2);
+        assert!((got - 6.25 * fk).abs() <= 1e-12, "{got}");
     }
 }
