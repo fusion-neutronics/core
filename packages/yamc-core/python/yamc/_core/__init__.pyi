@@ -613,12 +613,30 @@ class DataUncertainty:
       energy never enters the solve, so the inventory and activity are
       untouched.
     
-    Decay branching ratios, fission yields and the isomeric-branching overlay
-    are held at their evaluated values; they carry uncertainties of their own
-    that this does not propagate.
-    ``TransmutationResults.get_data_uncertainty_info`` says so per material,
-    along with any nuclide whose evaluation carries no covariance and any
-    unstable nuclide whose half-life has no stated sigma.
+    Each cross-section draw is a lognormal multiplier with the covariance's
+    own mean and variance, so a sampled rate is never negative and nothing is
+    floored.
+    
+    Held at their nominal values, with uncertainties of their own that this
+    does not propagate:
+    
+    - decay branching ratios, fission yields and the isomeric-branching
+      overlay (MF=9/MF=10);
+    - covariance correlating two evaluations (MAT1 != 0) and the
+      resonance-parameter covariance (MF=32), so only MF=33 is sampled;
+    - the self-shielding correction, when ``self_shielding_chord`` or
+      ``self_shielding_shape`` is given: the shielded flux is built once from
+      the nominal cross sections and reused by every replica;
+    - on a transport run, the tallied flux, which does not respond to a
+      perturbed cross section;
+    - decay photon line intensities, photon attenuation (XCOM), air energy
+      absorption (NIST SRD 126), the ICRP-116 fluence-to-dose coefficients and
+      the contact-dose build-up factor;
+    - the material's composition, density and natural isotopic abundances.
+    
+    ``TransmutationResults.get_data_uncertainty_info`` lists these per material
+    under ``not_perturbed``, along with any nuclide whose evaluation carries no
+    covariance and any unstable nuclide whose half-life has no stated sigma.
     
     Args:
         seed (int): Base seed. A given nuclide's perturbation in a given replica
@@ -2622,7 +2640,11 @@ class Model:
                 - ``"half_life"``: the decay data's half-life sigmas.
         
                 ``"flux_spectrum"`` does not apply: there is no supplied spectrum,
-                and the flux's error is the statistical one. The sources are
+                and the flux's error is the statistical one. The transport runs
+                once, so every replica is solved in the flux it tallied: a
+                perturbed cross section does not change the flux or the
+                shielding the transport saw, and the report lists the tallied
+                flux under ``not_perturbed``. The sources are
                 independent, so ``sources=["statistical"]`` isolates the
                 transport's contribution and the default gives the total. Omit
                 it and nothing extra is tallied or solved: the inventories are
@@ -5078,6 +5100,12 @@ class TransmutationResults:
         Needs no ``volume``, unlike the other three, because the estimate takes
         the material for a half-space.
         
+        The band is the spread of the replicas' inventories alone (each with
+        its own half-lives when the ``"half_life"`` source is on). The decay
+        photon line intensities, photon attenuation (XCOM), air energy
+        absorption (NIST SRD 126), ICRP-116 dose coefficients and the build-up
+        factor are held at their nominal values and contribute nothing to it.
+        
         Args:
             material_id: Material ID number.
             step: Timestep index (0 = initial composition).
@@ -5103,6 +5131,11 @@ class TransmutationResults:
         and the only one under which two lines' spreads are taken over the same
         sample -- and ``LineEstimate.emitting`` reports how many replicas
         emitted it, which is what the zero-fill would otherwise hide.
+        
+        The band is the spread of the replicas' inventories alone (each with
+        its own half-lives when the ``"half_life"`` source is on). The line
+        intensities per decay are held at their nominal values and contribute
+        nothing to it.
         
             >>> lines = results.get_decay_photon_spectrum_uncertainty(mid, step)
             >>> [(l.energy, l.nominal, l.std_dev) for l in lines[:2]]
@@ -5156,7 +5189,10 @@ class TransmutationResults:
           transport run, how many tallied rates were sampled from their
           covariance; ``statistical_floored`` / ``statistical_sampled`` count
           draws that came out negative and were floored.
-        - ``not_perturbed``: the sources this does not propagate at all.
+        - ``not_perturbed``: every input this run held at its nominal value,
+          such as the MF=32 resonance-parameter covariance, the photon and dose
+          data, the material composition, and, where they applied, the
+          self-shielding correction and the tallied flux.
         - ``samples`` / ``converged``: how many replicas ran, and whether the
           sigmas settled or the cap was hit.
         

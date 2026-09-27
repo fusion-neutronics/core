@@ -9,10 +9,12 @@
 //! through the MF=33 covariance folded against this material's own spectrum;
 //! the **flux spectrum**, from a per-bin sigma the caller supplies; and the
 //! **half-lives**, from the evaluation's own standard deviation. Decay
-//! branching ratios, fission yields and the isomeric-branching overlay are held
-//! at their nominal values; they carry their own uncertainties and are not
-//! propagated yet (issue #140). [`Info`] says so per run rather than leaving it
-//! to be inferred from a small sigma.
+//! branching ratios, fission yields, the isomeric-branching overlay, the MF=32
+//! resonance-parameter covariance, the decay photon and dose data, and the
+//! material's own composition are held at their nominal values; they carry
+//! their own uncertainties and are not propagated yet (issue #140).
+//! [`Info::not_perturbed`] lists them per run rather than leaving it to be
+//! inferred from a small sigma.
 //!
 //! # Cost
 //!
@@ -270,7 +272,11 @@ pub struct Info {
     /// Statistically drawn rates that came out negative and were floored.
     pub statistical_floored: usize,
     pub statistical_sampled: usize,
-    /// Sources deliberately NOT perturbed, for the record.
+    /// Inputs this run held at their nominal values, for the record.
+    ///
+    /// Every input the answer depends on and no source here samples, whether
+    /// the data carries an uncertainty for it or not, so that an absent entry
+    /// means the input was perturbed and not that it was forgotten.
     pub not_perturbed: Vec<String>,
     /// Which sources this run perturbed, by name.
     pub sources: Vec<String>,
@@ -294,6 +300,15 @@ impl Info {
                 "fission yield",
                 "isomeric branching (MF=9/MF=10)",
                 "cross-material covariance (MAT1 != 0)",
+                "resonance-parameter covariance (MF=32)",
+                "decay photon line intensity",
+                "photon attenuation coefficient (XCOM)",
+                "air energy-absorption coefficient (NIST SRD 126)",
+                "fluence-to-dose coefficient (ICRP-116)",
+                "contact-dose build-up factor",
+                "material composition",
+                "material density",
+                "natural isotopic abundance",
             ]
             .iter()
             .map(|s| s.to_string())
@@ -746,6 +761,39 @@ pub(crate) fn set_half_life(cn: &mut yani::ChainNuclide, half_life: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every input held at nominal whatever the run was, named so a reader
+    /// does not have to know the code to see what the sigma leaves out.
+    #[test]
+    fn the_report_names_every_input_held_at_nominal() {
+        let info = Info::from_fold(&Coverage::default(), &Clipping::default());
+        for held in [
+            "decay branching ratio",
+            "fission yield",
+            "isomeric branching (MF=9/MF=10)",
+            "cross-material covariance (MAT1 != 0)",
+            "resonance-parameter covariance (MF=32)",
+            "decay photon line intensity",
+            "photon attenuation coefficient (XCOM)",
+            "air energy-absorption coefficient (NIST SRD 126)",
+            "fluence-to-dose coefficient (ICRP-116)",
+            "contact-dose build-up factor",
+            "material composition",
+            "material density",
+            "natural isotopic abundance",
+        ] {
+            assert!(
+                info.not_perturbed.iter().any(|s| s == held),
+                "{held:?} missing from {:?}",
+                info.not_perturbed
+            );
+        }
+        // Only a shielded or a transport run holds these, so the fold alone
+        // must not claim them.
+        for conditional in ["self-shielding correction", "tallied flux"] {
+            assert!(!info.not_perturbed.iter().any(|s| s == conditional));
+        }
+    }
 
     #[test]
     fn moments_match_a_hand_computed_standard_deviation() {

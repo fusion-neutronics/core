@@ -511,6 +511,12 @@ impl PyTransmutationResults {
     /// Needs no ``volume``, unlike the other three, because the estimate takes
     /// the material for a half-space.
     ///
+    /// The band is the spread of the replicas' inventories alone (each with
+    /// its own half-lives when the ``"half_life"`` source is on). The decay
+    /// photon line intensities, photon attenuation (XCOM), air energy
+    /// absorption (NIST SRD 126), ICRP-116 dose coefficients and the build-up
+    /// factor are held at their nominal values and contribute nothing to it.
+    ///
     /// Args:
     ///     material_id: Material ID number.
     ///     step: Timestep index (0 = initial composition).
@@ -561,6 +567,11 @@ impl PyTransmutationResults {
     /// and the only one under which two lines' spreads are taken over the same
     /// sample -- and ``LineEstimate.emitting`` reports how many replicas
     /// emitted it, which is what the zero-fill would otherwise hide.
+    ///
+    /// The band is the spread of the replicas' inventories alone (each with
+    /// its own half-lives when the ``"half_life"`` source is on). The line
+    /// intensities per decay are held at their nominal values and contribute
+    /// nothing to it.
     ///
     ///     >>> lines = results.get_decay_photon_spectrum_uncertainty(mid, step)
     ///     >>> [(l.energy, l.nominal, l.std_dev) for l in lines[:2]]
@@ -624,7 +635,10 @@ impl PyTransmutationResults {
     ///   transport run, how many tallied rates were sampled from their
     ///   covariance; ``statistical_floored`` / ``statistical_sampled`` count
     ///   draws that came out negative and were floored.
-    /// - ``not_perturbed``: the sources this does not propagate at all.
+    /// - ``not_perturbed``: every input this run held at its nominal value,
+    ///   such as the MF=32 resonance-parameter covariance, the photon and dose
+    ///   data, the material composition, and, where they applied, the
+    ///   self-shielding correction and the tallied flux.
     /// - ``samples`` / ``converged``: how many replicas ran, and whether the
     ///   sigmas settled or the cap was hit.
     ///

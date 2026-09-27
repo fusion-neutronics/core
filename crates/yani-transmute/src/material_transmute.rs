@@ -1372,6 +1372,18 @@ fn run_replicas(
     if !want_decay_energy {
         info.not_perturbed.insert(0, "decay energy".to_string());
     }
+    // The shielded flux shape is built once from the nominal cross sections
+    // and every replica reuses it, so a perturbed capture never deepens its
+    // own flux dip.
+    if shielding.is_some() {
+        info.not_perturbed
+            .push("self-shielding correction".to_string());
+    }
+    // One transport, no transport per replica: the flux the tally saw is the
+    // flux every replica is solved in, whatever its cross sections were.
+    if transport {
+        info.not_perturbed.push("tallied flux".to_string());
+    }
     info.decay_energies_perturbed = decay_energy_perturbed.clone();
     info.no_decay_energy_uncertainty = no_decay_energy_sigma;
     if let Some(h) = &half_life {

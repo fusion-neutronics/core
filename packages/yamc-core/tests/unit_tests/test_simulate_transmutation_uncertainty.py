@@ -98,6 +98,8 @@ def test_the_report_names_the_sources_that_applied():
     assert "flux_spectrum" not in info["sources"]
     assert info["statistical_rates"] > 0
     assert info["statistical_sampled"] == 16 * info["statistical_rates"]
+    # One transport feeds every replica, so the flux it tallied is held.
+    assert "tallied flux" in info["not_perturbed"]
 
 
 def test_each_rate_has_a_statistical_sigma():
