@@ -528,7 +528,12 @@ pub fn reachable_nuclides(
 /// * a single edge transfers at most the parent's whole bound, because an atom
 ///   cannot transmute more than once;
 /// * decay uses the exact `1 - exp(-ln2 t / T_half)` fraction, needing no
-///   cross-section data at all.
+///   cross-section data at all;
+/// * a reaction `branch` has curves for is split by the largest share the
+///   overlay's fold could give each target (see `overlay_branching_bounds`),
+///   never by the chain's own value alone: grafted metastable channels sit in
+///   the loaded chain at a 0.0 placeholder, and the fold rewrites every split
+///   it covers.
 ///
 /// `reaction_rate(parent, kind)` gives that channel's per-atom rate in 1/s, i.e.
 /// the one-group cross section folded with the flux. Only parents already loaded
@@ -568,6 +573,7 @@ pub fn reachable_nuclides(
 /// either.
 pub fn populated_nuclides<F>(
     chain: &HashMap<String, ChainNuclide>,
+    branch: &BranchTable,
     seeds: &HashMap<String, f64>,
     total_time: f64,
     floor: f64,
@@ -615,8 +621,23 @@ where
     // and reused every sweep.
     let mut edges: Vec<(&str, &str, f64)> = Vec::new();
     for (name, cn) in chain.iter() {
+        // The overlay's fold rewrites the split of any reaction it has curves
+        // for, so the chain's own branching is not a bound on those edges.
+        let overlay = branch.get(name);
+        let mut overlay_bounds: HashMap<&str, HashMap<&str, f64>> = HashMap::new();
         for rx in &cn.reactions {
-            let frac = (reaction_rate(name, &rx.kind) * total_time).min(1.0) * rx.branching;
+            let mut branching = rx.branching;
+            if let (Some(kinds), Some(target)) = (overlay, rx.target.as_deref()) {
+                if let Some(curves) = kinds.get(&rx.kind) {
+                    let per_target = overlay_bounds
+                        .entry(rx.kind.as_str())
+                        .or_insert_with(|| overlay_branching_bounds(name, cn, &rx.kind, curves));
+                    if let Some(&bound) = per_target.get(target) {
+                        branching = branching.max(bound);
+                    }
+                }
+            }
+            let frac = (reaction_rate(name, &rx.kind) * total_time).min(1.0) * branching;
             if frac <= 0.0 {
                 continue;
             }
@@ -726,6 +747,173 @@ where
         .filter(|&(_, b)| b >= floor)
         .map(|(name, _)| name.to_string())
         .collect()
+}
+
+/// The largest branching the overlay's fold can give each target of one of
+/// `parent`'s reactions, over every spectrum.
+///
+/// Grafted metastable channels enter the loaded chain at 0.0 and the fold
+/// sets them from the curves, while a channel the base chain already carries
+/// has its split re-partitioned, so neither the placeholder nor the base value
+/// bounds what the solve uses. Mirrors `build_fold_refine` and `refine_chain`
+/// in yani-transmute (and `apply_coupled_branching`, which shares the latter):
+///
+/// * `(n,n')`: a target's branching becomes its share of the summed metastable
+///   partials, the ground self-loop excluded;
+/// * any other kind: the branching mass the chain puts on the targets with
+///   curves is re-split in proportion to those targets' curves, MF=10 partials
+///   taking precedence over MF=9 yields when a reaction has both.
+///
+/// Every such share is a ratio of two integrals of the same non-negative
+/// weight (the flux, times the transport cross section for yields), so it
+/// never exceeds the ratio of the curves themselves at the worst energy, which
+/// is what is returned: exact for a spectrum concentrated there, never below
+/// the fold for any other. Targets without a curve are left out, since the
+/// fold never touches their branching.
+fn overlay_branching_bounds<'a>(
+    parent: &str,
+    cn: &'a ChainNuclide,
+    kind: &str,
+    curves: &'a [BranchCurve],
+) -> HashMap<&'a str, f64> {
+    let well_formed = |c: &&BranchCurve| !c.energy.is_empty() && c.energy.len() == c.values.len();
+    let selected: Vec<&BranchCurve> = if kind == "(n,n')" {
+        curves
+            .iter()
+            .filter(well_formed)
+            .filter(|c| c.quantity == BranchQuantity::CrossSection && c.target != parent)
+            .collect()
+    } else {
+        let quantity = if curves
+            .iter()
+            .any(|c| c.quantity == BranchQuantity::CrossSection)
+        {
+            BranchQuantity::CrossSection
+        } else {
+            BranchQuantity::Yield
+        };
+        curves
+            .iter()
+            .filter(well_formed)
+            .filter(|c| c.quantity == quantity)
+            .collect()
+    };
+
+    let mut bounds = HashMap::new();
+    if kind == "(n,n')" {
+        // The share is of every partial, whether or not the chain carries its
+        // target, and is assigned as the branching outright.
+        for c in &selected {
+            let own: Vec<&BranchCurve> = selected
+                .iter()
+                .copied()
+                .filter(|o| o.target == c.target)
+                .collect();
+            bounds
+                .entry(c.target.as_str())
+                .or_insert_with(|| largest_share(&own, &selected));
+        }
+        return bounds;
+    }
+
+    // The fold only moves the mass already on the covered targets, and splits
+    // it over those targets alone, once per chain edge. The base value stays in
+    // the bound through the caller's `max`, for spectra where nothing is folded.
+    let covered: Vec<&ChainReaction> = cn
+        .reactions
+        .iter()
+        .filter(|r| r.kind == kind)
+        .filter(|r| {
+            r.target
+                .as_deref()
+                .is_some_and(|t| selected.iter().any(|c| c.target == t))
+        })
+        .collect();
+    let mass: f64 = covered.iter().map(|r| r.branching).sum();
+    let denominator: Vec<&BranchCurve> = covered
+        .iter()
+        .flat_map(|r| {
+            let t = r.target.as_deref();
+            selected
+                .iter()
+                .copied()
+                .filter(move |c| Some(c.target.as_str()) == t)
+        })
+        .collect();
+    for r in &covered {
+        let target = r.target.as_deref().expect("covered edges have a target");
+        let own: Vec<&BranchCurve> = selected
+            .iter()
+            .copied()
+            .filter(|c| c.target == target)
+            .collect();
+        bounds
+            .entry(target)
+            .or_insert_with(|| largest_share(&own, &denominator) * mass);
+    }
+    bounds
+}
+
+/// The supremum over energy of `sum(numerator) / sum(denominator)`, curves
+/// interpolated as the fold interpolates them: linearly, zero below the first
+/// point, flat above the last. `numerator` must be a subset of `denominator`.
+///
+/// Between two breakpoints of the union grid both sums are linear, so their
+/// ratio is monotone there and the supremum sits at a breakpoint, approached
+/// from one side or the other (a threshold or a doubled point is a step). A
+/// side where the denominator vanishes has a numerator vanishing with it, and
+/// then the ratio is constant across the segment, so the segment's midpoint
+/// stands in for it.
+fn largest_share(numerator: &[&BranchCurve], denominator: &[&BranchCurve]) -> f64 {
+    let mut grid: Vec<f64> = denominator
+        .iter()
+        .flat_map(|c| c.energy.iter().copied())
+        .collect();
+    grid.sort_by(f64::total_cmp);
+    grid.dedup();
+
+    let sum = |curves: &[&BranchCurve], e: f64, from_left: bool| -> f64 {
+        curves
+            .iter()
+            .map(|c| curve_limit(&c.energy, &c.values, e, from_left))
+            .sum()
+    };
+    let mut best: f64 = 0.0;
+    let mut consider = |e: f64, from_left: bool| {
+        let d = sum(denominator, e, from_left);
+        if d > 0.0 {
+            best = best.max(sum(numerator, e, from_left) / d);
+        }
+    };
+    for (i, &e) in grid.iter().enumerate() {
+        consider(e, true);
+        consider(e, false);
+        if let Some(&next) = grid.get(i + 1) {
+            consider(0.5 * (e + next), false);
+        }
+    }
+    best
+}
+
+/// A piecewise-linear curve's one-sided limit at `e`, zero below its first
+/// point and flat above its last. At a doubled breakpoint the left limit takes
+/// the first value and the right limit the last.
+fn curve_limit(energy: &[f64], values: &[f64], e: f64, from_left: bool) -> f64 {
+    let last = energy.len() - 1;
+    if e < energy[0] || (from_left && e == energy[0]) {
+        return 0.0;
+    }
+    if e > energy[last] || (!from_left && e == energy[last]) {
+        return values[last];
+    }
+    // The segment [energy[i - 1], energy[i]] the limit is taken along.
+    let i = if from_left {
+        energy.partition_point(|&x| x < e)
+    } else {
+        energy.partition_point(|&x| x <= e)
+    };
+    let (e0, e1, v0, v1) = (energy[i - 1], energy[i], values[i - 1], values[i]);
+    v0 + (v1 - v0) * (e - e0) / (e1 - e0)
 }
 
 /// Shared BFS behind [`reachable_nuclides`] and [`reduce_chain`], so the two
@@ -1041,7 +1229,14 @@ mod tests {
         let chain = test_fixture_chain();
         let closure = reachable_nuclides(&chain, &["Fe56"]);
         for rate in [0.0, 1e-20, 1e-6, 1.0, 1e6] {
-            let kept = populated_nuclides(&chain, &fe56_seed(), 3.15e7, 1e-30, |_, _| rate);
+            let kept = populated_nuclides(
+                &chain,
+                &BranchTable::new(),
+                &fe56_seed(),
+                3.15e7,
+                1e-30,
+                |_, _| rate,
+            );
             for name in &kept {
                 assert!(
                     closure.contains(name),
@@ -1059,7 +1254,17 @@ mod tests {
         let closure = reachable_nuclides(&chain, &["Fe56"]);
         let sizes: Vec<usize> = [1e-30, 1e-12, 1e-8, 1e-4, 1.0]
             .iter()
-            .map(|&rate| populated_nuclides(&chain, &fe56_seed(), 3.15e7, 1e-30, |_, _| rate).len())
+            .map(|&rate| {
+                populated_nuclides(
+                    &chain,
+                    &BranchTable::new(),
+                    &fe56_seed(),
+                    3.15e7,
+                    1e-30,
+                    |_, _| rate,
+                )
+                .len()
+            })
             .collect();
         for pair in sizes.windows(2) {
             assert!(
@@ -1067,7 +1272,14 @@ mod tests {
                 "a harder-driven run reached fewer nuclides: {sizes:?}"
             );
         }
-        let hardest = populated_nuclides(&chain, &fe56_seed(), 3.15e7, 1e-30, |_, _| 1.0);
+        let hardest = populated_nuclides(
+            &chain,
+            &BranchTable::new(),
+            &fe56_seed(),
+            3.15e7,
+            1e-30,
+            |_, _| 1.0,
+        );
         assert_eq!(
             hardest.len(),
             closure.len(),
@@ -1081,7 +1293,14 @@ mod tests {
         // the daughter has to survive even when every reaction rate is zero.
         let chain = test_fixture_chain();
         let seeds: HashMap<String, f64> = [("Mn56".to_string(), 1.0)].into_iter().collect();
-        let kept = populated_nuclides(&chain, &seeds, 3.15e7, 1e-30, |_, _| 0.0);
+        let kept = populated_nuclides(
+            &chain,
+            &BranchTable::new(),
+            &seeds,
+            3.15e7,
+            1e-30,
+            |_, _| 0.0,
+        );
         assert!(
             kept.contains("Fe56"),
             "decay daughter dropped though decay needs no cross section: {kept:?}"
@@ -1111,13 +1330,20 @@ mod tests {
         .map(|n| (n.name.clone(), n))
         .collect();
         let seeds: HashMap<String, f64> = [("Pu245".to_string(), 1.0)].into_iter().collect();
-        let kept = populated_nuclides(&chain, &seeds, 1.0, 1e-29, |_, kind| {
-            if kind == "(n,p)" {
-                1.0
-            } else {
-                2e-30
-            }
-        });
+        let kept = populated_nuclides(
+            &chain,
+            &BranchTable::new(),
+            &seeds,
+            1.0,
+            1e-29,
+            |_, kind| {
+                if kind == "(n,p)" {
+                    1.0
+                } else {
+                    2e-30
+                }
+            },
+        );
         assert!(kept.contains("Pu245"), "{kept:?}");
         assert!(!kept.contains("Pu246"), "{kept:?}");
     }
@@ -1129,13 +1355,20 @@ mod tests {
         // the closure alone cannot do.
         let chain = test_fixture_chain();
         // One hop transfers 1e-20 of the seed, two hops 1e-40, floor is 1e-30.
-        let kept = populated_nuclides(&chain, &fe56_seed(), 1.0, 1e-30, |_, kind| {
-            if kind.starts_with("(n,") {
-                1e-20
-            } else {
-                0.0
-            }
-        });
+        let kept = populated_nuclides(
+            &chain,
+            &BranchTable::new(),
+            &fe56_seed(),
+            1.0,
+            1e-30,
+            |_, kind| {
+                if kind.starts_with("(n,") {
+                    1e-20
+                } else {
+                    0.0
+                }
+            },
+        );
         assert!(kept.contains("Fe57"), "one hop should survive: {kept:?}");
         assert!(
             !kept.contains("Fe58"),
@@ -1159,7 +1392,9 @@ mod tests {
         chain.insert("Sink".to_string(), nuc("Sink", None, vec![], vec![]));
         let seeds: HashMap<String, f64> = [("Seed".to_string(), 1.0)].into_iter().collect();
         // Each of the 20 edges alone is under the floor; together they clear it.
-        let kept = populated_nuclides(&chain, &seeds, 1.0, 1e-30, |_, _| 1e-31);
+        let kept = populated_nuclides(&chain, &BranchTable::new(), &seeds, 1.0, 1e-30, |_, _| {
+            1e-31
+        });
         assert!(
             kept.contains("Sink"),
             "twenty sub-floor pathways should add up to clear the floor: {kept:?}"
@@ -1195,13 +1430,20 @@ mod tests {
         let floor = 1e-30;
 
         // Every intermediate really is under the floor on its own.
-        let ceiling_sweep = populated_nuclides(&chain, &seeds, 1.0, floor, |parent, _| {
-            if parent == "Seed" {
-                1e-32
-            } else {
-                1.0 // the ceiling: no nuclide can react faster than every atom
-            }
-        });
+        let ceiling_sweep = populated_nuclides(
+            &chain,
+            &BranchTable::new(),
+            &seeds,
+            1.0,
+            floor,
+            |parent, _| {
+                if parent == "Seed" {
+                    1e-32
+                } else {
+                    1.0 // the ceiling: no nuclide can react faster than every atom
+                }
+            },
+        );
         assert!(
             !ceiling_sweep.contains("Mid0"),
             "an intermediate at 1e-32 is under the floor and should not be kept"
@@ -1213,18 +1455,196 @@ mod tests {
         );
 
         // Rating the unloaded intermediates at zero silently loses the sink.
-        let zeroed = populated_nuclides(&chain, &seeds, 1.0, floor, |parent, _| {
-            if parent == "Seed" {
-                1e-32
-            } else {
-                0.0
-            }
-        });
+        let zeroed = populated_nuclides(
+            &chain,
+            &BranchTable::new(),
+            &seeds,
+            1.0,
+            floor,
+            |parent, _| {
+                if parent == "Seed" {
+                    1e-32
+                } else {
+                    0.0
+                }
+            },
+        );
         assert!(
             !zeroed.contains("Sink"),
             "zeroing unloaded parents should be what loses the sink, \
              otherwise this test is not demonstrating the hazard"
         );
+    }
+
+    fn curve(
+        target: &str,
+        quantity: BranchQuantity,
+        energy: &[f64],
+        values: &[f64],
+    ) -> BranchCurve {
+        BranchCurve {
+            target: target.to_string(),
+            quantity,
+            energy: energy.to_vec(),
+            values: values.to_vec(),
+        }
+    }
+
+    /// Li6 capture split 3:1 between Li7 and a metastable the loader grafted
+    /// at 0.0, which itself captures to Li8.
+    fn grafted_capture() -> (HashMap<String, ChainNuclide>, BranchTable) {
+        let mut chain = HashMap::new();
+        chain.insert(
+            "Li6".into(),
+            nuc(
+                "Li6",
+                None,
+                vec![
+                    rx("(n,gamma)", Some("Li7"), 1.0),
+                    rx("(n,gamma)", Some("Li7_m1"), 0.0),
+                ],
+                vec![],
+            ),
+        );
+        chain.insert("Li7".into(), nuc("Li7", None, vec![], vec![]));
+        chain.insert(
+            "Li7_m1".into(),
+            nuc(
+                "Li7_m1",
+                None,
+                vec![rx("(n,gamma)", Some("Li8"), 1.0)],
+                vec![],
+            ),
+        );
+        chain.insert("Li8".into(), nuc("Li8", None, vec![], vec![]));
+        let mut branch = BranchTable::new();
+        branch.entry("Li6".into()).or_default().insert(
+            "(n,gamma)".into(),
+            vec![
+                curve(
+                    "Li7",
+                    BranchQuantity::CrossSection,
+                    &[1e-5, 2e7],
+                    &[3.0, 3.0],
+                ),
+                curve(
+                    "Li7_m1",
+                    BranchQuantity::CrossSection,
+                    &[1e-5, 2e7],
+                    &[1.0, 1.0],
+                ),
+            ],
+        );
+        (chain, branch)
+    }
+
+    #[test]
+    fn grafted_metastable_enters_the_bound_at_its_overlay_share() {
+        let (chain, branch) = grafted_capture();
+        let seeds: HashMap<String, f64> = [("Li6".to_string(), 1.0)].into_iter().collect();
+        // Li7_m1 reaches 1e-10 x 1/4 and Li8 a further 1e-10 times that.
+        let kept = populated_nuclides(&chain, &branch, &seeds, 1.0, 1e-22, |_, _| 1e-10);
+        assert!(kept.contains("Li7_m1"), "{kept:?}");
+        assert!(
+            kept.contains("Li8"),
+            "the metastable's own capture: {kept:?}"
+        );
+
+        // Read from the placeholder, the metastable and its product vanish.
+        let bare = populated_nuclides(&chain, &BranchTable::new(), &seeds, 1.0, 1e-22, |_, _| {
+            1e-10
+        });
+        assert!(
+            !bare.contains("Li7_m1") && !bare.contains("Li8"),
+            "{bare:?}"
+        );
+
+        let bounds = overlay_branching_bounds(
+            "Li6",
+            &chain["Li6"],
+            "(n,gamma)",
+            &branch["Li6"]["(n,gamma)"],
+        );
+        assert_eq!(bounds["Li7_m1"], 0.25);
+        assert_eq!(bounds["Li7"], 0.75);
+    }
+
+    #[test]
+    fn overlay_bound_covers_a_base_split_the_fold_raises() {
+        // The base chain's 0.9/0.1 split is not a bound once equal partials
+        // re-split it to 0.5/0.5.
+        let (mut chain, mut branch) = grafted_capture();
+        let li6 = chain.get_mut("Li6").unwrap();
+        li6.reactions[0].branching = 0.9;
+        li6.reactions[1].branching = 0.1;
+        branch.get_mut("Li6").unwrap().get_mut("(n,gamma)").unwrap()[0].values = vec![1.0, 1.0];
+        let bounds = overlay_branching_bounds(
+            "Li6",
+            &chain["Li6"],
+            "(n,gamma)",
+            &branch["Li6"]["(n,gamma)"],
+        );
+        assert_eq!(bounds["Li7_m1"], 0.5);
+    }
+
+    #[test]
+    fn inelastic_overlay_bound_is_the_share_of_the_state_changing_partials() {
+        let cn = nuc(
+            "Rh103",
+            None,
+            vec![
+                rx("(n,n')", Some("Rh103_m1"), 0.0),
+                rx("(n,n')", Some("Rh103_m2"), 0.0),
+            ],
+            vec![],
+        );
+        let curves = vec![
+            curve(
+                "Rh103_m1",
+                BranchQuantity::CrossSection,
+                &[1e5, 2e7],
+                &[1.0, 1.0],
+            ),
+            curve(
+                "Rh103_m2",
+                BranchQuantity::CrossSection,
+                &[1e5, 2e7],
+                &[3.0, 3.0],
+            ),
+            // The ground self-loop moves nothing and is not in the share.
+            curve(
+                "Rh103",
+                BranchQuantity::CrossSection,
+                &[1e5, 2e7],
+                &[100.0, 100.0],
+            ),
+        ];
+        let bounds = overlay_branching_bounds("Rh103", &cn, "(n,n')", &curves);
+        assert_eq!(bounds["Rh103_m1"], 0.25);
+        assert_eq!(bounds["Rh103_m2"], 0.75);
+    }
+
+    #[test]
+    fn largest_share_takes_the_worst_energy_including_steps() {
+        let cs = BranchQuantity::CrossSection;
+        // The metastable alone below the ground state's threshold step: the
+        // share is 1 just under 1 MeV, however small above.
+        let meta = curve("m", cs, &[1e3, 2e7], &[1.0, 1.0]);
+        let ground = curve("g", cs, &[1e6, 2e7], &[99.0, 99.0]);
+        assert_eq!(largest_share(&[&meta], &[&meta, &ground]), 1.0);
+        assert_eq!(largest_share(&[&ground], &[&meta, &ground]), 0.99);
+
+        // Proportional ramps from a shared zero: 0/0 at the threshold, 1/4
+        // everywhere else.
+        let meta = curve("m", cs, &[1e2, 5e5, 2e6], &[0.0, 1.0, 0.5]);
+        let ground = curve("g", cs, &[1e2, 5e5, 2e6], &[0.0, 3.0, 1.5]);
+        assert!((largest_share(&[&meta], &[&meta, &ground]) - 0.25).abs() < 1e-15);
+
+        // A doubled breakpoint is a step, and both sides count.
+        let meta = curve("m", cs, &[1.0, 1e6, 1e6, 2e7], &[1.0, 1.0, 0.0, 0.0]);
+        let ground = curve("g", cs, &[1.0, 2e7], &[1.0, 1.0]);
+        assert_eq!(largest_share(&[&meta], &[&meta, &ground]), 0.5);
+        assert_eq!(largest_share(&[&ground], &[&meta, &ground]), 1.0);
     }
 
     #[test]
