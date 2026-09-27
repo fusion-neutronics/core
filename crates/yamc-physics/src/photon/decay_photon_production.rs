@@ -204,6 +204,12 @@ pub fn precompute_decay_photon_data(
                         _ => continue,
                     };
                     let path_branching = path.path_branching();
+                    // A path that carries no weight is skipped before any
+                    // continuum is read, so an unreadable one only fails the
+                    // setup when it would enter the source.
+                    if reaction.branching * path_branching <= 0.0 {
+                        continue;
+                    }
 
                     for source in &emitter.sources {
                         if source.particle != "photon" {
