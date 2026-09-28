@@ -38,11 +38,12 @@ pub fn natural_abundance(py: Python) -> Py<PyAny> {
     dict.into()
 }
 
-/// Return the TICE 2013 row behind each natural abundance, by nuclide name.
+/// Return the TICE 2013 record behind each natural abundance, by nuclide name.
 ///
 /// Table 1 of Meija et al., "Isotopic compositions of the elements 2013
 /// (IUPAC Technical Report)", Pure Appl. Chem. 88(3), 293-306 (2016),
-/// doi:10.1515/pac-2015-0503 (© IUPAC, De Gruyter 2016), as printed.
+/// doi:10.1515/pac-2015-0503 (© IUPAC, De Gruyter 2016), columns 4, 5, 6
+/// and 9.
 /// :func:`natural_abundance` gives column 9 where it is a value and the
 /// column 6 best measurement where column 9 is an interval.
 ///
@@ -55,8 +56,10 @@ pub fn natural_abundance(py: Python) -> Py<PyAny> {
 ///   Si, S, Cl, Br, Tl).
 /// - ``observed_interval``: column 4, ``(low, high)`` of natural variation.
 /// - ``best_measurement``, ``best_measurement_uncertainty``: column 6.
-/// - ``best_measurement_coverage``: column 6 coverage as printed, e.g. ``"2s"``.
-/// - ``best_measurement_calibration``: ``"C"``, ``"F"`` or ``"N"``.
+/// - ``best_measurement_coverage``: column 6 coverage, e.g. ``"2s"``.
+/// - ``best_measurement_calibration``: ``"C"``, ``"F"`` or ``"N"``. TICE
+///   prints this and the coverage once per element; they apply to every
+///   isotope of it.
 /// - ``annotations``: column 5, e.g. ``"g,r"``.
 ///
 /// ``None`` means the table leaves that field empty ("not stated", never

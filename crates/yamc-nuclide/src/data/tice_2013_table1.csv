@@ -5,9 +5,10 @@
 # © IUPAC, De Gruyter 2016. Reproduced with acknowledgment, as the report's
 # reproduction note permits.
 #
-# One row per isotope found in normal materials, in the table's order. Numbers
-# are as printed, with the digit-group spaces removed and "4.6 × 10–10" written
-# 4.6e-10. An uncertainty printed in parentheses on the last digits is written
+# Columns 1 to 6 and 9 of the table; columns 7 (reference) and 8 (material)
+# are not transcribed. One row per isotope found in normal materials, in the
+# table's order. Numbers are as printed, with the digit-group spaces removed
+# and "4.6 × 10–10" written 4.6e-10. An uncertainty printed in parentheses on the last digits is written
 # out as an absolute amount fraction with the same number of decimals, so
 # 0.058 450(230) becomes best_value 0.058450, best_uncertainty 0.000230. An
 # empty field means the table prints nothing there. Mononuclidic elements are
@@ -22,6 +23,10 @@
 #                            (standard deviation), se (standard error) or uc
 #                            (combined uncertainty); n/a where the table says so
 #   best_calibration         column 6 flag: C fully, F partially, N not calibrated
+#                            The table prints best_coverage and
+#                            best_calibration on the element's first row only;
+#                            they apply to that element's best measurement, so
+#                            they are repeated onto each of its isotopes here.
 #   representative_value/uncertainty
 #                            column 9, representative abundance; the table gives
 #                            no coverage factor for this uncertainty

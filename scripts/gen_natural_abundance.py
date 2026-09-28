@@ -18,8 +18,8 @@ origin, wherever column 9 is a value. For the 12 elements whose column 9 is an
 interval (H, Li, B, C, N, O, Mg, Si, S, Cl, Br, Tl) there is no value to take,
 so it is the column 6 best measurement. Mononuclidic elements are 1.
 
-The remaining columns carry the rest of the row as printed, so the uncertainty
-ships with the value it belongs to. ``-`` marks a field the table leaves empty;
+The remaining columns carry columns 4, 5, 6 and 9 of the row, so the
+uncertainty ships with the value it belongs to. ``-`` marks a field the table leaves empty;
 readers take it as "not stated", never as zero.
 
 Output columns: nuclide, abundance, representative_value,

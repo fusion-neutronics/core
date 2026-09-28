@@ -92,9 +92,12 @@ pub enum RepresentativeAbundance {
     Interval { low: f64, high: f64 },
 }
 
-/// One isotope's row of TICE 2013 Table 1, as printed.
+/// Columns 4, 5, 6 and 9 of one isotope's row of TICE 2013 Table 1. Columns 7
+/// (reference) and 8 (material) are not transcribed.
 ///
-/// Every field is published data; nothing is derived. `None` means the table
+/// Every field is published data; nothing is derived, except that TICE prints
+/// the column 5 annotations and the column 6 coverage and calibration once per
+/// element and they are repeated here onto each of its isotopes. `None` means the table
 /// leaves the field empty, which is "not stated", never zero.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NaturalAbundanceRecord {
@@ -108,12 +111,14 @@ pub struct NaturalAbundanceRecord {
     pub best_measurement: f64,
     /// Column 6 uncertainty, at the coverage in `best_measurement_coverage`.
     pub best_measurement_uncertainty: Option<f64>,
-    /// Column 6 coverage as printed: the factor k, then `s` (standard
+    /// Column 6 coverage: the factor k, then `s` (standard
     /// deviation), `se` (standard error) or `uc` (combined uncertainty), e.g.
     /// `"2s"`. The table prints `"n/a"` for C and N, and `"9uc"` for Mg.
+    /// Printed on the element's first row only; it applies to every isotope
+    /// of that element's best measurement.
     pub best_measurement_coverage: Option<&'static str>,
     /// Column 6 calibration flag: `'C'` fully, `'F'` partially, `'N'` not
-    /// calibrated.
+    /// calibrated. Printed on the element's first row only, like the coverage.
     pub best_measurement_calibration: Option<char>,
     /// Column 5 annotations for the element, comma separated from `g`
     /// (geologically exceptional specimens), `m` (modified commercial
@@ -121,7 +126,7 @@ pub struct NaturalAbundanceRecord {
     pub annotations: Option<&'static str>,
 }
 
-/// Parse `natural_abundance.txt` into its full TICE 2013 rows. The columns are
+/// Parse `natural_abundance.txt` into its TICE 2013 records. The columns are
 /// the ones `scripts/gen_natural_abundance.py` writes, `-` for an empty field.
 fn parse_abundance_records(data: &'static str) -> HashMap<&'static str, NaturalAbundanceRecord> {
     fn field(cell: &'static str) -> Option<&'static str> {
@@ -173,7 +178,7 @@ fn parse_abundance_records(data: &'static str) -> HashMap<&'static str, NaturalA
         .collect()
 }
 
-/// The full TICE 2013 row behind each entry of [`NATURAL_ABUNDANCE`], keyed
+/// The TICE 2013 record behind each entry of [`NATURAL_ABUNDANCE`], keyed
 /// the same way: the representative value or interval, the observed interval,
 /// and the best measurement with its uncertainty, coverage and calibration.
 ///
@@ -468,8 +473,9 @@ mod tests {
 
     /// The value every lookup uses is the one the TICE row says it is:
     /// column 9 where that is a value, the column 6 best measurement where
-    /// column 9 is an interval. Equality is exact, so this also pins that the
-    /// uncertainty columns did not shift any central value.
+    /// column 9 is an interval. Both sides come from the same file, so this is
+    /// internal consistency only; `the_lookup_values_are_the_ones_shipped_before_tice`
+    /// is the check against the values that were there before.
     #[test]
     fn the_lookup_value_is_the_tice_value_its_row_names() {
         assert_eq!(NATURAL_ABUNDANCE_RECORDS.len(), NATURAL_ABUNDANCE.len());
@@ -497,6 +503,105 @@ mod tests {
             assert_eq!(abundance.to_bits(), expected.to_bits(), "{nuclide}");
         }
         assert_eq!((representative, interval, mononuclidic), (239, 29, 21));
+    }
+
+    /// Every central value was already the TICE 2013 number before the
+    /// uncertainty columns were added, and adding them changed none. This is
+    /// an FNV-1a hash of the sorted (name, f64 bits) pairs taken from the
+    /// table as it stood then, so a regeneration that moves any value, adds
+    /// or drops a nuclide fails here rather than passing silently. Change the
+    /// hash only for a deliberate change of source data.
+    #[test]
+    fn the_lookup_values_are_the_ones_shipped_before_tice() {
+        let mut pairs: Vec<(&str, f64)> = NATURAL_ABUNDANCE.iter().map(|(k, v)| (*k, *v)).collect();
+        pairs.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for (name, value) in &pairs {
+            for byte in name.bytes().chain(value.to_bits().to_le_bytes()) {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        assert_eq!(pairs.len(), 289);
+        assert_eq!(hash, 0x453c_7b51_e24c_2dc2, "a central abundance value changed");
+    }
+
+    /// The shipped table is what `scripts/gen_natural_abundance.py` makes of
+    /// the checked-in transcription. The two files hold the same data, so a
+    /// hand edit to either one, or a transcription fix without regenerating,
+    /// fails here. This repeats the generator's mapping line by line.
+    #[test]
+    fn the_shipped_table_is_generated_from_the_tice_transcription() {
+        // The only quoting in the file is around comma-separated annotations
+        // such as "g,r", with no escaped quotes inside.
+        fn split(line: &str) -> Vec<&str> {
+            let mut cells = Vec::new();
+            let (mut start, mut quoted) = (0, false);
+            for (i, c) in line.char_indices() {
+                match c {
+                    '"' => quoted = !quoted,
+                    ',' if !quoted => {
+                        cells.push(line[start..i].trim_matches('"'));
+                        start = i + 1;
+                    }
+                    _ => {}
+                }
+            }
+            cells.push(line[start..].trim_matches('"'));
+            cells
+        }
+        let csv = include_str!("tice_2013_table1.csv");
+        let mut rows = csv.lines().filter(|line| !line.starts_with('#'));
+        let header = split(rows.next().expect("CSV header"));
+        let column = |name: &str| {
+            header
+                .iter()
+                .position(|h| *h == name)
+                .unwrap_or_else(|| panic!("CSV has no {name} column"))
+        };
+        let generated: Vec<String> = rows
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let cells = split(line);
+                assert_eq!(cells.len(), header.len(), "{line:?}");
+                let get = |name: &str| cells[column(name)];
+                let (element, a) = (get("element"), get("a"));
+                let name = if (element, a) == ("Ta", "180") {
+                    "Ta180_m1".to_string()
+                } else {
+                    format!("{element}{a}")
+                };
+                let abundance = match get("representative_value") {
+                    "" => get("best_value"),
+                    value => value,
+                };
+                let mut out = vec![name, abundance.to_owned()];
+                for field in [
+                    "representative_value",
+                    "representative_uncertainty",
+                    "representative_low",
+                    "representative_high",
+                    "interval_low",
+                    "interval_high",
+                    "best_value",
+                    "best_uncertainty",
+                    "best_coverage",
+                    "best_calibration",
+                    "annotations",
+                ] {
+                    out.push(match get(field) {
+                        "" => "-".to_owned(),
+                        value => value.to_owned(),
+                    });
+                }
+                out.join(" ")
+            })
+            .collect();
+        let shipped: Vec<&str> = include_str!("natural_abundance.txt").lines().collect();
+        assert_eq!(generated.len(), shipped.len());
+        for (generated, shipped) in generated.iter().zip(&shipped) {
+            assert_eq!(generated, shipped, "rerun python scripts/gen_natural_abundance.py");
+        }
     }
 
     #[test]
