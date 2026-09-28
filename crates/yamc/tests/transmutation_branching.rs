@@ -368,6 +368,7 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
                     kind: "(n,gamma)".to_string(),
                     target: Some("Li7".to_string()),
                     branching: 1.0,
+                    branching_uncertainty: None,
                     q_value: None,
                 },
                 // Exactly what `parse_chain_parts_from_bytes` grafts.
@@ -375,6 +376,7 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
                     kind: "(n,gamma)".to_string(),
                     target: Some("Li7_m2".to_string()),
                     branching: 0.0,
+                    branching_uncertainty: None,
                     q_value: None,
                 },
             ],
@@ -392,6 +394,7 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
         kind: "(n,gamma)".to_string(),
         target: Some("Li8".to_string()),
         branching: 1.0,
+        branching_uncertainty: None,
         q_value: None,
     });
     map.insert("Li7_m2".to_string(), li7m);
