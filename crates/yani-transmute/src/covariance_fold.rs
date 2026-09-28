@@ -745,8 +745,9 @@ fn stated_variance_share(
 const MIRROR_ROUNDING: f64 = 1.0e-5;
 
 /// The cross-reaction pairs, as `(lower MT, higher MT)`, that this
-/// evaluation's explicit blocks give in both orientations, between two
-/// reactions the chain drives.
+/// evaluation's explicit blocks give in both orientations, between two of the
+/// chain's kinds (`index`). Whether the nuclide has a rate for both is the
+/// caller's to check.
 ///
 /// ENDF-102 puts a pair in the section of its lower MT, with MT1 above MT, but
 /// nothing forbids the transpose in the other section as well, and JEFF-4.0
@@ -942,21 +943,25 @@ fn fold_nuclide(
     // A pair stored in both orientations is folded from one copy only: the
     // lower MT's section, unless a block of it does not expand and the other
     // copy's all do. Only two copies that both expand have numbers to
-    // compare, so a copy that does not expand is a layout gap, not a
-    // disagreement.
+    // compare. A copy left unused that does not expand is a layout gap
+    // whichever copy it is: its numbers were never read, so nothing checks
+    // them against the copy that was folded. A pair on a reaction this
+    // nuclide has no rate for is skipped by the fold below, so it reports
+    // nothing here either.
     let mirrored = mirrored_pairs(blocks, &index);
     let drives = |mt: i32| reactions.contains_key(&mt);
     let mut skipped_copy: BTreeSet<(i32, i32)> = BTreeSet::new();
-    for &(a, b) in &mirrored {
+    for &(a, b) in mirrored.iter().filter(|(a, b)| drives(*a) && drives(*b)) {
         let (lower_expands, higher_expands) = (
             orientation_expands(blocks, a, b),
             orientation_expands(blocks, b, a),
         );
-        if lower_expands || !higher_expands {
-            skipped_copy.insert((b, a));
+        let (unused, unused_expands) = if lower_expands || !higher_expands {
+            ((b, a), higher_expands)
         } else {
-            skipped_copy.insert((a, b));
-        }
+            ((a, b), lower_expands)
+        };
+        skipped_copy.insert(unused);
         if lower_expands && higher_expands {
             let mismatch = mirror_mismatch(blocks, a, b);
             if mismatch > MIRROR_ROUNDING {
@@ -965,11 +970,11 @@ fn fold_nuclide(
                     .mirrored_disagree
                     .insert((nuclide.to_string(), kind(a), kind(b)), mismatch);
             }
-        } else if !higher_expands && drives(a) && drives(b) {
-            // Neither copy expands. The fold reports the lower one's blocks;
-            // the higher one's are skipped before it expands them, so they
-            // are reported here.
-            count_unexpandable(blocks, b, a, coverage);
+        } else if !unused_expands {
+            // The fold skips this copy before it expands it, so its failures
+            // are counted here. The folded copy's, if neither expands, are
+            // counted by the fold as it reaches them.
+            count_unexpandable(blocks, unused.0, unused.1, coverage);
         }
     }
 
@@ -2041,11 +2046,21 @@ mod same_evaluation_tests {
     }
 
     fn fold(blocks: &[CovarianceBlock]) -> (Option<RateCovariance>, Coverage) {
+        fold_driving(blocks, &KINDS.map(|(_, mt)| mt))
+    }
+
+    /// [`fold`] for a nuclide whose data has a reaction only for `driven`, of
+    /// the chain's `KINDS`.
+    fn fold_driving(
+        blocks: &[CovarianceBlock],
+        driven: &[i32],
+    ) -> (Option<RateCovariance>, Coverage) {
         let rxs: Vec<Reaction> = KINDS.iter().map(|(_, mt)| reaction(*mt)).collect();
         let reactions: BTreeMap<i32, &Reaction> = KINDS
             .iter()
             .zip(&rxs)
             .map(|((_, mt), r)| (*mt, r))
+            .filter(|(mt, _)| driven.contains(mt))
             .collect();
         let kinds: Vec<(String, i32)> = KINDS.iter().map(|(k, mt)| (k.to_string(), *mt)).collect();
         let full = BARN_TO_CM2 * flux().integrate_xs(&rxs[0], 1.0e-5, 2.0e7);
@@ -2186,6 +2201,21 @@ mod same_evaluation_tests {
         assert!(coverage.has_gaps());
     }
 
+    /// A pair the nuclide has no rate for on one side is not folded, so two
+    /// copies of it that disagree are not reported either.
+    #[test]
+    fn copies_of_a_pair_without_a_rate_are_not_compared() {
+        let mut upper = transposed(102, MAT, 16);
+        let CovarianceData::Ni(ni) = &mut upper.data else {
+            unreachable!()
+        };
+        ni.fkl[0] += 0.0006;
+        let (_, coverage) =
+            fold_driving(&[own(16), own(102), cross(16, MAT, 102), upper], &[16, 103]);
+        assert!(coverage.mirrored_disagree.is_empty());
+        assert!(!coverage.has_gaps(), "{coverage:?}");
+    }
+
     /// `block` with its layout changed to one the fold does not expand.
     fn unexpandable(mut block: CovarianceBlock) -> CovarianceBlock {
         let CovarianceData::Ni(ni) = &mut block.data else {
@@ -2212,7 +2242,8 @@ mod same_evaluation_tests {
     }
 
     /// When the lower copy does not expand, the higher one stands for the
-    /// pair, and no gap is left.
+    /// pair, and the lower copy is a layout gap, as the higher one is when
+    /// the roles are swapped: nothing checked it against the folded copy.
     #[test]
     fn an_unexpandable_lower_copy_gives_way_to_the_higher() {
         let higher = relative(&[own(16), own(102), transposed(102, MAT, 16)]);
@@ -2224,7 +2255,7 @@ mod same_evaluation_tests {
         ]);
         assert_eq!(both.expect("usable").relative, higher);
         assert!(coverage.mirrored_disagree.is_empty());
-        assert!(coverage.unsupported_layouts.is_empty());
+        assert_eq!(coverage.unsupported_layouts, BTreeMap::from([(9, 1)]));
     }
 
     /// When neither copy expands, both are counted as layout gaps.
