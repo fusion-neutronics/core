@@ -291,8 +291,8 @@ impl std::fmt::Display for GpuDispatchError {
             ),
             Self::DecayPhotonContinuumUnsupported { emitter } => write!(
                 f,
-                "compute='gpu' D1S samples decay photon lines only, and {emitter} also emits a \
-                 photon continuum, which would be dropped. Run D1S with compute='cpu'."
+                "compute='gpu' D1S samples decay photon lines only, and {emitter} emits a photon \
+                 continuum, which would be dropped. Run D1S with compute='cpu'."
             ),
             Self::MaxLostParticlesExceeded { count, max, .. } => write!(
                 f,
