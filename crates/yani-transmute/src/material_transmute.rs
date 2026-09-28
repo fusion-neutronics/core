@@ -2668,6 +2668,7 @@ mod tests {
                 kind: "(n,d3He)".to_string(),
                 target: Some(target.to_string()),
                 branching,
+                branching_uncertainty: None,
                 q_value: None,
             };
             let mut map: HashMap<String, ChainNuclide> = HashMap::new();
