@@ -629,14 +629,19 @@ impl PyTransmutationResults {
     ///   within each bin, and the ``1/E`` within-group weight with a
     ///   covariance edge inside a group. The share in
     ///   ``rate_fraction_covered`` is measured against the fold's own rate,
-    ///   so it is unaffected.
+    ///   so it is unaffected. On a channel derived through an NC block, the
+    ///   check is also that the reactions the block names add up to the one
+    ///   it derives over the block's range; a sum above it lands here.
     /// - ``partials_below_rate``: keyed the same way, where a covariance grid
     ///   spans the whole flux range and its partial rates add up to less than
     ///   the rate, their ratio to it: a channel whose sigma is understated.
     ///   The ``1/E`` weight gives one for a reaction falling with energy when
     ///   a covariance edge cuts a group. A grid that stops short of the flux
     ///   range cannot be checked from below, since rate from outside it
-    ///   rightly leaves its partials short.
+    ///   rightly leaves its partials short. A derived channel whose NC block
+    ///   names reactions adding up to less than the one it derives lands here
+    ///   too: ENDF/B-VIII.1 O16 ``(n,d)`` above 20 MeV, whose cross section
+    ///   holds MT 660 to 669 while the block names 650 to 659.
     /// - ``unsupported_layouts``: covariance blocks that were present but not
     ///   consumed, counted once per spectrum, so a run over several spectra
     ///   counts the same block once for each.
@@ -644,9 +649,11 @@ impl PyTransmutationResults {
     ///   other reactions) that could not be derived. An LTY=0 block is
     ///   derived from the NI covariances of the reactions it names, cross
     ///   blocks included, over its own energy range: ENDF/B-VIII.1 O16
-    ///   ``(n,p)`` is stated only that way. Left here are LTY 1 to 4, an
-    ///   LTY=0 block naming a reaction with no cross section, and a circular
-    ///   derivation.
+    ///   ``(n,p)`` is stated only that way. Left here are LTY 1 to 4, a block
+    ///   in a cross-reaction subsection, one whose list of reactions is empty
+    ///   or does not match its coefficients, one whose own energy range is
+    ///   empty, one naming a reaction with no cross section, and one met
+    ///   only circularly.
     /// - ``skipped_cross_material``: per nuclide, blocks on a channel the
     ///   chain drives that correlate it with another evaluation, not
     ///   consumed. A block naming the nuclide's own MAT is its own evaluation

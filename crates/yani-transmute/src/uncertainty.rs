@@ -217,9 +217,11 @@ pub struct Info {
     pub mirrored_disagree: BTreeMap<(String, String, String), f64>,
     /// Per nuclide, NC blocks (covariance derived from other reactions) that
     /// could not be derived, not consumed. LTY=0 blocks are derived from the
-    /// reactions they name; what is left is an LTY other than 0, an LTY=0
-    /// block naming a reaction with no cross section, or a circular
-    /// derivation.
+    /// reactions they name; what is left is an LTY other than 0, a block in
+    /// a cross-reaction subsection, one whose list of reactions is empty or
+    /// does not match its coefficients, one whose own energy range is empty,
+    /// one naming a reaction with no cross section, and one met only
+    /// circularly.
     pub skipped_nc: BTreeMap<String, usize>,
     /// Blocks whose `lb` layout is not implemented, counted per `lb`.
     pub unsupported_layouts: BTreeMap<i64, usize>,
@@ -244,14 +246,20 @@ pub struct Info {
     /// is a channel whose relative sigma is overstated, because the two were
     /// computed different ways: a tallied rate against partials weighted flat
     /// within each bin, or the `1/E` within-group weight with a covariance
-    /// edge inside a group. Its `rate_fraction_covered` is unaffected.
+    /// edge inside a group. Its `rate_fraction_covered` is unaffected. On a
+    /// derived channel the check is also that the reactions each NC block
+    /// names add up to the reaction it derives over the block's range, and a
+    /// sum above it lands here.
     pub partials_above_rate: BTreeMap<(String, String), f64>,
     /// Per (nuclide, reaction kind), where a relative block's grid spans the
     /// whole flux range and its partial rates add up to less than the rate it
     /// was divided by, their ratio to it: a channel whose relative sigma is
     /// understated. A grid that stops short of the flux range cannot be
     /// checked this way, since rate from outside it rightly leaves its
-    /// partials short.
+    /// partials short. A derived channel whose NC block names reactions that
+    /// add up to less than the one it derives lands here too: ENDF/B-VIII.1
+    /// O16 `(n,d)` above 20 MeV, where its cross section holds MT 660 to 669
+    /// and the block names 650 to 659.
     pub partials_below_rate: BTreeMap<(String, String), f64>,
     /// Mean of the per-channel shares in [`Info::rate_fraction_covered`],
     /// weighted by the production each channel drove (the rate this run used
