@@ -183,10 +183,12 @@ fn optional_list(list: Option<&ListArray>, i: usize) -> Result<Option<Vec<f64>>,
 /// Every row of a `sources.arrow` batch that holds data, as `(nuclide,
 /// source)` in file order.
 ///
-/// A row with no energies and no intensities is skipped. One with data on
-/// one side only is malformed, and [`source_distribution`] refuses it. So is
-/// a per-line sigma list that does not pair with the lines, or a covariance
-/// given in part.
+/// A row with no energies and no intensities is skipped, and with it any
+/// normalisation it states, since there is no line for it to scale. One that
+/// also states a covariance is refused, as there is nothing for it to cover.
+/// One with data on one side only is malformed, and [`source_distribution`]
+/// refuses it. So is a per-line sigma list that does not pair with the
+/// lines, or a covariance given in part.
 fn read_sources(batch: &RecordBatch) -> Result<Vec<(String, DecaySource)>, Box<dyn Error>> {
     let nuclides = col::<StringArray>(batch, "nuclide")?;
     let particles = col::<StringArray>(batch, "particle")?;
@@ -211,10 +213,19 @@ fn read_sources(batch: &RecordBatch) -> Result<Vec<(String, DecaySource)>, Box<d
     for i in 0..batch.num_rows() {
         let energies = list_f64(energies_col, i)?;
         let intensities = list_f64(intensities_col, i)?;
+        let nuclide = nuclides.value(i);
         if energies.is_empty() && intensities.is_empty() {
+            if int(covariance_lb, i).is_some()
+                || optional_list(covariance_energies, i)?.is_some()
+                || optional_list(covariance_values, i)?.is_some()
+            {
+                return Err(format!(
+                    "sources.arrow: a row of {nuclide} with no energies or intensities states                      a covariance, which has nothing to cover"
+                )
+                .into());
+            }
             continue;
         }
-        let nuclide = nuclides.value(i);
         let distribution = source_distribution(
             nuclide,
             types.value(i),
@@ -1895,6 +1906,69 @@ mod tests {
             interpolation: Some(crate::Interpolation::Histogram),
         };
         assert!(read(continuum, Some(vec![0.0, 0.0])).contains("only lines have"));
+    }
+
+    /// A row with no lines is skipped, but a covariance on it has nothing to
+    /// cover and is refused rather than dropped.
+    #[test]
+    fn a_covariance_on_a_row_with_no_lines_is_refused() {
+        use crate::chain::{
+            ChainNuclide, DecaySource, DecaySourceDistribution, DecaySourceUncertainty,
+            SourceCovariance,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let read = |covariance| {
+            let mut chain = HashMap::new();
+            chain.insert(
+                "W187".to_string(),
+                ChainNuclide {
+                    name: "W187".to_string(),
+                    half_life: Some(8.5e4),
+                    half_life_uncertainty: None,
+                    decay_energy: 0.0,
+                    decay_energy_uncertainty: None,
+                    decay_energy_components: Default::default(),
+                    reactions: Vec::new(),
+                    decays: Vec::new(),
+                    fission_yields: None,
+                    sources: vec![DecaySource {
+                        particle: "photon".to_string(),
+                        radiation: Some("gamma".to_string()),
+                        distribution: DecaySourceDistribution::Discrete {
+                            energies: Vec::new(),
+                            intensities: Vec::new(),
+                        },
+                        uncertainty: Some(Arc::new(DecaySourceUncertainty {
+                            normalization: Some(1.0),
+                            covariance,
+                            ..Default::default()
+                        })),
+                    }],
+                },
+            );
+            let dir = std::env::temp_dir().join(format!(
+                "yani-empty-row-covariance-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+            let result = parse_chain_parts(&dir.join("decay"), None, None, None);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.map_err(|e| e.to_string())
+        };
+        let (chain, _) = read(None).expect("an empty row without a covariance is skipped");
+        assert!(chain["W187"].sources.is_empty());
+        let message = read(Some(SourceCovariance {
+            ls: Some(1),
+            lb: 5,
+            energies: vec![4.8e5],
+            values: vec![1.0e-4],
+        }))
+        .unwrap_err();
+        assert!(message.contains("nothing to cover"), "{message}");
     }
 
     /// An `interpolation` column of the wrong type is an error naming the

@@ -441,7 +441,7 @@ pub fn decay_sources() -> Schema {
         // The spectrum's covariance where it states one (LCOV != 0), packed
         // as the tape packs it: LS and LB, then the energies and the values
         // (LB=5 packed matrix for lines, LB=2 pairs for a continuum; LS is
-        // null there). No photon spectrum in the libraries yani ships has one.
+        // null there).
         i32("covariance_ls", true),
         i32("covariance_lb", true),
         f64s("covariance_energies", true),
