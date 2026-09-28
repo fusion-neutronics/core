@@ -69,7 +69,9 @@ impl CovarianceBlock {
     /// The reaction this block correlates `mt` with.
     ///
     /// `mt1 == 0` on the tape means "the same reaction", so this resolves it
-    /// rather than leaving every caller to remember the convention.
+    /// rather than leaving every caller to remember the convention. MF=33's
+    /// convention only: an MF=40 block goes through
+    /// [`BranchingCovarianceBlock`] instead.
     pub fn partner_mt(&self) -> i32 {
         if self.mt1 == 0 {
             self.mt
@@ -81,7 +83,8 @@ impl CovarianceBlock {
     /// Whether this block is a reaction's covariance with itself.
     ///
     /// The only blocks for which the matrix is symmetric in itself, and the
-    /// only ones a variance can be read off directly.
+    /// only ones a variance can be read off directly. Blind to XLFS1, so not
+    /// for MF=40: use [`BranchingCovarianceBlock::is_self_block`].
     pub fn is_diagonal(&self) -> bool {
         self.mat1 == 0 && self.partner_mt() == self.mt
     }
@@ -90,7 +93,9 @@ impl CovarianceBlock {
     ///
     /// Not consumed today: using it would mean sampling two nuclides' cross
     /// sections from one joint distribution, and the fold is per nuclide.
-    /// Counted and reported rather than silently dropped.
+    /// Counted and reported rather than silently dropped. MF=40 can write the
+    /// evaluation's own MAT here, so use
+    /// [`BranchingCovarianceBlock::is_cross_material`] for it.
     pub fn is_cross_material(&self) -> bool {
         self.mat1 != 0
     }
@@ -128,8 +133,8 @@ impl CovarianceBlock {
 /// (LFS 0) and its 77 eV isomer (XLFS1 1), and both resolve to U235.
 ///
 /// A product state with no sub-subsection, or a sub-subsection with no block,
-/// has no block here: it holds no number, and the converter lists it in its
-/// `mf40_without_blocks` statistic rather than in the file.
+/// has no block here: it holds no covariance, and the converter lists it under
+/// `mf40_without_blocks` in `branching/provenance.json` rather than in the file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BranchingCovarianceBlock {
     /// The parent, as in `branching.arrow`.
@@ -140,8 +145,8 @@ pub struct BranchingCovarianceBlock {
     /// when the converter matched it to no MF=9 or MF=10 state.
     pub target: Option<String>,
     /// The chain nuclide the partner state resolved to, `None` when it is in
-    /// another material, `xmf1` is not 10, or the converter found no single
-    /// state of `mt1` at level `xlfs1`.
+    /// another material, `xmf1` is not 10, `mt1` is 0, or the tape does not
+    /// pin level `xlfs1` of `mt1` to one state.
     pub target1: Option<String>,
     /// This state's own MF=10 partial, linearized as `branching.arrow` has
     /// it, when several MF=10 states share `target` and the `branching.arrow`
@@ -172,8 +177,9 @@ impl BranchingCovarianceBlock {
     /// state's own MT and level.
     ///
     /// MT1 is compared as written, so an MT1 of 0 is not read as this MT, and
-    /// the level is XLFS1 against `lfs`, both as the tape numbers them. That
-    /// is the rule the converter resolves `target1` by.
+    /// the level is XLFS1 against `lfs`, both as the tape numbers them. The
+    /// converter's `mf40_cross_state_blocks` counts every block this is false
+    /// for.
     pub fn is_self_block(&self) -> bool {
         !self.is_cross_material()
             && self.block.xmf1 == 10.0
