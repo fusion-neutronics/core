@@ -229,6 +229,10 @@ pub struct Info {
     /// every isotope in the material and none of it for the channel making the
     /// product of interest, which leaves the count reading as full coverage
     /// while the ensemble perturbs almost nothing.
+    ///
+    /// Built from the same relative-only coverage as `rate_fraction_covered`,
+    /// so a channel stated only in absolute (LB=0) or short-range (LB=8)
+    /// blocks lowers it although those blocks are folded (#169).
     pub rate_fraction_covered_total: Option<f64>,
     /// Covariance matrices that were not positive semi-definite as evaluated,
     /// and the worst repair that had to be made.

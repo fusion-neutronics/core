@@ -5136,7 +5136,11 @@ class TransmutationResults:
           sharper question than how many nuclides carry MF=33: an evaluation can
           state covariance for every isotope in the material and none for the
           channel making the product of interest, and the count then reads as
-          full coverage while the ensemble perturbs almost nothing.
+          full coverage while the ensemble perturbs almost nothing. It is
+          built from the same relative-only coverage as
+          ``rate_fraction_covered``, so a channel stated only in absolute
+          (LB=0) or short-range (LB=8) blocks lowers it although those blocks
+          are folded (#169).
         - ``rate_fraction_covered``: per nuclide and channel, the share of the
           reaction rate the relative covariance grids actually span. Below one
           means part of the rate carries no stated relative uncertainty and the
