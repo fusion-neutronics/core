@@ -638,7 +638,12 @@ fn dump_radionuclide_production(d: &mut Dump, path: &str, material: &Material) {
             if let Some(elfs) = state.elfs {
                 d.float(format!("{sp}/ELFS"), elfs);
             }
-            d.float(format!("{sp}/excitation_energy"), state.excitation_energy());
+            // The Python reader takes ELFS as it stands where the Rust one
+            // passes over a non-positive ELFS on an excited state; every
+            // fixture's excited states have a positive ELFS, so the two agree.
+            if let Some(e) = state.excitation_energy() {
+                d.float(format!("{sp}/excitation_energy"), e);
+            }
             if let Some(y) = &state.yields {
                 d.tab1(&format!("{sp}/yields"), y);
             }

@@ -134,7 +134,7 @@ fn the_depletion_inputs_are_reachable() {
     let production = endf::radionuclide_production(&production_material);
     assert!(!production.is_empty());
     let states: &Vec<RadionuclideProduction> = production.values().next().unwrap();
-    assert!(states[0].excitation_energy() >= 0.0);
+    assert!(states[0].excitation_energy().is_some_and(|e| e >= 0.0));
 }
 
 /// A depletion chain, built from evaluations the caller supplies.
