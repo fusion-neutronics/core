@@ -228,9 +228,23 @@ impl Coverage {
     ///
     /// `None` when this run drove no production at all, which is a decay-only
     /// schedule and has no fraction to report rather than a fraction of zero.
+    ///
+    /// In [0, 1] without a clamp: each channel adds `production * share` to
+    /// one sum and `production` to the other, in the same order, with the
+    /// share at most one. Rounding is monotone, so the covered sum cannot pass
+    /// the total. A ratio outside [0, 1] is a bug upstream (a negative rate,
+    /// or a share above one), and clamping it would hide that.
     pub fn rate_fraction_total(&self) -> Option<f64> {
-        (self.total_production > 0.0)
-            .then(|| (self.covered_production / self.total_production).clamp(0.0, 1.0))
+        (self.total_production > 0.0).then(|| {
+            let fraction = self.covered_production / self.total_production;
+            debug_assert!(
+                (0.0..=1.0).contains(&fraction),
+                "covered production {} against a total of {}",
+                self.covered_production,
+                self.total_production
+            );
+            fraction
+        })
     }
 
     /// Fold one nuclide's report into this one.
@@ -409,6 +423,14 @@ fn contract(block: &ExpandedBlock, row: &Partials, col: &Partials) -> f64 {
 /// `Coverage::partials_above_rate`. This sits six orders of magnitude above
 /// that, and an excess below it would move a relative sigma by less than a
 /// part in a billion.
+///
+/// It separates rounding from an inconsistency, not a large inconsistency
+/// from a small one: any excess past rounding means the covariance's
+/// numerator and denominator were computed two different ways, and every
+/// such channel is listed with its ratio for the reader to weigh. So until
+/// the fold weights a self-shielded rate with shielded partials (#166 item
+/// 4), a shielded run lists most channels a relative block names, many a few
+/// parts in 1e7 over, and `has_gaps` reads true on it.
 const PARTIALS_ROUNDING: f64 = 1.0e-9;
 
 /// The interval of `grid` that holds all of `[a, b]`, if one does.
@@ -850,15 +872,16 @@ mod coverage_total_tests {
         assert_eq!(Coverage::default().rate_fraction_total(), None);
     }
 
-    /// Floating point can put the ratio a hair over one when every channel is
-    /// fully covered; a coverage of 100.0000001% is not a thing to print.
+    /// Full coverage reads exactly one with no clamp to make it so: a share of
+    /// 1.0 adds each production to both sums unchanged and in the same order,
+    /// on productions whose sum rounds (0.1 + 0.2 is not 0.3).
     #[test]
-    fn full_coverage_cannot_exceed_one() {
-        let c = Coverage {
-            covered_production: 1.0 + f64::EPSILON,
-            total_production: 1.0,
-            ..Default::default()
-        };
+    fn full_coverage_reads_exactly_one() {
+        let mut c = Coverage::default();
+        for production in [0.1, 0.2, 0.7, 1.0e-17, 3.0e5] {
+            c.total_production += production;
+            c.covered_production += production * 1.0;
+        }
         assert_eq!(c.rate_fraction_total(), Some(1.0));
     }
 }
