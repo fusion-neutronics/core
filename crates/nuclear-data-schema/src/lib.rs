@@ -249,12 +249,13 @@ pub fn branching_branching() -> Schema {
 /// selection. One row per block, which is one NC or NI block of one
 /// sub-subsection of one product state. Every tape value is written as the tape
 /// gives it: nothing is normalised, and a state the converter could not place
-/// in the chain is still written, with a null `target`. A product state with
-/// no sub-subsection (NL 0), or a sub-subsection with no block (NC and NI 0),
-/// holds no covariance and so has no row, and the counts NS, NL, NC and NI are
-/// not columns, being the row counts. The converter lists each such part, with
-/// its tape values, under `mf40_without_blocks` in `branching/provenance.json`
-/// instead. None of the published libraries has one.
+/// in the chain is still written, with a null `target`. A section with no
+/// product state (NS 0), a product state with no sub-subsection (NL 0), or a
+/// sub-subsection with no block (NC and NI 0), holds no covariance and so has
+/// no row, and the counts NS, NL, NC and NI are not columns, being the row
+/// counts. The converter lists each such part, with its tape values, under
+/// `mf40_without_blocks` in `branching/provenance.json` instead. None of the
+/// published libraries has one.
 ///
 /// The first columns are the converter's key, the rest are the tape's:
 ///
@@ -264,22 +265,28 @@ pub fn branching_branching() -> Schema {
 /// * `target` is the chain nuclide the product state (`izap`, `lfs`) is the
 ///   partial of, which is the `target` of the `branching.arrow` row for
 ///   (`nuclide`, `reaction`). Null when no MF=9 or MF=10 state of that MT
-///   matched it. `target1` is the same for the partner state the block
-///   correlates this one with, level `xlfs1` of reaction `mt1`: the match of
-///   the one state of `mt1`'s MF=40 section at LFS `xlfs1`, as that state's
-///   own row's `target` is. Null when the partner is in another material,
-///   `xmf1` is not 10, `mt1` is 0 (which the manual gives no meaning in
-///   MF=40), or the tape does not pin the partner to one state. MF=40 gives
-///   no IZAP for it, so a level that two MF=40 states of `mt1` share, or an
-///   MF=9 or MF=10 state of another product, is left null rather than read as
-///   this row's own product. So is an `mt1` with no MF=40 section, whose level
-///   XLFS1 would have to be read in MF=10's numbering with no excitation to
-///   check it by. Each such null is listed under `mf40_partner_unresolved` in
-///   `branching/provenance.json`. Several
-///   levels can resolve to one chain nuclide: JEFF-4.0 U235 MT 4 correlates
-///   its ground (LFS 0) with its 77 eV isomer (XLFS1 1), both U235. So a
-///   consumer keys a block on (`mt`, `lfs`, `mt1`, `xlfs1`), never on
-///   (`target`, `target1`).
+///   matched it, or when several states of one chain nuclide sit within the
+///   converter's tolerance of its excitation, since taking the nearest would
+///   guess which partial weights the covariance; each such state is listed
+///   under `mf40_unmatched_states` in `branching/provenance.json`. `target1` is
+///   the same for the partner state the block correlates this one with, level
+///   `xlfs1` of reaction `mt1`: the match of the one state of `mt1`'s MF=40
+///   section at LFS `xlfs1`, as that state's own row's `target` is. Null when
+///   the partner is in another material, `xmf1` is not 10, `mt1` is 0 (which
+///   the manual gives no meaning in MF=40), or the tape does not pin the
+///   partner to one state. MF=40 gives no IZAP for it, so a level that two
+///   MF=40 states of `mt1` share, or an MF=9 or MF=10 state of another product,
+///   is left null rather than read as this row's own product. So is an `mt1`
+///   with no MF=40 section, whose level XLFS1 would have to be read in MF=10's
+///   numbering with no excitation to check it by. Each such null is listed
+///   under `mf40_partner_unresolved` in `branching/provenance.json`. The manual
+///   numbers XLFS1 as MF=10 does, so where MF=10 of `mt1` gives the partner's
+///   product no state at that LFS, or one at another excitation than the MF=40
+///   state read through (ENDF/B-VIII.1 Pb204 MT 4), the block is listed under
+///   `mf40_partner_level_mismatches` there too. Several levels can resolve to
+///   one chain nuclide: JEFF-4.0 U235 MT 4 correlates its ground (LFS 0) with
+///   its 77 eV isomer (XLFS1 1), both U235. So a consumer keys a block on
+///   (`mt`, `lfs`, `mt1`, `xlfs1`), never on (`target`, `target1`).
 /// * `energy` and `values` are this state's own MF=10 partial, linearized
 ///   by the converter exactly as `branching.arrow` has it (the tape's own
 ///   points when every region is lin-lin), and are written only when several
@@ -287,8 +294,9 @@ pub fn branching_branching() -> Schema {
 ///   carries as their sum. A relative covariance of one state has to be
 ///   weighted by that state's own partial to fold exactly. Null for an MF=10
 ///   state means the `branching.arrow` cross section for (`nuclide`,
-///   `reaction`, `target`) is that state's own. A state MF=9 gives as a yield has no MF=10 partial, so
-///   is always null here, whether or not its yield row is merged with another.
+///   `reaction`, `target`) is that state's own. A state MF=9 gives as a yield
+///   has no MF=10 partial, so is always null here, whether or not its yield
+///   row is merged with another.
 /// * `mat` is the evaluation's MAT, so a reader can tell a `mat1` naming the
 ///   evaluation itself (JEFF-4.0 U235 MT 4 writes its own 9228 there) from a
 ///   correlation with another material.

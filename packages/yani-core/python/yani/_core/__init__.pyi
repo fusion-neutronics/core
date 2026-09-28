@@ -2827,8 +2827,9 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         by ``mf40_sections`` (sections read, whatever the MT),
         ``mf40_blocks`` (blocks written), ``mf40_blocks_by_lb`` (the NI blocks
         by layout), ``mf40_nc_blocks``, ``mf40_unmatched_states`` (one line
-        per product state that matches no MF=9 or MF=10 state, written with no
-        target), ``mf40_states_without_chain_kind`` (states of an MT with no
+        per product state that matches no MF=9 or MF=10 state, or several
+        within the tolerance, written with no target),
+        ``mf40_states_without_chain_kind`` (states of an MT with no
         chain reaction, such as MT 18, written with no reaction),
         ``mf40_on_yield_channels`` (states matched to a level whose production
         MF=9 gives as a yield rather than an MF=10 cross section),
@@ -2838,11 +2839,14 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         LFS, MT1 and XLFS1, since both states can resolve to one target),
         ``mf40_blocks_outside_mf10`` (blocks whose partner is in another
         material or has XMF1 other than 10), ``mf40_without_blocks`` (one line
-        per state or sub-subsection holding no block, with its tape values,
-        the only part of MF=40 the file cannot show) and
+        per section, state or sub-subsection holding no block, with its tape
+        values, the only part of MF=40 the file cannot show),
         ``mf40_partner_unresolved`` (one line per sub-subsection written with
         no partner target because the tape does not pin the partner to one
-        state). The three line lists are also written to
+        state) and ``mf40_partner_level_mismatches`` (one line per
+        sub-subsection whose partner target was read through MF=40's level
+        XLFS1 where MF=10 gives no state, or another excitation, at that
+        level). The four line lists are also written to
         ``branching/provenance.json``. An evaluation set without MF=40
         writes no covariance file, and removes one an earlier conversion left
         there.

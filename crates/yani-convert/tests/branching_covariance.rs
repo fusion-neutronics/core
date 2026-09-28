@@ -161,8 +161,10 @@ fn mf40_is_written_beside_branching_for_nb93() {
     assert_eq!(stats.mf40_cross_state_blocks, 0);
     assert_eq!(stats.mf40_blocks_outside_mf10, 0);
     assert!(stats.mf40_without_blocks.is_empty());
-    // One product per level in each MT, so every partner is pinned.
+    // One product per level in each MT, so every partner is pinned, and
+    // MF=10 numbers each level as MF=40 does.
     assert!(stats.mf40_partner_unresolved.is_empty());
+    assert!(stats.mf40_partner_level_mismatches.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -513,6 +515,67 @@ fn an_mf40_state_matches_mf10_by_excitation_when_lfs_differs() {
     );
     assert_eq!(row.target1.as_deref(), Some("Nb92_m1"));
     assert!(row.energy.is_none(), "still one state per target");
+    // The self block's XLFS1 of 7 was read in MF=40's numbering, which MF=10
+    // does not share, so that reading is listed.
+    assert_eq!(
+        out.stats.mf40_partner_level_mismatches,
+        [
+            "Nb93 MT16: IZAP 41092 LFS 7 sub-subsection 0, partner MT16 level 7: \
+          MF=9 and MF=10 give IZAP 41092 no state at that LFS; read through the \
+          MF=40 state at 135.5 keV"
+        ]
+    );
+}
+
+/// The excitation fallback places a state only when one level of the chain
+/// nuclide it resolves to sits within `tol_ev`. Here MF=10's (n,2n) ground is
+/// moved to a second level 1 keV above the 135.5 keV isomer, so both MF=10
+/// states resolve to Nb92_m1, and the MF=40 isomer, renumbered 7, lies within
+/// 3 keV of both: nearest would be a guess at which partial weights it, so it
+/// is left unplaced and listed.
+#[test]
+fn an_mf40_state_near_several_mf10_levels_is_not_placed() {
+    let tape = text(NB93);
+    let tape = edit(
+        tape,
+        "-8.830870+6-8.830870+6      41092          0          1         31412510 16    2",
+        "-8.830870+6-8.967370+6      41092          2          1         31412510 16    2",
+    );
+    let tape = edit(
+        tape,
+        "-8.830870+6-8.966370+6      41092          1          0          1412540 16   10",
+        "-8.830870+6-8.966370+6      41092          7          0          1412540 16   10",
+    );
+    let tape = edit(
+        tape,
+        " 1.000000+1 1.000000+0          0         16          0          1412540 16   11",
+        " 1.000000+1 7.000000+0          0         16          0          1412540 16   11",
+    );
+    let out = extract(&[material(&tape)], &nb_decay());
+    let ambiguous: Vec<&String> = out
+        .stats
+        .mf40_unmatched_states
+        .iter()
+        .filter(|line| line.contains("IZAP 41092 LFS 7"))
+        .collect();
+    assert_eq!(
+        ambiguous,
+        [
+            "Nb93 MT16: IZAP 41092 LFS 7 at 135.5 keV is within tolerance of 2 \
+          MF=9 or MF=10 states of one target, so is not placed"
+        ],
+        "{:?}",
+        out.stats.mf40_unmatched_states
+    );
+    let row = out
+        .covariance
+        .iter()
+        .find(|r| r.reaction.as_deref() == Some("(n,2n)") && r.lfs == 7)
+        .expect("the state is still written");
+    assert_eq!(row.target, None);
+    assert_eq!(row.target1, None);
+    assert!(row.energy.is_none() && row.values.is_none());
+    assert!(out.stats.mf40_partner_level_mismatches.is_empty());
 }
 
 /// The excitation fallback does not reach past `tol_ev`. Here the (n,2n)
@@ -856,6 +919,30 @@ fn parts_without_a_block_are_listed_with_their_tape_values() {
     assert_eq!(blocks.len(), 2);
     assert!(blocks.iter().all(|b| b.block.mt == 4));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A section with no product state (NS 0) has no row either, so it is listed
+/// with its HEAD. Here MF=40 MT 4 keeps its HEAD and loses both states.
+#[test]
+fn a_section_without_a_product_state_is_listed_with_its_head() {
+    let tape = text(NB93);
+    let tape = edit(
+        tape,
+        " 4.109300+4 9.210827+1          0          0          2          0412540  4    1",
+        " 4.109300+4 9.210827+1          0          0          0          0412540  4    1",
+    );
+    let tape = drop_lines(tape, "4", 2..=47);
+    let nb93 = material(&tape);
+    assert!(nb93.mf40(4).expect("MF=40 MT 4").subsections.is_empty());
+
+    let out = extract(std::slice::from_ref(&nb93), &nb_decay());
+    assert_eq!(
+        out.stats.mf40_without_blocks,
+        ["Nb93 MT4: ZA 41093 AWR 92.10827 LIS 0 has no product state"]
+    );
+    assert_eq!(out.stats.mf40_sections, 2);
+    assert_eq!(out.stats.mf40_blocks, 2);
+    assert!(out.covariance.iter().all(|r| r.mt == 16));
 }
 
 /// A state MF=9 gives as a yield has no MF=10 partial: its block is still

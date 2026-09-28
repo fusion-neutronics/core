@@ -84,9 +84,9 @@ pub struct BranchingCovarianceRow {
     /// The chain nuclide the partner state resolved to, `None` when it is in
     /// another material, XMF1 is not 10, MT1 is 0, or the tape does not pin
     /// level XLFS1 of MT1 to one state (see `partner_target`, and
-    /// `mf40_partner_unresolved`). Several levels can resolve to
-    /// one chain nuclide, so (`target`, `target1`) does not identify the pair
-    /// of states: (`mt`, `lfs`, `mt1`, `xlfs1`) does.
+    /// `mf40_partner_unresolved`). Several levels can resolve to one chain
+    /// nuclide, so (`target`, `target1`) does not identify the pair of
+    /// states: (`mt`, `lfs`, `mt1`, `xlfs1`) does.
     pub target1: Option<String>,
     /// This state's own MF=10 partial, linearized exactly as `branching.arrow`
     /// has it, only when several MF=10 states resolved to `target` and
@@ -361,7 +361,8 @@ pub struct BranchingStats {
     /// MF=40, so one appearing is worth seeing here first.
     pub mf40_nc_blocks: usize,
     /// MF=40 product states in an MT with a chain kind that match no MF=9 or
-    /// MF=10 state, one line each. Written, with a null `target`.
+    /// MF=10 state, or match several by excitation and so are not placed,
+    /// one line each. Written, with a null `target`.
     pub mf40_unmatched_states: Vec<String>,
     /// MF=40 product states in an MT with no chain kind (TENDL's MT 18 with
     /// IZAP 0). Written, with a null `reaction` and `target`.
@@ -387,10 +388,10 @@ pub struct BranchingStats {
     /// Blocks whose partner is not an MF=10 partial of this evaluation: MAT1
     /// names another material, or XMF1 is not 10. Their `target1` is null.
     pub mf40_blocks_outside_mf10: usize,
-    /// Product states with no sub-subsection and sub-subsections with no
-    /// block, one line each with every tape value the part holds (the state's
-    /// QM, QI, IZAP and LFS, or the sub-subsection's MAT1, MT1, XMF1 and
-    /// XLFS1). They hold no covariance and have no row, so this, which the
+    /// Sections with no product state, product states with no sub-subsection
+    /// and sub-subsections with no block, one line each with every tape value
+    /// the part holds (the section's ZA, AWR and LIS, the state's QM, QI, IZAP
+    /// and LFS, or the sub-subsection's MAT1, MT1, XMF1 and XLFS1). They hold no covariance and have no row, so this, which the
     /// conversion also writes to `branching/provenance.json`, is the one
     /// place they are kept; none of the published libraries has one.
     pub mf40_without_blocks: Vec<String>,
@@ -401,6 +402,14 @@ pub struct BranchingStats {
     /// or MF=10), since MF=40 gives the partner no IZAP; or MT1 has no
     /// MF=40 section whose state at XLFS1 could say which level is meant.
     pub mf40_partner_unresolved: Vec<String>,
+    /// Sub-subsections whose `target1` was set through MT1's MF=40 state at
+    /// LFS XLFS1 although MF=9 and MF=10 give that product no state at that
+    /// LFS, or give it one at another excitation, one line each. The manual
+    /// defines XLFS1 as the partner's final state, which for XMF1 10 is
+    /// MF=10's numbering, so where the two files number the level
+    /// differently (ENDF/B-VIII.1 Pb204 MT 4, LFS 21 in MF=10 and 1 in
+    /// MF=40) reading it in MF=40's is a choice this records.
+    pub mf40_partner_level_mismatches: Vec<String>,
 }
 
 /// The value of `t` at `e`, zero outside its tabulated range.
@@ -736,7 +745,7 @@ impl BranchingExtractor {
             .filter_map(|(_, mt)| material.mf40(mt).map(|section| (mt, section)))
             .collect();
         let empty = BTreeMap::new();
-        let matched: BTreeMap<i32, Vec<Option<&ProductionState>>> = mf40
+        let matched: BTreeMap<i32, Vec<Mf40Match>> = mf40
             .iter()
             .map(|&(mt, section)| {
                 let found = if mt2type.contains_key(&(mt as i64)) {
@@ -747,7 +756,7 @@ impl BranchingExtractor {
                         .map(|sub| match_mf40_state(sub, mt, meta.za, states, isomers, tol_ev))
                         .collect()
                 } else {
-                    vec![None; section.subsections.len()]
+                    vec![Err(UnplacedState::NoChainKind); section.subsections.len()]
                 };
                 (mt, found)
             })
@@ -755,22 +764,31 @@ impl BranchingExtractor {
         let own_mat = material.mat as i64;
         for &(mt, section) in &mf40 {
             stats.mf40_sections += 1;
+            if section.subsections.is_empty() {
+                stats.mf40_without_blocks.push(format!(
+                    "{parent} MT{mt}: ZA {} AWR {} LIS {} has no product state",
+                    section.za, section.awr, section.lis
+                ));
+            }
             let rtype = mt2type.get(&(mt as i64));
-            for (state_idx, (sub, state)) in
+            for (state_idx, (sub, found)) in
                 section.subsections.iter().zip(&matched[&mt]).enumerate()
             {
                 let excitation_kev = (sub.qm - sub.qi) / 1.0e3;
-                match (rtype, state) {
-                    (None, _) => stats.mf40_states_without_chain_kind += 1,
-                    (Some(_), None) => stats.mf40_unmatched_states.push(format!(
+                match found {
+                    Err(UnplacedState::NoChainKind) => stats.mf40_states_without_chain_kind += 1,
+                    Err(UnplacedState::NoState) => stats.mf40_unmatched_states.push(format!(
                         "{parent} MT{mt}: IZAP {} LFS {} at {excitation_kev:.1} keV matches no MF=9 or MF=10 state",
                         sub.izap, sub.lfs
                     )),
-                    (Some(_), Some(state)) if state.curve.is_none() => {
-                        stats.mf40_on_yield_channels += 1
-                    }
-                    _ => {}
+                    Err(UnplacedState::Ambiguous(n)) => stats.mf40_unmatched_states.push(format!(
+                        "{parent} MT{mt}: IZAP {} LFS {} at {excitation_kev:.1} keV is within tolerance of {n} MF=9 or MF=10 states of one target, so is not placed",
+                        sub.izap, sub.lfs
+                    )),
+                    Ok(state) if state.curve.is_none() => stats.mf40_on_yield_channels += 1,
+                    Ok(_) => {}
                 }
+                let state = found.ok();
                 if sub.subsubsections.is_empty() {
                     stats.mf40_without_blocks.push(format!(
                         "{parent} MT{mt} state {state_idx}: QM {} QI {} IZAP {} LFS {} has no sub-subsection",
@@ -780,7 +798,7 @@ impl BranchingExtractor {
                 // The state's own partial, when `branching.arrow` carries it
                 // summed with another state's.
                 let own_curve = rtype
-                    .zip(*state)
+                    .zip(state)
                     .filter(|(rtype, state)| {
                         summed
                             .get(&((*rtype).clone(), state.target.clone()))
@@ -815,8 +833,30 @@ impl BranchingExtractor {
                             &mf40,
                             &matched,
                             &states_by_mt,
+                            tol_ev,
                         ) {
-                            Ok(target1) => target1,
+                            Ok((target1, level)) => {
+                                let why = match level {
+                                    _ if target1.is_none() => None,
+                                    Mf10Level::Agrees => None,
+                                    Mf10Level::Missing { zap, mf40_ev } => Some(format!(
+                                        "MF=9 and MF=10 give IZAP {zap} no state at that LFS; read through the MF=40 state at {:.1} keV",
+                                        mf40_ev / 1.0e3
+                                    )),
+                                    Mf10Level::Elsewhere { zap, mf10_ev, mf40_ev } => Some(format!(
+                                        "MF=9 or MF=10 gives IZAP {zap} that LFS at {:.1} keV, the MF=40 state read through is at {:.1} keV",
+                                        mf10_ev / 1.0e3,
+                                        mf40_ev / 1.0e3
+                                    )),
+                                };
+                                if let Some(why) = why {
+                                    stats.mf40_partner_level_mismatches.push(format!(
+                                        "{parent} MT{mt}: IZAP {} LFS {} sub-subsection {subsection_idx}, partner MT{partner_mt} level {}: {why}",
+                                        sub.izap, sub.lfs, ss.xlfs1
+                                    ));
+                                }
+                                target1
+                            }
                             Err(why) => {
                                 let why = match why {
                                     UnresolvedPartner::Ambiguous => {
@@ -918,6 +958,9 @@ impl BranchingExtractor {
         self.stats
             .mf40_partner_unresolved
             .extend(stats.mf40_partner_unresolved);
+        self.stats
+            .mf40_partner_level_mismatches
+            .extend(stats.mf40_partner_level_mismatches);
     }
 
     /// The rows, the covariance and the statistics, with duplicate target
@@ -942,11 +985,13 @@ impl BranchingExtractor {
 /// the 2.186 MeV isomer as LFS=21 in MF=10 and LFS=1 in MF=40, with the same
 /// QI. So failing that, the state is resolved through the isomer table from
 /// its own QM - QI, as the rows are, and matched by the chain nuclide it lands
-/// on; among several states landing there, the one nearest in excitation.
-/// That one must also sit within `tol_ev` of the state's own excitation:
-/// `resolve_level` can land on a nuclide by level index, or by a lone isomer,
-/// with no regard to energy, and a state at another level is not this one's
-/// partial. Such a state is left unmatched, so it is counted as such.
+/// on, among the states of that nuclide within `tol_ev` of the state's own
+/// excitation: `resolve_level` can land on a nuclide by level index, or by a
+/// lone isomer, with no regard to energy, and a state at another level is not
+/// this one's partial. The match must be the only one: when several levels of
+/// that nuclide sit within `tol_ev`, picking the nearest would be a guess at
+/// which partial weights the covariance, so the state is left unplaced, and
+/// so is one with none, each counted as such.
 /// IZAP=0 on MT 4 is matched as the target itself, since JEFF-4.0 U235 writes
 /// it so where its MF=10 says 92235. Only the match reads it that way; the row
 /// keeps the tape's 0.
@@ -957,12 +1002,12 @@ fn match_mf40_state<'a>(
     states: &'a BTreeMap<(i64, i64), ProductionState>,
     isomers: &endf::radionuclide_production::IsomerTable,
     tol_ev: f64,
-) -> Option<&'a ProductionState> {
+) -> Mf40Match<'a> {
     let izap = mf40_zap(sub, mt, za);
     let excitation = sub.qm - sub.qi;
     let near = |state: &ProductionState| (state.excitation - excitation).abs() <= tol_ev;
     if let Some(state) = states.get(&(izap, sub.lfs)).filter(|state| near(state)) {
-        return Some(state);
+        return Ok(state);
     }
     let (z, a) = (izap / 1000, izap % 1000);
     let resolved = endf::radionuclide_production::resolve_level(
@@ -974,16 +1019,48 @@ fn match_mf40_state<'a>(
         tol_ev,
     );
     let target = endf::gnds_name(z as u32, a as u32, resolved.liso as u32);
-    states
+    let candidates: Vec<&ProductionState> = states
         .iter()
-        .filter(|((zap, _), state)| *zap == izap && state.target == target)
+        .filter(|((zap, _), state)| *zap == izap && state.target == target && near(state))
         .map(|(_, state)| state)
-        .min_by(|x, y| {
-            (x.excitation - excitation)
-                .abs()
-                .total_cmp(&(y.excitation - excitation).abs())
-        })
-        .filter(|state| near(state))
+        .collect();
+    match candidates.as_slice() {
+        [state] => Ok(state),
+        [] => Err(UnplacedState::NoState),
+        several => Err(UnplacedState::Ambiguous(several.len())),
+    }
+}
+
+/// The MF=9 or MF=10 state an MF=40 product state is the covariance of, or
+/// why it has none.
+type Mf40Match<'a> = Result<&'a ProductionState, UnplacedState>;
+
+/// Why an MF=40 product state was written with a null `target`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnplacedState {
+    /// Its MT has no chain kind, so there is no state to match.
+    NoChainKind,
+    /// No MF=9 or MF=10 state of its MT matches it.
+    NoState,
+    /// This many states of one chain nuclide sit within `tol_ev` of it.
+    Ambiguous(usize),
+}
+
+/// How MF=9 and MF=10 of MT1 give the level XLFS1 that a partner was read
+/// through MF=40 at.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Mf10Level {
+    /// A state of the same product at that LFS, within `tol_ev` of the MF=40
+    /// state's excitation.
+    Agrees,
+    /// No state of product `zap` at that LFS.
+    Missing { zap: i64, mf40_ev: f64 },
+    /// A state of product `zap` at that LFS, at another excitation.
+    Elsewhere {
+        zap: i64,
+        mf10_ev: f64,
+        mf40_ev: f64,
+    },
 }
 
 /// Why a block's `target1` was left null although its partner is an MF=10
@@ -1005,7 +1082,9 @@ enum UnresolvedPartner {
 /// when one product of `partner_mt` sits at that level: a single state of
 /// `partner_mt`'s MF=40 section at LFS `xlfs1`, and no MF=9 or MF=10 state of
 /// another product at that LFS. The target is then that state's own match, as
-/// its row's `target` is, and `Ok(None)` when that state matched nothing.
+/// its row's `target` is, and `None` when that state matched nothing. It
+/// comes with how MF=9 and MF=10 give level `xlfs1` of that product, since
+/// the manual numbers XLFS1 as MF=10 does and the two files need not agree.
 /// The row's own IZAP is not taken for the partner's, even within one MT,
 /// since the tape does not say so. Nor is an MT1 without an MF=40 section read
 /// against MF=10's LFS: the two files can number a level differently
@@ -1016,31 +1095,47 @@ fn partner_target(
     xlfs1: f64,
     za: i64,
     mf40: &[(i32, &Mf40)],
-    matched: &BTreeMap<i32, Vec<Option<&ProductionState>>>,
+    matched: &BTreeMap<i32, Vec<Mf40Match>>,
     states_by_mt: &BTreeMap<i32, BTreeMap<(i64, i64), ProductionState>>,
-) -> Result<Option<String>, UnresolvedPartner> {
+    tol_ev: f64,
+) -> Result<(Option<String>, Mf10Level), UnresolvedPartner> {
     let Some((_, section)) = mf40.iter().find(|(m, _)| *m == partner_mt) else {
         return Err(UnresolvedPartner::NoMf40Section);
     };
-    let at_level: Vec<(i64, Option<&ProductionState>)> = section
+    let at_level: Vec<(&Mf40Subsection, &Mf40Match)> = section
         .subsections
         .iter()
         .zip(&matched[&partner_mt])
         .filter(|(other, _)| other.lfs as f64 == xlfs1)
-        .map(|(other, state)| (mf40_zap(other, partner_mt, za), *state))
         .collect();
-    let [(zap, state)] = at_level.as_slice() else {
+    let [(other, found)] = at_level.as_slice() else {
         return Err(UnresolvedPartner::Ambiguous);
     };
-    let other_product = states_by_mt.get(&partner_mt).is_some_and(|states| {
+    let zap = mf40_zap(other, partner_mt, za);
+    let states = states_by_mt.get(&partner_mt);
+    let other_product = states.is_some_and(|states| {
         states
             .keys()
-            .any(|&(other_zap, lfs)| lfs as f64 == xlfs1 && other_zap != *zap)
+            .any(|&(other_zap, lfs)| lfs as f64 == xlfs1 && other_zap != zap)
     });
     if other_product {
         return Err(UnresolvedPartner::Ambiguous);
     }
-    Ok(state.map(|s| s.target.clone()))
+    let mf40_ev = other.qm - other.qi;
+    let level = match states.and_then(|states| {
+        states
+            .iter()
+            .find(|(&(state_zap, lfs), _)| state_zap == zap && lfs as f64 == xlfs1)
+    }) {
+        None => Mf10Level::Missing { zap, mf40_ev },
+        Some((_, state)) if (state.excitation - mf40_ev).abs() <= tol_ev => Mf10Level::Agrees,
+        Some((_, state)) => Mf10Level::Elsewhere {
+            zap,
+            mf10_ev: state.excitation,
+            mf40_ev,
+        },
+    };
+    Ok((found.ok().map(|s| s.target.clone()), level))
 }
 
 /// The product ZA of an MF=40 state, with MT 4's IZAP of 0 (JEFF-4.0 U235)
