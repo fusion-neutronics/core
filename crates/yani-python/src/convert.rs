@@ -208,12 +208,10 @@ pub fn convert_transmutation(
 ///     material or has XMF1 other than 10), ``mf40_without_blocks`` (one line
 ///     per section, state or sub-subsection holding no block, with its tape
 ///     values, the only part of MF=40 the file cannot show),
-///     ``mf40_partner_unresolved`` (one line per sub-subsection written with
-///     no partner target because the tape does not pin the partner to one
-///     state) and ``mf40_partner_level_mismatches`` (one line per
-///     sub-subsection whose partner target was read through MF=40's level
-///     XLFS1 where MF=10 gives no state, or another excitation, at that
-///     level). The four line lists are also written to
+///     and ``mf40_partner_unresolved`` (one line per sub-subsection written
+///     with no partner target because the tape does not pin the partner to
+///     one state, among them a partner whose level XLFS1 MF=10 numbers
+///     differently from MF=40). The three line lists are also written to
 ///     ``branching/provenance.json``. An evaluation set without MF=40
 ///     writes no covariance file, and removes one an earlier conversion left
 ///     there.
@@ -291,10 +289,6 @@ pub fn convert_branching(
     out.set_item("mf40_without_blocks", stats.mf40_without_blocks)?;
     out.set_item("mf40_blocks_outside_mf10", stats.mf40_blocks_outside_mf10)?;
     out.set_item("mf40_partner_unresolved", stats.mf40_partner_unresolved)?;
-    out.set_item(
-        "mf40_partner_level_mismatches",
-        stats.mf40_partner_level_mismatches,
-    )?;
     Ok(out.unbind())
 }
 

@@ -278,15 +278,18 @@ pub fn branching_branching() -> Schema {
 ///   MF=40 states of `mt1` share, or an MF=9 or MF=10 state of another product,
 ///   is left null rather than read as this row's own product. So is an `mt1`
 ///   with no MF=40 section, whose level XLFS1 would have to be read in MF=10's
-///   numbering with no excitation to check it by. Each such null is listed
-///   under `mf40_partner_unresolved` in `branching/provenance.json`. The manual
-///   numbers XLFS1 as MF=10 does, so where MF=10 of `mt1` gives the partner's
-///   product no state at that LFS, or one at another excitation than the MF=40
-///   state read through (ENDF/B-VIII.1 Pb204 MT 4), the block is listed under
-///   `mf40_partner_level_mismatches` there too. Several levels can resolve to
-///   one chain nuclide: JEFF-4.0 U235 MT 4 correlates its ground (LFS 0) with
-///   its 77 eV isomer (XLFS1 1), both U235. So a consumer keys a block on
-///   (`mt`, `lfs`, `mt1`, `xlfs1`), never on (`target`, `target1`).
+///   numbering with no excitation to check it by. The manual numbers XLFS1 as
+///   MF=10 does and MF=40 need not (ENDF/B-VIII.1 Pb204 MT 4, LFS 21 in MF=10
+///   and 1 in MF=40), so `target1` is also null where MF=10 of `mt1` gives the
+///   partner's product no state at LFS `xlfs1`, or one at another excitation
+///   than the MF=40 state there. Each such null is listed under
+///   `mf40_partner_unresolved` in `branching/provenance.json`. A state's block
+///   with itself (`mt1` and `xlfs1` its own `mt` and `lfs`) names the state by
+///   its own subsection's label, so its `target1` is its `target` unless a
+///   second MF=40 state of `mt` carries that label. Several levels can
+///   resolve to one chain nuclide: JEFF-4.0 U235 MT 4 correlates its ground
+///   (LFS 0) with its 77 eV isomer (XLFS1 1), both U235. So a consumer keys a
+///   block on (`mt`, `lfs`, `mt1`, `xlfs1`), never on (`target`, `target1`).
 /// * `energy` and `values` are this state's own MF=10 partial, linearized
 ///   by the converter exactly as `branching.arrow` has it (the tape's own
 ///   points when every region is lin-lin), and are written only when several

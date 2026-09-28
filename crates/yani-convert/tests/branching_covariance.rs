@@ -164,7 +164,6 @@ fn mf40_is_written_beside_branching_for_nb93() {
     // One product per level in each MT, so every partner is pinned, and
     // MF=10 numbers each level as MF=40 does.
     assert!(stats.mf40_partner_unresolved.is_empty());
-    assert!(stats.mf40_partner_level_mismatches.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -515,16 +514,106 @@ fn an_mf40_state_matches_mf10_by_excitation_when_lfs_differs() {
     );
     assert_eq!(row.target1.as_deref(), Some("Nb92_m1"));
     assert!(row.energy.is_none(), "still one state per target");
-    // The self block's XLFS1 of 7 was read in MF=40's numbering, which MF=10
-    // does not share, so that reading is listed.
+    // The self block names the state by its own subsection's label, so MF=10
+    // having no level 7 leaves nothing to choose between.
+    assert!(
+        out.stats.mf40_partner_unresolved.is_empty(),
+        "{:?}",
+        out.stats.mf40_partner_unresolved
+    );
+}
+
+/// The manual numbers XLFS1 as MF=10 does, and MF=40 need not, so a partner
+/// in another MT is pinned only where both numberings put the same state at
+/// XLFS1. Here the (n,n') isomer's block is pointed at level 7 of (n,2n),
+/// which MF=40 alone gives (the renumbered Nb92_m1), and then at level 1 of
+/// (n,2n) with MF=40's ground renumbered 1 and its isomer 7, so that MF=40's
+/// level 1 is the ground and MF=10's the isomer. Either way the partner is
+/// null and listed.
+#[test]
+fn a_partner_level_the_two_numberings_disagree_on_is_unresolved() {
+    let to_mt16 = |tape: String, xlfs1: &str| {
+        edit(
+            tape,
+            " 1.000000+1 1.000000+0          0          4          0          1412540  4   26",
+            &format!(
+                " 1.000000+1 {xlfs1}          0         16          0          1412540  4   26"
+            ),
+        )
+    };
+    let isomer_row = |out: &yani_convert::branching::Extracted| {
+        out.covariance
+            .iter()
+            .find(|r| r.mt == 4 && r.lfs == 1)
+            .expect("the (n,n') isomer")
+            .clone()
+    };
+
+    let tape = text(NB93);
+    let tape = edit(
+        tape,
+        "-8.830870+6-8.966370+6      41092          1          0          1412540 16   10",
+        "-8.830870+6-8.966370+6      41092          7          0          1412540 16   10",
+    );
+    let tape = edit(
+        tape,
+        " 1.000000+1 1.000000+0          0         16          0          1412540 16   11",
+        " 1.000000+1 7.000000+0          0         16          0          1412540 16   11",
+    );
+    let out = extract(&[material(&to_mt16(tape, "7.000000+0"))], &nb_decay());
     assert_eq!(
-        out.stats.mf40_partner_level_mismatches,
+        out.stats.mf40_partner_unresolved,
         [
-            "Nb93 MT16: IZAP 41092 LFS 7 sub-subsection 0, partner MT16 level 7: \
-          MF=9 and MF=10 give IZAP 41092 no state at that LFS; read through the \
-          MF=40 state at 135.5 keV"
+            "Nb93 MT4: IZAP 41093 LFS 1 sub-subsection 0, partner MT16 level 7: \
+          MF=9 and MF=10 give IZAP 41092 no state at that LFS, MF=40 gives it one \
+          at 135.5 keV"
         ]
     );
+    let row = isomer_row(&out);
+    assert_eq!(row.target.as_deref(), Some("Nb93_m1"));
+    assert_eq!(row.target1, None);
+
+    let tape = text(NB93);
+    let tape = edit(
+        tape,
+        "-8.830870+6-8.830870+6      41092          0          0          1412540 16    2",
+        "-8.830870+6-8.830870+6      41092          1          0          1412540 16    2",
+    );
+    let tape = edit(
+        tape,
+        " 1.000000+1 0.000000+0          0         16          0          1412540 16    3",
+        " 1.000000+1 1.000000+0          0         16          0          1412540 16    3",
+    );
+    let tape = edit(
+        tape,
+        "-8.830870+6-8.966370+6      41092          1          0          1412540 16   10",
+        "-8.830870+6-8.966370+6      41092          7          0          1412540 16   10",
+    );
+    let tape = edit(
+        tape,
+        " 1.000000+1 1.000000+0          0         16          0          1412540 16   11",
+        " 1.000000+1 7.000000+0          0         16          0          1412540 16   11",
+    );
+    let out = extract(&[material(&to_mt16(tape, "1.000000+0"))], &nb_decay());
+    assert!(
+        out.stats.mf40_unmatched_states.is_empty(),
+        "{:?}",
+        out.stats.mf40_unmatched_states
+    );
+    assert_eq!(
+        out.stats.mf40_partner_unresolved,
+        [
+            "Nb93 MT4: IZAP 41093 LFS 1 sub-subsection 0, partner MT16 level 1: \
+          MF=9 or MF=10 gives IZAP 41092 that LFS at 135.5 keV, MF=40 at 0.0 keV"
+        ]
+    );
+    assert_eq!(isomer_row(&out).target1, None);
+    // The swapped states' own blocks still name themselves.
+    assert!(out
+        .covariance
+        .iter()
+        .filter(|r| r.mt == 16)
+        .all(|r| r.target.is_some() && r.target1 == r.target));
 }
 
 /// The excitation fallback places a state only when one level of the chain
@@ -575,7 +664,6 @@ fn an_mf40_state_near_several_mf10_levels_is_not_placed() {
     assert_eq!(row.target, None);
     assert_eq!(row.target1, None);
     assert!(row.energy.is_none() && row.values.is_none());
-    assert!(out.stats.mf40_partner_level_mismatches.is_empty());
 }
 
 /// The excitation fallback does not reach past `tol_ev`. Here the (n,2n)
@@ -761,11 +849,11 @@ fn states_with_no_chain_row_are_still_written() {
         .expect("the unmatched state");
     assert_eq!(moved.reaction.as_deref(), Some("(n,2n)"));
     assert!(moved.target.is_none() && moved.target1.is_none());
-    // The two MT 18 partners have no MF=40 section to be found in, and the
-    // moved state's own level 1 of MT 16 is Nb91 in MF=40 but Nb92 in MF=10,
-    // two products the tape does not choose between.
+    // The two MT 18 partners have no MF=40 section to be found in. The moved
+    // state's block with itself names it by its own label, so its null
+    // `target1` is its unmatched `target`, listed once as such.
     let unresolved = &out.stats.mf40_partner_unresolved;
-    assert_eq!(unresolved.len(), 3, "{unresolved:?}");
+    assert_eq!(unresolved.len(), 2, "{unresolved:?}");
     assert_eq!(
         unresolved
             .iter()
@@ -774,10 +862,6 @@ fn states_with_no_chain_row_are_still_written() {
         2,
         "{unresolved:?}"
     );
-    assert!(unresolved
-        .iter()
-        .any(|l| l.starts_with("Nb93 MT16: IZAP 41091 LFS 1")
-            && l.ends_with("several states sit at that level")));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

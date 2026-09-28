@@ -391,25 +391,23 @@ pub struct BranchingStats {
     /// Sections with no product state, product states with no sub-subsection
     /// and sub-subsections with no block, one line each with every tape value
     /// the part holds (the section's ZA, AWR and LIS, the state's QM, QI, IZAP
-    /// and LFS, or the sub-subsection's MAT1, MT1, XMF1 and XLFS1). They hold no covariance and have no row, so this, which the
-    /// conversion also writes to `branching/provenance.json`, is the one
-    /// place they are kept; none of the published libraries has one.
+    /// and LFS, or the sub-subsection's MAT1, MT1, XMF1 and XLFS1). They hold
+    /// no covariance and have no row, so this, which the conversion also
+    /// writes to `branching/provenance.json`, is the one place they are kept;
+    /// none of the published libraries has one.
     pub mf40_without_blocks: Vec<String>,
     /// Sub-subsections whose partner is an MF=10 partial of this evaluation
     /// that the tape does not pin to one state, one line each with the
     /// reason, and so written with a null `target1`: several states of MT1
     /// sit at level XLFS1 (two in MF=40, or one of another product in MF=9
-    /// or MF=10), since MF=40 gives the partner no IZAP; or MT1 has no
-    /// MF=40 section whose state at XLFS1 could say which level is meant.
+    /// or MF=10), since MF=40 gives the partner no IZAP; MT1 has no MF=40
+    /// section whose state at XLFS1 could say which level is meant; or, for
+    /// a block other than a state's with itself, MF=9 and MF=10 of MT1 give
+    /// that product no state at LFS XLFS1, or one at another excitation than
+    /// MF=40's. The manual numbers XLFS1 as MF=10 does and MF=40 need not
+    /// (ENDF/B-VIII.1 Pb204 MT 4, LFS 21 in MF=10 and 1 in MF=40), so there
+    /// the two readings of XLFS1 name different states, or one names none.
     pub mf40_partner_unresolved: Vec<String>,
-    /// Sub-subsections whose `target1` was set through MT1's MF=40 state at
-    /// LFS XLFS1 although MF=9 and MF=10 give that product no state at that
-    /// LFS, or give it one at another excitation, one line each. The manual
-    /// defines XLFS1 as the partner's final state, which for XMF1 10 is
-    /// MF=10's numbering, so where the two files number the level
-    /// differently (ENDF/B-VIII.1 Pb204 MT 4, LFS 21 in MF=10 and 1 in
-    /// MF=40) reading it in MF=40's is a choice this records.
-    pub mf40_partner_level_mismatches: Vec<String>,
 }
 
 /// The value of `t` at `e`, zero outside its tabulated range.
@@ -826,45 +824,34 @@ impl BranchingExtractor {
                     let target1 = if !mf10_here || partner_mt == 0 {
                         None
                     } else {
+                        let self_block = partner_mt == mt && ss.xlfs1 == sub.lfs as f64;
                         match partner_target(
-                            partner_mt,
-                            ss.xlfs1,
+                            (partner_mt, ss.xlfs1),
+                            self_block,
                             meta.za,
                             &mf40,
                             &matched,
                             &states_by_mt,
                             tol_ev,
                         ) {
-                            Ok((target1, level)) => {
-                                let why = match level {
-                                    _ if target1.is_none() => None,
-                                    Mf10Level::Agrees => None,
-                                    Mf10Level::Missing { zap, mf40_ev } => Some(format!(
-                                        "MF=9 and MF=10 give IZAP {zap} no state at that LFS; read through the MF=40 state at {:.1} keV",
-                                        mf40_ev / 1.0e3
-                                    )),
-                                    Mf10Level::Elsewhere { zap, mf10_ev, mf40_ev } => Some(format!(
-                                        "MF=9 or MF=10 gives IZAP {zap} that LFS at {:.1} keV, the MF=40 state read through is at {:.1} keV",
-                                        mf10_ev / 1.0e3,
-                                        mf40_ev / 1.0e3
-                                    )),
-                                };
-                                if let Some(why) = why {
-                                    stats.mf40_partner_level_mismatches.push(format!(
-                                        "{parent} MT{mt}: IZAP {} LFS {} sub-subsection {subsection_idx}, partner MT{partner_mt} level {}: {why}",
-                                        sub.izap, sub.lfs, ss.xlfs1
-                                    ));
-                                }
-                                target1
-                            }
+                            Ok(target1) => target1,
                             Err(why) => {
                                 let why = match why {
                                     UnresolvedPartner::Ambiguous => {
-                                        "several states sit at that level"
+                                        "several states sit at that level".to_string()
                                     }
                                     UnresolvedPartner::NoMf40Section => {
-                                        "that MT has no MF=40 section"
+                                        "that MT has no MF=40 section".to_string()
                                     }
+                                    UnresolvedPartner::NotInMf10 { zap, mf40_ev } => format!(
+                                        "MF=9 and MF=10 give IZAP {zap} no state at that LFS, MF=40 gives it one at {:.1} keV",
+                                        mf40_ev / 1.0e3
+                                    ),
+                                    UnresolvedPartner::OtherExcitation { zap, mf10_ev, mf40_ev } => format!(
+                                        "MF=9 or MF=10 gives IZAP {zap} that LFS at {:.1} keV, MF=40 at {:.1} keV",
+                                        mf10_ev / 1.0e3,
+                                        mf40_ev / 1.0e3
+                                    ),
                                 };
                                 stats.mf40_partner_unresolved.push(format!(
                                     "{parent} MT{mt}: IZAP {} LFS {} sub-subsection {subsection_idx}, partner MT{partner_mt} level {}: {why}",
@@ -958,9 +945,6 @@ impl BranchingExtractor {
         self.stats
             .mf40_partner_unresolved
             .extend(stats.mf40_partner_unresolved);
-        self.stats
-            .mf40_partner_level_mismatches
-            .extend(stats.mf40_partner_level_mismatches);
     }
 
     /// The rows, the covariance and the statistics, with duplicate target
@@ -1046,26 +1030,9 @@ enum UnplacedState {
     Ambiguous(usize),
 }
 
-/// How MF=9 and MF=10 of MT1 give the level XLFS1 that a partner was read
-/// through MF=40 at.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Mf10Level {
-    /// A state of the same product at that LFS, within `tol_ev` of the MF=40
-    /// state's excitation.
-    Agrees,
-    /// No state of product `zap` at that LFS.
-    Missing { zap: i64, mf40_ev: f64 },
-    /// A state of product `zap` at that LFS, at another excitation.
-    Elsewhere {
-        zap: i64,
-        mf10_ev: f64,
-        mf40_ev: f64,
-    },
-}
-
 /// Why a block's `target1` was left null although its partner is an MF=10
 /// partial of this evaluation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum UnresolvedPartner {
     /// Several states of `mt1` sit at level `xlfs1`, and MF=40 names the
     /// partner by MT1 and XLFS1 alone, with no IZAP.
@@ -1073,6 +1040,16 @@ enum UnresolvedPartner {
     /// `mt1` has no MF=40 section, so there is no MF=40 state at XLFS1 whose
     /// excitation could confirm which MF=9 or MF=10 level is meant.
     NoMf40Section,
+    /// MF=9 and MF=10 of `mt1` give product `zap` no state at LFS `xlfs1`,
+    /// which is where the manual's numbering of XLFS1 would put the partner.
+    NotInMf10 { zap: i64, mf40_ev: f64 },
+    /// MF=9 or MF=10 of `mt1` gives product `zap` a state at LFS `xlfs1`, at
+    /// another excitation than MF=40's state at that LFS.
+    OtherExcitation {
+        zap: i64,
+        mf10_ev: f64,
+        mf40_ev: f64,
+    },
 }
 
 /// The chain target of a block's partner state, level `xlfs1` of `partner_mt`
@@ -1081,24 +1058,27 @@ enum UnresolvedPartner {
 /// MF=40 names the partner by MT1 and XLFS1 alone, so it is one state only
 /// when one product of `partner_mt` sits at that level: a single state of
 /// `partner_mt`'s MF=40 section at LFS `xlfs1`, and no MF=9 or MF=10 state of
-/// another product at that LFS. The target is then that state's own match, as
-/// its row's `target` is, and `None` when that state matched nothing. It
-/// comes with how MF=9 and MF=10 give level `xlfs1` of that product, since
-/// the manual numbers XLFS1 as MF=10 does and the two files need not agree.
-/// The row's own IZAP is not taken for the partner's, even within one MT,
-/// since the tape does not say so. Nor is an MT1 without an MF=40 section read
-/// against MF=10's LFS: the two files can number a level differently
-/// (ENDF/B-VIII.1 Pb204 MT 4, LFS 21 in MF=10 and 1 in MF=40), and there is
-/// no MF=40 state whose excitation would show which level XLFS1 means.
+/// another product at that LFS. The manual numbers XLFS1 as MF=10 does, and
+/// MF=40 need not (ENDF/B-VIII.1 Pb204 MT 4, LFS 21 in MF=10 and 1 in
+/// MF=40), so that state is the partner only when MF=9 or MF=10 of
+/// `partner_mt` gives the same product a state at LFS `xlfs1` within `tol_ev`
+/// of its excitation: then both readings of XLFS1 name one state. Where they
+/// part, or MF=10 has no such level, which reading the evaluator meant is not
+/// on the tape. A state's block with itself (`self_block`, MT1 and XLFS1
+/// equal to its own MT and LFS) is the exception: it names the state by the
+/// label its own subsection carries, whatever MF=10 calls that level. The
+/// target is then that state's own match, as its row's `target` is, and
+/// `None` when that state matched nothing. The row's own IZAP is not taken
+/// for the partner's, even within one MT, since the tape does not say so.
 fn partner_target(
-    partner_mt: i32,
-    xlfs1: f64,
+    (partner_mt, xlfs1): (i32, f64),
+    self_block: bool,
     za: i64,
     mf40: &[(i32, &Mf40)],
     matched: &BTreeMap<i32, Vec<Mf40Match>>,
     states_by_mt: &BTreeMap<i32, BTreeMap<(i64, i64), ProductionState>>,
     tol_ev: f64,
-) -> Result<(Option<String>, Mf10Level), UnresolvedPartner> {
+) -> Result<Option<String>, UnresolvedPartner> {
     let Some((_, section)) = mf40.iter().find(|(m, _)| *m == partner_mt) else {
         return Err(UnresolvedPartner::NoMf40Section);
     };
@@ -1111,6 +1091,10 @@ fn partner_target(
     let [(other, found)] = at_level.as_slice() else {
         return Err(UnresolvedPartner::Ambiguous);
     };
+    let target = found.ok().map(|s| s.target.clone());
+    if self_block {
+        return Ok(target);
+    }
     let zap = mf40_zap(other, partner_mt, za);
     let states = states_by_mt.get(&partner_mt);
     let other_product = states.is_some_and(|states| {
@@ -1122,20 +1106,19 @@ fn partner_target(
         return Err(UnresolvedPartner::Ambiguous);
     }
     let mf40_ev = other.qm - other.qi;
-    let level = match states.and_then(|states| {
+    match states.and_then(|states| {
         states
             .iter()
             .find(|(&(state_zap, lfs), _)| state_zap == zap && lfs as f64 == xlfs1)
     }) {
-        None => Mf10Level::Missing { zap, mf40_ev },
-        Some((_, state)) if (state.excitation - mf40_ev).abs() <= tol_ev => Mf10Level::Agrees,
-        Some((_, state)) => Mf10Level::Elsewhere {
+        None => Err(UnresolvedPartner::NotInMf10 { zap, mf40_ev }),
+        Some((_, state)) if (state.excitation - mf40_ev).abs() <= tol_ev => Ok(target),
+        Some((_, state)) => Err(UnresolvedPartner::OtherExcitation {
             zap,
             mf10_ev: state.excitation,
             mf40_ev,
-        },
-    };
-    Ok((found.ok().map(|s| s.target.clone()), level))
+        }),
+    }
 }
 
 /// The product ZA of an MF=40 state, with MT 4's IZAP of 0 (JEFF-4.0 U235)
