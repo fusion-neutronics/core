@@ -1890,8 +1890,12 @@ fn first_order_contributors(
 
 /// Merge one spectrum's coverage into the run's.
 ///
-/// Counts add and sets union, but a rate fraction is kept at its SMALLEST over
-/// the spectra: a channel well covered under one spectrum and barely covered
+/// Merges the way [`Coverage::absorb`](crate::covariance_fold::Coverage::absorb)
+/// does. Sets union; the per-nuclide counts (`skipped_cross_material`,
+/// `skipped_other_file`) and `mirrored_disagree` take the larger, since a
+/// nuclide gives the same ones on every spectrum; `skipped_nc`,
+/// `unsupported_layouts` and `malformed` add, once per spectrum. A rate
+/// fraction is kept at its SMALLEST over the spectra: a channel well covered under one spectrum and barely covered
 /// under another is only as well covered as the worse of the two, and reporting
 /// the better one would overstate what the evaluation actually says.
 fn merge_coverage(

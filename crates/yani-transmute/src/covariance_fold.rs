@@ -148,6 +148,9 @@ pub struct Coverage {
     /// ways; folding both would count each covariance twice.
     pub mirrored_disagree: BTreeMap<(String, String, String), f64>,
     /// NC blocks (a covariance derived from other reactions), not consumed.
+    ///
+    /// This and the two block counters below add over a run's spectra, so a
+    /// run with several spectra counts a block once per spectrum.
     pub skipped_nc: usize,
     /// Blocks whose `lb` layout is not implemented, counted per `lb`.
     pub unsupported_layouts: BTreeMap<i64, usize>,

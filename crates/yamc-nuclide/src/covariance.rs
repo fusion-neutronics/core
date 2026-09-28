@@ -117,9 +117,10 @@ impl CovarianceBlock {
     ///
     /// Not consumed today: using it would mean sampling two nuclides' cross
     /// sections from one joint distribution, and the fold is per nuclide.
-    /// Counted and reported rather than silently dropped. A block from a file
-    /// without the evaluation's own MAT reads as this whenever `mat1 != 0`,
-    /// since nothing then says that `mat1` is this material.
+    /// Counted and reported rather than silently dropped. In a file without
+    /// the own MAT (`mat == 0`), every block with `mat1 != 0` counts as
+    /// another evaluation's, since nothing says that `mat1` names this
+    /// material.
     pub fn is_cross_material(&self) -> bool {
         self.mat1 != 0 && self.mat1 != self.mat
     }
