@@ -2208,9 +2208,12 @@ class TransmutationChain:
         a nuclide emitting gammas and x-rays has one line source for each.
         Each has its own normalisation in the data file, which this tuple does
         not expose, and the tuple does not say which radiation a source is,
-        so the gamma and x-ray sources cannot be told apart from Python. Lines
-        are listed as the evaluation writes them: an energy can appear in both
-        sources, and can repeat within one.
+        so the gamma and x-ray sources cannot be told apart from Python. In
+        data that keeps the spectra apart (``decay/sources.arrow`` with a
+        ``radiation`` column), lines are listed as the evaluation writes them:
+        an energy can appear in both sources, and can repeat within one. Older
+        data holds one merged line source per nuclide, sorted by energy with
+        coincident energies summed.
         ``Material.decay_photon_spectrum()`` sums the lines by energy.
         
         Returns:

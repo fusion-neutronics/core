@@ -366,9 +366,8 @@ impl DecaySource {
 /// stated", never as an exact value, because the libraries write 0.0 for a
 /// sigma they did not give. `normalization` is not a sigma: it is the value
 /// the intensities were scaled by, so a stated 0.0 there means the
-/// intensities are exactly zero as written. JENDL-5.0,
-/// for one, puts a reference line's sigma in the normalisation and writes
-/// 0.0 on the line.
+/// intensities are exactly zero as written. JENDL-5.0, for one, puts a
+/// reference line's sigma in the normalisation and writes 0.0 on the line.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DecaySourceUncertainty {
     /// The spectrum's normalisation: FD for lines, FC for a continuum. It
@@ -394,9 +393,13 @@ pub struct DecaySourceUncertainty {
 /// `values` pair one to one with `energies`, and `ls` is `None`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceCovariance {
+    /// The LB=5 symmetry flag LS; `None` on a continuum.
     pub ls: Option<i32>,
+    /// The LB flag, which says how `values` is laid out.
     pub lb: i32,
+    /// ER for the lines, Ek for a continuum [eV].
     pub energies: Vec<f64>,
+    /// The packed matrix for the lines, the Fk list for a continuum.
     pub values: Vec<f64>,
 }
 

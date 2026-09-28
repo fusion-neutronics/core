@@ -221,7 +221,7 @@ pub fn precompute_decay_photon_data(
                         }
                         // photon_per_decay = emission rate / λ (the chain
                         // stores rates, λ × yield per decay): the continuum
-                        // integrated, or the lines summed.
+                        // integrated.
                         let emission_rate = source.distribution.emission_rate().map_err(|why| {
                             format!("D1S: the decay photon continuum of {} {why}", path.emitter)
                         })?;
