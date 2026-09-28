@@ -181,6 +181,12 @@ fn the_shielded_partials_sum_to_the_shielded_rate() {
         "{:?}",
         coverage.partials_above_rate
     );
+    // The grid spans the flux range, so a shortfall would be checked too.
+    assert!(
+        coverage.partials_below_rate.is_empty(),
+        "{:?}",
+        coverage.partials_below_rate
+    );
 
     // What the fold did before: dilute partials, which sum to the dilute rate,
     // over the shielded rate. The variance is then v (R_dilute / R_shielded)^2,
@@ -284,6 +290,11 @@ fn the_evaluations_covariance_folds_consistently_under_shielding() {
         "{:?}",
         coverage.partials_above_rate
     );
+    assert!(
+        coverage.partials_below_rate.is_empty(),
+        "{:?}",
+        coverage.partials_below_rate
+    );
     for (key, share) in &coverage.rate_fraction_covered {
         assert!((0.0..=1.0).contains(share), "{key:?}: {share}");
     }
@@ -339,6 +350,14 @@ fn a_zero_covariance_gives_zero_spread_under_shielding() {
         "{:?}",
         info.partials_above_rate
     );
+    assert!(
+        info.partials_below_rate.is_empty(),
+        "{:?}",
+        info.partials_below_rate
+    );
+    // The shares are of the shielded rate the run drove, so the production
+    // total is the covered share there too: zero, for a zero covariance.
+    assert_eq!(info.rate_fraction_covered_total, Some(0.0));
     for product in ["Fe57", "Mn56"] {
         let nominal = results
             .get_nuclide_density(id, product, 1)
