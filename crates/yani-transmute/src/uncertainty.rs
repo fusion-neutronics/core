@@ -753,6 +753,23 @@ pub(crate) fn set_half_life(cn: &mut yani::ChainNuclide, half_life: f64) {
 mod tests {
     use super::*;
 
+    /// Every run states the decay photon sources it holds at nominal, lines
+    /// and continua both, so a reader does not take their silence for zero.
+    #[test]
+    fn the_report_names_the_photon_sources_held_at_nominal() {
+        let info = Info::from_fold(&Coverage::default(), &Clipping::default());
+        for source in [
+            "decay photon line intensity",
+            "decay photon continuum normalisation",
+        ] {
+            assert!(
+                info.not_perturbed.iter().any(|s| s == source),
+                "{source:?} missing from {:?}",
+                info.not_perturbed
+            );
+        }
+    }
+
     /// A new half-life rescales a continuum's density exactly as it rescales a
     /// line, so both keep their per-decay yield.
     #[test]
