@@ -1,7 +1,7 @@
 //! Fold MF=33 covariance against the flux to get the covariance of the
 //! collapsed reaction rates.
 //!
-//! # Why this needs no group structure
+//! # Why the covariance is never regridded
 //!
 //! A reaction rate is linear in the cross section, and MF=33 states a
 //! covariance that is constant on each cell of the evaluation's own energy
@@ -19,7 +19,15 @@
 //!
 //! Blocks are therefore never summed onto a union grid either. Each one folds
 //! on its own grid and the contributions add, because the sum over blocks is
-//! outside the contraction.
+//! outside the contraction. (An `lb = 4` block is written on the union of its
+//! own two tables, which is still that one block's grid.)
+//!
+//! The one term that depends on the flux groups is `lb = 8`. ENDF-102 states it
+//! as an absolute short-range variance whose effect on an average over `ΔEj`
+//! scales as `ΔEk/ΔEj`, so the rate's variance depends on how the flux varies
+//! inside each tape interval. The fold cuts the interval at the group
+//! boundaries, where the flux density is constant, which makes that term exact
+//! too; see [`Scale::ShortRange`].
 //!
 //! # What the rate actually is
 //!
@@ -430,6 +438,14 @@ fn fold_nuclide(
         if expanded.is_empty() {
             continue;
         }
+        // ENDF-102 defines `lb = 8` as a variance, so it belongs only on a
+        // self-covariance. Its weights are square roots with no sign or
+        // cross-section factor, and folding one between two reactions would
+        // add `Σ Fk·w²` to their covariance with nothing to justify it.
+        if expanded.scale == Scale::ShortRange && row_mt != col_mt {
+            coverage.malformed += 1;
+            continue;
+        }
 
         let row = partial_rates(flux, row_rx, &expanded.row_energies, expanded.scale);
         let col = partial_rates(flux, col_rx, &expanded.col_energies, expanded.scale);
@@ -444,6 +460,9 @@ fn fold_nuclide(
             absolute[j * n + i] += contribution;
         }
 
+        // Only a relative block's weights are partial rates, so only its
+        // grid's span is measured here. Absolute and short-range blocks fold
+        // into the covariance but do not add to the coverage fraction.
         if expanded.scale == Scale::Relative {
             let e = covered_rate.entry(row_mt).or_insert(0.0);
             *e = e.max(row.total().abs());
@@ -785,5 +804,71 @@ mod integration_range_tests {
         let w = partial_rates(&density, &reaction, &block.row_energies, block.scale);
         let got = contract(&block, &w, &w) / (BARN_TO_CM2 * BARN_TO_CM2);
         assert!((got - 6.25 * fk).abs() <= 1e-12, "{got}");
+    }
+
+    /// An `lb = 8` block between two reactions is refused rather than folded
+    /// with square-root weights, while the same block on a self-covariance
+    /// folds.
+    #[test]
+    fn a_short_range_block_between_two_reactions_is_malformed() {
+        use endf::mf::covariance::NiSubsection;
+
+        let boundaries = vec![0.0, 10.0];
+        let flux = vec![1.0];
+        let density = FluxDensity {
+            boundaries: &boundaries,
+            flux: &flux,
+        };
+        let capture = ramp(0.0, 10.0, 1.0, 1.0);
+        let mut proton = ramp(0.0, 10.0, 1.0, 1.0);
+        proton.mt_number = 103;
+        let reactions = BTreeMap::from([(102, &capture), (103, &proton)]);
+        let kinds = vec![("(n,gamma)".to_string(), 102), ("(n,p)".to_string(), 103)];
+        let full = BARN_TO_CM2 * density.integrate_xs(&capture, 0.0, 10.0);
+        let rates = BTreeMap::from([("(n,gamma)".to_string(), full), ("(n,p)".to_string(), full)]);
+        let block = |mt1: i32| CovarianceBlock {
+            mt: 102,
+            subsection_idx: 0,
+            block_idx: 0,
+            mat1: 0,
+            mt1,
+            xmf1: 0.0,
+            xlfs1: 0.0,
+            mtl: 0,
+            data: CovarianceData::Ni(NiSubsection {
+                lb: 8,
+                np: 2,
+                nt: 4,
+                ek: vec![0.0, 10.0],
+                fk: vec![0.01, 0.0],
+                ..NiSubsection::default()
+            }),
+        };
+
+        let mut coverage = Coverage::default();
+        let folded = fold_nuclide(
+            &density,
+            &[block(103)],
+            &reactions,
+            &kinds,
+            &rates,
+            "X1",
+            &mut coverage,
+        );
+        assert!(folded.is_none());
+        assert_eq!(coverage.malformed, 1);
+
+        let mut coverage = Coverage::default();
+        let folded = fold_nuclide(
+            &density,
+            &[block(102)],
+            &reactions,
+            &kinds,
+            &rates,
+            "X1",
+            &mut coverage,
+        );
+        assert!(folded.is_some());
+        assert_eq!(coverage.malformed, 0);
     }
 }
