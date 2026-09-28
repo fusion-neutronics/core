@@ -9,7 +9,7 @@
 
 use endf::chain::Chain;
 use endf::{Decay, Material};
-use yani::{DecaySourceDistribution, Interpolation};
+use yani::{Continuum, DecaySourceDistribution, Interpolation};
 
 const CF252: &[u8] = include_bytes!("../../endf/fixtures/dec-098_Cf_252.jeff40.endf.xz");
 
@@ -157,4 +157,39 @@ fn the_linear_linear_reading_closes_the_energy_balance() {
         "the histogram reading should not close it: {}",
         lines + histogram
     );
+}
+
+/// The share of the continuum below the dose tables, which a contact dose
+/// leaves out as it does a line there: 1 keV for the absorbed-air quantity and
+/// 10 keV for the effective dose. The tape's first interval ramps linearly from
+/// zero at 0 eV to 140 keV, so the share below a cut `c` is the triangle
+/// `c * density(c) / 2` over the whole integral: 3.3e-4 below 10 keV and 3.3e-6
+/// below 1 keV, measured here so the exclusion is shown to be small rather
+/// than assumed.
+#[test]
+fn the_part_below_the_dose_tables_is_small() {
+    let sources = photon_sources("below");
+    let DecaySourceDistribution::Tabular {
+        energies,
+        intensities,
+        interpolation,
+    } = sources
+        .iter()
+        .find(|d| matches!(d, DecaySourceDistribution::Tabular { .. }))
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        (energies[0], intensities[0], energies[1]),
+        (0.0, 0.0, 1.4e5)
+    );
+    let continuum = Continuum::new(energies, intensities, *interpolation).expect("readable");
+    let share = |cut: f64| 0.5 * cut * continuum.density(cut) / continuum.integral();
+    let (below_1kev, below_10kev) = (share(1.0e3), share(1.0e4));
+    assert!(
+        (below_10kev / 3.2734e-4 - 1.0).abs() < 1e-3,
+        "{below_10kev}"
+    );
+    assert!((below_1kev / 3.2734e-6 - 1.0).abs() < 1e-3, "{below_1kev}");
 }
