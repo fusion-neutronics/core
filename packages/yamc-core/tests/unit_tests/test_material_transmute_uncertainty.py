@@ -122,6 +122,34 @@ def test_asking_on_data_without_covariance_reports_it_rather_than_a_zero():
     assert sigma == 0.0
 
 
+def test_skipped_block_counters_are_per_nuclide_dicts():
+    """The skipped block counters are keyed by nuclide, not summed to one int.
+
+    ``skipped_cross_material`` and ``skipped_other_file`` map a nuclide to its
+    count, and ``mirrored_disagree`` maps ``"Nuclide (n,a) (n,b)"`` to a
+    relative difference. Their shape is checked on every run, and is empty
+    when the fixture carries no covariance.arrow.
+    """
+    iron = _iron()
+    results = iron.transmute(
+        schedule=_schedule(),
+        data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["cross_sections"]),
+    )
+    info = results.get_data_uncertainty_info(iron.id or 0)
+    for key in ("skipped_cross_material", "skipped_other_file", "mirrored_disagree"):
+        assert isinstance(info[key], dict), f"{key} is {type(info[key])}"
+        assert all(isinstance(k, str) for k in info[key]), info[key]
+    for nuclide, count in info["skipped_cross_material"].items():
+        assert isinstance(count, int) and count > 0, (nuclide, count)
+    for pair, difference in info["mirrored_disagree"].items():
+        assert len(pair.split(" ")) == 3, pair
+        assert difference > 0.0, (pair, difference)
+    if "Fe56" not in info["perturbed"]:
+        assert info["skipped_cross_material"] == {}
+        assert info["skipped_other_file"] == {}
+        assert info["mirrored_disagree"] == {}
+
+
 def test_the_report_names_what_is_never_perturbed():
     """The sources this does not propagate are stated, not left to be inferred."""
     iron = _iron()

@@ -638,7 +638,8 @@ impl PyTransmutationResults {
     ///   range cannot be checked from below, since rate from outside it
     ///   rightly leaves its partials short.
     /// - ``skipped_nc``, ``unsupported_layouts``: covariance blocks that were
-    ///   present but not consumed.
+    ///   present but not consumed, counted once per spectrum, so a run over
+    ///   several spectra counts the same block once for each.
     /// - ``skipped_cross_material``: per nuclide, blocks on a channel the
     ///   chain drives that correlate it with another evaluation, not
     ///   consumed. A block naming the nuclide's own MAT is its own evaluation
