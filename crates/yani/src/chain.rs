@@ -79,10 +79,12 @@ pub enum BranchQuantity {
 /// Worth stating plainly, because the name says "branch ratios" and the
 /// setting sits beside `cross_section_data` as though the two were disjoint.
 /// A [`BranchQuantity::CrossSection`] curve is a partial cross section in
-/// barns, not a dimensionless fraction, and for `(n,n')` it is the *only*
-/// thing the metastable production rate is computed from: `build_fold_refine`
-/// folds it directly and grafts the result into the rates, without consulting
-/// the parent's own evaluation at all.
+/// barns, not a dimensionless fraction. For `(n,n')`, and for a list that
+/// gives a reaction's isomers alone, the partial is an absolute production:
+/// yani-transmute's branching rule folds it directly, and for `(n,n')` it is
+/// the *only* thing the metastable production rate is computed from. Only a
+/// complete list, its ground state listed too, is read as shares of the
+/// transport total alone.
 ///
 /// Two consequences follow, and neither is obvious from the setting names.
 ///
@@ -111,8 +113,8 @@ pub struct BranchCurve {
     pub values: Vec<f64>,
     /// The evaluated production states summed into this curve, in the order
     /// they were summed. Empty for a subsection written before these facts
-    /// were stored. Shared, since nothing in the solve reads them and a
-    /// session copies its branch table on every run.
+    /// were stored, which the branching rule refuses. Shared, since a session
+    /// copies its branch table on every run.
     pub states: Arc<[BranchState]>,
     /// The parent evaluation's MF=1 account of what it was normalised to
     /// (TENDL's "Normalization to other libraries" block), verbatim.
@@ -122,9 +124,8 @@ pub struct BranchCurve {
 /// What the evaluation states about one production state behind a
 /// [`BranchCurve`], as the converter recorded it.
 ///
-/// Facts only, carried for whoever decides what a list means: nothing in the
-/// fold or the matrix reads them, so a curve's rates are the same with or
-/// without them.
+/// Facts only: the branching rule in yani-transmute reads `list_complete` to
+/// decide what the list's values mean, and reports the rest.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BranchState {
     /// The MT the state was listed under.

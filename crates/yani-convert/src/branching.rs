@@ -707,6 +707,12 @@ impl BranchingExtractor {
         let mut emitted_any = false;
 
         for (mt, states) in &production {
+            // TODO(#140): MT=5 names no chain reaction, so its MF=10 partials
+            // are passed over here, as are the MF=6 residual yields (with
+            // their LIP isomer flag) that `radionuclide_production` does not
+            // read. Until they are carried as an (n,X) reaction, the solve
+            // measures MT=5's share of each parent's removal and reports it
+            // (`measure_unmodelled_mt5`).
             let Some(rtype) = mt2type.get(&(*mt as i64)) else {
                 continue;
             };

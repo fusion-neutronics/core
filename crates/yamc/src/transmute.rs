@@ -237,7 +237,7 @@ impl Model {
                     &chain,
                     &branch,
                     &HashMap::new(),
-                ))
+                )?)
             };
             self.run_internal::<NoOpTracker>(settings, None, Some(Arc::clone(&scout)), false)?;
             Some(scout)
@@ -509,7 +509,7 @@ impl Model {
                 &chain,
                 &branch,
                 &carried,
-            );
+            )?;
             // The per-history covariance the statistical source samples from.
             // Off otherwise, so the default run allocates nothing for it.
             Arc::new(if want_statistics {
@@ -620,6 +620,8 @@ impl Model {
                             fy_weights: dep_tallies.get_fission_yield_weights(mat_id),
                             spectrum,
                             statistics,
+                            branch: Arc::clone(&branch),
+                            diagnostics: dep_tallies.get_branching_diagnostics(mat_id, volume, 1.0),
                         },
                     );
                 }
@@ -755,32 +757,49 @@ impl Model {
                 HashMap::new()
             };
 
-            // Isomeric-branching overlay: every chain parent gets exact
-            // continuous-energy splits (issue #218). MF=10 partials are folded
-            // from the tally's union-grid flux moments (covering products that
-            // build up during the step too), MF=9 yields are scored directly
-            // at the collision energies, as is an isomer-only partial on a
-            // material nuclide above its last breakpoint, where it follows the
-            // transport total at the share it ends on, and the (n,n')
-            // metastable production rates are injected from the same folds.
-            // When no branching subsection is configured the overlay is empty
-            // and the physics is identical to before.
+            // Isomeric-branching overlay: every list on a material nuclide is
+            // scored at the collision energies as `yani_transmute::
+            // branching_rule` defines it (issue #218), and the (n,n') partials
+            // of every other chain parent are folded from the tally's
+            // union-grid flux moments (covering products that build up during
+            // the step too), their rates injected. When no branching
+            // subsection is configured the overlay is empty and the physics is
+            // identical to before. MT=5, whose products are not modelled, is
+            // measured and reported either way.
             let mut folded_chains: HashMap<u32, Arc<HashMap<String, ChainNuclide>>> =
                 HashMap::new();
-            if source_rate > 0.0 && !branch.is_empty() {
+            let mut step_reports: HashMap<u32, Arc<yani_transmute::BranchingReport>> =
+                HashMap::new();
+            if source_rate > 0.0 {
                 for (&mat_id, cell_indices) in &transmutable_cells {
                     let slot = self.geometry.cells()[cell_indices[0]]
                         .material_idx
                         .expect("transmutable cell must have a material");
                     let cell_material = self.geometry.materials()[slot as usize].as_ref();
                     let volume = cell_material.volume.unwrap_or(1.0);
-                    let partials = dep_tallies.get_partial_rates(mat_id, volume, source_rate);
-                    if partials.is_empty() {
-                        continue;
-                    }
+                    let diagnostics =
+                        dep_tallies.get_branching_diagnostics(mat_id, volume, source_rate);
+                    let partials = if branch.is_empty() {
+                        HashMap::new()
+                    } else {
+                        dep_tallies.get_partial_rates(mat_id, volume, source_rate)
+                    };
                     let mat_rates = rates.entry(mat_id).or_default();
-                    let folded = apply_coupled_branching(&chain, &partials, mat_rates);
-                    folded_chains.insert(mat_id, folded);
+                    let named = |e: String| -> Box<dyn std::error::Error> {
+                        format!("material {mat_id}, step {}: {e}", step + 1).into()
+                    };
+                    let (folded, report) = apply_coupled_branching(
+                        &chain,
+                        &branch,
+                        &partials,
+                        mat_rates,
+                        Some(&diagnostics),
+                    )
+                    .map_err(named)?;
+                    if !partials.is_empty() {
+                        folded_chains.insert(mat_id, folded);
+                    }
+                    step_reports.insert(mat_id, Arc::new(report));
                 }
             }
 
@@ -853,6 +872,11 @@ impl Model {
                     .map(|mat_rates| yani::per_edge_rates(edge_chain, mat_rates))
                     .unwrap_or_default();
                 results.add_step_rates(mat_id, edges);
+                results
+                    .branching_report
+                    .entry(mat_id)
+                    .or_default()
+                    .push(step_reports.get(&mat_id).cloned().unwrap_or_default());
 
                 // In independent mode, skip transport material updates (geometry is frozen)
                 if !is_independent {
@@ -1228,6 +1252,7 @@ mod tests {
                     &yani::BranchTable::new(),
                     &HashMap::new(),
                 )
+                .expect("no branching to read")
                 .with_history_statistics(),
             );
             let settings = crate::model::TransportSettings {

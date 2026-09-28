@@ -16,10 +16,11 @@
 //! ```
 //!
 //! - `s0_c`, the track length in base-grid bin `c`, so any rate folded from
-//!   the spectrum (the MF=10 partials, or a nuclide the tally does not score)
-//!   gets its covariance as `a^T Sigma a` for its fold weights `a`;
-//! - `y_k`, each yield channel scored directly: the MF=9 yields, then the
-//!   parts of isomer-only MF=10 partials above their last breakpoint;
+//!   the spectrum (the `(n,n')` partials of parents the tally does not score,
+//!   or a nuclide it does not carry) gets its covariance as `a^T Sigma a` for
+//!   its fold weights `a`;
+//! - `y_k`, each state of a branching list scored directly at the collision
+//!   energy, on one of the material's own nuclides;
 //! - `r_j`, each `sum(sigma * TL)` the tally scores for a nuclide and MT.
 //!
 //! The scored rates are in the vector themselves rather than folded from the
@@ -28,7 +29,7 @@
 //! the resonance, so weighting every track in the bin by one averaged cross
 //! section misstates how the rate fluctuates. For Fe56 capture it overstated
 //! the variance about threefold against independent runs, where the smooth
-//! MF=10 curves fold to within a fraction of a percent. Scored directly, the
+//! partial curves fold to within a fraction of a percent. Scored directly, the
 //! rates' covariance is exact, resonances and all.
 //!
 //! The spectrum is taken on the fixed base spectrum grid, not on the full
@@ -471,10 +472,8 @@ pub struct HistoryCovariance {
     /// Base-grid edges [eV]. Bin `c` is `[grid[c], grid[c+1])`; the last bin
     /// runs to infinity.
     pub grid: Vec<f64>,
-    /// The directly scored yield channels, in order: the MF=9 yields, then
-    /// the parts of isomer-only MF=10 partials above their last breakpoint,
-    /// each labelled as its partial is. Such a partial's rate is its fold
-    /// from the spectrum up to that breakpoint plus its entry here.
+    /// The directly scored yield channels, in order: one per producing state
+    /// of each branching list scored on one of the material's own nuclides.
     pub yield_channels: Vec<YieldChannelLabel>,
     /// The scored rates, `(nuclide, MT)`, in order, including pairs that
     /// scored nothing.
