@@ -424,7 +424,9 @@ impl Bound<'_, '_> {
         let (mut sum, mut negative) = (0.0, 0.0);
         for (k, c) in rule.curves.iter().enumerate() {
             let mut v = if rule.yields && e < c.energy[0] {
-                point.extrapolated |= live;
+                // A yield starting at zero starts at its threshold, and
+                // holding the zero below it says nothing the tape does not.
+                point.extrapolated |= live && c.values[0] != 0.0;
                 c.values[0]
             } else {
                 curve_interp(&c.energy, &c.values, e)
@@ -841,6 +843,33 @@ mod tests {
         assert!((p.clipped - 0.2 * 2.0).abs() < 1e-15, "{}", p.clipped);
         assert_eq!(p.factor, 2.0);
         assert!(!p.extrapolated);
+    }
+
+    /// A yield that starts at zero starts at its threshold: holding that zero
+    /// below it is not an extrapolation, where holding a non-zero first value
+    /// is.
+    #[test]
+    fn a_yield_threshold_is_not_an_extrapolation() {
+        let curves = [
+            curve(
+                "X",
+                BranchQuantity::Yield,
+                &[1.0e-5, 10.0],
+                &[1.0, 1.0],
+                true,
+            ),
+            curve(
+                "X_m1",
+                BranchQuantity::Yield,
+                &[2.0, 10.0],
+                &[0.0, 0.5],
+                true,
+            ),
+        ];
+        let (_, p) = point(&curves, "(n,gamma)", 1.0, 3.0);
+        assert!(!p.extrapolated);
+        let (_, p) = point(&curves, "(n,gamma)", 1.0e-6, 3.0);
+        assert!(p.extrapolated);
     }
 
     /// A complete list's split is held from the nearest node where its
