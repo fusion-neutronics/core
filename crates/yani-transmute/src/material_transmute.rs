@@ -778,8 +778,8 @@ fn solve_case(
 struct ReplicaOutcome {
     /// This replica's inventory at each schedule step.
     densities: Vec<HashMap<String, f64>>,
-    /// Rates the sampler had to truncate, for this replica alone.
-    truncations: crate::covariance_sample::Truncations,
+    /// Cross-section rate draws this replica made.
+    rates_sampled: usize,
     /// The two flux counters a replica actually produces. NOT the whole
     /// `FluxCoverage`: `Info::add_flux_coverage` assigns the spectrum counts,
     /// which are established before the loop, so folding a replica's zeros over
@@ -1372,6 +1372,45 @@ fn run_replicas(
     if !want_decay_energy {
         info.not_perturbed.insert(0, "decay energy".to_string());
     }
+    if !cross_sections {
+        info.not_perturbed
+            .insert(0, "activation cross section (MF=33)".to_string());
+    }
+    // On the spectrum path a spectrum without a per-bin sigma, or any spectrum
+    // with the source off, is used as given. When only some are, the entry
+    // says so, so it never reads as held for a flux that was partly sampled.
+    if !transport {
+        let held = per_group.iter().filter(|g| g.is_none()).count();
+        if held > 0 && held == per_group.len() {
+            info.not_perturbed.insert(0, "flux spectrum".to_string());
+        } else if held > 0 {
+            info.not_perturbed.insert(
+                0,
+                "flux spectrum (spectra without a sigma only)".to_string(),
+            );
+        }
+    }
+    // With the statistical source off, or nothing tallied to draw, the tallied
+    // rates are used as they came out of the one transport.
+    if transport && statistical.is_none() {
+        info.not_perturbed
+            .insert(0, "tallied-rate statistics".to_string());
+    }
+    // The shielded flux shape is built once from the nominal cross sections
+    // and every replica reuses it, so a perturbed capture never deepens its
+    // own flux dip.
+    if shielding.is_some() {
+        info.not_perturbed
+            .push("self-shielding correction".to_string());
+    }
+    // One transport, no transport per replica: the flux the tally saw is the
+    // flux every replica is solved in, whatever its cross sections were. The
+    // tallied values may still be drawn statistically; what is held is how
+    // the flux would answer a perturbed cross section.
+    if transport {
+        info.not_perturbed
+            .push("flux response to perturbed cross sections (one transport)".to_string());
+    }
     info.decay_energies_perturbed = decay_energy_perturbed.clone();
     info.no_decay_energy_uncertainty = no_decay_energy_sigma;
     if let Some(h) = &half_life {
@@ -1442,7 +1481,7 @@ fn run_replicas(
     // them. Only the two counters a replica actually produces come back.
     let one_replica = |replica: u64| -> Result<ReplicaOutcome, String> {
         let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
-        let mut truncations = crate::covariance_sample::Truncations::default();
+        let mut rates_sampled = 0usize;
         let mut half_lives_floored = 0usize;
         // A statistical draw of the whole tallied rate vector, the partials
         // re-folded into the branching the way the nominal was, so an
@@ -1497,9 +1536,8 @@ fn run_replicas(
                 }
                 None => rates.clone(),
             };
-            let (rates, t) = samplers[idx].perturb(&rates, request.seed, replica);
-            truncations.floored += t.floored;
-            truncations.sampled += t.sampled;
+            let (rates, n) = samplers[idx].perturb(&rates, request.seed, replica);
+            rates_sampled += n;
             let folded_chain = match &half_life {
                 // The pruned nominal chain, unless this replica drew its own
                 // branching, which then carries the half-lives instead.
@@ -1525,7 +1563,7 @@ fn run_replicas(
             .map_err(|e| e.to_string())?;
         Ok(ReplicaOutcome {
             densities: densities_of(&materials),
-            truncations,
+            rates_sampled,
             flux_bins_sampled: flux_coverage.bins_sampled,
             flux_bins_floored: flux_coverage.bins_floored,
             half_lives: sampled_half_lives,
@@ -1556,7 +1594,7 @@ fn run_replicas(
 
         for outcome in outcomes {
             let outcome = outcome?;
-            info.add_truncations(&outcome.truncations);
+            info.rates_sampled += outcome.rates_sampled;
             flux_coverage.bins_sampled += outcome.flux_bins_sampled;
             flux_coverage.bins_floored += outcome.flux_bins_floored;
             info.half_lives_sampled += outcome.half_lives.len();

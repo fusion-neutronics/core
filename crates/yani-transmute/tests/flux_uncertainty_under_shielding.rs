@@ -268,3 +268,27 @@ fn an_unperturbed_shielded_replica_is_the_nominal_run() {
         );
     }
 }
+
+/// A shielded run says its shielding was held at nominal; a dilute one has no
+/// shielding to hold and must not claim it.
+#[test]
+fn a_shielded_run_reports_its_shielding_held_at_nominal() {
+    let Some(data) = yamc_test_cache::nuclide("Fe56") else {
+        eprintln!("skipping: Fe56 fixture missing");
+        return;
+    };
+    let shielding = Shielding::new(CHORD_CM).expect("a positive chord");
+    let id = iron(&data).material_id.unwrap_or(0);
+    let held = |results: &TransmutationResults| {
+        results
+            .uncertainty_info
+            .get(&id)
+            .expect("info is reported")
+            .not_perturbed
+            .iter()
+            .any(|s| s == "self-shielding correction")
+    };
+
+    assert!(held(&run(&data, Some(&shielding), true)));
+    assert!(!held(&run(&data, None, true)));
+}
