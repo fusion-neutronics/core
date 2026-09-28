@@ -654,10 +654,10 @@ impl PyTransmutationResults {
     ///   or does not match its coefficients, one whose own energy range is
     ///   empty, one naming a reaction with no cross section, and one met
     ///   only circularly.
-    /// - ``skipped_cross_material``: per nuclide, blocks on a channel the
-    ///   chain drives that correlate it with another evaluation, not
-    ///   consumed. A block naming the nuclide's own MAT is its own evaluation
-    ///   and is folded. ``skipped_other_file``: the same for blocks whose
+    /// - ``skipped_cross_material``: per nuclide, blocks on a reaction the
+    ///   fold reaches (a channel, or one a channel is derived from) that
+    ///   correlate it with another evaluation, not consumed. A block naming
+    ///   the nuclide's own MAT is its own evaluation and is folded. ``skipped_other_file``: the same for blocks whose
     ///   partner is not a cross section.
     /// - ``mirrored_disagree``: keyed ``"Nuclide (n,a) (n,b)"``, where a pair
     ///   stored in both orientations has copies that are not each other's

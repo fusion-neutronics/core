@@ -126,9 +126,9 @@ def test_skipped_block_counters_are_per_nuclide_dicts():
     """The skipped block counters are keyed by nuclide, not summed to one int.
 
     ``skipped_cross_material``, ``skipped_other_file`` and ``skipped_nc`` map
-    a nuclide to its count, and ``mirrored_disagree`` maps ``"Nuclide (n,a) (n,b)"`` to a
-    relative difference. Their shape is checked on every run, and is empty
-    when the fixture carries no covariance.arrow.
+    a nuclide to its count, and ``mirrored_disagree`` maps
+    ``"Nuclide (n,a) (n,b)"`` to a relative difference. Their shape is checked
+    on every run, and is empty when the fixture carries no covariance.arrow.
     """
     iron = _iron()
     results = iron.transmute(

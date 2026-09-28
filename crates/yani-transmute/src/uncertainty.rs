@@ -203,13 +203,15 @@ pub struct Info {
     pub perturbed: BTreeSet<String>,
     /// Nuclides with rates but no usable covariance, so no stated uncertainty.
     pub no_covariance_data: BTreeSet<String>,
-    /// Per nuclide, blocks correlating one of its channels with a reaction of
+    /// Per nuclide, blocks correlating one of its reactions with a reaction of
     /// another evaluation, not consumed. A `mat1` naming the nuclide's own MAT
-    /// is its own evaluation and is folded, and a block on a reaction the
-    /// chain does not drive is not counted.
+    /// is its own evaluation and is folded, and a block is counted only on a
+    /// reaction the fold reaches (a channel, or one a channel is derived
+    /// from).
     pub skipped_cross_material: BTreeMap<String, usize>,
-    /// Per nuclide, blocks correlating one of its channels with a quantity
+    /// Per nuclide, blocks correlating one of its reactions with a quantity
     /// that is not a cross section (`xmf1` other than 0 or 3), not consumed.
+    /// Counted like `skipped_cross_material`.
     pub skipped_other_file: BTreeMap<String, usize>,
     /// Per (nuclide, kind, kind), where a pair stored in both orientations
     /// has copies that are not each other's transpose, the largest difference
