@@ -296,6 +296,7 @@ impl Info {
                 "cross-material covariance (MAT1 != 0)",
                 "decay photon line intensity",
                 "decay photon continuum normalisation",
+                "decay photon line energy",
             ]
             .iter()
             .map(|s| s.to_string())
@@ -761,6 +762,7 @@ mod tests {
         for source in [
             "decay photon line intensity",
             "decay photon continuum normalisation",
+            "decay photon line energy",
         ] {
             assert!(
                 info.not_perturbed.iter().any(|s| s == source),
