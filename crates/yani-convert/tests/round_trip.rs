@@ -840,9 +840,25 @@ fn fission_yield_evaluations_are_written_verbatim() {
         .entry("U235".to_string())
         .or_default()
         .insert(18, 1.9e8);
-    let chain = Chain::from_endf(&decay, &fpy, &q_values, &endf::chain::DEFAULT_REACTIONS)
+    let mut chain = Chain::from_endf(&decay, &fpy, &q_values, &endf::chain::DEFAULT_REACTIONS)
         .expect("chain builds");
-    let tape = endf::FissionProductYields::from_material(&fpy[0]).expect("yields parse");
+    let mut tape = endf::FissionProductYields::from_material(&fpy[0]).expect("yields parse");
+
+    // Real tapes state DY = 0.0 for many products (about one in eight on
+    // ENDF/B-VIII.1) and the fixture has none, so one is pinned here. It must
+    // be written as 0.0, not as null: the file keeps what the tape says and a
+    // reader decides what 0.0 means.
+    let zeroed = tape.independent[0][0].name.clone();
+    tape.independent[0][0].yield_.1 = 0.0;
+    chain
+        .nuclides
+        .iter_mut()
+        .find(|n| n.name == "U235")
+        .and_then(|n| n.yield_evaluation.as_mut())
+        .expect("U235 has an evaluation")
+        .independent[0][0]
+        .yield_
+        .1 = 0.0;
 
     let dir = std::env::temp_dir().join(format!("yani-convert-evaluated-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -915,13 +931,19 @@ fn fission_yield_evaluations_are_written_verbatim() {
             for (j, p) in set.iter().enumerate() {
                 assert_eq!(products.value(j), p.name);
                 assert_eq!(yields.value(j), p.yield_.0, "{label} {} Y", p.name);
-                assert!(!sigmas.is_null(j));
+                assert!(!sigmas.is_null(j), "{label} {} DY written as null", p.name);
                 assert_eq!(sigmas.value(j), p.yield_.1, "{label} {} DY", p.name);
             }
             row += 1;
         }
     }
     assert_eq!(row, batch.num_rows(), "rows beyond the tape's");
+    let first = lists[2].value(0);
+    let first = first.as_any().downcast_ref::<Float64Array>().unwrap();
+    assert!(
+        !first.is_null(0) && first.value(0) == 0.0,
+        "{zeroed}: the tape's 0.0 DY was not written as 0.0"
+    );
 
     // The nominal file still holds the derived yields and nothing else.
     let nominal = read_batch("fission_yields.arrow");
@@ -960,6 +982,24 @@ fn fission_yield_evaluations_are_written_verbatim() {
             assert_eq!(evaluated.uncertainties, sigmas);
         }
     }
+    let independent = set.yields[0].independent.as_ref().unwrap();
+    assert_eq!(independent.products[0], zeroed);
+    assert_eq!(
+        independent.uncertainties[0],
+        Some(0.0),
+        "{zeroed}: yani read the tape's 0.0 DY as something else"
+    );
+
+    // Converting a chain with no evaluations into the same directory removes
+    // the file rather than leaving it to attach to yields it was not read with.
+    for n in &mut chain.nuclides {
+        n.yield_evaluation = None;
+    }
+    yani_convert::write_fission_yields(&chain, &dir.join("fission_yields")).unwrap();
+    assert!(
+        !dir.join("fission_yields/evaluated_yields.arrow").exists(),
+        "a stale evaluated_yields.arrow was left behind"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

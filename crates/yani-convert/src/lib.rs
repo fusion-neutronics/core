@@ -406,17 +406,21 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
             list_of(&yields),
         ],
     )?;
-    if let Some(columns) = evaluated {
-        write_section(
+    // Both optional files are written only when there is something to say,
+    // matching the Python converter. When there is not, one left by an earlier
+    // run into the same directory is removed: a reader loads whatever is
+    // present and would attach it to yields it was not derived from.
+    match evaluated {
+        Some(columns) => write_section(
             &dir.join("evaluated_yields.arrow"),
             "fission_yields/evaluated_yields.arrow",
             columns,
-        )?;
+        )?,
+        None => remove_stale(&dir.join("evaluated_yields.arrow"))?,
     }
-
-    // Written only when there is something to say, matching the Python
-    // converter: a library with no borrowed yields leaves no aliases file.
-    if !alias_nuc.is_empty() {
+    if alias_nuc.is_empty() {
+        remove_stale(&dir.join("aliases.arrow"))?;
+    } else {
         write_section(
             &dir.join("aliases.arrow"),
             "fission_yields/aliases.arrow",
@@ -424,6 +428,17 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
         )?;
     }
     Ok(())
+}
+
+/// Remove an optional file this run has nothing to write into, if an earlier
+/// run left one.
+fn remove_stale(path: &Path) -> Result<(), Box<dyn Error>> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("removing stale {}: {e}", path.display()).into())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The columns of `fission_yields/evaluated_yields.arrow`: every yield
@@ -473,8 +488,14 @@ fn evaluated_yields_columns(chain: &Chain) -> Result<Option<Vec<ArrayRef>>, Box<
                 if !nominal.contains(e) {
                     return Err(format!(
                         "{}: {label} yields at {e} eV have no independent yields at \
-                         that energy for the chain to be built from",
-                        n.name
+                         that energy for the chain to be built from. The fission \
+                         yield tape for {} gives MT={} at an energy the chain has no \
+                         MT=454 yields for; leave that tape out of the fission yield \
+                         inputs, or extend evaluated_yields.arrow so rows need not sit \
+                         on a nominal one",
+                        n.name,
+                        n.name,
+                        if label == "independent" { 454 } else { 459 }
                     )
                     .into());
                 }
