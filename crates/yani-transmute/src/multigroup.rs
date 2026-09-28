@@ -996,11 +996,12 @@ impl<'a> CollapseSetup<'a> {
 /// The per-nuclide flux shapes a shielded collapse weights its group averages
 /// with, for a consumer that has to integrate against the same flux.
 ///
-/// Built from the same [`CollapseSetup`] and [`Collapse::shape_for`] the
-/// collapse uses, so a shape handed out here is the one the rate came from
-/// rather than a second solve that could disagree with it. The covariance fold
-/// is the consumer: its partial rates have to sum to the shielded rate it
-/// divides them by.
+/// Recomputed with the collapse's own [`CollapseSetup`] and
+/// [`Collapse::shape_for`], so a shape handed out here is the same shape the
+/// rate came from, not a separate model of it. The solve runs again, on the
+/// same inputs in the same order (the mixture total is summed in name order),
+/// so it gives the same bits. The covariance fold is the consumer: its partial
+/// rates have to sum to the shielded rate it divides them by.
 pub(crate) struct CollapseShapes<'a> {
     material: &'a Material,
     multigroup_flux: &'a [f64],
