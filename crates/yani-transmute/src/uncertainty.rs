@@ -805,6 +805,7 @@ mod tests {
             "flux response to perturbed cross sections (one transport)",
             "tallied-rate statistics",
             "flux spectrum",
+            "flux spectrum (spectra without a sigma only)",
             "activation cross section (MF=33)",
             "half-life",
             "decay energy",
