@@ -96,13 +96,6 @@ CHAIN_SECTIONS = {
         ("aliases.arrow", False),
     ],
 }
-# The isomeric-branching subsection, fetched on its own into the entry the
-# runtime cache uses for it (`<library>-transmutation-branching.arrow`), not into
-# the chain fixture: `TransmutationChain` grafts a `branching/` it finds beside
-# the other three onto the chain, and every suite reading the fixture expects
-# the base chain.
-BRANCHING_SECTIONS = [("provenance.json", True), ("branching.arrow", True)]
-BRANCHING_FIXTURE = "transmutation-branching"
 
 NUCLIDES = [
     "Al27", "B10", "Be9", "C12", "Co58", "Cr52", "Fe54", "Fe56", "Fe57",
@@ -154,12 +147,12 @@ NUCLIDES = [
     # of this list put together, and nothing needs them that Th232 + U240 does
     # not now cover.
     "Th232",
-    # ENDF/B-VIII.1 lists only the isomer for In115 (n,gamma) and (n,2n), the
-    # ground state being the remainder, and
+    # ENDF/B-VIII.1 lists only the isomer for In115 (n,gamma) and (n,2n) and
+    # for Mo92 (n,p), the ground state being the remainder, and
     # crates/yani-transmute/tests/isomer_only_branching.rs checks the split
-    # against the library itself, with the branching subsection fetched below.
-    # About 17 MB.
-    "In115",
+    # against the library itself, with the branching rows committed beside it.
+    # About 17 MB and 3 MB.
+    "In115", "Mo92",
 ]
 ELEMENTS = ["Be", "Fe", "Li"]
 CHAIN_FIXTURE = "transmutation-endf-b8.1-sfr"
@@ -387,14 +380,13 @@ def main() -> int:
             name for name, _, _ in plan
             if not (cache / f"{LIBRARY}-{name}.arrow").is_dir()
         ]
-        for fixture in (CHAIN_FIXTURE, BRANCHING_FIXTURE):
-            if not (cache / f"{LIBRARY}-{fixture}.arrow").is_dir():
-                missing.append(fixture)
+        if not (cache / f"{LIBRARY}-{CHAIN_FIXTURE}.arrow").is_dir():
+            missing.append(CHAIN_FIXTURE)
         stale = [
             name for name, base_url, sections in plan
             if restamped(base_url, cache / f"{LIBRARY}-{name}.arrow", sections[0][0])
         ]
-        print(f"{len(plan) + 2 - len(missing)}/{len(plan) + 2} fixtures cached in {cache}")
+        print(f"{len(plan) + 1 - len(missing)}/{len(plan) + 1} fixtures cached in {cache}")
         if missing:
             print("missing: " + ", ".join(missing))
         if stale:
@@ -415,15 +407,8 @@ def main() -> int:
     downloaded += fetch_chain(chain_dest, args.force)
     link(FIXTURE_DIR / f"{CHAIN_FIXTURE}.arrow", chain_dest)
 
-    downloaded += fetch_sections(
-        f"{ORIGIN}/{LIBRARY}/transmutation/branching.arrow",
-        cache / f"{LIBRARY}-{BRANCHING_FIXTURE}.arrow",
-        BRANCHING_SECTIONS,
-        args.force,
-    )
-
     print(
-        f"{len(plan) + 2} fixtures ready in {cache} "
+        f"{len(plan) + 1} fixtures ready in {cache} "
         f"({downloaded} section files downloaded, {migrated} migrated to "
         f"format_version 2), linked into {FIXTURE_DIR}"
     )

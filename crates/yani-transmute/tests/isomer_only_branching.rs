@@ -10,9 +10,13 @@
 //!
 //! The synthetic case always runs and checks the split exactly, in what
 //! `get_isomeric_branching` reports and in the inventory. The ENDF/B-VIII.1
-//! case reads the In115 fixture, the chain fixture and the branching
-//! subsection, all of which `scripts/fetch_test_fixtures.py` fetches, and
-//! self-skips on a machine that has not run it.
+//! cases read the In115 and Mo92 fixtures and the chain fixture, which
+//! `scripts/fetch_test_fixtures.py` fetches, and self-skip on a machine that
+//! has not run it. Their branching rows are
+//! `tests/fixtures/endf-b8.1-branching-In115-Mo92`, the In115 and Mo92 rows of
+//! ENDF/B-VIII.1's `branching.arrow` as the converter writes it now, with the
+//! facts saying each list gives its isomer alone: the published subsection
+//! predates those facts, and the rule refuses a list without them.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,7 +24,7 @@ use std::sync::Arc;
 use yamc_materials::Material;
 use yamc_nuclide::nuclide::Nuclide;
 use yamc_nuclide::reaction::Reaction;
-use yani::{BranchCurve, BranchQuantity, BranchTable, ChainNuclide, ChainReaction};
+use yani::{BranchCurve, BranchQuantity, BranchState, BranchTable, ChainNuclide, ChainReaction};
 use yani_transmute::{transmute_material, MultigroupSpectrum, TransmuteStep};
 
 fn reaction(mt: i32, threshold_idx: usize, energy: Vec<f64>, cross_section: Vec<f64>) -> Reaction {
@@ -138,6 +142,20 @@ fn chain() -> Arc<HashMap<String, ChainNuclide>> {
     Arc::new(map)
 }
 
+/// The converter's facts for an isomer its list gives alone.
+fn isomer_only(mt: i32) -> Arc<[BranchState]> {
+    Arc::from(vec![BranchState {
+        mt,
+        lfs: 1,
+        lmf: Some(10),
+        list_complete: false,
+        level_route: "energy".to_string(),
+        level_energy: 0.0,
+        level_energy_difference: Some(0.0),
+        mf3_cross_section: None,
+    }])
+}
+
 /// Only the isomers, as ENDF/B-VIII.1 lists them: a flat 0.79 capture yield,
 /// and an (n,2n) partial at 0.9 of the cross section on its own grid.
 fn branch() -> BranchTable {
@@ -151,6 +169,8 @@ fn branch() -> BranchTable {
             quantity: BranchQuantity::Yield,
             energy: vec![1.0e-5, 2.0e7],
             values: vec![0.79, 0.79],
+            states: isomer_only(102),
+            normalisation: None,
         }],
     );
     kinds.insert(
@@ -160,6 +180,8 @@ fn branch() -> BranchTable {
             quantity: BranchQuantity::CrossSection,
             energy: e16,
             values: xs16.iter().map(|x| 0.9 * x).collect(),
+            states: isomer_only(16),
+            normalisation: None,
         }],
     );
     branch
@@ -228,44 +250,36 @@ fn an_isomer_only_list_splits_off_the_ground_state() {
     );
 }
 
-/// ENDF/B-VIII.1 itself: In115 capture makes In116_m1 at the evaluation's flat
-/// 0.79 (it was never made at all), and 14 MeV (n,2n) makes mostly In114_m1,
-/// whose partial is 1.33 of the 1.46 b total at 14 MeV.
-#[test]
-fn endf_b8_1_in115_makes_its_isomers() {
-    let Some(in115) = yamc_test_cache::nuclide("In115") else {
-        eprintln!("skipping -- In115 fixture absent");
-        return;
+/// ENDF/B-VIII.1's chain fixture with the fixture branching rows, and a
+/// one-nuclide material of `nuclide` loaded at the scope a transmute loads, or
+/// `None` where this machine lacks a fixture.
+fn endf_b8_1_case(nuclide: &str) -> Option<(yani::LoadedChain, Material)> {
+    let Some(path) = yamc_test_cache::nuclide(nuclide) else {
+        eprintln!("skipping -- {nuclide} fixture absent");
+        return None;
     };
-    // Where scripts/fetch_test_fixtures.py puts them: the chain fixture's
-    // three subsections, and the branching subsection in its own cache entry.
-    let chain_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../yamc/tests/transmutation-endf-b8.1-sfr.arrow");
-    let branching = yamc_test_cache::root().join(format!(
-        "{}-transmutation-branching.arrow",
-        yamc_test_cache::LIBRARY
-    ));
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let chain_fixture = manifest.join("../yamc/tests/transmutation-endf-b8.1-sfr.arrow");
     let dirs = [
         chain_fixture.join("decay"),
         chain_fixture.join("reactions"),
         chain_fixture.join("fission_yields"),
-        branching,
+        manifest.join("tests/fixtures/endf-b8.1-branching-In115-Mo92"),
     ];
     if let Some(missing) = dirs.iter().find(|d| !d.is_dir()) {
         eprintln!("skipping -- {} absent", missing.display());
-        return;
+        return None;
     }
     let dir = |i: usize| dirs[i].to_string_lossy().into_owned();
     let loaded = yani::load_chain_parts(&dir(0), Some(&dir(1)), Some(&dir(2)), Some(&dir(3)))
         .expect("chain");
-
     let mut material = Material::new(
-        HashMap::from([("In115".to_string(), 3.8e-2)]),
+        HashMap::from([(nuclide.to_string(), 3.8e-2)]),
         "atom",
         "sum",
         None,
     )
-    .expect("indium");
+    .expect("material");
     material.set_temperature("294");
     // At the scope a transmute loads, which is also the only scope a cache
     // entry fetched for one carries.
@@ -274,38 +288,34 @@ fn endf_b8_1_in115_makes_its_isomers() {
         &loaded.branch,
     ));
     let data = yamc_nuclide::nuclide::get_or_load_nuclide(
-        "In115",
-        &HashMap::from([("In115".to_string(), in115)]),
+        nuclide,
+        &HashMap::from([(nuclide.to_string(), path)]),
         &scope,
     )
-    .expect("load In115");
-    material.nuclide_data.insert("In115".to_string(), data);
-    // A thermal group and a 14 MeV group, one step each.
-    let spectra = [
-        MultigroupSpectrum {
-            boundaries: vec![1.0e-5, 0.1, 1.35e7, 1.45e7],
-            masses: vec![1.0, 0.0, 0.0],
-            flux_error: None,
-        },
-        MultigroupSpectrum {
-            boundaries: vec![1.0e-5, 0.1, 1.35e7, 1.45e7],
-            masses: vec![0.0, 0.0, 1.0],
-            flux_error: None,
-        },
-    ];
-    let steps = [
-        TransmuteStep {
+    .expect("load");
+    material.nuclide_data.insert(nuclide.to_string(), data);
+    Some((loaded, material))
+}
+
+/// Each spectrum as one step, and the share `target` takes of `reaction` on
+/// `parent` in each.
+fn shares(
+    loaded: &yani::LoadedChain,
+    material: &mut Material,
+    spectra: &[MultigroupSpectrum],
+    parent: &str,
+    reaction: &str,
+    target: &str,
+) -> Vec<f64> {
+    let steps: Vec<TransmuteStep> = (0..spectra.len())
+        .map(|i| TransmuteStep {
             dt: 60.0,
-            irradiation: Some((0, 1.0e10)),
-        },
-        TransmuteStep {
-            dt: 60.0,
-            irradiation: Some((1, 1.0e10)),
-        },
-    ];
+            irradiation: Some((i, 1.0e10)),
+        })
+        .collect();
     let results = transmute_material(
-        &mut material,
-        &spectra,
+        material,
+        spectra,
         &steps,
         Arc::clone(&loaded.chain),
         &loaded.branch,
@@ -313,16 +323,78 @@ fn endf_b8_1_in115_makes_its_isomers() {
         None,
     )
     .expect("transmute");
-    let share = |step: usize, reaction: &str, target: &str| {
-        let channels = results.get_isomeric_branching(0, step).expect("step");
-        let channel = channels
-            .iter()
-            .find(|c| c.parent == "In115" && c.reaction == reaction)
-            .unwrap_or_else(|| panic!("In115 {reaction} not reported at step {step}"));
-        split_of(&channel.split, target)
+    (0..spectra.len())
+        .map(|step| {
+            let channels = results.get_isomeric_branching(0, step).expect("step");
+            let channel = channels
+                .iter()
+                .find(|c| c.parent == parent && c.reaction == reaction)
+                .unwrap_or_else(|| panic!("{parent} {reaction} not reported at step {step}"));
+            let report = results.get_branching_report(0, step).expect("report");
+            let rule = report
+                .channels
+                .iter()
+                .find(|c| c.parent == parent && c.reaction == reaction)
+                .expect("the rule's report");
+            assert!(!rule.complete, "{rule:?}");
+            split_of(&channel.split, target)
+        })
+        .collect()
+}
+
+fn group(masses: [f64; 3]) -> MultigroupSpectrum {
+    MultigroupSpectrum {
+        boundaries: vec![1.0e-5, 0.1, 1.35e7, 1.45e7],
+        masses: masses.to_vec(),
+        flux_error: None,
+    }
+}
+
+/// ENDF/B-VIII.1 itself: In115 capture makes In116_m1 at the evaluation's flat
+/// 0.79 (it was never made at all), and 14 MeV (n,2n) makes mostly In114_m1,
+/// whose partial is 1.33 of the 1.46 b total at 14 MeV.
+#[test]
+fn endf_b8_1_in115_makes_its_isomers() {
+    let Some((loaded, mut material)) = endf_b8_1_case("In115") else {
+        return;
     };
-    let capture = share(0, "(n,gamma)", "In116_m1");
+    let thermal = group([1.0, 0.0, 0.0]);
+    let dt = group([0.0, 0.0, 1.0]);
+    let capture = shares(
+        &loaded,
+        &mut material,
+        std::slice::from_ref(&thermal),
+        "In115",
+        "(n,gamma)",
+        "In116_m1",
+    )[0];
     assert!((capture - 0.79).abs() < 1e-9, "In116_m1 share {capture}");
-    let n2n = share(1, "(n,2n)", "In114_m1");
+    let n2n = shares(
+        &loaded,
+        &mut material,
+        std::slice::from_ref(&dt),
+        "In115",
+        "(n,2n)",
+        "In114_m1",
+    )[0];
     assert!((0.88..0.94).contains(&n2n), "In114_m1 share {n2n}");
+}
+
+/// ENDF/B-VIII.1 Mo92 (n,p) lists Nb92_m1 alone, an MF=10 partial, which made
+/// no Nb92_m1 before the isomer-only rule. Over 13.5-14.5 MeV it is 0.571 of
+/// the reaction: the partial is 0.59 of MF=3 at 13.5 MeV and 0.55 at 14.5.
+#[test]
+fn endf_b8_1_mo92_makes_its_isomer() {
+    let Some((loaded, mut material)) = endf_b8_1_case("Mo92") else {
+        return;
+    };
+    let share = shares(
+        &loaded,
+        &mut material,
+        &[group([0.0, 0.0, 1.0])],
+        "Mo92",
+        "(n,p)",
+        "Nb92_m1",
+    )[0];
+    assert!((share - 0.571).abs() < 1e-3, "Nb92_m1 share {share}");
 }
