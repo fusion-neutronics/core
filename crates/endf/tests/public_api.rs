@@ -134,7 +134,7 @@ fn the_depletion_inputs_are_reachable() {
     let production = endf::radionuclide_production(&production_material);
     assert!(!production.is_empty());
     let states: &Vec<RadionuclideProduction> = production.values().next().unwrap();
-    assert!(states[0].excitation_energy() >= 0.0);
+    assert!(states[0].excitation_energy().is_some_and(|e| e >= 0.0));
 }
 
 /// A depletion chain, built from evaluations the caller supplies.
@@ -180,6 +180,17 @@ fn placeholder_decay_energies_are_labelled_and_fillable() {
     );
     // The half-life is still this chain's own.
     assert_eq!(sn111.half_life, Some(2118.0));
+    // The energy's sigmas are the filling tape's, as it writes them, zeros
+    // included.
+    let candidate = endf::decay::Decay::from_material(&jendl[0]).unwrap();
+    assert_eq!(
+        sn111.decay_energy_uncertainty,
+        Some(candidate.decay_energy().1)
+    );
+    assert_eq!(
+        sn111.decay_energy_components,
+        candidate.decay_energy_components()
+    );
 
     // Filling again finds nothing left to fill, and an evaluated record is
     // never touched.

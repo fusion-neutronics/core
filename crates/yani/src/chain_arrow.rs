@@ -253,6 +253,7 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
                         target: modelled_decay_target(parent, kind, target),
                         branching: branching.value(i),
                         q_value: None,
+                        branching_uncertainty: None,
                     });
                 }
             }
@@ -281,6 +282,7 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
                         },
                         branching: branching.value(i),
                         q_value: q_values.as_ref().map(|q| q.value(i)),
+                        branching_uncertainty: None,
                     });
                 }
             }
@@ -637,6 +639,13 @@ pub fn parse_chain_parts_from_bytes(
             let types = col::<StringArray>(&batch, "type")?;
             let targets = col::<StringArray>(&batch, "target")?;
             let branching = col::<Float64Array>(&batch, "branching_ratio")?;
+            // Optional: a file written before the column reads with no mode
+            // carrying a stated sigma. Taken as stored, 0.0 included.
+            let branching_sigmas = batch
+                .schema()
+                .index_of("branching_ratio_uncertainty")
+                .ok()
+                .and_then(|idx| batch.column(idx).as_any().downcast_ref::<Float64Array>());
             for i in 0..batch.num_rows() {
                 let parent = nuclides.value(i);
                 let kind = types.value(i);
@@ -647,6 +656,9 @@ pub fn parse_chain_parts_from_bytes(
                     target: modelled_decay_target(parent, kind, target),
                     branching: branching.value(i),
                     q_value: None,
+                    branching_uncertainty: branching_sigmas
+                        .filter(|column| !column.is_null(i))
+                        .map(|column| column.value(i)),
                 });
             }
         }
@@ -700,6 +712,7 @@ pub fn parse_chain_parts_from_bytes(
                     },
                     branching: branching.value(i),
                     q_value: q_values.as_ref().map(|q| q.value(i)),
+                    branching_uncertainty: None,
                 });
             }
         }
@@ -794,9 +807,10 @@ pub fn parse_chain_parts_from_bytes(
     //     the fold re-partitions a nonzero mass and no parent atoms leak into an
     //     unproduced target.
     // The grafted branching is a 0.0 placeholder overwritten by the rate-time
-    // fold; reduction follows targets regardless of branching value. The
-    // ground/self `(n,n')` row (target == parent) is a depletion no-op and is
-    // skipped.
+    // fold; reduction follows targets regardless of branching value, and
+    // `populated_nuclides` bounds the edge from the curves rather than the
+    // placeholder. The ground/self `(n,n')` row (target == parent) is a
+    // depletion no-op and is skipped.
     let mut branch_table: BranchTable = BranchTable::new();
     {
         if let Some(bytes) = parts.branching.get("branching.arrow") {
@@ -842,6 +856,7 @@ pub fn parse_chain_parts_from_bytes(
                                 target: Some(target.clone()),
                                 branching: 0.0,
                                 q_value: None,
+                                branching_uncertainty: None,
                             });
                         }
                     }
@@ -942,7 +957,8 @@ pub fn parse_chain_parts(
 /// mode involving spontaneous fission, and one whose stored target is its own
 /// parent: see `modelled_decay_target`), so those rows are written with a null
 /// target where the source file names the parent, a ground state or a
-/// `replace_missing` stand-in. Their branching ratios are written unchanged.
+/// `replace_missing` stand-in. Their branching ratios, and the sigmas on
+/// them, are written unchanged.
 pub fn export_chain_parts<P: AsRef<Path>>(
     chain: &HashMap<String, ChainNuclide>,
     dir: P,
@@ -983,8 +999,8 @@ pub fn export_chain_parts<P: AsRef<Path>>(
                 None => hl_b.append_null(),
             }
             de_b.append_value(nuc.decay_energy);
-            // Null rather than zero where the evaluation stated nothing, so a
-            // round trip cannot turn "unknown" into "known to be exact".
+            // Written back as read: null stays null and a stored 0.0 stays
+            // 0.0, so a round trip changes nothing a reader could tell apart.
             match nuc.half_life_uncertainty {
                 Some(sigma) => hl_sigma_b.append_value(sigma),
                 None => hl_sigma_b.append_null(),
@@ -1011,7 +1027,8 @@ pub fn export_chain_parts<P: AsRef<Path>>(
     }
 
     // decay/decay_modes.arrow and reactions/reactions.arrow share a shape:
-    // (nuclide, type, target, branching_ratio).
+    // (nuclide, type, target, branching_ratio), each with one column of its
+    // own.
     let write_reactions = |path: &Path,
                            section: &str,
                            pick: &dyn Fn(&ChainNuclide) -> &Vec<ChainReaction>|
@@ -1021,6 +1038,7 @@ pub fn export_chain_parts<P: AsRef<Path>>(
         let mut target_b = StringBuilder::new();
         let mut q_b = Float64Builder::new();
         let mut br_b = Float64Builder::new();
+        let mut br_sigma_b = Float64Builder::new();
         for name in &names {
             let nuc = &chain[*name];
             for r in pick(nuc) {
@@ -1034,6 +1052,7 @@ pub fn export_chain_parts<P: AsRef<Path>>(
                 // the column is only built for the section that declares it.
                 q_b.append_value(r.q_value.unwrap_or(0.0));
                 br_b.append_value(r.branching);
+                br_sigma_b.append_option(r.branching_uncertainty);
             }
         }
         // The two files do NOT share a schema, though they share a shape.
@@ -1052,6 +1071,11 @@ pub fn export_chain_parts<P: AsRef<Path>>(
             columns.push(Arc::new(q_b.finish()));
         }
         columns.push(Arc::new(br_b.finish()));
+        // The mirror image: only decay_modes declares a branching sigma, and
+        // check_batch refuses a reactions file that carries one.
+        if section == "decay/decay_modes.arrow" {
+            columns.push(Arc::new(br_sigma_b.finish()));
+        }
         let batch = RecordBatch::try_new(schema.clone(), columns)?;
         write_arrow_file(path, schema, batch)
     };
@@ -1539,6 +1563,154 @@ mod tests {
         );
     }
 
+    /// A chain of three decay modes: a sigma, a stored 0.0 and none at all.
+    fn chain_with_branching_sigmas() -> std::collections::HashMap<String, crate::ChainNuclide> {
+        use crate::chain::{ChainNuclide, ChainReaction, DecayEnergyComponent};
+        let mode = |kind: &str, target: &str, branching: f64, sigma: Option<f64>| ChainReaction {
+            kind: kind.to_string(),
+            target: Some(target.to_string()),
+            branching,
+            q_value: None,
+            branching_uncertainty: sigma,
+        };
+        let nuclide = |name: &str, decays: Vec<ChainReaction>| ChainNuclide {
+            name: name.to_string(),
+            half_life: Some(3.6e3),
+            // What MT=457 writes when it states no sigma, stored as such.
+            half_life_uncertainty: Some(0.0),
+            decay_energy: 2.0e6,
+            decay_energy_uncertainty: Some(0.0),
+            decay_energy_components: [
+                Some(DecayEnergyComponent {
+                    energy: 2.0e6,
+                    uncertainty: Some(0.0),
+                }),
+                None,
+                None,
+            ],
+            reactions: Vec::new(),
+            decays,
+            fission_yields: None,
+            sources: Vec::new(),
+        };
+        std::collections::HashMap::from([
+            (
+                "Bi212".to_string(),
+                nuclide(
+                    "Bi212",
+                    vec![
+                        mode("alpha", "Tl208", 0.3594, Some(6.0e-4)),
+                        mode("beta-", "Po212", 0.6406, Some(6.0e-4)),
+                    ],
+                ),
+            ),
+            (
+                "In116_m1".to_string(),
+                nuclide("In116_m1", vec![mode("beta-", "Sn116", 1.0, Some(0.0))]),
+            ),
+            (
+                "Xx999".to_string(),
+                nuclide("Xx999", vec![mode("beta-", "Yy999", 1.0, None)]),
+            ),
+        ])
+    }
+
+    #[test]
+    fn stored_sigmas_come_back_as_stored_zeros_included() {
+        // The file holds the tape's numbers, and 0.0 is one of them (MT=457's
+        // "not stated"). Export has to write back exactly what it read, so a
+        // 0.0 stays a 0.0 and a null stays a null: turning one into the other
+        // is a claim about the data the data never made.
+        let chain = chain_with_branching_sigmas();
+        let dir = std::env::temp_dir().join(format!("yani-sigmas-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+        let (back, _branch) =
+            super::parse_chain_parts(&dir.join("decay"), None, None, None).expect("load succeeds");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        for (name, written) in &chain {
+            let read = &back[name];
+            let sigmas = |n: &crate::ChainNuclide| -> Vec<Option<f64>> {
+                n.decays.iter().map(|d| d.branching_uncertainty).collect()
+            };
+            assert_eq!(sigmas(read), sigmas(written), "{name} dBR");
+            assert_eq!(read.half_life_uncertainty, Some(0.0), "{name}");
+            assert_eq!(read.decay_energy_uncertainty, Some(0.0), "{name}");
+            assert_eq!(
+                read.decay_energy_components, written.decay_energy_components,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            back["In116_m1"].decays[0].branching_uncertainty,
+            Some(0.0),
+            "a stored 0.0 must not come back as null"
+        );
+        assert_eq!(
+            back["Xx999"].decays[0].branching_uncertainty, None,
+            "a null must not come back as 0.0"
+        );
+    }
+
+    #[test]
+    fn decay_modes_written_before_the_sigma_column_read_as_unstated() {
+        // The published files up to now have four columns. Nullable and last
+        // is what lets them keep loading, with every mode carrying no sigma.
+        let chain = chain_with_branching_sigmas();
+        let dir = std::env::temp_dir().join(format!("yani-old-modes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+
+        let mut names: Vec<&String> = chain.keys().collect();
+        names.sort();
+        let (mut nuclide, mut kind, mut target, mut branching) = (
+            super::StringBuilder::new(),
+            super::StringBuilder::new(),
+            super::StringBuilder::new(),
+            super::Float64Builder::new(),
+        );
+        for name in names {
+            for d in &chain[name].decays {
+                nuclide.append_value(name);
+                kind.append_value(&d.kind);
+                target.append_option(d.target.as_deref());
+                branching.append_value(d.branching);
+            }
+        }
+        let declared = nuclear_data_schema::decay_decay_modes();
+        let old = std::sync::Arc::new(super::Schema::new(declared.fields()[..4].to_vec()));
+        assert_eq!(
+            declared.fields().len(),
+            5,
+            "this test writes the layout from before the fifth column"
+        );
+        let batch = super::RecordBatch::try_new(
+            old.clone(),
+            vec![
+                std::sync::Arc::new(nuclide.finish()),
+                std::sync::Arc::new(kind.finish()),
+                std::sync::Arc::new(target.finish()),
+                std::sync::Arc::new(branching.finish()),
+            ],
+        )
+        .expect("a four-column batch");
+        super::write_arrow_file(&dir.join("decay/decay_modes.arrow"), old, batch)
+            .expect("overwrite decay_modes.arrow");
+
+        let (back, _branch) = super::parse_chain_parts(&dir.join("decay"), None, None, None)
+            .expect("a file without the column still loads");
+        let _ = std::fs::remove_dir_all(&dir);
+        let decays: Vec<_> = back.values().flat_map(|n| &n.decays).collect();
+        assert_eq!(decays.len(), 4, "every mode still loads");
+        for d in decays {
+            assert_eq!(
+                d.branching_uncertainty, None,
+                "a column the file does not have must read as unstated, not zero"
+            );
+        }
+    }
+
     #[test]
     fn exported_parts_match_the_declared_schemas_and_round_trip() {
         use crate::chain::{ChainNuclide, ChainReaction, DecaySource, DecaySourceDistribution};
@@ -1559,12 +1731,14 @@ mod tests {
                     target: Some("Co61".to_string()),
                     branching: 1.0,
                     q_value: Some(7.492e6),
+                    branching_uncertainty: None,
                 }],
                 decays: vec![ChainReaction {
                     kind: "beta-".to_string(),
                     target: Some("Ni60".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 fission_yields: None,
                 sources: vec![DecaySource {
