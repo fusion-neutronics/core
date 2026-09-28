@@ -16,15 +16,18 @@
 //! ```
 //!
 //! summed over lines and over nuclides, and integrated over energy for a
-//! continuum, where `mu_material` is the linear
-//! attenuation coefficient [1/cm] of the material itself, `response` is the
-//! mass energy-absorption coefficient of air [cm^2/g] or the ICRP-116
-//! effective-dose coefficient [pSv cm^2], and `B` is a build-up factor
-//! standing in for the photons that scatter in the slab and still arrive.
+//! continuum, where `mu_material` is the linear attenuation coefficient [1/cm]
+//! of the material itself, `response` is the mass energy-absorption
+//! coefficient of air [cm^2/g] or the ICRP-116 effective-dose coefficient
+//! [pSv cm^2], and `B` is a build-up factor standing in for the photons that
+//! scatter in the slab and still arrive.
 //!
 //! This follows the FISPACT-II manual (UKAEA-CCFE-RE(21)02, Appendix C.7.1) for
-//! the absorbed-air quantity, and matches what OpenMC's
-//! `Material.get_photon_contact_dose_rate` computes.
+//! the absorbed-air quantity. For photon lines it matches what OpenMC's
+//! `Material.get_photon_contact_dose_rate` computes. A continuum is integrated
+//! under its evaluated law, where OpenMC raises for a nuclide that has both
+//! lines and a continuum and takes a trapezoid rule over a continuum alone, so
+//! a continuum emitter differs from OpenMC by design.
 //!
 //! Two things it does not model: bremsstrahlung from decay electrons, which
 //! matters at contact for strong beta emitters, and any nuclide whose radiation
@@ -281,11 +284,17 @@ fn multiplier(quantity: DoseQuantity, build_up: f64) -> f64 {
 /// rather than returned as zero.
 ///
 /// A continuum is integrated over its part of that range, its density read
-/// exactly under its law (see [`weight_moments`]). One whose law the chain does
-/// not state is an `Err` naming the nuclide rather than a smaller dose: its
-/// integral is unknown, and leaving it out would understate the answer by an
-/// unknown amount. A continuum wholly outside the range needs no law and adds
-/// nothing, as a line there does.
+/// exactly under its law (see [`weight_moments`]). The part below or above the
+/// range is left out, as a line there is, and nothing reports it: for the
+/// JEFF-4.0 Cf252 continuum, which starts at 0 eV, it is 3.3e-4 of the
+/// continuum's emission below 10 keV and 3.3e-6 below 1 keV (see
+/// `yani-convert/tests/decay_continuum.rs`). A continuum this build cannot
+/// integrate is an `Err` naming the nuclide rather than a smaller dose: one
+/// with no stated law, one tabulated under a law other than histogram or
+/// linear-linear, and a hand-built one whose lists are unpaired or whose
+/// energies descend. Its integral is unknown, and leaving it out would
+/// understate the answer by an unknown amount. A continuum wholly outside the
+/// range needs no law and adds nothing, as a line there does.
 ///
 /// Units follow `quantity`: Gy/h for [`DoseQuantity::AbsorbedAir`], Sv/h for
 /// [`DoseQuantity::Effective`].

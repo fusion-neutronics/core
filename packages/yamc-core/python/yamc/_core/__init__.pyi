@@ -1658,9 +1658,13 @@ class Material:
         
         Raises:
             ValueError: If a nuclide in the material has a photon continuum
+                in the dose tables' range that this build cannot integrate: one
                 whose data states no interpolation law, as transmutation data
-                written before the law was stored does. Its integral is
-                unknown, and leaving it out would understate the dose.
+                written before the law was stored does, one tabulated under a
+                law other than histogram or linear-linear, or one whose energy
+                and rate lists are unpaired or whose energies descend. Its
+                integral is unknown, and leaving it out would understate the
+                dose.
         
         Examples:
             >>> activated.contact_dose()

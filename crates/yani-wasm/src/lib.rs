@@ -371,8 +371,10 @@ impl YaniSession {
     /// densities, the decay photon line spectrum, and the photon continua
     /// apart from it (`photon_continua`: per nuclide, energies in eV, rates in
     /// photons/s/eV, the interpolation law, and the emission rate, null where
-    /// the law is not stated). Everything the plots need, in one call, so the
-    /// host does not pay a boundary crossing per series.
+    /// this build cannot integrate the continuum: no stated law, a law other
+    /// than histogram or linear-linear, or unpaired or descending lists).
+    /// Everything the plots need, in one call, so the host does not pay a
+    /// boundary crossing per series.
     pub fn run(&mut self, spectra_json: &str, schedule_json: &str) -> Result<String, String> {
         // Taken apart before `material` below borrows the same `self` mutably.
         // The chain itself is an `Arc`, so only the branching overlay is copied.
@@ -463,8 +465,9 @@ impl YaniSession {
 
 /// One entry of a step's `photon_continua`: energies in eV, rates in
 /// photons/s/eV and the emission rate in photons/s, all for the whole
-/// material. A continuum whose law the data does not state has no emission
-/// rate, and says so with a null rather than a number.
+/// material. A continuum this build cannot integrate (no stated law, a law
+/// other than histogram or linear-linear, or unpaired or descending lists)
+/// has no emission rate, and says so with a null rather than a number.
 fn continuum_json(continuum: &yani_decay::PhotonContinuum) -> serde_json::Value {
     serde_json::json!({
         "nuclide": continuum.nuclide,
