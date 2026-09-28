@@ -485,6 +485,18 @@ fn branching_is_written_and_joins_the_manifest() {
         out.join("branching/provenance.json").is_file(),
         "branching has no provenance"
     );
+    // What of MF=40 the covariance file cannot show is recorded beside it.
+    let record: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("branching/provenance.json")).expect("provenance"),
+    )
+    .expect("json");
+    for key in [
+        "mf40_without_blocks",
+        "mf40_unmatched_states",
+        "mf40_partner_unresolved",
+    ] {
+        assert!(record[key].is_array(), "branching provenance has no {key}");
+    }
 
     // All four subsections in one manifest: the branching call must not have
     // overwritten what the chain call recorded.

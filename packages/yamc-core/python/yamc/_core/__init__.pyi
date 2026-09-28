@@ -5845,14 +5845,16 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         MF=9 gives as a yield rather than an MF=10 cross section),
         ``mf40_mat1_naming_itself`` (sub-subsections whose MAT1 is the
         evaluation's own MAT, written as given), ``mf40_cross_state_blocks``
-        (blocks correlating two different states rather than one state with
-        itself; key them on MT, LFS, MT1 and XLFS1, since both states can
-        resolve to one target), ``mf40_without_blocks``
-        (one line per state or sub-subsection holding no block, the only part
-        of MF=40 the file cannot show) and ``mf40_partner_by_own_izap`` (one
-        line per sub-subsection whose partner target was taken from the row's
-        own IZAP, because several products share the partner's level and
-        MF=40 names no IZAP for it). An evaluation set without MF=40
+        (blocks other than a state's covariance with itself; key them on MT,
+        LFS, MT1 and XLFS1, since both states can resolve to one target),
+        ``mf40_blocks_outside_mf10`` (blocks whose partner is in another
+        material or has XMF1 other than 10), ``mf40_without_blocks`` (one line
+        per state or sub-subsection holding no block, with its tape values,
+        the only part of MF=40 the file cannot show) and
+        ``mf40_partner_unresolved`` (one line per sub-subsection written with
+        no partner target because the tape does not pin the partner to one
+        state). The three line lists are also written to
+        ``branching/provenance.json``. An evaluation set without MF=40
         writes no covariance file, and removes one an earlier conversion left
         there.
     """

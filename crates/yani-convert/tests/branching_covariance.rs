@@ -159,10 +159,10 @@ fn mf40_is_written_beside_branching_for_nb93() {
     assert_eq!(stats.mf40_on_yield_channels, 0);
     assert_eq!(stats.mf40_mat1_naming_itself, 0);
     assert_eq!(stats.mf40_cross_state_blocks, 0);
+    assert_eq!(stats.mf40_blocks_outside_mf10, 0);
     assert!(stats.mf40_without_blocks.is_empty());
-    // One product per level in each MT, so no partner rests on the own-IZAP
-    // reading.
-    assert!(stats.mf40_partner_by_own_izap.is_empty());
+    // One product per level in each MT, so every partner is pinned.
+    assert!(stats.mf40_partner_unresolved.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -647,8 +647,10 @@ fn tape_values_are_written_literally() {
 }
 
 /// A state that matches nothing, and a section whose MT has no chain kind, are
-/// still written, with the key they could not be given left null. A partner
-/// in an MT with MF=10 but no MF=40 section is still resolved.
+/// still written, with the key they could not be given left null. So is a
+/// partner in an MT with MF=10 but no MF=40 section: XLFS1 is MF=40's level
+/// number, which MF=10's need not be, and there is no MF=40 state to check
+/// its excitation against.
 #[test]
 fn states_with_no_chain_row_are_still_written() {
     let tape = text(NB93);
@@ -659,8 +661,7 @@ fn states_with_no_chain_row_are_still_written() {
         "-8.830870+6-8.966370+6      41091          1          0          1412540 16   10",
     );
     // MF=40 MT 4 moved to MT 18, which has no chain kind. Its MT1 still says
-    // 4, a reaction with no MF=40 section left to find the partner in, so the
-    // partner is found among MT 4's MF=10 states instead.
+    // 4, a reaction with no MF=40 section left to find the partner in.
     let tape: String = tape
         .lines()
         .map(|line| {
@@ -690,25 +691,209 @@ fn states_with_no_chain_row_are_still_written() {
     assert_eq!(fission.len(), 2);
     assert!(fission
         .iter()
-        .all(|b| b.reaction.is_none() && b.target.is_none()));
-    for b in fission {
-        let partner = if b.block.xlfs1 == 0.0 {
-            "Nb93"
-        } else {
-            "Nb93_m1"
-        };
-        assert_eq!(
-            b.target1.as_deref(),
-            Some(partner),
-            "XLFS1 {}",
-            b.block.xlfs1
-        );
-    }
+        .all(|b| b.reaction.is_none() && b.target.is_none() && b.target1.is_none()));
     let moved = blocks
         .iter()
         .find(|b| b.izap == 41091)
         .expect("the unmatched state");
     assert_eq!(moved.reaction.as_deref(), Some("(n,2n)"));
     assert!(moved.target.is_none() && moved.target1.is_none());
+    // The two MT 18 partners have no MF=40 section to be found in, and the
+    // moved state's own level 1 of MT 16 is Nb91 in MF=40 but Nb92 in MF=10,
+    // two products the tape does not choose between.
+    let unresolved = &out.stats.mf40_partner_unresolved;
+    assert_eq!(unresolved.len(), 3, "{unresolved:?}");
+    assert_eq!(
+        unresolved
+            .iter()
+            .filter(|l| l.starts_with("Nb93 MT18") && l.ends_with("that MT has no MF=40 section"))
+            .count(),
+        2,
+        "{unresolved:?}"
+    );
+    assert!(unresolved
+        .iter()
+        .any(|l| l.starts_with("Nb93 MT16: IZAP 41091 LFS 1")
+            && l.ends_with("several states sit at that level")));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Drop the lines of one MF=40 section with the given sequence numbers.
+fn drop_lines(tape: String, mt: &str, seqs: std::ops::RangeInclusive<u32>) -> String {
+    let control = format!("412540{mt:>3}");
+    tape.lines()
+        .filter(|line| {
+            !(line.len() >= 80
+                && line[66..75] == control
+                && line[75..80]
+                    .trim()
+                    .parse::<u32>()
+                    .is_ok_and(|n| seqs.contains(&n)))
+        })
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+/// MF=40 names a block's partner by MT1 and XLFS1, with no IZAP, so two states
+/// of one MT at one level leave it open which of them is meant. Here the
+/// (n,n') isomer is renumbered to level 0 in MF=40, beside the ground: neither
+/// self block's partner is taken for its own state, both are null and listed.
+#[test]
+fn two_states_at_the_partner_level_leave_it_unresolved() {
+    let tape = text(NB93);
+    let tape = edit(
+        tape,
+        " 0.000000+0-3.077000+4      41093          1          0          1412540  4   25",
+        " 0.000000+0-3.077000+4      41093          0          0          1412540  4   25",
+    );
+    let tape = edit(
+        tape,
+        " 1.000000+1 1.000000+0          0          4          0          1412540  4   26",
+        " 1.000000+1 0.000000+0          0          4          0          1412540  4   26",
+    );
+    let out = extract(&[material(&tape)], &nb_decay());
+    let unresolved = &out.stats.mf40_partner_unresolved;
+    assert_eq!(unresolved.len(), 2, "{unresolved:?}");
+    assert!(unresolved
+        .iter()
+        .all(|l| l.starts_with("Nb93 MT4") && l.ends_with("several states sit at that level")));
+    let mt4: Vec<_> = out.covariance.iter().filter(|r| r.mt == 4).collect();
+    assert_eq!(mt4.len(), 2);
+    assert!(mt4.iter().all(|r| r.lfs == 0 && r.target1.is_none()));
+    // The (n,2n) states, one per level, are pinned as before.
+    assert!(out
+        .covariance
+        .iter()
+        .filter(|r| r.mt == 16)
+        .all(|r| r.target1.is_some() && r.target1 == r.target));
+}
+
+/// A partner in another material, or one whose XMF1 is not 10, is not an MF=10
+/// partial of this evaluation, so `target1` is null. The tape's values are
+/// kept, and both count as blocks that are not a state's covariance with
+/// itself.
+#[test]
+fn a_partner_outside_this_mf10_has_no_target() {
+    let tape = text(NB93);
+    // The (n,n') isomer's partner in another MAT, the (n,2n) isomer's in MF=3.
+    let tape = edit(
+        tape,
+        " 1.000000+1 1.000000+0          0          4          0          1412540  4   26",
+        " 1.000000+1 1.000000+0       2625          4          0          1412540  4   26",
+    );
+    let tape = edit(
+        tape,
+        " 1.000000+1 1.000000+0          0         16          0          1412540 16   11",
+        " 3.000000+0 1.000000+0          0         16          0          1412540 16   11",
+    );
+    let out = extract(&[material(&tape)], &nb_decay());
+    assert_eq!(out.stats.mf40_blocks_outside_mf10, 2);
+    assert_eq!(out.stats.mf40_cross_state_blocks, 2);
+    assert!(out.stats.mf40_partner_unresolved.is_empty());
+
+    let dir = scratch("outside-mf10");
+    write_branching_covariance(&out.covariance, &dir).expect("writes");
+    let blocks = read_back(&dir);
+    let foreign = blocks
+        .iter()
+        .find(|b| b.block.mt == 4 && b.lfs == 1)
+        .expect("the (n,n') isomer");
+    assert_eq!(foreign.block.mat1, 2625);
+    assert!(foreign.is_cross_material() && !foreign.is_self_block());
+    assert_eq!(foreign.target.as_deref(), Some("Nb93_m1"));
+    assert_eq!(foreign.target1, None);
+    let mf3 = blocks
+        .iter()
+        .find(|b| b.block.mt == 16 && b.lfs == 1)
+        .expect("the (n,2n) isomer");
+    assert_eq!(mf3.block.xmf1, 3.0);
+    assert!(!mf3.is_cross_material() && !mf3.is_self_block());
+    assert_eq!(mf3.target.as_deref(), Some("Nb92_m1"));
+    assert_eq!(mf3.target1, None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A product state with no sub-subsection (NL 0), and a sub-subsection with no
+/// block (NC and NI 0), hold no covariance and so have no row. Each is listed
+/// with every tape value it holds, and that list is what the conversion
+/// writes to `provenance.json` beside the file.
+#[test]
+fn parts_without_a_block_are_listed_with_their_tape_values() {
+    let tape = text(NB93);
+    // The (n,2n) ground keeps its sub-subsection but loses its block.
+    let tape = edit(
+        tape,
+        " 1.000000+1 0.000000+0          0         16          0          1412540 16    3",
+        " 1.000000+1 0.000000+0          0         16          0          0412540 16    3",
+    );
+    // The (n,2n) isomer loses its sub-subsection.
+    let tape = edit(
+        tape,
+        "-8.830870+6-8.966370+6      41092          1          0          1412540 16   10",
+        "-8.830870+6-8.966370+6      41092          1          0          0412540 16   10",
+    );
+    let tape = drop_lines(tape, "16", 4..=9);
+    let tape = drop_lines(tape, "16", 11..=17);
+    let nb93 = material(&tape);
+    let mf40 = nb93.mf40(16).expect("MF=40 MT 16");
+    assert!(mf40.subsections[0].subsubsections[0]
+        .ni_subsections
+        .is_empty());
+    assert!(mf40.subsections[1].subsubsections.is_empty());
+
+    let out = extract(std::slice::from_ref(&nb93), &nb_decay());
+    assert_eq!(
+        out.stats.mf40_without_blocks,
+        [
+            "Nb93 MT16 state 0 sub-subsection 0: MAT1 0 MT1 16 XMF1 10 XLFS1 0 has no block",
+            "Nb93 MT16 state 1: QM -8830870 QI -8966370 IZAP 41092 LFS 1 has no sub-subsection",
+        ]
+    );
+    assert_eq!(out.stats.mf40_blocks, 2);
+    let dir = scratch("without-blocks");
+    write_branching_covariance(&out.covariance, &dir).expect("writes");
+    let blocks = read_back(&dir);
+    assert_eq!(blocks.len(), 2);
+    assert!(blocks.iter().all(|b| b.block.mt == 4));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A state MF=9 gives as a yield has no MF=10 partial: its block is still
+/// written, with a null `energy` and `values`, and counted. Here MF=40 MT 16
+/// becomes MT 102, its ground state IZAP 41094 at the Q value of Nb93's MF=9
+/// capture yield to Nb94.
+#[test]
+fn a_state_on_an_mf9_yield_is_written_without_a_curve() {
+    let tape = text(NB93);
+    let tape = edit(
+        tape,
+        "-8.830870+6-8.830870+6      41092          0          0          1412540 16    2",
+        " 7.227550+6 7.227550+6      41094          0          0          1412540 16    2",
+    );
+    let tape = edit(
+        tape,
+        " 1.000000+1 0.000000+0          0         16          0          1412540 16    3",
+        " 1.000000+1 0.000000+0          0        102          0          1412540 16    3",
+    );
+    let tape: String = tape
+        .lines()
+        .map(|line| {
+            if line.len() >= 75 && &line[66..75] == "412540 16" {
+                format!("{}412540102{}\n", &line[..66], &line[75..])
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect();
+    let out = extract(&[material(&tape)], &nb_decay());
+    assert_eq!(out.stats.mf40_on_yield_channels, 1, "{:?}", out.stats);
+    let row = out
+        .covariance
+        .iter()
+        .find(|r| r.mt == 102 && r.lfs == 0)
+        .expect("the capture ground state");
+    assert_eq!(row.reaction.as_deref(), Some("(n,gamma)"));
+    assert_eq!(row.target.as_deref(), Some("Nb94"));
+    assert_eq!(row.target1.as_deref(), Some("Nb94"));
+    assert!(row.energy.is_none() && row.values.is_none());
 }

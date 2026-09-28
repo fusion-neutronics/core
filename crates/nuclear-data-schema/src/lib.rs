@@ -251,9 +251,10 @@ pub fn branching_branching() -> Schema {
 /// gives it: nothing is normalised, and a state the converter could not place
 /// in the chain is still written, with a null `target`. A product state with
 /// no sub-subsection (NL 0), or a sub-subsection with no block (NC and NI 0),
-/// holds no number and so has no row; the converter lists each one in its
-/// `mf40_without_blocks` statistic instead. None of the published libraries
-/// has one.
+/// holds no covariance and so has no row, and the counts NS, NL, NC and NI are
+/// not columns, being the row counts. The converter lists each such part, with
+/// its tape values, under `mf40_without_blocks` in `branching/provenance.json`
+/// instead. None of the published libraries has one.
 ///
 /// The first columns are the converter's key, the rest are the tape's:
 ///
@@ -264,26 +265,29 @@ pub fn branching_branching() -> Schema {
 ///   partial of, which is the `target` of the `branching.arrow` row for
 ///   (`nuclide`, `reaction`). Null when no MF=9 or MF=10 state of that MT
 ///   matched it. `target1` is the same for the partner state the block
-///   correlates this one with, level `xlfs1` of reaction `mt1`, found among
-///   the states of `mt1`'s MF=40 section, or of its MF=9 and MF=10 states when
-///   it has no MF=40 section. Null when the partner is in another material,
+///   correlates this one with, level `xlfs1` of reaction `mt1`: the match of
+///   the one state of `mt1`'s MF=40 section at LFS `xlfs1`, as that state's
+///   own row's `target` is. Null when the partner is in another material,
 ///   `xmf1` is not 10, `mt1` is 0 (which the manual gives no meaning in
-///   MF=40), or no single state at that level is found (MF=40 gives no IZAP
-///   for the partner, so a level several products share is resolved only by
-///   this row's own IZAP, in the same MT, and the converter's
-///   `mf40_partner_by_own_izap` statistic lists each time it was). Several
+///   MF=40), or the tape does not pin the partner to one state. MF=40 gives
+///   no IZAP for it, so a level that two MF=40 states of `mt1` share, or an
+///   MF=9 or MF=10 state of another product, is left null rather than read as
+///   this row's own product. So is an `mt1` with no MF=40 section, whose level
+///   XLFS1 would have to be read in MF=10's numbering with no excitation to
+///   check it by. Each such null is listed under `mf40_partner_unresolved` in
+///   `branching/provenance.json`. Several
 ///   levels can resolve to one chain nuclide: JEFF-4.0 U235 MT 4 correlates
 ///   its ground (LFS 0) with its 77 eV isomer (XLFS1 1), both U235. So a
 ///   consumer keys a block on (`mt`, `lfs`, `mt1`, `xlfs1`), never on
 ///   (`target`, `target1`).
 /// * `energy` and `values` are this state's own MF=10 partial, linearized
 ///   by the converter exactly as `branching.arrow` has it (the tape's own
-///   points when every region is lin-lin), and are written only when several MF=10 states
-///   resolved to one target, which `branching.arrow` then carries as their
-///   sum. A relative covariance of one state has to be weighted by that
-///   state's own partial to fold exactly. Null for an MF=10 state means the
-///   `branching.arrow` cross section for (`nuclide`, `reaction`, `target`) is
-///   that state's own. A state MF=9 gives as a yield has no MF=10 partial, so
+///   points when every region is lin-lin), and are written only when several
+///   MF=10 states resolved to one target, which `branching.arrow` then
+///   carries as their sum. A relative covariance of one state has to be
+///   weighted by that state's own partial to fold exactly. Null for an MF=10
+///   state means the `branching.arrow` cross section for (`nuclide`,
+///   `reaction`, `target`) is that state's own. A state MF=9 gives as a yield has no MF=10 partial, so
 ///   is always null here, whether or not its yield row is merged with another.
 /// * `mat` is the evaluation's MAT, so a reader can tell a `mat1` naming the
 ///   evaluation itself (JEFF-4.0 U235 MT 4 writes its own 9228 there) from a

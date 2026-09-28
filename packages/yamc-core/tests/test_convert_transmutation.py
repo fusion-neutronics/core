@@ -210,4 +210,8 @@ def test_branching_covariance_is_written_beside_the_curves(tmp_path):
     assert stats["mf40_cross_state_blocks"] == 0
     assert stats["mf40_unmatched_states"] == []
     assert stats["mf40_without_blocks"] == []
-    assert stats["mf40_partner_by_own_izap"] == []
+    assert stats["mf40_blocks_outside_mf10"] == 0
+    assert stats["mf40_partner_unresolved"] == []
+    provenance = json.loads((out / "branching" / "provenance.json").read_text())
+    assert provenance["mf40_without_blocks"] == []
+    assert provenance["mf40_partner_unresolved"] == []
