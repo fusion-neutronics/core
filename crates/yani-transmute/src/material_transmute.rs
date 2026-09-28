@@ -2034,8 +2034,8 @@ fn refine_chain(
         for (kind, tmap) in kinds {
             if kind.as_str() == "(n,n')" {
                 // Grafted self-inelastic channels: the folded fraction is the
-                // share of the total (n,n') rate (base branchings are 1.0
-                // placeholders), so assign it directly.
+                // share of the total (n,n') rate (the loaded branchings are
+                // 0.0 placeholders), so assign it directly.
                 for rx in nuc.reactions.iter_mut().filter(|r| &r.kind == kind) {
                     if let Some(t) = &rx.target {
                         if let Some(&f) = tmap.get(t) {

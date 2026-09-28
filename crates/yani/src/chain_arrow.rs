@@ -702,9 +702,10 @@ pub fn parse_chain_parts_from_bytes(
     //     the fold re-partitions a nonzero mass and no parent atoms leak into an
     //     unproduced target.
     // The grafted branching is a 0.0 placeholder overwritten by the rate-time
-    // fold; reduction follows targets regardless of branching value. The
-    // ground/self `(n,n')` row (target == parent) is a depletion no-op and is
-    // skipped.
+    // fold; reduction follows targets regardless of branching value, and
+    // `populated_nuclides` bounds the edge from the curves rather than the
+    // placeholder. The ground/self `(n,n')` row (target == parent) is a
+    // depletion no-op and is skipped.
     let mut branch_table: BranchTable = BranchTable::new();
     {
         if let Some(bytes) = parts.branching.get("branching.arrow") {
