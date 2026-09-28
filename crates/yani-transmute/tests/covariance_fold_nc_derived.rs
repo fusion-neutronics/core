@@ -289,3 +289,150 @@ fn b10_na_is_derived_from_its_correlated_partials() {
         100.0 * na
     );
 }
+
+/// The O16 `(n,d)` shortfall is rate with no stated variance, so the share
+/// of the rate the covariance covers falls with it rather than reading one.
+#[test]
+fn o16_nd_above_20_mev_is_not_counted_as_covered() {
+    let Some((m, _)) = material("O16", 825) else {
+        eprintln!("skipping: O16 fixture or its covariance.arrow missing");
+        return;
+    };
+    let (_, coverage) = sigma(&m, "O16", "(n,d)", 2.4e7, 2.6e7);
+    let key = ("O16".to_string(), "(n,d)".to_string());
+    let ratio = coverage.partials_below_rate[&key];
+    let share = coverage.rate_fraction_covered[&key];
+    // 650 to 659 state a variance across the whole group, so what is left
+    // uncovered is exactly the rate they miss.
+    assert!(
+        (share - ratio).abs() < 1.0e-9,
+        "share {share}, named partials {ratio}"
+    );
+}
+
+/// TENDL-2017 H2 `(n,2n)` is `σ_1 - σ_2 - σ_102`, a derived rate of
+/// millibarns from barns each rounded to its own digits. The tape's
+/// derivation holds to that rounding, so it is not reported as inconsistent.
+#[test]
+fn tendl_2017_h2_n2n_cancelling_derivation_is_not_flagged() {
+    // Cached as the activation subset of MT 1, 2, 16 and 102, which only a
+    // load asking for some MTs reads.
+    let dir = yamc_test_cache::root().join("tendl-2017-H2.arrow");
+    if !yamc_test_cache::format_version_is_readable(&dir) {
+        eprintln!("skipping: TENDL-2017 H2 fixture missing or stale");
+        return;
+    }
+    let scope = yamc_nuclide::load_scope::LoadScope::activation([1, 2, 16, 102].into())
+        .with_temperatures(Some(["294".to_string()].into()))
+        .with_covariance(true);
+    let loaded = yamc_nuclide::nuclide::get_or_load_nuclide(
+        "H2",
+        &HashMap::from([("H2".to_string(), dir.to_string_lossy().into_owned())]),
+        &scope,
+    );
+    let nd = loaded.expect("the cached subset loads");
+    let Some(blocks) = nd.covariance.as_ref().map(|b| b.to_vec()) else {
+        eprintln!("skipping: TENDL-2017 H2 has no covariance.arrow");
+        return;
+    };
+    let mut m = Material::new(
+        HashMap::from([("H2".to_string(), 1.0)]),
+        "atom",
+        "sum",
+        None,
+    )
+    .expect("material");
+    m.set_temperature("294");
+    m.nuclide_data.insert("H2".to_string(), nd);
+    assert_eq!(derivation(&blocks, 16), [(1.0, 1), (-1.0, 2), (-1.0, 102)]);
+    let key = ("H2".to_string(), "(n,2n)".to_string());
+    for (lo, hi) in [(3.4e6, 3.5e6), (1.39e7, 1.41e7)] {
+        let (n2n, coverage) = sigma(&m, "H2", "(n,2n)", lo, hi);
+        assert!(!coverage.skipped_nc.contains_key("H2"));
+        assert!(
+            !coverage.partials_above_rate.contains_key(&key)
+                && !coverage.partials_below_rate.contains_key(&key),
+            "{lo} to {hi} eV: above {:?}, below {:?}",
+            coverage.partials_above_rate.get(&key),
+            coverage.partials_below_rate.get(&key)
+        );
+        eprintln!("TENDL-2017 H2 (n,2n), {lo} to {hi} eV: {:.4}%", 100.0 * n2n);
+    }
+}
+
+/// Through the load an ordinary standalone run makes, which asks for the
+/// chain's MTs only: the partials O16 `(n,p)` and B10 `(n,a)` are derived
+/// from must be read as well, or both channels fold to nothing.
+#[test]
+fn the_activation_load_reads_the_reactions_a_channel_is_derived_from() {
+    let chain = chain();
+    let branch = yani::BranchTable::new();
+    let mut m = Material::new(
+        HashMap::from([("O16".to_string(), 0.5), ("B10".to_string(), 0.5)]),
+        "atom",
+        "sum",
+        None,
+    )
+    .expect("material");
+    m.set_temperature("294");
+    let scope = yamc_nuclide::load_scope::LoadScope::activation(yani_transmute::activation_mts(
+        &chain, &branch,
+    ))
+    .with_temperatures(Some(["294".to_string()].into()))
+    .with_covariance(true);
+    for name in ["O16", "B10"] {
+        let Some(dir) = yamc_test_cache::nuclide(name) else {
+            eprintln!("skipping: {name} fixture missing");
+            return;
+        };
+        let nd = yamc_nuclide::nuclide::get_or_load_nuclide(
+            name,
+            &HashMap::from([(name.to_string(), dir)]),
+            &scope,
+        )
+        .expect("loads");
+        if nd.covariance.is_none() {
+            eprintln!("skipping: {name} has no covariance.arrow");
+            return;
+        }
+        m.nuclide_data.insert(name.to_string(), nd);
+    }
+    let request = yani_transmute::uncertainty::DataUncertainty {
+        sources: vec![yani_transmute::uncertainty::Source::CrossSections],
+        ..Default::default()
+    };
+    yani_transmute::preload_activation_data(&mut m, &chain, &branch, Some(&request), None)
+        .expect("preload");
+    let held = |name: &str, mt: i32| {
+        m.nuclide_data[name]
+            .reactions_for_temp("294")
+            .expect("294 K")
+            .contains_key(&mt)
+    };
+    assert!((600..=603).all(|mt| held("O16", mt)));
+    assert!(held("B10", 800) && held("B10", 801));
+
+    let (lo, hi) = (1.39e7, 1.41e7);
+    let (np, coverage) = sigma(&m, "O16", "(n,p)", lo, hi);
+    assert!(
+        !coverage.skipped_nc.contains_key("O16"),
+        "{:?}",
+        coverage.skipped_nc
+    );
+    assert_eq!(
+        coverage.rate_fraction_covered[&("O16".to_string(), "(n,p)".to_string())],
+        1.0
+    );
+    assert!(np > 0.0);
+    eprintln!(
+        "ENDF/B-VIII.1 O16 (n,p) on the activation load, 13.9 to 14.1 MeV: {:.4}%",
+        100.0 * np
+    );
+    let (na, coverage) = sigma(&m, "B10", "(n,a)", 0.02, 0.03);
+    assert!(
+        !coverage.skipped_nc.contains_key("B10"),
+        "{:?}",
+        coverage.skipped_nc
+    );
+    assert!(na > 0.0);
+}

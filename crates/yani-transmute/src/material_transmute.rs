@@ -1,4 +1,4 @@
-use crate::covariance_fold::fold_rate_covariance;
+use crate::covariance_fold::{fold_rate_covariance, reachable_mts};
 use crate::covariance_sample::Sampler;
 use crate::multigroup::{compute_multigroup_reaction_rates_shielded, scale_rates};
 use crate::results::TransmutationResults;
@@ -1023,8 +1023,54 @@ pub fn preload_activation_data(
     // covariance, which reads exactly like an evaluation that has none.
     if want_covariance {
         material.ensure_covariance_loaded()?;
+        ensure_derivations_loaded(material, chain)?;
     }
 
+    Ok(())
+}
+
+/// Widen each loaded nuclide to the MTs its NC derivations name.
+///
+/// The load above asks for the chain's MTs, and an NC block derives a channel
+/// from reactions the chain never names: ENDF/B-VIII.1 O16 `(n,p)` is
+/// `600 + ... + 603` and B10 `(n,a)` is `800 + 801`. Only the covariance says
+/// which, so this runs once it is read, and a nuclide whose derivations are
+/// already held is left alone. Loaded at the union with what it holds, so
+/// nothing already read is dropped.
+fn ensure_derivations_loaded(
+    material: &mut Material,
+    chain: &HashMap<String, ChainNuclide>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let short: Vec<(String, LoadScope)> = material
+        .nuclide_data
+        .iter()
+        .filter_map(|(name, nd)| {
+            // `None` is every MT, which holds any derivation.
+            let held = nd.load_scope.mts.as_ref()?;
+            let blocks = nd.covariance.as_ref()?;
+            let reach = reachable_mts(chain.get(name)?, blocks);
+            if reach.iter().all(|mt| held.contains(mt)) {
+                return None;
+            }
+            let mut scope = nd.load_scope.clone();
+            scope.mts = Some(held.iter().copied().chain(reach).collect());
+            Some((name.clone(), scope))
+        })
+        .collect();
+    for (name, scope) in short {
+        let source = material.nuclide_data[&name].data_path.clone().or_else(|| {
+            let cfg = yamc_nuclide::config::CONFIG
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            cfg.get_cross_section(&name)
+        });
+        let Some(source) = source else {
+            continue;
+        };
+        let path_map = HashMap::from([(name.clone(), source)]);
+        let widened = get_or_load_nuclide(&name, &path_map, &scope)?;
+        material.nuclide_data.insert(name, widened);
+    }
     Ok(())
 }
 
@@ -1125,6 +1171,7 @@ pub fn transport_replicas(
     let mut initial = initial.clone();
     if request.wants(crate::uncertainty::Source::CrossSections) {
         initial.ensure_covariance_loaded()?;
+        ensure_derivations_loaded(&mut initial, chain)?;
     }
     // The nominal the replicas scatter around: the same branching fold the
     // step loop applies, at unit source rate, since fractions do not depend on

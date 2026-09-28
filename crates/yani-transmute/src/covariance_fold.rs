@@ -130,16 +130,17 @@ pub struct Coverage {
     pub covered: BTreeSet<String>,
     /// Nuclides in the chain that had rates but no covariance data at all.
     pub without_data: BTreeSet<String>,
-    /// Per nuclide, its blocks correlating one of its channels with a
+    /// Per nuclide, its blocks correlating one of its reactions with a
     /// reaction of ANOTHER evaluation, not consumed.
     ///
     /// Only genuine ones: a `mat1` naming this evaluation's own MAT is this
     /// evaluation (ENDF-102 33.3.1) and is folded. Only relevant ones: a block
-    /// on a reaction the chain does not drive is not counted, since there is
-    /// no rate for it to be the uncertainty of. Per nuclide rather than a sum,
+    /// is counted only on a reaction the fold reaches (a channel, or one a
+    /// channel is derived from), since elsewhere there is no rate for it to
+    /// be the uncertainty of. Per nuclide rather than a sum,
     /// so a run with several spectra counts each block once.
     pub skipped_cross_material: BTreeMap<String, usize>,
-    /// Per nuclide, its blocks correlating one of its channels with a
+    /// Per nuclide, its blocks correlating one of its reactions with a
     /// quantity of this evaluation that is not a cross section (`xmf1` other
     /// than 0 or 3, or a final state in `xlfs1`), not consumed. Counted like
     /// [`Coverage::skipped_cross_material`]. No library yani reads has one.
@@ -189,12 +190,15 @@ pub struct Coverage {
     /// by that rate over the whole flux range. On a derived channel the
     /// blocks are also those of the reactions it is derived from, each over
     /// the NC block's energy range only, and the energy counts where any of
-    /// them states a variance. That takes the derivation as the tape states
-    /// it, `σ_MT = Σ c_i σ_MTi`; where the cross sections do not satisfy it,
-    /// rate the named reactions miss is counted as covered with them, and
-    /// [`Coverage::partials_below_rate`] lists the channel. Counting term by
-    /// term instead would need the coefficients to be positive, and TENDL-2017
-    /// H2 `(n,2n)` is `σ_1 - σ_2 - σ_102`. Rate from an interval a grid
+    /// them states a variance. Where the cross sections do not satisfy the
+    /// derivation `σ_MT = Σ c_i σ_MTi` past rounding and the named reactions
+    /// add up to less, the rate they miss, `c (σ_MT - Σ c_i σ_MTi)` for a
+    /// derivation reached with coefficient `c`, is taken off each energy it
+    /// falls in, down to none of it, and [`Coverage::partials_below_rate`]
+    /// lists the channel as well: ENDF/B-VIII.1 O16 `(n,d)` above 20 MeV,
+    /// where MT 660 to 669 carry about 7% of the rate at 25 MeV and no
+    /// covariance.
+    /// Rate from an interval a grid
     /// spans with a variance of zero counts as uncovered, the same as rate
     /// from outside every grid, because neither carries a stated uncertainty.
     /// Below one, part of the rate enters the relative covariance's
@@ -202,8 +206,8 @@ pub struct Coverage {
     /// sigma also depends on how the stated variance is spread over the
     /// covered part, so the share is not itself a dilution factor.
     ///
-    /// The numerator adds a subset of the denominator's terms in the same
-    /// order, so the share lies in [0, 1] without a clamp, and it does not
+    /// The numerator adds, in the same order, the denominator's terms or
+    /// smaller ones that are not negative, so the share lies in [0, 1], and it does not
     /// depend on how the rate the covariance is divided by was computed. On a
     /// tallied rate, whose within-bin weighting the fold does not have, it is
     /// the share of the dilute rate over the tally spectrum and not of the
@@ -723,8 +727,9 @@ fn contract(block: &ExpandedBlock, row: &Partials, col: &Partials) -> f64 {
 /// such channel is listed with its ratio for the reader to weigh.
 const PARTIALS_ROUNDING: f64 = 1.0e-9;
 
-/// How far from one the rate of the reactions an NC block names, over the
-/// rate of the one it derives, may sit and still be rounding.
+/// How far the rate of the reactions an NC block names may sit from the rate
+/// of the one it derives and still be rounding, relative to the larger of
+/// that rate and `Σ |c_i| R_MTi` (see [`derivation_mismatch`]).
 ///
 /// Wider than [`PARTIALS_ROUNDING`], because the two sides are different
 /// tape values rather than one integral grouped two ways: an ENDF float
@@ -819,25 +824,56 @@ impl Diagonal {
 /// make. Relative and absolute blocks are summed apart, having different
 /// units.
 ///
-/// The covered sum adds a subset of the total's terms in the same order, and
-/// rounded addition of terms that are not negative is monotone, so the share
-/// cannot exceed one. A block that states a variance on every interval across
-/// the whole flux range therefore reads exactly one.
+/// Where a derivation in `short` names reactions that add up to less than the
+/// one it derives, the rate they miss is taken off each cell it falls in, down
+/// to none of the cell: it is rate the covariance states nothing for.
+///
+/// The covered sum adds, in the same order, the total's terms or smaller ones
+/// that are not negative, and rounded addition of such terms is monotone, so
+/// the share cannot exceed one. A block that states a variance on every
+/// interval across the whole flux range therefore reads exactly one.
 fn stated_variance_share(
     flux: &FluxDensity,
     reaction: &Reaction,
     diagonals: &[Diagonal],
+    reactions: &BTreeMap<i32, &Reaction>,
+    short: &[&Derivation],
 ) -> Option<f64> {
     let (&lo, &hi) = (flux.boundaries.first()?, flux.boundaries.last()?);
     let mut edges: Vec<f64> = diagonals
         .iter()
         .flat_map(|d| d.pieces.iter().flat_map(|&(lo, hi, _)| [lo, hi]))
+        .chain(short.iter().flat_map(|d| [d.range.0, d.range.1]))
         .chain([lo, hi])
         .collect();
     edges.sort_by(f64::total_cmp);
     edges.dedup();
+    // Per cell, the channel's rate no named reaction carries: each short
+    // derivation's `coefficient (R_MT - Σ c_i R_MTi)` over its range. The
+    // gaps add, since a nested derivation's is the shortfall inside a
+    // reaction its parent names, so their sum is the channel's rate less
+    // that of the reactions the covariance is actually stated for.
+    let mut missing = vec![0.0; edges.len() - 1];
+    for d in short {
+        let rate = |mt: i32| flux.xs_over(reactions[&mt], &edges);
+        let mut gap = rate(d.mt);
+        for &(c, mt) in &d.named {
+            for (g, r) in gap.iter_mut().zip(rate(mt)) {
+                *g -= c * r;
+            }
+        }
+        for (k, w) in edges.windows(2).enumerate() {
+            if d.range.0 <= w[0] && w[1] <= d.range.1 {
+                missing[k] += d.coefficient * gap[k];
+            }
+        }
+    }
     let (mut covered, mut total) = (0.0, 0.0);
-    for (w, rate) in edges.windows(2).zip(flux.xs_over(reaction, &edges)) {
+    for (k, (w, rate)) in edges
+        .windows(2)
+        .zip(flux.xs_over(reaction, &edges))
+        .enumerate()
+    {
         let (a, b) = (w[0], w[1]);
         total += rate;
         let (mut relative, mut absolute) = (0.0, 0.0);
@@ -848,7 +884,9 @@ fn stated_variance_share(
             }
         }
         if relative != 0.0 || absolute != 0.0 {
-            covered += rate;
+            // Clamped to the cell's rate, so one cell where the named
+            // reactions exceed it cannot make up for another's shortfall.
+            covered += rate - missing[k].max(0.0).min(rate);
         }
     }
     (total != 0.0).then(|| covered / total)
@@ -1095,11 +1133,14 @@ fn derivation(
 }
 
 /// One NC block as the fold applied it: over `range`, reaction `mt` of
-/// `channel` is `Σ c_i σ_MTi` for the `(c_i, MT_i)` in `named`.
+/// `channel` is `Σ c_i σ_MTi` for the `(c_i, MT_i)` in `named`, and enters the
+/// channel scaled by `coefficient`, the product of the coefficients on the
+/// path that reached it.
 #[derive(Debug, Clone, PartialEq)]
 struct Derivation {
     channel: usize,
     mt: i32,
+    coefficient: f64,
     range: (f64, f64),
     named: Vec<(f64, i32)>,
 }
@@ -1174,6 +1215,7 @@ fn expand_terms(
         out.derivations.push(Derivation {
             channel,
             mt,
+            coefficient,
             range: within,
             named: named.clone(),
         });
@@ -1219,8 +1261,50 @@ fn channel_terms(
     out
 }
 
+/// Every MT the fold can reach on `chain_nuclide`: its channels' own, and
+/// those the LTY=0 NC blocks on them name, transitively.
+///
+/// An activation load reads only the MTs it is asked for, and the chain names
+/// none of the partials a derivation weights with, such as O16 MT 600 to 603,
+/// so without them [`derivation`] finds no cross section and the channel folds
+/// to nothing. Read off the blocks alone, before any cross section, so the
+/// loader can be asked for them. A named MT the evaluation does not publish is
+/// asked for and not found, and the fold reports its block in
+/// [`Coverage::skipped_nc`].
+pub(crate) fn reachable_mts(
+    chain_nuclide: &ChainNuclide,
+    blocks: &[CovarianceBlock],
+) -> BTreeSet<i32> {
+    let mut reached: BTreeSet<i32> = kinds_and_mts(chain_nuclide)
+        .into_iter()
+        .map(|(_, mt)| mt)
+        .collect();
+    let mut pending: Vec<i32> = reached.iter().copied().collect();
+    while let Some(mt) = pending.pop() {
+        for block in blocks {
+            let CovarianceData::Nc(nc) = &block.data else {
+                continue;
+            };
+            if block.mt != mt
+                || !block.is_same_evaluation()
+                || nc.lty != 0
+                || block.partner_mt() != block.mt
+            {
+                continue;
+            }
+            for &x in &nc.xmti {
+                let named = x as i32;
+                if f64::from(named) == x && reached.insert(named) {
+                    pending.push(named);
+                }
+            }
+        }
+    }
+    reached
+}
+
 /// The named reactions' rate over a derivation's range, over the rate of the
-/// reaction it derives, or `None` where neither has any rate there.
+/// reaction it derives, when the two differ by more than rounding.
 ///
 /// ENDF-102 33.2.2.1 derives the covariance as if `σ_MT = Σ c_i σ_MTi` held
 /// over `[E1, E2]`, and the fold builds the numerator from the right side and
@@ -1228,7 +1312,13 @@ fn channel_terms(
 /// library's cross sections do not satisfy the derivation its covariance
 /// states: ENDF/B-VIII.1 O16 MT 104 names 650 to 659, and above 20 MeV its
 /// cross section also holds 660 to 669, which have no covariance.
-fn derivation_ratio(
+///
+/// Rounding acts on each named rate, so the difference is judged against
+/// `Σ |c_i| R_MTi` rather than against the derived rate: with cancelling
+/// coefficients, as in TENDL-2017 H2 `(n,2n)` = `σ_1 - σ_2 - σ_102`, a derived
+/// rate of millibarns is the difference of barns, each rounded to its own
+/// seven digits.
+fn derivation_mismatch(
     flux: &FluxDensity,
     reactions: &BTreeMap<i32, &Reaction>,
     d: &Derivation,
@@ -1240,8 +1330,14 @@ fn derivation_ratio(
     }
     let rate = |mt: i32| flux.xs_over(reactions[&mt], &edges)[0];
     let derived = rate(d.mt);
-    let named: f64 = d.named.iter().map(|&(c, mt)| c * rate(mt)).sum();
-    (derived != 0.0 || named != 0.0).then(|| named / derived)
+    let (mut named, mut magnitude) = (0.0, 0.0);
+    for &(c, mt) in &d.named {
+        let r = rate(mt);
+        named += c * r;
+        magnitude += (c * r).abs();
+    }
+    ((named - derived).abs() > DERIVATION_ROUNDING * magnitude.max(derived.abs()))
+        .then(|| named / derived)
 }
 
 /// Fold one nuclide's covariance blocks against the flux.
@@ -1504,7 +1600,23 @@ fn fold_nuclide(
             continue;
         };
         let key = (nuclide.to_string(), kind.clone());
-        if let Some(share) = stated_variance_share(flux, reaction, diagonals) {
+        // A derived channel's numerator is built from the reactions its NC
+        // blocks name, so its check is that they add up to the reaction they
+        // derive, over each block's range, nested derivations included.
+        let mismatched: Vec<(&Derivation, f64)> = expansion
+            .derivations
+            .iter()
+            .filter(|d| d.channel == channel)
+            .filter_map(|d| Some((d, derivation_mismatch(flux, reactions, d)?)))
+            .collect();
+        // Rate a derivation's named reactions do not carry has no stated
+        // variance, so it is taken out of the covered share.
+        let short: Vec<&Derivation> = mismatched
+            .iter()
+            .filter(|(_, ratio)| *ratio < 1.0)
+            .map(|(d, _)| *d)
+            .collect();
+        if let Some(share) = stated_variance_share(flux, reaction, diagonals, reactions, &short) {
             coverage.rate_fraction_covered.insert(key.clone(), share);
         }
         let mut ratios = Vec::new();
@@ -1518,17 +1630,7 @@ fn fold_nuclide(
                 ratios.push(spanning / full);
             }
         }
-        // A derived channel's numerator is built from the reactions its NC
-        // blocks name, so its check is that they add up to the reaction they
-        // derive, over each block's range, nested derivations included.
-        ratios.extend(
-            expansion
-                .derivations
-                .iter()
-                .filter(|d| d.channel == channel)
-                .filter_map(|d| derivation_ratio(flux, reactions, d))
-                .filter(|r| (r - 1.0).abs() > DERIVATION_ROUNDING),
-        );
+        ratios.extend(mismatched.iter().map(|(_, ratio)| *ratio));
         for ratio in ratios {
             if ratio > 1.0 {
                 let e = coverage
@@ -1955,7 +2057,10 @@ mod stated_variance_tests {
             values: vec![0.01],
             scale: Scale::Relative,
         });
-        assert_eq!(stated_variance_share(&flux(), &above, &[d]), None);
+        assert_eq!(
+            stated_variance_share(&flux(), &above, &[d], &BTreeMap::new(), &[]),
+            None
+        );
     }
 
     /// A cross block correlates two reactions and states a variance for
