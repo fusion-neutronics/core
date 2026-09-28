@@ -1,0 +1,377 @@
+//! Every MF=32 section of six evaluated libraries, read to its SEND record.
+//!
+//! No fixture is small enough to cover what the libraries actually write in
+//! MF=32, and the Python reader the goldens come from does not parse it at
+//! all, so this is the check that the parser matches the tapes: every section
+//! of ENDF/B-VIII.1, JEFF-4.0, JENDL-5.0, TENDL-2017, TENDL-2025 and
+//! FENDL-3.2d is parsed, must consume exactly the lines up to its SEND
+//! record, and the counts of what was read must match an independent survey
+//! of the same tapes.
+//!
+//! The tapes are tens of gigabytes and live outside the repository, so this
+//! is ignored by default. Point `ENDF_TAPES` at a directory laid out as
+//! `nuclear_data_generation_scripts/data` is and run
+//!
+//! ```text
+//! ENDF_TAPES=/path/to/data cargo test -p endf --release --test mf32_tapes -- --ignored
+//! ```
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+
+use endf::mf::mf32::{parse_mf32, Covariance, Defect};
+use endf::Reader;
+
+/// A library, where it lives under `ENDF_TAPES`, and what the survey found.
+struct Library {
+    name: &'static str,
+    dir: &'static str,
+    files_with_mf32: usize,
+    /// Ranges by `(LRU, LRF, LCOMP)`, with LCOMP -1 for an unresolved range.
+    ranges: &'static [((i64, i64, i64), usize)],
+    /// LCOMP=2 ranges by NDIGIT.
+    ndigit: &'static [(i64, usize)],
+    /// Files with an INTG line outside its matrix, and how many such lines.
+    rows_outside: (usize, usize),
+    /// Files with a negative variance, and how many each has.
+    negative_variances: &'static [(&'static str, usize)],
+    /// Non-zero correlations below the diagonal, over every compact matrix.
+    correlations: usize,
+}
+
+const LIBRARIES: [Library; 6] = [
+    Library {
+        name: "ENDF/B-VIII.1",
+        dir: "endfb-viii.1-endf/neutrons-version.VIII.1",
+        files_with_mf32: 130,
+        ranges: &[
+            ((1, 2, 0), 20),
+            ((1, 2, 1), 6),
+            ((1, 2, 2), 62),
+            ((1, 3, 1), 31),
+            ((1, 3, 2), 1),
+            ((1, 7, 1), 1),
+            ((1, 7, 2), 9),
+            ((2, 1, -1), 44),
+        ],
+        ndigit: &[(2, 65), (3, 5), (4, 1), (5, 1)],
+        rows_outside: (0, 0),
+        negative_variances: &[],
+        correlations: 850_643,
+    },
+    Library {
+        name: "JEFF-4.0",
+        dir: "jeff-4.0-endf/neutron",
+        files_with_mf32: 510,
+        ranges: &[
+            ((1, 2, 0), 17),
+            ((1, 2, 1), 5),
+            ((1, 2, 2), 439),
+            ((1, 3, 1), 17),
+            ((1, 3, 2), 20),
+            ((1, 7, 2), 11),
+            ((2, 1, -1), 436),
+        ],
+        ndigit: &[(2, 468), (4, 2)],
+        rows_outside: (14, 45),
+        negative_variances: &[("n_91-Pa-233g.jeff", 93)],
+        correlations: 855_915,
+    },
+    Library {
+        name: "JENDL-5.0",
+        dir: "jendl-5.0-endf/neutron",
+        files_with_mf32: 43,
+        ranges: &[
+            ((1, 2, 0), 30),
+            ((1, 2, 1), 2),
+            ((1, 3, 1), 9),
+            ((1, 3, 2), 1),
+            ((1, 7, 2), 1),
+        ],
+        ndigit: &[(2, 1), (4, 1)],
+        rows_outside: (0, 0),
+        negative_variances: &[],
+        correlations: 8_518,
+    },
+    Library {
+        name: "TENDL-2017",
+        dir: "tendl-2017-endf/neutron_file",
+        files_with_mf32: 10,
+        ranges: &[((1, 3, 1), 1), ((1, 3, 2), 9), ((2, 1, -1), 1)],
+        ndigit: &[(2, 8), (5, 1)],
+        rows_outside: (0, 0),
+        negative_variances: &[],
+        correlations: 1_901_998,
+    },
+    Library {
+        name: "TENDL-2025",
+        dir: "tendl-2025-endf",
+        files_with_mf32: 2850,
+        ranges: &[((1, 2, 2), 2803), ((1, 3, 2), 47), ((2, 1, -1), 2715)],
+        ndigit: &[(2, 2850)],
+        rows_outside: (17, 49),
+        negative_variances: &[],
+        correlations: 737,
+    },
+    Library {
+        name: "FENDL-3.2d",
+        dir: "fendl-3.2d-endf/neutron",
+        files_with_mf32: 35,
+        ranges: &[
+            ((1, 2, 1), 4),
+            ((1, 2, 2), 7),
+            ((1, 3, 1), 4),
+            ((1, 3, 2), 16),
+            ((1, 7, 2), 4),
+            ((2, 1, -1), 11),
+        ],
+        ndigit: &[(2, 26), (4, 1)],
+        rows_outside: (4, 19),
+        negative_variances: &[],
+        correlations: 634_206,
+    },
+];
+
+/// What one file's MF=32 section held.
+#[derive(Default)]
+struct Summary {
+    ranges: BTreeMap<(i64, i64, i64), usize>,
+    ndigit: BTreeMap<i64, usize>,
+    rows_outside: usize,
+    negative_variances: usize,
+    correlations: usize,
+}
+
+/// Incident-neutron evaluations under `dir`, the way the survey chose them.
+fn evaluations(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).unwrap_or_else(|e| panic!("{}: {e}", d.display())) {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if (name.starts_with("n-") || name.starts_with("n_"))
+                && !name.ends_with(".md")
+                && !name.ends_with(".json")
+            {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The MF=32 MT=151 lines of a file, or `None` if it has none, checking that
+/// they are contiguous and closed by a SEND record.
+fn mf32_section(text: &str) -> Result<Option<String>, String> {
+    let control = |line: &str| {
+        let f = |a: usize, b: usize| {
+            line.get(a..b.min(line.len()))
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        (f(70, 72), f(72, 75))
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(start) = lines
+        .iter()
+        .position(|l| control(l) == ("32".to_string(), "151".to_string()))
+    else {
+        return Ok(None);
+    };
+    let mut end = start;
+    while end < lines.len() && control(lines[end]) == ("32".to_string(), "151".to_string()) {
+        end += 1;
+    }
+    match lines.get(end).map(|l| control(l)) {
+        Some((mf, mt)) if mf == "32" && (mt == "0" || mt.is_empty()) => {}
+        other => return Err(format!("MF=32 MT=151 is followed by {other:?}, not SEND")),
+    }
+    if lines[end..]
+        .iter()
+        .any(|l| control(l) == ("32".to_string(), "151".to_string()))
+    {
+        return Err("MF=32 MT=151 appears twice".into());
+    }
+    let mut body = String::new();
+    for line in &lines[start..end] {
+        body.push_str(line);
+        body.push('\n');
+    }
+    Ok(Some(body))
+}
+
+/// A file's summary, `None` if it has no MF=32, or why it could not be read.
+type Walked = Result<Option<Summary>, String>;
+
+fn walk(path: &Path) -> Walked {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&bytes);
+    let Some(body) = mf32_section(&text)? else {
+        return Ok(None);
+    };
+    let mut reader = Reader::new(&body);
+    let mf32 = parse_mf32(&mut reader).map_err(|e| e.to_string())?;
+    if !reader.is_empty() {
+        return Err(format!("{} lines left before SEND", reader.remaining()));
+    }
+
+    let mut s = Summary::default();
+    for iso in &mf32.isotopes {
+        for range in &iso.ranges {
+            let lcomp = match &range.covariance {
+                Covariance::Compatible(_) => 0,
+                Covariance::General(_) | Covariance::GeneralRMatrix(_) => 1,
+                Covariance::Compact(c) => {
+                    *s.ndigit.entry(c.correlation.ndigit).or_default() += 1;
+                    s.correlations += c.correlation.entries().count();
+                    2
+                }
+                Covariance::CompactRMatrix(c) => {
+                    *s.ndigit.entry(c.correlation.ndigit).or_default() += 1;
+                    s.correlations += c.correlation.entries().count();
+                    2
+                }
+                Covariance::Unresolved(_) => -1,
+            };
+            *s.ranges.entry((range.lru, range.lrf, lcomp)).or_default() += 1;
+        }
+    }
+    for d in &mf32.defects {
+        match d {
+            Defect::CorrelationRowOutsideMatrix { .. } => s.rows_outside += 1,
+            Defect::NegativeVariance { .. } => s.negative_variances += 1,
+        }
+    }
+    Ok(Some(s))
+}
+
+#[test]
+#[ignore = "reads tens of GB of local tapes; set ENDF_TAPES and run with --ignored"]
+fn every_mf32_section_on_the_local_tapes_is_read_to_send() {
+    let root = PathBuf::from(
+        std::env::var_os("ENDF_TAPES")
+            .expect("set ENDF_TAPES to the directory holding the six libraries"),
+    );
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let mut failures = Vec::new();
+    let mut mismatches = Vec::new();
+
+    for lib in &LIBRARIES {
+        let files = evaluations(&root.join(lib.dir));
+        let next = AtomicUsize::new(0);
+        let results: Mutex<Vec<(PathBuf, Walked)>> = Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(path) = files.get(i) else { break };
+                    let r = walk(path);
+                    results.lock().unwrap().push((path.clone(), r));
+                });
+            }
+        });
+
+        let mut with_mf32 = 0usize;
+        let mut ranges: BTreeMap<(i64, i64, i64), usize> = BTreeMap::new();
+        let mut ndigit: BTreeMap<i64, usize> = BTreeMap::new();
+        let mut rows_outside = (0usize, 0usize);
+        let mut negative = Vec::new();
+        let mut correlations = 0usize;
+        for (path, r) in results.into_inner().unwrap() {
+            match r {
+                Ok(None) => {}
+                Ok(Some(s)) => {
+                    with_mf32 += 1;
+                    for (k, v) in s.ranges {
+                        *ranges.entry(k).or_default() += v;
+                    }
+                    for (k, v) in s.ndigit {
+                        *ndigit.entry(k).or_default() += v;
+                    }
+                    correlations += s.correlations;
+                    if s.rows_outside > 0 {
+                        rows_outside.0 += 1;
+                        rows_outside.1 += s.rows_outside;
+                    }
+                    if s.negative_variances > 0 {
+                        let name = path.file_name().unwrap().to_string_lossy().to_string();
+                        negative.push((name, s.negative_variances));
+                    }
+                }
+                Err(e) => failures.push(format!("{}: {e}", path.display())),
+            }
+        }
+        negative.sort();
+        println!(
+            "{}: {} files, {with_mf32} with MF=32; ranges {ranges:?}; NDIGIT {ndigit:?}; \
+             {correlations} correlations; INTG lines outside the matrix: {} in {} files; \
+             negative variances: {negative:?}",
+            lib.name,
+            files.len(),
+            rows_outside.1,
+            rows_outside.0,
+        );
+
+        let expected_ranges: BTreeMap<_, _> = lib.ranges.iter().copied().collect();
+        let expected_ndigit: BTreeMap<_, _> = lib.ndigit.iter().copied().collect();
+        if with_mf32 != lib.files_with_mf32 {
+            mismatches.push(format!(
+                "{}: {with_mf32} files with MF=32, the survey found {}",
+                lib.name, lib.files_with_mf32
+            ));
+        }
+        if ranges != expected_ranges {
+            mismatches.push(format!(
+                "{}: ranges {ranges:?}, expected {expected_ranges:?}",
+                lib.name
+            ));
+        }
+        if ndigit != expected_ndigit {
+            mismatches.push(format!(
+                "{}: NDIGIT {ndigit:?}, expected {expected_ndigit:?}",
+                lib.name
+            ));
+        }
+        if rows_outside != lib.rows_outside {
+            mismatches.push(format!(
+                "{}: (files, lines) with INTG lines outside the matrix {rows_outside:?}, \
+                 the survey found {:?}",
+                lib.name, lib.rows_outside
+            ));
+        }
+        if correlations != lib.correlations {
+            mismatches.push(format!(
+                "{}: {correlations} non-zero correlations, the survey found {}",
+                lib.name, lib.correlations
+            ));
+        }
+        let expected_negative: Vec<(String, usize)> = lib
+            .negative_variances
+            .iter()
+            .map(|&(f, n)| (f.to_string(), n))
+            .collect();
+        if negative != expected_negative {
+            mismatches.push(format!(
+                "{}: negative variances {negative:?}, expected {expected_negative:?}",
+                lib.name
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "{} files failed:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}

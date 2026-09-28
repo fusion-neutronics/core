@@ -46,10 +46,13 @@ fn the_states_a_reaction_lists_are_reported_in_level_order() {
     // which JEFF-4.0, ENDF/B-VIII.1, JENDL-5.0 and TENDL-2025 all list and
     // this evaluation does not. That absence is the finding: nothing else
     // about the channel looks wrong.
-    let energies: Vec<f64> = n2n.states.iter().map(|s| s.excitation_energy).collect();
+    let energies: Vec<Option<f64>> = n2n.states.iter().map(|s| s.excitation_energy).collect();
     assert_eq!(energies.len(), 2, "{energies:?}");
-    assert_eq!(energies[0], 0.0);
-    assert!((energies[1] - 26_100.0).abs() < 100.0, "{energies:?}");
+    assert_eq!(energies[0], Some(0.0));
+    assert!(
+        energies[1].is_some_and(|e| (e - 26_100.0).abs() < 100.0),
+        "{energies:?}"
+    );
     assert!(n2n.excited().count() == 1);
 
     // The product is named at its ground state even for the excited entry,

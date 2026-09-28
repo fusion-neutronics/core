@@ -175,6 +175,45 @@ def test_fission_yield_evaluations_are_stored_as_the_tape_gives_them(tmp_path):
     assert (cumulative["yields"][i], cumulative["yield_uncertainties"][i]) == (0.0605, 0.0018)
 
 
+def test_decay_mode_sigmas_are_stored_as_the_tape_gives_them(converted):
+    """The dBR of every decay mode is in the file, and a 0.0 stays a 0.0.
+
+    MT=457 writes 0.0 for an uncertainty it does not state. The file keeps
+    that number rather than a null standing in for it, and readers take both
+    as "not stated". Read with pyarrow, so this checks the file itself.
+    """
+    pytest.importorskip("pyarrow")
+    import pyarrow.ipc as ipc
+
+    out, _ = converted
+    modes = ipc.open_file(out / "decay" / "decay_modes.arrow").read_all()
+    assert modes.schema.names[-1] == "branching_ratio_uncertainty"
+    assert modes.column("branching_ratio_uncertainty").null_count == 0
+    dbr = {}
+    for nuclide, sigma in zip(
+        modes.column("nuclide").to_pylist(),
+        modes.column("branching_ratio_uncertainty").to_pylist(),
+    ):
+        dbr.setdefault(nuclide, []).append(sigma)
+    # Cs137's two modes carry one stated number each; In116_m1's one mode
+    # states none.
+    assert dbr["Cs137"] == [1.999988e-3, 1.999988e-3]
+    assert dbr["In116_m1"] == [0.0]
+
+
+def test_nuclide_sigmas_are_stored_as_the_tape_gives_them(converted):
+    """A decay-energy sigma the tape writes as 0.0 is 0.0 in the file too."""
+    pytest.importorskip("pyarrow")
+    import pyarrow.ipc as ipc
+
+    out, _ = converted
+    nuclides = ipc.open_file(out / "decay" / "nuclides.arrow").read_all()
+    row = nuclides.column("name").to_pylist().index("Cs137")
+    # Cs137 emits no heavy particles: the tape gives 0.0 +- 0.0.
+    assert nuclides.column("decay_energy_alpha")[row].as_py() == 0.0
+    assert nuclides.column("decay_energy_alpha_uncertainty")[row].as_py() == 0.0
+
+
 def test_missing_inputs_are_refused(tmp_path):
     """A partial chain is a wrong chain, not a smaller one."""
     with pytest.raises(ValueError, match="decay_files"):

@@ -64,6 +64,8 @@ pub enum Section {
     Mf27(Box<mf::atomic::Mf27>),
     /// MF=28, atomic relaxation data.
     Mf28(Box<mf::atomic::Mf28>),
+    /// MF=32 MT=151, covariances of resonance parameters.
+    Mf32(Box<mf::mf32::Mf32>),
     /// MF=33, covariances of neutron cross sections.
     Mf33(Box<mf::covariance::Mf33>),
     /// MF=34, covariances of angular distributions.
@@ -351,6 +353,14 @@ impl Material {
         }
     }
 
+    /// The MF=32 MT=151 resonance parameter covariances.
+    pub fn mf32(&self) -> Option<&mf::mf32::Mf32> {
+        match self.section_data.get(&(32, 151))? {
+            Section::Mf32(s) => Some(s),
+            _ => None,
+        }
+    }
+
     /// The MF=33 covariance section for a reaction.
     pub fn mf33(&self, mt: i32) -> Option<&mf::covariance::Mf33> {
         match self.section_data.get(&(33, mt))? {
@@ -488,6 +498,7 @@ fn parse_section(mf: i32, mt: i32, text: &str) -> Result<Section> {
         (26, _) => Section::Mf26(Box::new(mf::atomic::parse_mf26(&mut r)?)),
         (27, _) => Section::Mf27(Box::new(mf::atomic::parse_mf27(&mut r)?)),
         (28, _) => Section::Mf28(Box::new(mf::atomic::parse_mf28(&mut r)?)),
+        (32, 151) => Section::Mf32(Box::new(mf::mf32::parse_mf32(&mut r)?)),
         (33, _) => Section::Mf33(Box::new(mf::covariance::parse_mf33(&mut r)?)),
         (34, _) => Section::Mf34(Box::new(mf::covariance::parse_mf34(&mut r, mt as i64)?)),
         (40, _) => Section::Mf40(Box::new(mf::covariance::parse_mf40(&mut r)?)),
