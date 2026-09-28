@@ -539,6 +539,7 @@ mod tests {
                     target: Some("Mn56".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 decays: vec![],
                 fission_yields: None,
@@ -715,6 +716,7 @@ mod tests {
                     target: Some("ParentA".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 decays: vec![],
                 fission_yields: None,
@@ -737,6 +739,7 @@ mod tests {
                     target: Some("DaughterB".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 fission_yields: None,
                 sources: vec![],
@@ -832,6 +835,7 @@ mod tests {
             target: Some(target.to_string()),
             branching: 1.0,
             q_value: None,
+            branching_uncertainty: None,
         };
         let emitter = |name: &str, reactions: Vec<ChainReaction>| ChainNuclide {
             name: name.to_string(),

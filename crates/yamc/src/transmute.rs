@@ -1181,6 +1181,7 @@ mod tests {
                         target: Some(target.to_string()),
                         branching: 1.0,
                         q_value: None,
+                        branching_uncertainty: None,
                     })
                     .collect(),
                 decays: vec![],

@@ -806,6 +806,52 @@ mod tests {
         assert!(!settled(&before, &after), "a new nuclide has not settled");
     }
 
+    /// A nuclide whose every sigma is the 0.0 MT=457 writes for "not stated",
+    /// which the chain files store as 0.0 rather than as null.
+    fn stated_as_zero() -> yani::ChainNuclide {
+        yani::ChainNuclide {
+            name: "In116_m1".to_string(),
+            half_life: Some(3257.4),
+            half_life_uncertainty: Some(0.0),
+            decay_energy: 2.8e6,
+            decay_energy_uncertainty: Some(0.0),
+            decay_energy_components: [
+                Some(yani::DecayEnergyComponent {
+                    energy: 2.8e6,
+                    uncertainty: Some(0.0),
+                }),
+                None,
+                None,
+            ],
+            reactions: Vec::new(),
+            decays: Vec::new(),
+            fission_yields: None,
+            sources: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_stored_zero_sigma_is_not_stated_rather_than_exact() {
+        // Every reader of these sigmas has to take 0.0 as "not stated", the
+        // way it takes a null: a zero sampled as a sigma would report the
+        // nuclide as known exactly, and it would not be listed among the
+        // inputs that carry no uncertainty.
+        let cn = stated_as_zero();
+        let chain = HashMap::from([(cn.name.clone(), cn.clone())]);
+        let (with, without) = half_life_candidates(&chain);
+        assert!(
+            with.is_empty(),
+            "a 0.0 half-life sigma was sampled: {with:?}"
+        );
+        assert!(
+            without.contains("In116_m1"),
+            "and it was not reported unstated"
+        );
+
+        assert!(!has_decay_energy_sigma(&cn));
+        assert_eq!(sample_decay_energy(&cn, 7, 0), None);
+    }
+
     #[test]
     fn only_significant_nuclides_drive_convergence() {
         let mut e = Ensemble::new(1);
