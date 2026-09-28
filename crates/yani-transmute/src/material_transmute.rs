@@ -2610,6 +2610,71 @@ mod tests {
         assert!((get("X_m1") - 0.25).abs() < 1e-12);
     }
 
+    /// The overlay re-partitions only the mass on the base chain's product,
+    /// so it is live only when that product is one of the overlay's listed
+    /// states. ENDF/B-VIII.1 lists La139 (n,d3He) Xe135 and Xe135_m1, and the
+    /// reaction table must put the base edge on Xe135 (139 + 1 - 2 - 3) for
+    /// the Xe135_m1 graft to receive anything.
+    #[test]
+    fn la139_n_d3he_overlay_moves_mass_onto_its_listed_states() {
+        let info = endf::chain::reaction_info("(n,d3He)").unwrap();
+        assert_eq!(57 + info.delta_z, 54, "(n,d3He) on La must land on Xe");
+        let product = format!("Xe{}", 139 + info.delta_a);
+
+        let la139 = |product: &str| {
+            let rx = |target: &str, branching: f64| ChainReaction {
+                kind: "(n,d3He)".to_string(),
+                target: Some(target.to_string()),
+                branching,
+                q_value: None,
+            };
+            let mut map: HashMap<String, ChainNuclide> = HashMap::new();
+            map.insert(
+                "La139".to_string(),
+                ChainNuclide {
+                    name: "La139".to_string(),
+                    half_life: None,
+                    decay_energy: 0.0,
+                    // The base edge, then the 0.0 graft chain_arrow adds.
+                    reactions: vec![rx(product, 1.0), rx("Xe135_m1", 0.0)],
+                    decays: vec![],
+                    fission_yields: None,
+                    sources: Vec::new(),
+                    half_life_uncertainty: None,
+                    decay_energy_uncertainty: None,
+                    decay_energy_components: Default::default(),
+                },
+            );
+            Arc::new(map)
+        };
+        let mut partials: PartialRates = HashMap::new();
+        partials.entry("La139".to_string()).or_default().insert(
+            "(n,d3He)".to_string(),
+            vec![
+                ("Xe135".to_string(), 3.0e-30),
+                ("Xe135_m1".to_string(), 1.0e-30),
+            ],
+        );
+        let split = |product: &str| -> Vec<(String, f64)> {
+            let folded = apply_coupled_branching(&la139(product), &partials, &mut HashMap::new());
+            folded["La139"]
+                .reactions
+                .iter()
+                .map(|r| (r.target.clone().unwrap(), r.branching))
+                .collect()
+        };
+
+        // On the old product, Xe134, nothing the overlay lists holds any mass.
+        assert_eq!(
+            split("Xe134"),
+            [("Xe134".to_string(), 1.0), ("Xe135_m1".to_string(), 0.0)]
+        );
+        let fixed = split(&product);
+        assert_eq!(fixed[0].0, "Xe135");
+        assert!((fixed[0].1 - 0.75).abs() < 1e-12, "{fixed:?}");
+        assert!((fixed[1].1 - 0.25).abs() < 1e-12, "{fixed:?}");
+    }
+
     /// All-zero partial rates (flux never reached the thresholds) keep the
     /// base split, matching the fold's `None` behaviour; nothing is cloned.
     #[test]
