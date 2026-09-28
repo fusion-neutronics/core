@@ -228,18 +228,29 @@ pub struct Info {
     /// add up to more than the rate it was divided by, their ratio to it. Each
     /// is a channel whose relative sigma is overstated, because the two were
     /// computed different ways; a self-shielded rate against dilute partials
-    /// is one. Its `rate_fraction_covered` is unaffected.
+    /// is one, and a tallied rate is another. Its `rate_fraction_covered` is
+    /// unaffected. Until the fold weights a shielded rate with shielded
+    /// partials (#166 item 4), a self-shielded run lists most channels a
+    /// relative block names, many only a few parts in 1e7 over.
     pub partials_above_rate: BTreeMap<(String, String), f64>,
+    /// Per (nuclide, reaction kind), where a relative block's grid spans the
+    /// whole flux range and its partial rates add up to less than the rate it
+    /// was divided by, their ratio to it: a channel whose relative sigma is
+    /// understated. A grid that stops short of the flux range cannot be
+    /// checked this way, since rate from outside it rightly leaves its
+    /// partials short.
+    pub partials_below_rate: BTreeMap<(String, String), f64>,
     /// Mean of the per-channel shares in [`Info::rate_fraction_covered`],
     /// weighted by the production each channel drove (the rate this run used
-    /// times parent density), or `None` for a decay-only schedule that drove
-    /// none.
+    /// times parent density): the share of the production driven from
+    /// energies where a covariance states a nonzero variance.
     ///
-    /// On a dilute run that is the share of the production driven from
-    /// energies where a covariance states a nonzero variance. On a
-    /// self-shielded or tallied run it is not: the shares are of the dilute
-    /// rate, and shielding moves rate out of the resonance range, where
-    /// capture blocks often state zero. That covered share is not computed.
+    /// `None` for a decay-only schedule, which drove no production, and on a
+    /// self-shielded or tallied run, where that share is not computed. The
+    /// per-channel shares are of the dilute rate, and shielding moves rate
+    /// out of the resonance range, where capture blocks often state zero, so
+    /// weighting them by the shielded or tallied production would give a
+    /// figure that is not the share its name claims.
     ///
     /// The number to read before any sigma here, and not the same question as
     /// how many nuclides carry MF=33: an evaluation can state covariance for
@@ -299,7 +310,10 @@ pub struct Info {
 }
 
 impl Info {
-    pub(crate) fn from_fold(coverage: &Coverage, clipping: &Clipping) -> Self {
+    /// `dilute` is whether the rates the fold was divided by are the dilute
+    /// collapse, the only case in which the production total is the covered
+    /// share.
+    pub(crate) fn from_fold(coverage: &Coverage, clipping: &Clipping, dilute: bool) -> Self {
         Self {
             perturbed: coverage.covered.clone(),
             no_covariance_data: coverage.without_data.clone(),
@@ -309,7 +323,8 @@ impl Info {
             malformed_blocks: coverage.malformed,
             rate_fraction_covered: coverage.rate_fraction_covered.clone(),
             partials_above_rate: coverage.partials_above_rate.clone(),
-            rate_fraction_covered_total: coverage.rate_fraction_total(),
+            partials_below_rate: coverage.partials_below_rate.clone(),
+            rate_fraction_covered_total: coverage.rate_fraction_total().filter(|_| dilute),
             matrices_clipped: clipping.matrices_clipped,
             worst_relative_clip: clipping.worst_relative_clip,
             not_perturbed: [
@@ -346,6 +361,7 @@ impl Info {
             || !self.unsupported_layouts.is_empty()
             || self.malformed_blocks > 0
             || !self.partials_above_rate.is_empty()
+            || !self.partials_below_rate.is_empty()
             || self.spectra_without_flux_sigma > 0
             || !self.no_half_life_uncertainty.is_empty()
             || !self.no_decay_energy_uncertainty.is_empty()
@@ -776,6 +792,27 @@ pub(crate) fn set_half_life(cn: &mut yani::ChainNuclide, half_life: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The production total weights dilute shares by the production the run
+    /// drove, which is the covered share only when that production is the
+    /// dilute one. A shielded or tallied run reports no total rather than a
+    /// figure that is not the share its name claims, and keeps the
+    /// per-channel dilute shares, which are.
+    #[test]
+    fn only_a_dilute_run_reports_a_production_total() {
+        let coverage = Coverage {
+            rate_fraction_covered: BTreeMap::from([(("W186".into(), "(n,gamma)".into()), 0.25)]),
+            covered_production: 1.0,
+            total_production: 4.0,
+            ..Default::default()
+        };
+        let clipping = Clipping::default();
+        let dilute = Info::from_fold(&coverage, &clipping, true);
+        assert_eq!(dilute.rate_fraction_covered_total, Some(0.25));
+        let other = Info::from_fold(&coverage, &clipping, false);
+        assert_eq!(other.rate_fraction_covered_total, None);
+        assert_eq!(other.rate_fraction_covered, coverage.rate_fraction_covered);
+    }
 
     #[test]
     fn moments_match_a_hand_computed_standard_deviation() {

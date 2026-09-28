@@ -180,9 +180,30 @@ pub struct Coverage {
     ///
     /// Absolute (`lb = 0`) blocks weight with partial fluxes rather than
     /// partial rates, which have no rate to compare with, so they are not
-    /// checked. Absence from this map therefore says the relative blocks are
-    /// consistent, not that an absolute one is.
+    /// checked. The check from below is
+    /// [`Coverage::partials_below_rate`], and it reaches only some blocks, so
+    /// absence from both maps is not a statement that every block is
+    /// consistent.
     pub partials_above_rate: BTreeMap<(String, String), f64>,
+    /// Per (nuclide, kind), where a relative block's grid spans the whole
+    /// flux range and its partial rates add up to less than the rate the
+    /// covariance was divided by, their ratio to it.
+    ///
+    /// Such a grid leaves no energy outside it, so its partials are the whole
+    /// rate integrated interval by interval and must equal it; the smallest
+    /// sum over the channel's spanning blocks is the one compared. A shortfall
+    /// past rounding is the same inconsistency as an excess, the other way:
+    /// the channel's relative sigma is understated. The `1/E` within-group
+    /// weight gives one for a reaction falling with energy, such as a `1/v`
+    /// capture, whenever a covariance edge cuts a group, for the reason given
+    /// on [`Coverage::partials_above_rate`].
+    ///
+    /// A grid that stops short of either end of the flux range cannot be
+    /// checked from below: rate from outside it is rate with no stated
+    /// uncertainty, which legitimately leaves its partials short of the rate
+    /// (see [`Coverage::rate_fraction_covered`]). Absolute blocks are not
+    /// checked, as above.
+    pub partials_below_rate: BTreeMap<(String, String), f64>,
     /// The production this spectrum drove, each channel's weighted by its
     /// share in [`Coverage::rate_fraction_covered`], and the production it
     /// drove in total. Both are per barn-cm per second, and both are weighted
@@ -214,7 +235,8 @@ impl Coverage {
     /// On a dilute run that is the share of the production driven from
     /// energies where a covariance states a nonzero variance. On a
     /// self-shielded or tallied run it is not, for the reason given on
-    /// [`Coverage::covered_production`].
+    /// [`Coverage::covered_production`], and the run reports no total there
+    /// rather than this figure (`Info::rate_fraction_covered_total`).
     ///
     /// The number to read before any sigma from this fold. Counting nuclides
     /// with MF=33 answers a different and much weaker question: an evaluation
@@ -233,13 +255,14 @@ impl Coverage {
     /// one sum and `production` to the other, in the same order, with the
     /// share at most one. Rounding is monotone, so the covered sum cannot pass
     /// the total. A ratio outside [0, 1] is a bug upstream (a negative rate,
-    /// or a share above one), and clamping it would hide that.
+    /// or a share above one), and clamping it would hide that, so it panics
+    /// in every build rather than return a share that is not one.
     pub fn rate_fraction_total(&self) -> Option<f64> {
         (self.total_production > 0.0).then(|| {
             let fraction = self.covered_production / self.total_production;
-            debug_assert!(
+            assert!(
                 (0.0..=1.0).contains(&fraction),
-                "covered production {} against a total of {}",
+                "covered production {} against a total of {} is not a share",
                 self.covered_production,
                 self.total_production
             );
@@ -251,7 +274,8 @@ impl Coverage {
     ///
     /// Every field is order-free: the sets union, the counters sum,
     /// `rate_fraction_covered` is keyed by (nuclide, kind) and takes the
-    /// smaller claim, and `partials_above_rate` takes the larger excess. That
+    /// smaller claim, `partials_above_rate` takes the larger excess and
+    /// `partials_below_rate` the larger shortfall, the smaller ratio. That
     /// is what lets the fold below run per nuclide in parallel and merge
     /// afterwards (issue #576, finding 5c).
     pub fn absorb(&mut self, other: Coverage) {
@@ -275,6 +299,12 @@ impl Coverage {
                 .and_modify(|r| *r = r.max(ratio))
                 .or_insert(ratio);
         }
+        for (key, ratio) in other.partials_below_rate {
+            self.partials_below_rate
+                .entry(key)
+                .and_modify(|r| *r = r.min(ratio))
+                .or_insert(ratio);
+        }
         self.covered_production += other.covered_production;
         self.total_production += other.total_production;
     }
@@ -287,6 +317,7 @@ impl Coverage {
             || !self.unsupported_layouts.is_empty()
             || self.malformed > 0
             || !self.partials_above_rate.is_empty()
+            || !self.partials_below_rate.is_empty()
     }
 }
 
@@ -414,8 +445,9 @@ fn contract(block: &ExpandedBlock, row: &Partials, col: &Partials) -> f64 {
     total
 }
 
-/// How far above one a channel's summed partial rates over its rate may sit
-/// and still be rounding.
+/// How far from one a channel's summed partial rates over its rate may sit
+/// and still be rounding, above it or, for a grid spanning the whole flux
+/// range, below it.
 ///
 /// On a dilute collapse under the flat-within-group weight the two add the
 /// same terms grouped differently, and on CCFE-709 they agree to a few parts
@@ -590,6 +622,16 @@ fn fold_nuclide(
     // the rate, and not the share: it is what the covariance's numerator was
     // built from, whatever the block states.
     let mut weighted_rate: BTreeMap<i32, f64> = BTreeMap::new();
+    // Per MT, the smallest such sum over the relative blocks whose grid spans
+    // the whole flux range, the only ones whose partials must add up to the
+    // rate rather than to at most it.
+    let mut spanning_rate: BTreeMap<i32, f64> = BTreeMap::new();
+    let spans = |grid: &[f64]| match (grid.first(), grid.last()) {
+        (Some(&a), Some(&b)) => {
+            a <= flux.boundaries[0] && b >= flux.boundaries[flux.boundaries.len() - 1]
+        }
+        _ => false,
+    };
 
     for block in blocks {
         if block.is_cross_material() {
@@ -651,10 +693,17 @@ fn fold_nuclide(
             own.push(Diagonal::of(&expanded));
         }
         if expanded.scale == Scale::Relative {
-            for (mt, partials) in [(row_mt, &row), (col_mt, &col)] {
+            for (mt, partials, grid) in [
+                (row_mt, &row, &expanded.row_energies),
+                (col_mt, &col, &expanded.col_energies),
+            ] {
                 let sum = partials.total().abs();
                 let e = weighted_rate.entry(mt).or_insert(0.0);
                 *e = e.max(sum);
+                if spans(grid) {
+                    let e = spanning_rate.entry(mt).or_insert(f64::INFINITY);
+                    *e = e.min(sum);
+                }
             }
         }
         used += 1;
@@ -689,7 +738,14 @@ fn fold_nuclide(
         }
         if let (Some(&weighted), Some(&full)) = (weighted_rate.get(mt), rates.get(kind)) {
             if full != 0.0 && weighted / full > 1.0 + PARTIALS_ROUNDING {
-                coverage.partials_above_rate.insert(key, weighted / full);
+                coverage
+                    .partials_above_rate
+                    .insert(key.clone(), weighted / full);
+            }
+        }
+        if let (Some(&spanning), Some(&full)) = (spanning_rate.get(mt), rates.get(kind)) {
+            if full != 0.0 && spanning / full < 1.0 - PARTIALS_ROUNDING {
+                coverage.partials_below_rate.insert(key, spanning / full);
             }
         }
     }
@@ -1004,6 +1060,7 @@ mod stated_variance_tests {
         );
         assert!(got < 0.5, "most of this rate is below 10 keV: {got}");
         assert!(c.partials_above_rate.is_empty());
+        assert!(c.partials_below_rate.is_empty());
 
         // Against half the rate, as a shielded collapse would give, the
         // partials the fold weighted with sum to twice it. The zero variance
@@ -1065,6 +1122,8 @@ mod stated_variance_tests {
             (got - before).abs() <= 1.0e-14 * before,
             "{got} against {before}"
         );
+        // Short of the rate, rightly: the rest of it is outside the grid.
+        assert!(c.partials_below_rate.is_empty());
     }
 
     /// A threshold above the spectrum's top edge drives no dilute rate, so
@@ -1185,6 +1244,42 @@ mod stated_variance_tests {
             ..Default::default()
         });
         assert_eq!(merged.partials_above_rate[&key], ratio);
+    }
+
+    /// A grid spanning the whole flux range leaves no rate outside it, so its
+    /// partials short of the rate are the same inconsistency as partials above
+    /// it, understating the sigma instead. A grid that stops short cannot be
+    /// checked that way, because rate from outside it is rightly left out.
+    #[test]
+    fn partials_below_the_rate_are_reported_where_the_grid_spans_it() {
+        let key = ("W186".to_string(), "(n,gamma)".to_string());
+        // Twice the rate the partials sum to.
+        let spanning = [1.0e-5, 1.0e4, 2.0e7];
+        let c = fold(&[block(102, 102, lb5(&spanning, &[0.01, 0.0, 0.01]))], 2.0);
+        let ratio = c.partials_below_rate[&key];
+        assert!((ratio - 0.5).abs() < 1.0e-12, "{ratio}");
+        assert!(c.partials_above_rate.is_empty());
+        assert!(
+            c.has_gaps(),
+            "an understated sigma is something to know about"
+        );
+        assert_eq!(fraction(&c, "(n,gamma)"), 1.0);
+
+        let short = [1.0, 1.0e3, 1.0e6];
+        let c = fold(&[block(102, 102, lb5(&short, &[0.01, 0.002, 0.03]))], 2.0);
+        assert!(c.partials_below_rate.is_empty());
+
+        // Across spectra the larger shortfall is the one kept.
+        let mut merged = Coverage::default();
+        merged.absorb(Coverage {
+            partials_below_rate: BTreeMap::from([(key.clone(), 0.8)]),
+            ..Default::default()
+        });
+        merged.absorb(Coverage {
+            partials_below_rate: BTreeMap::from([(key.clone(), ratio)]),
+            ..Default::default()
+        });
+        assert_eq!(merged.partials_below_rate[&key], ratio);
     }
 }
 

@@ -701,13 +701,13 @@ fn fe56_np_is_not_covered_where_its_variance_is_zero() {
 }
 
 /// On a dilute collapse the fold's partial rates and the rate they are divided
-/// by are the same integral, so no channel may report partials above its rate,
-/// and every share the fold reports lies in [0, 1].
+/// by are the same integral, so no channel may report partials above or below
+/// its rate, and every share the fold reports lies in [0, 1].
 #[test]
-fn a_dilute_fold_reports_no_partials_above_the_rate() {
+fn a_dilute_fold_reports_no_partials_off_the_rate() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let Some(dir) = fe56_with_covariance(tmp.path()) else {
-        return skip("a_dilute_fold_reports_no_partials_above_the_rate");
+        return skip("a_dilute_fold_reports_no_partials_off_the_rate");
     };
     let mut material = iron(&dir);
     let results = run(
@@ -729,6 +729,15 @@ fn a_dilute_fold_reports_no_partials_above_the_rate() {
         info.partials_above_rate.is_empty(),
         "a dilute fold is consistent: {:?}",
         info.partials_above_rate
+    );
+    assert!(
+        info.partials_below_rate.is_empty(),
+        "a dilute fold is consistent: {:?}",
+        info.partials_below_rate
+    );
+    assert!(
+        info.rate_fraction_covered_total.is_some(),
+        "a dilute run drove production, so it has a total"
     );
     for (key, fraction) in &info.rate_fraction_covered {
         assert!(

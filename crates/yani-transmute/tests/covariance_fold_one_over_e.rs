@@ -116,6 +116,11 @@ fn a_one_over_e_fold_with_an_edge_inside_a_group_is_reported() {
         "{:?}",
         flat.partials_above_rate
     );
+    assert!(
+        flat.partials_below_rate.is_empty(),
+        "{:?}",
+        flat.partials_below_rate
+    );
 
     let one_over_e = {
         let _weight = WeightGuard::set(Weighting::OneOverE);
