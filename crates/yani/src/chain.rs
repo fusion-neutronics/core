@@ -118,11 +118,12 @@ pub struct BranchCurve {
 ///
 /// The table also holds the subsection's `branching_covariance.arrow`, the
 /// MF=40 covariance of the MF=10 partials, when the subsection carries one.
-/// That is kept as the file's record batches, schema-checked and otherwise as written: it is every MF=40 block of
-/// the library, not only those of this chain's parents, and turning a row into
-/// a covariance block is the covariance reader's job (`yamc-nuclide`), which
-/// this crate does not depend on. Nothing here reads it, so the curves and every
-/// nominal result are what they are without it.
+/// That is kept as the file's record batches, schema-checked and otherwise
+/// as written: it is every MF=40 block of the library, not only those of this
+/// chain's parents, and turning a row into a covariance block is the
+/// covariance reader's job (`yamc-nuclide`), which this crate does not depend
+/// on. Nothing here reads it, so the curves and every nominal result are what
+/// they are without it.
 #[derive(Clone, Debug, Default)]
 pub struct BranchTable {
     curves: HashMap<String, HashMap<String, Vec<BranchCurve>>>,
