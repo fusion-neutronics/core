@@ -396,6 +396,7 @@ mod tests {
                     target: Some("A".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 vec![],
                 vec![],
@@ -412,6 +413,7 @@ mod tests {
                     target: Some("B".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 vec![], // no photons on the parent
             ),
@@ -455,6 +457,7 @@ mod tests {
             target: Some(target.to_string()),
             branching: 1.0,
             q_value: None,
+            branching_uncertainty: None,
         };
         chain.get_mut("X").unwrap().reactions = vec![rx("(n,gamma)", "P")];
         chain.get_mut("A").unwrap().reactions = vec![rx("(n,p)", "A")];

@@ -579,14 +579,14 @@ pub const REACTIONS: [ReactionInfo; 84] = [
     ReactionInfo {
         name: "(n,p3He)",
         mts: &[191],
-        delta_a: -4,
+        delta_a: -3,
         delta_z: -3,
         secondaries: &["H1", "He3"],
     },
     ReactionInfo {
         name: "(n,d3He)",
         mts: &[192],
-        delta_a: -5,
+        delta_a: -4,
         delta_z: -3,
         secondaries: &["H2", "He3"],
     },
@@ -688,6 +688,30 @@ pub fn normalise_branch_ratios(branch_ratios: &mut [f64]) {
     branch_ratios[i] = max - total + 1.0;
 }
 
+/// A parent's decay paths: each mode's target, its ratio normalised with
+/// [`normalise_branch_ratios`], and the tape's dBR beside it untouched.
+fn decay_paths(data: &Decay, decay_data: &BTreeMap<String, Decay>) -> Vec<DecayPath> {
+    let mut ratios: Vec<f64> = data.modes.iter().map(|m| m.branching_ratio.0).collect();
+    normalise_branch_ratios(&mut ratios);
+    data.modes
+        .iter()
+        .zip(ratios)
+        .map(|(mode, ratio)| {
+            let target = match mode.daughter() {
+                Some(d) if decay_data.contains_key(&d) => Some(d),
+                Some(d) => replace_missing(&d, decay_data),
+                None => None,
+            };
+            DecayPath {
+                kind: mode.modes.join(","),
+                target,
+                branching_ratio: ratio,
+                branching_ratio_uncertainty: mode.branching_ratio.1,
+            }
+        })
+        .collect()
+}
+
 /// One decay path out of a nuclide.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DecayPath {
@@ -704,6 +728,18 @@ pub struct DecayPath {
     /// is where the target is dropped.
     pub target: Option<String>,
     pub branching_ratio: f64,
+    /// The evaluation's dBR on `branching_ratio`, exactly as MT=457 writes it.
+    ///
+    /// A 0.0 is kept as 0.0. It is how the format says "not stated", and it
+    /// is stored rather than turned into something else so the chain carries
+    /// the tape and not an interpretation of it; a consumer must read it as
+    /// not stated, never as a ratio known to be exact.
+    ///
+    /// It is the tape's dBR on the tape's BR. [`normalise_branch_ratios`]
+    /// leaves it as evaluated, but where the parent's ratios do not sum to one
+    /// it moves the residual into `branching_ratio` on the parent's largest
+    /// mode, so on that one row the two no longer come from the same number.
+    pub branching_ratio_uncertainty: f64,
 }
 
 /// One neutron-induced path out of a nuclide.
@@ -728,12 +764,14 @@ pub struct Nuclide {
     pub name: String,
     /// Half-life in seconds. `None` for a stable nuclide.
     pub half_life: Option<f64>,
-    /// The evaluation's stated standard deviation on the half-life, in seconds.
+    /// The evaluation's standard deviation on the half-life, in seconds,
+    /// exactly as MT=457 writes it. `None` where there is no half-life.
     ///
-    /// `None` where the evaluation published none, which is NOT zero: an
-    /// unstated uncertainty and one measured to be negligible are different
-    /// claims, and a consumer that cannot tell them apart reports the first
-    /// as confidence (issue #515).
+    /// A 0.0 is kept as 0.0. It is how the format says "not stated" (292 of
+    /// the 3561 half-lives in ENDF/B-VIII.1), and a consumer must read it
+    /// that way: an unstated uncertainty is not one measured to be
+    /// negligible, and reporting the first as the second is confidence the
+    /// evaluation never claimed (issue #515).
     pub half_life_uncertainty: Option<f64>,
     /// Average energy per decay in eV.
     pub decay_energy: f64,
@@ -741,21 +779,24 @@ pub struct Nuclide {
     ///
     /// Quadrature over the three recoverable-heat components, which is what
     /// MT=457 supports: it publishes a sigma per component and no covariance
-    /// between them. `None` where the evaluation stated none, which is not
-    /// zero.
+    /// between them. `None` where there is no half-life, or where the tape
+    /// gives none of the three components. A 0.0 is the quadrature of
+    /// components whose sigmas the tape writes as 0.0, the format's "not
+    /// stated", and is to be read the same way.
     pub decay_energy_uncertainty: Option<f64>,
     /// `decay_energy` split into its three recoverable-heat components, in
     /// [`crate::decay::DECAY_HEAT_ENERGY_NAMES`] order: light particles (beta
     /// and conversion or Auger electrons), electromagnetic (gammas and x-rays)
     /// and heavy particles (alphas, protons, neutrons, fragments). Each is
-    /// `(energy [eV], sigma [eV])`, the sigma `None` where the evaluation
-    /// stated none. `None` for a component the evaluation did not give, which
-    /// is not the same as one it gave as zero.
+    /// `(energy [eV], sigma [eV])` exactly as the tape writes it, so a sigma
+    /// of 0.0 is the format's "not stated" and is kept as 0.0. `None` for a
+    /// component the evaluation did not give, which is not the same as one it
+    /// gave as zero.
     ///
     /// The components have different uncertainties and different consumers:
     /// a decay heat split into its parts, or a gamma-only heat for shielding,
     /// cannot be recovered from the total.
-    pub decay_energy_components: [Option<(f64, Option<f64>)>; 3],
+    pub decay_energy_components: [Option<(f64, f64)>; 3],
     /// Where `decay_energy` came from: [`DECAY_ENERGY_EVALUATED`] for an
     /// evaluated decay scheme, [`DECAY_ENERGY_PLACEHOLDER`] for the Q/3
     /// stand-in some libraries write for nuclides nobody has evaluated (see
@@ -975,8 +1016,8 @@ impl Chain {
                 .replaced
                 .push((nuclide.name.clone(), nuclide.decay_energy, energy));
             nuclide.decay_energy = energy;
-            nuclide.decay_energy_uncertainty = (sigma > 0.0).then_some(sigma);
-            nuclide.decay_energy_components = components_of(candidate);
+            nuclide.decay_energy_uncertainty = Some(sigma);
+            nuclide.decay_energy_components = candidate.decay_energy_components();
             nuclide.decay_energy_source = Some(format!("filled:{library}"));
         }
         Ok(report)
@@ -1049,21 +1090,23 @@ impl Chain {
             let half_life = data.half_life.map(|(t, _)| t).unwrap_or(0.0);
             if !data.nuclide.stable && half_life != 0.0 {
                 nuclide.half_life = Some(half_life);
-                // The sigma sits beside the half-life in MF=8 MT=457. A zero
-                // there is how the format says "not stated": an evaluation
-                // that had measured the uncertainty to be zero would be
-                // claiming an exact half-life, which nothing does. Mapping it
-                // straight through would make `Some(0.0)` -- known to be
-                // exact -- out of 292 of the 3562 unstable nuclides in
-                // ENDF/B-8.1, which is the confidence this column exists to
-                // avoid manufacturing.
-                nuclide.half_life_uncertainty = data.half_life.map(|(_, s)| s).filter(|s| *s > 0.0);
+                // The sigmas are kept as the tape writes them, zeros included.
+                // A zero is how MT=457 says "not stated", and it is the
+                // readers' job to take it that way: turning it into a null here
+                // made the published file say something the tape does not.
+                nuclide.half_life_uncertainty = data.half_life.map(|(_, s)| s);
                 // One call, so the value and its sigma cannot come from two
                 // different evaluations of the same quadrature.
                 let (energy, energy_sigma) = data.decay_energy();
                 nuclide.decay_energy = energy;
-                nuclide.decay_energy_uncertainty = (energy_sigma > 0.0).then_some(energy_sigma);
-                nuclide.decay_energy_components = components_of(data);
+                nuclide.decay_energy_components = data.decay_energy_components();
+                // With no component on the tape the quadrature is of nothing,
+                // and its 0.0 would be a number the evaluation never wrote.
+                nuclide.decay_energy_uncertainty = nuclide
+                    .decay_energy_components
+                    .iter()
+                    .any(Option::is_some)
+                    .then_some(energy_sigma);
                 nuclide.decay_energy_source = Some(
                     if data.mean_energy_placeholder {
                         DECAY_ENERGY_PLACEHOLDER
@@ -1073,26 +1116,7 @@ impl Chain {
                     .to_string(),
                 );
 
-                let mut ratios: Vec<f64> = Vec::new();
-                let mut ids: Vec<(String, Option<String>)> = Vec::new();
-                for mode in &data.modes {
-                    let daughter = mode.daughter();
-                    let target = match &daughter {
-                        Some(d) if decay_data.contains_key(d) => Some(d.clone()),
-                        Some(d) => replace_missing(d, &decay_data),
-                        None => None,
-                    };
-                    ratios.push(mode.branching_ratio.0);
-                    ids.push((mode.modes.join(","), target));
-                }
-                normalise_branch_ratios(&mut ratios);
-                for (ratio, (kind, target)) in ratios.into_iter().zip(ids) {
-                    nuclide.decay_modes.push(DecayPath {
-                        kind,
-                        target,
-                        branching_ratio: ratio,
-                    });
-                }
+                nuclide.decay_modes = decay_paths(data, &decay_data);
             }
 
             let mut fissionable = false;
@@ -1433,13 +1457,6 @@ pub fn replace_missing_fpy(
     "U235".to_string()
 }
 
-/// A decay's three recoverable-heat components, `(energy, sigma)` each, the
-/// sigma `None` where the evaluation wrote zero (the format's "not stated").
-fn components_of(data: &crate::decay::Decay) -> [Option<(f64, Option<f64>)>; 3] {
-    data.decay_energy_components()
-        .map(|c| c.map(|(energy, sigma)| (energy, (sigma > 0.0).then_some(sigma))))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1463,27 +1480,67 @@ mod tests {
 
         assert!(reaction_info("(n,nonsense)").is_none());
 
-        // Every reaction conserves nucleons: the change in A plus what the
-        // secondaries carry away accounts for the incident neutron.
+        // Every entry follows from the particles its name says leave: the
+        // product is the target plus the incident neutron less what was
+        // emitted, so delta_a = 1 - sum(A) and delta_z = -sum(Z), and the
+        // secondaries are the emitted particles other than neutrons.
         for rx in &REACTIONS {
-            let carried: i64 = rx
-                .secondaries
-                .iter()
-                .map(|s| match *s {
-                    "H1" => 1,
-                    "H2" => 2,
-                    "H3" => 3,
-                    "He3" => 3,
-                    "He4" => 4,
-                    other => panic!("unexpected secondary {other}"),
-                })
-                .sum();
-            assert!(
-                rx.delta_a + carried <= 1,
-                "{} gains nucleons from nowhere",
+            let emitted = emitted_particles(rx.name);
+            let (a, z) = emitted.iter().fold((0, 0), |(a, z), p| (a + p.1, z + p.2));
+            assert_eq!(
+                (rx.delta_a, rx.delta_z),
+                (1 - a, -z),
+                "{} does not match the particles it emits",
                 rx.name
             );
+            let mut charged: Vec<&str> =
+                emitted.iter().filter(|p| p.0 != "n").map(|p| p.0).collect();
+            let mut secondaries = rx.secondaries.to_vec();
+            charged.sort_unstable();
+            secondaries.sort_unstable();
+            assert_eq!(secondaries, charged, "{} secondaries", rx.name);
         }
+    }
+
+    /// The particles a reaction name says leave, as (nuclide, A, Z), one
+    /// entry per particle: `"(n,2npa)"` gives n, n, H1, He4.
+    fn emitted_particles(name: &str) -> Vec<(&'static str, i64, i64)> {
+        let body = name
+            .strip_prefix("(n,")
+            .and_then(|b| b.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("{name} is not of the form (n,...)"));
+        if body == "gamma" {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut rest = body;
+        while !rest.is_empty() {
+            // "3He" is a particle, not three of something, so it is matched
+            // before a leading digit is read as a count.
+            if let Some(r) = rest.strip_prefix("3He") {
+                out.push(("He3", 3, 2));
+                rest = r;
+                continue;
+            }
+            let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+            let count: usize = if digits == 0 {
+                1
+            } else {
+                rest[..digits].parse().unwrap()
+            };
+            rest = &rest[digits..];
+            let particle = match rest.chars().next() {
+                Some('n') => ("n", 1, 0),
+                Some('p') => ("H1", 1, 1),
+                Some('d') => ("H2", 2, 1),
+                Some('t') => ("H3", 3, 1),
+                Some('a') => ("He4", 4, 2),
+                other => panic!("unexpected particle {other:?} in {name}"),
+            };
+            rest = &rest[1..];
+            out.extend(std::iter::repeat_n(particle, count));
+        }
+        out
     }
 
     #[test]
@@ -1511,6 +1568,36 @@ mod tests {
     }
 
     #[test]
+    fn a_renormalised_ratio_keeps_the_tapes_dbr() {
+        // JEFF-4.0's Er152 as evaluated: 0.1 +- 0.04 and 0.91 +- 0.04, which
+        // sum to 1.01. The ratio moves, the sigma must not.
+        let mode = |modes: Vec<&'static str>, ratio| crate::decay::DecayMode {
+            parent: "Er152".to_string(),
+            modes,
+            branching_ratio: ratio,
+            ..Default::default()
+        };
+        let data = Decay {
+            modes: vec![
+                mode(vec!["ec/beta+"], (0.1, 0.04)),
+                mode(vec!["alpha"], (0.91, 0.04)),
+            ],
+            ..Default::default()
+        };
+        let paths = decay_paths(&data, &BTreeMap::new());
+        let ratios: Vec<f64> = paths.iter().map(|p| p.branching_ratio).collect();
+        assert_eq!(ratios[0], 0.1, "the smaller branch is as evaluated");
+        assert!((ratios[1] - 0.9).abs() < 1e-12, "the residual is on alpha");
+        let sigmas: Vec<f64> = paths
+            .iter()
+            .map(|p| p.branching_ratio_uncertainty)
+            .collect();
+        assert_eq!(sigmas, [0.04, 0.04]);
+        assert_eq!(paths[0].kind, "ec/beta+");
+        assert_eq!(paths[1].kind, "alpha");
+    }
+
+    #[test]
     fn a_missing_product_walks_to_one_the_library_has() {
         // An empty library has nothing to walk to, and the walk stops rather
         // than running off the table; see issue #22.
@@ -1530,6 +1617,7 @@ mod tests {
                     kind: "beta-".to_string(),
                     target: Some(target.to_string()),
                     branching_ratio: 1.0,
+                    branching_ratio_uncertainty: 0.0,
                 });
             }
             chain.nuclides.push(n);
