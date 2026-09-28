@@ -973,6 +973,109 @@ impl PyTransmutationResults {
         Some(out.into_any().unbind())
     }
 
+    /// What the isomeric-branching rule did over one step's spectrum.
+    ///
+    /// The branching evaluation gives the split and the cross-section library
+    /// the total. How a list's values are read is decided by how the
+    /// evaluation gives them, which the converter records: a complete MF=10
+    /// list (its ground state listed) and every MF=9 list are shares of the
+    /// transport total, applied at each energy; an MF=10 list of isomers only,
+    /// and every ``(n,n')`` list, are absolute productions, the ground state
+    /// taking the rest. This says, per channel, which of those applied and how
+    /// much of the parent's removal rate rests on anything the evaluation
+    /// does not give.
+    ///
+    /// A run refuses when a channel's clipped or held production is more than
+    /// 0.1% of that parent's neutron removal rate, so what comes back here is
+    /// below that. MT=5's share is reported whatever its size: its products
+    /// are not modelled yet.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     step: Schedule step index, as ``get_reaction_rates`` takes it.
+    ///
+    /// Returns:
+    ///     dict | None: ``channels``, ``dropped`` and ``unmodelled_mt5``, or
+    ///     None if the material or the step is unknown. Each channel has
+    ///     ``parent``, ``reaction``, ``mt``, ``file`` (9 or 10),
+    ///     ``representation`` (``"share"`` or ``"absolute"``), ``complete``,
+    ///     ``completeness_source``, ``denominator``, ``states`` (each with
+    ///     ``target``, ``lfs``, ``level_route``, ``level_energy_difference``
+    ///     and ``share``, its share of the reaction), ``removal_share`` (the
+    ///     reaction's share of the parent's removal rate), ``clipped_share``
+    ///     and ``extrapolated_share`` (of the same removal rate),
+    ///     ``own_total_excess`` (``(energy_ev, ratio)`` where the listed values
+    ///     most exceed the evaluation's own total, or None) and
+    ///     ``normalisation``. Each dropped channel has ``parent``,
+    ///     ``reaction``, ``target``, ``reason`` and ``removal_share`` (None
+    ///     where it cannot be folded). ``unmodelled_mt5`` is
+    ///     ``[(nuclide, share)]``, MT=5's share of each parent's removal
+    ///     rate, largest first. Empty for a decay-only step.
+    ///
+    /// Examples:
+    ///     >>> report = results.get_branching_report(material_id=1, step=0)
+    ///     >>> report["channels"][0]["representation"]
+    ///     'absolute'
+    fn get_branching_report<'py>(
+        &self,
+        py: Python<'py>,
+        material_id: u32,
+        step: usize,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(report) = self.inner.get_branching_report(material_id, step) else {
+            return Ok(None);
+        };
+        let out = PyDict::new(py);
+        let channels = PyList::empty(py);
+        for c in &report.channels {
+            let d = PyDict::new(py);
+            d.set_item("parent", c.parent.as_str())?;
+            d.set_item("reaction", c.reaction.as_str())?;
+            d.set_item("mt", c.mt)?;
+            d.set_item("file", c.file)?;
+            d.set_item("representation", c.representation.as_str())?;
+            d.set_item("complete", c.complete)?;
+            d.set_item("completeness_source", c.completeness_source.as_str())?;
+            d.set_item("denominator", c.denominator.as_str())?;
+            let states = PyList::empty(py);
+            for s in &c.states {
+                let sd = PyDict::new(py);
+                sd.set_item("target", s.target.as_str())?;
+                sd.set_item("lfs", s.lfs.clone())?;
+                sd.set_item("level_route", s.level_route.clone())?;
+                sd.set_item("level_energy_difference", s.level_energy_difference.clone())?;
+                sd.set_item("share", s.share)?;
+                states.append(sd)?;
+            }
+            d.set_item("states", states)?;
+            d.set_item("removal_share", c.removal_share)?;
+            d.set_item("clipped_share", c.clipped_share)?;
+            d.set_item("extrapolated_share", c.extrapolated_share)?;
+            d.set_item("own_total_excess", c.own_total_excess)?;
+            d.set_item("normalisation", c.normalisation.clone())?;
+            channels.append(d)?;
+        }
+        out.set_item("channels", channels)?;
+        let dropped = PyList::empty(py);
+        for c in &report.dropped {
+            let d = PyDict::new(py);
+            d.set_item("parent", c.parent.as_str())?;
+            d.set_item("reaction", c.reaction.as_str())?;
+            d.set_item("target", c.target.clone())?;
+            d.set_item("reason", c.reason.as_str())?;
+            d.set_item("removal_share", c.removal_share)?;
+            dropped.append(d)?;
+        }
+        out.set_item("dropped", dropped)?;
+        let mt5: Vec<(String, f64)> = report
+            .unmodelled_mt5
+            .iter()
+            .map(|u| (u.nuclide.clone(), u.share))
+            .collect();
+        out.set_item("unmodelled_mt5", mt5)?;
+        Ok(Some(out))
+    }
+
     /// Every way a product was made over one step, weighted by how much of it
     /// arrived down each.
     ///
