@@ -1895,9 +1895,10 @@ fn first_order_contributors(
 /// `skipped_other_file`) and `mirrored_disagree` take the larger, since a
 /// nuclide gives the same ones on every spectrum; `skipped_nc`,
 /// `unsupported_layouts` and `malformed` add, once per spectrum. A rate
-/// fraction is kept at its SMALLEST over the spectra: a channel well covered under one spectrum and barely covered
-/// under another is only as well covered as the worse of the two, and reporting
-/// the better one would overstate what the evaluation actually says.
+/// fraction is kept at its SMALLEST over the spectra: a channel well covered
+/// under one spectrum and barely covered under another is only as well covered
+/// as the worse of the two, and reporting the better one would overstate what
+/// the evaluation actually says.
 fn merge_coverage(
     into: &mut crate::covariance_fold::Coverage,
     from: crate::covariance_fold::Coverage,
