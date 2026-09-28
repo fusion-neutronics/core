@@ -11,10 +11,10 @@
 //! - both modes state the same sigma, which is how an evaluator writes one
 //!   number for a complementary pair (Bi212 0.3594 and 0.6406, both 0.0006),
 //!   or only one mode states a sigma, the other being its complement by the sum
-//!   rule (K35 p 0.0037 +- 0.0015 beside EC 0.9963 with none); and
+//!   rule (JENDL-5.0 Bi212 gives alpha 0.0006 and beta- none); and
 //! - the smaller ratio is at least [`MIN_SIGMAS`] sigmas from zero, so the
 //!   Gaussian the sigma describes stays inside `[0, T]` (the chance of a draw
-//!   outside is below 3e-7).
+//!   leaving through either end is at most `2 Phi(-5)`, below 6e-7).
 //!
 //! Every other parent is held at nominal and reported by why: three or more
 //! modes with a sigma (the split of the error between them is not stated),

@@ -85,6 +85,12 @@ def test_asking_for_decay_branching_reports_disjoint_categories():
     info = _info(["decay_branching"])
     assert "decay branching ratio" not in info["not_perturbed"]
     assert info["sources"] == ["decay_branching"]
+    assert isinstance(info["has_gaps"], bool)
+    for key in ("decay_branchings_perturbed", *HELD_AT_NOMINAL):
+        assert all(isinstance(name, str) for name in info[key]), key
+    # Every parent held at nominal is a gap the summary flag must show.
+    if any(info[key] for key in HELD_AT_NOMINAL):
+        assert info["has_gaps"]
     # A parent is in at most one category.
     seen = set(info["decay_branchings_perturbed"])
     for key in HELD_AT_NOMINAL:

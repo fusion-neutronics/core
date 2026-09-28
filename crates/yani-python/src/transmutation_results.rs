@@ -636,7 +636,8 @@ impl PyTransmutationResults {
     ///   transport run, how many tallied rates were sampled from their
     ///   covariance; ``statistical_floored`` / ``statistical_sampled`` count
     ///   draws that came out negative and were floored.
-    /// - ``not_perturbed``: the sources this does not propagate at all.
+    /// - ``not_perturbed``: the inputs and couplings this run held at
+    ///   nominal.
     /// - ``samples`` / ``converged``: how many replicas ran, and whether the
     ///   sigmas settled or the cap was hit.
     ///
