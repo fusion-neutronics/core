@@ -125,8 +125,8 @@ def test_asking_on_data_without_covariance_reports_it_rather_than_a_zero():
 def test_skipped_block_counters_are_per_nuclide_dicts():
     """The skipped block counters are keyed by nuclide, not summed to one int.
 
-    ``skipped_cross_material`` and ``skipped_other_file`` map a nuclide to its
-    count, and ``mirrored_disagree`` maps ``"Nuclide (n,a) (n,b)"`` to a
+    ``skipped_cross_material``, ``skipped_other_file`` and ``skipped_nc`` map
+    a nuclide to its count, and ``mirrored_disagree`` maps ``"Nuclide (n,a) (n,b)"`` to a
     relative difference. Their shape is checked on every run, and is empty
     when the fixture carries no covariance.arrow.
     """
@@ -136,17 +136,20 @@ def test_skipped_block_counters_are_per_nuclide_dicts():
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["cross_sections"]),
     )
     info = results.get_data_uncertainty_info(iron.id or 0)
-    for key in ("skipped_cross_material", "skipped_other_file", "mirrored_disagree"):
+    counters = ("skipped_cross_material", "skipped_other_file", "skipped_nc")
+    for key in (*counters, "mirrored_disagree"):
         assert isinstance(info[key], dict), f"{key} is {type(info[key])}"
         assert all(isinstance(k, str) for k in info[key]), info[key]
-    for nuclide, count in info["skipped_cross_material"].items():
-        assert isinstance(count, int) and count > 0, (nuclide, count)
+    for key in counters:
+        for nuclide, count in info[key].items():
+            assert isinstance(count, int) and count > 0, (key, nuclide, count)
     for pair, difference in info["mirrored_disagree"].items():
         assert len(pair.split(" ")) == 3, pair
         assert difference > 0.0, (pair, difference)
     if "Fe56" not in info["perturbed"]:
         assert info["skipped_cross_material"] == {}
         assert info["skipped_other_file"] == {}
+        assert info["skipped_nc"] == {}
         assert info["mirrored_disagree"] == {}
 
 

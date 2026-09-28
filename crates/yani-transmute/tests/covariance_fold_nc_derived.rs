@@ -27,19 +27,26 @@ fn chain() -> Arc<HashMap<String, yani::ChainNuclide>> {
     Arc::new(yani::parse_chain_arrow(&path).expect("parse chain"))
 }
 
-/// Three groups with all the flux in the middle one, `[lo, hi]`.
+/// Three groups with all the flux in the middle one, `[lo, hi]`, the top
+/// one ending at 20 MeV or, for a group above that, at twice its top.
 fn groups(lo: f64, hi: f64) -> ([f64; 4], [f64; 3]) {
-    ([1.0e-5, lo, hi, 2.0e7], [0.0, 1.0e14, 0.0])
+    let top = if hi < 2.0e7 { 2.0e7 } else { 2.0 * hi };
+    ([1.0e-5, lo, hi, top], [0.0, 1.0e14, 0.0])
 }
 
-/// The cached evaluation with its own MF=33, or `None` when either is missing.
+/// The cached ENDF/B-VIII.1 evaluation with its own MF=33, or `None` when
+/// either is missing.
+fn material(name: &str, mat: i32) -> Option<(Material, Vec<CovarianceBlock>)> {
+    material_in(yamc_test_cache::nuclide(name)?, name, mat)
+}
+
+/// The evaluation in `dir` with its own MF=33, or `None` when it has none.
 ///
 /// `mat` is the evaluation's MAT, given to every block that does not carry
 /// it, as a covariance.arrow written before the `mat` column does not. The
 /// converter now writes it, and without it a cross block naming the own MAT
 /// reads as another evaluation's.
-fn material(name: &str, mat: i32) -> Option<(Material, Vec<CovarianceBlock>)> {
-    let dir = yamc_test_cache::nuclide(name)?;
+fn material_in(dir: String, name: &str, mat: i32) -> Option<(Material, Vec<CovarianceBlock>)> {
     let mut blocks = yamc_nuclide::arrow::covariance_arrow::read_covariance(Path::new(&dir), name)
         .expect("covariance reads")?;
     for block in blocks.iter_mut().filter(|b| b.mat == 0) {
@@ -193,13 +200,73 @@ fn o16_np_is_derived_from_its_partials() {
         "{:?}",
         coverage.skipped_nc
     );
-    let share = coverage.rate_fraction_covered[&("O16".to_string(), "(n,p)".to_string())];
-    assert_eq!(share, 1.0);
+    let key = ("O16".to_string(), "(n,p)".to_string());
+    assert_eq!(coverage.rate_fraction_covered[&key], 1.0);
+    // 600 to 603 add up to MT 103 here, so the derivation holds.
+    assert!(!coverage.partials_above_rate.contains_key(&key));
+    assert!(!coverage.partials_below_rate.contains_key(&key));
     close(np, hand_sigma(&m, &blocks, "O16", 103, lo, hi), "O16 (n,p)");
     eprintln!(
         "ENDF/B-VIII.1 O16 (n,p), 13.9 to 14.1 MeV: {:.4}%",
         100.0 * np
     );
+}
+
+/// TENDL-2017 O16 states `(n,p)` the same way, as `600 + ... + 603`.
+#[test]
+fn tendl_2017_o16_np_is_derived_from_its_partials() {
+    let dir = yamc_test_cache::root().join("tendl-2017-O16.arrow");
+    if !yamc_test_cache::format_version_is_readable(&dir) {
+        eprintln!("skipping: TENDL-2017 O16 fixture missing or stale");
+        return;
+    }
+    let Some((m, blocks)) = material_in(dir.to_string_lossy().into_owned(), "O16", 825) else {
+        eprintln!("skipping: TENDL-2017 O16 has no covariance.arrow");
+        return;
+    };
+    assert_eq!(
+        derivation(&blocks, 103),
+        [(1.0, 600), (1.0, 601), (1.0, 602), (1.0, 603)]
+    );
+    let (lo, hi) = (1.39e7, 1.41e7);
+    let (np, coverage) = sigma(&m, "O16", "(n,p)", lo, hi);
+    assert!(
+        !coverage.skipped_nc.contains_key("O16"),
+        "{:?}",
+        coverage.skipped_nc
+    );
+    close(np, hand_sigma(&m, &blocks, "O16", 103, lo, hi), "O16 (n,p)");
+    eprintln!("TENDL-2017 O16 (n,p), 13.9 to 14.1 MeV: {:.4}%", 100.0 * np);
+}
+
+/// Above 20 MeV the ENDF/B-VIII.1 O16 `(n,d)` cross section holds MT 660 to
+/// 669 as well, and its NC block names only 650 to 659, which carry the
+/// covariance. The shortfall is the named reactions' rate over the
+/// channel's, and is reported rather than read as a covered rate.
+#[test]
+fn o16_nd_above_20_mev_is_reported_short_of_its_rate() {
+    let Some((m, blocks)) = material("O16", 825) else {
+        eprintln!("skipping: O16 fixture or its covariance.arrow missing");
+        return;
+    };
+    let named = derivation(&blocks, 104);
+    assert!(named
+        .iter()
+        .all(|&(c, mt)| c == 1.0 && (650..=659).contains(&mt)));
+    let (lo, hi) = (2.4e7, 2.6e7);
+    let (_, coverage) = sigma(&m, "O16", "(n,d)", lo, hi);
+    let want = named
+        .iter()
+        .map(|&(_, mt)| integral(&m, "O16", mt, lo, hi))
+        .sum::<f64>()
+        / integral(&m, "O16", 104, lo, hi);
+    assert!(want < 0.99, "the named partials cover {want} of (n,d)");
+    let got = coverage.partials_below_rate[&("O16".to_string(), "(n,d)".to_string())];
+    assert!(
+        ((got - want) / want).abs() < 1.0e-9,
+        "fold {got}, hand {want}"
+    );
+    eprintln!("ENDF/B-VIII.1 O16 (n,d), 24 to 26 MeV: named partials are {got:.4} of the rate");
 }
 
 /// ENDF/B-VIII.1 B10 `(n,a)` is `800 + 801`, correlated by a cross block the
