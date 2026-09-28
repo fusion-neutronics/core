@@ -275,14 +275,41 @@ pub struct DecaySpectrum {
 /// symmetry flag. For a continuum (LB=2) `values` pairs one to one with
 /// `energies` and there is no `ls`. The LIST header can be rebuilt from the
 /// two lists, so nothing else is needed to write it back: for the lines NERP
-/// is `energies.len()` and NT is `energies.len() + values.len()`, and for a
+/// is `energies.len()` and NT is `energies.len() + values.len()` (a tape
+/// whose header says otherwise is refused on conversion), and for a
 /// continuum NE is `energies.len()` and NPL is twice that.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SpectrumCovariance {
+    /// The LB=5 symmetry flag LS; `None` on a continuum.
     pub ls: Option<i64>,
+    /// The LB flag, which says how `values` is laid out.
     pub lb: i64,
+    /// ER for the lines, Ek for a continuum, in eV.
     pub energies: Vec<f64>,
+    /// The packed matrix for the lines, the Fk list for a continuum.
     pub values: Vec<f64>,
+}
+
+/// A lines covariance as [`SpectrumCovariance`] keeps it.
+///
+/// Only the two lists are kept, so a LIST whose header does not match them
+/// (NERP other than the number of energies read, or NT other than the
+/// length of the two together) is refused: it could not be written back as
+/// the tape states it.
+fn lines_covariance(c: &DiscreteCovariance) -> Result<SpectrumCovariance> {
+    if usize::try_from(c.nerp).ok() != Some(c.ek.len())
+        || usize::try_from(c.ne).ok() != Some(c.ek.len() + c.fkk.len())
+    {
+        return Err(Error::Unsupported {
+            what: "a decay lines covariance whose LIST header does not match its values",
+        });
+    }
+    Ok(SpectrumCovariance {
+        ls: Some(c.ls),
+        lb: c.lb,
+        energies: c.ek.clone(),
+        values: c.fkk.clone(),
+    })
 }
 
 /// One spectrum's lines, or its continuum, as an emission rate per atom,
@@ -309,8 +336,7 @@ pub struct SpectrumSource {
     pub intensity_uncertainties: Option<Vec<f64>>,
     /// Each line's energy sigma dER, in eV. `None` on a continuum.
     pub energy_uncertainties: Option<Vec<f64>>,
-    /// The spectrum's covariance, where the evaluation states one. No
-    /// photon spectrum in ENDF/B-VIII.1, JEFF-4.0 or JENDL-5.0 does.
+    /// The spectrum's covariance, where the evaluation states one.
     pub covariance: Option<SpectrumCovariance>,
 }
 
@@ -661,9 +687,10 @@ impl Decay {
                 })?;
 
             // The parser reads a lines covariance whenever LCOV says so, even
-            // for a spectrum with no lines (LCON=1). There is no row to carry
-            // it, so it is refused rather than dropped.
-            if spectrum.continuous_flag == ContinuousFlag::Continuous
+            // for a spectrum with no lines (LCON=1, or NER=0). There are no
+            // lines to carry it, so it is refused rather than dropped.
+            if (spectrum.continuous_flag == ContinuousFlag::Continuous
+                || spectrum.discrete.is_empty())
                 && spectrum.discrete_covariance.is_some()
             {
                 return Err(Error::Unsupported {
@@ -697,12 +724,8 @@ impl Decay {
                     covariance: spectrum
                         .discrete_covariance
                         .as_ref()
-                        .map(|c| SpectrumCovariance {
-                            ls: Some(c.ls),
-                            lb: c.lb,
-                            energies: c.ek.clone(),
-                            values: c.fkk.clone(),
-                        }),
+                        .map(lines_covariance)
+                        .transpose()?,
                 });
             }
 
@@ -1088,6 +1111,27 @@ mod tests {
         assert!(matches!(
             d.spectrum_sources(),
             Err(Error::Unsupported { what }) if what.contains("no lines")
+        ));
+    }
+
+    /// Only the two lists are kept, so a LIST header they do not rebuild
+    /// is refused rather than rewritten.
+    #[test]
+    fn a_lines_covariance_whose_header_disagrees_is_refused() {
+        const CF252: &[u8] = include_bytes!("../fixtures/dec-098_Cf_252.jeff40.endf.xz");
+        let mut d = decay(CF252);
+        let gamma = d.spectra.get_mut("gamma").unwrap();
+        gamma.discrete_covariance = Some(DiscreteCovariance {
+            ls: 1,
+            lb: 5,
+            ne: 6,
+            nerp: 2,
+            ek: vec![1.0e5, 2.0e6],
+            fkk: vec![1.0e-4, 2.0e-5, 3.0e-4],
+        });
+        assert!(matches!(
+            d.spectrum_sources(),
+            Err(Error::Unsupported { what }) if what.contains("LIST header")
         ));
     }
 
