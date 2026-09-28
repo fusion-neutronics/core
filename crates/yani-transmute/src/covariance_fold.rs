@@ -2347,8 +2347,9 @@ mod same_evaluation_tests {
 
     /// ENDF/B-VIII.1 Np237's MT 16, 17, 18 and 102 sections: every block is
     /// this evaluation's, several are written from the higher MT's section,
-    /// and none is stored twice, so each is folded as it stands and the
-    /// matrix comes out symmetric.
+    /// and none is stored twice, so each is folded as it stands. The tape
+    /// folds to what it folds to with each of those blocks rewritten as its
+    /// transpose in the lower MT's section.
     #[test]
     fn endfb_np237_pairs_from_the_higher_mt_are_folded() {
         const NP237: &[u8] = include_bytes!("../../endf/fixtures/n-093_Np_237_mf33.endf.xz");
@@ -2363,11 +2364,47 @@ mod same_evaluation_tests {
         let (folded, coverage) = fold_all(&blocks);
         assert!(coverage.skipped_cross_material.is_empty());
         assert!(coverage.mirrored_disagree.is_empty());
-        let n = folded.n();
-        for i in 0..n {
-            for j in 0..n {
-                assert_eq!(folded.get(i, j), folded.get(j, i), "{i}, {j}");
-            }
+        let lower: Vec<CovarianceBlock> = blocks
+            .iter()
+            .map(|b| {
+                if b.partner_mt() >= b.mt {
+                    return b.clone();
+                }
+                let CovarianceData::Ni(ni) = &b.data else {
+                    panic!("MT {} x {} is not explicit", b.mt, b.mt1);
+                };
+                let e = expand_ni(ni).expect("the block expands");
+                assert_eq!(e.scale, Scale::Relative);
+                let (rows, cols) = (e.n_rows(), e.n_cols());
+                let fkl = (0..cols)
+                    .flat_map(|j| (0..rows).map(move |i| (i, j)))
+                    .map(|(i, j)| e.get(i, j))
+                    .collect();
+                CovarianceBlock {
+                    mt: b.partner_mt(),
+                    mt1: b.mt,
+                    data: CovarianceData::Ni(NiSubsection {
+                        lb: 6,
+                        ner: e.col_energies.len() as i64,
+                        nec: e.row_energies.len() as i64,
+                        er: e.col_energies.clone(),
+                        ec: e.row_energies.clone(),
+                        fkl,
+                        ..Default::default()
+                    }),
+                    ..b.clone()
+                }
+            })
+            .collect();
+        let (rewritten, _) = fold_all(&lower);
+        assert_eq!(folded.kinds, rewritten.kinds);
+        // The same products summed in another order, so equal to rounding.
+        let largest = folded.relative.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        for (k, (x, y)) in folded.relative.iter().zip(&rewritten.relative).enumerate() {
+            assert!(
+                (x - y).abs() <= 1.0e-12 * largest,
+                "entry {k}: {x} against {y}"
+            );
         }
         // Fission with capture and (n,2n) with (n,3n), pairs the tape writes
         // only from the higher MT's section.
