@@ -5138,13 +5138,18 @@ class TransmutationResults:
           channel making the product of interest, and the count then reads as
           full coverage while the ensemble perturbs almost nothing.
         - ``rate_fraction_covered``: per nuclide and channel, the share of the
-          reaction rate the covariance grid actually spans. Below one means part
-          of the rate carries no stated uncertainty and the sigma is diluted.
+          reaction rate the relative covariance grids actually span. Below one
+          means part of the rate carries no stated relative uncertainty and the
+          sigma is diluted. Absolute (LB=0) and short-range (LB=8) blocks are
+          folded into the sigma but not yet counted here, so a channel stated
+          only in those reads as uncovered.
         - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
           covariance blocks that were present but not consumed.
-        - ``malformed_blocks``: covariance blocks not consumed because their
-          arrays disagree with their declared sizes or with their layout, such
-          as an LB=0 to 2 block carrying a second energy table.
+        - ``malformed_blocks``: covariance blocks not consumed because they
+          break ENDF-102's rules for their layout: arrays that disagree with
+          their declared sizes, an LB=0 to 2 block carrying a second energy
+          table, an LB=3 or 4 block without one or whose tables share no
+          energy range, or an LB=8 variance stated between two reactions.
         - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
           covariance was not positive semi-definite and had to be repaired.
         - ``rates_floored`` / ``rates_sampled``: samples that went negative and

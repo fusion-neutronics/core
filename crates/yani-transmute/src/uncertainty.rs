@@ -209,12 +209,16 @@ pub struct Info {
     pub skipped_nc: usize,
     /// Blocks whose `lb` layout is not implemented, counted per `lb`.
     pub unsupported_layouts: BTreeMap<i64, usize>,
-    /// Blocks whose arrays disagreed with their own declared sizes or with
-    /// their layout, such as an LB=0 to 2 block carrying a second table.
+    /// Blocks not consumed because they break ENDF-102's rules for their
+    /// layout: arrays that disagree with their declared sizes, an LB=0 to 2
+    /// block carrying a second table, an LB=3 or 4 block without one or whose
+    /// tables share no energy range, or an LB=8 block between two reactions.
     pub malformed_blocks: usize,
-    /// Per (nuclide, reaction kind), the share of the rate the covariance grid
-    /// spans. Below one means part of the rate carries no stated uncertainty
-    /// and the sigma is diluted accordingly.
+    /// Per (nuclide, reaction kind), the share of the rate the relative
+    /// covariance grids span. Below one means part of the rate carries no
+    /// stated relative uncertainty and the sigma is diluted accordingly.
+    /// Absolute (LB=0) and short-range (LB=8) blocks are folded but not
+    /// counted here yet (#169).
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
     /// Share of the production this run drove that carries a stated covariance,
     /// weighted by rate and by parent density, or `None` for a decay-only

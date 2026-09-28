@@ -117,15 +117,20 @@ pub struct Coverage {
     pub skipped_nc: usize,
     /// Blocks whose `lb` layout is not implemented, counted per `lb`.
     pub unsupported_layouts: BTreeMap<i64, usize>,
-    /// Blocks whose arrays did not match their own declared sizes or their
-    /// layout, such as an LB=0 to 2 block carrying a second table or an LB=3
-    /// or 4 block without one.
+    /// Blocks not consumed because they break ENDF-102's rules for their
+    /// layout: arrays that do not match their own declared sizes, an LB=0 to 2
+    /// block carrying a second table, an LB=3 or 4 block without one or whose
+    /// two tables share no energy range, or an LB=8 variance stated between
+    /// two different reactions.
     pub malformed: usize,
     /// Per (nuclide, kind), the fraction of the rate the covariance grid spans.
     ///
     /// Below one means part of the rate comes from energies the evaluation
     /// gives no covariance for, so the relative uncertainty is diluted by
-    /// exactly that much.
+    /// exactly that much. Only relative blocks (LB=1 to 6) are measured here:
+    /// absolute (LB=0) and short-range (LB=8) blocks fold into the covariance
+    /// but do not raise the fraction, so a channel stated only in those reads
+    /// as uncovered while still carrying a variance (#169).
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
     /// Production this spectrum drove through a channel a covariance spans, and
     /// the production it drove in total. Both are per barn-cm per second, and
@@ -808,7 +813,8 @@ mod integration_range_tests {
 
     /// An `lb = 8` block between two reactions is refused rather than folded
     /// with square-root weights, while the same block on a self-covariance
-    /// folds.
+    /// folds. The folded one still adds nothing to `rate_fraction_covered`,
+    /// which counts relative blocks only until #169.
     #[test]
     fn a_short_range_block_between_two_reactions_is_malformed() {
         use endf::mf::covariance::NiSubsection;
@@ -868,7 +874,9 @@ mod integration_range_tests {
             "X1",
             &mut coverage,
         );
-        assert!(folded.is_some());
+        let folded = folded.expect("a self-covariance LB=8 block folds");
         assert_eq!(coverage.malformed, 0);
+        assert!(folded.relative[0] > 0.0, "{:?}", folded.relative);
+        assert!(coverage.rate_fraction_covered.is_empty());
     }
 }
