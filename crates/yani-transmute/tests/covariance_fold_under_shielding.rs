@@ -255,6 +255,152 @@ fn the_shielded_sigma_is_the_closed_form_value() {
     );
 }
 
+/// A variance stated on one whole group covers that group's share of the
+/// shielded rate, `r_g / Σ r` over the collapse's shielded per-group terms, and
+/// the run's production total is that share weighted by the shielded rates.
+/// Shielding moves the share, so a share of the dilute rate would fail this.
+#[test]
+fn the_covered_share_is_of_the_shielded_rate() {
+    let Some(data) = yamc_test_cache::nuclide("Fe56") else {
+        eprintln!("skipping: Fe56 fixture missing");
+        return;
+    };
+    // The epithermal group only, where Fe56's keV resonances shield capture.
+    let covered_group = 1;
+    let variances = [0.0, 0.04, 0.0];
+    let mut m = fe56_with(&data, vec![block(102, diagonal(&GROUPS, &variances))]);
+    let shielding = Shielding::new(CHORD_CM).expect("a positive chord");
+    let shielded = rates(&m, Some(&shielding));
+    let (_, coverage) = fold_rate_covariance(
+        &m,
+        &chain(),
+        &shielded,
+        &masses(),
+        &GROUPS,
+        Some(&shielding),
+    );
+    let key = ("Fe56".to_string(), "(n,gamma)".to_string());
+    let got = coverage.rate_fraction_covered[&key];
+
+    let share = |shielding: Option<&Shielding>| {
+        let terms = per_group_reaction_rates(&m, &chain(), &masses(), &GROUPS, shielding);
+        let r = &terms["Fe56"]["(n,gamma)"];
+        r[covered_group] / r.iter().sum::<f64>()
+    };
+    let expected = share(Some(&shielding));
+    assert!(
+        (got / expected - 1.0).abs() < 1.0e-12,
+        "shielded (n,gamma) covered share {got} against {expected}"
+    );
+    let dilute = share(None);
+    assert!(
+        (got / dilute - 1.0).abs() > 1.0e-3,
+        "shielding must move the share for this to discriminate: {got} against {dilute}"
+    );
+
+    // One nuclide, so the production total is the rate-weighted mean of the
+    // shares over every channel the chain drives, only capture covered.
+    let total_rate: f64 = shielded["Fe56"].values().sum();
+    let expected_total = shielded["Fe56"]["(n,gamma)"] * expected / total_rate;
+    let id = m.material_id.unwrap_or(0);
+    let total: f64 = FLUX.iter().sum();
+    let results = transmute_material_shielded(
+        &mut m,
+        &[MultigroupSpectrum {
+            boundaries: GROUPS.to_vec(),
+            masses: masses(),
+            flux_error: None,
+        }],
+        &[TransmuteStep {
+            dt: 86400.0,
+            irradiation: Some((0, total)),
+        }],
+        chain(),
+        &Default::default(),
+        Default::default(),
+        Some(&DataUncertainty {
+            seed: 1,
+            samples: Some(2),
+            sources: vec![Source::CrossSections],
+            attribution: false,
+        }),
+        Some(&shielding),
+    )
+    .expect("transmute");
+    let info = &results.uncertainty_info[&id];
+    let reported = info.rate_fraction_covered[&key];
+    assert!(
+        (reported / expected - 1.0).abs() < 1.0e-12,
+        "reported share {reported} against {expected}"
+    );
+    let reported_total = info
+        .rate_fraction_covered_total
+        .expect("a shielded spectrum run reports the total");
+    assert!(
+        (reported_total / expected_total - 1.0).abs() < 1.0e-12,
+        "reported total {reported_total} against {expected_total}"
+    );
+}
+
+/// With a second nuclide in the mixture the shape is still the collapse's:
+/// the fully correlated check of the first test holds for Fe56 diluted in
+/// hydrogen, where the mixture total has more than one entry to sum.
+#[test]
+fn the_shielded_partials_sum_to_the_rate_in_a_mixture() {
+    let (Some(fe), Some(h)) = (
+        yamc_test_cache::nuclide("Fe56"),
+        yamc_test_cache::nuclide("H1"),
+    ) else {
+        eprintln!("skipping: Fe56 or H1 fixture missing");
+        return;
+    };
+    const V: f64 = 0.01;
+    let grid = [1.0e-5, 1.0, 1.0e3, 3.0e4, 1.0e6, 2.0e7];
+    let mut m = Material::new(
+        HashMap::from([("Fe56".to_string(), 1.0), ("H1".to_string(), 0.5)]),
+        "atom",
+        "sum",
+        None,
+    )
+    .expect("Fe56 and H1 material");
+    m.set_temperature("294");
+    m.read_nuclear_data(
+        &HashMap::from([("Fe56".to_string(), fe), ("H1".to_string(), h)]),
+        None,
+    )
+    .expect("read Fe56 and H1");
+    let nuclide = Arc::make_mut(m.nuclide_data.get_mut("Fe56").expect("Fe56 loaded"));
+    nuclide.covariance = Some(Arc::new(
+        CHANNELS
+            .iter()
+            .map(|&(mt, _)| block(mt, correlated(&grid, V)))
+            .collect(),
+    ));
+    nuclide.load_scope.covariance = true;
+    let shielding = Shielding::new(CHORD_CM).expect("a positive chord");
+    let shielded = rates(&m, Some(&shielding));
+
+    let (folded, coverage) = fold_rate_covariance(
+        &m,
+        &chain(),
+        &shielded,
+        &masses(),
+        &GROUPS,
+        Some(&shielding),
+    );
+    for (_, kind) in CHANNELS {
+        let got = variance(&folded, kind);
+        assert!(
+            (got / V - 1.0).abs() < 1.0e-12,
+            "{kind}: shielded partials over the shielded rate give {got}, not {V}"
+        );
+    }
+    let fe56 =
+        |map: &BTreeMap<(String, String), f64>| map.keys().filter(|(n, _)| n == "Fe56").count();
+    assert_eq!(fe56(&coverage.partials_above_rate), 0);
+    assert_eq!(fe56(&coverage.partials_below_rate), 0);
+}
+
 /// The evaluation's own MF=33 folds consistently under shielding: every
 /// partial sum is within rounding of the rate it is divided by, where the
 /// dilute partials sat above the shielded rate.
