@@ -461,8 +461,9 @@ fn sample_continuum_energy<R: rand::Rng>(
     if total <= 0.0 {
         return 0.0;
     }
-    let continuum = Continuum::new(energies, densities, Some(interpolation))
-        .expect("the law was checked when the channel was built");
+    // The channel was built through Continuum::new, so the per-draw path skips
+    // the O(n) checks.
+    let continuum = Continuum::already_checked(energies, densities, interpolation);
     let target = rng.random::<f64>() * total;
     // The first interval whose running integral passes the target; intervals
     // that hold nothing never do.

@@ -169,6 +169,26 @@ impl<'a> Continuum<'a> {
         })
     }
 
+    /// A continuum from lists [`Continuum::new`] has already accepted under
+    /// `interpolation`, without scanning them again. For a sampler that keeps
+    /// the validated lists and reads them once per draw; the checks still run
+    /// in debug builds.
+    pub fn already_checked(
+        energies: &'a [f64],
+        densities: &'a [f64],
+        interpolation: Interpolation,
+    ) -> Continuum<'a> {
+        debug_assert!(
+            Continuum::new(energies, densities, Some(interpolation)).is_ok(),
+            "Continuum::already_checked on lists Continuum::new refuses"
+        );
+        Continuum {
+            energies,
+            densities,
+            linear: interpolation == Interpolation::LinearLinear,
+        }
+    }
+
     /// The tabulated energies.
     pub fn energies(&self) -> &'a [f64] {
         self.energies
