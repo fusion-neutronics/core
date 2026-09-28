@@ -9,10 +9,12 @@
 //! through the MF=33 covariance folded against this material's own spectrum;
 //! the **flux spectrum**, from a per-bin sigma the caller supplies; and the
 //! **half-lives**, from the evaluation's own standard deviation. Decay
-//! branching ratios, fission yields and the isomeric-branching overlay are held
-//! at their nominal values; they carry their own uncertainties and are not
-//! propagated yet (issue #140). [`Info`] says so per run rather than leaving it
-//! to be inferred from a small sigma.
+//! branching ratios, fission yields, the isomeric-branching overlay, the MF=32
+//! resonance-parameter covariance, the decay photon and dose data, and the
+//! material's own composition are held at their nominal values; they carry
+//! their own uncertainties and are not propagated yet (issue #140).
+//! [`Info::not_perturbed`] lists them per run rather than leaving it to be
+//! inferred from a small sigma.
 //!
 //! # Cost
 //!
@@ -32,7 +34,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use yamc_materials::Material;
 
 use crate::covariance_fold::Coverage;
-use crate::covariance_sample::{Clipping, Truncations};
+use crate::covariance_sample::Clipping;
 
 /// One input to the Bateman matrix that can be perturbed.
 ///
@@ -229,11 +231,11 @@ pub struct Info {
     /// and the worst repair that had to be made.
     pub matrices_clipped: usize,
     pub worst_relative_clip: f64,
-    /// Sampled rates that went negative and were floored at zero.
+    /// Cross-section rate draws made, one per perturbed channel per spectrum
+    /// per replica.
     ///
-    /// A large share means the Gaussian is being used past where it describes
-    /// the cross section, and the truncation biases the mean upward.
-    pub rates_floored: usize,
+    /// Each draw is a lognormal multiplier matched to the channel's mean and
+    /// variance, so none can go negative and there is no floor to count.
     pub rates_sampled: usize,
     /// Spectra that carried a per-bin flux sigma, and those that did not.
     ///
@@ -270,7 +272,15 @@ pub struct Info {
     /// Statistically drawn rates that came out negative and were floored.
     pub statistical_floored: usize,
     pub statistical_sampled: usize,
-    /// Sources deliberately NOT perturbed, for the record.
+    /// Inputs this run held at their nominal values, for the record.
+    ///
+    /// Every input the answer depends on and no source here samples, whether
+    /// the data carries an uncertainty for it or not. MF=33 blocks that were
+    /// present but could not be used are counted in `skipped_cross_material`,
+    /// `skipped_nc`, `unsupported_layouts` and `malformed_blocks`. A block for
+    /// a reaction the chain does not drive (a partial-level section such as
+    /// MT=600-849) is neither listed nor counted: the chain has no rate for it
+    /// to be the uncertainty of.
     pub not_perturbed: Vec<String>,
     /// Which sources this run perturbed, by name.
     pub sources: Vec<String>,
@@ -294,17 +304,24 @@ impl Info {
                 "fission yield",
                 "isomeric branching (MF=9/MF=10)",
                 "cross-material covariance (MAT1 != 0)",
+                "NC-derived covariance (MF=33 NC)",
+                "lumped-reaction covariance (MF=33 MT=851-870)",
+                "resonance-parameter covariance (MF=32)",
+                "decay photon line energy and intensity (MF=8 MT=457)",
+                "photon attenuation coefficient (XCOM)",
+                "air energy-absorption coefficient (NIST SRD 126)",
+                "fluence-to-dose coefficient (ICRP-116)",
+                "contact-dose build-up factor",
+                "material composition",
+                "material density",
+                "natural isotopic abundance",
+                "atomic mass (AME2020)",
             ]
             .iter()
             .map(|s| s.to_string())
             .collect(),
             ..Default::default()
         }
-    }
-
-    pub(crate) fn add_truncations(&mut self, t: &Truncations) {
-        self.rates_floored += t.floored;
-        self.rates_sampled += t.sampled;
     }
 
     pub(crate) fn add_flux_coverage(&mut self, c: &crate::flux_uncertainty::FluxCoverage) {
@@ -752,6 +769,50 @@ pub(crate) fn set_half_life(cn: &mut yani::ChainNuclide, half_life: f64) {
 mod tests {
     use super::*;
 
+    /// Every input held at nominal whatever the run was, named so a reader
+    /// does not have to know the code to see what the sigma leaves out.
+    #[test]
+    fn the_report_names_every_input_held_at_nominal() {
+        let info = Info::from_fold(&Coverage::default(), &Clipping::default());
+        for held in [
+            "decay branching ratio",
+            "fission yield",
+            "isomeric branching (MF=9/MF=10)",
+            "cross-material covariance (MAT1 != 0)",
+            "NC-derived covariance (MF=33 NC)",
+            "lumped-reaction covariance (MF=33 MT=851-870)",
+            "resonance-parameter covariance (MF=32)",
+            "decay photon line energy and intensity (MF=8 MT=457)",
+            "photon attenuation coefficient (XCOM)",
+            "air energy-absorption coefficient (NIST SRD 126)",
+            "fluence-to-dose coefficient (ICRP-116)",
+            "contact-dose build-up factor",
+            "material composition",
+            "material density",
+            "natural isotopic abundance",
+            "atomic mass (AME2020)",
+        ] {
+            assert!(
+                info.not_perturbed.iter().any(|s| s == held),
+                "{held:?} missing from {:?}",
+                info.not_perturbed
+            );
+        }
+        // These depend on the run and the sources asked for, so the fold
+        // alone must not claim them.
+        for conditional in [
+            "self-shielding correction",
+            "flux response to perturbed cross sections (one transport)",
+            "tallied-rate statistics",
+            "flux spectrum",
+            "activation cross section (MF=33)",
+            "half-life",
+            "decay energy",
+        ] {
+            assert!(!info.not_perturbed.iter().any(|s| s == conditional));
+        }
+    }
+
     #[test]
     fn moments_match_a_hand_computed_standard_deviation() {
         let mut m = Moments::default();
@@ -804,6 +865,52 @@ mod tests {
         let before = BTreeMap::from([("a".into(), 1.0)]);
         let after = BTreeMap::from([("a".into(), 1.0), ("b".into(), 0.5)]);
         assert!(!settled(&before, &after), "a new nuclide has not settled");
+    }
+
+    /// A nuclide whose every sigma is the 0.0 MT=457 writes for "not stated",
+    /// which the chain files store as 0.0 rather than as null.
+    fn stated_as_zero() -> yani::ChainNuclide {
+        yani::ChainNuclide {
+            name: "In116_m1".to_string(),
+            half_life: Some(3257.4),
+            half_life_uncertainty: Some(0.0),
+            decay_energy: 2.8e6,
+            decay_energy_uncertainty: Some(0.0),
+            decay_energy_components: [
+                Some(yani::DecayEnergyComponent {
+                    energy: 2.8e6,
+                    uncertainty: Some(0.0),
+                }),
+                None,
+                None,
+            ],
+            reactions: Vec::new(),
+            decays: Vec::new(),
+            fission_yields: None,
+            sources: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_stored_zero_sigma_is_not_stated_rather_than_exact() {
+        // Every reader of these sigmas has to take 0.0 as "not stated", the
+        // way it takes a null: a zero sampled as a sigma would report the
+        // nuclide as known exactly, and it would not be listed among the
+        // inputs that carry no uncertainty.
+        let cn = stated_as_zero();
+        let chain = HashMap::from([(cn.name.clone(), cn.clone())]);
+        let (with, without) = half_life_candidates(&chain);
+        assert!(
+            with.is_empty(),
+            "a 0.0 half-life sigma was sampled: {with:?}"
+        );
+        assert!(
+            without.contains("In116_m1"),
+            "and it was not reported unstated"
+        );
+
+        assert!(!has_decay_energy_sigma(&cn));
+        assert_eq!(sample_decay_energy(&cn, 7, 0), None);
     }
 
     #[test]

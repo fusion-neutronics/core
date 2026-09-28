@@ -95,8 +95,16 @@ are exercised by a fixture. The exception is
     MF 40 (radionuclide production covariances)
 
 which is structurally complete and unverified end to end, though the MF33
-subsection parser it delegates to is covered. The list is pinned in `golden.rs`
-as `UNCOVERED_BY_ANY_FIXTURE` and checked, so it cannot drift in either
+subsection parser it delegates to is covered.
+
+MF 32 (resonance parameter covariances) has a Rust parser the Python package
+does not, so it is kept out of the golden comparison entirely: there is no
+reader to generate a golden from, and a hand-written one would only restate
+the parser. It is covered by the unit tests in `src/mf/mf32.rs` and by
+`tests/mf32_tapes.rs`, which walks every MF=32 section of six libraries.
+
+Both are pinned in `golden.rs`
+as `UNCOVERED_BY_ANY_FIXTURE` and checked, so the list cannot drift in either
 direction: the test fails both when a fixture starts covering one, and when a
 new parser arrives without coverage.
 

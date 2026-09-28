@@ -108,6 +108,7 @@ fn mode(kind: &str, target: &str, branching: f64) -> ChainReaction {
         target: Some(target.to_string()),
         branching,
         q_value: None,
+        branching_uncertainty: None,
     }
 }
 

@@ -288,8 +288,10 @@ pub struct BranchingStats {
     /// or `unresolved`, which is the regression the plain counts above hide.
     pub level_routes: BTreeMap<String, usize>,
     /// The levels worth a look, one line each: unresolved and so taken as
-    /// ground, matched only by the looser energy pass, or matched by energy
-    /// while the level index pointed at another isomer.
+    /// ground, excited but taken as ground because the decay data has no
+    /// isomer for the product, matched only by the looser energy pass, or
+    /// matched by energy while the level index pointed at another isomer.
+    /// Every excited level that ends up at ground is here.
     pub flagged_levels: Vec<String>,
     /// The reactions whose partials do not reconstruct their total within
     /// [`PARTIAL_SUM_TOLERANCE`], one line each with the worst point. yani
@@ -550,7 +552,7 @@ impl BranchingExtractor {
                     z,
                     a,
                     s.lfs,
-                    Some(s.excitation_energy()),
+                    s.excitation_energy(),
                     isomers,
                     tol_ev,
                 );
@@ -568,6 +570,9 @@ impl BranchingExtractor {
                         (LevelRoute::Unresolved, _) => {
                             Some("unresolved, taken as ground".to_string())
                         }
+                        (LevelRoute::NoIsomers, _) => {
+                            Some("no isomer in the decay data, taken as ground".to_string())
+                        }
                         (LevelRoute::NearEnergy, _) => {
                             Some("matched by energy only within a tenth".to_string())
                         }
@@ -578,10 +583,13 @@ impl BranchingExtractor {
                         _ => None,
                     };
                     if let Some(why) = why {
+                        let at = match s.excitation_energy() {
+                            Some(e) => format!("at {:.1} keV", e / 1.0e3),
+                            None => "with no excitation energy".to_string(),
+                        };
                         stats.flagged_levels.push(format!(
-                            "{parent} MT{mt} -> {target}: level {} at {:.1} keV, {why}",
-                            s.lfs,
-                            s.excitation_energy() / 1.0e3
+                            "{parent} MT{mt} -> {target}: level {} {at}, {why}",
+                            s.lfs
                         ));
                     }
                 }
