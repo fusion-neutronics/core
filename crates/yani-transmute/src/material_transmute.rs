@@ -2670,6 +2670,7 @@ mod tests {
                 target: Some(target.to_string()),
                 branching,
                 q_value: None,
+                branching_uncertainty: None,
             };
             let mut map: HashMap<String, ChainNuclide> = HashMap::new();
             map.insert(

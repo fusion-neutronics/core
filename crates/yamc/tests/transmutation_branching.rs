@@ -369,6 +369,7 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
                     target: Some("Li7".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 },
                 // Exactly what `parse_chain_parts_from_bytes` grafts.
                 ChainReaction {
@@ -376,6 +377,7 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
                     target: Some("Li7_m2".to_string()),
                     branching: 0.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 },
             ],
             decays: vec![],
@@ -393,6 +395,7 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
         target: Some("Li8".to_string()),
         branching: 1.0,
         q_value: None,
+        branching_uncertainty: None,
     });
     map.insert("Li7_m2".to_string(), li7m);
     map.insert("Li8".to_string(), stable("Li8"));
