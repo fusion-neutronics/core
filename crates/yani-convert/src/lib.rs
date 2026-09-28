@@ -223,7 +223,7 @@ pub fn write_decay(
         decay_energy_sigmas.push(n.decay_energy_uncertainty);
         for (c, part) in n.decay_energy_components.iter().enumerate() {
             component_energies[c].push(part.map(|(e, _)| e));
-            component_sigmas[c].push(part.and_then(|(_, s)| s));
+            component_sigmas[c].push(part.map(|(_, s)| s));
         }
     }
     write_section(
@@ -248,12 +248,14 @@ pub fn write_decay(
     let mut kind = Vec::new();
     let mut target = Vec::new();
     let mut branching = Vec::new();
+    let mut branching_sigmas = Vec::new();
     for n in &chain.nuclides {
         for d in &n.decay_modes {
             nuc.push(n.name.clone());
             kind.push(d.kind.clone());
             target.push(d.target.clone());
             branching.push(d.branching_ratio);
+            branching_sigmas.push(d.branching_ratio_uncertainty);
         }
     }
     write_section(
@@ -264,6 +266,7 @@ pub fn write_decay(
             strings(&kind),
             opt_strings(&target),
             floats(&branching),
+            floats(&branching_sigmas),
         ],
     )?;
 

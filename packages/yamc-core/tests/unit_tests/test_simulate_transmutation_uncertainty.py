@@ -98,6 +98,19 @@ def test_the_report_names_the_sources_that_applied():
     assert "flux_spectrum" not in info["sources"]
     assert info["statistical_rates"] > 0
     assert info["statistical_sampled"] == 16 * info["statistical_rates"]
+    # One transport feeds every replica, so how the flux would answer a
+    # perturbed cross section is held, while the tallied values are drawn.
+    assert "flux response to perturbed cross sections (one transport)" in info["not_perturbed"]
+    assert "tallied-rate statistics" not in info["not_perturbed"]
+
+
+def test_the_report_names_the_tallied_rates_held_with_statistical_off():
+    sources = ["cross_sections"]
+    results = _run(data_uncertainty=yamc.DataUncertainty(seed=1, samples=16, sources=sources))
+    info = results.get_data_uncertainty_info(MAT_ID)
+    assert "statistical" not in info["sources"]
+    assert info["statistical_rates"] == 0
+    assert "tallied-rate statistics" in info["not_perturbed"]
 
 
 def test_each_rate_has_a_statistical_sigma():

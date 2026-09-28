@@ -3,8 +3,9 @@ to the published Cloudflare R2 tarballs and assemble into a usable chain.
 
 The four ``yamc.transmutation_*`` settings each take a library keyword or a
 path. A keyword downloads ``{keyword}/transmutation/{subsection}.arrow.tar`` on
-first use and caches it under ``~/.cache/yamc/``. Unset decay/reactions/
-fission_yields fall back to the default ``endf-b8.1`` library.
+first use and caches it under ``$YAMC_CACHE_DIR`` (``~/.cache/yamc/`` when that
+is unset or empty). Unset decay/reactions/fission_yields fall back to the
+default ``endf-b8.1`` library.
 
 These are end-to-end network tests against the R2 data; they skip when the
 data is unreachable (offline).
@@ -18,7 +19,10 @@ import yamc
 
 
 def _cache(sub, keyword="endf-b8.1"):
-    return os.path.expanduser(f"~/.cache/yamc/{keyword}-transmutation-{sub}.arrow")
+    # The root the downloader writes to (cache_root in url_cache.rs), so a run
+    # pointed at another cache checks the directory it actually filled.
+    root = os.environ.get("YAMC_CACHE_DIR") or os.path.expanduser("~/.cache/yamc")
+    return os.path.join(root, f"{keyword}-transmutation-{sub}.arrow")
 
 
 def _reset():
@@ -52,6 +56,11 @@ def _try_endf_b81():
     try:
         _radionuclides(["Fe54"])
     except Exception as e:  # pragma: no cover - offline + empty cache
+        # A data_version error means the origin answered and its stamp is not
+        # the one this build pins: a publishing or pinning mistake to fail on,
+        # not the missing network the skip below is for.
+        if "data_version" in str(e):
+            raise
         return False, str(e)
     return True, ""
 
