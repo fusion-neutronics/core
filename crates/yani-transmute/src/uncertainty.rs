@@ -228,8 +228,9 @@ pub struct Info {
     /// covariance block was weighted with, zero variance intervals included,
     /// add up to more than the rate it was divided by, their ratio to it. Each
     /// is a channel whose relative sigma is overstated, because the two were
-    /// computed different ways; a tallied rate against partials weighted flat
-    /// within each bin can be one. Its `rate_fraction_covered` is unaffected.
+    /// computed different ways: a tallied rate against partials weighted flat
+    /// within each bin, or the `1/E` within-group weight with a covariance
+    /// edge inside a group. Its `rate_fraction_covered` is unaffected.
     pub partials_above_rate: BTreeMap<(String, String), f64>,
     /// Per (nuclide, reaction kind), where a relative block's grid spans the
     /// whole flux range and its partial rates add up to less than the rate it
