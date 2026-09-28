@@ -471,6 +471,13 @@ pub fn decay_decay_modes() -> Schema {
         utf8("type", false),
         utf8("target", true),
         f64("branching_ratio", false),
+        // The evaluation's dBR, as MT=457 writes it. Nullable and last, so a
+        // file written without it still reads. A 0.0 is the format's "not
+        // stated" and is stored as 0.0; readers take null and 0.0 alike as
+        // not stated, never as an exact ratio (issue #140). It is the dBR on
+        // the tape's BR, and `branching_ratio` in the same row may carry the
+        // normalisation residual on the parent's largest mode.
+        f64("branching_ratio_uncertainty", true),
     ])
 }
 
@@ -481,15 +488,18 @@ pub fn decay_nuclides() -> Schema {
         f64("half_life", true),
         f64("decay_energy", false),
         // Nullable and last, so a file written without it still reads.
-        // Null means the evaluation stated no uncertainty, which is not
-        // the same as stating zero (issue #515).
+        // Each sigma is stored as the evaluation writes it, and MT=457 writes
+        // 0.0 for "not stated". Readers take null (no value, or a file that
+        // predates the column) and 0.0 alike as not stated, which is not the
+        // same as stated to be zero (issue #515).
         f64("half_life_uncertainty", true),
         f64("decay_energy_uncertainty", true),
         // The decay energy split into its recoverable-heat components (ENDF
         // MT=457 light particle, electromagnetic, heavy particle) with each
         // one's sigma. Nullable and last for the same reason: a file written
-        // before them still reads, with no split. Null is "not given", not
-        // zero (issue #140).
+        // before them still reads, with no split. A null energy is a
+        // component not given, not one given as zero; the sigmas follow the
+        // rule above (issue #140).
         f64("decay_energy_beta", true),
         f64("decay_energy_beta_uncertainty", true),
         f64("decay_energy_gamma", true),

@@ -19,8 +19,11 @@ fn material(compressed: &[u8]) -> Material {
 /// With decay data for In116's two isomers only, the first two products have no
 /// isomer table and the capture level is matched by energy: In116_m1 decays by
 /// beta- alone, but its decay file's header states its 127.27 keV.
+///
+/// The first two are excited levels written as ground, so they are flagged by
+/// name: an excited level never reaches the ground state silently.
 #[test]
-fn routes_are_counted_and_nothing_here_is_flagged() {
+fn routes_are_counted_and_excited_levels_taken_as_ground_are_flagged() {
     let neutron = vec![material(fixture!("n-049_In-115_trimmed.endf.xz"))];
     let decay = vec![
         material(fixture!("dec-049_In_116m1.endf.xz")),
@@ -39,9 +42,11 @@ fn routes_are_counted_and_nothing_here_is_flagged() {
     assert_eq!(stats.level_routes.get("energy"), Some(&1));
     assert_eq!(stats.level_routes.get("no_isomers"), Some(&2));
     assert_eq!(stats.level_routes.values().sum::<usize>(), 3);
-    assert!(
-        stats.flagged_levels.is_empty(),
-        "{:?}",
-        stats.flagged_levels
+    assert_eq!(
+        stats.flagged_levels,
+        [
+            "In115 MT4 -> In115: level 1 at 336.2 keV, no isomer in the decay data, taken as ground",
+            "In115 MT16 -> In114: level 1 at 190.3 keV, no isomer in the decay data, taken as ground",
+        ]
     );
 }

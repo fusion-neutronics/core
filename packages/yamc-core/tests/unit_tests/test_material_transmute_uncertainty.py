@@ -131,8 +131,51 @@ def test_the_report_names_what_is_never_perturbed():
     )
     not_perturbed = results.get_data_uncertainty_info(iron.id or 0)["not_perturbed"]
     joined = " ".join(not_perturbed)
-    for source in ("fission yield", "branching"):
+    for source in (
+        "fission yield",
+        "branching",
+        "resonance-parameter covariance (MF=32)",
+        "decay photon line energy and intensity (MF=8 MT=457)",
+        "photon attenuation coefficient (XCOM)",
+        "air energy-absorption coefficient (NIST SRD 126)",
+        "fluence-to-dose coefficient (ICRP-116)",
+        "contact-dose build-up factor",
+        "material composition",
+        "material density",
+        "natural isotopic abundance",
+        "atomic mass (AME2020)",
+    ):
         assert source in joined, f"{source!r} missing from {not_perturbed}"
+    # A dilute spectrum run has no shielding and no tally to hold fixed.
+    assert "self-shielding correction" not in not_perturbed
+    assert "flux response to perturbed cross sections (one transport)" not in not_perturbed
+    assert "tallied-rate statistics" not in not_perturbed
+    # Every default source is on, so none is listed as switched off.
+    assert "activation cross section (MF=33)" not in not_perturbed
+
+
+def test_a_shielded_run_reports_its_shielding_held_at_nominal():
+    """The shielded flux shape is built once, so the report says it was held."""
+    iron = _iron()
+    results = iron.transmute(
+        schedule=_schedule(),
+        data_uncertainty=yamc.DataUncertainty(seed=1, samples=8),
+        self_shielding_chord=2.0,
+    )
+    info = results.get_data_uncertainty_info(iron.id or 0)
+    assert "self-shielding correction" in info["not_perturbed"]
+
+
+def test_no_floor_counter_is_reported_for_a_draw_that_cannot_go_negative():
+    """The cross-section draw is lognormal, so there is nothing to floor."""
+    iron = _iron()
+    results = iron.transmute(
+        schedule=_schedule(),
+        data_uncertainty=yamc.DataUncertainty(seed=1, samples=8),
+    )
+    info = results.get_data_uncertainty_info(iron.id or 0)
+    assert "rates_floored" not in info
+    assert "rates_sampled" in info
 
 
 def test_the_means_are_unchanged_by_asking_for_uncertainty():

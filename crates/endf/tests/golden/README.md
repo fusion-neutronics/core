@@ -91,10 +91,17 @@ ported.
 
 Every ENDF file the Python package parses now has a Rust parser, and every one
 is exercised by a fixture. MF 40 was the last, and the TENDL-2017 Nb93 trim now
-covers it. The list of parsers no fixture exercises is pinned in `golden.rs` as
-`UNCOVERED_BY_ANY_FIXTURE`, empty today, and checked, so it cannot drift in
-either direction: the test fails both when a fixture starts covering one, and
-when a new parser arrives without coverage.
+covers it.
+
+MF 32 (resonance parameter covariances) has a Rust parser the Python package
+does not, so it is kept out of the golden comparison entirely: there is no
+reader to generate a golden from, and a hand-written one would only restate
+the parser. It is covered by the unit tests in `src/mf/mf32.rs` and by
+`tests/mf32_tapes.rs`, which walks every MF=32 section of six libraries.
+
+It is pinned in `golden.rs` as `UNCOVERED_BY_ANY_FIXTURE` and checked, so the
+list cannot drift in either direction: the test fails both when a fixture
+starts covering one, and when a new parser arrives without coverage.
 
 `MF2` is worth a line of its own. It has real Reich-Moore parameters from Fe56
 and U235, a Case C unresolved region from U235, and a synthetic multi-level

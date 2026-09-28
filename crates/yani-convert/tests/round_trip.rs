@@ -184,7 +184,7 @@ fn the_decay_energy_split_survives() {
                 (None, None) => {}
                 (Some((energy, sigma)), Some(part)) => {
                     assert_eq!(part.energy, *energy, "{}", written.name);
-                    assert_eq!(part.uncertainty, *sigma, "{} sigma", written.name);
+                    assert_eq!(part.uncertainty, Some(*sigma), "{} sigma", written.name);
                 }
                 _ => panic!("{}: a component appeared or vanished", written.name),
             }
@@ -206,6 +206,193 @@ fn the_decay_energy_split_survives() {
         }
     }
     assert!(split > 0, "no nuclide in the fixtures carries a split");
+    let _ = std::fs::remove_dir_all(&c.dir);
+}
+
+/// One Float64 column of a written section, nulls as `None`, with the name of
+/// the section's last column so a test can check where a column was appended.
+fn float_column(path: &std::path::Path, name: &str) -> (Vec<Option<f64>>, String) {
+    use arrow_array::Array;
+    let file = std::fs::File::open(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let reader = arrow_ipc::reader::FileReader::try_new(file, None).expect("an Arrow IPC file");
+    let last = reader
+        .schema()
+        .fields()
+        .last()
+        .expect("a section with columns")
+        .name()
+        .clone();
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch.expect("a readable batch");
+        let column = batch
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("{} has no {name} column", path.display()));
+        let values = column
+            .as_any()
+            .downcast_ref::<arrow_array::Float64Array>()
+            .expect("a Float64 column");
+        out.extend((0..values.len()).map(|i| (!values.is_null(i)).then(|| values.value(i))));
+    }
+    (out, last)
+}
+
+/// One Utf8 column of a written section.
+fn string_column(path: &std::path::Path, name: &str) -> Vec<String> {
+    let file = std::fs::File::open(path).expect("section exists");
+    let reader = arrow_ipc::reader::FileReader::try_new(file, None).expect("an Arrow IPC file");
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch.expect("a readable batch");
+        let values = batch
+            .column_by_name(name)
+            .and_then(|c| {
+                c.as_any()
+                    .downcast_ref::<arrow_array::StringArray>()
+                    .cloned()
+            })
+            .unwrap_or_else(|| panic!("{} has no {name} column", path.display()));
+        out.extend(values.iter().map(|v| v.expect("non-null").to_string()));
+    }
+    out
+}
+
+/// The parsed decay tapes of the fixtures, by nuclide name.
+fn tapes() -> BTreeMap<String, endf::decay::Decay> {
+    materials(DECAY)
+        .iter()
+        .map(|m| {
+            let d = endf::decay::Decay::from_material(m).expect("decay data parses");
+            (d.nuclide.name.clone(), d)
+        })
+        .collect()
+}
+
+/// Every decay mode's dBR in the written file is the tape's own number, the
+/// zeros included.
+///
+/// MT=457 writes 0.0 for an uncertainty it does not state. The file stores
+/// what the tape says and leaves "0.0 means not stated" to the readers, so this
+/// reads the column straight out of the file, not through yani, and compares
+/// it with the parsed tapes.
+#[test]
+fn every_branching_sigma_is_written_as_the_tape_gives_it() {
+    let c = convert("dbr");
+    let tapes = tapes();
+
+    let modes = c.dir.join("decay/decay_modes.arrow");
+    let (sigmas, last) = float_column(&modes, "branching_ratio_uncertainty");
+    assert_eq!(
+        last, "branching_ratio_uncertainty",
+        "the new column must be appended last"
+    );
+    let parents = string_column(&modes, "nuclide");
+    assert_eq!(parents.len(), sigmas.len());
+    let mut row = 0;
+    for nuclide in &c.chain.nuclides {
+        // Stable, or a half-life never evaluated (Xe136): no modes written.
+        if nuclide.decay_modes.is_empty() {
+            continue;
+        }
+        let tape = &tapes[&nuclide.name].modes;
+        assert_eq!(nuclide.decay_modes.len(), tape.len(), "{}", nuclide.name);
+        for mode in tape {
+            assert_eq!(parents[row], nuclide.name);
+            assert_eq!(
+                sigmas[row],
+                Some(mode.branching_ratio.1),
+                "{} row {row}: the dBR is not the tape's",
+                nuclide.name
+            );
+            row += 1;
+        }
+    }
+    assert_eq!(row, sigmas.len(), "rows the tapes do not account for");
+    let zeros = sigmas.iter().filter(|s| **s == Some(0.0)).count();
+    let stated = sigmas.iter().filter(|s| s.is_some_and(|s| s > 0.0)).count();
+    assert!(
+        zeros > 0 && stated > 0,
+        "the fixtures need both a stated dBR (Cs137, In116) and an unstated \
+         one (Xe137, In116_m1) or this proves half of nothing: {zeros} zero, \
+         {stated} stated"
+    );
+
+    // yani's reader takes the dBR as stored, 0.0 included, so what it exports
+    // is what it read.
+    let (back, _) = yani::parse_chain_parts(&c.dir.join("decay"), None, None, None)
+        .expect("yani reads the converted chain");
+    let dbr = |name: &str| -> Vec<Option<f64>> {
+        back[name]
+            .decays
+            .iter()
+            .map(|d| d.branching_uncertainty)
+            .collect()
+    };
+    assert_eq!(dbr("Cs137"), [Some(1.999988e-3), Some(1.999988e-3)]);
+    assert_eq!(dbr("In116"), [Some(6.0e-5), Some(6.0e-5)]);
+    assert_eq!(dbr("In116_m1"), [Some(0.0)]);
+    let _ = std::fs::remove_dir_all(&c.dir);
+}
+
+/// Every half-life, decay-energy and decay-energy component sigma in the
+/// written file is the tape's own number, the zeros included.
+///
+/// The converter used to write MT=457's 0.0 ("not stated") as null, which is
+/// an interpretation rather than the data: the file then said something the
+/// tape does not. It now stores the tape's numbers, as the dBR column does.
+#[test]
+fn every_nuclide_sigma_is_written_as_the_tape_gives_it() {
+    let c = convert("literal");
+    let tapes = tapes();
+
+    let nuclides = c.dir.join("decay/nuclides.arrow");
+    let names = string_column(&nuclides, "name");
+    let (half_life_sigmas, _) = float_column(&nuclides, "half_life_uncertainty");
+    let (energy_sigmas, _) = float_column(&nuclides, "decay_energy_uncertainty");
+    let component_sigmas: Vec<Vec<Option<f64>>> = ["beta", "gamma", "alpha"]
+        .iter()
+        .map(|c| float_column(&nuclides, &format!("decay_energy_{c}_uncertainty")).0)
+        .collect();
+    let mut literal_zero_components = 0;
+    for (i, name) in names.iter().enumerate() {
+        let tape = &tapes[name];
+        let unstable = !tape.nuclide.stable && tape.half_life.is_some_and(|(t, _)| t != 0.0);
+        assert_eq!(
+            half_life_sigmas[i],
+            unstable.then(|| tape.half_life.expect("unstable").1),
+            "{name}: the half-life sigma is not the tape's"
+        );
+        let parts = tape.decay_energy_components();
+        // The total's sigma is the quadrature of the tape's own component
+        // sigmas, and there is none where the tape gives no component.
+        assert_eq!(
+            energy_sigmas[i],
+            (unstable && parts.iter().any(Option::is_some)).then(|| tape.decay_energy().1),
+            "{name}: the decay-energy sigma is not the tape's"
+        );
+        for (c, column) in component_sigmas.iter().enumerate() {
+            let expected = if unstable {
+                parts[c].map(|(_, s)| s)
+            } else {
+                None
+            };
+            assert_eq!(column[i], expected, "{name} component {c} sigma");
+            literal_zero_components += usize::from(column[i] == Some(0.0));
+        }
+    }
+    assert!(
+        literal_zero_components > 0,
+        "no component sigma the tape writes as 0.0 (Cs137's alpha is one), so \
+         nothing here shows a zero surviving as a zero"
+    );
+
+    let (back, _) = yani::parse_chain_parts(&c.dir.join("decay"), None, None, None)
+        .expect("yani reads the converted chain");
+    assert_eq!(
+        back["Cs137"].decay_energy_components[2].map(|p| p.uncertainty),
+        Some(Some(0.0)),
+        "Cs137's alpha component is 0.0 +- 0.0 on the tape"
+    );
     let _ = std::fs::remove_dir_all(&c.dir);
 }
 

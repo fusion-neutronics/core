@@ -38,7 +38,7 @@ let nuclide = IncidentNeutron::from_ace(&tables[0], MetastableScheme::default())
 
 | | |
 |---|---|
-| ENDF files | MF 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 15, 23, 26, 27, 28, 33, 34, 40 |
+| ENDF files | MF 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 15, 23, 26, 27, 28, 32, 33, 34, 40 |
 | ACE | Type 1 tables: the ESZ, AND, DLW, MTR, LSIG/SIG, TYR and URR blocks |
 | Derived | reactions, products and their distributions, incident neutron and photon data, decay data, fission product yields, radionuclide production, depletion chains |
 
@@ -55,6 +55,13 @@ whole, 38,000 values across 28 evaluations and ACE tables, bit for bit, with a
 tolerance only where the value is computed rather than parsed.
 
 See `tests/golden/README.md` for what is covered and what is not.
+
+MF=32 is the exception: the Python reader does not parse it, so there is no
+golden to compare against. It is held to the tapes instead.
+`tests/mf32_tapes.rs` reads every MF=32 section of ENDF/B-VIII.1, JEFF-4.0,
+JENDL-5.0, TENDL-2017, TENDL-2025 and FENDL-3.2d to its SEND record and checks
+the counts of what it read against an independent survey of the same files.
+It needs the libraries locally, so it is `#[ignore]`d by default.
 
 ## Minimum supported Rust version
 

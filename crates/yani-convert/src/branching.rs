@@ -340,8 +340,10 @@ pub struct BranchingStats {
     /// or `unresolved`, which is the regression the plain counts above hide.
     pub level_routes: BTreeMap<String, usize>,
     /// The levels worth a look, one line each: unresolved and so taken as
-    /// ground, matched only by the looser energy pass, or matched by energy
-    /// while the level index pointed at another isomer.
+    /// ground, excited but taken as ground because the decay data has no
+    /// isomer for the product, matched only by the looser energy pass, or
+    /// matched by energy while the level index pointed at another isomer.
+    /// Every excited level that ends up at ground is here.
     pub flagged_levels: Vec<String>,
     /// The reactions whose partials do not reconstruct their total within
     /// [`PARTIAL_SUM_TOLERANCE`], one line each with the worst point. yani
@@ -585,7 +587,9 @@ struct ProductionState {
     target: String,
     /// The linearized MF=10 partial, `None` for a state MF=9 gives instead.
     curve: Option<(Vec<f64>, Vec<f64>)>,
-    excitation: f64,
+    /// `None` when the evaluation gives the state no usable excitation
+    /// energy, so no MF=40 state can be matched to it by energy.
+    excitation: Option<f64>,
 }
 
 impl BranchingExtractor {
@@ -663,7 +667,7 @@ impl BranchingExtractor {
                     z,
                     a,
                     s.lfs,
-                    Some(s.excitation_energy()),
+                    s.excitation_energy(),
                     isomers,
                     tol_ev,
                 );
@@ -681,6 +685,9 @@ impl BranchingExtractor {
                         (LevelRoute::Unresolved, _) => {
                             Some("unresolved, taken as ground".to_string())
                         }
+                        (LevelRoute::NoIsomers, _) => {
+                            Some("no isomer in the decay data, taken as ground".to_string())
+                        }
                         (LevelRoute::NearEnergy, _) => {
                             Some("matched by energy only within a tenth".to_string())
                         }
@@ -691,10 +698,13 @@ impl BranchingExtractor {
                         _ => None,
                     };
                     if let Some(why) = why {
+                        let at = match s.excitation_energy() {
+                            Some(e) => format!("at {:.1} keV", e / 1.0e3),
+                            None => "with no excitation energy".to_string(),
+                        };
                         stats.flagged_levels.push(format!(
-                            "{parent} MT{mt} -> {target}: level {} at {:.1} keV, {why}",
-                            s.lfs,
-                            s.excitation_energy() / 1.0e3
+                            "{parent} MT{mt} -> {target}: level {} {at}, {why}",
+                            s.lfs
                         ));
                     }
                 }
@@ -847,11 +857,16 @@ impl BranchingExtractor {
                                         "MF=9 and MF=10 give IZAP {zap} no state at that LFS, MF=40 gives it one at {:.1} keV",
                                         mf40_ev / 1.0e3
                                     ),
-                                    UnresolvedPartner::OtherExcitation { zap, mf10_ev, mf40_ev } => format!(
-                                        "MF=9 or MF=10 gives IZAP {zap} that LFS at {:.1} keV, MF=40 at {:.1} keV",
-                                        mf10_ev / 1.0e3,
-                                        mf40_ev / 1.0e3
-                                    ),
+                                    UnresolvedPartner::OtherExcitation { zap, mf10_ev, mf40_ev } => {
+                                        let mf10 = match mf10_ev {
+                                            Some(ev) => format!("at {:.1} keV", ev / 1.0e3),
+                                            None => "with no excitation energy".to_string(),
+                                        };
+                                        format!(
+                                            "MF=9 or MF=10 gives IZAP {zap} that LFS {mf10}, MF=40 at {:.1} keV",
+                                            mf40_ev / 1.0e3
+                                        )
+                                    }
                                 };
                                 stats.mf40_partner_unresolved.push(format!(
                                     "{parent} MT{mt}: IZAP {} LFS {} sub-subsection {subsection_idx}, partner MT{partner_mt} level {}: {why}",
@@ -989,8 +1004,20 @@ fn match_mf40_state<'a>(
 ) -> Mf40Match<'a> {
     let izap = mf40_zap(sub, mt, za);
     let excitation = sub.qm - sub.qi;
-    let near = |state: &ProductionState| (state.excitation - excitation).abs() <= tol_ev;
-    if let Some(state) = states.get(&(izap, sub.lfs)).filter(|state| near(state)) {
+    let near = |state: &ProductionState| {
+        state
+            .excitation
+            .is_some_and(|e| (e - excitation).abs() <= tol_ev)
+    };
+    // An excited MF=40 state whose QM - QI is not positive states no energy,
+    // the same reading excitation_energy gives MF=9 and MF=10. The energy
+    // guard then has nothing to compare, and the (IZAP, LFS) join the manual
+    // defines stands on its own, as resolve_level's level-index route does.
+    let states_no_energy = sub.lfs > 0 && excitation <= 0.0;
+    if let Some(state) = states
+        .get(&(izap, sub.lfs))
+        .filter(|state| states_no_energy || near(state))
+    {
         return Ok(state);
     }
     let (z, a) = (izap / 1000, izap % 1000);
@@ -1047,7 +1074,8 @@ enum UnresolvedPartner {
     /// another excitation than MF=40's state at that LFS.
     OtherExcitation {
         zap: i64,
-        mf10_ev: f64,
+        /// `None` when MF=9 or MF=10 gives the state no usable energy.
+        mf10_ev: Option<f64>,
         mf40_ev: f64,
     },
 }
@@ -1112,7 +1140,13 @@ fn partner_target(
             .find(|(&(state_zap, lfs), _)| state_zap == zap && lfs as f64 == xlfs1)
     }) {
         None => Err(UnresolvedPartner::NotInMf10 { zap, mf40_ev }),
-        Some((_, state)) if (state.excitation - mf40_ev).abs() <= tol_ev => Ok(target),
+        Some((_, state))
+            if state
+                .excitation
+                .is_some_and(|e| (e - mf40_ev).abs() <= tol_ev) =>
+        {
+            Ok(target)
+        }
         Some((_, state)) => Err(UnresolvedPartner::OtherExcitation {
             zap,
             mf10_ev: state.excitation,
