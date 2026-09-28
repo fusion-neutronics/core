@@ -159,6 +159,10 @@ fn modelled_decay_target(parent: &str, kind: &str, target: Option<&str>) -> Opti
 }
 
 /// Parse a transmutation chain from a `.chain.arrow/` directory.
+///
+/// The flat layout has no evaluated yields, so every [`FissionYield`] comes
+/// back with `independent` and `cumulative` as `None`. The split layout read
+/// by [`parse_chain_parts`] carries them.
 pub fn parse_chain_arrow<P: AsRef<Path>>(
     dir: P,
 ) -> Result<HashMap<String, ChainNuclide>, Box<dyn Error>> {
@@ -1202,8 +1206,14 @@ pub fn export_chain_parts<P: AsRef<Path>>(
                 ],
             )?;
             write_arrow_file(&fy_dir.join("evaluated_yields.arrow"), schema, batch)?;
+        } else {
+            remove_stale(&fy_dir.join("evaluated_yields.arrow"))?;
         }
     }
+    // The yields above are written per nuclide, inheritors included, so no
+    // aliases.arrow belongs beside them. One left by a converter run into the
+    // same directory would be read over them.
+    remove_stale(&fy_dir.join("aliases.arrow"))?;
 
     std::fs::write(
         dir.join("manifest.json"),
@@ -1215,6 +1225,18 @@ pub fn export_chain_parts<P: AsRef<Path>>(
     )?;
 
     Ok(())
+}
+
+/// Remove an optional file an export has nothing to write into, if an earlier
+/// run left one. A reader loads whatever is present, so a stale file would be
+/// attached to a chain it was not written from.
+fn remove_stale(path: &Path) -> Result<(), Box<dyn Error>> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("removing stale {}: {e}", path.display()).into())
+        }
+        _ => Ok(()),
+    }
 }
 
 fn write_arrow_file(
@@ -1238,6 +1260,11 @@ fn write_arrow_file(
 ///
 /// `library` is the source data library identifier (e.g. `"endf-b8.1"`) written
 /// into `version.json`; pass `None` if unknown (recorded as `"unknown"`).
+///
+/// The flat layout has no place for evaluated yields: the `independent` and
+/// `cumulative` fields of each [`FissionYield`] are not written, and a round
+/// trip through this layout drops them. [`export_chain_parts`] is the lossless
+/// writer.
 pub fn export_chain_arrow<P: AsRef<Path>>(
     chain: &HashMap<String, ChainNuclide>,
     dir: P,
@@ -1742,6 +1769,42 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Exporting a chain with no evaluated yields over a directory that holds
+    /// some from an earlier export removes them. Left in place they would
+    /// attach, by nuclide and energy, to yields they were not written from.
+    #[test]
+    fn an_export_without_evaluated_yields_removes_stale_ones() {
+        let dir = std::env::temp_dir().join(format!("yani-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let chain = |evaluated| {
+            std::collections::HashMap::from([(
+                "U235".to_string(),
+                fissioning("U235", &[0.0253], evaluated),
+            )])
+        };
+        super::export_chain_parts(&chain(true), &dir, None).unwrap();
+        let path = dir.join("fission_yields/evaluated_yields.arrow");
+        assert!(path.exists());
+        // A converter's aliases.arrow has no place beside an export either,
+        // which writes every nuclide's yields in full.
+        std::fs::write(dir.join("fission_yields/aliases.arrow"), b"stale").unwrap();
+
+        super::export_chain_parts(&chain(false), &dir, None).unwrap();
+        assert!(!path.exists(), "a stale evaluated_yields.arrow was left");
+        assert!(!dir.join("fission_yields/aliases.arrow").exists());
+        let (back, _) = parse_chain_parts(
+            &dir.join("decay"),
+            None,
+            Some(&dir.join("fission_yields")),
+            None,
+        )
+        .expect("reloads");
+        let yields = &back["U235"].fission_yields.as_ref().unwrap().yields;
+        assert!(yields[0].independent.is_none() && yields[0].cumulative.is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// An evaluated row with no nominal row to belong to is refused, not
