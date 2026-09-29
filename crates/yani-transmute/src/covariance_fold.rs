@@ -1798,8 +1798,14 @@ fn fold_nuclide(
         // A lump a derivation reaches is folded whole, as its components'
         // sum, and so covers the levels it holds. A component reached in its
         // own right still has no covariance of its own. A level sum whose own
-        // section states its covariance loses nothing to a lump of part of it.
-        let states_own = |mt: i32| blocks.iter().any(|b| b.is_diagonal() && b.mt == mt);
+        // section states its covariance explicitly loses nothing to a lump of
+        // part of it. A derivation on the sum does not count: it may be the
+        // very one that names the lump and could not be folded.
+        let states_own = |mt: i32| {
+            blocks
+                .iter()
+                .any(|b| b.is_diagonal() && b.mt == mt && matches!(b.data, CovarianceData::Ni(_)))
+        };
         let reaches = components.iter().any(|&c| reached.contains(&c))
             || (!reached.contains(&mtl)
                 && components.iter().any(|&c| {
@@ -4388,6 +4394,26 @@ mod lumped_tests {
         assert!(folded.is_some());
         assert!(coverage.lumped_covariance_not_assignable.is_empty());
         assert!(!coverage.has_gaps(), "{coverage:?}");
+    }
+
+    /// U235 MT 4 is only a derivation, MT 51 + MT 851. Where the lump's sum
+    /// cannot be built, that derivation states nothing, so it does not hide
+    /// the lump of `(n,n')`'s levels the way an explicit section would.
+    #[test]
+    fn a_derivation_on_the_level_sum_does_not_hide_an_unfolded_lump() {
+        let blocks = [
+            nc(NP, &[(1.0, 855)]),
+            component(600, 855),
+            component(649, 855),
+            own(855, U),
+        ];
+        let (_, coverage) = fold(&blocks, &[NP], &[NP]);
+        let want: BTreeSet<String> = ["MT600", "MT649"].map(String::from).into();
+        assert_eq!(
+            coverage.lumped_covariance_not_assignable,
+            BTreeMap::from([(("W186".to_string(), 855), want)])
+        );
+        assert!(coverage.has_gaps());
     }
 
     /// A lump no channel reaches has no rate to be the uncertainty of, and
