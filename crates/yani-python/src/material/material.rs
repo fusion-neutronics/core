@@ -881,15 +881,23 @@ impl PyMaterial {
     /// ascending in energy. Stable nuclides, nuclides the chain does not know
     /// and non-photon sources contribute nothing.
     ///
+    /// Lines only. Part of some decay spectra is a continuum, a density per eV
+    /// rather than a set of lines, and ``decay_photon_continua()`` returns it.
+    ///
     /// The two lists are the ``(x, p)`` pair the source distributions take, so
-    /// the spectrum round-trips straight into a photon transport run:
+    /// the lines round-trip straight into a photon transport source:
     ///
     ///     >>> energies, rates = activated.decay_photon_spectrum()
     ///     >>> source = PhotonSource(energy=sources.Discrete(energies, rates))
     ///
     /// ``Discrete`` normalizes the weights, so the shape is what transport
-    /// samples; keep ``sum(rates)`` yourself for the absolute emission rate
-    /// (photons/s) that scales the tallies.
+    /// samples. ``sum(rates)`` is the line emission rate (photons/s) only,
+    /// the rate that scales tallies from this source. That source leaves out
+    /// every continuum, which for a continuum emitter can be most of its
+    /// photons (all of them for Sm158 in ENDF/B-VIII.1); the continua emit
+    /// ``sum(c.emission_rate for c in activated.decay_photon_continua())``
+    /// more. No ``sources`` distribution yet holds a linear-linear continuum
+    /// exactly, so a transport source cannot yet carry every continuum.
     ///
     /// Returns:
     ///     tuple[list[float], list[float]]: Line energies (eV) and their
@@ -904,6 +912,47 @@ impl PyMaterial {
         let chain = crate::distribution::resolve_chain()?.chain;
         let lines = yani_decay::decay_photon_lines(&atom_densities, volume, &chain);
         Ok(lines.into_iter().unzip())
+    }
+
+    /// The decay photon continua of the current inventory, one per nuclide
+    /// and continuum, in nuclide-name order.
+    ///
+    /// The part of a decay spectrum ENDF gives as a density over energy rather
+    /// than as lines, which ``decay_photon_spectrum()`` does not include. Each
+    /// continuum keeps its own energy grid and interpolation law, and its
+    /// rates are photons/s/eV (or per cm³ or per g, following ``per``), so
+    /// they are not line rates; ``emission_rate`` is the integral. A material
+    /// whose nuclides have no continuum returns an empty list.
+    ///
+    /// Args:
+    ///     per (str | None): None for the whole material, which needs a
+    ///         ``volume``, or ``'cm3'`` or ``'g'``, as for
+    ///         ``decay_photon_spectrum()``.
+    ///
+    /// Returns:
+    ///     list[PhotonContinuum]: The continua, each with its nuclide,
+    ///     energies, rates, interpolation law and emission rate.
+    ///
+    /// Examples:
+    ///     >>> for continuum in activated.decay_photon_continua():
+    ///     ...     print(continuum.nuclide, continuum.emission_rate)
+    #[pyo3(signature = (*, per=None))]
+    fn decay_photon_continua(
+        &self,
+        per: Option<&str>,
+    ) -> PyResult<Vec<super::photon_continuum::PyPhotonContinuum>> {
+        let volume = self.scale_for(per, "decay_photon_continua")?;
+        let atom_densities = self
+            .internal
+            .get_atoms_per_barn_cm()
+            .map_err(PyValueError::new_err)?;
+        let chain = crate::distribution::resolve_chain()?.chain;
+        Ok(
+            yani_decay::decay_photon_continua(&atom_densities, volume, &chain)
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        )
     }
 
     /// Contact dose rate from the material's own decay photons.
@@ -921,18 +970,20 @@ impl PyMaterial {
     /// for the absorbed dose in air, and the same without the trailing ``E``
     /// for the effective dose. ``mu_material`` is the material's own linear
     /// attenuation coefficient, built from the NIST XCOM mass attenuation
-    /// coefficients of the elements present; the response is the NIST-126 mass
-    /// energy-absorption coefficient of air, or the ICRP-116 photon
+    /// coefficients of the elements present; the response is the NIST-126
+    /// mass energy-absorption coefficient of air, or the ICRP-116 photon
     /// effective-dose coefficient for anterior-posterior irradiation.
     ///
     /// Follows the FISPACT-II manual (UKAEA-CCFE-RE(21)02, Appendix C.7.1) for
-    /// the absorbed-air quantity and agrees with OpenMC's
-    /// ``Material.get_photon_contact_dose_rate``.
+    /// the absorbed-air quantity. For photon lines it agrees with OpenMC's
+    /// ``Material.get_photon_contact_dose_rate``. A photon continuum is
+    /// integrated exactly under its evaluated interpolation law.
     ///
     /// Bremsstrahlung from decay electrons is not modelled, and nuclides whose
     /// radiation the chain file does not describe contribute nothing. Photon
     /// lines outside the tabulated range (1 keV to 20 MeV for the absorbed-air
-    /// quantity, 10 keV to 20 MeV for the effective dose) are dropped.
+    /// quantity, 10 keV to 20 MeV for the effective dose) are dropped, and a
+    /// continuum is integrated over its part of that range.
     ///
     /// Args:
     ///     dose_quantity (str): ``'absorbed-air'`` for the absorbed dose in air
@@ -947,6 +998,17 @@ impl PyMaterial {
     /// Returns:
     ///     float | dict[str, float]: Contact dose rate in Gy/h
     ///     (``'absorbed-air'``) or Sv/h (``'effective'``).
+    ///
+    /// Raises:
+    ///     ValueError: If a nuclide in the material has a photon continuum
+    ///         in the dose tables' range that this build cannot integrate: one
+    ///         whose data states no interpolation law, as transmutation data
+    ///         written before the law was stored does, one tabulated under a
+    ///         law other than histogram or linear-linear, or one whose energy
+    ///         and rate lists are unpaired, whose energies are not finite or
+    ///         descend, or whose rates are negative or not finite. Its
+    ///         integral is unknown, and leaving it out would understate the
+    ///         dose.
     ///
     /// Examples:
     ///     >>> activated.contact_dose()

@@ -42,6 +42,7 @@ __all__ = [
     "Particle",
     "ParticleTrack",
     "PhotonCoefficients",
+    "PhotonContinuum",
     "PhotonSource",
     "Plane",
     "Pulse",
@@ -634,9 +635,11 @@ class DataUncertainty:
     - on a transport run, the flux's response to a perturbed cross section:
       there is one transport, not one per replica. The tallied values
       themselves are still drawn by the ``"statistical"`` source;
-    - decay photon line energies and intensities (MF=8 MT=457), photon
-      attenuation (XCOM), air energy absorption (NIST SRD 126), the ICRP-116
-      fluence-to-dose coefficients and the contact-dose build-up factor;
+    - decay photon line energies and intensities (MF=8 MT=457), the decay
+      photon continuum normalisation and shape (MF=8 MT=457 continuum and its
+      covariance), photon attenuation (XCOM), air energy absorption (NIST
+      SRD 126), the ICRP-116 fluence-to-dose coefficients and the contact-dose
+      build-up factor;
     - the material's composition, density, natural isotopic abundances and the
       AME2020 atomic masses used to convert mass fractions;
     - any source switched off with ``sources``, or with nothing to act on (a
@@ -1591,19 +1594,52 @@ class Material:
         ascending in energy. Stable nuclides, nuclides the chain does not know
         and non-photon sources contribute nothing.
         
+        Lines only. Part of some decay spectra is a continuum, a density per eV
+        rather than a set of lines, and ``decay_photon_continua()`` returns it.
+        
         The two lists are the ``(x, p)`` pair the source distributions take, so
-        the spectrum round-trips straight into a photon transport run:
+        the lines round-trip straight into a photon transport source:
         
             >>> energies, rates = activated.decay_photon_spectrum()
             >>> source = PhotonSource(energy=sources.Discrete(energies, rates))
         
         ``Discrete`` normalizes the weights, so the shape is what transport
-        samples; keep ``sum(rates)`` yourself for the absolute emission rate
-        (photons/s) that scales the tallies.
+        samples. ``sum(rates)`` is the line emission rate (photons/s) only,
+        the rate that scales tallies from this source. That source leaves out
+        every continuum, which for a continuum emitter can be most of its
+        photons (all of them for Sm158 in ENDF/B-VIII.1); the continua emit
+        ``sum(c.emission_rate for c in activated.decay_photon_continua())``
+        more. No ``sources`` distribution yet holds a linear-linear continuum
+        exactly, so a transport source cannot yet carry every continuum.
         
         Returns:
             tuple[list[float], list[float]]: Line energies (eV) and their
             emission rates (photons/s).
+        """
+    def decay_photon_continua(self, *, per: typing.Optional[builtins.str] = None) -> builtins.list[PhotonContinuum]:
+        r"""
+        The decay photon continua of the current inventory, one per nuclide
+        and continuum, in nuclide-name order.
+        
+        The part of a decay spectrum ENDF gives as a density over energy rather
+        than as lines, which ``decay_photon_spectrum()`` does not include. Each
+        continuum keeps its own energy grid and interpolation law, and its
+        rates are photons/s/eV (or per cm³ or per g, following ``per``), so
+        they are not line rates; ``emission_rate`` is the integral. A material
+        whose nuclides have no continuum returns an empty list.
+        
+        Args:
+            per (str | None): None for the whole material, which needs a
+                ``volume``, or ``'cm3'`` or ``'g'``, as for
+                ``decay_photon_spectrum()``.
+        
+        Returns:
+            list[PhotonContinuum]: The continua, each with its nuclide,
+            energies, rates, interpolation law and emission rate.
+        
+        Examples:
+            >>> for continuum in activated.decay_photon_continua():
+            ...     print(continuum.nuclide, continuum.emission_rate)
         """
     def contact_dose(self, *, dose_quantity: builtins.str = 'absorbed-air', build_up: builtins.float = 2.0, by_nuclide: builtins.bool = False) -> typing.Any:
         r"""
@@ -1622,18 +1658,20 @@ class Material:
         for the absorbed dose in air, and the same without the trailing ``E``
         for the effective dose. ``mu_material`` is the material's own linear
         attenuation coefficient, built from the NIST XCOM mass attenuation
-        coefficients of the elements present; the response is the NIST-126 mass
-        energy-absorption coefficient of air, or the ICRP-116 photon
+        coefficients of the elements present; the response is the NIST-126
+        mass energy-absorption coefficient of air, or the ICRP-116 photon
         effective-dose coefficient for anterior-posterior irradiation.
         
         Follows the FISPACT-II manual (UKAEA-CCFE-RE(21)02, Appendix C.7.1) for
-        the absorbed-air quantity and agrees with OpenMC's
-        ``Material.get_photon_contact_dose_rate``.
+        the absorbed-air quantity. For photon lines it agrees with OpenMC's
+        ``Material.get_photon_contact_dose_rate``. A photon continuum is
+        integrated exactly under its evaluated interpolation law.
         
         Bremsstrahlung from decay electrons is not modelled, and nuclides whose
         radiation the chain file does not describe contribute nothing. Photon
         lines outside the tabulated range (1 keV to 20 MeV for the absorbed-air
-        quantity, 10 keV to 20 MeV for the effective dose) are dropped.
+        quantity, 10 keV to 20 MeV for the effective dose) are dropped, and a
+        continuum is integrated over its part of that range.
         
         Args:
             dose_quantity (str): ``'absorbed-air'`` for the absorbed dose in air
@@ -1648,6 +1686,17 @@ class Material:
         Returns:
             float | dict[str, float]: Contact dose rate in Gy/h
             (``'absorbed-air'``) or Sv/h (``'effective'``).
+        
+        Raises:
+            ValueError: If a nuclide in the material has a photon continuum
+                in the dose tables' range that this build cannot integrate: one
+                whose data states no interpolation law, as transmutation data
+                written before the law was stored does, one tabulated under a
+                law other than histogram or linear-linear, or one whose energy
+                and rate lists are unpaired, whose energies are not finite or
+                descend, or whose rates are negative or not finite. Its
+                integral is unknown, and leaving it out would understate the
+                dose.
         
         Examples:
             >>> activated.contact_dose()
@@ -3164,6 +3213,59 @@ class PhotonCoefficients:
         r"""
         Repackage as the ``(energy, coefficients, units)`` tuple accepted by
         ``Tally(energy_function=...)``.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class PhotonContinuum:
+    r"""
+    One nuclide's decay photon continuum within a material's inventory.
+    
+    ENDF gives part of some decay spectra as a density over energy rather than
+    as lines: the spontaneous-fission photons of an actinide, or the whole
+    photon emission of a nuclide far from stability, whose lines were never
+    measured. The values are a rate per eV, so they are not line rates and
+    cannot be added to ``decay_photon_spectrum()``'s. Their rate is the
+    integral, which ``emission_rate`` gives. Both follow the ``per`` argument
+    of ``decay_photon_continua()``: for the whole material, or per cm³ or per g.
+    """
+    @property
+    def nuclide(self) -> builtins.str:
+        r"""
+        The emitting nuclide.
+        """
+    @property
+    def energies(self) -> builtins.list[builtins.float]:
+        r"""
+        Tabulated energies [eV], ascending.
+        """
+    @property
+    def rates(self) -> builtins.list[builtins.float]:
+        r"""
+        The emission-rate density at each energy: photons/s/eV for the whole
+        material, or per cm³ or per g following the ``per`` argument the
+        continuum was requested with.
+        """
+    @property
+    def interpolation(self) -> typing.Optional[builtins.str]:
+        r"""
+        How ``rates`` is read between the energies: the ENDF law by name
+        (``"histogram"``, ``"linear-linear"``, ...), or None where the data
+        states no law, which data written before the law was stored does.
+        """
+    @property
+    def emission_rate(self) -> builtins.float:
+        r"""
+        The emission rate over the whole continuum, its integral read under its
+        law: photons/s for the whole material, or per cm³ or per g following
+        the ``per`` argument the continuum was requested with.
+        
+        Raises:
+            ValueError: If the law is not stated, or is one this build does not
+                integrate, or if the energy and rate lists are unpaired, the
+                energies are not finite or descend, or the rates are negative
+                or not finite. The integral is then unknown, and no number is
+                returned in its place.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -4808,9 +4910,19 @@ class TransmutationChain:
         r"""
         Decay photon sources of each nuclide that has them (D1S data).
         
+        A source is lines or a continuum, and the two are in different units,
+        so each one says which it is.
+        
         Returns:
-            dict[str, list[tuple[list[float], list[float]]]]: nuclide name ->
-            list of (energies, intensities) for each photon source.
+            dict[str, list[tuple[str, list[float], list[float], str | None]]]:
+            nuclide name -> one ``(type, energies, intensities, interpolation)``
+            per photon source. A ``"discrete"`` source lists lines, each
+            intensity its emission rate per atom [1/s], and its interpolation is
+            None. A ``"tabular"`` one is a continuum: each intensity is the
+            emission-rate density per atom [1/s/eV] at that energy, read between
+            energies by ``interpolation``, the ENDF law by name (e.g.
+            ``"histogram"`` or ``"linear-linear"``), which is None where the
+            data states no law.
         """
     def __new__(cls, path: builtins.str) -> TransmutationChain:
         r"""
@@ -5143,7 +5255,9 @@ class TransmutationResults:
         not emit counts as a zero in it -- the same rule the densities follow,
         and the only one under which two lines' spreads are taken over the same
         sample -- and ``LineEstimate.emitting`` reports how many replicas
-        emitted it, which is what the zero-fill would otherwise hide.
+        emitted it, which is what the zero-fill would otherwise hide. Lines
+        only, as there: a photon continuum is not a line and is not reported
+        here.
         
         The band is the spread of the replicas' inventories alone (each with
         its own half-lives when the ``"half_life"`` source is on). The line

@@ -59,9 +59,11 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 /// - on a transport run, the flux's response to a perturbed cross section:
 ///   there is one transport, not one per replica. The tallied values
 ///   themselves are still drawn by the ``"statistical"`` source;
-/// - decay photon line energies and intensities (MF=8 MT=457), photon
-///   attenuation (XCOM), air energy absorption (NIST SRD 126), the ICRP-116
-///   fluence-to-dose coefficients and the contact-dose build-up factor;
+/// - decay photon line energies and intensities (MF=8 MT=457), the decay
+///   photon continuum normalisation and shape (MF=8 MT=457 continuum and its
+///   covariance), photon attenuation (XCOM), air energy absorption (NIST
+///   SRD 126), the ICRP-116 fluence-to-dose coefficients and the contact-dose
+///   build-up factor;
 /// - the material's composition, density, natural isotopic abundances and the
 ///   AME2020 atomic masses used to convert mass fractions;
 /// - any source switched off with ``sources``, or with nothing to act on (a

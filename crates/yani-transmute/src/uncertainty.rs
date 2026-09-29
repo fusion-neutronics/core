@@ -346,6 +346,7 @@ impl Info {
                 "lumped-reaction covariance (MF=33 MT=851-870)",
                 "resonance-parameter covariance (MF=32)",
                 "decay photon line energy and intensity (MF=8 MT=457)",
+                "decay photon continuum normalisation and shape (MF=8 MT=457 continuum and its covariance)",
                 "photon attenuation coefficient (XCOM)",
                 "air energy-absorption coefficient (NIST SRD 126)",
                 "fluence-to-dose coefficient (ICRP-116)",
@@ -785,9 +786,10 @@ pub(crate) fn with_half_lives(
 ///
 /// Decay-source intensities are stored per atom per second, which is the
 /// emission probability per decay times the decay constant (Co60's 1332 keV
-/// line is `0.9998 * ln2 / T`). The per-decay probability is the decay
-/// scheme's and does not change with the half-life, so the stored intensity
-/// scales as `T_nominal / T`. Leaving it would evaluate a replica's photon
+/// line is `0.9998 * ln2 / T`), and a continuum's density per eV is the same
+/// product. The per-decay probability is the decay scheme's and does not
+/// change with the half-life, so the stored intensity scales as
+/// `T_nominal / T`. Leaving it would evaluate a replica's photon
 /// emission as `N_k lambda y` instead of `N_k lambda_k y`: at saturation
 /// `N_k ~ 1 / lambda_k`, so the photon rate would inherit the half-life's
 /// whole spread, which is the inconsistent-lambda inflation the per-replica
@@ -796,9 +798,7 @@ pub(crate) fn set_half_life(cn: &mut yani::ChainNuclide, half_life: f64) {
     if let Some(nominal) = cn.half_life.filter(|t| *t > 0.0 && half_life > 0.0) {
         let scale = nominal / half_life;
         for source in &mut cn.sources {
-            let yani::DecaySourceDistribution::Discrete { intensities, .. } =
-                &mut source.distribution;
-            for i in intensities.iter_mut() {
+            for i in source.distribution.intensities_mut().iter_mut() {
                 *i *= scale;
             }
         }
@@ -809,6 +809,68 @@ pub(crate) fn set_half_life(cn: &mut yani::ChainNuclide, half_life: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every run states the decay photon sources it holds at nominal, lines
+    /// and continua both, so a reader does not take their silence for zero.
+    #[test]
+    fn the_report_names_the_photon_sources_held_at_nominal() {
+        let info = Info::from_fold(&Coverage::default(), &Clipping::default(), true);
+        for source in [
+            "decay photon line energy and intensity (MF=8 MT=457)",
+            "decay photon continuum normalisation and shape (MF=8 MT=457 continuum and its covariance)",
+        ] {
+            assert!(
+                info.not_perturbed.iter().any(|s| s == source),
+                "{source:?} missing from {:?}",
+                info.not_perturbed
+            );
+        }
+    }
+
+    /// A new half-life rescales a continuum's density exactly as it rescales a
+    /// line, so both keep their per-decay yield.
+    #[test]
+    fn a_half_life_rescales_lines_and_continua_alike() {
+        let lambda = std::f64::consts::LN_2 / 318.0;
+        let source = |distribution| yani::DecaySource {
+            particle: "photon".to_string(),
+            distribution,
+        };
+        let mut cn = yani::ChainNuclide {
+            name: "Sm158".to_string(),
+            half_life: Some(318.0),
+            half_life_uncertainty: Some(1.8),
+            decay_energy: 1.0e6,
+            decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
+            reactions: vec![],
+            decays: vec![],
+            fission_yields: None,
+            sources: vec![
+                source(yani::DecaySourceDistribution::Discrete {
+                    energies: vec![2.0e5],
+                    intensities: vec![0.5 * lambda],
+                }),
+                source(yani::DecaySourceDistribution::Tabular {
+                    energies: vec![1.0e4, 1.0e6],
+                    intensities: vec![3.0e-6 * lambda, 0.0],
+                    interpolation: Some(yani::Interpolation::Histogram),
+                }),
+            ],
+        };
+        set_half_life(&mut cn, 636.0);
+        let lambda_k = std::f64::consts::LN_2 / 636.0;
+        let per_decay: Vec<f64> = cn
+            .sources
+            .iter()
+            .map(|s| s.distribution.emission_rate().unwrap() / lambda_k)
+            .collect();
+        assert!((per_decay[0] - 0.5).abs() < 1e-14, "{per_decay:?}");
+        assert!(
+            (per_decay[1] - 3.0e-6 * 9.9e5).abs() < 1e-14,
+            "{per_decay:?}"
+        );
+    }
 
     /// The production total weights dilute shares by the production the run
     /// drove, which is the covered share only when that production is the

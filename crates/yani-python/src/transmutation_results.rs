@@ -566,7 +566,9 @@ impl PyTransmutationResults {
     /// not emit counts as a zero in it -- the same rule the densities follow,
     /// and the only one under which two lines' spreads are taken over the same
     /// sample -- and ``LineEstimate.emitting`` reports how many replicas
-    /// emitted it, which is what the zero-fill would otherwise hide.
+    /// emitted it, which is what the zero-fill would otherwise hide. Lines
+    /// only, as there: a photon continuum is not a line and is not reported
+    /// here.
     ///
     /// The band is the spread of the replicas' inventories alone (each with
     /// its own half-lives when the ``"half_life"`` source is on). The line
