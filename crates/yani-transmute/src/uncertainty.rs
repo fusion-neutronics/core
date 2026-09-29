@@ -10,10 +10,11 @@
 //! the **flux spectrum**, from a per-bin sigma the caller supplies; and the
 //! **half-lives** and **decay energies**, from the evaluation's own standard
 //! deviation, each drawn per nuclide as a lognormal with the stated mean and
-//! sigma. Decay branching ratios, fission yields, the isomeric-branching overlay, the MF=32
-//! resonance-parameter covariance, the decay photon and dose data, and the
-//! material's own composition are held at their nominal values; they carry
-//! their own uncertainties and are not propagated yet (issue #140).
+//! sigma. Decay branching ratios, fission yields, the isomeric-branching
+//! overlay, the MF=32 resonance-parameter covariance, the decay photon and
+//! dose data, and the material's own composition are held at their nominal
+//! values; they carry their own uncertainties and are not propagated yet
+//! (issue #140).
 //! [`Info::not_perturbed`] lists them per run rather than leaving it to be
 //! inferred from a small sigma.
 //!
@@ -758,15 +759,19 @@ fn stated(sigma: Option<f64>) -> bool {
 }
 
 /// `sigma` when a lognormal draw of `value` can carry it: stated, on a
-/// positive value, with a relative sigma that is positive and finite.
+/// positive value, with a relative sigma that is positive and whose square
+/// is finite.
 ///
 /// A mean of zero for a quantity that cannot go negative is zero in every
 /// draw, and an infinite sigma has no lognormal, so either is reported as
-/// not carried rather than drawn as a NaN or silently held.
+/// not carried rather than drawn as a NaN or silently held. The square is
+/// checked, not just the ratio, because the lognormal is built from
+/// `ln(1 + relative^2)` and a ratio above about 1e154 overflows there into
+/// the same NaN.
 fn carried(value: f64, sigma: Option<f64>) -> Option<f64> {
     let sigma = sigma.filter(|s| *s > 0.0 && s.is_finite())?;
     let relative = sigma / value;
-    (value > 0.0 && relative > 0.0 && relative.is_finite()).then_some(sigma)
+    (value > 0.0 && relative > 0.0 && (relative * relative).is_finite()).then_some(sigma)
 }
 
 /// `(name, half-life, sigma)` for one nuclide whose half-life is drawn.
@@ -1321,6 +1326,15 @@ mod tests {
         assert_eq!(sample_decay_energy(&cn, 5, 0), None);
         assert!(!has_decay_energy_sigma(&cn));
         assert!(has_decay_energy_sigma_not_carried(&cn));
+    }
+
+    /// A finite relative sigma whose square overflows would make the
+    /// lognormal NaN, so it is reported like an infinite one.
+    #[test]
+    fn a_relative_sigma_whose_square_overflows_is_not_carried() {
+        assert_eq!(carried(1.0, Some(1.0e155)), None);
+        assert_eq!(carried(1.0e-10, Some(1.0e150)), None);
+        assert_eq!(carried(1.0, Some(1.0e150)), Some(1.0e150));
     }
 
     #[test]

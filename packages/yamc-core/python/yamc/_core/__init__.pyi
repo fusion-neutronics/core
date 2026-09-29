@@ -649,8 +649,9 @@ class DataUncertainty:
     
     ``TransmutationResults.get_data_uncertainty_info`` lists every one of these
     that applied to a material under ``not_perturbed``, along with any nuclide
-    whose evaluation carries no covariance and any unstable nuclide whose
-    half-life has no stated sigma.
+    whose evaluation carries no covariance, any unstable nuclide whose
+    half-life or decay energy has no stated sigma, and any whose stated
+    half-life or decay-energy sigma no draw can carry.
     
     Args:
         seed (int): Base seed. A given nuclide's perturbation in a given replica
@@ -5272,7 +5273,8 @@ class TransmutationResults:
           ``"half_life"`` source, which reachable unstable nuclides had their
           half-life sampled and which state no sigma to sample from.
           ``half_life_uncertainty_not_carried`` names those whose stated sigma
-          no draw can carry (not finite), held at nominal and counted as a gap.
+          no draw can carry (not finite, or not finite relative to the
+          half-life), held at nominal and counted as a gap.
           ``half_lives_sampled`` counts the draws made. Each is a lognormal
           matched to the evaluation's mean and sigma, so none can go
           non-positive and none is floored.

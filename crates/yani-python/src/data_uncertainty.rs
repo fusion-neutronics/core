@@ -74,8 +74,9 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///
 /// ``TransmutationResults.get_data_uncertainty_info`` lists every one of these
 /// that applied to a material under ``not_perturbed``, along with any nuclide
-/// whose evaluation carries no covariance and any unstable nuclide whose
-/// half-life has no stated sigma.
+/// whose evaluation carries no covariance, any unstable nuclide whose
+/// half-life or decay energy has no stated sigma, and any whose stated
+/// half-life or decay-energy sigma no draw can carry.
 ///
 /// Args:
 ///     seed (int): Base seed. A given nuclide's perturbation in a given replica

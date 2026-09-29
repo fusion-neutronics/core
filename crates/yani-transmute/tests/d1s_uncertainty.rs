@@ -98,3 +98,30 @@ fn without_the_half_life_source_nothing_is_drawn() {
     assert!(ensemble.replicas.is_empty());
     assert!(ensemble.sources.is_empty());
 }
+
+/// A half-life sigma no draw can carry reaches the ensemble's report as its
+/// own gap, not as a nuclide perturbed or one that states none.
+#[test]
+fn a_half_life_sigma_no_draw_can_carry_is_reported() {
+    let mut chain = Arc::unwrap_or_clone(chain());
+    chain.get_mut("Mn56").expect("Mn56").half_life_uncertainty = Some(f64::INFINITY);
+    let chain = Arc::new(chain);
+    let emitters = vec!["Mn56".to_string()];
+    let request = DataUncertainty {
+        seed: 3,
+        samples: Some(8),
+        sources: vec![Source::HalfLife],
+        attribution: false,
+    };
+    let ensemble = time_correction_factor_ensemble(
+        &emitters,
+        &[48.0 * HOUR],
+        &[vec![1.0e10]],
+        &chain,
+        &request,
+    )
+    .unwrap();
+    assert!(ensemble.half_life_uncertainty_not_carried.contains("Mn56"));
+    assert!(!ensemble.half_lives_perturbed.contains("Mn56"));
+    assert!(!ensemble.no_half_life_uncertainty.contains("Mn56"));
+}

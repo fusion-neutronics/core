@@ -39,7 +39,8 @@ pub struct TcfEnsemble {
     /// held at nominal. Not a claim that they are exact.
     pub no_half_life_uncertainty: BTreeSet<String>,
     /// The same, for nuclides whose stated half-life sigma no draw can carry
-    /// (not finite), so held at nominal.
+    /// (not finite, or not finite relative to the half-life), so held at
+    /// nominal.
     pub half_life_uncertainty_not_carried: BTreeSet<String>,
     /// Whether the TCF spreads settled rather than hitting the cap.
     pub converged: bool,

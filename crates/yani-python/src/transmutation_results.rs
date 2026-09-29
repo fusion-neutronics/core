@@ -702,7 +702,8 @@ impl PyTransmutationResults {
     ///   ``"half_life"`` source, which reachable unstable nuclides had their
     ///   half-life sampled and which state no sigma to sample from.
     ///   ``half_life_uncertainty_not_carried`` names those whose stated sigma
-    ///   no draw can carry (not finite), held at nominal and counted as a gap.
+    ///   no draw can carry (not finite, or not finite relative to the
+    ///   half-life), held at nominal and counted as a gap.
     ///   ``half_lives_sampled`` counts the draws made. Each is a lognormal
     ///   matched to the evaluation's mean and sigma, so none can go
     ///   non-positive and none is floored.
