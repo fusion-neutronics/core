@@ -373,6 +373,17 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
         for batch in read_arrow_file(&sources_path)? {
             let nuclides = col::<StringArray>(&batch, "nuclide")?;
             let particles = col::<StringArray>(&batch, "particle")?;
+            // export_chain_arrow wrote this file without a type column before
+            // issue #163, and a row's kind cannot be guessed from its values.
+            if batch.schema().index_of("type").is_err() {
+                return Err(format!(
+                    "{} has no 'type' column: it was written by an export_chain_arrow \
+                     that did not record which rows are lines and which are continua. \
+                     Re-export the chain with a current build, or use the split layout.",
+                    sources_path.display()
+                )
+                .into());
+            }
             let types = col::<StringArray>(&batch, "type")?;
             let codes = interpolation_codes(&batch)?;
             let energies_col = col::<ListArray>(&batch, "energies")?;
@@ -2014,6 +2025,67 @@ mod tests {
         assert!(write("tabular", Some(7)).contains("not an ENDF law"));
         assert!(write("discrete", Some(1)).contains("only a tabular row"));
         assert!(write("mixture", None).contains("expected 'discrete' or 'tabular'"));
+    }
+
+    /// A flat `sources.arrow` from an export_chain_arrow that wrote no type
+    /// column is refused with a message saying why and what to do, not a
+    /// bare "column not found".
+    #[test]
+    fn a_flat_sources_file_without_a_type_column_says_to_re_export() {
+        use arrow_array::builder::{Float64Builder, ListBuilder, StringBuilder};
+        use arrow_array::{ArrayRef, RecordBatch};
+        use std::sync::Arc;
+
+        let dir = std::env::temp_dir().join(format!("yani-untyped-sources-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut chain = std::collections::HashMap::new();
+        chain.insert(
+            "Co60".to_string(),
+            crate::ChainNuclide {
+                name: "Co60".to_string(),
+                half_life: Some(1.66e8),
+                half_life_uncertainty: None,
+                decay_energy: 2.6e6,
+                decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
+                reactions: Vec::new(),
+                decays: Vec::new(),
+                fission_yields: None,
+                sources: Vec::new(),
+            },
+        );
+        super::export_chain_arrow(&chain, &dir, Some("test")).expect("export succeeds");
+
+        let mut nuclide = StringBuilder::new();
+        let mut particle = StringBuilder::new();
+        let mut energies = ListBuilder::new(Float64Builder::new());
+        let mut intensities = ListBuilder::new(Float64Builder::new());
+        nuclide.append_value("Co60");
+        particle.append_value("photon");
+        energies.values().append_slice(&[1.173e6, 1.332e6]);
+        energies.append(true);
+        intensities.values().append_slice(&[0.9985, 0.9998]);
+        intensities.append(true);
+        let batch = RecordBatch::try_from_iter([
+            ("nuclide", Arc::new(nuclide.finish()) as ArrayRef),
+            ("particle", Arc::new(particle.finish()) as ArrayRef),
+            ("energies", Arc::new(energies.finish()) as ArrayRef),
+            ("intensities", Arc::new(intensities.finish()) as ArrayRef),
+        ])
+        .unwrap();
+        let path = dir.join("sources.arrow");
+        super::write_arrow_file(&path, batch.schema(), batch).unwrap();
+
+        let err = super::parse_chain_arrow(&dir)
+            .expect_err("an untyped sources file must not load")
+            .to_string();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            err.contains(&path.display().to_string())
+                && err.contains("no 'type' column")
+                && err.contains("Re-export"),
+            "got: {err}"
+        );
     }
 
     /// An `interpolation` column of the wrong type is an error naming the
