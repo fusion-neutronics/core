@@ -414,6 +414,7 @@ impl Model {
                         let initial = material.get_atoms_per_barn_cm()?;
                         let mut keep = yani::populated_nuclides(
                             &chain,
+                            &branch,
                             &initial,
                             total_time,
                             yani_transmute::DENSITY_FLOOR,
@@ -1207,6 +1208,7 @@ mod tests {
                         target: Some(target.to_string()),
                         branching: 1.0,
                         q_value: None,
+                        branching_uncertainty: None,
                     })
                     .collect(),
                 decays: vec![],

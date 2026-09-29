@@ -94,6 +94,7 @@ CHAIN_SECTIONS = {
         ("provenance.json", True),
         ("fission_yields.arrow", True),
         ("aliases.arrow", False),
+        ("evaluated_yields.arrow", False),
     ],
 }
 

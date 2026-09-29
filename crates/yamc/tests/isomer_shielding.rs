@@ -177,6 +177,7 @@ fn chain() -> Arc<HashMap<String, ChainNuclide>> {
         kind: "(n,gamma)".to_string(),
         target: Some(target.to_string()),
         branching,
+        branching_uncertainty: None,
         q_value: Some(0.0),
     };
     Arc::new(HashMap::from([

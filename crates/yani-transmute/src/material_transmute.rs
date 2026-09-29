@@ -790,8 +790,8 @@ fn solve_case(
 struct ReplicaOutcome {
     /// This replica's inventory at each schedule step.
     densities: Vec<HashMap<String, f64>>,
-    /// Rates the sampler had to truncate, for this replica alone.
-    truncations: crate::covariance_sample::Truncations,
+    /// Cross-section rate draws this replica made.
+    rates_sampled: usize,
     /// The two flux counters a replica actually produces. NOT the whole
     /// `FluxCoverage`: `Info::add_flux_coverage` assigns the spectrum counts,
     /// which are established before the loop, so folding a replica's zeros over
@@ -1393,12 +1393,52 @@ fn run_replicas(
         Default::default()
     };
 
-    let mut info = Info::from_fold(&coverage, &clipping);
+    let mut info = Info::from_fold(&coverage, &clipping, shielding.is_none() && !transport);
     if half_life.is_none() {
         info.not_perturbed.insert(0, "half-life".to_string());
     }
     if !want_decay_energy {
         info.not_perturbed.insert(0, "decay energy".to_string());
+    }
+    if !cross_sections {
+        info.not_perturbed
+            .insert(0, "activation cross section (MF=33)".to_string());
+    }
+    // On the spectrum path a spectrum without a per-bin sigma, or any spectrum
+    // with the source off, is used as given. When only some are, the entry
+    // says so, so it never reads as held for a flux that was partly sampled.
+    if !transport {
+        let held = per_group.iter().filter(|g| g.is_none()).count();
+        if held > 0 && held == per_group.len() {
+            info.not_perturbed.insert(0, "flux spectrum".to_string());
+        } else if held > 0 {
+            info.not_perturbed.insert(
+                0,
+                "flux spectrum (spectra without a sigma only)".to_string(),
+            );
+        }
+    }
+    // With the statistical source off, or nothing tallied to draw, the tallied
+    // rates are used as they came out of the one transport.
+    if transport && statistical.is_none() {
+        info.not_perturbed
+            .insert(0, "tallied-rate statistics".to_string());
+    }
+    // The shielded flux shape is built once from the nominal cross sections
+    // and every replica reuses it, so a perturbed capture never deepens its
+    // own flux dip.
+    if shielding.is_some() {
+        info.not_perturbed
+            .push("self-shielding correction".to_string());
+    }
+    // One transport, no transport per replica: the flux the tally saw is the
+    // flux every replica is solved in, whatever its cross sections were. The
+    // tallied values may still be drawn statistically; what is held is how
+    // the flux would answer a perturbed cross section. With cross sections off
+    // there is no perturbed cross section for it to answer, so nothing is held.
+    if transport && cross_sections {
+        info.not_perturbed
+            .push("flux response to perturbed cross sections (one transport)".to_string());
     }
     info.decay_energies_perturbed = decay_energy_perturbed.clone();
     info.no_decay_energy_uncertainty = no_decay_energy_sigma;
@@ -1470,7 +1510,7 @@ fn run_replicas(
     // them. Only the two counters a replica actually produces come back.
     let one_replica = |replica: u64| -> Result<ReplicaOutcome, String> {
         let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
-        let mut truncations = crate::covariance_sample::Truncations::default();
+        let mut rates_sampled = 0usize;
         let mut half_lives_floored = 0usize;
         // A statistical draw of the whole tallied rate vector, the partials
         // re-folded into the branching the way the nominal was, so an
@@ -1537,9 +1577,8 @@ fn run_replicas(
                 }
                 None => rates.clone(),
             };
-            let (rates, t) = samplers[idx].perturb(&rates, request.seed, replica);
-            truncations.floored += t.floored;
-            truncations.sampled += t.sampled;
+            let (rates, n) = samplers[idx].perturb(&rates, request.seed, replica);
+            rates_sampled += n;
             let folded_chain = match &half_life {
                 // The pruned nominal chain, unless this replica drew its own
                 // branching, which then carries the half-lives instead.
@@ -1565,7 +1604,7 @@ fn run_replicas(
             .map_err(|e| e.to_string())?;
         Ok(ReplicaOutcome {
             densities: densities_of(&materials),
-            truncations,
+            rates_sampled,
             flux_bins_sampled: flux_coverage.bins_sampled,
             flux_bins_floored: flux_coverage.bins_floored,
             half_lives: sampled_half_lives,
@@ -1596,7 +1635,7 @@ fn run_replicas(
 
         for outcome in outcomes {
             let outcome = outcome?;
-            info.add_truncations(&outcome.truncations);
+            info.rates_sampled += outcome.rates_sampled;
             flux_coverage.bins_sampled += outcome.flux_bins_sampled;
             flux_coverage.bins_floored += outcome.flux_bins_floored;
             info.half_lives_sampled += outcome.half_lives.len();
@@ -2414,7 +2453,8 @@ struct Split {
     /// among the listed states, which re-partition only the mass those states
     /// already carry in the chain (see [`refine_chain`]): a complete list may
     /// cover only some of the chain's targets, as ENDF/B-VIII.1's La139
-    /// (n,d3He) lists Xe135 and Xe135_m1 where the chain goes to Xe134.
+    /// (n,d3He) list of Xe135 and Xe135_m1 does on a chain that books the
+    /// reaction to Xe134.
     remainder: bool,
 }
 
@@ -2443,8 +2483,8 @@ fn refine_chain(
             let tmap = &split.fractions;
             if kind.as_str() == INELASTIC {
                 // Grafted self-inelastic channels: the folded fraction is the
-                // share of the total (n,n') rate (base branchings are 1.0
-                // placeholders), so assign it directly.
+                // share of the total (n,n') rate (the loaded branchings are
+                // 0.0 placeholders), so assign it directly.
                 for rx in nuc.reactions.iter_mut().filter(|r| &r.kind == kind) {
                     if let Some(t) = &rx.target {
                         if let Some(&f) = tmap.get(t) {
@@ -2713,6 +2753,7 @@ mod tests {
             kind: kind.to_string(),
             target: Some(target.to_string()),
             branching,
+            branching_uncertainty: None,
             q_value: None,
         }
     }
@@ -2896,6 +2937,79 @@ mod tests {
         assert_eq!(rates, tallied, "non-(n,n') kinds must not inject rates");
         assert!((branching_in(&folded, "X", "X_g") - 0.75).abs() < 1e-12);
         assert!((branching_in(&folded, "X", "X_m1") - 0.25).abs() < 1e-12);
+    }
+
+    /// The overlay re-partitions only the mass on the base chain's product,
+    /// so it is live only when that product is one of the overlay's listed
+    /// states. ENDF/B-VIII.1 lists La139 (n,d3He) Xe135 and Xe135_m1, and the
+    /// reaction table must put the base edge on Xe135 (139 + 1 - 2 - 3) for
+    /// the Xe135_m1 graft to receive anything.
+    #[test]
+    fn la139_n_d3he_overlay_moves_mass_onto_its_listed_states() {
+        let info = endf::chain::reaction_info("(n,d3He)").unwrap();
+        assert_eq!(57 + info.delta_z, 54, "(n,d3He) on La must land on Xe");
+        let product = format!("Xe{}", 139 + info.delta_a);
+
+        let la139 = |product: &str| {
+            Arc::new(HashMap::from([(
+                "La139".to_string(),
+                // The base edge, then the 0.0 graft chain_arrow adds.
+                nuclide_entry(
+                    "La139",
+                    vec![
+                        edge("(n,d3He)", product, 1.0),
+                        edge("(n,d3He)", "Xe135_m1", 0.0),
+                    ],
+                ),
+            )]))
+        };
+        // The list as ENDF/B-VIII.1 gives it: Xe135 and Xe135_m1, complete.
+        let mut branch = BranchTable::new();
+        branch.entry("La139".to_string()).or_default().insert(
+            "(n,d3He)".to_string(),
+            ["Xe135", "Xe135_m1"]
+                .iter()
+                .map(|t| {
+                    curve(
+                        t,
+                        BranchQuantity::CrossSection,
+                        &[1.0, 1.0e8],
+                        &[1.0, 1.0],
+                        true,
+                    )
+                })
+                .collect(),
+        );
+        let mut partials: PartialRates = HashMap::new();
+        partials.entry("La139".to_string()).or_default().insert(
+            "(n,d3He)".to_string(),
+            vec![
+                ("Xe135".to_string(), 3.0e-30),
+                ("Xe135_m1".to_string(), 1.0e-30),
+            ],
+        );
+        let split = |product: &str| -> Vec<(String, f64)> {
+            let mut rates: ReactionRates = HashMap::from([(
+                "La139".to_string(),
+                HashMap::from([("(n,d3He)".to_string(), 4.0e-30)]),
+            )]);
+            let folded = coupled(&la139(product), &branch, &partials, &mut rates);
+            folded["La139"]
+                .reactions
+                .iter()
+                .map(|r| (r.target.clone().unwrap(), r.branching))
+                .collect()
+        };
+
+        // On the old product, Xe134, nothing the overlay lists holds any mass.
+        assert_eq!(
+            split("Xe134"),
+            [("Xe134".to_string(), 1.0), ("Xe135_m1".to_string(), 0.0)]
+        );
+        let fixed = split(&product);
+        assert_eq!(fixed[0].0, "Xe135");
+        assert!((fixed[0].1 - 0.75).abs() < 1e-12, "{fixed:?}");
+        assert!((fixed[1].1 - 0.25).abs() < 1e-12, "{fixed:?}");
     }
 
     /// All-zero productions (flux never reached the thresholds) keep the base

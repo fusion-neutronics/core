@@ -2272,6 +2272,8 @@ mod tests {
                 .map(|&energy| yani::FissionYield {
                     energy,
                     products: vec![],
+                    independent: None,
+                    cumulative: None,
                 })
                 .collect(),
         )

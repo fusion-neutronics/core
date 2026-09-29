@@ -63,6 +63,7 @@ fn rx(kind: &str, target: &str) -> ChainReaction {
         target: Some(target.to_string()),
         branching: 1.0,
         q_value: None,
+        branching_uncertainty: None,
     }
 }
 
