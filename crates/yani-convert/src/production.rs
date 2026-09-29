@@ -34,9 +34,11 @@ use crate::branching::mt_to_type;
 /// One final state of one reaction, as the evaluation lists it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProductionState {
-    /// Excitation energy above the product's ground state, in eV. From MF=8
-    /// where the evaluation gives it, otherwise `QM - QI`.
-    pub excitation_energy: f64,
+    /// Excitation energy above the product's ground state, in eV. Zero for
+    /// the ground state; for an excited state, MF=8's ELFS where it is
+    /// positive, otherwise `QM - QI` where that is positive, and `None` when
+    /// the evaluation gives neither.
+    pub excitation_energy: Option<f64>,
     /// The product's nuclear level index, LFS. Zero is the ground state.
     ///
     /// Not an isomeric-state ordinal: two evaluators number the levels of one
@@ -79,7 +81,7 @@ pub struct ProductionChannel {
 impl ProductionChannel {
     /// The excited states, which is what a completeness comparison is about.
     pub fn excited(&self) -> impl Iterator<Item = &ProductionState> {
-        self.states.iter().filter(|s| s.excitation_energy > 0.0)
+        self.states.iter().filter(|s| s.level_index > 0)
     }
 }
 

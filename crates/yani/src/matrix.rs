@@ -782,6 +782,7 @@ mod tests {
                     target: Some("B".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 vec![],
             ),
@@ -818,6 +819,7 @@ mod tests {
                     target: Some("B".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
             ),
         );
@@ -856,18 +858,21 @@ mod tests {
                         target: Some("B".to_string()),
                         branching: 0.75,
                         q_value: None,
+                        branching_uncertainty: None,
                     },
                     ChainReaction {
                         kind: "(n,gamma)".to_string(),
                         target: Some("B_m1".to_string()),
                         branching: 0.25,
                         q_value: None,
+                        branching_uncertainty: None,
                     },
                     ChainReaction {
                         kind: "(n,2n)".to_string(),
                         target: Some("C".to_string()),
                         branching: 1.0,
                         q_value: None,
+                        branching_uncertainty: None,
                     },
                     // No named product, and no rate given for it below.
                     ChainReaction {
@@ -875,6 +880,7 @@ mod tests {
                         target: None,
                         branching: 1.0,
                         q_value: None,
+                        branching_uncertainty: None,
                     },
                 ],
             ),
@@ -929,6 +935,7 @@ mod tests {
                     target: None,
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
             ),
         );
@@ -976,6 +983,7 @@ mod tests {
                         target: Some("B".to_string()),
                         branching: 1.0,
                         q_value: None,
+                        branching_uncertainty: None,
                     }],
                 ),
             ),
@@ -998,12 +1006,15 @@ mod tests {
                     target: None,
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 decays: vec![],
                 fission_yields: Some(Arc::new(FissionYieldSet {
                     yields: vec![FissionYield {
                         energy: 0.0253,
                         products: vec![("B".to_string(), 1.0), ("C".to_string(), 1.0)],
+                        independent: None,
+                        cumulative: None,
                     }],
                 })),
                 sources: Vec::new(),
@@ -1052,12 +1063,15 @@ mod tests {
                     target: None,
                     branching: 0.5,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 decays: vec![],
                 fission_yields: Some(Arc::new(FissionYieldSet {
                     yields: vec![FissionYield {
                         energy: 0.0253,
                         products: vec![("Xe".to_string(), 0.06), ("Sr".to_string(), 0.04)],
+                        independent: None,
+                        cumulative: None,
                     }],
                 })),
                 sources: Vec::new(),
@@ -1117,6 +1131,7 @@ mod tests {
                     target: Some("Th".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 vec![],
             ),
@@ -1157,6 +1172,7 @@ mod tests {
                     target: Some("B".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
             ),
         );
@@ -1199,6 +1215,7 @@ mod tests {
                     target: Some("B".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
             ),
         );
@@ -1235,12 +1252,14 @@ mod tests {
                     target: Some("Cd108".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 vec![ChainReaction {
                     kind: "(n,p)".to_string(),
                     target: Some("Pd108".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
             ),
         );
@@ -1255,6 +1274,7 @@ mod tests {
                     target: Some("Pd105".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
             ),
         );
@@ -1348,12 +1368,14 @@ mod tests {
                         target: Some("U2".to_string()),
                         branching: 1.0,
                         q_value: None,
+                        branching_uncertainty: None,
                     },
                     ChainReaction {
                         kind: "(n,fission)".to_string(),
                         target: None,
                         branching: 1.0,
                         q_value: None,
+                        branching_uncertainty: None,
                     },
                 ],
                 decays: vec![ChainReaction {
@@ -1361,11 +1383,14 @@ mod tests {
                     target: Some("Th".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 fission_yields: Some(Arc::new(FissionYieldSet {
                     yields: vec![FissionYield {
                         energy: 0.0253,
                         products: vec![("Xe".to_string(), 0.065), ("Cs".to_string(), 0.062)],
+                        independent: None,
+                        cumulative: None,
                     }],
                 })),
                 sources: Vec::new(),
@@ -1442,12 +1467,14 @@ mod tests {
                     target: Some("B".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 vec![ChainReaction {
                     kind: "(n,gamma)".to_string(),
                     target: Some("B".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
             ),
         );
@@ -1486,12 +1513,15 @@ mod tests {
                     target: None,
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 decays: vec![],
                 fission_yields: Some(Arc::new(FissionYieldSet {
                     yields: vec![FissionYield {
                         energy: 0.0253,
                         products: vec![("Xe".to_string(), 0.065), ("NotInNames".to_string(), 0.05)],
+                        independent: None,
+                        cumulative: None,
                     }],
                 })),
                 sources: Vec::new(),
@@ -1544,16 +1574,21 @@ mod tests {
                     target: None,
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 decays: vec![],
                 fission_yields: Some(Arc::new(FissionYieldSet::new(vec![
                     FissionYield {
                         energy: 0.0253,
                         products: vec![("B".to_string(), 1.6), ("C".to_string(), 0.4)],
+                        independent: None,
+                        cumulative: None,
                     },
                     FissionYield {
                         energy: 1.4e7,
                         products: vec![("B".to_string(), 0.6), ("C".to_string(), 1.4)],
+                        independent: None,
+                        cumulative: None,
                     },
                 ]))),
                 sources: Vec::new(),
@@ -1779,6 +1814,7 @@ mod tests {
                         target: Some("B".to_string()),
                         branching: 1.0,
                         q_value: None,
+                        branching_uncertainty: None,
                     })
                     .collect(),
             ),

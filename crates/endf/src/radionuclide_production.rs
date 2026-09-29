@@ -54,12 +54,25 @@ impl RadionuclideProduction {
         (z > 0 && a > 0).then_some((z, a))
     }
 
-    /// Excitation energy of the final state in eV.
+    /// Excitation energy of the final state in eV, where the evaluation gives
+    /// one.
     ///
-    /// The MF=8 value when the evaluation gave one, and `QM - QI` otherwise,
-    /// the same quantity read off the Q values.
-    pub fn excitation_energy(&self) -> f64 {
-        self.elfs.unwrap_or(self.qm - self.qi)
+    /// Zero for the ground state (LFS = 0), which is where ENDF-102 measures
+    /// ELFS from. For an excited state, the MF=8 ELFS when it is positive, and
+    /// `QM - QI` when that is positive, the same quantity read off the Q
+    /// values; `None` when neither is. A zero or negative ELFS on an excited
+    /// state is a placeholder, not an energy: IRDFF-II writes ELFS = 0 for
+    /// Nb93m, Nb92m, Rh103m and Ag110m, whose MF=10 Q values put them at
+    /// 30.77, 135.5, 39.76 and 117.6 keV, and writes QI itself as ELFS for
+    /// Hg199m and Pb204m, -532.5 and -2185.8 keV.
+    pub fn excitation_energy(&self) -> Option<f64> {
+        if self.lfs == 0 {
+            return Some(0.0);
+        }
+        [self.elfs, Some(self.qm - self.qi)]
+            .into_iter()
+            .flatten()
+            .find(|&e| e > 0.0)
     }
 }
 
@@ -314,7 +327,7 @@ pub const ISOMER_ENERGY_RELATIVE_TOLERANCE: f64 = 0.10;
 /// How a production level was matched to an isomeric state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LevelRoute {
-    /// The ground state: level 0, no energy given, or below a keV.
+    /// The ground state: level 0.
     Ground,
     /// The decay data has no metastable state for this nuclide.
     NoIsomers,
@@ -362,13 +375,19 @@ pub struct ResolvedLevel {
 
 /// Map a production level to an isomeric-state ordinal.
 ///
-/// The ground state maps to 0. Otherwise the level's excitation energy is
-/// matched against the isomer energies in `table`, first within `tol_ev` and
-/// then, for a single candidate, within a tenth of the isomer's energy;
-/// failing that, the level index is compared against LIS; failing that, a
-/// nuclide with exactly one isomer maps to it. A level that resolves to none
-/// of these is treated as ground, on the basis that a short-lived level
-/// gamma-cascades down. [`resolve_level`] says which of these happened.
+/// The ground state, LFS = 0, maps to 0. Otherwise the level's excitation
+/// energy, when there is one, is matched against the isomer energies in
+/// `table`, first within `tol_ev` and then, for a single candidate, within a
+/// tenth of the isomer's energy; failing that, the level index is compared
+/// against LIS; failing that, a nuclide with exactly one isomer maps to it. A
+/// level that resolves to none of these is treated as ground, on the basis
+/// that a short-lived level gamma-cascades down. [`resolve_level`] says which
+/// of these happened.
+///
+/// An excited level with no energy is still an excited level: the evaluation
+/// said LFS > 0, and the level index and the single-isomer routes do not need
+/// an energy. IRDFF-II's Mo92 (n,p) gives Nb92m with ELFS = 0 and QM = QI, and
+/// is Nb92_m1 by its level index.
 pub fn level_to_isomeric_state(
     z: i64,
     a: i64,
@@ -401,14 +420,12 @@ pub fn resolve_level(
     if metastable.is_empty() {
         return resolved(0, LevelRoute::NoIsomers);
     }
-    // A level below a keV is not a metastable state; nor is the ground state,
-    // whatever energy it is given.
-    let excitation_energy = match excitation_energy {
-        _ if lfs == 0 => return resolved(0, LevelRoute::Ground),
-        None => return resolved(0, LevelRoute::Ground),
-        Some(e) if e < 1000.0 => return resolved(0, LevelRoute::Ground),
-        Some(e) => e,
-    };
+    // The ground state is ground whatever energy it is given. Nothing else
+    // is: an excited level with a small or missing energy goes on to the
+    // routes below, and the energy passes are skipped when there is none.
+    if lfs == 0 {
+        return resolved(0, LevelRoute::Ground);
+    }
 
     // What the level index says, read once: it decides the third step and
     // qualifies the first two.
@@ -418,44 +435,46 @@ pub fn resolve_level(
         .map(|(&liso, _)| liso);
     let conflict = |liso: i64| by_index.filter(|&other| other != liso);
 
-    // 1. The energy match against the decay isomer energies.
-    let mut best: Option<(i64, f64)> = None;
-    for (&liso, isomer) in &metastable {
-        if let Some(e_iso) = isomer.e_iso {
-            let residual = (excitation_energy - e_iso).abs();
-            match best {
-                Some((_, r)) if r <= residual => {}
-                _ => best = Some((liso, residual)),
+    if let Some(excitation_energy) = excitation_energy {
+        // 1. The energy match against the decay isomer energies.
+        let mut best: Option<(i64, f64)> = None;
+        for (&liso, isomer) in &metastable {
+            if let Some(e_iso) = isomer.e_iso {
+                let residual = (excitation_energy - e_iso).abs();
+                match best {
+                    Some((_, r)) if r <= residual => {}
+                    _ => best = Some((liso, residual)),
+                }
             }
         }
-    }
-    if let Some((liso, residual)) = best {
-        if residual <= tol_ev {
+        if let Some((liso, residual)) = best {
+            if residual <= tol_ev {
+                return ResolvedLevel {
+                    liso,
+                    route: LevelRoute::Energy,
+                    conflicting_liso: conflict(liso),
+                };
+            }
+        }
+
+        // 1b. The looser pass: one isomer, and only one, within a tenth of
+        // its own energy.
+        let near: Vec<i64> = metastable
+            .iter()
+            .filter(|(_, isomer)| {
+                isomer.e_iso.is_some_and(|e_iso| {
+                    (excitation_energy - e_iso).abs() <= ISOMER_ENERGY_RELATIVE_TOLERANCE * e_iso
+                })
+            })
+            .map(|(&liso, _)| liso)
+            .collect();
+        if let [liso] = near[..] {
             return ResolvedLevel {
                 liso,
-                route: LevelRoute::Energy,
+                route: LevelRoute::NearEnergy,
                 conflicting_liso: conflict(liso),
             };
         }
-    }
-
-    // 1b. The looser pass: one isomer, and only one, within a tenth of its
-    // own energy.
-    let near: Vec<i64> = metastable
-        .iter()
-        .filter(|(_, isomer)| {
-            isomer.e_iso.is_some_and(|e_iso| {
-                (excitation_energy - e_iso).abs() <= ISOMER_ENERGY_RELATIVE_TOLERANCE * e_iso
-            })
-        })
-        .map(|(&liso, _)| liso)
-        .collect();
-    if let [liso] = near[..] {
-        return ResolvedLevel {
-            liso,
-            route: LevelRoute::NearEnergy,
-            conflicting_liso: conflict(liso),
-        };
     }
 
     // 2. The level index.
@@ -508,7 +527,7 @@ mod tests {
 
         // The excitation energy comes from MF=8's ELFS, not from QM - QI.
         assert_eq!(state.elfs, Some(127_269.7));
-        assert_eq!(state.excitation_energy(), 127_269.7);
+        assert_eq!(state.excitation_energy(), Some(127_269.7));
     }
 
     /// One ENDF record: a 66-column body, then MAT, MF and MT.
@@ -616,18 +635,178 @@ mod tests {
         // With no MF=8 subsection the energy is QM - QI, which is the same
         // quantity the evaluation would have written as ELFS.
         let state = RadionuclideProduction {
+            lfs: 1,
             qm: 6.0e6,
             qi: 5.8e6,
             elfs: None,
             ..Default::default()
         };
-        assert_eq!(state.excitation_energy(), 2.0e5);
+        assert_eq!(state.excitation_energy(), Some(2.0e5));
 
         let state = RadionuclideProduction {
             elfs: Some(1.0e5),
             ..state
         };
-        assert_eq!(state.excitation_energy(), 1.0e5);
+        assert_eq!(state.excitation_energy(), Some(1.0e5));
+    }
+
+    /// An excited state as IRDFF-II writes it, with the placeholder ELFS in
+    /// MF=8 and the energy in the MF=10 Q values.
+    fn irdff(lfs: i64, elfs: f64, qm: f64, qi: f64) -> RadionuclideProduction {
+        RadionuclideProduction {
+            lfs,
+            qm,
+            qi,
+            elfs: Some(elfs),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_zero_elfs_on_an_excited_state_is_not_its_energy() {
+        // Nb93 (n,n') Nb93m, (n,2n) Nb92m and (n,gamma) Nb94m, Rh103 (n,n')
+        // Rh103m, and Ag109 (n,gamma) Ag110m at level 2.
+        for (lfs, qm, qi, energy) in [
+            (1, 0.0, -30_770.0, 30_770.0),
+            (1, -8_831_262.0, -8_966_762.0, 135_500.0),
+            (1, 7_227_540.0, 7_186_600.0, 40_940.0),
+            (1, 0.0, -39_756.0, 39_756.0),
+            (2, 6_805_700.0, 6_688_100.0, 117_600.0),
+        ] {
+            let state = irdff(lfs, 0.0, qm, qi);
+            let e = state.excitation_energy().unwrap();
+            assert!((e - energy).abs() < 1.0e-6 * energy, "{e} for {energy}");
+        }
+    }
+
+    #[test]
+    fn a_negative_elfs_is_not_its_energy_either() {
+        // Hg199 and Pb204 (n,n') give QI itself as ELFS. The energy is
+        // QM - QI, not the magnitude of ELFS, which only happens to agree
+        // here because QM is zero.
+        assert_eq!(
+            irdff(1, -532_480.0, 0.0, -532_480.0).excitation_energy(),
+            Some(532_480.0)
+        );
+        assert_eq!(
+            irdff(1, -2_185_790.0, 0.0, -2_185_790.0).excitation_energy(),
+            Some(2_185_790.0)
+        );
+        assert_eq!(
+            irdff(1, -500_000.0, 0.0, -100_000.0).excitation_energy(),
+            Some(100_000.0)
+        );
+    }
+
+    #[test]
+    fn an_excited_state_with_neither_energy_has_none() {
+        // Mo92 (n,p) Nb92m: ELFS = 0 and QM = QI.
+        assert_eq!(
+            irdff(1, 0.0, 425_680.0, 425_680.0).excitation_energy(),
+            None
+        );
+        // QM - QI negative is not an energy above ground.
+        assert_eq!(irdff(1, 0.0, 0.0, 1.0e5).excitation_energy(), None);
+        assert_eq!(
+            RadionuclideProduction {
+                lfs: 1,
+                ..Default::default()
+            }
+            .excitation_energy(),
+            None
+        );
+    }
+
+    #[test]
+    fn the_ground_state_is_at_zero() {
+        // Whatever the Q values say: LFS = 0 is where ELFS is measured from.
+        assert_eq!(irdff(0, 0.0, 6.0e6, 5.8e6).excitation_energy(), Some(0.0));
+        assert_eq!(
+            RadionuclideProduction::default().excitation_energy(),
+            Some(0.0)
+        );
+    }
+
+    /// One reaction's MF=8 and MF=10, laid out as an ENDF tape, with the
+    /// MF=10 cross section cut down to two points.
+    #[allow(clippy::too_many_arguments)]
+    fn one_reaction(
+        mat: i32,
+        mt: i32,
+        za: f64,
+        zap: i64,
+        elfs: f64,
+        lfs: i64,
+        qm: f64,
+        qi: f64,
+    ) -> Material {
+        fn f(v: f64) -> String {
+            format!("{v:>11}")
+        }
+        fn i(v: i64) -> String {
+            format!("{v:>11}")
+        }
+        let line = |mf: i32, mt: i32, fields: [String; 6]| {
+            format!("{:<66}{mat:>4}{mf:>2}{mt:>3}\n", fields.concat())
+        };
+        let end = |mat: i32, mf: i32, mt: i32| format!("{:<66}{mat:>4}{mf:>2}{mt:>3}\n", "");
+        let e = String::new;
+        let awr = 92.1083;
+        let text = String::from("tape\n")
+            + &line(8, mt, [f(za), f(awr), i(0), i(0), i(1), i(1)])
+            + &line(8, mt, [f(zap as f64), f(elfs), i(10), i(lfs), i(0), i(0)])
+            + &end(mat, 8, 0)
+            + &end(mat, 0, 0)
+            + &line(10, mt, [f(za), f(awr), i(0), i(0), i(1), i(0)])
+            + &line(10, mt, [f(qm), f(qi), i(zap), i(lfs), i(1), i(2)])
+            + &line(10, mt, [i(2), i(2), e(), e(), e(), e()])
+            + &line(10, mt, [f(1.0e6), f(0.1), f(2.0e7), f(0.2), e(), e()])
+            + &end(mat, 10, 0)
+            + &end(mat, 0, 0)
+            + &end(0, 0, 0)
+            + &end(-1, 0, 0);
+        Material::from_str(&text).unwrap()
+    }
+
+    #[test]
+    fn irdff_ii_records_give_the_q_value_energy() {
+        // Nb93 (n,n') Nb93m, MAT 4125, as IRDFF-II writes it: ELFS = 0 in
+        // MF=8, the 30.77 keV in MF=10's QI.
+        let m = one_reaction(4125, 4, 41093.0, 41093, 0.0, 1, 0.0, -30_770.0);
+        let state = &radionuclide_production(&m)[&4][0];
+        assert_eq!((state.zap, state.lfs, state.elfs), (41093, 1, Some(0.0)));
+        assert_eq!(state.excitation_energy(), Some(30_770.0));
+
+        // Hg199 (n,n') Hg199m, MAT 8034: QI written again as ELFS.
+        let m = one_reaction(8034, 4, 80199.0, 80199, -532_480.0, 1, 0.0, -532_480.0);
+        let state = &radionuclide_production(&m)[&4][0];
+        assert_eq!(state.excitation_energy(), Some(532_480.0));
+
+        // Mo92 (n,p) Nb92m, MAT 4225: no energy anywhere, and still level 1,
+        // which the level index then resolves.
+        let m = one_reaction(4225, 103, 42092.0, 41092, 0.0, 1, 425_680.0, 425_680.0);
+        let state = &radionuclide_production(&m)[&103][0];
+        assert_eq!(state.excitation_energy(), None);
+        let table = IsomerTable::from([(
+            (41, 92),
+            BTreeMap::from([(
+                1,
+                Isomer {
+                    lis: 1,
+                    half_life: Some(8.8e5),
+                    e_iso: Some(135_500.0),
+                },
+            )]),
+        )]);
+        let level = resolve_level(
+            41,
+            92,
+            state.lfs,
+            state.excitation_energy(),
+            &table,
+            ISOMER_ENERGY_TOLERANCE,
+        );
+        assert_eq!((level.liso, level.route), (1, LevelRoute::LevelIndex));
     }
 
     /// A two-isomer nuclide, as decay data would leave it: the second isomer
@@ -668,16 +847,31 @@ mod tests {
     }
 
     #[test]
-    fn the_ground_state_and_low_levels_are_ground() {
+    fn only_level_zero_is_ground_without_a_match() {
         let table = two_isomers();
         let at = |e: Option<f64>, lfs: i64| {
-            level_to_isomeric_state(95, 242, lfs, e, &table, ISOMER_ENERGY_TOLERANCE)
+            resolve_level(95, 242, lfs, e, &table, ISOMER_ENERGY_TOLERANCE)
         };
-        assert_eq!(at(Some(0.0), 0), 0);
-        // A level index above zero but an energy too low to be metastable.
-        assert_eq!(at(Some(500.0), 1), 0);
-        // Nothing known about the energy.
-        assert_eq!(at(None, 1), 0);
+        let ground = (0, LevelRoute::Ground);
+        let level = at(Some(0.0), 0);
+        assert_eq!((level.liso, level.route), ground);
+        // The ground state stays ground whatever energy it carries.
+        let level = at(Some(48_600.0), 0);
+        assert_eq!((level.liso, level.route), ground);
+        let level = at(None, 0);
+        assert_eq!((level.liso, level.route), ground);
+        // An excited level with a small energy, or none, is not the ground
+        // state: it goes on to the level index, which says the first isomer.
+        let level = at(Some(500.0), 1);
+        assert_eq!((level.liso, level.route), (1, LevelRoute::LevelIndex));
+        let level = at(None, 1);
+        assert_eq!((level.liso, level.route), (1, LevelRoute::LevelIndex));
+        let level = at(None, 2);
+        assert_eq!((level.liso, level.route), (2, LevelRoute::LevelIndex));
+        // With no energy, no index match and two isomers to choose from,
+        // it is unresolved, which the caller flags, not ground.
+        let level = at(None, 7);
+        assert_eq!((level.liso, level.route), (0, LevelRoute::Unresolved));
         // A nuclide the table has never heard of.
         assert_eq!(
             level_to_isomeric_state(1, 1, 1, Some(1.0e6), &table, ISOMER_ENERGY_TOLERANCE),
@@ -912,5 +1106,27 @@ mod tests {
             level_to_isomeric_state(49, 116, 4, Some(9.0e5), &table, ISOMER_ENERGY_TOLERANCE),
             1
         );
+        // Nor does it need an energy at all.
+        let level = resolve_level(49, 116, 4, None, &table, ISOMER_ENERGY_TOLERANCE);
+        assert_eq!((level.liso, level.route), (1, LevelRoute::SingleIsomer));
+    }
+
+    /// U235's 76 eV isomer, which ENDF/B-VIII.1's U235 (n,n') gives as level
+    /// 1 at 77 eV. A level below a keV is matched by energy like any other.
+    #[test]
+    fn an_isomer_below_a_kev_is_matched_by_energy() {
+        let table = IsomerTable::from([(
+            (92, 235),
+            BTreeMap::from([(
+                1,
+                Isomer {
+                    lis: 1,
+                    half_life: Some(1560.0),
+                    e_iso: Some(76.737),
+                },
+            )]),
+        )]);
+        let level = resolve_level(92, 235, 1, Some(77.0), &table, ISOMER_ENERGY_TOLERANCE);
+        assert_eq!((level.liso, level.route), (1, LevelRoute::Energy));
     }
 }
