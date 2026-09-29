@@ -63,6 +63,18 @@ impl Interpolation {
             }
         })
     }
+
+    /// The ENDF interpolation code, the inverse of
+    /// [`from_endf_code`](Self::from_endf_code).
+    pub fn endf_code(self) -> i32 {
+        match self {
+            Interpolation::Histogram => 1,
+            Interpolation::LinearLinear => 2,
+            Interpolation::LinearLog => 3,
+            Interpolation::LogLinear => 4,
+            Interpolation::LogLog => 5,
+        }
+    }
 }
 
 /// `(exp(x) - 1) / x`, without the cancellation that spoils it near zero.
@@ -552,6 +564,7 @@ mod tests {
         ] {
             let by_code = Interpolation::from_endf_code(code).unwrap();
             assert_eq!(by_code.name(), name);
+            assert_eq!(by_code.endf_code(), code);
             assert_eq!(Interpolation::from_name(name).unwrap(), by_code);
         }
         assert!(Interpolation::from_endf_code(9).is_err());
