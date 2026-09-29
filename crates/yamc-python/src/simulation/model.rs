@@ -1412,7 +1412,13 @@ impl PyModel {
     ///         - ``"half_life"``: the decay data's half-life sigmas.
     ///
     ///         ``"flux_spectrum"`` does not apply: there is no supplied spectrum,
-    ///         and the flux's error is the statistical one. The sources are
+    ///         and the flux's error is the statistical one. The transport runs
+    ///         once, so every replica is solved in the flux it tallied: a
+    ///         perturbed cross section does not change the flux or the
+    ///         shielding the transport saw, and the report lists that held
+    ///         response under ``not_perturbed`` as ``"flux response to
+    ///         perturbed cross sections (one transport)"``. The tallied values
+    ///         themselves are still drawn by ``"statistical"``. The sources are
     ///         independent, so ``sources=["statistical"]`` isolates the
     ///         transport's contribution and the default gives the total. Omit
     ///         it and nothing extra is tallied or solved: the inventories are

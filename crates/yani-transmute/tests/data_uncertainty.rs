@@ -569,6 +569,91 @@ fn a_spectrum_without_an_error_is_reported_not_assumed_exact() {
     );
 }
 
+/// A source switched off is held at nominal and the report names it, the way
+/// it names an input no source can sample. Switched back on with something to
+/// act on, the entry goes.
+#[test]
+fn a_source_switched_off_is_named_as_held() {
+    use yani_transmute::uncertainty::Source;
+
+    let Some(dir) = yamc_test_cache::nuclide("Fe56") else {
+        return skip("a_source_switched_off_is_named_as_held");
+    };
+    let total: f64 = FLUX.iter().sum();
+    let with_sigma = vec![MultigroupSpectrum {
+        boundaries: GROUPS.to_vec(),
+        masses: FLUX.iter().map(|f| f / total).collect(),
+        flux_error: Some(yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(
+            vec![0.05; FLUX.len()],
+        )),
+    }];
+    let held = |spectra: &[MultigroupSpectrum], sources: Vec<Source>| {
+        let mut material = iron(std::path::Path::new(&dir));
+        transmute_material(
+            &mut material,
+            spectra,
+            &schedule(),
+            chain(),
+            &Default::default(),
+            Default::default(),
+            Some(&DataUncertainty {
+                seed: 7,
+                samples: Some(8),
+                sources,
+                attribution: false,
+            }),
+        )
+        .expect("transmute")
+        .uncertainty_info
+        .get(&0)
+        .cloned()
+        .expect("info")
+        .not_perturbed
+    };
+
+    let narrowed = held(&with_sigma, vec![Source::HalfLife]);
+    for off in [
+        "activation cross section (MF=33)",
+        "flux spectrum",
+        "decay energy",
+    ] {
+        assert!(
+            narrowed.iter().any(|s| s == off),
+            "{off:?} missing from {narrowed:?}"
+        );
+    }
+    assert!(!narrowed.iter().any(|s| s == "half-life"));
+
+    let everything = held(&with_sigma, vec![]);
+    for on in [
+        "activation cross section (MF=33)",
+        "flux spectrum",
+        "half-life",
+        "decay energy",
+    ] {
+        assert!(
+            !everything.iter().any(|s| s == on),
+            "{on:?} was sampled but listed as held: {everything:?}"
+        );
+    }
+
+    // A spectrum with no sigma is used as given even with its source on.
+    let without_sigma = held(&spectra(), vec![Source::FluxSpectrum]);
+    assert!(without_sigma.iter().any(|s| s == "flux spectrum"));
+
+    // One spectrum with a sigma and one without: the flux was partly sampled,
+    // so the entry says only the spectra without a sigma were held.
+    let mixed: Vec<MultigroupSpectrum> = with_sigma.iter().cloned().chain(spectra()).collect();
+    let partial = held(&mixed, vec![Source::FluxSpectrum]);
+    assert!(!partial.iter().any(|s| s == "flux spectrum"), "{partial:?}");
+    assert!(
+        partial
+            .iter()
+            .any(|s| s == "flux spectrum (spectra without a sigma only)"),
+        "{partial:?}"
+    );
+}
+
 /// A bigger flux error gives a bigger inventory error.
 #[test]
 fn the_inventory_spread_scales_with_the_flux_error() {

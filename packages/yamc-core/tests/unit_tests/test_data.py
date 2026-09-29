@@ -1,7 +1,8 @@
 import pytest
 
 from yamc.data import (atomic_number, atomic_symbol, element_nuclides,
-                       natural_abundance, reaction_names)
+                       natural_abundance, natural_abundance_records,
+                       reaction_names)
 
 def test_lithium_natural_abundance():
     abund = natural_abundance()
@@ -10,6 +11,34 @@ def test_lithium_natural_abundance():
     assert abs(li6 - 0.0759) < 1e-4, f"Li6 abundance incorrect: {li6}"
     assert abs(li7 - 0.9241) < 1e-4, f"Li7 abundance incorrect: {li7}"
     assert abs(li6 + li7 - 1.0) < 1e-3, f"Li6 + Li7 should sum to 1, got {li6 + li7}"
+
+def test_natural_abundance_records_cover_every_abundance():
+    records = natural_abundance_records()
+    abundance = natural_abundance()
+    assert records.keys() == abundance.keys()
+    for nuclide, row in records.items():
+        if row['representative_interval'] is None:
+            assert abundance[nuclide] == row['representative_value'], nuclide
+        else:
+            assert abundance[nuclide] == row['best_measurement'], nuclide
+
+def test_natural_abundance_records_spot_values():
+    records = natural_abundance_records()
+    assert records['Fe58'] == {
+        'representative_value': 0.00282,
+        'representative_uncertainty': 0.00012,
+        'representative_interval': None,
+        'observed_interval': (0.00281, 0.00282),
+        'best_measurement': 0.002819,
+        'best_measurement_uncertainty': 0.000027,
+        'best_measurement_coverage': '2s',
+        'best_measurement_calibration': 'C',
+        'annotations': None,
+    }
+    assert records['W186']['representative_uncertainty'] == 0.0019
+    assert records['Li6']['representative_interval'] == (0.019, 0.078)
+    assert records['Li6']['representative_value'] is None
+    assert records['Co59']['representative_uncertainty'] is None
 
 def test_element_nuclides_li_and_be():
     nuclides = element_nuclides()

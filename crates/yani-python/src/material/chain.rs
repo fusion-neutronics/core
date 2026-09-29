@@ -106,6 +106,12 @@ impl PyChain {
     /// Write the chain to a split (v2) chain directory with `decay/`,
     /// `reactions/` and `fission_yields/` subsection subdirs.
     ///
+    /// Decay modes the chain models no product for (any mode involving
+    /// spontaneous fission, and a mode whose stored daughter is the parent
+    /// itself) are written with no target, as :attr:`decays` reports them.
+    /// Loading the export gives the same chain, but for those rows the file
+    /// does not repeat the target the source file stored.
+    ///
     /// Args:
     ///     path (str): Output directory path.
     pub fn export_to_arrow(&self, path: &str) -> PyResult<()> {
@@ -155,7 +161,14 @@ impl PyChain {
     ///     dict[str, list[tuple[str, str | None, float]]]: nuclide name ->
     ///     list of (reaction_type, target, branching_ratio). ``target`` is
     ///     ``None`` for a channel that names no single product, which in
-    ///     practice means fission.
+    ///     practice means fission. ``target`` can also be the parent itself,
+    ///     where the evaluation's product has no decay data and the chain
+    ///     builder stepped from it to a nuclide that has: ENDF/B-VIII.1's
+    ///     Pu245 ``(n,p)`` makes Np245, which has none, and the beta- step
+    ///     from it lands back on Pu245. Such a channel leaves the parent's
+    ///     count unchanged and makes no product, so a production-route walk
+    ///     should skip it, as :meth:`TransmutationResults.get_production_routes`
+    ///     does.
     #[getter]
     pub fn reactions(&self, py: Python) -> Py<PyAny> {
         let dict = PyDict::new(py);
@@ -184,11 +197,14 @@ impl PyChain {
     ///     one parent summing to 1. Modes carry the evaluation's own
     ///     spellings: ``"beta-"``, ``"ec/beta+"``, ``"alpha"``, ``"IT"``,
     ///     ``"sf"``, ``"p"``, ``"n"``, and multi-particle emissions written as
-    ///     ``"beta-,n"``. ``daughter`` is the parent itself on ``"sf"``, whose
-    ///     products come from the fission yields rather than from the edge, and
-    ///     ``None`` where the mode's product is outside the chain. Stable
-    ///     nuclides have no decay modes and are omitted, as they are from
-    ///     :attr:`half_lives`.
+    ///     ``"beta-,n"``. ``daughter`` is ``None`` where the chain models no
+    ///     product: on any mode involving spontaneous fission (``"sf"``,
+    ///     ``"ec/beta+,sf"``), whose fission products the chain does not
+    ///     carry, on a mode whose stored daughter is the parent itself, and where
+    ///     the mode's product is outside the chain. The branching is kept, so a
+    ///     parent still decays at its full half-life and that share of it
+    ///     leaves the chain. Stable nuclides have no decay modes and are
+    ///     omitted, as they are from :attr:`half_lives`.
     #[getter]
     pub fn decays(&self, py: Python) -> Py<PyAny> {
         let dict = PyDict::new(py);
