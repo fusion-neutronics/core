@@ -104,6 +104,15 @@ def test_the_report_names_the_sources_that_applied():
     assert "tallied-rate statistics" not in info["not_perturbed"]
 
 
+def test_the_report_holds_no_flux_response_with_cross_sections_off():
+    results = _run(data_uncertainty=STATISTICAL)
+    info = results.get_data_uncertainty_info(MAT_ID)
+    # Nothing perturbs a cross section, so there is no response of the flux to
+    # hold; the unperturbed cross sections are named instead.
+    assert "activation cross section (MF=33)" in info["not_perturbed"]
+    assert "flux response to perturbed cross sections (one transport)" not in info["not_perturbed"]
+
+
 def test_the_report_names_the_tallied_rates_held_with_statistical_off():
     sources = ["cross_sections"]
     results = _run(data_uncertainty=yamc.DataUncertainty(seed=1, samples=16, sources=sources))

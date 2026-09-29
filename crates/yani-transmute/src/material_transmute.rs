@@ -1406,8 +1406,9 @@ fn run_replicas(
     // One transport, no transport per replica: the flux the tally saw is the
     // flux every replica is solved in, whatever its cross sections were. The
     // tallied values may still be drawn statistically; what is held is how
-    // the flux would answer a perturbed cross section.
-    if transport {
+    // the flux would answer a perturbed cross section. With cross sections off
+    // there is no perturbed cross section for it to answer, so nothing is held.
+    if transport && cross_sections {
         info.not_perturbed
             .push("flux response to perturbed cross sections (one transport)".to_string());
     }
@@ -2670,6 +2671,7 @@ mod tests {
                 branching,
                 branching_uncertainty: None,
                 q_value: None,
+                branching_uncertainty: None,
             };
             let mut map: HashMap<String, ChainNuclide> = HashMap::new();
             map.insert(
