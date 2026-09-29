@@ -2903,15 +2903,15 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         fission, an IZAP of zero that no single MF=8 subsection resolves, or
         any other ZAP whose Z or A is not positive). The MF=40 production
         covariance, written as the tape gives it to
-        ``branching/branching_covariance.arrow``, is counted
-        by ``mf40_sections`` (sections read, whatever the MT),
-        ``mf40_blocks`` (blocks written), ``mf40_blocks_by_lb`` (the NI blocks
-        by layout), ``mf40_nc_blocks``, ``mf40_unmatched_states`` (one line
-        per product state that matches no MF=9 or MF=10 state, matches
-        several within the tolerance, or is excited with no stated excitation
-        to confirm a level by, written with no target),
-        ``mf40_states_without_chain_kind`` (states of an MT with no
-        chain reaction, such as MT 18, written with no reaction),
+        ``branching/branching_covariance.arrow``, is counted by
+        ``mf40_sections`` (sections read, whatever the MT), ``mf40_blocks``
+        (blocks written), ``mf40_blocks_by_lb`` (the NI blocks by layout),
+        ``mf40_nc_blocks``, ``mf40_unmatched_states`` (one line per product
+        state that matches no MF=9 or MF=10 state, matches several within the
+        tolerance, or is excited with no stated excitation to confirm a level
+        by, written with no target), ``mf40_states_without_chain_kind``
+        (states of an MT with no chain reaction, such as MT 18, written with
+        no reaction),
         ``mf40_on_yield_channels`` (states matched to a level whose production
         MF=9 gives as a yield rather than an MF=10 cross section; where that
         yield is merged with another state's, the row carries the state's own
@@ -2931,10 +2931,9 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         line per product state whose target was matched by excitation because
         MF=9 and MF=10 give its IZAP and LFS no state or one at another
         excitation; its self blocks name it by MF=40's own LFS). The four line
-        lists are also written to
-        ``branching/provenance.json``. An evaluation set without MF=40
-        writes no covariance file, and removes one an earlier conversion left
-        there.
+        lists are also written to ``branching/provenance.json``. An evaluation
+        set without MF=40 writes no covariance file, and removes one an
+        earlier conversion left there.
     """
 
 def convert_neutron_transport(input_path: builtins.str, output_dir: builtins.str, njoy_exec: builtins.str = 'njoy', temperatures: typing.Optional[typing.Sequence[builtins.float]] = None, library: builtins.str = '', data_version: builtins.str = '', created_utc: typing.Optional[builtins.str] = None, covariance: builtins.bool = False) -> builtins.str:

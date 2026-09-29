@@ -154,8 +154,10 @@ pub struct BranchingCovarianceBlock {
     /// yield. `None` means the `branching.arrow` curve is this state's own.
     pub energy: Option<Vec<f64>>,
     pub values: Option<Vec<f64>>,
-    /// `"cross_section"` or `"yield"`, as in `branching.arrow`, whenever
-    /// `energy` and `values` are set.
+    /// `"cross_section"` or `"yield"`, as in `branching.arrow`: which of
+    /// `target`'s curves is this state's, set for every placed state. `None`
+    /// only when `target` is `None`. With `energy` and `values` null it names
+    /// the `branching.arrow` row that is the state's own curve.
     pub quantity: Option<String>,
     /// The evaluation's own MAT.
     pub mat: i32,
