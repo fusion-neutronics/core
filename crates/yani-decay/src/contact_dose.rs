@@ -25,9 +25,7 @@
 //! This follows the FISPACT-II manual (UKAEA-CCFE-RE(21)02, Appendix C.7.1) for
 //! the absorbed-air quantity. For photon lines it matches what OpenMC's
 //! `Material.get_photon_contact_dose_rate` computes. A continuum is integrated
-//! under its evaluated law, where OpenMC raises for a nuclide that has both
-//! lines and a continuum and takes a trapezoid rule over a continuum alone, so
-//! a continuum emitter differs from OpenMC by design.
+//! exactly under its evaluated interpolation law.
 //!
 //! Two things it does not model: bremsstrahlung from decay electrons, which
 //! matters at contact for strong beta emitters, and any nuclide whose radiation

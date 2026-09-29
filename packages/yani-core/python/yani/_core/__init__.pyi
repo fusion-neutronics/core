@@ -925,12 +925,13 @@ class Material:
             >>> source = PhotonSource(energy=sources.Discrete(energies, rates))
         
         ``Discrete`` normalizes the weights, so the shape is what transport
-        samples. ``sum(rates)`` is the line emission rate (photons/s) only.
-        That source leaves out every continuum, which for a continuum emitter
-        can be most of its photons (all of them for Sm158 in ENDF/B-VIII.1), so
-        the rate that scales the tallies also needs
-        ``sum(c.emission_rate for c in activated.decay_photon_continua())``,
-        and a complete source needs each continuum added as well.
+        samples. ``sum(rates)`` is the line emission rate (photons/s) only,
+        the rate that scales tallies from this source. That source leaves out
+        every continuum, which for a continuum emitter can be most of its
+        photons (all of them for Sm158 in ENDF/B-VIII.1); the continua emit
+        ``sum(c.emission_rate for c in activated.decay_photon_continua())``
+        more. No ``sources`` distribution yet holds a linear-linear continuum
+        exactly, so a transport source cannot yet carry every continuum.
         
         Returns:
             tuple[list[float], list[float]]: Line energies (eV) and their
@@ -976,12 +977,11 @@ class Material:
         Per photon line of energy ``E`` and per-atom emission rate ``S`` the
         estimate is ``(build_up / 2) * (response(E) / mu_material(E)) * S * E``
         for the absorbed dose in air, and the same without the trailing ``E``
-        for the effective dose. A photon continuum is integrated over energy,
-        its density read under the law its data states. ``mu_material`` is the
-        material's own linear attenuation coefficient, built from the NIST XCOM
-        mass attenuation coefficients of the elements present; the response is
-        the NIST-126 mass energy-absorption coefficient of air, or the ICRP-116
-        photon effective-dose coefficient for anterior-posterior irradiation.
+        for the effective dose. ``mu_material`` is the material's own linear
+        attenuation coefficient, built from the NIST XCOM mass attenuation
+        coefficients of the elements present; the response is the NIST-126
+        mass energy-absorption coefficient of air, or the ICRP-116 photon
+        effective-dose coefficient for anterior-posterior irradiation.
         
         Follows the FISPACT-II manual (UKAEA-CCFE-RE(21)02, Appendix C.7.1) for
         the absorbed-air quantity. For photon lines it agrees with OpenMC's
