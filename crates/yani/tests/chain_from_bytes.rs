@@ -18,7 +18,7 @@ fn fixture() -> Option<PathBuf> {
     dir.join("decay/nuclides.arrow").exists().then_some(dir)
 }
 
-/// Load the same seven files a filesystem caller would, as bytes.
+/// Load the same eight files a filesystem caller would, as bytes.
 fn sections(root: &Path) -> ChainSections {
     let mut parts = ChainSections::default();
     for (subsection, dir, file) in [
@@ -28,6 +28,7 @@ fn sections(root: &Path) -> ChainSections {
         ("reactions", "reactions", "reactions.arrow"),
         ("fission_yields", "fission_yields", "fission_yields.arrow"),
         ("fission_yields", "fission_yields", "aliases.arrow"),
+        ("fission_yields", "fission_yields", "evaluated_yields.arrow"),
         ("branching", "branching", "branching.arrow"),
     ] {
         let path = root.join(dir).join(file);
@@ -55,14 +56,23 @@ fn fingerprint(n: &ChainNuclide) -> String {
         .map(|d| format!("{}->{:?}@{}", d.kind, d.target, d.branching))
         .collect();
     decays.sort();
+    // The evaluated yields are carried, not solved with, so they could differ
+    // between the two loaders with every nominal field still agreeing.
+    let evaluated: Vec<String> = n.fission_yields.as_ref().map_or(Vec::new(), |set| {
+        set.yields
+            .iter()
+            .map(|y| format!("{}:{:?}:{:?}", y.energy, y.independent, y.cumulative))
+            .collect()
+    });
     format!(
-        "{} hl={:?} q={} rx=[{}] dk=[{}] fy={} src={}",
+        "{} hl={:?} q={} rx=[{}] dk=[{}] fy={} ev=[{}] src={}",
         n.name,
         n.half_life,
         n.decay_energy,
         reactions.join(","),
         decays.join(","),
         n.fission_yields.as_ref().map_or(0, |set| set.yields.len()),
+        evaluated.join(","),
         n.sources.len(),
     )
 }

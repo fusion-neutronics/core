@@ -17,11 +17,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod common;
+use common::fe56_with_covariance;
+
 use yamc_materials::Material;
 use yani_transmute::uncertainty::DataUncertainty;
 use yani_transmute::{transmute_material, MultigroupSpectrum, TransmuteStep};
-
-const FE56_ENDF: &[u8] = include_bytes!("../../endf/fixtures/n-026_Fe_056_trimmed.endf.xz");
 
 /// Three groups: thermal, epithermal, fast. Small enough to read, wide enough
 /// that `(n,p)` (a threshold reaction) actually fires.
@@ -32,30 +33,6 @@ fn chain() -> Arc<HashMap<String, yani::ChainNuclide>> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../yani/tests/transmutation-endf-b8.1-sfr.arrow");
     Arc::new(yani::parse_chain_arrow(&path).expect("parse chain"))
-}
-
-/// A copy of the cached Fe56 directory with `covariance.arrow` written into it.
-fn fe56_with_covariance(tmp: &Path) -> Option<PathBuf> {
-    let cached = PathBuf::from(yamc_test_cache::nuclide("Fe56")?);
-    let dir = tmp.join("Fe56.arrow");
-    std::fs::create_dir_all(&dir).expect("mkdir");
-    for entry in std::fs::read_dir(&cached).expect("read cached Fe56") {
-        let entry = entry.expect("dir entry");
-        if entry.path().is_file() {
-            std::fs::copy(entry.path(), dir.join(entry.file_name())).expect("copy section");
-        }
-    }
-
-    let evaluation = tmp.join("fe56.endf");
-    let mut raw = Vec::new();
-    lzma_rs::xz_decompress(&mut &FE56_ENDF[..], &mut raw).expect("fixture decompresses");
-    std::fs::write(&evaluation, raw).expect("write evaluation");
-    let material = endf::Material::from_file(&evaluation).expect("Fe56 parses");
-    assert!(
-        yamc_convert::covariance::write_covariance(&material, &dir).expect("covariance writes"),
-        "the fixture must carry MF=33 for this test to mean anything"
-    );
-    Some(dir)
 }
 
 fn iron(data: &Path) -> Material {
@@ -596,6 +573,91 @@ fn a_spectrum_without_an_error_is_reported_not_assumed_exact() {
     );
 }
 
+/// A source switched off is held at nominal and the report names it, the way
+/// it names an input no source can sample. Switched back on with something to
+/// act on, the entry goes.
+#[test]
+fn a_source_switched_off_is_named_as_held() {
+    use yani_transmute::uncertainty::Source;
+
+    let Some(dir) = yamc_test_cache::nuclide("Fe56") else {
+        return skip("a_source_switched_off_is_named_as_held");
+    };
+    let total: f64 = FLUX.iter().sum();
+    let with_sigma = vec![MultigroupSpectrum {
+        boundaries: GROUPS.to_vec(),
+        masses: FLUX.iter().map(|f| f / total).collect(),
+        flux_error: Some(yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(
+            vec![0.05; FLUX.len()],
+        )),
+    }];
+    let held = |spectra: &[MultigroupSpectrum], sources: Vec<Source>| {
+        let mut material = iron(std::path::Path::new(&dir));
+        transmute_material(
+            &mut material,
+            spectra,
+            &schedule(),
+            chain(),
+            &Default::default(),
+            Default::default(),
+            Some(&DataUncertainty {
+                seed: 7,
+                samples: Some(8),
+                sources,
+                attribution: false,
+            }),
+        )
+        .expect("transmute")
+        .uncertainty_info
+        .get(&0)
+        .cloned()
+        .expect("info")
+        .not_perturbed
+    };
+
+    let narrowed = held(&with_sigma, vec![Source::HalfLife]);
+    for off in [
+        "activation cross section (MF=33)",
+        "flux spectrum",
+        "decay energy",
+    ] {
+        assert!(
+            narrowed.iter().any(|s| s == off),
+            "{off:?} missing from {narrowed:?}"
+        );
+    }
+    assert!(!narrowed.iter().any(|s| s == "half-life"));
+
+    let everything = held(&with_sigma, vec![]);
+    for on in [
+        "activation cross section (MF=33)",
+        "flux spectrum",
+        "half-life",
+        "decay energy",
+    ] {
+        assert!(
+            !everything.iter().any(|s| s == on),
+            "{on:?} was sampled but listed as held: {everything:?}"
+        );
+    }
+
+    // A spectrum with no sigma is used as given even with its source on.
+    let without_sigma = held(&spectra(), vec![Source::FluxSpectrum]);
+    assert!(without_sigma.iter().any(|s| s == "flux spectrum"));
+
+    // One spectrum with a sigma and one without: the flux was partly sampled,
+    // so the entry says only the spectra without a sigma were held.
+    let mixed: Vec<MultigroupSpectrum> = with_sigma.iter().cloned().chain(spectra()).collect();
+    let partial = held(&mixed, vec![Source::FluxSpectrum]);
+    assert!(!partial.iter().any(|s| s == "flux spectrum"), "{partial:?}");
+    assert!(
+        partial
+            .iter()
+            .any(|s| s == "flux spectrum (spectra without a sigma only)"),
+        "{partial:?}"
+    );
+}
+
 /// A bigger flux error gives a bigger inventory error.
 #[test]
 fn the_inventory_spread_scales_with_the_flux_error() {
@@ -691,4 +753,85 @@ fn the_cross_section_attribution_names_the_evaluation() {
         "the channel making Mn56 is named: {:?}",
         b.contributors
     );
+}
+
+/// Fe56 `(n,p)` shows the zero-variance rule on a real evaluation. Its MT=103
+/// grid runs from 1e-5 eV, but the variance is zero on every interval below
+/// 4.3 MeV, so the sliver of rate between the 2.97 MeV threshold and there is
+/// not covered and the share falls just short of one, where spanning the grid
+/// alone would call it fully covered.
+#[test]
+fn fe56_np_is_not_covered_where_its_variance_is_zero() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let Some(dir) = fe56_with_covariance(tmp.path()) else {
+        return skip("fe56_np_is_not_covered_where_its_variance_is_zero");
+    };
+    let mut material = iron(&dir);
+    let results = run(
+        &mut material,
+        Some(&DataUncertainty {
+            seed: 1,
+            samples: Some(32),
+            sources: vec![yani_transmute::uncertainty::Source::CrossSections],
+            ..Default::default()
+        }),
+    );
+    let info = results
+        .uncertainty_info
+        .get(&0)
+        .cloned()
+        .expect("info is reported");
+
+    let np = info.rate_fraction_covered[&("Fe56".to_string(), "(n,p)".to_string())];
+    assert!(
+        np > 0.9999 && np < 1.0,
+        "Fe56 (n,p) is covered above 4.3 MeV only, which is nearly all of its rate: {np}"
+    );
+}
+
+/// On a dilute collapse the fold's partial rates and the rate they are divided
+/// by are the same integral, so no channel may report partials above or below
+/// its rate, and every share the fold reports lies in [0, 1].
+#[test]
+fn a_dilute_fold_reports_no_partials_off_the_rate() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let Some(dir) = fe56_with_covariance(tmp.path()) else {
+        return skip("a_dilute_fold_reports_no_partials_off_the_rate");
+    };
+    let mut material = iron(&dir);
+    let results = run(
+        &mut material,
+        Some(&DataUncertainty {
+            seed: 1,
+            samples: Some(32),
+            sources: vec![yani_transmute::uncertainty::Source::CrossSections],
+            ..Default::default()
+        }),
+    );
+    let info = results
+        .uncertainty_info
+        .get(&0)
+        .cloned()
+        .expect("info is reported");
+
+    assert!(
+        info.partials_above_rate.is_empty(),
+        "a dilute fold is consistent: {:?}",
+        info.partials_above_rate
+    );
+    assert!(
+        info.partials_below_rate.is_empty(),
+        "a dilute fold is consistent: {:?}",
+        info.partials_below_rate
+    );
+    assert!(
+        info.rate_fraction_covered_total.is_some(),
+        "a dilute run drove production, so it has a total"
+    );
+    for (key, fraction) in &info.rate_fraction_covered {
+        assert!(
+            (0.0..=1.0).contains(fraction),
+            "{key:?} reads {fraction}, which is not a share"
+        );
+    }
 }

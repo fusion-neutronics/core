@@ -620,9 +620,43 @@ class DataUncertainty:
       energy never enters the solve, so the inventory and activity are
       untouched.
     
-    Anything a run did not perturb is listed in the report's ``not_perturbed``.
-    ``TransmutationResults.get_data_uncertainty_info`` says so per material,
-    along with every input whose evaluation states no uncertainty.
+    Each cross-section draw is a lognormal multiplier with the covariance's
+    own mean and variance, so a sampled rate is never negative and nothing is
+    floored. The correlated Gaussian deviates are kept (a Gaussian copula), so
+    the ordering between channels is preserved, but the Pearson correlations
+    come out weaker than evaluated as the sigmas grow.
+    
+    Held at their nominal values, with uncertainties of their own that this
+    does not propagate:
+    
+    - the decay branching ratios the sum rule does not fix (see
+      ``"decay_branching"``), and the per-decay photon lines and decay energy
+      of a drawn parent, which follow its nominal branching;
+    - fission yields and the isomeric-branching overlay from MF=9/MF=10;
+    - covariance correlating two evaluations (MAT1 != 0), covariance derived
+      from other sections (MF=33 NC), the lumped-reaction covariance
+      (MT=851-870) and the resonance-parameter covariance (MF=32), so only the
+      explicit MF=33 blocks of each reaction are sampled;
+    - the self-shielding correction, when ``self_shielding_chord`` or
+      ``self_shielding_shape`` is given: the shielded flux is built once from
+      the nominal cross sections and reused by every replica;
+    - on a transport run, the flux's response to a perturbed cross section:
+      there is one transport, not one per replica. The tallied values
+      themselves are still drawn by the ``"statistical"`` source;
+    - decay photon line energies and intensities (MF=8 MT=457), photon
+      attenuation (XCOM), air energy absorption (NIST SRD 126), the ICRP-116
+      fluence-to-dose coefficients and the contact-dose build-up factor;
+    - the material's composition, density, natural isotopic abundances and the
+      AME2020 atomic masses used to convert mass fractions;
+    - any source switched off with ``sources``, or with nothing to act on (a
+      spectrum given without ``flux_std_dev``). When only some of a material's
+      spectra have one, the entry is ``"flux spectrum (spectra without a sigma
+      only)"`` and ``spectra_without_flux_sigma`` gives the count.
+    
+    ``TransmutationResults.get_data_uncertainty_info`` lists every one of these
+    that applied to a material under ``not_perturbed``, along with any nuclide
+    whose evaluation carries no covariance and any unstable nuclide whose
+    half-life has no stated sigma.
     
     Args:
         seed (int): Base seed. A given nuclide's perturbation in a given replica
@@ -2629,7 +2663,13 @@ class Model:
                   shared, as ``DataUncertainty`` describes.
         
                 ``"flux_spectrum"`` does not apply: there is no supplied spectrum,
-                and the flux's error is the statistical one. The sources are
+                and the flux's error is the statistical one. The transport runs
+                once, so every replica is solved in the flux it tallied: a
+                perturbed cross section does not change the flux or the
+                shielding the transport saw, and the report lists that held
+                response under ``not_perturbed`` as ``"flux response to
+                perturbed cross sections (one transport)"``. The tallied values
+                themselves are still drawn by ``"statistical"``. The sources are
                 independent, so ``sources=["statistical"]`` isolates the
                 transport's contribution and the default gives the total. Omit
                 it and nothing extra is tallied or solved: the inventories are
@@ -5090,6 +5130,12 @@ class TransmutationResults:
         Needs no ``volume``, unlike the other three, because the estimate takes
         the material for a half-space.
         
+        The band is the spread of the replicas' inventories alone (each with
+        its own half-lives when the ``"half_life"`` source is on). The decay
+        photon line intensities, photon attenuation (XCOM), air energy
+        absorption (NIST SRD 126), ICRP-116 dose coefficients and the build-up
+        factor are held at their nominal values and contribute nothing to it.
+        
         Args:
             material_id: Material ID number.
             step: Timestep index (0 = initial composition).
@@ -5115,6 +5161,11 @@ class TransmutationResults:
         and the only one under which two lines' spreads are taken over the same
         sample -- and ``LineEstimate.emitting`` reports how many replicas
         emitted it, which is what the zero-fill would otherwise hide.
+        
+        The band is the spread of the replicas' inventories alone (each with
+        its own half-lives when the ``"half_life"`` source is on). The line
+        intensities per decay are held at their nominal values and contribute
+        nothing to it.
         
             >>> lines = results.get_decay_photon_spectrum_uncertainty(mid, step)
             >>> [(l.energy, l.nominal, l.std_dev) for l in lines[:2]]
@@ -5142,22 +5193,52 @@ class TransmutationResults:
         
         - ``perturbed`` / ``no_covariance_data``: which nuclides had usable
           MF=33 covariance and which had none.
-        - ``rate_fraction_covered_total``: the share of the production this run
-          drove that a covariance actually spans, weighted by rate and by parent
-          density. Read this before any sigma here. It is a different and much
-          sharper question than how many nuclides carry MF=33: an evaluation can
-          state covariance for every isotope in the material and none for the
+        - ``rate_fraction_covered_total``: the per-channel shares below,
+          averaged with each channel weighted by the production it drove (the
+          rate this run used times parent density): the share of the
+          production driven from energies where a covariance states a nonzero
+          variance. ``None`` on a decay-only schedule, and on a self-shielded
+          or transport run, where the shares are of the dilute rate and the
+          covered share of the production actually driven is not computed.
+          Read this before any sigma here. It is a different and much sharper
+          question than how many nuclides carry MF=33: an evaluation can state
+          covariance for every isotope in the material and none for the
           channel making the product of interest, and the count then reads as
           full coverage while the ensemble perturbs almost nothing.
         - ``rate_fraction_covered``: per nuclide and channel, the share of the
-          reaction rate the covariance grid actually spans. Below one means part
-          of the rate carries no stated uncertainty and the sigma is diluted.
+          dilute reaction rate from energies where the evaluation states a
+          nonzero variance for it. Below one means part of the dilute rate
+          carries no stated uncertainty and dilutes the sigma; on a shielded
+          or tallied run the dilution applied differs from this share. An
+          interval the covariance grid spans with a variance of zero counts as
+          uncovered: ENDF/B-VIII.1 W186 ``(n,gamma)`` states zero from 1e-5 eV
+          to 10 keV, where nearly all of its capture rate is.
+        - ``partials_above_rate``: per nuclide and channel, where the partial
+          rates the covariance was weighted with, zero variance intervals
+          included, add up to more than the rate it was divided by, their
+          ratio to it. Each entry is a channel whose sigma is overstated. Three
+          known causes: a self-shielded rate against dilute partials, which
+          lists most channels a relative block names, many a few parts in 1e7
+          over, until the fold weights with shielded partials (#166 item 4); a
+          tallied rate on a transport run, computed apart from the partials
+          the fold takes from the tally's flux; and the ``1/E`` within-group
+          weight with a covariance edge inside a group. The share in
+          ``rate_fraction_covered`` is measured against the dilute rate, so it
+          is unaffected.
+        - ``partials_below_rate``: keyed the same way, where a covariance grid
+          spans the whole flux range and its partial rates add up to less than
+          the rate, their ratio to it: a channel whose sigma is understated.
+          The ``1/E`` weight gives one for a reaction falling with energy when
+          a covariance edge cuts a group. A grid that stops short of the flux
+          range cannot be checked from below, since rate from outside it
+          rightly leaves its partials short.
         - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
           covariance blocks that were present but not consumed.
         - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
           covariance was not positive semi-definite and had to be repaired.
-        - ``rates_floored`` / ``rates_sampled``: samples that went negative and
-          were truncated at zero, which biases the mean upward when common.
+        - ``rates_sampled``: cross-section rate draws made. Each is a lognormal
+          multiplier matched to the covariance's mean and variance, so none can
+          go negative and none is floored.
         - ``half_lives_perturbed`` / ``no_half_life_uncertainty``: with the
           ``"half_life"`` source, which reachable unstable nuclides had their
           half-life sampled and which state no sigma to sample from.
@@ -5178,8 +5259,12 @@ class TransmutationResults:
           transport run, how many tallied rates were sampled from their
           covariance; ``statistical_floored`` / ``statistical_sampled`` count
           draws that came out negative and were floored.
-        - ``not_perturbed``: the inputs and couplings this run held at
-          nominal.
+        - ``not_perturbed``: every input this run held at its nominal value,
+          such as the MF=32 resonance-parameter covariance, the photon and dose
+          data, the material composition, any source switched off, and, where
+          they applied, the self-shielding correction, the flux's response to a
+          perturbed cross section on a transport run, and the per-branch decay
+          emission of a parent whose branching was drawn.
         - ``samples`` / ``converged``: how many replicas ran, and whether the
           sigmas settled or the cap was hit.
         
@@ -5853,11 +5938,16 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         excited production levels were matched to an isomer by energy, by
         energy within a tenth, by level index, as the only isomer, or not at
         all) and ``flagged_levels`` (one line per level that was unresolved,
+        taken as ground because the decay data has no isomer for its product,
         matched only by the looser energy pass, or matched by energy while its
-        level index pointed at another isomer), and ``partial_sum_mismatches``
+        level index pointed at another isomer; every excited level that ends
+        up at ground is listed), ``partial_sum_mismatches``
         (one line per reaction whose MF=10 partial cross sections do not sum to
         its MF=3 total, or whose MF=9 yields do not sum to one, within two
-        percent below 20 MeV).
+        percent below 20 MeV), and ``skipped_states`` (one line per production
+        state that names no single product nuclide, and so gives no row:
+        fission, an IZAP of zero that no single MF=8 subsection resolves, or
+        any other ZAP whose Z or A is not positive).
     """
 
 def convert_neutron_transport(input_path: builtins.str, output_dir: builtins.str, njoy_exec: builtins.str = 'njoy', temperatures: typing.Optional[typing.Sequence[builtins.float]] = None, library: builtins.str = '', data_version: builtins.str = '', created_utc: typing.Optional[builtins.str] = None, covariance: builtins.bool = False) -> builtins.str:
@@ -6234,11 +6324,16 @@ def radionuclide_production(neutron_files: typing.Sequence[builtins.str]) -> lis
         each with ``parent``, ``mt``, ``reaction`` (the transmutation reaction
         name, or ``None`` for an MT no chain reaction covers) and ``states``.
         Each state has ``excitation_energy_eV``, ``level_index``, ``product``
-        and ``source``.
+        and ``source``. ``excitation_energy_eV`` is ``None`` for an excited
+        state whose evaluation gives neither a positive MF=8 ELFS nor a
+        positive ``QM - QI``.
     
         ``product`` is the product's **ground-state** name even for an excited
         state, because naming the isomer needs decay data to say which
         isomeric ordinal a level is; pair it with ``excitation_energy_eV``.
+        It is ``None`` for a state naming no single nuclide: fission, a
+        subsection whose IZAP is zero with no single MF=8 subsection to name
+        it, or any other ZAP whose Z or A is not positive.
         ``level_index`` is the evaluation's own LFS and is not comparable
         between libraries: Ir190's 377 keV isomer is level 3 in ENDF/B-VIII.1
         and level 37 in JEFF-4.0. ``source`` is ``"cross_section"`` for MF=10

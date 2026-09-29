@@ -579,14 +579,14 @@ pub const REACTIONS: [ReactionInfo; 84] = [
     ReactionInfo {
         name: "(n,p3He)",
         mts: &[191],
-        delta_a: -4,
+        delta_a: -3,
         delta_z: -3,
         secondaries: &["H1", "He3"],
     },
     ReactionInfo {
         name: "(n,d3He)",
         mts: &[192],
-        delta_a: -5,
+        delta_a: -4,
         delta_z: -3,
         secondaries: &["H2", "He3"],
     },
@@ -810,6 +810,18 @@ pub struct Nuclide {
     /// Fission yields by incident energy in eV. Empty when the nuclide does
     /// not fission, or when its yields are borrowed from another nuclide.
     pub yield_data: BTreeMap<String, FissionYields>,
+    /// The yield evaluation `yield_data` is derived from, exactly as the tape
+    /// gives it: the independent (MT=454) and cumulative (MT=459) yields with
+    /// their DY, every product under its own name and in tape order.
+    ///
+    /// Kept beside `yield_data` rather than folded into it because the
+    /// derivation is not reversible. It maps a product with no decay data onto
+    /// a stand-in and sums products that land on the same name, and the DY of
+    /// such a sum is not stated anywhere: it would need the correlation
+    /// between its parts, which no evaluation publishes. A nuclide that
+    /// borrows its yields carries the evaluation it borrows them from, as it
+    /// carries the yields. `None` where there are no yields.
+    pub yield_evaluation: Option<FissionProductYields>,
     /// The nuclide whose yields stand in for this one's, where the library has
     /// none of its own.
     pub borrowed_yields_from: Option<String>,
@@ -1188,6 +1200,7 @@ impl Chain {
                             }
                             nuclide.yield_data.insert(energy_key(*energy), yields);
                         }
+                        nuclide.yield_evaluation = Some(fpy.clone());
                     }
                     None => {
                         nuclide.borrowed_yields_from =
@@ -1208,8 +1221,10 @@ impl Chain {
             .collect();
         for (i, from) in borrowed {
             if let Some(source) = chain.get(&from) {
-                let yields = source.yield_data.clone();
+                let (yields, evaluation) =
+                    (source.yield_data.clone(), source.yield_evaluation.clone());
                 chain.nuclides[i].yield_data = yields;
+                chain.nuclides[i].yield_evaluation = evaluation;
             }
         }
 
@@ -1480,27 +1495,67 @@ mod tests {
 
         assert!(reaction_info("(n,nonsense)").is_none());
 
-        // Every reaction conserves nucleons: the change in A plus what the
-        // secondaries carry away accounts for the incident neutron.
+        // Every entry follows from the particles its name says leave: the
+        // product is the target plus the incident neutron less what was
+        // emitted, so delta_a = 1 - sum(A) and delta_z = -sum(Z), and the
+        // secondaries are the emitted particles other than neutrons.
         for rx in &REACTIONS {
-            let carried: i64 = rx
-                .secondaries
-                .iter()
-                .map(|s| match *s {
-                    "H1" => 1,
-                    "H2" => 2,
-                    "H3" => 3,
-                    "He3" => 3,
-                    "He4" => 4,
-                    other => panic!("unexpected secondary {other}"),
-                })
-                .sum();
-            assert!(
-                rx.delta_a + carried <= 1,
-                "{} gains nucleons from nowhere",
+            let emitted = emitted_particles(rx.name);
+            let (a, z) = emitted.iter().fold((0, 0), |(a, z), p| (a + p.1, z + p.2));
+            assert_eq!(
+                (rx.delta_a, rx.delta_z),
+                (1 - a, -z),
+                "{} does not match the particles it emits",
                 rx.name
             );
+            let mut charged: Vec<&str> =
+                emitted.iter().filter(|p| p.0 != "n").map(|p| p.0).collect();
+            let mut secondaries = rx.secondaries.to_vec();
+            charged.sort_unstable();
+            secondaries.sort_unstable();
+            assert_eq!(secondaries, charged, "{} secondaries", rx.name);
         }
+    }
+
+    /// The particles a reaction name says leave, as (nuclide, A, Z), one
+    /// entry per particle: `"(n,2npa)"` gives n, n, H1, He4.
+    fn emitted_particles(name: &str) -> Vec<(&'static str, i64, i64)> {
+        let body = name
+            .strip_prefix("(n,")
+            .and_then(|b| b.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("{name} is not of the form (n,...)"));
+        if body == "gamma" {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut rest = body;
+        while !rest.is_empty() {
+            // "3He" is a particle, not three of something, so it is matched
+            // before a leading digit is read as a count.
+            if let Some(r) = rest.strip_prefix("3He") {
+                out.push(("He3", 3, 2));
+                rest = r;
+                continue;
+            }
+            let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+            let count: usize = if digits == 0 {
+                1
+            } else {
+                rest[..digits].parse().unwrap()
+            };
+            rest = &rest[digits..];
+            let particle = match rest.chars().next() {
+                Some('n') => ("n", 1, 0),
+                Some('p') => ("H1", 1, 1),
+                Some('d') => ("H2", 2, 1),
+                Some('t') => ("H3", 3, 1),
+                Some('a') => ("He4", 4, 2),
+                other => panic!("unexpected particle {other:?} in {name}"),
+            };
+            rest = &rest[1..];
+            out.extend(std::iter::repeat_n(particle, count));
+        }
+        out
     }
 
     #[test]

@@ -134,7 +134,7 @@ fn the_depletion_inputs_are_reachable() {
     let production = endf::radionuclide_production(&production_material);
     assert!(!production.is_empty());
     let states: &Vec<RadionuclideProduction> = production.values().next().unwrap();
-    assert!(states[0].excitation_energy() >= 0.0);
+    assert!(states[0].excitation_energy().is_some_and(|e| e >= 0.0));
 }
 
 /// A depletion chain, built from evaluations the caller supplies.
@@ -223,4 +223,40 @@ fn photoatomic_data_is_reachable() {
     let photon = IncidentPhoton::from_endf(&material, None).unwrap();
     assert_eq!(photon.atomic_number, 1);
     assert!(!photon.reactions.is_empty());
+}
+
+/// A fissioning chain nuclide keeps the yield evaluation its yields were
+/// derived from, both MT=454 and MT=459 with DY, as the tape gives it.
+///
+/// With only Cs137 beside U235 in the decay library, most products have no
+/// decay data, so the derived yields differ from the tape's. The evaluation
+/// must not.
+#[test]
+fn a_chain_keeps_the_yield_evaluation_it_was_built_from() {
+    let decay: Vec<Material> = ["dec-092_U_235.endf.xz", "dec-055_Cs_137.endf.xz"]
+        .iter()
+        .map(|name| Material::from_str(&read_text(name)).unwrap())
+        .collect();
+    let fpy = vec![Material::from_str(&read_text("synthetic-nfy.endf.xz")).unwrap()];
+    let mut q = QValues::new();
+    q.entry("U235".to_string()).or_default().insert(18, 1.9e8);
+
+    let chain = Chain::from_endf(&decay, &fpy, &q, &[]).unwrap();
+    let u235 = chain.get("U235").unwrap();
+    let tape = FissionProductYields::from_material(&fpy[0]).unwrap();
+    assert_eq!(u235.yield_evaluation.as_ref(), Some(&tape));
+    assert!(!tape.cumulative.is_empty(), "the fixture has MT=459");
+    assert_eq!(u235.yield_energies(), tape.energies);
+
+    // Cs137 has decay data, so its derived yield is the tape's own value.
+    let thermal = &u235.yield_data["0.0253"];
+    let cs137 = tape.independent[0]
+        .iter()
+        .find(|p| p.name == "Cs137")
+        .unwrap();
+    assert_eq!(thermal["Cs137"], cs137.yield_.0);
+    // Xe135_m1 has none, so it is not in the derived yields under its own
+    // name, and the evaluation is the only place its DY survives.
+    assert!(!thermal.contains_key("Xe135_m1"));
+    assert!(tape.independent[0].iter().any(|p| p.name == "Xe135_m1"));
 }
