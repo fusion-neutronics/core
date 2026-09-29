@@ -120,6 +120,100 @@ def test_reactions_carry_q(converted):
     assert any(v != 0.0 for v in q), "every Q is zero, which is not real data"
 
 
+def test_fission_yield_evaluations_are_stored_as_the_tape_gives_them(tmp_path):
+    """Both MT=454 and MT=459, with DY, beside the nominal yields.
+
+    U235 joins the decay set so the synthetic yields reach the chain. Read with
+    pyarrow, so this checks the file rather than yamc's reading of it.
+    """
+    pytest.importorskip("pyarrow")
+    import pyarrow.ipc as ipc
+
+    inputs = tmp_path / "endf"
+    inputs.mkdir()
+    out = tmp_path / "out"
+    yamc.convert_transmutation(
+        decay_files=_plain([*DECAY, "dec-092_U_235.endf.xz"], inputs),
+        fpy_files=_plain(FPY, inputs),
+        neutron_files=_plain([*NEUTRON, "n-092_U_235_trimmed.endf.xz"], inputs),
+        output_path=str(out),
+        library="endf-b8.1",
+        data_version="2026-08-09.1",
+        subsections=["fission_yields"],
+    )
+
+    nominal = ipc.open_file(out / "fission_yields" / "fission_yields.arrow").read_all()
+    assert nominal.schema.names == ["nuclide", "energy", "products", "yields"]
+
+    table = ipc.open_file(out / "fission_yields" / "evaluated_yields.arrow").read_all()
+    assert table.schema.names == [
+        "nuclide",
+        "energy",
+        "kind",
+        "interpolation",
+        "products",
+        "yields",
+        "yield_uncertainties",
+    ]
+    rows = {(r["kind"], r["energy"]): r for r in table.to_pylist()}
+    assert set(rows) == {
+        (kind, energy)
+        for kind in ("independent", "cumulative")
+        for energy in (0.0253, 5.0e5)
+    }
+    assert {r["nuclide"] for r in rows.values()} == {"U235"}
+
+    thermal = rows[("independent", 0.0253)]
+    assert thermal["interpolation"] is None
+    assert rows[("independent", 5.0e5)]["interpolation"] == 2
+    # Xe135_m1 has no decay data here, so the evaluated file is the only place
+    # its yield survives under its own name.
+    i = thermal["products"].index("Xe135_m1")
+    assert (thermal["yields"][i], thermal["yield_uncertainties"][i]) == (0.0134, 0.0006)
+    cumulative = rows[("cumulative", 0.0253)]
+    i = cumulative["products"].index("Zr95")
+    assert (cumulative["yields"][i], cumulative["yield_uncertainties"][i]) == (0.0605, 0.0018)
+
+
+def test_decay_mode_sigmas_are_stored_as_the_tape_gives_them(converted):
+    """The dBR of every decay mode is in the file, and a 0.0 stays a 0.0.
+
+    MT=457 writes 0.0 for an uncertainty it does not state. The file keeps
+    that number rather than a null standing in for it, and readers take both
+    as "not stated". Read with pyarrow, so this checks the file itself.
+    """
+    pytest.importorskip("pyarrow")
+    import pyarrow.ipc as ipc
+
+    out, _ = converted
+    modes = ipc.open_file(out / "decay" / "decay_modes.arrow").read_all()
+    assert modes.schema.names[-1] == "branching_ratio_uncertainty"
+    assert modes.column("branching_ratio_uncertainty").null_count == 0
+    dbr = {}
+    for nuclide, sigma in zip(
+        modes.column("nuclide").to_pylist(),
+        modes.column("branching_ratio_uncertainty").to_pylist(),
+    ):
+        dbr.setdefault(nuclide, []).append(sigma)
+    # Cs137's two modes carry one stated number each; In116_m1's one mode
+    # states none.
+    assert dbr["Cs137"] == [1.999988e-3, 1.999988e-3]
+    assert dbr["In116_m1"] == [0.0]
+
+
+def test_nuclide_sigmas_are_stored_as_the_tape_gives_them(converted):
+    """A decay-energy sigma the tape writes as 0.0 is 0.0 in the file too."""
+    pytest.importorskip("pyarrow")
+    import pyarrow.ipc as ipc
+
+    out, _ = converted
+    nuclides = ipc.open_file(out / "decay" / "nuclides.arrow").read_all()
+    row = nuclides.column("name").to_pylist().index("Cs137")
+    # Cs137 emits no heavy particles: the tape gives 0.0 +- 0.0.
+    assert nuclides.column("decay_energy_alpha")[row].as_py() == 0.0
+    assert nuclides.column("decay_energy_alpha_uncertainty")[row].as_py() == 0.0
+
+
 def test_missing_inputs_are_refused(tmp_path):
     """A partial chain is a wrong chain, not a smaller one."""
     with pytest.raises(ValueError, match="decay_files"):

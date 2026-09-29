@@ -34,9 +34,11 @@ use crate::branching::mt_to_type;
 /// One final state of one reaction, as the evaluation lists it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProductionState {
-    /// Excitation energy above the product's ground state, in eV. From MF=8
-    /// where the evaluation gives it, otherwise `QM - QI`.
-    pub excitation_energy: f64,
+    /// Excitation energy above the product's ground state, in eV. Zero for
+    /// the ground state; for an excited state, MF=8's ELFS where it is
+    /// positive, otherwise `QM - QI` where that is positive, and `None` when
+    /// the evaluation gives neither.
+    pub excitation_energy: Option<f64>,
     /// The product's nuclear level index, LFS. Zero is the ground state.
     ///
     /// Not an isomeric-state ordinal: two evaluators number the levels of one
@@ -50,7 +52,12 @@ pub struct ProductionState {
     /// isomer would need decay data to say which isomeric ordinal this level
     /// is, and this function deliberately reads no decay data. Pair the name
     /// with `excitation_energy` to identify the state.
-    pub product: String,
+    ///
+    /// `None` for a state that names no single nuclide: fission, whose
+    /// products are the fission yields' business, a subsection whose IZAP
+    /// is zero with no single MF=8 subsection to name it either, or any other
+    /// ZAP whose Z or A is not positive.
+    pub product: Option<String>,
     /// `"cross_section"` for a state given in MF=10, `"yield"` for MF=9.
     pub source: &'static str,
 }
@@ -74,7 +81,7 @@ pub struct ProductionChannel {
 impl ProductionChannel {
     /// The excited states, which is what a completeness comparison is about.
     pub fn excited(&self) -> impl Iterator<Item = &ProductionState> {
-        self.states.iter().filter(|s| s.excitation_energy > 0.0)
+        self.states.iter().filter(|s| s.level_index > 0)
     }
 }
 
@@ -102,7 +109,9 @@ pub fn extract_production(material: &Material) -> Vec<ProductionChannel> {
             .map(|state| ProductionState {
                 excitation_energy: state.excitation_energy(),
                 level_index: state.lfs,
-                product: endf::gnds_name((state.zap / 1000) as u32, (state.zap % 1000) as u32, 0),
+                product: state
+                    .nuclide()
+                    .map(|(z, a)| endf::gnds_name(z as u32, a as u32, 0)),
                 source: if state.cross_section.is_some() {
                     "cross_section"
                 } else {

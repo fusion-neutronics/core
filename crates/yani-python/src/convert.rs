@@ -185,11 +185,16 @@ pub fn convert_transmutation(
 ///     excited production levels were matched to an isomer by energy, by
 ///     energy within a tenth, by level index, as the only isomer, or not at
 ///     all) and ``flagged_levels`` (one line per level that was unresolved,
+///     taken as ground because the decay data has no isomer for its product,
 ///     matched only by the looser energy pass, or matched by energy while its
-///     level index pointed at another isomer), and ``partial_sum_mismatches``
+///     level index pointed at another isomer; every excited level that ends
+///     up at ground is listed), ``partial_sum_mismatches``
 ///     (one line per reaction whose MF=10 partial cross sections do not sum to
 ///     its MF=3 total, or whose MF=9 yields do not sum to one, within two
-///     percent below 20 MeV).
+///     percent below 20 MeV), and ``skipped_states`` (one line per production
+///     state that names no single product nuclide, and so gives no row:
+///     fission, an IZAP of zero that no single MF=8 subsection resolves, or
+///     any other ZAP whose Z or A is not positive).
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
@@ -249,6 +254,7 @@ pub fn convert_branching(
     out.set_item("level_routes", stats.level_routes)?;
     out.set_item("flagged_levels", stats.flagged_levels)?;
     out.set_item("partial_sum_mismatches", stats.partial_sum_mismatches)?;
+    out.set_item("skipped_states", stats.skipped_states)?;
     Ok(out.unbind())
 }
 
@@ -558,11 +564,16 @@ pub fn convert_photon(
 ///     each with ``parent``, ``mt``, ``reaction`` (the transmutation reaction
 ///     name, or ``None`` for an MT no chain reaction covers) and ``states``.
 ///     Each state has ``excitation_energy_eV``, ``level_index``, ``product``
-///     and ``source``.
+///     and ``source``. ``excitation_energy_eV`` is ``None`` for an excited
+///     state whose evaluation gives neither a positive MF=8 ELFS nor a
+///     positive ``QM - QI``.
 ///
 ///     ``product`` is the product's **ground-state** name even for an excited
 ///     state, because naming the isomer needs decay data to say which
 ///     isomeric ordinal a level is; pair it with ``excitation_energy_eV``.
+///     It is ``None`` for a state naming no single nuclide: fission, a
+///     subsection whose IZAP is zero with no single MF=8 subsection to name
+///     it, or any other ZAP whose Z or A is not positive.
 ///     ``level_index`` is the evaluation's own LFS and is not comparable
 ///     between libraries: Ir190's 377 keV isomer is level 3 in ENDF/B-VIII.1
 ///     and level 37 in JEFF-4.0. ``source`` is ``"cross_section"`` for MF=10

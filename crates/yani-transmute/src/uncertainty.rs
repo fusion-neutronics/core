@@ -9,10 +9,12 @@
 //! through the MF=33 covariance folded against this material's own spectrum;
 //! the **flux spectrum**, from a per-bin sigma the caller supplies; and the
 //! **half-lives**, from the evaluation's own standard deviation. Decay
-//! branching ratios, fission yields and the isomeric-branching overlay are held
-//! at their nominal values; they carry their own uncertainties and are not
-//! propagated yet (issue #140). [`Info`] says so per run rather than leaving it
-//! to be inferred from a small sigma.
+//! branching ratios, fission yields, the isomeric-branching overlay, the MF=32
+//! resonance-parameter covariance, the decay photon and dose data, and the
+//! material's own composition are held at their nominal values; they carry
+//! their own uncertainties and are not propagated yet (issue #140).
+//! [`Info::not_perturbed`] lists them per run rather than leaving it to be
+//! inferred from a small sigma.
 //!
 //! # Cost
 //!
@@ -32,7 +34,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use yamc_materials::Material;
 
 use crate::covariance_fold::Coverage;
-use crate::covariance_sample::{Clipping, Truncations};
+use crate::covariance_sample::Clipping;
 
 /// One input to the Bateman matrix that can be perturbed.
 ///
@@ -214,35 +216,64 @@ pub struct Info {
     /// block carrying a second table, an LB=3 or 4 block without one or whose
     /// tables share no energy range, or an LB=8 block between two reactions.
     pub malformed_blocks: usize,
-    /// Per (nuclide, reaction kind), the share of the rate the relative
-    /// covariance grids span. Below one means part of the rate carries no
-    /// stated relative uncertainty and the sigma is diluted accordingly.
-    /// Absolute (LB=0) and short-range (LB=8) blocks are folded but not
-    /// counted here yet (#169).
+    /// Per (nuclide, reaction kind), the share of the dilute rate over the
+    /// flux range that comes from energies where the evaluation states a
+    /// nonzero variance for that reaction. Below one means part of the dilute
+    /// rate carries no stated uncertainty, so it dilutes the relative sigma.
+    /// An interval a covariance grid spans with a variance of zero counts as
+    /// uncovered: it states no uncertainty either. In [0, 1] whatever rate the
+    /// covariance is divided by, and a share of the dilute rate only: on a
+    /// self-shielded or tallied run the covered share of the rate actually
+    /// used is not computed. See [`Info::partials_above_rate`] for when that
+    /// rate disagrees with the partials. No entry for a channel whose dilute
+    /// rate over the flux range is zero. Every consumed self-covariance block
+    /// counts where its own diagonal is nonzero, relative (LB=1 to 6),
+    /// absolute (LB=0) and short-range (LB=8) alike.
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
-    /// Share of the production this run drove that carries a stated covariance,
-    /// weighted by rate and by parent density, or `None` for a decay-only
-    /// schedule that drove none.
+    /// Per (nuclide, reaction kind), where the partial rates a relative
+    /// covariance block was weighted with, zero variance intervals included,
+    /// add up to more than the rate it was divided by, their ratio to it. Each
+    /// is a channel whose relative sigma is overstated, because the two were
+    /// computed different ways; a self-shielded rate against dilute partials
+    /// is one, and a tallied rate is another. Its `rate_fraction_covered` is
+    /// unaffected. Until the fold weights a shielded rate with shielded
+    /// partials (#166 item 4), a self-shielded run lists most channels a
+    /// relative block names, many only a few parts in 1e7 over.
+    pub partials_above_rate: BTreeMap<(String, String), f64>,
+    /// Per (nuclide, reaction kind), where a relative block's grid spans the
+    /// whole flux range and its partial rates add up to less than the rate it
+    /// was divided by, their ratio to it: a channel whose relative sigma is
+    /// understated. A grid that stops short of the flux range cannot be
+    /// checked this way, since rate from outside it rightly leaves its
+    /// partials short.
+    pub partials_below_rate: BTreeMap<(String, String), f64>,
+    /// Mean of the per-channel shares in [`Info::rate_fraction_covered`],
+    /// weighted by the production each channel drove (the rate this run used
+    /// times parent density): the share of the production driven from
+    /// energies where a covariance states a nonzero variance.
+    ///
+    /// `None` for a decay-only schedule, which drove no production, and on a
+    /// self-shielded or tallied run, where that share is not computed. The
+    /// per-channel shares are of the dilute rate, and shielding moves rate
+    /// out of the resonance range, where capture blocks often state zero, so
+    /// weighting them by the shielded or tallied production would give a
+    /// figure that is not the share its name claims.
     ///
     /// The number to read before any sigma here, and not the same question as
     /// how many nuclides carry MF=33: an evaluation can state covariance for
     /// every isotope in the material and none of it for the channel making the
     /// product of interest, which leaves the count reading as full coverage
     /// while the ensemble perturbs almost nothing.
-    ///
-    /// Built from the same relative-only coverage as `rate_fraction_covered`,
-    /// so a channel stated only in absolute (LB=0) or short-range (LB=8)
-    /// blocks lowers it although those blocks are folded (#169).
     pub rate_fraction_covered_total: Option<f64>,
     /// Covariance matrices that were not positive semi-definite as evaluated,
     /// and the worst repair that had to be made.
     pub matrices_clipped: usize,
     pub worst_relative_clip: f64,
-    /// Sampled rates that went negative and were floored at zero.
+    /// Cross-section rate draws made, one per perturbed channel per spectrum
+    /// per replica.
     ///
-    /// A large share means the Gaussian is being used past where it describes
-    /// the cross section, and the truncation biases the mean upward.
-    pub rates_floored: usize,
+    /// Each draw is a lognormal multiplier matched to the channel's mean and
+    /// variance, so none can go negative and there is no floor to count.
     pub rates_sampled: usize,
     /// Spectra that carried a per-bin flux sigma, and those that did not.
     ///
@@ -279,14 +310,25 @@ pub struct Info {
     /// Statistically drawn rates that came out negative and were floored.
     pub statistical_floored: usize,
     pub statistical_sampled: usize,
-    /// Sources deliberately NOT perturbed, for the record.
+    /// Inputs this run held at their nominal values, for the record.
+    ///
+    /// Every input the answer depends on and no source here samples, whether
+    /// the data carries an uncertainty for it or not. MF=33 blocks that were
+    /// present but could not be used are counted in `skipped_cross_material`,
+    /// `skipped_nc`, `unsupported_layouts` and `malformed_blocks`. A block for
+    /// a reaction the chain does not drive (a partial-level section such as
+    /// MT=600-849) is neither listed nor counted: the chain has no rate for it
+    /// to be the uncertainty of.
     pub not_perturbed: Vec<String>,
     /// Which sources this run perturbed, by name.
     pub sources: Vec<String>,
 }
 
 impl Info {
-    pub(crate) fn from_fold(coverage: &Coverage, clipping: &Clipping) -> Self {
+    /// `dilute` is whether the rates the fold was divided by are the dilute
+    /// collapse, the only case in which the production total is the covered
+    /// share.
+    pub(crate) fn from_fold(coverage: &Coverage, clipping: &Clipping, dilute: bool) -> Self {
         Self {
             perturbed: coverage.covered.clone(),
             no_covariance_data: coverage.without_data.clone(),
@@ -295,7 +337,9 @@ impl Info {
             unsupported_layouts: coverage.unsupported_layouts.clone(),
             malformed_blocks: coverage.malformed,
             rate_fraction_covered: coverage.rate_fraction_covered.clone(),
-            rate_fraction_covered_total: coverage.rate_fraction_total(),
+            partials_above_rate: coverage.partials_above_rate.clone(),
+            partials_below_rate: coverage.partials_below_rate.clone(),
+            rate_fraction_covered_total: coverage.rate_fraction_total().filter(|_| dilute),
             matrices_clipped: clipping.matrices_clipped,
             worst_relative_clip: clipping.worst_relative_clip,
             not_perturbed: [
@@ -303,17 +347,24 @@ impl Info {
                 "fission yield",
                 "isomeric branching (MF=9/MF=10)",
                 "cross-material covariance (MAT1 != 0)",
+                "NC-derived covariance (MF=33 NC)",
+                "lumped-reaction covariance (MF=33 MT=851-870)",
+                "resonance-parameter covariance (MF=32)",
+                "decay photon line energy and intensity (MF=8 MT=457)",
+                "photon attenuation coefficient (XCOM)",
+                "air energy-absorption coefficient (NIST SRD 126)",
+                "fluence-to-dose coefficient (ICRP-116)",
+                "contact-dose build-up factor",
+                "material composition",
+                "material density",
+                "natural isotopic abundance",
+                "atomic mass (AME2020)",
             ]
             .iter()
             .map(|s| s.to_string())
             .collect(),
             ..Default::default()
         }
-    }
-
-    pub(crate) fn add_truncations(&mut self, t: &Truncations) {
-        self.rates_floored += t.floored;
-        self.rates_sampled += t.sampled;
     }
 
     pub(crate) fn add_flux_coverage(&mut self, c: &crate::flux_uncertainty::FluxCoverage) {
@@ -323,13 +374,16 @@ impl Info {
         self.flux_bins_sampled = c.bins_sampled;
     }
 
-    /// Whether anything was left out that a reader should know about.
+    /// Whether anything was left out, or is inconsistent, that a reader should
+    /// know about.
     pub fn has_gaps(&self) -> bool {
         !self.no_covariance_data.is_empty()
             || self.skipped_cross_material > 0
             || self.skipped_nc > 0
             || !self.unsupported_layouts.is_empty()
             || self.malformed_blocks > 0
+            || !self.partials_above_rate.is_empty()
+            || !self.partials_below_rate.is_empty()
             || self.spectra_without_flux_sigma > 0
             || !self.no_half_life_uncertainty.is_empty()
             || !self.no_decay_energy_uncertainty.is_empty()
@@ -761,6 +815,72 @@ pub(crate) fn set_half_life(cn: &mut yani::ChainNuclide, half_life: f64) {
 mod tests {
     use super::*;
 
+    /// The production total weights dilute shares by the production the run
+    /// drove, which is the covered share only when that production is the
+    /// dilute one. A shielded or tallied run reports no total rather than a
+    /// figure that is not the share its name claims, and keeps the
+    /// per-channel dilute shares, which are.
+    #[test]
+    fn only_a_dilute_run_reports_a_production_total() {
+        let coverage = Coverage {
+            rate_fraction_covered: BTreeMap::from([(("W186".into(), "(n,gamma)".into()), 0.25)]),
+            covered_production: 1.0,
+            total_production: 4.0,
+            ..Default::default()
+        };
+        let clipping = Clipping::default();
+        let dilute = Info::from_fold(&coverage, &clipping, true);
+        assert_eq!(dilute.rate_fraction_covered_total, Some(0.25));
+        let other = Info::from_fold(&coverage, &clipping, false);
+        assert_eq!(other.rate_fraction_covered_total, None);
+        assert_eq!(other.rate_fraction_covered, coverage.rate_fraction_covered);
+    }
+
+    /// Every input held at nominal whatever the run was, named so a reader
+    /// does not have to know the code to see what the sigma leaves out.
+    #[test]
+    fn the_report_names_every_input_held_at_nominal() {
+        let info = Info::from_fold(&Coverage::default(), &Clipping::default(), true);
+        for held in [
+            "decay branching ratio",
+            "fission yield",
+            "isomeric branching (MF=9/MF=10)",
+            "cross-material covariance (MAT1 != 0)",
+            "NC-derived covariance (MF=33 NC)",
+            "lumped-reaction covariance (MF=33 MT=851-870)",
+            "resonance-parameter covariance (MF=32)",
+            "decay photon line energy and intensity (MF=8 MT=457)",
+            "photon attenuation coefficient (XCOM)",
+            "air energy-absorption coefficient (NIST SRD 126)",
+            "fluence-to-dose coefficient (ICRP-116)",
+            "contact-dose build-up factor",
+            "material composition",
+            "material density",
+            "natural isotopic abundance",
+            "atomic mass (AME2020)",
+        ] {
+            assert!(
+                info.not_perturbed.iter().any(|s| s == held),
+                "{held:?} missing from {:?}",
+                info.not_perturbed
+            );
+        }
+        // These depend on the run and the sources asked for, so the fold
+        // alone must not claim them.
+        for conditional in [
+            "self-shielding correction",
+            "flux response to perturbed cross sections (one transport)",
+            "tallied-rate statistics",
+            "flux spectrum",
+            "flux spectrum (spectra without a sigma only)",
+            "activation cross section (MF=33)",
+            "half-life",
+            "decay energy",
+        ] {
+            assert!(!info.not_perturbed.iter().any(|s| s == conditional));
+        }
+    }
+
     #[test]
     fn moments_match_a_hand_computed_standard_deviation() {
         let mut m = Moments::default();
@@ -813,6 +933,52 @@ mod tests {
         let before = BTreeMap::from([("a".into(), 1.0)]);
         let after = BTreeMap::from([("a".into(), 1.0), ("b".into(), 0.5)]);
         assert!(!settled(&before, &after), "a new nuclide has not settled");
+    }
+
+    /// A nuclide whose every sigma is the 0.0 MT=457 writes for "not stated",
+    /// which the chain files store as 0.0 rather than as null.
+    fn stated_as_zero() -> yani::ChainNuclide {
+        yani::ChainNuclide {
+            name: "In116_m1".to_string(),
+            half_life: Some(3257.4),
+            half_life_uncertainty: Some(0.0),
+            decay_energy: 2.8e6,
+            decay_energy_uncertainty: Some(0.0),
+            decay_energy_components: [
+                Some(yani::DecayEnergyComponent {
+                    energy: 2.8e6,
+                    uncertainty: Some(0.0),
+                }),
+                None,
+                None,
+            ],
+            reactions: Vec::new(),
+            decays: Vec::new(),
+            fission_yields: None,
+            sources: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_stored_zero_sigma_is_not_stated_rather_than_exact() {
+        // Every reader of these sigmas has to take 0.0 as "not stated", the
+        // way it takes a null: a zero sampled as a sigma would report the
+        // nuclide as known exactly, and it would not be listed among the
+        // inputs that carry no uncertainty.
+        let cn = stated_as_zero();
+        let chain = HashMap::from([(cn.name.clone(), cn.clone())]);
+        let (with, without) = half_life_candidates(&chain);
+        assert!(
+            with.is_empty(),
+            "a 0.0 half-life sigma was sampled: {with:?}"
+        );
+        assert!(
+            without.contains("In116_m1"),
+            "and it was not reported unstated"
+        );
+
+        assert!(!has_decay_energy_sigma(&cn));
+        assert_eq!(sample_decay_energy(&cn, 7, 0), None);
     }
 
     #[test]
