@@ -118,7 +118,11 @@ pub use crate::neutron::xs::{
 };
 pub use cpu::run_multi_cell_transport_cpu;
 pub use cpu_rayon::run_multi_cell_transport_cpu_rayon;
-pub use decay_photon_emission::{DecayPhotonInputs, MaterialDecayTable, DECAY_META_COLS};
+pub use decay_photon_emission::{
+    decay_spectrum_span, DecayPhotonInputs, MaterialDecayTable, DECAY_COUNT_MASK, DECAY_META_COLS,
+    DECAY_SPECTRUM_HISTOGRAM, DECAY_SPECTRUM_LINEAR_LINEAR, DECAY_SPECTRUM_LINES,
+    DECAY_SPECTRUM_SHIFT,
+};
 pub use host::run_multi_cell_transport;
 pub use photon_emission::{CoupledPhotonInputs, PhotonBankResult};
 pub use shared::{CollisionRecord, PendDrain, PEND_SLOTS, PEND_SLOTS_U32};
