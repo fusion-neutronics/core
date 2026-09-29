@@ -641,8 +641,9 @@ impl PyTransmutationResults {
     ///   covariance edge inside a group. The share in
     ///   ``rate_fraction_covered`` is measured against the fold's own rate,
     ///   so it is unaffected. On a channel derived through an NC block, the
-    ///   check is also that the reactions the block names add up to the one
-    ///   it derives over the block's range; a sum above it lands here.
+    ///   partials of the reactions the block names are checked the same way,
+    ///   and the check is also that they add up to the one it derives over
+    ///   the block's range; a sum above it lands here.
     /// - ``partials_below_rate``: keyed the same way, where a covariance grid
     ///   spans the whole flux range and its partial rates add up to less than
     ///   the rate, their ratio to it: a channel whose sigma is understated.

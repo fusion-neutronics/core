@@ -252,9 +252,10 @@ pub struct Info {
     /// computed different ways: a tallied rate against partials weighted flat
     /// within each bin, or the `1/E` within-group weight with a covariance
     /// edge inside a group. Its `rate_fraction_covered` is unaffected. On a
-    /// derived channel the check is also that the reactions each NC block
-    /// names add up to the reaction it derives over the block's range, and a
-    /// sum above it lands here.
+    /// derived channel the partials of the reactions each NC block names are
+    /// checked the same way, and the check is also that they add up to the
+    /// reaction it derives over the block's range, a sum above it landing
+    /// here.
     pub partials_above_rate: BTreeMap<(String, String), f64>,
     /// Per (nuclide, reaction kind), where a relative block's grid spans the
     /// whole flux range and its partial rates add up to less than the rate it
