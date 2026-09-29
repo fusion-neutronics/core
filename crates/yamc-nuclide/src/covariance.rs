@@ -29,7 +29,13 @@ pub enum CovarianceData {
     Nc(NcSubsection),
     /// Reaction `mt` is a component of the lumped reaction `mtl` and has no
     /// covariance of its own (ENDF-102 33.2.3). The section's HEAD record is
-    /// all there is, so the block's other fields are 0.
+    /// all there is, so the block's other fields are 0. Those zeros are the
+    /// spellings of "this evaluation's cross section, the same reaction", so
+    /// [`CovarianceBlock::is_same_evaluation`] and
+    /// [`CovarianceBlock::names_cross_section`] hold for it. A consumer that
+    /// wants covariance blocks matches on the data or excludes
+    /// [`CovarianceBlock::lumped_into`]; only
+    /// [`CovarianceBlock::is_diagonal`] turns it away itself.
     Lumped,
 }
 
@@ -103,9 +109,13 @@ impl CovarianceBlock {
     /// Whether this block is a reaction's covariance with itself.
     ///
     /// The only blocks for which the matrix is symmetric in itself, and the
-    /// only ones a variance can be read off directly.
+    /// only ones a variance can be read off directly. A lumped reaction's
+    /// component states no covariance, so it is not one, although its HEAD
+    /// reads as the same reaction.
     pub fn is_diagonal(&self) -> bool {
-        self.is_same_evaluation() && self.partner_mt() == self.mt
+        !matches!(self.data, CovarianceData::Lumped)
+            && self.is_same_evaluation()
+            && self.partner_mt() == self.mt
     }
 
     /// The lumped reaction (MT 851-870) this block's `mt` is a component of,
@@ -181,6 +191,20 @@ mod tests {
             assert!(b.is_same_evaluation(), "mat1 {mat1}, xmf1 {xmf1}");
             assert!(!b.is_cross_material(), "mat1 {mat1}, xmf1 {xmf1}");
         }
+    }
+
+    /// A component's HEAD has every other field 0, which would read as the
+    /// reaction with itself, but it states no covariance.
+    #[test]
+    fn a_lumped_component_is_not_a_diagonal_block() {
+        let b = CovarianceBlock {
+            mt1: 0,
+            mtl: 851,
+            data: CovarianceData::Lumped,
+            ..block(7837, 0, 0.0)
+        };
+        assert!(!b.is_diagonal());
+        assert_eq!(b.lumped_into(), Some(851));
     }
 
     #[test]
