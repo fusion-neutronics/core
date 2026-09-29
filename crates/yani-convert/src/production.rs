@@ -52,7 +52,12 @@ pub struct ProductionState {
     /// isomer would need decay data to say which isomeric ordinal this level
     /// is, and this function deliberately reads no decay data. Pair the name
     /// with `excitation_energy` to identify the state.
-    pub product: String,
+    ///
+    /// `None` for a state that names no single nuclide: fission, whose
+    /// products are the fission yields' business, a subsection whose IZAP
+    /// is zero with no single MF=8 subsection to name it either, or any other
+    /// ZAP whose Z or A is not positive.
+    pub product: Option<String>,
     /// `"cross_section"` for a state given in MF=10, `"yield"` for MF=9.
     pub source: &'static str,
 }
@@ -104,7 +109,9 @@ pub fn extract_production(material: &Material) -> Vec<ProductionChannel> {
             .map(|state| ProductionState {
                 excitation_energy: state.excitation_energy(),
                 level_index: state.lfs,
-                product: endf::gnds_name((state.zap / 1000) as u32, (state.zap % 1000) as u32, 0),
+                product: state
+                    .nuclide()
+                    .map(|(z, a)| endf::gnds_name(z as u32, a as u32, 0)),
                 source: if state.cross_section.is_some() {
                     "cross_section"
                 } else {
