@@ -37,6 +37,7 @@ SUBMODULES: dict[str, list[str]] = {
         "mass_attenuation_coefficient",
         "mass_energy_absorption_coefficient",
         "natural_abundance",
+        "natural_abundance_records",
         "element_nuclides",
         "element_names",
         "reaction_names",

@@ -558,9 +558,19 @@ impl FluxDensity<'_> {
                     .map(|w| weight(&walk_group(reaction, w[0], w[1], Some(shape), None))),
             );
             let sum: f64 = parts.iter().sum();
-            if sum <= 0.0 {
-                continue;
-            }
+            // The pieces' walks visit every point of the whole group's walk,
+            // so on a nonnegative cross section a nonzero term leaves a
+            // nonzero sum of pieces. A zero one is a bug here, and any way
+            // of completing the partition (by width, say) would be the dilute
+            // assumption this split exists to avoid, so it stops the run
+            // rather than hand the partials a guess. A negative sum, possible
+            // only on a cross section that goes negative, still normalizes to
+            // a partition of the term and needs no special case.
+            assert!(
+                sum != 0.0,
+                "the shielded pieces of group [{glo}, {ghi}] eV sum to zero \
+                 against a collapse term of {term}"
+            );
             for (w, part) in cuts.windows(2).zip(&parts) {
                 if let Some(k) = interval_holding(grid, w[0], w[1]) {
                     out[k] += term * part / sum;

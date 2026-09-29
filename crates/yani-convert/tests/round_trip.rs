@@ -184,7 +184,7 @@ fn the_decay_energy_split_survives() {
                 (None, None) => {}
                 (Some((energy, sigma)), Some(part)) => {
                     assert_eq!(part.energy, *energy, "{}", written.name);
-                    assert_eq!(part.uncertainty, *sigma, "{} sigma", written.name);
+                    assert_eq!(part.uncertainty, Some(*sigma), "{} sigma", written.name);
                 }
                 _ => panic!("{}: a component appeared or vanished", written.name),
             }
@@ -206,6 +206,193 @@ fn the_decay_energy_split_survives() {
         }
     }
     assert!(split > 0, "no nuclide in the fixtures carries a split");
+    let _ = std::fs::remove_dir_all(&c.dir);
+}
+
+/// One Float64 column of a written section, nulls as `None`, with the name of
+/// the section's last column so a test can check where a column was appended.
+fn float_column(path: &std::path::Path, name: &str) -> (Vec<Option<f64>>, String) {
+    use arrow_array::Array;
+    let file = std::fs::File::open(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let reader = arrow_ipc::reader::FileReader::try_new(file, None).expect("an Arrow IPC file");
+    let last = reader
+        .schema()
+        .fields()
+        .last()
+        .expect("a section with columns")
+        .name()
+        .clone();
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch.expect("a readable batch");
+        let column = batch
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("{} has no {name} column", path.display()));
+        let values = column
+            .as_any()
+            .downcast_ref::<arrow_array::Float64Array>()
+            .expect("a Float64 column");
+        out.extend((0..values.len()).map(|i| (!values.is_null(i)).then(|| values.value(i))));
+    }
+    (out, last)
+}
+
+/// One Utf8 column of a written section.
+fn string_column(path: &std::path::Path, name: &str) -> Vec<String> {
+    let file = std::fs::File::open(path).expect("section exists");
+    let reader = arrow_ipc::reader::FileReader::try_new(file, None).expect("an Arrow IPC file");
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch.expect("a readable batch");
+        let values = batch
+            .column_by_name(name)
+            .and_then(|c| {
+                c.as_any()
+                    .downcast_ref::<arrow_array::StringArray>()
+                    .cloned()
+            })
+            .unwrap_or_else(|| panic!("{} has no {name} column", path.display()));
+        out.extend(values.iter().map(|v| v.expect("non-null").to_string()));
+    }
+    out
+}
+
+/// The parsed decay tapes of the fixtures, by nuclide name.
+fn tapes() -> BTreeMap<String, endf::decay::Decay> {
+    materials(DECAY)
+        .iter()
+        .map(|m| {
+            let d = endf::decay::Decay::from_material(m).expect("decay data parses");
+            (d.nuclide.name.clone(), d)
+        })
+        .collect()
+}
+
+/// Every decay mode's dBR in the written file is the tape's own number, the
+/// zeros included.
+///
+/// MT=457 writes 0.0 for an uncertainty it does not state. The file stores
+/// what the tape says and leaves "0.0 means not stated" to the readers, so this
+/// reads the column straight out of the file, not through yani, and compares
+/// it with the parsed tapes.
+#[test]
+fn every_branching_sigma_is_written_as_the_tape_gives_it() {
+    let c = convert("dbr");
+    let tapes = tapes();
+
+    let modes = c.dir.join("decay/decay_modes.arrow");
+    let (sigmas, last) = float_column(&modes, "branching_ratio_uncertainty");
+    assert_eq!(
+        last, "branching_ratio_uncertainty",
+        "the new column must be appended last"
+    );
+    let parents = string_column(&modes, "nuclide");
+    assert_eq!(parents.len(), sigmas.len());
+    let mut row = 0;
+    for nuclide in &c.chain.nuclides {
+        // Stable, or a half-life never evaluated (Xe136): no modes written.
+        if nuclide.decay_modes.is_empty() {
+            continue;
+        }
+        let tape = &tapes[&nuclide.name].modes;
+        assert_eq!(nuclide.decay_modes.len(), tape.len(), "{}", nuclide.name);
+        for mode in tape {
+            assert_eq!(parents[row], nuclide.name);
+            assert_eq!(
+                sigmas[row],
+                Some(mode.branching_ratio.1),
+                "{} row {row}: the dBR is not the tape's",
+                nuclide.name
+            );
+            row += 1;
+        }
+    }
+    assert_eq!(row, sigmas.len(), "rows the tapes do not account for");
+    let zeros = sigmas.iter().filter(|s| **s == Some(0.0)).count();
+    let stated = sigmas.iter().filter(|s| s.is_some_and(|s| s > 0.0)).count();
+    assert!(
+        zeros > 0 && stated > 0,
+        "the fixtures need both a stated dBR (Cs137, In116) and an unstated \
+         one (Xe137, In116_m1) or this proves half of nothing: {zeros} zero, \
+         {stated} stated"
+    );
+
+    // yani's reader takes the dBR as stored, 0.0 included, so what it exports
+    // is what it read.
+    let (back, _) = yani::parse_chain_parts(&c.dir.join("decay"), None, None, None)
+        .expect("yani reads the converted chain");
+    let dbr = |name: &str| -> Vec<Option<f64>> {
+        back[name]
+            .decays
+            .iter()
+            .map(|d| d.branching_uncertainty)
+            .collect()
+    };
+    assert_eq!(dbr("Cs137"), [Some(1.999988e-3), Some(1.999988e-3)]);
+    assert_eq!(dbr("In116"), [Some(6.0e-5), Some(6.0e-5)]);
+    assert_eq!(dbr("In116_m1"), [Some(0.0)]);
+    let _ = std::fs::remove_dir_all(&c.dir);
+}
+
+/// Every half-life, decay-energy and decay-energy component sigma in the
+/// written file is the tape's own number, the zeros included.
+///
+/// The converter used to write MT=457's 0.0 ("not stated") as null, which is
+/// an interpretation rather than the data: the file then said something the
+/// tape does not. It now stores the tape's numbers, as the dBR column does.
+#[test]
+fn every_nuclide_sigma_is_written_as_the_tape_gives_it() {
+    let c = convert("literal");
+    let tapes = tapes();
+
+    let nuclides = c.dir.join("decay/nuclides.arrow");
+    let names = string_column(&nuclides, "name");
+    let (half_life_sigmas, _) = float_column(&nuclides, "half_life_uncertainty");
+    let (energy_sigmas, _) = float_column(&nuclides, "decay_energy_uncertainty");
+    let component_sigmas: Vec<Vec<Option<f64>>> = ["beta", "gamma", "alpha"]
+        .iter()
+        .map(|c| float_column(&nuclides, &format!("decay_energy_{c}_uncertainty")).0)
+        .collect();
+    let mut literal_zero_components = 0;
+    for (i, name) in names.iter().enumerate() {
+        let tape = &tapes[name];
+        let unstable = !tape.nuclide.stable && tape.half_life.is_some_and(|(t, _)| t != 0.0);
+        assert_eq!(
+            half_life_sigmas[i],
+            unstable.then(|| tape.half_life.expect("unstable").1),
+            "{name}: the half-life sigma is not the tape's"
+        );
+        let parts = tape.decay_energy_components();
+        // The total's sigma is the quadrature of the tape's own component
+        // sigmas, and there is none where the tape gives no component.
+        assert_eq!(
+            energy_sigmas[i],
+            (unstable && parts.iter().any(Option::is_some)).then(|| tape.decay_energy().1),
+            "{name}: the decay-energy sigma is not the tape's"
+        );
+        for (c, column) in component_sigmas.iter().enumerate() {
+            let expected = if unstable {
+                parts[c].map(|(_, s)| s)
+            } else {
+                None
+            };
+            assert_eq!(column[i], expected, "{name} component {c} sigma");
+            literal_zero_components += usize::from(column[i] == Some(0.0));
+        }
+    }
+    assert!(
+        literal_zero_components > 0,
+        "no component sigma the tape writes as 0.0 (Cs137's alpha is one), so \
+         nothing here shows a zero surviving as a zero"
+    );
+
+    let (back, _) = yani::parse_chain_parts(&c.dir.join("decay"), None, None, None)
+        .expect("yani reads the converted chain");
+    assert_eq!(
+        back["Cs137"].decay_energy_components[2].map(|p| p.uncertainty),
+        Some(Some(0.0)),
+        "Cs137's alpha component is 0.0 +- 0.0 on the tape"
+    );
     let _ = std::fs::remove_dir_all(&c.dir);
 }
 
@@ -819,4 +1006,238 @@ fn absorbing_partials_in_file_order_matches_adding_one_at_a_time() {
     );
     assert_eq!(rows_merged, rows_one_at_a_time);
     assert_eq!(stats_merged, stats_one_at_a_time);
+}
+
+/// Both yield evaluations reach the file exactly as the tape gives them, and
+/// the nominal yields the solver reads are the ones they always were.
+///
+/// The decay set is the fixture chain plus U235, so most products have no
+/// decay data and the nominal yields are a derivation the evaluation cannot be
+/// recovered from. That is the case the evaluated file exists for.
+#[test]
+fn fission_yield_evaluations_are_written_verbatim() {
+    use arrow_array::{Array, Float64Array, Int32Array, ListArray, StringArray};
+
+    let mut blobs = DECAY.to_vec();
+    blobs.push(fixture!("dec-092_U_235.endf.xz"));
+    let decay = materials(&blobs);
+    let fpy = materials(FPY);
+    let mut q_values = endf::chain::q_values(&materials(NEUTRON));
+    q_values
+        .entry("U235".to_string())
+        .or_default()
+        .insert(18, 1.9e8);
+    let mut chain = Chain::from_endf(&decay, &fpy, &q_values, &endf::chain::DEFAULT_REACTIONS)
+        .expect("chain builds");
+    let mut tape = endf::FissionProductYields::from_material(&fpy[0]).expect("yields parse");
+
+    // Real tapes state DY = 0.0 for many products (about one in eight on
+    // ENDF/B-VIII.1) and the fixture has none, so one is pinned here. It must
+    // be written as 0.0, not as null: the file keeps what the tape says and a
+    // reader decides what 0.0 means.
+    let zeroed = tape.independent[0][0].name.clone();
+    tape.independent[0][0].yield_.1 = 0.0;
+    chain
+        .nuclides
+        .iter_mut()
+        .find(|n| n.name == "U235")
+        .and_then(|n| n.yield_evaluation.as_mut())
+        .expect("U235 has an evaluation")
+        .independent[0][0]
+        .yield_
+        .1 = 0.0;
+
+    let dir = std::env::temp_dir().join(format!("yani-convert-evaluated-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    yani_convert::write_decay(&chain, &BTreeMap::new(), &dir.join("decay")).unwrap();
+    yani_convert::write_fission_yields(&chain, &dir.join("fission_yields")).unwrap();
+
+    let read_batch = |file: &str| {
+        let bytes = std::fs::read(dir.join("fission_yields").join(file)).unwrap();
+        let reader =
+            arrow_ipc::reader::FileReader::try_new(std::io::Cursor::new(bytes), None).unwrap();
+        let batches: Vec<_> = reader.map(Result::unwrap).collect();
+        assert_eq!(batches.len(), 1);
+        batches.into_iter().next().unwrap()
+    };
+    let batch = read_batch("evaluated_yields.arrow");
+    let declared =
+        nuclear_data_schema::section("fission_yields/evaluated_yields.arrow").expect("declared");
+    assert_eq!(batch.schema().fields(), declared.fields());
+    let column = |name: &str| batch.column_by_name(name).unwrap().clone();
+    let nuclide = column("nuclide");
+    let nuclide = nuclide.as_any().downcast_ref::<StringArray>().unwrap();
+    let energy = column("energy");
+    let energy = energy.as_any().downcast_ref::<Float64Array>().unwrap();
+    let kind = column("kind");
+    let kind = kind.as_any().downcast_ref::<StringArray>().unwrap();
+    let law = column("interpolation");
+    let law = law.as_any().downcast_ref::<Int32Array>().unwrap();
+    let lists: Vec<ListArray> = ["products", "yields", "yield_uncertainties"]
+        .iter()
+        .map(|c| {
+            column(c)
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .unwrap()
+                .clone()
+        })
+        .collect();
+
+    // Independent rows then cumulative, one per tape energy each.
+    let expected = [
+        (
+            "independent",
+            &tape.independent,
+            &tape.independent_interpolation,
+        ),
+        (
+            "cumulative",
+            &tape.cumulative,
+            &tape.cumulative_interpolation,
+        ),
+    ];
+    let mut row = 0;
+    for (label, sets, laws) in expected {
+        for (i, set) in sets.iter().enumerate() {
+            assert_eq!(nuclide.value(row), "U235");
+            assert_eq!(energy.value(row), tape.energies[i]);
+            assert_eq!(kind.value(row), label);
+            assert_eq!(
+                (!law.is_null(row)).then(|| law.value(row) as i64),
+                laws[i],
+                "{label} law at row {row}"
+            );
+            let products = lists[0].value(row);
+            let products = products.as_any().downcast_ref::<StringArray>().unwrap();
+            let yields = lists[1].value(row);
+            let yields = yields.as_any().downcast_ref::<Float64Array>().unwrap();
+            let sigmas = lists[2].value(row);
+            let sigmas = sigmas.as_any().downcast_ref::<Float64Array>().unwrap();
+            assert_eq!(products.len(), set.len());
+            for (j, p) in set.iter().enumerate() {
+                assert_eq!(products.value(j), p.name);
+                assert_eq!(yields.value(j), p.yield_.0, "{label} {} Y", p.name);
+                assert!(!sigmas.is_null(j), "{label} {} DY written as null", p.name);
+                assert_eq!(sigmas.value(j), p.yield_.1, "{label} {} DY", p.name);
+            }
+            row += 1;
+        }
+    }
+    assert_eq!(row, batch.num_rows(), "rows beyond the tape's");
+    let first = lists[2].value(0);
+    let first = first.as_any().downcast_ref::<Float64Array>().unwrap();
+    assert!(
+        !first.is_null(0) && first.value(0) == 0.0,
+        "{zeroed}: the tape's 0.0 DY was not written as 0.0"
+    );
+
+    // The nominal file still holds the derived yields and nothing else.
+    let nominal = read_batch("fission_yields.arrow");
+    let declared =
+        nuclear_data_schema::section("fission_yields/fission_yields.arrow").expect("declared");
+    assert_eq!(nominal.schema().fields(), declared.fields());
+    let u235 = chain.get("U235").unwrap();
+    assert_eq!(nominal.num_rows(), u235.yield_data.len());
+
+    // And yani carries the evaluation on the yields it solves with.
+    let (back, _) = yani::parse_chain_parts(
+        &dir.join("decay"),
+        None,
+        Some(&dir.join("fission_yields")),
+        None,
+    )
+    .expect("yani reads it");
+    let set = back["U235"]
+        .fission_yields
+        .as_ref()
+        .expect("U235 has yields");
+    assert_eq!(set.yields.len(), tape.energies.len());
+    for (i, y) in set.yields.iter().enumerate() {
+        assert_eq!(y.energy, tape.energies[i]);
+        let nominal = &u235.yield_data[&format!("{}", y.energy)];
+        let products: Vec<(String, f64)> = nominal.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        assert_eq!(y.products, products, "nominal yields at {} eV", y.energy);
+        for (evaluated, tape_set) in [
+            (&y.independent, &tape.independent[i]),
+            (&y.cumulative, &tape.cumulative[i]),
+        ] {
+            let evaluated = evaluated.as_ref().expect("both kinds carried");
+            let names: Vec<&str> = tape_set.iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(evaluated.products, names);
+            let sigmas: Vec<Option<f64>> = tape_set.iter().map(|p| Some(p.yield_.1)).collect();
+            assert_eq!(evaluated.uncertainties, sigmas);
+        }
+    }
+    let independent = set.yields[0].independent.as_ref().unwrap();
+    assert_eq!(independent.products[0], zeroed);
+    assert_eq!(
+        independent.uncertainties[0],
+        Some(0.0),
+        "{zeroed}: yani read the tape's 0.0 DY as something else"
+    );
+
+    // Converting a chain with no evaluations into the same directory removes
+    // the file rather than leaving it to attach to yields it was not read with.
+    for n in &mut chain.nuclides {
+        n.yield_evaluation = None;
+    }
+    yani_convert::write_fission_yields(&chain, &dir.join("fission_yields")).unwrap();
+    assert!(
+        !dir.join("fission_yields/evaluated_yields.arrow").exists(),
+        "a stale evaluated_yields.arrow was left behind"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An evaluation with cumulative yields (MT=459) and no independent ones
+/// (MT=454) is refused on purpose. The chain is built from the independent
+/// yields, so there would be no nominal row for the cumulative ones to belong
+/// to, and a reader refuses such a row. Converting anyway would mean dropping
+/// the MT=459 data without a word. No local library has such a tape.
+#[test]
+fn cumulative_yields_without_independent_ones_are_refused() {
+    let mut blobs = DECAY.to_vec();
+    blobs.push(fixture!("dec-092_U_235.endf.xz"));
+    let decay = materials(&blobs);
+    let fpy = materials(FPY);
+    let mut q_values = endf::chain::q_values(&materials(NEUTRON));
+    q_values
+        .entry("U235".to_string())
+        .or_default()
+        .insert(18, 1.9e8);
+    let mut chain = Chain::from_endf(&decay, &fpy, &q_values, &endf::chain::DEFAULT_REACTIONS)
+        .expect("chain builds");
+
+    // What a tape with no MT=454 section gives: no nominal yields, and an
+    // evaluation that holds only the cumulative ones.
+    let u235 = chain
+        .nuclides
+        .iter_mut()
+        .find(|n| n.name == "U235")
+        .expect("U235 is in the chain");
+    u235.yield_data.clear();
+    let evaluation = u235.yield_evaluation.as_mut().expect("U235 has yields");
+    evaluation.independent.clear();
+    evaluation.independent_interpolation.clear();
+
+    let dir = std::env::temp_dir().join(format!(
+        "yani-convert-cumulative-only-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let err = yani_convert::write_fission_yields(&chain, &dir)
+        .expect_err("cumulative-only yields must not convert")
+        .to_string();
+    assert!(
+        err.starts_with("U235: cumulative yields at") && err.contains("have no independent yields"),
+        "got: {err}"
+    );
+    // Refused before anything is written, so no nominal file is left behind
+    // to read as a library without evaluated yields.
+    assert!(
+        !dir.join("fission_yields.arrow").exists(),
+        "a refused conversion left fission_yields.arrow on disk"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -561,7 +561,13 @@ fn activation_products(material: &Material, mt: i32, xs: &Tabulated1D) -> Vec<Pr
         let Some(section) = section else { continue };
 
         for level in &section.levels {
-            let (z, a) = (level.izap / 1000, level.izap % 1000);
+            // A subsection naming no single nuclide, fission or a product the
+            // evaluation leaves unstated, has no product to attach it to.
+            let zap = crate::radionuclide_production::product_zap(Some(mf8), mf, level);
+            let (z, a) = (zap / 1000, zap % 1000);
+            if z <= 0 || a <= 0 {
+                continue;
+            }
             let symbol = ATOMIC_SYMBOL.get(z as usize).copied().unwrap_or("");
             // The excited state, not the isomeric state: see
             // `crate::radionuclide_production` for the difference.
