@@ -270,10 +270,11 @@ pub struct Info {
     /// Per (nuclide, reaction kind), where a channel derived through an NC
     /// block names two reactions with opposite signs, each with a variance
     /// block of its own, and the evaluation states no covariance between
-    /// them, those pairs by kind. The absent block is read as zero, as ENDF
-    /// states, and with opposing signs that reading sets the sigma: FENDL-3.2d
-    /// and TENDL-2017 H2 `(n,2n)` = `σ_1 - σ_2 - σ_102` folds to about 22% at
-    /// 14 MeV and thousands of percent near threshold. The tape's literal
+    /// them, those pairs by kind. The absent block is read as zero, since
+    /// ENDF-102 33.3.2 a.1 lets a tape leave a zero covariance unstated, and
+    /// with opposing signs that reading sets the sigma: FENDL-3.2d and
+    /// TENDL-2017 H2 `(n,2n)` = `σ_1 - σ_2 - σ_102` folds to about 22% at 14
+    /// MeV and thousands of percent near threshold. The tape's literal
     /// statement, so reported rather than altered, and counted as a gap.
     pub derived_opposing_uncorrelated: BTreeMap<(String, String), BTreeSet<(String, String)>>,
     /// Mean of the per-channel shares in [`Info::rate_fraction_covered`],

@@ -5230,7 +5230,8 @@ class TransmutationResults:
           derived through an NC block whose terms name two reactions with
           opposite signs, each with a variance of its own, and no covariance
           between them: the ``[a, b]`` pairs. The absent block is read as zero,
-          as ENDF states, and with opposing signs that reading sets the sigma.
+          since ENDF-102 33.3.2 a.1 lets a tape leave a zero covariance
+          unstated, and with opposing signs that reading sets the sigma.
           FENDL-3.2d and TENDL-2017 H2 ``(n,2n)`` is ``σ_1 - σ_2 - σ_102`` and
           folds to about 22% at 14 MeV and thousands of percent near
           threshold, the tape's literal statement. Counted in ``has_gaps``.
