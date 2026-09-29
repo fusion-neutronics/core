@@ -200,7 +200,8 @@ fn optional_list(list: Option<&ListArray>, i: usize) -> Result<Option<Vec<f64>>,
 /// also states a covariance is refused, as there is nothing for it to cover.
 /// One with data on one side only is malformed, and [`source_distribution`]
 /// refuses it. So is a per-line sigma list that does not pair with the
-/// lines, or a covariance given in part.
+/// lines, a covariance given in part, or a continuum covariance whose
+/// energies and values do not pair.
 fn read_sources(batch: &RecordBatch) -> Result<Vec<(String, DecaySource)>, Box<dyn Error>> {
     let nuclides = col::<StringArray>(batch, "nuclide")?;
     let particles = col::<StringArray>(batch, "particle")?;
@@ -278,6 +279,19 @@ fn read_sources(batch: &RecordBatch) -> Result<Vec<(String, DecaySource)>, Box<d
             optional_list(covariance_values, i)?,
         ) {
             (None, None, None) if int(covariance_ls, i).is_none() => None,
+            // A continuum's covariance is (Ek, Fk) pairs, so its two lists
+            // pair one to one as the tape's NE says.
+            (Some(_), Some(energies), Some(values))
+                if lines.is_none() && energies.len() != values.len() =>
+            {
+                return Err(format!(
+                    "sources.arrow: a tabular row of {nuclide} has {} covariance_energies and \
+                     {} covariance_values, which must pair one to one",
+                    energies.len(),
+                    values.len()
+                )
+                .into())
+            }
             (Some(lb), Some(energies), Some(values)) => Some(SourceCovariance {
                 ls: int(covariance_ls, i),
                 lb,
@@ -2225,6 +2239,88 @@ mod tests {
         assert!(write("mixture", None).contains("expected 'discrete' or 'tabular'"));
     }
 
+    /// A `sources.arrow` written before the radiation, normalisation and
+    /// uncertainty columns holds only the first six, and still loads through
+    /// both readers with every one of them unstated: `None`, not zero.
+    #[test]
+    fn a_sources_file_predating_the_uncertainty_columns_states_none() {
+        use arrow_array::builder::{Float64Builder, Int32Builder, ListBuilder, StringBuilder};
+        use arrow_array::{ArrayRef, RecordBatch};
+        use std::sync::Arc;
+
+        let dir =
+            std::env::temp_dir().join(format!("yani-sources-predating-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut chain = std::collections::HashMap::new();
+        chain.insert(
+            "Co60".to_string(),
+            crate::ChainNuclide {
+                name: "Co60".to_string(),
+                half_life: Some(1.66e8),
+                half_life_uncertainty: None,
+                decay_energy: 2.6e6,
+                decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
+                reactions: Vec::new(),
+                decays: Vec::new(),
+                fission_yields: None,
+                sources: Vec::new(),
+            },
+        );
+        super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+        super::export_chain_arrow(&chain, dir.join("flat"), Some("test")).expect("export succeeds");
+
+        let mut nuclide = StringBuilder::new();
+        let mut particle = StringBuilder::new();
+        let mut kind = StringBuilder::new();
+        let mut energies = ListBuilder::new(Float64Builder::new());
+        let mut intensities = ListBuilder::new(Float64Builder::new());
+        let mut interpolation = Int32Builder::new();
+        for (k, e, p, code) in [
+            ("discrete", [1.173e6, 1.332e6], [4.2e-9, 4.2e-9], None),
+            ("tabular", [1.0e4, 1.0e6], [1.0e-15, 0.0], Some(2)),
+        ] {
+            nuclide.append_value("Co60");
+            particle.append_value("photon");
+            kind.append_value(k);
+            energies.values().append_slice(&e);
+            energies.append(true);
+            intensities.values().append_slice(&p);
+            intensities.append(true);
+            interpolation.append_option(code);
+        }
+        let declared = super::section_schema("decay/sources.arrow");
+        let schema = Arc::new(arrow_schema::Schema::new(declared.fields()[..6].to_vec()));
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(nuclide.finish()),
+            Arc::new(particle.finish()),
+            Arc::new(kind.finish()),
+            Arc::new(energies.finish()),
+            Arc::new(intensities.finish()),
+            Arc::new(interpolation.finish()),
+        ];
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        super::write_arrow_file(
+            &dir.join("decay/sources.arrow"),
+            schema.clone(),
+            batch.clone(),
+        )
+        .unwrap();
+        super::write_arrow_file(&dir.join("flat/sources.arrow"), schema, batch).unwrap();
+
+        let parts = parse_chain_parts(&dir.join("decay"), None, None, None).map(|(c, _)| c);
+        let flat = super::parse_chain_arrow(dir.join("flat"));
+        let _ = std::fs::remove_dir_all(&dir);
+        for chain in [parts.unwrap(), flat.unwrap()] {
+            let sources = &chain["Co60"].sources;
+            assert_eq!(sources.len(), 2, "both rows load");
+            for source in sources {
+                assert_eq!(source.radiation, None);
+                assert!(source.uncertainty.is_none(), "{source:?}");
+            }
+        }
+    }
+
     /// A per-line sigma list that does not pair with the lines, or one on a
     /// continuum, is refused rather than read against the wrong line.
     #[test]
@@ -2349,6 +2445,68 @@ mod tests {
         }))
         .unwrap_err();
         assert!(message.contains("nothing to cover"), "{message}");
+    }
+
+    /// A continuum covariance is (Ek, Fk) pairs, so one whose two lists
+    /// differ in length is refused rather than read against the wrong Ek.
+    #[test]
+    fn a_continuum_covariance_that_does_not_pair_is_refused() {
+        use crate::chain::{
+            ChainNuclide, DecaySource, DecaySourceDistribution, DecaySourceUncertainty,
+            SourceCovariance,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let read = |values: Vec<f64>| {
+            let mut chain = HashMap::new();
+            chain.insert(
+                "Cf252".to_string(),
+                ChainNuclide {
+                    name: "Cf252".to_string(),
+                    half_life: Some(8.35e7),
+                    half_life_uncertainty: None,
+                    decay_energy: 6.2e6,
+                    decay_energy_uncertainty: None,
+                    decay_energy_components: Default::default(),
+                    reactions: Vec::new(),
+                    decays: Vec::new(),
+                    fission_yields: None,
+                    sources: vec![DecaySource {
+                        particle: "photon".to_string(),
+                        radiation: Some("gamma".to_string()),
+                        distribution: DecaySourceDistribution::Tabular {
+                            energies: vec![1.0e4, 1.0e6],
+                            intensities: vec![1.0e-9, 0.0],
+                            interpolation: Some(crate::Interpolation::LinearLinear),
+                        },
+                        uncertainty: Some(Arc::new(DecaySourceUncertainty {
+                            normalization: Some(1.0),
+                            covariance: Some(SourceCovariance {
+                                ls: None,
+                                lb: 2,
+                                energies: vec![1.0e4, 1.0e6],
+                                values,
+                            }),
+                            ..Default::default()
+                        })),
+                    }],
+                },
+            );
+            let dir = std::env::temp_dir().join(format!(
+                "yani-continuum-covariance-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+            let result = parse_chain_parts(&dir.join("decay"), None, None, None);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.map(|_| ()).map_err(|e| e.to_string())
+        };
+        assert_eq!(read(vec![0.01, 0.0]), Ok(()));
+        let message = read(vec![0.01]).unwrap_err();
+        assert!(message.contains("must pair one to one"), "{message}");
     }
 
     /// A flat `sources.arrow` from an export_chain_arrow that wrote no type
