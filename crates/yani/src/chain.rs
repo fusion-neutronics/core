@@ -225,6 +225,37 @@ pub struct FissionYield {
     pub energy: f64,
     /// Product nuclide names and their yields (fractional per fission)
     pub products: Vec<(String, f64)>,
+    /// The evaluation's independent yields (MT=454) at this energy, exactly
+    /// as the tape gives them. `products` is derived from these and is what
+    /// the solver reads. `None` where the chain carries no evaluated yields.
+    pub independent: Option<EvaluatedYields>,
+    /// The evaluation's cumulative yields (MT=459) at this energy. Carried,
+    /// not solved with: a cumulative yield already includes the decay the
+    /// solver models, so using it as a source would count that decay twice.
+    pub cumulative: Option<EvaluatedYields>,
+}
+
+/// One set of evaluated fission product yields, as the tape gives them.
+///
+/// Not the same list as [`FissionYield::products`]. That one names chain
+/// nuclides, so a product with no decay data is mapped onto a stand-in and
+/// products that land on the same name are summed. These are the tape's own
+/// products in tape order, and each `uncertainties` entry is the DY of the
+/// `yields` entry beside it. A summed yield has no stated DY, since it would
+/// need the correlation of its parts and no evaluation publishes one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvaluatedYields {
+    /// Product names from the tape's ZAFP and FPS, e.g. `"Xe135_m1"`.
+    pub products: Vec<String>,
+    /// The tape's Y, per fission.
+    pub yields: Vec<f64>,
+    /// The tape's DY, one per product. An evaluator's 0.0 is kept as
+    /// `Some(0.0)`, and it and `None` both mean "not stated", never an exact
+    /// yield.
+    pub uncertainties: Vec<Option<f64>>,
+    /// The ENDF interpolation law from the next lower energy to this one.
+    /// `None` at the lowest energy, where the tape states no law.
+    pub interpolation: Option<i32>,
 }
 
 /// Complete fission yield data for a nuclide (may have multiple energies).
@@ -1273,6 +1304,8 @@ mod tests {
                     ("Cs137".into(), 0.062),
                     ("Sr90".into(), 0.058),
                 ],
+                independent: None,
+                cumulative: None,
             }],
         }));
         chain.insert("U235".into(), u235);
@@ -1860,6 +1893,8 @@ mod tests {
         FissionYield {
             energy,
             products: vec![],
+            independent: None,
+            cumulative: None,
         }
     }
 

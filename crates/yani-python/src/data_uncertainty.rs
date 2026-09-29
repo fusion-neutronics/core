@@ -248,11 +248,26 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
 
     // The one number that says whether the sigmas above are a spread over the
     // answer or over a corner of it. `None` for a decay-only schedule, which
-    // drove no production and so has no share to report.
+    // drove no production and so has no share to report, and on a shielded or
+    // transport run, where the share of the production driven is not computed.
     d.set_item(
         "rate_fraction_covered_total",
         info.rate_fraction_covered_total,
     )?;
+
+    // Keyed like `rate_fraction_covered`. Each entry is a channel whose sigma
+    // is overstated, so it is a warning and not a detail: `has_gaps` counts it.
+    let above = PyDict::new(py);
+    for ((nuclide, kind), ratio) in &info.partials_above_rate {
+        above.set_item(format!("{nuclide} {kind}"), ratio)?;
+    }
+    d.set_item("partials_above_rate", above)?;
+    // The same inconsistency the other way, a sigma understated.
+    let below = PyDict::new(py);
+    for ((nuclide, kind), ratio) in &info.partials_below_rate {
+        below.set_item(format!("{nuclide} {kind}"), ratio)?;
+    }
+    d.set_item("partials_below_rate", below)?;
 
     d.set_item("matrices_clipped", info.matrices_clipped)?;
     d.set_item("worst_relative_clip", info.worst_relative_clip)?;

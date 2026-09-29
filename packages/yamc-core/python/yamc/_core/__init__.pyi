@@ -5176,16 +5176,45 @@ class TransmutationResults:
         
         - ``perturbed`` / ``no_covariance_data``: which nuclides had usable
           MF=33 covariance and which had none.
-        - ``rate_fraction_covered_total``: the share of the production this run
-          drove that a covariance actually spans, weighted by rate and by parent
-          density. Read this before any sigma here. It is a different and much
-          sharper question than how many nuclides carry MF=33: an evaluation can
-          state covariance for every isotope in the material and none for the
+        - ``rate_fraction_covered_total``: the per-channel shares below,
+          averaged with each channel weighted by the production it drove (the
+          rate this run used times parent density): the share of the
+          production driven from energies where a covariance states a nonzero
+          variance. ``None`` on a decay-only schedule, and on a self-shielded
+          or transport run, where the shares are of the dilute rate and the
+          covered share of the production actually driven is not computed.
+          Read this before any sigma here. It is a different and much sharper
+          question than how many nuclides carry MF=33: an evaluation can state
+          covariance for every isotope in the material and none for the
           channel making the product of interest, and the count then reads as
           full coverage while the ensemble perturbs almost nothing.
         - ``rate_fraction_covered``: per nuclide and channel, the share of the
-          reaction rate the covariance grid actually spans. Below one means part
-          of the rate carries no stated uncertainty and the sigma is diluted.
+          dilute reaction rate from energies where the evaluation states a
+          nonzero variance for it. Below one means part of the dilute rate
+          carries no stated uncertainty and dilutes the sigma; on a shielded
+          or tallied run the dilution applied differs from this share. An
+          interval the covariance grid spans with a variance of zero counts as
+          uncovered: ENDF/B-VIII.1 W186 ``(n,gamma)`` states zero from 1e-5 eV
+          to 10 keV, where nearly all of its capture rate is.
+        - ``partials_above_rate``: per nuclide and channel, where the partial
+          rates the covariance was weighted with, zero variance intervals
+          included, add up to more than the rate it was divided by, their
+          ratio to it. Each entry is a channel whose sigma is overstated. Three
+          known causes: a self-shielded rate against dilute partials, which
+          lists most channels a relative block names, many a few parts in 1e7
+          over, until the fold weights with shielded partials (#166 item 4); a
+          tallied rate on a transport run, computed apart from the partials
+          the fold takes from the tally's flux; and the ``1/E`` within-group
+          weight with a covariance edge inside a group. The share in
+          ``rate_fraction_covered`` is measured against the dilute rate, so it
+          is unaffected.
+        - ``partials_below_rate``: keyed the same way, where a covariance grid
+          spans the whole flux range and its partial rates add up to less than
+          the rate, their ratio to it: a channel whose sigma is understated.
+          The ``1/E`` weight gives one for a reaction falling with energy when
+          a covariance edge cuts a group. A grid that stops short of the flux
+          range cannot be checked from below, since rate from outside it
+          rightly leaves its partials short.
         - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
           covariance blocks that were present but not consumed.
         - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
@@ -5883,11 +5912,15 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         taken as ground because the decay data has no isomer for its product,
         matched only by the looser energy pass, or matched by energy while its
         level index pointed at another isomer; every excited level that ends
-        up at ground is listed), and ``partial_sum_mismatches``
+        up at ground is listed), ``partial_sum_mismatches``
         (one line per reaction whose MF=10 partial cross sections do not sum to
         its MF=3 total, or whose MF=9 yields do not sum to one, within two
-        percent below 20 MeV). The MF=40 production covariance, written as the
-        tape gives it to ``branching/branching_covariance.arrow``, is counted
+        percent below 20 MeV), and ``skipped_states`` (one line per production
+        state that names no single product nuclide, and so gives no row:
+        fission, an IZAP of zero that no single MF=8 subsection resolves, or
+        any other ZAP whose Z or A is not positive). The MF=40 production
+        covariance, written as the tape gives it to
+        ``branching/branching_covariance.arrow``, is counted
         by ``mf40_sections`` (sections read, whatever the MT),
         ``mf40_blocks`` (blocks written), ``mf40_blocks_by_lb`` (the NI blocks
         by layout), ``mf40_nc_blocks``, ``mf40_unmatched_states`` (one line
@@ -6295,6 +6328,9 @@ def radionuclide_production(neutron_files: typing.Sequence[builtins.str]) -> lis
         ``product`` is the product's **ground-state** name even for an excited
         state, because naming the isomer needs decay data to say which
         isomeric ordinal a level is; pair it with ``excitation_energy_eV``.
+        It is ``None`` for a state naming no single nuclide: fission, a
+        subsection whose IZAP is zero with no single MF=8 subsection to name
+        it, or any other ZAP whose Z or A is not positive.
         ``level_index`` is the evaluation's own LFS and is not comparable
         between libraries: Ir190's 377 keV isomer is level 3 in ENDF/B-VIII.1
         and level 37 in JEFF-4.0. ``source`` is ``"cross_section"`` for MF=10

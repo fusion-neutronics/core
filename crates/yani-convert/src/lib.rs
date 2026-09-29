@@ -16,9 +16,8 @@
 //!   at all: it would have to expand every alias into a full copy of its
 //!   parent's yields and lose the relationship.
 //! * `yani::export_chain_parts` exists to round-trip a chain yani already
-//!   holds. That is a different job from converting an evaluation, and reusing
-//!   it would have meant widening the in-memory type to carry fields the solver
-//!   never reads.
+//!   holds. That is a different job from converting an evaluation, and the
+//!   fields above are exactly the ones such a round trip has no source for.
 //!
 //! Decay source spectra are the one thing [`endf::Chain`] does not carry, so
 //! they are read from the same decay evaluations separately and joined by
@@ -33,7 +32,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow_array::builder::{Float64Builder, ListBuilder, StringBuilder};
+use arrow_array::builder::{Float64Builder, Int32Builder, ListBuilder, StringBuilder};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::writer::{FileWriter, IpcWriteOptions};
 use arrow_ipc::CompressionType;
@@ -175,6 +174,25 @@ pub(crate) fn opt_list_of(values: &[Option<Vec<f64>>]) -> ArrayRef {
             }
             None => b.append_null(),
         }
+    }
+    Arc::new(b.finish())
+}
+
+pub(crate) fn string_lists(values: &[Vec<String>]) -> ArrayRef {
+    let mut b = ListBuilder::new(StringBuilder::new());
+    for row in values {
+        for v in row {
+            b.values().append_value(v);
+        }
+        b.append(true);
+    }
+    Arc::new(b.finish())
+}
+
+pub(crate) fn opt_ints(values: &[Option<i32>]) -> ArrayRef {
+    let mut b = Int32Builder::new();
+    for v in values {
+        b.append_option(*v);
     }
     Arc::new(b.finish())
 }
@@ -392,27 +410,36 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
         }
     }
 
-    let mut product_lists = ListBuilder::new(StringBuilder::new());
-    for row in &products {
-        for p in row {
-            product_lists.values().append_value(p);
-        }
-        product_lists.append(true);
-    }
+    // Built before anything is written, since it can refuse the chain: a
+    // refusal after fission_yields.arrow is on disk would leave a nominal file
+    // with nothing beside it, which reads as a library published before the
+    // evaluated yields existed.
+    let evaluated = evaluated_yields_columns(chain)?;
     write_section(
         &dir.join("fission_yields.arrow"),
         "fission_yields/fission_yields.arrow",
         vec![
             strings(&nuc),
             floats(&energy),
-            Arc::new(product_lists.finish()),
+            string_lists(&products),
             list_of(&yields),
         ],
     )?;
-
-    // Written only when there is something to say, matching the Python
-    // converter: a library with no borrowed yields leaves no aliases file.
-    if !alias_nuc.is_empty() {
+    // Both optional files are written only when there is something to say,
+    // matching the Python converter. When there is not, one left by an earlier
+    // run into the same directory is removed: a reader loads whatever is
+    // present and would attach it to yields it was not derived from.
+    match evaluated {
+        Some(columns) => write_section(
+            &dir.join("evaluated_yields.arrow"),
+            "fission_yields/evaluated_yields.arrow",
+            columns,
+        )?,
+        None => remove_stale(&dir.join("evaluated_yields.arrow"))?,
+    }
+    if alias_nuc.is_empty() {
+        remove_stale(&dir.join("aliases.arrow"))?;
+    } else {
         write_section(
             &dir.join("aliases.arrow"),
             "fission_yields/aliases.arrow",
@@ -420,6 +447,100 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
         )?;
     }
     Ok(())
+}
+
+/// Remove an optional file this run has nothing to write into, if an earlier
+/// run left one.
+fn remove_stale(path: &Path) -> Result<(), Box<dyn Error>> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("removing stale {}: {e}", path.display()).into())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The columns of `fission_yields/evaluated_yields.arrow`: every yield
+/// evaluation exactly as its tape gives it, both MT=454 and MT=459, with DY.
+/// `None` when no nuclide has an evaluation, so no file is written.
+///
+/// Nothing here is derived. Where `fission_yields.arrow` maps products onto
+/// the decay library and sums the ones that meet, this keeps the tape's
+/// products, values and uncertainties as they are, so an evaluator's 0.0 DY is
+/// written as 0.0. Only owners get rows: a nuclide that borrows its yields is
+/// in `aliases.arrow`, as it is for the nominal yields.
+///
+/// Every row is at an energy the owner has a nominal row for, since a reader
+/// attaches it there. An evaluation that breaks that (cumulative yields with
+/// no independent ones beside them) is refused rather than written as a file
+/// no reader could load.
+fn evaluated_yields_columns(chain: &Chain) -> Result<Option<Vec<ArrayRef>>, Box<dyn Error>> {
+    let mut nuc = Vec::new();
+    let mut energy = Vec::new();
+    let mut kind = Vec::new();
+    let mut interpolation = Vec::new();
+    let mut products: Vec<Vec<String>> = Vec::new();
+    let mut yields: Vec<Vec<f64>> = Vec::new();
+    let mut sigmas: Vec<Vec<f64>> = Vec::new();
+
+    for n in &chain.nuclides {
+        if n.borrowed_yields_from.is_some() {
+            continue;
+        }
+        let Some(evaluation) = &n.yield_evaluation else {
+            continue;
+        };
+        let nominal = n.yield_energies();
+        for (label, sets, laws) in [
+            (
+                "independent",
+                &evaluation.independent,
+                &evaluation.independent_interpolation,
+            ),
+            (
+                "cumulative",
+                &evaluation.cumulative,
+                &evaluation.cumulative_interpolation,
+            ),
+        ] {
+            for ((e, set), law) in evaluation.energies.iter().zip(sets).zip(laws) {
+                if !nominal.contains(e) {
+                    return Err(format!(
+                        "{}: {label} yields at {e} eV have no independent yields at \
+                         that energy for the chain to be built from. The fission \
+                         yield tape for {} gives MT={} at an energy the chain has no \
+                         MT=454 yields for; leave that tape out of the fission yield \
+                         inputs, or extend evaluated_yields.arrow so rows need not sit \
+                         on a nominal one",
+                        n.name,
+                        n.name,
+                        if label == "independent" { 454 } else { 459 }
+                    )
+                    .into());
+                }
+                nuc.push(n.name.clone());
+                energy.push(*e);
+                kind.push(label.to_string());
+                interpolation.push(law.map(i32::try_from).transpose()?);
+                products.push(set.iter().map(|p| p.name.clone()).collect());
+                yields.push(set.iter().map(|p| p.yield_.0).collect());
+                sigmas.push(set.iter().map(|p| p.yield_.1).collect());
+            }
+        }
+    }
+
+    if nuc.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(vec![
+        strings(&nuc),
+        floats(&energy),
+        strings(&kind),
+        opt_ints(&interpolation),
+        string_lists(&products),
+        list_of(&yields),
+        list_of(&sigmas),
+    ]))
 }
 
 /// Provenance and the chain manifest, matching what the Python converter

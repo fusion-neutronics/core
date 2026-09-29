@@ -145,6 +145,7 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 | eight more `dec-*` | The decay evaluations that close the chain fixture |
 | `dec-049_In_116m2` | MF8 MT=457 decay data: an isomeric transition down to m1 |
 | `dec-072_Hf_177m1` | MF8 MT=457 decay data: an isomeric transition whose average energies exceed its Q |
+| `dec-092_U_235` | MF8 MT=457 decay data: a fissioning parent, so the `synthetic-nfy.endf` yields reach a chain |
 | `Li6.ace` | An ACE Type 1 table; AND in all three shapes, DLW laws 3, 33 and 44, 15 reactions with photon production |
 | `synthetic-urr.ace` | The unresolved resonance block, which no small real table has |
 | `synthetic-laws.ace` | DLW laws 2, 4, 7, 9, 11, 61 and 66 |

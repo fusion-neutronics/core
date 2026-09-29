@@ -354,6 +354,17 @@ pub struct BranchingStats {
     /// partials sum to 95% of MF=3 at 14 MeV and 84% at 20 MeV, is the case
     /// that prompted the check.
     pub partial_sum_mismatches: Vec<String>,
+    /// The production states of a transmutation reaction that name no single
+    /// product nuclide, one line each, and so give no row. Fission (IZAP =
+    /// -1) is one kind; another is a subsection with IZAP = 0 whose level no
+    /// single MF=8 subsection names a product for either, where the file does
+    /// not say which nuclide it is; the last is any other ZAP whose Z or A is not
+    /// positive, reported with its value. None reaches this list from the six
+    /// libraries yani builds from: their fission subsections are all MT=18,
+    /// which is no transmutation reaction and is passed over before this, and
+    /// the one evaluation writing IZAP = 0 elsewhere, FENDL-3.2d's Al27, is
+    /// named by its MF=8.
+    pub skipped_states: Vec<String>,
     /// MF=40 sections read, one per evaluation and MT, whatever the MT.
     pub mf40_sections: usize,
     /// Covariance blocks written, all of them and the NI ones by `lb`.
@@ -661,8 +672,19 @@ impl BranchingExtractor {
                 }
             }
             for s in states {
-                let z = s.zap / 1000;
-                let a = s.zap % 1000;
+                let Some((z, a)) = s.nuclide() else {
+                    let why = match s.zap {
+                        -1 => "fission, which leaves no single product".to_string(),
+                        0 => "no product named: IZAP = 0 in MF=9/10, and MF=8 has no single \
+                              subsection for the level naming one (none, several, or ZAP = 0)"
+                            .to_string(),
+                        zap => format!("ZAP {zap} names no single nuclide"),
+                    };
+                    stats
+                        .skipped_states
+                        .push(format!("{parent} MT{mt} level {}: {why}", s.lfs));
+                    continue;
+                };
                 let resolved = endf::radionuclide_production::resolve_level(
                     z,
                     a,
@@ -940,6 +962,7 @@ impl BranchingExtractor {
         self.stats
             .partial_sum_mismatches
             .extend(stats.partial_sum_mismatches);
+        self.stats.skipped_states.extend(stats.skipped_states);
         self.stats.mf40_sections += stats.mf40_sections;
         self.stats.mf40_blocks += stats.mf40_blocks;
         for (lb, n) in stats.mf40_blocks_by_lb {
