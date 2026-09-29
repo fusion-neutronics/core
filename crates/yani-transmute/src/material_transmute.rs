@@ -1365,7 +1365,12 @@ fn run_replicas(
         Default::default()
     };
 
-    let mut info = Info::from_fold(&coverage, &clipping, shielding.is_none() && !transport);
+    // The shares split each group's rate by energy width, which is the
+    // collapse's own split only under the flat within-group weight.
+    let dilute = shielding.is_none()
+        && !transport
+        && crate::multigroup::within_group_weight() == crate::multigroup::Weighting::FlatInEnergy;
+    let mut info = Info::from_fold(&coverage, &clipping, dilute)?;
     if half_life.is_none() {
         info.not_perturbed.insert(0, "half-life".to_string());
     }

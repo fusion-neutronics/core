@@ -138,13 +138,15 @@ pub struct Coverage {
     /// Both integrals are the fold's own, the dilute cross section against the
     /// flux the partial rates are weighted with, and the numerator adds a
     /// subset of the denominator's terms in the same order. So the share lies
-    /// in [0, 1] without a clamp, and it does not depend on how the rate the
-    /// covariance is divided by was computed. It describes the dilute rate
-    /// only: on a self-shielded or a tallied rate, the share of THAT rate
-    /// coming from covered energies is not computed (the fold has only the
-    /// dilute cross section to split a rate by energy with), and the dilution
-    /// the fold then applies differs from this share; where the partials add
-    /// up to more than that rate, [`Coverage::partials_above_rate`] lists it.
+    /// in [0, 1] without a clamp as long as no cross section or flux in it is
+    /// negative, which [`Coverage::rate_fraction_total`] checks, and it does
+    /// not depend on how the rate the covariance is divided by was computed. It
+    /// describes the dilute rate only: on a self-shielded or a tallied rate,
+    /// the share of THAT rate coming from covered energies is not computed (the
+    /// fold has only the dilute cross section to split a rate by energy with),
+    /// and the dilution the fold then applies differs from this share; where
+    /// the partials add up to more than that rate,
+    /// [`Coverage::partials_above_rate`] lists it.
     /// On a dilute collapse under the flat-within-group weight, the denominator
     /// is that rate to a few parts in 1e15. Under the `1/E` weight it is only
     /// where no covariance edge cuts a group, for the reason given on
@@ -211,13 +213,20 @@ pub struct Coverage {
     /// what it actually made.
     ///
     /// Each channel's production is the rate this run used, which may be
-    /// self-shielded or tallied, while its share is of the dilute rate. On a
-    /// dilute collapse the covered sum is exactly the production from energies
-    /// where a covariance states a nonzero variance. Otherwise it is that
-    /// production only if the rate kept the dilute rate's distribution in
-    /// energy, which shielding does not: it depresses the resonance range,
-    /// where capture blocks often state zero. The covered share of a shielded
-    /// or tallied production is not computed.
+    /// self-shielded or tallied, while its share is of the dilute rate of the
+    /// reaction the fold weights it with. The covered sum is exactly the
+    /// production from energies where a covariance states a nonzero variance
+    /// only where every channel's rate is that dilute rate and the flat
+    /// within-group weight is in force (under `1/E` the share itself is off
+    /// where an edge cuts a group, see [`Coverage::rate_fraction_covered`]).
+    /// Shielding breaks that: it depresses the resonance range, where capture
+    /// blocks often state zero. So does the branching fold on the spectrum
+    /// path, which replaces the `(n,n')` rate of a nuclide with a metastable by
+    /// the sum of its MF=10 partials to the metastables, while the fold still
+    /// weights and shares that channel by MT 4; with a relative MT 4 block the
+    /// channel lands in [`Coverage::partials_above_rate`]. The covered share of
+    /// such a production is not computed, and the run reports no total
+    /// (`Info::rate_fraction_covered_total`).
     ///
     /// Kept as two sums rather than as their ratio because sums merge and a
     /// ratio does not: the fold runs per nuclide and a schedule can name more
@@ -232,9 +241,12 @@ impl Coverage {
     /// The production-weighted mean of the per-channel dilute shares, weighted
     /// by the rate this run used and by parent density.
     ///
-    /// On a dilute run that is the share of the production driven from
-    /// energies where a covariance states a nonzero variance. On a
-    /// self-shielded or tallied run it is not, for the reason given on
+    /// On a dilute run under the flat within-group weight whose partials agree
+    /// with every rate, that is the share of the production driven from energies
+    /// where a covariance states a nonzero variance. On a self-shielded or
+    /// tallied run, or where a channel is listed in
+    /// [`Coverage::partials_above_rate`] or [`Coverage::partials_below_rate`],
+    /// or under `1/E`, it is not, for the reasons given on
     /// [`Coverage::covered_production`], and the run reports no total there
     /// rather than this figure (`Info::rate_fraction_covered_total`).
     ///
@@ -251,23 +263,40 @@ impl Coverage {
     /// `None` when this run drove no production at all, which is a decay-only
     /// schedule and has no fraction to report rather than a fraction of zero.
     ///
-    /// In [0, 1] without a clamp: each channel adds `production * share` to
-    /// one sum and `production` to the other, in the same order, with the
-    /// share at most one. Rounding is monotone, so the covered sum cannot pass
-    /// the total. A ratio outside [0, 1] is a bug upstream (a negative rate,
-    /// or a share above one), and clamping it would hide that, so it panics
-    /// in every build rather than return a share that is not one.
-    pub fn rate_fraction_total(&self) -> Option<f64> {
-        (self.total_production > 0.0).then(|| {
-            let fraction = self.covered_production / self.total_production;
-            assert!(
-                (0.0..=1.0).contains(&fraction),
-                "covered production {} against a total of {} is not a share",
-                self.covered_production,
-                self.total_production
-            );
-            fraction
-        })
+    /// In [0, 1] without a clamp as long as no cross section or production is
+    /// negative: each channel adds `production * share` to one sum and
+    /// `production` to the other, in the same order, with the share at most
+    /// one. Rounding is monotone, so the covered sum cannot pass the total.
+    /// Nothing upstream checks the sign, so a per-channel share or a total
+    /// outside [0, 1] (a negative tabulated cross section in a covered cell, a
+    /// negative production) is returned as an error naming it. Clamping would
+    /// hide it, and a panic would abort a run that otherwise fails with a
+    /// message.
+    pub fn rate_fraction_total(&self) -> Result<Option<f64>, String> {
+        let share = 0.0..=1.0;
+        if let Some(((nuclide, kind), s)) = self
+            .rate_fraction_covered
+            .iter()
+            .find(|(_, s)| !share.contains(*s))
+        {
+            return Err(format!(
+                "{nuclide} {kind}: the share of its dilute rate with a stated variance \
+                 came out {s}, outside [0, 1]: a cross section or flux it integrates is \
+                 negative"
+            ));
+        }
+        if self.total_production <= 0.0 {
+            return Ok(None);
+        }
+        let fraction = self.covered_production / self.total_production;
+        if !share.contains(&fraction) {
+            return Err(format!(
+                "covered production {} against a total of {} is not a share: a \
+                 production entering the covariance total is negative",
+                self.covered_production, self.total_production
+            ));
+        }
+        Ok(Some(fraction))
     }
 
     /// Fold one nuclide's report into this one.
@@ -916,7 +945,7 @@ mod coverage_total_tests {
         // Sums merge; the ratio is taken once at the end over both.
         assert_eq!(a.covered_production, 3.0);
         assert_eq!(a.total_production, 8.0);
-        assert_eq!(a.rate_fraction_total(), Some(0.375));
+        assert_eq!(a.rate_fraction_total(), Ok(Some(0.375)));
     }
 
     /// A decay-only schedule drove no production, so there is no share to
@@ -925,7 +954,7 @@ mod coverage_total_tests {
     /// being nothing to cover.
     #[test]
     fn no_production_reports_no_fraction_rather_than_zero() {
-        assert_eq!(Coverage::default().rate_fraction_total(), None);
+        assert_eq!(Coverage::default().rate_fraction_total(), Ok(None));
     }
 
     /// Full coverage reads exactly one with no clamp to make it so: a share of
@@ -938,7 +967,7 @@ mod coverage_total_tests {
             c.total_production += production;
             c.covered_production += production * 1.0;
         }
-        assert_eq!(c.rate_fraction_total(), Some(1.0));
+        assert_eq!(c.rate_fraction_total(), Ok(Some(1.0)));
     }
 }
 
