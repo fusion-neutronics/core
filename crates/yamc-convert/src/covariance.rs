@@ -361,7 +361,8 @@ fn push_section(rows: &mut Rows, mat: i32, mt: i32, mf33: &Mf33) -> Result<(), B
     Ok(())
 }
 
-/// Write `covariance.arrow`, one row per covariance block.
+/// Write `covariance.arrow`, one row per covariance block, plus one per
+/// lumped reaction's component HEAD.
 ///
 /// Returns whether a file was written. An evaluation with no MF=33 at all, or
 /// one whose MF=33 sections hold no blocks and name no lumped reaction, writes

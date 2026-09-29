@@ -141,7 +141,11 @@ def test_skipped_block_counters_are_per_nuclide_dicts():
     )
     info = results.get_data_uncertainty_info(iron.id or 0)
     counters = ("skipped_cross_material", "skipped_other_file", "skipped_nc")
-    maps = ("mirrored_disagree", "derived_opposing_uncorrelated", "lumped_covariance_not_assignable")
+    maps = (
+        "mirrored_disagree",
+        "derived_opposing_uncorrelated",
+        "lumped_covariance_not_assignable",
+    )
     for key in (*counters, *maps):
         assert isinstance(info[key], dict), f"{key} is {type(info[key])}"
         assert all(isinstance(k, str) for k in info[key]), info[key]
