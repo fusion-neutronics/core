@@ -19,13 +19,18 @@ use endf::mf::covariance::{NcSubsection, NiSubsection};
 ///
 /// The discriminant is the `kind` column, and it selects which columns of the
 /// row were populated. NC is a covariance derived from other reactions; NI is
-/// one given explicitly.
+/// one given explicitly. `Lumped` is not a covariance at all but the section
+/// of a lumped reaction's component, see [`CovarianceBlock::lumped_into`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum CovarianceData {
     /// Given explicitly. `lb` selects the layout within it.
     Ni(NiSubsection),
     /// Derived from other reactions. `lty` selects the derivation.
     Nc(NcSubsection),
+    /// Reaction `mt` is a component of the lumped reaction `mtl` and has no
+    /// covariance of its own (ENDF-102 33.2.3). The section's HEAD record is
+    /// all there is, so the block's other fields are 0.
+    Lumped,
 }
 
 /// One covariance block: the covariance of `mt` with `mt1`, on one grid.
@@ -101,6 +106,18 @@ impl CovarianceBlock {
     /// only ones a variance can be read off directly.
     pub fn is_diagonal(&self) -> bool {
         self.is_same_evaluation() && self.partner_mt() == self.mt
+    }
+
+    /// The lumped reaction (MT 851-870) this block's `mt` is a component of,
+    /// when the block is that component's section.
+    ///
+    /// ENDF-102 33.2.3 lists a lumped reaction's components nowhere but on
+    /// their own HEAD records, so the lumped reactions of an evaluation are
+    /// these blocks grouped by what this returns. The lumped reaction's own
+    /// section gives the covariance of the SUM of its components; none of
+    /// them has one of its own.
+    pub fn lumped_into(&self) -> Option<i32> {
+        matches!(self.data, CovarianceData::Lumped).then_some(self.mtl)
     }
 
     /// Whether `mt1` is a cross section of this same evaluation.
@@ -191,6 +208,17 @@ mod tests {
         assert!(!b.is_same_evaluation());
         assert!(!b.is_cross_material());
         assert!(!b.names_cross_section());
+    }
+
+    /// Only a component's own section names the lump it belongs to: a block
+    /// carrying a nonzero `mtl` is still a block.
+    #[test]
+    fn only_a_component_section_is_lumped() {
+        let mut b = block(7443, 0, 0.0);
+        b.mtl = 852;
+        assert_eq!(b.lumped_into(), None);
+        b.data = CovarianceData::Lumped;
+        assert_eq!(b.lumped_into(), Some(852));
     }
 
     /// Diagonal needs the same evaluation as well as the same reaction.

@@ -21,6 +21,12 @@
 //! subsection. That granularity IS the sparse form: most (MT, MT1) pairs have
 //! no cross terms and simply have no row, with nothing thresholded and no small
 //! value dropped.
+//!
+//! The one row that is not a block is a component of a lumped reaction
+//! (ENDF-102 33.2.3): a section with a nonzero MTL and no subsections, whose
+//! HEAD record is the only statement of which reactions the lumped MT 851-870
+//! sums. Dropping it would lose that index, so it is written as a
+//! `kind = "lumped"` row.
 
 use std::error::Error;
 use std::path::Path;
@@ -186,6 +192,28 @@ impl Rows {
         self.push_nc_null();
     }
 
+    /// A lumped reaction's component: its section's HEAD record and nothing
+    /// else, since the format gives a component no subsections.
+    ///
+    /// Only `mt`, `mtl` and `mat` carry anything. The HEAD record has no
+    /// MAT1, MT1, XMF1 or XLFS1, so those are null rather than a zero the
+    /// tape never wrote, and the two indices are 0 because the section has
+    /// no subsection or block for them to count.
+    fn push_lumped(&mut self, mat: i32, mt: i32, mtl: i64) {
+        self.mt.push(mt);
+        self.subsection_idx.push(0);
+        self.block_idx.push(0);
+        self.kind.push("lumped".to_string());
+        self.mat1.push(None);
+        self.mt1.push(None);
+        self.xmf1.push(None);
+        self.xlfs1.push(None);
+        self.mtl.push(Some(narrow(mtl)));
+        self.mat.push(Some(mat));
+        self.push_ni_null();
+        self.push_nc_null();
+    }
+
     /// One NC block: a covariance derived from other reactions.
     fn push_nc(&mut self, s: &NcSubsection) {
         self.push_ni_null();
@@ -275,7 +303,16 @@ fn covariance_mts(material: &Material) -> Vec<i32> {
 /// is a running index over both rather than one per kind. Two subsections of
 /// one section may name the same (MAT1, MT1), which is why the position is
 /// carried explicitly instead of being recovered from the keys.
+///
+/// A section with a nonzero MTL and no subsections is a lumped reaction's
+/// component, and its one row is its HEAD. One with subsections is written
+/// block by block whatever its MTL, which every row then carries, so no
+/// section's MTL is lost either way.
 fn push_section(rows: &mut Rows, mat: i32, mt: i32, mf33: &Mf33) {
+    if mf33.mtl != 0 && mf33.subsections.is_empty() {
+        rows.push_lumped(mat, mt, mf33.mtl);
+        return;
+    }
     for (subsection_idx, sub) in mf33.subsections.iter().enumerate() {
         let mut block_idx = 0;
         for block in &sub.nc_subsections {
@@ -316,7 +353,8 @@ fn push_section(rows: &mut Rows, mat: i32, mt: i32, mf33: &Mf33) {
 /// Write `covariance.arrow`, one row per covariance block.
 ///
 /// Returns whether a file was written. An evaluation with no MF=33 at all, or
-/// one whose MF=33 sections hold no blocks, writes nothing: absence is how this
+/// one whose MF=33 sections hold no blocks and name no lumped reaction, writes
+/// nothing: absence is how this
 /// section says "no covariance", and the reader treats a missing file that way
 /// rather than as an error. No `.absent` marker is written here, since that is
 /// a download-cache record of a settled 404 rather than anything a conversion

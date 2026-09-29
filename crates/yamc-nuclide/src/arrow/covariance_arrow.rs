@@ -99,10 +99,11 @@ pub fn read_covariance(
         let data = match kind.as_str() {
             "ni" => CovarianceData::Ni(ni_from_row(&batch, row)),
             "nc" => CovarianceData::Nc(nc_from_row(&batch, row)),
+            "lumped" => CovarianceData::Lumped,
             other => {
                 return Err(format!(
                     "{nuclide} covariance.arrow row {row}: unknown kind {other:?}; \
-                     expected \"ni\" or \"nc\""
+                     expected \"ni\", \"nc\" or \"lumped\""
                 )
                 .into())
             }

@@ -30,6 +30,10 @@ const BE9_ENDF: &[u8] = include_bytes!("../../endf/fixtures/n-004_Be_009_jeff-4.
 /// and 102. Its cross-reaction blocks name its own MAT (9346), several of them
 /// from the higher MT's section with MT1 below MT.
 const NP237_ENDF: &[u8] = include_bytes!("../../endf/fixtures/n-093_Np_237_mf33.endf.xz");
+/// ENDF/B-VIII.1 Li7's MF=1 MT=451 and every MF=33 section. It lumps
+/// reactions into MT 851 to 859, two of them (852 = MT 51, 854 = MT 56) of a
+/// single component, and each component's section is its HEAD alone.
+const LI7_ENDF: &[u8] = include_bytes!("../../endf/fixtures/n-003_Li_007_mf33.endf.xz");
 /// In115 has no MF=33 at all, which is what "absent" has to be tested against.
 const IN115_ENDF: &[u8] = include_bytes!("../../endf/fixtures/n-049_In-115_trimmed.endf.xz");
 
@@ -210,6 +214,24 @@ fn round_trip(compressed: &[u8], name: &str, expect_mts: &[i32]) {
     {
         let mf33 = material.mf33(mt_value).expect("the section parses");
         mts_seen.push(mt_value);
+        // A lumped reaction's component: its HEAD is its one row.
+        if mf33.mtl != 0 && mf33.subsections.is_empty() {
+            let key = (mt_value, 0, 0);
+            let row = *seen
+                .get(&key)
+                .unwrap_or_else(|| panic!("no row written for the component {key:?}"));
+            assert_eq!(kind.value(row), "lumped", "kind at {key:?}");
+            assert_eq!(mtl.value(row) as i64, mf33.mtl, "mtl at {key:?}");
+            assert_eq!(mat.value(row), material.mat, "mat at {key:?}");
+            // The HEAD has no MAT1, MT1, XMF1 or XLFS1 to write.
+            assert!(mat1.is_null(row) && mt1.is_null(row), "at {key:?}");
+            assert!(xmf1.is_null(row) && xlfs1.is_null(row), "at {key:?}");
+            for c in ["lb", "lty"] {
+                assert!(ints(&batch, c).is_null(row), "{c} is not null at {key:?}");
+            }
+            rows_checked += 1;
+            continue;
+        }
         for (si, sub) in mf33.subsections.iter().enumerate() {
             // Tape order: NC blocks first, then NI, with one running index.
             let expected: Vec<(&str, usize)> = (0..sub.nc_subsections.len())
@@ -296,6 +318,57 @@ fn be9_covariance_round_trips_through_the_section() {
 #[test]
 fn np237_covariance_round_trips_through_the_section() {
     round_trip(NP237_ENDF, "np237", &[16, 17, 18, 102]);
+}
+
+#[test]
+fn li7_covariance_round_trips_through_the_section() {
+    let mut mts = vec![1, 2, 4, 16, 24, 25];
+    mts.extend(51..=82);
+    mts.extend([102, 104, 203, 204, 205, 207]);
+    mts.extend(851..=859);
+    round_trip(LI7_ENDF, "li7", &mts);
+}
+
+/// Which reactions a lumped MT sums is stated only on the components' HEAD
+/// records (ENDF-102 33.2.3), so the file must carry them for the index to
+/// survive, and the loader must give it back.
+#[test]
+fn the_lumped_reaction_index_survives_the_round_trip() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let material = material(LI7_ENDF, tmp.path(), "Li7");
+    assert!(yamc_convert::covariance::write_covariance(&material, tmp.path()).expect("writes"));
+    let blocks = yamc_nuclide::arrow::covariance_arrow::read_covariance(tmp.path(), "Li7")
+        .expect("reads")
+        .expect("the file is there");
+
+    let mut lumps: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
+    for b in &blocks {
+        if let Some(mtl) = b.lumped_into() {
+            lumps.entry(mtl).or_default().push(b.mt);
+        }
+    }
+    let want: BTreeMap<i32, Vec<i32>> = BTreeMap::from([
+        (851, vec![16, 24]),
+        (852, vec![51]),
+        (853, (52..=55).collect()),
+        (854, vec![56]),
+        (855, (57..=61).collect()),
+        (856, (62..=66).collect()),
+        (857, (67..=71).collect()),
+        (858, (72..=76).collect()),
+        (859, (77..=82).collect()),
+    ]);
+    assert_eq!(lumps, want);
+    // Each lump states its own covariance, and none of its components does.
+    for (mtl, components) in &want {
+        assert!(blocks.iter().any(|b| b.mt == *mtl && b.is_diagonal()));
+        for c in components {
+            assert!(blocks
+                .iter()
+                .filter(|b| b.mt == *c)
+                .all(|b| b.lumped_into() == Some(*mtl)));
+        }
+    }
 }
 
 /// A `mat1` naming the evaluation's own MAT reads back as this evaluation.

@@ -1656,6 +1656,8 @@ fn fold_nuclide(
             CovarianceData::Ni(ni) => ni,
             // Consumed by `channel_terms`, as the terms it derives.
             CovarianceData::Nc(_) => continue,
+            // A lumped reaction's component, with no covariance of its own.
+            CovarianceData::Lumped => continue,
         };
 
         let (row_mt, col_mt) = (block.mt, block.partner_mt());
