@@ -94,8 +94,10 @@ pub struct BranchingCovarianceRow {
     /// state MF=9 gives, its yield.
     pub energy: Option<Vec<f64>>,
     pub values: Option<Vec<f64>>,
-    /// `"cross_section"` or `"yield"`, as in `branching.arrow`, whenever
-    /// `energy` and `values` are set.
+    /// `"cross_section"` or `"yield"`, as in `branching.arrow`: which of
+    /// `target`'s curves is this state's, for every placed state, since a
+    /// target can have both a yield row and a cross-section row. `None` only
+    /// when the state is not placed.
     pub quantity: Option<String>,
     /// The evaluation's own MAT.
     pub mat: i32,
@@ -418,7 +420,8 @@ pub struct BranchingStats {
     /// reason, and so written with a null `target1`: several states of MT1
     /// sit at level XLFS1 (two in MF=40, or one of another product in MF=9
     /// or MF=10), since MF=40 gives the partner no IZAP; MT1 has no MF=40
-    /// section whose state at XLFS1 could say which level is meant; or, for
+    /// section, or no MF=40 state at XLFS1, that could say which level is
+    /// meant; or, for
     /// a block other than a state's with itself, MF=9 and MF=10 of MT1 give
     /// that product no state at LFS XLFS1, or one at another excitation than
     /// MF=40's. The manual numbers XLFS1 as MF=10 does and MF=40 need not
@@ -907,6 +910,10 @@ impl BranchingExtractor {
                                     UnresolvedPartner::Ambiguous => {
                                         "several states sit at that level".to_string()
                                     }
+                                    UnresolvedPartner::NoMf40State => {
+                                        "that MT's MF=40 section has no state at that level"
+                                            .to_string()
+                                    }
                                     UnresolvedPartner::NoMf40Section => {
                                         "that MT has no MF=40 section".to_string()
                                     }
@@ -957,8 +964,8 @@ impl BranchingExtractor {
                         target1,
                         energy: own_curve.as_ref().map(|(_, energy, _)| energy.clone()),
                         values: own_curve.as_ref().map(|(_, _, values)| values.clone()),
-                        quantity: own_curve
-                            .as_ref()
+                        quantity: state
+                            .and_then(|state| state.curve.as_ref())
                             .map(|(quantity, ..)| quantity.to_string()),
                         mat: material.mat,
                         mt,
@@ -1138,6 +1145,9 @@ enum UnresolvedPartner {
     /// Several states of `mt1` sit at level `xlfs1`, and MF=40 names the
     /// partner by MT1 and XLFS1 alone, with no IZAP.
     Ambiguous,
+    /// `mt1`'s MF=40 section has no state at level `xlfs1`, so there is no
+    /// excitation to confirm which MF=9 or MF=10 level is meant.
+    NoMf40State,
     /// `mt1` has no MF=40 section, so there is no MF=40 state at XLFS1 whose
     /// excitation could confirm which MF=9 or MF=10 level is meant.
     NoMf40Section,
@@ -1192,8 +1202,10 @@ fn partner_target(
         .zip(&matched[&partner_mt])
         .filter(|(other, _)| other.lfs as f64 == xlfs1)
         .collect();
-    let [(other, found)] = at_level.as_slice() else {
-        return Err(UnresolvedPartner::Ambiguous);
+    let (other, found) = match at_level.as_slice() {
+        [] => return Err(UnresolvedPartner::NoMf40State),
+        [one] => *one,
+        _ => return Err(UnresolvedPartner::Ambiguous),
     };
     let target = found.ok().map(|s| s.target.clone());
     if self_block {

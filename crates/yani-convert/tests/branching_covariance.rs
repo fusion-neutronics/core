@@ -493,7 +493,10 @@ fn merged_targets_carry_their_own_curve() {
         .iter()
         .find(|r| r.target.as_deref() == Some("Nb93_m1"))
         .expect("the (n,n') isomer");
-    assert!(isomer.energy.is_none() && isomer.values.is_none() && isomer.quantity.is_none());
+    assert!(isomer.energy.is_none() && isomer.values.is_none());
+    // Its curve is not merged, but which of the target's curves it is still
+    // is written.
+    assert_eq!(isomer.quantity.as_deref(), Some("cross_section"));
 
     // And the reader keeps the null a null.
     let dir = scratch("merged");
@@ -561,6 +564,34 @@ fn an_mf40_state_matches_mf10_by_excitation_when_lfs_differs() {
           excitation, MF=9 and MF=10 giving that IZAP and LFS no state"
         ]
     );
+}
+
+/// A partner level that MT1's MF=40 section gives no state at has no
+/// excitation to confirm an MF=10 level by, so it is null and listed with that
+/// reason, not as a level several states share. Here the (n,n') isomer's
+/// block is pointed at level 2 of (n,2n), whose MF=40 has only LFS 0 and 1.
+#[test]
+fn a_partner_level_with_no_mf40_state_is_unresolved() {
+    let tape = edit(
+        text(NB93),
+        " 1.000000+1 1.000000+0          0          4          0          1412540  4   26",
+        " 1.000000+1 2.000000+0          0         16          0          1412540  4   26",
+    );
+    let out = extract(&[material(&tape)], &nb_decay());
+    assert_eq!(
+        out.stats.mf40_partner_unresolved,
+        [
+            "Nb93 MT4: IZAP 41093 LFS 1 sub-subsection 0, partner MT16 level 2: \
+          that MT's MF=40 section has no state at that level"
+        ]
+    );
+    let row = out
+        .covariance
+        .iter()
+        .find(|r| r.mt == 4 && r.lfs == 1)
+        .expect("the (n,n') isomer");
+    assert_eq!(row.target.as_deref(), Some("Nb93_m1"));
+    assert_eq!(row.target1, None);
 }
 
 /// The manual numbers XLFS1 as MF=10 does, and MF=40 need not, so a partner

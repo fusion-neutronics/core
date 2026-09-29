@@ -287,7 +287,8 @@ pub fn branching_branching() -> Schema {
 ///   partner to one state. MF=40 gives no IZAP for it, so a level that two
 ///   MF=40 states of `mt1` share, or an MF=9 or MF=10 state of another product,
 ///   is left null rather than read as this row's own product. So is an `mt1`
-///   with no MF=40 section, whose level XLFS1 would have to be read in MF=10's
+///   with no MF=40 section, or no MF=40 state at `xlfs1`, whose level XLFS1
+///   would have to be read in MF=10's
 ///   numbering with no excitation to check it by. The manual numbers XLFS1 as
 ///   MF=10 does and MF=40 need not (ENDF/B-VIII.1 Pb204 MT 4, LFS 21 in MF=10
 ///   and 1 in MF=40), so `target1` is also null where MF=10 of `mt1` gives the
@@ -306,13 +307,16 @@ pub fn branching_branching() -> Schema {
 ///   converter exactly as `branching.arrow` has it (the tape's own points
 ///   when every region is lin-lin), and are written only when several states
 ///   resolved to one target in one quantity, which `branching.arrow` then
-///   carries as their sum. `quantity` says which curve it is, as
-///   `branching.arrow`'s column does: `"cross_section"` for an MF=10 partial,
-///   `"yield"` for an MF=9 yield, whose partial is that yield times the MF=3
-///   cross section of the MT. A relative covariance of one state has to be
-///   weighted by that state's own partial to fold exactly. All three null
-///   means the `branching.arrow` curve for (`nuclide`, `reaction`, `target`)
-///   is that state's own.
+///   carries as their sum. `quantity` says which of the target's curves is
+///   this state's, as `branching.arrow`'s column does: `"cross_section"` for
+///   an MF=10 partial, `"yield"` for an MF=9 yield, whose partial is that
+///   yield times the MF=3 cross section of the MT. It is written for every
+///   placed state (`target` set), merged or not, since one target can have
+///   both a yield row and a cross-section row. A relative covariance of one
+///   state has to be weighted by that state's own partial to fold exactly.
+///   `energy` and `values` null with `quantity` set means the
+///   `branching.arrow` row for (`nuclide`, `reaction`, `target`, `quantity`)
+///   is that state's own curve.
 /// * `mat` is the evaluation's MAT, so a reader can tell a `mat1` naming the
 ///   evaluation itself (JEFF-4.0 U235 MT 4 writes its own 9228 there) from a
 ///   correlation with another material.

@@ -548,7 +548,7 @@ fn attach_evaluated_yields(
 /// Parse a v2 split chain from bytes, with no filesystem involved.
 ///
 /// The filesystem entry point is [`parse_chain_parts`], which reads the same
-/// eight files and delegates here.
+/// files and delegates here.
 pub fn parse_chain_parts_from_bytes(
     parts: &ChainSections,
 ) -> Result<(HashMap<String, ChainNuclide>, BranchTable), Box<dyn Error>> {

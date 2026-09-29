@@ -18,7 +18,7 @@ fn fixture() -> Option<PathBuf> {
     dir.join("decay/nuclides.arrow").exists().then_some(dir)
 }
 
-/// Load the same eight files a filesystem caller would, as bytes.
+/// Load the same files a filesystem caller would, as bytes.
 fn sections(root: &Path) -> ChainSections {
     let mut parts = ChainSections::default();
     for (subsection, dir, file) in [
