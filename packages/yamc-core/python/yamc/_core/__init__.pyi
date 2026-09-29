@@ -1691,7 +1691,8 @@ class Material:
                 whose data states no interpolation law, as transmutation data
                 written before the law was stored does, one tabulated under a
                 law other than histogram or linear-linear, or one whose energy
-                and rate lists are unpaired or whose energies descend. Its
+                and rate lists are unpaired, whose energies are not finite or
+                descend, or whose rates are negative or not finite. Its
                 integral is unknown, and leaving it out would understate the
                 dose.
         

@@ -91,6 +91,11 @@ pub enum UnreadableContinuum {
     UnpairedLists { energies: usize, densities: usize },
     /// An energy lies below the one before it; the tabulation must ascend.
     Descending { index: usize },
+    /// An energy is not finite, so no interval holding it is known.
+    NonFiniteEnergy { index: usize },
+    /// A density is negative or not finite. An emission rate cannot be
+    /// negative, and the running integral a sampler searches must not fall.
+    InvalidDensity { index: usize },
 }
 
 impl fmt::Display for UnreadableContinuum {
@@ -118,6 +123,14 @@ impl fmt::Display for UnreadableContinuum {
             UnreadableContinuum::Descending { index } => write!(
                 f,
                 "has energy {index} below the one before it; a continuum is tabulated ascending"
+            ),
+            UnreadableContinuum::NonFiniteEnergy { index } => {
+                write!(f, "has energy {index} that is not a finite number")
+            }
+            UnreadableContinuum::InvalidDensity { index } => write!(
+                f,
+                "has density {index} negative or not a finite number; an emission rate is \
+                 finite and not negative"
             ),
         }
     }
@@ -159,8 +172,16 @@ impl<'a> Continuum<'a> {
                 densities: densities.len(),
             });
         }
+        // A NaN compares false, so the finite check runs before the order
+        // check would let one through.
+        if let Some(index) = energies.iter().position(|e| !e.is_finite()) {
+            return Err(UnreadableContinuum::NonFiniteEnergy { index });
+        }
         if let Some(i) = energies.windows(2).position(|w| w[1] < w[0]) {
             return Err(UnreadableContinuum::Descending { index: i + 1 });
+        }
+        if let Some(index) = densities.iter().position(|y| !(y.is_finite() && *y >= 0.0)) {
+            return Err(UnreadableContinuum::InvalidDensity { index });
         }
         Ok(Continuum {
             energies,
@@ -398,5 +419,36 @@ mod tests {
             .unwrap_err(),
             UnreadableContinuum::Descending { index: 2 }
         );
+    }
+
+    #[test]
+    fn a_non_finite_energy_or_a_negative_density_is_refused() {
+        assert_eq!(
+            Continuum::new(
+                &[1.0, f64::NAN, 3.0],
+                &[1.0, 2.0, 3.0],
+                Some(Interpolation::LinearLinear)
+            )
+            .unwrap_err(),
+            UnreadableContinuum::NonFiniteEnergy { index: 1 }
+        );
+        for bad in [-1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                Continuum::new(
+                    &[1.0, 2.0, 3.0],
+                    &[1.0, 2.0, bad],
+                    Some(Interpolation::Histogram)
+                )
+                .unwrap_err(),
+                UnreadableContinuum::InvalidDensity { index: 2 }
+            );
+        }
+        // A zero density is a stated value, not a refusal.
+        assert!(Continuum::new(
+            &[1.0, 2.0, 3.0],
+            &[0.0, 2.0, 0.0],
+            Some(Interpolation::LinearLinear)
+        )
+        .is_ok());
     }
 }

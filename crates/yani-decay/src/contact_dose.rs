@@ -291,8 +291,9 @@ fn multiplier(quantity: DoseQuantity, build_up: f64) -> f64 {
 /// `yani-convert/tests/decay_continuum.rs`). A continuum this build cannot
 /// integrate is an `Err` naming the nuclide rather than a smaller dose: one
 /// with no stated law, one tabulated under a law other than histogram or
-/// linear-linear, and a hand-built one whose lists are unpaired or whose
-/// energies descend. Its integral is unknown, and leaving it out would
+/// linear-linear, and a hand-built one whose lists are unpaired, whose
+/// energies are not finite or descend, or whose densities are negative or
+/// not finite. Its integral is unknown, and leaving it out would
 /// understate the answer by an unknown amount. A continuum wholly outside the
 /// range needs no law and adds nothing, as a line there does.
 ///
