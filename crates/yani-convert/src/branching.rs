@@ -79,7 +79,8 @@ pub struct BranchingCovarianceRow {
     /// The chain kind the MT maps to, `None` for an MT with none.
     pub reaction: Option<String>,
     /// The chain nuclide this row's product state is the partial of, `None`
-    /// when no MF=9 or MF=10 state of the MT matched it.
+    /// when no MF=9 or MF=10 state of the MT matched it, several matched it,
+    /// or it is excited with QM - QI not positive and so is not placed.
     pub target: Option<String>,
     /// The chain nuclide the partner state resolved to, `None` when it is in
     /// another material, XMF1 is not 10, MT1 is 0, or the tape does not pin
@@ -379,8 +380,9 @@ pub struct BranchingStats {
     /// MF=40, so one appearing is worth seeing here first.
     pub mf40_nc_blocks: usize,
     /// MF=40 product states in an MT with a chain kind that match no MF=9 or
-    /// MF=10 state, or match several by excitation and so are not placed,
-    /// one line each. Written, with a null `target`.
+    /// MF=10 state, match several by excitation, or are excited with QM - QI
+    /// not positive, and so are not placed, one line each. Written, with a
+    /// null `target`.
     pub mf40_unmatched_states: Vec<String>,
     /// MF=40 product states in an MT with no chain kind (TENDL's MT 18 with
     /// IZAP 0). Written, with a null `reaction` and `target`.
@@ -1066,6 +1068,8 @@ impl BranchingExtractor {
 /// MF=9 or MF=10 state at LFS 0 and an excited one only to an excited one, so
 /// a low excited level of a product with no isomer in the decay data is not
 /// put on the ground partial because both resolve to the ground nuclide.
+/// A state at LFS 0 is taken at zero excitation whatever its QM - QI, as
+/// excitation_energy takes MF=9 and MF=10 grounds.
 /// An excited state whose QM - QI is not positive states no energy, the same
 /// reading excitation_energy gives MF=9 and MF=10, so nothing on the tape
 /// confirms which level it is: MF=40 need not number levels as MF=10 does, so
@@ -1084,7 +1088,9 @@ fn match_mf40_state<'a>(
     tol_ev: f64,
 ) -> Mf40Match<'a> {
     let izap = mf40_zap(sub, mt, za);
-    let excitation = sub.qm - sub.qi;
+    // LFS 0 is the ground whatever QM - QI says, as excitation_energy reads
+    // MF=9 and MF=10, so the two sides are compared on the same terms.
+    let excitation = if sub.lfs == 0 { 0.0 } else { sub.qm - sub.qi };
     let near = |state: &ProductionState| {
         state
             .excitation

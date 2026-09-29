@@ -1271,3 +1271,30 @@ fn an_excited_mf40_state_with_no_energy_is_not_placed() {
         assert!(out.stats.mf40_partner_unresolved.is_empty());
     }
 }
+
+/// LFS 0 names the ground whatever QM - QI says, as MF=9 and MF=10 are read,
+/// so a ground whose QI sits 1 MeV below its QM is still placed on the ground
+/// partial, and the tape's QI is kept.
+#[test]
+fn an_mf40_ground_is_placed_whatever_its_qm_minus_qi() {
+    let tape = text(NB93);
+    let tape = edit(
+        tape,
+        "-8.830870+6-8.830870+6      41092          0          0          1412540 16    2",
+        "-8.830870+6-9.830870+6      41092          0          0          1412540 16    2",
+    );
+    let out = extract(&[material(&tape)], &nb_decay());
+    assert!(
+        out.stats.mf40_unmatched_states.is_empty(),
+        "{:?}",
+        out.stats.mf40_unmatched_states
+    );
+    let row = out
+        .covariance
+        .iter()
+        .find(|r| r.mt == 16 && r.lfs == 0)
+        .expect("the ground is written");
+    assert_eq!(row.target.as_deref(), Some("Nb92"));
+    assert_eq!(row.qi, -9.83087e6, "QI is the tape's");
+    assert!(out.stats.mf40_states_placed_by_excitation.is_empty());
+}

@@ -275,7 +275,8 @@ pub fn branching_branching() -> Schema {
 ///   (`lfs` above 0) with `qm - qi` not positive, since then nothing on the
 ///   tape confirms which MF=9 or MF=10 level its `lfs` names; each such state
 ///   is listed under `mf40_unmatched_states` in `branching/provenance.json`.
-///   A match by excitation never puts an excited state on a ground partial,
+///   A ground state (`lfs` 0) is taken at zero excitation whatever its
+///   `qm - qi`, as MF=9 and MF=10 grounds are. A match by excitation never puts an excited state on a ground partial,
 ///   or the reverse, and one made because MF=9 and MF=10 give the state's
 ///   (`izap`, `lfs`) no state or one at another excitation is listed under
 ///   `mf40_states_placed_by_excitation` there. `target1` is
