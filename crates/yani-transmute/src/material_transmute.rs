@@ -657,7 +657,12 @@ fn collapse_one(
     // treats it as zero. A sliver of flux there is a rounding matter; more
     // than that and every rate on the nuclide would be understated by data
     // that does not exist, so the run stops and says which nuclide and how
-    // much rather than answering as if it knew.
+    // much rather than answering as if it knew. The top is over the
+    // reactions loaded, which on an uncertainty run include the partials an
+    // NC derivation names (`ensure_derivations_loaded`). They are the same
+    // evaluation's, so the top is still its last energy point, and they
+    // could move it only by running past every chain MT, which no partial
+    // on the local libraries was seen to do.
     let above = crate::multigroup::spectrum_above_evaluation(material, &s.masses, &s.boundaries);
     if let Some((name, top, fraction)) = above
         .iter()
