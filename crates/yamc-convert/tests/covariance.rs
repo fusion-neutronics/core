@@ -18,12 +18,20 @@ use std::path::Path;
 use arrow_array::{Array, Float64Array, Int32Array, ListArray, RecordBatch, StringArray};
 use endf::mf::covariance::{NcSubsection, NiSubsection};
 use endf::Material;
+use yamc_nuclide::covariance::{CovarianceBlock, CovarianceData};
 
 /// Li6 and Fe56 both carry MF=33; Li6 is the smaller of the two.
 const LI6_ENDF: &[u8] = include_bytes!("../../endf/fixtures/n-003_Li_006_trimmed.endf.xz");
 const FE56_ENDF: &[u8] = include_bytes!("../../endf/fixtures/n-026_Fe_056_trimmed.endf.xz");
 /// In115 has no MF=33 at all, which is what "absent" has to be tested against.
 const IN115_ENDF: &[u8] = include_bytes!("../../endf/fixtures/n-049_In-115_trimmed.endf.xz");
+/// FENDL-3.2d Ni58, MF=33 MT=28, 103 and 107: LB=0, 1, 4 and 5, LB=1 tables
+/// with odd and even NP, and in MT=103 the only LB=4 block on any tape.
+const NI58_FENDL: &[u8] =
+    include_bytes!("../../endf/fixtures/n_2825_28-Ni-58_trimmed.fendl32d.endf.xz");
+/// ENDF/B-VIII.1 Cr52, MF=33 MT=103: LB=0, 1 and 8.
+const CR52_ENDFB81: &[u8] =
+    include_bytes!("../../endf/fixtures/n-024_Cr_052_trimmed.endfb81.endf.xz");
 
 fn material(compressed: &[u8], dir: &Path, name: &str) -> Material {
     let path = dir.join(format!("{name}.endf"));
@@ -271,6 +279,147 @@ fn fe56_covariance_round_trips_through_the_section() {
     round_trip(FE56_ENDF, "fe56", &[103]);
 }
 
+#[test]
+fn ni58_covariance_round_trips_through_the_section() {
+    // (n,np), (n,p) and (n,a).
+    round_trip(NI58_FENDL, "ni58", &[28, 103, 107]);
+}
+
+#[test]
+fn cr52_covariance_round_trips_through_the_section() {
+    round_trip(CR52_ENDFB81, "cr52", &[103]);
+}
+
+/// Every LB=0 to 2 block is one table (LT=0) running to the top of the
+/// evaluation, 20 MeV here, with nothing left over for a second.
+///
+/// The LB=0 to 4 split used to be at NT - NP values, which put the upper half
+/// of the only table in `el`/`fl`: on Ni58 MT=107 `ek` stopped at 4 MeV, and
+/// with odd NP `el` started on an F value.
+#[test]
+fn every_one_table_block_runs_to_20_mev() {
+    use yamc_nuclide::covariance::expand::expand_ni;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let mut seen = 0;
+    for (compressed, name) in [(NI58_FENDL, "ni58"), (CR52_ENDFB81, "cr52")] {
+        let material = material(compressed, tmp.path(), name);
+        for mt in [28, 103, 107] {
+            let Some(mf33) = material.mf33(mt) else {
+                continue;
+            };
+            for ni in mf33.subsections.iter().flat_map(|s| &s.ni_subsections) {
+                if ni.lb > 2 {
+                    continue;
+                }
+                let at = format!("{name} MT={mt} LB={} NP={}", ni.lb, ni.np);
+                assert_eq!(ni.lt, 0, "{at}: LB=0 to 2 have one table");
+                assert_eq!(ni.ek.len() as i64, ni.np, "{at}: every pair in ek");
+                assert_eq!(ni.fk.len() as i64, ni.np, "{at}: every pair in fk");
+                assert_eq!(ni.ek.last(), Some(&2.0e7), "{at}: ek ends at 20 MeV");
+                assert!(
+                    ni.el.is_empty() && ni.fl.is_empty(),
+                    "{at}: no second table"
+                );
+                assert!(expand_ni(ni).is_ok(), "{at}: expands");
+                seen += 1;
+            }
+        }
+    }
+    // Ni58: two in MT=28, one in MT=103, three in MT=107. Cr52: three.
+    assert_eq!(seen, 9);
+}
+
+/// The relative variance every diagonal block of `mt` states at `energy`, as
+/// the loader reads it back and `expand_ni` lays it out, summed.
+///
+/// `lb = 0` and `lb = 8` are left out: both are absolute, in barns squared, and
+/// relativizing them needs the cross section (and for `lb = 8` the width it is
+/// averaged over too). The yani-transmute fold test checks Cr52's `lb = 8`.
+fn relative_variance_at(blocks: &[CovarianceBlock], mt: i32, energy: f64) -> f64 {
+    use yamc_nuclide::covariance::expand::{expand_ni, Scale};
+
+    let interval = |grid: &[f64]| {
+        grid.windows(2)
+            .position(|w| w[0] <= energy && energy < w[1])
+    };
+    let mut total = 0.0;
+    for block in blocks.iter().filter(|b| b.mt == mt && b.is_diagonal()) {
+        let CovarianceData::Ni(ni) = &block.data else {
+            continue;
+        };
+        let e = expand_ni(ni).expect("every block on these tapes expands");
+        if e.scale != Scale::Relative {
+            continue;
+        }
+        if let (Some(i), Some(j)) = (interval(&e.row_energies), interval(&e.col_energies)) {
+            total += e.get(i, j);
+        }
+    }
+    total
+}
+
+/// At 14.1 MeV, what folds out of the file is what the tape states, block by
+/// block. The expected values are the tape's own numbers for the interval
+/// holding 14.1 MeV, so each term can be found in the evaluation.
+///
+/// Before the split was fixed these read 0.0% for Ni58 (n,a) and (n,np), and
+/// nothing at all for Cr52's relative blocks. Ni58 (n,p) read 20.6%: its LB=1
+/// block was lost and its LB=4 block had the two tables swapped, which turned
+/// a subtraction into an addition.
+#[test]
+fn the_14_mev_sigmas_are_the_tapes_own() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let read = |compressed: &[u8], name: &str| {
+        let dir = tmp.path().join(name);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let material = material(compressed, &dir, name);
+        assert!(yamc_convert::covariance::write_covariance(&material, &dir).expect("writes"));
+        yamc_nuclide::arrow::covariance_arrow::read_covariance(&dir, name)
+            .expect("reads")
+            .expect("the file is there")
+    };
+    let ni58 = read(NI58_FENDL, "Ni58");
+    let cr52 = read(CR52_ENDFB81, "Cr52");
+
+    let e = 14.1e6;
+    let cases = [
+        // (n,a): LB=1 on [0.8, 20] MeV, and LB=1 on [13, 16] MeV.
+        (
+            "Ni58 (n,a)",
+            relative_variance_at(&ni58, 107, e),
+            1.125e-2 + 2.8125e-2,
+        ),
+        // (n,np): LB=1 on [9.5, 20] MeV, and LB=1 on [12, 15.5] MeV.
+        (
+            "Ni58 (n,np)",
+            relative_variance_at(&ni58, 28, e),
+            1.8e-3 + 2.88e-3,
+        ),
+        // (n,p): LB=5 on [13, 15] MeV; LB=4 with Fk = -0.21 and Fl = 0.18503
+        // on [13, 15] MeV, which subtracts; and LB=1 on [14, 14.5] MeV.
+        (
+            "Ni58 (n,p)",
+            relative_variance_at(&ni58, 103, e),
+            3.4236e-2 - 0.21 * 0.18503 * 0.18503 + 6.4705e-3,
+        ),
+        // (n,p): LB=1 on [4, 20] MeV and LB=1 on [14, 16] MeV.
+        (
+            "Cr52 (n,p)",
+            relative_variance_at(&cr52, 103, e),
+            1.125e-2 + 1.8e-2,
+        ),
+    ];
+    for (what, got, want) in cases {
+        assert!(
+            (got - want).abs() <= 1e-12 * want,
+            "{what} at 14.1 MeV: {got} (sigma {:.2}%), the tape states {want} (sigma {:.2}%)",
+            100.0 * got.max(0.0).sqrt(),
+            100.0 * want.sqrt(),
+        );
+    }
+}
+
 /// An evaluation with no MF=33 writes no file at all.
 ///
 /// Absence is how this section says "no covariance", and the reader is required
@@ -305,7 +454,6 @@ fn an_evaluation_without_mf33_writes_nothing() {
 #[test]
 fn the_loader_reads_back_what_the_converter_writes() {
     use yamc_nuclide::covariance::expand::{expand_ni, Scale};
-    use yamc_nuclide::covariance::CovarianceData;
 
     let tmp = tempfile::tempdir().expect("temp dir");
     let material = material(FE56_ENDF, tmp.path(), "fe56");
