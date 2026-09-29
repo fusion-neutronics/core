@@ -1644,8 +1644,9 @@ fn run_replicas(
             let (rates, n) = samplers[idx].perturb(&rates, request.seed, replica);
             rates_sampled += n;
             let folded_chain = match &chains {
-                // The pruned nominal chain, unless this replica drew its own
-                // branching, which then carries the edits instead.
+                // The pruned nominal chain, unless the statistical draw
+                // re-folded this replica's own chain, which then carries the
+                // edits instead.
                 Some(c) if !edits.is_empty() => Arc::new(if drawn.is_some() {
                     edits.apply(folded_chain)
                 } else {

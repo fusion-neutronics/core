@@ -79,8 +79,11 @@ def test_leaving_decay_branching_out_is_reported():
 def test_asking_for_decay_branching_reports_disjoint_categories():
     """Every category key is present and no parent is in two of them.
 
-    Which parent lands in which category is pinned on a synthetic chain in
-    the Rust test, since the local fixture chain need not fill every one.
+    Which parent lands in which category, and the realised spread of a
+    draw, are pinned on a synthetic chain in the Rust tests. The local
+    fixture chain carries no branching sigmas yet (they arrive with the
+    #172 republish), so here every category may be empty and this is a
+    boundary smoke test of the report keys only.
     """
     info = _info(["decay_branching"])
     assert "decay branching ratio" not in info["not_perturbed"]
