@@ -337,10 +337,11 @@ pub fn covariance() -> Schema {
         // repeats across a section's rows. Nonzero on a "lumped" row, which
         // is the component's whole section.
         i32("mtl", true),
-        // kind = "ni". `lb` selects which of the rest are populated: 0-4 use
-        // `lt`, `np` and both (E, F) tables; 5 uses `ls`, `ne`, `ek` and `fkk`;
-        // 6 uses `ner`, `nec`, `er`, `ec` and `fkl`; 8 and 9 use `lt`, `np` and
-        // the first table only.
+        // kind = "ni". `lb` selects which of the rest are populated: 0-2 use
+        // `lt` (always 0), `np` and the first (E, F) table, `ek`/`fk`; 3 and 4
+        // add the second, `el`/`fl`, of `lt` pairs; 5 uses `ls`, `ne`, `ek`
+        // and `fkk`; 6 uses `ner`, `nec`, `er`, `ec` and `fkl`; 8 and 9 use
+        // `lt`, `np` and the first table only.
         i32("lb", true),
         i32("ls", true),
         i32("lt", true),
@@ -439,6 +440,13 @@ pub fn decay_sources() -> Schema {
         utf8("type", false),
         f64s("energies", false),
         f64s("intensities", false),
+        // The ENDF interpolation code (INT) a `tabular` row's density is read
+        // with between its points, null on a `discrete` row. A continuum's
+        // integral depends on it, and the libraries use more than one: JEFF-4.0
+        // gives 16 photon continua as linear-linear beside 44 histograms.
+        // Nullable and last, so a file written before it still reads; there a
+        // continuum states no law and cannot be integrated (issue #163).
+        i32("interpolation", true),
     ])
 }
 

@@ -1452,7 +1452,7 @@ impl Model {
             &chain,
             &all_nuclides,
             nuclide_registry,
-        );
+        )?;
         if is_root && self.verbose.summary {
             let n_nuclides = data.iter().filter(|v| !v.is_empty()).count();
             let n_channels: usize = data

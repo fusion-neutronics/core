@@ -282,13 +282,17 @@ fn nuclides_without_covariance_are_named_in_the_report() {
             .is_none(),
         "a nuclide cannot be both perturbed and lacking data"
     );
-    assert!(
-        info.not_perturbed
-            .iter()
-            .any(|s| s.contains("decay branching")),
-        "the sources this does not propagate must be stated: {:?}",
-        info.not_perturbed
-    );
+    for source in [
+        "fission yield",
+        "isomeric branching",
+        "covariance with another evaluation",
+    ] {
+        assert!(
+            info.not_perturbed.iter().any(|s| s.contains(source)),
+            "{source} must be stated as not propagated: {:?}",
+            info.not_perturbed
+        );
+    }
 }
 
 /// The ensemble is kept, so a derived quantity can be evaluated per sample.

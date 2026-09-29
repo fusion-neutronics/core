@@ -5,16 +5,10 @@
 //! the same solve again. That is exact to all orders in the matrix exponential:
 //! nothing is linearized, and the solver is not touched at all, only its input.
 //!
-//! What can be perturbed ([`Source`]): the **activation cross sections**,
-//! through the MF=33 covariance folded against this material's own spectrum;
-//! the **flux spectrum**, from a per-bin sigma the caller supplies; and the
-//! **half-lives**, from the evaluation's own standard deviation. Decay
-//! branching ratios, fission yields, the isomeric-branching overlay, the MF=32
-//! resonance-parameter covariance, the decay photon and dose data, and the
-//! material's own composition are held at their nominal values; they carry
-//! their own uncertainties and are not propagated yet (issue #140).
-//! [`Info::not_perturbed`] lists them per run rather than leaving it to be
-//! inferred from a small sigma.
+//! What can be perturbed is [`Source::IMPLEMENTED`], each source documented on
+//! its variant. [`Info`] says per run what was perturbed, what carried no
+//! stated uncertainty, and what was held at nominal, rather than leaving it to
+//! be inferred from a small sigma.
 //!
 //! # Cost
 //!
@@ -65,6 +59,18 @@ pub enum Source {
     /// insensitive to its own half-life (`N ~ R / lambda`, so `A ~ R`), and
     /// inflate its uncertainty.
     HalfLife,
+    /// Decay branching ratios, from the MT=457 sigma on each mode, for the
+    /// parents whose sum rule fixes the joint distribution: exactly two modes,
+    /// one sigma between them (both state the same one, or one states it and
+    /// the other is its complement), and the smaller ratio at least five
+    /// sigmas from zero. A replica draws one deviate per parent, moves one
+    /// mode by `sigma z` and the other by `-sigma z`, so the pair's total is
+    /// kept and the two are perfectly anticorrelated.
+    ///
+    /// Any other multi-mode parent stays at nominal and [`Info`] names it by
+    /// why. It moves the inventory only: a parent's own per-decay emission is
+    /// the decay scheme's.
+    DecayBranching,
     /// The Monte Carlo statistical uncertainty of transport-tallied reaction
     /// rates, from their per-history covariance (issue #140, item 1).
     ///
@@ -83,17 +89,13 @@ pub enum Source {
 }
 
 impl Source {
-    /// Every source this build can actually perturb.
-    ///
-    /// Three more inputs feed the matrix and are held at nominal: decay
-    /// branching, fission yields and the isomeric-branching overlay. The first
-    /// two have published uncertainties this build does not read yet (issue
-    /// #140); the third has none in ENDF-6 at all, so it could only ever carry
-    /// an assumed value.
+    /// Every source this build can perturb. [`Info::not_perturbed`] lists what
+    /// a run held at nominal.
     pub const IMPLEMENTED: &'static [Source] = &[
         Source::CrossSections,
         Source::FluxSpectrum,
         Source::HalfLife,
+        Source::DecayBranching,
         Source::Statistical,
         Source::DecayEnergy,
     ];
@@ -104,6 +106,7 @@ impl Source {
             Source::CrossSections => "cross_sections",
             Source::FluxSpectrum => "flux_spectrum",
             Source::HalfLife => "half_life",
+            Source::DecayBranching => "decay_branching",
             Source::Statistical => "statistical",
             Source::DecayEnergy => "decay_energy",
         }
@@ -119,9 +122,8 @@ impl Source {
                 let have: Vec<&str> = Source::IMPLEMENTED.iter().map(|s| s.name()).collect();
                 format!(
                     "unknown uncertainty source {name:?}; this build can perturb {have:?}. \
-                     Decay branching and fission yields carry published uncertainties \
-                     that are not read yet (issue #140), and reaction branching has \
-                     none in ENDF-6 to read."
+                     Fission yields carry published uncertainties that are not read yet \
+                     (issue #140), and reaction branching has none in ENDF-6 to read."
                 )
             })
     }
@@ -230,7 +232,10 @@ pub struct Info {
     pub skipped_nc: BTreeMap<String, usize>,
     /// Blocks whose `lb` layout is not implemented, counted per `lb`.
     pub unsupported_layouts: BTreeMap<i64, usize>,
-    /// Blocks whose arrays disagreed with their own declared sizes.
+    /// Blocks not consumed because they break ENDF-102's rules for their
+    /// layout: arrays that disagree with their declared sizes, an LB=0 to 2
+    /// block carrying a second table, an LB=3 or 4 block without one or whose
+    /// tables share no energy range, or an LB=8 block between two reactions.
     pub malformed_blocks: usize,
     /// Per (nuclide, reaction kind), the share of the rate over the flux range
     /// that comes from energies where the evaluation states a nonzero variance
@@ -243,7 +248,9 @@ pub struct Info {
     /// share of the dilute rate over the tally spectrum, and the covered share
     /// of the tallied rate is not computed. See [`Info::partials_above_rate`]
     /// for when that rate disagrees with the partials. No entry for a channel
-    /// whose rate over the flux range is zero.
+    /// whose rate over the flux range is zero. Every consumed self-covariance
+    /// block counts where its own diagonal is nonzero, relative (LB=1 to 6),
+    /// absolute (LB=0) and short-range (LB=8) alike.
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
     /// Per (nuclide, reaction kind), where the partial rates a relative
     /// covariance block was weighted with, zero variance intervals included,
@@ -343,6 +350,27 @@ pub struct Info {
     /// where it describes the evaluation.
     pub half_lives_floored: usize,
     pub half_lives_sampled: usize,
+    /// Reachable parents whose decay branching was perturbed: two modes whose
+    /// sum rule fixes how the stated sigma is shared.
+    pub decay_branchings_perturbed: BTreeSet<String>,
+    /// Reachable parents with several decay modes and no stated sigma on any,
+    /// held at nominal. Not a claim that the split is exact.
+    pub no_decay_branching_uncertainty: BTreeSet<String>,
+    /// Reachable parents with three or more modes and a stated sigma, held at
+    /// nominal: MT=457 gives no covariance between the modes, and with more
+    /// than one degree of freedom the sum rule does not supply it.
+    pub decay_branchings_three_or_more_modes: BTreeSet<String>,
+    /// Reachable two-mode parents whose modes state different sigmas, held at
+    /// nominal: a sum rule leaves room for one.
+    pub decay_branchings_unequal_sigmas: BTreeSet<String>,
+    /// Reachable two-mode parents whose smaller ratio is under five sigmas,
+    /// held at nominal: a Gaussian that wide would have to be truncated at
+    /// zero, which the evaluation does not describe.
+    pub decay_branchings_too_wide: BTreeSet<String>,
+    /// Branching draws that fell outside `[0, T]` and were clamped, and draws
+    /// made, one per perturbed parent per replica.
+    pub decay_branchings_floored: usize,
+    pub decay_branchings_sampled: usize,
     /// Reachable unstable nuclides whose decay energy was perturbed.
     pub decay_energies_perturbed: BTreeSet<String>,
     /// Reachable unstable nuclides with a decay energy but no stated sigma on
@@ -398,7 +426,6 @@ impl Info {
             matrices_clipped: clipping.matrices_clipped,
             worst_relative_clip: clipping.worst_relative_clip,
             not_perturbed: [
-                "decay branching ratio",
                 "fission yield",
                 "isomeric branching (MF=9/MF=10)",
                 "covariance with another evaluation (MAT1 naming another material)",
@@ -407,6 +434,7 @@ impl Info {
                 "lumped-reaction covariance of several components no derivation names (MF=33 MT=851-870, in lumped_covariance_not_assignable)",
                 "resonance-parameter covariance (MF=32)",
                 "decay photon line energy and intensity (MF=8 MT=457)",
+                "decay photon continuum normalisation and shape (MF=8 MT=457 continuum and its covariance)",
                 "photon attenuation coefficient (XCOM)",
                 "air energy-absorption coefficient (NIST SRD 126)",
                 "fluence-to-dose coefficient (ICRP-116)",
@@ -446,6 +474,10 @@ impl Info {
             || !self.lumped_covariance_not_assignable.is_empty()
             || self.spectra_without_flux_sigma > 0
             || !self.no_half_life_uncertainty.is_empty()
+            || !self.no_decay_branching_uncertainty.is_empty()
+            || !self.decay_branchings_three_or_more_modes.is_empty()
+            || !self.decay_branchings_unequal_sigmas.is_empty()
+            || !self.decay_branchings_too_wide.is_empty()
             || !self.no_decay_energy_uncertainty.is_empty()
     }
 }
@@ -515,11 +547,11 @@ pub struct Ensemble {
 ///   nuclide's statistical and nuclear-data variances are measured the same
 ///   way the total is. Sources are independent, so they sum to the total up to
 ///   interaction and sampling noise, which is the unattributed residual.
-/// - `contributors` is first order: within the cross sections and the
-///   half-lives, one deterministic solve per nuclide (and per reaction) gives
-///   its sensitivity, and its variance is that squared against its own
-///   stated uncertainty. It says which evaluation to look at, not the total,
-///   which is always the resampled one.
+/// - `contributors` is first order: within the cross sections, the
+///   half-lives and the decay branchings, one deterministic solve per nuclide
+///   (and per reaction) gives its sensitivity, and its variance is that
+///   squared against its own stated uncertainty. It says which evaluation to
+///   look at, not the total, which is always the resampled one.
 #[derive(Debug, Clone, Default)]
 pub struct Attribution {
     /// Source name -> `[step][nuclide]` variance, from that source alone.
@@ -537,7 +569,8 @@ pub struct Contributor {
     pub nuclide: String,
     /// The reaction, for one cross-section channel alone; `None` for the
     /// nuclide's whole evaluation (every channel with its correlations) or for
-    /// a half-life.
+    /// a half-life. A `decay_branching` contributor is a two-mode parent's
+    /// one degree of freedom, so `None` too.
     pub reaction: Option<String>,
     /// `[step][nuclide]` variance it contributes, only where it is non-zero.
     pub variance: Vec<HashMap<String, f64>>,
@@ -722,7 +755,7 @@ pub(crate) fn densities_of(materials: &[Material]) -> Vec<HashMap<String, f64>> 
 
 /// Keeps the half-life streams clear of the per-nuclide cross-section streams,
 /// which are keyed on the same name hash without it.
-const HALF_LIFE_STREAM: u32 = 0x4A1F_11FE;
+pub(crate) const HALF_LIFE_STREAM: u32 = 0x4A1F_11FE;
 
 /// The unstable nuclides of `chain` split into those with a stated half-life
 /// sigma, as `(name, half-life, sigma)`, and those without.
@@ -780,7 +813,7 @@ pub(crate) fn sample_half_lives(
 }
 
 /// Keeps the decay-energy streams clear of every other per-nuclide stream.
-const DECAY_ENERGY_STREAM: u32 = 0xDEC4_E6E1;
+pub(crate) const DECAY_ENERGY_STREAM: u32 = 0xDEC4_E6E1;
 
 /// One replica's decay energy for one nuclide, and its components, drawn
 /// from each component's own sigma, or from the total's where the data gives
@@ -850,9 +883,10 @@ pub(crate) fn with_half_lives(
 ///
 /// Decay-source intensities are stored per atom per second, which is the
 /// emission probability per decay times the decay constant (Co60's 1332 keV
-/// line is `0.9998 * ln2 / T`). The per-decay probability is the decay
-/// scheme's and does not change with the half-life, so the stored intensity
-/// scales as `T_nominal / T`. Leaving it would evaluate a replica's photon
+/// line is `0.9998 * ln2 / T`), and a continuum's density per eV is the same
+/// product. The per-decay probability is the decay scheme's and does not
+/// change with the half-life, so the stored intensity scales as
+/// `T_nominal / T`. Leaving it would evaluate a replica's photon
 /// emission as `N_k lambda y` instead of `N_k lambda_k y`: at saturation
 /// `N_k ~ 1 / lambda_k`, so the photon rate would inherit the half-life's
 /// whole spread, which is the inconsistent-lambda inflation the per-replica
@@ -861,9 +895,7 @@ pub(crate) fn set_half_life(cn: &mut yani::ChainNuclide, half_life: f64) {
     if let Some(nominal) = cn.half_life.filter(|t| *t > 0.0 && half_life > 0.0) {
         let scale = nominal / half_life;
         for source in &mut cn.sources {
-            let yani::DecaySourceDistribution::Discrete { intensities, .. } =
-                &mut source.distribution;
-            for i in intensities.iter_mut() {
+            for i in source.distribution.intensities_mut().iter_mut() {
                 *i *= scale;
             }
         }
@@ -874,6 +906,68 @@ pub(crate) fn set_half_life(cn: &mut yani::ChainNuclide, half_life: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every run states the decay photon sources it holds at nominal, lines
+    /// and continua both, so a reader does not take their silence for zero.
+    #[test]
+    fn the_report_names_the_photon_sources_held_at_nominal() {
+        let info = Info::from_fold(&Coverage::default(), &Clipping::default(), true);
+        for source in [
+            "decay photon line energy and intensity (MF=8 MT=457)",
+            "decay photon continuum normalisation and shape (MF=8 MT=457 continuum and its covariance)",
+        ] {
+            assert!(
+                info.not_perturbed.iter().any(|s| s == source),
+                "{source:?} missing from {:?}",
+                info.not_perturbed
+            );
+        }
+    }
+
+    /// A new half-life rescales a continuum's density exactly as it rescales a
+    /// line, so both keep their per-decay yield.
+    #[test]
+    fn a_half_life_rescales_lines_and_continua_alike() {
+        let lambda = std::f64::consts::LN_2 / 318.0;
+        let source = |distribution| yani::DecaySource {
+            particle: "photon".to_string(),
+            distribution,
+        };
+        let mut cn = yani::ChainNuclide {
+            name: "Sm158".to_string(),
+            half_life: Some(318.0),
+            half_life_uncertainty: Some(1.8),
+            decay_energy: 1.0e6,
+            decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
+            reactions: vec![],
+            decays: vec![],
+            fission_yields: None,
+            sources: vec![
+                source(yani::DecaySourceDistribution::Discrete {
+                    energies: vec![2.0e5],
+                    intensities: vec![0.5 * lambda],
+                }),
+                source(yani::DecaySourceDistribution::Tabular {
+                    energies: vec![1.0e4, 1.0e6],
+                    intensities: vec![3.0e-6 * lambda, 0.0],
+                    interpolation: Some(yani::Interpolation::Histogram),
+                }),
+            ],
+        };
+        set_half_life(&mut cn, 636.0);
+        let lambda_k = std::f64::consts::LN_2 / 636.0;
+        let per_decay: Vec<f64> = cn
+            .sources
+            .iter()
+            .map(|s| s.distribution.emission_rate().unwrap() / lambda_k)
+            .collect();
+        assert!((per_decay[0] - 0.5).abs() < 1e-14, "{per_decay:?}");
+        assert!(
+            (per_decay[1] - 3.0e-6 * 9.9e5).abs() < 1e-14,
+            "{per_decay:?}"
+        );
+    }
 
     /// The production total weights the fold's shares by the production the
     /// run drove, which is the covered share only when that production is the
@@ -926,7 +1020,6 @@ mod tests {
     fn the_report_names_every_input_held_at_nominal() {
         let info = Info::from_fold(&Coverage::default(), &Clipping::default(), true);
         for held in [
-            "decay branching ratio",
             "fission yield",
             "isomeric branching (MF=9/MF=10)",
             "covariance with another evaluation (MAT1 naming another material)",
@@ -960,6 +1053,7 @@ mod tests {
             "flux spectrum (spectra without a sigma only)",
             "activation cross section (MF=33)",
             "half-life",
+            "decay branching ratio",
             "decay energy",
         ] {
             assert!(!info.not_perturbed.iter().any(|s| s == conditional));
