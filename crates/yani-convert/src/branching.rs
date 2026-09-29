@@ -88,12 +88,15 @@ pub struct BranchingCovarianceRow {
     /// nuclide, so (`target`, `target1`) does not identify the pair of
     /// states: (`mt`, `lfs`, `mt1`, `xlfs1`) does.
     pub target1: Option<String>,
-    /// This state's own MF=10 partial, linearized exactly as `branching.arrow`
-    /// has it, only when several MF=10 states resolved to `target` and
-    /// `branching.arrow` carries their sum. Always `None` for a state MF=9
-    /// gives as a yield, which has no MF=10 partial.
+    /// This state's own curve, linearized exactly as `branching.arrow` has it,
+    /// only when several states resolved to `target` in the same `quantity`
+    /// and `branching.arrow` carries their sum: its MF=10 partial, or for a
+    /// state MF=9 gives, its yield.
     pub energy: Option<Vec<f64>>,
     pub values: Option<Vec<f64>>,
+    /// `"cross_section"` or `"yield"`, as in `branching.arrow`, whenever
+    /// `energy` and `values` are set.
+    pub quantity: Option<String>,
     /// The evaluation's own MAT.
     pub mat: i32,
     /// The section's MT and HEAD.
@@ -381,9 +384,10 @@ pub struct BranchingStats {
     /// IZAP 0). Written, with a null `reaction` and `target`.
     pub mf40_states_without_chain_kind: usize,
     /// MF=40 product states matched to a state whose split MF=9 yields give
-    /// rather than an MF=10 partial. Written, with a null `energy` and
-    /// `values` since there is no MF=10 partial to give; the covariance is
-    /// still of the production cross section, not of the yield.
+    /// rather than an MF=10 partial. The covariance is still of the
+    /// production cross section, not of the yield, and where the yield row
+    /// is merged with another state's the row carries the state's own yield
+    /// (`quantity` "yield") to weight it by.
     pub mf40_on_yield_channels: usize,
     /// Sub-subsections whose MAT1 names the evaluation itself (JEFF-4.0 U235
     /// MT 4 writes its own MAT there). Written as the tape gives it, so a
@@ -421,6 +425,13 @@ pub struct BranchingStats {
     /// (ENDF/B-VIII.1 Pb204 MT 4, LFS 21 in MF=10 and 1 in MF=40), so there
     /// the two readings of XLFS1 name different states, or one names none.
     pub mf40_partner_unresolved: Vec<String>,
+    /// MF=40 product states whose `target` the excitation fallback gave,
+    /// because MF=9 and MF=10 give their (IZAP, LFS) no state or one at
+    /// another excitation, one line each (ENDF/B-VIII.1 Pb204 MT 4, LFS 21 in
+    /// MF=10 and 1 in MF=40). Their self blocks name the state by MF=40's own
+    /// LFS, so `target1` there is this `target`, where the manual's reading
+    /// of XLFS1 in MF=10's numbering would name another level or none.
+    pub mf40_states_placed_by_excitation: Vec<String>,
 }
 
 /// The value of `t` at `e`, zero outside its tabulated range.
@@ -596,8 +607,10 @@ pub struct Extracted {
 /// One MF=9 or MF=10 state of an evaluation, as the MF=40 match needs it.
 struct ProductionState {
     target: String,
-    /// The linearized MF=10 partial, `None` for a state MF=9 gives instead.
-    curve: Option<(Vec<f64>, Vec<f64>)>,
+    /// The state's own curve as `branching.arrow` has it before merging, and
+    /// which quantity that is: the linearized MF=10 partial where the state
+    /// has one, else its linearized MF=9 yield.
+    curve: Option<(&'static str, Vec<f64>, Vec<f64>)>,
     /// `None` when the evaluation gives the state no usable excitation
     /// energy, so no MF=40 state can be matched to it by energy.
     excitation: Option<f64>,
@@ -637,12 +650,12 @@ impl BranchingExtractor {
         );
         let mut out = BranchingPartial::default();
         let (rows, stats, metastable) = (&mut out.rows, &mut out.stats, &mut out.metastable);
-        // Every state's resolved target and partial, for the MF=40 match below,
-        // and how many MF=10 states each (kind, target) sums, across every MT
-        // of the evaluation, as `merge_duplicates` sums them.
+        // Every state's resolved target and curve, for the MF=40 match below,
+        // and how many states each (kind, target, quantity) sums, across every
+        // MT of the evaluation, as `merge_duplicates` sums them.
         let mut states_by_mt: BTreeMap<i32, BTreeMap<(i64, i64), ProductionState>> =
             BTreeMap::new();
-        let mut summed: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut summed: BTreeMap<(String, String, &'static str), usize> = BTreeMap::new();
 
         // The evaluation names itself in MF=1/451, which is the same route
         // Chain::from_endf takes, so parent names match the reactions
@@ -737,10 +750,12 @@ impl BranchingExtractor {
                         stats.linearized_curves += 1;
                     }
                     let (energy, values) = linearize(tab, linearize_tol);
-                    if quantity == "cross_section" {
-                        curve = Some((energy.clone(), values.clone()));
-                        *summed.entry((rtype.clone(), target.clone())).or_insert(0) += 1;
-                    }
+                    // The cross section comes second, so it is the curve of a
+                    // state that gives both.
+                    curve = Some((quantity, energy.clone(), values.clone()));
+                    *summed
+                        .entry((rtype.clone(), target.clone(), quantity))
+                        .or_insert(0) += 1;
                     rows.push(BranchingRow {
                         nuclide: parent.clone(),
                         reaction: rtype.clone(),
@@ -815,8 +830,28 @@ impl BranchingExtractor {
                         "{parent} MT{mt}: IZAP {} LFS {} at {excitation_kev:.1} keV is within tolerance of {n} MF=9 or MF=10 states of one target, so is not placed",
                         sub.izap, sub.lfs
                     )),
-                    Ok(state) if state.curve.is_none() => stats.mf40_on_yield_channels += 1,
-                    Ok(_) => {}
+                    Err(UnplacedState::NoEnergy) => stats.mf40_unmatched_states.push(format!(
+                        "{parent} MT{mt}: IZAP {} LFS {} is excited but QM - QI is {excitation_kev:.1} keV, which states no excitation to confirm an MF=9 or MF=10 state by, so is not placed",
+                        sub.izap, sub.lfs
+                    )),
+                    Ok(state) => {
+                        if !matches!(state.curve, Some(("cross_section", ..))) {
+                            stats.mf40_on_yield_channels += 1;
+                        }
+                        let states = states_by_mt.get(&mt).unwrap_or(&empty);
+                        let keyed = states.get(&(mf40_zap(sub, mt, meta.za), sub.lfs));
+                        if !keyed.is_some_and(|keyed| std::ptr::eq(keyed, *state)) {
+                            let mf10 = match keyed.map(|keyed| keyed.excitation) {
+                                None => "no state".to_string(),
+                                Some(Some(e)) => format!("one at {:.1} keV", e / 1.0e3),
+                                Some(None) => "one with no excitation energy".to_string(),
+                            };
+                            stats.mf40_states_placed_by_excitation.push(format!(
+                                "{parent} MT{mt}: IZAP {} LFS {} at {excitation_kev:.1} keV is placed on {} by its excitation, MF=9 and MF=10 giving that IZAP and LFS {mf10}",
+                                sub.izap, sub.lfs, state.target
+                            ));
+                        }
+                    }
                 }
                 let state = found.ok();
                 if sub.subsubsections.is_empty() {
@@ -825,16 +860,16 @@ impl BranchingExtractor {
                         sub.qm, sub.qi, sub.izap, sub.lfs
                     ));
                 }
-                // The state's own partial, when `branching.arrow` carries it
+                // The state's own curve, when `branching.arrow` carries it
                 // summed with another state's.
                 let own_curve = rtype
-                    .zip(state)
-                    .filter(|(rtype, state)| {
+                    .zip(state.and_then(|state| state.curve.as_ref().map(|c| (state, c))))
+                    .filter(|(rtype, (state, (quantity, ..)))| {
                         summed
-                            .get(&((*rtype).clone(), state.target.clone()))
+                            .get(&((*rtype).clone(), state.target.clone(), *quantity))
                             .is_some_and(|&n| n > 1)
                     })
-                    .and_then(|(_, state)| state.curve.clone());
+                    .map(|(_, (_, curve))| curve.clone());
                 for (subsection_idx, ss) in sub.subsubsections.iter().enumerate() {
                     if ss.mat1 == own_mat {
                         stats.mf40_mat1_naming_itself += 1;
@@ -920,8 +955,11 @@ impl BranchingExtractor {
                         reaction: rtype.cloned(),
                         target: state.map(|state| state.target.clone()),
                         target1,
-                        energy: own_curve.as_ref().map(|(energy, _)| energy.clone()),
-                        values: own_curve.as_ref().map(|(_, values)| values.clone()),
+                        energy: own_curve.as_ref().map(|(_, energy, _)| energy.clone()),
+                        values: own_curve.as_ref().map(|(_, _, values)| values.clone()),
+                        quantity: own_curve
+                            .as_ref()
+                            .map(|(quantity, ..)| quantity.to_string()),
                         mat: material.mat,
                         mt,
                         za: section.za,
@@ -983,6 +1021,9 @@ impl BranchingExtractor {
         self.stats
             .mf40_partner_unresolved
             .extend(stats.mf40_partner_unresolved);
+        self.stats
+            .mf40_states_placed_by_excitation
+            .extend(stats.mf40_states_placed_by_excitation);
     }
 
     /// The rows, the covariance and the statistics, with duplicate target
@@ -1013,7 +1054,17 @@ impl BranchingExtractor {
 /// this one's partial. The match must be the only one: when several levels of
 /// that nuclide sit within `tol_ev`, picking the nearest would be a guess at
 /// which partial weights the covariance, so the state is left unplaced, and
-/// so is one with none, each counted as such.
+/// so is one with none, each counted as such. The fallback never crosses
+/// between ground and excited: an MF=40 state at LFS 0 is matched only to an
+/// MF=9 or MF=10 state at LFS 0 and an excited one only to an excited one, so
+/// a low excited level of a product with no isomer in the decay data is not
+/// put on the ground partial because both resolve to the ground nuclide.
+/// An excited state whose QM - QI is not positive states no energy, the same
+/// reading excitation_energy gives MF=9 and MF=10, so nothing on the tape
+/// confirms which level it is: MF=40 need not number levels as MF=10 does, so
+/// the (IZAP, LFS) join alone would be a guess, and the state is left
+/// unplaced. A state placed by the fallback is listed under
+/// `mf40_states_placed_by_excitation`.
 /// IZAP=0 on MT 4 is matched as the target itself, since JEFF-4.0 U235 writes
 /// it so where its MF=10 says 92235. Only the match reads it that way; the row
 /// keeps the tape's 0.
@@ -1032,15 +1083,10 @@ fn match_mf40_state<'a>(
             .excitation
             .is_some_and(|e| (e - excitation).abs() <= tol_ev)
     };
-    // An excited MF=40 state whose QM - QI is not positive states no energy,
-    // the same reading excitation_energy gives MF=9 and MF=10. The energy
-    // guard then has nothing to compare, and the (IZAP, LFS) join the manual
-    // defines stands on its own, as resolve_level's level-index route does.
-    let states_no_energy = sub.lfs > 0 && excitation <= 0.0;
-    if let Some(state) = states
-        .get(&(izap, sub.lfs))
-        .filter(|state| states_no_energy || near(state))
-    {
+    if sub.lfs > 0 && excitation <= 0.0 {
+        return Err(UnplacedState::NoEnergy);
+    }
+    if let Some(state) = states.get(&(izap, sub.lfs)).filter(|state| near(state)) {
         return Ok(state);
     }
     let (z, a) = (izap / 1000, izap % 1000);
@@ -1055,7 +1101,9 @@ fn match_mf40_state<'a>(
     let target = endf::gnds_name(z as u32, a as u32, resolved.liso as u32);
     let candidates: Vec<&ProductionState> = states
         .iter()
-        .filter(|((zap, _), state)| *zap == izap && state.target == target && near(state))
+        .filter(|((zap, lfs), state)| {
+            *zap == izap && (*lfs == 0) == (sub.lfs == 0) && state.target == target && near(state)
+        })
         .map(|(_, state)| state)
         .collect();
     match candidates.as_slice() {
@@ -1078,6 +1126,9 @@ enum UnplacedState {
     NoState,
     /// This many states of one chain nuclide sit within `tol_ev` of it.
     Ambiguous(usize),
+    /// It is excited but its QM - QI is not positive, so gives no excitation
+    /// to confirm a level by.
+    NoEnergy,
 }
 
 /// Why a block's `target1` was left null although its partner is an MF=10
@@ -1119,7 +1170,9 @@ enum UnresolvedPartner {
 /// equal to its own MT and LFS) is the exception: it names the state by the
 /// label its own subsection carries, whatever MF=10 calls that level. The
 /// target is then that state's own match, as its row's `target` is, and
-/// `None` when that state matched nothing. The row's own IZAP is not taken
+/// `None` when that state matched nothing. Where MF=10 numbers that level
+/// otherwise, the state was matched by excitation and is listed under
+/// `mf40_states_placed_by_excitation`, so the reading is on record. The row's own IZAP is not taken
 /// for the partner's, even within one MT, since the tape does not say so.
 fn partner_target(
     (partner_mt, xlfs1): (i32, f64),
@@ -1262,6 +1315,7 @@ pub fn write_branching_covariance(
     let mut target1 = Vec::new();
     let mut energy = Vec::new();
     let mut values = Vec::new();
+    let mut quantity = Vec::new();
     let mut mat = Vec::new();
     let mut za = Vec::new();
     let mut awr = Vec::new();
@@ -1281,6 +1335,7 @@ pub fn write_branching_covariance(
             target1.push(row.target1.clone());
             energy.push(row.energy.clone());
             values.push(row.values.clone());
+            quantity.push(row.quantity.clone());
             mat.push(row.mat);
             za.push(narrow(row.za));
             awr.push(row.awr);
@@ -1299,6 +1354,7 @@ pub fn write_branching_covariance(
         opt_strings(&target1),
         opt_list_of(&energy),
         opt_list_of(&values),
+        opt_strings(&quantity),
         ints(&mat),
         ints(&za),
         floats(&awr),

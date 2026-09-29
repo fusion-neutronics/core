@@ -681,6 +681,7 @@ fn branching_is_written_and_joins_the_manifest() {
         "mf40_without_blocks",
         "mf40_unmatched_states",
         "mf40_partner_unresolved",
+        "mf40_states_placed_by_excitation",
     ] {
         assert!(record[key].is_array(), "branching provenance has no {key}");
     }

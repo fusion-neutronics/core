@@ -178,6 +178,7 @@ pub fn branching_covariance_blocks(
                 target1: try_get_str(batch, "target1", row),
                 energy: optional_list(batch, "energy", row),
                 values: optional_list(batch, "values", row),
+                quantity: try_get_str(batch, "quantity", row),
                 mat: int("mat")?,
                 za: int("za")?,
                 awr: float("awr")?,

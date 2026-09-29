@@ -269,10 +269,16 @@ pub fn branching_branching() -> Schema {
 /// * `target` is the chain nuclide the product state (`izap`, `lfs`) is the
 ///   partial of, which is the `target` of the `branching.arrow` row for
 ///   (`nuclide`, `reaction`). Null when no MF=9 or MF=10 state of that MT
-///   matched it, or when several states of one chain nuclide sit within the
+///   matched it, when several states of one chain nuclide sit within the
 ///   converter's tolerance of its excitation, since taking the nearest would
-///   guess which partial weights the covariance; each such state is listed
-///   under `mf40_unmatched_states` in `branching/provenance.json`. `target1` is
+///   guess which partial weights the covariance, or when the state is excited
+///   (`lfs` above 0) with `qm - qi` not positive, since then nothing on the
+///   tape confirms which MF=9 or MF=10 level its `lfs` names; each such state
+///   is listed under `mf40_unmatched_states` in `branching/provenance.json`.
+///   A match by excitation never puts an excited state on a ground partial,
+///   or the reverse, and one made because MF=9 and MF=10 give the state's
+///   (`izap`, `lfs`) no state or one at another excitation is listed under
+///   `mf40_states_placed_by_excitation` there. `target1` is
 ///   the same for the partner state the block correlates this one with, level
 ///   `xlfs1` of reaction `mt1`: the match of the one state of `mt1`'s MF=40
 ///   section at LFS `xlfs1`, as that state's own row's `target` is. Null when
@@ -290,20 +296,23 @@ pub fn branching_branching() -> Schema {
 ///   `mf40_partner_unresolved` in `branching/provenance.json`. A state's block
 ///   with itself (`mt1` and `xlfs1` its own `mt` and `lfs`) names the state by
 ///   its own subsection's label, so its `target1` is its `target` unless a
-///   second MF=40 state of `mt` carries that label. Several levels can
+///   second MF=40 state of `mt` carries that label; where that label is not
+///   MF=10's number for the level, the state is one of those listed under
+///   `mf40_states_placed_by_excitation`. Several levels can
 ///   resolve to one chain nuclide: JEFF-4.0 U235 MT 4 correlates its ground
 ///   (LFS 0) with its 77 eV isomer (XLFS1 1), both U235. So a consumer keys a
 ///   block on (`mt`, `lfs`, `mt1`, `xlfs1`), never on (`target`, `target1`).
-/// * `energy` and `values` are this state's own MF=10 partial, linearized
-///   by the converter exactly as `branching.arrow` has it (the tape's own
-///   points when every region is lin-lin), and are written only when several
-///   MF=10 states resolved to one target, which `branching.arrow` then
-///   carries as their sum. A relative covariance of one state has to be
-///   weighted by that state's own partial to fold exactly. Null for an MF=10
-///   state means the `branching.arrow` cross section for (`nuclide`,
-///   `reaction`, `target`) is that state's own. A state MF=9 gives as a yield
-///   has no MF=10 partial, so is always null here, whether or not its yield
-///   row is merged with another.
+/// * `energy` and `values` are this state's own curve, linearized by the
+///   converter exactly as `branching.arrow` has it (the tape's own points
+///   when every region is lin-lin), and are written only when several states
+///   resolved to one target in one quantity, which `branching.arrow` then
+///   carries as their sum. `quantity` says which curve it is, as
+///   `branching.arrow`'s column does: `"cross_section"` for an MF=10 partial,
+///   `"yield"` for an MF=9 yield, whose partial is that yield times the MF=3
+///   cross section of the MT. A relative covariance of one state has to be
+///   weighted by that state's own partial to fold exactly. All three null
+///   means the `branching.arrow` curve for (`nuclide`, `reaction`, `target`)
+///   is that state's own.
 /// * `mat` is the evaluation's MAT, so a reader can tell a `mat1` naming the
 ///   evaluation itself (JEFF-4.0 U235 MT 4 writes its own 9228 there) from a
 ///   correlation with another material.
@@ -324,6 +333,7 @@ pub fn branching_branching_covariance() -> Schema {
         utf8("target1", true),
         f64s("energy", true),
         f64s("values", true),
+        utf8("quantity", true),
         i32("mat", false),
         i32("za", false),
         f64("awr", false),

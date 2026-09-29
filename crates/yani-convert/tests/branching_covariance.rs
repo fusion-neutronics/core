@@ -74,6 +74,7 @@ fn edit(tape: String, from: &str, to: &str) -> String {
 
 /// The blocks as a consumer gets them: the chain loader reads the file into
 /// the branch table, and the covariance reader turns its rows into blocks.
+/// Read both from disk and as bytes, the browser's path, which must agree.
 fn read_back(dir: &Path) -> Vec<BranchingCovarianceBlock> {
     let chain_dir = dir.join("chain");
     let nuclide = yani::ChainNuclide {
@@ -92,8 +93,37 @@ fn read_back(dir: &Path) -> Vec<BranchingCovarianceBlock> {
     yani::export_chain_parts(&chain, &chain_dir, Some("test")).expect("chain exports");
     let (_, branch) = yani::parse_chain_parts(&chain_dir.join("decay"), None, None, Some(dir))
         .expect("chain loads");
-    branching_covariance_blocks(branch.covariance().expect("the covariance is loaded"))
-        .expect("blocks read")
+    let blocks =
+        branching_covariance_blocks(branch.covariance().expect("the covariance is loaded"))
+            .expect("blocks read");
+
+    let mut sections = yani::ChainSections::default();
+    for (subsection, from) in [
+        ("decay", chain_dir.join("decay")),
+        ("branching", dir.to_path_buf()),
+    ] {
+        for entry in std::fs::read_dir(&from).expect("listed") {
+            let path = entry.expect("entry").path();
+            if path.extension().is_some_and(|ext| ext == "arrow") {
+                let file = path.file_name().expect("named").to_str().expect("UTF-8");
+                sections
+                    .insert(subsection, file, std::fs::read(&path).expect("read"))
+                    .expect("a known subsection");
+            }
+        }
+    }
+    let (_, from_bytes) = yani::parse_chain_parts_from_bytes(&sections).expect("bytes load");
+    let bytes_blocks = branching_covariance_blocks(
+        from_bytes
+            .covariance()
+            .expect("the covariance is loaded from bytes"),
+    )
+    .expect("blocks read from bytes");
+    assert_eq!(
+        bytes_blocks, blocks,
+        "the bytes loader reads what the disk one does"
+    );
+    blocks
 }
 
 #[test]
@@ -164,6 +194,7 @@ fn mf40_is_written_beside_branching_for_nb93() {
     // One product per level in each MT, so every partner is pinned, and
     // MF=10 numbers each level as MF=40 does.
     assert!(stats.mf40_partner_unresolved.is_empty());
+    assert!(stats.mf40_states_placed_by_excitation.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -455,13 +486,14 @@ fn merged_targets_carry_their_own_curve() {
         );
         assert_eq!(row.energy.as_ref(), Some(&energy), "LFS {}", row.lfs);
         assert_eq!(row.values.as_ref(), Some(&values), "LFS {}", row.lfs);
+        assert_eq!(row.quantity.as_deref(), Some("cross_section"));
     }
     let isomer = out
         .covariance
         .iter()
         .find(|r| r.target.as_deref() == Some("Nb93_m1"))
         .expect("the (n,n') isomer");
-    assert!(isomer.energy.is_none() && isomer.values.is_none());
+    assert!(isomer.energy.is_none() && isomer.values.is_none() && isomer.quantity.is_none());
 
     // And the reader keeps the null a null.
     let dir = scratch("merged");
@@ -515,11 +547,19 @@ fn an_mf40_state_matches_mf10_by_excitation_when_lfs_differs() {
     assert_eq!(row.target1.as_deref(), Some("Nb92_m1"));
     assert!(row.energy.is_none(), "still one state per target");
     // The self block names the state by its own subsection's label, so MF=10
-    // having no level 7 leaves nothing to choose between.
+    // having no level 7 leaves nothing to choose between; that the label is
+    // not MF=10's number for the level is on record with the placement.
     assert!(
         out.stats.mf40_partner_unresolved.is_empty(),
         "{:?}",
         out.stats.mf40_partner_unresolved
+    );
+    assert_eq!(
+        out.stats.mf40_states_placed_by_excitation,
+        [
+            "Nb93 MT16: IZAP 41092 LFS 7 at 135.5 keV is placed on Nb92_m1 by its \
+          excitation, MF=9 and MF=10 giving that IZAP and LFS no state"
+        ]
     );
 }
 
@@ -595,10 +635,14 @@ fn a_partner_level_the_two_numberings_disagree_on_is_unresolved() {
         " 1.000000+1 7.000000+0          0         16          0          1412540 16   11",
     );
     let out = extract(&[material(&to_mt16(tape, "1.000000+0"))], &nb_decay());
-    assert!(
-        out.stats.mf40_unmatched_states.is_empty(),
-        "{:?}",
-        out.stats.mf40_unmatched_states
+    // MF=40's ground, now LFS 1 at QM - QI of 0, states no excitation, so
+    // nothing confirms which level it is and it is not placed.
+    assert_eq!(
+        out.stats.mf40_unmatched_states,
+        [
+            "Nb93 MT16: IZAP 41092 LFS 1 is excited but QM - QI is 0.0 keV, which \
+          states no excitation to confirm an MF=9 or MF=10 state by, so is not placed"
+        ]
     );
     assert_eq!(
         out.stats.mf40_partner_unresolved,
@@ -608,12 +652,25 @@ fn a_partner_level_the_two_numberings_disagree_on_is_unresolved() {
         ]
     );
     assert_eq!(isomer_row(&out).target1, None);
-    // The swapped states' own blocks still name themselves.
-    assert!(out
-        .covariance
-        .iter()
-        .filter(|r| r.mt == 16)
-        .all(|r| r.target.is_some() && r.target1 == r.target));
+    // The isomer, now LFS 7, is placed by its excitation and listed as such,
+    // and its self block names it by that label.
+    let mt16 = |lfs: i64| {
+        out.covariance
+            .iter()
+            .find(|r| r.mt == 16 && r.lfs == lfs)
+            .expect("written")
+    };
+    assert_eq!(mt16(1).target, None);
+    assert_eq!(mt16(1).target1, None);
+    assert_eq!(mt16(7).target.as_deref(), Some("Nb92_m1"));
+    assert_eq!(mt16(7).target1.as_deref(), Some("Nb92_m1"));
+    assert_eq!(
+        out.stats.mf40_states_placed_by_excitation,
+        [
+            "Nb93 MT16: IZAP 41092 LFS 7 at 135.5 keV is placed on Nb92_m1 by its \
+          excitation, MF=9 and MF=10 giving that IZAP and LFS no state"
+        ]
+    );
 }
 
 /// The excitation fallback places a state only when one level of the chain
@@ -1029,12 +1086,14 @@ fn a_section_without_a_product_state_is_listed_with_its_head() {
     assert!(out.covariance.iter().all(|r| r.mt == 16));
 }
 
-/// A state MF=9 gives as a yield has no MF=10 partial: its block is still
-/// written, with a null `energy` and `values`, and counted. Here MF=40 MT 16
-/// becomes MT 102, its ground state IZAP 41094 at the Q value of Nb93's MF=9
-/// capture yield to Nb94.
+/// A state MF=9 gives as a yield has no MF=10 partial, and is counted. Here
+/// MF=40 MT 16 becomes MT 102, its ground state IZAP 41094 at the Q value of
+/// Nb93's MF=9 capture yield to Nb94. The decay fixtures have no Nb94 isomer,
+/// so MF=9's 40.9 keV level lands on Nb94 too and `branching.arrow` carries
+/// the two yields summed: the row then carries the state's own yield, since
+/// a relative covariance of one state is weighted by its own partial.
 #[test]
-fn a_state_on_an_mf9_yield_is_written_without_a_curve() {
+fn a_state_on_a_merged_mf9_yield_carries_its_own_yield() {
     let tape = text(NB93);
     let tape = edit(
         tape,
@@ -1066,5 +1125,118 @@ fn a_state_on_an_mf9_yield_is_written_without_a_curve() {
     assert_eq!(row.reaction.as_deref(), Some("(n,gamma)"));
     assert_eq!(row.target.as_deref(), Some("Nb94"));
     assert_eq!(row.target1.as_deref(), Some("Nb94"));
-    assert!(row.energy.is_none() && row.values.is_none());
+    let nb94 = material(&tape);
+    let production = endf::radionuclide_production::radionuclide_production(&nb94);
+    let state = production[&102]
+        .iter()
+        .find(|s| s.lfs == 0)
+        .expect("the MF=9 ground state");
+    let (energy, values) = yani_convert::branching::linearize(
+        state.yields.as_ref().expect("an MF=9 yield"),
+        DEFAULT_LINEARIZE_TOL,
+    );
+    assert_eq!(row.energy.as_ref(), Some(&energy));
+    assert_eq!(row.values.as_ref(), Some(&values));
+    assert_eq!(row.quantity.as_deref(), Some("yield"));
+    let merged = out
+        .rows
+        .iter()
+        .find(|r| r.reaction == "(n,gamma)" && r.target == "Nb94")
+        .expect("the merged capture row");
+    assert_eq!(merged.quantity, "yield");
+    assert_ne!(merged.values, values, "branching.arrow has the sum");
+
+    let dir = scratch("merged-yield");
+    write_branching_covariance(&out.covariance, &dir).expect("writes");
+    let blocks = read_back(&dir);
+    let block = blocks
+        .iter()
+        .find(|b| b.block.mt == 102 && b.lfs == 0)
+        .expect("read back");
+    assert_eq!(block.quantity.as_deref(), Some("yield"));
+    assert_eq!(block.values.as_ref(), Some(&values));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The excitation fallback never puts an excited state on a ground partial.
+/// With no decay file for Nb92's isomer, the (n,2n) isomer, renumbered 7 in
+/// MF=40 and moved to 1 keV, resolves to Nb92, as MF=10's ground does, and
+/// lies within 3 keV of it; but it is an excited level, and MF=10 gives none
+/// there, so it is left unmatched rather than keyed to the ground partial.
+#[test]
+fn an_excited_mf40_state_is_never_placed_on_a_ground_partial() {
+    let tape = text(NB93);
+    let tape = edit(
+        tape,
+        "-8.830870+6-8.966370+6      41092          1          0          1412540 16   10",
+        "-8.830870+6-8.831870+6      41092          7          0          1412540 16   10",
+    );
+    let tape = edit(
+        tape,
+        " 1.000000+1 1.000000+0          0         16          0          1412540 16   11",
+        " 1.000000+1 7.000000+0          0         16          0          1412540 16   11",
+    );
+    let decay = vec![material(&text(fixture!("dec-041_Nb_093m1.endf.xz")))];
+    let out = extract(&[material(&tape)], &decay);
+    assert_eq!(
+        out.stats.mf40_unmatched_states,
+        ["Nb93 MT16: IZAP 41092 LFS 7 at 1.0 keV matches no MF=9 or MF=10 state"]
+    );
+    let row = |lfs: i64| {
+        out.covariance
+            .iter()
+            .find(|r| r.mt == 16 && r.lfs == lfs)
+            .expect("written")
+    };
+    assert_eq!(row(7).target, None);
+    assert_eq!(row(7).target1, None);
+    assert_eq!(
+        row(0).target.as_deref(),
+        Some("Nb92"),
+        "the ground is its own"
+    );
+    assert!(out.stats.mf40_states_placed_by_excitation.is_empty());
+}
+
+/// An excited MF=40 state whose QM - QI is not positive states no energy, so
+/// nothing on the tape confirms which MF=9 or MF=10 level its LFS names: not
+/// the (IZAP, LFS) join, since the two files need not number levels alike,
+/// and not the excitation fallback. Here the (n,2n) isomer is given QI equal
+/// to QM, first at its own LFS 1, which MF=10 also gives, then renumbered 7.
+#[test]
+fn an_excited_mf40_state_with_no_energy_is_not_placed() {
+    for lfs in ["1", "7"] {
+        let tape = text(NB93);
+        let tape = edit(
+            tape,
+            "-8.830870+6-8.966370+6      41092          1          0          1412540 16   10",
+            &format!(
+                "-8.830870+6-8.830870+6      41092          {lfs}          0          1412540 16   10"
+            ),
+        );
+        let tape = edit(
+            tape,
+            " 1.000000+1 1.000000+0          0         16          0          1412540 16   11",
+            &format!(
+                " 1.000000+1 {lfs}.000000+0          0         16          0          1412540 16   11"
+            ),
+        );
+        let out = extract(&[material(&tape)], &nb_decay());
+        assert_eq!(
+            out.stats.mf40_unmatched_states,
+            [format!(
+                "Nb93 MT16: IZAP 41092 LFS {lfs} is excited but QM - QI is 0.0 keV, which \
+                 states no excitation to confirm an MF=9 or MF=10 state by, so is not placed"
+            )]
+        );
+        let row = out
+            .covariance
+            .iter()
+            .find(|r| r.mt == 16 && r.lfs.to_string() == lfs)
+            .expect("the state is still written");
+        assert_eq!(row.target, None, "LFS {lfs}");
+        assert_eq!(row.target1, None, "LFS {lfs}");
+        assert_eq!(row.qi, row.qm, "QI is the tape's");
+        assert!(out.stats.mf40_partner_unresolved.is_empty());
+    }
 }

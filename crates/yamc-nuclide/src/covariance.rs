@@ -148,13 +148,15 @@ pub struct BranchingCovarianceBlock {
     /// another material, `xmf1` is not 10, `mt1` is 0, or the tape does not
     /// pin level `xlfs1` of `mt1` to one state.
     pub target1: Option<String>,
-    /// This state's own MF=10 partial, linearized as `branching.arrow` has
-    /// it, when several MF=10 states share `target` and the `branching.arrow`
-    /// cross section is their sum. `None` for an MF=10 state means that cross
-    /// section is this state's own; a state MF=9 gives as a yield is always
-    /// `None`, having no MF=10 partial.
+    /// This state's own curve, linearized as `branching.arrow` has it, when
+    /// several states share `target` in the same `quantity` and the
+    /// `branching.arrow` curve is their sum: its MF=10 partial, or its MF=9
+    /// yield. `None` means the `branching.arrow` curve is this state's own.
     pub energy: Option<Vec<f64>>,
     pub values: Option<Vec<f64>>,
+    /// `"cross_section"` or `"yield"`, as in `branching.arrow`, whenever
+    /// `energy` and `values` are set.
+    pub quantity: Option<String>,
     /// The evaluation's own MAT.
     pub mat: i32,
     /// The section HEAD.
