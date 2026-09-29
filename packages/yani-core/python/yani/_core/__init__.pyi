@@ -2564,8 +2564,9 @@ class TransmutationResults:
           negative), ``evaluated_sigma`` (``None`` when that variance is
           negative) and ``sampled_sigma``. A repair of a nuclide outside the
           populated bound has no dict; ``covariance_repaired_outside_bound``
-          names those nuclides. They are not a gap on the nominal bound, but a
-          replica's rates can populate them.
+          names those with a channel a draw can move. The bound holds at
+          nominal rates only and a replica's rates can populate them, so any
+          also makes ``has_gaps`` true.
         - ``worst_sigma_inflation``: the largest sampled over evaluated sigma,
           minus one, over the repaired channels of populated nuclides with a
           positive rate on a spectrum the schedule irradiates with,

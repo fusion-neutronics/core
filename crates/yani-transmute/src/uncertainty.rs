@@ -290,9 +290,12 @@ pub struct Info {
     /// nuclide is in `covariance_repaired_outside_bound`.
     pub covariance_repairs: Vec<Repair>,
     /// Nuclides outside the populated bound whose covariance needed a repair
-    /// on some spectrum. Not a gap, since on the nominal bound they cannot
-    /// move any density past the floor, but named because a replica's rates
-    /// can populate them and their repairs are otherwise listed nowhere.
+    /// on some spectrum, with a channel a draw can move there (a positive rate
+    /// on a spectrum the schedule irradiates with). A gap: the bound holds at
+    /// nominal rates only, a replica's lognormal draw can populate them, and
+    /// whether one did is not something the stepper's end-of-step densities
+    /// can settle, since the solve applies every reachable nuclide's rates
+    /// within a step. Their per-channel records are not kept.
     pub covariance_repaired_outside_bound: BTreeSet<String>,
     /// The largest `sampled / evaluated - 1` over the repaired channels a draw
     /// can move: a populated nuclide, present at the start or produced, with a
@@ -457,6 +460,7 @@ impl Info {
             || !self.partials_above_rate.is_empty()
             || !self.partials_below_rate.is_empty()
             || !self.covariance_repaired.is_empty()
+            || !self.covariance_repaired_outside_bound.is_empty()
             || self.spectra_without_flux_sigma > 0
             || !self.no_half_life_uncertainty.is_empty()
             || !self.no_decay_energy_uncertainty.is_empty()
@@ -932,7 +936,8 @@ mod tests {
         assert_eq!(info.covariance_repairs.len(), 2);
         assert!(info.has_gaps());
 
-        // Outside the populated bound a repair is named, not a gap.
+        // Outside the populated bound a repair is named, and is a gap too:
+        // the bound is nominal and a replica's draw can populate the nuclide.
         let mut outside = SigmaReport::default();
         outside.repaired_outside_bound = BTreeSet::from(["Xe135".to_string()]);
         let info = Info::from_fold(&Coverage::default(), &outside, true);
@@ -940,7 +945,7 @@ mod tests {
             info.covariance_repaired_outside_bound,
             BTreeSet::from(["Xe135".to_string()])
         );
-        assert!(!info.has_gaps());
+        assert!(info.has_gaps());
         assert!(!Info::from_fold(&Coverage::default(), &SigmaReport::default(), true).has_gaps());
     }
 

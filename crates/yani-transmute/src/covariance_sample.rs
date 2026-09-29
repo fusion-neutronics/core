@@ -70,9 +70,12 @@ use crate::covariance_fold::RateCovariance;
 /// scale. The Jacobi round-off on `C` is absolute, about `eps · λ_max`, and a
 /// small channel can carry an O(1) share of a null-space eigenvector, so on
 /// `C` a rank-one matrix whose channels span a few orders in sigma already
-/// reads as needing clipping. On `R` every diagonal is one and `λ_max <= m`,
-/// so the round-off is about `m · eps`, orders below `m · 1e-12`, whatever the
-/// spread. The spread itself is real: TENDL-2017 has channels at a relative
+/// reads as needing clipping. On `R` every diagonal is one, so the trace is
+/// `m`, and the round-off is about `eps` times the largest `|λ|` of `R`. That
+/// is at most `m` on a PSD `R` and near it close to the PSD boundary, where
+/// the test decides anything, so the round-off is about `m · eps`, orders
+/// below `m · 1e-12`, whatever the spread. (A far-from-PSD `R` can have
+/// `λ_max > m`, but its negative eigenvalue is then far past the threshold.) The spread itself is real: TENDL-2017 has channels at a relative
 /// sigma up to 5.6e8, a variance near 3e17, and a threshold against the
 /// `λ_max` of `C` would sit far above a real repair among the ordinary
 /// channels beside one.
@@ -126,9 +129,17 @@ pub struct Repair {
     /// Index of the spectrum the covariance was folded against, in the order
     /// the schedule names them.
     pub spectrum: usize,
-    /// The most negative eigenvalue of the folded relative covariance.
+    /// The most negative eigenvalue of the folded relative covariance `C`.
+    ///
+    /// Read off the same decomposition of `C` that is sampled, not off the
+    /// correlation matrix the repair was decided on, so this and every other
+    /// value here describe what was drawn. Cyclic Jacobi keeps a small
+    /// eigenvalue beside a huge one to high relative accuracy in the cases
+    /// tested, but the guarantee on `C` is only about `eps · λ_max(C)`: next
+    /// to a channel at a variance of 1e17 a flagged repair could in principle
+    /// read here as a `lambda_min` near zero or above it.
     pub lambda_min: f64,
-    /// The largest eigenvalue.
+    /// The largest eigenvalue of `C`.
     pub lambda_max: f64,
     /// `sum |λ_neg| / trace(C)`: the variance the clipping added, as a share
     /// of the variance the evaluation states. Infinite when the stated trace
@@ -373,9 +384,9 @@ impl Sampler {
 /// The repairs and the widest sigmas over every spectrum of a run, for the
 /// nuclides the material can populate.
 ///
-/// All of it is read off the factorization, so it is exact with respect to the
-/// folded covariance: nothing here is a modelling choice, it says where one
-/// was made. The fold covers every chain nuclide with data, and from almost
+/// All of it is read off the factorization that is sampled, so it is what was
+/// drawn, to that decomposition's round-off (see [`Repair::lambda_min`]):
+/// nothing here is a modelling choice, it says where one was made. The fold covers every chain nuclide with data, and from almost
 /// any composition the chain's closure saturates on one large component, so
 /// a pure W182 material folds Xe135 and Mo100. Those are left out here by
 /// `populated`, the nuclides `yani::populated_nuclides` bounds at or above the
@@ -395,8 +406,10 @@ pub struct SigmaReport {
     /// nuclide is named in `repaired_outside_bound` instead.
     pub repairs: Vec<Repair>,
     /// The nuclides outside `populated` whose matrix needed a repair on some
-    /// spectrum. Not a gap on the nominal bound, but named so that leaving
-    /// their records out is visible, since a replica can populate them.
+    /// spectrum, with a channel a draw can move there: a positive rate on a
+    /// spectrum the schedule irradiates with. Their records are left out, but
+    /// the bound holds at nominal rates only and a replica's draw can
+    /// populate them, so these count as a gap (see `Info::has_gaps`).
     pub repaired_outside_bound: BTreeSet<String>,
     /// The nuclides of `repairs` with at least one repaired channel a draw
     /// can move: a positive rate on a spectrum the schedule irradiates with.
@@ -473,7 +486,16 @@ impl SigmaReport {
         let moves = |nuclide: &str, kind: &str| populated.contains(nuclide) && drawn(nuclide, kind);
         for repair in sampler.repairs(spectrum) {
             if !populated.contains(&repair.nuclide) {
-                self.repaired_outside_bound.insert(repair.nuclide);
+                // Named only when a draw can reach it: a multiplier on a zero
+                // rate, or on an unirradiated spectrum, moves nothing in any
+                // replica, bound or not.
+                if repair
+                    .channels
+                    .iter()
+                    .any(|c| drawn(&repair.nuclide, &c.kind))
+                {
+                    self.repaired_outside_bound.insert(repair.nuclide);
+                }
                 continue;
             }
             for c in repair
@@ -1046,9 +1068,38 @@ mod tests {
         );
     }
 
+    /// Coupled to the repaired pair, the wide channel still leaves the
+    /// recorded eigenvalue exact rather than round-off of `eps · 1e17`, about
+    /// 22. The negative eigenvalue is the one of the pair's block less the
+    /// wide channel's share, `x^2 / w` on `a`, to a relative 1e-19.
+    #[test]
+    fn a_huge_channel_coupled_to_a_repair_keeps_its_eigenvalue() {
+        let w = 1.0e17_f64;
+        let x = 0.5 * w.sqrt() * 0.1;
+        let c = cov(
+            &["wide", "a", "b"],
+            vec![
+                w, x, 0.0, //
+                x, 0.01, 0.05, //
+                0.0, 0.05, 0.01,
+            ],
+        );
+        let s = Sampler::new(&BTreeMap::from([("X".to_string(), c)]));
+        let repairs = s.repairs(0);
+        assert_eq!(repairs.len(), 1);
+        let r = &repairs[0];
+        // [[0.01 - x^2 / w, 0.05], [0.05, 0.01]] = [[0.0075, 0.05], [0.05, 0.01]].
+        let want = 0.00875 - (0.00125_f64.powi(2) + 0.05_f64.powi(2)).sqrt();
+        assert!((r.lambda_min - want).abs() < 1e-12, "{}", r.lambda_min);
+        for ch in &r.channels[1..] {
+            assert!(ch.sampled > 0.1, "{ch:?}");
+        }
+    }
+
     /// A nuclide the material cannot populate has no repair record, no weight
     /// and no place in the wide-sigma lists, and is named instead as a repair
-    /// outside the bound with its wide channels beside it.
+    /// outside the bound with its wide channels beside it, when a draw can
+    /// move one of its channels.
     #[test]
     fn a_nuclide_the_material_cannot_populate_is_named_outside_the_bound() {
         let s = Sampler::new(&BTreeMap::from([(
@@ -1080,6 +1131,19 @@ mod tests {
         );
         assert!(reported.sigma_at_least_one_outside_bound.is_empty());
         assert!(reported.repaired_outside_bound.is_empty());
+
+        // With no rate on any of its channels no replica's draw moves it, so
+        // outside the bound it is not named at all, and not a gap.
+        let mut no_rate = SigmaReport::default();
+        no_rate.add(
+            0,
+            &s,
+            &unit_rates("X", &[("a", 0.0), ("b", 0.0)]),
+            1.0,
+            &densities,
+            &Default::default(),
+        );
+        assert_eq!(no_rate, SigmaReport::default());
     }
 
     /// A wide channel with a small rate beside a repair on the channels that
