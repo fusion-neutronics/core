@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::error::Result;
 use crate::function::Tabulated1D;
 use crate::material::Material;
+use crate::mf::mf8::{IsomerLevel, Mf8};
 
 /// Production data for one final state of one reaction.
 ///
@@ -18,7 +19,10 @@ use crate::material::Material;
 /// [`level_to_isomeric_state`].
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RadionuclideProduction {
-    /// `1000*Z + A` of the product nuclide.
+    /// `1000*Z + A` of the product nuclide, `-1` for fission, or `0` where
+    /// the evaluation does not say. A zero IZAP in MF=9 or MF=10 is replaced
+    /// by the product the one MF=8 subsection for the same level (and LMF)
+    /// names, when there is exactly one. [`Self::nuclide`] reads it.
     pub zap: i64,
     /// Level number of the final state; 0 is the ground state.
     pub lfs: i64,
@@ -36,6 +40,15 @@ pub struct RadionuclideProduction {
 }
 
 impl RadionuclideProduction {
+    /// The product's `(Z, A)`, or `None` when the state names no single
+    /// nuclide: fission (ZAP = -1), which leaves a spread of fragments the
+    /// fission yields describe, or a product the evaluation does not state
+    /// (ZAP = 0).
+    pub fn nuclide(&self) -> Option<(i64, i64)> {
+        let (z, a) = (self.zap / 1000, self.zap % 1000);
+        (z > 0 && a > 0).then_some((z, a))
+    }
+
     /// Excitation energy of the final state in eV, where the evaluation gives
     /// one.
     ///
@@ -65,6 +78,11 @@ impl RadionuclideProduction {
 /// `(ZAP, LFS)` pair are merged into one entry, and the MF=8 excitation energy
 /// attached where there is one. The tabulated functions are returned exactly
 /// as evaluated.
+///
+/// A state whose ZAP stays zero (IZAP = 0 with no MF=8 subsection to name it)
+/// is keyed by `(0, LFS)` too, so two such subsections at the same LFS in one
+/// file merge and the later curve replaces the earlier. None of the six
+/// surveyed libraries has such a pair.
 pub fn radionuclide_production(material: &Material) -> BTreeMap<i32, Vec<RadionuclideProduction>> {
     let mut by_mt: BTreeMap<i32, BTreeSet<i32>> = BTreeMap::new();
     for &(mf, mt) in material.section_data.keys() {
@@ -76,8 +94,9 @@ pub fn radionuclide_production(material: &Material) -> BTreeMap<i32, Vec<Radionu
     let mut result = BTreeMap::new();
     for (mt, files) in by_mt {
         // MF=8 links each (ZAP, LFS) pair to an excitation energy.
+        let mf8 = material.mf8(mt);
         let mut elfs: BTreeMap<(i64, i64), f64> = BTreeMap::new();
-        if let Some(mf8) = material.mf8(mt) {
+        if let Some(mf8) = mf8 {
             for sub in &mf8.subsections {
                 elfs.insert((sub.zap as i64, sub.lfs), sub.elfs);
             }
@@ -95,7 +114,7 @@ pub fn radionuclide_production(material: &Material) -> BTreeMap<i32, Vec<Radionu
             };
             let Some(section) = section else { continue };
             for level in &section.levels {
-                let key = (level.izap, level.lfs);
+                let key = (product_zap(mf8, i64::from(mf), level), level.lfs);
                 let i = *index.entry(key).or_insert_with(|| {
                     ordered.push(RadionuclideProduction {
                         zap: key.0,
@@ -117,6 +136,41 @@ pub fn radionuclide_production(material: &Material) -> BTreeMap<i32, Vec<Radionu
         result.insert(mt, ordered);
     }
     result
+}
+
+/// The product ZA of one MF=9 or MF=10 subsection.
+///
+/// IZAP as the subsection states it, except where it is zero. The field is a
+/// late addition to MF=9 and MF=10: ENDF-102's table of updates for the
+/// 2004 revision lists "Added final product identifier, IZAP" for both files,
+/// and the July 2010 revision again lists "Addition of the IZAP parameters in
+/// Files 9 and 10". Before that the product was named in MF=8 alone, and an
+/// evaluation written to the older layout leaves the field zero. FENDL-3.2d's
+/// Al27, the JEFF-3.1.1 file of a 1997 LANL evaluation, is one: its MF=9
+/// (n,2n) and (n,alpha) yields carry IZAP = 0, and the MF=8 subsections for
+/// the same final states name Al26 and Na24.
+/// So zero is read as "not stated here", and the product is the one the MF=8
+/// subsection for the same final state (LFS) names, provided that
+/// subsection points at this file (LMF) and is the only one that does. Where
+/// none does the zero stands, since the file then does not say which nuclide
+/// it is, and a guess from the reaction's change in Z and A would be ours
+/// rather than the evaluator's.
+///
+/// -1 is fission (ENDF-102 section 10.3.2), kept as stated: it has no single
+/// product.
+pub(crate) fn product_zap(mf8: Option<&Mf8>, mf: i64, level: &IsomerLevel) -> i64 {
+    if level.izap != 0 {
+        return level.izap;
+    }
+    let Some(mf8) = mf8 else { return 0 };
+    let mut named = mf8
+        .subsections
+        .iter()
+        .filter(|sub| sub.lfs == level.lfs && sub.lmf == mf);
+    match (named.next(), named.next()) {
+        (Some(sub), None) => sub.zap as i64,
+        _ => 0,
+    }
 }
 
 /// One isomeric state of a nuclide, as decay data describes it.
@@ -465,6 +519,106 @@ mod tests {
         // The excitation energy comes from MF=8's ELFS, not from QM - QI.
         assert_eq!(state.elfs, Some(127_269.7));
         assert_eq!(state.excitation_energy(), Some(127_269.7));
+    }
+
+    /// One ENDF record: a 66-column body, then MAT, MF and MT.
+    fn record(body: &str, mf: i32, mt: i32) -> String {
+        format!("{body:<66}1325{mf:>2}{mt:>3}\n")
+    }
+
+    /// A TAB1 subsection of MF=9 or MF=10 with a two-point lin-lin function.
+    fn tab1(izap: i64, lfs: i64, mf: i32, mt: i32) -> String {
+        record(
+            &format!(" 0.000000+0 0.000000+0{izap:>11}{lfs:>11}          1          2"),
+            mf,
+            mt,
+        ) + &record("          2          2", mf, mt)
+            + &record(" 1.000000+7 5.000000-1 2.000000+7 5.000000-1", mf, mt)
+    }
+
+    /// An MF=8 subsection with NO = 1: product, level energy, LMF and LFS.
+    fn mf8_sub(zap: &str, elfs: &str, lmf: i64, lfs: i64, mt: i32) -> String {
+        record(
+            &format!("{zap:>11}{elfs:>11}{lmf:>11}{lfs:>11}          0          0"),
+            8,
+            mt,
+        )
+    }
+
+    /// Wraps subsections in a HEAD and a SEND.
+    fn section(mf: i32, mt: i32, ns: i64, body: &str) -> String {
+        record(
+            &format!(" 1.302700+4 2.674975+1          0          0{ns:>11}          1"),
+            mf,
+            mt,
+        ) + body
+            + &record("", mf, 0)
+    }
+
+    /// FENDL-3.2d's Al27 (JEFF-3.1.1's file) writes its MF=9 to the
+    /// layout before IZAP joined MF=9 and MF=10, so the field is zero and
+    /// MF=8 is what names the product. The (n,2n) MF=8 records here are the
+    /// tape's, and the MF=9 Q values are zero, so the isomer's level energy
+    /// can only come from MF=8. The other reactions are the cases around it:
+    /// an IZAP of zero that MF=8 does not resolve, one it resolves
+    /// ambiguously, one whose MF=8 subsection for the level points at MF=10
+    /// rather than MF=9, and fission.
+    #[test]
+    fn a_zero_izap_takes_the_product_mf8_names() {
+        let text = record(" tape", 0, 0)
+            + &section(
+                8,
+                16,
+                2,
+                &(mf8_sub(" 1.302600+4", " 0.000000+0", 9, 0, 16)
+                    + &mf8_sub(" 1.302600+4", " 2.284000+5", 9, 1, 16)),
+            )
+            + &section(8, 18, 1, &mf8_sub("-1.000000+0", " 0.000000+0", 10, 0, 18))
+            + &section(8, 22, 1, &mf8_sub(" 1.102300+4", " 0.000000+0", 10, 0, 22))
+            + &section(
+                8,
+                103,
+                2,
+                &(mf8_sub(" 1.202700+4", " 0.000000+0", 9, 0, 103)
+                    + &mf8_sub(" 1.202600+4", " 0.000000+0", 9, 0, 103)),
+            )
+            + &record("", 0, 0)
+            + &section(9, 16, 2, &(tab1(0, 0, 9, 16) + &tab1(0, 1, 9, 16)))
+            + &section(9, 22, 1, &tab1(0, 0, 9, 22))
+            + &section(9, 103, 1, &tab1(0, 0, 9, 103))
+            + &section(9, 107, 1, &tab1(0, 0, 9, 107))
+            + &record("", 0, 0)
+            + &section(10, 18, 1, &tab1(-1, 0, 10, 18))
+            + &record("", 0, 0)
+            + &format!("{:<66}   0 0  0\n", "")
+            + &format!("{:<66}  -1 0  0\n", "");
+        let m = Material::from_str(&text).unwrap();
+        let production = radionuclide_production(&m);
+
+        // Al26 in both final states, and the level energy is MF=8's 228.4 keV
+        // rather than the zero QM - QI the subsection would otherwise fall
+        // back on.
+        let n2n = &production[&16];
+        assert_eq!(n2n.len(), 2);
+        assert_eq!((n2n[0].zap, n2n[0].lfs), (13026, 0));
+        assert_eq!((n2n[1].zap, n2n[1].lfs), (13026, 1));
+        assert_eq!(n2n[1].nuclide(), Some((13, 26)));
+        assert_eq!(n2n[1].elfs, Some(228_400.0));
+
+        // Two MF=8 products for the one level, and none at all, leave the
+        // product unstated rather than picked.
+        assert_eq!(production[&103][0].zap, 0);
+        assert_eq!(production[&103][0].nuclide(), None);
+        assert_eq!(production[&107][0].zap, 0);
+        assert_eq!(production[&107][0].nuclide(), None);
+
+        // An MF=8 subsection for the level that points at MF=10 says nothing
+        // about the MF=9 subsection, so its product is not taken either.
+        assert_eq!(production[&22][0].zap, 0);
+
+        // Fission is kept as the file states it, and names no nuclide.
+        assert_eq!(production[&18][0].zap, -1);
+        assert_eq!(production[&18][0].nuclide(), None);
     }
 
     #[test]

@@ -9,6 +9,8 @@ use std::sync::{Arc, RwLock};
 
 use once_cell::sync::Lazy;
 
+use crate::continuum::{Continuum, Interpolation, UnreadableContinuum};
+
 type ChainMap = HashMap<String, ChainNuclide>;
 type ChainCache = RwLock<HashMap<String, Arc<ChainMap>>>;
 
@@ -179,6 +181,37 @@ pub struct FissionYield {
     pub energy: f64,
     /// Product nuclide names and their yields (fractional per fission)
     pub products: Vec<(String, f64)>,
+    /// The evaluation's independent yields (MT=454) at this energy, exactly
+    /// as the tape gives them. `products` is derived from these and is what
+    /// the solver reads. `None` where the chain carries no evaluated yields.
+    pub independent: Option<EvaluatedYields>,
+    /// The evaluation's cumulative yields (MT=459) at this energy. Carried,
+    /// not solved with: a cumulative yield already includes the decay the
+    /// solver models, so using it as a source would count that decay twice.
+    pub cumulative: Option<EvaluatedYields>,
+}
+
+/// One set of evaluated fission product yields, as the tape gives them.
+///
+/// Not the same list as [`FissionYield::products`]. That one names chain
+/// nuclides, so a product with no decay data is mapped onto a stand-in and
+/// products that land on the same name are summed. These are the tape's own
+/// products in tape order, and each `uncertainties` entry is the DY of the
+/// `yields` entry beside it. A summed yield has no stated DY, since it would
+/// need the correlation of its parts and no evaluation publishes one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvaluatedYields {
+    /// Product names from the tape's ZAFP and FPS, e.g. `"Xe135_m1"`.
+    pub products: Vec<String>,
+    /// The tape's Y, per fission.
+    pub yields: Vec<f64>,
+    /// The tape's DY, one per product. An evaluator's 0.0 is kept as
+    /// `Some(0.0)`, and it and `None` both mean "not stated", never an exact
+    /// yield.
+    pub uncertainties: Vec<Option<f64>>,
+    /// The ENDF interpolation law from the next lower energy to this one.
+    /// `None` at the lowest energy, where the tape states no law.
+    pub interpolation: Option<i32>,
 }
 
 /// Complete fission yield data for a nuclide (may have multiple energies).
@@ -266,20 +299,57 @@ fn bracket(e_lo: f64, e_hi: f64, hi: usize, energy: f64) -> [(usize, f64); 2] {
 }
 
 /// Distribution data for a decay photon source.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum DecaySourceDistribution {
-    /// Discrete line spectrum: each (energy, intensity) pair is a spectral line.
+    /// Discrete line spectrum: each (energy, intensity) pair is a spectral
+    /// line, its intensity the emission rate per atom [1/s].
     Discrete {
         energies: Vec<f64>,
         intensities: Vec<f64>,
     },
+    /// A continuum: `intensities` is the emission-rate density per atom
+    /// [1/s/eV] at each of `energies` [eV], read between them by
+    /// `interpolation`. `None` there is a file that states no law, which a
+    /// `decay/sources.arrow` written before the column does for every
+    /// continuum; see [`crate::continuum`].
+    Tabular {
+        energies: Vec<f64>,
+        intensities: Vec<f64>,
+        interpolation: Option<Interpolation>,
+    },
+}
+
+impl DecaySourceDistribution {
+    /// Particles emitted per atom per second: the lines summed, or the
+    /// continuum integrated under its law.
+    pub fn emission_rate(&self) -> Result<f64, UnreadableContinuum> {
+        match self {
+            DecaySourceDistribution::Discrete { intensities, .. } => Ok(intensities.iter().sum()),
+            DecaySourceDistribution::Tabular {
+                energies,
+                intensities,
+                interpolation,
+            } => Ok(Continuum::new(energies, intensities, *interpolation)?.integral()),
+        }
+    }
+
+    /// The stored values: a line's emission rate, or a continuum's density.
+    ///
+    /// Either is the per-decay yield times the decay constant, so a change of
+    /// half-life rescales both the same way.
+    pub fn intensities_mut(&mut self) -> &mut Vec<f64> {
+        match self {
+            DecaySourceDistribution::Discrete { intensities, .. }
+            | DecaySourceDistribution::Tabular { intensities, .. } => intensities,
+        }
+    }
 }
 
 /// A decay photon source associated with a nuclide.
 ///
 /// In D1S chain files, nuclides may have source entries describing the decay
 /// gamma spectrum emitted when the nuclide decays.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DecaySource {
     /// Particle type emitted (e.g. "photon")
     pub particle: String,
@@ -1227,6 +1297,8 @@ mod tests {
                     ("Cs137".into(), 0.062),
                     ("Sr90".into(), 0.058),
                 ],
+                independent: None,
+                cumulative: None,
             }],
         }));
         chain.insert("U235".into(), u235);
@@ -1803,6 +1875,8 @@ mod tests {
         FissionYield {
             energy,
             products: vec![],
+            independent: None,
+            cumulative: None,
         }
     }
 

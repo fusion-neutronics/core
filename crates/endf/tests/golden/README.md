@@ -139,6 +139,8 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 | `n-054_Xe_136_trimmed` | MF1, MF3 |
 | `n-003_Li_006_trimmed` | MF6 LAW=2 and LAW=4, MF12, MF14, MF33 |
 | `n-026_Fe_056_trimmed` | MF2 Reich-Moore, MF6 LAW=1, MF12/14, MF33 |
+| `n_2825_28-Ni-58_trimmed.fendl32d` | MF33 LB=0, 1, 4 and 5 from FENDL-3.2d: LB=1 tables with odd and even NP, and the only LB=4 block on any tape (shimwell/endf-python#25) |
+| `n-024_Cr_052_trimmed.endfb81` | MF33 LB=0, 1 and 8 from ENDF/B-VIII.1: the (n,p) tables whose upper half the old LB=0 to 4 split dropped (shimwell/endf-python#25) |
 | `n-092_U_235_trimmed` | MF2 Reich-Moore + Case C URR, MF5 LF=5, MF8, MF10, MF15, MF34, delayed neutron groups |
 | `photoat-001_H_000` | MF23, MF27 |
 | `atom-001_H_000` | MF28 |
@@ -148,6 +150,8 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 | eight more `dec-*` | The decay evaluations that close the chain fixture |
 | `dec-049_In_116m2` | MF8 MT=457 decay data: an isomeric transition down to m1 |
 | `dec-072_Hf_177m1` | MF8 MT=457 decay data: an isomeric transition whose average energies exceed its Q |
+| `dec-098_Cf_252.jeff40` | MF8 MT=457 decay data from JEFF-4.0: a linear-linear photon continuum (LCON=2) beside the lines, and a log-linear neutron continuum |
+| `dec-092_U_235` | MF8 MT=457 decay data: a fissioning parent, so the `synthetic-nfy.endf` yields reach a chain |
 | `Li6.ace` | An ACE Type 1 table; AND in all three shapes, DLW laws 3, 33 and 44, 15 reactions with photon production |
 | `synthetic-urr.ace` | The unresolved resonance block, which no small real table has |
 | `synthetic-laws.ace` | DLW laws 2, 4, 7, 9, 11, 61 and 66 |
@@ -182,8 +186,10 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 - **A delayed neutron group whose applicability varies with energy.** U235
   gives each group a constant share, which is the usual case; the branch that
   takes the product on the union of two grids is unexercised.
-- **Other libraries.** Everything here is ENDF/B-VIII.0 except the ACE table,
-  which is TENDL-2023.1. JEFF-4.0, JENDL-5 and TENDL-2025 differ in which
+- **Other libraries.** Nearly everything here is ENDF/B-VIII.0. The exceptions
+  are the ACE table (TENDL-2023.1), Ir191 (TENDL-2017), the Sn111 decay file
+  (JENDL-5) and the two MF33 fixtures (FENDL-3.2d Ni58 and ENDF/B-VIII.1
+  Cr52). JEFF-4.0, JENDL-5 and TENDL-2025 differ in which
   optional records they write and how strictly they follow the format, which is
   exactly what a format reader gets wrong.
 

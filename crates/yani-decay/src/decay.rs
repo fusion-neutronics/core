@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use yani::{ChainNuclide, DecaySourceDistribution};
+use yani::{ChainNuclide, Continuum, DecaySourceDistribution, Interpolation, UnreadableContinuum};
 
 /// Electron-volt to joule conversion (2019 SI redefinition).
 const EV_TO_J: f64 = 1.602_176_634e-19;
@@ -147,6 +147,10 @@ pub fn decay_heat_total(
 /// The discrete decay photon lines an inventory emits: `(energy [eV], photons
 /// per second)`, ascending in energy, coincident energies summed.
 ///
+/// Lines only. A continuum is a density per eV rather than a set of rates, so
+/// it has no place in this list, and summing its tabulated values as lines is
+/// the defect issue #163 found. [`decay_photon_continua`] returns it.
+///
 /// The chain records each line's intensity **per atom per second**, not per
 /// decay: it is the emission probability already multiplied by the nuclide's
 /// decay constant. Co60's 1332 keV line, emitted on 99.98% of decays, is stored
@@ -185,7 +189,10 @@ pub fn decay_photon_lines(
             let DecaySourceDistribution::Discrete {
                 energies,
                 intensities,
-            } = &source.distribution;
+            } = &source.distribution
+            else {
+                continue;
+            };
             for (energy, intensity) in energies.iter().zip(intensities) {
                 if *intensity > 0.0 {
                     *lines.entry(energy.to_bits()).or_insert(0.0) += atoms * intensity;
@@ -197,6 +204,81 @@ pub fn decay_photon_lines(
         .into_iter()
         .map(|(bits, rate)| (f64::from_bits(bits), rate))
         .collect()
+}
+
+/// One nuclide's decay photon continuum within an inventory.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhotonContinuum {
+    /// The emitting nuclide.
+    pub nuclide: String,
+    /// Tabulated energies [eV], ascending.
+    pub energies: Vec<f64>,
+    /// The emission-rate density at each energy [photons/s/eV]: the chain's
+    /// per-atom density times the nuclide's atom count.
+    pub rates: Vec<f64>,
+    /// How `rates` is read between the energies, `None` where the chain
+    /// states no law.
+    pub interpolation: Option<Interpolation>,
+}
+
+impl PhotonContinuum {
+    /// Photons per second over the whole continuum, its integral under its
+    /// law.
+    pub fn emission_rate(&self) -> Result<f64, UnreadableContinuum> {
+        Ok(Continuum::new(&self.energies, &self.rates, self.interpolation)?.integral())
+    }
+}
+
+/// The decay photon continua an inventory emits, one per nuclide and
+/// continuum, in nuclide-name order.
+///
+/// The counterpart of [`decay_photon_lines`] for the part of a decay spectrum
+/// ENDF gives as a density. Each continuum stays on its own grid and keeps its
+/// own law: two continua cannot be summed point by point unless they share
+/// both, so merging them would mean resampling one onto the other.
+///
+/// Atom counts scale the chain's per-atom densities exactly as they scale line
+/// intensities, and nuclides the chain does not know are skipped. A continuum
+/// whose law the chain does not state is still returned, with `None` for it,
+/// so the caller can see what it cannot integrate.
+pub fn decay_photon_continua(
+    atom_densities: &HashMap<String, f64>,
+    volume: f64,
+    chain: &HashMap<String, ChainNuclide>,
+) -> Vec<PhotonContinuum> {
+    let mut names: Vec<&String> = atom_densities.keys().collect();
+    names.sort();
+
+    let mut continua = Vec::new();
+    for name in names {
+        let atoms = atom_densities[name] * BARN_PER_CM_SQ * volume;
+        if atoms <= 0.0 {
+            continue;
+        }
+        let Some(chain_nuclide) = chain.get(name.as_str()) else {
+            continue;
+        };
+        for source in &chain_nuclide.sources {
+            if source.particle != "photon" {
+                continue;
+            }
+            let DecaySourceDistribution::Tabular {
+                energies,
+                intensities,
+                interpolation,
+            } = &source.distribution
+            else {
+                continue;
+            };
+            continua.push(PhotonContinuum {
+                nuclide: name.clone(),
+                energies: energies.clone(),
+                rates: intensities.iter().map(|d| atoms * d).collect(),
+                interpolation: *interpolation,
+            });
+        }
+    }
+    continua
 }
 
 #[cfg(test)]
@@ -335,6 +417,89 @@ mod tests {
 
     fn mn56_total(chain: &HashMap<String, ChainNuclide>) -> f64 {
         chain["Mn56"].decay_energy
+    }
+
+    /// Sm158 as ENDF/B-VIII.1 gives it has no lines at all, only a continuum;
+    /// here a coarse histogram of the same kind beside one line.
+    fn chain_with_a_continuum(
+        interpolation: Option<Interpolation>,
+    ) -> HashMap<String, ChainNuclide> {
+        let lambda = std::f64::consts::LN_2 / 318.0;
+        let mut sm158 = nuclide("Sm158", Some(318.0), 1.0e6);
+        sm158.sources = vec![
+            yani::DecaySource {
+                particle: "photon".to_string(),
+                distribution: DecaySourceDistribution::Discrete {
+                    energies: vec![2.0e5],
+                    intensities: vec![0.5 * lambda],
+                },
+            },
+            yani::DecaySource {
+                particle: "photon".to_string(),
+                distribution: DecaySourceDistribution::Tabular {
+                    energies: vec![1.0e4, 1.0e5, 1.0e6],
+                    intensities: vec![2.0e-5 * lambda, 1.0e-6 * lambda, 0.0],
+                    interpolation,
+                },
+            },
+            // A continuum of another particle is not a photon source.
+            yani::DecaySource {
+                particle: "electron".to_string(),
+                distribution: DecaySourceDistribution::Tabular {
+                    energies: vec![1.0e4, 1.0e6],
+                    intensities: vec![1.0e-6 * lambda, 0.0],
+                    interpolation,
+                },
+            },
+        ];
+        HashMap::from([("Sm158".to_string(), sm158)])
+    }
+
+    /// Lines and continuum come back apart, each in its own units: the line in
+    /// photons/s, the continuum in photons/s/eV with its law, and the lines
+    /// list never holds a continuum's values (issue #163).
+    #[test]
+    fn a_continuum_is_returned_apart_from_the_lines() {
+        let chain = chain_with_a_continuum(Some(Interpolation::Histogram));
+        let densities = HashMap::from([("Sm158".to_string(), 1.0e-12)]);
+        let atoms = 1.0e-12 * 1.0e24 * 2.0;
+        let lambda = std::f64::consts::LN_2 / 318.0;
+
+        assert_eq!(
+            decay_photon_lines(&densities, 2.0, &chain),
+            vec![(2.0e5, atoms * 0.5 * lambda)]
+        );
+
+        let continua = decay_photon_continua(&densities, 2.0, &chain);
+        assert_eq!(
+            continua.len(),
+            1,
+            "the electron continuum is not a photon one"
+        );
+        let c = &continua[0];
+        assert_eq!(c.nuclide, "Sm158");
+        assert_eq!(c.energies, vec![1.0e4, 1.0e5, 1.0e6]);
+        assert_eq!(c.interpolation, Some(Interpolation::Histogram));
+        assert_eq!(c.rates[1], atoms * 1.0e-6 * lambda);
+        // 2e-5 per eV over 9e4 eV, then 1e-6 per eV over 9e5 eV: 2.7 photons
+        // per decay.
+        let expected = atoms * lambda * (2.0e-5 * 9.0e4 + 1.0e-6 * 9.0e5);
+        let rate = c.emission_rate().unwrap();
+        assert!(
+            (rate / expected - 1.0).abs() < 1e-14,
+            "{rate} != {expected}"
+        );
+    }
+
+    /// A continuum with no stated law still comes back, so a caller sees it,
+    /// but has no emission rate to give.
+    #[test]
+    fn a_continuum_without_a_law_is_returned_but_not_integrated() {
+        let chain = chain_with_a_continuum(None);
+        let densities = HashMap::from([("Sm158".to_string(), 1.0e-12)]);
+        let continua = decay_photon_continua(&densities, 1.0, &chain);
+        assert_eq!(continua[0].interpolation, None);
+        assert_eq!(continua[0].emission_rate(), Err(UnreadableContinuum::NoLaw));
     }
 
     /// Data without the split cannot give a component, and says which
