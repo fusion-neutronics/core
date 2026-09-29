@@ -126,9 +126,11 @@ def test_skipped_block_counters_are_per_nuclide_dicts():
     """The skipped block counters are keyed by nuclide, not summed to one int.
 
     ``skipped_cross_material``, ``skipped_other_file`` and ``skipped_nc`` map
-    a nuclide to its count, and ``mirrored_disagree`` maps
-    ``"Nuclide (n,a) (n,b)"`` to a relative difference. Their shape is checked
-    on every run, and is empty when the fixture carries no covariance.arrow.
+    a nuclide to its count, ``mirrored_disagree`` maps
+    ``"Nuclide (n,a) (n,b)"`` to a relative difference, and
+    ``derived_opposing_uncorrelated`` maps ``"Nuclide kind"`` to a list of
+    ``[a, b]`` reaction pairs. Their shape is checked on every run, and is
+    empty when the fixture carries no covariance.arrow.
     """
     iron = _iron()
     results = iron.transmute(
@@ -137,7 +139,7 @@ def test_skipped_block_counters_are_per_nuclide_dicts():
     )
     info = results.get_data_uncertainty_info(iron.id or 0)
     counters = ("skipped_cross_material", "skipped_other_file", "skipped_nc")
-    for key in (*counters, "mirrored_disagree"):
+    for key in (*counters, "mirrored_disagree", "derived_opposing_uncorrelated"):
         assert isinstance(info[key], dict), f"{key} is {type(info[key])}"
         assert all(isinstance(k, str) for k in info[key]), info[key]
     for key in counters:
@@ -146,11 +148,18 @@ def test_skipped_block_counters_are_per_nuclide_dicts():
     for pair, difference in info["mirrored_disagree"].items():
         assert len(pair.split(" ")) == 3, pair
         assert difference > 0.0, (pair, difference)
+    for channel, pairs in info["derived_opposing_uncorrelated"].items():
+        assert len(channel.split(" ")) == 2, channel
+        assert isinstance(pairs, list) and pairs, (channel, pairs)
+        for pair in pairs:
+            assert isinstance(pair, list) and len(pair) == 2, (channel, pair)
+            assert all(isinstance(name, str) for name in pair), (channel, pair)
     if "Fe56" not in info["perturbed"]:
         assert info["skipped_cross_material"] == {}
         assert info["skipped_other_file"] == {}
         assert info["skipped_nc"] == {}
         assert info["mirrored_disagree"] == {}
+        assert info["derived_opposing_uncorrelated"] == {}
 
 
 def test_the_report_names_what_is_never_perturbed():

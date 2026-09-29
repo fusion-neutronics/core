@@ -325,9 +325,9 @@ fn o16_nd_above_20_mev_is_not_counted_as_covered() {
 /// reported as inconsistent.
 ///
 /// The two tapes give MT 1, 2 and 102 self blocks and no cross blocks, and an
-/// absent block states a zero covariance (ENDF-102 33.2), so the derived
-/// variance is `Var(1) + Var(2) + Var(102)` of barn reactions over a
-/// millibarn difference: about 2400% near threshold and 22% at 14 MeV on
+/// absent block reads as a zero covariance (ENDF-102 33.3.2 a.1 lets a tape
+/// leave one unstated), so the derived variance is `Var(1) + Var(2) +
+/// Var(102)` of barn reactions over a millibarn difference: about 2400% near threshold and 22% at 14 MeV on
 /// TENDL-2017. That is the tape's literal statement, set by the correlations
 /// it leaves out rather than by the fold, so it is pinned to the hand
 /// sandwich rather than clamped, and reported as resting on the absent
@@ -551,4 +551,82 @@ fn a_derivation_partial_leaves_the_evaluation_top_alone() {
     partial.cross_section = xs.into();
     by_mt.insert(600, Arc::new(partial));
     assert_eq!(above(&m), before);
+}
+
+/// An independent-mode transport uncertainty run widens an activation load
+/// to the reactions a channel is derived from as the transmute path does, so
+/// O16 `(n,p)` folds from 600 to 603 on the tallied spectrum.
+#[test]
+fn a_transport_run_reads_the_reactions_a_channel_is_derived_from() {
+    let chain = chain();
+    let Some(dir) = yamc_test_cache::nuclide("O16") else {
+        eprintln!("skipping: O16 fixture missing");
+        return;
+    };
+    let scope = yamc_nuclide::load_scope::LoadScope::activation(yani_transmute::activation_mts(
+        &chain,
+        &yani::BranchTable::new(),
+    ))
+    .with_temperatures(Some(["294".to_string()].into()))
+    .with_covariance(true);
+    let nd = yamc_nuclide::nuclide::get_or_load_nuclide(
+        "O16",
+        &HashMap::from([("O16".to_string(), dir)]),
+        &scope,
+    )
+    .expect("loads");
+    if nd.covariance.is_none() {
+        eprintln!("skipping: O16 has no covariance.arrow");
+        return;
+    }
+    let held = nd.reactions_for_temp("294").expect("294 K");
+    assert!(!held.contains_key(&600), "the activation load holds MT 600");
+    let mut m = Material::new(
+        HashMap::from([("O16".to_string(), 1.0)]),
+        "atom",
+        "sum",
+        None,
+    )
+    .expect("material");
+    m.set_temperature("294");
+    m.nuclide_data.insert("O16".to_string(), nd);
+
+    let (bounds, flux) = groups(1.39e7, 1.41e7);
+    let rates = compute_multigroup_reaction_rates_shielded(&m, &chain, &flux, &bounds, 1.0, None).0;
+    let tallied = yani_transmute::TransportTallied {
+        rates,
+        partials: HashMap::new(),
+        fy_weights: HashMap::new(),
+        spectrum: yani_transmute::MultigroupSpectrum {
+            boundaries: bounds.to_vec(),
+            masses: vec![0.0, 1.0, 0.0],
+            flux_error: None,
+        },
+        statistics: None,
+    };
+    let request = yani_transmute::uncertainty::DataUncertainty {
+        sources: vec![yani_transmute::uncertainty::Source::CrossSections],
+        samples: Some(8),
+        ..Default::default()
+    };
+    let (_, info) = yani_transmute::transport_replicas(
+        &m,
+        &tallied,
+        &[3600.0],
+        &[1.0e10],
+        &chain,
+        yani::ChainParts::default(),
+        &request,
+    )
+    .expect("replicas");
+    assert!(
+        !info.skipped_nc.contains_key("O16"),
+        "{:?}",
+        info.skipped_nc
+    );
+    assert_eq!(
+        info.rate_fraction_covered[&("O16".to_string(), "(n,p)".to_string())],
+        1.0
+    );
+    assert!(info.perturbed.contains("O16"));
 }
