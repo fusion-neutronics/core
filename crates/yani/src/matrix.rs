@@ -1013,6 +1013,8 @@ mod tests {
                     yields: vec![FissionYield {
                         energy: 0.0253,
                         products: vec![("B".to_string(), 1.0), ("C".to_string(), 1.0)],
+                        independent: None,
+                        cumulative: None,
                     }],
                 })),
                 sources: Vec::new(),
@@ -1068,6 +1070,8 @@ mod tests {
                     yields: vec![FissionYield {
                         energy: 0.0253,
                         products: vec![("Xe".to_string(), 0.06), ("Sr".to_string(), 0.04)],
+                        independent: None,
+                        cumulative: None,
                     }],
                 })),
                 sources: Vec::new(),
@@ -1385,6 +1389,8 @@ mod tests {
                     yields: vec![FissionYield {
                         energy: 0.0253,
                         products: vec![("Xe".to_string(), 0.065), ("Cs".to_string(), 0.062)],
+                        independent: None,
+                        cumulative: None,
                     }],
                 })),
                 sources: Vec::new(),
@@ -1514,6 +1520,8 @@ mod tests {
                     yields: vec![FissionYield {
                         energy: 0.0253,
                         products: vec![("Xe".to_string(), 0.065), ("NotInNames".to_string(), 0.05)],
+                        independent: None,
+                        cumulative: None,
                     }],
                 })),
                 sources: Vec::new(),
@@ -1573,10 +1581,14 @@ mod tests {
                     FissionYield {
                         energy: 0.0253,
                         products: vec![("B".to_string(), 1.6), ("C".to_string(), 0.4)],
+                        independent: None,
+                        cumulative: None,
                     },
                     FissionYield {
                         energy: 1.4e7,
                         products: vec![("B".to_string(), 0.6), ("C".to_string(), 1.4)],
+                        independent: None,
+                        cumulative: None,
                     },
                 ]))),
                 sources: Vec::new(),

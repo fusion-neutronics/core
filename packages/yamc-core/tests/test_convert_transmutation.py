@@ -120,6 +120,61 @@ def test_reactions_carry_q(converted):
     assert any(v != 0.0 for v in q), "every Q is zero, which is not real data"
 
 
+def test_fission_yield_evaluations_are_stored_as_the_tape_gives_them(tmp_path):
+    """Both MT=454 and MT=459, with DY, beside the nominal yields.
+
+    U235 joins the decay set so the synthetic yields reach the chain. Read with
+    pyarrow, so this checks the file rather than yamc's reading of it.
+    """
+    pytest.importorskip("pyarrow")
+    import pyarrow.ipc as ipc
+
+    inputs = tmp_path / "endf"
+    inputs.mkdir()
+    out = tmp_path / "out"
+    yamc.convert_transmutation(
+        decay_files=_plain([*DECAY, "dec-092_U_235.endf.xz"], inputs),
+        fpy_files=_plain(FPY, inputs),
+        neutron_files=_plain([*NEUTRON, "n-092_U_235_trimmed.endf.xz"], inputs),
+        output_path=str(out),
+        library="endf-b8.1",
+        data_version="2026-08-09.1",
+        subsections=["fission_yields"],
+    )
+
+    nominal = ipc.open_file(out / "fission_yields" / "fission_yields.arrow").read_all()
+    assert nominal.schema.names == ["nuclide", "energy", "products", "yields"]
+
+    table = ipc.open_file(out / "fission_yields" / "evaluated_yields.arrow").read_all()
+    assert table.schema.names == [
+        "nuclide",
+        "energy",
+        "kind",
+        "interpolation",
+        "products",
+        "yields",
+        "yield_uncertainties",
+    ]
+    rows = {(r["kind"], r["energy"]): r for r in table.to_pylist()}
+    assert set(rows) == {
+        (kind, energy)
+        for kind in ("independent", "cumulative")
+        for energy in (0.0253, 5.0e5)
+    }
+    assert {r["nuclide"] for r in rows.values()} == {"U235"}
+
+    thermal = rows[("independent", 0.0253)]
+    assert thermal["interpolation"] is None
+    assert rows[("independent", 5.0e5)]["interpolation"] == 2
+    # Xe135_m1 has no decay data here, so the evaluated file is the only place
+    # its yield survives under its own name.
+    i = thermal["products"].index("Xe135_m1")
+    assert (thermal["yields"][i], thermal["yield_uncertainties"][i]) == (0.0134, 0.0006)
+    cumulative = rows[("cumulative", 0.0253)]
+    i = cumulative["products"].index("Zr95")
+    assert (cumulative["yields"][i], cumulative["yield_uncertainties"][i]) == (0.0605, 0.0018)
+
+
 def test_decay_mode_sigmas_are_stored_as_the_tape_gives_them(converted):
     """The dBR of every decay mode is in the file, and a 0.0 stays a 0.0.
 
