@@ -44,12 +44,12 @@ pub enum CovarianceData {
 /// # Which blocks are symmetric
 ///
 /// Only the diagonal ones, a reaction with itself within this evaluation
-/// ([`CovarianceBlock::is_diagonal`]). An off-diagonal
-/// block's transpose is the (`mt1`, `mt`) block, not itself, so nothing here
-/// may be mirrored on the assumption that a covariance matrix is symmetric. The
-/// same caution applies one level down, inside an `Ni` block: `ls == 1` is an
-/// upper triangle whose transpose is implied, `ls == 0` is a full asymmetric
-/// matrix as written, and folding one into the other loses numbers.
+/// ([`CovarianceBlock::is_diagonal`]). An off-diagonal block's transpose is
+/// the (`mt1`, `mt`) block, not itself, so nothing here may be mirrored on the
+/// assumption that a covariance matrix is symmetric. The same caution applies
+/// one level down, inside an `Ni` block: `ls == 1` is an upper triangle whose
+/// transpose is implied, `ls == 0` is a full asymmetric matrix as written, and
+/// folding one into the other loses numbers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CovarianceBlock {
     /// The reaction this block's section belongs to.

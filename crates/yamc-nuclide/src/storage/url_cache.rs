@@ -301,9 +301,20 @@ pub fn expand_keyword_to_subsection_url(keyword: &str, subsection: &str) -> Opti
 
 /// Section files published in each transmutation subsection dir (option-D),
 /// `(filename, required)`. The primary section is required; auxiliary sections
-/// and `provenance.json` are optional and 404 cleanly. Mirrors the filenames
-/// the yani chain loader reads. Returns an empty slice for an unknown
-/// subsection (callers gate on [`keyword_transmutation_subsections`] first).
+/// and `provenance.json` are optional and 404 cleanly. Lists the files each
+/// subsection can publish; the yani chain loader reads the ones it
+/// understands. Returns an empty slice for an unknown subsection (callers gate
+/// on [`keyword_transmutation_subsections`] first).
+///
+/// `branching_covariance.arrow` is the optional MF=40 covariance of the
+/// isomeric branching (#140). A library without one answers 404, which settles
+/// as a `branching_covariance.arrow.absent` marker (see [`download_sections`]),
+/// so a missing file means "no covariance" rather than an incomplete download.
+/// As of 2026-09-26 every published branching folder answers 404 for it.
+///
+/// `evaluated_yields.arrow` is the tape-literal fission yield evaluation, both
+/// MT=454 and MT=459 with DY. A library published before it answers 404 and
+/// loads with no evaluated yields; the nominal yields are unaffected.
 #[cfg(feature = "download")]
 fn transmutation_sections(subsection: &str) -> &'static [(&'static str, bool)] {
     match subsection {
@@ -317,9 +328,14 @@ fn transmutation_sections(subsection: &str) -> &'static [(&'static str, bool)] {
         "fission_yields" => &[
             ("fission_yields.arrow", true),
             ("aliases.arrow", false),
+            ("evaluated_yields.arrow", false),
             ("provenance.json", false),
         ],
-        "branching" => &[("branching.arrow", true), ("provenance.json", false)],
+        "branching" => &[
+            ("branching.arrow", true),
+            ("branching_covariance.arrow", false),
+            ("provenance.json", false),
+        ],
         _ => &[],
     }
 }
@@ -383,7 +399,7 @@ pub fn resolve_subsection(
         let url = expand_keyword_to_subsection_url(source, subsection)
             .ok_or_else(|| format!("Unknown keyword: {source}"))?;
         let cache_name = format!("{source}-transmutation-{subsection}.arrow");
-        download_and_cache_named(
+        download_and_cache_subsection(
             &url,
             &cache_name,
             source,
@@ -421,7 +437,10 @@ static EMBEDDED_INDEX: Lazy<HashMap<&'static str, HashSet<&'static str>>> = Lazy
     m
 });
 
-/// The `data_version` each published library is expected to carry (issue #366).
+/// The `data_version` each library's cross sections are expected to carry
+/// (issue #366): the `{keyword}-{nuclide}.arrow` and `{keyword}-{element}.arrow`
+/// directories [`download_and_cache`] writes. The transmutation subsections are
+/// pinned separately, in [`EXPECTED_TRANSMUTATION_DATA_VERSION`].
 ///
 /// The R2 objects are overwritten in place when a library is rebuilt, so the
 /// URL and the cache key `{keyword}-{nuclide}.arrow` are identical before and
@@ -431,15 +450,23 @@ static EMBEDDED_INDEX: Lazy<HashMap<&'static str, HashSet<&'static str>>> = Lazy
 /// apart.
 ///
 /// The value here is the release identifier the converter stamps into every
-/// `version.json` it writes (`yamc_convert::entry::write_version`, and its
-/// transmutation counterpart in `yani-convert`). A cached directory whose stamp
-/// differs, or which predates stamping and has none, is evicted and refetched.
+/// `version.json` it writes (`yamc_convert::entry::write_version`). A cached
+/// directory whose stamp differs, or which predates stamping and has none, is
+/// evicted and refetched.
 ///
 /// Compiled in rather than fetched, for the same reason as [`EMBEDDED_INDEX`]:
 /// the cache-hit path stays a zero-cost offline path with no round trip per
 /// nuclide, which matters when a model loads hundreds of them. The cost is that
 /// invalidation ships with a yamc release, so a re-publish needs an entry here
 /// bumped in the same release to reach existing installs.
+///
+/// Two tables, because the cross sections and the chains are republished on
+/// their own schedules and each table must move only with its own data. A
+/// cross-section republish moves the row here; a chain-only republish moves the
+/// row in [`EXPECTED_TRANSMUTATION_DATA_VERSION`] and leaves this one, and so
+/// every nuclide and element cache, alone; a republish of both moves both.
+/// Bumping a row whose data did not change evicts and refetches every cache it
+/// covers for nothing.
 ///
 /// A keyword with no entry is not checked at all, which is the behaviour every
 /// library had before this existed. Add an entry when a library is published
@@ -454,33 +481,28 @@ const EXPECTED_DATA_VERSION: &[(&str, &str)] = &[
     // published data carries invalidates every cache on first load and then
     // fails.
     //
-    // Swept over neutron for all six, photon for the three that publish it, and
-    // every transmutation subsection each library provides (four for endf-b8.1
-    // / jeff-4.0 / jendl-5.0, two for the TENDLs, none for fendl-3.2d); all 25
-    // published paths read "2026-09-02". jeff-4.0 publishes no photon data at
-    // all (404 on element.arrow, not an unstamped directory), so there is
-    // nothing to pin for it there.
+    // Swept over neutron for all six and photon for the three that publish it;
+    // all nine published paths read "2026-09-02". jeff-4.0 publishes no photon
+    // data at all (404 on element.arrow, not an unstamped directory), so there
+    // is nothing to pin for it there.
     //
     // This pin has to move with a republish. The previous value was
     // "2026-09-02", and leaving it behind does not serve stale data: it fails
     // every fresh download outright, because the stamp the origin now carries
     // no longer matches what this build expects.
     //
-    // The 2026-09-08 rebuild is the first carrying the placeholder and decay
-    // consistency records in the transmutation provenance, isomer excitation
-    // energies read from the decay headers, TENDL branching scoped to TENDL's
-    // own parents, and photon sections without the heating column this schema
-    // stopped declaring. A released wheel pinning 2026-09-02 can read none of
-    // it, and one pinning this can read none of what came before, which is the
-    // coupling issue #366 accepted and #28 in the generation scripts is about.
+    // The 2026-09-08 rebuild is the first whose photon sections drop the
+    // heating column this schema stopped declaring. A released wheel pinning
+    // 2026-09-02 can read none of it, and one pinning this can read none of
+    // what came before, which is the coupling issue #366 accepted and #28 in
+    // the generation scripts is about.
     //
     // The 2026-09-18 republish is the format_version 2 one: the union energy
     // grids moved out of nuclide.arrow into energy.arrow (#100/#109) and
     // reactions.arrow went to one record batch per (MT, temperature) (#103).
     // The cross sections were relaid out rather than reconverted, so no value
-    // moved; the chains were rebuilt, so theirs did. All 8047 published markers
-    // carry this stamp and format_version 2, checked over the built tree before
-    // upload.
+    // moved. All 8047 published markers carry this stamp and format_version 2,
+    // checked over the built tree before upload.
     //
     // This pin MUST NOT ship until every library is live. A wheel pinning
     // 2026-09-18 fails outright against any library still serving 2026-09-08,
@@ -493,10 +515,104 @@ const EXPECTED_DATA_VERSION: &[(&str, &str)] = &[
     ("jendl-5.0", "2026-09-18"),
 ];
 
-/// The `data_version` this build expects for `source`, if it pins one.
+/// The `data_version` each library's transmutation subsections are expected to
+/// carry: the `{keyword}-transmutation-{subsection}.arrow` directories
+/// [`download_and_cache_subsection`] writes, stamped in `provenance.json` by
+/// `yani-convert`. Kept apart from [`EXPECTED_DATA_VERSION`] so that a
+/// chain-only republish bumps only this table and leaves every per-nuclide and
+/// per-element cache current; the rules on that table (when a row moves, and
+/// why none is added speculatively) apply here unchanged.
+///
+/// One stamp per keyword, not per subsection, because `build_chain` in the
+/// generation scripts rebuilds and restamps every subsection of a keyword in
+/// one run (`libraries/endf-b8.1.sh` and its siblings). A library's subsections
+/// therefore never carry different stamps, and republishing one means
+/// republishing all of them.
+///
+/// There is no fendl-3.2d row because it publishes no transmutation subsection
+/// ([`keyword_transmutation_subsections`]), and [`resolve_subsection`] refuses
+/// it before any download, so a row would never be read.
 #[cfg(feature = "download")]
-fn expected_data_version(source: &str) -> Option<&'static str> {
-    EXPECTED_DATA_VERSION
+const EXPECTED_TRANSMUTATION_DATA_VERSION: &[(&str, &str)] = &[
+    // Until this table existed the chains were pinned by EXPECTED_DATA_VERSION
+    // with the cross sections, so their history up to 2026-09-18 is shared.
+    //
+    // The 2026-09-02 sweep covered every transmutation subsection each library
+    // provides (four for endf-b8.1 / jeff-4.0 / jendl-5.0, two for the TENDLs,
+    // none for fendl-3.2d); all 16 read "2026-09-02".
+    //
+    // The 2026-09-08 rebuild is the first carrying the placeholder and decay
+    // consistency records in the transmutation provenance, isomer excitation
+    // energies read from the decay headers, and TENDL branching scoped to
+    // TENDL's own parents.
+    //
+    // The 2026-09-18 republish relaid the cross sections out without moving a
+    // value, but the chains were rebuilt, so theirs did. Checked against the
+    // origin on 2026-09-26 with a cache-busted curl: all 16 published
+    // `<keyword>/transmutation/<subsection>.arrow/provenance.json` files read
+    // "2026-09-18".
+    //
+    // This pin MUST NOT ship until every library is live. A wheel pinning a new
+    // stamp fails outright against any library whose chain still serves the
+    // old one, and the five are uploaded one at a time.
+    ("tendl-2025", "2026-09-18"),
+    ("tendl-2017", "2026-09-18"),
+    ("endf-b8.1", "2026-09-18"),
+    ("jeff-4.0", "2026-09-18"),
+    ("jendl-5.0", "2026-09-18"),
+];
+
+/// Which kind of published data a cached directory holds, and so which table
+/// its stamp is judged against.
+#[cfg(feature = "download")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Published {
+    /// A `{keyword}-{nuclide}.arrow` or `{keyword}-{element}.arrow` directory.
+    CrossSections,
+    /// A `{keyword}-transmutation-{subsection}.arrow` directory.
+    Transmutation,
+}
+
+#[cfg(feature = "download")]
+impl Published {
+    /// The pins this kind is checked against.
+    fn pins(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Published::CrossSections => EXPECTED_DATA_VERSION,
+            Published::Transmutation => EXPECTED_TRANSMUTATION_DATA_VERSION,
+        }
+    }
+
+    /// The name of that table, for errors that tell a maintainer what to fix.
+    fn table_name(self) -> &'static str {
+        match self {
+            Published::CrossSections => "EXPECTED_DATA_VERSION",
+            Published::Transmutation => "EXPECTED_TRANSMUTATION_DATA_VERSION",
+        }
+    }
+}
+
+/// The kind [`download_and_cache`] judges its directories by.
+///
+/// Named once per download path rather than at each of its checks, so the
+/// choice is made in one place and `each_download_path_reads_its_own_table`
+/// can pin it. Nothing else would catch a swap: while both tables carry the
+/// same stamp for a keyword, no cached directory is current against one and
+/// stale against the other.
+#[cfg(feature = "download")]
+const NUCLIDE_CACHE_KIND: Published = Published::CrossSections;
+
+/// The kind [`download_and_cache_subsection`] judges its directories by (see
+/// [`NUCLIDE_CACHE_KIND`]).
+#[cfg(feature = "download")]
+const SUBSECTION_CACHE_KIND: Published = Published::Transmutation;
+
+/// The `data_version` this build expects for `source`'s `published` data, if
+/// it pins one.
+#[cfg(feature = "download")]
+fn expected_data_version(source: &str, published: Published) -> Option<&'static str> {
+    published
+        .pins()
         .iter()
         .find(|(keyword, _)| *keyword == source)
         .map(|(_, version)| *version)
@@ -547,10 +663,11 @@ fn data_version_matches(dir: &std::path::Path, expected: Option<&str>) -> bool {
     }
 }
 
-/// Whether the cached copy of `source` at `dir` is the one this build expects.
+/// Whether the cached copy of `source`'s `published` data at `dir` is the one
+/// this build expects.
 #[cfg(feature = "download")]
-fn cache_is_current(dir: &std::path::Path, source: &str) -> bool {
-    data_version_matches(dir, expected_data_version(source))
+fn cache_is_current(dir: &std::path::Path, source: &str, published: Published) -> bool {
+    data_version_matches(dir, expected_data_version(source, published))
 }
 
 /// Remove a cached directory that holds a different release than this build
@@ -565,8 +682,12 @@ fn cache_is_current(dir: &std::path::Path, source: &str) -> bool {
 /// removing anything, so a caller mistake cannot turn this into a delete of
 /// somewhere else.
 #[cfg(feature = "download")]
-fn evict_if_stale(dir: &std::path::Path, source: &str) -> Result<(), Box<dyn std::error::Error>> {
-    if !dir.is_dir() || cache_is_current(dir, source) {
+fn evict_if_stale(
+    dir: &std::path::Path,
+    source: &str,
+    published: Published,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !dir.is_dir() || cache_is_current(dir, source, published) {
         return Ok(());
     }
     let cache_dir = get_cache_dir()?;
@@ -584,7 +705,7 @@ fn evict_if_stale(dir: &std::path::Path, source: &str) -> Result<(), Box<dyn std
         source,
         dir.display(),
         cached_data_version(dir).unwrap_or_else(|| "no data_version".to_string()),
-        expected_data_version(source).unwrap_or("none"),
+        expected_data_version(source, published).unwrap_or("none"),
     );
     fs::remove_dir_all(dir)?;
     Ok(())
@@ -596,17 +717,22 @@ fn evict_if_stale(dir: &std::path::Path, source: &str) -> Result<(), Box<dyn std
 ///
 /// Loud on purpose. The alternative is evicting and refetching the same bytes
 /// on every single load, which looks like a network problem rather than a
-/// publishing mistake.
+/// publishing mistake. Names the table that was checked, since a chain and a
+/// cross-section pin are fixed in different places.
 #[cfg(feature = "download")]
-fn stale_after_download_error(source: &str, dir: &std::path::Path) -> Box<dyn std::error::Error> {
+fn stale_after_download_error(
+    source: &str,
+    dir: &std::path::Path,
+    published: Published,
+) -> Box<dyn std::error::Error> {
     format!(
         "'{}' was downloaded fresh and still reports data_version {:?}, but this build of yamc \
          expects {:?}. The published data has not been stamped with the version this yamc \
-         release pins, so either the publish or EXPECTED_DATA_VERSION in url_cache.rs is wrong. \
-         Cached at {}.",
+         release pins, so either the publish or {} in url_cache.rs is wrong. Cached at {}.",
         source,
         cached_data_version(dir).unwrap_or_else(|| "no data_version".to_string()),
-        expected_data_version(source).unwrap_or("none"),
+        expected_data_version(source, published).unwrap_or("none"),
+        published.table_name(),
         dir.display(),
     )
     .into()
@@ -686,7 +812,9 @@ pub fn download_and_cache(
     // to be the one this build expects, so a re-published library invalidates
     // rather than hitting forever (issue #366); it is a local `version.json`
     // read, so the offline zero-round-trip property is unchanged.
-    if have_all_sections(&local_path, sections, subset) && cache_is_current(&local_path, source) {
+    if have_all_sections(&local_path, sections, subset)
+        && cache_is_current(&local_path, source, NUCLIDE_CACHE_KIND)
+    {
         return Ok(local_path);
     }
 
@@ -695,14 +823,16 @@ pub fn download_and_cache(
     // we were waiting.
     let path_lock = get_path_lock(&local_path);
     let _guard = path_lock.lock().unwrap_or_else(|p| p.into_inner());
-    if have_all_sections(&local_path, sections, subset) && cache_is_current(&local_path, source) {
+    if have_all_sections(&local_path, sections, subset)
+        && cache_is_current(&local_path, source, NUCLIDE_CACHE_KIND)
+    {
         return Ok(local_path);
     }
 
     // A stale directory has to go before the top-up, not after: the top-up only
     // fetches sections that are not already resolved, so a complete stale copy
     // would fetch nothing at all.
-    evict_if_stale(&local_path, source)?;
+    evict_if_stale(&local_path, source, NUCLIDE_CACHE_KIND)?;
 
     // Cache miss. If we ship an index of available nuclides for this
     // library and the requested name isn't in it, fail fast -- saves a
@@ -718,20 +848,26 @@ pub fn download_and_cache(
 
     download_sections(url, &local_path, sections, source, nuclide_name, subset)?;
 
-    if !cache_is_current(&local_path, source) {
-        return Err(stale_after_download_error(source, &local_path));
+    if !cache_is_current(&local_path, source, NUCLIDE_CACHE_KIND) {
+        return Err(stale_after_download_error(
+            source,
+            &local_path,
+            NUCLIDE_CACHE_KIND,
+        ));
     }
 
     Ok(local_path)
 }
 
-/// Download an option-D per-section object set to the cache under an explicit
-/// cache directory name and return the local path. Used for assets that don't
-/// follow the `<source>-<nuclide>.arrow` cache layout -- currently the
-/// transmutation subsections (one dir per library subsection). `sections` is
-/// the file list for the subsection (see [`transmutation_sections`]).
+/// Download a transmutation subsection's option-D per-section object set into
+/// the cache directory `cache_name` and return the local path. The subsections
+/// do not follow the `<source>-<nuclide>.arrow` cache layout, and their stamp
+/// is judged against [`EXPECTED_TRANSMUTATION_DATA_VERSION`] rather than the
+/// cross-section pin, so a chain republish invalidates these directories and
+/// nothing else. `sections` is the file list for the subsection (see
+/// [`transmutation_sections`]).
 #[cfg(feature = "download")]
-pub fn download_and_cache_named(
+fn download_and_cache_subsection(
     url: &str,
     cache_name: &str,
     source: &str,
@@ -740,17 +876,17 @@ pub fn download_and_cache_named(
     let cache_dir = get_cache_dir()?;
     let local_path = cache_dir.join(cache_name);
 
-    if local_path.exists() && cache_is_current(&local_path, source) {
+    if local_path.exists() && cache_is_current(&local_path, source, SUBSECTION_CACHE_KIND) {
         return Ok(local_path);
     }
 
     let path_lock = get_path_lock(&local_path);
     let _guard = path_lock.lock().unwrap_or_else(|p| p.into_inner());
-    if local_path.exists() && cache_is_current(&local_path, source) {
+    if local_path.exists() && cache_is_current(&local_path, source, SUBSECTION_CACHE_KIND) {
         return Ok(local_path);
     }
 
-    evict_if_stale(&local_path, source)?;
+    evict_if_stale(&local_path, source, SUBSECTION_CACHE_KIND)?;
 
     // `None`, and load-bearing rather than incidental: the chain's `reactions`
     // subsection publishes a file that is also called `reactions.arrow`, and it
@@ -758,8 +894,12 @@ pub fn download_and_cache_named(
     // subset here would try to range into it.
     download_sections(url, &local_path, sections, source, cache_name, None)?;
 
-    if !cache_is_current(&local_path, source) {
-        return Err(stale_after_download_error(source, &local_path));
+    if !cache_is_current(&local_path, source, SUBSECTION_CACHE_KIND) {
+        return Err(stale_after_download_error(
+            source,
+            &local_path,
+            SUBSECTION_CACHE_KIND,
+        ));
     }
 
     Ok(local_path)
@@ -1393,107 +1533,6 @@ pub fn cached_entry_path(source: &str, nuclide: &str) -> Option<PathBuf> {
     Some(cache_root()?.join(generate_cache_name(source, nuclide)))
 }
 
-#[cfg(test)]
-mod cache_root_tests {
-    use super::{cache_root, cache_root_from, generate_cache_name, home_dir};
-    use std::collections::HashMap;
-    use std::ffi::OsString;
-    use std::path::PathBuf;
-
-    /// A fixed environment, so these say nothing about the machine they run on.
-    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
-        let map: HashMap<String, String> = pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        move |key| map.get(key).filter(|v| !v.is_empty()).map(OsString::from)
-    }
-
-    fn home(path: &str) -> Option<PathBuf> {
-        Some(PathBuf::from(path))
-    }
-
-    #[test]
-    fn the_root_hangs_off_the_home_directory() {
-        assert_eq!(
-            cache_root_from(env(&[]), home("/home/someone")),
-            Some(PathBuf::from("/home/someone/.cache/yamc"))
-        );
-    }
-
-    /// The Windows spelling, which is the shape issue #544 was about. Only the
-    /// join is ours: which variable produced the home is `etcetera`'s business,
-    /// and taking it back off it is what broke a process with no exported HOME.
-    #[test]
-    fn a_windows_home_joins_the_same_way() {
-        assert_eq!(
-            cache_root_from(env(&[]), home("C:/Users/runneradmin")),
-            Some(PathBuf::from("C:/Users/runneradmin/.cache/yamc"))
-        );
-    }
-
-    /// The override names the cache root itself, with no `.cache/yamc`
-    /// appended: it is a cache directory, not a home directory to derive one
-    /// from. And it wins over a home that resolves perfectly well, which is
-    /// what makes it usable for an isolated test cache.
-    #[test]
-    fn the_override_wins_verbatim() {
-        assert_eq!(
-            cache_root_from(
-                env(&[("YAMC_CACHE_DIR", "/tmp/isolated")]),
-                home("/home/someone")
-            ),
-            Some(PathBuf::from("/tmp/isolated"))
-        );
-    }
-
-    /// An empty variable is an unset one. A shell that exports
-    /// `YAMC_CACHE_DIR=` would otherwise name the empty path, and the cache
-    /// would land relative to the working directory.
-    #[test]
-    fn an_empty_override_is_no_override() {
-        assert_eq!(
-            cache_root_from(env(&[("YAMC_CACHE_DIR", "")]), home("/home/someone")),
-            Some(PathBuf::from("/home/someone/.cache/yamc"))
-        );
-    }
-
-    /// No home and no override is a machine with nowhere to put a cache, which
-    /// a caller must be able to tell from a machine whose cache is empty.
-    #[test]
-    fn no_home_and_no_override_resolves_nothing() {
-        assert_eq!(cache_root_from(env(&[]), None), None);
-    }
-
-    /// And the override still answers without a home, which is the case it
-    /// exists for: a container or a service account.
-    #[test]
-    fn the_override_answers_without_a_home() {
-        assert_eq!(
-            cache_root_from(env(&[("YAMC_CACHE_DIR", "/srv/cache")]), None),
-            Some(PathBuf::from("/srv/cache"))
-        );
-    }
-
-    #[test]
-    fn an_entry_sits_directly_under_the_root() {
-        let root = cache_root_from(env(&[("YAMC_CACHE_DIR", "/tmp/isolated")]), None).unwrap();
-        assert_eq!(
-            root.join(generate_cache_name("endf-b8.1", "Fe58")),
-            PathBuf::from("/tmp/isolated/endf-b8.1-Fe58.arrow")
-        );
-    }
-
-    /// `etcetera` resolves a home on every platform CI runs on, including the
-    /// Windows runner where `HOME` is unset and `USERPROFILE` carries it. A
-    /// `HOME`-only read is what returned nothing there (issue #544).
-    #[test]
-    fn this_machine_has_a_home_and_therefore_a_cache_root() {
-        assert!(home_dir().is_some(), "no home directory resolved");
-        assert!(cache_root().is_some());
-    }
-}
-
 /// Get the cache directory for yamc, creating it if it does not exist.
 #[cfg(feature = "download")]
 pub fn get_cache_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -1882,6 +1921,47 @@ mod tests {
             Some(&[][..])
         );
         assert!(keyword_transmutation_subsections("not-a-library").is_none());
+    }
+
+    /// The MF=40 covariance is optional: a library without one answers 404, so
+    /// a required entry would fail every branching download there, while an
+    /// optional one settles as a `.absent` marker and is fetched where it exists.
+    #[test]
+    fn the_branching_subsection_lists_its_covariance_as_optional() {
+        let sections = transmutation_sections("branching");
+        assert!(
+            sections.contains(&("branching.arrow", true)),
+            "{sections:?}"
+        );
+        assert!(
+            sections.contains(&("branching_covariance.arrow", false)),
+            "{sections:?}"
+        );
+        assert_eq!(
+            sections.last(),
+            Some(&("provenance.json", false)),
+            "provenance.json stays last, as in every other subsection"
+        );
+    }
+
+    /// Optional, so a library published before the evaluated yields existed
+    /// settles as `.absent` on a 404 rather than failing every download.
+    #[test]
+    fn the_fission_yields_subsection_lists_its_evaluated_yields_as_optional() {
+        let sections = transmutation_sections("fission_yields");
+        assert!(
+            sections.contains(&("fission_yields.arrow", true)),
+            "{sections:?}"
+        );
+        assert!(
+            sections.contains(&("evaluated_yields.arrow", false)),
+            "{sections:?}"
+        );
+        assert_eq!(
+            sections.last(),
+            Some(&("provenance.json", false)),
+            "provenance.json stays last, as in every other subsection"
+        );
     }
 
     #[test]
@@ -2528,7 +2608,11 @@ mod tests {
         // No keyword pins a version, so this is a no-op and returns Ok without
         // touching anything; the guard is exercised by the assertion that the
         // directory survives either way.
-        let _ = evict_if_stale(&outside, "definitely-not-a-library");
+        let _ = evict_if_stale(
+            &outside,
+            "definitely-not-a-library",
+            Published::CrossSections,
+        );
         assert!(
             outside.join("version.json").is_file(),
             "a directory outside the cache must never be removed"
@@ -2536,22 +2620,124 @@ mod tests {
         let _ = fs::remove_dir_all(&outside);
     }
 
-    /// Every pinned entry must name a keyword that can actually be expanded to
-    /// a URL. A typo here would silently pin nothing, and the check it is meant
-    /// to perform would never run.
+    /// Every pinned entry, in either table, must name a keyword that can
+    /// actually be expanded to a URL. A typo here would silently pin nothing,
+    /// and the check it is meant to perform would never run.
     #[test]
     fn every_pinned_keyword_is_a_real_keyword() {
-        for (keyword, version) in EXPECTED_DATA_VERSION {
-            assert!(
-                is_keyword(keyword),
-                "EXPECTED_DATA_VERSION pins {keyword:?} (version {version:?}), \
-                 which is not a library keyword"
-            );
-            assert!(
-                !version.is_empty(),
-                "EXPECTED_DATA_VERSION pins an empty version for {keyword:?}"
+        for published in [Published::CrossSections, Published::Transmutation] {
+            let table = published.table_name();
+            for (keyword, version) in published.pins() {
+                assert!(
+                    is_keyword(keyword),
+                    "{table} pins {keyword:?} (version {version:?}), which is not a \
+                     library keyword"
+                );
+                assert!(
+                    !version.is_empty(),
+                    "{table} pins an empty version for {keyword:?}"
+                );
+            }
+        }
+    }
+
+    /// Nothing else ties a keyword to its chain pin, and a keyword with no row
+    /// is never stale, so a missing row would silently switch invalidation off
+    /// for that library's chain. A row for a library that publishes no chain
+    /// would never be read, and says something false about the origin.
+    #[test]
+    fn every_chain_publishing_keyword_has_a_transmutation_pin() {
+        for keyword in get_keyword_info_mapping().keys() {
+            let publishes = keyword_transmutation_subsections(keyword)
+                .is_some_and(|subsections| !subsections.is_empty());
+            let pinned = expected_data_version(keyword, Published::Transmutation).is_some();
+            assert_eq!(
+                pinned, publishes,
+                "{keyword:?} publishes transmutation subsections: {publishes}, but \
+                 EXPECTED_TRANSMUTATION_DATA_VERSION pins it: {pinned}"
             );
         }
+    }
+
+    /// Compared by value: a reference to a `const` has no guaranteed address,
+    /// so `std::ptr::eq` on one is not a reliable identity check.
+    #[test]
+    fn each_kind_is_judged_against_its_own_table() {
+        assert_eq!(Published::CrossSections.pins(), EXPECTED_DATA_VERSION);
+        assert_eq!(
+            Published::Transmutation.pins(),
+            EXPECTED_TRANSMUTATION_DATA_VERSION
+        );
+        assert_ne!(
+            EXPECTED_DATA_VERSION, EXPECTED_TRANSMUTATION_DATA_VERSION,
+            "the two tables must be told apart for the checks above to mean anything"
+        );
+        assert!(expected_data_version("fendl-3.2d", Published::Transmutation).is_none());
+        assert!(expected_data_version("fendl-3.2d", Published::CrossSections).is_some());
+        let chain_row = EXPECTED_TRANSMUTATION_DATA_VERSION
+            .iter()
+            .find(|(keyword, _)| *keyword == "endf-b8.1")
+            .map(|(_, version)| *version);
+        assert!(chain_row.is_some());
+        assert_eq!(
+            expected_data_version("endf-b8.1", Published::Transmutation),
+            chain_row
+        );
+    }
+
+    /// Both tables pin the same stamp for every chain keyword today, so no
+    /// cached directory tells the two apart, and a download path reading the
+    /// wrong one would pass every other test here. Each path takes its kind
+    /// from one const, so pinning the consts is what catches a swap.
+    #[test]
+    fn each_download_path_reads_its_own_table() {
+        assert_eq!(NUCLIDE_CACHE_KIND, Published::CrossSections);
+        assert_eq!(SUBSECTION_CACHE_KIND, Published::Transmutation);
+    }
+
+    /// A subsection stamped with the chain pin is current against it, judged
+    /// by the same `cache_is_current(.., SUBSECTION_CACHE_KIND)` call that
+    /// `download_and_cache_subsection` gates its cache hit on. That function
+    /// itself is not called: it resolves the real cache directory.
+    #[test]
+    fn a_chain_stamp_is_current_against_the_transmutation_pin() {
+        let expected = expected_data_version("endf-b8.1", Published::Transmutation);
+        let stamp = expected.expect("endf-b8.1 publishes a chain, so it has a transmutation pin");
+        let dir = scratch("chain-pin");
+        fs::create_dir_all(&dir).expect("create dir");
+        fs::write(
+            dir.join("provenance.json"),
+            format!(r#"{{"subsection": "decay", "data_version": "{stamp}"}}"#),
+        )
+        .expect("write provenance");
+        assert!(data_version_matches(&dir, expected));
+        assert!(cache_is_current(&dir, "endf-b8.1", SUBSECTION_CACHE_KIND));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The error has to send a maintainer to the table that was actually
+    /// checked, since the two are bumped for different republishes.
+    #[test]
+    fn the_stale_error_names_the_table_it_checked() {
+        let dir = scratch("stale-error");
+        write_marker(&dir, Some("never-published"));
+        let chain =
+            stale_after_download_error("endf-b8.1", &dir, Published::Transmutation).to_string();
+        assert!(
+            chain.contains("EXPECTED_TRANSMUTATION_DATA_VERSION"),
+            "{chain}"
+        );
+        let cross_sections =
+            stale_after_download_error("endf-b8.1", &dir, Published::CrossSections).to_string();
+        assert!(
+            cross_sections.contains("EXPECTED_DATA_VERSION"),
+            "{cross_sections}"
+        );
+        assert!(
+            !cross_sections.contains("EXPECTED_TRANSMUTATION_DATA_VERSION"),
+            "{cross_sections}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A transmutation subsection stamps `provenance.json` rather than
@@ -2569,5 +2755,106 @@ mod tests {
         assert!(data_version_matches(&dir, Some("2026-08-09.1")));
         assert!(!data_version_matches(&dir, Some("2026-06-13.1")));
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod cache_root_tests {
+    use super::{cache_root, cache_root_from, generate_cache_name, home_dir};
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    /// A fixed environment, so these say nothing about the machine they run on.
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |key| map.get(key).filter(|v| !v.is_empty()).map(OsString::from)
+    }
+
+    fn home(path: &str) -> Option<PathBuf> {
+        Some(PathBuf::from(path))
+    }
+
+    #[test]
+    fn the_root_hangs_off_the_home_directory() {
+        assert_eq!(
+            cache_root_from(env(&[]), home("/home/someone")),
+            Some(PathBuf::from("/home/someone/.cache/yamc"))
+        );
+    }
+
+    /// The Windows spelling, which is the shape issue #544 was about. Only the
+    /// join is ours: which variable produced the home is `etcetera`'s business,
+    /// and taking it back off it is what broke a process with no exported HOME.
+    #[test]
+    fn a_windows_home_joins_the_same_way() {
+        assert_eq!(
+            cache_root_from(env(&[]), home("C:/Users/runneradmin")),
+            Some(PathBuf::from("C:/Users/runneradmin/.cache/yamc"))
+        );
+    }
+
+    /// The override names the cache root itself, with no `.cache/yamc`
+    /// appended: it is a cache directory, not a home directory to derive one
+    /// from. And it wins over a home that resolves perfectly well, which is
+    /// what makes it usable for an isolated test cache.
+    #[test]
+    fn the_override_wins_verbatim() {
+        assert_eq!(
+            cache_root_from(
+                env(&[("YAMC_CACHE_DIR", "/tmp/isolated")]),
+                home("/home/someone")
+            ),
+            Some(PathBuf::from("/tmp/isolated"))
+        );
+    }
+
+    /// An empty variable is an unset one. A shell that exports
+    /// `YAMC_CACHE_DIR=` would otherwise name the empty path, and the cache
+    /// would land relative to the working directory.
+    #[test]
+    fn an_empty_override_is_no_override() {
+        assert_eq!(
+            cache_root_from(env(&[("YAMC_CACHE_DIR", "")]), home("/home/someone")),
+            Some(PathBuf::from("/home/someone/.cache/yamc"))
+        );
+    }
+
+    /// No home and no override is a machine with nowhere to put a cache, which
+    /// a caller must be able to tell from a machine whose cache is empty.
+    #[test]
+    fn no_home_and_no_override_resolves_nothing() {
+        assert_eq!(cache_root_from(env(&[]), None), None);
+    }
+
+    /// And the override still answers without a home, which is the case it
+    /// exists for: a container or a service account.
+    #[test]
+    fn the_override_answers_without_a_home() {
+        assert_eq!(
+            cache_root_from(env(&[("YAMC_CACHE_DIR", "/srv/cache")]), None),
+            Some(PathBuf::from("/srv/cache"))
+        );
+    }
+
+    #[test]
+    fn an_entry_sits_directly_under_the_root() {
+        let root = cache_root_from(env(&[("YAMC_CACHE_DIR", "/tmp/isolated")]), None).unwrap();
+        assert_eq!(
+            root.join(generate_cache_name("endf-b8.1", "Fe58")),
+            PathBuf::from("/tmp/isolated/endf-b8.1-Fe58.arrow")
+        );
+    }
+
+    /// `etcetera` resolves a home on every platform CI runs on, including the
+    /// Windows runner where `HOME` is unset and `USERPROFILE` carries it. A
+    /// `HOME`-only read is what returned nothing there (issue #544).
+    #[test]
+    fn this_machine_has_a_home_and_therefore_a_cache_root() {
+        assert!(home_dir().is_some(), "no home directory resolved");
+        assert!(cache_root().is_some());
     }
 }

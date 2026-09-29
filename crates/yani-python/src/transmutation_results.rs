@@ -511,6 +511,12 @@ impl PyTransmutationResults {
     /// Needs no ``volume``, unlike the other three, because the estimate takes
     /// the material for a half-space.
     ///
+    /// The band is the spread of the replicas' inventories alone (each with
+    /// its own half-lives when the ``"half_life"`` source is on). The decay
+    /// photon line intensities, photon attenuation (XCOM), air energy
+    /// absorption (NIST SRD 126), ICRP-116 dose coefficients and the build-up
+    /// factor are held at their nominal values and contribute nothing to it.
+    ///
     /// Args:
     ///     material_id: Material ID number.
     ///     step: Timestep index (0 = initial composition).
@@ -561,6 +567,11 @@ impl PyTransmutationResults {
     /// and the only one under which two lines' spreads are taken over the same
     /// sample -- and ``LineEstimate.emitting`` reports how many replicas
     /// emitted it, which is what the zero-fill would otherwise hide.
+    ///
+    /// The band is the spread of the replicas' inventories alone (each with
+    /// its own half-lives when the ``"half_life"`` source is on). The line
+    /// intensities per decay are held at their nominal values and contribute
+    /// nothing to it.
     ///
     ///     >>> lines = results.get_decay_photon_spectrum_uncertainty(mid, step)
     ///     >>> [(l.energy, l.nominal, l.std_dev) for l in lines[:2]]
@@ -657,16 +668,19 @@ impl PyTransmutationResults {
     /// - ``skipped_cross_material``: per nuclide, blocks on a reaction the
     ///   fold reaches (a channel, or one a channel is derived from) that
     ///   correlate it with another evaluation, not consumed. A block naming
-    ///   the nuclide's own MAT is its own evaluation and is folded. ``skipped_other_file``: the same for blocks whose
-    ///   partner is not a cross section.
+    ///   the nuclide's own MAT is its own evaluation and is folded. The
+    ///   partner is not checked, so a block is counted whether or not the
+    ///   evaluation it names is in the run. ``skipped_other_file``: the same
+    ///   for blocks whose partner is not a cross section.
     /// - ``mirrored_disagree``: keyed ``"Nuclide (n,a) (n,b)"``, where a pair
     ///   stored in both orientations has copies that are not each other's
     ///   transpose, the largest difference relative to the largest entry.
     ///   The copy in the lower MT's section is the one folded.
     /// - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
     ///   covariance was not positive semi-definite and had to be repaired.
-    /// - ``rates_floored`` / ``rates_sampled``: samples that went negative and
-    ///   were truncated at zero, which biases the mean upward when common.
+    /// - ``rates_sampled``: cross-section rate draws made. Each is a lognormal
+    ///   multiplier matched to the covariance's mean and variance, so none can
+    ///   go negative and none is floored.
     /// - ``half_lives_perturbed`` / ``no_half_life_uncertainty``: with the
     ///   ``"half_life"`` source, which reachable unstable nuclides had their
     ///   half-life sampled and which state no sigma to sample from.
@@ -676,7 +690,11 @@ impl PyTransmutationResults {
     ///   transport run, how many tallied rates were sampled from their
     ///   covariance; ``statistical_floored`` / ``statistical_sampled`` count
     ///   draws that came out negative and were floored.
-    /// - ``not_perturbed``: the sources this does not propagate at all.
+    /// - ``not_perturbed``: every input this run held at its nominal value,
+    ///   such as the MF=32 resonance-parameter covariance, the photon and dose
+    ///   data, the material composition, any source switched off, and, where
+    ///   they applied, the self-shielding correction and the flux's response
+    ///   to a perturbed cross section on a transport run.
     /// - ``samples`` / ``converged``: how many replicas ran, and whether the
     ///   sigmas settled or the cap was hit.
     ///

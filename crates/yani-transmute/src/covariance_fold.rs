@@ -137,8 +137,12 @@ pub struct Coverage {
     /// evaluation (ENDF-102 33.3.1) and is folded. Only relevant ones: a block
     /// is counted only on a reaction the fold reaches (a channel, or one a
     /// channel is derived from), since elsewhere there is no rate for it to
-    /// be the uncertainty of. Per nuclide rather than a sum,
-    /// so a run with several spectra counts each block once.
+    /// be the uncertainty of. Relevant on this nuclide's side only: a block
+    /// is counted whether or not the evaluation `mat1` names is in the run,
+    /// since a MAT is known only from a covariance block and a partner in the
+    /// run with no covariance of its own would have none to match. Per
+    /// nuclide rather than a sum, so a run with several spectra counts each
+    /// block once.
     pub skipped_cross_material: BTreeMap<String, usize>,
     /// Per nuclide, its blocks correlating one of its reactions with a
     /// quantity of this evaluation that is not a cross section (`xmf1` other
@@ -605,9 +609,19 @@ impl FluxDensity<'_> {
                     .map(|w| weight(&walk_group(reaction, w[0], w[1], Some(shape), None))),
             );
             let sum: f64 = parts.iter().sum();
-            if sum <= 0.0 {
-                continue;
-            }
+            // The pieces' walks visit every point of the whole group's walk,
+            // so on a nonnegative cross section a nonzero term leaves a
+            // nonzero sum of pieces. A zero one is a bug here, and any way
+            // of completing the partition (by width, say) would be the dilute
+            // assumption this split exists to avoid, so it stops the run
+            // rather than hand the partials a guess. A negative sum, possible
+            // only on a cross section that goes negative, still normalizes to
+            // a partition of the term and needs no special case.
+            assert!(
+                sum != 0.0,
+                "the shielded pieces of group [{glo}, {ghi}] eV sum to zero \
+                 against a collapse term of {term}"
+            );
             for (w, part) in cuts.windows(2).zip(&parts) {
                 if let Some(k) = interval_holding(grid, w[0], w[1]) {
                     out[k] += term * part / sum;
@@ -1444,8 +1458,10 @@ fn fold_nuclide(
 
     for block in blocks {
         // Whether the fold reaches the block's own reaction. The partner's is
-        // checked below for this evaluation's blocks; another evaluation's
-        // partner is not this nuclide's to check.
+        // checked below for this evaluation's blocks. Another evaluation's
+        // partner is not: its MAT is known only if it has covariance blocks of
+        // its own, so a partner in the run without any could not be told from
+        // one that is absent.
         let reaches_row = reached.contains(&block.mt);
         if block.is_cross_material() {
             if reaches_row {
