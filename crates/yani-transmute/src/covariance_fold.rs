@@ -337,9 +337,11 @@ pub struct Coverage {
     /// lump the fold does not reach itself, a level of one (MT 51-91 of MT 4,
     /// 600-649 of MT 103, and so on to 875-891 of MT 16), since a channel's
     /// rate holds its levels'. So W186 MT 855, the sum of MT 600 and 649, is
-    /// listed wherever `(n,p)` is a channel. A channel whose covariance is
-    /// lumped this way may have none of its own, so it can also appear with
-    /// no stated variance at all. Counted as a gap.
+    /// listed wherever `(n,p)` is a channel. It is not listed where the sum
+    /// has a diagonal block of its own, as that states the channel's rate
+    /// variance whole and loses nothing to a lump of part of it. A channel
+    /// whose covariance is lumped this way may have none of its own, so it
+    /// can also appear with no stated variance at all. Counted as a gap.
     ///
     /// A single-component lump whose component is a level, as Li7 MT 852 is
     /// MT 51 alone, is not listed where only the level's sum is reached. It
@@ -1795,12 +1797,14 @@ fn fold_nuclide(
         });
         // A lump a derivation reaches is folded whole, as its components'
         // sum, and so covers the levels it holds. A component reached in its
-        // own right still has no covariance of its own.
+        // own right still has no covariance of its own. A level sum whose own
+        // section states its covariance loses nothing to a lump of part of it.
+        let states_own = |mt: i32| blocks.iter().any(|b| b.is_diagonal() && b.mt == mt);
         let reaches = components.iter().any(|&c| reached.contains(&c))
             || (!reached.contains(&mtl)
-                && components
-                    .iter()
-                    .any(|&c| level_sum(c).is_some_and(|s| reached.contains(&s))));
+                && components.iter().any(|&c| {
+                    level_sum(c).is_some_and(|s| reached.contains(&s) && !states_own(s))
+                }));
         if stated && reaches {
             coverage.lumped_covariance_not_assignable.insert(
                 (nuclide.to_string(), mtl),
@@ -4368,6 +4372,22 @@ mod lumped_tests {
             coverage.lumped_covariance_not_assignable,
             BTreeMap::from([(("W186".to_string(), 855), want)])
         );
+    }
+
+    /// A lump of `(n,p)`'s levels is not lost where MT 103 states its own
+    /// covariance: the channel's rate variance is that section's, whole.
+    #[test]
+    fn a_lump_of_levels_is_not_reported_where_their_sum_states_its_own() {
+        let blocks = [
+            own(NP, U),
+            component(600, 855),
+            component(649, 855),
+            own(855, U),
+        ];
+        let (folded, coverage) = fold(&blocks, &[NP], &[NP]);
+        assert!(folded.is_some());
+        assert!(coverage.lumped_covariance_not_assignable.is_empty());
+        assert!(!coverage.has_gaps(), "{coverage:?}");
     }
 
     /// A lump no channel reaches has no rate to be the uncertainty of, and
