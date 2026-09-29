@@ -1365,7 +1365,7 @@ fn run_replicas(
         Default::default()
     };
 
-    let mut info = Info::from_fold(&coverage, &clipping);
+    let mut info = Info::from_fold(&coverage, &clipping, shielding.is_none() && !transport);
     if half_life.is_none() {
         info.not_perturbed.insert(0, "half-life".to_string());
     }
