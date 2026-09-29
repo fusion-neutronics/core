@@ -3112,10 +3112,12 @@ mod tests {
             fission_yields: None,
             sources: vec![yani::DecaySource {
                 particle: "photon".to_string(),
+                radiation: None,
                 distribution: yani::DecaySourceDistribution::Discrete {
                     energies: vec![1.17e6, 1.33e6],
                     intensities: vec![0.9985 * std::f64::consts::LN_2 / half_life, 4.2e-9],
                 },
+                uncertainty: None,
             }],
             half_life_uncertainty: Some(0.01 * half_life),
             decay_energy_uncertainty: None,
