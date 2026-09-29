@@ -354,11 +354,10 @@ fn push_section(rows: &mut Rows, mat: i32, mt: i32, mf33: &Mf33) {
 ///
 /// Returns whether a file was written. An evaluation with no MF=33 at all, or
 /// one whose MF=33 sections hold no blocks and name no lumped reaction, writes
-/// nothing: absence is how this
-/// section says "no covariance", and the reader treats a missing file that way
-/// rather than as an error. No `.absent` marker is written here, since that is
-/// a download-cache record of a settled 404 rather than anything a conversion
-/// produces.
+/// nothing: absence is how this section says "no covariance", and the reader
+/// treats a missing file that way rather than as an error. No `.absent` marker
+/// is written here, since that is a download-cache record of a settled 404
+/// rather than anything a conversion produces.
 pub fn write_covariance(material: &Material, dir: &Path) -> Result<bool, Box<dyn Error>> {
     let mut rows = Rows::default();
     for mt in covariance_mts(material) {
