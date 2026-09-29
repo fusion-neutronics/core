@@ -38,9 +38,8 @@ use crate::transmutation_results::PyTransmutationResults;
 ///         times.
 ///     data_uncertainty (DataUncertainty, optional): Nuclear-data uncertainty,
 ///         applied to every material as ``Material.transmute`` applies it to
-///         one. The same seed perturbs a nuclide's cross sections the same way
-///         in every material, which is right: one evaluation is uncertain in
-///         one way wherever it is used.
+///         one. The same seed perturbs a given evaluation the same way in every
+///         material.
 ///     self_shielding_chord (float, optional): One chord length ``4V/S`` in cm,
 ///         for every material. See ``Material.transmute``.
 ///     self_shielding_shape (SphereLump | CubeLump | FoilLump | CylinderLump | WireLump, optional):

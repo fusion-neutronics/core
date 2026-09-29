@@ -1295,14 +1295,14 @@ impl PyMaterial {
     ///         steps directly, so its step 0 is the first step.
     ///
     ///     data_uncertainty (DataUncertainty, optional): Ask for nuclear-data
-    ///         uncertainty on the result. The activation cross sections are
-    ///         sampled from their ENDF MF=33 covariance, folded against this
-    ///         material's own spectrum, and the schedule is re-solved until the
-    ///         reported standard deviations settle. Omit it (the default) and
-    ///         nothing is read, folded or sampled: the inventories are
-    ///         bit-identical either way. Read the sigmas with
-    ///         ``get_nuclide_uncertainty``, and what was and was not covered
-    ///         with ``get_data_uncertainty_info(id)``.
+    ///         uncertainty on the result. Each source ``DataUncertainty`` names
+    ///         is sampled where it applies (``statistical`` needs a transport
+    ///         run, ``flux_spectrum`` a supplied flux sigma), and the schedule
+    ///         is re-solved until the reported standard deviations settle.
+    ///         Omit it (the default) and nothing is read, folded or sampled:
+    ///         the inventories are bit-identical either way. Read the sigmas
+    ///         with ``get_nuclide_uncertainty``, and what was and was not
+    ///         covered with ``get_data_uncertainty_info(id)``.
     ///
     ///     self_shielding_chord (float, optional): Mean chord length ``4V/S`` of
     ///         this material's lump, in cm, which is twice the thickness for a

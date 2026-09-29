@@ -252,6 +252,8 @@ def test_the_time_correction_carries_the_half_life_uncertainty(dp_result):
     info = dose.data_uncertainty_info
     assert info["sources"] == ["half_life"]
     assert info["samples"] == 64
+    # A TCF depends on decay branching too, and D1S does not draw it.
+    assert info["not_perturbed"] == ["decay branching ratio"]
     if info["half_lives_perturbed"]:
         # After two weeks' cooling the dose hangs on the emitters' half-lives.
         assert data[-1].max() > 0.0

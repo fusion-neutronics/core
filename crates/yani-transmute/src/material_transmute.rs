@@ -791,6 +791,9 @@ struct ReplicaOutcome {
     half_lives: HashMap<String, f64>,
     /// Half-life draws that came out non-positive and were floored.
     half_lives_floored: usize,
+    /// Decay-branching draws made, and those clamped to `[0, T]`.
+    decay_branchings_sampled: usize,
+    decay_branchings_floored: usize,
     /// Statistically drawn rates that came out negative and were floored.
     statistical_floored: usize,
 }
@@ -1105,10 +1108,9 @@ pub struct TransportTallied {
 /// item 3), by resampling and re-solving exactly as [`transmute_material`]
 /// does, with the tally's spectrum standing in for the supplied one.
 ///
-/// The sources that apply: `statistical`, the Monte Carlo covariance of the
-/// tallied rates; `cross_sections`, the MF=33 covariance folded against the
-/// tally's own flux shape; and `half_life`. `flux_spectrum` does not: there is
-/// no supplied spectrum, and the flux's error is the statistical one.
+/// Every source in [`crate::uncertainty::Source::IMPLEMENTED`] applies except
+/// `flux_spectrum`: there is no supplied spectrum, and the flux's error is the
+/// statistical one. Covariances are folded against the tally's own flux shape.
 ///
 /// `source_rates` scale the per-source-particle rates per step, which is how
 /// independent mode scales them. The coupled method re-runs transport per step
@@ -1170,18 +1172,89 @@ pub fn transport_replicas(
     )
 }
 
-/// What the half-life source needs for a run: the nuclides to perturb, those
-/// with no stated sigma, and the chains pruned to what the material can reach,
-/// ready to receive a replica's half-lives.
+/// What the half-life source needs for a run: the nuclides to perturb and
+/// those with no stated sigma.
 struct HalfLifeSampling {
     /// `(name, half-life, sigma)` for the reachable nuclides with a sigma.
     candidates: Vec<(String, f64, f64)>,
     /// Reachable unstable nuclides whose evaluation states no sigma.
     without: std::collections::BTreeSet<String>,
-    /// The base chain, pruned.
-    base: HashMap<String, ChainNuclide>,
-    /// Each spectrum's folded chain, pruned, in `per_spectrum` order.
-    folded: Vec<HashMap<String, ChainNuclide>>,
+}
+
+/// The chains a replica edits, pruned once to what the material can reach.
+///
+/// Only the nuclides this material can reach are carried: the stepper walks a
+/// subset of that closure, so pruning to it changes nothing, and it keeps each
+/// replica's copy to the part of a 3800-nuclide chain the solve uses.
+struct ReplicaChains {
+    /// The base chain, for cooldowns.
+    base: Arc<HashMap<String, ChainNuclide>>,
+    /// Each spectrum's folded chain, in `per_spectrum` order.
+    folded: Vec<Arc<HashMap<String, ChainNuclide>>>,
+}
+
+/// Prune the base chain and every spectrum's folded chain to the closure the
+/// material reaches through either.
+fn replica_chains(
+    initial: &Material,
+    chain: &Arc<HashMap<String, ChainNuclide>>,
+    per_spectrum: &[PerSpectrum],
+) -> ReplicaChains {
+    let seeds: Vec<&str> = initial
+        .nuclides
+        .keys()
+        .chain(initial.nuclide_data.keys())
+        .map(|s| s.as_str())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let mut reach = yani::reachable_nuclides(chain, &seeds);
+    for (_, _, folded_chain) in per_spectrum {
+        reach.extend(yani::reachable_nuclides(folded_chain, &seeds));
+    }
+    let prune = |c: &HashMap<String, ChainNuclide>| -> Arc<HashMap<String, ChainNuclide>> {
+        Arc::new(
+            c.iter()
+                .filter(|(name, _)| reach.contains(*name))
+                .map(|(name, cn)| (name.clone(), cn.clone()))
+                .collect(),
+        )
+    };
+    ReplicaChains {
+        base: prune(chain),
+        folded: per_spectrum.iter().map(|(_, _, c)| prune(c)).collect(),
+    }
+}
+
+/// One replica's edits to the chain's nuclear data, applied to a copy.
+#[derive(Default)]
+struct ChainEdits {
+    /// Perturbed half-lives [s].
+    half_lives: HashMap<String, f64>,
+    /// Perturbed decay branching ratios, one per row of the parent's `decays`.
+    decay_branchings: HashMap<String, Vec<f64>>,
+}
+
+impl ChainEdits {
+    fn is_empty(&self) -> bool {
+        self.half_lives.is_empty() && self.decay_branchings.is_empty()
+    }
+
+    /// `chain` with every edit made.
+    fn apply(&self, chain: &HashMap<String, ChainNuclide>) -> HashMap<String, ChainNuclide> {
+        let mut out = chain.clone();
+        for (name, t) in &self.half_lives {
+            if let Some(cn) = out.get_mut(name) {
+                crate::uncertainty::set_half_life(cn, *t);
+            }
+        }
+        for (name, ratios) in &self.decay_branchings {
+            if let Some(cn) = out.get_mut(name) {
+                crate::decay_branching_uncertainty::set_decay_branchings(cn, ratios);
+            }
+        }
+        out
+    }
 }
 
 /// Fold the covariance, factorize it, and re-solve until the sigmas settle.
@@ -1295,44 +1368,35 @@ fn run_replicas(
         }
     }
 
+    // The sources that edit the chain rather than the rates work on copies
+    // pruned once to what the material can reach, so each replica copies only
+    // the part of the chain its solve walks.
+    let want_half_life = request.wants(crate::uncertainty::Source::HalfLife);
+    let want_decay_branching = request.wants(crate::uncertainty::Source::DecayBranching);
+    let edits_chain = want_half_life || want_decay_branching;
+    let chains = edits_chain.then(|| replica_chains(initial, chain, per_spectrum));
+
     // Half-lives: sampled per replica from the evaluation's stated sigma, and
     // substituted into every chain the replica is solved with, the base one
     // for cooldowns and each spectrum's folded one for irradiations, so one
-    // replica has one set of decay constants throughout. Only the nuclides
-    // this material can reach are carried into those chains: the stepper walks
-    // a subset of that closure, so pruning to it changes nothing, and it keeps
-    // the per-replica copy to the part of a 3800-nuclide chain the solve uses.
-    let half_life = if request.wants(crate::uncertainty::Source::HalfLife) {
-        let seeds: Vec<&str> = initial
-            .nuclides
-            .keys()
-            .chain(initial.nuclide_data.keys())
-            .map(|s| s.as_str())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        let mut reach = yani::reachable_nuclides(chain, &seeds);
-        for (_, _, folded_chain) in per_spectrum {
-            reach.extend(yani::reachable_nuclides(folded_chain, &seeds));
+    // replica has one set of decay constants throughout.
+    let half_life = match (&chains, want_half_life) {
+        (Some(c), true) => {
+            let (candidates, without) = crate::uncertainty::half_life_candidates(&c.base);
+            Some(HalfLifeSampling {
+                candidates,
+                without,
+            })
         }
-        let prune = |c: &HashMap<String, ChainNuclide>| -> HashMap<String, ChainNuclide> {
-            c.iter()
-                .filter(|(name, _)| reach.contains(*name))
-                .map(|(name, cn)| (name.clone(), cn.clone()))
-                .collect()
-        };
-        let base = prune(chain);
-        let (candidates, without) = crate::uncertainty::half_life_candidates(&base);
-        let folded: Vec<HashMap<String, ChainNuclide>> =
-            per_spectrum.iter().map(|(_, _, c)| prune(c)).collect();
-        Some(HalfLifeSampling {
-            candidates,
-            without,
-            base,
-            folded,
-        })
-    } else {
-        None
+        _ => None,
+    };
+
+    // Decay branchings: the two-mode parents the sum rule fixes, substituted
+    // into the same chains as the half-lives. Folding rewrites reactions and
+    // never decays, so a parent's rows are the same in every chain.
+    let decay_branching = match (&chains, want_decay_branching) {
+        (Some(c), true) => Some(crate::decay_branching_uncertainty::candidates(&c.base)),
+        _ => None,
     };
 
     // Decay energies: no solve reads them, so they are drawn where decay heat
@@ -1368,6 +1432,30 @@ fn run_replicas(
     let mut info = Info::from_fold(&coverage, &clipping, shielding.is_none() && !transport);
     if half_life.is_none() {
         info.not_perturbed.insert(0, "half-life".to_string());
+    }
+    match &decay_branching {
+        None => info
+            .not_perturbed
+            .insert(0, "decay branching ratio".to_string()),
+        Some(b) => {
+            // A drawn ratio moves the inventory only. The parent's own lines
+            // and decay energy per decay stay those of the nominal scheme, so
+            // a photon source or dose spread does not cover this coupling.
+            if !b.two_modes.is_empty() {
+                info.not_perturbed.insert(
+                    0,
+                    "decay emission per branch (line intensities and decay energy \
+                     follow the nominal branching)"
+                        .to_string(),
+                );
+            }
+            info.decay_branchings_perturbed =
+                b.two_modes.iter().map(|t| t.parent.clone()).collect();
+            info.no_decay_branching_uncertainty = b.without.clone();
+            info.decay_branchings_three_or_more_modes = b.three_or_more_modes.clone();
+            info.decay_branchings_unequal_sigmas = b.unequal_sigmas.clone();
+            info.decay_branchings_too_wide = b.too_wide.clone();
+        }
     }
     if !want_decay_energy {
         info.not_perturbed.insert(0, "decay energy".to_string());
@@ -1440,9 +1528,13 @@ fn run_replicas(
     // every sigma reads zero, with `info` saying why: no covariance data, not a
     // confident zero.
     let no_half_lives = half_life.as_ref().is_none_or(|h| h.candidates.is_empty());
+    let no_decay_branchings = decay_branching
+        .as_ref()
+        .is_none_or(|b| b.two_modes.is_empty());
     if samplers.iter().all(Sampler::is_empty)
         && per_group.iter().all(Option::is_none)
         && no_half_lives
+        && no_decay_branchings
         && statistical.is_none()
     {
         info.converged = true;
@@ -1484,6 +1576,7 @@ fn run_replicas(
         let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
         let mut rates_sampled = 0usize;
         let mut half_lives_floored = 0usize;
+        let mut decay_branchings_floored = 0usize;
         // A statistical draw of the whole tallied rate vector, the partials
         // re-folded into the branching the way the nominal was, so an
         // isomeric split moves with the rates it is made of.
@@ -1498,14 +1591,25 @@ fn run_replicas(
             };
             (totals, chain_k)
         });
-        let sampled_half_lives = match &half_life {
-            Some(h) if !h.candidates.is_empty() => crate::uncertainty::sample_half_lives(
-                &h.candidates,
-                request.seed,
-                replica,
-                &mut half_lives_floored,
-            ),
-            _ => HashMap::new(),
+        let edits = ChainEdits {
+            half_lives: match &half_life {
+                Some(h) if !h.candidates.is_empty() => crate::uncertainty::sample_half_lives(
+                    &h.candidates,
+                    request.seed,
+                    replica,
+                    &mut half_lives_floored,
+                ),
+                _ => HashMap::new(),
+            },
+            decay_branchings: match &decay_branching {
+                Some(b) if !b.two_modes.is_empty() => crate::decay_branching_uncertainty::sample(
+                    &b.two_modes,
+                    request.seed,
+                    replica,
+                    &mut decay_branchings_floored,
+                ),
+                _ => HashMap::new(),
+            },
         };
 
         // Every spectrum's rates are perturbed by the SAME replica index,
@@ -1539,22 +1643,21 @@ fn run_replicas(
             };
             let (rates, n) = samplers[idx].perturb(&rates, request.seed, replica);
             rates_sampled += n;
-            let folded_chain = match &half_life {
-                // The pruned nominal chain, unless this replica drew its own
-                // branching, which then carries the half-lives instead.
-                Some(h) if !sampled_half_lives.is_empty() => Arc::new(if drawn.is_some() {
-                    crate::uncertainty::with_half_lives(folded_chain, &sampled_half_lives)
+            let folded_chain = match &chains {
+                // The pruned nominal chain, unless the statistical draw
+                // re-folded this replica's own chain, which then carries the
+                // edits instead.
+                Some(c) if !edits.is_empty() => Arc::new(if drawn.is_some() {
+                    edits.apply(folded_chain)
                 } else {
-                    crate::uncertainty::with_half_lives(&h.folded[idx], &sampled_half_lives)
+                    edits.apply(&c.folded[idx])
                 }),
                 _ => Arc::clone(folded_chain),
             };
             perturbed.push((rates, weights.clone(), folded_chain));
         }
-        let base_chain = match &half_life {
-            Some(h) if !sampled_half_lives.is_empty() => Arc::new(
-                crate::uncertainty::with_half_lives(&h.base, &sampled_half_lives),
-            ),
+        let base_chain = match &chains {
+            Some(c) if !edits.is_empty() => Arc::new(edits.apply(&c.base)),
             _ => Arc::clone(chain),
         };
 
@@ -1567,7 +1670,9 @@ fn run_replicas(
             rates_sampled,
             flux_bins_sampled: flux_coverage.bins_sampled,
             flux_bins_floored: flux_coverage.bins_floored,
-            half_lives: sampled_half_lives,
+            decay_branchings_sampled: edits.decay_branchings.len(),
+            decay_branchings_floored,
+            half_lives: edits.half_lives,
             half_lives_floored,
             statistical_floored,
         })
@@ -1600,6 +1705,8 @@ fn run_replicas(
             flux_coverage.bins_floored += outcome.flux_bins_floored;
             info.half_lives_sampled += outcome.half_lives.len();
             info.half_lives_floored += outcome.half_lives_floored;
+            info.decay_branchings_sampled += outcome.decay_branchings_sampled;
+            info.decay_branchings_floored += outcome.decay_branchings_floored;
             info.statistical_floored += outcome.statistical_floored;
             if statistical.is_some() {
                 info.statistical_sampled += info.statistical_rates;
@@ -1677,7 +1784,9 @@ fn run_replicas(
             applied
                 .contains(&crate::uncertainty::Source::CrossSections)
                 .then_some(samplers.as_slice()),
+            chains.as_ref(),
             half_life.as_ref(),
+            decay_branching.as_ref(),
         )?;
         ensemble.attribution = Some(crate::uncertainty::Attribution {
             by_source,
@@ -1714,7 +1823,8 @@ const SENSITIVITY_STEP: f64 = 1.0e-3;
 /// and each channel alone. Half-lives: each nuclide the solve populates, as
 /// `(s sigma_T / T)^2`. A half-life of a nuclide that never appears in the
 /// inventory cannot move it, which keeps this to the nuclides that matter
-/// even in a fission chain.
+/// even in a fission chain. Decay branchings: each populated two-mode parent,
+/// along its one degree of freedom.
 #[allow(clippy::too_many_arguments)]
 fn first_order_contributors(
     initial: &Material,
@@ -1724,7 +1834,9 @@ fn first_order_contributors(
     parts: yani::ChainParts,
     stepper: &ForwardEulerStepper,
     samplers: Option<&[Sampler]>,
+    chains: Option<&ReplicaChains>,
     half_life: Option<&HalfLifeSampling>,
+    decay_branching: Option<&crate::decay_branching_uncertainty::Candidates>,
 ) -> Result<Vec<crate::uncertainty::Contributor>, Box<dyn std::error::Error>> {
     use crate::uncertainty::Contributor;
     let solve = |ps: &[PerSpectrum], base: &Arc<HashMap<String, ChainNuclide>>| {
@@ -1851,14 +1963,25 @@ fn first_order_contributors(
         }
     }
 
-    // Half-lives: one solve per populated nuclide with a stated sigma.
-    if let Some(h) = half_life {
-        let populated: HashSet<&str> = nominal
+    // A solve with one replica's worth of chain edits, on the pruned chains.
+    let solve_edited = |edits: &ChainEdits, c: &ReplicaChains| {
+        let base = Arc::new(edits.apply(&c.base));
+        let ps: Vec<PerSpectrum> = per_spectrum
             .iter()
-            .flat_map(|m| m.keys())
-            .chain(initial.nuclides.keys())
-            .map(|s| s.as_str())
+            .zip(&c.folded)
+            .map(|((r, w, _), folded)| (r.clone(), w.clone(), Arc::new(edits.apply(folded))))
             .collect();
+        solve(&ps, &base)
+    };
+    let populated: HashSet<&str> = nominal
+        .iter()
+        .flat_map(|m| m.keys())
+        .chain(initial.nuclides.keys())
+        .map(|s| s.as_str())
+        .collect();
+
+    // Half-lives: one solve per populated nuclide with a stated sigma.
+    if let (Some(h), Some(c)) = (half_life, chains) {
         let jobs: Vec<&(String, f64, f64)> = h
             .candidates
             .iter()
@@ -1866,20 +1989,11 @@ fn first_order_contributors(
             .collect();
         let run =
             |(name, t, _): &&(String, f64, f64)| -> Result<Vec<HashMap<String, f64>>, String> {
-                let sampled = HashMap::from([(name.clone(), t * (1.0 + SENSITIVITY_STEP))]);
-                let base = Arc::new(crate::uncertainty::with_half_lives(&h.base, &sampled));
-                let ps: Vec<PerSpectrum> = per_spectrum
-                    .iter()
-                    .zip(&h.folded)
-                    .map(|((r, w, _), folded)| {
-                        (
-                            r.clone(),
-                            w.clone(),
-                            Arc::new(crate::uncertainty::with_half_lives(folded, &sampled)),
-                        )
-                    })
-                    .collect();
-                Ok(sensitivity(&solve(&ps, &base)?))
+                let edits = ChainEdits {
+                    half_lives: HashMap::from([(name.clone(), t * (1.0 + SENSITIVITY_STEP))]),
+                    ..Default::default()
+                };
+                Ok(sensitivity(&solve_edited(&edits, c)?))
             };
         let results: Vec<Result<Vec<HashMap<String, f64>>, String>> = {
             #[cfg(not(target_arch = "wasm32"))]
@@ -1906,6 +2020,60 @@ fn first_order_contributors(
             out.push(Contributor {
                 source: "half_life".to_string(),
                 nuclide: name.clone(),
+                reaction: None,
+                variance,
+            });
+        }
+    }
+
+    // Decay branchings: one solve per populated parent, moving its one degree
+    // of freedom by a step relative to the smaller ratio, which is at least
+    // five sigmas and so well clear of zero. A parent absent from every
+    // inventory decays nowhere and cannot move one.
+    if let (Some(b), Some(c)) = (decay_branching, chains) {
+        use crate::decay_branching_uncertainty::TwoModes;
+        let jobs: Vec<&TwoModes> = b
+            .two_modes
+            .iter()
+            .filter(|t| populated.contains(t.parent.as_str()))
+            .collect();
+        let run = |t: &&TwoModes| -> Result<Vec<HashMap<String, f64>>, String> {
+            let edits = ChainEdits {
+                decay_branchings: HashMap::from([(
+                    t.parent.clone(),
+                    t.shifted(SENSITIVITY_STEP * t.smaller()),
+                )]),
+                ..Default::default()
+            };
+            Ok(sensitivity(&solve_edited(&edits, c)?))
+        };
+        let results: Vec<Result<Vec<HashMap<String, f64>>, String>> = {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use rayon::prelude::*;
+                jobs.par_iter().map(run).collect()
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                jobs.iter().map(run).collect()
+            }
+        };
+        for (t, sens) in jobs.into_iter().zip(results) {
+            // `sensitivity` divides by the relative step, so `s` is dN per
+            // unit relative change of the smaller ratio.
+            let rel = t.sigma / t.smaller();
+            let variance = sens?
+                .into_iter()
+                .map(|per| {
+                    per.into_iter()
+                        .map(|(k, s)| (k, (s * rel) * (s * rel)))
+                        .filter(|(_, v)| *v > 0.0)
+                        .collect()
+                })
+                .collect();
+            out.push(Contributor {
+                source: "decay_branching".to_string(),
+                nuclide: t.parent.clone(),
                 reaction: None,
                 variance,
             });
@@ -2774,5 +2942,208 @@ mod tests {
         let folded = apply_coupled_branching(&chain, &partials, &mut rates);
         assert!(Arc::ptr_eq(&chain, &folded));
         assert!(rates.is_empty());
+    }
+
+    /// A transport replica that draws its own rates builds its own folded
+    /// chain from the unpruned base, and the decay branching edits must land
+    /// on that chain too: Bi212 decays under irradiation here, so its
+    /// daughters come out of the folded chain, not the base one.
+    #[test]
+    fn transport_replicas_apply_decay_branching_to_a_drawn_chain() {
+        use crate::history_statistics::{RateCovariance, RateLabel};
+        use crate::uncertainty::Source;
+
+        const N0: f64 = 1.0e-3;
+        const HALF_LIFE: f64 = 3600.0;
+        const SIGMA: f64 = 0.02;
+        const SAMPLES: usize = 256;
+        let reaction = |kind: &str, target: &str, b: f64, sigma: Option<f64>| ChainReaction {
+            kind: kind.to_string(),
+            target: Some(target.to_string()),
+            branching: b,
+            q_value: None,
+            branching_uncertainty: sigma,
+        };
+        let nuclide = |name: &str,
+                       half_life: Option<f64>,
+                       reactions: Vec<ChainReaction>,
+                       decays: Vec<ChainReaction>| ChainNuclide {
+            name: name.to_string(),
+            half_life,
+            decay_energy: 0.0,
+            reactions,
+            decays,
+            fission_yields: None,
+            sources: Vec::new(),
+            half_life_uncertainty: None,
+            decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
+        };
+        let mut map: HashMap<String, ChainNuclide> = HashMap::new();
+        map.insert(
+            "Fe56".to_string(),
+            nuclide(
+                "Fe56",
+                None,
+                vec![reaction("(n,p)", "Mn56", 1.0, None)],
+                Vec::new(),
+            ),
+        );
+        map.insert(
+            "Bi212".to_string(),
+            nuclide(
+                "Bi212",
+                Some(HALF_LIFE),
+                Vec::new(),
+                vec![
+                    reaction("beta-", "Po212", 0.6406, Some(SIGMA)),
+                    reaction("alpha", "Tl208", 0.3594, Some(SIGMA)),
+                ],
+            ),
+        );
+        for stable in ["Mn56", "Po212", "Tl208"] {
+            map.insert(
+                stable.to_string(),
+                nuclide(stable, None, Vec::new(), Vec::new()),
+            );
+        }
+        let chain = Arc::new(map);
+
+        let mut material = Material::new(
+            HashMap::from([("Fe56".to_string(), 1.0), ("Bi212".to_string(), 1.0)]),
+            "atom",
+            "sum",
+            None,
+        )
+        .unwrap();
+        material.nuclides.insert("Fe56".to_string(), 1.0e-2);
+        material.nuclides.insert("Bi212".to_string(), N0);
+        material.set_temperature("294");
+
+        let rate = 1.0e-6;
+        let tallied = TransportTallied {
+            rates: HashMap::from([(
+                "Fe56".to_string(),
+                HashMap::from([("(n,p)".to_string(), rate)]),
+            )]),
+            partials: HashMap::new(),
+            fy_weights: HashMap::new(),
+            spectrum: MultigroupSpectrum {
+                boundaries: vec![1.0e-5, 2.0e7],
+                masses: vec![1.0],
+                flux_error: None,
+            },
+            statistics: Some(RateCovariance::from_parts(
+                vec![RateLabel {
+                    nuclide: "Fe56".to_string(),
+                    kind: "(n,p)".to_string(),
+                    target: None,
+                }],
+                vec![rate],
+                1000,
+                vec![(0.1 * rate).powi(2)],
+            )),
+        };
+        let request = DataUncertainty {
+            seed: 5,
+            samples: Some(SAMPLES),
+            sources: vec![Source::Statistical, Source::DecayBranching],
+            attribution: false,
+        };
+        let (ensemble, info) = transport_replicas(
+            &material,
+            &tallied,
+            &[HALF_LIFE],
+            &[1.0],
+            &chain,
+            Default::default(),
+            &request,
+        )
+        .unwrap();
+
+        assert!(info.decay_branchings_perturbed.contains("Bi212"));
+        assert_eq!(info.decay_branchings_sampled, SAMPLES);
+        // The statistical draw ran, so each replica solved its own chain.
+        let mn = ensemble.samples_at(0, "Mn56");
+        assert!(mn.iter().any(|v| v.to_bits() != mn[0].to_bits()));
+
+        let po = ensemble.samples_at(0, "Po212");
+        let tl = ensemble.samples_at(0, "Tl208");
+        let std_dev = |x: &[f64]| {
+            let m = x.iter().sum::<f64>() / x.len() as f64;
+            (x.iter().map(|v| (v - m).powi(2)).sum::<f64>() / (x.len() - 1) as f64).sqrt()
+        };
+        // One half-life: each daughter holds `r N0 / 2`. Sampling error on a
+        // sigma from 256 replicas is about 4.5%.
+        let want = SIGMA * N0 / 2.0;
+        for (name, x) in [("Po212", &po), ("Tl208", &tl)] {
+            let got = std_dev(x);
+            assert!(
+                (got / want - 1.0).abs() < 0.15,
+                "{name} spreads by {got:e}, the stated sigma gives {want:e}"
+            );
+        }
+        for (x, y) in po.iter().zip(&tl) {
+            assert!(
+                ((x + y) / (po[0] + tl[0]) - 1.0).abs() < 1e-12,
+                "the pair's total moved: {}",
+                x + y
+            );
+        }
+    }
+
+    /// A half-life-only `ChainEdits` makes exactly the chain the pre-edit
+    /// replica path built with `with_half_lives` (still D1S's), so moving the
+    /// half-life draw onto the shared edit path changes no replica.
+    #[test]
+    fn half_life_only_edits_match_with_half_lives() {
+        let nuclide = |name: &str, half_life: f64| ChainNuclide {
+            name: name.to_string(),
+            half_life: Some(half_life),
+            decay_energy: 1.0e5,
+            reactions: Vec::new(),
+            decays: vec![ChainReaction {
+                kind: "beta-".to_string(),
+                target: Some("Ni60".to_string()),
+                branching: 1.0,
+                q_value: None,
+                branching_uncertainty: None,
+            }],
+            fission_yields: None,
+            sources: vec![yani::DecaySource {
+                particle: "photon".to_string(),
+                distribution: yani::DecaySourceDistribution::Discrete {
+                    energies: vec![1.17e6, 1.33e6],
+                    intensities: vec![0.9985 * std::f64::consts::LN_2 / half_life, 4.2e-9],
+                },
+            }],
+            half_life_uncertainty: Some(0.01 * half_life),
+            decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
+        };
+        let chain: HashMap<String, ChainNuclide> = HashMap::from([
+            ("Co60".to_string(), nuclide("Co60", 1.663e8)),
+            ("Mn56".to_string(), nuclide("Mn56", 9.284e3)),
+        ]);
+        let sampled = HashMap::from([
+            ("Co60".to_string(), 1.671e8),
+            // A drawn nuclide the pruned chain does not carry is skipped.
+            ("Fe59".to_string(), 3.84e6),
+        ]);
+        let edits = ChainEdits {
+            half_lives: sampled.clone(),
+            decay_branchings: HashMap::new(),
+        };
+        let got = edits.apply(&chain);
+        let want = crate::uncertainty::with_half_lives(&chain, &sampled);
+        assert_eq!(got.len(), want.len());
+        for (name, cn) in &want {
+            assert_eq!(
+                format!("{cn:?}"),
+                format!("{:?}", got[name]),
+                "{name} differs"
+            );
+        }
+        assert_ne!(format!("{:?}", got["Co60"]), format!("{:?}", chain["Co60"]));
     }
 }

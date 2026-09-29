@@ -232,8 +232,10 @@ impl PyTransmutationResults {
     /// - ``contributors``: first order, a list of ``(source, nuclide,
     ///   reaction, variance)``, largest reach first. Within the cross sections
     ///   a nuclide's whole evaluation has ``reaction`` of ``None`` and each
-    ///   channel alone names it; a half-life has ``None``. It says which
-    ///   evaluation to look at; the total is the resampled one.
+    ///   channel alone names it; a half-life has ``None``. A decay branching
+    ///   contributor is a two-mode parent's one degree of freedom, with
+    ///   ``reaction`` of ``None``. It says which evaluation to look at; the
+    ///   total is the resampled one.
     ///
     /// Args:
     ///     material_id: Material ID number.
@@ -669,6 +671,17 @@ impl PyTransmutationResults {
     ///   half-life sampled and which state no sigma to sample from.
     ///   ``half_lives_floored`` / ``half_lives_sampled`` count draws that came
     ///   out non-positive and had to be floored.
+    /// - ``decay_branchings_perturbed``: with the ``"decay_branching"``
+    ///   source, the reachable two-mode parents whose split was sampled. The
+    ///   multi-mode parents held at their evaluated ratios, each a gap:
+    ///   ``no_decay_branching_uncertainty`` (no mode states a sigma),
+    ///   ``decay_branchings_three_or_more_modes`` (a sigma, but no stated
+    ///   covariance to share it between three or more modes),
+    ///   ``decay_branchings_unequal_sigmas`` (two modes stating different
+    ///   sigmas) and ``decay_branchings_too_wide`` (the smaller ratio under
+    ///   five sigmas). ``decay_branchings_floored`` /
+    ///   ``decay_branchings_sampled`` count draws clamped to the pair's total
+    ///   and draws made.
     /// - ``statistical_rates``: with the ``"statistical"`` source on a
     ///   transport run, how many tallied rates were sampled from their
     ///   covariance; ``statistical_floored`` / ``statistical_sampled`` count
@@ -676,8 +689,9 @@ impl PyTransmutationResults {
     /// - ``not_perturbed``: every input this run held at its nominal value,
     ///   such as the MF=32 resonance-parameter covariance, the photon and dose
     ///   data, the material composition, any source switched off, and, where
-    ///   they applied, the self-shielding correction and the flux's response
-    ///   to a perturbed cross section on a transport run.
+    ///   they applied, the self-shielding correction, the flux's response to a
+    ///   perturbed cross section on a transport run, and the per-branch decay
+    ///   emission of a parent whose branching was drawn.
     /// - ``samples`` / ``converged``: how many replicas ran, and whether the
     ///   sigmas settled or the cap was hit.
     ///
