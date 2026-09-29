@@ -46,6 +46,12 @@ pub struct TcfEnsemble {
     pub converged: bool,
     /// The sources that applied, by name. Only `half_life` acts on a TCF.
     pub sources: Vec<String>,
+    /// What feeds a TCF and is held at nominal here, for the record.
+    ///
+    /// Decay branching moves a TCF too, through the share of a parent's
+    /// decays that feeds an emitter, but a TCF ensemble does not draw it, so
+    /// a D1S dose carries none of the spread a transmutation reports for it.
+    pub not_perturbed: Vec<String>,
 }
 
 /// The emitters and every nuclide that decays into one of them, so the only
@@ -85,8 +91,12 @@ pub fn time_correction_factor_ensemble(
     chain: &Arc<HashMap<String, ChainNuclide>>,
     request: &DataUncertainty,
 ) -> Result<TcfEnsemble, String> {
-    let mut out = TcfEnsemble::default();
+    let mut out = TcfEnsemble {
+        not_perturbed: vec!["decay branching ratio".to_string()],
+        ..Default::default()
+    };
     if !request.wants(Source::HalfLife) {
+        out.not_perturbed.insert(0, "half-life".to_string());
         out.converged = true;
         return Ok(out);
     }

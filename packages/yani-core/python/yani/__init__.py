@@ -34,6 +34,7 @@ from yani._core import (  # noqa: F811
     LineEstimate as LineEstimate,
     Material as Material,
     NeutronSource as NeutronSource,
+    PhotonContinuum as PhotonContinuum,
     Pulse as Pulse,
     PulseSchedule as PulseSchedule,
     TransmutationResults as TransmutationResults,
