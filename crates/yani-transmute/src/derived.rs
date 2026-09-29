@@ -428,7 +428,9 @@ impl TransmutationResults {
     ///
     /// Ascending in energy, coincident lines summed, exactly as
     /// `Material.decay_photon_spectrum` returns them -- and over the union of
-    /// the lines that appear in the nominal run and in any replica. A line a
+    /// the lines that appear in the nominal run and in any replica. Lines
+    /// only, as there: a continuum is a density per eV, which has no place in
+    /// a list of line rates, and it is not reported here. A line a
     /// replica does not emit is a zero in it, and
     /// [`LineEstimate::emitting`](LineEstimate) says how many replicas emitted
     /// it at all, which is the part the zero-fill would otherwise hide.

@@ -112,12 +112,15 @@ fn correlated(energies: &[f64], v: f64) -> NiSubsection {
     }
 }
 
-/// `lb = 1`: one relative variance per interval, uncorrelated between them.
+/// `lb = 1`: one relative variance per interval, uncorrelated between them,
+/// as `NP` pairs with the last `F` unused.
 fn diagonal(energies: &[f64], variances: &[f64]) -> NiSubsection {
+    assert_eq!(variances.len() + 1, energies.len());
     NiSubsection {
         lb: 1,
+        np: energies.len() as i64,
         ek: energies.to_vec(),
-        fk: variances.to_vec(),
+        fk: variances.iter().copied().chain([0.0]).collect(),
         ..Default::default()
     }
 }

@@ -22,6 +22,7 @@ __all__ = [
     "NeutronSource",
     "Nuclide",
     "PhotonCoefficients",
+    "PhotonContinuum",
     "Pulse",
     "PulseSchedule",
     "Reaction",
@@ -248,6 +249,13 @@ class DataUncertainty:
       solve AND in the activity, decay heat and dose evaluated from it, so a
       saturated activity (``lambda N = R``) is correctly insensitive to its
       own half-life rather than inheriting the density's spread;
+    - ``"decay_branching"``: the decay branching ratios of every reachable
+      parent with exactly two modes and one stated sigma between them (both
+      state the same one, or one states it and the other is its complement),
+      whose smaller ratio is at least five sigmas from zero. One draw per
+      parent moves one mode up and the other down by the same amount, so the
+      pair's total is kept. Other multi-mode parents stay at their evaluated
+      ratios and the report names them by why;
     - ``"statistical"``: the Monte Carlo uncertainty of transport-tallied
       reaction rates, from their per-history covariance. It applies to
       ``Model.simulate_transmutation``, as ``"flux_spectrum"`` applies only to
@@ -268,8 +276,11 @@ class DataUncertainty:
     Held at their nominal values, with uncertainties of their own that this
     does not propagate:
     
-    - decay branching ratios, fission yields, and the isomeric-branching
-      overlay from MF=9/MF=10;
+    - the decay branching ratios ``"decay_branching"`` does not sample (three
+      or more modes, unequal sigmas, too wide to sample untruncated, or no
+      sigma), and the per-decay photon lines and decay energy of a drawn
+      parent, which follow its nominal branching;
+    - fission yields and the isomeric-branching overlay from MF=9/MF=10;
     - covariance correlating two evaluations (MAT1 != 0), covariance derived
       from other sections (MF=33 NC), the lumped-reaction covariance
       (MT=851-870) and the resonance-parameter covariance (MF=32), so only the
@@ -280,9 +291,11 @@ class DataUncertainty:
     - on a transport run, the flux's response to a perturbed cross section:
       there is one transport, not one per replica. The tallied values
       themselves are still drawn by the ``"statistical"`` source;
-    - decay photon line energies and intensities (MF=8 MT=457), photon
-      attenuation (XCOM), air energy absorption (NIST SRD 126), the ICRP-116
-      fluence-to-dose coefficients and the contact-dose build-up factor;
+    - decay photon line energies and intensities (MF=8 MT=457), the decay
+      photon continuum normalisation and shape (MF=8 MT=457 continuum and its
+      covariance), photon attenuation (XCOM), air energy absorption (NIST
+      SRD 126), the ICRP-116 fluence-to-dose coefficients and the contact-dose
+      build-up factor;
     - the material's composition, density, natural isotopic abundances and the
       AME2020 atomic masses used to convert mass fractions;
     - any source switched off with ``sources``, or with nothing to act on (a
@@ -914,19 +927,52 @@ class Material:
         ascending in energy. Stable nuclides, nuclides the chain does not know
         and non-photon sources contribute nothing.
         
+        Lines only. Part of some decay spectra is a continuum, a density per eV
+        rather than a set of lines, and ``decay_photon_continua()`` returns it.
+        
         The two lists are the ``(x, p)`` pair the source distributions take, so
-        the spectrum round-trips straight into a photon transport run:
+        the lines round-trip straight into a photon transport source:
         
             >>> energies, rates = activated.decay_photon_spectrum()
             >>> source = PhotonSource(energy=sources.Discrete(energies, rates))
         
         ``Discrete`` normalizes the weights, so the shape is what transport
-        samples; keep ``sum(rates)`` yourself for the absolute emission rate
-        (photons/s) that scales the tallies.
+        samples. ``sum(rates)`` is the line emission rate (photons/s) only,
+        the rate that scales tallies from this source. That source leaves out
+        every continuum, which for a continuum emitter can be most of its
+        photons (all of them for Sm158 in ENDF/B-VIII.1); the continua emit
+        ``sum(c.emission_rate for c in activated.decay_photon_continua())``
+        more. No ``sources`` distribution yet holds a linear-linear continuum
+        exactly, so a transport source cannot yet carry every continuum.
         
         Returns:
             tuple[list[float], list[float]]: Line energies (eV) and their
             emission rates (photons/s).
+        """
+    def decay_photon_continua(self, *, per: typing.Optional[builtins.str] = None) -> builtins.list[PhotonContinuum]:
+        r"""
+        The decay photon continua of the current inventory, one per nuclide
+        and continuum, in nuclide-name order.
+        
+        The part of a decay spectrum ENDF gives as a density over energy rather
+        than as lines, which ``decay_photon_spectrum()`` does not include. Each
+        continuum keeps its own energy grid and interpolation law, and its
+        rates are photons/s/eV (or per cm³ or per g, following ``per``), so
+        they are not line rates; ``emission_rate`` is the integral. A material
+        whose nuclides have no continuum returns an empty list.
+        
+        Args:
+            per (str | None): None for the whole material, which needs a
+                ``volume``, or ``'cm3'`` or ``'g'``, as for
+                ``decay_photon_spectrum()``.
+        
+        Returns:
+            list[PhotonContinuum]: The continua, each with its nuclide,
+            energies, rates, interpolation law and emission rate.
+        
+        Examples:
+            >>> for continuum in activated.decay_photon_continua():
+            ...     print(continuum.nuclide, continuum.emission_rate)
         """
     def contact_dose(self, *, dose_quantity: builtins.str = 'absorbed-air', build_up: builtins.float = 2.0, by_nuclide: builtins.bool = False) -> typing.Any:
         r"""
@@ -945,18 +991,20 @@ class Material:
         for the absorbed dose in air, and the same without the trailing ``E``
         for the effective dose. ``mu_material`` is the material's own linear
         attenuation coefficient, built from the NIST XCOM mass attenuation
-        coefficients of the elements present; the response is the NIST-126 mass
-        energy-absorption coefficient of air, or the ICRP-116 photon
+        coefficients of the elements present; the response is the NIST-126
+        mass energy-absorption coefficient of air, or the ICRP-116 photon
         effective-dose coefficient for anterior-posterior irradiation.
         
         Follows the FISPACT-II manual (UKAEA-CCFE-RE(21)02, Appendix C.7.1) for
-        the absorbed-air quantity and agrees with OpenMC's
-        ``Material.get_photon_contact_dose_rate``.
+        the absorbed-air quantity. For photon lines it agrees with OpenMC's
+        ``Material.get_photon_contact_dose_rate``. A photon continuum is
+        integrated exactly under its evaluated interpolation law.
         
         Bremsstrahlung from decay electrons is not modelled, and nuclides whose
         radiation the chain file does not describe contribute nothing. Photon
         lines outside the tabulated range (1 keV to 20 MeV for the absorbed-air
-        quantity, 10 keV to 20 MeV for the effective dose) are dropped.
+        quantity, 10 keV to 20 MeV for the effective dose) are dropped, and a
+        continuum is integrated over its part of that range.
         
         Args:
             dose_quantity (str): ``'absorbed-air'`` for the absorbed dose in air
@@ -971,6 +1019,17 @@ class Material:
         Returns:
             float | dict[str, float]: Contact dose rate in Gy/h
             (``'absorbed-air'``) or Sv/h (``'effective'``).
+        
+        Raises:
+            ValueError: If a nuclide in the material has a photon continuum
+                in the dose tables' range that this build cannot integrate: one
+                whose data states no interpolation law, as transmutation data
+                written before the law was stored does, one tabulated under a
+                law other than histogram or linear-linear, or one whose energy
+                and rate lists are unpaired, whose energies are not finite or
+                descend, or whose rates are negative or not finite. Its
+                integral is unknown, and leaving it out would understate the
+                dose.
         
         Examples:
             >>> activated.contact_dose()
@@ -1140,14 +1199,14 @@ class Material:
                 steps directly, so its step 0 is the first step.
         
             data_uncertainty (DataUncertainty, optional): Ask for nuclear-data
-                uncertainty on the result. The activation cross sections are
-                sampled from their ENDF MF=33 covariance, folded against this
-                material's own spectrum, and the schedule is re-solved until the
-                reported standard deviations settle. Omit it (the default) and
-                nothing is read, folded or sampled: the inventories are
-                bit-identical either way. Read the sigmas with
-                ``get_nuclide_uncertainty``, and what was and was not covered
-                with ``get_data_uncertainty_info(id)``.
+                uncertainty on the result. Each source ``DataUncertainty`` names
+                is sampled where it applies (``statistical`` needs a transport
+                run, ``flux_spectrum`` a supplied flux sigma), and the schedule
+                is re-solved until the reported standard deviations settle.
+                Omit it (the default) and nothing is read, folded or sampled:
+                the inventories are bit-identical either way. Read the sigmas
+                with ``get_nuclide_uncertainty``, and what was and was not
+                covered with ``get_data_uncertainty_info(id)``.
         
             self_shielding_chord (float, optional): Mean chord length ``4V/S`` of
                 this material's lump, in cm, which is twice the thickness for a
@@ -1704,6 +1763,59 @@ class PhotonCoefficients:
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
+class PhotonContinuum:
+    r"""
+    One nuclide's decay photon continuum within a material's inventory.
+    
+    ENDF gives part of some decay spectra as a density over energy rather than
+    as lines: the spontaneous-fission photons of an actinide, or the whole
+    photon emission of a nuclide far from stability, whose lines were never
+    measured. The values are a rate per eV, so they are not line rates and
+    cannot be added to ``decay_photon_spectrum()``'s. Their rate is the
+    integral, which ``emission_rate`` gives. Both follow the ``per`` argument
+    of ``decay_photon_continua()``: for the whole material, or per cm³ or per g.
+    """
+    @property
+    def nuclide(self) -> builtins.str:
+        r"""
+        The emitting nuclide.
+        """
+    @property
+    def energies(self) -> builtins.list[builtins.float]:
+        r"""
+        Tabulated energies [eV], ascending.
+        """
+    @property
+    def rates(self) -> builtins.list[builtins.float]:
+        r"""
+        The emission-rate density at each energy: photons/s/eV for the whole
+        material, or per cm³ or per g following the ``per`` argument the
+        continuum was requested with.
+        """
+    @property
+    def interpolation(self) -> typing.Optional[builtins.str]:
+        r"""
+        How ``rates`` is read between the energies: the ENDF law by name
+        (``"histogram"``, ``"linear-linear"``, ...), or None where the data
+        states no law, which data written before the law was stored does.
+        """
+    @property
+    def emission_rate(self) -> builtins.float:
+        r"""
+        The emission rate over the whole continuum, its integral read under its
+        law: photons/s for the whole material, or per cm³ or per g following
+        the ``per`` argument the continuum was requested with.
+        
+        Raises:
+            ValueError: If the law is not stated, or is one this build does not
+                integrate, or if the energy and rate lists are unpaired, the
+                energies are not finite or descend, or the rates are negative
+                or not finite. The integral is then unknown, and no number is
+                returned in its place.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
 class PhotonSource:
     r"""
     A photon particle source with spatial, energy, and angular distributions.
@@ -1908,6 +2020,9 @@ class PulseSchedule:
                 emitter once and uses it for every campaign, so one evaluation
                 is one uncertainty; the draws are those a transmutation with the
                 same seed makes. Read ``.data_std_dev`` and ``.total_std_dev``.
+                Decay branching ratios also shape a time correction and are held
+                at nominal here, which ``.data_uncertainty_info`` lists under
+                ``not_perturbed``.
         
         Returns:
             DoseResult with ``.mean`` / ``.std_dev`` / ``.by_nuclide`` / ``.times``,
@@ -2135,9 +2250,19 @@ class TransmutationChain:
         r"""
         Decay photon sources of each nuclide that has them (D1S data).
         
+        A source is lines or a continuum, and the two are in different units,
+        so each one says which it is.
+        
         Returns:
-            dict[str, list[tuple[list[float], list[float]]]]: nuclide name ->
-            list of (energies, intensities) for each photon source.
+            dict[str, list[tuple[str, list[float], list[float], str | None]]]:
+            nuclide name -> one ``(type, energies, intensities, interpolation)``
+            per photon source. A ``"discrete"`` source lists lines, each
+            intensity its emission rate per atom [1/s], and its interpolation is
+            None. A ``"tabular"`` one is a continuum: each intensity is the
+            emission-rate density per atom [1/s/eV] at that energy, read between
+            energies by ``interpolation``, the ENDF law by name (e.g.
+            ``"histogram"`` or ``"linear-linear"``), which is None where the
+            data states no law.
         """
     def __new__(cls, path: builtins.str) -> TransmutationChain:
         r"""
@@ -2258,8 +2383,10 @@ class TransmutationResults:
         - ``contributors``: first order, a list of ``(source, nuclide,
           reaction, variance)``, largest reach first. Within the cross sections
           a nuclide's whole evaluation has ``reaction`` of ``None`` and each
-          channel alone names it; a half-life has ``None``. It says which
-          evaluation to look at; the total is the resampled one.
+          channel alone names it; a half-life has ``None``. A decay branching
+          contributor is a two-mode parent's one degree of freedom, with
+          ``reaction`` of ``None``. It says which evaluation to look at; the
+          total is the resampled one.
         
         Args:
             material_id: Material ID number.
@@ -2470,7 +2597,9 @@ class TransmutationResults:
         not emit counts as a zero in it -- the same rule the densities follow,
         and the only one under which two lines' spreads are taken over the same
         sample -- and ``LineEstimate.emitting`` reports how many replicas
-        emitted it, which is what the zero-fill would otherwise hide.
+        emitted it, which is what the zero-fill would otherwise hide. Lines
+        only, as there: a photon continuum is not a line and is not reported
+        here.
         
         The band is the spread of the replicas' inventories alone (each with
         its own half-lives when the ``"half_life"`` source is on). The line
@@ -2524,7 +2653,9 @@ class TransmutationResults:
           spectrum, and the dilution applied differs from it. An
           interval the covariance grid spans with a variance of zero counts as
           uncovered: ENDF/B-VIII.1 W186 ``(n,gamma)`` states zero from 1e-5 eV
-          to 10 keV, where nearly all of its capture rate is.
+          to 10 keV, where nearly all of its capture rate is. Every consumed
+          self-covariance block counts where it states a nonzero variance,
+          relative (LB=1 to 6), absolute (LB=0) and short-range (LB=8) alike.
         - ``partials_above_rate``: per nuclide and channel, where the partial
           rates the covariance was weighted with, zero variance intervals
           included, add up to more than the rate it was divided by, their
@@ -2544,6 +2675,11 @@ class TransmutationResults:
           rightly leaves its partials short.
         - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
           covariance blocks that were present but not consumed.
+        - ``malformed_blocks``: covariance blocks not consumed because they
+          break ENDF-102's rules for their layout: arrays that disagree with
+          their declared sizes, an LB=0 to 2 block carrying a second energy
+          table, an LB=3 or 4 block without one or whose tables share no
+          energy range, or an LB=8 variance stated between two reactions.
         - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
           covariance was not positive semi-definite and had to be repaired.
         - ``rates_sampled``: cross-section rate draws made. Each is a lognormal
@@ -2554,6 +2690,17 @@ class TransmutationResults:
           half-life sampled and which state no sigma to sample from.
           ``half_lives_floored`` / ``half_lives_sampled`` count draws that came
           out non-positive and had to be floored.
+        - ``decay_branchings_perturbed``: with the ``"decay_branching"``
+          source, the reachable two-mode parents whose split was sampled. The
+          multi-mode parents held at their evaluated ratios, each a gap:
+          ``no_decay_branching_uncertainty`` (no mode states a sigma),
+          ``decay_branchings_three_or_more_modes`` (a sigma, but no stated
+          covariance to share it between three or more modes),
+          ``decay_branchings_unequal_sigmas`` (two modes stating different
+          sigmas) and ``decay_branchings_too_wide`` (the smaller ratio under
+          five sigmas). ``decay_branchings_floored`` /
+          ``decay_branchings_sampled`` count draws clamped to the pair's total
+          and draws made.
         - ``statistical_rates``: with the ``"statistical"`` source on a
           transport run, how many tallied rates were sampled from their
           covariance; ``statistical_floored`` / ``statistical_sampled`` count
@@ -2561,8 +2708,9 @@ class TransmutationResults:
         - ``not_perturbed``: every input this run held at its nominal value,
           such as the MF=32 resonance-parameter covariance, the photon and dose
           data, the material composition, any source switched off, and, where
-          they applied, the self-shielding correction and the flux's response
-          to a perturbed cross section on a transport run.
+          they applied, the self-shielding correction, the flux's response to a
+          perturbed cross section on a transport run, and the per-branch decay
+          emission of a parent whose branching was drawn.
         - ``samples`` / ``converged``: how many replicas ran, and whether the
           sigmas settled or the cap was hit.
         
@@ -3445,9 +3593,8 @@ def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | t
             times.
         data_uncertainty (DataUncertainty, optional): Nuclear-data uncertainty,
             applied to every material as ``Material.transmute`` applies it to
-            one. The same seed perturbs a nuclide's cross sections the same way
-            in every material, which is right: one evaluation is uncertain in
-            one way wherever it is used.
+            one. The same seed perturbs a given evaluation the same way in every
+            material.
         self_shielding_chord (float, optional): One chord length ``4V/S`` in cm,
             for every material. See ``Material.transmute``.
         self_shielding_shape (SphereLump | CubeLump | FoilLump | CylinderLump | WireLump, optional):
