@@ -346,7 +346,7 @@ impl Info {
                 "lumped-reaction covariance (MF=33 MT=851-870)",
                 "resonance-parameter covariance (MF=32)",
                 "decay photon line energy and intensity (MF=8 MT=457)",
-                "decay photon continuum normalisation",
+                "decay photon continuum normalisation and shape (MF=8 MT=457 continuum and its covariance)",
                 "photon attenuation coefficient (XCOM)",
                 "air energy-absorption coefficient (NIST SRD 126)",
                 "fluence-to-dose coefficient (ICRP-116)",
@@ -817,7 +817,7 @@ mod tests {
         let info = Info::from_fold(&Coverage::default(), &Clipping::default(), true);
         for source in [
             "decay photon line energy and intensity (MF=8 MT=457)",
-            "decay photon continuum normalisation",
+            "decay photon continuum normalisation and shape (MF=8 MT=457 continuum and its covariance)",
         ] {
             assert!(
                 info.not_perturbed.iter().any(|s| s == source),
