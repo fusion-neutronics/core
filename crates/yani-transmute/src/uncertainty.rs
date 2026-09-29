@@ -267,6 +267,15 @@ pub struct Info {
     /// O16 `(n,d)` above 20 MeV, where its cross section holds MT 660 to 669
     /// and the block names 650 to 659.
     pub partials_below_rate: BTreeMap<(String, String), f64>,
+    /// Per (nuclide, reaction kind), where a channel derived through an NC
+    /// block names two reactions with opposite signs, each with a variance
+    /// block of its own, and the evaluation states no covariance between
+    /// them, those pairs by kind. The absent block is read as zero, as ENDF
+    /// states, and with opposing signs that reading sets the sigma: FENDL-3.2d
+    /// and TENDL-2017 H2 `(n,2n)` = `σ_1 - σ_2 - σ_102` folds to about 22% at
+    /// 14 MeV and thousands of percent near threshold. The tape's literal
+    /// statement, so reported rather than altered, and counted as a gap.
+    pub derived_opposing_uncorrelated: BTreeMap<(String, String), BTreeSet<(String, String)>>,
     /// Mean of the per-channel shares in [`Info::rate_fraction_covered`],
     /// weighted by the production each channel drove (the rate this run used
     /// times parent density): the share of the production driven from
@@ -366,6 +375,7 @@ impl Info {
             rate_fraction_covered: coverage.rate_fraction_covered.clone(),
             partials_above_rate: coverage.partials_above_rate.clone(),
             partials_below_rate: coverage.partials_below_rate.clone(),
+            derived_opposing_uncorrelated: coverage.derived_opposing_uncorrelated.clone(),
             rate_fraction_covered_total: coverage.rate_fraction_total().filter(|_| collapsed),
             matrices_clipped: clipping.matrices_clipped,
             worst_relative_clip: clipping.worst_relative_clip,
@@ -375,7 +385,7 @@ impl Info {
                 "isomeric branching (MF=9/MF=10)",
                 "covariance with another evaluation (MAT1 naming another material)",
                 "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
-                "NC-derived covariance other than LTY=0 (MF=33 NC LTY 1-4)",
+                "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, or LTY=0 in skipped_nc)",
                 "lumped-reaction covariance (MF=33 MT=851-870)",
                 "resonance-parameter covariance (MF=32)",
                 "decay photon line energy and intensity (MF=8 MT=457)",
@@ -414,6 +424,7 @@ impl Info {
             || self.malformed_blocks > 0
             || !self.partials_above_rate.is_empty()
             || !self.partials_below_rate.is_empty()
+            || !self.derived_opposing_uncorrelated.is_empty()
             || self.spectra_without_flux_sigma > 0
             || !self.no_half_life_uncertainty.is_empty()
             || !self.no_decay_energy_uncertainty.is_empty()
@@ -880,7 +891,7 @@ mod tests {
             "isomeric branching (MF=9/MF=10)",
             "covariance with another evaluation (MAT1 naming another material)",
             "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
-            "NC-derived covariance other than LTY=0 (MF=33 NC LTY 1-4)",
+            "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, or LTY=0 in skipped_nc)",
             "lumped-reaction covariance (MF=33 MT=851-870)",
             "resonance-parameter covariance (MF=32)",
             "decay photon line energy and intensity (MF=8 MT=457)",

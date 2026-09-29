@@ -296,6 +296,21 @@ pub struct Coverage {
     /// 20 MeV, where MT 104 holds 660 to 669 and its NC block names 650 to
     /// 659.
     pub partials_below_rate: BTreeMap<(String, String), f64>,
+    /// Per (nuclide, kind), where a derived channel's terms name two
+    /// reactions with opposite signs, each with a self-covariance block of
+    /// its own, and the evaluation states no block between them, those pairs
+    /// by kind, lower MT first.
+    ///
+    /// The fold reads the absent block as a zero covariance, as ENDF-102
+    /// 33.2 states, and with opposing signs that reading decides the
+    /// channel's sigma: the two variances add where a positive correlation
+    /// would cancel them. FENDL-3.2d and TENDL-2017 H2 `(n,2n)` is
+    /// `σ_1 - σ_2 - σ_102` from 3.339 MeV with self blocks on MT 1, 2 and 102
+    /// only, and folds to about 2400% near threshold and 22% at 14 MeV on
+    /// TENDL-2017, while `σ_1` holds `σ_2` by construction. Reported so the
+    /// sigma is read as the tape's literal statement and not as a measured
+    /// one. Counted as a gap.
+    pub derived_opposing_uncorrelated: BTreeMap<(String, String), BTreeSet<(String, String)>>,
     /// The production this spectrum drove, each channel's weighted by its
     /// share in [`Coverage::rate_fraction_covered`], and the production it
     /// drove in total. Both are per barn-cm per second, and both are weighted
@@ -370,8 +385,8 @@ impl Coverage {
     /// per-nuclide counts and mismatches take the larger,
     /// `rate_fraction_covered` is keyed by (nuclide, kind) and takes the
     /// smaller claim, `partials_above_rate` takes the larger excess and
-    /// `partials_below_rate` the larger shortfall, the smaller ratio. That
-    /// is what lets the fold below run per nuclide in parallel and merge
+    /// `partials_below_rate` the larger shortfall, the smaller ratio, and
+    /// `derived_opposing_uncorrelated` unions its pairs. That is what lets the fold below run per nuclide in parallel and merge
     /// afterwards (issue #576, finding 5c).
     pub fn absorb(&mut self, other: Coverage) {
         self.covered.extend(other.covered);
@@ -417,6 +432,12 @@ impl Coverage {
                 .and_modify(|r| *r = r.min(ratio))
                 .or_insert(ratio);
         }
+        for (key, pairs) in other.derived_opposing_uncorrelated {
+            self.derived_opposing_uncorrelated
+                .entry(key)
+                .or_default()
+                .extend(pairs);
+        }
         self.covered_production += other.covered_production;
         self.total_production += other.total_production;
     }
@@ -432,6 +453,7 @@ impl Coverage {
             || self.malformed > 0
             || !self.partials_above_rate.is_empty()
             || !self.partials_below_rate.is_empty()
+            || !self.derived_opposing_uncorrelated.is_empty()
     }
 }
 
@@ -1400,6 +1422,44 @@ fn derivation_mismatch(
     (channel_rate != 0.0).then(|| 1.0 + d.coefficient * named / channel_rate)
 }
 
+/// The pairs of reactions, lower MT first, that enter one channel's terms
+/// with opposite signs over a common part of `flux_range`, each with a self
+/// block of its own consumed, and with no consumed block between them.
+///
+/// An absent block states a zero covariance (ENDF-102 33.2), and the fold
+/// reads it so. Where the two enter with the same sign that is the usual
+/// omission. Where they oppose it decides the answer: the two variances add
+/// where a positive correlation would cancel them, and a derivation such as
+/// FENDL-3.2d and TENDL-2017 H2 `(n,2n)` = `σ_1 - σ_2 - σ_102`, whose named
+/// reactions contain the one derived, cannot have its parts uncorrelated in
+/// fact. Such a sigma is the tape's literal statement, so it is reported
+/// rather than altered.
+fn opposing_uncorrelated(
+    terms: &[&Term],
+    diagonals: &BTreeMap<i32, Vec<Diagonal>>,
+    correlated: &BTreeSet<(i32, i32)>,
+    flux_range: (f64, f64),
+) -> BTreeSet<(i32, i32)> {
+    let mut out = BTreeSet::new();
+    for (k, t) in terms.iter().enumerate() {
+        for u in &terms[k + 1..] {
+            let pair = (t.mt.min(u.mt), t.mt.max(u.mt));
+            let lo = flux_range.0.max(t.range.0).max(u.range.0);
+            let hi = flux_range.1.min(t.range.1).min(u.range.1);
+            if t.mt != u.mt
+                && t.coefficient * u.coefficient < 0.0
+                && lo < hi
+                && diagonals.contains_key(&t.mt)
+                && diagonals.contains_key(&u.mt)
+                && !correlated.contains(&pair)
+            {
+                out.insert(pair);
+            }
+        }
+    }
+    out
+}
+
 /// Fold one nuclide's covariance blocks against the flux.
 ///
 /// `reactions` holds every cross section the nuclide has, not only the
@@ -1467,6 +1527,9 @@ fn fold_nuclide(
     // is applied below.
     let mut derived_weighted: BTreeMap<usize, f64> = BTreeMap::new();
     let mut derived_spanning: BTreeMap<usize, f64> = BTreeMap::new();
+    // The pairs of distinct reactions a consumed cross block correlates, lower
+    // MT first, for the check that opposing terms of a derivation had one.
+    let mut correlated: BTreeSet<(i32, i32)> = BTreeSet::new();
     let (flux_lo, flux_hi) = (
         flux.boundaries[0],
         flux.boundaries[flux.boundaries.len() - 1],
@@ -1651,6 +1714,9 @@ fn fold_nuclide(
                 }
             }
         }
+        if row_mt != col_mt {
+            correlated.insert((row_mt.min(col_mt), row_mt.max(col_mt)));
+        }
         used += 1;
     }
 
@@ -1705,6 +1771,16 @@ fn fold_nuclide(
             .iter()
             .filter(|d| d.channel == channel)
             .collect();
+        let opposing = opposing_uncorrelated(&terms, &diagonals, &correlated, (flux_lo, flux_hi));
+        if !opposing.is_empty() {
+            coverage.derived_opposing_uncorrelated.insert(
+                key.clone(),
+                opposing
+                    .into_iter()
+                    .map(|(a, b)| (name(a), name(b)))
+                    .collect(),
+            );
+        }
         if let Some(share) = stated_variance_share(
             flux,
             reaction,
@@ -3361,6 +3437,36 @@ mod nc_derived_tests {
             absolute / rate(NP, sums).powi(2),
         );
         assert!(!coverage.has_gaps(), "{coverage:?}");
+    }
+
+    /// Opposing terms with no block between them fold as uncorrelated, which
+    /// is the tape's statement, and the channel is reported as resting on
+    /// that: the variances add, with nothing to cancel them.
+    #[test]
+    fn opposing_terms_without_a_cross_block_are_reported() {
+        let terms = [(1.0, 601), (-1.0, 600)];
+        let blocks = [
+            nc(NP, 1.0e-5, 2.0e7, &terms),
+            own(600, C600),
+            own(601, C601),
+        ];
+        let sums: Sums = &[(NP, &terms)];
+        let (folded, coverage) = fold(&blocks, &[("(n,p)", NP)], &[NP, 600, 601], sums);
+        let (r0, r1) = (
+            partials(600, sums, 0.0, f64::INFINITY),
+            partials(601, sums, 0.0, f64::INFINITY),
+        );
+        let absolute = sandwich(r0, symmetric(C600), r0) + sandwich(r1, symmetric(C601), r1);
+        close(
+            folded.expect("derived").get(0, 0),
+            absolute / rate(NP, sums).powi(2),
+        );
+        let key = ("O16".to_string(), "(n,p)".to_string());
+        assert_eq!(
+            coverage.derived_opposing_uncorrelated[&key],
+            [("MT600".to_string(), "MT601".to_string())].into()
+        );
+        assert!(coverage.has_gaps());
     }
 
     /// A derived channel is correlated with another channel through the cross

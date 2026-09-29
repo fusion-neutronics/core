@@ -272,8 +272,9 @@ class DataUncertainty:
       overlay from MF=9/MF=10;
     - covariance correlating two evaluations (MAT1 naming another material),
       covariance with a quantity that is not a cross section (XMF1 not 0 or
-      3), covariance derived from other sections by an NC block with LTY 1-4,
-      the lumped-reaction covariance (MT=851-870) and the resonance-parameter
+      3), covariance derived from other sections by an NC block that cannot
+      be derived (LTY 1-4, or an LTY=0 block counted in ``skipped_nc``), the
+      lumped-reaction covariance (MT=851-870) and the resonance-parameter
       covariance (MF=32). What is sampled is each reaction's explicit MF=33
       blocks, and for a reaction an LTY=0 NC block states as a sum of others
       (ENDF/B-VIII.1 O16 (n,p) as MT 600 to 603), the covariance derived from
@@ -2552,6 +2553,14 @@ class TransmutationResults:
           names reactions adding up to less than the one it derives lands here
           too: ENDF/B-VIII.1 O16 ``(n,d)`` above 20 MeV, whose cross section
           holds MT 660 to 669 while the block names 650 to 659.
+        - ``derived_opposing_uncorrelated``: keyed the same way, for a channel
+          derived through an NC block whose terms name two reactions with
+          opposite signs, each with a variance of its own, and no covariance
+          between them: the ``[a, b]`` pairs. The absent block is read as zero,
+          as ENDF states, and with opposing signs that reading sets the sigma.
+          FENDL-3.2d and TENDL-2017 H2 ``(n,2n)`` is ``σ_1 - σ_2 - σ_102`` and
+          folds to about 22% at 14 MeV and thousands of percent near
+          threshold, the tape's literal statement. Counted in ``has_gaps``.
         - ``unsupported_layouts``: covariance blocks that were present but not
           consumed, counted once per spectrum, so a run over several spectra
           counts the same block once for each.

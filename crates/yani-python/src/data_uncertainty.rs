@@ -51,8 +51,9 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///   overlay from MF=9/MF=10;
 /// - covariance correlating two evaluations (MAT1 naming another material),
 ///   covariance with a quantity that is not a cross section (XMF1 not 0 or
-///   3), covariance derived from other sections by an NC block with LTY 1-4,
-///   the lumped-reaction covariance (MT=851-870) and the resonance-parameter
+///   3), covariance derived from other sections by an NC block that cannot
+///   be derived (LTY 1-4, or an LTY=0 block counted in ``skipped_nc``), the
+///   lumped-reaction covariance (MT=851-870) and the resonance-parameter
 ///   covariance (MF=32). What is sampled is each reaction's explicit MF=33
 ///   blocks, and for a reaction an LTY=0 NC block states as a sum of others
 ///   (ENDF/B-VIII.1 O16 (n,p) as MT 600 to 603), the covariance derived from
@@ -292,6 +293,17 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
         below.set_item(format!("{nuclide} {kind}"), ratio)?;
     }
     d.set_item("partials_below_rate", below)?;
+    // A derived channel whose sigma rests on reading an absent covariance
+    // between two opposing terms as zero, each pair as `[a, b]`.
+    let opposing = PyDict::new(py);
+    for ((nuclide, kind), pairs) in &info.derived_opposing_uncorrelated {
+        let pairs: Vec<[&str; 2]> = pairs
+            .iter()
+            .map(|(a, b)| [a.as_str(), b.as_str()])
+            .collect();
+        opposing.set_item(format!("{nuclide} {kind}"), pairs)?;
+    }
+    d.set_item("derived_opposing_uncorrelated", opposing)?;
 
     d.set_item("matrices_clipped", info.matrices_clipped)?;
     d.set_item("worst_relative_clip", info.worst_relative_clip)?;

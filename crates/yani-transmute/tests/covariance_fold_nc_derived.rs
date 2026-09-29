@@ -330,8 +330,9 @@ fn o16_nd_above_20_mev_is_not_counted_as_covered() {
 /// millibarn difference: about 2400% near threshold and 22% at 14 MeV on
 /// TENDL-2017. That is the tape's literal statement, set by the correlations
 /// it leaves out rather than by the fold, so it is pinned to the hand
-/// sandwich rather than clamped. ENDF/B-VIII.1 and JEFF-4.0 give MT 16 its
-/// own block instead.
+/// sandwich rather than clamped, and reported as resting on the absent
+/// blocks between the opposing terms. ENDF/B-VIII.1 and JEFF-4.0 give MT 16
+/// its own block instead.
 #[test]
 fn h2_n2n_cancelling_derivation_is_the_hand_sandwich() {
     for library in ["fendl-3.2d", "tendl-2017"] {
@@ -376,6 +377,12 @@ fn h2_n2n_cancelling_derivation_is_the_hand_sandwich() {
                 coverage.partials_above_rate.get(&key),
                 coverage.partials_below_rate.get(&key)
             );
+            let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+            assert_eq!(
+                coverage.derived_opposing_uncorrelated.get(&key),
+                Some(&[pair("MT1", "MT2"), pair("MT1", "(n,gamma)")].into()),
+            );
+            assert!(coverage.has_gaps());
             close(n2n, hand_sigma(&m, &blocks, "H2", 16, lo, hi), "H2 (n,2n)");
             eprintln!("{library} H2 (n,2n), {lo} to {hi} eV: {:.4}%", 100.0 * n2n);
         }
