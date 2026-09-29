@@ -97,8 +97,8 @@ pub enum RepresentativeAbundance {
 ///
 /// Every field is published data; nothing is derived, except that TICE prints
 /// the column 5 annotations and the column 6 coverage and calibration once per
-/// element and they are repeated here onto each of its isotopes. `None` means the table
-/// leaves the field empty, which is "not stated", never zero.
+/// element and they are repeated here onto each of its isotopes. `None` means
+/// the table leaves the field empty, which is "not stated", never zero.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NaturalAbundanceRecord {
     /// Column 9.
@@ -146,9 +146,13 @@ fn parse_abundance_records(data: &'static str) -> HashMap<&'static str, NaturalA
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
             let cells: Vec<&'static str> = line.split_whitespace().collect();
-            let [nuclide, _abundance, rep_value, rep_uncertainty, rep_low, rep_high, interval_low, interval_high, best, best_uncertainty, coverage, calibration, annotations] =
-                cells[..]
-            else {
+            let [
+                nuclide, _abundance,
+                rep_value, rep_uncertainty, rep_low, rep_high,
+                interval_low, interval_high,
+                best, best_uncertainty, coverage, calibration,
+                annotations,
+            ] = cells[..] else {
                 panic!("natural_abundance.txt line {line:?} does not have 13 columns");
             };
             let representative = match (number(rep_value), pair(rep_low, rep_high)) {
@@ -645,7 +649,10 @@ mod tests {
         assert_eq!(w186.best_measurement_calibration, Some('N'));
 
         let li6 = NATURAL_ABUNDANCE_RECORDS["Li6"];
-        assert_eq!(li6.representative, RepresentativeAbundance::Interval { low: 0.019, high: 0.078 });
+        assert_eq!(
+            li6.representative,
+            RepresentativeAbundance::Interval { low: 0.019, high: 0.078 }
+        );
         assert_eq!(li6.best_measurement, 0.07589);
         assert_eq!(li6.best_measurement_uncertainty, Some(0.00024));
         assert_eq!(li6.annotations, Some("m"));
@@ -657,7 +664,13 @@ mod tests {
         assert_eq!(NATURAL_ABUNDANCE_RECORDS["N14"].best_measurement_coverage, Some("n/a"));
 
         let co59 = NATURAL_ABUNDANCE_RECORDS["Co59"];
-        assert_eq!(co59.representative, RepresentativeAbundance::Value { value: 1.0, uncertainty: None });
+        assert_eq!(
+            co59.representative,
+            RepresentativeAbundance::Value {
+                value: 1.0,
+                uncertainty: None
+            }
+        );
         assert_eq!(co59.best_measurement_uncertainty, None);
         assert_eq!(co59.best_measurement_coverage, None);
         assert_eq!(co59.best_measurement_calibration, None);
