@@ -161,6 +161,8 @@ pub struct ContinuousSpectrum {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ContinuousCovariance {
     pub lb: i64,
+    /// NE, the number of (Ek, Fk) pairs the LIST header states.
+    pub ne: i64,
     pub ek: Vec<f64>,
     pub fk: Vec<f64>,
 }
@@ -380,6 +382,7 @@ pub fn parse_mf8_mt457(reader: &mut Reader) -> Result<Mf8Mt457> {
             let list = reader.list_record()?;
             spectrum.continuous_covariance = Some(ContinuousCovariance {
                 lb: list.cont.l2,
+                ne: list.cont.n2,
                 ek: column(&list.values, 0, 2),
                 fk: column(&list.values, 1, 2),
             });

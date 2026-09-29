@@ -275,9 +275,9 @@ pub struct DecaySpectrum {
 /// symmetry flag. For a continuum (LB=2) `values` pairs one to one with
 /// `energies` and there is no `ls`. The LIST header can be rebuilt from the
 /// two lists, so nothing else is needed to write it back: for the lines NERP
-/// is `energies.len()` and NT is `energies.len() + values.len()` (a tape
-/// whose header says otherwise is refused on conversion), and for a
-/// continuum NE is `energies.len()` and NPL is twice that.
+/// is `energies.len()` and NT is `energies.len() + values.len()`, and for a
+/// continuum NE is `energies.len()` and NPL is twice that. A tape whose NERP
+/// or NE says otherwise is refused on conversion.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SpectrumCovariance {
     /// The LB=5 symmetry flag LS; `None` on a continuum.
@@ -292,14 +292,12 @@ pub struct SpectrumCovariance {
 
 /// A lines covariance as [`SpectrumCovariance`] keeps it.
 ///
-/// Only the two lists are kept, so a LIST whose header does not match them
-/// (NERP other than the number of energies read, or NT other than the
-/// length of the two together) is refused: it could not be written back as
-/// the tape states it.
+/// Only the two lists are kept, so a LIST whose NERP is not the number of
+/// energies read (negative, or more than the list holds) is refused: it
+/// could not be written back as the tape states it. NT needs no check, since
+/// the reader splits exactly NT values between the two lists.
 fn lines_covariance(c: &DiscreteCovariance) -> Result<SpectrumCovariance> {
-    if usize::try_from(c.nerp).ok() != Some(c.ek.len())
-        || usize::try_from(c.ne).ok() != Some(c.ek.len() + c.fkk.len())
-    {
+    if usize::try_from(c.nerp).ok() != Some(c.ek.len()) {
         return Err(Error::Unsupported {
             what: "a decay lines covariance whose LIST header does not match its values",
         });
@@ -309,6 +307,25 @@ fn lines_covariance(c: &DiscreteCovariance) -> Result<SpectrumCovariance> {
         lb: c.lb,
         energies: c.ek.clone(),
         values: c.fkk.clone(),
+    })
+}
+
+/// A continuum covariance as [`SpectrumCovariance`] keeps it.
+///
+/// The LIST holds NE (Ek, Fk) pairs. One whose NE disagrees with the pairs
+/// read, or whose NPL is odd so that an Ek has no Fk, is refused for the
+/// same reason as in [`lines_covariance`].
+fn continuum_covariance(c: &ContinuousCovariance) -> Result<SpectrumCovariance> {
+    if usize::try_from(c.ne).ok() != Some(c.ek.len()) || c.ek.len() != c.fk.len() {
+        return Err(Error::Unsupported {
+            what: "a decay continuum covariance whose LIST header does not match its values",
+        });
+    }
+    Ok(SpectrumCovariance {
+        ls: None,
+        lb: c.lb,
+        energies: c.ek.clone(),
+        values: c.fk.clone(),
     })
 }
 
@@ -327,7 +344,9 @@ pub struct SpectrumSource {
     pub distribution: Univariate,
     /// FD for lines, FC for a continuum, with its sigma, as written. It is
     /// already multiplied into `distribution`; its sigma is common to every
-    /// line of the spectrum.
+    /// line of the spectrum. The other part's normalisation (FC on a
+    /// lines-only spectrum, FD on a continuum-only one) has nothing to scale
+    /// and is not carried.
     pub normalization: WithUncertainty,
     /// Each line's intensity sigma in the units of its intensity:
     /// `lambda * FD * dRI`, which is the tape's dRI and nothing else, since
@@ -644,7 +663,10 @@ impl Decay {
     /// constant makes them rates. Lines and continua of the same particle are
     /// combined, so a nuclide that emits both gammas and x-rays gives one
     /// photon distribution. [`spectrum_sources`](Self::spectrum_sources)
-    /// keeps them apart, with their uncertainties.
+    /// keeps them apart, with their uncertainties. It is built on that, so a
+    /// tape it refuses (a covariance with nothing to carry it, or a LIST
+    /// header that disagrees with its values) is refused here too, although
+    /// the covariance plays no part in these numbers.
     pub fn sources(&self) -> Result<BTreeMap<&'static str, Univariate>> {
         let mut by_particle: BTreeMap<&'static str, Vec<Univariate>> = BTreeMap::new();
         for source in self.spectrum_sources()? {
@@ -757,14 +779,11 @@ impl Decay {
                     normalization: spectrum.continuous_normalization,
                     intensity_uncertainties: None,
                     energy_uncertainties: None,
-                    covariance: spectrum.continuous_covariance.as_ref().map(|c| {
-                        SpectrumCovariance {
-                            ls: None,
-                            lb: c.lb,
-                            energies: c.ek.clone(),
-                            values: c.fk.clone(),
-                        }
-                    }),
+                    covariance: spectrum
+                        .continuous_covariance
+                        .as_ref()
+                        .map(continuum_covariance)
+                        .transpose()?,
                 });
             }
         }
@@ -1062,6 +1081,7 @@ mod tests {
         });
         gamma.continuous_covariance = Some(ContinuousCovariance {
             lb: 2,
+            ne: 2,
             ek: vec![0.0, 1.0e7],
             fk: vec![0.01, 0.0],
         });
@@ -1131,18 +1151,40 @@ mod tests {
         const CF252: &[u8] = include_bytes!("../fixtures/dec-098_Cf_252.jeff40.endf.xz");
         let mut d = decay(CF252);
         let gamma = d.spectra.get_mut("gamma").unwrap();
+        // NERP=4 on a LIST of NT=3: the reader takes all three values as
+        // energies and leaves no matrix.
         gamma.discrete_covariance = Some(DiscreteCovariance {
             ls: 1,
             lb: 5,
-            ne: 6,
-            nerp: 2,
-            ek: vec![1.0e5, 2.0e6],
-            fkk: vec![1.0e-4, 2.0e-5, 3.0e-4],
+            ne: 3,
+            nerp: 4,
+            ek: vec![1.0e5, 2.0e6, 3.0e6],
+            fkk: vec![],
         });
         assert!(matches!(
             d.spectrum_sources(),
-            Err(Error::Unsupported { what }) if what.contains("LIST header")
+            Err(Error::Unsupported { what }) if what.contains("lines covariance whose LIST header")
         ));
+    }
+
+    #[test]
+    fn a_continuum_covariance_whose_header_disagrees_is_refused() {
+        const CF252: &[u8] = include_bytes!("../fixtures/dec-098_Cf_252.jeff40.endf.xz");
+        // An odd NPL leaves the last Ek without an Fk; a wrong NE is refused
+        // even when the pairs are whole.
+        for (ne, ek, fk) in [
+            (2, vec![0.0, 1.0e7], vec![0.01]),
+            (3, vec![0.0, 1.0e7], vec![0.01, 0.0]),
+        ] {
+            let mut d = decay(CF252);
+            d.spectra.get_mut("gamma").unwrap().continuous_covariance =
+                Some(ContinuousCovariance { lb: 2, ne, ek, fk });
+            assert!(matches!(
+                d.spectrum_sources(),
+                Err(Error::Unsupported { what })
+                    if what.contains("continuum covariance whose LIST header")
+            ));
+        }
     }
 
     #[test]
