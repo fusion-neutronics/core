@@ -603,6 +603,13 @@ class DataUncertainty:
       solve AND in the activity, decay heat and dose evaluated from it, so a
       saturated activity (``lambda N = R``) is correctly insensitive to its
       own half-life rather than inheriting the density's spread;
+    - ``"decay_branching"``: the decay branching ratios of every reachable
+      parent with exactly two modes and one stated sigma between them (both
+      state the same one, or one states it and the other is its complement),
+      whose smaller ratio is at least five sigmas from zero. One draw per
+      parent moves one mode up and the other down by the same amount, so the
+      pair's total is kept. Other multi-mode parents stay at their evaluated
+      ratios and the report names them by why;
     - ``"statistical"``: the Monte Carlo uncertainty of transport-tallied
       reaction rates, from their per-history covariance. It applies to
       ``Model.simulate_transmutation``, as ``"flux_spectrum"`` applies only to
@@ -623,8 +630,11 @@ class DataUncertainty:
     Held at their nominal values, with uncertainties of their own that this
     does not propagate:
     
-    - decay branching ratios, fission yields, and the isomeric-branching
-      overlay from MF=9/MF=10;
+    - the decay branching ratios ``"decay_branching"`` does not sample (three
+      or more modes, unequal sigmas, too wide to sample untruncated, or no
+      sigma), and the per-decay photon lines and decay energy of a drawn
+      parent, which follow its nominal branching;
+    - fission yields and the isomeric-branching overlay from MF=9/MF=10;
     - covariance correlating two evaluations (MAT1 != 0), covariance derived
       from other sections (MF=33 NC), the lumped-reaction covariance
       (MT=851-870) and the resonance-parameter covariance (MF=32), so only the
@@ -1866,14 +1876,14 @@ class Material:
                 steps directly, so its step 0 is the first step.
         
             data_uncertainty (DataUncertainty, optional): Ask for nuclear-data
-                uncertainty on the result. The activation cross sections are
-                sampled from their ENDF MF=33 covariance, folded against this
-                material's own spectrum, and the schedule is re-solved until the
-                reported standard deviations settle. Omit it (the default) and
-                nothing is read, folded or sampled: the inventories are
-                bit-identical either way. Read the sigmas with
-                ``get_nuclide_uncertainty``, and what was and was not covered
-                with ``get_data_uncertainty_info(id)``.
+                uncertainty on the result. Each source ``DataUncertainty`` names
+                is sampled where it applies (``statistical`` needs a transport
+                run, ``flux_spectrum`` a supplied flux sigma), and the schedule
+                is re-solved until the reported standard deviations settle.
+                Omit it (the default) and nothing is read, folded or sampled:
+                the inventories are bit-identical either way. Read the sigmas
+                with ``get_nuclide_uncertainty``, and what was and was not
+                covered with ``get_data_uncertainty_info(id)``.
         
             self_shielding_chord (float, optional): Mean chord length ``4V/S`` of
                 this material's lump, in cm, which is twice the thickness for a
@@ -2697,7 +2707,12 @@ class Model:
                   ``get_reaction_rate_uncertainty``;
                 - ``"cross_sections"``: the ENDF MF=33 covariance, folded against
                   the spectrum the tally actually saw;
-                - ``"half_life"``: the decay data's half-life sigmas.
+                - ``"half_life"``: the decay data's half-life sigmas;
+                - ``"decay_branching"``: the decay branching ratios of the
+                  two-mode parents whose sum rule fixes how the stated sigma is
+                  shared, as ``DataUncertainty`` describes;
+                - ``"decay_energy"``: the decay data's mean decay energy sigmas,
+                  which move decay heat only.
         
                 ``"flux_spectrum"`` does not apply: there is no supplied spectrum,
                 and the flux's error is the statistical one. The transport runs
@@ -3476,6 +3491,9 @@ class PulseSchedule:
                 emitter once and uses it for every campaign, so one evaluation
                 is one uncertainty; the draws are those a transmutation with the
                 same seed makes. Read ``.data_std_dev`` and ``.total_std_dev``.
+                Decay branching ratios also shape a time correction and are held
+                at nominal here, which ``.data_uncertainty_info`` lists under
+                ``not_perturbed``.
         
         Returns:
             DoseResult with ``.mean`` / ``.std_dev`` / ``.by_nuclide`` / ``.times``,
@@ -5053,8 +5071,10 @@ class TransmutationResults:
         - ``contributors``: first order, a list of ``(source, nuclide,
           reaction, variance)``, largest reach first. Within the cross sections
           a nuclide's whole evaluation has ``reaction`` of ``None`` and each
-          channel alone names it; a half-life has ``None``. It says which
-          evaluation to look at; the total is the resampled one.
+          channel alone names it; a half-life has ``None``. A decay branching
+          contributor is a two-mode parent's one degree of freedom, with
+          ``reaction`` of ``None``. It says which evaluation to look at; the
+          total is the resampled one.
         
         Args:
             material_id: Material ID number.
@@ -5319,7 +5339,9 @@ class TransmutationResults:
           or tallied run the dilution applied differs from this share. An
           interval the covariance grid spans with a variance of zero counts as
           uncovered: ENDF/B-VIII.1 W186 ``(n,gamma)`` states zero from 1e-5 eV
-          to 10 keV, where nearly all of its capture rate is.
+          to 10 keV, where nearly all of its capture rate is. Every consumed
+          self-covariance block counts where it states a nonzero variance,
+          relative (LB=1 to 6), absolute (LB=0) and short-range (LB=8) alike.
         - ``partials_above_rate``: per nuclide and channel, where the partial
           rates the covariance was weighted with, zero variance intervals
           included, add up to more than the rate it was divided by, their
@@ -5341,6 +5363,11 @@ class TransmutationResults:
           rightly leaves its partials short.
         - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
           covariance blocks that were present but not consumed.
+        - ``malformed_blocks``: covariance blocks not consumed because they
+          break ENDF-102's rules for their layout: arrays that disagree with
+          their declared sizes, an LB=0 to 2 block carrying a second energy
+          table, an LB=3 or 4 block without one or whose tables share no
+          energy range, or an LB=8 variance stated between two reactions.
         - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
           covariance was not positive semi-definite and had to be repaired.
         - ``rates_sampled``: cross-section rate draws made. Each is a lognormal
@@ -5351,6 +5378,17 @@ class TransmutationResults:
           half-life sampled and which state no sigma to sample from.
           ``half_lives_floored`` / ``half_lives_sampled`` count draws that came
           out non-positive and had to be floored.
+        - ``decay_branchings_perturbed``: with the ``"decay_branching"``
+          source, the reachable two-mode parents whose split was sampled. The
+          multi-mode parents held at their evaluated ratios, each a gap:
+          ``no_decay_branching_uncertainty`` (no mode states a sigma),
+          ``decay_branchings_three_or_more_modes`` (a sigma, but no stated
+          covariance to share it between three or more modes),
+          ``decay_branchings_unequal_sigmas`` (two modes stating different
+          sigmas) and ``decay_branchings_too_wide`` (the smaller ratio under
+          five sigmas). ``decay_branchings_floored`` /
+          ``decay_branchings_sampled`` count draws clamped to the pair's total
+          and draws made.
         - ``statistical_rates``: with the ``"statistical"`` source on a
           transport run, how many tallied rates were sampled from their
           covariance; ``statistical_floored`` / ``statistical_sampled`` count
@@ -5358,8 +5396,9 @@ class TransmutationResults:
         - ``not_perturbed``: every input this run held at its nominal value,
           such as the MF=32 resonance-parameter covariance, the photon and dose
           data, the material composition, any source switched off, and, where
-          they applied, the self-shielding correction and the flux's response
-          to a perturbed cross section on a transport run.
+          they applied, the self-shielding correction, the flux's response to a
+          perturbed cross section on a transport run, and the per-branch decay
+          emission of a parent whose branching was drawn.
         - ``samples`` / ``converged``: how many replicas ran, and whether the
           sigmas settled or the cap was hit.
         
@@ -6640,9 +6679,8 @@ def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | t
             times.
         data_uncertainty (DataUncertainty, optional): Nuclear-data uncertainty,
             applied to every material as ``Material.transmute`` applies it to
-            one. The same seed perturbs a nuclide's cross sections the same way
-            in every material, which is right: one evaluation is uncertain in
-            one way wherever it is used.
+            one. The same seed perturbs a given evaluation the same way in every
+            material.
         self_shielding_chord (float, optional): One chord length ``4V/S`` in cm,
             for every material. See ``Material.transmute``.
         self_shielding_shape (SphereLump | CubeLump | FoilLump | CylinderLump | WireLump, optional):

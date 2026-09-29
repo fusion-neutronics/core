@@ -232,8 +232,10 @@ impl PyTransmutationResults {
     /// - ``contributors``: first order, a list of ``(source, nuclide,
     ///   reaction, variance)``, largest reach first. Within the cross sections
     ///   a nuclide's whole evaluation has ``reaction`` of ``None`` and each
-    ///   channel alone names it; a half-life has ``None``. It says which
-    ///   evaluation to look at; the total is the resampled one.
+    ///   channel alone names it; a half-life has ``None``. A decay branching
+    ///   contributor is a two-mode parent's one degree of freedom, with
+    ///   ``reaction`` of ``None``. It says which evaluation to look at; the
+    ///   total is the resampled one.
     ///
     /// Args:
     ///     material_id: Material ID number.
@@ -630,7 +632,9 @@ impl PyTransmutationResults {
     ///   or tallied run the dilution applied differs from this share. An
     ///   interval the covariance grid spans with a variance of zero counts as
     ///   uncovered: ENDF/B-VIII.1 W186 ``(n,gamma)`` states zero from 1e-5 eV
-    ///   to 10 keV, where nearly all of its capture rate is.
+    ///   to 10 keV, where nearly all of its capture rate is. Every consumed
+    ///   self-covariance block counts where it states a nonzero variance,
+    ///   relative (LB=1 to 6), absolute (LB=0) and short-range (LB=8) alike.
     /// - ``partials_above_rate``: per nuclide and channel, where the partial
     ///   rates the covariance was weighted with, zero variance intervals
     ///   included, add up to more than the rate it was divided by, their
@@ -652,6 +656,11 @@ impl PyTransmutationResults {
     ///   rightly leaves its partials short.
     /// - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
     ///   covariance blocks that were present but not consumed.
+    /// - ``malformed_blocks``: covariance blocks not consumed because they
+    ///   break ENDF-102's rules for their layout: arrays that disagree with
+    ///   their declared sizes, an LB=0 to 2 block carrying a second energy
+    ///   table, an LB=3 or 4 block without one or whose tables share no
+    ///   energy range, or an LB=8 variance stated between two reactions.
     /// - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
     ///   covariance was not positive semi-definite and had to be repaired.
     /// - ``rates_sampled``: cross-section rate draws made. Each is a lognormal
@@ -662,6 +671,17 @@ impl PyTransmutationResults {
     ///   half-life sampled and which state no sigma to sample from.
     ///   ``half_lives_floored`` / ``half_lives_sampled`` count draws that came
     ///   out non-positive and had to be floored.
+    /// - ``decay_branchings_perturbed``: with the ``"decay_branching"``
+    ///   source, the reachable two-mode parents whose split was sampled. The
+    ///   multi-mode parents held at their evaluated ratios, each a gap:
+    ///   ``no_decay_branching_uncertainty`` (no mode states a sigma),
+    ///   ``decay_branchings_three_or_more_modes`` (a sigma, but no stated
+    ///   covariance to share it between three or more modes),
+    ///   ``decay_branchings_unequal_sigmas`` (two modes stating different
+    ///   sigmas) and ``decay_branchings_too_wide`` (the smaller ratio under
+    ///   five sigmas). ``decay_branchings_floored`` /
+    ///   ``decay_branchings_sampled`` count draws clamped to the pair's total
+    ///   and draws made.
     /// - ``statistical_rates``: with the ``"statistical"`` source on a
     ///   transport run, how many tallied rates were sampled from their
     ///   covariance; ``statistical_floored`` / ``statistical_sampled`` count
@@ -669,8 +689,9 @@ impl PyTransmutationResults {
     /// - ``not_perturbed``: every input this run held at its nominal value,
     ///   such as the MF=32 resonance-parameter covariance, the photon and dose
     ///   data, the material composition, any source switched off, and, where
-    ///   they applied, the self-shielding correction and the flux's response
-    ///   to a perturbed cross section on a transport run.
+    ///   they applied, the self-shielding correction, the flux's response to a
+    ///   perturbed cross section on a transport run, and the per-branch decay
+    ///   emission of a parent whose branching was drawn.
     /// - ``samples`` / ``converged``: how many replicas ran, and whether the
     ///   sigmas settled or the cap was hit.
     ///

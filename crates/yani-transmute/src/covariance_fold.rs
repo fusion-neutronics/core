@@ -1,7 +1,7 @@
 //! Fold MF=33 covariance against the flux to get the covariance of the
 //! collapsed reaction rates.
 //!
-//! # Why this needs no group structure
+//! # Why the covariance is never regridded
 //!
 //! A reaction rate is linear in the cross section, and MF=33 states a
 //! covariance that is constant on each cell of the evaluation's own energy
@@ -19,7 +19,15 @@
 //!
 //! Blocks are therefore never summed onto a union grid either. Each one folds
 //! on its own grid and the contributions add, because the sum over blocks is
-//! outside the contraction.
+//! outside the contraction. (An `lb = 4` block is written on the union of its
+//! own two tables, which is still that one block's grid.)
+//!
+//! The one term that depends on the flux groups is `lb = 8`. ENDF-102 states it
+//! as an absolute short-range variance whose effect on an average over `ΔEj`
+//! scales as `ΔEk/ΔEj`, so the rate's variance depends on how the flux varies
+//! inside each tape interval. The fold cuts the interval at the group
+//! boundaries, where the flux density is constant, which makes that term exact
+//! too; see [`Scale::ShortRange`].
 //!
 //! # What the rate actually is
 //!
@@ -118,7 +126,11 @@ pub struct Coverage {
     pub skipped_nc: usize,
     /// Blocks whose `lb` layout is not implemented, counted per `lb`.
     pub unsupported_layouts: BTreeMap<i64, usize>,
-    /// Blocks whose arrays did not match their own declared sizes.
+    /// Blocks not consumed because they break ENDF-102's rules for their
+    /// layout: arrays that do not match their own declared sizes, an LB=0 to 2
+    /// block carrying a second table, an LB=3 or 4 block without one or whose
+    /// two tables share no energy range, or an LB=8 variance stated between
+    /// two different reactions.
     pub malformed: usize,
     /// Per (nuclide, kind), the share of the dilute rate that comes from
     /// energies where the evaluation states a nonzero variance for that
@@ -154,6 +166,14 @@ pub struct Coverage {
     /// rate over the flux range is zero (a threshold above the spectrum's top
     /// edge), which has no share to report. So a channel whose blocks state no
     /// variance anywhere reads zero rather than being absent.
+    ///
+    /// Every consumed self-covariance block counts, whatever its `lb`: a
+    /// relative (LB=1 to 6), an absolute (LB=0) or a short-range (LB=8) block
+    /// covers the energies where its own diagonal is nonzero. An LB=8 block
+    /// states a variance `Fk` on each of its intervals, so an interval with a
+    /// nonzero `Fk` counts as covered even when no other block states one
+    /// there. An LB=8 block between two reactions is malformed and not
+    /// consumed, so it names neither channel.
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
     /// Per (nuclide, kind), where the partial rates the covariance was weighted
     /// with add up to more than the rate it was divided by, their ratio to it.
@@ -178,9 +198,9 @@ pub struct Coverage {
     /// with its 4.3 MeV edge inside the fast one sums to about ten times its
     /// rate. Where no covariance edge falls inside a group the two agree.
     ///
-    /// Absolute (`lb = 0`) blocks weight with partial fluxes rather than
-    /// partial rates, which have no rate to compare with, so they are not
-    /// checked. The check from below is
+    /// Absolute (`lb = 0`) and short-range (`lb = 8`) blocks weight with
+    /// partial fluxes rather than partial rates, which have no rate to compare
+    /// with, so they are not checked. The check from below is
     /// [`Coverage::partials_below_rate`], and it reaches only some blocks, so
     /// absence from both maps is not a statement that every block is
     /// consistent.
@@ -201,8 +221,8 @@ pub struct Coverage {
     /// A grid that stops short of either end of the flux range cannot be
     /// checked from below: rate from outside it is rate with no stated
     /// uncertainty, which legitimately leaves its partials short of the rate
-    /// (see [`Coverage::rate_fraction_covered`]). Absolute blocks are not
-    /// checked, as above.
+    /// (see [`Coverage::rate_fraction_covered`]). Absolute and short-range
+    /// blocks are not checked, as above.
     pub partials_below_rate: BTreeMap<(String, String), f64>,
     /// The production this spectrum drove, each channel's weighted by its
     /// share in [`Coverage::rate_fraction_covered`], and the production it
@@ -396,6 +416,26 @@ impl FluxDensity<'_> {
         }
         total
     }
+
+    /// `∫_a^b ψ(E)² dE`, in (n/cm^2/s)^2 per eV. Needed only by short-range
+    /// (`lb = 8`) blocks; see [`partial_rates`].
+    fn integrate_density_squared(&self, a: f64, b: f64) -> f64 {
+        if a >= b {
+            return 0.0;
+        }
+        let mut total = 0.0;
+        for g in self.overlapping(a, b) {
+            let (glo, ghi) = (self.boundaries[g], self.boundaries[g + 1]);
+            let lo = a.max(glo);
+            let hi = b.min(ghi);
+            if lo >= hi || ghi <= glo {
+                continue;
+            }
+            let density = self.flux[g] / (ghi - glo);
+            total += density * density * (hi - lo);
+        }
+        total
+    }
 }
 
 /// Reaction `i`'s partial rates over one block's grid.
@@ -424,6 +464,19 @@ fn partial_rates(flux: &FluxDensity, reaction: &Reaction, grid: &[f64], scale: S
             // An absolute covariance is already in barns squared, so the weight
             // is the partial FLUX and the cross section must not appear twice.
             Scale::Absolute => BARN_TO_CM2 * flux.integrate_flux(grid[k], grid[k + 1]),
+            // A short-range variance `Fk` on `ΔEk` is `Fk·ΔEk/ΔEj` for the
+            // average over any `ΔEj` inside it, with nothing correlating two
+            // such intervals (ENDF-102 section 33.2.2.2). Cut `ΔEk` at the
+            // flux-group boundaries, where `ψ` is constant, and the partial
+            // rate over each piece `j` is that average times `ψ_j·ΔEj`, so
+            // the rate's variance is `Fk·ΔEk·Σ_j ψ_j²·ΔEj`. The block is
+            // diagonal, so the weight is the square root of what multiplies
+            // `Fk`. That is exact for any flux grid, and a flat flux over the
+            // whole interval gives `Fk·Φk²`, the absolute diagonal.
+            Scale::ShortRange => {
+                let (lo, hi) = (grid[k], grid[k + 1]);
+                BARN_TO_CM2 * ((hi - lo) * flux.integrate_density_squared(lo, hi)).sqrt()
+            }
         };
         per_interval.push(v);
     }
@@ -531,7 +584,11 @@ impl Diagonal {
 /// No tolerance is applied: values that cancel only to rounding count as
 /// stated, since calling them zero would be a judgement the tape does not
 /// make. Relative and absolute blocks are summed apart, having different
-/// units.
+/// units. Short-range (`lb = 8`) blocks are summed apart from both: their
+/// `Fk` is in barns squared like an absolute block's, but it is the variance
+/// of the average over the block's own interval and scales with the width of
+/// any narrower one, so a cancellation against an absolute value at the
+/// tape's width would not be one at any other.
 ///
 /// The covered sum adds a subset of the total's terms in the same order, and
 /// rounded addition of terms that are not negative is monotone, so the share
@@ -555,14 +612,15 @@ fn stated_variance_share(
         let (a, b) = (w[0], w[1]);
         let rate = flux.integrate_xs(reaction, a, b);
         total += rate;
-        let (mut relative, mut absolute) = (0.0, 0.0);
+        let (mut relative, mut absolute, mut short_range) = (0.0, 0.0, 0.0);
         for d in diagonals {
             match d.scale {
                 Scale::Relative => relative += d.over(a, b),
                 Scale::Absolute => absolute += d.over(a, b),
+                Scale::ShortRange => short_range += d.over(a, b),
             }
         }
-        if relative != 0.0 || absolute != 0.0 {
+        if relative != 0.0 || absolute != 0.0 || short_range != 0.0 {
             covered += rate;
         }
     }
@@ -668,6 +726,14 @@ fn fold_nuclide(
             }
         };
         if expanded.is_empty() {
+            continue;
+        }
+        // ENDF-102 defines `lb = 8` as a variance, so it belongs only on a
+        // self-covariance. Its weights are square roots with no sign or
+        // cross-section factor, and folding one between two reactions would
+        // add `Σ Fk·w²` to their covariance with nothing to justify it.
+        if expanded.scale == Scale::ShortRange && row_mt != col_mt {
+            coverage.malformed += 1;
             continue;
         }
 
@@ -999,12 +1065,16 @@ mod stated_variance_tests {
         }
     }
 
-    /// `lb = 1` or `lb = 8`: one variance per interval.
+    /// `lb = 1` or `lb = 8`: one variance per interval. Written as the tape
+    /// writes it, `np` (E, F) pairs with the last `F` a zero past the top
+    /// edge, which is what an `lb = 1` block is checked against.
     fn diagonal(lb: i64, energies: &[f64], variances: &[f64]) -> NiSubsection {
+        assert_eq!(variances.len() + 1, energies.len());
         NiSubsection {
             lb,
+            np: energies.len() as i64,
             ek: energies.to_vec(),
-            fk: variances.to_vec(),
+            fk: variances.iter().copied().chain([0.0]).collect(),
             ..Default::default()
         }
     }
@@ -1169,7 +1239,8 @@ mod stated_variance_tests {
 
     /// Blocks of one subsection add, so coverage is where their summed
     /// variance is nonzero: the union of what each states, less anywhere two
-    /// cancel exactly.
+    /// cancel exactly. The short-range block covers where its `Fk` is
+    /// nonzero like any other.
     #[test]
     fn blocks_on_different_grids_cover_their_union() {
         let overlapping = [
@@ -1187,12 +1258,26 @@ mod stated_variance_tests {
         // A negative variance cancelling the first block above 1 keV. Not
         // physical, but it is what summing the blocks means. The two tape
         // values cancel bit for bit, which is the only cancellation counted.
+        // Both are relative: a short-range value is summed apart, so the same
+        // -0.02 stated as LB=8 would not cancel it.
         let cancelling = [
             block(102, 102, diagonal(1, &[1.0, 1.0e3, 1.0e5], &[0.01, 0.02])),
-            block(102, 102, diagonal(8, &[1.0e3, 1.0e5], &[-0.02])),
+            block(102, 102, diagonal(1, &[1.0e3, 1.0e5], &[-0.02])),
         ];
         let c = fold(&cancelling, 1.0);
         let expected = rate(1.0, 1.0e3) / rate(1.0e-5, 2.0e7);
+        let got = fraction(&c, "(n,gamma)");
+        assert!(
+            (got - expected).abs() <= 1.0e-12 * expected,
+            "{got} against {expected}"
+        );
+
+        let apart = [
+            block(102, 102, diagonal(1, &[1.0, 1.0e3, 1.0e5], &[0.01, 0.02])),
+            block(102, 102, diagonal(8, &[1.0e3, 1.0e5], &[-0.02])),
+        ];
+        let c = fold(&apart, 1.0);
+        let expected = rate(1.0, 1.0e5) / rate(1.0e-5, 2.0e7);
         let got = fraction(&c, "(n,gamma)");
         assert!(
             (got - expected).abs() <= 1.0e-12 * expected,
@@ -1370,5 +1455,107 @@ mod integration_range_tests {
                 "integrate_flux over ({a}, {b})"
             );
         }
+    }
+
+    /// An `lb = 8` variance `Fk` on `[0, 10]`, folded against a flux that is
+    /// not flat inside it: 1 n/cm^2/s in each of `[0, 2]` and `[2, 10]`. ENDF-102
+    /// gives each group's average `Fk·10/2` and `Fk·10/8`, uncorrelated, so
+    /// the rate variance is `Fk·10/2·1² + Fk·10/8·1² = 6.25·Fk` (times the
+    /// barn factor twice). The absolute diagonal would say `Fk·2² = 4·Fk`.
+    #[test]
+    fn a_short_range_variance_scales_with_the_width_of_each_flux_group() {
+        let boundaries = vec![0.0, 2.0, 10.0];
+        let flux = vec![1.0, 1.0];
+        let density = FluxDensity {
+            boundaries: &boundaries,
+            flux: &flux,
+        };
+        let fk = 0.3;
+        let block = ExpandedBlock {
+            row_energies: vec![0.0, 10.0],
+            col_energies: vec![0.0, 10.0],
+            values: vec![fk],
+            scale: Scale::ShortRange,
+        };
+        let reaction = ramp(0.0, 10.0, 1.0, 1.0);
+        let w = partial_rates(&density, &reaction, &block.row_energies, block.scale);
+        let got = contract(&block, &w, &w) / (BARN_TO_CM2 * BARN_TO_CM2);
+        assert!((got - 6.25 * fk).abs() <= 1e-12, "{got}");
+    }
+
+    /// An `lb = 8` block between two reactions is refused rather than folded
+    /// with square-root weights, while the same block on a self-covariance
+    /// folds. The refused one names no channel in `rate_fraction_covered`,
+    /// and the folded one covers its channel wherever its `Fk` is nonzero,
+    /// here the whole flux range.
+    #[test]
+    fn a_short_range_block_between_two_reactions_is_malformed() {
+        use endf::mf::covariance::NiSubsection;
+
+        let boundaries = vec![0.0, 10.0];
+        let flux = vec![1.0];
+        let density = FluxDensity {
+            boundaries: &boundaries,
+            flux: &flux,
+        };
+        let capture = ramp(0.0, 10.0, 1.0, 1.0);
+        let mut proton = ramp(0.0, 10.0, 1.0, 1.0);
+        proton.mt_number = 103;
+        let reactions = BTreeMap::from([(102, &capture), (103, &proton)]);
+        let kinds = vec![("(n,gamma)".to_string(), 102), ("(n,p)".to_string(), 103)];
+        let full = BARN_TO_CM2 * density.integrate_xs(&capture, 0.0, 10.0);
+        let rates = BTreeMap::from([("(n,gamma)".to_string(), full), ("(n,p)".to_string(), full)]);
+        let block = |mt1: i32| CovarianceBlock {
+            mt: 102,
+            subsection_idx: 0,
+            block_idx: 0,
+            mat1: 0,
+            mt1,
+            xmf1: 0.0,
+            xlfs1: 0.0,
+            mtl: 0,
+            data: CovarianceData::Ni(NiSubsection {
+                lb: 8,
+                np: 2,
+                nt: 4,
+                ek: vec![0.0, 10.0],
+                fk: vec![0.01, 0.0],
+                ..NiSubsection::default()
+            }),
+        };
+
+        let mut coverage = Coverage::default();
+        let folded = fold_nuclide(
+            &density,
+            &[block(103)],
+            &reactions,
+            &kinds,
+            &rates,
+            "X1",
+            &mut coverage,
+        );
+        assert!(folded.is_none());
+        assert_eq!(coverage.malformed, 1);
+        assert!(coverage.rate_fraction_covered.is_empty());
+
+        let mut coverage = Coverage::default();
+        let folded = fold_nuclide(
+            &density,
+            &[block(102)],
+            &reactions,
+            &kinds,
+            &rates,
+            "X1",
+            &mut coverage,
+        );
+        let folded = folded.expect("a self-covariance LB=8 block folds");
+        assert_eq!(coverage.malformed, 0);
+        assert!(folded.relative[0] > 0.0, "{:?}", folded.relative);
+        assert_eq!(
+            coverage.rate_fraction_covered,
+            BTreeMap::from([(("X1".to_string(), "(n,gamma)".to_string()), 1.0)])
+        );
+        assert!(coverage.partials_above_rate.is_empty());
+        assert!(coverage.partials_below_rate.is_empty());
     }
 }
