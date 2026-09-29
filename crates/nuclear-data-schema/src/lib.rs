@@ -815,7 +815,7 @@ mod tests {
         let sections = all_sections();
         assert_eq!(
             sections.len(),
-            21,
+            22,
             "section count changed; update the manifest"
         );
         let mut paths: Vec<&str> = sections.iter().map(|(p, _)| *p).collect();
