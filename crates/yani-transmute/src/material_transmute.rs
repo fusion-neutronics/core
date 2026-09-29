@@ -94,6 +94,21 @@ pub fn activation_mts(
     mts
 }
 
+/// The MTs a transport-free collapse loads: [`activation_mts`], and with a
+/// shielding chord the total and elastic the correction needs.
+fn collapse_mts(
+    chain: &HashMap<String, yani::ChainNuclide>,
+    branch: &BranchTable,
+    shielding: Option<&Shielding>,
+) -> HashSet<i32> {
+    let mut mts = activation_mts(chain, branch);
+    if shielding.is_some() {
+        mts.insert(1);
+        mts.insert(2);
+    }
+    mts
+}
+
 /// Transmute a material over a timeline of per-step multigroup spectra.
 ///
 /// Performs standalone transmutation without re-running transport. Each
@@ -657,13 +672,15 @@ fn collapse_one(
     // treats it as zero. A sliver of flux there is a rounding matter; more
     // than that and every rate on the nuclide would be understated by data
     // that does not exist, so the run stops and says which nuclide and how
-    // much rather than answering as if it knew. The top is over the
-    // reactions loaded, which on an uncertainty run include the partials an
-    // NC derivation names (`ensure_derivations_loaded`). They are the same
-    // evaluation's, so the top is still its last energy point, and they
-    // could move it only by running past every chain MT, which no partial
-    // on the local libraries was seen to do.
-    let above = crate::multigroup::spectrum_above_evaluation(material, &s.masses, &s.boundaries);
+    // much rather than answering as if it knew. The top is over the MTs a
+    // collapse loads and not over whatever the material holds: an
+    // uncertainty run also holds the partials an NC derivation names
+    // (`ensure_derivations_loaded`), and the global cache can hand a later
+    // run that wider entry, so a top over every held reaction would let the
+    // same spectrum be refused or accepted by what was loaded before.
+    let mts = collapse_mts(chain, branch, shielding);
+    let above =
+        crate::multigroup::spectrum_above_evaluation(material, &s.masses, &s.boundaries, &mts);
     if let Some((name, top, fraction)) = above
         .iter()
         .find(|(_, _, fraction)| *fraction > crate::multigroup::ABOVE_EVALUATION_TOLERANCE)
@@ -921,11 +938,7 @@ pub fn preload_activation_data(
         // in-scattering that fills the dips again. They are the expensive
         // full-grid kind the comment above is about, so they are read only when
         // a chord was actually given and the correction is going to be applied.
-        let mut wanted = activation_mts(chain, branch);
-        if shielding.is_some() {
-            wanted.insert(1);
-            wanted.insert(2);
-        }
+        let wanted = collapse_mts(chain, branch, shielding);
         let scope = LoadScope::activation(wanted)
             .with_temperatures(temp_filter)
             .with_covariance(want_covariance);

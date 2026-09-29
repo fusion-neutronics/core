@@ -3,7 +3,7 @@
 /// Computes effective one-group cross sections and reaction rates from a
 /// user-provided multigroup flux spectrum, enabling standalone transmutation
 /// without re-running transport at each timestep.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 
 use yamc_materials::material::Material;
@@ -447,10 +447,14 @@ pub(crate) fn fraction_above(multigroup_flux: &[f64], group_boundaries: &[f64], 
 /// material part of the spectrum is involved. TENDL evaluations end at 200
 /// MeV and ENDF/B's at 20 MeV, and CCFE-709 runs to 1 GeV, so a spectrum with
 /// flux in its top groups can reach this with either library.
+///
+/// The top is the last energy of the reactions in `mts` the nuclide holds,
+/// so it does not depend on which other reactions happen to be loaded.
 pub fn spectrum_above_evaluation(
     material: &Material,
     multigroup_flux: &[f64],
     group_boundaries: &[f64],
+    mts: &HashSet<i32>,
 ) -> Vec<(String, f64, f64)> {
     let mut names: Vec<&String> = material.nuclide_data.keys().collect();
     names.sort();
@@ -469,7 +473,9 @@ pub fn spectrum_above_evaluation(
             continue;
         };
         let top = reactions
-            .values()
+            .iter()
+            .filter(|(mt, _)| mts.contains(mt))
+            .map(|(_, r)| r)
             .filter_map(|r| r.energy.last().copied())
             .fold(f64::NEG_INFINITY, f64::max);
         if !top.is_finite() {

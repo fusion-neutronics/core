@@ -503,3 +503,45 @@ fn the_activation_load_reads_the_reactions_a_channel_is_derived_from() {
     );
     assert!(na > 0.0);
 }
+
+/// The refusal of a spectrum above the evaluation reads the top of the MTs a
+/// collapse loads, so a partial an uncertainty run adds for a derivation
+/// cannot move it even where the partial runs past every chain MT.
+#[test]
+fn a_derivation_partial_leaves_the_evaluation_top_alone() {
+    let Some((mut m, _)) = material("O16", 825) else {
+        eprintln!("skipping: O16 fixture or its covariance.arrow missing");
+        return;
+    };
+    let mts = yani_transmute::activation_mts(&chain(), &yani::BranchTable::new());
+    assert!(!mts.contains(&600));
+    let top = |m: &Material| {
+        m.nuclide_data["O16"]
+            .reactions_for_temp("294")
+            .expect("294 K")
+            .iter()
+            .filter(|(mt, _)| mts.contains(mt))
+            .filter_map(|(_, r)| r.energy.last().copied())
+            .fold(0.0, f64::max)
+    };
+    let evaluated = top(&m);
+    // All the flux in one group above the evaluation's top.
+    let bounds = [1.0e-5, evaluated, 4.0 * evaluated];
+    let flux = [0.0, 1.0];
+    let above = |m: &Material| {
+        yani_transmute::multigroup::spectrum_above_evaluation(m, &flux, &bounds, &mts)
+    };
+    let before = above(&m);
+    assert_eq!(before.len(), 1, "{before:?}");
+    let nuclide = Arc::make_mut(m.nuclide_data.get_mut("O16").expect("loaded"));
+    let by_mt = nuclide.reactions.first_mut().expect("a temperature");
+    let mut partial = (*by_mt[&600]).clone();
+    let mut energy = partial.energy.to_vec();
+    let mut xs = partial.cross_section.to_vec();
+    energy.push(8.0 * evaluated);
+    xs.push(*xs.last().expect("points"));
+    partial.energy = energy.into();
+    partial.cross_section = xs.into();
+    by_mt.insert(600, Arc::new(partial));
+    assert_eq!(above(&m), before);
+}
