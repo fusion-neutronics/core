@@ -57,7 +57,10 @@ fn the_states_a_reaction_lists_are_reported_in_level_order() {
 
     // The product is named at its ground state even for the excited entry,
     // since naming the isomer would need decay data this read never touches.
-    assert!(n2n.states.iter().all(|s| s.product == "Ir190"));
+    assert!(n2n
+        .states
+        .iter()
+        .all(|s| s.product.as_deref() == Some("Ir190")));
     assert!(n2n.states.iter().all(|s| s.source == "cross_section"));
 }
 
@@ -83,4 +86,33 @@ fn a_yield_channel_is_labelled_as_one() {
 fn a_decay_evaluation_has_no_production_to_report() {
     let decay = material(fixture!("dec-049_In_116m1.endf.xz"));
     assert!(yani_convert::production::extract_production(&decay).is_empty());
+}
+
+/// FENDL-3.2d's Al27 leaves IZAP zero in MF=9 and names its products in MF=8
+/// alone; the read reports the products MF=8 names, and MF=8's level energy.
+/// The fixture sits beside the tests; `branching_routes.rs` says why.
+#[test]
+fn a_zero_izap_reports_the_product_mf8_names() {
+    let al27 = material(include_bytes!(
+        "fixtures/n-013_Al_027_fendl-3.2d_trimmed.endf.xz"
+    ));
+    let channels = yani_convert::production::extract_production(&al27);
+    let products = |mt: i32| -> Vec<(Option<&str>, Option<f64>)> {
+        channels
+            .iter()
+            .find(|c| c.mt == mt)
+            .expect("the reaction is listed")
+            .states
+            .iter()
+            .map(|s| (s.product.as_deref(), s.excitation_energy))
+            .collect()
+    };
+    assert_eq!(
+        products(16),
+        [(Some("Al26"), Some(0.0)), (Some("Al26"), Some(228_400.0))]
+    );
+    assert_eq!(
+        products(107),
+        [(Some("Na24"), Some(0.0)), (Some("Na24"), Some(472_290.0))]
+    );
 }

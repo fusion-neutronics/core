@@ -663,6 +663,12 @@ pub struct FissionProductYields {
     pub independent: Vec<Vec<ProductYield>>,
     /// Yields after it.
     pub cumulative: Vec<Vec<ProductYield>>,
+    /// The ENDF interpolation law of the independent yields from the energy
+    /// before each one to it, as MT=454 states it. `None` at the lowest
+    /// energy, whose LIST puts LE in the same field instead of a law.
+    pub independent_interpolation: Vec<Option<i64>>,
+    /// The same for the cumulative yields, from MT=459.
+    pub cumulative_interpolation: Vec<Option<i64>>,
 }
 
 impl FissionProductYields {
@@ -689,8 +695,10 @@ impl FissionProductYields {
             };
             let mut energies = Vec::with_capacity(section.yields.len());
             let mut yields = Vec::with_capacity(section.yields.len());
-            for set in &section.yields {
+            let mut interpolation = Vec::with_capacity(section.yields.len());
+            for (i, set) in section.yields.iter().enumerate() {
                 energies.push(set.energy);
+                interpolation.push((i > 0).then_some(set.le_or_interpolation));
                 yields.push(
                     set.products
                         .iter()
@@ -711,8 +719,10 @@ impl FissionProductYields {
             }
             if target {
                 out.independent = yields;
+                out.independent_interpolation = interpolation;
             } else {
                 out.cumulative = yields;
+                out.cumulative_interpolation = interpolation;
             }
         }
         Ok(out)
@@ -1004,6 +1014,11 @@ mod tests {
         assert_eq!(fpy.cumulative[0][0].name, "Zr95");
         assert_eq!(fpy.cumulative[0][0].yield_, (0.0605, 0.0018));
         assert_ne!(fpy.independent[0][0].yield_, fpy.cumulative[0][0].yield_);
+
+        // The lowest energy's LIST holds LE where the others hold a law, so it
+        // has none.
+        assert_eq!(fpy.independent_interpolation, [None, Some(2)]);
+        assert_eq!(fpy.cumulative_interpolation, [None, Some(2)]);
     }
 
     #[test]

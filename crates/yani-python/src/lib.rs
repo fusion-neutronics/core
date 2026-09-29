@@ -165,6 +165,10 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
         &data
     )?)?;
     data.add_function(wrap_pyfunction!(material::natural_abundance, &data)?)?;
+    data.add_function(wrap_pyfunction!(
+        material::natural_abundance_records,
+        &data
+    )?)?;
     data.add_function(wrap_pyfunction!(material::split_nuclide, &data)?)?;
     data.add_function(wrap_pyfunction!(material::element_nuclides, &data)?)?;
     data.add_function(wrap_pyfunction!(material::element_names, &data)?)?;
