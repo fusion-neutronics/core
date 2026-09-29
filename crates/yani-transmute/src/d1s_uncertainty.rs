@@ -38,6 +38,9 @@ pub struct TcfEnsemble {
     /// The same, for nuclides whose evaluation states no half-life sigma, so
     /// held at nominal. Not a claim that they are exact.
     pub no_half_life_uncertainty: BTreeSet<String>,
+    /// The same, for nuclides whose stated half-life sigma no draw can carry
+    /// (not finite), so held at nominal.
+    pub half_life_uncertainty_not_carried: BTreeSet<String>,
     /// Whether the TCF spreads settled rather than hitting the cap.
     pub converged: bool,
     /// The sources that applied, by name. Only `half_life` acts on a TCF.
@@ -89,13 +92,17 @@ pub fn time_correction_factor_ensemble(
     out.sources = vec![Source::HalfLife.name().to_string()];
 
     let relevant = feeding(chain, emitters);
-    let (all, without) = half_life_candidates(chain);
+    let (all, without, not_carried) = half_life_candidates(chain);
     let candidates: Vec<(String, f64, f64)> = all
         .into_iter()
         .filter(|(n, _, _)| relevant.contains(n))
         .collect();
     out.half_lives_perturbed = candidates.iter().map(|(n, _, _)| n.clone()).collect();
     out.no_half_life_uncertainty = without
+        .into_iter()
+        .filter(|n| relevant.contains(n))
+        .collect();
+    out.half_life_uncertainty_not_carried = not_carried
         .into_iter()
         .filter(|n| relevant.contains(n))
         .collect();

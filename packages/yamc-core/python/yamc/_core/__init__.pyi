@@ -5271,9 +5271,17 @@ class TransmutationResults:
         - ``half_lives_perturbed`` / ``no_half_life_uncertainty``: with the
           ``"half_life"`` source, which reachable unstable nuclides had their
           half-life sampled and which state no sigma to sample from.
+          ``half_life_uncertainty_not_carried`` names those whose stated sigma
+          no draw can carry (not finite), held at nominal and counted as a gap.
           ``half_lives_sampled`` counts the draws made. Each is a lognormal
           matched to the evaluation's mean and sigma, so none can go
           non-positive and none is floored.
+        - ``decay_energies_perturbed`` / ``no_decay_energy_uncertainty``: the
+          same for the ``"decay_energy"`` source, drawn per nuclide as a
+          lognormal with the stated mean and sigma, per component where the
+          data splits it. ``decay_energy_uncertainty_not_carried`` names those
+          with a sigma stated on a zero energy, or not finite, which no draw
+          can carry; that energy is held at nominal and counted as a gap.
         - ``statistical_rates``: with the ``"statistical"`` source on a
           transport run, how many tallied rates were sampled from their
           covariance; ``statistical_floored`` / ``statistical_sampled`` count

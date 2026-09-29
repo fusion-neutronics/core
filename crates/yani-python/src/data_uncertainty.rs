@@ -347,6 +347,13 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
             .cloned()
             .collect::<Vec<_>>(),
     )?;
+    d.set_item(
+        "half_life_uncertainty_not_carried",
+        info.half_life_uncertainty_not_carried
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
     d.set_item("half_lives_sampled", info.half_lives_sampled)?;
     d.set_item(
         "decay_energies_perturbed",
@@ -358,6 +365,13 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     d.set_item(
         "no_decay_energy_uncertainty",
         info.no_decay_energy_uncertainty
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    d.set_item(
+        "decay_energy_uncertainty_not_carried",
+        info.decay_energy_uncertainty_not_carried
             .iter()
             .cloned()
             .collect::<Vec<_>>(),

@@ -743,6 +743,14 @@ impl PyPulseSchedule {
                     .cloned()
                     .collect::<Vec<_>>(),
             )?;
+            info.set_item(
+                "half_life_uncertainty_not_carried",
+                ensemble
+                    .half_life_uncertainty_not_carried
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )?;
             info.set_item("samples", ensemble.replicas.len())?;
             info.set_item("converged", ensemble.converged)?;
             info.set_item("sources", ensemble.sources.clone())?;

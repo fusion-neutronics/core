@@ -8,8 +8,9 @@
 //! What can be perturbed ([`Source`]): the **activation cross sections**,
 //! through the MF=33 covariance folded against this material's own spectrum;
 //! the **flux spectrum**, from a per-bin sigma the caller supplies; and the
-//! **half-lives**, from the evaluation's own standard deviation. Decay
-//! branching ratios, fission yields, the isomeric-branching overlay, the MF=32
+//! **half-lives** and **decay energies**, from the evaluation's own standard
+//! deviation, each drawn per nuclide as a lognormal with the stated mean and
+//! sigma. Decay branching ratios, fission yields, the isomeric-branching overlay, the MF=32
 //! resonance-parameter covariance, the decay photon and dose data, and the
 //! material's own composition are held at their nominal values; they carry
 //! their own uncertainties and are not propagated yet (issue #140).
@@ -359,6 +360,10 @@ pub struct Info {
     ///
     /// Not a claim that the half-life is exact: the evaluation said nothing.
     pub no_half_life_uncertainty: BTreeSet<String>,
+    /// Reachable unstable nuclides whose evaluation states a half-life sigma
+    /// no draw can carry (not finite, or not finite relative to the
+    /// half-life), so their half-life was held at nominal.
+    pub half_life_uncertainty_not_carried: BTreeSet<String>,
     /// Half-life draws made, one per perturbed nuclide per replica.
     ///
     /// Each is a lognormal matched to the evaluation's mean and sigma, so none
@@ -369,6 +374,11 @@ pub struct Info {
     /// Reachable unstable nuclides with a decay energy but no stated sigma on
     /// it, held at nominal. Not a claim that it is exact.
     pub no_decay_energy_uncertainty: BTreeSet<String>,
+    /// Reachable unstable nuclides with a decay-energy sigma, on the total or
+    /// on a component, that no draw can carry: stated on an energy of zero,
+    /// or not finite. That energy was held at nominal; any other component of
+    /// the same nuclide with a usable sigma was still drawn.
+    pub decay_energy_uncertainty_not_carried: BTreeSet<String>,
     /// Tallied rates sampled statistically, the totals and partials together;
     /// zero off the transport path or with the source off.
     pub statistical_rates: usize,
@@ -462,6 +472,8 @@ impl Info {
             || self.spectra_without_flux_sigma > 0
             || !self.no_half_life_uncertainty.is_empty()
             || !self.no_decay_energy_uncertainty.is_empty()
+            || !self.half_life_uncertainty_not_carried.is_empty()
+            || !self.decay_energy_uncertainty_not_carried.is_empty()
     }
 }
 
@@ -739,26 +751,50 @@ pub(crate) fn densities_of(materials: &[Material]) -> Vec<HashMap<String, f64>> 
 /// which are keyed on the same name hash without it.
 const HALF_LIFE_STREAM: u32 = 0x4A1F_11FE;
 
-/// The unstable nuclides of `chain` split into those with a stated half-life
-/// sigma, as `(name, half-life, sigma)`, and those without.
+/// Whether an evaluation states `sigma`: a stored 0.0 is "not stated", the
+/// same as a null, never an exact value.
+fn stated(sigma: Option<f64>) -> bool {
+    sigma.is_some_and(|s| s > 0.0)
+}
+
+/// `sigma` when a lognormal draw of `value` can carry it: stated, on a
+/// positive value, with a relative sigma that is positive and finite.
+///
+/// A mean of zero for a quantity that cannot go negative is zero in every
+/// draw, and an infinite sigma has no lognormal, so either is reported as
+/// not carried rather than drawn as a NaN or silently held.
+fn carried(value: f64, sigma: Option<f64>) -> Option<f64> {
+    let sigma = sigma.filter(|s| *s > 0.0 && s.is_finite())?;
+    let relative = sigma / value;
+    (value > 0.0 && relative > 0.0 && relative.is_finite()).then_some(sigma)
+}
+
+/// `(name, half-life, sigma)` for one nuclide whose half-life is drawn.
+pub(crate) type HalfLifeSigma = (String, f64, f64);
+
+/// The unstable nuclides of `chain` split three ways: those with a half-life
+/// sigma a draw can carry, as `(name, half-life, sigma)`; those that state
+/// none; and those that state one no draw can carry.
 pub(crate) fn half_life_candidates(
     chain: &HashMap<String, yani::ChainNuclide>,
-) -> (Vec<(String, f64, f64)>, BTreeSet<String>) {
+) -> (Vec<HalfLifeSigma>, BTreeSet<String>, BTreeSet<String>) {
     let mut with = Vec::new();
     let mut without = BTreeSet::new();
+    let mut not_carried = BTreeSet::new();
     for (name, cn) in chain {
         let Some(t) = cn.half_life.filter(|t| *t > 0.0) else {
             continue;
         };
-        match cn.half_life_uncertainty.filter(|s| *s > 0.0) {
-            Some(sigma) => with.push((name.clone(), t, sigma)),
-            None => {
-                without.insert(name.clone());
-            }
+        if let Some(sigma) = carried(t, cn.half_life_uncertainty) {
+            with.push((name.clone(), t, sigma));
+        } else if stated(cn.half_life_uncertainty) {
+            not_carried.insert(name.clone());
+        } else {
+            without.insert(name.clone());
         }
     }
     with.sort_by(|a, b| a.0.cmp(&b.0));
-    (with, without)
+    (with, without, not_carried)
 }
 
 /// One replica's half-lives, from a stream keyed on `(seed, replica, nuclide)`.
@@ -798,7 +834,8 @@ const DECAY_ENERGY_STREAM: u32 = 0xDEC4_E6E1;
 
 /// One replica's decay energy for one nuclide, and its components, drawn
 /// from each component's own sigma, or from the total's where the data gives
-/// no split. `None` when there is nothing to perturb.
+/// no split. `None` when no sigma can be carried (see
+/// [`has_decay_energy_sigma`]).
 ///
 /// Each drawn energy is its nominal times [`lognormal_multiplier`], for the
 /// reason [`sample_half_lives`] gives: the evaluation's mean and sigma exactly,
@@ -813,53 +850,65 @@ pub(crate) fn sample_decay_energy(
         replica_seed,
         crate::covariance_sample::name_ordinal(&cn.name) ^ DECAY_ENERGY_STREAM,
     );
+    if !has_decay_energy_sigma(cn) {
+        return None;
+    }
     let mut state = yamc_rng::expand_seed(seed);
-    let with_sigma = cn
-        .decay_energy_components
-        .iter()
-        .any(|c| c.is_some_and(|c| c.uncertainty.is_some_and(|s| s > 0.0)));
-    if with_sigma {
+    if components_state_sigma(cn) {
         let z = crate::covariance_sample::standard_normals(&mut state, 3);
         let mut parts = cn.decay_energy_components;
         let mut total = 0.0;
         for (part, z) in parts.iter_mut().zip(z) {
             if let Some(p) = part {
-                if let Some(sigma) = p.uncertainty.filter(|s| *s > 0.0) {
-                    p.energy = scaled(p.energy, sigma, z);
+                if let Some(sigma) = carried(p.energy, p.uncertainty) {
+                    p.energy *= lognormal_multiplier(z, sigma / p.energy);
                 }
                 total += p.energy;
             }
         }
         return Some((total, parts));
     }
-    let sigma = cn.decay_energy_uncertainty.filter(|s| *s > 0.0)?;
+    let sigma = carried(cn.decay_energy, cn.decay_energy_uncertainty)?;
     let z = crate::covariance_sample::standard_normals(&mut state, 1)[0];
     Some((
-        scaled(cn.decay_energy, sigma, z),
+        cn.decay_energy * lognormal_multiplier(z, sigma / cn.decay_energy),
         cn.decay_energy_components,
     ))
 }
 
-/// `energy` drawn with standard deviation `sigma` from the standard normal
-/// `z`, as a lognormal with the stated mean and sigma.
-///
-/// An energy of zero is kept at zero: a quantity that cannot be negative and
-/// has a mean of zero is zero in every draw, so no draw can carry the stated
-/// sigma. ENDF/B-VIII.1, JENDL-5.0 and JEFF-4.0 state none on a zero total.
-fn scaled(energy: f64, sigma: f64, z: f64) -> f64 {
-    if energy > 0.0 {
-        energy * lognormal_multiplier(z, sigma / energy)
+/// Whether any component states a sigma, which makes the components, not the
+/// total, what is drawn: the total's sigma is theirs combined.
+fn components_state_sigma(cn: &yani::ChainNuclide) -> bool {
+    cn.decay_energy_components
+        .iter()
+        .any(|c| c.is_some_and(|c| stated(c.uncertainty)))
+}
+
+/// Whether a nuclide's decay energy carries a sigma a draw can sample from.
+pub(crate) fn has_decay_energy_sigma(cn: &yani::ChainNuclide) -> bool {
+    if components_state_sigma(cn) {
+        cn.decay_energy_components
+            .iter()
+            .any(|c| c.is_some_and(|c| carried(c.energy, c.uncertainty).is_some()))
     } else {
-        energy
+        carried(cn.decay_energy, cn.decay_energy_uncertainty).is_some()
     }
 }
 
-/// Whether a nuclide's decay energy carries a sigma to sample from.
-pub(crate) fn has_decay_energy_sigma(cn: &yani::ChainNuclide) -> bool {
-    cn.decay_energy_components
-        .iter()
-        .any(|c| c.is_some_and(|c| c.uncertainty.is_some_and(|s| s > 0.0)))
-        || cn.decay_energy_uncertainty.is_some_and(|s| s > 0.0)
+/// Whether a nuclide states a decay-energy sigma that no draw can carry, on
+/// the total or a component: one on an energy of zero, or one not finite.
+/// ENDF/B-VIII.1 has none of either, but the rule is to report such a sigma,
+/// not absorb it.
+pub(crate) fn has_decay_energy_sigma_not_carried(cn: &yani::ChainNuclide) -> bool {
+    let unusable =
+        |energy: f64, sigma: Option<f64>| stated(sigma) && carried(energy, sigma).is_none();
+    if components_state_sigma(cn) {
+        cn.decay_energy_components
+            .iter()
+            .any(|c| c.is_some_and(|c| unusable(c.energy, c.uncertainty)))
+    } else {
+        unusable(cn.decay_energy, cn.decay_energy_uncertainty)
+    }
 }
 
 /// `chain` with the half-lives of `sampled` substituted.
@@ -1094,7 +1143,7 @@ mod tests {
         // inputs that carry no uncertainty.
         let cn = stated_as_zero();
         let chain = HashMap::from([(cn.name.clone(), cn.clone())]);
-        let (with, without) = half_life_candidates(&chain);
+        let (with, without, not_carried) = half_life_candidates(&chain);
         assert!(
             with.is_empty(),
             "a 0.0 half-life sigma was sampled: {with:?}"
@@ -1103,6 +1152,7 @@ mod tests {
             without.contains("In116_m1"),
             "and it was not reported unstated"
         );
+        assert!(not_carried.is_empty());
 
         assert!(!has_decay_energy_sigma(&cn));
         assert_eq!(sample_decay_energy(&cn, 7, 0), None);
@@ -1265,8 +1315,48 @@ mod tests {
             None,
             None,
         ];
-        let (total, parts) = sample_decay_energy(&cn, 5, 0).unwrap();
-        assert_eq!(total, 0.0);
+        // A zero energy is zero in every draw, so its sigma cannot be carried:
+        // nothing is drawn, and the nuclide is reported rather than listed as
+        // perturbed.
+        assert_eq!(sample_decay_energy(&cn, 5, 0), None);
+        assert!(!has_decay_energy_sigma(&cn));
+        assert!(has_decay_energy_sigma_not_carried(&cn));
+    }
+
+    #[test]
+    fn a_sigma_no_draw_can_carry_is_reported_not_drawn() {
+        let mut cn = stated_as_zero();
+        cn.half_life = Some(10.0);
+        cn.half_life_uncertainty = Some(f64::INFINITY);
+        cn.decay_energy = 1.0e6;
+        cn.decay_energy_uncertainty = Some(f64::INFINITY);
+        let chain = HashMap::from([(cn.name.clone(), cn.clone())]);
+        let (with, without, not_carried) = half_life_candidates(&chain);
+        assert!(
+            with.is_empty() && without.is_empty(),
+            "{with:?} {without:?}"
+        );
+        assert!(not_carried.contains("In116_m1"));
+        assert_eq!(sample_decay_energy(&cn, 5, 0), None);
+        assert!(has_decay_energy_sigma_not_carried(&cn));
+
+        // One component carried and one not: the nuclide is drawn, and still
+        // reported for the component whose sigma is lost.
+        cn.decay_energy_components = [
+            Some(yani::DecayEnergyComponent {
+                energy: 0.0,
+                uncertainty: Some(1.0e3),
+            }),
+            Some(yani::DecayEnergyComponent {
+                energy: 1.0e6,
+                uncertainty: Some(1.0e5),
+            }),
+            None,
+        ];
+        assert!(has_decay_energy_sigma(&cn));
+        assert!(has_decay_energy_sigma_not_carried(&cn));
+        let (_, parts) = sample_decay_energy(&cn, 5, 0).unwrap();
         assert_eq!(parts[0].unwrap().energy, 0.0);
+        assert_ne!(parts[1].unwrap().energy, 1.0e6);
     }
 }

@@ -772,6 +772,10 @@ fn lognormal_factor(deviate: f64, sigma: f64) -> f64 {
 /// correlation for the transform to distort and this reproduces exactly what
 /// the evaluation states. `sigma` must be positive and finite.
 pub(crate) fn lognormal_multiplier(z: f64, sigma: f64) -> f64 {
+    debug_assert!(
+        sigma.is_finite() && sigma > 0.0,
+        "lognormal sigma {sigma} is not positive and finite"
+    );
     let s_squared = (1.0 + sigma * sigma).ln();
     let s = s_squared.sqrt();
     (s * z - 0.5 * s_squared).exp()
