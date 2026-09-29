@@ -4870,6 +4870,82 @@ fn resample_linear_e(src: &[f64], src_grid: &[f64], master_grid: &[f64]) -> Vec<
     out
 }
 
+/// Append a D1S channel's spectrum to `table` in the layout the kernel reads
+/// (`decay_photon_emission` documents it), pushing its base, count and kind.
+/// Returns false, appending nothing, when the spectrum holds no emission to
+/// draw from.
+#[cfg(not(target_os = "macos"))]
+fn pack_decay_photon_spectrum(
+    spectrum: &yamc_physics::photon::decay_photon_production::DecayPhotonSpectrum,
+    table: &mut yamc_gpu::neutron::transport::MaterialDecayTable,
+) -> bool {
+    use yamc_gpu::neutron::transport::{
+        DECAY_SPECTRUM_HISTOGRAM, DECAY_SPECTRUM_LINEAR_LINEAR, DECAY_SPECTRUM_LINES,
+    };
+    use yamc_physics::photon::decay_photon_production::DecayPhotonSpectrum;
+    let e_base = table.ch_energies.len() as u32;
+    let (count, kind) = match spectrum {
+        DecayPhotonSpectrum::Lines {
+            energies,
+            intensities,
+        } => {
+            let total: f64 = intensities.iter().sum();
+            if energies.is_empty() || total <= 0.0 {
+                return false;
+            }
+            // Cumulative intensity CDF, normalized to 1.0 at the last line.
+            let mut cum = 0.0_f64;
+            for (&e, &inten) in energies.iter().zip(intensities.iter()) {
+                cum += inten;
+                table.ch_energies.push(e);
+                table.ch_intensity_cdf.push(cum / total);
+            }
+            (energies.len(), DECAY_SPECTRUM_LINES)
+        }
+        DecayPhotonSpectrum::Continuum {
+            energies,
+            densities,
+            interpolation,
+            cumulative,
+        } => {
+            let Some(&total) = cumulative.last() else {
+                return false;
+            };
+            if total <= 0.0 {
+                return false;
+            }
+            let kind = match interpolation {
+                yani::Interpolation::Histogram => DECAY_SPECTRUM_HISTOGRAM,
+                yani::Interpolation::LinearLinear => DECAY_SPECTRUM_LINEAR_LINEAR,
+                other => unreachable!(
+                    "DecayPhotonSpectrum::Continuum is built through Continuum::new, which \
+                     refuses the {} law",
+                    other.name()
+                ),
+            };
+            // The points beside the running integral at each, then the
+            // densities; both divided by the whole integral so the kernel's
+            // uniform draw is the share directly.
+            table.ch_energies.extend_from_slice(energies);
+            table.ch_intensity_cdf.push(0.0);
+            table
+                .ch_intensity_cdf
+                .extend(cumulative.iter().map(|c| c / total));
+            table
+                .ch_energies
+                .extend(std::iter::repeat_n(0.0, energies.len()));
+            table
+                .ch_intensity_cdf
+                .extend(densities.iter().map(|y| y / total));
+            (energies.len(), kind)
+        }
+    };
+    table.ch_e_base.push(e_base);
+    table.ch_e_count.push(count as u32);
+    table.ch_e_kind.push(kind);
+    true
+}
+
 /// Build the per-material D1S decay-photon tables for the GPU neutron kernel,
 /// in `geometry.materials` order (the same order `cell_to_material` indexes).
 ///
@@ -4937,7 +5013,12 @@ fn build_decay_photon_inputs(
             let src_grid = &fast_grid.energy;
 
             for ch in &decay_nuc.channels {
-                if ch.yield_constant <= 0.0 || ch.energies.is_empty() {
+                if ch.yield_constant <= 0.0 {
+                    continue;
+                }
+                // The spectrum goes in first, so a channel with nothing to draw
+                // adds no row to photon_prod that no channel could answer.
+                if !pack_decay_photon_spectrum(&ch.spectrum, &mut table) {
                     continue;
                 }
                 // Macroscopic weighted reaction xs on the master grid:
@@ -4955,24 +5036,8 @@ fn build_decay_photon_inputs(
                     table.photon_prod[g] += v;
                 }
 
-                // Cumulative intensity CDF (normalized to 1.0 at the last line).
-                let total: f64 = ch.intensities.iter().sum();
-                if total <= 0.0 {
-                    continue;
-                }
-                let e_base = table.ch_energies.len() as u32;
-                let mut cum = 0.0_f64;
-                for (&e, &inten) in ch.energies.iter().zip(ch.intensities.iter()) {
-                    cum += inten;
-                    table.ch_energies.push(e);
-                    table.ch_intensity_cdf.push(cum / total);
-                }
-                let e_count = ch.energies.len() as u32;
-
                 table.ch_xs.extend_from_slice(&row);
                 table.ch_parent_id.push(ch.target_id.get() as u32);
-                table.ch_e_base.push(e_base);
-                table.ch_e_count.push(e_count);
             }
         }
 
@@ -5963,6 +6028,53 @@ mod tests {
         ];
         t.scores = vec![Score::Flux(yamc_tallies::score::FluxScore)];
         Arc::new(t)
+    }
+
+    /// Lines pack as their CDF; a continuum packs as its points beside the
+    /// running integral, then its densities, both over the whole integral.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_decay_photon_continuum_is_packed_as_a_continuum() {
+        use yamc_gpu::neutron::transport::{
+            MaterialDecayTable, DECAY_SPECTRUM_LINEAR_LINEAR, DECAY_SPECTRUM_LINES,
+        };
+        use yamc_physics::photon::decay_photon_production::DecayPhotonSpectrum;
+        let mut table = MaterialDecayTable::default();
+        let lines = DecayPhotonSpectrum::Lines {
+            energies: vec![1.0e5, 2.0e5],
+            intensities: vec![1.0, 3.0],
+        };
+        assert!(pack_decay_photon_spectrum(&lines, &mut table));
+        // Densities 1, 1, 2 at 1, 2, 3 keV, linear-linear: 1000 then 1500.
+        let continuum = DecayPhotonSpectrum::Continuum {
+            energies: vec![1.0e3, 2.0e3, 3.0e3],
+            densities: vec![1.0, 1.0, 2.0],
+            interpolation: yani::Interpolation::LinearLinear,
+            cumulative: vec![1.0e3, 2.5e3],
+        };
+        assert!(pack_decay_photon_spectrum(&continuum, &mut table));
+        let empty = DecayPhotonSpectrum::Continuum {
+            energies: vec![1.0e3, 2.0e3],
+            densities: vec![0.0, 0.0],
+            interpolation: yani::Interpolation::Histogram,
+            cumulative: vec![0.0],
+        };
+        assert!(!pack_decay_photon_spectrum(&empty, &mut table));
+
+        assert_eq!(table.ch_e_base, vec![0, 2]);
+        assert_eq!(table.ch_e_count, vec![2, 3]);
+        assert_eq!(
+            table.ch_e_kind,
+            vec![DECAY_SPECTRUM_LINES, DECAY_SPECTRUM_LINEAR_LINEAR]
+        );
+        assert_eq!(
+            table.ch_energies,
+            vec![1.0e5, 2.0e5, 1.0e3, 2.0e3, 3.0e3, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            table.ch_intensity_cdf,
+            vec![0.25, 1.0, 0.0, 0.4, 1.0, 4.0e-4, 4.0e-4, 8.0e-4]
+        );
     }
 
     fn one_cell_geometry() -> crate::geometry::Geometry {
