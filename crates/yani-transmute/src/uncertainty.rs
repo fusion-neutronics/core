@@ -211,7 +211,10 @@ pub struct Info {
     pub skipped_nc: usize,
     /// Blocks whose `lb` layout is not implemented, counted per `lb`.
     pub unsupported_layouts: BTreeMap<i64, usize>,
-    /// Blocks whose arrays disagreed with their own declared sizes.
+    /// Blocks not consumed because they break ENDF-102's rules for their
+    /// layout: arrays that disagree with their declared sizes, an LB=0 to 2
+    /// block carrying a second table, an LB=3 or 4 block without one or whose
+    /// tables share no energy range, or an LB=8 block between two reactions.
     pub malformed_blocks: usize,
     /// Per (nuclide, reaction kind), the share of the dilute rate over the
     /// flux range that comes from energies where the evaluation states a
@@ -223,7 +226,9 @@ pub struct Info {
     /// self-shielded or tallied run the covered share of the rate actually
     /// used is not computed. See [`Info::partials_above_rate`] for when that
     /// rate disagrees with the partials. No entry for a channel whose dilute
-    /// rate over the flux range is zero.
+    /// rate over the flux range is zero. Every consumed self-covariance block
+    /// counts where its own diagonal is nonzero, relative (LB=1 to 6),
+    /// absolute (LB=0) and short-range (LB=8) alike.
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
     /// Per (nuclide, reaction kind), where the partial rates a relative
     /// covariance block was weighted with, zero variance intervals included,

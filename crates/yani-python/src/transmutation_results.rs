@@ -630,7 +630,9 @@ impl PyTransmutationResults {
     ///   or tallied run the dilution applied differs from this share. An
     ///   interval the covariance grid spans with a variance of zero counts as
     ///   uncovered: ENDF/B-VIII.1 W186 ``(n,gamma)`` states zero from 1e-5 eV
-    ///   to 10 keV, where nearly all of its capture rate is.
+    ///   to 10 keV, where nearly all of its capture rate is. Every consumed
+    ///   self-covariance block counts where it states a nonzero variance,
+    ///   relative (LB=1 to 6), absolute (LB=0) and short-range (LB=8) alike.
     /// - ``partials_above_rate``: per nuclide and channel, where the partial
     ///   rates the covariance was weighted with, zero variance intervals
     ///   included, add up to more than the rate it was divided by, their
@@ -652,6 +654,11 @@ impl PyTransmutationResults {
     ///   rightly leaves its partials short.
     /// - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
     ///   covariance blocks that were present but not consumed.
+    /// - ``malformed_blocks``: covariance blocks not consumed because they
+    ///   break ENDF-102's rules for their layout: arrays that disagree with
+    ///   their declared sizes, an LB=0 to 2 block carrying a second energy
+    ///   table, an LB=3 or 4 block without one or whose tables share no
+    ///   energy range, or an LB=8 variance stated between two reactions.
     /// - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
     ///   covariance was not positive semi-definite and had to be repaired.
     /// - ``rates_sampled``: cross-section rate draws made. Each is a lognormal
