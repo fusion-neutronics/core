@@ -15,15 +15,17 @@
 //!     (B / 2) * (response(E) / mu_material(E)) * S         [effective dose]
 //! ```
 //!
-//! summed over lines and over nuclides, where `mu_material` is the linear
-//! attenuation coefficient [1/cm] of the material itself, `response` is the
-//! mass energy-absorption coefficient of air [cm^2/g] or the ICRP-116
-//! effective-dose coefficient [pSv cm^2], and `B` is a build-up factor
-//! standing in for the photons that scatter in the slab and still arrive.
+//! summed over lines and over nuclides, and integrated over energy for a
+//! continuum, where `mu_material` is the linear attenuation coefficient [1/cm]
+//! of the material itself, `response` is the mass energy-absorption
+//! coefficient of air [cm^2/g] or the ICRP-116 effective-dose coefficient
+//! [pSv cm^2], and `B` is a build-up factor standing in for the photons that
+//! scatter in the slab and still arrive.
 //!
 //! This follows the FISPACT-II manual (UKAEA-CCFE-RE(21)02, Appendix C.7.1) for
-//! the absorbed-air quantity, and matches what OpenMC's
-//! `Material.get_photon_contact_dose_rate` computes.
+//! the absorbed-air quantity. For photon lines it matches what OpenMC's
+//! `Material.get_photon_contact_dose_rate` computes. A continuum is integrated
+//! exactly under its evaluated interpolation law.
 //!
 //! Two things it does not model: bremsstrahlung from decay electrons, which
 //! matters at contact for strong beta emitters, and any nuclide whose radiation
@@ -39,7 +41,7 @@ use yamc_nuclide::data::effective_dose::{
 use yamc_nuclide::data::photon_attenuation::{
     mass_attenuation_coefficient, mass_energy_absorption_air, CoefficientTable,
 };
-use yani::{ChainNuclide, DecaySourceDistribution};
+use yani::{ChainNuclide, Continuum, DecaySourceDistribution};
 
 /// Electron-volt to joule conversion (2019 SI redefinition).
 const EV_TO_J: f64 = 1.602_176_634e-19;
@@ -61,6 +63,16 @@ const SV_PER_PSV: f64 = 1.0e-12;
 
 /// Half the photons emitted anywhere in a half-space head towards its surface.
 const SLAB_GEOMETRY_FACTOR: f64 = 0.5;
+
+/// The eight-point Gauss-Legendre rule on [-1, 1], as (node, weight) for the
+/// positive nodes; the negative ones mirror them. Exact for polynomials up to
+/// degree 15.
+const GAUSS_LEGENDRE_8: [(f64, f64); 4] = [
+    (0.183_434_642_495_649_8, 0.362_683_783_378_362),
+    (0.525_532_409_916_329, 0.313_706_645_877_887_3),
+    (0.796_666_477_413_626_7, 0.222_381_034_453_374_5),
+    (0.960_289_856_497_536_3, 0.101_228_536_290_376_3),
+];
 
 /// The dose quantity a contact dose rate is expressed in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +182,75 @@ fn response_function(quantity: DoseQuantity) -> CoefficientTable {
     }
 }
 
+/// The dose weight's zeroth and first moments over each interval of a grid:
+/// `(midpoint, integral of w, integral of (E - midpoint) w)`.
+///
+/// A continuum is constant or linear between its own points, so on an interval
+/// inside one of them its density is exactly `value + slope * (E - midpoint)`,
+/// and its fold against the weight is `value * m0 + slope * m1`. The law is
+/// then read exactly and only the weight is left to a quadrature. The weight
+/// is a ratio of log-log tables, each smooth between its own points, and the
+/// grid holds every one of those points, so on each interval it is smooth and
+/// the eight-point rule converges to rounding.
+fn weight_moments(grid: &[f64], weight: impl Fn(f64) -> f64) -> Vec<(f64, f64, f64)> {
+    grid.windows(2)
+        .map(|interval| {
+            let (mid, half) = (
+                0.5 * (interval[0] + interval[1]),
+                0.5 * (interval[1] - interval[0]),
+            );
+            let (mut m0, mut m1) = (0.0, 0.0);
+            for (node, w) in GAUSS_LEGENDRE_8 {
+                for offset in [-half * node, half * node] {
+                    let value = w * weight(mid + offset);
+                    m0 += value;
+                    m1 += value * offset;
+                }
+            }
+            (mid, half * m0, half * m1)
+        })
+        .collect()
+}
+
+/// Every energy a continuum fold has to break at inside `[lowest, highest]`:
+/// the response's and each element's tabulated points, and each continuum's
+/// own points and the ends of its part of the range.
+fn fold_grid(
+    response: &CoefficientTable,
+    attenuation: &LinearAttenuation,
+    continua: &[(usize, Continuum<'_>)],
+    lowest: f64,
+    highest: f64,
+) -> Vec<f64> {
+    let tables = std::iter::once(response.energy())
+        .chain(attenuation.terms.iter().map(|(_, table)| table.energy()))
+        .chain(continua.iter().map(|(_, c)| c.energies()));
+    let mut grid: Vec<f64> = tables
+        .flatten()
+        .copied()
+        .filter(|e| *e > lowest && *e < highest)
+        .chain(
+            continua
+                .iter()
+                .flat_map(|(_, c)| clipped_range(c, lowest, highest)),
+        )
+        .collect();
+    grid.push(lowest);
+    grid.push(highest);
+    grid.sort_by(f64::total_cmp);
+    grid.dedup();
+    grid
+}
+
+/// The part of a continuum's range inside `[lowest, highest]`, as its two ends.
+fn clipped_range(continuum: &Continuum<'_>, lowest: f64, highest: f64) -> [f64; 2] {
+    let energies = continuum.energies();
+    [
+        energies[0].max(lowest),
+        energies[energies.len() - 1].min(highest),
+    ]
+}
+
 /// The unit conversion that turns the folded integral into a dose rate.
 fn multiplier(quantity: DoseQuantity, build_up: f64) -> f64 {
     let common = build_up * SLAB_GEOMETRY_FACTOR * SECONDS_PER_HOUR * BARN_PER_CM_SQ;
@@ -199,6 +280,20 @@ fn multiplier(quantity: DoseQuantity, build_up: f64) -> f64 {
 /// 20 MeV. Nuclides that contribute nothing -- stable ones, ones the chain does
 /// not know, ones with no photon lines in range -- are omitted from the map
 /// rather than returned as zero.
+///
+/// A continuum is integrated over its part of that range, its density read
+/// exactly under its law (see [`weight_moments`]). The part below or above the
+/// range is left out, as a line there is, and nothing reports it: for the
+/// JEFF-4.0 Cf252 continuum, which starts at 0 eV, it is 3.3e-4 of the
+/// continuum's emission below 10 keV and 3.3e-6 below 1 keV (see
+/// `yani-convert/tests/decay_continuum.rs`). A continuum this build cannot
+/// integrate is an `Err` naming the nuclide rather than a smaller dose: one
+/// with no stated law, one tabulated under a law other than histogram or
+/// linear-linear, and a hand-built one whose lists are unpaired, whose
+/// energies are not finite or descend, or whose densities are negative or
+/// not finite. Its integral is unknown, and leaving it out would
+/// understate the answer by an unknown amount. A continuum wholly outside the
+/// range needs no law and adds nothing, as a line there does.
 ///
 /// Units follow `quantity`: Gy/h for [`DoseQuantity::AbsorbedAir`], Sv/h for
 /// [`DoseQuantity::Effective`].
@@ -237,7 +332,11 @@ pub fn contact_dose_by_nuclide(
     let mut names: Vec<&String> = atom_densities.keys().collect();
     names.sort();
 
-    let mut doses = HashMap::new();
+    // The line fold of each nuclide, and the continua to fold after it. The
+    // continua wait because their weight moments are taken once, over the
+    // union of every continuum's grid, rather than once per nuclide.
+    let mut folds: Vec<(&String, f64, f64)> = Vec::new();
+    let mut continua: Vec<(usize, Continuum<'_>)> = Vec::new();
     for name in names {
         let density = atom_densities[name];
         if density <= 0.0 {
@@ -252,22 +351,75 @@ pub fn contact_dose_by_nuclide(
             if source.particle != "photon" {
                 continue;
             }
-            let DecaySourceDistribution::Discrete {
-                energies,
-                intensities,
-            } = &source.distribution;
-            for (&energy, &intensity) in energies.iter().zip(intensities) {
-                if intensity <= 0.0 || energy < lowest || energy > highest {
-                    continue;
+            match &source.distribution {
+                DecaySourceDistribution::Discrete {
+                    energies,
+                    intensities,
+                } => {
+                    for (&energy, &intensity) in energies.iter().zip(intensities) {
+                        if intensity <= 0.0 || energy < lowest || energy > highest {
+                            continue;
+                        }
+                        let mut term =
+                            response.interpolate(energy) / attenuation.at(energy) * intensity;
+                        if weigh_by_energy {
+                            term *= energy;
+                        }
+                        folded += term;
+                    }
                 }
-                let mut term = response.interpolate(energy) / attenuation.at(energy) * intensity;
-                if weigh_by_energy {
-                    term *= energy;
+                DecaySourceDistribution::Tabular {
+                    energies,
+                    intensities,
+                    interpolation,
+                } => {
+                    let (Some(&first), Some(&last)) = (energies.first(), energies.last()) else {
+                        continue;
+                    };
+                    if last <= lowest || first >= highest {
+                        continue;
+                    }
+                    let continuum =
+                        Continuum::new(energies, intensities, *interpolation).map_err(|why| {
+                            format!(
+                                "The decay photon continuum of {name} {why}. A contact dose \
+                                 without it would be understated by an unknown amount."
+                            )
+                        })?;
+                    continua.push((folds.len(), continuum));
                 }
-                folded += term;
             }
         }
+        folds.push((name, density, folded));
+    }
 
+    if !continua.is_empty() {
+        let grid = fold_grid(&response, &attenuation, &continua, lowest, highest);
+        let moments = weight_moments(&grid, |energy| {
+            let w = response.interpolate(energy) / attenuation.at(energy);
+            if weigh_by_energy {
+                w * energy
+            } else {
+                w
+            }
+        });
+        for (fold, continuum) in &continua {
+            // Both ends are grid points, so the intervals between them are
+            // exactly the continuum's part of the range.
+            let [start, end] = clipped_range(continuum, lowest, highest);
+            let first = grid.partition_point(|&e| e < start);
+            let last = grid.partition_point(|&e| e < end);
+            let mut integral = 0.0;
+            for &(mid, m0, m1) in &moments[first..last] {
+                let (value, slope) = continuum.value_and_slope(mid);
+                integral += value * m0 + slope * m1;
+            }
+            folds[*fold].2 += integral;
+        }
+    }
+
+    let mut doses = HashMap::new();
+    for (name, density, folded) in folds {
         let dose = folded * density * multiplier;
         if dose > 0.0 {
             doses.insert(name.clone(), dose);
@@ -508,6 +660,253 @@ mod tests {
         assert!(
             (effective / 3.807_282_670_9e2 - 1.0).abs() < 1e-9,
             "effective dose {effective} Sv/h differs from OpenMC's 380.72826709"
+        );
+    }
+
+    /// Iron with a trace of Fe59 carrying only a synthetic continuum, so the
+    /// material and the emitter are one element and the weight on every grid
+    /// interval is a single power law, which integrates in closed form.
+    fn iron_with_a_continuum(
+        energies: Vec<f64>,
+        densities: Vec<f64>,
+        interpolation: Option<yani::Interpolation>,
+    ) -> (HashMap<String, f64>, HashMap<String, ChainNuclide>) {
+        let mut chain = HashMap::new();
+        for (name, sources) in [
+            ("Fe56", vec![]),
+            (
+                "Fe59",
+                vec![DecaySource {
+                    particle: "photon".to_string(),
+                    distribution: DecaySourceDistribution::Tabular {
+                        energies,
+                        intensities: densities,
+                        interpolation,
+                    },
+                }],
+            ),
+        ] {
+            chain.insert(
+                name.to_string(),
+                ChainNuclide {
+                    name: name.to_string(),
+                    half_life: (name == "Fe59").then_some(3.84e6),
+                    decay_energy: 0.0,
+                    reactions: vec![],
+                    decays: vec![],
+                    fission_yields: None,
+                    sources,
+                    half_life_uncertainty: None,
+                    decay_energy_uncertainty: None,
+                    decay_energy_components: Default::default(),
+                },
+            );
+        }
+        let densities = HashMap::from([
+            ("Fe56".to_string(), 0.084_912),
+            ("Fe59".to_string(), 1.0e-6),
+        ]);
+        (densities, chain)
+    }
+
+    /// Irregular points across the whole tabulated range, with a jump, and
+    /// reaching past both ends of it.
+    fn synthetic_continuum() -> (Vec<f64>, Vec<f64>) {
+        (
+            vec![
+                500.0, 2.5e3, 7.3e3, 7.3e3, 2.0e4, 8.8e4, 3.1e5, 1.0e6, 2.7e6, 9.0e6, 3.0e7,
+            ],
+            vec![
+                1.0e-9, 4.0e-8, 2.0e-8, 6.0e-8, 3.0e-8, 1.0e-8, 4.0e-9, 1.5e-9, 3.0e-10, 2.0e-11,
+                0.0,
+            ],
+        )
+    }
+
+    /// The fold in closed form: on each interval of the union grid the weight
+    /// is the power law through its end values and the density is linear, so
+    /// the integral of their product is two power-law integrals.
+    fn closed_form_fold(
+        densities: &HashMap<String, f64>,
+        chain: &HashMap<String, ChainNuclide>,
+        quantity: DoseQuantity,
+    ) -> f64 {
+        let DecaySourceDistribution::Tabular {
+            energies,
+            intensities,
+            interpolation,
+        } = &chain["Fe59"].sources[0].distribution
+        else {
+            unreachable!()
+        };
+        let continuum = Continuum::new(energies, intensities, *interpolation).unwrap();
+        let attenuation = linear_attenuation(densities).unwrap();
+        let response = response_function(quantity);
+        let (lowest, highest) = (
+            response
+                .min_energy()
+                .max(attenuation.terms[0].1.min_energy()),
+            response
+                .max_energy()
+                .min(attenuation.terms[0].1.max_energy()),
+        );
+        let weight = |e: f64| {
+            let w = response.interpolate(e) / attenuation.at(e);
+            if quantity == DoseQuantity::AbsorbedAir {
+                w * e
+            } else {
+                w
+            }
+        };
+        let grid = fold_grid(&response, &attenuation, &[(0, continuum)], lowest, highest);
+        let mut total = 0.0;
+        for interval in grid.windows(2) {
+            let (a, b) = (interval[0], interval[1]);
+            // An absorption edge's two energies are one ulp apart, and the
+            // interval between them holds nothing.
+            if b / a - 1.0 < 1e-12 {
+                continue;
+            }
+            let (wa, r) = (weight(a), b / a);
+            let p = (weight(b) / wa).ln() / r.ln();
+            let (value, slope) = continuum.value_and_slope(0.5 * (a + b));
+            let at_a = value - slope * 0.5 * (b - a);
+            let power = |k: f64| a * (r.powf(p + k) - 1.0) / (p + k);
+            // density = at_a + slope (E - a) = (at_a - slope a) + slope E.
+            total += wa * ((at_a - slope * a) * power(1.0) + slope * a * power(2.0));
+        }
+        total * densities["Fe59"] * multiplier(quantity, 2.0)
+    }
+
+    /// The continuum fold agrees with the closed form under both laws and for
+    /// both quantities, which is what "read exactly" means here: the law is
+    /// taken as the evaluation states it, and the quadrature of the weight
+    /// leaves nothing above rounding.
+    #[test]
+    fn a_continuum_folds_to_its_closed_form() {
+        for law in [
+            yani::Interpolation::Histogram,
+            yani::Interpolation::LinearLinear,
+        ] {
+            for quantity in [DoseQuantity::AbsorbedAir, DoseQuantity::Effective] {
+                let (energies, values) = synthetic_continuum();
+                let (densities, chain) = iron_with_a_continuum(energies, values, Some(law));
+                let dose = contact_dose_total(&densities, &chain, quantity, 2.0).unwrap();
+                let expected = closed_form_fold(&densities, &chain, quantity);
+                assert!(
+                    (dose / expected - 1.0).abs() < 1e-14,
+                    "{law:?} {quantity:?}: {dose} != {expected}"
+                );
+            }
+        }
+    }
+
+    /// The eight-point rule is exact through degree 15, which pins every node
+    /// and weight to rounding.
+    #[test]
+    fn the_quadrature_rule_is_exact_through_degree_fifteen() {
+        for degree in 0..16 {
+            let integral: f64 = GAUSS_LEGENDRE_8
+                .iter()
+                .map(|(x, w)| w * (x.powi(degree) + (-x).powi(degree)))
+                .sum();
+            let exact = if degree % 2 == 0 {
+                2.0 / (degree as f64 + 1.0)
+            } else {
+                0.0
+            };
+            assert!(
+                (integral - exact).abs() < 4e-16,
+                "degree {degree}: {integral} != {exact}"
+            );
+        }
+    }
+
+    /// Halving every interval moves nothing: the rule has converged on a
+    /// material whose weight is a sum over elements, where no closed form
+    /// exists.
+    #[test]
+    fn the_weight_moments_have_converged_on_a_mixture() {
+        let densities = HashMap::from([
+            ("Fe56".to_string(), 0.06),
+            ("Cr52".to_string(), 0.016),
+            ("Ni58".to_string(), 0.008),
+            ("W184".to_string(), 1.0e-4),
+        ]);
+        let attenuation = linear_attenuation(&densities).unwrap();
+        let response = response_function(DoseQuantity::AbsorbedAir);
+        let (energies, values) = synthetic_continuum();
+        let continuum =
+            Continuum::new(&energies, &values, Some(yani::Interpolation::LinearLinear)).unwrap();
+        let (lowest, highest) = (1.0e3, 2.0e7);
+        let grid = fold_grid(&response, &attenuation, &[(0, continuum)], lowest, highest);
+        let halved: Vec<f64> = grid
+            .windows(2)
+            .flat_map(|w| [w[0], 0.5 * (w[0] + w[1])])
+            .chain([highest])
+            .collect();
+        let weight = |e: f64| response.interpolate(e) / attenuation.at(e) * e;
+        let fold = |grid: &[f64]| -> f64 {
+            weight_moments(grid, weight)
+                .iter()
+                .map(|&(mid, m0, m1)| {
+                    let (value, slope) = continuum.value_and_slope(mid);
+                    value * m0 + slope * m1
+                })
+                .sum()
+        };
+        let (once, twice) = (fold(&grid), fold(&halved));
+        assert!(
+            (once / twice - 1.0).abs() < 1e-14,
+            "{once} vs {twice} on the halved grid"
+        );
+    }
+
+    /// A continuum whose law the chain does not state stops the dose rather
+    /// than leaving itself out of it, and says which nuclide and why.
+    #[test]
+    fn a_continuum_without_a_law_is_an_error_naming_it() {
+        let (energies, values) = synthetic_continuum();
+        let (densities, chain) = iron_with_a_continuum(energies, values, None);
+        let error =
+            contact_dose_total(&densities, &chain, DoseQuantity::AbsorbedAir, 2.0).unwrap_err();
+        assert!(error.contains("Fe59"), "{error}");
+        assert!(error.contains("interpolation"), "{error}");
+    }
+
+    /// Outside the tabulated range a continuum adds nothing, as a line there
+    /// does, and needs no law to add nothing.
+    #[test]
+    fn a_continuum_outside_the_tabulated_range_needs_no_law() {
+        let (densities, chain) = iron_with_a_continuum(vec![2.5e7, 3.0e7], vec![1.0, 1.0], None);
+        let doses =
+            contact_dose_by_nuclide(&densities, &chain, DoseQuantity::AbsorbedAir, 2.0).unwrap();
+        assert!(doses.is_empty(), "{doses:?}");
+    }
+
+    /// The per-eV values of a continuum are not line intensities. Read as lines
+    /// they gave a dose smaller by roughly the grid spacing in eV, which is the
+    /// defect issue #163 describes.
+    #[test]
+    fn a_continuum_is_not_its_values_read_as_lines() {
+        let (energies, values) = synthetic_continuum();
+        let (densities, mut chain) = iron_with_a_continuum(
+            energies.clone(),
+            values.clone(),
+            Some(yani::Interpolation::Histogram),
+        );
+        let as_continuum =
+            contact_dose_total(&densities, &chain, DoseQuantity::AbsorbedAir, 2.0).unwrap();
+        chain.get_mut("Fe59").unwrap().sources[0].distribution =
+            DecaySourceDistribution::Discrete {
+                energies,
+                intensities: values,
+            };
+        let as_lines =
+            contact_dose_total(&densities, &chain, DoseQuantity::AbsorbedAir, 2.0).unwrap();
+        assert!(
+            as_continuum > 1e3 * as_lines,
+            "continuum {as_continuum}, lines {as_lines}"
         );
     }
 
