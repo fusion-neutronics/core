@@ -1,9 +1,9 @@
 //! Host-side packing for D1S (Direct-1-Step) decay-photon production.
 //!
 //! D1S replaces the prompt secondary-photon yields of a coupled run with
-//! *decay* gamma lines: at every neutron collision the kernel emits one photon
-//! whose energy is a discrete decay line of an activation/transmutation product
-//! and whose weight is scaled by the decay photon-production yield. Each emitted
+//! *decay* photons: at every neutron collision the kernel emits one photon
+//! whose energy is drawn from the decay photon spectrum (lines or a continuum)
+//! of an activation/transmutation product and whose weight is scaled by the decay photon-production yield. Each emitted
 //! photon is tagged with the *parent radionuclide* (the chain emitter), so a
 //! `parent_nuclides` tally filter can bin the photon flux per radionuclide for
 //! the host-side time-correction-factor (TCF) post-processing.
@@ -20,8 +20,24 @@
 //! `channel_xs[i_grid]` across ALL the material's channels. Each channel's
 //! `xs` row is the macroscopic `N_n * micro_rxn_xs * yield_constant`, so the
 //! aggregate `photon_prod[g] == sum over channels of ch_xs[ch_row + g]`. The
-//! selected channel supplies the discrete energy line (sampled from its
-//! cumulative intensity table) and the parent-nuclide id stamped on the photon.
+//! selected channel supplies the photon energy and the parent-nuclide id
+//! stamped on the photon.
+//!
+//! # Channel spectra
+//!
+//! A channel holds either discrete lines or one continuum, and the high bits
+//! of its packed count say which ([`DECAY_SPECTRUM_SHIFT`]):
+//!
+//! - lines: `count` energies, each beside its cumulative intensity
+//!   (normalized to 1.0 at the last line);
+//! - a histogram or linear-linear continuum of `count` points: a span of
+//!   `2 * count` entries. The first `count` hold the energies beside the
+//!   running integral at each point (0.0 at the first, 1.0 at the last); the
+//!   next `count` hold the density divided by the integral, in the CDF array,
+//!   beside 0.0 padding in the energy array. The kernel picks the interval by
+//!   the running integral and inverts it exactly inside, as the CPU's
+//!   `sample_continuum_energy` does, so a continuum's photons are drawn from
+//!   its density instead of being dropped or read as lines.
 //!
 //! This reproduces the CPU joint (parent, energy) distribution in expectation;
 //! it is statistically (not bit-) equal, the same acceptance class as the
@@ -47,6 +63,18 @@
 /// `[pp_base, ch_base, ch_count]`.
 pub const DECAY_META_COLS: usize = 3;
 
+/// A channel of discrete lines.
+pub const DECAY_SPECTRUM_LINES: u32 = 0;
+/// A channel holding a histogram (ENDF INT=1) continuum.
+pub const DECAY_SPECTRUM_HISTOGRAM: u32 = 1;
+/// A channel holding a linear-linear (ENDF INT=2) continuum.
+pub const DECAY_SPECTRUM_LINEAR_LINEAR: u32 = 2;
+/// The spectrum kind sits in the packed count's bits from here up; the bits
+/// below are the count.
+pub const DECAY_SPECTRUM_SHIFT: u32 = 30;
+/// The count bits of a packed count.
+pub const DECAY_COUNT_MASK: u32 = (1u32 << DECAY_SPECTRUM_SHIFT) - 1;
+
 /// Per-material decay-photon table for ONE material, built on the host from the
 /// per-nuclide `DecayPhotonNuclideData` aggregated by atom density. Concatenated
 /// into [`DecayPhotonInputs`] by [`DecayPhotonInputs::from_materials`].
@@ -63,16 +91,28 @@ pub struct MaterialDecayTable {
     /// Per-channel parent-nuclide id (the chain emitter's `NuclideId.get()`,
     /// widened to u32). One per channel.
     pub ch_parent_id: Vec<u32>,
-    /// Per-channel discrete decay-line energies [eV], concatenated channel-major.
-    /// Channel `c`'s lines start at `ch_e_base[c]`, count `ch_e_count[c]`.
+    /// Per-channel spectrum energies [eV], concatenated channel-major, laid
+    /// out as the module docs describe. Channel `c` starts at `ch_e_base[c]`.
     pub ch_energies: Vec<f64>,
-    /// Per-channel cumulative intensity CDF (normalized to 1.0 at the last
-    /// line), concatenated channel-major, parallel to `ch_energies`.
+    /// Per-channel cumulative intensity CDF, and for a continuum its
+    /// normalized densities, concatenated channel-major, parallel to
+    /// `ch_energies`.
     pub ch_intensity_cdf: Vec<f64>,
     /// Per-channel base offset into `ch_energies` / `ch_intensity_cdf`.
     pub ch_e_base: Vec<u32>,
-    /// Per-channel line count.
+    /// Per-channel line count, or a continuum's point count.
     pub ch_e_count: Vec<u32>,
+    /// Per-channel spectrum kind, one of the `DECAY_SPECTRUM_*` constants.
+    pub ch_e_kind: Vec<u32>,
+}
+
+/// The entries a channel occupies in `ch_energies` / `ch_intensity_cdf`.
+pub fn decay_spectrum_span(kind: u32, count: u32) -> usize {
+    if kind == DECAY_SPECTRUM_LINES {
+        count as usize
+    } else {
+        2 * count as usize
+    }
 }
 
 impl MaterialDecayTable {
@@ -115,14 +155,15 @@ pub struct DecayPhotonInputs {
     pub ch_xs: Vec<f64>,
     /// Per-channel parent-nuclide id (widened `NuclideId.get()`), concatenated.
     pub ch_parent_id: Vec<u32>,
-    /// GLOBAL per-channel discrete-line `[base, count]` into `ch_energies` /
-    /// `ch_intensity_cdf`, interleaved (stride 2) and concatenated. Channel `c`
-    /// (global) reads `ch_e_meta[c*2]` / `ch_e_meta[c*2 + 1]`.
+    /// GLOBAL per-channel `[base, count | kind << DECAY_SPECTRUM_SHIFT]` into
+    /// `ch_energies` / `ch_intensity_cdf`, interleaved (stride 2) and
+    /// concatenated. Channel `c` (global) reads `ch_e_meta[c*2]` /
+    /// `ch_e_meta[c*2 + 1]`.
     pub ch_e_meta: Vec<u32>,
-    /// Per-channel discrete decay-line energies [eV], concatenated.
+    /// Per-channel spectrum energies [eV], concatenated.
     pub ch_energies: Vec<f64>,
-    /// Per-channel cumulative intensity CDF, concatenated, parallel to
-    /// `ch_energies`.
+    /// Per-channel cumulative intensity CDF and continuum densities,
+    /// concatenated, parallel to `ch_energies`.
     pub ch_intensity_cdf: Vec<f64>,
     /// Packed per-material metadata, `[mat * DECAY_META_COLS + col]`:
     /// col 0 = `pp_base` (aggregate-row offset into `photon_prod`, element
@@ -156,8 +197,8 @@ impl DecayPhotonInputs {
     /// Concatenate per-material [`MaterialDecayTable`]s into the flat kernel
     /// buffers and set the gate flag to `1` (decay ON). Every table must share
     /// the same `n_grid` (the shared log-energy grid the kernel uses). The
-    /// per-channel `[base, count]` discrete-energy metadata is rewritten GLOBAL
-    /// as each channel's lines are concatenated.
+    /// per-channel `[base, count | kind]` spectrum metadata is rewritten GLOBAL
+    /// as each channel's spectrum is concatenated.
     pub fn from_materials(tables: &[MaterialDecayTable], n_grid: usize) -> Self {
         let n_mat = tables.len().max(1);
         let mut out = DecayPhotonInputs {
@@ -198,10 +239,15 @@ impl DecayPhotonInputs {
             for c in 0..t.n_channels() {
                 let global_base = out.ch_energies.len() as u32;
                 let count = t.ch_e_count[c];
+                let kind = t.ch_e_kind[c];
+                assert!(
+                    count <= DECAY_COUNT_MASK,
+                    "decay photon channel with {count} points overflows the packed count"
+                );
                 out.ch_e_meta.push(global_base);
-                out.ch_e_meta.push(count);
+                out.ch_e_meta.push(count | (kind << DECAY_SPECTRUM_SHIFT));
                 let local_base = t.ch_e_base[c] as usize;
-                let local_end = local_base + count as usize;
+                let local_end = local_base + decay_spectrum_span(kind, count);
                 out.ch_energies
                     .extend_from_slice(&t.ch_energies[local_base..local_end]);
                 out.ch_intensity_cdf
@@ -263,6 +309,7 @@ mod tests {
             ch_intensity_cdf: vec![0.4, 1.0],
             ch_e_base: vec![0],
             ch_e_count: vec![2],
+            ch_e_kind: vec![DECAY_SPECTRUM_LINES],
         };
         // Material 1: two channels, 1 + 3 lines.
         let mat1 = MaterialDecayTable {
@@ -273,6 +320,7 @@ mod tests {
             ch_intensity_cdf: vec![1.0, 0.3, 0.6, 1.0],
             ch_e_base: vec![0, 1],
             ch_e_count: vec![1, 3],
+            ch_e_kind: vec![DECAY_SPECTRUM_LINES; 2],
         };
         let d = DecayPhotonInputs::from_materials(&[mat0, mat1], n_grid);
 
@@ -293,5 +341,34 @@ mod tests {
             vec![100.0, 200.0, 300.0, 400.0, 500.0, 600.0]
         );
         assert_eq!(d.ch_intensity_cdf, vec![0.4, 1.0, 1.0, 0.3, 0.6, 1.0]);
+    }
+
+    /// A continuum channel carries twice its point count, and its kind rides
+    /// in the packed count so the kernel can tell it from lines.
+    #[test]
+    fn a_continuum_channel_packs_its_kind_and_both_halves() {
+        let table = MaterialDecayTable {
+            photon_prod: vec![2.0],
+            ch_xs: vec![1.0, 1.0],
+            ch_parent_id: vec![3, 5],
+            ch_energies: vec![100.0, 1.0e3, 2.0e3, 3.0e3, 0.0, 0.0, 0.0],
+            ch_intensity_cdf: vec![1.0, 0.0, 0.4, 1.0, 4.0e-4, 4.0e-4, 8.0e-4],
+            ch_e_base: vec![0, 1],
+            ch_e_count: vec![1, 3],
+            ch_e_kind: vec![DECAY_SPECTRUM_LINES, DECAY_SPECTRUM_LINEAR_LINEAR],
+        };
+        let d = DecayPhotonInputs::from_materials(&[table], 1);
+        assert_eq!(
+            d.ch_e_meta,
+            vec![
+                0,
+                1,
+                1,
+                3 | (DECAY_SPECTRUM_LINEAR_LINEAR << DECAY_SPECTRUM_SHIFT)
+            ]
+        );
+        assert_eq!(d.ch_e_meta[3] & DECAY_COUNT_MASK, 3);
+        assert_eq!(d.ch_energies.len(), 7);
+        assert_eq!(d.ch_intensity_cdf[4..], [4.0e-4, 4.0e-4, 8.0e-4]);
     }
 }
