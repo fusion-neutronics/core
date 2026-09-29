@@ -304,14 +304,24 @@ fn covariance_mts(material: &Material) -> Vec<i32> {
 /// one section may name the same (MAT1, MT1), which is why the position is
 /// carried explicitly instead of being recovered from the keys.
 ///
-/// A section with a nonzero MTL and no subsections is a lumped reaction's
-/// component, and its one row is its HEAD. One with subsections is written
-/// block by block whatever its MTL, which every row then carries, so no
-/// section's MTL is lost either way.
-fn push_section(rows: &mut Rows, mat: i32, mt: i32, mf33: &Mf33) {
-    if mf33.mtl != 0 && mf33.subsections.is_empty() {
+/// A section with a nonzero MTL is a lumped reaction's component, and its one
+/// row is its HEAD. ENDF-102 33.2.3 gives such a section no subsections
+/// (NL=0), and one that has them is refused: the lump's component list is read
+/// off these HEAD rows, and a component that also stated a covariance of its
+/// own would leave the fold no exact reading of either.
+fn push_section(rows: &mut Rows, mat: i32, mt: i32, mf33: &Mf33) -> Result<(), Box<dyn Error>> {
+    if mf33.mtl != 0 {
+        if !mf33.subsections.is_empty() {
+            return Err(format!(
+                "MAT {mat} MF=33 MT={mt} is a component of lumped reaction MT={} but has {} \
+                 subsections; ENDF-102 33.2.3 requires NL=0 for a lumped reaction's component",
+                mf33.mtl,
+                mf33.subsections.len()
+            )
+            .into());
+        }
         rows.push_lumped(mat, mt, mf33.mtl);
-        return;
+        return Ok(());
     }
     for (subsection_idx, sub) in mf33.subsections.iter().enumerate() {
         let mut block_idx = 0;
@@ -348,6 +358,7 @@ fn push_section(rows: &mut Rows, mat: i32, mt: i32, mf33: &Mf33) {
             block_idx += 1;
         }
     }
+    Ok(())
 }
 
 /// Write `covariance.arrow`, one row per covariance block.
@@ -362,7 +373,7 @@ pub fn write_covariance(material: &Material, dir: &Path) -> Result<bool, Box<dyn
     let mut rows = Rows::default();
     for mt in covariance_mts(material) {
         if let Some(mf33) = material.mf33(mt) {
-            push_section(&mut rows, material.mat, mt, mf33);
+            push_section(&mut rows, material.mat, mt, mf33)?;
         }
     }
 
@@ -376,4 +387,30 @@ pub fn write_covariance(material: &Material, dir: &Path) -> Result<bool, Box<dyn
         rows.columns(),
     )?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use endf::mf::covariance::Mf33Subsection;
+
+    /// A lumped reaction's component is its HEAD alone. One that also carries
+    /// subsections is out of format and refused, not written as blocks whose
+    /// lump the fold would never see.
+    #[test]
+    fn a_component_with_subsections_is_refused() {
+        let mut rows = Rows::default();
+        let head = Mf33 {
+            mtl: 852,
+            ..Mf33::default()
+        };
+        push_section(&mut rows, 7443, 16, &head).expect("a HEAD alone is a component");
+        assert_eq!(rows.mtl, [Some(852)]);
+        let with_blocks = Mf33 {
+            subsections: vec![Mf33Subsection::default()],
+            ..head
+        };
+        let err = push_section(&mut rows, 7443, 16, &with_blocks).unwrap_err();
+        assert!(err.to_string().contains("NL=0"), "{err}");
+    }
 }

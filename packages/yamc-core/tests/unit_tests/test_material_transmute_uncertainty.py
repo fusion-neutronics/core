@@ -159,6 +159,7 @@ def test_skipped_block_counters_are_per_nuclide_dicts():
             assert all(isinstance(name, str) for name in pair), (channel, pair)
     for lump, components in info["lumped_covariance_not_assignable"].items():
         nuclide, mtl = lump.split(" ")
+        assert nuclide[:1].isupper() and nuclide.isalnum(), lump
         assert 851 <= int(mtl.removeprefix("MT")) <= 870, lump
         assert isinstance(components, list) and len(components) > 1, (lump, components)
     if "Fe56" not in info["perturbed"]:

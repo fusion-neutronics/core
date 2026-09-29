@@ -235,7 +235,8 @@ mod tests {
     }
 
     /// Only a component's own section names the lump it belongs to: a block
-    /// carrying a nonzero `mtl` is still a block.
+    /// carrying a nonzero `mtl` is still a block. Conversion refuses such a
+    /// section (ENDF-102 33.2.3 gives a component NL=0), so none is written.
     #[test]
     fn only_a_component_section_is_lumped() {
         let mut b = block(7443, 0, 0.0);
