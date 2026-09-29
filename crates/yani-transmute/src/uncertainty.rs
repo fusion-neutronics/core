@@ -208,7 +208,9 @@ pub struct Info {
     /// Per nuclide, blocks correlating one of its channels with a reaction of
     /// another evaluation, not consumed. A `mat1` naming the nuclide's own MAT
     /// is its own evaluation and is folded, and a block on a reaction the
-    /// chain does not drive is not counted.
+    /// chain does not drive is not counted. The partner is not checked: a
+    /// block is counted whether or not the evaluation `mat1` names is in the
+    /// run.
     pub skipped_cross_material: BTreeMap<String, usize>,
     /// Per nuclide, blocks correlating one of its channels with a quantity
     /// that is not a cross section (`xmf1` other than 0 or 3), not consumed.
@@ -319,10 +321,12 @@ pub struct Info {
     /// Every input the answer depends on and no source here samples, whether
     /// the data carries an uncertainty for it or not. MF=33 blocks that were
     /// present but could not be used are counted in `skipped_cross_material`,
-    /// `skipped_nc`, `unsupported_layouts` and `malformed_blocks`. A block for
-    /// a reaction the chain does not drive (a partial-level section such as
-    /// MT=600-849) is neither listed nor counted: the chain has no rate for it
-    /// to be the uncertainty of.
+    /// `skipped_other_file`, `skipped_nc`, `unsupported_layouts` and
+    /// `malformed_blocks`. A pair stored in both orientations is used once,
+    /// and a second copy that disagrees with the first is reported in
+    /// `mirrored_disagree`. A block for a reaction the chain does not drive (a
+    /// partial-level section such as MT=600-849) is neither listed nor
+    /// counted: the chain has no rate for it to be the uncertainty of.
     pub not_perturbed: Vec<String>,
     /// Which sources this run perturbed, by name.
     pub sources: Vec<String>,
@@ -354,6 +358,7 @@ impl Info {
                 "fission yield",
                 "isomeric branching (MF=9/MF=10)",
                 "covariance with another evaluation (MAT1 naming another material)",
+                "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
                 "NC-derived covariance (MF=33 NC)",
                 "lumped-reaction covariance (MF=33 MT=851-870)",
                 "resonance-parameter covariance (MF=32)",
@@ -858,6 +863,7 @@ mod tests {
             "fission yield",
             "isomeric branching (MF=9/MF=10)",
             "covariance with another evaluation (MAT1 naming another material)",
+            "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
             "NC-derived covariance (MF=33 NC)",
             "lumped-reaction covariance (MF=33 MT=851-870)",
             "resonance-parameter covariance (MF=32)",

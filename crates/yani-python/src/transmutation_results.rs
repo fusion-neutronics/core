@@ -654,8 +654,10 @@ impl PyTransmutationResults {
     /// - ``skipped_cross_material``: per nuclide, blocks on a channel the
     ///   chain drives that correlate it with another evaluation, not
     ///   consumed. A block naming the nuclide's own MAT is its own evaluation
-    ///   and is folded. ``skipped_other_file``: the same for blocks whose
-    ///   partner is not a cross section.
+    ///   and is folded. The partner is not checked, so a block is counted
+    ///   whether or not the evaluation it names is in the run.
+    ///   ``skipped_other_file``: the same for blocks whose partner is not a
+    ///   cross section.
     /// - ``mirrored_disagree``: keyed ``"Nuclide (n,a) (n,b)"``, where a pair
     ///   stored in both orientations has copies that are not each other's
     ///   transpose, the largest difference relative to the largest entry.

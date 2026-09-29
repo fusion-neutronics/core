@@ -624,10 +624,12 @@ class DataUncertainty:
     
     - decay branching ratios, fission yields, and the isomeric-branching
       overlay from MF=9/MF=10;
-    - covariance correlating two evaluations (MAT1 naming another material), covariance derived
-      from other sections (MF=33 NC), the lumped-reaction covariance
-      (MT=851-870) and the resonance-parameter covariance (MF=32), so only the
-      explicit MF=33 blocks of each reaction are sampled;
+    - covariance correlating two evaluations (MAT1 naming another material),
+      covariance with a quantity that is not a cross section (XMF1 not 0 or
+      3), covariance derived from other sections (MF=33 NC), the
+      lumped-reaction covariance (MT=851-870) and the resonance-parameter
+      covariance (MF=32), so only the explicit MF=33 blocks of each reaction
+      are sampled;
     - the self-shielding correction, when ``self_shielding_chord`` or
       ``self_shielding_shape`` is given: the shielded flux is built once from
       the nominal cross sections and reused by every replica;
@@ -5221,8 +5223,10 @@ class TransmutationResults:
         - ``skipped_cross_material``: per nuclide, blocks on a channel the
           chain drives that correlate it with another evaluation, not
           consumed. A block naming the nuclide's own MAT is its own evaluation
-          and is folded. ``skipped_other_file``: the same for blocks whose
-          partner is not a cross section.
+          and is folded. The partner is not checked, so a block is counted
+          whether or not the evaluation it names is in the run.
+          ``skipped_other_file``: the same for blocks whose partner is not a
+          cross section.
         - ``mirrored_disagree``: keyed ``"Nuclide (n,a) (n,b)"``, where a pair
           stored in both orientations has copies that are not each other's
           transpose, the largest difference relative to the largest entry.

@@ -131,8 +131,12 @@ pub struct Coverage {
     /// Only genuine ones: a `mat1` naming this evaluation's own MAT is this
     /// evaluation (ENDF-102 33.3.1) and is folded. Only relevant ones: a block
     /// on a reaction the chain does not drive is not counted, since there is
-    /// no rate for it to be the uncertainty of. Per nuclide rather than a sum,
-    /// so a run with several spectra counts each block once.
+    /// no rate for it to be the uncertainty of. Relevant on this nuclide's
+    /// side only: a block is counted whether or not the evaluation `mat1`
+    /// names is in the run, since a MAT is known only from a covariance block
+    /// and a partner in the run with no covariance of its own would have none
+    /// to match. Per nuclide rather than a sum, so a run with several spectra
+    /// counts each block once.
     pub skipped_cross_material: BTreeMap<String, usize>,
     /// Per nuclide, its blocks correlating one of its channels with a
     /// quantity of this evaluation that is not a cross section (`xmf1` other
@@ -993,8 +997,10 @@ fn fold_nuclide(
 
     for block in blocks {
         // Whether this nuclide has a rate for the block's own reaction. The
-        // partner's is checked below for this evaluation's blocks; another
-        // evaluation's partner is not this nuclide's to check.
+        // partner's is checked below for this evaluation's blocks. Another
+        // evaluation's partner is not: its MAT is known only if it has
+        // covariance blocks of its own, so a partner in the run without any
+        // could not be told from one that is absent.
         let drives_row = index.contains_key(&block.mt) && reactions.contains_key(&block.mt);
         if block.is_cross_material() {
             if drives_row {
