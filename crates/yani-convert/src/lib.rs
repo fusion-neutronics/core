@@ -33,7 +33,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow_array::builder::{Float64Builder, Int32Builder, ListBuilder, StringBuilder};
-use arrow_array::{ArrayRef, RecordBatch};
+use arrow_array::{ArrayRef, Int32Array, RecordBatch};
 use arrow_ipc::writer::{FileWriter, IpcWriteOptions};
 use arrow_ipc::CompressionType;
 use arrow_schema::{ArrowError, Schema};
@@ -323,6 +323,23 @@ pub fn write_decay(
         floats(&rows.iter().map(|(_, row)| f(row)).collect::<Vec<_>>())
     };
     let nuclides: Vec<String> = rows.iter().map(|(name, _)| (*name).clone()).collect();
+    // LS and LB are flags of a few values, but they are I11 fields on the
+    // tape, so one past i32 is refused rather than wrapped.
+    let flag = |name: &str, what: &str, v: i64| -> Result<i32, Box<dyn Error>> {
+        i32::try_from(v)
+            .map_err(|_| format!("{name}: decay covariance {what} {v} does not fit in i32").into())
+    };
+    let mut ls = Vec::with_capacity(rows.len());
+    let mut lb = Vec::with_capacity(rows.len());
+    for (name, row) in &rows {
+        let c = row.covariance.as_ref();
+        ls.push(
+            c.and_then(|c| c.ls)
+                .map(|v| flag(name, "LS", v))
+                .transpose()?,
+        );
+        lb.push(c.map(|c| flag(name, "LB", c.lb)).transpose()?);
+    }
     write_section(
         &dir.join("sources.arrow"),
         "decay/sources.arrow",
@@ -338,9 +355,8 @@ pub fn write_decay(
             numbers(|r| r.normalization.1),
             lists(|r| r.intensity_uncertainties.as_ref()),
             lists(|r| r.energy_uncertainties.as_ref()),
-            // LS and LB are flags of a few values, written in I11 fields.
-            ints(|r| r.covariance.as_ref().and_then(|c| c.ls).map(|ls| ls as i32)),
-            ints(|r| r.covariance.as_ref().map(|c| c.lb as i32)),
+            Arc::new(Int32Array::from(ls)),
+            Arc::new(Int32Array::from(lb)),
             lists(|r| r.covariance.as_ref().map(|c| &c.energies)),
             lists(|r| r.covariance.as_ref().map(|c| &c.values)),
         ],
