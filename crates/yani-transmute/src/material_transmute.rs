@@ -3090,4 +3090,59 @@ mod tests {
             );
         }
     }
+
+    /// A half-life-only `ChainEdits` makes exactly the chain the pre-edit
+    /// replica path built with `with_half_lives` (still D1S's), so moving the
+    /// half-life draw onto the shared edit path changes no replica.
+    #[test]
+    fn half_life_only_edits_match_with_half_lives() {
+        let nuclide = |name: &str, half_life: f64| ChainNuclide {
+            name: name.to_string(),
+            half_life: Some(half_life),
+            decay_energy: 1.0e5,
+            reactions: Vec::new(),
+            decays: vec![ChainReaction {
+                kind: "beta-".to_string(),
+                target: Some("Ni60".to_string()),
+                branching: 1.0,
+                q_value: None,
+                branching_uncertainty: None,
+            }],
+            fission_yields: None,
+            sources: vec![yani::DecaySource {
+                particle: "photon".to_string(),
+                distribution: yani::DecaySourceDistribution::Discrete {
+                    energies: vec![1.17e6, 1.33e6],
+                    intensities: vec![0.9985 * std::f64::consts::LN_2 / half_life, 4.2e-9],
+                },
+            }],
+            half_life_uncertainty: Some(0.01 * half_life),
+            decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
+        };
+        let chain: HashMap<String, ChainNuclide> = HashMap::from([
+            ("Co60".to_string(), nuclide("Co60", 1.663e8)),
+            ("Mn56".to_string(), nuclide("Mn56", 9.284e3)),
+        ]);
+        let sampled = HashMap::from([
+            ("Co60".to_string(), 1.671e8),
+            // A drawn nuclide the pruned chain does not carry is skipped.
+            ("Fe59".to_string(), 3.84e6),
+        ]);
+        let edits = ChainEdits {
+            half_lives: sampled.clone(),
+            decay_branchings: HashMap::new(),
+        };
+        let got = edits.apply(&chain);
+        let want = crate::uncertainty::with_half_lives(&chain, &sampled);
+        assert_eq!(got.len(), want.len());
+        for (name, cn) in &want {
+            assert_eq!(
+                format!("{cn:?}"),
+                format!("{:?}", got[name]),
+                "{name} differs"
+            );
+        }
+        assert_ne!(format!("{:?}", got["Co60"]), format!("{:?}", chain["Co60"]));
+    }
 }

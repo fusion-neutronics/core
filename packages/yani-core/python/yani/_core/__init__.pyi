@@ -275,9 +275,10 @@ class DataUncertainty:
     Held at their nominal values, with uncertainties of their own that this
     does not propagate:
     
-    - the decay branching ratios the sum rule does not fix (see
-      ``"decay_branching"``), and the per-decay photon lines and decay energy
-      of a drawn parent, which follow its nominal branching;
+    - the decay branching ratios ``"decay_branching"`` does not sample (three
+      or more modes, unequal sigmas, too wide to sample untruncated, or no
+      sigma), and the per-decay photon lines and decay energy of a drawn
+      parent, which follow its nominal branching;
     - fission yields and the isomeric-branching overlay from MF=9/MF=10;
     - covariance correlating two evaluations (MAT1 != 0), covariance derived
       from other sections (MF=33 NC), the lumped-reaction covariance
