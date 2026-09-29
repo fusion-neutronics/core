@@ -663,6 +663,16 @@ impl PyTransmutationResults {
     ///   FENDL-3.2d and TENDL-2017 H2 ``(n,2n)`` is ``σ_1 - σ_2 - σ_102`` and
     ///   folds to about 22% at 14 MeV and thousands of percent near
     ///   threshold, the tape's literal statement. Counted in ``has_gaps``.
+    /// - ``lumped_covariance_not_assignable``: keyed ``"Nuclide MT852"``, a
+    ///   lumped reaction (MT 851-870) with several components, to their
+    ///   kinds (``"MT41"`` for one that is not a channel). ENDF-102 33.2.3
+    ///   states its covariance for the sum of the components and for none of
+    ///   them, so it is not folded: ENDF/B-VIII.1, FENDL-3.2d and JEFF-4.0
+    ///   W180 to W186 give ``(n,2n)`` only as MT 852, the sum of MT 16 and
+    ///   41. A lump with one component is that component, and its covariance
+    ///   is folded as the component's. Listed where the fold reaches a
+    ///   component, or the reaction holding one as a level (MT 103 for MT
+    ///   600 to 649, and so on). Counted in ``has_gaps``.
     /// - ``unsupported_layouts``: covariance blocks that were present but not
     ///   consumed, counted once per spectrum, so a run over several spectra
     ///   counts the same block once for each.

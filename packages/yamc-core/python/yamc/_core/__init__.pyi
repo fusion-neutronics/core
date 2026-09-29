@@ -628,11 +628,14 @@ class DataUncertainty:
       covariance with a quantity that is not a cross section (XMF1 not 0 or
       3), covariance derived from other sections by an NC block that cannot
       be derived (LTY 1-4, or an LTY=0 block counted in ``skipped_nc``), the
-      lumped-reaction covariance (MT=851-870) and the resonance-parameter
-      covariance (MF=32). What is sampled is each reaction's explicit MF=33
-      blocks, and for a reaction an LTY=0 NC block states as a sum of others
-      (ENDF/B-VIII.1 O16 (n,p) as MT 600 to 603), the covariance derived from
-      the named reactions' own blocks and the cross blocks between them;
+      covariance of a lumped reaction (MT=851-870) with several components,
+      listed in ``lumped_covariance_not_assignable``, and the
+      resonance-parameter covariance (MF=32). What is sampled is each
+      reaction's explicit MF=33 blocks, the blocks of a lumped reaction whose
+      one component it is, and for a reaction an LTY=0 NC block states as a
+      sum of others (ENDF/B-VIII.1 O16 (n,p) as MT 600 to 603), the covariance
+      derived from the named reactions' own blocks and the cross blocks
+      between them;
     - the self-shielding correction, when ``self_shielding_chord`` or
       ``self_shielding_shape`` is given: the shielded flux is built once from
       the nominal cross sections and reused by every replica;
@@ -5235,6 +5238,16 @@ class TransmutationResults:
           FENDL-3.2d and TENDL-2017 H2 ``(n,2n)`` is ``σ_1 - σ_2 - σ_102`` and
           folds to about 22% at 14 MeV and thousands of percent near
           threshold, the tape's literal statement. Counted in ``has_gaps``.
+        - ``lumped_covariance_not_assignable``: keyed ``"Nuclide MT852"``, a
+          lumped reaction (MT 851-870) with several components, to their
+          kinds (``"MT41"`` for one that is not a channel). ENDF-102 33.2.3
+          states its covariance for the sum of the components and for none of
+          them, so it is not folded: ENDF/B-VIII.1, FENDL-3.2d and JEFF-4.0
+          W180 to W186 give ``(n,2n)`` only as MT 852, the sum of MT 16 and
+          41. A lump with one component is that component, and its covariance
+          is folded as the component's. Listed where the fold reaches a
+          component, or the reaction holding one as a level (MT 103 for MT
+          600 to 649, and so on). Counted in ``has_gaps``.
         - ``unsupported_layouts``: covariance blocks that were present but not
           consumed, counted once per spectrum, so a run over several spectra
           counts the same block once for each.

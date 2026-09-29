@@ -129,8 +129,10 @@ def test_skipped_block_counters_are_per_nuclide_dicts():
     a nuclide to its count, ``mirrored_disagree`` maps
     ``"Nuclide (n,a) (n,b)"`` to a relative difference, and
     ``derived_opposing_uncorrelated`` maps ``"Nuclide kind"`` to a list of
-    ``[a, b]`` reaction pairs. Their shape is checked on every run, and is
-    empty when the fixture carries no covariance.arrow.
+    ``[a, b]`` reaction pairs, and ``lumped_covariance_not_assignable`` maps
+    ``"Nuclide MT852"`` to the lumped reaction's components. Their shape is
+    checked on every run, and is empty when the fixture carries no
+    covariance.arrow.
     """
     iron = _iron()
     results = iron.transmute(
@@ -139,7 +141,8 @@ def test_skipped_block_counters_are_per_nuclide_dicts():
     )
     info = results.get_data_uncertainty_info(iron.id or 0)
     counters = ("skipped_cross_material", "skipped_other_file", "skipped_nc")
-    for key in (*counters, "mirrored_disagree", "derived_opposing_uncorrelated"):
+    maps = ("mirrored_disagree", "derived_opposing_uncorrelated", "lumped_covariance_not_assignable")
+    for key in (*counters, *maps):
         assert isinstance(info[key], dict), f"{key} is {type(info[key])}"
         assert all(isinstance(k, str) for k in info[key]), info[key]
     for key in counters:
@@ -154,12 +157,17 @@ def test_skipped_block_counters_are_per_nuclide_dicts():
         for pair in pairs:
             assert isinstance(pair, list) and len(pair) == 2, (channel, pair)
             assert all(isinstance(name, str) for name in pair), (channel, pair)
+    for lump, components in info["lumped_covariance_not_assignable"].items():
+        nuclide, mtl = lump.split(" ")
+        assert 851 <= int(mtl.removeprefix("MT")) <= 870, lump
+        assert isinstance(components, list) and len(components) > 1, (lump, components)
     if "Fe56" not in info["perturbed"]:
         assert info["skipped_cross_material"] == {}
         assert info["skipped_other_file"] == {}
         assert info["skipped_nc"] == {}
         assert info["mirrored_disagree"] == {}
         assert info["derived_opposing_uncorrelated"] == {}
+        assert info["lumped_covariance_not_assignable"] == {}
 
 
 def test_the_report_names_what_is_never_perturbed():

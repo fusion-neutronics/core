@@ -71,6 +71,7 @@
 //! Nearly all of a capture rate comes from there, so the coverage counts only
 //! rate from energies whose stated variance is nonzero.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use endf::mf::covariance::NiSubsection;
@@ -312,6 +313,28 @@ pub struct Coverage {
     /// sigma is read as the tape's literal statement and not as a measured
     /// one. Counted as a gap.
     pub derived_opposing_uncorrelated: BTreeMap<(String, String), BTreeSet<(String, String)>>,
+    /// Per (nuclide, lumped MT), a lumped reaction whose covariance the fold
+    /// could not give to any reaction, with its components by kind (`MT<n>`
+    /// for one that is not a channel).
+    ///
+    /// ENDF-102 33.2.3 states a lumped reaction's covariance, MT 851-870, for
+    /// the SUM of its components and none for each of them. A lump with one
+    /// component is that component, and the fold reads its blocks as the
+    /// component's ([`single_component_lumps`]). With several, splitting the
+    /// sum's covariance among them would need an assumption the evaluation
+    /// does not make, so it is listed here and not folded. ENDF/B-VIII.1,
+    /// FENDL-3.2d and JEFF-4.0 W180 to W186 give `(n,2n)` only as MT 852,
+    /// the sum of MT 16 and 41.
+    ///
+    /// Only lumps with a block of their own, and only where the fold reaches
+    /// a component: a channel, a reaction one is derived from, or a level of
+    /// one (MT 51-91 of MT 4, 600-649 of MT 103, and so on to 875-891 of MT
+    /// 16), since a channel's rate holds its levels'. So W186 MT 855, the
+    /// sum of MT 600 and 649, is listed wherever `(n,p)` is a channel. A
+    /// channel whose covariance is lumped this way may have none of its own,
+    /// so it can also appear with no stated variance at all. Counted as a
+    /// gap.
+    pub lumped_covariance_not_assignable: BTreeMap<(String, i32), BTreeSet<String>>,
     /// The production this spectrum drove, each channel's weighted by its
     /// share in [`Coverage::rate_fraction_covered`], and the production it
     /// drove in total. Both are per barn-cm per second, and both are weighted
@@ -387,7 +410,8 @@ impl Coverage {
     /// `rate_fraction_covered` is keyed by (nuclide, kind) and takes the
     /// smaller claim, `partials_above_rate` takes the larger excess and
     /// `partials_below_rate` the larger shortfall, the smaller ratio, and
-    /// `derived_opposing_uncorrelated` unions its pairs. That is what lets
+    /// `derived_opposing_uncorrelated` and `lumped_covariance_not_assignable`
+    /// union theirs. That is what lets
     /// the fold below run per nuclide in parallel and merge afterwards (issue
     /// #576, finding 5c).
     pub fn absorb(&mut self, other: Coverage) {
@@ -440,6 +464,12 @@ impl Coverage {
                 .or_default()
                 .extend(pairs);
         }
+        for (key, components) in other.lumped_covariance_not_assignable {
+            self.lumped_covariance_not_assignable
+                .entry(key)
+                .or_default()
+                .extend(components);
+        }
         self.covered_production += other.covered_production;
         self.total_production += other.total_production;
     }
@@ -456,6 +486,7 @@ impl Coverage {
             || !self.partials_above_rate.is_empty()
             || !self.partials_below_rate.is_empty()
             || !self.derived_opposing_uncorrelated.is_empty()
+            || !self.lumped_covariance_not_assignable.is_empty()
     }
 }
 
@@ -1384,6 +1415,10 @@ pub(crate) fn reachable_mts(
     chain_nuclide: &ChainNuclide,
     blocks: &[CovarianceBlock],
 ) -> BTreeSet<i32> {
+    // As the fold reads them, so an NC block naming a single-component lump
+    // asks for the component.
+    let blocks = single_component_lumps(blocks);
+    let blocks = blocks.as_ref();
     let mut reached: BTreeSet<i32> = kinds_and_mts(chain_nuclide)
         .into_iter()
         .map(|(_, mt)| mt)
@@ -1410,6 +1445,89 @@ pub(crate) fn reachable_mts(
         }
     }
     reached
+}
+
+/// The lumped reactions an evaluation defines, each MTL with its components,
+/// read off the components' own sections ([`CovarianceBlock::lumped_into`]).
+fn lumped_reactions(blocks: &[CovarianceBlock]) -> BTreeMap<i32, BTreeSet<i32>> {
+    let mut out: BTreeMap<i32, BTreeSet<i32>> = BTreeMap::new();
+    for block in blocks {
+        if let Some(mtl) = block.lumped_into() {
+            out.entry(mtl).or_default().insert(block.mt);
+        }
+    }
+    out
+}
+
+/// The blocks, with every lumped reaction that has a single component read
+/// as that component.
+///
+/// ENDF-102 33.2.3 defines a lumped reaction as the sum of its components, so
+/// with one component the two are one cross section and the lump's blocks
+/// are the component's covariance, exactly: its own blocks, its cross blocks
+/// with other reactions, and the LTY=0 NC blocks naming it. The fold has a
+/// cross section for the component and none for MT 851-870, which the format
+/// keeps out of Files 3 to 6, so the lump is renamed rather than left
+/// unreached. The component's own section is its HEAD alone, so nothing is
+/// stated for it twice, and that section's row is dropped here, having been
+/// read. Only this evaluation's references are renamed: an `mt1` beside
+/// another material's `mat1` is that material's MT.
+///
+/// Borrowed unchanged when no lump has a single component. On the local
+/// ENDF/B-VIII.1, FENDL-3.2d, JEFF-4.0, JENDL-5.0, TENDL-2017 and TENDL-2025
+/// tapes that is every evaluation but Li7, which gives MT 51 as MT 852 and
+/// MT 56 as MT 854 in all four libraries that lump at all.
+pub(crate) fn single_component_lumps(blocks: &[CovarianceBlock]) -> Cow<'_, [CovarianceBlock]> {
+    let alias: BTreeMap<i32, i32> = lumped_reactions(blocks)
+        .into_iter()
+        .filter(|(_, components)| components.len() == 1)
+        .filter_map(|(mtl, components)| components.first().map(|&c| (mtl, c)))
+        .collect();
+    if alias.is_empty() {
+        return Cow::Borrowed(blocks);
+    }
+    let read = |mt: i32| alias.get(&mt).copied().unwrap_or(mt);
+    Cow::Owned(
+        blocks
+            .iter()
+            .filter(|b| !b.lumped_into().is_some_and(|mtl| alias.contains_key(&mtl)))
+            .map(|b| {
+                let mut b = b.clone();
+                b.mt = read(b.mt);
+                if b.is_same_evaluation() {
+                    // `mt1 == 0` means `mt` itself, and stays so.
+                    b.mt1 = read(b.mt1);
+                    if let CovarianceData::Nc(nc) = &mut b.data {
+                        if nc.lty == 0 {
+                            for x in &mut nc.xmti {
+                                let mt = *x as i32;
+                                if f64::from(mt) == *x {
+                                    *x = f64::from(read(mt));
+                                }
+                            }
+                        }
+                    }
+                }
+                b
+            })
+            .collect(),
+    )
+}
+
+/// The redundant reaction whose cross section holds level `mt`, per ENDF-102
+/// Appendix B.1: MT 4 holds 51 to 91, MT 103 to 107 the levels of each emitted
+/// particle, and MT 16 its levels 875 to 891.
+fn level_sum(mt: i32) -> Option<i32> {
+    match mt {
+        51..=91 => Some(4),
+        600..=649 => Some(103),
+        650..=699 => Some(104),
+        700..=749 => Some(105),
+        750..=799 => Some(106),
+        800..=849 => Some(107),
+        875..=891 => Some(16),
+        _ => None,
+    }
 }
 
 /// The named reactions' rate over a derivation's range, over the rate of the
@@ -1535,6 +1653,8 @@ fn fold_nuclide(
     if n == 0 {
         return None;
     }
+    let blocks = single_component_lumps(blocks);
+    let blocks = blocks.as_ref();
     let expansion = channel_terms(blocks, reactions, kinds);
     let skipped = expansion.skipped();
     if skipped > 0 {
@@ -1554,6 +1674,28 @@ fn fold_nuclide(
             .map(|(kind, _)| kind.clone())
             .unwrap_or_else(|| format!("MT{mt}"))
     };
+
+    // A lumped reaction with several components states the covariance of
+    // their sum and of none of them. Reported whether or not anything else
+    // folds, since the channel it would have covered may have nothing else.
+    for (mtl, components) in lumped_reactions(blocks) {
+        if components.len() < 2 {
+            continue;
+        }
+        let stated = blocks.iter().any(|b| {
+            b.lumped_into().is_none()
+                && (b.mt == mtl || (b.is_same_evaluation() && b.partner_mt() == mtl))
+        });
+        let reaches = components
+            .iter()
+            .any(|&c| reached.contains(&c) || level_sum(c).is_some_and(|s| reached.contains(&s)));
+        if stated && reaches {
+            coverage.lumped_covariance_not_assignable.insert(
+                (nuclide.to_string(), mtl),
+                components.iter().map(|&c| name(c)).collect(),
+            );
+        }
+    }
 
     // Absolute covariance, in (1/s)^2, before relativizing.
     let mut absolute = vec![0.0; n * n];
@@ -3876,5 +4018,306 @@ mod nc_derived_tests {
             let within = partial_rates_within(&flux(), &rx, &GRID, Scale::Relative, range);
             assert_eq!(within.per_interval, whole);
         }
+    }
+}
+
+#[cfg(test)]
+mod lumped_tests {
+    //! Lumped reactions (ENDF-102 33.2.3): MT 851-870 state the covariance of
+    //! the sum of their components, which are named only on the components'
+    //! own HEAD records. One component is that component; several are
+    //! reported and not folded.
+
+    use super::*;
+    use endf::mf::covariance::NcSubsection;
+
+    const BOUNDARIES: [f64; 4] = [1.0e-5, 1.0, 1.0e6, 2.0e7];
+    const FLUX: [f64; 3] = [1.0e10, 1.0e11, 1.0e12];
+    const GRID: [f64; 3] = [1.0e-5, 1.0e4, 2.0e7];
+    const N2N: i32 = 16;
+    const CAPTURE: i32 = 102;
+    const NP: i32 = 103;
+
+    fn flux() -> FluxDensity<'static> {
+        FluxDensity {
+            boundaries: &BOUNDARIES,
+            flux: &FLUX,
+            shape: None,
+        }
+    }
+
+    fn reaction(mt: i32) -> Reaction {
+        let k = f64::from(mt % 100 + 1);
+        Reaction {
+            cross_section: vec![k, 0.5 * k, 0.1 * k * k].into(),
+            threshold_idx: 0,
+            energy: vec![1.0e-5, 1.0e5, 2.0e7].into(),
+            mt_number: mt,
+            q_value: 0.0,
+            products: vec![],
+            scatter_in_cm: false,
+            redundant: false,
+        }
+    }
+
+    fn with(mt: i32, mt1: i32, data: CovarianceData) -> CovarianceBlock {
+        CovarianceBlock {
+            mt,
+            subsection_idx: 0,
+            block_idx: 0,
+            mat1: 0,
+            mt1,
+            xmf1: 0.0,
+            xlfs1: 0.0,
+            mtl: 0,
+            mat: 7443,
+            data,
+        }
+    }
+
+    /// Reaction `mt`'s section when it is a component of `mtl`: its HEAD
+    /// and nothing else, as `covariance.arrow` reads it back.
+    fn component(mt: i32, mtl: i32) -> CovarianceBlock {
+        CovarianceBlock {
+            mat1: 0,
+            mt1: 0,
+            mtl,
+            ..with(mt, 0, CovarianceData::Lumped)
+        }
+    }
+
+    /// `lb = 5`, `ls = 1` on `GRID`, upper triangle `[a, b, c]`.
+    fn own(mt: i32, upper: [f64; 3]) -> CovarianceBlock {
+        let ni = NiSubsection {
+            lb: 5,
+            ls: 1,
+            ne: GRID.len() as i64,
+            ek: GRID.to_vec(),
+            fkk: upper.to_vec(),
+            ..Default::default()
+        };
+        with(mt, mt, CovarianceData::Ni(ni))
+    }
+
+    /// `lb = 5`, `ls = 0` on `GRID`: `mt` with `mt1`, row-major.
+    fn cross(mt: i32, mt1: i32, full: [f64; 4]) -> CovarianceBlock {
+        let ni = NiSubsection {
+            lb: 5,
+            ls: 0,
+            ne: GRID.len() as i64,
+            ek: GRID.to_vec(),
+            fkk: full.to_vec(),
+            ..Default::default()
+        };
+        with(mt, mt1, CovarianceData::Ni(ni))
+    }
+
+    /// An LTY=0 block over the whole axis, `σ_mt = Σ c_i σ_mt_i`.
+    fn nc(mt: i32, terms: &[(f64, i32)]) -> CovarianceBlock {
+        let data = NcSubsection {
+            lty: 0,
+            e1: 1.0e-5,
+            e2: 2.0e7,
+            nci: terms.len() as i64,
+            ci: terms.iter().map(|t| t.0).collect(),
+            xmti: terms.iter().map(|t| f64::from(t.1)).collect(),
+            ..Default::default()
+        };
+        with(mt, mt, CovarianceData::Nc(data))
+    }
+
+    fn kind(mt: i32) -> &'static str {
+        match mt {
+            N2N => "(n,2n)",
+            CAPTURE => "(n,gamma)",
+            NP => "(n,p)",
+            _ => unreachable!("not a channel here"),
+        }
+    }
+
+    /// Fold `blocks` for W186 with `channels` driven and a cross section for
+    /// every MT in `present`.
+    fn fold(
+        blocks: &[CovarianceBlock],
+        channels: &[i32],
+        present: &[i32],
+    ) -> (Option<RateCovariance>, Coverage) {
+        let rxs: Vec<Reaction> = present.iter().map(|&mt| reaction(mt)).collect();
+        let reactions: BTreeMap<i32, &Reaction> = present.iter().copied().zip(&rxs).collect();
+        let kinds: Vec<(String, i32)> = channels
+            .iter()
+            .map(|&mt| (kind(mt).to_string(), mt))
+            .collect();
+        let rates: BTreeMap<String, f64> = kinds
+            .iter()
+            .map(|(k, mt)| {
+                let full =
+                    BARN_TO_CM2 * flux().integrate_xs(reactions[mt], BOUNDARIES[0], BOUNDARIES[3]);
+                (k.clone(), full)
+            })
+            .collect();
+        let mut coverage = Coverage::default();
+        let folded = fold_nuclide(
+            &flux(),
+            blocks,
+            &reactions,
+            &kinds,
+            &rates,
+            "W186",
+            &mut coverage,
+        );
+        (folded, coverage)
+    }
+
+    const U: [f64; 3] = [0.01, 0.004, 0.0225];
+    const V: [f64; 3] = [0.04, -0.01, 0.09];
+    const X: [f64; 4] = [0.003, 0.001, -0.002, 0.005];
+
+    /// A lump of one reaction is that reaction, so its own and its cross
+    /// blocks fold exactly, bit for bit, as the same numbers written on the
+    /// component would.
+    #[test]
+    fn a_single_component_lump_folds_as_its_component() {
+        let lumped = [
+            component(N2N, 851),
+            own(CAPTURE, V),
+            cross(CAPTURE, 851, X),
+            own(851, U),
+        ];
+        let direct = [own(CAPTURE, V), cross(CAPTURE, N2N, X), own(N2N, U)];
+        let (a, coverage) = fold(&lumped, &[N2N, CAPTURE], &[N2N, CAPTURE]);
+        let (b, direct_coverage) = fold(&direct, &[N2N, CAPTURE], &[N2N, CAPTURE]);
+        let a = a.expect("the lump is the component's covariance");
+        assert_eq!(Some(a.clone()), b);
+        assert!(a.get(0, 1) != 0.0, "the cross block is folded");
+        assert_eq!(coverage, direct_coverage);
+        assert!(!coverage.has_gaps(), "{coverage:?}");
+    }
+
+    /// An NC block naming a single-component lump derives from the
+    /// component, which has the cross section the lump lacks.
+    #[test]
+    fn a_derivation_naming_a_single_component_lump_reads_the_component() {
+        let lumped = [nc(NP, &[(1.0, 851)]), component(600, 851), own(851, U)];
+        let direct = [nc(NP, &[(1.0, 600)]), own(600, U)];
+        let (a, coverage) = fold(&lumped, &[NP], &[NP, 600]);
+        let (b, _) = fold(&direct, &[NP], &[NP, 600]);
+        assert!(a.is_some());
+        assert_eq!(a, b);
+        assert!(coverage.skipped_nc.is_empty(), "{coverage:?}");
+    }
+
+    /// Only this evaluation's MTs are renamed: another material's `mt1`
+    /// that happens to equal the lump's is that material's reaction.
+    #[test]
+    fn another_materials_mt1_is_not_renamed() {
+        let mut other = cross(CAPTURE, 851, X);
+        other.mat1 = 9228;
+        let blocks = [component(N2N, 851), other];
+        let renamed = single_component_lumps(&blocks);
+        assert_eq!(renamed.len(), 1, "the component's HEAD is read and dropped");
+        assert_eq!(renamed[0].mt1, 851);
+    }
+
+    /// W180 to W186 in ENDF/B-VIII.1, FENDL-3.2d and JEFF-4.0 give `(n,2n)`
+    /// only as MT 852 = MT 16 + MT 41. Handing the sum's covariance to 16
+    /// would be an assumption, so nothing folds and the lump is reported.
+    #[test]
+    fn a_lump_of_several_components_is_reported_and_not_folded() {
+        let blocks = [component(N2N, 852), component(41, 852), own(852, U)];
+        let (folded, coverage) = fold(&blocks, &[N2N], &[N2N, 41]);
+        assert!(folded.is_none());
+        let want: BTreeSet<String> = ["(n,2n)", "MT41"].map(String::from).into();
+        assert_eq!(
+            coverage.lumped_covariance_not_assignable,
+            BTreeMap::from([(("W186".to_string(), 852), want)])
+        );
+        assert!(coverage.has_gaps());
+    }
+
+    /// W186 MT 855 is MT 600 + MT 649, the levels `(n,p)` holds, so it is
+    /// the channel's covariance lost even though no component is a channel.
+    #[test]
+    fn a_lump_of_a_channels_levels_is_reported() {
+        let blocks = [component(600, 855), component(649, 855), own(855, U)];
+        let (_, coverage) = fold(&blocks, &[NP], &[NP]);
+        let want: BTreeSet<String> = ["MT600", "MT649"].map(String::from).into();
+        assert_eq!(
+            coverage.lumped_covariance_not_assignable,
+            BTreeMap::from([(("W186".to_string(), 855), want)])
+        );
+    }
+
+    /// A lump no channel reaches has no rate to be the uncertainty of, and
+    /// one with no block of its own states nothing to lose.
+    #[test]
+    fn an_unreached_or_empty_lump_is_not_reported() {
+        let blocks = [component(N2N, 852), component(41, 852), own(852, U)];
+        let (_, coverage) = fold(&blocks, &[CAPTURE], &[CAPTURE]);
+        assert!(coverage.lumped_covariance_not_assignable.is_empty());
+        let blocks = [component(N2N, 852), component(41, 852), own(CAPTURE, V)];
+        let (_, coverage) = fold(&blocks, &[N2N, CAPTURE], &[N2N, CAPTURE]);
+        assert!(coverage.lumped_covariance_not_assignable.is_empty());
+    }
+
+    /// ENDF/B-VIII.1 Li7 lumps MT 51 alone as MT 852 and MT 56 alone as MT
+    /// 854. Those two read as their components, blocks, cross blocks and
+    /// all, and the seven lumps of several components are left as written.
+    #[test]
+    fn endfb_li7_single_component_lumps_read_as_their_components() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let mut raw = Vec::new();
+        lzma_rs::xz_decompress(
+            &mut &include_bytes!("../../endf/fixtures/n-003_Li_007_mf33.endf.xz")[..],
+            &mut raw,
+        )
+        .expect("fixture decompresses");
+        let text = String::from_utf8(raw).expect("ENDF is text");
+        let material = endf::Material::from_str(&text).expect("evaluation parses");
+        assert!(yamc_convert::covariance::write_covariance(&material, tmp.path()).expect("writes"));
+        let blocks = yamc_nuclide::arrow::covariance_arrow::read_covariance(tmp.path(), "Li7")
+            .expect("reads")
+            .expect("the file is there");
+
+        let renamed = single_component_lumps(&blocks);
+        let names = |bs: &[CovarianceBlock], mt: i32| {
+            bs.iter()
+                .filter(|b| b.lumped_into().is_none() && (b.mt == mt || b.partner_mt() == mt))
+                .count()
+        };
+        for (mtl, component) in [(852, 51), (854, 56)] {
+            let stated = names(&blocks, mtl);
+            assert!(stated > 0, "MT {mtl} has blocks");
+            assert_eq!(
+                names(&renamed, mtl),
+                0,
+                "MT {mtl} is read as MT {component}"
+            );
+            assert_eq!(names(&renamed, component), stated);
+            assert!(renamed.iter().all(|b| b.lumped_into() != Some(mtl)));
+        }
+        // Every other lump keeps its own MT, and its components their HEADs.
+        for mtl in [851, 853, 855, 856, 857, 858, 859] {
+            assert_eq!(names(&renamed, mtl), names(&blocks, mtl), "MT {mtl}");
+        }
+        assert_eq!(
+            renamed.iter().filter(|b| b.lumped_into().is_some()).count(),
+            blocks.iter().filter(|b| b.lumped_into().is_some()).count() - 2
+        );
+        assert_eq!(renamed.len(), blocks.len() - 2);
+    }
+
+    /// The fold's report merges across spectra like the rest.
+    #[test]
+    fn the_report_unions_across_spectra() {
+        let key = ("W186".to_string(), 852);
+        let mut a = Coverage::default();
+        a.lumped_covariance_not_assignable
+            .insert(key.clone(), ["(n,2n)".to_string()].into());
+        let mut b = Coverage::default();
+        b.lumped_covariance_not_assignable
+            .insert(key.clone(), ["MT41".to_string()].into());
+        a.absorb(b);
+        assert_eq!(a.lumped_covariance_not_assignable[&key].len(), 2);
     }
 }
