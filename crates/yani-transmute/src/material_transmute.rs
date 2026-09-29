@@ -789,8 +789,6 @@ struct ReplicaOutcome {
     /// The half-lives this replica was solved with, for the nuclides whose
     /// half-life was perturbed; empty when none were.
     half_lives: HashMap<String, f64>,
-    /// Half-life draws that came out non-positive and were floored.
-    half_lives_floored: usize,
     /// Statistically drawn rates that came out negative and were floored.
     statistical_floored: usize,
 }
@@ -1565,7 +1563,6 @@ fn run_replicas(
     let one_replica = |replica: u64| -> Result<ReplicaOutcome, String> {
         let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
         let mut rates_sampled = 0usize;
-        let mut half_lives_floored = 0usize;
         // A statistical draw of the whole tallied rate vector, the partials
         // re-folded into the branching the way the nominal was, so an
         // isomeric split moves with the rates it is made of.
@@ -1581,12 +1578,9 @@ fn run_replicas(
             (totals, chain_k)
         });
         let sampled_half_lives = match &half_life {
-            Some(h) if !h.candidates.is_empty() => crate::uncertainty::sample_half_lives(
-                &h.candidates,
-                request.seed,
-                replica,
-                &mut half_lives_floored,
-            ),
+            Some(h) if !h.candidates.is_empty() => {
+                crate::uncertainty::sample_half_lives(&h.candidates, request.seed, replica)
+            }
             _ => HashMap::new(),
         };
 
@@ -1650,7 +1644,6 @@ fn run_replicas(
             flux_bins_sampled: flux_coverage.bins_sampled,
             flux_bins_floored: flux_coverage.bins_floored,
             half_lives: sampled_half_lives,
-            half_lives_floored,
             statistical_floored,
         })
     };
@@ -1681,7 +1674,6 @@ fn run_replicas(
             flux_coverage.bins_sampled += outcome.flux_bins_sampled;
             flux_coverage.bins_floored += outcome.flux_bins_floored;
             info.half_lives_sampled += outcome.half_lives.len();
-            info.half_lives_floored += outcome.half_lives_floored;
             info.statistical_floored += outcome.statistical_floored;
             if statistical.is_some() {
                 info.statistical_sampled += info.statistical_rates;

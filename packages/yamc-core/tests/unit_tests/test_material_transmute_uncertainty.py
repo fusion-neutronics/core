@@ -610,6 +610,8 @@ def test_asking_for_half_lives_reports_which_were_sampled():
     # Every reachable unstable nuclide is in exactly one of the two lists.
     assert not set(info["half_lives_perturbed"]) & set(info["no_half_life_uncertainty"])
     assert info["half_lives_perturbed"] or info["no_half_life_uncertainty"]
+    # The draw is lognormal, so there is nothing to floor and no count of it.
+    assert "half_lives_floored" not in info
 
 
 

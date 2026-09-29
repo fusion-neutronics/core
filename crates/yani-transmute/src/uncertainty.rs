@@ -34,7 +34,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use yamc_materials::Material;
 
 use crate::covariance_fold::Coverage;
-use crate::covariance_sample::{Repair, SigmaReport};
+use crate::covariance_sample::{lognormal_multiplier, Repair, SigmaReport};
 
 /// One input to the Bateman matrix that can be perturbed.
 ///
@@ -359,12 +359,10 @@ pub struct Info {
     ///
     /// Not a claim that the half-life is exact: the evaluation said nothing.
     pub no_half_life_uncertainty: BTreeSet<String>,
-    /// Sampled half-lives that came out non-positive and were floored.
+    /// Half-life draws made, one per perturbed nuclide per replica.
     ///
-    /// Only possible where the stated sigma is a large share of the half-life
-    /// itself; a count well above zero says the Gaussian is being used past
-    /// where it describes the evaluation.
-    pub half_lives_floored: usize,
+    /// Each is a lognormal matched to the evaluation's mean and sigma, so none
+    /// can go non-positive and there is no floor to count.
     pub half_lives_sampled: usize,
     /// Reachable unstable nuclides whose decay energy was perturbed.
     pub decay_energies_perturbed: BTreeSet<String>,
@@ -763,18 +761,22 @@ pub(crate) fn half_life_candidates(
     (with, without)
 }
 
-/// One replica's half-lives: `T + sigma z` per nuclide, from a stream keyed on
-/// `(seed, replica, nuclide)`.
+/// One replica's half-lives, from a stream keyed on `(seed, replica, nuclide)`.
+///
+/// Each is `T` times a lognormal multiplier with mean 1 and variance
+/// `(sigma / T)^2`, so the draws have the evaluation's mean and standard
+/// deviation exactly and are always positive. `T + sigma z` floored at zero
+/// did neither once the sigma was a large share of `T`: JENDL-5.0 states 120
+/// half-lives with a sigma above half of the value and 31 above all of it,
+/// and every floored draw pulled the mean up.
 ///
 /// Keyed on the name, like the cross sections, so a nuclide draws the same
 /// half-life in every spectrum and every material of a run: one evaluation is
-/// uncertain in one way wherever it is used. A draw at or below zero is
-/// floored at a millionth of the nominal and counted.
+/// uncertain in one way wherever it is used.
 pub(crate) fn sample_half_lives(
     candidates: &[(String, f64, f64)],
     base_seed: u64,
     replica: u64,
-    floored: &mut usize,
 ) -> HashMap<String, f64> {
     let replica_seed = yamc_rng::history_seed(base_seed, replica);
     candidates
@@ -786,12 +788,7 @@ pub(crate) fn sample_half_lives(
             );
             let mut state = yamc_rng::expand_seed(seed);
             let z = crate::covariance_sample::standard_normals(&mut state, 1)[0];
-            let mut sampled = t + sigma * z;
-            if sampled <= 0.0 {
-                *floored += 1;
-                sampled = t * 1.0e-6;
-            }
-            (name.clone(), sampled)
+            (name.clone(), t * lognormal_multiplier(z, sigma / t))
         })
         .collect()
 }
@@ -801,8 +798,11 @@ const DECAY_ENERGY_STREAM: u32 = 0xDEC4_E6E1;
 
 /// One replica's decay energy for one nuclide, and its components, drawn
 /// from each component's own sigma, or from the total's where the data gives
-/// no split. `None` when there is nothing to perturb. A draw below zero is
-/// floored at zero.
+/// no split. `None` when there is nothing to perturb.
+///
+/// Each drawn energy is its nominal times [`lognormal_multiplier`], for the
+/// reason [`sample_half_lives`] gives: the evaluation's mean and sigma exactly,
+/// and never negative, where a Gaussian floored at zero raised the mean.
 pub(crate) fn sample_decay_energy(
     cn: &yani::ChainNuclide,
     base_seed: u64,
@@ -825,7 +825,7 @@ pub(crate) fn sample_decay_energy(
         for (part, z) in parts.iter_mut().zip(z) {
             if let Some(p) = part {
                 if let Some(sigma) = p.uncertainty.filter(|s| *s > 0.0) {
-                    p.energy = (p.energy + sigma * z).max(0.0);
+                    p.energy = scaled(p.energy, sigma, z);
                 }
                 total += p.energy;
             }
@@ -835,9 +835,23 @@ pub(crate) fn sample_decay_energy(
     let sigma = cn.decay_energy_uncertainty.filter(|s| *s > 0.0)?;
     let z = crate::covariance_sample::standard_normals(&mut state, 1)[0];
     Some((
-        (cn.decay_energy + sigma * z).max(0.0),
+        scaled(cn.decay_energy, sigma, z),
         cn.decay_energy_components,
     ))
+}
+
+/// `energy` drawn with standard deviation `sigma` from the standard normal
+/// `z`, as a lognormal with the stated mean and sigma.
+///
+/// An energy of zero is kept at zero: a quantity that cannot be negative and
+/// has a mean of zero is zero in every draw, so no draw can carry the stated
+/// sigma. ENDF/B-VIII.1, JENDL-5.0 and JEFF-4.0 state none on a zero total.
+fn scaled(energy: f64, sigma: f64, z: f64) -> f64 {
+    if energy > 0.0 {
+        energy * lognormal_multiplier(z, sigma / energy)
+    } else {
+        energy
+    }
 }
 
 /// Whether a nuclide's decay energy carries a sigma to sample from.
@@ -1109,5 +1123,150 @@ mod tests {
             !probe.contains_key("trace"),
             "a trace 12 decades down must not decide when to stop"
         );
+    }
+
+    /// Assert `draws` have mean `mean` and standard deviation `sigma`, to five
+    /// standard errors of a lognormal with those two moments.
+    ///
+    /// The tolerance is the lognormal's own: the variance of a sample mean is
+    /// `sigma^2 / n` and of a sample variance `sigma^4 (w^4 + 2w^3 + 3w^2 - 4)
+    /// / n`, with `w = 1 + (sigma / mean)^2`. At a relative sigma of 2 that
+    /// second one is 946 / n, which is why the wide case needs a million draws.
+    fn assert_moments(draws: &[f64], mean: f64, sigma: f64) {
+        let n = draws.len() as f64;
+        let m = draws.iter().sum::<f64>() / n;
+        let var = draws.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / (n - 1.0);
+        let w = 1.0 + (sigma / mean).powi(2);
+        let mean_tol = 5.0 * sigma / n.sqrt();
+        let var_tol = 5.0 * ((w.powi(4) + 2.0 * w.powi(3) + 3.0 * w * w - 4.0) / n).sqrt();
+        assert!(
+            (m - mean).abs() < mean_tol,
+            "mean {m} against {mean}, tolerance {mean_tol}"
+        );
+        assert!(
+            (var / (sigma * sigma) - 1.0).abs() < var_tol,
+            "variance {var} against {}, relative tolerance {var_tol}",
+            sigma * sigma
+        );
+        assert!(draws.iter().all(|x| *x > 0.0), "a draw went non-positive");
+    }
+
+    const RELATIVE_SIGMAS: [f64; 3] = [0.01, 0.5, 2.0];
+    const DRAWS: u64 = 1_000_000;
+
+    #[test]
+    fn half_life_draws_carry_the_stated_mean_and_sigma() {
+        // A Gaussian floored at zero fails this at 0.5 and badly at 2: at a
+        // relative sigma of 2 its mean is 1.40 T, not T.
+        for rel in RELATIVE_SIGMAS {
+            let t = 3600.0;
+            let candidates = vec![("X".to_string(), t, rel * t)];
+            let draws: Vec<f64> = (0..DRAWS)
+                .map(|r| sample_half_lives(&candidates, 5, r)["X"])
+                .collect();
+            assert_moments(&draws, t, rel * t);
+        }
+    }
+
+    #[test]
+    fn decay_energy_draws_carry_the_stated_mean_and_sigma() {
+        let mut cn = stated_as_zero();
+        // The total, where the data gives no split.
+        cn.decay_energy_components = [None; 3];
+        for rel in RELATIVE_SIGMAS {
+            cn.decay_energy_uncertainty = Some(rel * cn.decay_energy);
+            let draws: Vec<f64> = (0..DRAWS)
+                .map(|r| sample_decay_energy(&cn, 5, r).unwrap().0)
+                .collect();
+            assert_moments(&draws, cn.decay_energy, rel * cn.decay_energy);
+        }
+
+        // The components, each from its own sigma, one of each width at once.
+        let energies = [1.5e6, 0.8e6, 5.0e6];
+        for (c, (e, rel)) in cn
+            .decay_energy_components
+            .iter_mut()
+            .zip(energies.iter().zip(RELATIVE_SIGMAS))
+        {
+            *c = Some(yani::DecayEnergyComponent {
+                energy: *e,
+                uncertainty: Some(rel * e),
+            });
+        }
+        let drawn: Vec<_> = (0..DRAWS)
+            .map(|r| sample_decay_energy(&cn, 5, r).unwrap())
+            .collect();
+        for (i, (e, rel)) in energies.iter().zip(RELATIVE_SIGMAS).enumerate() {
+            let draws: Vec<f64> = drawn.iter().map(|d| d.1[i].unwrap().energy).collect();
+            assert_moments(&draws, *e, rel * e);
+        }
+        for (total, parts) in &drawn {
+            let sum: f64 = parts.iter().flatten().map(|p| p.energy).sum();
+            assert_eq!(*total, sum, "the total is its components' sum");
+        }
+    }
+
+    /// At a small relative sigma the lognormal is the Gaussian it replaced to
+    /// first order, `T exp(s z - s^2/2) = T + sigma z + T rel^2 (z^2 - 1) / 2 +
+    /// O(rel^3)`, so a well known half-life samples as it did before. Drawn
+    /// from the same stream and the same `z`, so the seed contract is kept.
+    #[test]
+    fn a_small_sigma_draws_what_the_gaussian_did() {
+        let (t, rel) = (3600.0, 0.01);
+        let candidates = vec![("X".to_string(), t, rel * t)];
+        for replica in 0..10_000 {
+            let replica_seed = yamc_rng::history_seed(5, replica);
+            let seed = yamc_rng::secondary_seed(
+                replica_seed,
+                crate::covariance_sample::name_ordinal("X") ^ HALF_LIFE_STREAM,
+            );
+            let z =
+                crate::covariance_sample::standard_normals(&mut yamc_rng::expand_seed(seed), 1)[0];
+            let gaussian = t + rel * t * z;
+            let drawn = sample_half_lives(&candidates, 5, replica)["X"];
+            let bound = t * rel * rel * (1.0 + z * z);
+            assert!(
+                (drawn - gaussian).abs() < bound,
+                "replica {replica}: {drawn} against {gaussian} with z {z}"
+            );
+        }
+
+        let mut cn = stated_as_zero();
+        cn.decay_energy_components = [None; 3];
+        cn.decay_energy_uncertainty = Some(rel * cn.decay_energy);
+        for replica in 0..10_000 {
+            let replica_seed = yamc_rng::history_seed(5, replica);
+            let seed = yamc_rng::secondary_seed(
+                replica_seed,
+                crate::covariance_sample::name_ordinal(&cn.name) ^ DECAY_ENERGY_STREAM,
+            );
+            let z =
+                crate::covariance_sample::standard_normals(&mut yamc_rng::expand_seed(seed), 1)[0];
+            let gaussian = cn.decay_energy * (1.0 + rel * z);
+            let drawn = sample_decay_energy(&cn, 5, replica).unwrap().0;
+            let bound = cn.decay_energy * rel * rel * (1.0 + z * z);
+            assert!(
+                (drawn - gaussian).abs() < bound,
+                "replica {replica}: {drawn} against {gaussian} with z {z}"
+            );
+        }
+    }
+
+    /// A non-negative energy with a mean of zero is zero in every draw, so a
+    /// sigma stated on one cannot be carried and the energy stays at zero.
+    #[test]
+    fn a_zero_energy_stays_zero() {
+        let mut cn = stated_as_zero();
+        cn.decay_energy_components = [
+            Some(yani::DecayEnergyComponent {
+                energy: 0.0,
+                uncertainty: Some(1.0e3),
+            }),
+            None,
+            None,
+        ];
+        let (total, parts) = sample_decay_energy(&cn, 5, 0).unwrap();
+        assert_eq!(total, 0.0);
+        assert_eq!(parts[0].unwrap().energy, 0.0);
     }
 }

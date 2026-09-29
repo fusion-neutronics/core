@@ -105,8 +105,7 @@ pub fn time_correction_factor_ensemble(
     }
 
     let one = |replica: u64| -> Result<ReplicaTcfs, String> {
-        let mut floored = 0;
-        let sampled = sample_half_lives(&candidates, request.seed, replica, &mut floored);
+        let sampled = sample_half_lives(&candidates, request.seed, replica);
         let chain_k = Arc::new(with_half_lives(chain, &sampled));
         source_rates
             .iter()

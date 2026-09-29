@@ -42,7 +42,10 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 /// own mean and variance, so a sampled rate is never negative and nothing is
 /// floored. The correlated Gaussian deviates are kept (a Gaussian copula), so
 /// the ordering between channels is preserved, but the Pearson correlations
-/// come out weaker than evaluated as the sigmas grow.
+/// come out weaker than evaluated as the sigmas grow. Half-lives and decay
+/// energies are drawn the same way, one nuclide at a time: the decay data
+/// states a mean and a sigma for each and no correlation, so the draws carry
+/// exactly what the evaluation states and are never negative.
 ///
 /// Held at their nominal values, with uncertainties of their own that this
 /// does not propagate:
@@ -344,7 +347,6 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
             .cloned()
             .collect::<Vec<_>>(),
     )?;
-    d.set_item("half_lives_floored", info.half_lives_floored)?;
     d.set_item("half_lives_sampled", info.half_lives_sampled)?;
     d.set_item(
         "decay_energies_perturbed",

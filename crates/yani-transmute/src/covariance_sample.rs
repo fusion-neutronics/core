@@ -759,9 +759,22 @@ fn lognormal_factor(deviate: f64, sigma: f64) -> f64 {
     if !sigma.is_finite() || sigma <= 0.0 || !deviate.is_finite() {
         return 1.0;
     }
+    lognormal_multiplier(deviate / sigma, sigma)
+}
+
+/// [`lognormal_factor`] from a standard normal `z` rather than a deviate
+/// scaled by `sigma`: a positive multiplier with mean 1 and variance
+/// `sigma^2`, for a caller that draws one independent quantity at a time.
+///
+/// The half-life and decay-energy sources are that caller. Their evaluations
+/// state an expected value and a standard deviation and nothing else (ENDF-102
+/// section 29.1), and each nuclide is drawn on its own, so there is no
+/// correlation for the transform to distort and this reproduces exactly what
+/// the evaluation states. `sigma` must be positive and finite.
+pub(crate) fn lognormal_multiplier(z: f64, sigma: f64) -> f64 {
     let s_squared = (1.0 + sigma * sigma).ln();
     let s = s_squared.sqrt();
-    (s * (deviate / sigma) - 0.5 * s_squared).exp()
+    (s * z - 0.5 * s_squared).exp()
 }
 
 #[cfg(test)]

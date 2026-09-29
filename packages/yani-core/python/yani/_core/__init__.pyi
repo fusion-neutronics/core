@@ -263,7 +263,10 @@ class DataUncertainty:
     own mean and variance, so a sampled rate is never negative and nothing is
     floored. The correlated Gaussian deviates are kept (a Gaussian copula), so
     the ordering between channels is preserved, but the Pearson correlations
-    come out weaker than evaluated as the sigmas grow.
+    come out weaker than evaluated as the sigmas grow. Half-lives and decay
+    energies are drawn the same way, one nuclide at a time: the decay data
+    states a mean and a sigma for each and no correlation, so the draws carry
+    exactly what the evaluation states and are never negative.
     
     Held at their nominal values, with uncertainties of their own that this
     does not propagate:
@@ -2595,8 +2598,9 @@ class TransmutationResults:
         - ``half_lives_perturbed`` / ``no_half_life_uncertainty``: with the
           ``"half_life"`` source, which reachable unstable nuclides had their
           half-life sampled and which state no sigma to sample from.
-          ``half_lives_floored`` / ``half_lives_sampled`` count draws that came
-          out non-positive and had to be floored.
+          ``half_lives_sampled`` counts the draws made. Each is a lognormal
+          matched to the evaluation's mean and sigma, so none can go
+          non-positive and none is floored.
         - ``statistical_rates``: with the ``"statistical"`` source on a
           transport run, how many tallied rates were sampled from their
           covariance; ``statistical_floored`` / ``statistical_sampled`` count
