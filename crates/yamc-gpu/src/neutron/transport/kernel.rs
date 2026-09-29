@@ -2029,14 +2029,15 @@ pub(crate) fn multi_cell_transport_kernel(
     // Per-channel parent-nuclide id (`NuclideId.get()` widened to u32). Stamped
     // on the emitted photon's bank `gen` slot for `parent_nuclides` binning.
     decay_ch_parent_id: &[u32],
-    // GLOBAL per-channel discrete-line `[base, count]` into `decay_ch_energies`
+    // GLOBAL per-channel `[base, count | kind << 30]` into `decay_ch_energies`
     // / `decay_ch_intensity_cdf`, interleaved stride 2. Channel `c` reads
-    // `decay_ch_e_meta[c*2]` / `decay_ch_e_meta[c*2 + 1]`.
+    // `decay_ch_e_meta[c*2]` / `decay_ch_e_meta[c*2 + 1]`. The kind is lines
+    // or a continuum; `decay_photon_emission` documents both layouts.
     decay_ch_e_meta: &[u32],
-    // Per-channel discrete decay-line energies [eV], concatenated.
+    // Per-channel spectrum energies [eV], concatenated.
     decay_ch_energies: &[f64],
-    // Per-channel cumulative intensity CDF (normalized), concatenated, parallel
-    // to `decay_ch_energies`.
+    // Per-channel cumulative intensity CDF (normalized) and, for a continuum,
+    // its normalized densities, concatenated, parallel to `decay_ch_energies`.
     decay_ch_intensity_cdf: &[f64],
     // Packed per-material decay metadata, `[mat * DECAY_META_COLS + col]`:
     // col 0 = `pp_base` (aggregate-row offset), col 1 = `ch_base` (global index
@@ -3628,7 +3629,7 @@ pub(crate) fn multi_cell_transport_kernel(
                 // collision with weight `w * y_t` (`y_t = decay_photon_prod /
                 // sigma_t`), matching the CPU `sample_decay_photons` implicit-
                 // capture estimator (no floor+Bernoulli count). The photon's
-                // energy is a discrete decay line of a chain emitter and its
+                // energy is drawn from a chain emitter's decay spectrum and its
                 // parent-nuclide id is stamped into the bank `gen` slot for
                 // `parent_nuclides` tally binning. Isotropic direction.
                 //
@@ -3693,29 +3694,83 @@ pub(crate) fn multi_cell_transport_kernel(
 
                         let gsel = d_ch_base + sel;
 
-                        // Discrete energy: sample a line from the channel's
-                        // cumulative intensity CDF (normalized to 1.0 at the
-                        // last line). Find the first line with cdf >= xi2.
+                        // Photon energy from the channel's spectrum, one
+                        // draw either way. The packed count's top bits say
+                        // lines (0), a histogram (1) or a linear-linear (2)
+                        // continuum; DECAY_SPECTRUM_SHIFT = 30.
                         let e_base = decay_ch_e_meta[(gsel * 2u32) as usize];
-                        let e_count = decay_ch_e_meta[(gsel * 2u32 + 1u32) as usize];
+                        let e_word = decay_ch_e_meta[(gsel * 2u32 + 1u32) as usize];
+                        let e_kind = e_word >> 30u32;
+                        let e_count = e_word & 0x3FFF_FFFFu32;
                         let denergy_draw = crate::common::pcg32::draw_uniform(dstate);
                         dstate = denergy_draw.state;
                         let xi2 = denergy_draw.xi;
-                        // Default to the last line (covers the xi2 == 1.0 edge).
-                        let mut e_idx = e_count - 1u32;
-                        let mut e_found = false;
-                        let mut li = 0u32;
-                        while li < e_count {
-                            if !e_found {
-                                let cdf = decay_ch_intensity_cdf[(e_base + li) as usize];
-                                if xi2 <= cdf {
-                                    e_idx = li;
-                                    e_found = true;
+                        #[allow(unused_assignments)]
+                        let mut e_out = 0.0_f64;
+                        if e_kind == 0u32 {
+                            // Lines: the first with cdf >= xi2, defaulting to
+                            // the last (covers the xi2 == 1.0 edge).
+                            let mut e_idx = e_count - 1u32;
+                            let mut e_found = false;
+                            let mut li = 0u32;
+                            while li < e_count {
+                                if !e_found {
+                                    let cdf = decay_ch_intensity_cdf[(e_base + li) as usize];
+                                    if xi2 <= cdf {
+                                        e_idx = li;
+                                        e_found = true;
+                                    }
+                                }
+                                li += 1u32;
+                            }
+                            e_out = decay_ch_energies[(e_base + e_idx) as usize];
+                        } else {
+                            // A continuum: the first interval whose running
+                            // integral at its top passes xi2 (an interval
+                            // holding nothing never does), then the exact
+                            // inverse of the running integral inside it, as
+                            // CPU `sample_continuum_energy` does. The
+                            // densities follow the points, already divided by
+                            // the whole integral, so xi2 needs no rescaling.
+                            let mut iv = e_count - 2u32;
+                            let mut iv_found = false;
+                            let mut pi = 1u32;
+                            while pi < e_count {
+                                if !iv_found {
+                                    let top = decay_ch_intensity_cdf[(e_base + pi) as usize];
+                                    if xi2 < top {
+                                        iv = pi - 1u32;
+                                        iv_found = true;
+                                    }
+                                }
+                                pi += 1u32;
+                            }
+                            let e0 = decay_ch_energies[(e_base + iv) as usize];
+                            let e1 = decay_ch_energies[(e_base + iv + 1u32) as usize];
+                            let y0 = decay_ch_intensity_cdf[(e_base + e_count + iv) as usize];
+                            let y1 =
+                                decay_ch_intensity_cdf[(e_base + e_count + iv + 1u32) as usize];
+                            let part = xi2 - decay_ch_intensity_cdf[(e_base + iv) as usize];
+                            let mut offset = 0.0_f64;
+                            if part > 0.0 {
+                                if e_kind == 2u32 {
+                                    // Solve y0 t + slope t^2 / 2 = part; the
+                                    // root form has no cancellation.
+                                    let slope = (y1 - y0) / (e1 - e0);
+                                    let disc = (y0 * y0 + 2.0 * slope * part).max(0.0);
+                                    offset = 2.0 * part / (y0 + disc.sqrt());
+                                } else {
+                                    offset = part / y0;
                                 }
                             }
-                            li += 1u32;
+                            e_out = e0 + offset;
+                            if e_out > e1 {
+                                e_out = e1;
+                            }
+                            if e_out < e0 {
+                                e_out = e0;
+                            }
                         }
-                        let e_out = decay_ch_energies[(e_base + e_idx) as usize];
 
                         if e_out > 0.0 {
                             // Isotropic direction: mu = 2u - 1, phi = 2pi u
