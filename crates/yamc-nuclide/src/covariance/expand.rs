@@ -155,7 +155,8 @@ fn tables_match_header(s: &NiSubsection) -> bool {
 /// exactly this way: every `lb` 0 to 2 block in a `covariance.arrow`
 /// converted before fusion-neutronics/core#166 was fixed has the upper part
 /// of its only table in `el`/`fl`, and folding `ek` alone would drop it
-/// without a word.
+/// without a word. The `lb` 2 to 4 layouts index `fk` and `fl` by interval
+/// on the strength of this check, so they do not repeat it.
 pub fn expand_ni(s: &NiSubsection) -> Result<ExpandedBlock, Unsupported> {
     match s.lb {
         0..=4 if !tables_match_header(s) => Err(Unsupported::Malformed),
@@ -197,9 +198,6 @@ fn diagonal(s: &NiSubsection, scale: Scale) -> Result<ExpandedBlock, Unsupported
 /// `lb = 2`: one table, fully correlated across the whole range.
 fn outer_product(s: &NiSubsection) -> Result<ExpandedBlock, Unsupported> {
     let n = intervals(&s.ek);
-    if s.fk.len() < n {
-        return Err(Unsupported::Malformed);
-    }
     let mut values = vec![0.0; n * n];
     for k in 0..n {
         for l in 0..n {
@@ -222,9 +220,6 @@ fn outer_product(s: &NiSubsection) -> Result<ExpandedBlock, Unsupported> {
 fn two_table_product(s: &NiSubsection) -> Result<ExpandedBlock, Unsupported> {
     let n_rows = intervals(&s.ek);
     let n_cols = intervals(&s.el);
-    if s.fk.len() < n_rows || s.fl.len() < n_cols {
-        return Err(Unsupported::Malformed);
-    }
     let mut values = vec![0.0; n_rows * n_cols];
     for k in 0..n_rows {
         for l in 0..n_cols {
@@ -259,9 +254,6 @@ fn two_table_product(s: &NiSubsection) -> Result<ExpandedBlock, Unsupported> {
 fn interval_weighted(s: &NiSubsection) -> Result<ExpandedBlock, Unsupported> {
     let n_outer = intervals(&s.ek);
     let n_inner = intervals(&s.el);
-    if s.fk.len() < n_outer || s.fl.len() < n_inner {
-        return Err(Unsupported::Malformed);
-    }
     // Both tables are boundaries in ascending order on any tape. Checked
     // rather than assumed, because the interval lookup below bisects them.
     let ascending = |t: &[f64]| t.windows(2).all(|w| w[0] <= w[1]);
