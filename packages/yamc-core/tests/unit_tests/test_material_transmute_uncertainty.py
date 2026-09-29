@@ -173,7 +173,8 @@ def test_the_report_names_what_is_never_perturbed():
     joined = " ".join(not_perturbed)
     for source in (
         "fission yield",
-        "branching",
+        "isomeric branching (MF=9/MF=10)",
+        "covariance with another evaluation (MAT1 naming another material)",
         "resonance-parameter covariance (MF=32)",
         "decay photon line energy and intensity (MF=8 MT=457)",
         "photon attenuation coefficient (XCOM)",
@@ -192,6 +193,7 @@ def test_the_report_names_what_is_never_perturbed():
     assert "tallied-rate statistics" not in not_perturbed
     # Every default source is on, so none is listed as switched off.
     assert "activation cross section (MF=33)" not in not_perturbed
+    assert "decay branching ratio" not in not_perturbed
 
 
 def test_a_shielded_run_reports_its_shielding_held_at_nominal():

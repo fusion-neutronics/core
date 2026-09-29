@@ -509,6 +509,9 @@ impl PyPulseSchedule {
     ///         emitter once and uses it for every campaign, so one evaluation
     ///         is one uncertainty; the draws are those a transmutation with the
     ///         same seed makes. Read ``.data_std_dev`` and ``.total_std_dev``.
+    ///         Decay branching ratios also shape a time correction and are held
+    ///         at nominal here, which ``.data_uncertainty_info`` lists under
+    ///         ``not_perturbed``.
     ///
     /// Returns:
     ///     DoseResult with ``.mean`` / ``.std_dev`` / ``.by_nuclide`` / ``.times``,
@@ -746,6 +749,7 @@ impl PyPulseSchedule {
             info.set_item("samples", ensemble.replicas.len())?;
             info.set_item("converged", ensemble.converged)?;
             info.set_item("sources", ensemble.sources.clone())?;
+            info.set_item("not_perturbed", ensemble.not_perturbed.clone())?;
             data_std_dev = Some(shape_rows(py, data, single)?);
             total_std_dev = Some(shape_rows(py, total, single)?);
             data_uncertainty_info = Some(info.into_any().unbind());
