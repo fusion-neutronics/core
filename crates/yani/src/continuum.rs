@@ -26,6 +26,12 @@ use std::fmt;
 /// linear-linear; the log laws appear on neutron continua, which nothing here
 /// integrates, and [`Continuum::new`] refuses them rather than reading them
 /// as something else.
+///
+/// [`crate::chain::EvaluatedYields::interpolation`] keeps its law as the raw
+/// ENDF code instead. Nothing in yani interpolates evaluated yields between
+/// energies yet, so the code is only carried from tape to file and back, and
+/// a raw integer carries any code the tape wrote without a refusal that
+/// nothing would act on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Interpolation {
     /// INT=1: each point's value holds up to the next point.
