@@ -338,9 +338,11 @@ pub struct Info {
     /// `skipped_other_file`, `skipped_nc`, `unsupported_layouts` and
     /// `malformed_blocks`. A pair stored in both orientations is used once,
     /// and a second copy that disagrees with the first is reported in
-    /// `mirrored_disagree`. A block for a reaction the chain does not drive (a
-    /// partial-level section such as MT=600-849) is neither listed nor
-    /// counted: the chain has no rate for it to be the uncertainty of.
+    /// `mirrored_disagree`. A block on a reaction the fold does not reach
+    /// (neither a channel nor one a channel's NC derivation names) is neither
+    /// listed nor counted: the chain has no rate for it to be the uncertainty
+    /// of. A partial-level section such as MT=600-849 is reached, and its
+    /// blocks folded and counted, when an LTY=0 NC block names it.
     pub not_perturbed: Vec<String>,
     /// Which sources this run perturbed, by name.
     pub sources: Vec<String>,
@@ -373,7 +375,7 @@ impl Info {
                 "isomeric branching (MF=9/MF=10)",
                 "covariance with another evaluation (MAT1 naming another material)",
                 "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
-                "NC-derived covariance (MF=33 NC)",
+                "NC-derived covariance other than LTY=0 (MF=33 NC LTY 1-4)",
                 "lumped-reaction covariance (MF=33 MT=851-870)",
                 "resonance-parameter covariance (MF=32)",
                 "decay photon line energy and intensity (MF=8 MT=457)",
@@ -878,7 +880,7 @@ mod tests {
             "isomeric branching (MF=9/MF=10)",
             "covariance with another evaluation (MAT1 naming another material)",
             "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
-            "NC-derived covariance (MF=33 NC)",
+            "NC-derived covariance other than LTY=0 (MF=33 NC LTY 1-4)",
             "lumped-reaction covariance (MF=33 MT=851-870)",
             "resonance-parameter covariance (MF=32)",
             "decay photon line energy and intensity (MF=8 MT=457)",

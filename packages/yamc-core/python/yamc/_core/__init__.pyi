@@ -626,10 +626,12 @@ class DataUncertainty:
       overlay from MF=9/MF=10;
     - covariance correlating two evaluations (MAT1 naming another material),
       covariance with a quantity that is not a cross section (XMF1 not 0 or
-      3), covariance derived from other sections (MF=33 NC), the
-      lumped-reaction covariance (MT=851-870) and the resonance-parameter
-      covariance (MF=32), so only the explicit MF=33 blocks of each reaction
-      are sampled;
+      3), covariance derived from other sections by an NC block with LTY 1-4,
+      the lumped-reaction covariance (MT=851-870) and the resonance-parameter
+      covariance (MF=32). What is sampled is each reaction's explicit MF=33
+      blocks, and for a reaction an LTY=0 NC block states as a sum of others
+      (ENDF/B-VIII.1 O16 (n,p) as MT 600 to 603), the covariance derived from
+      the named reactions' own blocks and the cross blocks between them;
     - the self-shielding correction, when ``self_shielding_chord`` or
       ``self_shielding_shape`` is given: the shielded flux is built once from
       the nominal cross sections and reused by every replica;
