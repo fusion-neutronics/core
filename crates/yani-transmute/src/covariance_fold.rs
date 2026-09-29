@@ -814,61 +814,66 @@ impl Diagonal {
             _ => 0.0,
         }
     }
-
-    /// The pieces inside `range`, cut at its ends: what a derived term states
-    /// for the channel it derives, since it applies only over its NC block's
-    /// energy range.
-    fn within(&self, range: (f64, f64)) -> Self {
-        Self {
-            scale: self.scale,
-            pieces: self
-                .pieces
-                .iter()
-                .map(|&(lo, hi, v)| (lo.max(range.0), hi.min(range.1), v))
-                .filter(|&(lo, hi, _)| lo < hi)
-                .collect(),
-        }
-    }
 }
 
-/// The share of `reaction`'s rate over the flux range, as the fold integrates
-/// it, that comes from energies where its own blocks state a nonzero variance,
-/// or `None` when that rate is zero.
+/// The share of a channel's rate over the flux range, as the fold integrates
+/// it, that comes from energies where the covariance states a variance for
+/// it, or `None` when that rate is zero.
 ///
-/// Walked on the union of the blocks' edges and the flux range's two ends, so
-/// every cell lies inside one piece of each block or outside it, and a cell
-/// counts when the variances stated over it sum to something nonzero. Summed
-/// rather than tested one by one because the blocks of one subsection add, so
-/// two whose tape values cancel exactly, bit for bit, state no variance there.
-/// No tolerance is applied: values that cancel only to rounding count as
-/// stated, since calling them zero would be a judgement the tape does not
-/// make. Relative and absolute blocks are summed apart, having different
-/// units.
+/// The channel's rate is carried, cell by cell, by its leaves: the reactions
+/// among `terms` that no derivation in `derivations` expands there, each with
+/// its net coefficient, the terms' less the derivations'. Outside every NC
+/// range that is the channel's own reaction; inside one, the reactions the
+/// block names. A reaction's own blocks state its variance, summed over them
+/// in `diagonals` since the blocks of one subsection add, so two whose tape
+/// values cancel exactly, bit for bit, state none. No tolerance is applied:
+/// values that cancel only to rounding count as stated, since calling them
+/// zero would be a judgement the tape does not make. Relative and absolute
+/// blocks are summed apart, having different units. An expanded reaction's
+/// own blocks cover nothing where it is expanded, since ENDF-102 33.3.3
+/// item 3 has them state zero over the NC range.
 ///
-/// Where a derivation in `short` names reactions that add up to less than the
-/// one it derives, the rate they miss is taken off each cell it falls in, down
-/// to none of the cell: it is rate the covariance states nothing for.
+/// A cell counts when at least one leaf states a variance over it, less the
+/// rate of the leaves that state none there, as `|c R|` so that one entering
+/// with a negative coefficient is taken off too, and less the rate a
+/// derivation in `short` misses, whose named reactions add up to less than
+/// the one it derives: rate the covariance states nothing for. Down to none
+/// of the cell, and clamped to it, so one cell where the named reactions
+/// exceed the rate cannot make up for another's shortfall. A cell whose
+/// leaves all state a variance, off every short derivation, counts whole.
 ///
 /// The covered sum adds, in the same order, the total's terms or smaller ones
 /// that are not negative, and rounded addition of such terms is monotone, so
-/// the share cannot exceed one. A block that states a variance on every
-/// interval across the whole flux range therefore reads exactly one.
+/// the share cannot exceed one. A reaction whose blocks state a variance on
+/// every interval across the whole flux range therefore reads exactly one.
 fn stated_variance_share(
     flux: &FluxDensity,
     reaction: &Reaction,
-    diagonals: &[Diagonal],
+    terms: &[&Term],
+    derivations: &[&Derivation],
+    diagonals: &BTreeMap<i32, Vec<Diagonal>>,
     reactions: &BTreeMap<i32, &Reaction>,
     short: &[&Derivation],
 ) -> Option<f64> {
     let (&lo, &hi) = (flux.boundaries.first()?, flux.boundaries.last()?);
-    let mut edges: Vec<f64> = diagonals
+    let mts: BTreeSet<i32> = terms.iter().map(|t| t.mt).collect();
+    let mut edges: Vec<f64> = mts
         .iter()
+        .filter_map(|mt| diagonals.get(mt))
+        .flatten()
         .flat_map(|d| d.pieces.iter().flat_map(|&(lo, hi, _)| [lo, hi]))
-        .chain(short.iter().flat_map(|d| [d.range.0, d.range.1]))
+        .chain(terms.iter().flat_map(|t| [t.range.0, t.range.1]))
+        .chain(derivations.iter().flat_map(|d| [d.range.0, d.range.1]))
+        .filter(|&e| lo < e && e < hi)
         .chain([lo, hi])
         .collect();
     edges.sort_by(f64::total_cmp);
     edges.dedup();
+    let inside = |range: (f64, f64), w: &[f64]| range.0 <= w[0] && w[1] <= range.1;
+    let rates: BTreeMap<i32, Vec<f64>> = mts
+        .iter()
+        .map(|&mt| (mt, flux.xs_over(reactions[&mt], &edges)))
+        .collect();
     // Per cell, the channel's rate no named reaction carries: each short
     // derivation's `coefficient (R_MT - Σ c_i R_MTi)` over its range. The
     // gaps add, since a nested derivation's is the shortfall inside a
@@ -884,7 +889,7 @@ fn stated_variance_share(
             }
         }
         for (k, w) in edges.windows(2).enumerate() {
-            if d.range.0 <= w[0] && w[1] <= d.range.1 {
+            if inside(d.range, w) {
                 missing[k] += d.coefficient * gap[k];
             }
         }
@@ -895,19 +900,37 @@ fn stated_variance_share(
         .zip(flux.xs_over(reaction, &edges))
         .enumerate()
     {
-        let (a, b) = (w[0], w[1]);
         total += rate;
-        let (mut relative, mut absolute) = (0.0, 0.0);
-        for d in diagonals {
-            match d.scale {
-                Scale::Relative => relative += d.over(a, b),
-                Scale::Absolute => absolute += d.over(a, b),
+        let (mut stating, mut unstated) = (false, 0.0);
+        for &mt in &mts {
+            let leaf: f64 = terms
+                .iter()
+                .filter(|t| t.mt == mt && inside(t.range, w))
+                .map(|t| t.coefficient)
+                .sum::<f64>()
+                - derivations
+                    .iter()
+                    .filter(|d| d.mt == mt && inside(d.range, w))
+                    .map(|d| d.coefficient)
+                    .sum::<f64>();
+            if leaf == 0.0 {
+                continue;
+            }
+            let (mut relative, mut absolute) = (0.0, 0.0);
+            for d in diagonals.get(&mt).into_iter().flatten() {
+                match d.scale {
+                    Scale::Relative => relative += d.over(w[0], w[1]),
+                    Scale::Absolute => absolute += d.over(w[0], w[1]),
+                }
+            }
+            if relative != 0.0 || absolute != 0.0 {
+                stating = true;
+            } else {
+                unstated += (leaf * rates[&mt][k]).abs();
             }
         }
-        if relative != 0.0 || absolute != 0.0 {
-            // Clamped to the cell's rate, so one cell where the named
-            // reactions exceed it cannot make up for another's shortfall.
-            covered += rate - missing[k].max(0.0).min(rate);
+        if stating {
+            covered += rate - (missing[k].max(0.0) + unstated).min(rate);
         }
     }
     (total != 0.0).then(|| covered / total)
@@ -1111,40 +1134,6 @@ impl Term {
     fn is_own(&self, kinds: &[(String, i32)]) -> bool {
         self.mt == kinds[self.channel].1 && self.range == EVERYWHERE && self.coefficient == 1.0
     }
-}
-
-/// Per channel, the energy ranges over which `terms`, all of one reaction,
-/// add up to a nonzero coefficient.
-///
-/// One reaction can reach a channel on several paths whose coefficients
-/// cancel: ENDF/B-VIII.1 O16 MT 4 is `σ_1 - σ_2 - ...` with MT 1 itself
-/// `σ_2 + σ_800`, so MT 2 enters with `+1` and `-1`. The contraction cancels
-/// those exactly, and the reaction's variance then contributes nothing to the
-/// channel's, so it covers no energy there.
-fn net_ranges(terms: &[&Term]) -> Vec<(usize, (f64, f64))> {
-    let channels: BTreeSet<usize> = terms.iter().map(|t| t.channel).collect();
-    let mut out = Vec::new();
-    for channel in channels {
-        let on: Vec<&&Term> = terms.iter().filter(|t| t.channel == channel).collect();
-        let mut edges: Vec<f64> = on
-            .iter()
-            .flat_map(|t| [t.range.0, t.range.1])
-            .chain([f64::NEG_INFINITY, f64::INFINITY])
-            .collect();
-        edges.sort_by(f64::total_cmp);
-        edges.dedup();
-        for w in edges.windows(2) {
-            let net: f64 = on
-                .iter()
-                .filter(|t| t.range.0 <= w[0] && w[1] <= t.range.1)
-                .map(|t| t.coefficient)
-                .sum();
-            if net != 0.0 {
-                out.push((channel, (w[0], w[1])));
-            }
-        }
-    }
-    out
 }
 
 /// An NC block's identity within the evaluation, so one reached from several
@@ -1456,11 +1445,12 @@ fn fold_nuclide(
     // Absolute covariance, in (1/s)^2, before relativizing.
     let mut absolute = vec![0.0; n * n];
     let mut used = 0;
-    // Per channel named by a consumed block, the variance each of its terms'
-    // own blocks states. Kept block by block rather than summed onto one grid,
-    // because the blocks need not share a grid; `stated_variance_share` walks
-    // them together.
-    let mut variances: BTreeMap<usize, Vec<Diagonal>> = BTreeMap::new();
+    // The channels a consumed block names, and per reached reaction the
+    // variance each of its own blocks states. Kept block by block rather than
+    // summed onto one grid, because the blocks need not share a grid;
+    // `stated_variance_share` walks them together.
+    let mut named: BTreeSet<usize> = BTreeSet::new();
+    let mut diagonals: BTreeMap<i32, Vec<Diagonal>> = BTreeMap::new();
     // Per channel, the largest sum of partial rates any relative block of its
     // own reaction weighted it with, zero variance intervals included. The
     // consistency check against the rate, and not the share: it is what the
@@ -1622,21 +1612,15 @@ fn fold_nuclide(
             }
         }
 
-        // Only a reaction's own blocks state its variance, and a term's over
-        // its range only. A cross block correlates two reactions and gives
-        // neither a variance, so it names the channels it reaches and covers
-        // none.
-        for t in col_terms {
-            variances.entry(t.channel).or_default();
-        }
-        let diagonal = (row_mt == col_mt).then(|| Diagonal::of(&expanded));
-        for t in row_terms {
-            variances.entry(t.channel).or_default();
-        }
-        if let Some(d) = &diagonal {
-            for (channel, range) in net_ranges(row_terms) {
-                variances.entry(channel).or_default().push(d.within(range));
-            }
+        // Only a reaction's own blocks state its variance. A cross block
+        // correlates two reactions and gives neither a variance, so it names
+        // the channels it reaches and covers none.
+        named.extend(row_terms.iter().chain(col_terms).map(|t| t.channel));
+        if row_mt == col_mt {
+            diagonals
+                .entry(row_mt)
+                .or_default()
+                .push(Diagonal::of(&expanded));
         }
         if expanded.scale == Scale::Relative {
             for (ts, ps, grid) in [
@@ -1690,7 +1674,7 @@ fn fold_nuclide(
     }
 
     for (channel, (kind, mt)) in kinds.iter().enumerate() {
-        let (Some(diagonals), Some(reaction)) = (variances.get(&channel), reactions.get(mt)) else {
+        let Some(reaction) = reactions.get(mt).filter(|_| named.contains(&channel)) else {
             continue;
         };
         let key = (nuclide.to_string(), kind.clone());
@@ -1711,7 +1695,25 @@ fn fold_nuclide(
             .filter(|(_, ratio)| *ratio < 1.0)
             .map(|(d, _)| *d)
             .collect();
-        if let Some(share) = stated_variance_share(flux, reaction, diagonals, reactions, &short) {
+        let terms: Vec<&Term> = expansion
+            .terms
+            .iter()
+            .filter(|t| t.channel == channel)
+            .collect();
+        let derivations: Vec<&Derivation> = expansion
+            .derivations
+            .iter()
+            .filter(|d| d.channel == channel)
+            .collect();
+        if let Some(share) = stated_variance_share(
+            flux,
+            reaction,
+            &terms,
+            &derivations,
+            &diagonals,
+            reactions,
+            &short,
+        ) {
             coverage.rate_fraction_covered.insert(key.clone(), share);
         }
         let mut ratios = Vec::new();
@@ -2172,8 +2174,22 @@ mod stated_variance_tests {
             values: vec![0.01],
             scale: Scale::Relative,
         });
+        let own = Term {
+            channel: 0,
+            coefficient: 1.0,
+            mt: 16,
+            range: EVERYWHERE,
+        };
         assert_eq!(
-            stated_variance_share(&flux(), &above, &[d], &BTreeMap::new(), &[]),
+            stated_variance_share(
+                &flux(),
+                &above,
+                &[&own],
+                &[],
+                &BTreeMap::from([(16, vec![d])]),
+                &BTreeMap::from([(16, &above)]),
+                &[],
+            ),
             None
         );
     }
@@ -3534,6 +3550,27 @@ mod nc_derived_tests {
             share,
             partial(NP, sums, 1, 0.0, f64::INFINITY) / rate(NP, sums),
         );
+    }
+
+    /// Where one named partial states a variance over a cell and another
+    /// carries rate there and states none, only the stating one's rate is
+    /// covered, as ENDF/B-VIII.1 O16 `(n,a)` = 800 + ... + 803 is from 20.5
+    /// to 30 MeV, where 800's grid has ended. Here 601 states a variance on
+    /// the lower interval only.
+    #[test]
+    fn a_partial_stating_nothing_over_a_cell_is_not_covered_there() {
+        let terms = [(1.0, 600), (1.0, 601)];
+        let blocks = [
+            nc(NP, 1.0e-5, 2.0e7, &terms),
+            own(600, C600),
+            own(601, [0.01, 0.0, 0.0]),
+        ];
+        let sums: Sums = &[(NP, &terms)];
+        let (_, coverage) = fold(&blocks, &[("(n,p)", NP)], &[NP, 600, 601], sums);
+        let share = coverage.rate_fraction_covered[&("O16".to_string(), "(n,p)".to_string())];
+        let upper_601 = partial(601, sums, 1, 0.0, f64::INFINITY);
+        close(share, 1.0 - upper_601 / rate(NP, sums));
+        assert!(share < 1.0);
     }
 
     /// Named reactions with rate over a range where the reaction they derive

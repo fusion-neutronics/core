@@ -120,13 +120,20 @@ fn integral(m: &Material, name: &str, mt: i32, lo: f64, hi: f64) -> f64 {
 
 /// The relative covariance of `a` with `b` on the one cell of their block
 /// that holds `[lo, hi]`, from whichever section the tape writes it in, or 0
-/// when it writes none. Every block the test reads is relative and holds the
-/// group inside one interval of each grid.
+/// when it writes none. A block whose grid ends below the group states
+/// nothing there. Every block the test reads is relative and holds the group
+/// inside one interval of each grid or outside all of them.
 fn cell(blocks: &[CovarianceBlock], a: i32, b: i32, lo: f64, hi: f64) -> f64 {
     let holding = |grid: &[f64]| {
-        grid.windows(2)
+        let (first, last) = (grid[0], grid[grid.len() - 1]);
+        if hi <= first || last <= lo {
+            return None;
+        }
+        let k = grid
+            .windows(2)
             .position(|w| w[0] <= lo && hi <= w[1])
-            .expect("one interval holds the group")
+            .expect("one interval holds the group");
+        Some(k)
     };
     // Both indices hold the same group, so the (b, a) block's cell is the
     // (a, b) covariance as it stands.
@@ -139,8 +146,10 @@ fn cell(blocks: &[CovarianceBlock], a: i32, b: i32, lo: f64, hi: f64) -> f64 {
                     panic!("MT {row} x {col} is not NI")
                 };
                 let e = expand_ni(ni).expect("expands");
-                let (i, j) = (holding(&e.row_energies), holding(&e.col_energies));
-                e.get(i, j)
+                match (holding(&e.row_energies), holding(&e.col_energies)) {
+                    (Some(i), Some(j)) => e.get(i, j),
+                    _ => 0.0,
+                }
             })
             .collect();
         if !found.is_empty() {
@@ -310,54 +319,112 @@ fn o16_nd_above_20_mev_is_not_counted_as_covered() {
     );
 }
 
-/// TENDL-2017 H2 `(n,2n)` is `σ_1 - σ_2 - σ_102`, a derived rate of
-/// millibarns from barns each rounded to its own digits. The tape's
-/// derivation holds to that rounding, so it is not reported as inconsistent.
+/// FENDL-3.2d and TENDL-2017 H2 `(n,2n)` is `σ_1 - σ_2 - σ_102` from
+/// 3.339 MeV, a derived rate of millibarns from barns each rounded to its own
+/// digits. The tape's derivation holds to that rounding, so it is not
+/// reported as inconsistent.
+///
+/// The two tapes give MT 1, 2 and 102 self blocks and no cross blocks, and an
+/// absent block states a zero covariance (ENDF-102 33.2), so the derived
+/// variance is `Var(1) + Var(2) + Var(102)` of barn reactions over a
+/// millibarn difference: about 2400% near threshold and 22% at 14 MeV on
+/// TENDL-2017. That is the tape's literal statement, set by the correlations
+/// it leaves out rather than by the fold, so it is pinned to the hand
+/// sandwich rather than clamped. ENDF/B-VIII.1 and JEFF-4.0 give MT 16 its
+/// own block instead.
 #[test]
-fn tendl_2017_h2_n2n_cancelling_derivation_is_not_flagged() {
-    // Cached as the activation subset of MT 1, 2, 16 and 102, which only a
-    // load asking for some MTs reads.
-    let dir = yamc_test_cache::root().join("tendl-2017-H2.arrow");
-    if !yamc_test_cache::format_version_is_readable(&dir) {
-        eprintln!("skipping: TENDL-2017 H2 fixture missing or stale");
-        return;
+fn h2_n2n_cancelling_derivation_is_the_hand_sandwich() {
+    for library in ["fendl-3.2d", "tendl-2017"] {
+        // Cached as the activation subset of MT 1, 2, 16 and 102, which only
+        // a load asking for some MTs reads.
+        let dir = yamc_test_cache::root().join(format!("{library}-H2.arrow"));
+        if !yamc_test_cache::format_version_is_readable(&dir) {
+            eprintln!("skipping: {library} H2 fixture missing or stale");
+            continue;
+        }
+        let scope = yamc_nuclide::load_scope::LoadScope::activation([1, 2, 16, 102].into())
+            .with_temperatures(Some(["294".to_string()].into()))
+            .with_covariance(true);
+        let loaded = yamc_nuclide::nuclide::get_or_load_nuclide(
+            "H2",
+            &HashMap::from([("H2".to_string(), dir.to_string_lossy().into_owned())]),
+            &scope,
+        );
+        let nd = loaded.expect("the cached subset loads");
+        let Some(blocks) = nd.covariance.as_ref().map(|b| b.to_vec()) else {
+            eprintln!("skipping: {library} H2 has no covariance.arrow");
+            continue;
+        };
+        let mut m = Material::new(
+            HashMap::from([("H2".to_string(), 1.0)]),
+            "atom",
+            "sum",
+            None,
+        )
+        .expect("material");
+        m.set_temperature("294");
+        m.nuclide_data.insert("H2".to_string(), nd);
+        assert_eq!(derivation(&blocks, 16), [(1.0, 1), (-1.0, 2), (-1.0, 102)]);
+        let key = ("H2".to_string(), "(n,2n)".to_string());
+        for (lo, hi) in [(3.4e6, 3.5e6), (1.39e7, 1.41e7)] {
+            let (n2n, coverage) = sigma(&m, "H2", "(n,2n)", lo, hi);
+            assert!(!coverage.skipped_nc.contains_key("H2"));
+            assert!(
+                !coverage.partials_above_rate.contains_key(&key)
+                    && !coverage.partials_below_rate.contains_key(&key),
+                "{lo} to {hi} eV: above {:?}, below {:?}",
+                coverage.partials_above_rate.get(&key),
+                coverage.partials_below_rate.get(&key)
+            );
+            close(n2n, hand_sigma(&m, &blocks, "H2", 16, lo, hi), "H2 (n,2n)");
+            eprintln!("{library} H2 (n,2n), {lo} to {hi} eV: {:.4}%", 100.0 * n2n);
+        }
     }
-    let scope = yamc_nuclide::load_scope::LoadScope::activation([1, 2, 16, 102].into())
-        .with_temperatures(Some(["294".to_string()].into()))
-        .with_covariance(true);
-    let loaded = yamc_nuclide::nuclide::get_or_load_nuclide(
-        "H2",
-        &HashMap::from([("H2".to_string(), dir.to_string_lossy().into_owned())]),
-        &scope,
-    );
-    let nd = loaded.expect("the cached subset loads");
-    let Some(blocks) = nd.covariance.as_ref().map(|b| b.to_vec()) else {
-        eprintln!("skipping: TENDL-2017 H2 has no covariance.arrow");
+}
+
+/// ENDF/B-VIII.1 O16 `(n,a)` is `800 + ... + 803` from 1e-5 eV to 150 MeV,
+/// and MT 800's own grid ends at 20.5 MeV while 801 to 803 state variances to
+/// 30 MeV. At 22 MeV the covered share is 801 to 803's rate only: 800 carries
+/// rate there and states no variance for it.
+#[test]
+fn o16_na_above_800s_grid_covers_only_the_stating_partials() {
+    let Some((m, blocks)) = material("O16", 825) else {
+        eprintln!("skipping: O16 fixture or its covariance.arrow missing");
         return;
     };
-    let mut m = Material::new(
-        HashMap::from([("H2".to_string(), 1.0)]),
-        "atom",
-        "sum",
-        None,
-    )
-    .expect("material");
-    m.set_temperature("294");
-    m.nuclide_data.insert("H2".to_string(), nd);
-    assert_eq!(derivation(&blocks, 16), [(1.0, 1), (-1.0, 2), (-1.0, 102)]);
-    let key = ("H2".to_string(), "(n,2n)".to_string());
-    for (lo, hi) in [(3.4e6, 3.5e6), (1.39e7, 1.41e7)] {
-        let (n2n, coverage) = sigma(&m, "H2", "(n,2n)", lo, hi);
-        assert!(!coverage.skipped_nc.contains_key("H2"));
-        assert!(
-            !coverage.partials_above_rate.contains_key(&key)
-                && !coverage.partials_below_rate.contains_key(&key),
-            "{lo} to {hi} eV: above {:?}, below {:?}",
-            coverage.partials_above_rate.get(&key),
-            coverage.partials_below_rate.get(&key)
-        );
-        eprintln!("TENDL-2017 H2 (n,2n), {lo} to {hi} eV: {:.4}%", 100.0 * n2n);
-    }
+    assert_eq!(
+        derivation(&blocks, 107),
+        [(1.0, 800), (1.0, 801), (1.0, 802), (1.0, 803)]
+    );
+    let (lo, hi) = (2.19e7, 2.21e7);
+    let top_800 = blocks
+        .iter()
+        .filter(|b| b.mt == 800 && b.partner_mt() == 800)
+        .filter_map(|b| match &b.data {
+            CovarianceData::Ni(ni) => expand_ni(ni).ok(),
+            CovarianceData::Nc(_) => None,
+        })
+        .flat_map(|e| e.row_energies.last().copied())
+        .fold(0.0, f64::max);
+    assert!(top_800 <= lo, "800's grid reaches {top_800} eV");
+    assert!((801..=803).all(|mt| cell(&blocks, mt, mt, lo, hi) != 0.0));
+    let (na, coverage) = sigma(&m, "O16", "(n,a)", lo, hi);
+    let key = ("O16".to_string(), "(n,a)".to_string());
+    let share = coverage.rate_fraction_covered[&key];
+    let want = (801..=803)
+        .map(|mt| integral(&m, "O16", mt, lo, hi))
+        .sum::<f64>()
+        / integral(&m, "O16", 107, lo, hi);
+    assert!(want < 0.95, "801 to 803 carry {want} of (n,a)");
+    assert!(
+        ((share - want) / want).abs() < 1.0e-6,
+        "share {share}, stating partials {want}"
+    );
+    close(na, hand_sigma(&m, &blocks, "O16", 107, lo, hi), "O16 (n,a)");
+    eprintln!(
+        "ENDF/B-VIII.1 O16 (n,a), 21.9 to 22.1 MeV: share {share:.4}, sigma {:.4}%",
+        100.0 * na
+    );
 }
 
 /// Through the load an ordinary standalone run makes, which asks for the
