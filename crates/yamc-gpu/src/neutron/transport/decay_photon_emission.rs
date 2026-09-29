@@ -3,10 +3,11 @@
 //! D1S replaces the prompt secondary-photon yields of a coupled run with
 //! *decay* photons: at every neutron collision the kernel emits one photon
 //! whose energy is drawn from the decay photon spectrum (lines or a continuum)
-//! of an activation/transmutation product and whose weight is scaled by the decay photon-production yield. Each emitted
-//! photon is tagged with the *parent radionuclide* (the chain emitter), so a
-//! `parent_nuclides` tally filter can bin the photon flux per radionuclide for
-//! the host-side time-correction-factor (TCF) post-processing.
+//! of an activation/transmutation product and whose weight is scaled by the
+//! decay photon-production yield. Each emitted photon is tagged with the
+//! *parent radionuclide* (the chain emitter), so a `parent_nuclides` tally
+//! filter can bin the photon flux per radionuclide for the host-side
+//! time-correction-factor (TCF) post-processing.
 //!
 //! # Material-aggregate layout (mirrors the prompt coupled path)
 //!
