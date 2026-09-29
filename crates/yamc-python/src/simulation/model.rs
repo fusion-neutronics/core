@@ -1409,7 +1409,12 @@ impl PyModel {
     ///           ``get_reaction_rate_uncertainty``;
     ///         - ``"cross_sections"``: the ENDF MF=33 covariance, folded against
     ///           the spectrum the tally actually saw;
-    ///         - ``"half_life"``: the decay data's half-life sigmas.
+    ///         - ``"half_life"``: the decay data's half-life sigmas;
+    ///         - ``"decay_branching"``: the decay branching ratios of the
+    ///           two-mode parents whose sum rule fixes how the stated sigma is
+    ///           shared, as ``DataUncertainty`` describes;
+    ///         - ``"decay_energy"``: the decay data's mean decay energy sigmas,
+    ///           which move decay heat only.
     ///
     ///         ``"flux_spectrum"`` does not apply: there is no supplied spectrum,
     ///         and the flux's error is the statistical one. The transport runs

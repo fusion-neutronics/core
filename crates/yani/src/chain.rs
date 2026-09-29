@@ -9,6 +9,8 @@ use std::sync::{Arc, RwLock};
 
 use once_cell::sync::Lazy;
 
+use crate::continuum::{Continuum, Interpolation, UnreadableContinuum};
+
 type ChainMap = HashMap<String, ChainNuclide>;
 type ChainCache = RwLock<HashMap<String, Arc<ChainMap>>>;
 
@@ -347,20 +349,57 @@ fn bracket(e_lo: f64, e_hi: f64, hi: usize, energy: f64) -> [(usize, f64); 2] {
 }
 
 /// Distribution data for a decay photon source.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum DecaySourceDistribution {
-    /// Discrete line spectrum: each (energy, intensity) pair is a spectral line.
+    /// Discrete line spectrum: each (energy, intensity) pair is a spectral
+    /// line, its intensity the emission rate per atom [1/s].
     Discrete {
         energies: Vec<f64>,
         intensities: Vec<f64>,
     },
+    /// A continuum: `intensities` is the emission-rate density per atom
+    /// [1/s/eV] at each of `energies` [eV], read between them by
+    /// `interpolation`. `None` there is a file that states no law, which a
+    /// `decay/sources.arrow` written before the column does for every
+    /// continuum; see [`crate::continuum`].
+    Tabular {
+        energies: Vec<f64>,
+        intensities: Vec<f64>,
+        interpolation: Option<Interpolation>,
+    },
+}
+
+impl DecaySourceDistribution {
+    /// Particles emitted per atom per second: the lines summed, or the
+    /// continuum integrated under its law.
+    pub fn emission_rate(&self) -> Result<f64, UnreadableContinuum> {
+        match self {
+            DecaySourceDistribution::Discrete { intensities, .. } => Ok(intensities.iter().sum()),
+            DecaySourceDistribution::Tabular {
+                energies,
+                intensities,
+                interpolation,
+            } => Ok(Continuum::new(energies, intensities, *interpolation)?.integral()),
+        }
+    }
+
+    /// The stored values: a line's emission rate, or a continuum's density.
+    ///
+    /// Either is the per-decay yield times the decay constant, so a change of
+    /// half-life rescales both the same way.
+    pub fn intensities_mut(&mut self) -> &mut Vec<f64> {
+        match self {
+            DecaySourceDistribution::Discrete { intensities, .. }
+            | DecaySourceDistribution::Tabular { intensities, .. } => intensities,
+        }
+    }
 }
 
 /// A decay photon source associated with a nuclide.
 ///
 /// In D1S chain files, nuclides may have source entries describing the decay
 /// gamma spectrum emitted when the nuclide decays.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DecaySource {
     /// Particle type emitted (e.g. "photon")
     pub particle: String,
