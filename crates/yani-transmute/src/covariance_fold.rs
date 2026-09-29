@@ -4479,6 +4479,53 @@ mod lumped_tests {
         assert_eq!(renamed.len(), blocks.len() - 2);
     }
 
+    /// ENDF/B-VIII.1 Li7's MT 2 section names MT 851, the lump of MT 16 and
+    /// MT 24, which has no cross section of its own. On the cached evaluation
+    /// the two share the nuclide's grid, so the sum is built, point for point
+    /// the components' sum, and the derivation is not skipped for want of it.
+    /// Self-skips when the fixture is not cached.
+    #[test]
+    fn endfb_li7_n2n_lump_sum_is_built_on_the_cached_evaluation() {
+        let Some(dir) = yamc_test_cache::nuclide("Li7") else {
+            eprintln!("skipping: the Li7 fixture is not cached");
+            return;
+        };
+        let mut m = yamc_materials::Material::new(
+            std::collections::HashMap::from([("Li7".to_string(), 1.0)]),
+            "atom",
+            "sum",
+            None,
+        )
+        .expect("material");
+        m.set_temperature("294");
+        m.read_nuclear_data(
+            &std::collections::HashMap::from([("Li7".to_string(), dir)]),
+            None,
+        )
+        .expect("Li7 loads");
+        let by_mt = m.nuclide_data["Li7"]
+            .reactions_for_temp("294")
+            .expect("294 K");
+        let reactions: BTreeMap<i32, &Reaction> =
+            by_mt.iter().map(|(mt, r)| (*mt, r.as_ref())).collect();
+        assert!(!reactions.contains_key(&851), "a lump has no MF=3 section");
+        let sums = lump_cross_sections(&li7(), &reactions);
+        let sum = sums
+            .iter()
+            .find(|r| r.mt_number == 851)
+            .expect("MT 851 is built from MT 16 and MT 24");
+        for (&e, &x) in sum.energy.iter().zip(sum.cross_section.iter()) {
+            let parts: f64 = [16, 24]
+                .iter()
+                .map(|mt| reactions[mt].cross_section_at(e).unwrap_or(0.0))
+                .sum();
+            assert!(
+                (x - parts).abs() <= 1e-12 * parts.abs(),
+                "{e} eV: {x} vs {parts}"
+            );
+        }
+    }
+
     /// `mt` on the shared grid `GRID` from index `threshold`, as a nuclide's
     /// reactions sit on its own grid.
     fn on_grid(mt: i32, threshold: usize, xs: &[f64]) -> Reaction {
