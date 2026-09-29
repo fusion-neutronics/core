@@ -516,9 +516,14 @@ impl FluxDensity<'_> {
                 cuts.windows(2)
                     .map(|w| weight(&walk_group(reaction, w[0], w[1], Some(shape), None))),
             );
-            let sum: f64 = parts.iter().sum();
+            let mut sum: f64 = parts.iter().sum();
             if sum <= 0.0 {
-                continue;
+                // The whole group's term is nonzero, so its pieces should be
+                // too; if rounding ever leaves them at zero, split the term by
+                // width rather than drop it from every partial.
+                parts.clear();
+                parts.extend(cuts.windows(2).map(|w| w[1] - w[0]));
+                sum = ghi - glo;
             }
             for (w, part) in cuts.windows(2).zip(&parts) {
                 if let Some(k) = interval_holding(grid, w[0], w[1]) {
