@@ -58,7 +58,9 @@ impl PyPhotonContinuum {
     ///
     /// Raises:
     ///     ValueError: If the law is not stated, or is one this build does not
-    ///         integrate. The integral is then unknown, and no number is
+    ///         integrate, or if the energy and rate lists are unpaired, the
+    ///         energies are not finite or descend, or the rates are negative
+    ///         or not finite. The integral is then unknown, and no number is
     ///         returned in its place.
     #[getter]
     fn emission_rate(&self) -> PyResult<f64> {

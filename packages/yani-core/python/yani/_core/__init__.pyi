@@ -281,9 +281,11 @@ class DataUncertainty:
     - on a transport run, the flux's response to a perturbed cross section:
       there is one transport, not one per replica. The tallied values
       themselves are still drawn by the ``"statistical"`` source;
-    - decay photon line energies and intensities (MF=8 MT=457), photon
-      attenuation (XCOM), air energy absorption (NIST SRD 126), the ICRP-116
-      fluence-to-dose coefficients and the contact-dose build-up factor;
+    - decay photon line energies and intensities (MF=8 MT=457), the decay
+      photon continuum normalisation and shape (MF=8 MT=457 continuum and its
+      covariance), photon attenuation (XCOM), air energy absorption (NIST
+      SRD 126), the ICRP-116 fluence-to-dose coefficients and the contact-dose
+      build-up factor;
     - the material's composition, density, natural isotopic abundances and the
       AME2020 atomic masses used to convert mass fractions;
     - any source switched off with ``sources``, or with nothing to act on (a
@@ -925,12 +927,13 @@ class Material:
             >>> source = PhotonSource(energy=sources.Discrete(energies, rates))
         
         ``Discrete`` normalizes the weights, so the shape is what transport
-        samples. ``sum(rates)`` is the line emission rate (photons/s) only.
-        That source leaves out every continuum, which for a continuum emitter
-        can be most of its photons (all of them for Sm158 in ENDF/B-VIII.1), so
-        the rate that scales the tallies also needs
-        ``sum(c.emission_rate for c in activated.decay_photon_continua())``,
-        and a complete source needs each continuum added as well.
+        samples. ``sum(rates)`` is the line emission rate (photons/s) only,
+        the rate that scales tallies from this source. That source leaves out
+        every continuum, which for a continuum emitter can be most of its
+        photons (all of them for Sm158 in ENDF/B-VIII.1); the continua emit
+        ``sum(c.emission_rate for c in activated.decay_photon_continua())``
+        more. No ``sources`` distribution yet holds a linear-linear continuum
+        exactly, so a transport source cannot yet carry every continuum.
         
         Returns:
             tuple[list[float], list[float]]: Line energies (eV) and their
@@ -976,12 +979,11 @@ class Material:
         Per photon line of energy ``E`` and per-atom emission rate ``S`` the
         estimate is ``(build_up / 2) * (response(E) / mu_material(E)) * S * E``
         for the absorbed dose in air, and the same without the trailing ``E``
-        for the effective dose. A photon continuum is integrated over energy,
-        its density read under the law its data states. ``mu_material`` is the
-        material's own linear attenuation coefficient, built from the NIST XCOM
-        mass attenuation coefficients of the elements present; the response is
-        the NIST-126 mass energy-absorption coefficient of air, or the ICRP-116
-        photon effective-dose coefficient for anterior-posterior irradiation.
+        for the effective dose. ``mu_material`` is the material's own linear
+        attenuation coefficient, built from the NIST XCOM mass attenuation
+        coefficients of the elements present; the response is the NIST-126
+        mass energy-absorption coefficient of air, or the ICRP-116 photon
+        effective-dose coefficient for anterior-posterior irradiation.
         
         Follows the FISPACT-II manual (UKAEA-CCFE-RE(21)02, Appendix C.7.1) for
         the absorbed-air quantity. For photon lines it agrees with OpenMC's
@@ -1014,7 +1016,8 @@ class Material:
                 whose data states no interpolation law, as transmutation data
                 written before the law was stored does, one tabulated under a
                 law other than histogram or linear-linear, or one whose energy
-                and rate lists are unpaired or whose energies descend. Its
+                and rate lists are unpaired, whose energies are not finite or
+                descend, or whose rates are negative or not finite. Its
                 integral is unknown, and leaving it out would understate the
                 dose.
         
@@ -1795,7 +1798,9 @@ class PhotonContinuum:
         
         Raises:
             ValueError: If the law is not stated, or is one this build does not
-                integrate. The integral is then unknown, and no number is
+                integrate, or if the energy and rate lists are unpaired, the
+                energies are not finite or descend, or the rates are negative
+                or not finite. The integral is then unknown, and no number is
                 returned in its place.
         """
     def __repr__(self) -> builtins.str: ...
@@ -2622,16 +2627,45 @@ class TransmutationResults:
         
         - ``perturbed`` / ``no_covariance_data``: which nuclides had usable
           MF=33 covariance and which had none.
-        - ``rate_fraction_covered_total``: the share of the production this run
-          drove that a covariance actually spans, weighted by rate and by parent
-          density. Read this before any sigma here. It is a different and much
-          sharper question than how many nuclides carry MF=33: an evaluation can
-          state covariance for every isotope in the material and none for the
+        - ``rate_fraction_covered_total``: the per-channel shares below,
+          averaged with each channel weighted by the production it drove (the
+          rate this run used times parent density): the share of the
+          production driven from energies where a covariance states a nonzero
+          variance. ``None`` on a decay-only schedule, and on a self-shielded
+          or transport run, where the shares are of the dilute rate and the
+          covered share of the production actually driven is not computed.
+          Read this before any sigma here. It is a different and much sharper
+          question than how many nuclides carry MF=33: an evaluation can state
+          covariance for every isotope in the material and none for the
           channel making the product of interest, and the count then reads as
           full coverage while the ensemble perturbs almost nothing.
         - ``rate_fraction_covered``: per nuclide and channel, the share of the
-          reaction rate the covariance grid actually spans. Below one means part
-          of the rate carries no stated uncertainty and the sigma is diluted.
+          dilute reaction rate from energies where the evaluation states a
+          nonzero variance for it. Below one means part of the dilute rate
+          carries no stated uncertainty and dilutes the sigma; on a shielded
+          or tallied run the dilution applied differs from this share. An
+          interval the covariance grid spans with a variance of zero counts as
+          uncovered: ENDF/B-VIII.1 W186 ``(n,gamma)`` states zero from 1e-5 eV
+          to 10 keV, where nearly all of its capture rate is.
+        - ``partials_above_rate``: per nuclide and channel, where the partial
+          rates the covariance was weighted with, zero variance intervals
+          included, add up to more than the rate it was divided by, their
+          ratio to it. Each entry is a channel whose sigma is overstated. Three
+          known causes: a self-shielded rate against dilute partials, which
+          lists most channels a relative block names, many a few parts in 1e7
+          over, until the fold weights with shielded partials (#166 item 4); a
+          tallied rate on a transport run, computed apart from the partials
+          the fold takes from the tally's flux; and the ``1/E`` within-group
+          weight with a covariance edge inside a group. The share in
+          ``rate_fraction_covered`` is measured against the dilute rate, so it
+          is unaffected.
+        - ``partials_below_rate``: keyed the same way, where a covariance grid
+          spans the whole flux range and its partial rates add up to less than
+          the rate, their ratio to it: a channel whose sigma is understated.
+          The ``1/E`` weight gives one for a reaction falling with energy when
+          a covariance edge cuts a group. A grid that stops short of the flux
+          range cannot be checked from below, since rate from outside it
+          rightly leaves its partials short.
         - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
           covariance blocks that were present but not consumed.
         - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
@@ -2985,10 +3019,13 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         taken as ground because the decay data has no isomer for its product,
         matched only by the looser energy pass, or matched by energy while its
         level index pointed at another isomer; every excited level that ends
-        up at ground is listed), and ``partial_sum_mismatches``
+        up at ground is listed), ``partial_sum_mismatches``
         (one line per reaction whose MF=10 partial cross sections do not sum to
         its MF=3 total, or whose MF=9 yields do not sum to one, within two
-        percent below 20 MeV).
+        percent below 20 MeV), and ``skipped_states`` (one line per production
+        state that names no single product nuclide, and so gives no row:
+        fission, an IZAP of zero that no single MF=8 subsection resolves, or
+        any other ZAP whose Z or A is not positive).
     """
 
 def convert_neutron_transport(input_path: builtins.str, output_dir: builtins.str, njoy_exec: builtins.str = 'njoy', temperatures: typing.Optional[typing.Sequence[builtins.float]] = None, library: builtins.str = '', data_version: builtins.str = '', created_utc: typing.Optional[builtins.str] = None, covariance: builtins.bool = False) -> builtins.str:
@@ -3338,6 +3375,9 @@ def radionuclide_production(neutron_files: typing.Sequence[builtins.str]) -> lis
         ``product`` is the product's **ground-state** name even for an excited
         state, because naming the isomer needs decay data to say which
         isomeric ordinal a level is; pair it with ``excitation_energy_eV``.
+        It is ``None`` for a state naming no single nuclide: fission, a
+        subsection whose IZAP is zero with no single MF=8 subsection to name
+        it, or any other ZAP whose Z or A is not positive.
         ``level_index`` is the evaluation's own LFS and is not comparable
         between libraries: Ir190's 377 keV isomer is level 3 in ENDF/B-VIII.1
         and level 37 in JEFF-4.0. ``source`` is ``"cross_section"`` for MF=10

@@ -311,6 +311,10 @@ pub fn expand_keyword_to_subsection_url(keyword: &str, subsection: &str) -> Opti
 /// as a `branching_covariance.arrow.absent` marker (see [`download_sections`]),
 /// so a missing file means "no covariance" rather than an incomplete download.
 /// As of 2026-09-26 every published branching folder answers 404 for it.
+///
+/// `evaluated_yields.arrow` is the tape-literal fission yield evaluation, both
+/// MT=454 and MT=459 with DY. A library published before it answers 404 and
+/// loads with no evaluated yields; the nominal yields are unaffected.
 #[cfg(feature = "download")]
 fn transmutation_sections(subsection: &str) -> &'static [(&'static str, bool)] {
     match subsection {
@@ -324,6 +328,7 @@ fn transmutation_sections(subsection: &str) -> &'static [(&'static str, bool)] {
         "fission_yields" => &[
             ("fission_yields.arrow", true),
             ("aliases.arrow", false),
+            ("evaluated_yields.arrow", false),
             ("provenance.json", false),
         ],
         "branching" => &[
@@ -1930,6 +1935,26 @@ mod tests {
         );
         assert!(
             sections.contains(&("branching_covariance.arrow", false)),
+            "{sections:?}"
+        );
+        assert_eq!(
+            sections.last(),
+            Some(&("provenance.json", false)),
+            "provenance.json stays last, as in every other subsection"
+        );
+    }
+
+    /// Optional, so a library published before the evaluated yields existed
+    /// settles as `.absent` on a 404 rather than failing every download.
+    #[test]
+    fn the_fission_yields_subsection_lists_its_evaluated_yields_as_optional() {
+        let sections = transmutation_sections("fission_yields");
+        assert!(
+            sections.contains(&("fission_yields.arrow", true)),
+            "{sections:?}"
+        );
+        assert!(
+            sections.contains(&("evaluated_yields.arrow", false)),
             "{sections:?}"
         );
         assert_eq!(

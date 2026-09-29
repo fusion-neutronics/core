@@ -178,6 +178,39 @@ def test_no_floor_counter_is_reported_for_a_draw_that_cannot_go_negative():
     assert "rates_sampled" in info
 
 
+def test_coverage_is_a_share_and_a_dilute_run_has_no_partials_off_the_rate():
+    """Every coverage entry is a share, and nothing on a dilute run is off one.
+
+    On an unshielded collapse the fold's partial rates and the rate they are
+    divided by are the same integral, so ``partials_above_rate`` and
+    ``partials_below_rate`` must be empty; an entry there is a channel whose
+    sigma is overstated or understated.
+    """
+    iron = _iron()
+    results = iron.transmute(
+        schedule=_schedule(),
+        data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["cross_sections"]),
+    )
+    info = results.get_data_uncertainty_info(iron.id or 0)
+    # The key and its conversion are checked on every run: without covariance
+    # it is an empty dict, which is valid.
+    assert isinstance(info["partials_above_rate"], dict)
+    assert isinstance(info["partials_below_rate"], dict)
+    # Without covariance the checks below pass on empty maps, so a fixture
+    # without it is skipped, visibly, rather than passed unexamined. Whether
+    # the Fe56 fixture carries covariance.arrow depends on the cache: the URL
+    # cache fetches it on demand once uncertainty is asked for. The same
+    # checks are pinned on a built fixture in
+    # crates/yani-transmute/tests/data_uncertainty.rs.
+    if "Fe56" not in info["perturbed"]:
+        pytest.skip("the Fe56 fixture carries no covariance.arrow")
+    assert info["rate_fraction_covered"], "the fold consumed no covariance"
+    assert info["partials_above_rate"] == {}
+    assert info["partials_below_rate"] == {}
+    for channel, share in info["rate_fraction_covered"].items():
+        assert 0.0 <= share <= 1.0, f"{channel} reads {share}"
+
+
 def test_the_means_are_unchanged_by_asking_for_uncertainty():
     """Bit-identical, not merely close: the nominal pass is untouched."""
     iron = _iron()

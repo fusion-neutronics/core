@@ -25,9 +25,7 @@
 //! This follows the FISPACT-II manual (UKAEA-CCFE-RE(21)02, Appendix C.7.1) for
 //! the absorbed-air quantity. For photon lines it matches what OpenMC's
 //! `Material.get_photon_contact_dose_rate` computes. A continuum is integrated
-//! under its evaluated law, where OpenMC raises for a nuclide that has both
-//! lines and a continuum and takes a trapezoid rule over a continuum alone, so
-//! a continuum emitter differs from OpenMC by design.
+//! exactly under its evaluated interpolation law.
 //!
 //! Two things it does not model: bremsstrahlung from decay electrons, which
 //! matters at contact for strong beta emitters, and any nuclide whose radiation
@@ -291,8 +289,9 @@ fn multiplier(quantity: DoseQuantity, build_up: f64) -> f64 {
 /// `yani-convert/tests/decay_continuum.rs`). A continuum this build cannot
 /// integrate is an `Err` naming the nuclide rather than a smaller dose: one
 /// with no stated law, one tabulated under a law other than histogram or
-/// linear-linear, and a hand-built one whose lists are unpaired or whose
-/// energies descend. Its integral is unknown, and leaving it out would
+/// linear-linear, and a hand-built one whose lists are unpaired, whose
+/// energies are not finite or descend, or whose densities are negative or
+/// not finite. Its integral is unknown, and leaving it out would
 /// understate the answer by an unknown amount. A continuum wholly outside the
 /// range needs no law and adds nothing, as a line there does.
 ///
