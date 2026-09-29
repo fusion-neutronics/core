@@ -27,6 +27,13 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///   solve AND in the activity, decay heat and dose evaluated from it, so a
 ///   saturated activity (``lambda N = R``) is correctly insensitive to its
 ///   own half-life rather than inheriting the density's spread;
+/// - ``"decay_branching"``: the decay branching ratios of every reachable
+///   parent with exactly two modes and one stated sigma between them (both
+///   state the same one, or one states it and the other is its complement),
+///   whose smaller ratio is at least five sigmas from zero. One draw per
+///   parent moves one mode up and the other down by the same amount, so the
+///   pair's total is kept. Other multi-mode parents stay at their evaluated
+///   ratios and the report names them by why;
 /// - ``"statistical"``: the Monte Carlo uncertainty of transport-tallied
 ///   reaction rates, from their per-history covariance. It applies to
 ///   ``Model.simulate_transmutation``, as ``"flux_spectrum"`` applies only to
@@ -47,8 +54,11 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 /// Held at their nominal values, with uncertainties of their own that this
 /// does not propagate:
 ///
-/// - decay branching ratios, fission yields, and the isomeric-branching
-///   overlay from MF=9/MF=10;
+/// - the decay branching ratios ``"decay_branching"`` does not sample (three
+///   or more modes, unequal sigmas, too wide to sample untruncated, or no
+///   sigma), and the per-decay photon lines and decay energy of a drawn
+///   parent, which follow its nominal branching;
+/// - fission yields and the isomeric-branching overlay from MF=9/MF=10;
 /// - covariance correlating two evaluations (MAT1 != 0), covariance derived
 ///   from other sections (MF=33 NC), the lumped-reaction covariance
 ///   (MT=851-870) and the resonance-parameter covariance (MF=32), so only the
@@ -59,9 +69,11 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 /// - on a transport run, the flux's response to a perturbed cross section:
 ///   there is one transport, not one per replica. The tallied values
 ///   themselves are still drawn by the ``"statistical"`` source;
-/// - decay photon line energies and intensities (MF=8 MT=457), photon
-///   attenuation (XCOM), air energy absorption (NIST SRD 126), the ICRP-116
-///   fluence-to-dose coefficients and the contact-dose build-up factor;
+/// - decay photon line energies and intensities (MF=8 MT=457), the decay
+///   photon continuum normalisation and shape (MF=8 MT=457 continuum and its
+///   covariance), photon attenuation (XCOM), air energy absorption (NIST
+///   SRD 126), the ICRP-116 fluence-to-dose coefficients and the contact-dose
+///   build-up factor;
 /// - the material's composition, density, natural isotopic abundances and the
 ///   AME2020 atomic masses used to convert mass fractions;
 /// - any source switched off with ``sources``, or with nothing to act on (a
@@ -248,11 +260,26 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
 
     // The one number that says whether the sigmas above are a spread over the
     // answer or over a corner of it. `None` for a decay-only schedule, which
-    // drove no production and so has no share to report.
+    // drove no production and so has no share to report, and on a shielded or
+    // transport run, where the share of the production driven is not computed.
     d.set_item(
         "rate_fraction_covered_total",
         info.rate_fraction_covered_total,
     )?;
+
+    // Keyed like `rate_fraction_covered`. Each entry is a channel whose sigma
+    // is overstated, so it is a warning and not a detail: `has_gaps` counts it.
+    let above = PyDict::new(py);
+    for ((nuclide, kind), ratio) in &info.partials_above_rate {
+        above.set_item(format!("{nuclide} {kind}"), ratio)?;
+    }
+    d.set_item("partials_above_rate", above)?;
+    // The same inconsistency the other way, a sigma understated.
+    let below = PyDict::new(py);
+    for ((nuclide, kind), ratio) in &info.partials_below_rate {
+        below.set_item(format!("{nuclide} {kind}"), ratio)?;
+    }
+    d.set_item("partials_below_rate", below)?;
 
     d.set_item("matrices_clipped", info.matrices_clipped)?;
     d.set_item("worst_relative_clip", info.worst_relative_clip)?;
@@ -280,6 +307,29 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     )?;
     d.set_item("half_lives_floored", info.half_lives_floored)?;
     d.set_item("half_lives_sampled", info.half_lives_sampled)?;
+    for (key, set) in [
+        (
+            "decay_branchings_perturbed",
+            &info.decay_branchings_perturbed,
+        ),
+        (
+            "no_decay_branching_uncertainty",
+            &info.no_decay_branching_uncertainty,
+        ),
+        (
+            "decay_branchings_three_or_more_modes",
+            &info.decay_branchings_three_or_more_modes,
+        ),
+        (
+            "decay_branchings_unequal_sigmas",
+            &info.decay_branchings_unequal_sigmas,
+        ),
+        ("decay_branchings_too_wide", &info.decay_branchings_too_wide),
+    ] {
+        d.set_item(key, set.iter().cloned().collect::<Vec<_>>())?;
+    }
+    d.set_item("decay_branchings_floored", info.decay_branchings_floored)?;
+    d.set_item("decay_branchings_sampled", info.decay_branchings_sampled)?;
     d.set_item(
         "decay_energies_perturbed",
         info.decay_energies_perturbed

@@ -43,10 +43,12 @@ pub struct NiSubsection {
     pub ne: i64,
     pub ner: i64,
     pub nec: i64,
-    /// LB 0 to 4, and LB 8 or 9.
+    /// LB 0 to 4, and LB 8 or 9. For LB 0 to 4 this is the first (E, F)
+    /// table, NP - LT pairs of it.
     pub ek: Vec<f64>,
     pub fk: Vec<f64>,
-    /// LB 0 to 4 only: the second (E, F) table.
+    /// LB 0 to 4 only: the second (E, F) table, LT pairs of it. The format
+    /// gives one only to LB 3 and 4; LB 0 to 2 have LT=0 and leave it empty.
     pub el: Vec<f64>,
     pub fl: Vec<f64>,
     /// LB=5: the covariance matrix, in the format's packed order.
@@ -153,7 +155,14 @@ pub fn parse_mf33_subsection(reader: &mut Reader) -> Result<Mf33Subsection> {
             0..=4 => {
                 subsub.lt = list.cont.l1;
                 subsub.np = list.cont.n2;
-                let split = (subsub.nt - subsub.np).clamp(0, v.len() as i64) as usize;
+                // The first table holds NP - LT pairs and the second LT
+                // (ENDF-102 section 33.2.2.2). This parser and endf-python's
+                // mf33.py, the golden reader, both used to split at NT - NP,
+                // which is right only when LT = NP / 2: with LT = 0 it moved
+                // the upper half of the only table into `el`/`fl`. See
+                // fusion-neutronics/core#166 and
+                // <https://github.com/shimwell/endf-python/issues/25>.
+                let split = (2 * (subsub.np - subsub.lt)).clamp(0, v.len() as i64) as usize;
                 let (k, l) = v.split_at(split);
                 subsub.ek = column(k, 0, 2);
                 subsub.fk = column(k, 1, 2);
@@ -435,5 +444,43 @@ mod tests {
         assert_eq!(ni.ne, 3);
         assert_eq!(ni.ek, vec![1.0, 2.0, 3.0]);
         assert_eq!(ni.fkk, vec![10.0, 20.0]);
+    }
+
+    /// LB 0 to 4 split at 2*(NP - LT) values. Splitting at NT - NP agrees only
+    /// when LT = NP / 2; see fusion-neutronics/core#166.
+    #[test]
+    fn mf33_lb1_keeps_its_one_table_whole() {
+        // LT=0, LB=1, NT=6, NP=3: one table. NP is odd, so the old split also
+        // started the second array on an F value.
+        let text = line([f(0.0), f(0.0), i(0), i(0), i(0), i(1)])
+            + &line([f(0.0), f(0.0), i(0), i(1), i(6), i(3)])
+            + &line([f(1.0e-5), f(0.0), f(8.0e5), f(0.01125), f(2.0e7), f(0.0)]);
+
+        let sub = parse_mf33_subsection(&mut Reader::new(&text)).unwrap();
+        let ni = &sub.ni_subsections[0];
+        assert_eq!((ni.lb, ni.lt, ni.np), (1, 0, 3));
+        assert_eq!(ni.ek, vec![1.0e-5, 8.0e5, 2.0e7]);
+        assert_eq!(ni.fk, vec![0.0, 0.01125, 0.0]);
+        assert!(
+            ni.el.is_empty() && ni.fl.is_empty(),
+            "LT=0 has no second table"
+        );
+    }
+
+    #[test]
+    fn mf33_lb3_splits_at_the_second_tables_own_length() {
+        // LT=2, LB=3, NT=10, NP=5: three pairs, then two. NT - NP would have
+        // split two and a half pairs in.
+        let text = line([f(0.0), f(0.0), i(0), i(0), i(0), i(1)])
+            + &line([f(0.0), f(0.0), i(2), i(3), i(10), i(5)])
+            + &line([f(1.0), f(0.1), f(2.0), f(0.2), f(3.0), f(0.0)])
+            + &line([f(1.0), f(0.3), f(3.0), f(0.0), f(0.0), f(0.0)]);
+
+        let sub = parse_mf33_subsection(&mut Reader::new(&text)).unwrap();
+        let ni = &sub.ni_subsections[0];
+        assert_eq!(ni.ek, vec![1.0, 2.0, 3.0]);
+        assert_eq!(ni.fk, vec![0.1, 0.2, 0.0]);
+        assert_eq!(ni.el, vec![1.0, 3.0]);
+        assert_eq!(ni.fl, vec![0.3, 0.0]);
     }
 }

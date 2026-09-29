@@ -9,6 +9,7 @@ mod enrichment;
 #[allow(clippy::module_inception)]
 mod material;
 mod nuclide;
+mod photon_continuum;
 mod reaction;
 mod reaction_product;
 
@@ -20,5 +21,6 @@ pub use dose::*;
 pub use enrichment::*;
 pub use material::*;
 pub use nuclide::*;
+pub use photon_continuum::PyPhotonContinuum;
 pub use reaction::*;
 pub use reaction_product::*;

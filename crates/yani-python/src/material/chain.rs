@@ -220,9 +220,19 @@ impl PyChain {
 
     /// Decay photon sources of each nuclide that has them (D1S data).
     ///
+    /// A source is lines or a continuum, and the two are in different units,
+    /// so each one says which it is.
+    ///
     /// Returns:
-    ///     dict[str, list[tuple[list[float], list[float]]]]: nuclide name ->
-    ///     list of (energies, intensities) for each photon source.
+    ///     dict[str, list[tuple[str, list[float], list[float], str | None]]]:
+    ///     nuclide name -> one ``(type, energies, intensities, interpolation)``
+    ///     per photon source. A ``"discrete"`` source lists lines, each
+    ///     intensity its emission rate per atom [1/s], and its interpolation is
+    ///     None. A ``"tabular"`` one is a continuum: each intensity is the
+    ///     emission-rate density per atom [1/s/eV] at that energy, read between
+    ///     energies by ``interpolation``, the ENDF law by name (e.g.
+    ///     ``"histogram"`` or ``"linear-linear"``), which is None where the
+    ///     data states no law.
     #[getter]
     pub fn photon_sources(&self, py: Python) -> Py<PyAny> {
         let dict = PyDict::new(py);
@@ -233,16 +243,23 @@ impl PyChain {
             let sources = PyList::empty(py);
             for src in &nuclide.sources {
                 if src.particle == "photon" {
-                    match &src.distribution {
+                    let row = match &src.distribution {
                         DecaySourceDistribution::Discrete {
                             energies,
                             intensities,
-                        } => {
-                            sources
-                                .append((energies.clone(), intensities.clone()))
-                                .unwrap();
-                        }
-                    }
+                        } => ("discrete", energies.clone(), intensities.clone(), None),
+                        DecaySourceDistribution::Tabular {
+                            energies,
+                            intensities,
+                            interpolation,
+                        } => (
+                            "tabular",
+                            energies.clone(),
+                            intensities.clone(),
+                            interpolation.map(|law| law.name()),
+                        ),
+                    };
+                    sources.append(row).unwrap();
                 }
             }
             if !sources.is_empty() {

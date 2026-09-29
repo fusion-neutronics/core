@@ -232,8 +232,10 @@ impl PyTransmutationResults {
     /// - ``contributors``: first order, a list of ``(source, nuclide,
     ///   reaction, variance)``, largest reach first. Within the cross sections
     ///   a nuclide's whole evaluation has ``reaction`` of ``None`` and each
-    ///   channel alone names it; a half-life has ``None``. It says which
-    ///   evaluation to look at; the total is the resampled one.
+    ///   channel alone names it; a half-life has ``None``. A decay branching
+    ///   contributor is a two-mode parent's one degree of freedom, with
+    ///   ``reaction`` of ``None``. It says which evaluation to look at; the
+    ///   total is the resampled one.
     ///
     /// Args:
     ///     material_id: Material ID number.
@@ -566,7 +568,9 @@ impl PyTransmutationResults {
     /// not emit counts as a zero in it -- the same rule the densities follow,
     /// and the only one under which two lines' spreads are taken over the same
     /// sample -- and ``LineEstimate.emitting`` reports how many replicas
-    /// emitted it, which is what the zero-fill would otherwise hide.
+    /// emitted it, which is what the zero-fill would otherwise hide. Lines
+    /// only, as there: a photon continuum is not a line and is not reported
+    /// here.
     ///
     /// The band is the spread of the replicas' inventories alone (each with
     /// its own half-lives when the ``"half_life"`` source is on). The line
@@ -609,18 +613,54 @@ impl PyTransmutationResults {
     ///
     /// - ``perturbed`` / ``no_covariance_data``: which nuclides had usable
     ///   MF=33 covariance and which had none.
-    /// - ``rate_fraction_covered_total``: the share of the production this run
-    ///   drove that a covariance actually spans, weighted by rate and by parent
-    ///   density. Read this before any sigma here. It is a different and much
-    ///   sharper question than how many nuclides carry MF=33: an evaluation can
-    ///   state covariance for every isotope in the material and none for the
+    /// - ``rate_fraction_covered_total``: the per-channel shares below,
+    ///   averaged with each channel weighted by the production it drove (the
+    ///   rate this run used times parent density): the share of the
+    ///   production driven from energies where a covariance states a nonzero
+    ///   variance. ``None`` on a decay-only schedule, and on a self-shielded
+    ///   or transport run, where the shares are of the dilute rate and the
+    ///   covered share of the production actually driven is not computed.
+    ///   Read this before any sigma here. It is a different and much sharper
+    ///   question than how many nuclides carry MF=33: an evaluation can state
+    ///   covariance for every isotope in the material and none for the
     ///   channel making the product of interest, and the count then reads as
     ///   full coverage while the ensemble perturbs almost nothing.
     /// - ``rate_fraction_covered``: per nuclide and channel, the share of the
-    ///   reaction rate the covariance grid actually spans. Below one means part
-    ///   of the rate carries no stated uncertainty and the sigma is diluted.
+    ///   dilute reaction rate from energies where the evaluation states a
+    ///   nonzero variance for it. Below one means part of the dilute rate
+    ///   carries no stated uncertainty and dilutes the sigma; on a shielded
+    ///   or tallied run the dilution applied differs from this share. An
+    ///   interval the covariance grid spans with a variance of zero counts as
+    ///   uncovered: ENDF/B-VIII.1 W186 ``(n,gamma)`` states zero from 1e-5 eV
+    ///   to 10 keV, where nearly all of its capture rate is. Every consumed
+    ///   self-covariance block counts where it states a nonzero variance,
+    ///   relative (LB=1 to 6), absolute (LB=0) and short-range (LB=8) alike.
+    /// - ``partials_above_rate``: per nuclide and channel, where the partial
+    ///   rates the covariance was weighted with, zero variance intervals
+    ///   included, add up to more than the rate it was divided by, their
+    ///   ratio to it. Each entry is a channel whose sigma is overstated. Three
+    ///   known causes: a self-shielded rate against dilute partials, which
+    ///   lists most channels a relative block names, many a few parts in 1e7
+    ///   over, until the fold weights with shielded partials (#166 item 4); a
+    ///   tallied rate on a transport run, computed apart from the partials
+    ///   the fold takes from the tally's flux; and the ``1/E`` within-group
+    ///   weight with a covariance edge inside a group. The share in
+    ///   ``rate_fraction_covered`` is measured against the dilute rate, so it
+    ///   is unaffected.
+    /// - ``partials_below_rate``: keyed the same way, where a covariance grid
+    ///   spans the whole flux range and its partial rates add up to less than
+    ///   the rate, their ratio to it: a channel whose sigma is understated.
+    ///   The ``1/E`` weight gives one for a reaction falling with energy when
+    ///   a covariance edge cuts a group. A grid that stops short of the flux
+    ///   range cannot be checked from below, since rate from outside it
+    ///   rightly leaves its partials short.
     /// - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
     ///   covariance blocks that were present but not consumed.
+    /// - ``malformed_blocks``: covariance blocks not consumed because they
+    ///   break ENDF-102's rules for their layout: arrays that disagree with
+    ///   their declared sizes, an LB=0 to 2 block carrying a second energy
+    ///   table, an LB=3 or 4 block without one or whose tables share no
+    ///   energy range, or an LB=8 variance stated between two reactions.
     /// - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
     ///   covariance was not positive semi-definite and had to be repaired.
     /// - ``rates_sampled``: cross-section rate draws made. Each is a lognormal
@@ -631,6 +671,17 @@ impl PyTransmutationResults {
     ///   half-life sampled and which state no sigma to sample from.
     ///   ``half_lives_floored`` / ``half_lives_sampled`` count draws that came
     ///   out non-positive and had to be floored.
+    /// - ``decay_branchings_perturbed``: with the ``"decay_branching"``
+    ///   source, the reachable two-mode parents whose split was sampled. The
+    ///   multi-mode parents held at their evaluated ratios, each a gap:
+    ///   ``no_decay_branching_uncertainty`` (no mode states a sigma),
+    ///   ``decay_branchings_three_or_more_modes`` (a sigma, but no stated
+    ///   covariance to share it between three or more modes),
+    ///   ``decay_branchings_unequal_sigmas`` (two modes stating different
+    ///   sigmas) and ``decay_branchings_too_wide`` (the smaller ratio under
+    ///   five sigmas). ``decay_branchings_floored`` /
+    ///   ``decay_branchings_sampled`` count draws clamped to the pair's total
+    ///   and draws made.
     /// - ``statistical_rates``: with the ``"statistical"`` source on a
     ///   transport run, how many tallied rates were sampled from their
     ///   covariance; ``statistical_floored`` / ``statistical_sampled`` count
@@ -638,8 +689,9 @@ impl PyTransmutationResults {
     /// - ``not_perturbed``: every input this run held at its nominal value,
     ///   such as the MF=32 resonance-parameter covariance, the photon and dose
     ///   data, the material composition, any source switched off, and, where
-    ///   they applied, the self-shielding correction and the flux's response
-    ///   to a perturbed cross section on a transport run.
+    ///   they applied, the self-shielding correction, the flux's response to a
+    ///   perturbed cross section on a transport run, and the per-branch decay
+    ///   emission of a parent whose branching was drawn.
     /// - ``samples`` / ``converged``: how many replicas ran, and whether the
     ///   sigmas settled or the cap was hit.
     ///
