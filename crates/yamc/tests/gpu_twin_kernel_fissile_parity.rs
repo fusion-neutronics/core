@@ -1,15 +1,14 @@
-//! Twin vs cubecl KERNEL on a FISSILE model (issues #111, #154).
+//! Twin vs cubecl KERNEL on a FISSILE model.
 //!
 //! The `matched_stream_*` harnesses compare the production CPU against the GPU's
-//! CPU TWIN, and since #355 / #357 / #358 a fissile history is bit-identical
-//! between those two. Nothing compared the twin against the KERNEL on the
+//! CPU TWIN, and a fissile history is bit-identical between those two. Nothing compared the twin against the KERNEL on the
 //! fission branch, though: every `cpu_gpu_equivalence_*` fixture in yamc-gpu runs
 //! `FissionBankInputs::off()` on a material with no fission cross section, so the
 //! fission chi, the fission reaction split and the fission weight path were only
 //! ever checked against themselves.
 //!
-//! That is the half of the CPU-vs-GPU chain #154's 0.2% flux deficit has to live
-//! in. This closes it for ONE launch: with the fission bank off, neither side
+//! That is the half of the CPU-vs-GPU chain a 0.2% fissile flux deficit has to
+//! live in. This closes it for ONE launch: with the fission bank off, neither side
 //! banks progeny, so a single launch each is directly comparable and any
 //! difference is the kernel's own physics rather than the host's bank drain.
 //!
@@ -667,7 +666,7 @@ fn compare(
     }
 }
 
-/// U235 at 1 MeV: the #154 configuration, fission on essentially every history.
+/// U235 at 1 MeV: the deficit configuration, fission on essentially every history.
 #[test]
 fn twin_and_kernel_agree_on_a_fissile_sphere() {
     compare(
@@ -699,9 +698,9 @@ fn twin_and_kernel_agree_on_a_non_fissile_sphere() {
 /// seeds, one all-energy flux bin so the two normalisations line up
 /// (`twin_sum / n` against the dispatch's per-source mean).
 ///
-/// This is the half of the chain issue #154's deficit has to live in: with the
-/// bank OFF the two agree to 1e-13 (the tests above), and the production CPU is
-/// bit-identical to the twin per history since #355 / #357 / #358.
+/// This is the half of the chain the fissile flux deficit has to live in: with
+/// the bank OFF the two agree to 1e-13 (the tests above), and the production CPU
+/// is bit-identical to the twin per history.
 fn compare_bank_on(nuclide: &str, density: f64, radius: f64, energy_ev: f64, n: usize) {
     if !data_present(nuclide) {
         eprintln!("skipping bank-on {nuclide} -- cache absent");
@@ -904,7 +903,7 @@ fn compare_bank_on(nuclide: &str, density: f64, radius: f64, energy_ev: f64, n: 
         // the `round(w)` relaunch itself: a banked progeny whose weight is NOT
         // integral -- an (n,2n) multiply leaves `w = 1.981` on this model -- is
         // re-expanded by the host into `floor(w) + Bernoulli(frac)` unit-weight
-        // neutrons (issue #236), so the host transports weight 2.0 where the twin
+        // neutrons, so the host transports weight 2.0 where the twin
         // carries 1.981. That is unbiased but not per-history equal, and one such
         // progeny in 100k histories moves the total by ~5e-5. It happens on 3 of the
         // 8 seeds below (worst 5.0e-5) and is unrelated to what this test pins, so
@@ -933,7 +932,7 @@ fn twin_and_dispatch_agree_with_the_bank_on() {
 /// with the GPU's semantics, the production CPU with `transport/scoring.rs`. This
 /// is the only link in the CPU -> twin -> kernel -> dispatch chain that was never
 /// measured, and every other link is now exact (1e-13 or better), while the
-/// end-to-end CPU-vs-GPU flux on this model reads 0.998 (issue #154).
+/// end-to-end CPU-vs-GPU flux on this model reads 0.998.
 fn compare_cpu_vs_twin(nuclide: &str, density: f64, radius: f64, energy_ev: f64, n: usize) {
     if !data_present(nuclide) {
         eprintln!("skipping cpu-vs-twin {nuclide} -- cache absent");
@@ -1126,7 +1125,7 @@ fn compare_cpu_vs_twin(nuclide: &str, density: f64, radius: f64, energy_ev: f64,
     }
 }
 
-/// The missing link, on the #154 model.
+/// The missing link, on the U235 deficit model.
 #[test]
 fn cpu_and_twin_agree_on_tallies() {
     compare_cpu_vs_twin("U235", 18.95, 5.0, 1.0e6, 100_000);
@@ -1134,10 +1133,9 @@ fn cpu_and_twin_agree_on_tallies() {
 
 /// U240 at 14.06 MeV: the one ENDF/B-VIII.1 fissionable with partial fission
 /// channels (MT 19 / 20 / 21 / 38), so every fission here spends the channel
-/// draw and samples the chosen channel's own chi row
-/// (fusion-neutronics/core#34 entry 1). Twin and kernel must still agree bit
-/// for bit, which checks the walk, the row table and the per-channel cross
-/// sections on both sides. Skips without the U240 fixture.
+/// draw and samples the chosen channel's own chi row. Twin and kernel must
+/// still agree bit for bit, which checks the walk, the row table and the
+/// per-channel cross sections on both sides. Skips without the U240 fixture.
 #[test]
 fn twin_and_kernel_agree_on_a_partial_channel_fissile_sphere() {
     compare(
@@ -1152,7 +1150,7 @@ fn twin_and_kernel_agree_on_a_partial_channel_fissile_sphere() {
 
 /// A two-nuclide fissile material: the per-collision nuclide selection is live
 /// (`count > 1`), so the kernel and twin take the struck nuclide's partials,
-/// its chi rows and, since fusion-neutronics/core#93, its own `nu_bar` and
+/// its chi rows and its own `nu_bar` and
 /// delayed fraction, all on the same draw schedule. Bit-for-bit agreement here
 /// pins that whole path on both sides. Skips without U235 and U238 in the
 /// cache.

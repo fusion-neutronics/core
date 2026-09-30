@@ -20,7 +20,7 @@
 //!   -- log-space bin edges (inclusive at the lower edge,
 //!   exclusive at the upper)
 //! - `n_mesh_per_tally[t]` -- number of spatial mesh (voxel) bins, `1` for a
-//!   non-mesh tally (issue #234). Mesh is the innermost flat dimension.
+//!   non-mesh tally. Mesh is the innermost flat dimension.
 //! - `tally_out[out_offsets[t] + (bin_cell * n_bins_per_tally[t] + bin_e) *
 //!   n_mesh_per_tally[t] + voxel_bin]` -- fixed-point accumulator (1 / 2^30
 //!   scale, same as slice A). For a non-mesh tally `n_mesh == 1` and
@@ -47,7 +47,7 @@ pub const SCORE_ABSORPTION: u32 = 2;
 /// sub-routine for KERMA-shape scores.
 pub const SCORE_PER_MT: u32 = 3;
 
-/// Mesh-tally kind discriminant for [`TalliesPack::mesh_kind`] (issue #234).
+/// Mesh-tally kind discriminant for [`TalliesPack::mesh_kind`].
 /// A tally with `MESH_NONE` has no spatial mesh dimension (`n_mesh_per_tally
 /// == 1`, `voxel_bin` forced to 0); the flat index collapses to the pre-mesh
 /// `(cell_bin * n_bins + energy_bin)` form, byte-identical to a run without any
@@ -56,8 +56,6 @@ pub const SCORE_PER_MT: u32 = 3;
 /// across the voxels it crosses.
 pub const MESH_NONE: u32 = 0;
 /// Axis-aligned rectangular mesh, row-major voxel index `(iz*ny+iy)*nx+ix`.
-/// (Discriminant 2 was a Morton/Z-order variant, removed in issue #337 after
-/// it measured slower than row-major on both backends.)
 pub const MESH_RECT_ROWMAJOR: u32 = 1;
 /// Cylindrical `(r, φ, z)` mesh, voxel index `(iz*nphi+iphi)*nr+ir`.
 pub const MESH_CYLINDRICAL: u32 = 3;
@@ -78,7 +76,7 @@ pub const MESH_CYL_HEADER: usize = 7;
 /// Number of `f64` words an energy-function table occupies in
 /// [`TalliesPack::efunc_params`] for `n_points` tabulated points: one header
 /// word (`n_points`), the `n_points` energies, then the natural-cubic-spline
-/// coefficients, four (`a`, `b`, `c`, `d`) per interval (issue #271).
+/// coefficients, four (`a`, `b`, `c`, `d`) per interval.
 ///
 /// `EnergyFunctionFilter::new` requires `n_points >= 4`, so a packed table is
 /// never degenerate; an absent filter is encoded as an EMPTY range rather than
@@ -111,7 +109,7 @@ pub const KERMA_FIXED_POINT_SCALE: f64 = 1.0;
 /// size per-MT scales so the worst-case accumulated total stays
 /// below `2^62`, leaving a full bit of headroom for the
 /// summed-across-fission-generations realisation. Used by the
-/// dispatch's per-MT scale sizing (issue #150).
+/// dispatch's per-MT scale sizing.
 pub const FIXED_POINT_ACC_CEILING: f64 = 4_611_686_018_427_387_904.0; // 2^62
 
 /// Anchor for the per-history sum-of-squares fixed-point scale
@@ -135,8 +133,8 @@ pub const SUMSQ_SCALE_ANCHOR: f64 = 1_099_511_627_776.0; // 2^40
 pub const KERMA_SUMSQ_SCALE: f64 = 0.000_976_562_5; // 2^-10
 
 /// Fixed-point scale for the per-history sum-of-squares atomic of a tally
-/// whose linear (sum) scale is `sum_scale` (batch-free variance, issue
-/// #233). Sized `min(sum_scale^2 / SUMSQ_SCALE_ANCHOR, FIXED_POINT_ACC_CEILING)`.
+/// whose linear (sum) scale is `sum_scale` (batch-free variance).
+/// Sized `min(sum_scale^2 / SUMSQ_SCALE_ANCHOR, FIXED_POINT_ACC_CEILING)`.
 ///
 /// # Why this cannot overflow the i64 accumulator
 ///
@@ -147,10 +145,10 @@ pub const KERMA_SUMSQ_SCALE: f64 = 0.000_976_562_5; // 2^-10
 /// (order `1e3` cm for a flux tally, comfortably above any physical
 /// per-history track length), the factor `x_h * S / A <= 1`, so each
 /// squared quantum is `<= round(x_h * S)` (the linear quantum). The sum
-/// accumulator is already sized (issue #150) so `Σ_h round(x_h * S)` stays
+/// accumulator is already sized so `Σ_h round(x_h * S)` stays
 /// below `FIXED_POINT_ACC_CEILING` for one launch, so the sum-of-squares
 /// accumulator lives inside the same validated envelope. This mirrors the
-/// #150 per-MT argument with `X_max` playing the role `peak` plays there.
+/// per-MT scale argument with `X_max` playing the role `peak` plays there.
 /// The i64 accumulator only has to survive ONE launch (the buffer is
 /// zeroed per launch and folded into an f64 host-side accumulator across
 /// chunks), so no history-count-across-the-whole-run term is needed.
@@ -173,9 +171,9 @@ pub fn sum_sq_fixed_point_scale(sum_scale: f64) -> f64 {
 }
 
 /// Per-slot fixed-point scale for the `SCORE_PER_MT` reaction-rate
-/// tallies, sized from each MT's expected magnitude (issues #150, #307).
+/// tallies, sized from each MT's expected magnitude.
 ///
-/// The problem being solved (#150): the default scale `2^30` rounds a
+/// The problem being solved: the default scale `2^30` rounds a
 /// per-collision contribution of `Σ_MT / Σ_t ~ 2e-11` (tiny high-threshold
 /// channels like Fe56 MT 111 `(n,2p)`) to exactly 0, so the tally reads
 /// back as an exact zero. Such a channel needs its contributions amplified
@@ -206,8 +204,8 @@ pub fn sum_sq_fixed_point_scale(sum_scale: f64) -> f64 {
 /// sum of bounded per-step terms) inherit the same bound.
 ///
 /// Anchoring on `Σ_t(E)` at the SAME energy is what makes the argument
-/// hold; the earlier form `DEFAULT · (Σ_t_max / peak_MT)` did not
-/// (issue #307). It compared a channel's peak against the maximum of `Σ_t`
+/// hold; the earlier form `DEFAULT · (Σ_t_max / peak_MT)` did not.
+/// It compared a channel's peak against the maximum of `Σ_t`
 /// over the whole grid, and on a strong 1/v absorber those two live at
 /// opposite ends of the energy range: a B10 sphere at 1 g/cc has
 /// `Σ_t_max ≈ 1.16e4 /cm` (the `(n,α)` 1/v tail at the bottom of the grid)
@@ -296,13 +294,13 @@ pub fn per_mt_fixed_point_scales(
         .collect()
 }
 
-/// How a transport kernel (neutron OR photon) accumulates tally variance
-/// (issue #233). Shared by both kernels' hosts so the per-history / per-source
+/// How a transport kernel (neutron OR photon) accumulates tally variance.
+/// Shared by both kernels' hosts so the per-history / per-source
 /// machinery is identical across paths.
 #[derive(Clone, Copy)]
 pub enum TallyVarianceMode<'a> {
     /// Per-step atomic accumulation into `tally_out` (batch-means / no
-    /// per-history state). Byte-identical to the pre-#233 kernel.
+    /// per-history state).
     PerStep,
     /// Each source particle IS a complete history; it flushes its per-bin
     /// `sum` + `sum_sq` into the doubled `tally_out` at history end (batch-free
@@ -320,7 +318,7 @@ pub enum TallyVarianceMode<'a> {
         total_bins: u32,
         source_idx: Option<&'a [u32]>,
     },
-    /// Mesh-tally per-source variance (issue #234). Like [`PerSource`] on the
+    /// Mesh-tally per-source variance. Like [`PerSource`] on the
     /// host (same `src_acc` sizing, `source_idx`, and host-side `sum_sq`
     /// finalize), but the kernel accumulates each contribution DIRECTLY into
     /// `src_acc` (bypassing the touched-list/spill) so a track-length mesh tally
@@ -344,7 +342,7 @@ impl TallyVarianceMode<'_> {
     pub fn per_source(&self) -> bool {
         matches!(self, TallyVarianceMode::PerSource { .. })
     }
-    /// True for the issue-#234 mesh path (direct-to-`src_acc` scoring, no
+    /// True for the mesh path (direct-to-`src_acc` scoring, no
     /// touched-list). Sets the kernel `mesh_direct` comptime flag.
     pub fn mesh_direct(&self) -> bool {
         matches!(self, TallyVarianceMode::PerSourceDirect { .. })
@@ -374,7 +372,7 @@ impl TallyVarianceMode<'_> {
 /// rounding; both must stay bit-identical for the matched-stream
 /// equivalence. Using the signed-symmetric form (instead of a bare
 /// `(x + 0.5) as i64`) removes the round-half-up bias that truncated
-/// tiny positive contributions inconsistently (issue #150).
+/// tiny positive contributions inconsistently.
 #[inline]
 pub fn round_fixed_point_bits(contrib: f64, scale: f64) -> u64 {
     let scaled = contrib * scale;
@@ -470,7 +468,7 @@ pub struct TalliesPack {
     /// `ParentNuclideFilter::get_bin` `position` scan); a photon whose parent id
     /// is not in the range is NOT scored into that tally.
     pub parent_ids: Vec<u32>,
-    /// Number of spatial mesh (voxel) bins per tally (issue #234). `1` for any
+    /// Number of spatial mesh (voxel) bins per tally. `1` for any
     /// tally without a `MeshFilter` -- the mesh dimension collapses and the flat
     /// index `((cell_bin * n_parent + parent) * n_bins + e) * 1 + 0` stays
     /// byte-identical to a run without mesh support. For a mesh tally it is the
@@ -490,7 +488,7 @@ pub struct TalliesPack {
     /// sum; last entry is the total length). A `MESH_NONE` tally has an empty
     /// range.
     pub mesh_params_offsets: Vec<u32>,
-    /// Concatenated per-tally mesh geometry descriptors (issue #234), all as
+    /// Concatenated per-tally mesh geometry descriptors, all as
     /// `f64` so a single buffer carries both rectangular and cylindrical meshes.
     /// Tally `t` occupies `mesh_params[mesh_params_offsets[t]..mesh_params_offsets[t+1]]`.
     /// Rectangular: `[lower_left[3], upper_right[3], inv_width[3], width[3],
@@ -501,8 +499,7 @@ pub struct TalliesPack {
     /// Offsets into `efunc_params` per tally. Length `n_tallies + 1` (prefix
     /// sum; last entry is the total length). A tally with no
     /// `EnergyFunctionFilter` has an EMPTY range -- that emptiness is the
-    /// presence flag, so no separate per-tally count buffer is needed
-    /// (issue #271).
+    /// presence flag, so no separate per-tally count buffer is needed.
     pub efunc_offsets: Vec<u32>,
     /// Concatenated per-tally energy-function tables (`EnergyFunctionFilter`,
     /// i.e. `energy_function=` / `dose_coefficients=`). Tally `t` occupies
@@ -628,7 +625,7 @@ pub fn rect_rowmajor_bin(ix: u32, iy: u32, iz: u32, nx: u32, ny: u32) -> u32 {
 /// point is outside the mesh. Operates on the packed descriptor
 /// `[lower_left[3], upper_right[3], inv_width[3], width[3], shape[3]]`. Faithful
 /// twin of `RegularRectangularMesh::get_bin` (floor, clamp, half-open bounds),
-/// used by the collision estimator's mesh binning (issue #234).
+/// used by the collision estimator's mesh binning.
 #[inline]
 pub fn rect_mesh_bin_at(params: &[f64], pos: [f64; 3]) -> Option<u32> {
     let lower_left = [params[0], params[1], params[2]];
@@ -668,8 +665,8 @@ pub fn rect_mesh_bin_at(params: &[f64], pos: [f64; 3]) -> Option<u32> {
 /// segment's total length spent in that voxel.
 ///
 /// This is the plain-Rust twin of the `#[cube]` neutron/photon kernels' inline
-/// mesh DDA and a faithful port of `RegularRectangularMesh::bins_crossed_iter`
-/// (issue #234): same `TINY_BIT`/`FP_PRECISION` thresholds, same ray/AABB slab
+/// mesh DDA and a faithful port of `RegularRectangularMesh::bins_crossed_iter`:
+/// same `TINY_BIT`/`FP_PRECISION` thresholds, same ray/AABB slab
 /// entry test for tracks starting outside the mesh, same min-distance axis
 /// selection, and the same AW `distance += t_delta` incremental update. Keeping
 /// the two implementations byte-for-byte equivalent is what lets the
@@ -870,7 +867,7 @@ pub fn rect_mesh_crossings(
 }
 
 // =====================================================================
-// Cylindrical mesh DDA twin (issue #279)
+// Cylindrical mesh DDA twin
 // =====================================================================
 
 /// Distances below this along a track are treated as zero (matches
@@ -1124,7 +1121,7 @@ impl<'a> CylMeshView<'a> {
 
 /// Energy-function weight for the table packed at `off` in
 /// [`TalliesPack::efunc_params`], or `None` when `energy` falls outside the
-/// tabulated range (issue #271).
+/// tabulated range.
 ///
 /// Plain-Rust twin of the `#[cube]` `energy_function_weight_kernel`, and a
 /// faithful port of `EnergyFunctionFilter::get_weight`. `None` means the CPU
@@ -1171,8 +1168,8 @@ pub fn energy_function_weight(params: &[f64], off: usize, energy: f64) -> Option
 
 /// Voxel bin for a point in a cylindrical mesh, or `None` if outside. Plain-Rust
 /// twin of the `#[cube]` `cyl_mesh_bin_at_kernel` and a faithful port of
-/// `CylindricalMesh::get_bin`; drives the collision estimator's mesh binning
-/// (issue #279). Operates on the packed descriptor (see [`CylMeshView`]).
+/// `CylindricalMesh::get_bin`; drives the collision estimator's mesh binning.
+/// Operates on the packed descriptor (see [`CylMeshView`]).
 #[inline]
 pub fn cyl_mesh_bin_at(params: &[f64], pos: [f64; 3]) -> Option<u32> {
     CylMeshView::parse(params).bin_at(pos)
@@ -1181,7 +1178,7 @@ pub fn cyl_mesh_bin_at(params: &[f64], pos: [f64; 3]) -> Option<u32> {
 /// Analytic `(r, φ, z)` voxel walk of the segment `r0 -> r1` over a cylindrical
 /// mesh, invoking `emit(voxel_bin, length_fraction)` once per voxel crossed.
 /// Plain-Rust twin of the `#[cube]` `cyl_mesh_score_src_acc` and a faithful port
-/// of `CylindricalMesh::bins_crossed` (issue #279): the same radial quadratic
+/// of `CylindricalMesh::bins_crossed`: the same radial quadratic
 /// `ρ²(t)=a·t²+2b·t+c`, the through-axis perigee forced event `t* = -b/a`, the
 /// central `r < r_min` hole re-entry via `first_entry`, and the `full_phi` seam
 /// clamp. A track through the central hole produces two crossing groups with an
@@ -1267,8 +1264,7 @@ pub fn cyl_mesh_crossings(
 
 #[cfg(test)]
 mod per_mt_scale_tests {
-    //! Regression tests for the `SCORE_PER_MT` fixed-point scale policy
-    //! (issues #150 and #307).
+    //! Regression tests for the `SCORE_PER_MT` fixed-point scale policy.
     //!
     //! These are pure host-side arithmetic on the scale sizing, so they run
     //! under a plain `cargo test --workspace` on every platform -- no GPU
@@ -1283,7 +1279,7 @@ mod per_mt_scale_tests {
     const N_GRID: usize = 512;
 
     /// A B10-shaped pair of curves, in macroscopic units (1/cm) for a
-    /// 1 g/cc B10 sphere as measured on the real ENDF/B-8.1 data (issue #307):
+    /// 1 g/cc B10 sphere as measured on the real ENDF/B-8.1 data:
     ///
     /// - `sigma_t` is dominated by the `(n,α)` 1/v tail at the bottom of the
     ///   grid, reaching `1.163e4 /cm` at the first grid point, and falls to
@@ -1337,8 +1333,8 @@ mod per_mt_scale_tests {
     /// step: `Σ_MT(E) · scale_s ≤ Σ_t(E) · DEFAULT` at every energy point.
     /// This is the invariant the whole no-overflow argument rests on.
     ///
-    /// Pre-#307 the scale was `DEFAULT · Σ_t_max / peak_MT`, which on a
-    /// strong 1/v absorber compares the channel's fast-range peak against the
+    /// The older scale `DEFAULT · Σ_t_max / peak_MT`, applied to a
+    /// strong 1/v absorber, compares the channel's fast-range peak against the
     /// thermal end of Σ_t and breaks this bound by ~5 orders of magnitude.
     #[test]
     fn per_mt_scale_bounds_every_step_by_a_default_scaled_total_tally() {
@@ -1359,13 +1355,13 @@ mod per_mt_scale_tests {
         }
     }
 
-    /// The B10 launch that issue #307 reported, reproduced as arithmetic.
+    /// A B10 launch that overflowed under the old scale, reproduced as arithmetic.
     ///
     /// The GPU accumulates one launch (`FIXED_LAUNCH_CHUNK` = 100k source
     /// histories) into a `u64` atomic reinterpreted as two's-complement
     /// `i64`. The measured CPU answer for the B10 sphere is `4.176e-2` MT 51
     /// reactions per source history, so the launch accumulates
-    /// `rate · 1e5 · scale` integer quanta. With the pre-#307 scale of
+    /// `rate · 1e5 · scale` integer quanta. With the old scale of
     /// `2.5085e15` that is `1.048e19`, past `2^63 = 9.223e18`: it wrapped
     /// `2^64` exactly once and the tally read back `-3.176e-2`.
     #[test]
@@ -1396,7 +1392,7 @@ mod per_mt_scale_tests {
         );
     }
 
-    /// Issue #150's property, which the #307 fix must preserve: a tiny
+    /// The property the per-MT scale exists for: a tiny
     /// high-threshold channel (Fe56 MT 111 `(n,2p)`) is amplified enough that
     /// its contributions survive integer rounding instead of truncating the
     /// whole tally to an exact zero.

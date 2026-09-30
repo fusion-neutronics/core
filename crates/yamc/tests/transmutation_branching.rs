@@ -1,4 +1,4 @@
-//! End-to-end coupled-path isomeric branching (issue #218): the per-final-state
+//! End-to-end coupled-path isomeric branching: the per-final-state
 //! partials are scored directly at the collision energy during transport and
 //! re-partition the chain's ground/metastable split.
 //!

@@ -60,9 +60,9 @@ const PARTICLE_SEED_STRIDE_INV: u64 = 18157105691312717821;
 /// Run A's particle seeds are `{seed_a + g * S : g in [0, n_a)}` and
 /// likewise for B. They collide iff `seed_b - seed_a == k * S (mod 2^64)`
 /// for some integer `k` with `-n_b < k < n_a` (particle `g` of A is born
-/// exactly where particle `g - k` of B is). Since #315 the collision
-/// stream is keyed on the base seed too, so an overlap of this kind no
-/// longer makes the two histories identical; it still makes them
+/// exactly where particle `g - k` of B is). The collision stream is keyed
+/// on the base seed too, so an overlap of this kind does not make the
+/// two histories identical; it still makes them
 /// correlated (same source births), which is enough to invalidate a
 /// pooled error bar, so the refusal stands. Multiplying the seed delta
 /// by the stride's modular inverse recovers `k`. This subsumes the

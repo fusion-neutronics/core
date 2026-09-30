@@ -15,7 +15,7 @@
 //! during shader compilation ("Atomic should have a scope registered",
 //! `cubecl-spirv/src/atomic.rs:354`), even though feature detection
 //! (`atomic_type_usage` for `Atomic<u64>` with `LoadStore`) reported the
-//! type as supported. Filed as cubecl#1318; fixed by the pliron rewrite
+//! type as supported. An upstream cubecl-spirv bug, fixed by the pliron rewrite
 //! of the SPIR-V backend that shipped in 0.11.0-pre.3.
 //!
 //! The production tally path does not use this: it was designed while
@@ -100,7 +100,7 @@ mod tests {
 
     /// Passes on cubecl 0.11.0-pre.3 + RADV. It was `#[ignore]`d on
     /// cubecl 0.10, where cubecl-spirv panicked while lowering the CAS
-    /// (cubecl#1318); see module docs.
+    /// (an upstream cubecl-spirv bug); see module docs.
     #[test]
     fn gpu_f64_via_u64_cas_is_correct_or_unsupported() {
         let ctx = match GpuContext::new() {

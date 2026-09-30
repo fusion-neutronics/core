@@ -78,7 +78,7 @@ the tip (k/T of 0.99995 and above) and adds two points at k/T = 0.025 and 0.075.
 
 A newer calculation exists: Poškus's partial-wave BremsLib (CC BY 4.0), which
 computes directly the 2 to 30 MeV band that Seltzer and Berger interpolate.
-Adopting it is a physics change, tracked in #141.
+Adopting it would be a physics change and has not been done.
 
 ## Why plain text
 

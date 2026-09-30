@@ -18,7 +18,7 @@ use yamc_rng::next_xi;
 /// * `n_x_per_i` -- number of equiprobable bins at each incident-energy
 ///   point, length `n_e`.
 /// * `x_table` -- flat table of outgoing energies packed
-///   variable-length (issue #104): row `i` occupies `x_offset[i] ..
+///   variable-length: row `i` occupies `x_offset[i] ..
 ///   x_offset[i] + n_x_per_i[i]`, stored back to back with no padding.
 /// * `x_offset` -- start index of each incident-energy row in the flat
 ///   `x_table`, length `n_e`.

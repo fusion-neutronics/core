@@ -5,16 +5,16 @@
 //! allowed interval, and solve the bound-electron Compton kinematics for the
 //! broadened `E_out` on the branch the sign of `pz` selects.
 //!
-//! The procedure is Kaltiaisenaho (2016, Sec. 3.4.8) as adopted by OpenMC in
-//! openmc-dev/openmc#4036 and by the CPU `PhotonInteraction::compton_doppler`
-//! (fusion-neutronics/core#22); the two are the same algorithm on the same
+//! The procedure is Kaltiaisenaho (2016, Sec. 3.4.8) as adopted by OpenMC and
+//! by the CPU `PhotonInteraction::compton_doppler`; the two are the same algorithm on the same
 //! normalised tables, so the GPU is tested against the CPU distribution rather
 //! than byte for byte. Extracted from the inline block in
 //! `multi_cell_photon_transport` so the mega kernel calls it (single source of
 //! truth). Differences from the CPU that are forced by `#[cube]`:
 //!
 //! - `exp` and `ln` for the log-linear profile tail go through the software
-//!   polyfills, since the f64 GLSL ops are broken on RADV (cubecl#1316).
+//!   polyfills, since the f64 GLSL ops are broken on RADV (cubecl-spirv emits
+//!   GLSL.std.450 `Log`/`Exp` for f64, which the spec restricts to f16/f32).
 //! - The conditional shell PMF is not stored: the per-shell kinematics are
 //!   recomputed while walking the cumulative sum, which costs a few flops per
 //!   shell per attempt and no thread-private array.

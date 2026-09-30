@@ -43,8 +43,6 @@ pub struct ElementMicroXS {
 /// (Attix, "Introduction to Radiological Physics", ch. 7; Hubbell 1977).
 /// Verified against numerical integration of the Klein-Nishina
 /// differential cross section to machine precision from 1 keV to 14 MeV.
-/// (The previous inline expressions were wrong: the fraction went
-/// NEGATIVE below ~400 keV, issue #358.)
 ///
 /// `alpha` = E / (m_e c^2).
 pub(crate) fn compton_energy_transfer_fraction(alpha: f64) -> f64 {
@@ -745,9 +743,9 @@ impl PhotonInteraction {
     /// bound-electron momentum distribution.
     ///
     /// Implements the relativistic-impulse-approximation procedure of
-    /// Kaltiaisenaho (2016, Sec. 3.4.8) as adopted by OpenMC in
-    /// openmc-dev/openmc#4036, which replaced the LA-UR-04-0487 algorithm this
-    /// used to implement (fusion-neutronics/core#22). Three things changed:
+    /// Kaltiaisenaho (2016, Sec. 3.4.8) as adopted by OpenMC, which replaced
+    /// the LA-UR-04-0487 algorithm. It differs from that algorithm in three
+    /// ways:
     ///
     /// 1. Shell selection is weighted by occupancy AND by the fraction of the
     ///    shell's profile that is kinematically accessible, not by occupancy
@@ -1047,7 +1045,7 @@ impl PhotonInteraction {
     }
 
     // ====================================================================
-    // PR 5: Photoelectric Effect and Pair Production
+    // Photoelectric Effect and Pair Production
     // ====================================================================
 
     /// Sample the subshell absorbing a photon in the photoelectric effect.
@@ -1324,7 +1322,7 @@ static TTB_K_GRID: Lazy<RwLock<Option<Vec<f64>>>> = Lazy::new(|| RwLock::new(Non
 const LOWEST_Z_NEEDING_RELAXATION: u32 = 11;
 
 /// The warning to print when photon data arrives without atomic relaxation, or
-/// `None` when its absence is expected (issue #41).
+/// `None` when its absence is expected.
 ///
 /// With no relaxation tables the photoelectric path emits no fluorescence and no
 /// Auger electrons: the absorption just deposits locally, on both CPU and GPU.
@@ -1642,8 +1640,8 @@ pub fn compton_energy_ratio(alpha: f64, mu: f64, pz: f64) -> Option<f64> {
 /// end at a finite `pz_N`, while the kinematically allowed interval of the
 /// impulse approximation runs from `-1/alpha_fs` (`-FINE_STRUCTURE`, about
 /// -137, in atomic momentum units) up to `p_z,max`,
-/// well past any grid. Following Kaltiaisenaho (2016) and OpenMC
-/// (openmc-dev/openmc#4036), each profile is extrapolated as
+/// well past any grid. Following Kaltiaisenaho (2016) and OpenMC, each
+/// profile is extrapolated as
 /// `J_N exp(a_i (pz - pz_N))` with `a_i` from its last two points, and the pdf
 /// and trapezoid cdf are rescaled so that the tabulated part plus the tail
 /// integrate to 1/2. Returns `(tail_slope, negative_mass)` per shell, where
@@ -2394,9 +2392,9 @@ mod tests {
         // relaxes in turn. Every one of them is a bremsstrahlung source, which
         // is why `photon_photoelectric` loops `bank_ttb_photons` over the whole
         // Auger list and why the GPU kernel TTBs every hop's Auger rather than
-        // just the first (fusion-neutronics/core#31). Fe averages ~4.9 Augers
-        // per K-shell cascade; assert well clear of 1 so a consumer that keeps
-        // only the first is visibly wrong here.
+        // just the first. Fe averages ~4.9 Augers per K-shell cascade; assert
+        // well clear of 1 so a consumer that keeps only the first is visibly
+        // wrong here.
         let mean_augers = total_electrons as f64 / n as f64;
         assert!(
             mean_augers > 2.0,
@@ -2533,8 +2531,8 @@ mod tests {
     fn compton_energy_transfer_fraction_matches_klein_nishina() {
         // Reference values from numerical integration of the
         // Klein-Nishina differential cross section (scipy quad,
-        // agreement to ~1e-12; see issue #358). The broken closed form
-        // this replaced returned -1.78 at 50 keV.
+        // agreement to ~1e-12). A wrong closed form can go negative below
+        // ~400 keV (-1.78 at 50 keV), which these catch.
         const MEC2: f64 = crate::photon::MASS_ELECTRON_EV;
         let reference = [
             (1.0e3, 0.00195),
@@ -2649,10 +2647,10 @@ mod tests {
         assert!((r[0] - 50.0).abs() < 1e-9, "R = {}", r[0]);
     }
 
-    /// Issue #41: photon data without atomic relaxation emits no fluorescence and
-    /// no Auger electrons, and said nothing about it. The published fendl-3.2d
-    /// photon set carries none while the local Fe fixture does, so the tests
-    /// passed with relaxation and every downloaded element ran without it.
+    /// Photon data without atomic relaxation emits no fluorescence and no Auger
+    /// electrons, so it must say so. The published fendl-3.2d photon set carries
+    /// none while the local Fe fixture does, so the tests pass with relaxation
+    /// while a downloaded element can run without it.
     ///
     /// Tested on the predicate rather than through a load, because no fixture is
     /// both heavy enough to warn about AND missing relaxation -- that pairing is
@@ -2698,11 +2696,11 @@ mod tests {
         );
     }
 
-    /// Issue #41 bullet 3: the flag on data as PUBLISHED, not as fixtured.
+    /// The flag on data as PUBLISHED, not as fixtured.
     ///
-    /// The whole defect was that the local `Fe.arrow` fixture carries relaxation
-    /// while what users downloaded did not, so every existing assertion passed
-    /// against data no user ever loads. This one goes to the origin.
+    /// The local `Fe.arrow` fixture carries relaxation whatever the published
+    /// data does, so a fixture assertion passes against data no user ever
+    /// loads. This one goes to the origin.
     ///
     /// Ignored by default because it downloads. Run:
     ///   cargo test -p yamc-element --features download-tls -- --ignored downloaded
@@ -2713,7 +2711,7 @@ mod tests {
         // Tungsten rather than iron: `get_or_load_element` keys the global store
         // on the element NAME, so asking for "Fe" would hand back whatever the
         // fixture tests already registered and prove nothing about the origin.
-        // W is one of the elements the issue reported and no fixture loads it.
+        // W is a mid-Z element that no fixture loads.
         let w = get_or_load_element("W", "endf-b8.1").expect("download W from endf-b8.1");
         assert_eq!(w.atomic_number, 74);
         assert!(
@@ -2843,7 +2841,7 @@ mod tests {
         // A Compton event ionizes the shell sampled from electron_pdf, then
         // relaxes + transports its fluorescence, so the Compton KERMA term must
         // subtract that fluorescence (the Compton analogue of the photoelectric
-        // correction, issue #176).
+        // correction).
         let fe = get_or_load_element("Fe", yamc_test_path("Fe.arrow").as_str()).unwrap();
         assert!(fe.has_atomic_relaxation);
 

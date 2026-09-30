@@ -1,6 +1,6 @@
 //! Uncertainty on quantities derived from a whole inventory.
 //!
-//! Issue #557 put a standard deviation on every nuclide density. Activity and
+//! Every nuclide density carries a standard deviation. Activity and
 //! decay heat are sums over nuclides, and the sigma of a sum of correlated
 //! terms is not the quadrature of their sigmas: every Mn56 atom in an
 //! irradiated iron foil came out of an Fe56 atom, so the two densities move
@@ -13,7 +13,7 @@
 //! rather than as a missing one.
 //!
 //! So the ensemble is evaluated once per replica and the spread is taken over
-//! the results (issues #520, #558). This module holds only that accumulation.
+//! the results. This module holds only that accumulation.
 //! The quantities themselves stay where they are, in `yani-decay`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};

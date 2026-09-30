@@ -67,7 +67,7 @@ pub struct CoupledPhotonInputs {
     /// GLOBAL continuous-tabular slot per product (material ct base folded in).
     pub prod_dist_slot: Vec<u32>,
 
-    /// Per-product angular table (tight CSR, issue #104), concatenated across
+    /// Per-product angular table (tight CSR), concatenated across
     /// materials. `pa_ae_offset` (one per global product) is the GLOBAL ae-row
     /// base into the tight per-row arrays; `pa_mu_offset` (one per global
     /// ae-row) is the GLOBAL mu-point base into the tight per-point arrays.
@@ -82,7 +82,7 @@ pub struct CoupledPhotonInputs {
     pub pa_pdf: Vec<f64>,
     pub pa_interp: Vec<u32>,
 
-    /// Per-continuous-slot outgoing-energy table (tight CSR, issue #104),
+    /// Per-continuous-slot outgoing-energy table (tight CSR),
     /// concatenated across materials. `ct_ae_offset` (one per global continuous
     /// slot) is the GLOBAL ae-row base into the tight per-row arrays;
     /// `ct_x_offset` (one per global ae-row) is the GLOBAL x-point base into the
@@ -135,7 +135,7 @@ impl CoupledPhotonInputs {
             prod_primary_flag: vec![0i32],
             prod_awr: vec![0.0],
             prod_dist_slot: vec![0u32],
-            // Tight CSR (issue #104): one isotropic-empty product (n_energies
+            // Tight CSR: one isotropic-empty product (n_energies
             // 0) at ae-row base 0; no rows, so `pa_mu_offset` and the per-row /
             // per-point arrays are empty (host pads a sentinel). Kernel reads
             // none of it (emission is gated on `coupled_enabled[0] == 1`).
@@ -257,7 +257,7 @@ impl CoupledPhotonInputs {
                 }
             }
 
-            // Per-product angular table (tight CSR, issue #104). The CSR bases
+            // Per-product angular table (tight CSR). The CSR bases
             // are rewritten GLOBAL: each material's ae-row offsets shift by the
             // running ae-row count, and its mu-point offsets by the running
             // mu-point count (both captured BEFORE extending), mirroring the
@@ -278,7 +278,7 @@ impl CoupledPhotonInputs {
             out.pa_pdf.extend_from_slice(&t.pa_pdf);
             out.pa_interp.extend_from_slice(&t.pa_interp);
 
-            // Per-continuous-slot eout table (tight CSR, issue #104). The CSR
+            // Per-continuous-slot eout table (tight CSR). The CSR
             // bases are rewritten GLOBAL: each material's ae-row offsets shift
             // by the running ae-row count, and its x-point offsets by the
             // running x-point count (both captured BEFORE extending).

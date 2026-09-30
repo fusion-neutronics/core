@@ -1,4 +1,4 @@
-"""``data_uncertainty`` on ``Model.simulate_transmutation`` (issue #140, item 3).
+"""``data_uncertainty`` on ``Model.simulate_transmutation``.
 
 The check that matters is against the thing a statistical uncertainty claims
 to predict: run the same problem with independent seeds, and the spread of the

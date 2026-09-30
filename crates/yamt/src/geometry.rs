@@ -39,7 +39,7 @@ impl std::fmt::Display for MeshError {
                  {signed_volume:.6e} cm^3). Tet face normals are read off a fixed vertex \
                  ordering that points outward only for positively oriented tets, so a \
                  negative tet makes the element walk leave through an entry face and \
-                 unstructured track-length tallies read about 33 percent low (issue #316). \
+                 unstructured track-length tallies read about 33 percent low. \
                  Fix the mesh at its source: regenerate it with a writer that emits \
                  positively oriented tets (yamc's own mesher, yamm, guarantees this at its \
                  output boundary), or have that writer swap the last two vertices of every \
@@ -621,7 +621,7 @@ mod tests {
         // The parity ray from a point BELOW the cube crosses two faces
         // (bottom and top): even count, outside. Routing the parity
         // enumeration through the nearest-hit-pruned ray_traverse dropped
-        // the second hit and misclassified this as inside (issue #256),
+        // the second hit and misclassified this as inside,
         // which put every mesh-transport history whose source was not in
         // the first tested volume into the wrong birth cell.
         let geom = cube_geometry();

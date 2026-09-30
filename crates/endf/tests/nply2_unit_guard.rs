@@ -1,13 +1,13 @@
-//! The NPLY=2 unit correction fires exactly where its comment says (issue #17).
+//! The NPLY=2 unit correction fires exactly where its comment says.
 //!
 //! ENDF/B-VII.1 left some second-order MT=458 coefficients in MeV, so
 //! `FissionEnergyRelease::from_material` divides a second-order coefficient by
 //! 1e6 when it is too large to be physics. "Too large" is spelled out as
 //! `|c2| * (5 MeV)^2 > 100 MeV` in eV, which puts the boundary at `4e-6`.
 //!
-//! #17 reported the guard firing an order of magnitude below that, which would
-//! have meant a legitimately small coefficient in a modern evaluation was being
-//! silently divided. It does not. The measurement behind that report injected
+//! A report once had the guard firing an order of magnitude below that, which
+//! would have meant a legitimately small coefficient in a modern evaluation was
+//! being silently divided. It does not. The measurement behind that report injected
 //! into the fixed-format ENDF text, where MT=458's LIST is laid out order-major
 //! (a value and an uncertainty for each of the nine components, 18 numbers per
 //! order), so component `i` at order `k` is raw index `2i + 18k` rather than
@@ -57,7 +57,7 @@ fn coeffs_after_injecting(c2: f64) -> Vec<f64> {
 
 /// Below the boundary the coefficient is physics and must survive untouched.
 ///
-/// `3.9e-6` is the largest of these that #17 reported as divided, so it is the
+/// `3.9e-6` is the largest of these that was reported as divided, so it is the
 /// case that would fail if the guard really did fire early.
 #[test]
 fn a_small_second_order_coefficient_is_left_alone() {
@@ -91,7 +91,7 @@ fn a_second_order_coefficient_too_large_for_physics_is_converted_from_mev() {
 
 /// The boundary is where the comment's arithmetic puts it, not an order out.
 ///
-/// This is the assertion #17 actually turned on: it claimed the crossing was
+/// This is the assertion the report actually turned on: it claimed the crossing was
 /// "somewhere below 1e-6" rather than at 4e-6.
 #[test]
 fn the_boundary_sits_at_four_micro_ev_per_ev_squared() {

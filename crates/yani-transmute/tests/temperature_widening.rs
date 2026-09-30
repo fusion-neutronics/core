@@ -1,4 +1,4 @@
-//! Issue #481, yani side: a relabelled material silently activated nothing.
+//! A relabelled material must not silently activate nothing.
 //!
 //! `transmute_material` loads cross sections with a scope narrowed to the
 //! material's temperature, but skips nuclides already present in

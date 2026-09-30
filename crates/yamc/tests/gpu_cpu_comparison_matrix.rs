@@ -5,7 +5,7 @@
 //! (`Model::simulate_transport`) and the GPU (`yamc::gpu::run_on_gpu`), then
 //! prints markdown tables of CPU value | GPU value | GPU/CPU ratio. The modes
 //! covered: neutron, primary photon, coupled secondary photons, D1S decay
-//! photons, a mixed neutron+photon primary source (#58 / PR #98), the fissile
+//! photons, a mixed neutron+photon primary source, the fissile
 //! fission-bank path, and a multi-nuclide material. Survival biasing (implicit
 //! capture), multi-nuclide materials, the fission chain, and D1S decay photons
 //! now all run on the GPU and are compared like analog. Where
@@ -595,7 +595,7 @@ fn gpu_cpu_comparison_matrix() {
     // ---- Table 6: multi-nuclide material (per-collision nuclide selection) ----
     multinuclide_table();
 
-    // ---- Table 7: mixed neutron+photon primary source (#58 / PR #98) ----
+    // ---- Table 7: mixed neutron+photon primary source ----
     mixed_source_table();
 }
 
@@ -604,7 +604,7 @@ fn gpu_cpu_comparison_matrix() {
 // --------------------------------------------------------------------------
 
 /// A 2:1 H2:C12 (CH2-like) moderator sphere exercises per-collision nuclide
-/// selection on the GPU (#74): each collision picks WHICH nuclide is struck
+/// selection on the GPU: each collision picks WHICH nuclide is struck
 /// (proportional to its macroscopic total xs) and uses that nuclide's own AWR
 /// and elastic angular table. A material-averaged kernel under-moderates badly
 /// here (the light H1 is averaged against the heavy C12), so this is the
@@ -795,7 +795,7 @@ fn coupled_table() {
 }
 
 // --------------------------------------------------------------------------
-// Table 7: mixed neutron+photon primary source (#58 / PR #98)
+// Table 7: mixed neutron+photon primary source
 // --------------------------------------------------------------------------
 
 /// Build a mixed-source model on the shared Fe sphere: an equal-strength 14 MeV
@@ -821,7 +821,7 @@ fn build_mixed_model(tallies: Vec<Arc<Tally>>) -> (Model, TransportSettings) {
 }
 
 /// Mixed primary source mode: a 14 MeV neutron source and a 1.25 MeV photon
-/// source together (#58, added on the GPU in PR #98). For flux and heating, and
+/// source together. For flux and heating, and
 /// each estimator, report the neutron-filtered (neutron pass only),
 /// photon-filtered (primary photons + neutron-induced secondaries), and
 /// unfiltered (all-particle SUM = dual path) split on both backends. The GPU
@@ -969,8 +969,8 @@ fn cpu_only_table() {
         println!("| survival biasing (implicit capture) | {cpu_flux:.4e} | {msg} |");
     }
 
-    // -- Energy function / dose coefficients -- now SUPPORTED on the GPU
-    // (issue #271). The kernel evaluates the cubic spline the CPU already
+    // -- Energy function / dose coefficients -- SUPPORTED on the GPU.
+    // The kernel evaluates the cubic spline the CPU already
     // solved, so this is a weighted flux, not a rejection. Uses the real
     // ICRP-116 AP dose curve, i.e. what `dose_coefficients=('neutron','AP')`
     // lowers to.

@@ -66,7 +66,7 @@ impl TransmutationDriver {
     /// * `material` - Current material composition
     /// * `rates` - Reaction rates for this material (sigma*phi for each nuclide/reaction)
     /// * `fy_weights` - Spectrum weights over each fissionable nuclide's
-    ///   tabulated fission-yield energies (issue #379)
+    ///   tabulated fission-yield energies
     /// * `dt` - Timestep duration [s]
     ///
     /// # Returns
@@ -224,7 +224,7 @@ mod tests {
         // The chain files write MT 18 as "fission". While this did not resolve,
         // no fission rate was computed and MT 18 was never tallied, so fission
         // was absent from the transmutation network altogether and the
-        // spectrum fold of issue #379 had nothing to act on.
+        // fission-yield spectrum fold had nothing to act on.
         assert_eq!(reaction_type_to_mt("fission"), Some(18));
     }
 

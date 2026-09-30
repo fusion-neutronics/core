@@ -1,4 +1,4 @@
-//! Regression test for issue #84: O16 neutron heating must fold in its
+//! Regression test: O16 neutron heating must fold in its
 //! physically NEGATIVE KERMA (MT 301).
 //!
 //! In ENDF/B-VIII.1 the O16 macroscopic heating cross section (MT 301)
@@ -6,19 +6,17 @@
 //! charged-particle channels ((n,alpha) Q = -2.2 MeV, (n,p), (n,d),
 //! (n,t)) are endothermic, so the KERMA they contribute is negative
 //! there, turning positive again only near the 14 MeV source. OpenMC
-//! and the yamc GPU kernel fold these negatives correctly. The yamc CPU
-//! scoring used to guard the fold with `heating_xs > 0.0`, silently
-//! dropping the negative window and over-counting neutron heating
-//! (issue #84 quotes +18.4% on a single-collision spectral average).
+//! and the yamc GPU kernel fold these negatives. Guarding the fold with
+//! `heating_xs > 0.0` silently drops the negative window and over-counts
+//! neutron heating (+18.4% on a single-collision spectral average).
 //!
-//! The fix relaxes the neutron heating / heating-local fold guards to
-//! `!= 0.0` so negative KERMA accumulates. This test pins the corrected
-//! behaviour two ways:
+//! The CPU neutron heating / heating-local fold guards are `!= 0.0` so
+//! negative KERMA accumulates. This test pins that two ways:
 //!   1. The O16 macroscopic MT 301 KERMA really is negative across the
 //!      fast charged-particle window (proves the data has the negatives
-//!      the fix must keep).
+//!      the fold must keep).
 //!   2. A 14.06 MeV O16-sphere CPU run lands at the folded value, below
-//!      the inflated drop-negatives value the bug produced.
+//!      the inflated drop-negatives value.
 //!
 //! MT 301 is the only neutron KERMA that goes negative in O16; MT 901
 //! (heating-local) stays positive, so its result is unchanged by the
@@ -139,7 +137,7 @@ fn tally_mean_sum(t: &Tally) -> f64 {
 
 /// The O16 macroscopic KERMA (MT 301) must be negative across the fast
 /// charged-particle window (~7.4-13 MeV). This is the physics the fold
-/// must not discard (issue #84).
+/// must not discard.
 #[test]
 fn o16_macroscopic_kerma_is_negative_in_fast_window() {
     if !Path::new(O16_PATH).exists() {
@@ -192,12 +190,12 @@ fn o16_cpu_heating_folds_negative_kerma() {
 
     // Decisive check: in 7.4-13 MeV O16 MT 301 is negative everywhere,
     // so a heating tally restricted to that window must come out
-    // NEGATIVE once the fold keeps the negatives. The buggy code
-    // dropped every negative sample, leaving this bin at exactly 0.
+    // NEGATIVE once the fold keeps the negatives. Dropping every negative
+    // sample would leave this bin at exactly 0.
     assert!(
         heating_neg_window < 0.0,
         "Heating in the 7.4-13 MeV window should be negative (folded KERMA), got \
-         {heating_neg_window:.4e} -- negatives are being dropped (issue #84)"
+         {heating_neg_window:.4e} -- negatives are being dropped"
     );
 
     // Sanity: the total heating still nets positive (the 14 MeV source
@@ -214,9 +212,8 @@ fn o16_cpu_heating_folds_negative_kerma() {
     );
 }
 
-/// The yamc GPU kernel always folded the negative MT 301 KERMA (it
-/// matches OpenMC, per issue #84). With the CPU fold fixed, CPU and GPU
-/// O16 heating must now agree. Gated on `gpu`; skipped on the CPU CI.
+/// The yamc GPU kernel folds the negative MT 301 KERMA (it matches
+/// OpenMC), and so does the CPU, so CPU and GPU O16 heating must agree. Gated on `gpu`; skipped on the CPU CI.
 #[cfg(all(feature = "gpu", not(target_os = "macos")))]
 #[test]
 fn o16_cpu_matches_gpu_heating() {
@@ -239,12 +236,12 @@ fn o16_cpu_matches_gpu_heating() {
 
     let ratio = cpu_heating / gpu_heating;
     eprintln!("O16 heating CPU={cpu_heating:.6e}  GPU={gpu_heating:.6e}  CPU/GPU={ratio:.4}");
-    // Both fold the negatives now, so they agree to a few percent (seed
-    // is shared but the RNG ladders differ between backends). Pre-fix
-    // the CPU was high by the dropped-negative fraction.
+    // Both fold the negatives, so they agree to a few percent (seed is
+    // shared but the RNG ladders differ between backends). A CPU that drops
+    // the negatives reads high by the dropped-negative fraction.
     assert!(
         (0.90..=1.10).contains(&ratio),
         "O16 CPU/GPU heating ratio {ratio:.4} out of [0.90, 1.10] -- CPU fold may be dropping \
-         negative MT 301 again (issue #84)"
+         negative MT 301"
     );
 }

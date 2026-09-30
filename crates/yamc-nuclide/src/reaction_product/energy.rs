@@ -329,7 +329,7 @@ impl EnergyDistribution {
 
     /// Flatten a fission / secondary outgoing-energy (chi) distribution into the
     /// sampler-ready [`FissionChiFlat`] layout consumed by the shared GPU/CPU
-    /// flat samplers (issue #111). Built once per nuclide and cached
+    /// flat samplers. Built once per nuclide and cached
     /// ([`FissionChiFlatCache`]); the transport crate feeds these slices to
     /// `yamc_physics::gpu::flat::{watt, maxwell, evaporation, tabulated_continuous_eout}`
     /// driven by the per-particle PCG stream, so the CPU fission chi and the GPU
@@ -387,8 +387,8 @@ impl EnergyDistribution {
     }
 }
 
-/// Flat, sampler-ready form of a fission / secondary chi distribution
-/// (issue #111). See [`EnergyDistribution::to_fission_chi_flat`].
+/// Flat, sampler-ready form of a fission / secondary chi distribution.
+/// See [`EnergyDistribution::to_fission_chi_flat`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum FissionChiFlat {
     /// No usable chi data; the caller keeps the incident energy / falls back.
@@ -513,8 +513,7 @@ impl FissionChiFlat {
     /// Flatten the outgoing-energy MARGINAL of a `CorrelatedAngleEnergy` prompt
     /// fission spectrum (ENDF File 6 LAW 1, the encoding Th232, Pa231 and Pa233
     /// use) into the same `Continuous` layout a `ContinuousTabular` chi takes,
-    /// dropping the per-(E_in, E_out) angular tables (fusion-neutronics/core#34
-    /// entry 2).
+    /// dropping the per-(E_in, E_out) angular tables.
     ///
     /// The shared GPU/CPU path emits fission neutrons isotropically in the lab,
     /// and the GPU extractor already packs this marginal; carrying it here puts
@@ -640,7 +639,7 @@ fn trapezoid_cdf(x: &[f64], p: &[f64]) -> Vec<f64> {
 
 pub(crate) const FISSION_CHI_MTS: [i32; 5] = [18, 19, 20, 21, 38];
 
-/// Per-nuclide cache of the flattened fission chi (issue #111), one slot per
+/// Per-nuclide cache of the flattened fission chi, one slot per
 /// fission MT, each built lazily on that channel's first fission and shared
 /// read-only across transport threads. Resets on `clone()` and skipped by serde,
 /// mirroring [`crate::reaction_product::ElasticFlatCache`].
@@ -652,7 +651,7 @@ pub(crate) const FISSION_CHI_MTS: [i32; 5] = [18, 19, 20, 21, 38];
 /// it is also the only one this changes. With a single slot the run's entire
 /// fission spectrum was whichever channel the FIRST fission event happened to
 /// sample, frozen for every fission after it, which made the answer depend on
-/// which thread got there first (issue #425).
+/// which thread got there first.
 #[derive(Debug, Default)]
 pub struct FissionChiFlatCache([std::sync::OnceLock<FissionChiFlat>; FISSION_CHI_MTS.len()]);
 
@@ -695,7 +694,7 @@ impl FissionChiFlatCache {
 
 /// Combine several outgoing-energy spectra into one, weighted by `weight`.
 ///
-/// Used for the delayed-neutron groups (issue #364). ENDF gives each of the six
+/// Used for the delayed-neutron groups. ENDF gives each of the six
 /// delayed groups its own spectrum plus its own `nu_d,g(E)`, and yamc emits
 /// delayed neutrons with no time delay, so the group a neutron came from has no
 /// observable consequence: only the mixture matters. Where the group weights are
@@ -969,11 +968,11 @@ mod fission_chi_cache_tests {
         }
     }
 
-    /// Issue #418. Each fission MT gets its own slot, so an evaluation whose
-    /// partial channels carry different prompt spectra (U240 is the only one in
+    /// Each fission MT gets its own slot, so an evaluation whose partial
+    /// channels carry different prompt spectra (U240 is the only one in
     /// ENDF/B-VIII.1) gets the spectrum of the channel that actually fissioned.
-    /// The single-slot cache this replaced returned whichever channel the first
-    /// fission event of the run happened to sample, for every fission after it.
+    /// A single-slot cache would return whichever channel the first fission
+    /// event of the run happened to sample, for every fission after it.
     #[test]
     fn each_fission_mt_caches_its_own_chi() {
         let cache = FissionChiFlatCache::default();

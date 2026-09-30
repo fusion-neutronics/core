@@ -1,4 +1,4 @@
-"""Unit tests for the Rust CAD export finalize kernels (issue #246).
+"""Unit tests for the Rust CAD export finalize kernels.
 
 cad_mesh_labels and cad_mesh_to_arrow replaced the per-element Python loops in
 CadToYamc.to_vtkhdf/to_arrow. These tests pin the Rust kernels against direct

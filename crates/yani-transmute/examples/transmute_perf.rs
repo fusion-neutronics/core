@@ -1,8 +1,8 @@
 //! Where `Material::transmute` spends its time, phase by phase.
 //!
 //! Run as: `cargo run --release -p yani-transmute --example transmute_perf`,
-//! and with `RAYON_NUM_THREADS=1` beside it once any of issue #576's parallel
-//! work has landed, so a speedup can be told apart from a core count.
+//! and with `RAYON_NUM_THREADS=1` beside it, so a speedup from parallel work
+//! can be told apart from a core count.
 //!
 //! Three shapes, because they load the phases differently:
 //!
@@ -248,7 +248,7 @@ fn fusion_spectrum(boundaries: &[f64]) -> Vec<f64> {
 }
 
 /// All of the flux in the one group holding 14.06 MeV, which is the case the
-/// zero-flux skip of finding 2 exists for.
+/// zero-flux group skip exists for.
 fn fourteen_mev(boundaries: &[f64]) -> Vec<f64> {
     boundaries
         .windows(2)

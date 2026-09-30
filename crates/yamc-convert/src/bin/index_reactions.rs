@@ -11,7 +11,7 @@
 //! published library gains the index without NJOY running again, and only the
 //! few-kB `version.json` objects need reuploading.
 //!
-//! A library published before fusion-neutronics/core#100 has to be rerun
+//! A library published before the per-temperature split has to be rerun
 //! through this: its `version.json` carries the one-level `mt -> [off, len]`
 //! index, which this build reads as no index at all and answers by fetching
 //! whole objects. Rerunning it here writes the two-level shape over the

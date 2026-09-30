@@ -661,7 +661,7 @@ fn woodcock_urr_matches_surface() {
     );
 }
 
-/// Regression test for issue #223: Woodcock transport on concentric-
+/// Regression test: Woodcock transport on concentric-
 /// sphere geometries used to lose ~0.1 % of particles because the
 /// boundary-crossing branch double-moved the particle (once explicitly,
 /// then again inside `handle_surface_crossing`). After one such crossing
@@ -766,7 +766,7 @@ fn woodcock_concentric_shells_no_lost_particles() {
 }
 
 /// Defensive twin of `woodcock_concentric_shells_no_lost_particles`.
-/// Issue #223's double-move bug lived in `transport_particle_woodcock`,
+/// The double-move bug lived in `transport_particle_woodcock`,
 /// and Surface tracking was empirically clean on the same geometry both
 /// before and after the fix. This test pins that down: the same 3-shell
 /// Li6 geometry under Surface tracking must keep returning 0 lost

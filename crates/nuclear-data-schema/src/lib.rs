@@ -4,9 +4,8 @@
 //! retired Python converter's `schemas.py`, and `yani`'s `chain_arrow.rs`,
 //! which writes the transmutation subsections itself. The readers named the
 //! same columns a fourth time as string literals scattered through their
-//! parsing code. Nothing connected them, and the failure mode is quiet: issue
-//! #126 was writer and reader disagreeing about a name, and it reached
-//! published data.
+//! parsing code. Nothing connected them, and the failure mode is quiet: a
+//! writer and reader disagreeing about a name can reach published data.
 //!
 //! Every consumer builds against these declarations, so a rename is a compile
 //! error rather than a runtime surprise. There is no rendered copy any more:
@@ -109,8 +108,8 @@ pub fn flat_section_for_path(path: &std::path::Path) -> Option<String> {
 ///
 /// Catches the failure the per-file declarations exist to prevent: a reader
 /// pointed at the wrong section, or at data written to a schema this build does
-/// not know. Issue #126 was writer and reader disagreeing about a name, and it
-/// reached published data before anyone noticed.
+/// not know. A writer and reader disagreeing about a name can otherwise reach
+/// published data before anyone notices.
 ///
 /// Deliberately lenient in one direction: a column the declaration has and the
 /// batch does not is allowed, because several sections are written with
@@ -204,23 +203,17 @@ fn f64ss(name: &str, nullable: bool) -> Field {
 ///
 /// Arrow writes schema metadata in the map's iteration order and does not sort
 /// it (`arrow-ipc`, `metadata_to_fb`), so the order here is the order on disk.
-/// That matters because a published library has to be checksummable: when the
-/// order was a `HashMap`'s, the same conversion run twice wrote
-/// `filetype,version` or `version,filetype` at random, and a converted
-/// `element.arrow` came out as one of two byte patterns differing in 114 bytes,
-/// all inside the two schema blocks. A rebuild then looked like it had changed
-/// every file (issue #441).
+/// That matters because a published library has to be checksummable: with a
+/// `HashMap`'s order, the same conversion run twice writes
+/// `filetype,version` or `version,filetype` at random, and a rebuild looks
+/// like it has changed every file.
 ///
 /// Since arrow 60, `arrow_schema::Schema::metadata` is a `Metadata` newtype over
 /// a `BTreeMap`, which is ordered by construction, so collecting into it is
-/// enough (issue #28). Before that the field was a concrete
-/// `HashMap<String, String>`, which could be neither swapped for a `BTreeMap`
-/// nor given a fixed hasher, and this function held a build-and-check loop that
-/// rebuilt the map until a fresh hasher seed happened to yield sorted order.
+/// enough.
 ///
-/// The determinism tests that pinned that loop are kept as they are: they assert
-/// the property this format needs, not the mechanism that delivers it, so they
-/// go on being the thing that would catch a regression here.
+/// The determinism tests assert the property this format needs, not the
+/// mechanism that delivers it, so they are what would catch a regression here.
 fn meta<const N: usize>(pairs: [(&str, &str); N]) -> Metadata {
     pairs
         .into_iter()
@@ -416,7 +409,7 @@ pub fn compton() -> Schema {
 /// want uncertainty should download nothing extra, and every already-published
 /// `{nuclide}.arrow/` has no such file and must keep loading unchanged. Opt-in
 /// is therefore by file presence, and a reader treats absence as "no
-/// covariance", never as an error (issue #514).
+/// covariance", never as an error.
 ///
 /// One row per covariance block, which is one NC or NI sub-subsection of one
 /// MF=33 subsection. That is the tape's own granularity, and it is what makes
@@ -537,7 +530,7 @@ pub fn decay_decay_modes() -> Schema {
         // The evaluation's dBR, as MT=457 writes it. Nullable and last, so a
         // file written without it still reads. A 0.0 is the format's "not
         // stated" and is stored as 0.0; readers take null and 0.0 alike as
-        // not stated, never as an exact ratio (issue #140). It is the dBR on
+        // not stated, never as an exact ratio. It is the dBR on
         // the tape's BR, and `branching_ratio` in the same row may carry the
         // normalisation residual on the parent's largest mode.
         f64("branching_ratio_uncertainty", true),
@@ -554,7 +547,7 @@ pub fn decay_nuclides() -> Schema {
         // Each sigma is stored as the evaluation writes it, and MT=457 writes
         // 0.0 for "not stated". Readers take null (no value, or a file that
         // predates the column) and 0.0 alike as not stated, which is not the
-        // same as stated to be zero (issue #515).
+        // same as stated to be zero.
         f64("half_life_uncertainty", true),
         f64("decay_energy_uncertainty", true),
         // The decay energy split into its recoverable-heat components (ENDF
@@ -562,7 +555,7 @@ pub fn decay_nuclides() -> Schema {
         // one's sigma. Nullable and last for the same reason: a file written
         // before them still reads, with no split. A null energy is a
         // component not given, not one given as zero; the sigmas follow the
-        // rule above (issue #140).
+        // rule above.
         f64("decay_energy_beta", true),
         f64("decay_energy_beta_uncertainty", true),
         f64("decay_energy_gamma", true),
@@ -589,10 +582,10 @@ pub fn decay_sources() -> Schema {
         // integral depends on it, and the libraries use more than one: JEFF-4.0
         // gives 16 photon continua as linear-linear beside 44 histograms.
         // Nullable and last, so a file written before it still reads; there a
-        // continuum states no law and cannot be integrated (issue #163).
+        // continuum states no law and cannot be integrated.
         i32("interpolation", true),
         // What MT=457 states about each row's uncertainty, stored as written
-        // so nothing the evaluation gives is lost (issue #163). All nullable
+        // so nothing the evaluation gives is lost. All nullable
         // and last, so an older file still reads; a file that has them is
         // refused by a build that predates them (check_batch rejects columns
         // it does not declare). On the sigma columns a null and a 0.0 both
@@ -784,10 +777,9 @@ pub fn fission_yields_fission_yields() -> Schema {
 
 /// `nuclide.arrow`
 ///
-/// Metadata only since the union energy grids moved to [`energy()`]
-/// (fusion-neutronics/core#100). One row, on the order of a kilobyte, so a
-/// client that wants to know what a nuclide IS no longer pays 6.33 MB of U238
-/// grids to find out.
+/// Metadata only: the union energy grids are in [`energy()`]. One row, on the
+/// order of a kilobyte, so a client that wants to know what a nuclide IS does
+/// not pay 6.33 MB of U238 grids to find out.
 pub fn nuclide() -> Schema {
     Schema::new(vec![
         utf8("name", true),
@@ -945,7 +937,7 @@ mod determinism {
     ///
     /// This is what makes a written file byte-reproducible: arrow serialises
     /// the map in iteration order, so an unsorted one produces a different
-    /// file from the same data (issue #441).
+    /// file from the same data.
     #[test]
     fn every_section_metadata_iterates_sorted() {
         let mut checked = 0;
@@ -971,7 +963,7 @@ mod determinism {
     /// The check above could pass by luck on a single build. This one is what
     /// catches a return to a per-instance-seeded map: `HashMap` reseeds, so a
     /// rebuild would eventually come out the other way round and this would
-    /// fail. Kept after arrow 60 made `Metadata` a `BTreeMap` (issue #28),
+    /// fail. `Metadata` is a `BTreeMap` since arrow 60, but this is kept
     /// because it asserts the property the published format needs rather than
     /// whichever mechanism currently provides it.
     #[test]

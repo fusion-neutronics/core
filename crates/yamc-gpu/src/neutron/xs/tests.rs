@@ -207,13 +207,13 @@ fn make_synthetic_nuclide_with_inelastic_angle() -> Nuclide {
 
 /// The angular-distribution extractor must pull the tabulated
 /// CDF for the right MT slot, leave every other slot zero, and
-/// pack the buffers tight (variable-length CSR, issue #104).
+/// pack the buffers tight (variable-length CSR).
 #[test]
 fn extracts_per_mt_angle_buffers() {
     let nuclide = make_synthetic_nuclide_with_inelastic_angle();
     let xs = extract_xs_from_nuclide(&nuclide, "294").unwrap();
 
-    // Tight layout (issue #104): per-slot counts are `[MT_INELASTIC_COUNT]`;
+    // Tight layout: per-slot counts are `[MT_INELASTIC_COUNT]`;
     // the incident-energy rows (`energy_grid` / `n_mu` / `interp`) are
     // `[total ae-rows]`; the (mu, cdf) points are `[total mu-points]`. Here
     // only slot 0 (MT 51) has data: 1 incident energy -> 1 ae-row, 4 mu pts.
@@ -320,7 +320,7 @@ fn extracts_per_mt_eout_buffers() {
     let nuclide = make_synthetic_nuclide_with_continuum_eout();
     let xs = extract_xs_from_nuclide(&nuclide, "294").unwrap();
 
-    // Tight layout (issue #104): per-slot scalars are `[MT_INELASTIC_COUNT]`;
+    // Tight layout: per-slot scalars are `[MT_INELASTIC_COUNT]`;
     // the incident-energy rows (`energy_grid` / `n_x`) are `[total ae-rows]`;
     // the (x, cdf) points are `[total x-points]`. Here only the MT 91 slot has
     // data: 1 incident energy -> 1 ae-row, 3 x-points.
@@ -488,9 +488,8 @@ fn aggregates_multi_nuclide_xs_correctly() {
     );
 }
 
-/// Issue #88 (extends the #74 order-independence regression): the dual energy
-/// grid must be order-independent. The FINE grid is the exact UNION of the
-/// material's per-nuclide grids -- mirroring the CPU's
+/// The dual energy grid must be order-independent. The FINE grid is the exact
+/// UNION of the material's per-nuclide grids -- mirroring the CPU's
 /// `unified_energy_grid_neutron`, so every isotope's resonances survive in the
 /// collision / selection cross sections -- and the COARSE grid is the finest
 /// single per-nuclide grid (backing only the per-MT inelastic buffers). Both
@@ -702,7 +701,7 @@ fn extracts_per_mt_corr_buffers() {
     let nuclide = make_synthetic_nuclide_with_correlated();
     let xs = extract_xs_from_nuclide(&nuclide, "294").unwrap();
 
-    // Tight layout (issue #104): per-slot counts are `[MT_INELASTIC_COUNT]`;
+    // Tight layout: per-slot counts are `[MT_INELASTIC_COUNT]`;
     // the incident-energy ae-rows (`energy_grid` / `n_x` / `interp` /
     // `n_discrete`) are `[total ae-rows]`; the E_out x-points (`x` / `cdf` /
     // `p` / `n_mu` / `mu_interp`) are `[total x-points]`; the mu points (`mu`
@@ -955,7 +954,7 @@ fn slice_f_mt_xs_subtracted_from_absorption_derivation() {
     }
 }
 
-/// Issue #106: the breakup channels (MT 11 / 29 / 30 / 35 / 36 / 42) must
+/// The breakup channels (MT 11 / 29 / 30 / 35 / 36 / 42) must
 /// occupy slots 56..=61 with the multiplicity their reaction name implies, and
 /// their xs must reach `xs_inelastic_per_mt` rather than the derived
 /// absorption. These are the MTs that made the GPU over-absorb on TENDL data,
@@ -1011,7 +1010,7 @@ fn extracts_breakup_mts_into_slots_56_to_61() {
     }
 }
 
-/// Issue #106: the whole point of slotting the breakup channels is that their
+/// The whole point of slotting the breakup channels is that their
 /// cross section stops landing in the derived absorption, which is what killed
 /// neutrons on the GPU that the CPU scattered. Plug MT 11 into the synthetic
 /// nuclide and assert absorption is untouched while `xs_inelastic` grows by
@@ -1051,8 +1050,8 @@ fn breakup_mt_xs_subtracted_from_absorption_derivation() {
     }
 }
 
-/// Phase 2b of the GPU particle-bank work: the per-nuclide macroscopic
-/// total xs table that feeds the on-device nuclide selector.
+/// The per-nuclide macroscopic total xs table that feeds the on-device nuclide
+/// selector.
 ///
 /// Two checks pin it to the CPU semantics:
 ///  1. Each row equals `density * (sigma_elastic + capture_coef / sqrt(E))`,
@@ -1110,7 +1109,7 @@ fn per_nuclide_macro_total_xs_matches_cpu() {
     }
 }
 
-/// #74 Stage 2b: `extract_per_nuclide_inelastic` for a SINGLE-nuclide material
+/// `extract_per_nuclide_inelastic` for a SINGLE-nuclide material
 /// must produce per-MT distribution buffers byte-identical to the material-
 /// blended ones `extract_material_xs` produces (one nuclide => no blend), and
 /// reaction partials whose elastic + absorption + inelastic + fission sums to
@@ -1129,7 +1128,7 @@ fn per_nuclide_inelastic_single_nuclide_matches_material_blend() {
     assert_eq!(pool.n_nuclides, 1);
 
     // Per-MT distribution buffers byte-identical to the material blend. The pool
-    // stores the per-MT XS / yield SPARSE (issue #212): reconstruct the dense
+    // stores the per-MT XS / yield SPARSE: reconstruct the dense
     // `[MT_INELASTIC_COUNT × n_coarse]` layout (0 outside each slot's stored
     // range for XS, 1.0 for yield -- the dense defaults) and compare byte-for-byte
     // to the material's dense per-MT buffers.
@@ -1264,7 +1263,7 @@ fn evap_multi_distribution_u_is_energy_dependent() {
 
     // MT 91 is slot 40 (the 41st MT_SLOTS entry).
     let slot = MT_SLOTS.iter().position(|&m| m == 91).unwrap();
-    // Tight CSR layout (issue #104): the slot's E_in rows start at the running
+    // Tight CSR layout: the slot's E_in rows start at the running
     // prefix sum of n_energies (mirrors `evap_ae_offset` built in translate.rs).
     let off: usize = n_energies[..slot].iter().map(|&n| n as usize).sum();
     let n = n_energies[slot] as usize;
@@ -1332,7 +1331,7 @@ fn make_synthetic_urr_nuclide(z: u32, a: u32, n_e: usize, n_cdf: usize) -> Nucli
 /// `build_urr_buffers` must emit ONE slab row per nuclide of the material, in
 /// input order, with URR nuclides marked `PRESENT` (carrying their ZA / table
 /// dimensions and a tight concatenated table) and non-URR nuclides marked
-/// absent with a zero-length table (issue #210). This is the per-nuclide
+/// absent with a zero-length table. This is the per-nuclide
 /// keying the GPU URR fix depends on.
 #[test]
 fn build_urr_buffers_is_per_slab_over_all_nuclides() {
@@ -1390,7 +1389,7 @@ fn build_urr_buffers_is_per_slab_over_all_nuclides() {
     assert_eq!(atom_density, vec![0.3, 0.7, 0.0]);
 }
 
-/// Issue #106: a nuclide carrying a neutron-emitting MT the kernel has no slot
+/// A nuclide carrying a neutron-emitting MT the kernel has no slot
 /// for must be refused rather than silently over-absorbed. MT 160 ((n,7n)) is
 /// in the CPU's scattering set and has no slot, so a fat one is a hard error.
 #[test]
@@ -1434,7 +1433,7 @@ fn refuses_unslotted_scatter_mt_above_tolerance() {
     );
 }
 
-/// Issue #106: the guard must not refuse the negligible real case. ENDF/B-VIII.1
+/// The guard must not refuse the negligible real case. ENDF/B-VIII.1
 /// La139 carries the unslotted MT 152-200 series at 2.5e-6 of its total, and
 /// only above 20 MeV; refusing that would cost a GPU run for nothing.
 #[test]

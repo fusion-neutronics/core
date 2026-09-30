@@ -1,31 +1,31 @@
-//! GPU multi-nuclide moderation regression test (issue #74, Stages 1 + 2a + 2b).
+//! GPU multi-nuclide moderation regression test.
 //!
-//! Before Stage 1 the GPU kernel used a single density-weighted *average*
-//! target mass per material for elastic scattering. In a hydrogenous moderator
-//! the light nucleus (large per-collision energy loss) is averaged against the
-//! heavy one, so the kernel under-moderates and the thermal flux collapses to
-//! roughly half the CPU value (the issue documents ~0.45x for an H2O sphere).
+//! A kernel that used a single density-weighted *average* target mass per
+//! material for elastic scattering would average the light nucleus (large
+//! per-collision energy loss) against the heavy one in a hydrogenous moderator,
+//! so it under-moderates and the thermal flux collapses to roughly half the CPU
+//! value (~0.45x for an H2O sphere).
 //!
-//! Stage 1 selects WHICH nuclide is struck at every collision (proportional to
-//! that nuclide's macroscopic total xs) and uses THAT nuclide's exact AWR for
-//! the elastic kinematics, lifting the thermal ratio to ~0.66. Stage 2a then
+//! The kernel instead selects WHICH nuclide is struck at every collision
+//! (proportional to that nuclide's macroscopic total xs) and uses THAT nuclide's
+//! exact AWR for the elastic kinematics (thermal ratio ~0.66 on its own). It also
 //! samples the struck nuclide's OWN elastic CM angular table (not a material-
 //! blended one), correcting the per-collision angular deflection and closing the
 //! residual to ~0.96.
 //!
 //! Tests:
 //!   1. a real H2O (H1 + O16) sphere using `~/.cache/yamc` data when present --
-//!      the genuine #74 case;
+//!      the genuine multi-nuclide case;
 //!   2. a 2:1 H2:C12 (CH2-like) surrogate from the shipped fixtures, used when
 //!      the cache is unavailable; same physics (a light + heavy nuclide whose
 //!      average AWR / blended angle badly mis-models the light nuclide);
-//!   3. a single-nuclide Fe56 sphere that must stay in lock-step (Stages 1/2a/2b
-//!      are no-ops with one nuclide -- no extra draw, slab == old material row).
+//!   3. a single-nuclide Fe56 sphere that must stay in lock-step (per-nuclide
+//!      selection is a no-op with one nuclide -- no extra draw, slab == material row).
 //!   4. a natural-Fe (Fe54/56/57/58) sphere whose 14 MeV fast/inelastic spectrum
-//!      was ~15.9% off pre-Stage-2b (the material-blended inelastic secondary
-//!      distributions mis-modeled the per-isotope (n,n') down-scatter); Stage 2b
-//!      samples the struck isotope's own inelastic distribution + reaction-type
-//!      partials, dropping the per-bin GPU/CPU disagreement toward MC noise.
+//!      sits ~15.9% off with material-blended inelastic secondary distributions
+//!      (they mis-model the per-isotope (n,n') down-scatter); sampling the struck
+//!      isotope's own inelastic distribution + reaction-type partials drops the
+//!      per-bin GPU/CPU disagreement toward MC noise.
 //!
 //! Self-skips if the Arrow data or an f64 GPU adapter is absent. Retries the
 //! GPU run a few times on transient `BufferAsyncError` (single shared adapter).
@@ -194,14 +194,14 @@ fn thermal_flux(t: &Arc<Tally>) -> f64 {
 }
 
 /// A 2:1 H2:C12 (CH2-like) moderator sphere: GPU thermal flux must recover
-/// toward CPU. Pre-#74 the average-AWR kernel under-moderates and the thermal
-/// ratio sits near ~0.45; per-collision nuclide selection + per-nuclide elastic
-/// AWR (Stage 1) lifted it to ~0.66; per-nuclide elastic ANGULAR sampling
-/// (Stage 2a) closes the residual to ~0.96. The Stage 1 gap was the still-
-/// material-blended elastic CM angular table, which differs sharply between H2
-/// (near-isotropic in CM) and C12 (forward-peaked at MeV) -- with the struck
-/// nuclide's own table now sampled, the per-collision angular deflection (and
-/// thus the lab-frame energy loss) is correct.
+/// toward CPU. An average-AWR kernel under-moderates and the thermal ratio sits
+/// near ~0.45; per-collision nuclide selection + per-nuclide elastic AWR lifts it
+/// to ~0.66; per-nuclide elastic ANGULAR sampling closes the residual to ~0.96.
+/// The gap left by AWR alone is a material-blended elastic CM angular table,
+/// which differs sharply between H2 (near-isotropic in CM) and C12
+/// (forward-peaked at MeV) -- with the struck nuclide's own table sampled, the
+/// per-collision angular deflection (and thus the lab-frame energy loss) is
+/// correct.
 #[test]
 fn gpu_multinuclide_moderator_thermal_flux_recovers() {
     if !std::path::Path::new("tests/H2.arrow").exists()
@@ -242,16 +242,16 @@ fn gpu_multinuclide_moderator_thermal_flux_recovers() {
         cpu_thermal > 0.0 && gpu_thermal > 0.0,
         "both backends must produce thermal flux (cpu {cpu_thermal}, gpu {gpu_thermal})"
     );
-    // The #74 Stage 2a fix: with the struck nuclide's own elastic angular table
-    // (on top of Stage 1's per-nuclide AWR), the thermal ratio recovers close to
-    // 1.0 (~0.96 in practice). A floor of 0.85 fails hard if the per-nuclide
-    // elastic angular re-key regresses (Stage 1 alone sat ~0.66, the average-AWR
+    // With the struck nuclide's own elastic angular table (on top of the
+    // per-nuclide AWR), the thermal ratio recovers close to 1.0 (~0.96 in
+    // practice). A floor of 0.85 fails hard if the per-nuclide elastic angular
+    // re-key regresses (per-nuclide AWR alone sits ~0.66, the average-AWR
     // baseline ~0.45); the upper bound catches over-moderation.
     assert!(
         (0.85..=1.12).contains(&thermal_ratio),
         "thermal-bin GPU/CPU ratio {thermal_ratio:.3} outside [0.85, 1.12] -- \
-         per-nuclide elastic angular sampling (issue #74 Stage 2a) regressed; \
-         Stage 1 (per-nuclide AWR only) sat ~0.66, the average baseline ~0.45"
+         per-nuclide elastic angular sampling regressed; \
+         per-nuclide AWR only sits ~0.66, the average baseline ~0.45"
     );
     // Total flux is dominated by fast transport and is far less sensitive to the
     // AWR fix; a coarse sanity bound.
@@ -262,13 +262,13 @@ fn gpu_multinuclide_moderator_thermal_flux_recovers() {
 }
 
 /// Real H2O (H1 + O16) moderator sphere, drawing the actual ENDF/B-8.1 data
-/// from `~/.cache/yamc` when present. This is the genuine #74 case (the H2:C12
-/// surrogate above stands in when the cache is unavailable). Per-nuclide elastic
-/// angular sampling (Stage 2a) roughly doubles the thermal recovery: with the
-/// first-nuclide blended angle (Stage 1) the GPU/CPU thermal ratio sits ~0.43;
+/// from `~/.cache/yamc` when present. This is the genuine multi-nuclide case
+/// (the H2:C12 surrogate above stands in when the cache is unavailable).
+/// Per-nuclide elastic angular sampling roughly doubles the thermal recovery:
+/// with a first-nuclide blended angle the GPU/CPU thermal ratio sits ~0.43;
 /// indexing the struck nuclide's own elastic table lifts it to ~0.81. The
-/// remaining gap is the still-material-blended INELASTIC secondary distributions
-/// (O16 inelastic is significant at 14 MeV) -- that is Stage 2b of issue #74.
+/// remaining gap is attributed to material-blended INELASTIC secondary
+/// distributions (O16 inelastic is significant at 14 MeV).
 #[test]
 fn gpu_real_h2o_thermal_flux_recovers() {
     let h1 = yamc_test_cache::nuclide_path("H1");
@@ -312,15 +312,15 @@ fn gpu_real_h2o_thermal_flux_recovers() {
         cpu_thermal > 0.0 && gpu_thermal > 0.0,
         "both backends must produce thermal flux (cpu {cpu_thermal}, gpu {gpu_thermal})"
     );
-    // Stage 2a recovery: per-nuclide elastic angular lifts the real H2O thermal
-    // ratio from the Stage-1 blended-angle ~0.43 to ~0.81. A floor of 0.72 fails
-    // hard if the per-nuclide elastic re-key regresses, while leaving the known
-    // Stage 2b (inelastic-blend) gap; the upper bound catches over-moderation.
+    // Per-nuclide elastic angular lifts the real H2O thermal ratio from the
+    // blended-angle ~0.43 to ~0.81. A floor of 0.72 fails hard if the per-nuclide
+    // elastic re-key regresses, while leaving room for the inelastic-blend gap;
+    // the upper bound catches over-moderation.
     assert!(
         (0.72..=1.10).contains(&thermal_ratio),
         "real-H2O thermal GPU/CPU ratio {thermal_ratio:.3} outside [0.72, 1.10] -- \
-         per-nuclide elastic angular (issue #74 Stage 2a) regressed (blended-angle \
-         Stage 1 sat ~0.43); residual above 0.81 is the inelastic blend (Stage 2b)"
+         per-nuclide elastic angular regressed (blended angle sits ~0.43); \
+         residual above 0.81 is the inelastic blend"
     );
     assert!(
         (0.85..=1.15).contains(&total_ratio),
@@ -328,8 +328,8 @@ fn gpu_real_h2o_thermal_flux_recovers() {
     );
 }
 
-/// Single-nuclide Fe56 sphere: Stage 1 is a no-op (one nuclide => no selection
-/// draw), so the GPU must stay in lock-step with the CPU exactly as before #74.
+/// Single-nuclide Fe56 sphere: per-nuclide selection is a no-op (one nuclide =>
+/// no selection draw), so the GPU must stay in lock-step with the CPU.
 /// This is the model-level confirmation of the single-nuclide gate (the
 /// bit-for-bit kernel/twin check lives in the yamc-gpu `cpu_gpu_equivalence_*`
 /// lib tests).
@@ -361,14 +361,14 @@ fn gpu_single_nuclide_fe56_unchanged() {
     );
     assert!(
         (0.97..=1.03).contains(&ratio),
-        "single-nuclide Fe56 GPU/CPU flux ratio {ratio:.4} should be ~1 (Stage 1 is a no-op)"
+        "single-nuclide Fe56 GPU/CPU flux ratio {ratio:.4} should be ~1 (nuclide selection is a no-op)"
     );
 }
 
 /// Largest relative per-bin disagreement between two flux spectra (over bins
-/// where the CPU has meaningful counts). The pre-Stage-2b GPU mis-modeled the
-/// per-isotope inelastic down-scatter, so the fast/intermediate bins drifted
-/// ~15.9% from the CPU; Stage 2b should pull every bin into MC noise.
+/// where the CPU has meaningful counts). Material-blended inelastic sampling
+/// mis-models the per-isotope down-scatter, so the fast/intermediate bins drift
+/// ~15.9% from the CPU; per-isotope sampling should pull every bin into MC noise.
 fn max_rel_bin_disagreement(cpu: &Arc<Tally>, gpu: &Arc<Tally>) -> f64 {
     let c = cpu.get_mean();
     let g = gpu.get_mean();
@@ -388,12 +388,12 @@ fn max_rel_bin_disagreement(cpu: &Arc<Tally>, gpu: &Arc<Tally>) -> f64 {
 }
 
 /// Natural-Fe (Fe54/56/57/58 at natural abundance) sphere from `~/.cache/yamc`.
-/// The genuine #74 Stage 2b case: with the material-blended inelastic secondary
-/// distributions (Stages 1/2a) the 14 MeV fast/intermediate flux spectrum sat
-/// ~15.9% off the CPU because the per-isotope (n,n') down-scatter was averaged
-/// across isotopes. Stage 2b samples the STRUCK isotope's own inelastic
-/// distribution (and splits the reaction type from its own partials), so the
-/// largest per-bin GPU/CPU disagreement drops toward MC noise.
+/// The per-isotope inelastic case: with material-blended inelastic secondary
+/// distributions the 14 MeV fast/intermediate flux spectrum sits ~15.9% off the
+/// CPU because the per-isotope (n,n') down-scatter is averaged across isotopes.
+/// The kernel samples the STRUCK isotope's own inelastic distribution (and
+/// splits the reaction type from its own partials), so the largest per-bin
+/// GPU/CPU disagreement drops toward MC noise.
 #[test]
 fn gpu_natural_fe_inelastic_spectrum_recovers() {
     let isotopes = [
@@ -443,14 +443,14 @@ fn gpu_natural_fe_inelastic_spectrum_recovers() {
         gpu_t.get_mean()
     );
 
-    // Pre-Stage-2b the worst significant bin sat ~15.9% off (the inelastic
-    // blend). Stage 2b's per-isotope inelastic sampling should pull every
+    // With the inelastic blend the worst significant bin sits ~15.9% off.
+    // Per-isotope inelastic sampling should pull every
     // meaningful bin under ~8% (statistics on 80k histories); a hard ceiling of
     // 10% fails loudly if the per-nuclide inelastic re-key regresses.
     assert!(
         worst < 0.10,
         "natural-Fe max per-bin GPU/CPU disagreement {:.1}% exceeds 10% -- per-nuclide \
-         inelastic distributions (issue #74 Stage 2b) regressed (the material-blended \
+         inelastic distributions regressed (the material-blended \
          baseline sat ~15.9%)",
         worst * 100.0
     );

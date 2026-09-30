@@ -1,5 +1,5 @@
 //! PCG-32 random number generator (64-bit state, 32-bit output word,
-//! PCG-XSH-RR 64/32; issue #274) -- bit-identical CPU and GPU
+//! PCG-XSH-RR 64/32) -- bit-identical CPU and GPU
 //! implementations.
 //!
 //! The shared collision path threads one 64-bit PCG state per history on
@@ -31,7 +31,7 @@ pub use yamc_rng::{
 };
 
 /// 64-bit PCG (PCG-XSH-RR 64/32) with the same algorithm as `pcg_next` in
-/// [`crate::common::pcg32`] (issue #274). Stored as a `Pod` u64 so a
+/// [`crate::common::pcg32`]. Stored as a `Pod` u64 so a
 /// `Vec<GpuRng>` could be uploaded as a per-thread state buffer.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]

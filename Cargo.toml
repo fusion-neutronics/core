@@ -12,7 +12,7 @@ resolver = "2"
 #
 # Accuracy-safe: LLVM does not reassociate floating point without `fast-math`,
 # which Rust never enables, so this changes how the same operations are
-# scheduled and not which operations they are. Issue #576.
+# scheduled and not which operations they are.
 [profile.release]
 codegen-units = 1
 # "thin" rather than "fat". Fat gains another percent or so and links arrow,

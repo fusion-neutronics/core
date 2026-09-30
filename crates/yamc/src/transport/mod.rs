@@ -124,7 +124,7 @@ pub(crate) struct TransportCtx<'a> {
     /// Tallies scored over the transport.
     pub(crate) tallies: &'a [&'a Tally],
     /// Per-tally flag, parallel to `tallies`: eligible for TRUE
-    /// track-length scoring along Woodcock flight segments (issue #350)
+    /// track-length scoring along Woodcock flight segments
     /// instead of the delta-collision collision-density equivalent.
     /// All `false` (or empty) outside woodcock/hybrid modes.
     pub(crate) woodcock_tl_mesh_eligible: &'a [bool],
@@ -147,7 +147,7 @@ pub(crate) struct TransportCtx<'a> {
     /// Whether `YAMC_DEBUG` first-particle tracing is enabled.
     pub(crate) debug: bool,
     /// Run-scoped cache of flattened per-(nuclide, MT) inelastic kinematics
-    /// tables (issue #111). Built lazily on the first collision that needs a
+    /// tables. Built lazily on the first collision that needs a
     /// given reaction and shared read-only across transport threads; the
     /// continuum inelastic arm samples from it on the shared PCG stream,
     /// byte-identically to the GPU. Created per `Model::simulate` call, so it
@@ -167,8 +167,8 @@ pub(crate) struct TransportCtx<'a> {
 /// lookup, distance sample, interacting-nuclide pick, and URR random
 /// into a single function for cache-locality reasons.
 ///
-/// Extracted from the inner transport loop in [`Model::simulate`] as
-/// part of Phase 1f. Hot path: fires once per particle step.
+/// Called from the inner transport loop. Hot path: fires once per
+/// particle step.
 /// `#[inline(always)]` here (rather than just `#[inline]`) closes a
 /// ~1% regression observed when LLVM declined to inline the body --
 /// the function returns a non-trivial struct, which raises its
@@ -238,8 +238,8 @@ pub(crate) fn sample_distance_to_collision<'a>(
 /// returns `None` -- the caller is expected to treat that as
 /// "particle is dead, continue to the next one".
 ///
-/// Extracted from the inner transport loop in [`Model::simulate`] as
-/// part of Phase 1f. Hot path: this fires every particle step that
+/// Called from the inner transport loop. Hot path: this fires every
+/// particle step that
 /// crosses a surface (i.e. typically once per collision / surface
 /// crossing). The `#[inline]` annotation lets LLVM merge the body back
 /// into `simulate` so the function-call boundary is free at runtime.
@@ -346,7 +346,7 @@ pub(crate) fn handle_lost_particle(
     }
 }
 
-/// Spatial tracking verification (issue #254): before accepting a
+/// Spatial tracking verification: before accepting a
 /// surface crossing, check that no surface FOREIGN to the current cell
 /// intersects the open segment between the particle and the crossing.
 /// The adjacency tracker resolves crossings against the current
@@ -399,11 +399,10 @@ fn verify_crossing(
 /// `previous_cell_index` and `current_cell_index` hints so the next
 /// iteration's [`find_or_lose_cell`] starts from the right place.
 ///
-/// Extracted from the inner transport loop in [`Model::simulate`] as
-/// step 4 of Phase 1f. Hot path: fires every time a particle crosses
-/// a surface (typically more often than collision in low-density
-/// geometries). `#[inline(always)]` per the lesson from #34 -- plain
-/// `#[inline]` was unreliable because the call site is hot even when
+/// Called from the inner transport loop. Hot path: fires every time a
+/// particle crosses a surface (typically more often than collision in
+/// low-density geometries). `#[inline(always)]` because plain
+/// `#[inline]` is unreliable because the call site is hot even when
 /// the body isn't.
 ///
 /// Many parameters: this is the cost of being self-contained for the
@@ -467,20 +466,20 @@ pub(crate) fn handle_surface_crossing<T: Tracker>(
 /// the cost of being self-contained -- this is intentional and is the
 /// shape the eventual WGSL kernel will need.
 ///
-/// Step 6 (final step) of Phase 1f. The earlier steps factored out
-/// `find_or_lose_cell`, `sample_distance_to_collision`,
-/// `score_track_length_segment`, `handle_surface_crossing`, and
-/// `handle_lost_particle` into private helpers; this lift moves what
-/// was left of the inner `while particle.alive` body into a single
-/// callable function. `#[inline(always)]` per the lesson from #34.
+/// This is the inner `while particle.alive` body as a single callable
+/// function, built on the private helpers `find_or_lose_cell`,
+/// `sample_distance_to_collision`, `score_track_length_segment`,
+/// `handle_surface_crossing` and `handle_lost_particle`.
+/// `#[inline(always)]` because plain `#[inline]` is unreliable on a hot
+/// call site.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn transport_particle<T: Tracker>(
     ctx: &TransportCtx,
     particle: &mut yamc_particle::particle::Particle,
     rng: &mut FastRng,
-    // Per-particle 64-bit PCG state for sub-steps on the shared GPU/CPU
-    // collision path (issues #111, #274); threaded into the collision handler.
+    // Per-particle 64-bit PCG state for the steps on the shared GPU/CPU
+    // collision path; threaded into the collision handler.
     pcg: &mut u64,
     tracker: &mut T,
     neighbor_lists: &mut NeighborLists,
@@ -521,7 +520,7 @@ pub(crate) fn transport_particle<T: Tracker>(
         }
 
         let cell_material = geometry.material_for(cell);
-        // Free-flight on the shared PCG stream (issue #111). For a survival-off
+        // Free-flight on the shared PCG stream. For a survival-off
         // neutron in a non-URR fast-XS material -- the config whose reaction-type
         // split runs on PCG (see `handle_neutron_collision`) -- draw the flight
         // `xi1` from PCG so the per-step schedule matches the GPU kernel, whose
@@ -535,7 +534,7 @@ pub(crate) fn transport_particle<T: Tracker>(
             match cell_material {
                 Some(m) => {
                     // A band held at THIS energy is reused, so a crossing
-                    // does not redraw it (#342); at a new energy
+                    // does not redraw it; at a new energy
                     // `smooth_flight` draws one before the flight, matching
                     // the kernel's per-step order.
                     let held = if particle.urr_energy == particle.energy {
@@ -586,7 +585,7 @@ pub(crate) fn transport_particle<T: Tracker>(
             // Store URR random on particle for correlated reaction sampling.
             // Only update when a URR band was actually sampled; otherwise LEAVE
             // any held band intact so it survives a void / non-URR excursion at
-            // the same energy (issue #206). This matches OpenMC, whose URR seed
+            // the same energy. This matches OpenMC, whose URR seed
             // advances only when the energy changes: a neutron that backscatters
             // through a void and re-enters the same material at the same energy
             // must reuse its band, not redraw. The `urr_energy == energy` guard
@@ -714,7 +713,7 @@ pub(crate) fn transport_particle<T: Tracker>(
                         if heat_score != 0.0 {
                             for (tally_idx, tally) in ctx.tallies.iter().enumerate() {
                                 // TrackLength tallies score photon KERMA
-                                // along tracks instead (issue #356).
+                                // along tracks instead.
                                 if tally.estimator != yamc_tallies::Estimator::Collision {
                                     continue;
                                 }
@@ -920,7 +919,7 @@ pub(crate) fn do_photon_collision<T: Tracker>(
     if heat_score != 0.0 {
         for (tally_idx, tally) in tallies.iter().enumerate() {
             // TrackLength tallies score photon KERMA along tracks
-            // instead (issue #356).
+            // instead.
             if tally.estimator != yamc_tallies::Estimator::Collision {
                 continue;
             }
@@ -1033,8 +1032,8 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
     cell_mean_chords: &[f64],
     hybrid: bool,
     rng: &mut FastRng,
-    // Per-particle 64-bit PCG state for the shared GPU/CPU collision path
-    // (issues #111, #274); threaded into the collision handler.
+    // Per-particle 64-bit PCG state for the shared GPU/CPU collision path;
+    // threaded into the collision handler.
     pcg: &mut u64,
     tracker: &mut T,
     neighbor_lists: &mut NeighborLists,
@@ -1046,8 +1045,8 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
     welford_worker: &mut yamc_tallies::welford::WelfordWorkerState,
 ) {
     let geometry = ctx.geometry;
-    // Any tally taking the true track-length path along flight segments
-    // (issue #350)? Hoisted: the per-flight scoring below is skipped
+    // Any tally taking the true track-length path along flight segments?
+    // Hoisted: the per-flight scoring below is skipped
     // entirely when no eligible mesh tally exists, keeping analog
     // Woodcock bit-identical.
     let any_tl_mesh = ctx.woodcock_tl_mesh_eligible.iter().any(|&b| b);
@@ -1155,8 +1154,8 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                 None
             } else {
                 // Only update when a URR band was sampled; otherwise hold any
-                // band from a URR excursion at the same energy (issue #206,
-                // mirrors the surface-tracking path and OpenMC's seed-advances-
+                // band from a URR excursion at the same energy (mirrors the
+                // surface-tracking path and OpenMC's seed-advances-
                 // on-energy-change rule).
                 if let Some((_, _, _, Some(band), _)) = &collision_data {
                     particle.urr_random = yamc_particle::particle::urr_from_option(Some(*band));
@@ -1299,17 +1298,15 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
 
         let pre_flight_cell_idx = cell_index;
 
-        // Truncate the flight at the first TRUE vacuum exit (issue
-        // #360): without this, a flight crosses vacuum boundaries
-        // unchecked and can land in a disjoint body across
-        // out-of-geometry space, where surface tracking would have
-        // killed it at the boundary -- the modes would disagree on
-        // means, gaps would attenuate as exp(-sigma_maj*d), and the
-        // mesh scorer would deposit into gap voxels. Crossings whose
-        // far side is still inside the geometry are skipped by the
-        // helper, so flights never false-kill on another body's
-        // surface extensions. No RNG is drawn: non-leaking histories
-        // are bit-identical.
+        // Truncate the flight at the first TRUE vacuum exit: without this,
+        // a flight crosses vacuum boundaries unchecked and can land in a
+        // disjoint body across out-of-geometry space, where surface tracking
+        // would have killed it at the boundary -- the modes would disagree
+        // on means, gaps would attenuate as exp(-sigma_maj*d), and the mesh
+        // scorer would deposit into gap voxels. Crossings whose far side is
+        // still inside the geometry are skipped by the helper, so flights
+        // never false-kill on another body's surface extensions. No RNG is
+        // drawn: non-leaking histories are bit-identical.
         if let Some(exit_dist) = woodcock_flight_exit(
             geometry,
             neighbor_lists,
@@ -1350,8 +1347,7 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
 
         // Move the particle the full sampled distance -- no boundary
         // check beyond the vacuum-exit truncation above. This is the
-        // structural difference from the hybrid Phase 1-3
-        // implementation.
+        // structural difference from hybrid tracking.
         particle.move_by(d_flight);
 
         // Locate the post-flight cell directly via the neighbor list
@@ -1409,7 +1405,7 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                 continue;
             }
         };
-        // True track-length mesh tallies (issue #350): the whole flight
+        // True track-length mesh tallies: the whole flight
         // segment lies inside the geometry, so apportion it across the
         // crossed mesh voxels with the DDA. Material-independent by
         // eligibility, hence shared by the photon and neutron paths.
@@ -1603,14 +1599,13 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
     }
 }
 
-/// Outcome of the analog (survival-off) reaction-type split (issue #111): which
+/// Outcome of the analog (survival-off) reaction-type split: which
 /// scatter sub-channel `xi2` selected and the shared angle seed `xi3`. `None`
 /// (the `analog_split` local being unset) means the legacy FastRng path handled
 /// selection, which happens under survival biasing or when the material has no
-/// `fast_xs` grid. URR bands take this path as of #111 gap 1. Multi-nuclide
-/// materials DO take this
-/// path: the split runs against the struck nuclide's partials, and nuclide
-/// selection moved onto the shared stream in #131.
+/// `fast_xs` grid. URR bands take this path. Multi-nuclide materials DO take
+/// this path: the split runs against the struck nuclide's partials, and nuclide
+/// selection is on the shared stream too.
 struct AnalogSplit {
     /// `xi2` landed in the elastic sub-range (route to `scatter_elastic`);
     /// otherwise the inelastic/other-scatter sub-range (draw `xi_mt`).
@@ -1622,7 +1617,7 @@ struct AnalogSplit {
 /// True when this scatter constituent is a DISCRETE inelastic level: its first
 /// neutron product carries an uncorrelated angle-energy distribution whose
 /// energy is `LevelInelastic` (closed-form-Q two-body). Such levels route through
-/// `scatter_inelastic_level` on the shared PCG stream (issue #111 sub-step 3),
+/// `scatter_inelastic_level` on the shared PCG stream,
 /// bit-identically to the GPU; continuum / correlated / Kalbach distributions
 /// stay on the legacy tabulated FastRng path.
 fn constituent_is_discrete_level(reaction: &Reaction) -> bool {
@@ -1761,9 +1756,8 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
     material: &Material,
     collision_data: Option<CollisionData<'_>>,
     rng: &mut FastRng,
-    // Per-particle 64-bit PCG state for sub-steps migrated onto the shared
-    // GPU/CPU collision path (issues #111, #274). Currently consumed by
-    // elastic scatter; other sub-steps still draw from `rng` until migrated.
+    // Per-particle 64-bit PCG state for the collision steps on the shared
+    // GPU/CPU collision path; steps not on the shared path draw from `rng`.
     pcg: &mut u64,
     tracker: &mut T,
     particle_bank: &mut ParticleBank,
@@ -1780,8 +1774,8 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
     if let Some((_, nuclide_name, nuclide, _, nuclide_id)) = collision_data {
         // Reaction-type selection.
         //
-        // Both the analog and the survival-biased split now run on the shared
-        // PCG stream (issue #111 gaps 1 and 2). `xi2` partitions the *struck*
+        // Both the analog and the survival-biased split run on the shared
+        // PCG stream. `xi2` partitions the *struck*
         // nuclide's (sigma_e, sigma_a, sigma_i, sigma_f) -- the GPU twin's
         // branch on the selected nuclide's partials (yamc-gpu shared.rs) --
         // then `xi3` seeds the scatter angle and a per-MT `xi_mt` (drawn in the
@@ -1795,7 +1789,7 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
         // (`physics.cpp`: fission sites first, then
         // `wgt -= wgt * absorption/total` with fission inside `absorption`,
         // then the survivor scatters), and the GPU kernel runs the same scheme
-        // whenever its fission bank is on (fusion-neutronics/core#25); with
+        // whenever its fission bank is on; with
         // the bank off the kernel keeps its legacy weight-multiply fission
         // analog alongside scatter, which coincides with this for a
         // non-fissile nuclide since its `sigma_sf` collapses to
@@ -1803,7 +1797,7 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
         let mut analog_split: Option<AnalogSplit> = None;
         // Angle seed for an analog FISSION collision: the same `xi3` the split
         // drew, which the GPU kernel's fission branch reuses as the continuing
-        // progeny's isotropic cosine instead of drawing again (issue #111).
+        // progeny's isotropic cosine instead of drawing again.
         // `None` on the legacy no-fast-grid selection, which makes no split
         // draw -- the fission arm then draws its own, as the elastic arm does.
         let mut fission_angle_xi: Option<f64> = None;
@@ -1993,7 +1987,7 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                     TOTAL_SCATTERING_REACTIONS.fetch_add(1, Ordering::Relaxed);
 
                     if let Some(split) = analog_split {
-                        // Analog single-nuclide path (#111): `xi2` already chose
+                        // Analog single-nuclide path: `xi2` already chose
                         // elastic vs inelastic; route on the shared PCG stream.
                         if split.is_elastic {
                             let elastic = nuclide
@@ -2015,9 +2009,7 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                             tally_mt = 2;
                         } else {
                             // Per-MT inelastic constituent draw (mirrors the GPU
-                            // twin's `xi_mt`), then route to the existing
-                            // kinematics (those move onto PCG in a later #111
-                            // sub-step).
+                            // twin's `xi_mt`), then route to the kinematics.
                             let xi_mt = next_xi(pcg);
                             let constituent = nuclide
                                 .sample_inelastic_scatter_reaction(
@@ -2028,9 +2020,9 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                                 .expect("non-elastic constituent present when sigma_i > 0");
                             let proceed = match constituent.mt_number {
                                 // Discrete levels: closed-form-Q on the shared PCG
-                                // stream, bit-identical to the GPU (issue #111
-                                // sub-step 3). `split.xi3` is the angle seed drawn
-                                // at the reaction-type split, as the GPU does.
+                                // stream, bit-identical to the GPU. `split.xi3` is
+                                // the angle seed drawn at the reaction-type split,
+                                // as the GPU does.
                                 50..=91 | 875..=890
                                     if constituent_is_discrete_level(constituent) =>
                                 {
@@ -2049,7 +2041,7 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                                 // PCG stream, reading the same flattened
                                 // tables the GPU packs into its buffers, so
                                 // these collisions are bit-identical to the
-                                // GPU twin too (issue #111 sub-step 3).
+                                // GPU twin too.
                                 // `None` means the flat layer does not
                                 // recognise this reaction's outgoing-energy
                                 // law, so the legacy FastRng sampler (which
@@ -2078,10 +2070,10 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                                 // ... on the shared flat samplers and the PCG
                                 // stream, reading the same tables the GPU packs
                                 // into its per-MT buffers, so these collisions
-                                // are bit-identical to the GPU twin (issue
-                                // #111). `None` means the flat layer does not
-                                // recognise this reaction's outgoing-energy law
-                                // (or it emits no neutron), so the legacy
+                                // are bit-identical to the GPU twin. `None` means
+                                // the flat layer does not recognise this
+                                // reaction's outgoing-energy law (or it emits no
+                                // neutron), so the legacy
                                 // FastRng `scatter_other` still handles it.
                                 // Either way this arm always proceeds.
                                 _ => {
@@ -2285,7 +2277,7 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
             // weight_survive. Exactly one draw per roulette, on the shared PCG
             // stream and in the kernel's position (last thing in the collision,
             // only below the cutoff), so a survival-biased history stays in
-            // lockstep with the GPU (issue #111 gap 2).
+            // lockstep with the GPU.
             if ctx.survival_biasing && particle.alive && particle.weight < ctx.weight_cutoff {
                 let xi: f64 = next_xi(pcg);
                 match weight_cutoff_roulette(particle.weight, ctx.weight_survive, xi) {
@@ -2770,7 +2762,7 @@ mod tests {
         assert_eq!(bin0(&welford), 0.0);
     }
 
-    // --- true track-length mesh scoring under Woodcock (issue #350) -----
+    // --- true track-length mesh scoring under Woodcock -----
 
     /// Single-score flux tally on a 2x1x1 mesh over [0,10]^3 (bin
     /// boundary at x=5) with the requested estimator and extra filters.
@@ -2865,7 +2857,7 @@ mod tests {
         assert_eq!(bin0(&welford), 0.0);
     }
 
-    // --- woodcock_flight_exit (issue #360) -------------------------------
+    // --- woodcock_flight_exit -------------------------------
 
     use crate::geo::{HalfspaceType, Region, RegionExpr};
     use crate::geometry::Geometry;

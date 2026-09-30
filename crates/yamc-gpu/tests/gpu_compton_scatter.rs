@@ -19,8 +19,8 @@ const MASS_ELECTRON_EV: f64 = 0.510_998_950_00e6;
 /// scattered-energy distribution** as the CPU reference `klein_nishina`.
 /// Both are sampled N times at a fixed incident energy; we compare the mean
 /// `E'/E` and the large-energy-loss fraction. This is the per-scatter
-/// energy-loss check whose absence let the #415 photoelectric deficit hide
-/// behind loose integrated tallies.
+/// energy-loss check, which loose integrated tallies alone cannot provide
+/// (a photoelectric deficit once hid behind them).
 ///
 /// Energies: 5 MeV (α≈9.8, where the CPU switches to a different sampler
 /// than Kahn but the same Klein-Nishina distribution), 1.25 MeV (Co60-mean
@@ -76,7 +76,7 @@ fn gpu_compton_kahn_matches_klein_nishina_distribution() {
 
         // MC means of E'/E: SEM is well under 0.001 at N=200k for both. A 2%
         // absolute window on the mean and on the large-loss fraction is far
-        // tighter than the ~2.6x #415 bias and far looser than statistical
+        // tighter than the ~2.6x bias that deficit caused and far looser than statistical
         // noise -- it catches a real per-scatter energy-loss discrepancy
         // without flaking.
         println!(
@@ -84,7 +84,7 @@ fn gpu_compton_kahn_matches_klein_nishina_distribution() {
         );
         assert!(
             (gpu_mean - cpu_mean).abs() < 0.02,
-            "E={e_ev:.2e}: GPU mean E'/E {gpu_mean:.4} vs CPU {cpu_mean:.4} -- per-scatter energy loss disagrees (#415)"
+            "E={e_ev:.2e}: GPU mean E'/E {gpu_mean:.4} vs CPU {cpu_mean:.4} -- per-scatter energy loss disagrees"
         );
         assert!(
             (gpu_frac_big_loss - cpu_frac_big_loss).abs() < 0.02,

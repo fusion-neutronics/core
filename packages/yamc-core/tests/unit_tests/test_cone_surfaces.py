@@ -1,7 +1,7 @@
-"""Cone surfaces (issue #365): the XCone/YCone/ZCone plus the
+"""Cone surfaces: the XCone/YCone/ZCone plus the
 arbitrary-axis Cone, double-sheeted.
 
-The general quadric (#366) is the oracle: a finite cone-capped cell
+The general quadric is the oracle: a finite cone-capped cell
 bounded by a ZCone written both ways must transport bit-identically.
 """
 import math

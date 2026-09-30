@@ -134,7 +134,7 @@ def test_max_runtime_large_is_no_op():
     assert r.n_histories == 5000
 
 
-# max_runtime is now supported on compute='gpu' (#230 task 2); its GPU
+# max_runtime is now supported on compute='gpu'; its GPU
 # behaviour (uncapped time-only run, generous-budget no-op) is covered by
 # test_simulate_transport_gpu.py, which is gated on a real GPU being present.
 

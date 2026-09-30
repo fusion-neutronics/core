@@ -37,7 +37,7 @@ pub struct PyTally {
 /// Cell ids are assigned when a cell is added to a `Geometry`, so a tally built
 /// before its geometry sees `cell_id == None`. That is a user ordering mistake,
 /// not a bug, so it must surface as a normal Python exception rather than a
-/// panic crossing the FFI boundary (issue #305).
+/// panic crossing the FFI boundary.
 fn cell_filter_ids(cells: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
     let py_cells: Vec<pyo3::PyRef<'_, PyCell>> =
         if let Ok(list) = cells.extract::<Vec<pyo3::PyRef<'_, PyCell>>>() {
@@ -176,7 +176,7 @@ impl PyTally {
                 .parse::<yamc_tallies::Estimator>()
                 .map_err(pyo3::exceptions::PyValueError::new_err)?,
         };
-        // `response` selects the virtual-overlay regime (issue #341): the score
+        // `response` selects the virtual-overlay regime: the score
         // is evaluated across the whole geometry (including void), decoupled from
         // the cell material. Setting `multiply_density = false` only turns off the
         // usual "multiply by the *cell's* atom density" step -- it does NOT mean
@@ -348,7 +348,7 @@ impl PyTally {
                 let filter = yamc_tallies::UnstructuredMeshFilter::new(mesh_arc, volume_id);
                 // A surface-only mesh has no tetrahedra, so the tally would have
                 // zero bins and silently score nothing. Refuse it at
-                // construction with the actual remedy (issue #290).
+                // construction with the actual remedy.
                 if filter.num_bins() == 0 {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
                         "unstructured_mesh volume {volume_id} has no tetrahedra, so a \
@@ -548,7 +548,7 @@ impl PyTally {
         }
 
         // A per-nuclide axis on a score with no cross section is a construction
-        // error, not a run-time one (issue #305): the user can still fix the call
+        // error, not a run-time one: the user can still fix the call
         // here. Checked unconditionally, unlike the full `validate()` below,
         // which only runs when the tally has filters.
         tally
@@ -631,7 +631,7 @@ impl PyTally {
         self.inner.estimator.as_str()
     }
 
-    /// The virtual response target (issue #341), or ``None`` for a normal
+    /// The virtual response target, or ``None`` for a normal
     /// macroscopic tally.
     ///
     /// Mirrors the ``response=`` constructor argument, so one of:

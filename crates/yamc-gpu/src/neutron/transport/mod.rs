@@ -64,7 +64,7 @@ mod urr_perturb;
 pub(super) use kernel::multi_cell_transport_kernel;
 pub use kernel::PERHIST_K;
 // Shared #[cube] scoring helpers, reused by the photon kernel: mesh binning
-// (issues #234, #279) and the energy-function evaluator (issue #271). The
+// and the energy-function evaluator. The
 // latter is species-agnostic -- it reads a tabulated curve at the particle's
 // energy -- so both kernels call the same one rather than each carrying a copy
 // of the spline evaluation.
@@ -73,8 +73,7 @@ pub(crate) use kernel::{
     mesh_rect_score_src_acc, rect_mesh_bin_at_kernel,
 };
 
-/// Exact per-history global-spill capacity for the batch-free variance path
-/// (issue #233).
+/// Exact per-history global-spill capacity for the batch-free variance path.
 ///
 /// A history touches at most ONE flat tally bin per tally per transport step: it
 /// is at a single cell and single energy each step, and the track-length and
@@ -187,7 +186,7 @@ pub const REGION_CROSS_EPS: f64 = 1e-8;
 /// the actual count.
 // NOTE: this counts the kernel's READ-ONLY `&[T]` slice parameters only, which
 // is what the lockstep test in `tests.rs` checks; `&mut [T]` outputs (including
-// the issue-#289 `lost_count` / `lost_f64` pair) are not included.
+// the lost-particle `lost_count` / `lost_f64` pair) are not included.
 pub const KERNEL_STORAGE_BUFFER_COUNT: u32 = 184;
 
 /// Compile-time cap on the number of secondary photons banked per neutron
@@ -280,7 +279,7 @@ pub const COL_FISSION_B: u32 = 3;
 pub const COL_URR_ATOM_DENSITY: u32 = 4;
 
 /// Column count for `coarse_meta` -- the packed per-material buffer that
-/// describes each material's own COARSE energy grid (issue #212). Every
+/// describes each material's own COARSE energy grid. Every
 /// material carries its own coarse grid (its finest single per-nuclide grid),
 /// concatenated tight into `coarse_log_energy_grid`; the per-MT inelastic
 /// buffers (`xs_inelastic_per_mt` / `yield_per_mt`) are tight-CSR keyed per
@@ -301,8 +300,8 @@ pub const COL_COARSE_GRID_OFFSET: u32 = 0;
 /// This material's coarse grid length (the per-MT inelastic buffer stride and
 /// the coarse-bracket clamp bound).
 pub const COL_COARSE_N: u32 = 1;
-/// Base into `permt_meta` ROWS for this material's FIRST slab (issue #212
-/// sparse per-MT storage). Equals `nuc_off * MT_INELASTIC_COUNT` (the material's
+/// Base into `permt_meta` ROWS for this material's FIRST slab (sparse per-MT
+/// storage). Equals `nuc_off * MT_INELASTIC_COUNT` (the material's
 /// first slab's global (slab, slot) row base). The kernel derives (slab `s`,
 /// slot) 's permt row as `COL_COARSE_MT_BASE + (s - nuc_off) * MT_INELASTIC_COUNT
 /// + slot`, which reduces to the global `s * MT_INELASTIC_COUNT + slot` (the same
@@ -313,12 +312,12 @@ pub const COL_COARSE_N: u32 = 1;
 pub const COL_COARSE_MT_BASE: u32 = 2;
 
 /// Column count for `fine_meta` -- the packed per-material buffer that
-/// describes each material's own FINE energy grid (issue #212). Where the
+/// describes each material's own FINE energy grid. Where the
 /// COARSE grid backs the memory-bounded per-MT inelastic buffers, the FINE grid
 /// is resonance-critical: it backs the per-material aggregate macro XS
 /// (`xs_elastic_per_material` etc.) and the per-(material, nuclide)
 /// `nuc_macro_total` / `nuc_partial_xs` that drive Sigma_t, the per-collision
-/// nuclide selection, and the #211 URR smooth baseline. Each material now
+/// nuclide selection, and the URR smooth baseline. Each material now
 /// carries its OWN fine grid (its union grid), concatenated tight into
 /// `fine_log_energy_grid`; the aggregate XS are tight-CSR keyed per material and
 /// the nuc buffers per slab off that same per-material grid. Linear
@@ -360,32 +359,30 @@ pub struct MultiCellResult {
     /// is the per-bin `sum` (Σ_h x_h); otherwise it is the raw per-step
     /// accumulation.
     pub tally_outputs: Vec<Vec<f64>>,
-    /// Per-tally per-bin sum-of-squares (Σ_h x_h², physical units), in
-    /// the same shape/order as [`tally_outputs`](Self::tally_outputs).
-    /// Non-empty only for a batch-free per-history-variance run (issue
-    /// #233); empty for the per-step path and the CPU mirrors. Combined
-    /// with `tally_outputs` (the sum) and the history count it gives the
-    /// exact per-history variance `m2 = sum_sq − sum²/N`.
+    /// Per-tally per-bin sum-of-squares (Σ_h x_h², physical units), in the same
+    /// shape/order as [`tally_outputs`](Self::tally_outputs). Non-empty only
+    /// for a batch-free per-history-variance run; empty for the per-step path
+    /// and the CPU mirrors. Combined with `tally_outputs` (the sum) and the
+    /// history count it gives the exact per-history variance
+    /// `m2 = sum_sq − sum²/N`.
     pub tally_sum_sq: Vec<Vec<f64>>,
-    /// Per-(history, tally entry) total score (fusion-neutronics/core#29),
-    /// flat `[n_histories x n_tallies]` row-major by history, in physical
-    /// units: each history's per-bin totals summed over the entry's bins. This
-    /// is the per-history sample the convergence targets' aggregate moments
-    /// (`AggMoments`) are built from. Non-empty only for `PerHistory`; the
-    /// per-source paths derive the same totals from `src_acc`, and the CPU
-    /// mirrors leave it empty.
+    /// Per-(history, tally entry) total score, flat `[n_histories x n_tallies]`
+    /// row-major by history, in physical units: each history's per-bin totals
+    /// summed over the entry's bins. This is the per-history sample the
+    /// convergence targets' aggregate moments (`AggMoments`) are built from.
+    /// Non-empty only for `PerHistory`; the per-source paths derive the same
+    /// totals from `src_acc`, and the CPU mirrors leave it empty.
     pub hist_tally_total: Vec<f64>,
-    /// Raw per-source accumulator (issue #233 Stage 2, `PerSource` mode only):
+    /// Raw per-source accumulator (`PerSource` mode only):
     /// flat `chunk_sources * total_out_len` fixed-point words, row-major by
     /// source index, holding this launch's per-`(source, flat_bin)` sum (per-tally
     /// scale). The dispatch accumulates it across the source + generation launches
     /// and, per source, adds the total into `sum` and its square into `sum_sq`.
     /// Empty for `PerStep` / `PerHistory` and the CPU mirrors.
     pub src_acc: Vec<u64>,
-    /// Originating source index of each banked fission progeny (issue #233
-    /// Stage 2), indexed by bank slot. The dispatch reads it alongside the bank
-    /// to build the next generation launch's `source_idx`. Empty unless
-    /// `PerSource`.
+    /// Originating source index of each banked fission progeny, indexed by bank
+    /// slot. The dispatch reads it alongside the bank to build the next
+    /// generation launch's `source_idx`. Empty unless `PerSource`.
     pub bank_source_idx: Vec<u32>,
     /// Number of energy bins per tally -- copied from the input pack
     /// so callers can index `tally_outputs[t]` without re-threading
@@ -396,14 +393,14 @@ pub struct MultiCellResult {
     /// counters when the run was coupled-OFF; otherwise the secondary photons
     /// emitted at collisions, ready for S5 to drain and transport.
     pub photon_bank: PhotonBankResult,
-    /// Histories that ended in no cell, i.e. lost particles (issue #289).
+    /// Histories that ended in no cell, i.e. lost particles.
     /// `count` is every loss this launch saw; `records` carries diagnostics for
     /// the first [`crate::common::lost_particles::LOST_RECORD_CAPACITY`] of
     /// them. The dispatch enforces `max_lost_particles` from `count`, matching
     /// the CPU's abort.
     pub lost: crate::common::lost_particles::LostParticleResult,
     /// (n,xn) secondaries produced while the thread already held
-    /// [`shared::PEND_SLOTS`] of them (issue #111 phase 2). On the kernel these
+    /// [`shared::PEND_SLOTS`] of them. On the kernel these
     /// are appended to the device particle bank as `PTYPE_NEUTRON` records for
     /// the host to drain in a later pass; on the CPU mirrors they are
     /// transported in-thread and this is a pure diagnostic. Either way nothing
@@ -422,8 +419,8 @@ pub struct MultiCellResult {
     /// `PEND_SLOTS` are exactly the histories that spill, and by how much,
     /// while `max_pend_depth` above is the capped register-slot figure. The
     /// rate alone cannot say whether a deeper stack or the bank drain is the
-    /// right answer for a material; the distribution can
-    /// (fusion-neutronics/core#20). CPU mirrors only; empty from the GPU host
+    /// right answer for a material; the distribution can.
+    /// CPU mirrors only; empty from the GPU host
     /// path.
     pub pend_depth_hist: Vec<u64>,
 }
@@ -495,8 +492,8 @@ pub(super) fn unpack_tally_outputs(bits: &[u64], tallies: &TalliesPack) -> Vec<V
 }
 
 /// Slice the second half of a per-history-variance `tally_out` buffer
-/// (the sum-of-squares accumulator) back into per-tally f64 outputs
-/// (issue #233). `bits` is the second half only (length `total_out_len`,
+/// (the sum-of-squares accumulator) back into per-tally f64 outputs.
+/// `bits` is the second half only (length `total_out_len`,
 /// same layout as the sum half). Each tally `t` is unpacked at its
 /// derived per-history sum-of-squares scale
 /// [`sum_sq_fixed_point_scale`](crate::common::tallies::sum_sq_fixed_point_scale)`(fixed_point_scales[t])`,
@@ -563,8 +560,8 @@ pub(super) fn accumulate_tallies(
     cell: usize,
     n_cells: usize,
     log_e: f64,
-    // Linear energy, carried alongside `log_e` for the energy-function filter
-    // (issue #271), whose spline is tabulated in linear E. Recovering it as
+    // Linear energy, carried alongside `log_e` for the energy-function filter,
+    // whose spline is tabulated in linear E. Recovering it as
     // `exp(log_e)` would not be bit-identical to the CPU's own value.
     energy: f64,
     d: f64,
@@ -580,7 +577,7 @@ pub(super) fn accumulate_tallies(
     xs_score_per_mt: &[f64],
     n_score_mts: usize,
     urr: UrrScore,
-    // Segment endpoints and direction for mesh (voxel) tallies (issue #234):
+    // Segment endpoints and direction for mesh (voxel) tallies:
     // `r0` is the step start, `r1 = r0 + d*dir` the end, `dir` the unit
     // direction. Ignored by non-mesh tallies.
     r0: [f64; 3],
@@ -624,7 +621,7 @@ pub(super) fn accumulate_tallies(
             n_score_mts,
             urr,
         );
-        // Energy-function weighting (issue #271). Off the table means the CPU
+        // Energy-function weighting. Off the table means the CPU
         // drops the whole event, so this is a `continue`, not a zero score.
         let score = match apply_energy_function(tallies, t, energy, score) {
             Some(s) => s,
@@ -660,8 +657,8 @@ pub(super) fn accumulate_tallies(
 }
 
 /// Multiply tally `t`'s energy-function weight into `score`, or `None` when
-/// `energy` falls outside the table and the whole scoring event is dropped
-/// (issue #271). A tally with no `EnergyFunctionFilter` has an empty offset
+/// `energy` falls outside the table and the whole scoring event is dropped.
+/// A tally with no `EnergyFunctionFilter` has an empty offset
 /// range and passes `score` straight through, which is the common case.
 ///
 /// Twin of the kernel's `ef_in_range` block. `None` is deliberately distinct
@@ -726,8 +723,7 @@ fn tally_score_factor(
             let smooth = xs_lo + (xs_hi - xs_lo) * frac;
             // Capture is the smooth MT 102 plus what the bands moved, rather
             // than the perturbed disappearance: the material's disappearance
-            // carries every nuclide's (n,p) and (n,alpha) too
-            // (fusion-neutronics/core#106).
+            // carries every nuclide's (n,p) and (n,alpha) too.
             if urr.fired && tallies.score_mt[t] == 102 {
                 return (smooth + urr.capture_delta).max(0.0);
             }
@@ -761,7 +757,7 @@ pub(super) fn accumulate_collision_tallies(
     cell: usize,
     n_cells: usize,
     log_e: f64,
-    // Linear incident energy, for the energy-function filter (issue #271).
+    // Linear incident energy, for the energy-function filter.
     energy: f64,
     weight: f64,
     sigma_t: f64,
@@ -775,7 +771,7 @@ pub(super) fn accumulate_collision_tallies(
     xs_score_per_mt: &[f64],
     n_score_mts: usize,
     urr: UrrScore,
-    // Collision point for mesh (voxel) tallies (issue #234): the voxel
+    // Collision point for mesh (voxel) tallies: the voxel
     // containing this point receives the whole collision-estimator score.
     // Ignored by non-mesh tallies.
     pos: [f64; 3],
@@ -830,7 +826,7 @@ pub(super) fn accumulate_collision_tallies(
             n_score_mts,
             urr,
         );
-        // Energy-function weighting (issue #271); off the table drops the event.
+        // Energy-function weighting; off the table drops the event.
         let score = match apply_energy_function(tallies, t, energy, score) {
             Some(s) => s,
             None => continue,

@@ -1,4 +1,4 @@
-//! True track-length mesh tallies under delta tracking (issue #350).
+//! True track-length mesh tallies under delta tracking.
 //!
 //! Under `TrackingMode::Woodcock` / `Hybrid`, a flux-score mesh tally
 //! with `Estimator::TrackLength` is scored along each majorant flight
@@ -202,17 +202,13 @@ fn run_mesh_flux(
 /// deviations (Cauchy-Schwarz, attained at perfect correlation), which is what
 /// this uses.
 ///
-/// Recalibrated once, when issue #111 gave every in-history secondary its own
-/// stream and so re-rolled which realisation this fixed seed lands on. The bound
-/// was `3 * total_std_s`: the Surface run's quadrature sigma ALONE, for a
-/// difference between two independent estimates whose variance is the sum of
-/// both. Measured over 4 seeds at 20k and again at 200k histories, the
-/// difference normalised by the combined quadrature sigma sits at 0.1 to 3.6
-/// and does NOT shrink with history count, which is the signature of a
-/// mis-specified sigma rather than of a fluctuation: 2 of those 4 seeds
-/// exceeded the old bound. The means themselves are unmoved (Surface total
-/// 17.4345 after vs 17.4280 before, averaged over the same 4 seeds at 200k, each
-/// run carrying a per-history batch sigma of 0.026, so 0.4 sigma apart).
+/// A `3 * total_std_s` bound (the Surface run's quadrature sigma ALONE) is too
+/// tight for a difference between two independent estimates whose variance is
+/// the sum of both. Measured over 4 seeds at 20k and again at 200k histories,
+/// the difference normalised by the combined quadrature sigma sits at 0.1 to
+/// 3.6 and does NOT shrink with history count, which is the signature of a
+/// mis-specified sigma rather than of a fluctuation: 2 of those 4 seeds exceed
+/// that bound.
 ///
 /// The bound this leaves is deliberately loose: it catches a gross
 /// normalisation error, and the STRICT statement lives in the per-bin
@@ -592,7 +588,7 @@ fn ineligible_mesh_tallies_still_match_surface() {
 #[test]
 #[ignore = "manual A/B harness: prints analog-woodcock repr for bit-identity check"]
 fn print_analog_woodcock_repr() {
-    // No mesh tally anywhere: the issue-#350 gate must leave this run
+    // No mesh tally anywhere: the mesh-tally gate must leave this run
     // bit-identical across the change (fixed seed, threads=1).
     let geometry = build_two_material_geometry();
     let mut cell_tally = Tally::new();

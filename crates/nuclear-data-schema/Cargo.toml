@@ -11,7 +11,7 @@ path = "src/lib.rs"
 
 # A leaf on purpose: the schema declarations and the JSON the reaction-range
 # index rides in, and nothing else. yani depends on this and is the base of the
-# standalone transmutation wheel (#381), so anything heavier here would leak
+# standalone transmutation wheel, so anything heavier here would leak
 # into a package that must be installable without yamc. The neutral name says
 # the same thing: this is not a yamc-* crate, because yani must be able to use
 # it without depending on the transport engine.

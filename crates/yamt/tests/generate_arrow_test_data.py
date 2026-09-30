@@ -19,7 +19,7 @@ existing files and rewrote them in the current schema. That reformatting could
 not repair (and so silently preserved) geometric defects in the data: three of
 ``box.arrow``'s six cube faces were wound inward while all six senses said
 outward, which made the unit cube measure 0.0 cm3, and it survived every past
-"regeneration" (issue #324).
+"regeneration".
 
 After writing, each fixture is validated: the triangles bounding every volume
 must be a closed, consistently oriented manifold, wound outward for the sense

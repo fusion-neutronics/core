@@ -1,4 +1,4 @@
-//! GPU device-fission-bank verification (issue #78).
+//! GPU device-fission-bank verification.
 //!
 //! The legacy GPU fission branch approximated the fission chain as
 //! `weight *= nu_bar` followed by a hard `FISSION_WEIGHT_CAP = 1000` kill that

@@ -128,7 +128,7 @@ pub fn walk_elements(
 /// `volume`, when given, confines the walk to that volume's tets: tet
 /// adjacency is built globally by shared face, so on a conformal mesh it links
 /// tets across a volume interface and an unconfined walk would keep scoring
-/// into the neighbouring volume's tets (issue #316).
+/// into the neighbouring volume's tets.
 ///
 /// The returned distance is what a caller needs to resume the ray past the
 /// meshed region: it counts the per-face `SURFACE_BUMP` nudges as well as the
@@ -293,7 +293,7 @@ pub fn find_element(
 /// after every exit until the segment is spent. A tet-mesh tally overlays a
 /// small part of a much bigger model, so the usual case is a track that begins
 /// outside it; scoring only tracks that *begin* in a tet made the track-length
-/// estimator miss every entering track and read low (issue #316).
+/// estimator miss every entering track and read low.
 ///
 /// Only `volume`'s own tets are returned, matching what [`find_element`] (and
 /// so the collision estimator) resolves for the same volume.
@@ -444,7 +444,7 @@ mod tests {
         );
     }
 
-    /// Issue #316: the element walk read face normals off `TET_FACE_VERTICES`,
+    /// The element walk read face normals off `TET_FACE_VERTICES`,
     /// which point inward on a negatively oriented tet, so it picked an entry
     /// face as its exit and stopped short. Building a `MeshTopology` now fails
     /// on a negatively oriented tet, so the loaded fixtures are positive.
@@ -467,9 +467,9 @@ mod tests {
         }
     }
 
-    /// Issue #316: a track that starts outside the mesh must still be scored.
-    /// `segments` used to return nothing unless its start point was already
-    /// inside a tet, which is the minority case for a tally overlay.
+    /// A track that starts outside the mesh must still be scored.
+    /// A start point already inside a tet is the minority case for a tally
+    /// overlay.
     ///
     /// Reference is analytic: `cube.arrow` tiles the unit cube exactly, so the
     /// walked path length must equal the ray's chord through `[0, 1]^3`.
@@ -541,7 +541,7 @@ mod tests {
         assert!(checked > 200, "sweep degenerated: only {checked} rays hit");
     }
 
-    /// Issue #316: tet adjacency is global and links tets across a volume
+    /// Tet adjacency is global and links tets across a volume
     /// interface on a conformal mesh, so an unconfined walk kept scoring into
     /// the neighbouring volume's tets. A tally on volume V must see only V's
     /// tets, matching what `find_element(V, ..)` resolves for the collision

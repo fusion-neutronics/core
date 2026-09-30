@@ -8,7 +8,7 @@
 /// Voxel `(ix, iy, iz)` maps to the flat index `(iz * ny + iy) * nx + ix`,
 /// so bins along X are contiguous. This is the only layout.
 ///
-/// A Morton (Z-order) alternative existed until issue #337. The idea was that
+/// A Morton (Z-order) alternative was tried and removed. The idea was that
 /// interleaving the index bits would put spatially-near voxels near each other
 /// in memory and so be kinder to the prefetcher. Measured on both backends it
 /// was never faster: at a 64^3 power-of-two shape, where Morton's power-of-two
@@ -750,7 +750,7 @@ impl CylindricalMesh {
     /// True when `phi_grid` spans exactly `[0, 2π]`, so the azimuthal seam
     /// wraps (last φ bin adjacent to the first). Otherwise the φ ends are hard
     /// mesh boundaries. Exposed so the GPU translate layer can reproduce the
-    /// seam-wrap behaviour in the kernel descriptor (issue #234).
+    /// seam-wrap behaviour in the kernel descriptor.
     #[inline]
     pub fn full_phi(&self) -> bool {
         self.full_phi
@@ -1191,7 +1191,7 @@ mod tests {
         let m = RegularRectangularMesh::new([0.0, 0.0, 0.0], [4.0, 4.0, 4.0], [4, 4, 4]);
         assert_eq!(m.num_voxels(), 64);
         // Non-power-of-two shapes are exact too: there is no padding to a
-        // power of two now that the Morton layout is gone (issue #337).
+        // power of two.
         let m = RegularRectangularMesh::new([0.0, 0.0, 0.0], [5.0, 5.0, 5.0], [5, 5, 5]);
         assert_eq!(m.num_voxels(), 125);
         let m = RegularRectangularMesh::new([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [50, 50, 200]);

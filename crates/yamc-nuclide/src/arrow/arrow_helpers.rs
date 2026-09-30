@@ -18,9 +18,9 @@ use crate::storage;
 /// Prefix an error with the section it came from.
 ///
 /// Neither the io errors nor the Arrow ones carry a path, so a section that was
-/// absent or malformed surfaced as a bare "No such file or directory (os error
-/// 2)" or "Io error: Invalid argument (os error 22)" naming nothing, which is
-/// what made issue #506 take a bisection to find. Every failure
+/// absent or malformed would surface as a bare "No such file or directory (os
+/// error 2)" or "Io error: Invalid argument (os error 22)" naming nothing, which
+/// can take a bisection to track down. Every failure
 /// [`read_arrow_file`] can return goes through here, so all of them name the
 /// section: opening it, sniffing it, decoding it and fusing it alike.
 fn at(path: &Path, e: impl std::fmt::Display) -> String {
@@ -117,7 +117,7 @@ pub fn read_arrow_file(path: &Path) -> Result<RecordBatch, Box<dyn Error>> {
 ///
 /// One call here covers every section this crate reads, and turns a
 /// writer/reader disagreement into an error naming the file and the column
-/// rather than a downcast panic somewhere further in (issue #126).
+/// rather than a downcast panic somewhere further in.
 fn check_declared(path: &Path, batch: &RecordBatch) -> Result<(), Box<dyn Error>> {
     if let Some(section) = nuclear_data_schema::flat_section_for_path(path) {
         nuclear_data_schema::check_batch(&section, batch.schema().as_ref())
@@ -201,7 +201,7 @@ pub fn get_f64_list(
     Ok(f64_arr.values().iter().copied().collect())
 }
 
-/// Zero-copy view of one `List<Float64>` cell (issue #476, task 1).
+/// Zero-copy view of one `List<Float64>` cell.
 ///
 /// Where [`get_f64_list`] allocates a `Vec` and copies the cell into it, this
 /// hands back the Arrow values buffer itself, offset and trimmed to the cell.
@@ -228,7 +228,7 @@ pub fn borrow_f64_list(
 }
 
 /// Zero-copy view of one `List<Int32>` cell, the `int32` twin of
-/// [`borrow_f64_list`] (issue #482).
+/// [`borrow_f64_list`].
 ///
 /// Same sharing caveat: the view keeps the column's entire values buffer alive.
 /// Used where a cell is converted on the way in rather than kept as `i32`, so

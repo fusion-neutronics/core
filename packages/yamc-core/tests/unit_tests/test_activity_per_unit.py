@@ -1,4 +1,4 @@
-"""`per=` on the three quantities that count atoms (issue #567).
+"""`per=` on the three quantities that count atoms.
 
 The solve holds atom DENSITIES, so the intensive answer is the one it natively
 has and `volume` is only the multiplier that makes it extensive. These check

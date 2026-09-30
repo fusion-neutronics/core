@@ -41,7 +41,7 @@ pub const INTERP_LINLIN: u32 = 1;
 ///   bracket (followed by `n_x − n_discrete` continuous points),
 ///   length `n_e`.
 /// * `x_table`, `p_table`, `c_table` -- tight, full E_out tables
-///   (one entry per global x-point, issue #104). Row `i`'s points
+///   (one entry per global x-point). Row `i`'s points
 ///   start at `x_offset[i]`.
 /// * `n_mu_per_j` -- number of `(mu, pdf, cdf)` points at each
 ///   `(bracket, E_out)` bin, one entry per global x-point.
@@ -50,9 +50,9 @@ pub const INTERP_LINLIN: u32 = 1;
 /// * `mu_table`, `mu_pdf_table`, `mu_cdf_table` -- tight, full μ
 ///   sub-tables (one entry per global mu point). The sub-table for
 ///   global x-point `g` starts at `mu_offset[g]`.
-/// * `x_offset` -- per-E_in-row CSR base (issue #104): global x-point
+/// * `x_offset` -- per-E_in-row CSR base: global x-point
 ///   index where row `i`'s `(x, p, c)` points start. Length `n_e`.
-/// * `mu_offset` -- per-x-point CSR base (issue #104): global mu-point
+/// * `mu_offset` -- per-x-point CSR base: global mu-point
 ///   index where x-point `g`'s `(mu, pdf, cdf)` sub-table starts.
 ///   Indexed by the global x-point index `x_offset[bin_e] + j`.
 /// * `state` -- inline PCG RNG state.
@@ -106,7 +106,7 @@ pub fn sample_correlated_angle_energy(
     let xi_cx = next_xi(state);
 
     // Discrete-then-continuous CDF search, matching the CPU reference
-    // `sample_with_discrete_info` (issue #103). Discrete head (first `n_disc`
+    // `sample_with_discrete_info`. Discrete head (first `n_disc`
     // points) searched with `xi < c[k]` (exact discrete line); continuous tail
     // from `n_disc` with `xi <= c[k+1]`, carrying `c_j` as the CPU does. The
     // old single unified scan collapsed every discrete line onto index 0. For
@@ -201,7 +201,7 @@ pub fn sample_correlated_angle_energy(
     // Which of the bracketing E_out points supplies the angular sub-table.
     // The correlated law tabulates μ AT the E_out grid points, so a sampled
     // energy strictly inside `[x_j, x_j+1]` has two candidates and the law
-    // takes the NEARER one, measured on the CDF (issue #371):
+    // takes the NEARER one, measured on the CDF:
     //
     //   xi - c_j < c_j+1 - xi  ->  j, else j+1
     //
@@ -338,7 +338,7 @@ mod tests {
             mu_cdf_table[off + 1] = 1.0;
         }
         // CSR offsets for the dense fixture: row `i` starts at `i * max_x`,
-        // and x-point `g`'s mu sub-table at `g * max_mu` (issue #104).
+        // and x-point `g`'s mu sub-table at `g * max_mu`.
         let x_offset: Vec<u32> = (0..n_e).map(|i| (i * max_x) as u32).collect();
         let mu_offset: Vec<u32> = (0..n_e * max_x).map(|g| (g * max_mu) as u32).collect();
 
@@ -385,7 +385,7 @@ mod tests {
         );
     }
 
-    /// Issue #371: the angular sub-table comes from the NEARER of the two
+    /// The angular sub-table comes from the NEARER of the two
     /// bracketing E_out points, not always the lower one.
     ///
     /// The law tabulates μ AT the E_out grid points, so a sample landing
@@ -468,7 +468,7 @@ mod tests {
         assert!(
             (0.47..=0.53).contains(&frac),
             "forward fraction {frac} should be ~0.5; taking the lower E_out \
-             point unconditionally gives 0.0 (issue #371)"
+             point unconditionally gives 0.0"
         );
     }
 
@@ -504,7 +504,7 @@ mod tests {
         let mu_table = vec![0.0; n_e * max_x * max_mu];
         let mu_pdf_table = vec![0.0; n_e * max_x * max_mu];
         let mu_cdf_table = vec![0.0; n_e * max_x * max_mu];
-        // CSR offsets for the dense fixture (issue #104).
+        // CSR offsets for the dense fixture.
         let x_offset: Vec<u32> = (0..n_e).map(|i| (i * max_x) as u32).collect();
         let mu_offset: Vec<u32> = (0..n_e * max_x).map(|g| (g * max_mu) as u32).collect();
 

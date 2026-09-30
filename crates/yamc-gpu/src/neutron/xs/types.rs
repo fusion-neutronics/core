@@ -9,13 +9,13 @@ pub struct GpuNuclideXs {
     /// `ln(energy[i])` for each grid point of the FINE (resonance) grid.
     /// Sorted ascending. Same length as `xs_elastic` / `xs_absorption` /
     /// `xs_inelastic`. For a multi-nuclide material this is the exact UNION of
-    /// the per-nuclide grids (issue #88), so every isotope's resonances are
+    /// the per-nuclide grids, so every isotope's resonances are
     /// preserved for the collision / nuclide-selection cross sections. For a
     /// single nuclide it is exactly that nuclide's grid (so the single-nuclide
     /// path stays bit-identical).
     pub log_energy_grid: Vec<f64>,
     /// `ln(energy[i])` for the COARSE grid that backs the per-MT inelastic
-    /// buffers (`xs_inelastic_per_mt`, `yield_per_mt`). Issue #88: those are 3D
+    /// buffers (`xs_inelastic_per_mt`, `yield_per_mt`). Those are 3D
     /// `[MT_INELASTIC_COUNT × n_grid]` buffers, so putting them on the (much
     /// larger) union grid would blow GPU memory (SS316 ~2.6 GB). Inelastic is a
     /// fast-energy channel with no epithermal resonance structure, so a coarse
@@ -82,7 +82,7 @@ pub struct GpuNuclideXs {
     /// empty); the kernel falls back to isotropic-in-CM sampling for
     /// that slot.
     pub angle_n_energies: Vec<u32>,
-    /// Tight CSR (issue #104): incident-energy grids for all MT slots
+    /// Tight CSR: incident-energy grids for all MT slots
     /// concatenated back to back, length `sum(angle_n_energies)`. Slot
     /// `k`'s rows start at the CSR ae-row base built downstream in
     /// `translate.rs` from the `angle_n_energies` counts.
@@ -129,7 +129,7 @@ pub struct GpuNuclideXs {
     /// stretch, mirroring CPU's
     /// `ContinuousTabular::sample`. Length `MT_INELASTIC_COUNT`.
     pub eout_histogram_interp: Vec<u32>,
-    /// Tight CSR (issue #104): incident-energy grids for all MT slots'
+    /// Tight CSR: incident-energy grids for all MT slots'
     /// outgoing-energy distributions concatenated back to back, length
     /// `sum(eout_n_energies)`. Same CSR conventions as
     /// `angle_energy_grid` (per-slot ae-row bases built downstream).
@@ -171,14 +171,14 @@ pub struct GpuNuclideXs {
     /// `MT_INELASTIC_COUNT`. Non-zero only when `eout_kind ==
     /// EOUT_KIND_CORRELATED` for that slot.
     pub corr_n_energies: Vec<u32>,
-    /// Per-MT count of equally-weighted correlated components (issue #111),
+    /// Per-MT count of equally-weighted correlated components,
     /// length `MT_INELASTIC_COUNT`. `>= 2` when the neutron product carries
     /// several applicability-gated `CorrelatedAngleEnergy` laws (F19 MT16
     /// n,2n); the kernel/twin draw one uniform per collision to pick a
     /// component, and component `c` occupies the `corr_n_energies /
     /// corr_n_components` rows at `corr_ae_offset[slot] + c * n_per_comp`.
     pub corr_n_components: Vec<u32>,
-    /// Tight CSR (issue #104): correlated incident-energy grids for all
+    /// Tight CSR: correlated incident-energy grids for all
     /// MT slots concatenated, length `sum(corr_n_energies)`.
     pub corr_energy_grid: Vec<f64>,
     /// Correlated outgoing-energy point count per incident-energy row,
@@ -257,7 +257,7 @@ pub struct GpuNuclideXs {
     /// fission collision.
     pub nu_bar: Vec<f64>,
     /// Delayed-neutron fraction `beta(E) = nu_d(E) / nu_t(E)`, evaluated at every
-    /// master-grid energy point (issue #364). Same shape as `nu_bar`. Per fission
+    /// master-grid energy point. Same shape as `nu_bar`. Per fission
     /// progeny the kernel draws one uniform against this and takes the outgoing
     /// energy from `fission_eout_delayed_*` instead of the prompt table when it
     /// lands below. Zero everywhere for a material whose nuclides carry no delayed
@@ -282,7 +282,7 @@ pub struct GpuNuclideXs {
     /// PDF/CDF for the energy axis plus per-(E_in, E_out) (r, a)
     /// Kalbach-Mann parameters for the mu sampler.
     pub km_n_energies: Vec<u32>,
-    /// Tight CSR (issue #104): Kalbach-Mann incident-energy grids for
+    /// Tight CSR: Kalbach-Mann incident-energy grids for
     /// all MT slots concatenated, length `sum(km_n_energies)`.
     pub km_energy_grid: Vec<f64>,
     /// Per-(E_in) interpolation discriminant for the E_out axis, one
@@ -331,13 +331,13 @@ pub struct GpuNuclideXs {
     /// `0`/`1` mean a single curve (no selector draw).
     pub evap_n_components: Vec<u32>,
     /// Tabulated incident-energy grid for the evaporation θ(E_in)
-    /// parameter. Tight variable-length layout (issue #104): exactly
+    /// parameter. Tight variable-length layout: exactly
     /// `sum(evap_n_energies)` rows back to back, no per-axis padding.
     /// The per-(slab,MT) CSR base (`evap_ae_offset`) is built at
     /// concatenation time in `translate.rs`.
     pub evap_energy_grid: Vec<f64>,
-    /// Component-major tabulated θ values. Tight variable-length layout
-    /// (issue #104): exactly `sum(evap_n_components * evap_n_energies)` rows.
+    /// Component-major tabulated θ values. Tight variable-length layout:
+    /// exactly `sum(evap_n_components * evap_n_energies)` rows.
     /// Component `c`'s row begins at `evap_theta_offset[slot] + c *
     /// evap_n_energies[slot]`, where `evap_theta_offset` is built in
     /// `translate.rs`. `MAX_EVAP_COMPONENTS` bounds the kernel's component
@@ -364,7 +364,7 @@ pub struct GpuNuclideXs {
     /// interpolated on the slot's tabulated grid.
     pub maxwell_n_energies: Vec<u32>,
     /// Tabulated incident-energy grid for the Maxwell θ(E_in)
-    /// parameter. Tight variable-length layout (issue #104): exactly
+    /// parameter. Tight variable-length layout: exactly
     /// `sum(maxwell_n_energies)` rows back to back, no per-axis
     /// padding. The per-(slab,MT) CSR base (`maxwell_ae_offset`) is built
     /// at concatenation time in `translate.rs`.
@@ -387,7 +387,7 @@ pub struct GpuNuclideXs {
     /// interpolated on the slot's tabulated grid.
     pub watt_n_energies: Vec<u32>,
     /// Tabulated incident-energy grid for the Watt `a(E_in)` and
-    /// `b(E_in)` parameters. Tight variable-length layout (issue #104):
+    /// `b(E_in)` parameters. Tight variable-length layout:
     /// exactly `sum(watt_n_energies)` rows back to back, no per-axis
     /// padding. `a` and `b` share this grid; the per-(slab,MT) CSR base
     /// (`watt_ae_offset`) is built at concatenation time in `translate.rs`.
@@ -402,15 +402,15 @@ pub struct GpuNuclideXs {
     /// `MT_INELASTIC_COUNT`. `E_out` is constrained to
     /// `[0, E_in - u]`.
     pub watt_u: Vec<f64>,
-    /// Per-(material, nuclide) URR (unresolved resonance region) flags,
-    /// packed `[n_nuclides × URR_META_COLS]` u32, one row per nuclide of the
-    /// material in `weighted` order (issue #210: URR is applied to EVERY
-    /// in-range URR nuclide, so this is keyed on the slab, not one dominant
-    /// nuclide). `URR_META_PRESENT = 0` rows are non-URR nuclides (the kernel
-    /// skips them and keeps their smooth XS). See `URR_META_*` for the
-    /// columns; `URR_META_ZA` carries the per-nuclide stream key.
+    /// Per-(material, nuclide) URR (unresolved resonance region) flags, packed
+    /// `[n_nuclides × URR_META_COLS]` u32, one row per nuclide of the material
+    /// in `weighted` order (URR is applied to EVERY in-range URR nuclide, so
+    /// this is keyed on the slab, not one dominant nuclide).
+    /// `URR_META_PRESENT = 0` rows are non-URR nuclides (the kernel skips them
+    /// and keeps their smooth XS). See `URR_META_*` for the columns;
+    /// `URR_META_ZA` carries the per-nuclide stream key.
     pub urr_meta: Vec<u32>,
-    /// Tight CSR (issue #104): per-slab URR energy grids (eV) concatenated
+    /// Tight CSR: per-slab URR energy grids (eV) concatenated
     /// back to back, length `sum(urr_meta[.., URR_META_N_ENERGIES])`. The
     /// per-slab base is built downstream in `translate.rs`.
     pub urr_energy_grid: Vec<f64>,
@@ -429,7 +429,7 @@ pub struct GpuNuclideXs {
     /// URR nuclide's perturbed micro XS up to a macroscopic contribution.
     /// Zero for non-URR nuclides. The smooth baselines the URR delta is taken
     /// against come from `nuc_partial_xs` (already density-weighted
-    /// macroscopic), so no per-nuclide smooth micro buffer is needed (#210).
+    /// macroscopic), so no per-nuclide smooth micro buffer is needed.
     pub urr_atom_density: Vec<f64>,
 }
 
@@ -455,7 +455,7 @@ impl GpuNuclideXs {
     /// `[MT_INELASTIC_COUNT]` per-material stride a real extracted
     /// material uses (see `extract_material_xs`); the tight variable-
     /// length distribution arrays (angle / eout / corr / km / evap /
-    /// maxwell / watt / fission / URR, issue #104) carry no rows, so
+    /// maxwell / watt / fission / URR) carry no rows, so
     /// they are empty (the void slot contributes zero ae-rows / points
     /// to the concatenated CSR buffers). Either way the host launcher's
     /// per-material length assertions pass when this slot is appended.
@@ -469,7 +469,7 @@ impl GpuNuclideXs {
         let mt = MT_INELASTIC_COUNT;
         Self {
             // Void slot is all-zero. The per-MT inelastic buffers ride the
-            // COARSE grid (#88), so the void slab's length matches the
+            // COARSE grid, so the void slab's length matches the
             // per-nuclide pool's coarse stride the kernel indexes with; the
             // per-material collision buffers and URR stay on the fine grid.
             coarse_log_energy_grid,
@@ -486,7 +486,7 @@ impl GpuNuclideXs {
             yield_per_mt: vec![0.0; mt * n_coarse],
             target_mass: 1.0,
             temperature_k: 0.0,
-            // Tight CSR (issue #104): the void slot carries no inelastic
+            // Tight CSR: the void slot carries no inelastic
             // angular rows, so the per-slot counts are zero and the per-row /
             // per-point arrays are empty.
             angle_n_energies: vec![0u32; mt],
@@ -499,7 +499,7 @@ impl GpuNuclideXs {
             eout_kind: vec![0u32; mt],
             eout_n_energies: vec![0u32; mt],
             eout_histogram_interp: vec![0u32; mt],
-            // Tight CSR (issue #104): no outgoing-energy rows on the void slot.
+            // Tight CSR: no outgoing-energy rows on the void slot.
             eout_energy_grid: Vec::new(),
             eout_n_x: Vec::new(),
             eout_x: Vec::new(),
@@ -509,7 +509,7 @@ impl GpuNuclideXs {
             eout_n_discrete: Vec::new(),
             corr_n_energies: vec![0u32; mt],
             corr_n_components: vec![0u32; mt],
-            // Tight CSR (issue #104): no correlated rows on the void slot.
+            // Tight CSR: no correlated rows on the void slot.
             corr_energy_grid: Vec::new(),
             corr_n_x: Vec::new(),
             corr_x: Vec::new(),
@@ -529,7 +529,7 @@ impl GpuNuclideXs {
             fission_watt_a: 0.0,
             fission_watt_b: 0.0,
             km_n_energies: vec![0u32; mt],
-            // Tight CSR (issue #104): no Kalbach-Mann rows on the void slot.
+            // Tight CSR: no Kalbach-Mann rows on the void slot.
             km_energy_grid: Vec::new(),
             km_interp: Vec::new(),
             km_n_discrete: Vec::new(),
@@ -541,7 +541,7 @@ impl GpuNuclideXs {
             km_a: Vec::new(),
             evap_n_energies: vec![0u32; mt],
             evap_n_components: vec![0u32; mt],
-            // Tight layout (issue #104): the void slot carries no Evaporation
+            // Tight layout: the void slot carries no Evaporation
             // rows, so the per-E_in / component-major arrays are empty.
             evap_energy_grid: Vec::new(),
             evap_theta: Vec::new(),
@@ -549,21 +549,21 @@ impl GpuNuclideXs {
             nbps_n_bodies: vec![0u32; mt],
             nbps_total_mass: vec![0.0; mt],
             maxwell_n_energies: vec![0u32; mt],
-            // Tight layout (issue #104): the void slot carries no Maxwell rows.
+            // Tight layout: the void slot carries no Maxwell rows.
             maxwell_energy_grid: Vec::new(),
             maxwell_theta: Vec::new(),
             maxwell_u: vec![0.0; mt],
             watt_n_energies: vec![0u32; mt],
-            // Tight layout (issue #104): the void slot carries no Watt rows.
+            // Tight layout: the void slot carries no Watt rows.
             watt_energy_grid: Vec::new(),
             watt_a: Vec::new(),
             watt_b: Vec::new(),
             watt_u: vec![0.0; mt],
             // One URR slab for the void's single (pseudo-)nuclide, PRESENT = 0
-            // (issue #210: URR is slab-keyed, and the void slab is appended
-            // last so it aligns 1:1 with the nuclide-selection void slab).
+            // (URR is slab-keyed, and the void slab is appended last so it
+            // aligns 1:1 with the nuclide-selection void slab).
             urr_meta: vec![0u32; URR_META_COLS],
-            // Tight CSR layout (issue #104): the void slot carries no URR
+            // Tight CSR layout: the void slot carries no URR
             // energy points, so the energy / cdf / xs arrays are empty
             // (n_energies = 0 in `urr_meta`).
             urr_energy_grid: Vec::new(),
@@ -591,7 +591,7 @@ pub enum NuclideXsError {
     ZeroTotalDensity,
     /// The nuclide carries neutron-emitting scattering MTs that have no slot in
     /// [`MT_SLOTS`](crate::neutron::xs::MT_SLOTS), and they are big enough to
-    /// matter (issue #106).
+    /// matter.
     ///
     /// The kernel can only sample MTs it has a slot for. An unslotted channel's
     /// cross section is not in `xs_inelastic`, so it lands in the derived

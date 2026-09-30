@@ -79,10 +79,9 @@ fn energy_labels(data: &IncidentNeutron) -> Vec<String> {
 /// Write `energy.arrow`, one row and one record batch per temperature.
 ///
 /// One batch each so a client that wants a single temperature range-fetches a
-/// single grid (fusion-neutronics/core#100). These used to be two columns of
-/// `nuclide.arrow`, which meant reading all of them or none: 6.33 MB on U238,
-/// against 8.98 MB for the whole single-temperature JSON bundle this layout
-/// replaced.
+/// single grid. Stored as columns of `nuclide.arrow` they would be all or
+/// none: 6.33 MB on U238, against 8.98 MB for the whole single-temperature
+/// JSON bundle.
 ///
 /// Returns whether a file was written. Nothing is written when the nuclide has
 /// no grid at all, which is what the ENDF route produces: it carries no
@@ -108,7 +107,7 @@ pub fn write_energy(data: &IncidentNeutron, dir: &Path) -> Result<bool, Box<dyn 
 /// Move the union energy grids of an already-converted folder out of
 /// `nuclide.arrow` and into `energy.arrow`.
 ///
-/// For a library published before fusion-neutronics/core#100: the grids are
+/// For a library published with the grids inside `nuclide.arrow`: the grids are
 /// copied, not recomputed, so NJOY does not run again and every value is what
 /// it was. A folder already migrated is left alone and reported as such.
 ///

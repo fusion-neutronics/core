@@ -679,7 +679,7 @@ pub fn swap_for_valence(output: &mut CDTOutput, seam_verts: Option<&HashSet<usiz
 /// (a,b,c) and (a,b,d) become (a,m,c), (m,b,c), (a,m,d), (m,b,d).
 ///
 /// BOUNDARY edges (single adjacent triangle - the face's constraint
-/// polyline) are NEVER split (issue #70): a midpoint inserted here
+/// polyline) are NEVER split: a midpoint inserted here
 /// exists only on THIS face, while the neighbouring face keeps the
 /// shared edge's cached discretization - a unilateral Steiner point
 /// that no repair can reconcile on curved shared edges (the sagitta
@@ -719,7 +719,7 @@ pub fn split_long_edges(
         for (&(ea, eb), tris) in edge_to_tris.iter() {
             // Never split a boundary edge (single adjacent triangle):
             // it lies on the face's constraint polyline, which adjacent
-            // faces share point-for-point (issue #70 - see above).
+            // faces share point-for-point (see above).
             if tris.len() < 2 {
                 continue;
             }

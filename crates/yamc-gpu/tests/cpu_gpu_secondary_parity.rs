@@ -1,11 +1,11 @@
-//! CPU-vs-GPU parity for secondary outgoing-energy samplers (issue #101).
+//! CPU-vs-GPU parity for secondary outgoing-energy samplers.
 //!
 //! Pins the GPU `flat` samplers (`yamc_physics::gpu::flat::*`, used by both the
 //! cubecl kernel and its CPU twin) against the PRODUCTION samplers
 //! (`yamc_nuclide::reaction_product::EnergyDistribution`) statistically, so a
 //! silently-divergent outgoing-energy spectrum is caught per-sub-step rather
 //! than only at the integrated-flux level. The lack of exactly this comparison
-//! is what let the multi-isotope epithermal residual (#88) hide: the existing
+//! is what let the multi-isotope epithermal residual hide: the existing
 //! `gpu_*_matches_cpu` tests compare the kernel against the `flat` twin (which
 //! is bit-identical to it), never against the production transport.
 //!

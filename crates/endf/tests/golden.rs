@@ -893,9 +893,10 @@ fn dump_incident_neutron_ace(d: &mut Dump, path: &str, t: &ace::Table) {
 
     // The removal cross section is deliberately not dumped here. It folds the
     // elastic angular distribution into the total, and for ACE data the Python
-    // `forward_fraction` returns uninitialized memory (see issue #21) so
-    // there is nothing stable to compare against. It is dumped on the ENDF
-    // path, where the answer is well defined.
+    // `forward_fraction` returns uninitialized memory (`np.empty` for the
+    // shapes it does not fill), so there is nothing stable to compare
+    // against. It is dumped on the ENDF path, where the answer is well
+    // defined.
 
     // Only the reactions this type synthesises are dumped in full; the ones
     // `Reaction::from_ace` builds are compared elsewhere.
@@ -1058,7 +1059,7 @@ fn dump_decay_section(d: &mut Dump, path: &str, decay: &endf::Decay) {
     if !n.stable {
         d.floats(format!("{path}/half_life"), pair(decay.half_life.unwrap()));
         // A half-life of zero means it was not evaluated, and both readers
-        // return nothing for it rather than dividing by it (issue #23). Dumped
+        // return nothing for it rather than dividing by it. Dumped
         // either way, so the absence is compared rather than skipped on both
         // sides at once.
         d.floats(
@@ -1967,7 +1968,8 @@ fn dump_section(d: &mut Dump, path: &str, section: &Section) {
             d.float(format!("{path}/AWR"), s.awr);
             d.int(format!("{path}/LTT"), s.ltt);
             d.int(format!("{path}/NMT1"), s.nmt1);
-            // Always empty, matching upstream; see issue #18.
+            // Always empty, matching upstream, whose reader builds these and
+            // then drops them.
             for (i, sub) in s.subsections.iter().enumerate() {
                 let sp = format!("{path}/subsections/{i}");
                 for (key, value) in [
@@ -2457,7 +2459,7 @@ fn the_uncovered_parser_list_is_accurate() {
 ///
 /// ACE law 5 is missing for a different reason: the Python reader has no
 /// `from_ace` for the general evaporation spectrum and dies with an
-/// AttributeError, so there is nothing to compare against (issue #19). The
+/// AttributeError, so there is nothing to compare against. The
 /// Rust reader refuses that law by name.
 const DISTRIBUTION_SHAPES: [&str; 16] = [
     // Univariate shapes.

@@ -46,8 +46,7 @@ BINARY_SUFFIXES = (".so", ".pyd", ".dylib", ".wasm")
 # committed and built by hand so the remaps in `.cargo/config.toml` could not
 # reach them: those cover the CI runner layouts and a workstation's home is not
 # one. They are built in CI now and come out as `/build/...`, and
-# `yamc_geo_bg.wasm` is gone entirely because nothing referenced it. That was
-# issue #16.
+# `yamc_geo_bg.wasm` is gone entirely because nothing referenced it.
 #
 # The mechanism is kept rather than deleted, because the empty set is still
 # doing work: a new blob, or a leak in the extension module itself, fails. And
@@ -86,7 +85,7 @@ def check(path: Path) -> int:
         leaks = scan(name, blob)
 
         if leaks and known:
-            print(f"known (see issue 16): {member} carries {len(leaks)} path(s)")
+            print(f"known: {member} carries {len(leaks)} path(s)")
         elif leaks:
             total += len(leaks)
             print(f"::error::{name} carries {len(leaks)} builder path(s):")

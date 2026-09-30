@@ -35,13 +35,13 @@ use delaunay3d::Delaunay3D;
 /// tets crossing the boundary and spilling outside it, which for DAGMC is
 /// space claimed by a solid that its own surface does not enclose.
 ///
-/// History: 1% from the original #30 design, when the conforming carve
+/// History: 1% in the original design, when the conforming carve
 /// routinely fell back on the cylindrical flat-cap family - a tighter
-/// trigger just burned time. The #47 cluster-B re-triage then showed the
+/// trigger just burned time. A later re-triage then showed the
 /// fill suite's failures concentrated in the **sub-1% under-fill band**
 /// (e.g. NestedCylinder legacy fill 99.49% vs the suite's 99.5% floor)
 /// where the 1% trigger stayed silent. With the coplanar-region recovery
-/// (PR #56) the carve actually SUCCEEDS on that family, so the trigger
+/// the carve actually SUCCEEDS on that family, so the trigger
 /// dropped to 0.4% - below the fill tolerance of the day, and chosen to sit
 /// "comfortably above legacy's normal accuracy (exact-conforming models sit
 /// at ~0.0–0.1%)".
@@ -82,7 +82,7 @@ const CONFORMING_TRIGGER_DEFAULT: f64 = 1e-8;
 /// degenerate remainder; this function then RE-CHECKS the result at the single
 /// emission boundary so a pipeline that stops maintaining the orientation fails
 /// here instead of downstream. See [`VolumeOutput::first_non_positive_tet`] for
-/// why the orientation matters (issue #316) and what the check costs.
+/// why the orientation matters and what the check costs.
 ///
 /// # Errors
 ///
@@ -124,7 +124,7 @@ pub fn mesh_volume(input: &VolumeInput) -> Result<VolumeOutput> {
         }
     }
 
-    // --- Feasibility guard (issue #47) ---
+    // --- Feasibility guard ---
     // The BCC lattice seeds ~2·V/h³ interior points (V = enclosed volume,
     // h = target_edge_length·2/√3), and the pipeline downstream (Delaunay
     // build, recovery, improvement) scales super-linearly in that count. A
@@ -165,7 +165,7 @@ pub fn mesh_volume(input: &VolumeInput) -> Result<VolumeOutput> {
     // Delaunay pipeline with quality refinement
     let output = mesh_volume_delaunay(input)?;
 
-    // --- Emission-boundary invariant: positive orientation (issue #316) ---
+    // --- Emission-boundary invariant: positive orientation ---
     // One O(#tets), allocation-free sign pass at the single point every
     // internal path funnels through. Measured at ~15 ns/tet: 0.10 ms on a
     // 6.9k-tet mesh (0.39% of the 27 ms mesh_volume) and 11.7 ms on a 761k-tet
@@ -178,7 +178,7 @@ pub fn mesh_volume(input: &VolumeInput) -> Result<VolumeOutput> {
              Every tet yamm emits must have positive signed volume: transport reads \
              face normals off a fixed face table that only points outward for \
              positively oriented tets, and an inverted tet makes the element walk \
-             pick an entry face as its exit (issue #316). This is a mesher bug",
+             pick an entry face as its exit. This is a mesher bug",
             output.tetrahedra.len()
         )));
     }
@@ -206,10 +206,9 @@ const DEGENERATE_TET_VOLUME: f64 = 1e-12;
 /// tally as a cell that can never be scored, and DAGMC has to ray-fire against
 /// faces with no well-defined normal.
 ///
-/// Every pipeline exit calls this. It used to be inline in the boundary-only
-/// path alone, which is why SimpleTokamak shipped one zero-volume sliver out of
-/// ~500k tets (#47): its solids come out of the main Delaunay path, where
-/// nothing dropped what `improve_mesh` could not heal.
+/// Every pipeline exit calls this, including the main Delaunay path: without
+/// it, SimpleTokamak ships one zero-volume sliver out of ~500k tets that
+/// `improve_mesh` could not heal.
 fn drop_degenerate_tets(pts: &[[f64; 3]], tets: &mut Vec<[usize; 4]>, label: &str) -> usize {
     let before = tets.len();
     tets.retain(|t| {
@@ -248,7 +247,7 @@ fn carve_interior(dt: &Delaunay3D, boundary_faces: &[[usize; 3]]) -> Vec<[usize;
         })
         .collect();
 
-    // PARITY flood (issue #37, hollow solids): a solid's surface may have NESTED
+    // PARITY flood (hollow solids): a solid's surface may have NESTED
     // components (e.g. the coil casing - an outer shell with a sealed inner
     // cavity holding the winding pack). A binary "unreachable from hull ⇒
     // inside" flood wrongly counts the cavity as material (it too is sealed off
@@ -400,7 +399,7 @@ fn mesh_volume_conforming(
     // Activate the vertex→incident-tet index now that base construction is done.
     // Boundary recovery's edge/face/ring existence queries then run in
     // O(degree) instead of O(#tets) - the cost that made the conforming path
-    // too slow on fine meshes (issue #30). The index is maintained incrementally
+    // too slow on fine meshes. The index is maintained incrementally
     // through the recovery flips/Steiner splits from here on.
     dt.build_vert_tets();
     if tdbg {
@@ -412,7 +411,7 @@ fn mesh_volume_conforming(
         tp = Instant::now();
     }
 
-    // ── Volume-invariant probe (issue #37, YAMM_VOLCHECK) ──
+    // ── Volume-invariant probe (YAMM_VOLCHECK) ──
     // The Delaunay partitions its convex hull exactly, and every recovery
     // operation must preserve that partition: the SUM of finite live tet
     // volumes is invariant. A growth between stages pinpoints where an
@@ -451,7 +450,7 @@ fn mesh_volume_conforming(
     // still references the ORIGINAL input triangles (the true target volume).
     let mut cur_faces: Vec<[usize; 3]> = input.boundary_triangles.clone();
 
-    // ── Separation audit (issue #37, YAMM_SEP_AUDIT) ──
+    // ── Separation audit (YAMM_SEP_AUDIT) ──
     // The carve's flood partition is only valid if the surface SEPARATES, which
     // requires a closed 2-manifold: every undirected edge incident to exactly 2
     // triangles. Per-element recovery (each facet present as a tet face) does
@@ -765,7 +764,7 @@ impl BoundaryTriGrid {
 }
 
 /// Tets of `tets` whose interior the boundary passes through - an EXACT
-/// predictor of an inexact fill (issue #136). Such a tet is kept or dropped
+/// predictor of an inexact fill. Such a tet is kept or dropped
 /// wholesale by the inside/outside filter, so its volume is counted entirely or
 /// not at all; zero of them means the mesh partitions exactly the region the
 /// boundary encloses.
@@ -809,7 +808,7 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
     // FORCED conforming path (YAMM_CONFORMING): attempt the conforming carve
     // unconditionally, before the legacy pipeline. The DEFAULT flow instead
     // triggers the attempt only when the legacy filter's volume is wrong
-    // (Step 6b below, issue #30) - that confines the conforming build+recovery
+    // (Step 6b below) - that confines the conforming build+recovery
     // cost to the solids that need the fix, so the common case (filter already
     // exact, e.g. fine meshes where a discarded duplicate Delaunay build alone
     // costs ~60s at 184k pts) pays nothing. This env forces the attempt
@@ -822,9 +821,9 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
 
     if interior_pts.is_empty() {
         let out = mesh_boundary_only(input);
-        // Undershoot-trigger parity (issue #47): this early return previously
-        // skipped the Step-6b conforming backstop entirely, so boundary-only
-        // solids (thin shells) shipped whatever the centroid filter kept -
+        // Undershoot-trigger parity: without it this early return would skip
+        // the Step-6b conforming backstop entirely, so boundary-only
+        // solids (thin shells) would ship whatever the centroid filter kept -
         // e.g. Oktavian's outer shell under-fills by 1.34% with no second
         // chance. Apply the same trigger: if the boundary-only tet-sum
         // disagrees with the boundary-enclosed volume, attempt the exact
@@ -870,7 +869,7 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
     // Activate the vertex→incident-tet index: recover_faces' per-face cavity /
     // diagonal-swap collection is then O(degree) instead of a full O(#tets)
     // scan PER MISSING FACE - on a 306k-face boundary with ~20k missing faces
-    // that full scan ground for ~40 minutes (issue #47). Maintained
+    // that full scan ground for ~40 minutes. Maintained
     // incrementally by the flip/alloc paths from here on.
     dt.build_vert_tets();
 
@@ -954,7 +953,7 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
         t_filter_centroid.as_secs_f64()
     );
 
-    // ── CLIP AUDIT (issue #136, YAMM_CLIP_AUDIT) ──
+    // ── CLIP AUDIT (YAMM_CLIP_AUDIT) ──
     // De-risks the clipping route before any of it is built.
     //
     // The Delaunay tetrahedralises the CONVEX HULL of all points, and the
@@ -1282,7 +1281,7 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
                 let tot = clip::CROSSING_TOTAL.load(Relaxed);
                 let mt = clip::CROSSING_MIN_T_E9.load(Relaxed);
                 eprintln!(
-                    "    [clip] crossings: {tot} | min(t,1-t): smallest={:.3e} under-1e-3={} under-1e-6={} under-1e-9={} (#151)",
+                    "    [clip] crossings: {tot} | min(t,1-t): smallest={:.3e} under-1e-3={} under-1e-6={} under-1e-9={}",
                     if mt == u64::MAX { f64::NAN } else { mt as f64 / 1e9 },
                     clip::CROSSING_NEAR[0].load(Relaxed),
                     clip::CROSSING_NEAR[1].load(Relaxed),
@@ -1323,7 +1322,7 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
             }
         );
     }
-    // Zero-volume audit (issue #47 clusters B+C): count exactly/near-degenerate
+    // Zero-volume audit: count exactly/near-degenerate
     // tets after each pipeline stage to localize WHO commits them.
     let zv_audit = std::env::var("YAMM_ZEROVOL_AUDIT").is_ok();
     let zv_count = |pts: &[[f64; 3]], ts: &[[usize; 4]], label: &str| {
@@ -1340,7 +1339,7 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
                 tiny += 1;
             }
         }
-        // Coincident-vertex audit (issue #60): count vertices whose exact
+        // Coincident-vertex audit: count vertices whose exact
         // coordinates duplicate an earlier vertex - combinatorially distinct
         // points at identical positions break any index-based face matching
         // downstream.
@@ -1369,11 +1368,11 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
     // inside but centroid outside (characteristic of thin-walled hollow shapes).
     // For simple (non-hollow) solids this loop finds nothing - skip it entirely.
     let t_recovery_start = Instant::now();
-    // NOTE (issue #136): when the clip filter runs it rebuilds `tets` from
-    // `all_extracted` wholesale, so whatever this step adds is replaced rather
-    // than double-counted. That double count was real when the clip sat before
-    // this step: on ToroidalSector it re-added exactly the 70 tets the clip had
-    // just cut, turning a post-clip fill of -6.661e-15 into +9.833e-03.
+    // NOTE: when the clip filter runs it rebuilds `tets` from `all_extracted`
+    // wholesale, so whatever this step adds is replaced rather than
+    // double-counted. The clip must therefore stay after this step: before it,
+    // on ToroidalSector this re-adds exactly the 70 tets the clip just cut,
+    // turning a post-clip fill of -6.661e-15 into +9.833e-03.
     {
         // Quick hollow detection: sample a few rejected tets to see if any have
         // boundary vertices. If no rejected tet has a boundary vertex, the geometry
@@ -1509,7 +1508,7 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
 
     let t5 = t_step.elapsed();
 
-    // Step 6b: Undershoot-triggered conforming carve (issue #30 - DEFAULT-ON).
+    // Step 6b: Undershoot-triggered conforming carve (DEFAULT-ON).
     // The legacy centroid filter drops tets straddling thin/curved boundaries
     // (the Pipe / ThinWalledCylinder under-fill) and cannot represent exact
     // interiors. Compare its tet-sum volume to the (nesting-aware) boundary-
@@ -1558,7 +1557,7 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
         }
     }
 
-    // ── CLIP FILTER (issue #136 - DEFAULT ON, escape hatch YAMM_NO_CLIP_FILTER) ──
+    // ── CLIP FILTER (DEFAULT ON, escape hatch YAMM_NO_CLIP_FILTER) ──
     // Runs only AFTER the conforming carve has declined, i.e. it is the FALLBACK
     // rather than the mechanism.
     //
@@ -1574,7 +1573,7 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
     // Replaces the wholesale keep/drop decision for the tets the boundary
     // actually passes through. The centroid filter above is exact for every
     // OTHER tet; measured over ten zoo solids, zero cut tets iff the fill error
-    // is at machine precision (#147). So only the cut ones are re-decided here,
+    // is at machine precision. So only the cut ones are re-decided here,
     // which is 0.6%-18.9% of tets.
     //
     // For each cut tet: collect the distinct supporting planes of the boundary
@@ -1585,7 +1584,7 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
     // Default ON. The previous default shipped meshes that do not fill their own
     // boundary - BlanketModule's solid 1 was missing 5.4% of itself, silently, so
     // anything normalised over that mesh was out by the same amount. Trading that
-    // for the tail-quality regression in #151 (the smallest tets get smaller; the
+    // for a tail-quality regression (the smallest tets get smaller; the
     // sliver POPULATION is unchanged) is the right way round: the fill error is a
     // physics error, slivers are a robustness risk.
     //
@@ -1781,13 +1780,13 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
     // Extract interior vertices
     let interior_vertices = all_points[n_boundary..].to_vec();
 
-    // EXACTNESS SIGNAL (issue #136). Count the FINAL tets the boundary passes
+    // EXACTNESS SIGNAL. Count the FINAL tets the boundary passes
     // through. This is exact and cheap (measured 0.0s on every zoo model,
     // including BlanketModule's 25743 tets), and it is what the caller should
     // warn on: zero means the mesh partitions exactly the region the boundary
     // encloses, and nonzero means it cannot, because a cut tet is kept or dropped
     // wholesale. It replaces `faces_failed` as the watertightness signal, which
-    // fires on healthy meshes (issue #105).
+    // fires on healthy meshes.
     let t_cut = Instant::now();
     let mut all_v = input.boundary_vertices.clone();
     all_v.extend_from_slice(&interior_vertices);
@@ -1838,7 +1837,7 @@ fn mesh_boundary_only(input: &VolumeInput) -> VolumeOutput {
         }
     }
 
-    // Quality parity with the main pipeline (issue #47 cluster C): a Delaunay
+    // Quality parity with the main pipeline: a Delaunay
     // of near-COSPHERICAL boundary points (thin spherical/cylindrical shells -
     // exactly the geometries that reach this path) is full of degenerate
     // slivers, and this path previously shipped them raw (Oktavian solid 2:
@@ -2080,7 +2079,7 @@ fn remove_overlapping_tets(vertices: &[[f64; 3]], tets: &mut Vec<[usize; 4]>) {
     // Phase 1 (parallel): collect every overlapping PAIR. The pair set is a
     // pure geometric predicate (order-independent), so this parallelizes
     // safely - it was the dominant cost (~370s serial on a 682k-tet mesh once
-    // legacy recover_faces stopped grinding, issue #47).
+    // legacy recover_faces stopped grinding).
     use rayon::prelude::*;
     let cells: Vec<(&(i64, i64, i64), &Vec<usize>)> = grid.iter().collect();
     let mut overlapping: Vec<(usize, usize)> = cells

@@ -60,7 +60,7 @@ from .conftest import (
 # sigma. For the rarest score in the mix ((n,gamma), ~1e-5 of flux) the
 # combined TL+collision relative sigma is ~0.1 % at this budget, so the
 # strict cap sits at ~1 sigma and flips with the fixed-seed realization
-# (the 64-bit PCG stream of issue #274 landed it at 0.154 %, 1.5 sigma).
+# (the 64-bit PCG stream landed it at 0.154 %, 1.5 sigma).
 # A 4-sigma floor keeps the check exact where it is well resolved and
 # statistically fair where it is not; a real estimator bug is either
 # systematic (well-resolved scores blow the strict cap) or enormous.

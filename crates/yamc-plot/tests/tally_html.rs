@@ -1,7 +1,6 @@
 //! Tests for `yamc_plot::build_interactive_tally_html` -- focused on the
-//! pieces that are new in the share-tally-viewer PR (surface table
-//! plumbing) plus a couple of structural sanity checks so the move from
-//! yamc-python doesn't silently drop fields.
+//! surface table plumbing, plus a couple of structural sanity checks so no
+//! field is silently dropped.
 
 use std::collections::HashMap;
 use std::sync::Arc;

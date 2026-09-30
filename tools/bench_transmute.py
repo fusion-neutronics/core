@@ -1,7 +1,7 @@
 """Wall-clock benchmark for ``Material.transmute`` on a steel, plus a golden
 inventory dump that pins the answer while the speed moves.
 
-Four numbers, which are the four shapes a caller actually meets (issue #576):
+Four numbers, which are the four shapes a caller actually meets:
 
 ===============  ==================================================
 ``once``         the first ``transmute`` in a fresh interpreter, so
@@ -161,10 +161,9 @@ def run_case(uncertainty: bool) -> dict:
     # again" is the shape a sweep over schedules, fluxes or seeds has, and the
     # results object is dropped because holding every one of them is not.
     #
-    # Until issue #576's finding 3 this made no difference either way --
-    # `transmute` did not touch the material it was given, so a repeat call
-    # re-decoded every reachable nuclide's Arrow directory whatever the caller
-    # kept alive.
+    # This matters because `transmute` keeps the loaded cross sections in the
+    # material, so a repeat call skips re-decoding every reachable nuclide's
+    # Arrow directory only while the caller keeps the material alive.
     warm = []
     for _ in range(REPEATS_UNC if uncertainty else REPEATS):
         elapsed, results = one_call(material)

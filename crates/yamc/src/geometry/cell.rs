@@ -20,7 +20,7 @@ pub struct Cell {
     /// `None` for void cells. This is the only handle the hot path uses.
     pub material_idx: Option<u32>,
     pub volume: Option<f64>,
-    /// Role in a hybrid CSG+mesh fill (issue #232): `Host` for a cell
+    /// Role in a hybrid CSG+mesh fill: `Host` for a cell
     /// filled by a mesh body, `Embedded` for a cell synthesized from one
     /// mesh volume of a fill. `None` for ordinary cells. Not serialized:
     /// a geometry with fills only fingerprints (it cannot round-trip).
@@ -164,7 +164,7 @@ impl Cell {
         self.flat_region.contains(point)
     }
 
-    /// True when this cell takes part in a mesh fill (issue #232): the
+    /// True when this cell takes part in a mesh fill: the
     /// host of a fill, or a cell synthesized from one of its volumes.
     /// Such cells only make sense inside the geometry that owns the
     /// fill; they cannot seed a new geometry.

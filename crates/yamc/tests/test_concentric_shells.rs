@@ -1,5 +1,4 @@
-//! Scale-up regression for the concentric-shell lost-particle bug
-//! (issue #223, fixed by #226).
+//! Scale-up regression for the concentric-shell lost-particle bug.
 //!
 //! With the source inside a scattering MATERIAL cell bounded by
 //! transmission surfaces to further material shells, near-tangent
@@ -9,7 +8,7 @@
 //! existing 2-shell tests ran only 100 particles and never tripped it.
 //! This runs the original reproducer topology at 100k particles in all
 //! three tracking modes; completion (no lost-particle abort) is the
-//! assertion. Weight-window isosurfaces (WW PR4) depend on this
+//! assertion. Weight-window isosurfaces depend on this
 //! staying fixed.
 
 use std::collections::HashMap;
@@ -57,8 +56,8 @@ fn sphere(id: usize, radius: f64, vacuum: bool) -> Arc<Surface> {
     })
 }
 
-/// N concentric Li6 shells out to r=50, all material (the #223 trigger
-/// needs the source inside a scattering material cell).
+/// N concentric Li6 shells out to r=50, all material (the lost-particle
+/// trigger needs the source inside a scattering material cell).
 fn nested_shells_geometry(n_shells: usize) -> Geometry {
     let spheres: Vec<Arc<Surface>> = (1..=n_shells)
         .map(|i| {
@@ -135,7 +134,7 @@ fn nested_material_shells_lose_no_particles_at_scale() {
             model.verbose = yamc::model::Verbose::silent();
             model.tracking_mode = mode;
             model.simulate_transport(&settings).unwrap_or_else(|e| {
-                panic!("{n_shells} shells / {mode:?}: lost-particle regression (#223): {e}")
+                panic!("{n_shells} shells / {mode:?}: lost-particle regression: {e}")
             });
         }
     }

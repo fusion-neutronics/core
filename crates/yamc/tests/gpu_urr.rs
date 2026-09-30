@@ -127,9 +127,9 @@ fn gpu_urr_co58_matches_cpu_in_resonance_region() {
 }
 
 /// Mn55 sphere whose URR record uses LogLog interpolation (and has
-/// low-lying inelastic). Exercises the issue #105 fixes -- LogLog
+/// low-lying inelastic). Exercises LogLog
 /// interpolation of the URR micro cross-sections and the smooth-inelastic
-/// exclusion -- on a real nuclide, checking the GPU tracks the
+/// exclusion on a real nuclide, checking the GPU tracks the
 /// OpenMC-validated CPU URR treatment in the URR window. Uses the cached
 /// ENDF/B-VIII.1 Mn55 data; self-skips when it (or a GPU) is absent, so it
 /// is inert in CI (which has neither).

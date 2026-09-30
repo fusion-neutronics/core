@@ -16,7 +16,7 @@ extension actually exposes, in both directions:
     check above has anything to say, while type-checkers reject
     ``yani.shapes.CubeLump``.
 
-Runs over both wheels this repo builds, `yamc` and `yani` (issue #381); the
+Runs over both wheels this repo builds, `yamc` and `yani`; the
 `yani` half is skipped when that wheel is not installed.
 
 Exits non-zero with a report on any inconsistency. Run in CI next to the

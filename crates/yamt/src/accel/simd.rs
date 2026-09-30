@@ -555,7 +555,7 @@ pub fn print_simd_info() {
 mod tests {
     use super::*;
 
-    /// Regression for the phantom edge-band crossing (issue #256 residual).
+    /// Regression for the phantom edge-band crossing.
     ///
     /// Two facets share the edge y=0 with a dihedral fold: F1 lies in the
     /// z=0 plane (y >= 0 side), F2 dips away on the y < 0 side. A grazing

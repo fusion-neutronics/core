@@ -1,4 +1,4 @@
-//! Issue #425: an evaluation with partial fission channels carries a DIFFERENT
+//! An evaluation with partial fission channels carries a DIFFERENT
 //! prompt spectrum on each one, so the flat chi has to be cached per (nuclide,
 //! MT) rather than per nuclide.
 //!

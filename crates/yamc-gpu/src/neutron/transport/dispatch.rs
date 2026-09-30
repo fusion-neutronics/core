@@ -2,7 +2,7 @@
 //! sampling.
 //!
 //! The implementation moved to
-//! `yamc_physics::gpu::flat::inelastic_dispatch` (issue #111, stream
+//! `yamc_physics::gpu::flat::inelastic_dispatch` (stream
 //! unification) so the CPU production transport, which builds without
 //! the `gpu` feature, and this host-side twin call one
 //! single-source-of-truth dispatcher. Re-exported under the historical

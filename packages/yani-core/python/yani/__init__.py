@@ -117,8 +117,8 @@ sys.modules[__name__].__class__ = _YaniModule
 
 # Without this, `sys` and `types` above are public attributes of the package and
 # `from yani import *` drags them in. yamc has had the same guard since it grew
-# its own module-property shim. The transport-only classes are no longer a
-# concern here: `register_classes` stopped adding them to this wheel (#452).
+# its own module-property shim. The transport-only classes are not a concern
+# here: `register_classes` does not add them to this wheel.
 #
 # `dir()` inside a comprehension has its own scope in Python 3, hence the temp.
 _public_names = dir()

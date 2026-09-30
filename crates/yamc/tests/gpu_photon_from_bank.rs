@@ -207,7 +207,7 @@ fn run_direct(
         &inputs.element_select.mat_elem_meta,
         pack,
         MAX_STEPS,
-        1000.0, // photon_cutoff_energy (default, issue #286)
+        1000.0, // photon_cutoff_energy (default)
         yamc_gpu::common::tallies::TallyVarianceMode::PerStep,
     )
 }
@@ -284,7 +284,7 @@ fn run_from_bank(
         &inputs.element_select.mat_elem_meta,
         pack,
         MAX_STEPS,
-        1000.0, // photon_cutoff_energy (default, issue #286)
+        1000.0, // photon_cutoff_energy (default)
         yamc_gpu::common::tallies::TallyVarianceMode::PerStep,
     )
 }

@@ -69,5 +69,5 @@ ignored = ["getrandom", "getrandom_v04"]
 
 [dev-dependencies]
 # Resolves the nuclear-data fixture cache the same way the loader does,
-# rather than through `HOME` alone (issue #544).
+# rather than through `HOME` alone.
 yamc-test-cache = { path = "../yamc-test-cache" }

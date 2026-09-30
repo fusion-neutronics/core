@@ -32,7 +32,7 @@ pub struct PyCell {
     pub inner: Cell,
     /// Reference to the original Python Material object (for ID propagation)
     pub py_material: Option<Py<PyMaterial>>,
-    /// Mesh body filling this cell (issue #232), consumed by
+    /// Mesh body filling this cell, consumed by
     /// PyGeometry::new like py_material.
     #[cfg(feature = "mesh")]
     pub py_fill: Option<Py<crate::geometry::PyMeshGeometry>>,

@@ -34,7 +34,7 @@ pub struct OverlayXsData {
     micro_xs: HashMap<String, HashMap<i32, Vec<f64>>>,
     /// O(1) log-grid lookup table (maps a log(E) bin to a starting index in
     /// `energy_grid`). 32-bit for the same reason as
-    /// `FastXSGrid::log_grid_index` (issue #482): the values are grid indices,
+    /// `FastXSGrid::log_grid_index`: the values are grid indices,
     /// and a grid long enough to overflow `u32` would be 34 GB of `f64`. Built
     /// monotone below, so nothing to validate.
     log_grid_index: Vec<u32>,
@@ -47,7 +47,7 @@ pub struct OverlayXsData {
     /// Photon interaction data per overlay nuclide's element: nuclide -> element
     photon_elements: HashMap<String, Arc<yamc_element::photon::PhotonInteraction>>,
 
-    // --- Response weighting (issue #341) ---
+    // --- Response weighting ---
     /// The overlay's own nuclide list, in a stable order. Iterated when
     /// collapsing a material response into one combined bin (`combine`).
     /// Distinct from `Tally::nuclides`, which for a material response is
@@ -175,7 +175,7 @@ pub struct Tally {
     /// Default: true (standard macroscopic tally that scales by the cell's density).
     pub multiply_density: bool,
 
-    /// Overlay *material* response (issue #341): per-nuclide atom densities
+    /// Overlay *material* response: per-nuclide atom densities
     /// (atoms / barn-cm) of a virtual material the tally responds to. When
     /// `Some`, the overlay weights each nuclide's microscopic XS by its
     /// density and collapses the result into a single combined macroscopic
@@ -221,7 +221,7 @@ pub struct TallySerde {
     /// reconstruct as track-length, matching their original behavior.
     #[serde(default)]
     pub estimator: crate::Estimator,
-    /// Overlay material response (issue #341). `#[serde(default,
+    /// Overlay material response. `#[serde(default,
     /// skip_serializing_if)]` keeps backwards compatibility: tallies that
     /// pre-date the field reconstruct as `None`, and ordinary tallies don't
     /// emit it. `BTreeMap` keeps the JSON key order (and thus `PartialEq`)
@@ -805,8 +805,8 @@ impl Tally {
 
         // Heating scores: track-length KERMA for both particle types.
         // Neutrons use MT 301; photons use the macroscopic photon
-        // heating estimate (issue #356) -- the analog collision deposit
-        // now belongs to collision-estimator tallies only.
+        // heating estimate -- the analog collision deposit belongs to
+        // collision-estimator tallies only.
         if has_heating {
             if let Some(material) = material {
                 let heating_xs = if is_neutron {
@@ -819,7 +819,7 @@ impl Tally {
                 // Neutron KERMA (MT 301) is legitimately negative in
                 // endothermic charged-particle windows (e.g. O16
                 // 7.4-13 MeV); guard on `!= 0.0` so those negatives fold
-                // in (issue #84). Photon heating is non-negative.
+                // in. Photon heating is non-negative.
                 if heating_xs != 0.0 {
                     for &score_idx in heating_indices {
                         let bin_idx = score_idx * num_e_bins + energy_bin;
@@ -831,7 +831,7 @@ impl Tally {
 
         // Heating-local scores: track-length KERMA for both particle
         // types (photons reuse the heating estimate -- with no electron
-        // transport, local and total deposition coincide; issue #356).
+        // transport, local and total deposition coincide).
         if has_heating_local {
             if let Some(material) = material {
                 let heating_local_xs = if is_neutron {
@@ -842,7 +842,7 @@ impl Tally {
                     0.0
                 };
                 // See heating note above: negative neutron KERMA (MT 901)
-                // must fold in (issue #84).
+                // must fold in.
                 if heating_local_xs != 0.0 {
                     for &score_idx in heating_local_indices {
                         let bin_idx = score_idx * num_e_bins + energy_bin;
@@ -981,8 +981,8 @@ impl Tally {
 
     /// Slow path for score_track_length when cache is not initialized.
     /// Closure-parameterised over the per-bin storage write so the
-    /// same body serves both the default (atomic-CAS) and Stage 3
-    /// (scratch write) entry points. See `score_track_length` for the
+    /// same body serves both the default (atomic-CAS) and per-history
+    /// Welford (scratch write) entry points. See `score_track_length` for the
     /// public wrapper.
     #[allow(clippy::too_many_arguments)]
     fn score_track_length_slow_with(
@@ -1119,7 +1119,7 @@ impl Tally {
                                 0.0
                             };
                             // Neutron KERMA (MT 301) can be negative; fold it
-                            // in (issue #84). Photon heating stays >= 0.
+                            // in. Photon heating stays >= 0.
                             if (is_neutron && xs != 0.0) || (!is_neutron && xs > 0.0) {
                                 Some(xs * weighted_track_length)
                             } else {
@@ -1134,7 +1134,7 @@ impl Tally {
                                     }
                                 }
                             } else if is_photon {
-                                // Track-length photon KERMA (issue #356);
+                                // Track-length photon KERMA;
                                 // per-nuclide photon splits need the
                                 // element mapping and stay zero.
                                 match nuc_bin {
@@ -1146,8 +1146,8 @@ impl Tally {
                             } else {
                                 0.0
                             };
-                            // Negative neutron KERMA (MT 301) must fold in
-                            // (issue #84); photon heating stays >= 0.
+                            // Negative neutron KERMA (MT 301) must fold in;
+                            // photon heating stays >= 0.
                             if (is_neutron && heating_xs != 0.0)
                                 || (!is_neutron && heating_xs > 0.0)
                             {
@@ -1172,8 +1172,8 @@ impl Tally {
                             } else {
                                 0.0
                             };
-                            // Negative neutron KERMA (MT 901) must fold in
-                            // (issue #84); photon heating stays >= 0.
+                            // Negative neutron KERMA (MT 901) must fold in;
+                            // photon heating stays >= 0.
                             if (is_neutron && xs != 0.0) || (!is_neutron && xs > 0.0) {
                                 Some(xs * weighted_track_length)
                             } else {
@@ -1189,7 +1189,7 @@ impl Tally {
                                 }
                             } else if is_photon {
                                 // Photon KERMA; local == total without
-                                // electron transport (issue #356).
+                                // electron transport.
                                 match nuc_bin {
                                     NuclideBin::Total => {
                                         material.calculate_photon_xs(energy).heating
@@ -1199,8 +1199,8 @@ impl Tally {
                             } else {
                                 0.0
                             };
-                            // Negative neutron KERMA (MT 901) must fold in
-                            // (issue #84); photon heating stays >= 0.
+                            // Negative neutron KERMA (MT 901) must fold in;
+                            // photon heating stays >= 0.
                             if (is_neutron && xs != 0.0) || (!is_neutron && xs > 0.0) {
                                 Some(xs * weighted_track_length)
                             } else {
@@ -1560,7 +1560,7 @@ impl Tally {
         // Mesh filter -- single bin at the collision position (vs the
         // track-length estimator, which integrates over all bins the
         // segment touches). Unstructured meshes resolve the containing
-        // tetrahedron with yamt's element-BVH point query (issue #354);
+        // tetrahedron with yamt's element-BVH point query;
         // a collision outside the mesh volume scores nothing.
         let mesh_bin: usize = if let Some(mesh_filter) = self.get_mesh_filter() {
             match mesh_filter.get_bin(position) {
@@ -1582,7 +1582,7 @@ impl Tally {
         };
 
         // Energy-function weighting (e.g. dose conversion), kept SEPARATE from
-        // the weight/Σ_t factor (issues #378, #382).
+        // the weight/Σ_t factor.
         //
         // The two factors are not interchangeable. `weight/Σ_t` converts a
         // collision into a track-length equivalent and applies only to
@@ -1658,9 +1658,9 @@ impl Tally {
         // where `ef` is the optional energy-function weighting. It is folded
         // into `base_weight = weight/Σ_t · ef` for the Σ_t-dependent arms and
         // applied on its own to the analog photon heat, which takes `ef` but
-        // not `weight/Σ_t` (issue #382).
+        // not `weight/Σ_t`.
         // `allow_negative` lets neutron KERMA (MT 301/901) fold in its
-        // physically-negative endothermic windows (issue #84); damage
+        // physically-negative endothermic windows; damage
         // energy (MT 444) keeps the `> 0.0` guard.
         let neutron_xs_contrib = |lookup: fn(&yamc_materials::Material, f64) -> f64,
                                   allow_negative: bool| {
@@ -1676,7 +1676,7 @@ impl Tally {
         for (score_idx, score) in self.scores.iter().enumerate() {
             let contrib = match (score, particle_type) {
                 (Score::Flux(_), _) if total_xs > 0.0 => Some(base_weight),
-                // Photon heating routing (issues #358/#356):
+                // Photon heating routing:
                 // - Collision-estimator tallies take the analog eV
                 //   deposit dispatched after each real photon collision
                 //   (photon_heat_score_ev, total_xs == 0 on that call).
@@ -1691,7 +1691,7 @@ impl Tally {
                     if self.multiply_density && self.estimator == crate::Estimator::Collision =>
                 {
                     // The eV deposit takes the energy function but NOT
-                    // weight/Σ_t (issue #382). `energy` here is the
+                    // weight/Σ_t. `energy` here is the
                     // pre-collision photon energy, the same E the track-length
                     // arm below evaluates f at and the same E the energy filter
                     // binned on, which is what makes the two arms estimators of
@@ -2275,11 +2275,10 @@ impl Tally {
 
     /// Snapshot the currently-accumulated statistics into a `TallyResult`.
     ///
-    /// This is the finalize step for PR A of the `SimulationResults` refactor:
-    /// it produces an immutable result value from the current batch state
-    /// without disturbing any existing scoring machinery. PR B will wrap a
-    /// set of these into `SimulationResults` and return it from
-    /// `model.simulate_transport()`.
+    /// Produces an immutable result value from the current batch state
+    /// without disturbing any existing scoring machinery. A set of these is
+    /// wrapped into `SimulationResults`, which `model.simulate_transport()`
+    /// returns.
     ///
     /// Requires the `Tally` to be shared through an `Arc` so that the result
     /// can hold a back-reference to the config without copying.
@@ -2340,7 +2339,7 @@ impl Tally {
 
     /// Validate that the tally configuration is valid
     /// A per-nuclide axis folds a nuclide's cross section into the score, so it
-    /// cannot apply to a score that has no cross section (issue #305).
+    /// cannot apply to a score that has no cross section.
     ///
     /// Split out of [`Self::validate`] so the Python constructor can enforce it
     /// at construction, where the user can still fix the call, rather than at
@@ -2353,11 +2352,11 @@ impl Tally {
         // overlay, `multiply_density == false`) and `nuclides=` (the real
         // in-material breakdown).
         //
-        // This used to be accepted and silently do nothing, in three flavours
-        // (issue #305): `flux` + `response=` returned plain flux with the
-        // response dropped; `['flux', 'heating']` + `response=` returned
-        // response-weighted heating next to plain flux in one array with no
-        // marker; and `flux` + `nuclides=['Fe56', 'total']` duplicated the same
+        // Accepting it would silently do nothing, in three flavours:
+        // `flux` + `response=` returns plain flux with the response dropped;
+        // `['flux', 'heating']` + `response=` returns response-weighted
+        // heating next to plain flux in one array with no marker; and
+        // `flux` + `nuclides=['Fe56', 'total']` duplicates the same
         // flux into every nuclide bin, which reads as a per-nuclide breakdown
         // that does not exist.
         //
@@ -2411,7 +2410,7 @@ impl Tally {
 
         // Overlay tallies (multiply_density=false) need a response target:
         // either >=1 specific nuclide (unit-density nuclide overlay) or a
-        // non-empty material response (issue #341). The two are mutually
+        // non-empty material response. The two are mutually
         // exclusive -- a material response collapses to one combined bin
         // (`nuclides == [Total]`) and carries its own nuclide list + densities.
         if !self.multiply_density {
@@ -2470,9 +2469,9 @@ impl Tally {
     /// * `needs_neutron` / `needs_photon` - which data set is load-bearing for
     ///   this run. The caller knows which species will actually score the tally
     ///   (its `ParticleType` filter combined with what the model transports).
-    ///   Missing data for a species that WILL score used to warn and then score
-    ///   the plain, un-responded quantity (or a flat zero), i.e. a wrong answer
-    ///   behind a stderr line, so that case is an error now (issue #288).
+    ///   Missing data for a species that WILL score is an error: warning and
+    ///   then scoring the plain, un-responded quantity (or a flat zero) would
+    ///   be a wrong answer behind a stderr line.
     ///   Missing data for a species that cannot score stays a warning.
     pub fn prepare_overlay_xs(
         &self,
@@ -2491,7 +2490,7 @@ impl Tally {
             // Determine the overlay's nuclide list, per-nuclide densities, and
             // whether to collapse them into one combined macroscopic bin:
             //
-            // - Material response (issue #341): the nuclide list and the real
+            // - Material response: the nuclide list and the real
             //   atom densities (atoms/barn-cm) come from `overlay_material`,
             //   and `combine = true` → one combined bin `Σ_i N_i·σ_i`.
             // - Nuclide overlay (historical): the nuclides come from the
@@ -2620,7 +2619,7 @@ impl Tally {
                 } else if needs_photon {
                     // A photon-scoring overlay with no element data would score a
                     // flat zero, which reads as "no response here" rather than
-                    // "no data" (issue #288).
+                    // "no data".
                     fatal = Some(format!(
                         "overlay tally '{}': no photon data for element {} -- a photon \
                          response needs per-element photon data (load it on a material, \
@@ -3449,7 +3448,7 @@ mod tests {
     }
 
     /// A per-nuclide axis cannot apply to `flux`, which has no cross section
-    /// to fold it into (issue #305). All three shapes used to be accepted and
+    /// to fold it into. All three shapes must be refused rather than
     /// silently do nothing.
     #[test]
     fn validate_rejects_a_nuclide_axis_on_flux() {
@@ -3529,7 +3528,7 @@ mod tests {
     #[test]
     fn validate_accepts_both_estimators_on_unstructured_mesh() {
         // The collision path resolves the containing tet with yamt's
-        // point query (issue #354), so both estimators are valid.
+        // point query, so both estimators are valid.
         let mesh = std::sync::Arc::new(
             yamt::MeshGeometry::from_arrow(std::path::Path::new("../yamt/tests/data/cube.arrow"))
                 .unwrap(),

@@ -33,12 +33,12 @@ pub struct BoundaryRecoveryStats {
     /// counted entirely or not at all; zero cut tets means the tet mesh
     /// partitions exactly the region its boundary encloses. Measured over ten
     /// zoo solids, `tets_cut_by_boundary == 0` iff the fill error is at machine
-    /// precision (issue #136).
+    /// precision.
     ///
     /// Note the contrast with `faces_failed`, which counts boundary faces not
     /// present as tet faces and fires on healthy meshes - a plain cylinder
     /// reports hundreds while filling exactly, because mesh improvement
-    /// subdivides boundary faces (issue #105).
+    /// subdivides boundary faces.
     pub tets_cut_by_boundary: usize,
 }
 
@@ -92,7 +92,7 @@ impl VolumeOutput {
     /// walk picks its exit face with `dot(direction, normal) > 0`, so a
     /// negatively oriented tet makes it select an ENTRY face: the walk hops
     /// backwards or stops at the mesh boundary early, and unstructured
-    /// track-length tallies read far too low (issue #316, which measured -33%).
+    /// track-length tallies read far too low (about -33%).
     /// `yamt` refuses to load a mesh with an inverted tet, but a mesher that
     /// quietly starts emitting them should fail HERE, where the regression is,
     /// not later at load time or as a mysterious flux deficit.

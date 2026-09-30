@@ -128,7 +128,7 @@ pub const REACTION_MT_MAP: &[(&str, i32)] = &[
 /// its own, but `activation_mts` resolves every reaction kind of every one of a
 /// chain's ~3820 nuclides on every `Material::transmute` call, which came to
 /// roughly 5e6 string comparisons -- 40-60 ms per call, before any nuclear data
-/// was read (issue #576, finding 8).
+/// was read.
 ///
 /// Built with `or_insert`, so the MT lookup keeps the FIRST name listed for an
 /// MT, which is what `find` returned and what the table's own doc comment

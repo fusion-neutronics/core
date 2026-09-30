@@ -52,7 +52,7 @@ pub fn read_available_temperatures(dir: &Path) -> Result<Vec<String>, Box<dyn Er
     get_str_list(&nuclide_batch, "temperatures", 0)
 }
 
-/// Read the optional `fission_photon.arrow` section (issue #369).
+/// Read the optional `fission_photon.arrow` section.
 ///
 /// Layout is one row per term, keyed by `role` ("prompt_photons" /
 /// "delayed_photons"), so a term can be a polynomial or a table independently of
@@ -137,7 +137,7 @@ fn read_fission_photon_release(
 }
 
 /// Take an Arrow column view either by sharing its allocation or by copying out
-/// of it (issue #476, task 1).
+/// of it.
 ///
 /// Sharing skips the copy, but a `ScalarBuffer` view holds an `Arc` on the whole
 /// column, so it pins every row rather than the one it spans. That is a win when
@@ -167,7 +167,7 @@ const TRANSPORT_SECTIONS: [&str; 2] = ["products.arrow", "distributions.arrow"];
 /// The `format_version` this build reads.
 ///
 /// 2 since the union energy grids moved out of `nuclide.arrow` into
-/// `energy.arrow` (fusion-neutronics/core#100). Bumped rather than made
+/// `energy.arrow`. Bumped rather than made
 /// optional: a v1 folder read by this build would find no grids at all, and a
 /// v2 folder read by an older build would find no `energy_values` column, so
 /// there is no version of "best effort" that produces a correct cross section.
@@ -210,7 +210,7 @@ fn reactions_path(dir: &Path, scope: &LoadScope) -> std::path::PathBuf {
 /// correctly, because transmutation asks for [`SectionScope::XsOnly`] anyway. It
 /// was unreadable through `Nuclide.read_nuclear_data` only because that asks for
 /// `Full`, and the reader then required the transport sections whatever was on
-/// disk (issue #506).
+/// disk.
 ///
 /// A directory carrying NONE of them is that conversion, and loads at `XsOnly`.
 /// The narrowed scope is recorded on the [`Nuclide`], so transport still cannot
@@ -316,8 +316,8 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
             .unwrap_or(0);
         if fmt_version != FORMAT_VERSION {
             // Version 1 put the union energy grids in `nuclide.arrow`; version
-            // 2 has them in `energy.arrow`, one batch per temperature
-            // (fusion-neutronics/core#100). A v1 folder is not read on a
+            // 2 has them in `energy.arrow`, one batch per temperature. A v1
+            // folder is not read on a
             // best-effort basis, because the grids would simply be missing and
             // every cross section would then interpolate against nothing.
             let hint = if fmt_version == 1 {
@@ -346,10 +346,10 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
     let all_temps_raw = get_str_list(&nuclide_batch, "temperatures", 0)?;
 
     // The union energy grids, one row per temperature, from their own section.
-    // They were two columns of `nuclide.arrow` until #100: one
-    // `list<list<f64>>` cell, so a reader that wanted one temperature decoded
-    // all of them (6.33 MB on U238). A ranged download now brings only the rows
-    // it asked for, and this reads however many arrived.
+    // Kept out of `nuclide.arrow`, where one `list<list<f64>>` cell would make a
+    // reader that wanted one temperature decode all of them (6.33 MB on U238). A
+    // ranged download brings only the rows it asked for, and this reads however
+    // many arrived.
     //
     // Absent only for a nuclide with no processed temperature, which is what
     // the ENDF route (no NJOY, no ACE) produces: no temperature means no union
@@ -396,7 +396,7 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
         _ => a.cmp(b),
     });
 
-    // Fission energy release for the delayed-photon scaling (issue #369), read
+    // Fission energy release for the delayed-photon scaling, read
     // from its own optional section. OPTIONAL twice over: only evaluations with
     // `fission_energy_release` carry it (79 of 557 in ENDF/B-VIII.1), and files
     // published before the section existed have no such file at all. Either way
@@ -581,7 +581,7 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
                 // `cross_section_at` binary-searches `energy` and indexes
                 // `cross_section` with what it finds, so a file whose two
                 // sections disagree panics on the first lookup rather than
-                // failing to load (issue #507). Establishing the invariant here
+                // failing to load. Establishing the invariant here
                 // costs one comparison per (MT, temperature) at load and keeps
                 // that hot path a plain index.
                 //
@@ -825,8 +825,8 @@ fn find_temp_row(batch: &RecordBatch, temp_key: &str) -> Option<usize> {
 /// itself cannot police their contents: the writer and the reader agree only by
 /// both spelling the same literals. That makes them the one part of the format
 /// where a mismatch is invisible to `test_schema_manifest.py` and to every
-/// field-name check, which is how issue #379 (the chain spelling MT 18
-/// "fission" against a reader that only knew "(n,fission)") went unnoticed.
+/// field-name check (a chain spelling MT 18 "fission" against a reader that
+/// only knew "(n,fission)" would go unnoticed).
 ///
 /// Reaching an unknown value means the data was written by a converter this
 /// build does not understand. Refusing it is the only safe answer: silently
@@ -1001,7 +1001,7 @@ const ENDF_INTERP_HISTOGRAM: i32 = 1;
 /// final one is the length of the incident grid, and the test therefore needed a
 /// one-point grid to pass: it never fired on real data, and every distribution
 /// declaring a histogram incident-energy region was silently sampled lin-lin on
-/// both the CPU and GPU paths (issue #499).
+/// both the CPU and GPU paths.
 ///
 /// The rule is OpenMC's, in `ContinuousTabular::sample`: histogram only for a
 /// single region whose code says histogram. A multi-region distribution samples
@@ -1229,9 +1229,8 @@ fn parse_correlated(
     // Read them from the int32 columns (no f64-to-int round trip, and no
     // per-incident-energy `Vec<usize>`), falling back to the float copy for a
     // file that predates them. Index by point, `eout_start + j`; indexing
-    // `corr_mu_interp` by one of its own values, as this did, gave every mu
-    // table in a row the interpolation of one of the row's first three points.
-    // Issue #484.
+    // `corr_mu_interp` by one of its own values would give every mu table in a
+    // row the interpolation of one of the row's first three points.
     let mu_offsets_int = mu_offsets.len() == total_eout_pts;
     let mu_interp_int = mu_interp.len() == total_eout_pts;
     let mu_offset_at = |k: usize| -> usize {
@@ -1781,7 +1780,7 @@ mod tests {
         assert_eq!(scope.sections, SectionScope::Full);
     }
 
-    /// Issue #506: this is the directory that could not be opened at all.
+    /// A cross-sections-only directory must open, narrowed, rather than fail.
     #[test]
     fn a_cross_sections_only_directory_narrows_instead_of_failing() {
         let dir = xs_only_dir("xs-only");
@@ -1826,7 +1825,7 @@ mod tests {
         assert_eq!(scope.mts, requested.mts);
     }
 
-    // --- issue #499: histogram_interp over the concatenated column ---------
+    // --- histogram_interp over the concatenated column ---------------------
 
     /// The shape the bug needed and never got: a one-point incident grid is the
     /// only way `all(v == 1)` could have been true.

@@ -38,11 +38,11 @@ pub struct TransmutationResults {
     /// burnup matrix, whose entries are sums over the edges into each product,
     /// and used to discard the edges themselves. They are the share of a
     /// product arriving down each route, which is the column a pathway
-    /// analysis is written around. Issue #490.
+    /// analysis is written around.
     pub reaction_rates: HashMap<u32, Vec<EdgeRates>>,
 
     /// Material ID -> the ensemble of perturbed inventories, when
-    /// nuclear-data uncertainty was asked for (issue #514).
+    /// nuclear-data uncertainty was asked for.
     ///
     /// Empty on the default path, where nothing is sampled and nothing is
     /// allocated. Indexed by step the way `timesteps` is, so entry `i` is the
@@ -390,7 +390,7 @@ impl TransmutationResults {
     /// different physics: an effective `W186(n,gamma)` of 57 mb against a
     /// spectrum 89% of which sits in 12-16 MeV and 0.7% below 100 keV is
     /// either a fast-capture rate or a resonance-region rate, and only the
-    /// breakdown says which (yani#27). A disagreement can then be attributed
+    /// breakdown says which. A disagreement can then be attributed
     /// to resonance processing rather than guessed at, and a covariance grid
     /// that stops short of the spectrum can be checked against where the rate
     /// actually is.
@@ -1120,7 +1120,7 @@ mod tests {
     ///
     /// A rate is per atom of its parent, so ranking on it promotes whatever
     /// sits on a trace isotope: on the FNS tungsten foil `W180(n,2n)` has the
-    /// highest per-atom rate in the foil and W180 is 0.12% of it (issue #6).
+    /// highest per-atom rate in the foil and W180 is 0.12% of it.
     #[test]
     fn isomeric_branching_orders_by_production_not_by_rate() {
         let mut results = TransmutationResults::new(vec![1.0]);

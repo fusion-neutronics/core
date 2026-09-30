@@ -5,7 +5,8 @@
 //! NVIDIA's Vulkan driver tolerates it; AMD/RADV correctly rejects it
 //! and the kernel returns garbage. See:
 //! - Mesa work item: <https://gitlab.freedesktop.org/mesa/mesa/-/work_items/15359>
-//! - cubecl issue #1316: <https://github.com/tracel-ai/cubecl/issues/1316>
+//! - cubecl-spirv lowers f64 `ln`/`exp` straight to GLSL.std.450 `Log`/`Exp`
+//!   with no operand-width check, and upstream has not fixed it yet.
 //!
 //! Until cubecl-spirv emits a polyfill at codegen time, yamc-gpu does
 //! it at the source level. These functions use only ops we've validated
@@ -328,7 +329,7 @@ pub fn atan_full(t: f64) -> f64 {
 
 /// `atan2(y, x)` polyfill, ~1e-13 vs libm. cubecl-spirv has no validated
 /// `atan`/`atan2` lowering on the AMD/RADV f64 path, and the cylindrical mesh
-/// binning needs `φ = atan2(y, x)` on the track-length walk (issue #279). Builds
+/// binning needs `φ = atan2(y, x)` on the track-length walk. Builds
 /// on [`atan_full`] with the standard quadrant assembly from the signs of x, y.
 #[cube]
 pub fn atan2_f64(y: f64, x: f64) -> f64 {
@@ -401,8 +402,8 @@ fn atan2_polyfill_kernel(y_in: &[f64], x_in: &[f64], output: &mut [f64]) {
     output[ABSOLUTE_POS] = atan2_f64(y_in[ABSOLUTE_POS], x_in[ABSOLUTE_POS]);
 }
 
-/// Probe: f64 → i64 → f64 round-trip -- verifies cubecl issue #1317
-/// (the original "as i64 produces garbage on AMD RADV") on 0.10f64.0.
+/// Probe: f64 → i64 → f64 round-trip -- verifies the cubecl-spirv bug where
+/// `as i64` produced garbage on AMD RADV is fixed on 0.10f64.0.
 #[cube(launch_unchecked)]
 fn i64_cast_probe(input: &[f64], output: &mut [f64]) {
     if ABSOLUTE_POS >= input.len() {
@@ -766,7 +767,7 @@ mod tests {
     }
 
     /// `atan2_f64` polyfill regression. Drives the azimuthal binning of the
-    /// cylindrical mesh DDA (`φ = atan2(y, x)`; issue #279). Native `.atan2()`
+    /// cylindrical mesh DDA (`φ = atan2(y, x)`). Native `.atan2()`
     /// has no validated cubecl-spirv lowering on the AMD/RADV f64 path, so the
     /// kernel uses this polyfill. Inputs span all four quadrants and both axes;
     /// diffs are wrapped into `[-π, π]` so a legitimate result that lands on the
@@ -838,7 +839,7 @@ mod tests {
         );
     }
 
-    /// Verify cubecl issue #1317 on 0.10f64.0: `(f64_expr) as i64` round-
+    /// Verify on 0.10f64.0 that `(f64_expr) as i64` round-
     /// trip produces correct integer values. Pre-0.10f64.0 produced
     /// garbage on AMD RADV.
     #[test]

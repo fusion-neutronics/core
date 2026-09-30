@@ -318,8 +318,8 @@ fn check_parts_cover_rates(
 /// # Errors
 /// A nuclide that has fission yields and a non-zero fission rate but no entry
 /// in `fy_weights`. Falling back to a single tabulated energy there would
-/// silently reintroduce the spectrum-independent yields of issue #379, so it is
-/// reported as the caller error it is.
+/// silently reintroduce spectrum-independent fission yields, so it is reported
+/// as the caller error it is.
 ///
 /// # Returns
 /// The matrix dimension `n` (equal to `names.len()`).
@@ -390,11 +390,10 @@ where
         // two float accumulations downstream take their order from it: `loss`
         // below sums one `rate` per kind, and every `sink` call the loop makes
         // lands in a matrix cell its caller accumulates into. Rust seeds each
-        // `HashMap` instance separately, so a fresh one here walked its kinds
-        // in a different order on each call and `Material.transmute()` returned
-        // two different inventories for identical inputs -- irregularly, within
-        // a single process, with no Monte Carlo anywhere in the path (issue
-        // #502). Sorting by kind costs nothing at these sizes and makes the
+        // `HashMap` instance separately, so a fresh one here would walk its
+        // kinds in a different order on each call and `Material.transmute()`
+        // would return different inventories for identical inputs, within a
+        // single process, with no Monte Carlo anywhere in the path. Sorting by kind costs nothing at these sizes and makes the
         // whole path bit-reproducible.
         let mut grouped: BTreeMap<&str, Vec<&ChainReaction>> = BTreeMap::new();
         for rx in &nuc.reactions {
@@ -423,8 +422,8 @@ where
                         }
                     }
                     // Add fission product contributions, folding the tabulated
-                    // yield vectors with this material's spectrum weights
-                    // (issue #379). Products are accumulated into `fy_fold`
+                    // yield vectors with this material's spectrum weights.
+                    // Products are accumulated into `fy_fold`
                     // first so each one reaches the sink once, leaving the
                     // sparsity pattern the same as a single-energy yield.
                     if rx.kind.contains("fission") {
@@ -1556,7 +1555,7 @@ mod tests {
         );
     }
 
-    // --- spectrum-weighted fission yields (issue #379) ---
+    // --- spectrum-weighted fission yields ---
 
     /// `U` fissions into `B` and `C`, with yields that swap between a thermal
     /// and a fast tabulated point. Deliberately asymmetric so a fold that
@@ -1616,7 +1615,7 @@ mod tests {
     fn fold_at_a_tabulated_energy_reproduces_that_yield_vector_exactly() {
         // A delta spectrum on a tabulated point must select that point's
         // vector alone. With the delta at 0.0253 eV this is bit-identical to
-        // the pre-#379 `yields.first()` behaviour, which also pins equivalence
+        // the single-energy `yields.first()` choice, which also pins equivalence
         // to OpenMC's ConstantFissionYieldHelper default without a mode knob.
         let chain = two_energy_fission_chain();
         let names = vec!["B".to_string(), "C".to_string(), "U".to_string()];
@@ -1704,8 +1703,8 @@ mod tests {
 
     #[test]
     fn missing_weights_are_an_error_not_a_silent_fallback() {
-        // Quietly falling back to one tabulated energy is exactly the defect
-        // of issue #379, so the builder refuses instead.
+        // Quietly falling back to one tabulated energy would make fission
+        // yields spectrum-independent, so the builder refuses instead.
         let chain = two_energy_fission_chain();
         let names = vec!["B".to_string(), "C".to_string(), "U".to_string()];
         let err = build_matrix(
@@ -1780,11 +1779,11 @@ mod tests {
         assert!(light_particle_products("(n,2n)").is_empty());
     }
 
-    /// Issue #502: `Material.transmute()` returned two different inventories
-    /// for identical inputs. The reaction kinds were grouped into a `HashMap`
-    /// and both the diagonal loss sum and the order the matrix entries were
-    /// emitted in followed its iteration order, which differs per map instance
-    /// even inside one process.
+    /// `Material.transmute()` must return the same inventory for identical
+    /// inputs. If the reaction kinds are grouped into a `HashMap`, both the
+    /// diagonal loss sum and the order the matrix entries are emitted in follow
+    /// its iteration order, which differs per map instance even inside one
+    /// process.
     ///
     /// The rates are chosen so summation order is visible in the result: `1.0 +
     /// 1e-16` rounds back to `1.0`, so adding the small terms to the large one

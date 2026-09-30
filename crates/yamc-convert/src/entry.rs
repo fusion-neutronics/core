@@ -58,7 +58,7 @@ pub enum Source<'a> {
 pub struct Provenance {
     pub library: String,
     /// The published release this output belongs to, which is what a consumer
-    /// compares a cached copy against (issue #366). Identifies the DATA, not
+    /// compares a cached copy against. Identifies the DATA, not
     /// the code.
     pub data_version: String,
     pub created_utc: String,
@@ -340,9 +340,8 @@ fn write_version(dir: &Path, provenance: &Provenance) -> Result<(), Box<dyn Erro
     // Where each (MT, temperature) record batch sits in reactions.arrow, so an
     // activation reader can range-request just the channels its chain names
     // rather than pulling the full-grid transport MTs it never looks at (8.2x
-    // less on Fe56), and a plotter just the one temperature it draws
-    // (fusion-neutronics/core#100). Absent for a photon element, which has no
-    // reactions table.
+    // less on Fe56), and a plotter just the one temperature it draws. Absent
+    // for a photon element, which has no reactions table.
     // Best-effort: the index is an optimisation, and a reader that does not
     // find one falls back to fetching the whole file. Failing a conversion over
     // it would trade a working data set for a faster one.
@@ -355,8 +354,8 @@ fn write_version(dir: &Path, provenance: &Provenance) -> Result<(), Box<dyn Erro
     }
 
     // Where each temperature's grid sits in energy.arrow, so a client that
-    // draws one temperature fetches one grid rather than every one of them
-    // (fusion-neutronics/core#100). Best-effort for the same reason.
+    // draws one temperature fetches one grid rather than every one of them.
+    // Best-effort for the same reason.
     let energy = dir.join("energy.arrow");
     if energy.exists() {
         match crate::energy_ranges::index_energy(&energy) {

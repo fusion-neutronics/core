@@ -113,7 +113,7 @@ mod arrow_tests {
     ///
     /// `lookup_grid_index` brackets the energy with two entries of
     /// `log_grid_index` and searches only between them, so a table that is
-    /// narrowed (issue #482) or out of order can return an index a full search
+    /// narrowed or out of order can return an index a full search
     /// would not, and the interpolation then runs between the wrong pair of grid
     /// points without panicking. This walks the committed fixtures' own grids
     /// and demands the accelerated answer equal the brute-force one.

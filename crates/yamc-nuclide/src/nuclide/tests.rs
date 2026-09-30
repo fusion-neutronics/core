@@ -811,9 +811,9 @@ fn test_sample_inelastic_constituent_deterministic() {
     );
 }
 
-/// Issue #106: slotting MT 11 / 29 / 30 / 35 / 36 / 42 must not renumber any
-/// stream. They used to fall into the trailing "not in the table" group, which
-/// `build_inelastic_walk_order` appends in storage order; they now sit at the
+/// Slotting MT 11 / 29 / 30 / 35 / 36 / 42 must not renumber any stream.
+/// Unslotted MTs fall into the trailing "not in the table" group, which
+/// `build_inelastic_walk_order` appends in storage order; these sit at the
 /// end of the table in ascending MT order. Since libraries store reactions in
 /// ascending MT order, the walk is the same sequence either way, so a fixed
 /// `xi_mt` still selects the same channel as before.
@@ -848,7 +848,7 @@ fn breakup_mts_keep_their_position_in_the_walk() {
     for &mt in &walked {
         assert!(
             INELASTIC_MT_SLOTS.contains(&mt),
-            "MT {mt} should be slotted after issue #106"
+            "MT {mt} should be slotted in INELASTIC_MT_SLOTS"
         );
     }
     let table_order: Vec<i32> = INELASTIC_MT_SLOTS

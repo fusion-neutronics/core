@@ -1,4 +1,4 @@
-//! GPU lost-particle detection (issue #289), on-hardware.
+//! GPU lost-particle detection, on-hardware.
 //!
 //! A particle whose position is inside no cell is *lost*: the geometry does not
 //! cover the space it reached. The CPU refuses to run such a model past

@@ -1,4 +1,4 @@
-//! Regression for the #111 fission sub-step (CPU fission chi routed through the
+//! Regression for the unified fission sub-step (CPU fission chi routed through the
 //! shared `yamc_physics::gpu::flat` fission-spectrum samplers + the per-particle
 //! PCG stream).
 //!

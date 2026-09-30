@@ -1,4 +1,4 @@
-//! Which subset of a nuclide's Arrow data a caller needs (issue #389).
+//! Which subset of a nuclide's Arrow data a caller needs.
 //!
 //! `Material.transmute()` runs no transport, so it reads only the union energy
 //! grid and the per-MT cross sections of the reactions its chain names. The

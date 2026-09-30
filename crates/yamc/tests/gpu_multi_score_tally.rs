@@ -1,4 +1,4 @@
-//! GPU support for several scores on one tally (issue #271), on-hardware.
+//! GPU support for several scores on one tally, on-hardware.
 //!
 //! `score` is the OUTERMOST dimension of the CPU's 7D bin layout, with a stride
 //! equal to the whole remaining block (`Tally::get_bin_index_7d`). So the

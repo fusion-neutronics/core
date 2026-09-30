@@ -179,8 +179,8 @@ pub struct ShieldingInfo {
     /// Nuclides a dilute run did not shield that look like they needed it,
     /// with the strongest suppression each could have seen.
     ///
-    /// Populated only when no chord was given, which is the case #564 objects
-    /// to: today such a run over-predicts silently. This turns the silence into
+    /// Populated only when no chord was given, the case where a run would
+    /// otherwise over-predict silently. This turns the silence into
     /// a statement without inventing the geometry that would be needed to act
     /// on it.
     pub would_shield: HashMap<String, f64>,
@@ -190,9 +190,8 @@ impl ShieldingInfo {
     /// Fold another spectrum's report into this one.
     ///
     /// A schedule may name more than one spectrum, and each is collapsed
-    /// separately. The driver used to assign the report of each over the last,
-    /// so with two spectra only the second one's nuclides were ever named --
-    /// which is the whole point of #564's report, silently halved. Issue #576.
+    /// separately. Assigning the report of each over the last would name only
+    /// the second one's nuclides and silently halve the report.
     ///
     /// Every field folds the way it is built: the two maps are keyed by nuclide
     /// and take the strongest claim, `shielded` is a set of names in first-seen

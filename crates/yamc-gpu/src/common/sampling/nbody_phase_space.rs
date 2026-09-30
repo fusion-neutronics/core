@@ -21,7 +21,7 @@
 //! `mu_valid == 0`). The mu draw happens only when the energy denominator
 //! `x + y > 0` (`mu_valid == 1`), matching the flat twin
 //! `yamc_physics::gpu::flat::nbody_phase_space`, which returns `None` (no mu
-//! draw) for the degenerate `x + y <= 0` case (issue #107). The energy is
+//! draw) for the degenerate `x + y <= 0` case. The energy is
 //! applied only when `x + y > 0` and the result is `> 0` (`e_valid == 1`).
 //! With the PCG's `(0, 1)` uniforms `x_m` is a strictly positive sum of
 //! `-ln(xi)` terms, so `x + y > 0` always holds in practice; the guard exists
@@ -158,7 +158,7 @@ pub fn sample_nbody_phase_space(
                 // ONLY when the energy denominator `x + y > 0`, matching the
                 // flat twin `yamc_physics::gpu::flat::nbody_phase_space`,
                 // which returns `None` (no mu draw) for the degenerate
-                // `x + y <= 0` case (issue #107). With the PCG's `(0, 1)`
+                // `x + y <= 0` case. With the PCG's `(0, 1)`
                 // uniforms `x_m` is a strictly positive sum of `-ln(xi)`
                 // terms, so this branch is always taken in practice; the
                 // guard keeps the kernel and twin bit-identical regardless.
@@ -257,7 +257,7 @@ pub fn sample_nbody_phase_space_cpu(
                     e_valid = 1;
                 }
 
-                // Mu drawn ONLY when `x + y > 0` (issue #107), matching the
+                // Mu drawn ONLY when `x + y > 0`, matching the
                 // `#[cube]` kernel above and the flat twin's early-return.
                 let (xi_nb_mu, s) = draw_uniform_cpu(state);
                 state = s;

@@ -1,8 +1,7 @@
 # Speeding up `Material.transmute()`
 
-The result of working through [issue #576](https://github.com/fusion-neutronics/core/issues/576),
-one finding per pull request, each measured against the one before it and each
-proved to leave the inventories bit-identical.
+Twelve numbered findings, each applied on its own, measured against the one
+before it and proved to leave the inventories bit-identical.
 
 ## What was measured
 
@@ -51,7 +50,7 @@ python tools/plot_transmute_bench.py               # this table and the graph
 
 ## Reading it
 
-Four things carry almost all of it, and they are not the four the issue
+Four things carry almost all of it, and they are not the four that were
 expected:
 
 - **finding 1a** (bisect for a group's evaluation points instead of rescanning
@@ -72,10 +71,11 @@ such rather than quietly claimed:
   measures as noise, because the cross-crate call it was supposed to inline --
   `Reaction::cross_section_at` -- already carries `#[inline]`.
 - **finding 8**'s four items together are worth about 5 ms of a 2.5 s call. The
-  issue put `reaction_type_to_mt` alone at 40-60 ms; the whole of
-  `activation_mts` measures 0.2 ms. What *did* pay in that PR was the same
-  bisection applied to the branching fold's own integrator, which #576 does not
-  mention: the isomeric-branching overlay went from 0.35 s to 0.08 s per call.
+  estimate put `reaction_type_to_mt` alone at 40-60 ms; the whole of
+  `activation_mts` measures 0.2 ms. What *did* pay in that step was the same
+  bisection applied to the branching fold's own integrator, which was not one
+  of the findings: the isomeric-branching overlay went from 0.35 s to 0.08 s
+  per call.
 - **finding 2** (one walk per group, skip empty groups) is a wash on a spectrum
   that fills the structure. It is 64x on the collapse for a monoenergetic 14 MeV
   source in CCFE-709, which is the case it exists for.
@@ -105,7 +105,8 @@ Every step is **bit-identical** to `vanilla`:
 One thing had to be fixed before any of that could be checked at all:
 `Material::nuclides` is a `HashMap`, and `get_atoms_per_barn_cm` summed the
 fractions straight out of it, so 103 of 200 final densities disagreed at ~1e-15
-between one process and the next. That is the same defect as #502, one layer up.
+between one process and the next. That is the same `HashMap` iteration-order
+defect as the transmutation matrix had, one layer up.
 
 ## Build flags, measured
 
@@ -139,8 +140,7 @@ and that is only obvious once someone has measured it.
 
 ## Explicitly out of scope: checked, and wrong to do
 
-Carried over from issue #576 so the negative results survive the issue being
-closed. The first one is a wrong-answer trap rather than a missed optimisation.
+Recorded so the negative results are not lost. The first one is a wrong-answer trap rather than a missed optimisation.
 
 - **Parallelising the 24 CRAM poles.** `crates/yani/src/cram.rs` is the
   *incomplete partial fraction* form: `y` is seeded from `n0`, each pole's

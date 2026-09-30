@@ -1,4 +1,4 @@
-//! Statistical uncertainty on transport-tallied reaction rates (issue #140).
+//! Statistical uncertainty on transport-tallied reaction rates.
 //!
 //! A reaction rate from transport is a Monte Carlo estimate, and the rates of
 //! one material are estimated from the same histories, so they are correlated:

@@ -3,7 +3,7 @@
 Skipped unless yamc was built with the ``mpi`` feature and ``mpirun`` is
 available. Launches ``verify_mpi_max_runtime.py`` under ``mpirun -n 2``: the
 script runs a wall-time-bounded simulation whose only stop condition is the
-collective ``max_runtime`` early-stop (#230). A per-rank (non-collective)
+collective ``max_runtime`` early-stop. A per-rank (non-collective)
 break would deadlock the post-loop gather collectives, so a clean return with
 rank 0 carrying histories is the proof the stop bit is agreed collectively.
 """

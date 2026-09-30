@@ -21,7 +21,7 @@ Outputs:
 
 import yamc
 
-# Pull cross-section data from the R2 mirror (the URL switch from PR #168).
+# Pull cross-section data from the R2 mirror.
 # First run downloads + caches per-nuclide tarballs under ~/.cache/yamc/.
 yamc.cross_section_data = "endf-b8.1"
 

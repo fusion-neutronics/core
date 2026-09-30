@@ -1,9 +1,9 @@
 //! A schedule with two spectra must report on both of them.
 //!
 //! The driver assigned each spectrum's [`ShieldingInfo`] over the last, so with
-//! two spectra only the second one's nuclides were ever named. #564's whole
-//! point is that report -- what a dilute run did not correct for -- and it was
-//! silently halved by any schedule that switched spectrum. Issue #576.
+//! two spectra only the second one's nuclides were ever named. The report says
+//! what a dilute run did not correct for, and it was silently halved by any
+//! schedule that switched spectrum.
 //!
 //! Built so the two spectra genuinely disagree: one puts all its flux in the
 //! resonance region, where Fe56 has structure and the indicator fires, and the

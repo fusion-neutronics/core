@@ -1,4 +1,4 @@
-//! Issue #370: the free-gas elastic kernel against OpenMC's, via the equilibrium
+//! The free-gas elastic kernel against OpenMC's, via the equilibrium
 //! of a collision chain.
 //!
 //! Repeatedly scattering one neutron off a free gas drives a Markov chain whose
@@ -92,10 +92,9 @@ const OPENMC_EQUILIBRIUM_KT: f64 = 1.7502;
 
 /// The free-gas kernel must land on the same equilibrium as OpenMC's.
 ///
-/// This is the test that exonerated the kernel for #370: yamc settles at 1.7476 kT
-/// against OpenMC's 1.7502 kT, a 0.15% agreement, so the 0.4% H1 excess the V&V
-/// reports in the 0.1 to 0.414 eV bin does NOT come from the target-velocity
-/// sampling.
+/// yamc settles at 1.7476 kT against OpenMC's 1.7502 kT, a 0.15% agreement, so
+/// the 0.4% H1 excess the V&V reports in the 0.1 to 0.414 eV bin does NOT come
+/// from the target-velocity sampling.
 ///
 /// Measured sensitivity: making the sampled target 3% hotter moves the equilibrium
 /// to 1.8005 kT and trips this. It does NOT catch a constant rescaling of the
@@ -113,7 +112,7 @@ fn equilibrium_matches_openmcs_kernel() {
         (mean_kt - OPENMC_EQUILIBRIUM_KT).abs() < 0.01 * OPENMC_EQUILIBRIUM_KT,
         "free-gas equilibrium is {mean_kt:.4} kT against OpenMC's \
          {OPENMC_EQUILIBRIUM_KT:.4} kT. The two kernels sample the same target \
-         velocity distribution, so they must share a fixed point (#370)"
+         velocity distribution, so they must share a fixed point"
     );
 }
 
@@ -159,7 +158,7 @@ fn equilibrium_spectrum_is_smooth_and_unimodal() {
                 cur * tol >= prev,
                 "equilibrium spectrum dips at bin {k} ([{:.3e}, {:.3e}] eV) below the \
                  peak: density {cur:.4e} against {prev:.4e}. A hole here means a \
-                 rejection branch is dropping part of the target distribution (#370)",
+                 rejection branch is dropping part of the target distribution",
                 edges[k],
                 edges[k + 1]
             );
@@ -167,7 +166,7 @@ fn equilibrium_spectrum_is_smooth_and_unimodal() {
             assert!(
                 prev * tol >= cur,
                 "equilibrium spectrum rises at bin {k} ([{:.3e}, {:.3e}] eV) above the \
-                 peak: density {cur:.4e} against {prev:.4e} (#370)",
+                 peak: density {cur:.4e} against {prev:.4e}",
                 edges[k],
                 edges[k + 1]
             );
@@ -197,7 +196,7 @@ fn hydrogen_never_falls_back_to_a_stationary_target() {
         assert!(
             did_run,
             "H1 at {e:.3e} eV took the stationary-target path; awr = {AWR_H1} is below 1 \
-             so the threshold must not apply (#370)"
+             so the threshold must not apply"
         );
     }
     // A heavy target above the threshold must take the stationary path.
@@ -225,13 +224,13 @@ fn hydrogen_never_falls_back_to_a_stationary_target() {
 /// with them.
 ///
 /// Unlike `OPENMC_EQUILIBRIUM_KT`, which is a cross-code bound, this one IS an
-/// identity, which makes it the right shape of test for issue #478: a material at
-/// 900 K whose kernel is handed 294 K settles at 1.75 kT(294) rather than
+/// identity, which makes it the right shape of test for a temperature mix-up: a
+/// material at 900 K whose kernel is handed 294 K settles at 1.75 kT(294) rather than
 /// 1.75 kT(900), a factor of 3.1 too cold, and no amount of internal consistency
 /// would reveal it.
 ///
 /// What this does NOT bound: which temperature `Material` hands to the kernel.
-/// That is the plumbing #478 broke, and it is pinned by
+/// That plumbing is pinned by
 /// `temperature_k_tracks_the_label` over in yamc-materials.
 #[test]
 fn equilibrium_in_kt_does_not_depend_on_temperature() {
@@ -247,7 +246,7 @@ fn equilibrium_in_kt_does_not_depend_on_temperature() {
             (mean_kt - reference).abs() < 0.01 * reference,
             "equilibrium is {mean_kt:.4} kT at {temperature_k} K against \
              {reference:.4} kT at 294 K. The kernel is a function of E/kT alone, \
-             so these must agree (#478)"
+             so these must agree"
         );
     }
 }

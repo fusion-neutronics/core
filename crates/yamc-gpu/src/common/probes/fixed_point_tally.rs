@@ -4,7 +4,7 @@
 //! into per-cell tally accumulators. Direct `Atomic<f64>::fetch_add`
 //! isn't available on AMD/RADV (`atomic_f64.rs`), and when this was
 //! designed the obvious fallback `Atomic<u64>::compare_exchange_weak`
-//! panicked in cubecl-spirv (`atomic_u64_cas.rs`, cubecl#1318, working
+//! panicked in cubecl-spirv (`atomic_u64_cas.rs`, an upstream bug, working
 //! again since cubecl 0.11.0-pre.3). Plain `Atomic<u64>::fetch_add`
 //! does work (`atomic_u64_add.rs`), needs no retry loop, and so stays
 //! the accumulator. The shape is:
@@ -58,7 +58,7 @@ fn fixed_point_tally_kernel(contributions: &[f64], accumulator: &mut [Atomic<u64
     // Round-to-nearest via floor(x*S + 0.5). i64 cast (not i32) because
     // contributions can scale up: x ~ 100 with S = 2^30 gives ~1e11,
     // beyond i32. cubecl-spirv's f64 -> i64 cast was buggy elsewhere
-    // (cubecl#1317) but was specifically wrong on a value-not-pattern
+    // (garbage values on AMD RADV) but was specifically wrong on a value-not-pattern
     // path; here we emit the cast directly with no further math, which
     // is the common compiler-supported case.
     let scaled = x * TALLY_SCALE;

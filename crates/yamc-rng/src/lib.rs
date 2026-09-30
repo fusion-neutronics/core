@@ -1,5 +1,5 @@
 //! 64-bit PCG (PCG-XSH-RR 64/32) random number generator shared between the
-//! CPU transport path and the GPU CPU-companion path (issue #111 / #274).
+//! CPU transport path and the GPU CPU-companion path.
 //!
 //! The CPU companion in `yamc-gpu` must produce the same bit pattern as the
 //! cubecl kernel. The kernel uses these constants as `u64` literals inside
@@ -9,13 +9,13 @@
 //! change propagates to both call sites. This crate is a leaf with no
 //! dependencies precisely so every backend can reach the one stream.
 //!
-//! # Why 64-bit state (issue #274)
+//! # Why 64-bit state
 //!
-//! The generator previously kept a 32-bit state (period `2^32`), whose limited
-//! equidistribution over-disperses the rare tail that dominates an absorbing /
-//! deep-penetration tally's variance -- inflating the reported std_dev (means
-//! stayed unbiased) versus the CPU's 64-bit `FastRng` outer loop. Moving to a
-//! 64-bit state (PCG-XSH-RR 64->32, period `2^64`, the same LCG constants as
+//! A 32-bit state (period `2^32`) has limited equidistribution, which
+//! over-disperses the rare tail that dominates an absorbing /
+//! deep-penetration tally's variance, inflating the reported std_dev (means
+//! stay unbiased) versus the CPU's 64-bit `FastRng` outer loop. A 64-bit
+//! state (PCG-XSH-RR 64->32, period `2^64`, the same LCG constants as
 //! `FastRng`) removes that gap while keeping the shared CPU/GPU stream
 //! bit-identical (both seed via [`expand_seed`] and step this same generator).
 //!
@@ -29,8 +29,8 @@ pub const PCG_INCR: u64 = 1_442_695_040_888_963_407;
 /// Expand a 32-bit per-history seed into a well-mixed 64-bit PCG state via
 /// splitmix64. The CPU driver and the GPU kernel MUST apply this identically to
 /// the SAME per-history seed (always built by [`history_seed`]) so the two
-/// backends consume the identical 64-bit stream and the #40 per-history
-/// bit-identity holds.
+/// backends consume the identical 64-bit stream and the matched-stream
+/// per-history bit-identity holds.
 #[inline]
 pub fn expand_seed(seed: u32) -> u64 {
     let mut z = (seed as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -66,7 +66,7 @@ pub fn fold_base_seed(base_seed: u64) -> u32 {
     (z ^ (z >> 32)) as u32
 }
 
-/// THE single definition of per-history collision seeding (issue #315).
+/// THE single definition of per-history collision seeding.
 ///
 /// Every backend derives a history's collision-physics RNG state as
 /// `expand_seed(history_seed(base_seed, global_index))`:
@@ -76,7 +76,7 @@ pub fn fold_base_seed(base_seed: u64) -> u32 {
 ///   (`sample_initial_particles_for_batch` / `_for_chunk`) and consumed by the
 ///   cubecl kernel as `expand_seed(seeds[i])`.
 ///
-/// Both call this function, so the two backends cannot drift and the issue-#40
+/// Both call this function, so the two backends cannot drift and the
 /// matched-stream per-history bit-identity holds by construction.
 ///
 /// # Shape
@@ -92,11 +92,11 @@ pub fn fold_base_seed(base_seed: u64) -> u32 {
 /// * For a fixed base seed it is injective in `global_index` (mod `2^32`): the
 ///   multiply is by an odd constant and the XOR is by a constant, so both steps
 ///   are bijections and no two histories of a run share a stream (up to `2^32`
-///   histories, unchanged from before).
-/// * Changing `base_seed` changes every history's collision stream. Before #315
-///   the base seed was absent here, so re-running with a different `seed`
-///   re-sampled only the source birth (the `FastRng` stream) and left every
-///   collision realisation identical, which made a multi-seed spread a severe
+///   histories).
+/// * Changing `base_seed` changes every history's collision stream. Without
+///   the base seed here, re-running with a different `seed` would re-sample
+///   only the source birth (the `FastRng` stream) and leave every collision
+///   realisation identical, which makes a multi-seed spread a severe
 ///   under-estimate of the run-to-run error.
 ///
 /// # Limit of a 32-bit per-history seed
@@ -106,8 +106,7 @@ pub fn fold_base_seed(base_seed: u64) -> u32 {
 /// `N^2 / 2^32` collision streams by the birthday argument (about 230 of a
 /// million, 0.02%, and those histories are born differently anyway because the
 /// `FastRng` source stream also moved). That floor belongs to the seed WIDTH,
-/// not to this mixing function: any 32-bit per-history key has it. Before #315
-/// the overlap between two runs was 100%.
+/// not to this mixing function: any 32-bit per-history key has it.
 #[inline]
 pub fn history_seed(base_seed: u64, global_index: u64) -> u32 {
     fold_base_seed(base_seed) ^ (global_index as u32).wrapping_mul(HISTORY_SEED_GOLDEN)
@@ -124,7 +123,7 @@ pub const SECONDARY_SEED_MIX_A: u32 = 0x85EB_CA6B;
 /// Second multiplier of the finaliser in [`secondary_seed`].
 pub const SECONDARY_SEED_MIX_B: u32 = 0xC2B2_AE35;
 
-/// THE single definition of per-SECONDARY collision seeding (issue #111).
+/// THE single definition of per-SECONDARY collision seeding.
 ///
 /// An (n,xn) reaction produces extra neutrons that both backends transport
 /// INSIDE the parent history: the CPU banks them on a LIFO stack
@@ -222,7 +221,7 @@ mod tests {
         );
     }
 
-    /// Issue #315: the base seed must reach the collision stream. Two runs that
+    /// The base seed must reach the collision stream. Two runs that
     /// differ only in `TransportSettings::seed` must give every history a
     /// different PCG state, otherwise a multi-seed spread measures only the
     /// source sampling.
@@ -339,7 +338,7 @@ mod tests {
         }
     }
 
-    /// The whole point of issue #111's phase 1: the seed of a secondary depends
+    /// The whole point of per-secondary seeding: the seed of a secondary depends
     /// only on the tree it sits in, never on the order the tree is walked. This
     /// replays the same emission tree under a LIFO drain (the CPU bank) and a
     /// FIFO drain (the GPU's in-thread queue) and demands the same seed for the

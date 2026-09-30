@@ -81,8 +81,8 @@ def test_asking_for_decay_branching_reports_disjoint_categories():
 
     Which parent lands in which category, and the realised spread of a
     draw, are pinned on a synthetic chain in the Rust tests. The local
-    fixture chain carries no branching sigmas yet (they arrive with the
-    #172 republish), so here every category may be empty and this is a
+    fixture chain carries no branching sigmas yet (they arrive with a
+    later republish), so here every category may be empty and this is a
     boundary smoke test of the report keys only.
     """
     info = _info(["decay_branching"])

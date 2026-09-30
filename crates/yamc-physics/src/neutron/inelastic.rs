@@ -147,7 +147,7 @@ pub fn rotate_direction<R: rand::Rng>(
 }
 
 /// Sample a DISCRETE inelastic level (MT 51-90) with closed-form-Q kinematics on
-/// the shared per-particle PCG `state` (issue #111 sub-step 3).
+/// the shared per-particle PCG `state`.
 ///
 /// Bit-identical to the GPU twin: the CM outgoing energy uses the same
 /// closed-form Q formula (yamc-gpu shared.rs `e_cm = mass_ratio*(E_in - threshold)`,

@@ -1,6 +1,6 @@
 //! 2-D constrained Delaunay triangulation (CDT).
 //!
-//! Recovering a flat boundary FACE in the 3-D volume mesher (issue #31) reduces
+//! Recovering a flat boundary FACE in the 3-D volume mesher reduces
 //! to a 2-D problem: the face's vertices are coplanar, and we need a
 //! triangulation of that plane in which every boundary SEGMENT of the face is
 //! an edge. The 3-D bipyramid edge-removal (`flip_ring_general`) provably cannot
@@ -23,7 +23,7 @@
 use super::dethash::{HashMap, HashSet};
 
 /// Twice the signed area of triangle (a, b, c); > 0 iff CCW. EXACT (Shewchuk):
-/// the flat-face inputs this module exists for (issue #31) are full of
+/// the flat-face inputs this module exists for are full of
 /// collinear triples - straight subdivided cap edges - where the naive f64
 /// determinant returns noise instead of 0. Every orientation decision in this
 /// module (crossing tests, flip convexity) goes through this predicate.
@@ -136,7 +136,7 @@ pub(super) struct Mesh {
 /// One logged diagonal flip: the quad's OLD diagonal (s1, s2) was replaced by
 /// the NEW diagonal (x, y) - i.e. triangles (s1,s2,x), (s1,s2,y) became
 /// (x,y,s1), (x,y,s2). Indices are vertex indices of the mesh's point list.
-/// The 3-D caller (issue #31 coplanar-region recovery) replays a flip log as a
+/// The 3-D caller (coplanar-region recovery) replays a flip log as a
 /// stack of zero-volume tets {s1,s2,x,y}: each 2-D flip IS one flat tet whose
 /// bottom faces are the pre-flip triangle pair and whose top faces are the
 /// post-flip pair - the classic triangulation-flip ↔ stacked-tet
@@ -157,7 +157,7 @@ impl Mesh {
     /// the caller's, no offset). Each triangle is re-oriented CCW; adjacency is
     /// built from an edge map. Returns None when the input is not a valid
     /// 2-manifold triangulation: a zero-area triangle, or an edge shared by
-    /// more than two triangles. Used by the issue-#31 coplanar-region recovery
+    /// more than two triangles. Used by the coplanar-region recovery
     /// to load the 3-D mesh's in-plane sheet triangulations for 2-D flipping.
     pub(super) fn from_triangulation(pts: &[[f64; 2]], tris: &[[usize; 3]]) -> Option<Mesh> {
         let mut mesh = Mesh {
@@ -829,7 +829,7 @@ mod tests {
     #[test]
     fn lshaped_cap_cascade_recovery() {
         // The exact dumped region where recovery of (13,15) stalled on
-        // LShaped@1.25 (issue #31): geometric-grading cascades make the first
+        // LShaped@1.25: geometric-grading cascades make the first
         // crossing edges unflippable (collinear quads) while a later one IS
         // flippable. The recovery must find it.
         let pts: Vec<[f64; 2]> = vec![
@@ -924,7 +924,7 @@ mod tests {
     fn sheet_to_sheet_transformation_via_edge_recovery() {
         // Two triangulations of the same square fan differing in both quads;
         // recovering every edge of the target reproduces it EXACTLY - the
-        // path-2 step of the #31 coplanar-region recovery.
+        // path-2 step of the coplanar-region recovery.
         let pts = [
             [0.0, 0.0],
             [1.0, 0.0],

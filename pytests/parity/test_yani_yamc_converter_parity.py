@@ -11,7 +11,7 @@ its metadata. Not a tolerance: two conversions that agree to 1e-12 are not the
 same data, and the published libraries are distributed as files.
 
 The comparison is of the DATA rather than the raw bytes, and both now hold:
-the schema metadata is built to iterate in sorted key order (issue #441), so
+the schema metadata is built to iterate in sorted key order, so
 two conversions of the same input are byte-identical and so are the two
 wheels. `test_output_is_byte_reproducible` below asserts the bytes; these
 compare the data, so that a failure says which column differs instead of
@@ -237,9 +237,9 @@ def test_output_is_byte_reproducible(tmp_path):
     "did anything actually change?" unanswerable by comparison. Both questions
     came up while deciding which nuclides needed republishing.
 
-    This used to fail. Arrow serialises schema metadata in map iteration order
-    and `std`'s `HashMap` seeds per instance, so `element.arrow` came out as one
-    of two byte patterns differing in 114 bytes (issue #441). Twelve runs is
+    Arrow serialises schema metadata in map iteration order and `std`'s
+    `HashMap` seeds per instance, so unsorted metadata makes `element.arrow`
+    come out as one of two byte patterns differing in 114 bytes. Twelve runs is
     enough to catch a two-way flip with probability 1 - 2^-11.
     """
     import hashlib

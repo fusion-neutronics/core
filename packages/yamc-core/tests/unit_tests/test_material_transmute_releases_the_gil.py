@@ -3,7 +3,7 @@
 ``Model.transmute`` has released it for as long as it has existed;
 ``Material.transmute`` was the outlier, so one call froze the whole interpreter
 and a Python-level ``ThreadPoolExecutor`` over cases could not overlap them at
-all (issue #576, finding 7).
+all.
 
 Timed rather than inspected, because there is nothing to inspect from Python:
 the observable consequence is that two solves in two threads take about as long
@@ -142,8 +142,7 @@ def test_two_solves_in_two_threads_overlap():
     lands at 0.69 of serial on a 32-core box and 0.84 on a 2-core CI runner,
     where the old `together < 1.6 * solo` form read 1.38 and 1.66 against a
     threshold of 1.60 -- passing and failing for reasons that had nothing to do
-    with the GIL (issue #344 is the same class of defect, and this test had
-    never once run in CI to show it).
+    with the GIL.
 
     Serialized on the GIL, two threads can do no better than back to back, so
     `together` would land at or above `serial`. Overlapped, it is below it.

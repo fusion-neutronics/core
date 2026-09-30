@@ -1,10 +1,10 @@
-//! Woodcock flights terminate at true vacuum exits (issue #360).
+//! Woodcock flights terminate at true vacuum exits.
 //!
 //! Delta tracking samples flights with no boundary checks, so before
 //! the fix a flight could tunnel through a vacuum boundary, cross
 //! out-of-geometry space, and land in a disjoint body that surface
 //! tracking could never reach: the modes disagreed on MEANS, the gap
-//! attenuated as exp(-sigma_maj*d), and the #351 mesh scorer deposited
+//! attenuated as exp(-sigma_maj*d), and the mesh scorer deposited
 //! into gap voxels. `woodcock_flight_exit` now checks each flight
 //! against the geometry's precomputed vacuum surfaces and kills at the
 //! first crossing whose far side is outside the defined geometry.

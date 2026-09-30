@@ -1,5 +1,5 @@
 //! Bit-identity of the CPU transport's per-collision inelastic flat cache
-//! against the GPU host extraction (issue #111, stream unification).
+//! against the GPU host extraction (stream unification).
 //!
 //! `yamc_physics::gpu::flat::inelastic_flat::InelasticFlatCache` gives the CPU
 //! transport ONE reaction's flat kinematics arrays (single slot, zero-based

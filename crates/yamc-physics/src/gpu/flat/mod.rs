@@ -12,8 +12,8 @@
 //! caller does the flat-index → per-slot slice extraction, and these
 //! functions only see one slot's data. That keeps physics here and
 //! buffer-packing concerns in yamc-gpu. Two modules are deliberately wider
-//! (issue #111, so the CPU production transport and the GPU host-side twin
-//! share one path end to end):
+//! (so the CPU production transport and the GPU host-side twin share one
+//! path end to end):
 //!   * [`inelastic_dispatch`] owns the per-(slab, MT-slot) extraction and
 //!     `eout_kind` dispatch, plus the `MT_INELASTIC_COUNT` / `EOUT_KIND_*`
 //!     constants it needs.
@@ -52,7 +52,7 @@ use yamc_nuclide::reaction_product::FissionChiFlat;
 
 /// Sample an outgoing fission / secondary chi energy from a pre-flattened
 /// [`FissionChiFlat`], dispatching to the matching flat sampler driven by the
-/// shared 64-bit PCG `state` (issue #111). Used by both the CPU transport
+/// shared 64-bit PCG `state`. Used by both the CPU transport
 /// (`yamc::transport`'s fission path) and the parity tests, so the two share
 /// one fission-chi sampling implementation. Returns `None` when the chi has no
 /// usable data ([`FissionChiFlat::None`]) or the underlying sampler exhausts
@@ -91,7 +91,7 @@ pub fn sample_fission_chi_flat(chi: &FissionChiFlat, e_in: f64, state: &mut u64)
             // Bridge: the fission-chi flat tables are still fixed-stride
             // `max_x` (the fission_eout family is migrated separately), so
             // row `i` starts at `i * max_x`. The sampler now takes a tight
-            // CSR `x_offset` (issue #104); synthesise the strided offsets.
+            // CSR `x_offset`; synthesise the strided offsets.
             let x_offset: Vec<u32> = (0..n_x.len()).map(|i| (i * *max_x) as u32).collect();
             tabulated_continuous_eout::sample_tabulated_continuous_eout(
                 e_in,
@@ -112,7 +112,7 @@ pub fn sample_fission_chi_flat(chi: &FissionChiFlat, e_in: f64, state: &mut u64)
 
 #[cfg(test)]
 mod fission_chi_flat_tests {
-    //! Parity for the flat fission-chi path (issue #111 fission sub-step):
+    //! Parity for the flat fission-chi path:
     //! `EnergyDistribution::to_fission_chi_flat` then `sample_fission_chi_flat`
     //! must reproduce the production `EnergyDistribution::sample` outgoing-energy
     //! distribution. Statistical comparison (different RNGs); validates the
@@ -197,7 +197,7 @@ mod fission_chi_flat_tests {
         // Tabulated continuous chi with `histogram_interp = true` (suppresses
         // the stochastic bracket pick + stretch), two identical incident-energy
         // rows; sampling at the low knot reduces both paths to the within-
-        // bracket CDF inversion (validated against the CPU in #114).
+        // bracket CDF inversion.
         let x = vec![1.0e5, 1.0e6, 4.0e6, 1.0e7];
         let c = vec![0.0, 0.4, 0.8, 1.0];
         let mut p = vec![0.0; 4];

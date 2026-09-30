@@ -77,7 +77,7 @@ def run_yamc_decay_photons(nuclide):
 
         # Activation products reachable from the model's materials, via the
         # reduced chain. (Discovered from the model rather than a hand-passed
-        # nuclide list; see #484.)
+        # nuclide list.)
         radionuclides = yamc.Model(
             geometry=geometry, source=source
         ).radionuclides()
@@ -170,13 +170,13 @@ def test_decay_photons_total_flux(nuclide):
         # the check robust to the exact fixed-seed realization: a 2-3% gap that
         # sits well inside the combined Monte Carlo error (e.g. z ~ 0.5) is
         # noise, not a regression, and must not fail when an unrelated RNG
-        # stream change (issue #111) reshuffles which histories land where.
-        # The gate was z > 3 until the 64-bit stream (issue #274) landed the
+        # stream change reshuffles which histories land where.
+        # The gate was z > 3 until the 64-bit stream landed the
         # Fe57 realization at exactly 2.0% / z = 3.1: a 3-sigma bar on a
         # fixed seed flips on realization luck (the same failure mode the
         # heating band in conftest documents), so decay flux uses the same
         # 4-sigma band. A real D1S normalization bug is enormous by
-        # comparison (issue #128 was a factor of 10, hundreds of sigma).
+        # comparison (a factor of 10 is hundreds of sigma).
         denom = max(abs(ref_total), abs(yamc_total))
         if denom > 0:
             rel_diff_pct = abs(yamc_total - ref_total) / denom * 100.0

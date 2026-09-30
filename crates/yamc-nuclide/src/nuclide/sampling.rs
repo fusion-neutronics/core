@@ -14,7 +14,7 @@ struct UrrReactionXs {
     /// URR-sampled ELASTIC alone. `scatter` is this plus the inelastic that went
     /// into the URR total, and the two are NOT in the smooth elastic:inelastic
     /// ratio, because the probability table modifies elastic and leaves inelastic
-    /// alone. Carried so the reaction split can use it directly (issue #372).
+    /// alone. Carried so the reaction split can use it directly.
     elastic: f64,
     fission: f64,
     /// Only read by `debug_collision` logging at call sites.
@@ -130,15 +130,14 @@ impl Nuclide {
         // whose in-band fission exceeds its capture, i.e. every fissile one --
         // U235 at 10 keV has absorption 1.06 b against fission 2.91 b, so the
         // whole in-band capture was lost and the URR-adjusted total came out ~7%
-        // low (issue #154). W184, the only URR fixture, has no fission at all,
+        // low. W184, the only URR fixture, has no fission at all,
         // which is why it never showed it.
         let xs_capture = xs_absorption;
 
         // The per-collision base seed correlates the URR band with distance
         // sampling; derive this nuclide's independent band from it so a
         // material's isotopes sample uncorrelated resonance structure and the
-        // *struck* nuclide's reaction reuses the exact band its flight used
-        // (issue #204).
+        // *struck* nuclide's reaction reuses the exact band its flight used.
         let base = urr_random.unwrap_or_else(|| rng.random::<f64>());
         let r = crate::urr::urr_nuclide_random(base, self.urr_stream_key());
 
@@ -673,7 +672,7 @@ impl Nuclide {
     }
 
     /// Reaction-channel partial cross-sections `(sigma_e, sigma_a, sigma_i,
-    /// sigma_f)` for the analog reaction-type split (issue #111), computed by
+    /// sigma_f)` for the analog reaction-type split, computed by
     /// exactly mirroring [`Self::sample_reaction_type`]'s cross-section lookup
     /// and URR adjustment, then splitting the scattering bucket into elastic
     /// (MT 2) and inelastic by the smooth elastic/scatter ratio. The four
@@ -755,9 +754,9 @@ impl Nuclide {
         // elastic and 46% short on inelastic. Averaged over bands the elastic mean
         // survives (the tables preserve it) but the per-band correlation with the
         // flux does not, which is the self-shielding the tables exist to model.
-        // Issue #372: this is what put every URR-bearing nuclide at the top of the
+        // Ignoring the band puts every URR-bearing nuclide at the top of the
         // V&V outlier list (Fe58 chi2/dof 20, Mn55 11, Ni62 4.7) while every
-        // non-URR nuclide sat at ~1.1.
+        // non-URR nuclide sits at ~1.1.
         //
         // Out of band, fall back to the smooth ratio as before.
         let sigma_e = match urr_elastic {
@@ -775,7 +774,7 @@ impl Nuclide {
     }
 
     /// The elastic (MT 2) reaction, if present, for the analog reaction-type
-    /// split (issue #111): once `xi2` selects the elastic channel directly, the
+    /// split: once `xi2` selects the elastic channel directly, the
     /// caller needs the MT 2 `Reaction` to fetch its angular table. Returns the
     /// same `&Reaction` `sample_scattering_constituent` would yield for MT 2.
     pub fn elastic_reaction(&self, temperature: &str) -> Option<&Reaction> {
@@ -785,8 +784,8 @@ impl Nuclide {
     }
 
     /// Select a non-elastic scattering constituent proportional to its smooth
-    /// cross-section, driven by a pre-drawn PCG uniform `xi_mt` in `(0, 1]`
-    /// (issue #111). Used by the analog inelastic branch after `xi2` has decided
+    /// cross-section, driven by a pre-drawn PCG uniform `xi_mt` in `(0,
+    /// 1]`. Used by the analog inelastic branch after `xi2` has decided
     /// elastic-vs-inelastic, replacing the elastic/inelastic part of
     /// `sample_scattering_constituent` on the shared PCG stream.
     pub fn sample_inelastic_scatter_reaction(
@@ -894,8 +893,8 @@ impl Nuclide {
     }
 
     /// The nuclide's delayed-neutron groups: their yields `nu_d,g(E)` and the
-    /// yield-weighted fold of their spectra, resolved on first call and cached
-    /// (issue #364). `None` means the evaluation carries no delayed data.
+    /// yield-weighted fold of their spectra, resolved on first call and cached.
+    /// `None` means the evaluation carries no delayed data.
     ///
     /// Delayed neutrons come from the fission products' decay, so they belong to
     /// fission as a whole rather than to a chance-fission channel, and ENDF hangs
@@ -919,7 +918,7 @@ impl Nuclide {
 
     /// Sample which fission reaction to use, proportional to the non-redundant
     /// partial fission cross sections (MT 18, 19, 20, 21, 38), driven by a PCG
-    /// uniform in `(0, 1]` that `draw_xi` supplies (issue #418).
+    /// uniform in `(0, 1]` that `draw_xi` supplies.
     ///
     /// `draw_xi` is called at most once, and only when there is more than one
     /// channel to choose between. See [`FastXSGrid::sample_fission_reaction`] for

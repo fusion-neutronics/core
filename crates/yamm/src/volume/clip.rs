@@ -1,8 +1,8 @@
-//! Convex-cell clipping, for the exact cut-cell fill (issue #136).
+//! Convex-cell clipping, for the exact cut-cell fill.
 //!
 //! THE PROBLEM. `mesh_volume_delaunay`'s centroid filter keeps or drops each tet
 //! WHOLESALE, so a tet the boundary passes through has its volume counted
-//! entirely or not at all. Measured over ten zoo solids (#147), that is an exact
+//! entirely or not at all. Measured over ten zoo solids, that is an exact
 //! predictor of an inexact fill: zero cut tets iff the fill error is at machine
 //! precision. BlanketModule carries 11208 of its 12576 units of enclosed volume
 //! on cut tets and is 5.4% short; AnnularSector is 5.0% cut and 0.43% short.
@@ -22,25 +22,24 @@
 //! those edges also overlap the tet, so their planes are in the set.
 //!
 //! Unlike the conforming carve this needs no Delaunay property and no
-//! convergence, which is exactly why the carve cannot get here (it diverges,
-//! #139).
+//! convergence, which is exactly why the carve cannot get here (it diverges).
 //!
-//! Plane counts per cut tet were measured before any of this was written (#136
-//! step 0): k <= 3 for BlanketModule, NestedCylinder and ToroidalSector, with
+//! Plane counts per cut tet were measured before any of this was written:
+//! k <= 3 for BlanketModule, NestedCylinder and ToroidalSector, with
 //! AnnularSector the outlier at k <= 14 because its boundary carries sub-degree
 //! sliver triangles.
 
 use super::predicates3d::{orient_3d, tet_volume};
 
-/// Vertices snapped onto a cut plane. Diagnostic for #151.
+/// Vertices snapped onto a cut plane. Diagnostic for clip sliver cells.
 pub(super) static SNAPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Snap tolerance as a fraction of the cell's own diagonal: a vertex within this
 /// distance of a cut plane is treated as lying on it. Overridable with
 /// YAMM_CLIP_SNAP (0 disables).
 ///
-/// CALIBRATED by sweep, not chosen by taste - the same discipline that caught a
-/// bad work bound in #142 and a REGION_CAP that could never bind in #144:
+/// CALIBRATED by sweep, not chosen by taste - the same discipline that catches
+/// a bad work bound or a cap that can never bind:
 ///
 ///   snap        AnnularSector min-vol   tets    fill err
 ///   0 (off)     3.860e-09               12940   1.310e-14
@@ -59,8 +58,7 @@ pub(super) static SNAPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::A
 ///
 /// It does nothing for BlanketModule, whose result is unchanged at every value -
 /// none of its 45086 crossings lands near a vertex (closest 6.632e-3 of an edge),
-/// so its thin cells come from cuts near a tet EDGE and are a separate matter
-/// (#151).
+/// so its thin cells come from cuts near a tet EDGE and are a separate matter.
 fn snap_rel() -> f64 {
     static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
@@ -73,7 +71,7 @@ fn snap_rel() -> f64 {
 
 /// Smallest dihedral angle of a tet, in radians. Used to pick a fan apex, so only
 /// the ordering matters, but a real angle keeps the score interpretable against
-/// the numbers in #151.
+/// measured dihedral angles.
 fn min_dihedral(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) -> f64 {
     let sub = |p: [f64; 3], q: [f64; 3]| [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
     let cr = |u: [f64; 3], v: [f64; 3]| {
@@ -113,9 +111,9 @@ fn min_dihedral(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) -> f64 {
 }
 
 /// Smallest `min(t, 1-t)` seen over all edge crossings, scaled by 1e9 and stored
-/// as an integer so it can live in an atomic. Diagnostic for #151: a crossing that
-/// lands close to an endpoint is what produces a sliver cell, so this distribution
-/// is what a snap tolerance has to be chosen against.
+/// as an integer so it can live in an atomic. Diagnostic: a crossing that lands
+/// close to an endpoint is what produces a sliver cell, so this distribution is
+/// what a snap tolerance has to be chosen against.
 pub(super) static CROSSING_MIN_T_E9: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(u64::MAX);
 /// Crossings whose `min(t, 1-t)` fell below 1e-3, 1e-6 and 1e-9 respectively.
@@ -195,13 +193,13 @@ impl ConvexCell {
     /// rather than fixed at vertex 0. Any vertex of a convex cell partitions it,
     /// so this costs nothing in exactness or element count - the fan from a good
     /// apex has the same number of tets as the fan from a bad one - and it is the
-    /// only lever on #151 that touches BlanketModule, whose crossings are all
+    /// only sliver-cell lever that touches BlanketModule, whose crossings are all
     /// healthy (closest to a vertex: 6.632e-3 of an edge) yet whose smallest tet
     /// volume still fell to 7.8e-9. A thin tet there comes from fanning a face
     /// the apex is nearly coplanar with, which choosing the apex avoids.
     ///
     /// Emitted tets are POSITIVELY oriented, which `mesh_volume` requires at its
-    /// emission boundary (issue #108). Zero-volume fan triangles are skipped
+    /// emission boundary. Zero-volume fan triangles are skipped
     /// rather than emitted for `drop_degenerate_tets` to sweep up later.
     pub fn tetrahedralise(&self, voff: usize, out: &mut Vec<[usize; 4]>) {
         let apex = self.best_apex();
@@ -288,7 +286,7 @@ impl ConvexCell {
     }
 
     pub fn split_by_plane(&self, tri: &[[f64; 3]; 3]) -> (Option<ConvexCell>, Option<ConvexCell>) {
-        // SNAP (issue #151, size half). A vertex sitting a hair off the cut plane
+        // SNAP. A vertex sitting a hair off the cut plane
         // produces a crossing a hair away from it, and that is a sliver cell.
         // Measured over the clip's crossings: AnnularSector puts 6042 of 24796
         // within 1e-3 of an edge endpoint, and the count barely moves down to 1e-9
@@ -663,7 +661,7 @@ mod tests {
             let mut sum = 0.0;
             for t in &tets {
                 let v = tet_volume(pts[t[0]], pts[t[1]], pts[t[2]], pts[t[3]]);
-                // Every emitted tet must be positively oriented (issue #108).
+                // Every emitted tet must be positively oriented.
                 assert!(v > 0.0, "z={z} tet {t:?} has signed volume {v}");
                 sum += v;
             }

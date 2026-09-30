@@ -10,7 +10,7 @@
 //! unit correction at `crates/endf/src/fission_energy.rs:132-138`, and nothing
 //! here reaches it. It is pinned where it lives instead, by
 //! `crates/endf/tests/nply2_unit_guard.rs`, which is also where the suspicion
-//! that it gated early was settled: it does not (issue #17).
+//! that it gated early was settled: it does not.
 //!
 //! Neither section is reachable through `entry::convert_neutron_transport`
 //! without NJOY, so both writers are called directly. That loses nothing:
@@ -62,7 +62,7 @@ fn component_index(name: &str) -> usize {
 /// The written fission multiplicity must be the evaluation's TOTAL nu-bar.
 ///
 /// A failure means one of two things. Either the multiplicity written is the
-/// prompt yield rather than the total, which is issue #364 and a roughly 1.6%
+/// prompt yield rather than the total, which is a roughly 1.6%
 /// undercount of fission neutrons for U235 with nothing on disk to say so, or
 /// the tabulated pair was reshaped on the way out.
 ///
@@ -128,7 +128,7 @@ fn total_nu_is_the_derived_total_and_not_the_prompt_yield() {
         str_at(&batch, "emission_mode", 0),
         "total",
         "a \"prompt\" here means write_total_nu read products[0] rather than \
-         derived_products[0], which is issue #364"
+         derived_products[0], writing the prompt nu-bar instead of the total"
     );
 
     // Zero on this fixture: the total nu-bar covers prompt and delayed together
@@ -178,9 +178,9 @@ fn total_nu_is_the_derived_total_and_not_the_prompt_yield() {
     assert_i32_slice_eq("yield_breakpoints", &breakpoints, &[85]);
     assert_i32_slice_eq("yield_interpolation", &interpolation, &[2]);
 
-    // The #364 regression pin. Not a re-derivation of the written values: the
-    // MF=1/MT=456 prompt table is a different parsed object on the same
-    // reaction, and the whole bug is writing that one instead.
+    // The prompt-instead-of-total regression pin. Not a re-derivation of the
+    // written values: the MF=1/MT=456 prompt table is a different parsed object
+    // on the same reaction, and the whole bug is writing that one instead.
     let prompt = fission
         .products
         .first()
@@ -504,8 +504,8 @@ fn constructed_total(
 fn constructed_fissile_nuclide(fission_mt: i32, total_yield: Yield) -> endf::IncidentNeutron {
     let mut mt18 = constructed_redundant_mt18();
 
-    // Neither "total" (what the section is for) nor "prompt" (what #364 wrote
-    // instead), so a writer that hard-codes either one fails.
+    // Neither "total" (what the section is for) nor "prompt" (the wrong
+    // table), so a writer that hard-codes either one fails.
     let total = constructed_total(
         SENTINEL_PARTICLE,
         endf::EmissionMode::Delayed,
@@ -912,8 +912,8 @@ fn total_nu_prefers_mt_18_when_two_fission_mts_carry_a_total() {
 /// region lists through, and the reader then refuses the file it produced:
 /// `ReleaseFunction::from_tabulated` (`crates/yamc-nuclide/src/fission_photon.rs:66-73`)
 /// errors on `interpolation.len() > 1 || breakpoints.len() > 1`. This input
-/// therefore has no outcome that is both written and loadable, which is the
-/// asymmetric validation this pull request reports: the writer refuses an empty
+/// therefore has no outcome that is both written and loadable, which is an
+/// asymmetric validation: the writer refuses an empty
 /// polynomial because the reader refuses one, and applies no equivalent check
 /// to a tabulated term.
 ///
@@ -924,7 +924,7 @@ fn total_nu_prefers_mt_18_when_two_fission_mts_carry_a_total() {
 /// outcome, and it is the dangerous one: truncating to the first region turns a
 /// file the reader REFUSES into a file the reader ACCEPTS, evaluating a
 /// histogram tail as linear-linear with nothing on disk to say so. That is the
-/// #369 class of error the reader's refusal exists to prevent. Neither arm is
+/// class of error the reader's refusal exists to prevent. Neither arm is
 /// vacuous, and a writer that simply always failed would be caught by
 /// `fission_photon_carries_both_release_terms_in_their_own_forms` above.
 #[test]
@@ -990,7 +990,7 @@ fn a_multi_region_release_table_is_never_silently_truncated_to_one_region() {
 /// What that defends. `write_total_nu` returns a bool the caller writes into
 /// the manifest, so a swallowed error there means `entry.rs` records a
 /// `total_nu.arrow` that is not on disk, and the reader then falls back to the
-/// PROMPT yield, which is issue #364 arriving by a different route. A swallowed
+/// PROMPT yield, a silent undercount by a different route. A swallowed
 /// error in `write_fission_photon` loses the delayed photon scaling the same
 /// way. Both are silent: the conversion reports success and the wrong numbers
 /// turn up in a transport result.

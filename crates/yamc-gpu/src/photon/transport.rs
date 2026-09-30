@@ -29,8 +29,7 @@
 //!   deposited locally (no electron transport), scored as
 //!   `Σ_heating × track_length × weight` from the per-material heating
 //!   array -- a table + arithmetic match to the CPU track-length
-//!   photon-heating estimate `calculate_photon_xs().heating`
-//!   (issue #356).
+//!   photon-heating estimate `calculate_photon_xs().heating`.
 //!
 //! Still out of scope (the CPU pipeline handles these): TTB on the
 //! Auger electrons of the *Compton* relaxation cascade (the
@@ -75,7 +74,7 @@ use cubecl::prelude::*;
 /// to the dimensionless `α = E / m_e c²` Klein-Nishina parameter and as the
 /// energy of each e+ annihilation photon. Must equal the CPU constant
 /// (`yamc_element::photon::MASS_ELECTRON_EV`) so the 511 keV annihilation line
-/// lands in the same tally bin on both backends (issue #92).
+/// lands in the same tally bin on both backends.
 pub const MASS_ELECTRON_EV: f64 = 0.510_998_950_00e6;
 
 /// `h · c` in eV·angstrom -- used in the Rayleigh momentum-transfer
@@ -96,8 +95,8 @@ pub const PHOTON_BOUNDARY_VACUUM: u32 = 1;
 /// the kernel signature by `photon_kernel_storage_buffer_count_matches_signature`.
 pub const PHOTON_KERNEL_STORAGE_BUFFER_COUNT: u32 = 86;
 
-/// `run_params` slot holding the model's `photon_cutoff_energy` in eV (issue
-/// #286). One buffer carries the per-run scalars so adding another costs a slot
+/// `run_params` slot holding the model's `photon_cutoff_energy` in eV.
+/// One buffer carries the per-run scalars so adding another costs a slot
 /// rather than a descriptor binding.
 pub const PHOTON_PARAM_CUTOFF: usize = 0;
 /// Length of the kernel's `run_params` buffer.
@@ -185,7 +184,7 @@ fn multi_cell_photon_transport_kernel(
     surface_types: &[u32],
     surface_params: &[f64],
     surface_boundaries: &[u32],
-    // Per-cell CSG region program (issue: photon cell-find must disambiguate
+    // Per-cell CSG region program (photon cell-find must disambiguate
     // nested / overlapping AABBs with the exact region test, like the neutron
     // kernel; without it a photon far from the source is mis-assigned to an
     // inner cell whose bounding box still contains the point).
@@ -202,7 +201,7 @@ fn multi_cell_photon_transport_kernel(
     // linear interpolation as the component XS above; the kernel scores
     // `Score::Heating` / `Score::HeatingLocal` photon tallies (MT 301 /
     // 901) from this array, mirroring the CPU track-length photon-heating
-    // estimate `Σ_heating × track_length × weight` (issue #356).
+    // estimate `Σ_heating × track_length × weight`.
     heating_xs_per_material: &[f64],
     // Per-material Rayleigh integrated coherent form factor.
     // `rayleigh_x2[mat * MAX_RAYLEIGH_FF + j]` is the `x²` axis (in
@@ -249,7 +248,7 @@ fn multi_cell_photon_transport_kernel(
     tally_n_parent: &[u32],
     tally_parent_offsets: &[u32],
     tally_parent_ids: &[u32],
-    // Mesh (voxel) tally dimension (issue #234). `tally_n_mesh[t]` is the voxel
+    // Mesh (voxel) tally dimension. `tally_n_mesh[t]` is the voxel
     // bin count (1 = no MeshFilter -> collapses, byte-identical). Mesh is the
     // INNERMOST flat dimension, so the full index is `out_off +
     // ((cell_bin * n_parent + parent_bin) * n_bins + e) * n_mesh + voxel`. Only
@@ -261,7 +260,7 @@ fn multi_cell_photon_transport_kernel(
     tally_mesh_kind: &[u32],
     tally_mesh_params_offsets: &[u32],
     tally_mesh_params: &[f64],
-    // Energy-function weighting (issue #271), the photon twin of the neutron
+    // Energy-function weighting, the photon twin of the neutron
     // kernel's pair. `tally_efunc_offsets[t]..[t+1]` is tally `t`'s
     // `[n_points, energy[n], coeffs[4*(n-1)]]` table; an EMPTY range means no
     // `energy_function=` / `dose_coefficients=` filter. Multiplies the score
@@ -288,7 +287,7 @@ fn multi_cell_photon_transport_kernel(
     // shell occupancy `dop_electron_pdf[m * MAX_SHELLS + s]`,
     // binding energies `dop_binding_energy[...]`, J(p_z) profile
     // and CDF on a shared pz grid, plus the log-linear tail slope and
-    // the negative-branch mass per shell (fusion-neutronics/core#22). `dop_has_data[m]`
+    // the negative-branch mass per shell. `dop_has_data[m]`
     // gates whether the kernel applies Doppler -- otherwise falls back
     // to free Klein-Nishina E_out.
     dop_pz_grid: &[f64],
@@ -355,7 +354,7 @@ fn multi_cell_photon_transport_kernel(
     pair_r_z: &[f64],
     pair_a: &[f64],
     pair_c: &[f64],
-    // Per-collision element-selection inputs (task #72). `elem_macro_total` is
+    // Per-collision element-selection inputs. `elem_macro_total` is
     // the per-(element-slab, energy) macroscopic-total weight table, flat
     // `[n_slab x n_grid]`, element-major within a material and concatenated
     // material-major. `mat_elem_meta` is stride-2 `[offset, count]` per
@@ -364,12 +363,12 @@ fn multi_cell_photon_transport_kernel(
     // CPU `Material::sample_element`), computes its slab index `elem_off +
     // local`, and indexes that element's Rayleigh / Doppler / IFF / AR / pair
     // slab. `count == 1` -> the element is trivially `elem_off`; the selection
-    // draw is SKIPPED so the RNG stream stays byte-identical to the #79
+    // draw is SKIPPED so the RNG stream stays byte-identical to the
     // single-dominant-element path.
     elem_macro_total: &[f64],
     mat_elem_meta: &[u32],
     // Per-run scalars the kernel needs at runtime, packed into one binding so
-    // future additions do not each cost a descriptor (issue #286). Slot layout:
+    // future additions do not each cost a descriptor. Slot layout:
     //   0 = `photon_cutoff_energy` (eV): photons at or below this are killed at
     //       the top of the step and never emitted as secondaries, mirroring the
     //       CPU's `photon_cutoff` threading through `transport/photon.rs`.
@@ -378,13 +377,13 @@ fn multi_cell_photon_transport_kernel(
     out_n_steps: &mut [u32],
     out_final_energy: &mut [f64],
     tally_out: &mut [Atomic<u64>],
-    // Per-(history, tally) total score (fusion-neutronics/core#29): row
+    // Per-(history, tally) total score: row
     // `ABSOLUTE_POS`, one f64 per tally entry, summed over the tally's bins at
     // the `PerHistory` history-end flush with a plain add (each thread owns its
     // row). The host folds the rows into the per-history aggregate moments the
     // convergence targets are defined on. A size-1 dummy in the other modes.
     hist_tally_total: &mut [f64],
-    // Batch-free per-history / per-source variance (issue #233 Stage 3), mirroring
+    // Batch-free per-history / per-source variance, mirroring
     // the neutron kernel. `spill_bin`/`spill_val` are the per-history overflow list
     // (a thread touching more than `PERHIST_K` distinct bins owns
     // `[ABSOLUTE_POS * spill_cap ..)`). `source_idx[i]` is the source PARTICLE this
@@ -397,7 +396,7 @@ fn multi_cell_photon_transport_kernel(
     spill_val: &mut [f64],
     source_idx: &[u32],
     src_acc: &mut [Atomic<u64>],
-    // Lost-particle diagnostics (issue #289), same contract as the neutron
+    // Lost-particle diagnostics, same contract as the neutron
     // kernel: `lost_count[0]` counts every history that ended in no cell and
     // `lost_f64` keeps the first `lost_f64.len() / LOST_F64_STRIDE` records.
     lost_count: &mut [Atomic<u64>],
@@ -414,7 +413,7 @@ fn multi_cell_photon_transport_kernel(
     #[comptime] per_source_var: bool,
     // `src_acc` row stride (= `total_out_len`).
     #[comptime] total_bins: u32,
-    // Mesh-tally variance path (issue #234). When true, each tally contribution
+    // Mesh-tally variance path. When true, each tally contribution
     // (each voxel crossing of a track-length mesh tally, or a single bin for a
     // non-mesh tally) is atomic-added DIRECTLY into `src_acc[source_idx*
     // total_bins + flat_idx]`, bypassing the touched-list (no O(distinct^2)
@@ -455,7 +454,7 @@ fn multi_cell_photon_transport_kernel(
     // SECONDARY (fluorescence / Auger / annihilation / brem, drained from the
     // cascade stack below) is a fresh photon with NO radionuclide parent -- the
     // CPU/OpenMC reference does not attribute these to the source nuclide, so
-    // they must not be binned into the parent's flux (issue #150: attributing
+    // they must not be binned into the parent's flux (attributing
     // them over-predicted the D1S irradiation-phase photon flux by ~2% in the
     // thick sphere, where the secondary fraction is appreciable). Set to 0 when
     // a stack secondary is promoted to the transport variables.
@@ -471,7 +470,7 @@ fn multi_cell_photon_transport_kernel(
     let n_bvh_unbounded: u32 = bvh_unbounded.len() as u32;
     let n_ttb_e: u32 = ttb_e_grid_log.len() as u32;
 
-    // Batch-free per-history variance (issue #233 Stage 3): thread-private
+    // Batch-free per-history variance: thread-private
     // touched-list (`th_bin`/`th_val`) + spill, mirroring the neutron kernel.
     // Declared UNCONDITIONALLY (a conditional `Array::new` trips a cubecl codegen
     // quirk); only read/written when `per_history_var`. `my_source_idx` is the
@@ -523,12 +522,12 @@ fn multi_cell_photon_transport_kernel(
     // secondary vacancy tree exactly like CPU `atomic_relaxation`.
     let mut ar_holes = Array::<u32>::new(8usize);
 
-    // Model photon cutoff (issue #286). Read once: it is a per-run scalar, and
+    // Model photon cutoff. Read once: it is a per-run scalar, and
     // every cutoff site below uses this value rather than a literal, so
     // `photon_cutoff_energy` behaves the same on both backends.
     let photon_cutoff = run_params[PHOTON_PARAM_CUTOFF];
 
-    // Cell of the previous step, for the lost-particle record (issue #289).
+    // Cell of the previous step, for the lost-particle record.
     // u32 sentinel `4_294_967_295` = "none yet" (a photon born outside every
     // cell); widened to f64 at the single record site.
     let mut last_cell = 4_294_967_295u32;
@@ -561,7 +560,7 @@ fn multi_cell_photon_transport_kernel(
                 current_depth = stack_depth[stack_size as usize];
                 alive = 1u32;
                 // Transport-born secondary: drop the D1S parent attribution so
-                // its flux is not binned into the source radionuclide (#150).
+                // its flux is not binned into the source radionuclide.
                 current_parent = 0u32;
             } else {
                 keep_going = 0u32;
@@ -672,7 +671,7 @@ fn multi_cell_photon_transport_kernel(
 
             if cell == 4_294_967_295u32 {
                 // No cell covers this point: a lost photon, treated exactly as
-                // the neutron kernel and the CPU treat it (issue #289). A leak
+                // the neutron kernel and the CPU treat it. A leak
                 // through a `boundary='vacuum'` surface never lands here (the
                 // crossing block kills at the surface), so this only fires on a
                 // genuine gap in the geometry.
@@ -996,7 +995,7 @@ fn multi_cell_photon_transport_kernel(
                             }
                             score = s_mt;
                         }
-                        // Energy-function weighting (issue #271). Applied to
+                        // Energy-function weighting. Applied to
                         // `score` so the mesh DDA helpers, which take it by
                         // value, inherit it. Off the table drops the whole
                         // event (CPU `get_weight() == None` -> `return`), hence
@@ -1033,7 +1032,7 @@ fn multi_cell_photon_transport_kernel(
                         let _ = n_t_cells;
                         if in_range && ef_in_range {
                             if mesh_direct {
-                                // Issue #234: mesh models accumulate straight into
+                                // Mesh models accumulate straight into
                                 // the per-source accumulator (no touched-list). A
                                 // mesh tally fans the track-length step across the
                                 // voxels it crosses; a non-mesh tally writes its bin.
@@ -1044,7 +1043,7 @@ fn multi_cell_photon_transport_kernel(
                                     let base = out_off + cpe * n_mesh;
                                     let mo = tally_mesh_params_offsets[t as usize];
                                     // Cylindrical (kind 3) vs rectangular (1/2)
-                                    // voxel walk (issue #279).
+                                    // voxel walk.
                                     if tally_mesh_kind[t as usize] == 3u32 {
                                         cyl_mesh_score_src_acc(
                                             tally_mesh_params,
@@ -1084,7 +1083,7 @@ fn multi_cell_photon_transport_kernel(
                                     }
                                 }
                             } else if per_history_var {
-                                // Batch-free per-history variance (issue #233): accumulate
+                                // Batch-free per-history variance: accumulate
                                 // this history's per-bin PHYSICAL total in the touched-list
                                 // (dedup on tally_idx), spilling past PERHIST_K. Flushed at
                                 // history end.
@@ -1203,8 +1202,8 @@ fn multi_cell_photon_transport_kernel(
                                                    // `crates/yamc/src/transport/mod.rs`). The KERMA
                                                    // table and the analog deposit differ by ~1% for Fe
                                                    // at 1.25 MeV, so scoring KERMA here ran the GPU
-                                                   // collision heating ~0.96% high vs the CPU (task
-                                                   // #68). Skip heating here; the analog deposit is
+                                                   // collision heating ~0.96% high vs the CPU.
+                                                   // Skip heating here; the analog deposit is
                                                    // scored in block 8c after the collision physics.
                             let mut is_heating_c = false;
                             if kind_c == 1u32 {
@@ -1225,7 +1224,7 @@ fn multi_cell_photon_transport_kernel(
                                 }
                                 score_c = s_mt_c;
                             }
-                            // Energy-function weighting (issue #271), same rule
+                            // Energy-function weighting, same rule
                             // as the per-step block. Heating is excluded from
                             // this block entirely (`is_heating_c`) and picked up
                             // by the analog deposit in 8c, which applies the
@@ -1257,7 +1256,7 @@ fn multi_cell_photon_transport_kernel(
                             let tally_idx_c = out_off_c + cpe_c;
                             if in_range_c && !is_heating_c && ef_in_range_c {
                                 if mesh_direct {
-                                    // Issue #234: the collision-estimator score lands
+                                    // The collision-estimator score lands
                                     // in the single voxel holding the interaction
                                     // point (px,py,pz after the block-7 move). A
                                     // non-mesh tally writes its single composite bin.
@@ -1267,7 +1266,7 @@ fn multi_cell_photon_transport_kernel(
                                         let n_mesh_c = tally_n_mesh[tc as usize];
                                         let mo_c = tally_mesh_params_offsets[tc as usize];
                                         // Cylindrical (kind 3) vs rectangular
-                                        // (1/2) point binning (issue #279).
+                                        // (1/2) point binning.
                                         let voxel_c = if tally_mesh_kind[tc as usize] == 3u32 {
                                             cyl_mesh_bin_at_kernel(
                                                 tally_mesh_params,
@@ -1334,7 +1333,7 @@ fn multi_cell_photon_transport_kernel(
                         tc += 1u32;
                     }
 
-                    // Analog photon-heating bookkeeping (task #68). The CPU
+                    // Analog photon-heating bookkeeping. The CPU
                     // collision estimator scores photon heating as the analog
                     // energy deposited at this real collision:
                     //   deposit = (E_in - E_out - banked_secondary_photon_E) · w
@@ -1350,7 +1349,7 @@ fn multi_cell_photon_transport_kernel(
                     let heat_e_in = energy;
                     let heat_stack_start = stack_size;
 
-                    // 7b. Per-collision element selection (task #72). Mirror
+                    // 7b. Per-collision element selection. Mirror
                     // CPU `Material::sample_element`: pick the interacting
                     // element proportional to its macroscopic-total
                     // contribution at the collision energy, then run THAT
@@ -1362,7 +1361,7 @@ fn multi_cell_photon_transport_kernel(
                     // IFF / AR / pair slabs. When the material has a single
                     // element (`count == 1`) the draw is skipped -- `elem_slab`
                     // is trivially `elem_off`, no random is consumed, and the
-                    // RNG stream stays byte-identical to the #79 path.
+                    // RNG stream stays byte-identical to the single-element path.
                     let elem_off = mat_elem_meta[(mat_idx * 2u32) as usize];
                     let elem_count = mat_elem_meta[(mat_idx * 2u32 + 1u32) as usize];
                     let mut elem_slab = elem_off;
@@ -1419,7 +1418,7 @@ fn multi_cell_photon_transport_kernel(
                         // `sample_photoelectric_subshell`. Byte-identical (same
                         // one draw, same two-pass cumulative).
                         // Atomic-relaxation tables are keyed by the
-                        // per-collision-selected element slab (task #72).
+                        // per-collision-selected element slab.
                         let mut sampled_shell = 0u32;
                         let ar_has = ar_has_data[elem_slab as usize];
                         let ar_ns = ar_n_shells[elem_slab as usize];
@@ -1770,8 +1769,7 @@ fn multi_cell_photon_transport_kernel(
                             // medium its brem is a large share of the secondary
                             // flux, and giving that brem the parent's direction
                             // aims it along the parent's flight rather than
-                            // isotropically-ish off the collision site
-                            // (fusion-neutronics/core#110 entry 1).
+                            // isotropically-ish off the collision site.
                             //
                             // Sampled by the shared `sample_sauter_direction`
                             // probe, the single source of truth, unit-tested
@@ -1952,7 +1950,7 @@ fn multi_cell_photon_transport_kernel(
                         // energies is a follow-up (slice 4b) -- it
                         // needs two more inline TTB blocks.
                         // Pair-production constants are keyed by the
-                        // per-collision-selected element slab (task #72).
+                        // per-collision-selected element slab.
                         let pair_has = pair_has_data[elem_slab as usize];
                         let alpha_pp = energy / MASS_ELECTRON_EV;
                         // Pair-production threshold check: the
@@ -2232,8 +2230,8 @@ fn multi_cell_photon_transport_kernel(
                                     dz = nez / nrm_e;
                                 }
 
-                                // Inline electron TTB (mirrors PR
-                                // #136 Auger-TTB pattern -- no `while`
+                                // Inline electron TTB (mirrors the
+                                // Auger-TTB pattern -- no `while`
                                 // wrapper over electron sources to
                                 // dodge cubecl loop-doubling).
                                 let electron_ke = e_electron;
@@ -2628,7 +2626,7 @@ fn multi_cell_photon_transport_kernel(
                         // the lin-lin interpolation that ENDF/B incoherent
                         // form factors use.
                         // Incoherent form factor keyed by the per-collision-
-                        // selected element slab (task #72).
+                        // selected element slab.
                         let iff_n_pts = iff_n_points[elem_slab as usize];
                         let iff_has = iff_has_data[elem_slab as usize];
                         let iff_off = elem_slab * IFF_MAX_POINTS;
@@ -2817,11 +2815,11 @@ fn multi_cell_photon_transport_kernel(
                             // Shared `compton_doppler_sample` helper -- single
                             // source of truth, tested against the CPU
                             // `compton_doppler` distribution. Same algorithm
-                            // (Kaltiaisenaho / OpenMC 4036, fusion-neutronics/core#22); returns
+                            // (Kaltiaisenaho, as in OpenMC); returns
                             // e_out_kn when no shell is accessible.
                             let e_out_kn = alpha_out * MASS_ELECTRON_EV;
                             // Doppler profiles keyed by the per-collision-
-                            // selected element slab (task #72).
+                            // selected element slab.
                             let ds = compton_doppler_sample(
                                 state,
                                 e_in_compton,
@@ -2849,8 +2847,8 @@ fn multi_cell_photon_transport_kernel(
                             // `photon_incoherent` does
                             // (crates/yamc/src/transport/photon.rs). Without
                             // this the GPU low-energy photon spectrum was
-                            // missing Compton-ionization fluorescence lines
-                            // (issue #178). Mirrors the photoelectric branch's
+                            // missing Compton-ionization fluorescence lines.
+                            // Mirrors the photoelectric branch's
                             // register-based hole0..hole3 cascade (NOT an
                             // Array -- avoids the RADV codegen quirk noted
                             // there) and reuses the SHARED cascade stack.
@@ -3183,8 +3181,7 @@ fn multi_cell_photon_transport_kernel(
                         // integrated coherent form factor. Then
                         // μ = 1 − 2·x²/x²_max, with a Klein-Nishina-
                         // style angular acceptance 0.5·(1+μ²). Form factor
-                        // keyed by the per-collision-selected element slab
-                        // (task #72).
+                        // keyed by the per-collision-selected element slab.
                         let n_ff = rayleigh_n_points[elem_slab as usize];
                         let max_ff_rt = 64u32;
                         let ff_off = elem_slab * max_ff_rt;
@@ -3258,7 +3255,7 @@ fn multi_cell_photon_transport_kernel(
                     }
 
                     // 8c. Analog photon-heating deposit for collision-estimator
-                    // tallies (task #68). Mirrors the CPU's post-collision
+                    // tallies. Mirrors the CPU's post-collision
                     // analog dispatch (`score_photon_collision`):
                     //   deposit = (E_in - E_out - banked_secondary_photon_E) · w
                     // where E_out is the surviving photon's energy (0 if it was
@@ -3339,7 +3336,7 @@ fn multi_cell_photon_transport_kernel(
                                     bin_h = n_bins_h - 1u32;
                                 }
                                 // Energy function applied as both a gate and a
-                                // weight (issues #378, #382), matching the CPU's
+                                // weight, matching the CPU's
                                 // `photon_heat_score_ev × ef_weight` arm in
                                 // `Tally::score_collision`.
                                 //
@@ -3377,7 +3374,7 @@ fn multi_cell_photon_transport_kernel(
                                 // fixed-point atomic path AND the per-history
                                 // variance path, which accumulates the raw f64
                                 // rather than `bits_h` and would otherwise drop
-                                // the weighting (issue #382).
+                                // the weighting.
                                 let heat_scored_h = heat_deposit * ef_weight_h;
                                 let scale_h = tally_fixed_point_scales[th as usize];
                                 let scaled_h = (heat_scored_h * scale_h + 0.5) as i64;
@@ -3388,7 +3385,7 @@ fn multi_cell_photon_transport_kernel(
                                 let tally_idx_h = out_off_h + cpe_h;
                                 if in_range_h && ef_in_range_h {
                                     if mesh_direct {
-                                        // Issue #234: the analog heating deposit lands
+                                        // The analog heating deposit lands
                                         // in the voxel holding the collision point.
                                         if tally_mesh_kind[th as usize] == 0u32 {
                                             src_acc[src_base + tally_idx_h as usize]
@@ -3397,7 +3394,7 @@ fn multi_cell_photon_transport_kernel(
                                             let n_mesh_h = tally_n_mesh[th as usize];
                                             let mo_h = tally_mesh_params_offsets[th as usize];
                                             // Cylindrical (kind 3) vs rectangular
-                                            // (1/2) point binning (issue #279).
+                                            // (1/2) point binning.
                                             let voxel_h = if tally_mesh_kind[th as usize] == 3u32 {
                                                 cyl_mesh_bin_at_kernel(
                                                     tally_mesh_params,
@@ -3485,7 +3482,7 @@ fn multi_cell_photon_transport_kernel(
         n_steps += 1u32;
     }
 
-    // Batch-free per-history / per-source variance flush (issue #233 Stage 3),
+    // Batch-free per-history / per-source variance flush,
     // mirroring the neutron kernel. PerHistory: per-bin `sum` (first half of
     // `tally_out`) + `sum_sq` (second half). PerSource: per-bin `sum` into this
     // history's source row of `src_acc` (`sum_sq` done host-side per source). The
@@ -3585,8 +3582,7 @@ fn multi_cell_photon_transport_kernel(
 
     // Queued secondaries the cap left untransported are a truncation of this
     // history too (the step budget is shared by the primary and its stack),
-    // so report them as "did not finish" for the dispatch's cap check
-    // (fusion-neutronics/core#23).
+    // so report them as "did not finish" for the dispatch's cap check.
     if stack_size > 0u32 {
         alive = 1u32;
     }
@@ -3609,20 +3605,20 @@ pub struct PhotonMultiCellResult {
     /// mode this is the per-bin `sum`; in `PerSource` it is empty (the tally is
     /// reconstructed from `src_acc`).
     pub tally_outputs: Vec<Vec<f64>>,
-    /// Per-tally per-bin sum-of-squares (issue #233 Stage 3), non-empty only in
+    /// Per-tally per-bin sum-of-squares, non-empty only in
     /// `PerHistory` mode. Same shape/order as `tally_outputs`.
     pub tally_sum_sq: Vec<Vec<f64>>,
-    /// Per-(history, tally entry) total score (fusion-neutronics/core#29),
+    /// Per-(history, tally entry) total score,
     /// flat `[n_histories x n_tallies]` row-major by history, physical units:
     /// each history's per-bin totals summed over the entry's bins, the sample
     /// the convergence targets' aggregate moments are built from. Non-empty
     /// only for `PerHistory`.
     pub hist_tally_total: Vec<f64>,
-    /// Raw per-source accumulator (issue #233 Stage 3, `PerSource` mode only):
+    /// Raw per-source accumulator (`PerSource` mode only):
     /// flat `chunk_sources * total_out_len` fixed-point words, this launch's
     /// per-`(source, flat_bin)` sum. Empty otherwise.
     pub src_acc: Vec<u64>,
-    /// Photons that ended in no cell, i.e. lost particles (issue #289). The
+    /// Photons that ended in no cell, i.e. lost particles. The
     /// dispatch enforces `max_lost_particles` from `count`, matching the CPU.
     pub lost: crate::common::lost_particles::LostParticleResult,
 }
@@ -3645,7 +3641,7 @@ fn unpack_photon_tally_outputs(bits: &[u64], tallies: &TalliesPack) -> Vec<Vec<f
 }
 
 /// Unpack the second (sum-of-squares) half of a per-history photon `tally_out`
-/// buffer, at each tally's derived sum-of-squares scale (issue #233 Stage 3).
+/// buffer, at each tally's derived sum-of-squares scale.
 /// Mirror of the neutron `unpack_tally_sum_sq`.
 fn unpack_photon_tally_sum_sq(bits: &[u64], tallies: &TalliesPack) -> Vec<Vec<f64>> {
     let n_tallies = tallies.n_tallies() as usize;
@@ -3736,7 +3732,7 @@ pub fn run_multi_cell_photon_transport(
     pair_r_z: &[f64],
     pair_a: &[f64],
     pair_c: &[f64],
-    // Per-collision element-selection inputs (task #72). See the kernel
+    // Per-collision element-selection inputs. See the kernel
     // signature docs: `elem_macro_total` is the per-(element-slab, energy)
     // macro-total weight table; `mat_elem_meta` is stride-2 `[offset, count]`
     // per material.
@@ -3744,13 +3740,13 @@ pub fn run_multi_cell_photon_transport(
     mat_elem_meta: &[u32],
     tallies: &TalliesPack,
     max_steps: u32,
-    // `Model::photon_cutoff_energy` in eV (issue #286). Photons at or below it
+    // `Model::photon_cutoff_energy` in eV. Photons at or below it
     // are killed at the top of the step and never emitted as secondaries, the
     // same threshold the CPU applies. The GPU used to hardcode the 1 keV
     // default, so a non-default cutoff silently did nothing here.
     photon_cutoff_energy: f64,
-    // Tally variance mode (issue #233 Stage 3): `PerStep` is the byte-identical
-    // pre-#233 path; `PerHistory` flushes per-history sum + sum_sq into a doubled
+    // Tally variance mode: `PerStep` is the byte-identical
+    // batch-means path; `PerHistory` flushes per-history sum + sum_sq into a doubled
     // `tally_out`; `PerSource` scatters per-history sums into `src_acc` keyed by
     // `source_idx` (for coupled/mixed/D1S secondary/decay photons).
     variance: TallyVarianceMode,
@@ -3797,7 +3793,7 @@ pub fn run_multi_cell_photon_transport(
         "heating_xs_per_material must be [n_materials × n_grid]"
     );
     // Rayleigh / form-factor / relaxation / pair packs are now keyed by the
-    // per-collision-selected element slab (task #72), so their leading
+    // per-collision-selected element slab, so their leading
     // dimension is the total element count `n_slab`, not `n_materials`.
     let n_slab = rayleigh_n_points.len();
     assert_eq!(rayleigh_x2.len(), n_slab * MAX_RAYLEIGH_FF);
@@ -3901,7 +3897,7 @@ pub fn run_multi_cell_photon_transport(
         &tallies.parent_ids
     };
     let tally_parent_ids_h = client.create_from_slice(bytemuck::cast_slice(parent_ids_data));
-    // Mesh (voxel) tally buffers (issue #234). `mesh_params` is padded to a
+    // Mesh (voxel) tally buffers. `mesh_params` is padded to a
     // single dummy slot when no tally carries a mesh (cubecl rejects zero-length
     // buffers; the kernel only reads it when `mesh_direct` and the tally's kind
     // is non-`MESH_NONE`).
@@ -3915,7 +3911,7 @@ pub fn run_multi_cell_photon_transport(
         tallies.mesh_params.clone()
     };
     let tally_mesh_params_h = client.create_from_slice(bytemuck::cast_slice(&mesh_params_padded));
-    // Energy-function tally buffers (issue #271), padded like the mesh params:
+    // Energy-function tally buffers, padded like the mesh params:
     // with no `energy_function=` tally the params buffer would be zero-length,
     // which cubecl rejects. Offsets stay all-equal so every range is empty.
     let tally_efunc_offsets_h =
@@ -3967,7 +3963,7 @@ pub fn run_multi_cell_photon_transport(
     let elem_macro_total_h = client.create_from_slice(bytemuck::cast_slice(elem_macro_total));
     let mat_elem_meta_h = client.create_from_slice(bytemuck::cast_slice(mat_elem_meta));
 
-    // Per-run scalars (issue #286): slot 0 = the model photon cutoff.
+    // Per-run scalars: slot 0 = the model photon cutoff.
     let run_params_v = vec![photon_cutoff_energy; PHOTON_RUN_PARAMS_LEN];
     let run_params_h = client.create_from_slice(bytemuck::cast_slice(&run_params_v));
 
@@ -3975,18 +3971,18 @@ pub fn run_multi_cell_photon_transport(
     let out_steps_h = client.empty(std::mem::size_of_val(seeds));
     let out_e_h = client.empty(std::mem::size_of_val(energies_in));
     let total_out_len = tallies.total_out_len() as usize;
-    // Batch-free variance buffers (issue #233 Stage 3), mirroring the neutron
+    // Batch-free variance buffers, mirroring the neutron
     // host. PerHistory doubles `tally_out` (2nd half = sum_sq); PerSource writes
     // `src_acc` instead (size-1 `tally_out` dummy). Both per-history modes share
     // the thread-private touched-list + spill.
     let per_history = variance.per_history();
     let per_source = variance.per_source();
-    // Issue #234 mesh path: direct-to-`src_acc` scoring (no touched-list). Shares
+    // Mesh path: direct-to-`src_acc` scoring (no touched-list). Shares
     // the `src_acc` read-back and per-source finalize with `PerSource`.
     let mesh_direct = variance.mesh_direct();
     let uses_src_acc = variance.uses_src_acc();
     // Same proven per-history bound as the neutron host: at most one flat bin per
-    // tally per step over `max_steps` steps (issue #233 Stage 4). The mesh path
+    // tally per step over `max_steps` steps. The mesh path
     // accumulates straight into `src_acc` (no touched-list), so it needs no spill.
     let spill_cap = if mesh_direct {
         0
@@ -3995,7 +3991,7 @@ pub fn run_multi_cell_photon_transport(
     };
     let alloc_out_len = match variance {
         TallyVarianceMode::PerHistory => total_out_len * 2,
-        // PerSource and PerSourceDirect (issue #234 mesh) both write `src_acc`
+        // PerSource and PerSourceDirect (mesh) both write `src_acc`
         // instead of `tally_out`, so the `tally_out` dummy is size 1.
         TallyVarianceMode::PerSource { .. } | TallyVarianceMode::PerSourceDirect { .. } => 1,
         TallyVarianceMode::PerStep => total_out_len,
@@ -4008,11 +4004,11 @@ pub fn run_multi_cell_photon_transport(
         1
     };
     // Uninitialized: the kernel writes every spill slot before reading it
-    // (guarded by `spill_count`), so no zero-init / upload is needed (issue #233
-    // Stage 4). Mirrors the neutron host.
+    // (guarded by `spill_count`), so no zero-init / upload is needed.
+    // Mirrors the neutron host.
     let spill_bin_h = client.empty(spill_len * std::mem::size_of::<u32>());
     let spill_val_h = client.empty(spill_len * std::mem::size_of::<f64>());
-    // Per-(history, tally) totals (fusion-neutronics/core#29): one f64 row per
+    // Per-(history, tally) totals: one f64 row per
     // history in `PerHistory` mode, accumulated by the flush (zero-initialised);
     // a size-1 dummy otherwise.
     let hist_total_len = if matches!(variance, TallyVarianceMode::PerHistory) {
@@ -4031,7 +4027,7 @@ pub fn run_multi_cell_photon_transport(
         _ => 1,
     };
     let src_acc_h = client.create_from_slice(bytemuck::cast_slice(&vec![0u64; src_acc_len]));
-    // Lost-particle diagnostics (issue #289): counter + capped record buffer.
+    // Lost-particle diagnostics: counter + capped record buffer.
     let lost_count_h = client.create_from_slice(bytemuck::cast_slice(&[0u64]));
     let lost_records_z = vec![
         0.0_f64;
@@ -4184,7 +4180,7 @@ pub fn run_multi_cell_photon_transport(
     let n_steps: Vec<u32> = bytemuck::cast_slice(&client.read_one(out_steps_h).unwrap()).to_vec();
     let final_energies: Vec<f64> =
         bytemuck::cast_slice(&client.read_one(out_e_h).unwrap()).to_vec();
-    // Tally results (issue #233 Stage 3). PerStep/PerHistory read `tally_out`
+    // Tally results. PerStep/PerHistory read `tally_out`
     // (first half = sum, second half = sum_sq for PerHistory); PerSource reads
     // the per-source `src_acc` (the dispatch reconstructs the tally from it).
     let (tally_outputs, tally_sum_sq, src_acc) = if uses_src_acc {

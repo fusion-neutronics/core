@@ -13,8 +13,8 @@
 //! instant a particle leaks or is absorbed, so it is free for fast cases).
 //! This test pins the behaviour: with the default cap the GPU/CPU flux
 //! ratio must be within statistical noise. The historical 1000-step cap is
-//! also exercised: a binding cap is now an error rather than a warning
-//! (fusion-neutronics/core#23), because the under-counted flux it produces
+//! also exercised: a binding cap is now an error rather than a warning,
+//! because the under-counted flux it produces
 //! is not a valid answer, so that case asserts the refusal instead of the
 //! ~10% deficit it used to document.
 

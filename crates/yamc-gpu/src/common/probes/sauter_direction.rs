@@ -13,7 +13,7 @@
 //! The kernel used to give the photoelectron's brem the parent photon's
 //! direction instead. That is a Z-biased flux error: the photoelectron carries
 //! nearly the whole photon energy, so in a high-Z medium its brem is a large
-//! share of the secondary photon flux (fusion-neutronics/core#110 entry 1).
+//! share of the secondary photon flux.
 
 use crate::common::pcg32::{draw_uniform, expand_seed};
 use crate::common::polyfills::{cos_f64, sin_f64};

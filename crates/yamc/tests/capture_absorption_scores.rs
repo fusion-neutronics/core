@@ -1,23 +1,22 @@
-//! Issue #362: what a capture / absorption reaction-rate tally reports on a
-//! fissile nuclide, and above the charged-particle thresholds.
+//! What a capture / absorption reaction-rate tally reports on a fissile nuclide,
+//! and above the charged-particle thresholds.
 //!
-//! Two paths serve a reaction-rate tally, and only one was wrong.
+//! Two paths serve a reaction-rate tally.
 //!
 //! OUTSIDE a URR band, `Material::macro_xs_by_mt` falls through to
-//! `lookup_xs_by_mt`, which reads the library's own per-MT macroscopic table. MT
-//! 102 and MT 27 were always correct there.
+//! `lookup_xs_by_mt`, which reads the library's own per-MT macroscopic table.
 //!
-//! INSIDE a band it takes `u.capture` / `u.absorption` from the URR sample, and
-//! `urr_sample_for_nuclide` derived capture as `(xs_absorption -
-//! xs_fission).max(0.0)`. That is OpenMC's expression but not OpenMC's input:
-//! `nuclide.cpp` computes `capture *= (micro.absorption - micro.fission)` on an
-//! absorption that INCLUDES fission, whereas `FastXSGrid::lookup` returns a
-//! disappearance partial that excludes it (its four partials sum to the total).
-//! So in-band capture clamped to zero for every nuclide whose fission exceeds its
+//! INSIDE a band it takes `u.capture` / `u.absorption` from the URR sample. The
+//! pitfall there is deriving capture as `(xs_absorption - xs_fission).max(0.0)`.
+//! That is OpenMC's expression but not OpenMC's input: `nuclide.cpp` computes
+//! `capture *= (micro.absorption - micro.fission)` on an absorption that INCLUDES
+//! fission, whereas `FastXSGrid::lookup` returns a disappearance partial that
+//! excludes it (its four partials sum to the total). Applied to that partial,
+//! in-band capture clamps to zero for every nuclide whose fission exceeds its
 //! capture (U235 at 10 keV: absorption 1.06 b against fission 2.91 b), an MT 102
-//! tally read exactly zero, and an absorption tally -- built as `macro_capture +
-//! macro_fission` -- reported just the fission rate, the two agreeing to every
-//! digit. Same mistake as #154, which was the transport-side twin.
+//! tally reads exactly zero, and an absorption tally -- built as `macro_capture +
+//! macro_fission` -- reports just the fission rate, the two agreeing to every
+//! digit. The transport side has the same pitfall.
 //!
 //! The convention is OpenMC's: `micro.absorption = capture + fission`
 //! (`nuclide.cpp`), scored as `macro_xs().absorption * flux`, so MT 27 includes
@@ -88,7 +87,7 @@ fn run(nuclide: &str, density: f64, energy_ev: f64, tallies: Vec<Arc<Tally>>) ->
     .unwrap();
     m.set_material_id(1);
     m.set_temperature("294");
-    // A skip, not a panic, like the absence check above. Since #389 a cache
+    // A skip, not a panic, like the absence check above. A cache
     // directory is routinely populated at activation scope, holding cross
     // sections and none of the transport sections this needs, and the directory
     // exists either way. CI fetches only the fixture list and skips this
@@ -155,7 +154,7 @@ fn absorption_exceeds_fission_on_a_fissile_material() {
     assert!(
         absorption > fission * 1.01,
         "absorption {absorption:.8e} must exceed fission {fission:.8e} by the capture \
-         rate; equal values mean the capture component was lost (#362)"
+         rate; equal values mean the capture component was lost"
     );
 }
 
@@ -170,12 +169,12 @@ fn mt102_capture_is_nonzero_on_a_fissile_material() {
     assert!(
         v[0] > 0.0,
         "MT 102 radiative capture on U235 reads {:.6e}; the derived form clamped it to \
-         zero for every fissile nuclide (#362)",
+         zero for every fissile nuclide",
         v[0]
     );
 }
 
-/// INVARIANT, not a regression guard: this one passes on the pre-fix code too,
+/// INVARIANT, not a regression guard: this one passes with the derived capture too,
 /// because above the band the tally path reads the library's per-MT table rather
 /// than a derived value. Kept because it pins the distinction the derived form
 /// blurred -- MT 102 is radiative capture, and above the (n,p) / (n,alpha)
@@ -202,6 +201,6 @@ fn mt102_is_capture_not_disappearance_at_fast_energies() {
         mt102 < 0.1 * mt101,
         "above 10 MeV Fe56's radiative capture {mt102:.6e} should be far below its \
          disappearance {mt101:.6e} (the charged-particle channels dominate there); \
-         equal values mean MT 102 is being served the disappearance partial (#362)"
+         equal values mean MT 102 is being served the disappearance partial"
     );
 }

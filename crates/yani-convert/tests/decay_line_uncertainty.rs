@@ -1,11 +1,10 @@
 //! Every photon-line uncertainty MT=457 gives, from the tape to yani's reader.
 //!
-//! Issue #163: the sigmas were parsed and then dropped where
-//! `decay/sources.arrow` was written, and the gamma and x-ray spectra were
-//! merged into one row, which lost which normalisation each line shares. These
-//! tests read four real evaluations that between them state all of it: a
-//! JENDL-5.0 normalisation sigma kept apart from the lines (Sn111), a JEFF-4.0
-//! continuum normalisation sigma (Cf252), an ENDF/B-VIII.1 nuclide that
+//! The sigmas must survive the write of `decay/sources.arrow`, and the gamma
+//! and x-ray spectra must stay in separate rows, or which normalisation each
+//! line shares is lost. These tests read four real evaluations that between
+//! them state all of it: a JENDL-5.0 normalisation sigma kept apart from the
+//! lines (Sn111), a JEFF-4.0 continuum normalisation sigma (Cf252), an ENDF/B-VIII.1 nuclide that
 //! emits both gammas and x-rays (In116m1), and a JEFF-4.0 one whose lines
 //! coincide and repeat (Ac227).
 

@@ -44,7 +44,7 @@ use yamc_rng::next_xi;
 /// * `n_x_per_i` -- number of `(x, cdf)` points at each incident-energy
 ///   bracket, length `n_e`.
 /// * `x_table`, `cdf_table`, `p_table` -- flat tables packed
-///   variable-length (issue #104): row `i` occupies `x_offset[i] ..
+///   variable-length: row `i` occupies `x_offset[i] ..
 ///   x_offset[i] + n_x_per_i[i]`. Rows are stored back-to-back with no
 ///   padding. `p_table` is the PDF normalized like `cdf_table`;
 ///   zero-filled rows (no usable PDF) must carry `interp == 0` so the

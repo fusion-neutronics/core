@@ -142,10 +142,8 @@ pub fn extract_score_xs_per_mt(
 
 /// Parse the temperature label resolved by yamc into Kelvin.
 ///
-/// Shared with `Material::temperature_k` rather than reimplemented here. This
-/// used to be a private copy, and the copy was right while `Material`'s was
-/// stale, which is issue #478: the GPU ran a 900 K material at 900 K and the
-/// CPU ran it at 294 K.
+/// Shared with `Material::temperature_k` rather than reimplemented here, so
+/// the GPU and CPU cannot disagree on a material's temperature.
 use yamc_nuclide::temperature::label_to_kelvin_or_default as parse_temperature_k;
 
 fn total_xs_at(nuclide: &Nuclide, temp_idx: usize, energy: f64) -> f64 {
@@ -178,7 +176,7 @@ fn aggregate_inelastic_across_slots(xs_inelastic_per_mt: &[f64], n_grid: usize) 
 }
 
 /// Largest tolerated share of a nuclide's total cross section that may sit in
-/// neutron-emitting MTs the kernel cannot sample (issue #106).
+/// neutron-emitting MTs the kernel cannot sample.
 ///
 /// Zero would be the principled number, but it would refuse real data for no
 /// practical gain: on ENDF/B-VIII.1 the only affected nuclide is La139, whose
@@ -270,7 +268,7 @@ fn nu_bar_from_nu_sigma_f(nu_sigma_f: &[f64], xs_fission: &[f64]) -> Vec<f64> {
 
 /// Per-energy delayed-neutron fraction `beta(E)`: the fission-rate-weighted
 /// `nu_d-sigma_f / nu-sigma_f`, or `0.0` where the material emits no fission
-/// neutrons at all (issue #364). Clamped to `[0, 1]` because `nu_d` and `nu_t`
+/// neutrons at all. Clamped to `[0, 1]` because `nu_d` and `nu_t`
 /// come from different blocks of the evaluation. Both slices must have the same
 /// length.
 fn beta_from_nu_sigma_f(nu_delayed_sigma_f: &[f64], nu_sigma_f: &[f64]) -> Vec<f64> {
@@ -390,7 +388,7 @@ pub fn extract_xs_from_nuclide(
     // Aggregate xs across MT slots for branch-probability use.
     let xs_inelastic = aggregate_inelastic_across_slots(&xs_inelastic_per_mt, n_grid);
 
-    // Issue #106: refuse a nuclide whose unslotted neutron-emitting channels
+    // Refuse a nuclide whose unslotted neutron-emitting channels
     // are big enough to bias the answer. Anything the kernel has no slot for
     // is invisible to `xs_inelastic` and therefore lands in the derived
     // absorption below, so the GPU would kill neutrons the CPU scatters.
@@ -408,7 +406,7 @@ pub fn extract_xs_from_nuclide(
     if nuclide.fissionable {
         let mut nu_sigma_f: Vec<f64> = vec![0.0; n_grid];
         let mut nu_delayed_sigma_f: Vec<f64> = vec![0.0; n_grid];
-        // Delayed groups' total yield nu_d(E) (issue #364); `None` when the
+        // Delayed groups' total yield nu_d(E); `None` when the
         // evaluation has no delayed data, which leaves beta zero everywhere.
         let delayed = nuclide.delayed_neutrons(temperature);
         for &fmt in &[18, 19, 20, 21, 38] {
@@ -538,7 +536,7 @@ pub fn extract_xs_from_nuclide(
         extract_watt_params_single(nuclide, temperature).unwrap_or((0.988e6, 2.249e-6));
     Ok(GpuNuclideXs {
         // Single nuclide: fine and coarse grids are the same nuclide grid, so
-        // this path stays bit-identical to before issue #88.
+        // this path is bit-identical to a single-grid layout.
         coarse_log_energy_grid: log_energy_grid.clone(),
         log_energy_grid,
         xs_elastic,
@@ -620,8 +618,8 @@ pub fn extract_xs_from_nuclide(
     })
 }
 
-/// The exact UNION of the material's per-nuclide energy grids at `temperature`
-/// (issue #88). This mirrors the CPU's `Material::unified_energy_grid_neutron`
+/// The exact UNION of the material's per-nuclide energy grids at `temperature`.
+/// This mirrors the CPU's `Material::unified_energy_grid_neutron`
 /// exactly -- concatenate every nuclide's grid, sort ascending, dedup with a
 /// `1e-12` tolerance -- so the GPU's collision / nuclide-selection cross
 /// sections preserve every isotope's resonances, closing the multi-isotope
@@ -653,14 +651,14 @@ pub fn union_energy_grid(
 /// The GPU's COARSE energy grid for a multi-nuclide material: the FINEST
 /// (most points) of the material's per-nuclide grids at `temperature`.
 ///
-/// Issue #74: the previous master grid was the *first* nuclide's grid, and the
-/// host iterates a material's nuclides from a `HashMap`, so *which* nuclide was
-/// first -- and hence the master grid's resolution -- was non-deterministic.
-/// When a coarse-grid isotope landed first, the dominant isotope's resonance
-/// structure was resampled away, the GPU slowing-down spectrum diverged from the
-/// CPU (which keeps every resonance via the union grid) by up to ~40%, and the
-/// result varied run-to-run. Picking the finest grid is deterministic and
-/// always preserves the most-resolved isotope's resonances.
+/// The *first* nuclide's grid would not do: the host iterates a material's
+/// nuclides from a `HashMap`, so *which* nuclide is first -- and hence the
+/// grid's resolution -- is non-deterministic. When a coarse-grid isotope lands
+/// first, the dominant isotope's resonance structure is resampled away and the
+/// GPU slowing-down spectrum diverges from the CPU (which keeps every resonance
+/// via the union grid) by up to ~40%, varying run-to-run. Picking the finest
+/// grid is deterministic and always preserves the most-resolved isotope's
+/// resonances.
 ///
 /// The mathematically exact choice is the *union* of all nuclide grids (what the
 /// CPU's `Material::unified_energy_grid_neutron` builds), but for a many-nuclide
@@ -710,9 +708,9 @@ pub fn finest_energy_grid<'a>(
 ///
 /// The master grid is the FINEST of the material's per-nuclide grids (see
 /// [`finest_energy_grid`]): deterministic and order-independent, preserving the
-/// most-resolved isotope's resonances. Issue #74 fixed the prior "first
-/// nuclide's grid" choice, which was `HashMap`-order-dependent and smeared the
-/// dominant isotope's resonances when a coarse isotope happened to be first.
+/// most-resolved isotope's resonances. A "first nuclide's grid" choice would be
+/// `HashMap`-order-dependent and smear the dominant isotope's resonances when a
+/// coarse isotope happened to be first.
 ///
 /// Caller passes `&[(&Nuclide, atomic_density)]`. Atomic density is
 /// in whatever units the caller chooses; what matters is consistency
@@ -726,7 +724,7 @@ pub fn extract_material_xs(
         return Err(NuclideXsError::EmptyMaterial);
     }
 
-    // Dual energy grid (issue #88). The FINE grid is the exact UNION of the
+    // Dual energy grid. The FINE grid is the exact UNION of the
     // material's per-nuclide grids -- the same grid the CPU's
     // `Material::unified_energy_grid_neutron` builds -- so every isotope's
     // resonances survive in the collision / nuclide-selection cross sections
@@ -880,7 +878,7 @@ pub fn extract_material_xs(
         // material-level ν̄. Non-fissionable nuclides contribute zero.
         if nuclide.fissionable {
             // Delayed groups' total yield nu_d(E), for the material's delayed
-            // fraction (issue #364). `None` for an evaluation with no delayed data,
+            // fraction. `None` for an evaluation with no delayed data,
             // which then contributes nothing to nu_d-sigma_f and so leaves the
             // material's beta at zero.
             let delayed = nuclide.delayed_neutrons(temperature);
@@ -921,7 +919,7 @@ pub fn extract_material_xs(
     // `(N * A) / N` comes out a full ulp above `A` for Am240 at 5 g/cm3 (exact
     // for W184, Fe56 and F19, which is why only some nuclides showed it), and the
     // CPU's elastic kinematics use `A` itself, so every non-free-gas elastic
-    // scatter landed a few ulp off the CPU's (issue #111). The loop above already
+    // scatter landed a few ulp off the CPU's. The loop above already
     // errored on a nuclide with no atomic weight ratio.
     let target_mass = if let [(single, _)] = nuclides {
         single
@@ -979,7 +977,7 @@ pub fn extract_material_xs(
     let nu_bar_total = nu_bar_from_nu_sigma_f(&nu_sigma_f_total, &xs_fission_total);
 
     // Per-energy delayed fraction for the material: the fission-rate-weighted
-    // `nu_d / nu_t` (issue #364). For a single fissile nuclide it reduces exactly
+    // `nu_d / nu_t`. For a single fissile nuclide it reduces exactly
     // to that nuclide's `nu_d(E) / nu_t(E)`, which is what the CPU evaluates.
     let beta_delayed_total = beta_from_nu_sigma_f(&nu_delayed_sigma_f_total, &nu_sigma_f_total);
 
@@ -1083,7 +1081,7 @@ pub fn extract_material_xs(
     let (fission_watt_a, fission_watt_b) =
         extract_watt_params(nuclides, temperature).unwrap_or((0.988e6, 2.249e-6));
     Ok(GpuNuclideXs {
-        // Dual grid (issue #88): the FINE `log_energy_grid` is the union of the
+        // Dual grid: the FINE `log_energy_grid` is the union of the
         // per-nuclide grids (resonance-faithful collision / selection XS); the
         // COARSE grid backs the per-MT inelastic buffers. Equal for a
         // single-nuclide material, so that path stays bit-identical.
@@ -1225,14 +1223,14 @@ pub fn extract_per_nuclide_macro_total_xs(
     })
 }
 
-/// Per-nuclide elastic (MT 2) angular distribution pool for one material
-/// (issue #74, Stage 2a). Where [`GpuNuclideXs::elastic_angle_*`] carries a
-/// single material-blended slot (first nuclide with MT 2 data), this carries
-/// one slot per nuclide so the transport can sample the SELECTED nuclide's
-/// elastic CM cosine. All buffers are `[n_nuclides × …]`, nuclide-major in the
-/// same order as the input `nuclides` slice (the order the per-collision
-/// selector picks `chosen` against), so concatenating them material-major
-/// aligns row `slab` with `mat_nuclide_meta`'s `[offset, count]`.
+/// Per-nuclide elastic (MT 2) angular distribution pool for one material. Where
+/// [`GpuNuclideXs::elastic_angle_*`] carries a single material-blended slot
+/// (first nuclide with MT 2 data), this carries one slot per nuclide so the
+/// transport can sample the SELECTED nuclide's elastic CM cosine. All buffers
+/// are `[n_nuclides × …]`, nuclide-major in the same order as the input
+/// `nuclides` slice (the order the per-collision selector picks `chosen`
+/// against), so concatenating them material-major aligns row `slab` with
+/// `mat_nuclide_meta`'s `[offset, count]`.
 #[derive(Debug, Clone)]
 pub struct PerNuclideElasticAngle {
     /// Number of nuclides (rows).
@@ -1240,7 +1238,7 @@ pub struct PerNuclideElasticAngle {
     /// Per-nuclide tabulated incident-energy count, `[n_nuclides]`. Zero means
     /// "no tabulated elastic angle, fall back to isotropic-in-CM".
     pub n_energies: Vec<u32>,
-    /// Tight CSR (issue #104): incident-energy grids for all nuclides
+    /// Tight CSR: incident-energy grids for all nuclides
     /// concatenated back to back, length `sum(n_energies)`.
     pub energy_grid: Vec<f64>,
     /// Per-(nuclide, incident-energy) outgoing-cosine count, one entry per
@@ -1285,7 +1283,7 @@ pub fn extract_per_nuclide_elastic_angle(
             .get_temp_idx(temperature)
             .ok_or_else(|| NuclideXsError::TemperatureNotLoaded(temperature.to_string()))?;
         let reactions = &nuclide.reactions[temp_idx];
-        // Tight, full-resolution flatten (no MAX_* subsampling, issue #104),
+        // Tight, full-resolution flatten (no MAX_* subsampling),
         // via the same `to_elastic_flat` the CPU transport uses.
         let flat = match reactions.get(&MT_ELASTIC) {
             Some(rxn) => elastic_flat_from_reaction(rxn.as_ref()),
@@ -1312,13 +1310,12 @@ pub fn extract_per_nuclide_elastic_angle(
 }
 
 /// Per-(material, nuclide) inelastic distribution + reaction-type-partial pool
-/// for one material (issue #74, Stage 2b). Where [`extract_material_xs`]
-/// material-blends the per-MT inelastic distributions (the `pick_first`
-/// closure) and drives the reaction-type four-way split from material-aggregate
-/// partials, this carries one full set of per-MT distribution buffers AND the
-/// four reaction partials (elastic / absorption / inelastic / fission) PER
-/// NUCLIDE, so the kernel can:
-///   1. pick the struck nuclide (Stage 1, by macroscopic total), then
+/// for one material. Where [`extract_material_xs`] material-blends the per-MT
+/// inelastic distributions (the `pick_first` closure) and drives the
+/// reaction-type four-way split from material-aggregate partials, this carries
+/// one full set of per-MT distribution buffers AND the four reaction partials
+/// (elastic / absorption / inelastic / fission) PER NUCLIDE, so the kernel can:
+///   1. pick the struck nuclide (by macroscopic total), then
 ///   2. split the reaction type from THAT nuclide's own partials (mirroring
 ///      CPU `Nuclide::sample_reaction_type`), then
 ///   3. sample THAT nuclide's own inelastic secondary distribution.
@@ -1348,14 +1345,14 @@ pub struct PerNuclideInelastic {
     pub sigma_inelastic: Vec<f64>,
     pub sigma_fission: Vec<f64>,
     /// Per-nuclide fission yield on the master grid, flat `[n_nuclides x
-    /// n_grid]` each (fusion-neutronics/core#93): the nuclide's own `nu_bar(E)`
+    /// n_grid]` each: the nuclide's own `nu_bar(E)`
     /// (total neutrons per fission, the same `nu * sigma_f / sigma_f` fold
     /// `extract_xs_from_nuclide` does for one nuclide) and its delayed fraction
     /// `beta(E) = nu_d(E) / nu_t(E)`. Zero for a non-fissionable nuclide. The
     /// kernel takes the struck nuclide's pair from these after the selection.
     pub nu_bar: Vec<f64>,
     pub beta_delayed: Vec<f64>,
-    /// SPARSE per-MT inelastic XS / yield (issue #212). Per (slab, MT slot) only
+    /// SPARSE per-MT inelastic XS / yield. Per (slab, MT slot) only
     /// the tight nonzero (above-threshold) range of the material's coarse grid is
     /// stored, concatenated in (slab, slot) order. `permt_i_start[slab *
     /// MT_INELASTIC_COUNT + slot]` is the first coarse-grid index where the slot's
@@ -1437,7 +1434,7 @@ pub struct PerNuclideInelastic {
 
 /// Extract the per-(material, nuclide) inelastic distribution + reaction-partial
 /// pool (see [`PerNuclideInelastic`]) for `nuclides` (`(nuclide, atom_density)`
-/// pairs) at `temperature`. Issue #88 splits the grids: the four reaction
+/// pairs) at `temperature`. The grids are split: the four reaction
 /// partials live on the FINE (union) `fine_grid` -- resonance-critical, because
 /// the kernel's per-collision reaction-type split reads them at the struck
 /// nuclide's resonances -- while the per-MT inelastic XS / Q / yield live on
@@ -1475,7 +1472,7 @@ pub fn extract_per_nuclide_inelastic(
         sigma_fission: Vec::with_capacity(n * n_grid),
         nu_bar: Vec::with_capacity(n * n_grid),
         beta_delayed: Vec::with_capacity(n * n_grid),
-        // Sparse per-MT storage (issue #212): capacity is a loose upper bound
+        // Sparse per-MT storage: capacity is a loose upper bound
         // (real data is 90-99.9% zeros, so the sparse buffers stay far smaller).
         xs_inelastic_per_mt_sparse: Vec::new(),
         yield_per_mt_sparse: Vec::new(),
@@ -1561,8 +1558,8 @@ pub fn extract_per_nuclide_inelastic(
                     mt: MT_ELASTIC,
                     temperature: temperature.to_string(),
                 })?;
-        // This nuclide's own fission yield on the fine grid
-        // (fusion-neutronics/core#93): microscopic `sigma_f`, `nu sigma_f` and
+        // This nuclide's own fission yield on the fine grid:
+        // microscopic `sigma_f`, `nu sigma_f` and
         // `nu_d sigma_f` summed over the non-redundant fission channels, folded
         // the way `extract_xs_from_nuclide` folds them for one nuclide.
         let mut nuc_xs_f: Vec<f64> = Vec::with_capacity(n_grid);
@@ -1597,8 +1594,7 @@ pub fn extract_per_nuclide_inelastic(
                         // Redundant MT 18 beside its partials: see the matching
                         // guard in `extract_xs_from_nuclide`. This per-slab sum
                         // drives the reaction split in multi-nuclide materials,
-                        // and counted U240's fission twice there
-                        // (fusion-neutronics/core#34 entry 1).
+                        // and counted U240's fission twice there.
                         if rxn.redundant {
                             continue;
                         }
@@ -1680,8 +1676,8 @@ pub fn extract_per_nuclide_inelastic(
                 *slot_data = yield_sigma_per_mt[i] / yield_weight_per_mt[i];
             }
         }
-        // Compress each slot to its tight nonzero (above-threshold) range (issue
-        // #212). `i_start` / `i_end` are the first / one-past-last coarse-grid
+        // Compress each slot to its tight nonzero (above-threshold) range.
+        // `i_start` / `i_end` are the first / one-past-last coarse-grid
         // indices where this slot's XS is nonzero; the values are pushed tight
         // over `[i_start, i_end)`. Interior zeros inside the range are kept as-is
         // (XS `0.0`, yield `1.0`), so the sparse lookup reproduces the dense
@@ -1864,9 +1860,8 @@ fn extract_watt_params(nuclides: &[(&Nuclide, f64)], temperature: &str) -> Optio
 
 /// One fission outgoing-energy (chi) table, the unit the device chi buffers are
 /// built from: one row per (nuclide, fission channel) for the prompt spectra and
-/// one row per nuclide for the delayed spectrum (fusion-neutronics/core#34 entry
-/// 1; the per-(slab, channel) row table is
-/// `NuclideSelectInputs::chi_slab_meta`). Mirrors `EoutSlot`'s flat layout.
+/// one row per nuclide for the delayed spectrum (the per-(slab, channel) row
+/// table is `NuclideSelectInputs::chi_slab_meta`). Mirrors `EoutSlot`'s flat layout.
 /// `kind` records which sampler the kernel should use:
 /// - `EOUT_KIND_CONTINUOUS_TABULAR` (1): sample from `(x, cdf)`
 /// - `EOUT_KIND_MAXWELL` (6) / `EOUT_KIND_EVAPORATION` (4): the closed-form
@@ -1889,11 +1884,11 @@ fn extract_watt_params(nuclides: &[(&Nuclide, f64)], temperature: &str) -> Optio
 pub struct FissionEoutSlot {
     pub kind: u32,
     pub n_energies: u32,
-    /// Length `n_energies` (tight, issue #104).
+    /// Length `n_energies` (tight).
     pub energy_grid: Vec<f64>,
     /// Length `n_energies`.
     pub n_x: Vec<u32>,
-    /// Length `sum(n_x)` (tight CSR, issue #104).
+    /// Length `sum(n_x)` (tight CSR).
     pub x: Vec<f64>,
     /// Length `sum(n_x)`.
     pub cdf: Vec<f64>,
@@ -1904,8 +1899,8 @@ pub struct FissionEoutSlot {
 }
 
 impl FissionEoutSlot {
-    /// Default slot: Watt fallback, no continuum data. Tight CSR
-    /// (issue #104): an empty slot has zero rows and zero points, so
+    /// Default slot: Watt fallback, no continuum data. Tight CSR:
+    /// an empty slot has zero rows and zero points, so
     /// every Vec is empty (`n_energies == 0`).
     pub fn empty() -> Self {
         Self {
@@ -1989,7 +1984,7 @@ impl FissionEoutSlot {
         None
     }
 
-    /// Pack one nuclide's yield-weighted folded DELAYED spectrum (issue #364).
+    /// Pack one nuclide's yield-weighted folded DELAYED spectrum.
     /// The fold is `ContinuousTabular` by construction, so it reuses the same
     /// packing. Returns the empty slot when the nuclide has no delayed data;
     /// `beta == 0` then keeps the kernel from ever reading it.
@@ -2049,7 +2044,7 @@ impl FissionEoutSlot {
     /// Pack a `CorrelatedAngleEnergy` prompt-fission spectrum's E_out
     /// marginal into the ContinuousTabular `fission_eout_*` buffers,
     /// dropping the per-(E_in, E_out) angular sub-tables (fission mu is
-    /// isotropic in lab on the GPU). Tight CSR (issue #104): keeps every
+    /// isotropic in lab on the GPU). Tight CSR: keeps every
     /// incident-energy point and every E_out point (no subsampling); rows
     /// are concatenated back-to-back, `n_x[i]` recording each row's length.
     /// Same CDF-normalisation as `from_continuous_tabular`, reading the
@@ -2118,8 +2113,8 @@ impl FissionEoutSlot {
 
     /// Same normalisation as `EoutSlot::from_continuous_tabular` -- the
     /// kernel reuses the existing linear-in-c inelastic eout sampler for
-    /// the fission branch so the buffer encoding matches. Tight CSR
-    /// (issue #104): keeps the full incident-energy and E_out resolution
+    /// the fission branch so the buffer encoding matches. Tight CSR:
+    /// keeps the full incident-energy and E_out resolution
     /// (U235 MT18 has max_n_x = 643, Pu239 = 642, both above the old 512
     /// cap, so the full spectrum is now retained); rows are concatenated
     /// back-to-back with `n_x[i]` recording each row's length.
@@ -2192,8 +2187,8 @@ impl FissionEoutSlot {
     /// (`p(E) ∝ √E·exp(-E/θ)` for Maxwell, `p(E) ∝ E·exp(-E/θ)` for
     /// Evaporation, both capped at `E_in - u`), so there is no tabulated
     /// `(E_out, cdf)` table to store -- only the tabulated temperature
-    /// `θ(E_in)` and the scalar restriction energy `u`. Tight CSR
-    /// (issue #104): each E_in row carries a SINGLE point (`n_x[i] == 1`),
+    /// `θ(E_in)` and the scalar restriction energy `u`. Tight CSR:
+    /// each E_in row carries a SINGLE point (`n_x[i] == 1`),
     /// so the tight `x` / `cdf` arrays have one entry per row. The slot
     /// reuses:
     ///   `kind`              -- `EOUT_KIND_MAXWELL` / `_EVAPORATION`
@@ -2239,10 +2234,9 @@ impl FissionEoutSlot {
     }
 }
 
-/// One nuclide's fission chi rows for the device (fusion-neutronics/core#34
-/// entry 1): a prompt spectrum per fission channel plus the delayed spectrum,
-/// built by [`extract_fission_chi_per_nuclide`] and laid out per slab by the
-/// translator.
+/// One nuclide's fission chi rows for the device: a prompt spectrum per fission
+/// channel plus the delayed spectrum, built by
+/// [`extract_fission_chi_per_nuclide`] and laid out per slab by the translator.
 #[derive(Debug, Clone)]
 pub struct NuclideFissionChi {
     /// Prompt spectra, one per fission channel, in the CPU fast grid's
@@ -2535,7 +2529,7 @@ mod tests {
         // θ is on the incident-energy grid.
         assert_eq!(slot.energy_grid[0], 1.0e-5);
         assert_eq!(slot.energy_grid[3], 2.0e7);
-        // Tight CSR (issue #104): one stored point per E_in row, so θ
+        // Tight CSR: one stored point per E_in row, so θ
         // values are packed contiguously (row i at x[i]); `u` sits in the
         // material's row-0 cdf slot.
         assert_eq!(slot.n_x, vec![1u32; 4]);
@@ -2573,8 +2567,7 @@ mod tests {
     /// the channel that fissioned and keys its chi per MT. The device rows must
     /// follow: one prompt row per channel in the fast grid's order, each from
     /// that channel's own spectrum, with the channel cross sections the kernel
-    /// walks matching the reactions at every grid point
-    /// (fusion-neutronics/core#34 entry 1).
+    /// walks matching the reactions at every grid point.
     #[test]
     fn u240_fission_chi_has_one_prompt_row_per_channel() {
         let Some(nuclide) = load_u240() else { return };
@@ -2681,7 +2674,7 @@ mod tests {
     /// The per-slab fission partial that drives the reaction split in
     /// multi-nuclide materials summed every fission MT present, so U240's
     /// redundant MT 18 was counted on top of its partials there, exactly the
-    /// double count the single-nuclide path had (fusion-neutronics/core#89).
+    /// double count the single-nuclide path had.
     #[test]
     fn per_slab_fission_partial_counts_redundant_mt18_once() {
         let Some(nuclide) = load_u240() else { return };

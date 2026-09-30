@@ -1,4 +1,4 @@
-//! Issue #371: the flattened correlated angle-energy sampler must reproduce the
+//! The flattened correlated angle-energy sampler must reproduce the
 //! reference `CorrelatedAngleEnergy::sample` it was derived from.
 //!
 //! The CPU transport samples continuum inelastic through the GPU-shared FLAT

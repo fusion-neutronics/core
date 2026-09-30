@@ -232,8 +232,8 @@ fn gpu_coupled_neutron_photon_matches_cpu() {
     // (b) Neutron-identity: coupling must NOT perturb neutron transport. The
     //     neutron kernel forks a child PCG state for photon sampling
     //     (`pcg_next(state ^ ...)`) and never advances the neutron `state`, so
-    //     coupling-on vs coupling-off is bit-identical FOR THE SAME SEEDS. Since
-    //     issue #233 Stage 3 the coupled path is ALSO batch-free (per-source),
+    //     coupling-on vs coupling-off is bit-identical FOR THE SAME SEEDS. The
+    //     coupled path is ALSO batch-free (per-source),
     //     using the SAME fixed launch chunk as the neutron-only baseline, so the
     //     two runs transport the identical source neutrons and agree to a very
     //     tight band (only f64 round-off in the per-source vs per-history sum

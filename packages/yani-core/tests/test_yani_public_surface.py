@@ -1,4 +1,4 @@
-"""The transmutation wheel must not re-export the transport surface (#452).
+"""The transmutation wheel must not re-export the transport surface.
 
 `yani` and `yamc` are built from one bindings crate, so every class the crate
 defines is a candidate for both wheels. `register_classes` gates the
@@ -22,10 +22,8 @@ yani = pytest.importorskip("yani", reason="standalone yani wheel not installed")
 # Nothing an inventory calculation does needs these, and one of them is a test
 # helper. They stay usable in yamc.
 #
-# The five model-level names came from an inline heredoc in the `yani-wheel` CI
-# job, which asserted the same thing this file does and was the only check that
-# job ever ran. This suite is run there now instead (issue #535), so the names
-# live in one place.
+# The `yani-wheel` CI job runs this suite, so the names live in one place rather
+# than in an inline heredoc in the job as well.
 TRANSPORT_ONLY = [
     "AngleDistribution",
     "Cell",
@@ -77,7 +75,7 @@ def test_the_readback_gate_is_on_this_wheel_too():
 
     A conversion is checked by reading it back, and these two bind the real
     Rust loaders so the gate is the consumer rather than a second
-    implementation of the format (issue #525). They are registered outside the
+    implementation of the format. They are registered outside the
     `transport` gate in `register_classes` on purpose, because yani converts as
     well as yamc does, and nothing else pins that: the only Python tests for
     the pair live in the yamc package, so re-gating them behind `transport`

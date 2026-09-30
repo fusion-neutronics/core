@@ -4,7 +4,7 @@
 use super::*;
 
 /// Whether a tally can be scored with the TRUE track-length estimator
-/// along Woodcock flight segments (issue #350), instead of the
+/// along Woodcock flight segments, instead of the
 /// collision-density equivalent.
 ///
 /// Requirements, all checked once at run start:
@@ -24,10 +24,10 @@ pub(crate) fn woodcock_mesh_track_length_eligible(tally: &Tally) -> bool {
         #[cfg(feature = "mesh")]
         {
             // Regular/cylindrical meshes use the lazy DDA iterator;
-            // unstructured meshes use the ray-based `get_bins_crossed`
-            // (issue #355). Both apportion a straight segment without
-            // any geometry knowledge, which is what segment scoring
-            // under delta tracking requires.
+            // unstructured meshes use the ray-based `get_bins_crossed`.
+            // Both apportion a straight segment without any geometry
+            // knowledge, which is what segment scoring under delta
+            // tracking requires.
             tally.get_mesh_filter().is_some() || tally.get_unstructured_mesh_filter().is_some()
         }
         #[cfg(not(feature = "mesh"))]
@@ -58,8 +58,8 @@ pub(crate) fn woodcock_mesh_track_length_eligible(tally: &Tally) -> bool {
 /// material / URR arguments are never consulted.
 ///
 /// Segments are always fully inside the geometry: flights are truncated
-/// at the first true vacuum exit by [`woodcock_flight_exit`] (issue
-/// #360), and the leaking caller passes the clipped segment.
+/// at the first true vacuum exit by [`woodcock_flight_exit`],
+/// and the leaking caller passes the clipped segment.
 pub(super) fn score_woodcock_mesh_track_length(
     particle: &yamc_particle::particle::Particle,
     end_position: [f64; 3],
@@ -96,7 +96,7 @@ pub(super) fn score_woodcock_mesh_track_length(
 /// delta flight can cross several cells before exiting, so a single
 /// boundary query from the pre-flight cell is not enough).
 ///
-/// Fallback path only since issue #360: CSG vacuum exits are caught
+/// Fallback path only: CSG vacuum exits are caught
 /// pre-flight by [`woodcock_flight_exit`], so this fires just for mesh
 /// backends (no precomputed vacuum surfaces) and numerical corner
 /// cases, on leaking flights with eligible mesh tallies present.
@@ -145,7 +145,7 @@ pub(super) fn distance_to_geometry_exit(
 
 /// Distance along a Woodcock flight to the first TRUE geometry exit
 /// through a vacuum surface, or `None` when the full flight stays
-/// inside (issue #360).
+/// inside.
 ///
 /// Delta tracking samples flights with no boundary checks, so without
 /// this test a flight can tunnel through a vacuum boundary, cross

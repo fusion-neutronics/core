@@ -175,7 +175,7 @@ fn get_keyword_info_mapping() -> HashMap<&'static str, KeywordInfo> {
         "tendl-2025",
         KeywordInfo {
             // Hosted on Cloudflare R2 behind the xsplot.com custom domain, the
-            // same host as endf-b8.1. Option-D layout: per-section objects under
+            // same host as endf-b8.1. Per-section layout: objects under
             // `tendl-2025/neutron/<Name>.arrow/` (nuclide.arrow, reactions.arrow,
             // ...). TENDL is neutron-only: no photon subdir. No index file is
             // published -- unavailable nuclides surface as a download 404.
@@ -204,7 +204,7 @@ fn get_keyword_info_mapping() -> HashMap<&'static str, KeywordInfo> {
         KeywordInfo {
             // Hosted on Cloudflare R2 behind the xsplot.com custom domain, the
             // same host as endf-b8.1. FENDL 3.2d ships neutron + photon data.
-            // Option-D layout: `fendl-3.2d/{neutron,photon}/<Name>.arrow/`
+            // Per-section layout: `fendl-3.2d/{neutron,photon}/<Name>.arrow/`
             // section dirs. No index file -- unavailable nuclides surface as a
             // download 404.
             url_stem: concat!(data_origin!(), "fendl-3.2d/"),
@@ -217,7 +217,7 @@ fn get_keyword_info_mapping() -> HashMap<&'static str, KeywordInfo> {
         KeywordInfo {
             // Hosted on Cloudflare R2 behind a custom domain on the xsplot.com
             // zone; CORS-friendly (ACAO: *) so browser-WASM builds can fetch
-            // directly. Option-D layout: `endf-b8.1/{neutron,photon}/<Name>.arrow/`
+            // directly. Per-section layout: `endf-b8.1/{neutron,photon}/<Name>.arrow/`
             // section dirs, plus per-subsection transmutation section dirs under
             // `transmutation/<subsection>.arrow/`.
             url_stem: concat!(data_origin!(), "endf-b8.1/"),
@@ -279,7 +279,7 @@ pub fn expand_keyword_to_url(keyword: &str, nuclide_name: &str, kind: DataKind) 
             DataKind::Neutron => info.neutron_subdir,
             DataKind::Photon => info.photon_subdir,
         };
-        // Option-D (#224): the base prefix of the tar-free per-section object
+        // The base prefix of the tar-free per-section object
         // set (`<stem><subdir><Name>.arrow/`); the downloader appends each
         // section filename. No `.tar` suffix.
         format!("{}{}{}.arrow", info.url_stem, subdir, nuclide_name)
@@ -307,7 +307,7 @@ pub fn expand_keyword_to_subsection_url(keyword: &str, subsection: &str) -> Opti
 /// on [`keyword_transmutation_subsections`] first).
 ///
 /// `branching_covariance.arrow` is the optional MF=40 covariance of the
-/// isomeric branching (#140). A library without one answers 404, which settles
+/// isomeric branching. A library without one answers 404, which settles
 /// as a `branching_covariance.arrow.absent` marker (see [`download_sections`]),
 /// so a missing file means "no covariance" rather than an incomplete download.
 /// As of 2026-09-26 every published branching folder answers 404 for it.
@@ -414,7 +414,7 @@ pub fn resolve_subsection(
 
 /// Comma-separated list of nuclide and element names published in the
 /// endf-b8.1 cross-section release. Embedded at compile time so we can
-/// short-circuit guaranteed-404 downloads (issue #46) without a runtime
+/// short-circuit guaranteed-404 downloads without a runtime
 /// index fetch. Refresh from the R2 bucket index file (currently uploaded
 /// alongside the data on <https://yamc-data.xsplot.com/endf-b8.1/>) when
 /// the underlying release changes.
@@ -437,8 +437,8 @@ static EMBEDDED_INDEX: Lazy<HashMap<&'static str, HashSet<&'static str>>> = Lazy
     m
 });
 
-/// The `data_version` each library's cross sections are expected to carry
-/// (issue #366): the `{keyword}-{nuclide}.arrow` and `{keyword}-{element}.arrow`
+/// The `data_version` each library's cross sections are expected to carry:
+/// the `{keyword}-{nuclide}.arrow` and `{keyword}-{element}.arrow`
 /// directories [`download_and_cache`] writes. The transmutation subsections are
 /// pinned separately, in [`EXPECTED_TRANSMUTATION_DATA_VERSION`].
 ///
@@ -494,12 +494,12 @@ const EXPECTED_DATA_VERSION: &[(&str, &str)] = &[
     // The 2026-09-08 rebuild is the first whose photon sections drop the
     // heating column this schema stopped declaring. A released wheel pinning
     // 2026-09-02 can read none of it, and one pinning this can read none of
-    // what came before, which is the coupling issue #366 accepted and #28 in
-    // the generation scripts is about.
+    // what came before: the wheel and the data release are coupled, and this
+    // pin is what makes that coupling explicit.
     //
     // The 2026-09-18 republish is the format_version 2 one: the union energy
-    // grids moved out of nuclide.arrow into energy.arrow (#100/#109) and
-    // reactions.arrow went to one record batch per (MT, temperature) (#103).
+    // grids moved out of nuclide.arrow into energy.arrow and
+    // reactions.arrow went to one record batch per (MT, temperature).
     // The cross sections were relaid out rather than reconverted, so no value
     // moved. All 8047 published markers carry this stamp and format_version 2,
     // checked over the built tree before upload.
@@ -657,7 +657,7 @@ fn cached_data_version(dir: &std::path::Path) -> Option<String> {
 #[cfg(feature = "download")]
 fn data_version_matches(dir: &std::path::Path, expected: Option<&str>) -> bool {
     match expected {
-        // Nothing pinned for this keyword: unchanged pre-#366 behaviour.
+        // Nothing pinned for this keyword: any cached directory is current.
         None => true,
         Some(expected) => cached_data_version(dir).as_deref() == Some(expected),
     }
@@ -806,11 +806,11 @@ pub fn download_and_cache(
 
     // Fast path: cache hit without any locking. The gate is per-section rather
     // than per-directory, because a cache dir populated by an earlier
-    // transmutation load holds only some of what transport now wants (issue
-    // #389). Each section is published by rename, so a section that is present
+    // transmutation load holds only some of what transport now wants. Each
+    // section is published by rename, so a section that is present
     // is complete. `cache_is_current` additionally requires the release stamp
     // to be the one this build expects, so a re-published library invalidates
-    // rather than hitting forever (issue #366); it is a local `version.json`
+    // rather than hitting forever; it is a local `version.json`
     // read, so the offline zero-round-trip property is unchanged.
     if have_all_sections(&local_path, sections, subset)
         && cache_is_current(&local_path, source, NUCLIDE_CACHE_KIND)
@@ -836,7 +836,7 @@ pub fn download_and_cache(
 
     // Cache miss. If we ship an index of available nuclides for this
     // library and the requested name isn't in it, fail fast -- saves a
-    // guaranteed 404 round trip (issue #46). Falls through when no
+    // guaranteed 404 round trip. Falls through when no
     // embedded index is shipped for `source` (e.g. raw URLs, or
     // libraries we haven't shipped a list for).
     if matches!(
@@ -943,7 +943,7 @@ pub const NEUTRON_SECTIONS: &[(&str, bool)] = &[
     ("version.json", true),
     ("nuclide.arrow", true),
     // Required from format_version 2: the union energy grids, which every
-    // neutron scope interpolates against (fusion-neutronics/core#100).
+    // neutron scope interpolates against.
     ("energy.arrow", true),
     ("reactions.arrow", true),
     ("products.arrow", true),
@@ -963,7 +963,7 @@ const NEUTRON_SECTIONS_WITH_COVARIANCE: &[(&str, bool)] = &[
     ("version.json", true),
     ("nuclide.arrow", true),
     // Required from format_version 2: the union energy grids, which every
-    // neutron scope interpolates against (fusion-neutronics/core#100).
+    // neutron scope interpolates against.
     ("energy.arrow", true),
     ("reactions.arrow", true),
     ("products.arrow", true),
@@ -994,7 +994,7 @@ const NEUTRON_XS_ONLY_SECTIONS: &[(&str, bool)] = &[
     ("version.json", true),
     ("nuclide.arrow", true),
     // Required from format_version 2: the union energy grids, which every
-    // neutron scope interpolates against (fusion-neutronics/core#100).
+    // neutron scope interpolates against.
     ("energy.arrow", true),
     ("reactions.arrow", true),
 ];
@@ -1008,7 +1008,7 @@ const NEUTRON_XS_ONLY_SECTIONS_WITH_COVARIANCE: &[(&str, bool)] = &[
     ("version.json", true),
     ("nuclide.arrow", true),
     // Required from format_version 2: the union energy grids, which every
-    // neutron scope interpolates against (fusion-neutronics/core#100).
+    // neutron scope interpolates against.
     ("energy.arrow", true),
     ("reactions.arrow", true),
     ("covariance.arrow", false),
@@ -1334,7 +1334,7 @@ fn fetch_section_to_file(
 /// * absent: stage everything and rename the whole directory into place, as
 ///   before. Nothing can observe a partial directory.
 /// * present: rename each fetched section in individually. This is the additive
-///   case (issue #389) and it is why the whole directory is no longer replaced:
+///   case and it is why the whole directory is not replaced:
 ///   a user who transmutes today fetches three sections, and a transport run
 ///   tomorrow tops up the rest instead of refetching all of them.
 #[cfg(feature = "download")]
@@ -1473,7 +1473,7 @@ fn download_sections(
 /// Without it the root is `<home>/.cache/yamc`, where home is [`home_dir`].
 /// Resolving it there rather than through `HOME` alone is the whole point:
 /// `HOME` is not a Windows variable, so a `HOME`-only lookup silently resolves
-/// to nothing there (issue #544).
+/// to nothing there.
 ///
 /// `None` means neither the override nor a home directory resolved, which is a
 /// machine with no cache location rather than a machine with an empty cache.
@@ -1494,10 +1494,9 @@ pub fn cache_root() -> Option<PathBuf> {
 /// there would break every download for the sake of a rule this crate has no
 /// business restating.
 ///
-/// Issue #544 was never about this function. It was about the TESTS reading
-/// `HOME` themselves, which is not a Windows variable, so they resolved to
-/// nothing there while this resolved correctly. The fix is that everything
-/// comes through here.
+/// Tests must resolve the home directory through here too, rather than reading
+/// `HOME` themselves: `HOME` is not a Windows variable, so a direct read
+/// resolves to nothing there.
 pub fn home_dir() -> Option<PathBuf> {
     etcetera::home_dir().ok()
 }
@@ -1999,7 +1998,7 @@ mod tests {
 
     #[test]
     fn embedded_endf_b81_index_excludes_unpublished_nuclides() {
-        // Examples called out in issue #46 -- these should fail fast
+        // Known-unpublished examples -- these should fail fast
         // instead of triggering a 404.
         for unpublished in [
             "Ag104", "Ag105", "Ag106", "Ag107_m1", "Ag108_m1", "Ag109_m1", "Ag110", "Cd104",
@@ -2060,7 +2059,7 @@ mod tests {
         );
     }
 
-    // ---- issue #389: scoped, additive section fetching ----
+    // ---- scoped, additive section fetching ----
 
     /// A scratch directory that removes itself. The crate has no dev-dependencies
     /// and these tests only need a few empty files.
@@ -2223,8 +2222,8 @@ mod tests {
         write_index(&dir.0, &[16, 102]);
         write_subset(&dir.0, &[16, 102]);
         dir.touch("nuclide.arrow");
-        // The union energy grids are their own required section since #100, so
-        // a folder without one is not a satisfied activation load.
+        // The union energy grids are their own required section, so a folder
+        // without one is not a satisfied activation load.
         dir.touch("energy.arrow");
         let wanted = mts(&[16, 102]);
         let xs_only = sections_for(
@@ -2266,8 +2265,8 @@ mod tests {
             &crate::LoadScope::activation([102].into()),
         );
         let names: Vec<&str> = xs.iter().map(|(n, _)| *n).collect();
-        // energy.arrow joined the list in #100, when the union grids moved out
-        // of nuclide.arrow. An activation collapse folds cross sections onto
+        // energy.arrow holds the union grids. An activation collapse folds
+        // cross sections onto
         // that grid, so it is as required here as the cross sections are.
         assert_eq!(
             names,
@@ -2345,11 +2344,11 @@ mod tests {
         assert_eq!(cov, Some(("covariance.arrow", false)));
     }
 
-    /// Issue #369. Every other layer shipped the fission photon release (the
+    /// Every other layer ships the fission photon release (the
     /// converter writes it, the schema declares it, the Arrow reader parses
     /// it), but a download-path user only ever sees a section named in this
     /// list. Left out, the read silently returns `None` and actinide fission
-    /// photon production stays ~38% low -- the exact deficit #369 reported.
+    /// photon production stays ~38% low.
     #[test]
     fn a_transport_fetch_asks_for_the_fission_photon_section() {
         let full = sections_for(DataKind::Neutron, &crate::LoadScope::full());
@@ -2503,11 +2502,11 @@ mod tests {
         );
     }
 
-    // ----- data_version cache invalidation (issue #366) --------------------
+    // ----- data_version cache invalidation ----------------------------------
 
     /// Write a `version.json` holding `data_version`, or one without the field
-    /// when `version` is `None` (which is what every directory published before
-    /// #366 looks like).
+    /// when `version` is `None` (which is what a directory published before
+    /// `data_version` stamping looks like).
     fn write_marker(dir: &std::path::Path, version: Option<&str>) {
         fs::create_dir_all(dir).expect("create marker dir");
         let body = match version {
@@ -2531,7 +2530,7 @@ mod tests {
         write_marker(&dir, Some("anything-at-all"));
         assert!(
             data_version_matches(&dir, None),
-            "a library this build pins no version for must keep its pre-#366 behaviour"
+            "a library this build pins no version for must accept any cached directory"
         );
         // Including one with no marker at all.
         let bare = scratch("unpinned-bare");
@@ -2786,7 +2785,7 @@ mod cache_root_tests {
         );
     }
 
-    /// The Windows spelling, which is the shape issue #544 was about. Only the
+    /// The Windows spelling, where `HOME` is not set. Only the
     /// join is ours: which variable produced the home is `etcetera`'s business,
     /// and taking it back off it is what broke a process with no exported HOME.
     #[test]
@@ -2851,7 +2850,7 @@ mod cache_root_tests {
 
     /// `etcetera` resolves a home on every platform CI runs on, including the
     /// Windows runner where `HOME` is unset and `USERPROFILE` carries it. A
-    /// `HOME`-only read is what returned nothing there (issue #544).
+    /// `HOME`-only read is what returned nothing there.
     #[test]
     fn this_machine_has_a_home_and_therefore_a_cache_root() {
         assert!(home_dir().is_some(), "no home directory resolved");

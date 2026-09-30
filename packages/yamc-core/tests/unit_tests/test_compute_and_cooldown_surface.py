@@ -1,4 +1,4 @@
-"""API gaps that made a supported thing unaskable (issues #339, #453, and part of #338).
+"""API gaps that made a supported thing unaskable.
 
 None of these change what the engine does. They change whether a user can say
 what they want: two entry points had no `compute=` at all, so the GPU was
@@ -6,7 +6,7 @@ unreachable by construction rather than by a refusal anyone could read, one flag
 was hardcoded so a documented workaround named something Python could not do,
 and a decay curve meant differencing a log series by hand.
 
-The `gpu_fission_bank` part does NOT resolve #338. Turning the bank off is an
+The `gpu_fission_bank` part is not the full fix. Turning the bank off is an
 escape hatch, and the wanted outcome is the bank working WITH mesh tallies on
 the GPU, which is a device-side change to the fissile per-source path. What is
 fixed here is narrower and true regardless of that: the dispatch error told the
@@ -24,7 +24,7 @@ YEAR = 365.25 * 86400.0
 
 
 # --------------------------------------------------------------------------
-# #453: cooldown_steps
+# cooldown_steps
 # --------------------------------------------------------------------------
 
 
@@ -102,7 +102,7 @@ def test_cooldown_steps_zero_start_is_allowed_when_linear():
 
 
 # --------------------------------------------------------------------------
-# #338: gpu_fission_bank
+# gpu_fission_bank
 # --------------------------------------------------------------------------
 
 
@@ -132,7 +132,7 @@ def test_gpu_fission_bank_is_settable_after_construction():
 
 
 # --------------------------------------------------------------------------
-# #339: compute= on the two entry points that lacked it
+# compute= on the two entry points that lacked it
 # --------------------------------------------------------------------------
 
 
@@ -167,7 +167,7 @@ def test_compute_cpu_is_not_the_thing_that_gets_refused():
     their own reasons (this model carries no transmutation chain, and the
     generator wants a stop condition), and never with the compute rejection.
     Before this change the same call raised `TypeError: unexpected keyword
-    argument 'compute'`, which is the state issue #339 is about.
+    argument 'compute'`.
     """
     mesh = yamc.RegularRectangularMesh(
         lower_left=[-3, -3, -3], upper_right=[3, 3, 3], shape=[1, 1, 2]

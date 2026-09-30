@@ -535,9 +535,8 @@ pub fn blend_reactions(
                 cross_section: F64Buffer::from_slice(&values[threshold_idx..]),
                 threshold_idx,
                 // A view of the one grid the whole synthesised temperature
-                // shares, not a copy: a copy per reaction is what issue #476
-                // removed, and a synthesised temperature must not bring it
-                // back.
+                // shares, not a copy: a synthesised temperature must not
+                // duplicate the grid once per reaction.
                 energy: grid.tail(threshold_idx),
                 mt_number: mt,
                 q_value: template.q_value,

@@ -35,8 +35,8 @@ from .conftest import (
 PARTICLES = 5_000_000
 REL_TOL = 1e-3  # strict 0.1 % cap, no σ-based fallback
 
-# Heating crosses a convention boundary between the estimators since
-# #356: track-length scores collision KERMA along tracks (electron and
+# Heating crosses a convention boundary between the estimators:
+# track-length scores collision KERMA along tracks (electron and
 # positron kinetic energy counted at the interaction site, INCLUDING
 # the part later radiated as TTB bremsstrahlung), while the collision
 # estimator scores the analog absorbed energy (the TTB photons are

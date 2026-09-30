@@ -2,7 +2,7 @@
 //! spectrum, energy bin by energy bin, on the Fe sphere used by the
 //! photoelectric matrix sweep. photoelectric ∝ E^-3 is dominated by the
 //! low-energy tail; this shows WHERE the GPU under-populates so we can
-//! attribute the photoelectric deficit (#415). Run with:
+//! attribute the photoelectric deficit. Run with:
 //!   cargo test --release --test gpu_photon_spectrum_diag -- --nocapture --test-threads=1
 //!
 //! Both tests here assert nothing: they print tables for a person to read.
@@ -116,7 +116,7 @@ fn build_r(radius: f64) -> (Model, Arc<Tally>, TransportSettings) {
 /// fills in relative to CPU as the sphere grows (more chances to scatter),
 /// the per-scatter energy loss is fine and escape was truncating the chain.
 /// If it stays empty even in a large sphere, the per-scatter Compton energy
-/// loss is too small. (#415)
+/// loss is too small.
 #[test]
 fn diag_radius_sweep_deep_tail() {
     if yamc_gpu::GpuContext::new().is_err() {

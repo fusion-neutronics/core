@@ -1,7 +1,7 @@
-//! The macroscopic cross section must be bit-reproducible (issue #598).
+//! The macroscopic cross section must be bit-reproducible.
 //!
-//! Same defect as #502 (`matrix.rs`), #576 (`composition.rs`) and the four
-//! sites fixed in #597, one layer further in. `Material::nuclides` is a
+//! Same defect as `matrix.rs` and `composition.rs` guard against, one layer
+//! further in. `Material::nuclides` is a
 //! `HashMap`, Rust seeds each instance separately, and the accumulation loop
 //! in `macro_xs.rs` walked it directly:
 //!
@@ -16,8 +16,8 @@
 //! with it the last bit of the material's macroscopic cross section at every
 //! grid point, differed between runs.
 //!
-//! This one feeds transport, which is why it was held back from #597: the
-//! cross sections these tests pin are what a collision samples against.
+//! This one feeds transport: the cross sections these tests pin are what a
+//! collision samples against.
 //!
 //! Rebuilt rather than compared with itself: the map is constructed per
 //! material, so a fresh one is the only way to get a fresh iteration order.

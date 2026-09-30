@@ -1,4 +1,4 @@
-//! Baseline diagnostic for #88 (GPU multi-isotope epithermal residual on alloys).
+//! Baseline diagnostic for the GPU multi-isotope epithermal residual on alloys.
 //!
 //! Prints per-bin GPU/CPU flux ratios across the spectrum for natFe and SS316,
 //! and asserts the INTEGRATED flux matches. The dual-grid build (union grid for
@@ -7,8 +7,8 @@
 //! the CPU's union-grid lookups (and to OpenMC). A SEPARATE, pre-existing GPU
 //! transport bug still leaves the deep-epithermal per-bin ratios high (SS316
 //! 1-300 eV ~1.45x, reproduces single-isotope), so this test asserts only the
-//! integrated flux for now; that per-bin residual is tracked by the CPU/GPU
-//! transport-parity issues (#101-#107). Self-skips without an f64 GPU adapter or
+//! integrated flux for now; that per-bin residual is a CPU/GPU transport-parity
+//! gap still open. Self-skips without an f64 GPU adapter or
 //! the cached isotope data.
 #![cfg(all(feature = "gpu", not(target_os = "macos")))]
 
@@ -142,7 +142,7 @@ fn report(name: &str, comp: &[(&str, f64)], density: f64) {
     }
     // The integrated flux matches. The dual-grid build fixed the cross-section
     // (finest-vs-union) smearing; the remaining per-bin deep-epithermal residual
-    // is a separate GPU transport bug (#101-#107), so we assert only the total.
+    // is a separate GPU transport bug, so we assert only the total.
     assert!(
         (0.92..=1.08).contains(&total_ratio),
         "{name}: integrated GPU/CPU flux {total_ratio:.3} outside [0.92, 1.08]"

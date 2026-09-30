@@ -1,5 +1,5 @@
-//! GPU rectangular mesh tallies on the MIXED neutron+photon primary-source path
-//! (issue #234), on-hardware parity check.
+//! GPU rectangular mesh tallies on the MIXED neutron+photon primary-source path,
+//! on-hardware parity check.
 //!
 //! An Fe56 sphere with BOTH a 14 MeV neutron source and a 2 MeV photon source
 //! (equal strength). The mixed dispatch splits each chunk into a neutron share

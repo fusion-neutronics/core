@@ -53,7 +53,7 @@ pub fn activity_by_nuclide(
 /// runs, so a total summed in it moves in the last bit. In a single answer that
 /// is invisible; over an ensemble it is not, because two replicas holding the
 /// identical inventory then disagree and manufacture a spread where there is
-/// none (issue #558). Same reason [`decay_photon_lines`] walks its nuclides
+/// none. Same reason [`decay_photon_lines`] walks its nuclides
 /// sorted.
 pub fn total(by_nuclide: &HashMap<String, f64>) -> f64 {
     let mut names: Vec<&String> = by_nuclide.keys().collect();
@@ -148,8 +148,9 @@ pub fn decay_heat_total(
 /// per second)`, ascending in energy, coincident energies summed.
 ///
 /// Lines only. A continuum is a density per eV rather than a set of rates, so
-/// it has no place in this list, and summing its tabulated values as lines is
-/// the defect issue #163 found. [`decay_photon_continua`] returns it.
+/// it has no place in this list, and summing its tabulated values as lines
+/// would be wrong by about its grid spacing in eV. [`decay_photon_continua`]
+/// returns it.
 ///
 /// The chain records each line's intensity **per atom per second**, not per
 /// decay: it is the emission probability already multiplied by the nuclide's
@@ -334,7 +335,7 @@ mod tests {
     /// Two maps of the same content iterate in different orders, and a total
     /// summed in that order moves in the last bit. Invisible in one answer;
     /// over an ensemble it makes two identical inventories disagree and puts a
-    /// spread on a quantity that has none (issue #558).
+    /// spread on a quantity that has none.
     #[test]
     fn a_total_does_not_depend_on_the_map_it_came_out_of() {
         let pairs = [
@@ -451,7 +452,7 @@ mod tests {
 
     /// Lines and continuum come back apart, each in its own units: the line in
     /// photons/s, the continuum in photons/s/eV with its law, and the lines
-    /// list never holds a continuum's values (issue #163).
+    /// list never holds a continuum's values.
     #[test]
     fn a_continuum_is_returned_apart_from_the_lines() {
         let chain = chain_with_a_continuum(Some(Interpolation::Histogram));

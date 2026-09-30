@@ -119,7 +119,7 @@ pub enum SurfaceKind {
 /// Implicit torus equation in axis-permuted coordinates:
 /// `(rho - a)^2 / c^2 + ax^2 / b^2 - 1`, with `t1, t2` the transverse
 /// displacements from the centre and `ax` the axial one. Shared by
-/// X/Y/ZTorus (issue #367).
+/// X/Y/ZTorus.
 // Regular Rust implementation
 impl Surface {
     /// Compute the distance from a point along a direction to the surface.
@@ -622,11 +622,11 @@ mod tests {
 
     // ── Torus bounding box with offset ──
 
-    // -- Quadric tests (issue #366) --
+    // -- Quadric tests --
 
-    // -- Cone tests (issue #365) --
+    // -- Cone tests --
 
-    // -- X/Y torus tests (issue #367) --
+    // -- X/Y torus tests --
 
     #[test]
     fn xy_torus_bounding_boxes_permute() {

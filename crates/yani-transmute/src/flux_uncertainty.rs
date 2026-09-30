@@ -2,8 +2,7 @@
 //!
 //! `Material.transmute` takes the flux as exact. It usually is not: it arrives
 //! from a Monte Carlo tally with a standard deviation per bin, and that error
-//! goes straight into every reaction rate and so into the whole inventory
-//! (issue #559).
+//! goes straight into every reaction rate and so into the whole inventory.
 //!
 //! # It costs one dot product per replica
 //!
@@ -103,7 +102,7 @@ pub fn relative_std_dev(flux: &[f64], std_dev: &[f64]) -> Option<Vec<f64>> {
 /// correlated. A per-bin standard deviation treats them as independent, which
 /// understates the error of anything summed over a band whose bins move
 /// together, and a band is exactly what a reaction rate sums over. The
-/// covariance form keeps the correlations (issue #140, item 6).
+/// covariance form keeps the correlations.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FluxError {
     /// Per-bin relative standard deviation, bins independent.

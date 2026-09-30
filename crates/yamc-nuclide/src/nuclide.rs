@@ -80,7 +80,7 @@ pub const SCATTERING_MTS_NON_INELASTIC: &[i32] = &[
 ];
 
 /// Canonical visiting order for the NON-elastic neutron-producing channels
-/// when a collision samples *which* one of them occurs (issue #111).
+/// when a collision samples *which* one of them occurs.
 ///
 /// The reaction-type draw is a cumulative walk: a single uniform `xi_mt` is
 /// compared against the running sum of the candidate channels' partial cross
@@ -96,8 +96,7 @@ pub const SCATTERING_MTS_NON_INELASTIC: &[i32] = &[
 /// ((n,3n)); entries 43..=47 are the charged-particle-out + neutron MTs
 /// MT 22 / 28 / 32 / 33 / 34; entries 48..=55 close the remaining
 /// neutron-emitting coverage (MT 5, 23, 24, 25, 37, 41, 44, 45); entries
-/// 56..=61 are the breakup channels MT 11 / 29 / 30 / 35 / 36 / 42 (issue
-/// #106).
+/// 56..=61 are the breakup channels MT 11 / 29 / 30 / 35 / 36 / 42.
 ///
 /// The order is historical (it grew by appending as GPU coverage was
 /// extended) rather than meaningful: any fixed permutation samples each
@@ -132,7 +131,7 @@ pub const INELASTIC_MT_SLOTS: [i32; 62] = [
     41, // (n,2np)
     44, // (n,n'2p)
     45, // (n,n'pα)
-    // Breakup channels (issue #106). Rare in ENDF/B-VIII.1 (MT 11 / 29 in 26
+    // Breakup channels. Rare in ENDF/B-VIII.1 (MT 11 / 29 in 26
     // nuclides each, MT 30 in 11, MT 42 in 20, MT 36 in La139 alone) but
     // near-universal in TENDL: MT 11 in 541 of 558 TENDL-2017 nuclides and
     // 1521 of 1649 in TENDL-2025, MT 42 in 525 and 1465. Without slots their
@@ -186,7 +185,7 @@ pub struct CollisionXs {
 
 /// Reaction-channel partial cross-sections at a collision site, URR-adjusted
 /// exactly as [`Nuclide::sample_reaction_type`], for the shared GPU/CPU
-/// reaction-type split (issue #111). The four partials sum to the (URR-adjusted)
+/// reaction-type split. The four partials sum to the (URR-adjusted)
 /// total, so the analog split draws one uniform `xi2` and partitions
 /// `[elastic | inelastic | fission | absorption]` against them, mirroring the
 /// GPU twin's four-way branch.
@@ -218,7 +217,7 @@ pub struct ReactionPartials {
 pub struct FastXSGrid {
     /// Logarithmic grid index: maps a log(E) bin to a starting index in
     /// `energy`. 32-bit because the column is `int32` on disk and the loader has
-    /// range-checked it against the grid (issue #482); the largest index in any
+    /// range-checked it against the grid; the largest index in any
     /// published library is 163,746.
     pub log_grid_index: Vec<u32>,
     /// Log of minimum energy in grid
@@ -248,8 +247,8 @@ pub struct FastXSGrid {
     /// collision in the URR energy range.
     pub elastic_idx: Option<usize>,
     /// Indices into `scatter_mt_numbers` of every NON-elastic scattering
-    /// column, permuted into the canonical [`INELASTIC_MT_SLOTS`] order
-    /// (issue #111). Built once at load time by
+    /// column, permuted into the canonical [`INELASTIC_MT_SLOTS`] order.
+    /// Built once at load time by
     /// [`FastXSGrid::build_inelastic_walk_order`] so the per-collision
     /// cumulative walk in [`FastXSGrid::sample_inelastic_scatter_reaction`] is
     /// a single pass over a precomputed permutation rather than a search
@@ -298,7 +297,7 @@ pub struct FastXSGrid {
 
 impl FastXSGrid {
     /// Permutation of the non-elastic `scatter_mt_numbers` columns into the
-    /// canonical [`INELASTIC_MT_SLOTS`] order (issue #111). Columns whose MT is
+    /// canonical [`INELASTIC_MT_SLOTS`] order. Columns whose MT is
     /// in the table come first, in table order; the elastic column is dropped
     /// (the elastic-vs-inelastic split is made earlier, by `xi2`).
     ///
@@ -315,7 +314,7 @@ impl FastXSGrid {
     /// the GPU's.
     ///
     /// MT 11 / 29 / 30 / 35 / 36 / 42 used to be in that trailing group and are
-    /// now slotted (issue #106), which closed the gap for the TENDL libraries,
+    /// now slotted, which closed the gap for the TENDL libraries,
     /// where MT 11 and 42 appear in the great majority of nuclides. Because
     /// they were appended in ascending MT order before and sit in ascending MT
     /// order at the end of the table now, the walk they produce is unchanged.
@@ -633,7 +632,7 @@ impl FastXSGrid {
     }
 
     /// The elastic (MT 2) reaction, if this grid carries one. Used by the
-    /// analog reaction-type split (issue #111) once `xi2` has selected the
+    /// analog reaction-type split once `xi2` has selected the
     /// elastic channel directly, so the elastic angular table can be fetched
     /// without re-sampling a constituent.
     #[inline]
@@ -643,8 +642,8 @@ impl FastXSGrid {
     }
 
     /// Select a *non-elastic* scattering constituent proportional to its smooth
-    /// cross-section, driven by a pre-drawn PCG uniform `xi_mt` in `(0, 1]`
-    /// (issue #111). The elastic-vs-inelastic split is made earlier by `xi2`, so
+    /// cross-section, driven by a pre-drawn PCG uniform `xi_mt` in `(0,
+    /// 1]`. The elastic-vs-inelastic split is made earlier by `xi2`, so
     /// the elastic (`elastic_idx`) column is excluded here. Returns `None` only
     /// when there is no non-elastic scattering at this energy.
     ///
@@ -695,7 +694,7 @@ impl FastXSGrid {
 
     /// Sample which fission reaction occurs at `energy`, proportional to the
     /// partial fission cross sections, driven by a PCG uniform in `(0, 1]` that
-    /// `draw_xi` supplies (issue #418). Returns the first fission reaction
+    /// `draw_xi` supplies. Returns the first fission reaction
     /// without drawing when the evaluation has no partial channels.
     ///
     /// `draw_xi` is a closure rather than a pre-drawn `f64` (the shape
@@ -708,7 +707,7 @@ impl FastXSGrid {
     /// of the evaluation rather than of the history, so gating on it keeps the
     /// two backends in lockstep for all 87 of ENDF/B-VIII.1's single-channel
     /// fissionables and costs a draw only on U240, the one nuclide that carries
-    /// partial channels (and which the GPU cannot follow anyway, see #424).
+    /// partial channels (and which the GPU cannot follow anyway).
     ///
     /// The `accum >= target` test, the walk direction and the `.last()` fallback
     /// match [`Self::sample_inelastic_scatter_reaction`], so the two neighbouring
@@ -908,7 +907,7 @@ pub fn is_scattering_mt(mt: i32) -> bool {
 ///
 /// Tests membership of [`crate::reaction_product::energy::FISSION_CHI_MTS`],
 /// which is the one definition of the set, so this predicate and the per-channel
-/// chi cache cannot come to disagree about which MTs are fission (issue #425).
+/// chi cache cannot come to disagree about which MTs are fission.
 #[inline]
 pub fn is_fission_mt(mt: i32) -> bool {
     crate::reaction_product::energy::FISSION_CHI_MTS.contains(&mt)
@@ -1092,7 +1091,7 @@ pub struct Nuclide {
     #[serde(skip, default)]
     pub urr_present: bool,
     /// Fission energy release terms behind the delayed-photon scaling
-    /// `f(E) = (prompt + delayed) / prompt` (issue #369). `None` for the great
+    /// `f(E) = (prompt + delayed) / prompt`. `None` for the great
     /// majority of nuclides, which carry no `fission_energy_release` data.
     ///
     /// Stored as the evaluation's own functions rather than as values on an
@@ -1102,7 +1101,7 @@ pub struct Nuclide {
     #[serde(skip, default)]
     pub fission_photon_release: Option<crate::fission_photon::FissionPhotonRelease>,
     /// MF=33 cross-section covariance, when the load asked for it and the
-    /// directory had it (issue #514).
+    /// directory had it.
     ///
     /// Three-way rather than two: `None` means this nuclide was not loaded with
     /// [`LoadScope::covariance`] set, or was loaded from a directory with no
@@ -1117,7 +1116,7 @@ pub struct Nuclide {
     /// 145-point grid is 10440 doubles -- and `Nuclide` is `Clone`.
     #[serde(skip, default)]
     pub covariance: Option<std::sync::Arc<Vec<crate::covariance::CovarianceBlock>>>,
-    /// Lazily-built flat elastic angular table (issue #111). Routes the
+    /// Lazily-built flat elastic angular table. Routes the
     /// production CPU elastic scatter through the same
     /// `yamc_physics::gpu::flat::elastic_mu_cm` sampler the GPU kernel/twin
     /// use, so the two paths cannot drift. Built on the first elastic
@@ -1125,33 +1124,32 @@ pub struct Nuclide {
     /// clone and skipped by serde.
     #[serde(skip, default)]
     pub elastic_flat_cache: crate::reaction_product::ElasticFlatCache,
-    /// Lazily-built flat fission outgoing-energy (chi) tables (issue #111
-    /// fission sub-step). Routes the production CPU fission chi through the
+    /// Lazily-built flat fission outgoing-energy (chi) tables. Routes the
+    /// production CPU fission chi through the
     /// shared `yamc_physics::gpu::flat` fission-spectrum samplers. One slot per
     /// fission MT, each built from that channel's prompt fission neutron product
     /// on the channel's first fission and shared read-only across threads; reset
     /// on clone, skipped by serde.
     ///
     /// Per channel rather than per nuclide because an evaluation with partial
-    /// fission channels carries a different prompt spectrum on each (issue
-    /// #425).
+    /// fission channels carries a different prompt spectrum on each.
     #[serde(skip, default)]
     pub fission_chi_flat_cache: crate::reaction_product::FissionChiFlatCache,
-    /// Lazily-resolved delayed-neutron groups (issue #364): their yields, and the
+    /// Lazily-resolved delayed-neutron groups: their yields, and the
     /// yield-weighted fold of their spectra. Same lifetime rules as the prompt chi
     /// cache above. `None` once resolved means the evaluation carries no delayed
     /// data, which is how a nuclide keeps the prompt-only behaviour.
     #[serde(skip, default)]
     pub delayed_neutron_cache: crate::delayed_neutrons::DelayedNeutronCache,
-    /// Lazily-built per-MT flat angular tables for DISCRETE inelastic levels
-    /// (issue #111 sub-step 3). Routes the production CPU discrete-level
+    /// Lazily-built per-MT flat angular tables for DISCRETE inelastic levels.
+    /// Routes the production CPU discrete-level
     /// inelastic cosine through the shared `elastic_mu_cm` sampler (the GPU
     /// reuses it for inelastic), so the closed-form-Q level scatter is
     /// bit-identical between backends. Built per level on first use, shared
     /// read-only across threads; reset on clone, skipped by serde.
     #[serde(skip, default)]
     pub inelastic_angle_flat_cache: crate::reaction_product::InelasticAngleFlatCache,
-    /// The subset of the Arrow data this nuclide was parsed from (issue #389).
+    /// The subset of the Arrow data this nuclide was parsed from.
     ///
     /// Defaults to [`LoadScope::full`], so a nuclide built by hand or revived
     /// from serde reads as complete. The global cache consults it to decide
@@ -1203,7 +1201,7 @@ impl Nuclide {
     }
 
     /// Stable per-nuclide key used to decorrelate URR probability-table
-    /// sampling across the isotopes of a material (issue #204). Each nuclide
+    /// sampling across the isotopes of a material. Each nuclide
     /// must draw an independent probability-table band, so the per-collision
     /// base seed is mixed with this key via [`crate::urr::urr_nuclide_random`].
     ///
@@ -1664,7 +1662,7 @@ pub fn get_or_load_nuclide(
     // Fast path: upgrade Weak → Arc if the nuclide is still alive AND what it
     // holds is at least as wide as what this caller needs. A transmutation load
     // parses only the chain's MTs and none of the transport sections, so it can
-    // never satisfy a transport request (issue #389).
+    // never satisfy a transport request.
     let mut cached_scope: Option<LoadScope> = None;
     {
         let cache = match GLOBAL_NUCLIDE_CACHE.lock() {

@@ -133,8 +133,8 @@ impl LinearAttenuation {
 /// fixes the order the elements are added in and leaves the order the isotopes
 /// of one element were added in to the map's seed. `Material.contact_dose()`
 /// returned three different values across six runs, and three across eight
-/// calls in one process, because `mu` divides every photon-line term. Same
-/// defect as issue #502 and issue #576, in the denominator of a dose.
+/// calls in one process, because `mu` divides every photon-line term. It is
+/// map-order nondeterminism in the denominator of a dose.
 fn linear_attenuation(atom_densities: &HashMap<String, f64>) -> Result<LinearAttenuation, String> {
     let mut names: Vec<&String> = atom_densities.keys().collect();
     names.sort();
@@ -883,8 +883,7 @@ mod tests {
     }
 
     /// The per-eV values of a continuum are not line intensities. Read as lines
-    /// they gave a dose smaller by roughly the grid spacing in eV, which is the
-    /// defect issue #163 describes.
+    /// they give a dose smaller by roughly the grid spacing in eV.
     #[test]
     fn a_continuum_is_not_its_values_read_as_lines() {
         let (energies, values) = synthetic_continuum();

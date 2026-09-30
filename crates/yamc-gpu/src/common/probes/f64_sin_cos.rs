@@ -10,10 +10,9 @@
 //! Unimplemented NIR instr bit size: div 64    %31 = fcos_amd %26
 //! ```
 //!
-//! and the kernel returns garbage (~`-2.4e+220`). The cubecl-spirv
-//! issue against this gap (cubecl#1316 covers ln/exp) carries a
-//! follow-up note adding `sin`/`cos`/`pow` to the GLSL.std.450 ops
-//! that need 64-bit polyfilling.
+//! and the kernel returns garbage (~`-2.4e+220`). This is the same
+//! upstream cubecl-spirv gap that breaks f64 `ln`/`exp`: `sin`/`cos`/`pow`
+//! are also GLSL.std.450 ops that need 64-bit polyfilling.
 //!
 //! Re-tested on cubecl 0.11.0-pre.3 (Mesa 26.0.3, 2026-09-13): still
 //! broken, `sin(-pi/2)` and `cos(pi)` both read back as ~`2.8e-311`

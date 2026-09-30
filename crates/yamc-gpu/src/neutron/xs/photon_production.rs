@@ -186,13 +186,13 @@ pub struct GpuPhotonProductionXs {
     /// length `n_continuous`. Feeds `sample_continuous_tabular_eout`'s
     /// `hist_outer`.
     pub ct_hist: Vec<u32>,
-    /// Tight CSR base (issue #104): the global ae-row in the tight
+    /// Tight CSR base: the global ae-row in the tight
     /// `ct_energy_grid` / `ct_n_x` / `ct_interp` / `ct_n_discrete` arrays
     /// where each continuous slot's incident-energy rows begin. Length
     /// `n_continuous` (one per continuous slot). The sampler reads
     /// `eg_off_e = ct_ae_offset[prod_dist_slot[product]]`.
     pub ct_ae_offset: Vec<u32>,
-    /// Tight CSR base (issue #104): the index into the tight `ct_x` /
+    /// Tight CSR base: the index into the tight `ct_x` /
     /// `ct_cdf` / `ct_p` arrays where each ae-row's outgoing points begin.
     /// Length = total ae-rows across all continuous slots (== `ct_n_x.len()`).
     /// The sampler reads row `eg_off_e + bin` at `ct_x_offset[eg_off_e + bin]`.
@@ -226,17 +226,17 @@ pub struct GpuPhotonProductionXs {
     /// `n_product`. `0` => isotropic (kernel draws `2*xi - 1`); our data
     /// never hits that (every photon product carries a 2-point angle).
     pub pa_n_energies: Vec<u32>,
-    /// Tight CSR base (issue #104): the global ae-row in the tight
+    /// Tight CSR base: the global ae-row in the tight
     /// `pa_energy_grid` / `pa_n_mu` / `pa_interp` arrays where each product's
     /// incident-energy rows begin. Length `n_product` (one per product). The
     /// sampler reads `ae_off = pa_ae_offset[product]`.
     pub pa_ae_offset: Vec<u32>,
-    /// Tight CSR base (issue #104): the index into the tight `pa_mu` / `pa_cdf`
+    /// Tight CSR base: the index into the tight `pa_mu` / `pa_cdf`
     /// / `pa_pdf` arrays where each ae-row's mu points begin. Length = total
     /// ae-rows across all products (== `pa_n_mu.len()`). The sampler reads
     /// row `ae_off + bin` at `pa_mu_offset[ae_off + bin]`.
     pub pa_mu_offset: Vec<u32>,
-    /// Per-product angular incident-energy grid, tight CSR (issue #104):
+    /// Per-product angular incident-energy grid, tight CSR:
     /// product `p`'s incident energies are the `pa_n_energies[p]` entries
     /// starting at `pa_ae_offset[p]`. Length = sum of `pa_n_energies`
     /// (== total ae-rows). The sampler finds the E_in bin in this row.
@@ -293,7 +293,7 @@ impl GpuPhotonProductionXs {
             n_continuous: 1,
             ct_n_eout: vec![empty_ct.n_energies()],
             ct_hist: vec![empty_ct.histogram_interp()],
-            // Tight CSR (issue #104): one ae-row base (0) for the single empty
+            // Tight CSR: one ae-row base (0) for the single empty
             // continuous slot; the empty slot has no rows so `ct_x_offset` is
             // empty.
             ct_ae_offset: vec![0],
@@ -306,7 +306,7 @@ impl GpuPhotonProductionXs {
             ct_interp: empty_ct.interp().to_vec(),
             ct_n_discrete: empty_ct.n_discrete().to_vec(),
             pa_n_energies: vec![empty_angle.n_energies],
-            // Tight CSR (issue #104): one ae-row base (0) for the single empty
+            // Tight CSR: one ae-row base (0) for the single empty
             // angle product; the empty slot has no rows so `pa_mu_offset` and
             // the per-row / per-point arrays are empty.
             pa_ae_offset: vec![0],
@@ -469,7 +469,7 @@ pub fn extract_photon_production_xs(
     // slot eout buffers (slot-major), appended in lock-step with the product
     // walk so addressing matches `prod_dist_slot` / product index.
     let mut pa_n_energies: Vec<u32> = Vec::new();
-    // Tight CSR bases (issue #104): `pa_ae_offset` (one per product) is the
+    // Tight CSR bases: `pa_ae_offset` (one per product) is the
     // global ae-row where that product's incident-energy rows begin in the
     // tight `pa_energy_grid` / `pa_n_mu` / `pa_interp` arrays; `pa_mu_offset`
     // (one per ae-row) is the index into the tight `pa_mu` / `pa_cdf` /
@@ -485,7 +485,7 @@ pub fn extract_photon_production_xs(
 
     let mut ct_n_eout: Vec<u32> = Vec::new();
     let mut ct_hist: Vec<u32> = Vec::new();
-    // Tight CSR bases (issue #104): `ct_ae_offset` (one per continuous slot) is
+    // Tight CSR bases: `ct_ae_offset` (one per continuous slot) is
     // the global ae-row where that slot's incident-energy rows begin in the
     // tight `ct_energy_grid` / `ct_n_x` / `ct_interp` / `ct_n_discrete` arrays;
     // `ct_x_offset` (one per ae-row) is the index into the tight `ct_x` /
@@ -585,7 +585,7 @@ pub fn extract_photon_production_xs(
                         .unwrap_or_else(EoutSlot::empty);
                     ct_n_eout.push(slot.n_energies());
                     ct_hist.push(slot.histogram_interp());
-                    // Tight CSR bases (issue #104): record this slot's ae-row
+                    // Tight CSR bases: record this slot's ae-row
                     // base BEFORE extending the per-row arrays, then a per-row
                     // x-point base accumulated from the current `ct_x` length.
                     ct_ae_offset.push(ct_n_x.len() as u32);
@@ -607,7 +607,7 @@ pub fn extract_photon_production_xs(
 
                 // Per-product angular table (every photon product carries
                 // one; isotropic-empty is a safety net our data never hits).
-                // Tight CSR bases (issue #104): record this product's ae-row
+                // Tight CSR bases: record this product's ae-row
                 // base BEFORE extending the per-row arrays, then a per-row
                 // mu-point base accumulated from the current `pa_mu` length.
                 let ang = extract_photon_angle(&product.distribution);

@@ -179,9 +179,9 @@ impl Histogram {
         }
         // Ahead of the ascending check, which a NaN passes: every comparison
         // against a NaN is false, so `w[1] <= w[0]` says nothing about one.
-        // Such a boundary used to reach the multigroup collapse, where it
-        // produced a NaN group average, a NaN reaction rate, and an inventory
-        // of NaNs with no error anywhere along the way (issue #576).
+        // Such a boundary would reach the multigroup collapse, where it
+        // produces a NaN group average, a NaN reaction rate, and an inventory
+        // of NaNs with no error anywhere along the way.
         if let Some(i) = boundaries.iter().position(|e| !e.is_finite()) {
             return Err(format!(
                 "Histogram boundary {i} is {}, not a finite energy",

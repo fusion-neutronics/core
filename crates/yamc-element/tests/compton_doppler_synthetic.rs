@@ -1,6 +1,5 @@
-//! The OpenMC 4036 / Kaltiaisenaho Compton Doppler procedure, piece by piece
-//! (fusion-neutronics/core#22), on a synthetic two-shell element so no data
-//! files are needed.
+//! The OpenMC / Kaltiaisenaho Compton Doppler procedure, piece by piece, on a
+//! synthetic two-shell element so no data files are needed.
 //!
 //! An integration test rather than a unit test in `photon.rs` on purpose: the
 //! synthetic element publishes its own Compton momentum grid through

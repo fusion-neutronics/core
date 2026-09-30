@@ -1,4 +1,4 @@
-//! Hybrid geometry: CSG cells filled by surface-mesh bodies (issue #232).
+//! Hybrid geometry: CSG cells filled by surface-mesh bodies.
 //!
 //! Uses the two-region Arrow fixture (a unit cube split at x=0.5 into
 //! "fuel" (x in [0, 0.5]) and "moderator" (x in [0.5, 1]) volumes) embedded
@@ -689,14 +689,11 @@ fn hybrid_matches_pure_csg_twin() {
     // combined standard error, `z = |hybrid - twin| / sqrt(sigma_h^2 +
     // sigma_t^2)`, not against a fixed percentage.
     //
-    // Recalibrated from a flat `rel < 0.02` (issue #111): "fuel" is a thin
-    // low-flux Li6 region whose own relative error is ~3% at this N, so a 2%
-    // bound was tighter than the statistics and only held for one particular
-    // RNG realization. Moving the continuum inelastic kinematics off `FastRng`
-    // onto the shared PCG stream renumbers that stream and pushed the fuel
-    // realization to 2.14% while its z was UNCHANGED at 0.45 (and the
-    // discrepancy shrank as 1/sqrt(N): 2.14% -> 0.61% -> 0.43% at N x 4, x 16),
-    // i.e. noise, not bias. Measured z: complement 0.74, fuel 0.45,
+    // A flat `rel < 0.02` is too tight: "fuel" is a thin low-flux Li6 region
+    // whose own relative error is ~3% at this N, so a 2% bound only holds for
+    // particular RNG realizations. A stream renumbering can push the fuel to
+    // 2.14% with z UNCHANGED at 0.45 (and the discrepancy shrinks as 1/sqrt(N):
+    // 2.14% -> 0.61% -> 0.43% at N x 4, x 16), i.e. noise, not bias. Measured z: complement 0.74, fuel 0.45,
     // moderator 0.09. `Z_MAX = 4` leaves ample headroom for a future stream
     // renumbering while still catching a real geometry / tally-addressing bias
     // (which would show up as many sigma); `REL_MAX` is a coarse backstop for

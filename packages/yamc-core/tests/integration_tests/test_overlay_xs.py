@@ -1,6 +1,6 @@
 """Integration tests for virtual-overlay tallies (the ``response=`` argument).
 
-``response=`` replaced the old ``mode="microscopic"`` flag (issue #341):
+``response=`` replaced the old ``mode="microscopic"`` flag:
 
   * ``response="Fe56"`` / ``response=["Fe56", ...]`` -- microscopic cross
     sections (barns) at unit density; one bin per nuclide (the old overlay).
@@ -135,7 +135,7 @@ def test_overlay_neutron_reaction_rate_void():
 
 
 def test_overlay_flux_is_refused():
-    """`response=` on a flux score is refused at construction (issue #305).
+    """`response=` on a flux score is refused at construction.
 
     A response is applied by folding the overlay's microscopic cross section
     into the score, and flux has none, so the tally used to return plain flux
@@ -213,7 +213,7 @@ def test_overlay_vs_normal_density_comparison():
 
 
 def test_material_response_matches_nuclide_sum_workaround():
-    """Issue #341: response=<Material> equals the manual nuclide-sum workaround.
+    """response=<Material> equals the manual nuclide-sum workaround.
 
     Scores three tallies in the SAME run (identical tracks):
       * material  -- response=<Fe material> (one combined macroscopic bin)
@@ -275,7 +275,7 @@ def test_material_response_in_void():
 
 
 def test_overlay_rejected_on_gpu():
-    """``response=`` must be refused on the GPU, not silently dropped (#288).
+    """``response=`` must be refused on the GPU, not silently dropped.
 
     The kernel scores the CELL material's macroscopic cross section, so an
     overlay tally that reached it came back as the plain cell-material score
@@ -296,7 +296,7 @@ def test_overlay_without_resolvable_data_raises():
 
     The overlay nuclides' data comes from the global configuration, not from the
     cell materials, so a run whose global config cannot resolve them used to
-    print a ``[WARNING]`` and then score the un-responded quantity (#288).
+    print a ``[WARNING]`` and then score the un-responded quantity.
     """
     saved = yamc.cross_section_data
     yamc.cross_section_data = {}

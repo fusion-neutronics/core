@@ -265,7 +265,7 @@ fn gpu_photon_fluorescence_w_matches_cpu() {
     );
 }
 
-/// Regression for the GPU+LED fluorescence gate (yamc-verification issue #189).
+/// Regression for the GPU+LED fluorescence gate.
 /// Atomic relaxation is independent of the electron treatment, but the GPU
 /// translate step used to skip the atomic-relaxation / Doppler packs unless TTB
 /// was selected, so under LED (`ElectronTreatment::Local`) the GPU emitted no
