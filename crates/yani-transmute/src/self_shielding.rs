@@ -313,6 +313,15 @@ impl FluxShape {
     }
 }
 
+#[cfg(test)]
+impl FluxShape {
+    /// A shape stated point by point, `energy` descending, for tests that need
+    /// a known shape rather than one solved for from a material.
+    pub(crate) fn from_points(energy: Vec<f64>, phi: Vec<f64>) -> Self {
+        Self { energy, phi }
+    }
+}
+
 /// Mixture total cross section, sampled on demand.
 ///
 /// The flux depression is driven by everything in the material, not by the
@@ -340,8 +349,14 @@ pub fn mixture_total<'a>(
     densities: &HashMap<String, f64>,
     temperature_of: &dyn Fn(&str) -> Option<String>,
 ) -> MixtureTotal<'a> {
+    // In name order, so the sum in `MixtureTotal::at` is the same bits every
+    // time it is built: the covariance fold rebuilds it to recover the
+    // collapse's shape, and a hash map's order differs between two maps.
+    let mut names: Vec<&String> = densities.keys().collect();
+    names.sort();
     let mut entries = Vec::new();
-    for (name, &density) in densities.iter() {
+    for name in names {
+        let density = densities[name];
         if density <= 0.0 {
             continue;
         }

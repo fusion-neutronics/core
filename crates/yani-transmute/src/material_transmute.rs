@@ -1430,6 +1430,7 @@ fn run_replicas(
                 rates,
                 &spectrum.masses,
                 &spectrum.boundaries,
+                shielding,
             );
             merge_coverage(&mut coverage, spectrum_coverage);
             folded
@@ -1550,12 +1551,14 @@ fn run_replicas(
             Default::default()
         };
 
-    // The shares split each group's rate by energy width, which is the
-    // collapse's own split only under the flat within-group weight.
-    let dilute = shielding.is_none()
-        && !transport
+    // The shares are exact where the fold's partials are the collapse's own
+    // split of each rate: on a dilute or self-shielded collapse, not a tallied
+    // rate, and under the flat within-group weight, since under 1/E a nuclide
+    // the collapse took dilute has a group a covariance edge cuts split by
+    // energy width rather than lethargy.
+    let collapsed_flat = !transport
         && crate::multigroup::within_group_weight() == crate::multigroup::Weighting::FlatInEnergy;
-    let mut info = Info::from_fold(&coverage, &sigmas, dilute)?;
+    let mut info = Info::from_fold(&coverage, &sigmas, collapsed_flat)?;
     if half_life.is_none() {
         info.not_perturbed.insert(0, "half-life".to_string());
     }

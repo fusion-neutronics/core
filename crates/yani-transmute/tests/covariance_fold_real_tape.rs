@@ -96,7 +96,7 @@ fn cr52_np_folds_to_the_tapes_sigma_at_14_mev() {
     let chain = chain();
 
     let (rates, _) = compute_multigroup_reaction_rates(&material, &chain, &FLUX, &GROUPS, 1.0);
-    let (folded, coverage) = fold_rate_covariance(&material, &chain, &rates, &FLUX, &GROUPS);
+    let (folded, coverage) = fold_rate_covariance(&material, &chain, &rates, &FLUX, &GROUPS, None);
     assert_eq!(coverage.malformed, 0, "every block expands");
     assert!(coverage.unsupported_layouts.is_empty());
 
