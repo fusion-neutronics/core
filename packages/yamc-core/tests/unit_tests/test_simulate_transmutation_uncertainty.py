@@ -160,6 +160,11 @@ def test_the_cross_section_sigma_matches_a_supplied_spectrum():
     magnitude, a sigma that moves with the particle count, and every channel
     listed in ``partials_above_rate``.
     """
+    # The fetched fixtures carry no covariance section, so this only runs where
+    # the cache holds one from the start; otherwise another test could add it
+    # between the two halves and the comparison would be against nothing.
+    if not os.path.exists(os.path.join(TESTS_DIR, "Fe56.arrow", "covariance.arrow")):
+        pytest.skip("the Fe56 fixture carries no covariance section")
     sigmas = []
     for particles in (2000, 8000):
         results = _run(particles=particles, data_uncertainty=CROSS_SECTIONS)
