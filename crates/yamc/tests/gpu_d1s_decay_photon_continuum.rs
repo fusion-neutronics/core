@@ -69,19 +69,23 @@ fn continuum_chain() -> std::path::PathBuf {
     // of Mn56's decay constant (7.5e-5 /s) spread over an MeV.
     mn56.sources.push(yani::DecaySource {
         particle: "photon".to_string(),
+        radiation: None,
         distribution: yani::DecaySourceDistribution::Tabular {
             energies: vec![1.0e5, 1.0e6, 3.0e6],
             intensities: vec![0.0, 4.0e-11, 1.0e-11],
             interpolation: Some(yani::Interpolation::LinearLinear),
         },
+        uncertainty: None,
     });
     mn56.sources.push(yani::DecaySource {
         particle: "photon".to_string(),
+        radiation: None,
         distribution: yani::DecaySourceDistribution::Tabular {
             energies: vec![2.0e5, 5.0e5, 8.0e5],
             intensities: vec![5.0e-11, 1.0e-10, 0.0],
             interpolation: Some(yani::Interpolation::Histogram),
         },
+        uncertainty: None,
     });
     let dir = std::env::temp_dir().join(format!("yamc-d1s-continuum-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

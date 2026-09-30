@@ -33,7 +33,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow_array::builder::{Float64Builder, Int32Builder, ListBuilder, StringBuilder};
-use arrow_array::{ArrayRef, RecordBatch};
+use arrow_array::{ArrayRef, Int32Array, RecordBatch};
 use arrow_ipc::writer::{FileWriter, IpcWriteOptions};
 use arrow_ipc::CompressionType;
 use arrow_schema::{ArrowError, Schema};
@@ -76,14 +76,19 @@ pub(crate) fn write_section(
 /// The decay photon, electron and other particle spectra, by nuclide.
 ///
 /// [`endf::Chain`] describes who decays into what, not what comes out, so this
-/// reads the same decay evaluations a second time. [`endf::Decay::sources`]
+/// reads the same decay evaluations a second time. [`endf::Decay::spectrum_sources`]
 /// returns intensities already multiplied by the decay constant and the
 /// spectrum normalisation, which is the per atom per second convention the
 /// format stores. Reading `Decay::spectra` instead would be low by both
 /// factors, silently.
+///
+/// One row per spectrum's lines and one per its continuum, never a merge:
+/// the gamma and x-ray spectra have their own normalisation and its sigma is
+/// common to their lines only, so merging them loses which sigma is whose.
 pub fn decay_sources(
     decay: &[Material],
 ) -> Result<BTreeMap<String, Vec<SourceRow>>, Box<dyn Error>> {
+    use endf::univariate::Univariate;
     let mut out: BTreeMap<String, Vec<SourceRow>> = BTreeMap::new();
     for material in decay {
         let Ok(d) = Decay::from_material(material) else {
@@ -97,10 +102,24 @@ pub fn decay_sources(
             continue;
         }
         let name = d.nuclide.name.clone();
-        for (particle, dist) in d.sources()? {
-            for row in flatten(particle, &dist) {
-                out.entry(name.clone()).or_default().push(row);
-            }
+        for source in d.spectrum_sources()? {
+            let (kind, energies, intensities, interpolation) = match source.distribution {
+                Univariate::Discrete(lines) => ("discrete", lines.x, lines.p, None),
+                Univariate::Tabular(t) => ("tabular", t.x, t.p, Some(t.interpolation.endf_code())),
+                _ => unreachable!("a spectrum source is lines or a continuum"),
+            };
+            out.entry(name.clone()).or_default().push(SourceRow {
+                particle: source.particle.to_string(),
+                kind: kind.to_string(),
+                energies,
+                intensities,
+                interpolation,
+                radiation: source.radiation.to_string(),
+                normalization: source.normalization,
+                intensity_uncertainties: source.intensity_uncertainties,
+                energy_uncertainties: source.energy_uncertainties,
+                covariance: source.covariance,
+            });
         }
     }
     Ok(out)
@@ -120,45 +139,17 @@ pub struct SourceRow {
     /// `discrete` one. Without it the continuum has no integral: the same
     /// points read as a histogram and as linear-linear give different totals.
     pub interpolation: Option<i32>,
-}
-
-/// Flatten one distribution into rows.
-///
-/// A mixture becomes one row per component with the component's probability
-/// multiplied into its intensities, which is what keeps the total emission rate
-/// right without the format needing a mixture concept.
-fn flatten(particle: &str, dist: &endf::univariate::Univariate) -> Vec<SourceRow> {
-    use endf::univariate::Univariate;
-    match dist {
-        Univariate::Discrete(d) => vec![SourceRow {
-            particle: particle.to_string(),
-            kind: "discrete".to_string(),
-            energies: d.x.clone(),
-            intensities: d.p.clone(),
-            interpolation: None,
-        }],
-        Univariate::Tabular(t) => vec![SourceRow {
-            particle: particle.to_string(),
-            kind: "tabular".to_string(),
-            energies: t.x.clone(),
-            intensities: t.p.clone(),
-            interpolation: Some(t.interpolation.endf_code()),
-        }],
-        Univariate::Mixture(m) => m
-            .probability
-            .iter()
-            .zip(m.distribution.iter())
-            .flat_map(|(w, d)| {
-                flatten(particle, d).into_iter().map(move |mut row| {
-                    for value in &mut row.intensities {
-                        *value *= w;
-                    }
-                    row
-                })
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
+    /// The spectrum the row was read from, e.g. `"gamma"` or `"xray"`.
+    pub radiation: String,
+    /// FD on a `discrete` row, FC on a `tabular` one, with its sigma, as the
+    /// tape writes them.
+    pub normalization: (f64, f64),
+    /// Per line, in the units of `intensities`. `None` on a `tabular` row.
+    pub intensity_uncertainties: Option<Vec<f64>>,
+    /// Per line dER [eV]. `None` on a `tabular` row.
+    pub energy_uncertainties: Option<Vec<f64>>,
+    /// The spectrum's stated covariance, where it has one.
+    pub covariance: Option<endf::SpectrumCovariance>,
 }
 
 pub(crate) fn list_of(values: &[Vec<f64>]) -> ArrayRef {
@@ -312,32 +303,68 @@ pub fn write_decay(
         ],
     )?;
 
-    let mut nuc = Vec::new();
-    let mut particle = Vec::new();
-    let mut kind = Vec::new();
-    let mut energies = Vec::new();
-    let mut intensities = Vec::new();
-    let mut interpolation = Int32Builder::new();
-    for (name, rows) in sources {
-        for row in rows {
-            nuc.push(name.clone());
-            particle.push(row.particle.clone());
-            kind.push(row.kind.clone());
-            energies.push(row.energies.clone());
-            intensities.push(row.intensities.clone());
-            interpolation.append_option(row.interpolation);
+    let rows: Vec<(&String, &SourceRow)> = sources
+        .iter()
+        .flat_map(|(name, rows)| rows.iter().map(move |row| (name, row)))
+        .collect();
+    let text = |f: fn(&SourceRow) -> &String| -> Vec<String> {
+        rows.iter().map(|(_, row)| f(row).clone()).collect()
+    };
+    let lists = |f: fn(&SourceRow) -> Option<&Vec<f64>>| -> ArrayRef {
+        opt_list_of(
+            &rows
+                .iter()
+                .map(|(_, row)| f(row).cloned())
+                .collect::<Vec<_>>(),
+        )
+    };
+    let ints = |f: fn(&SourceRow) -> Option<i32>| -> ArrayRef {
+        let mut b = Int32Builder::new();
+        for (_, row) in &rows {
+            b.append_option(f(row));
         }
+        Arc::new(b.finish())
+    };
+    let numbers = |f: fn(&SourceRow) -> f64| -> ArrayRef {
+        floats(&rows.iter().map(|(_, row)| f(row)).collect::<Vec<_>>())
+    };
+    let nuclides: Vec<String> = rows.iter().map(|(name, _)| (*name).clone()).collect();
+    // LS and LB are flags of a few values, but they are I11 fields on the
+    // tape, so one past i32 is refused rather than wrapped.
+    let flag = |name: &str, what: &str, v: i64| -> Result<i32, Box<dyn Error>> {
+        i32::try_from(v)
+            .map_err(|_| format!("{name}: decay covariance {what} {v} does not fit in i32").into())
+    };
+    let mut ls = Vec::with_capacity(rows.len());
+    let mut lb = Vec::with_capacity(rows.len());
+    for (name, row) in &rows {
+        let c = row.covariance.as_ref();
+        ls.push(
+            c.and_then(|c| c.ls)
+                .map(|v| flag(name, "LS", v))
+                .transpose()?,
+        );
+        lb.push(c.map(|c| flag(name, "LB", c.lb)).transpose()?);
     }
     write_section(
         &dir.join("sources.arrow"),
         "decay/sources.arrow",
         vec![
-            strings(&nuc),
-            strings(&particle),
-            strings(&kind),
-            list_of(&energies),
-            list_of(&intensities),
-            Arc::new(interpolation.finish()),
+            strings(&nuclides),
+            strings(&text(|r| &r.particle)),
+            strings(&text(|r| &r.kind)),
+            lists(|r| Some(&r.energies)),
+            lists(|r| Some(&r.intensities)),
+            ints(|r| r.interpolation),
+            strings(&text(|r| &r.radiation)),
+            numbers(|r| r.normalization.0),
+            numbers(|r| r.normalization.1),
+            lists(|r| r.intensity_uncertainties.as_ref()),
+            lists(|r| r.energy_uncertainties.as_ref()),
+            Arc::new(Int32Array::from(ls)),
+            Arc::new(Int32Array::from(lb)),
+            lists(|r| r.covariance.as_ref().map(|c| &c.energies)),
+            lists(|r| r.covariance.as_ref().map(|c| &c.values)),
         ],
     )?;
     Ok(())

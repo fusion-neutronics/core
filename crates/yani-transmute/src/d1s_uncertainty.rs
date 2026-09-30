@@ -38,6 +38,10 @@ pub struct TcfEnsemble {
     /// The same, for nuclides whose evaluation states no half-life sigma, so
     /// held at nominal. Not a claim that they are exact.
     pub no_half_life_uncertainty: BTreeSet<String>,
+    /// The same, for nuclides whose stated half-life sigma no draw can carry
+    /// (not finite, or not finite relative to the half-life), so held at
+    /// nominal.
+    pub half_life_uncertainty_not_carried: BTreeSet<String>,
     /// Whether the TCF spreads settled rather than hitting the cap.
     pub converged: bool,
     /// The sources that applied, by name. Only `half_life` acts on a TCF.
@@ -99,7 +103,7 @@ pub fn time_correction_factor_ensemble(
     out.sources = vec![Source::HalfLife.name().to_string()];
 
     let relevant = feeding(chain, emitters);
-    let (all, without) = half_life_candidates(chain);
+    let (all, without, not_carried) = half_life_candidates(chain);
     let candidates: Vec<(String, f64, f64)> = all
         .into_iter()
         .filter(|(n, _, _)| relevant.contains(n))
@@ -109,14 +113,17 @@ pub fn time_correction_factor_ensemble(
         .into_iter()
         .filter(|n| relevant.contains(n))
         .collect();
+    out.half_life_uncertainty_not_carried = not_carried
+        .into_iter()
+        .filter(|n| relevant.contains(n))
+        .collect();
     if candidates.is_empty() {
         out.converged = true;
         return Ok(out);
     }
 
     let one = |replica: u64| -> Result<ReplicaTcfs, String> {
-        let mut floored = 0;
-        let sampled = sample_half_lives(&candidates, request.seed, replica, &mut floored);
+        let sampled = sample_half_lives(&candidates, request.seed, replica);
         let chain_k = Arc::new(with_half_lives(chain, &sampled));
         source_rates
             .iter()

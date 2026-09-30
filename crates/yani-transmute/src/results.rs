@@ -96,6 +96,14 @@ pub struct TransmutationResults {
     /// asked for statistical uncertainty. Scale by a step's source rate for
     /// that step's rates, and by its square for their covariance.
     pub rate_covariance: HashMap<u32, crate::history_statistics::RateCovariance>,
+
+    /// Material ID -> per step, what the isomeric-branching rule did over that
+    /// step's spectrum (see [`crate::branching_rule`]): each channel's
+    /// representation, denominator, level routes and shares, the clipped and
+    /// held production, the channels dropped, and MT=5's share of each
+    /// parent's removal. Indexed as `timesteps`; a decay-only step holds an
+    /// empty report. Steps sharing a spectrum share its report.
+    pub branching_report: HashMap<u32, Vec<std::sync::Arc<crate::branching_rule::BranchingReport>>>,
 }
 
 /// How much of a spectrum solve's collapse work was shared.
@@ -256,6 +264,7 @@ impl TransmutationResults {
             collapse: HashMap::new(),
             collapse_reuse: None,
             rate_covariance: HashMap::new(),
+            branching_report: HashMap::new(),
         }
     }
 
@@ -285,6 +294,19 @@ impl TransmutationResults {
             .entry(material_id)
             .or_default()
             .push(material);
+    }
+
+    /// What the isomeric-branching rule did over one step, or `None` when the
+    /// material or the step is unknown. `step` indexes [`Self::timesteps`].
+    pub fn get_branching_report(
+        &self,
+        material_id: u32,
+        step: usize,
+    ) -> Option<&crate::branching_rule::BranchingReport> {
+        self.branching_report
+            .get(&material_id)?
+            .get(step)
+            .map(|r| r.as_ref())
     }
 
     /// Record the per-edge reaction rates a step was solved with.
