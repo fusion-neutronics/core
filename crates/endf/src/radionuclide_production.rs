@@ -33,6 +33,11 @@ pub struct RadionuclideProduction {
     /// Excitation energy of the final state in eV, from MF=8. `None` when the
     /// evaluation has no MF=8 subsection for this state.
     pub elfs: Option<f64>,
+    /// The file MF=8 says this state's production is in (LMF: 3, 6, 9 or 10),
+    /// as the MF=8 subsection for the same `(ZAP, LFS)` states it. `None`
+    /// when there is no such subsection. Recorded rather than checked: it can
+    /// name a file other than the one the data was found in.
+    pub lmf: Option<i64>,
     /// MF=9 yield, as a multiplier on the reaction cross section.
     pub yields: Option<Tabulated1D>,
     /// MF=10 production cross section in barns.
@@ -93,12 +98,13 @@ pub fn radionuclide_production(material: &Material) -> BTreeMap<i32, Vec<Radionu
 
     let mut result = BTreeMap::new();
     for (mt, files) in by_mt {
-        // MF=8 links each (ZAP, LFS) pair to an excitation energy.
+        // MF=8 links each (ZAP, LFS) pair to an excitation energy and to the
+        // file it says holds the production.
         let mf8 = material.mf8(mt);
-        let mut elfs: BTreeMap<(i64, i64), f64> = BTreeMap::new();
+        let mut named: BTreeMap<(i64, i64), (f64, i64)> = BTreeMap::new();
         if let Some(mf8) = mf8 {
             for sub in &mf8.subsections {
-                elfs.insert((sub.zap as i64, sub.lfs), sub.elfs);
+                named.insert((sub.zap as i64, sub.lfs), (sub.elfs, sub.lmf));
             }
         }
 
@@ -121,7 +127,8 @@ pub fn radionuclide_production(material: &Material) -> BTreeMap<i32, Vec<Radionu
                         lfs: key.1,
                         qm: level.qm,
                         qi: level.qi,
-                        elfs: elfs.get(&key).copied(),
+                        elfs: named.get(&key).map(|&(elfs, _)| elfs),
+                        lmf: named.get(&key).map(|&(_, lmf)| lmf),
                         ..Default::default()
                     });
                     ordered.len() - 1
@@ -507,6 +514,7 @@ mod tests {
             assert_eq!((state.zap, state.lfs), (zap, 1));
             assert!(state.cross_section.is_some());
             assert!(state.yields.is_none());
+            assert_eq!(state.lmf, Some(10));
         }
 
         // Capture is given the other way, as an MF=9 yield on the MF=3 cross
@@ -515,6 +523,7 @@ mod tests {
         assert_eq!((state.zap, state.lfs), (49116, 1));
         assert!(state.yields.is_some());
         assert!(state.cross_section.is_none());
+        assert_eq!(state.lmf, Some(9));
 
         // The excitation energy comes from MF=8's ELFS, not from QM - QI.
         assert_eq!(state.elfs, Some(127_269.7));

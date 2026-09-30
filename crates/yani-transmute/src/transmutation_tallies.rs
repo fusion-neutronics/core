@@ -1754,12 +1754,16 @@ mod tests {
                         quantity: BranchQuantity::CrossSection,
                         energy: vec![1.0e6, 3.0e6, 5.0e6],
                         values: vec![0.0, 2.0, 1.0],
+                        states: Default::default(),
+                        normalisation: None,
                     },
                     yani::BranchCurve {
                         target: "U237_m1".to_string(),
                         quantity: BranchQuantity::CrossSection,
                         energy: vec![1.0e5, 3.0e6],
                         values: vec![0.5, 0.5],
+                        states: Default::default(),
+                        normalisation: None,
                     },
                 ],
             );
@@ -1776,6 +1780,8 @@ mod tests {
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![5.0e5, 2.0e6, 4.0e6],
                     values: vec![0.1, 0.3, 0.2],
+                    states: Default::default(),
+                    normalisation: None,
                 }],
             );
         branch
@@ -1890,12 +1896,16 @@ mod tests {
                         quantity: BranchQuantity::CrossSection,
                         energy: vec![1.0, 2.0],
                         values: vec![1.0, 1.0],
+                        states: Default::default(),
+                        normalisation: None,
                     },
                     yani::BranchCurve {
                         target: "Ag109_m1".to_string(),
                         quantity: BranchQuantity::CrossSection,
                         energy: vec![1.0, 2.0],
                         values: vec![1.0, 1.0],
+                        states: Default::default(),
+                        normalisation: None,
                     },
                 ],
             );
@@ -1911,12 +1921,16 @@ mod tests {
                         quantity: BranchQuantity::Yield,
                         energy: vec![1.0, 2.0],
                         values: vec![0.9, 0.9],
+                        states: Default::default(),
+                        normalisation: None,
                     },
                     yani::BranchCurve {
                         target: "Ag110_m1".to_string(),
                         quantity: BranchQuantity::Yield,
                         energy: vec![1.0, 2.0],
                         values: vec![0.1, 0.1],
+                        states: Default::default(),
+                        normalisation: None,
                     },
                 ],
             );
@@ -1932,6 +1946,8 @@ mod tests {
                     quantity: BranchQuantity::Yield,
                     energy: vec![1.0, 2.0],
                     values: vec![1.0, 1.0],
+                    states: Default::default(),
+                    normalisation: None,
                 }],
             );
         // Malformed curves must be dropped, well-formed sibling kept.
@@ -1947,18 +1963,24 @@ mod tests {
                         quantity: BranchQuantity::CrossSection,
                         energy: vec![],
                         values: vec![],
+                        states: Default::default(),
+                        normalisation: None,
                     },
                     yani::BranchCurve {
                         target: "Ag106_m1".to_string(),
                         quantity: BranchQuantity::CrossSection,
                         energy: vec![1.0, 2.0],
                         values: vec![1.0], // mismatched lengths
+                        states: Default::default(),
+                        normalisation: None,
                     },
                     yani::BranchCurve {
                         target: "Ag106_m2".to_string(),
                         quantity: BranchQuantity::CrossSection,
                         energy: vec![1.0, 2.0],
                         values: vec![1.0, 1.0],
+                        states: Default::default(),
+                        normalisation: None,
                     },
                 ],
             );

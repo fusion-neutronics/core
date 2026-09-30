@@ -137,12 +137,16 @@ fn synthetic_branch() -> Arc<BranchTable> {
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![1.0e-5, 1.0e9],
                     values: vec![3.0, 3.0],
+                    states: Default::default(),
+                    normalisation: None,
                 },
                 BranchCurve {
                     target: "Li7_m1".to_string(),
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![1.0e-5, 1.0e9],
                     values: vec![1.0, 1.0],
+                    states: Default::default(),
+                    normalisation: None,
                 },
             ],
         );
@@ -222,12 +226,16 @@ fn coupled_branching_exact_for_ramp_partials() {
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![1.0e2, 5.0e5, 2.0e6],
                     values: vec![0.0, 3.0, 1.5],
+                    states: Default::default(),
+                    normalisation: None,
                 },
                 BranchCurve {
                     target: "Li7_m1".to_string(),
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![1.0e2, 5.0e5, 2.0e6],
                     values: vec![0.0, 1.0, 0.5],
+                    states: Default::default(),
+                    normalisation: None,
                 },
             ],
         );
@@ -256,12 +264,16 @@ fn coupled_branching_scores_mf9_yields() {
                     quantity: BranchQuantity::Yield,
                     energy: vec![1.0e-5, 1.0e9],
                     values: vec![0.75, 0.75],
+                    states: Default::default(),
+                    normalisation: None,
                 },
                 BranchCurve {
                     target: "Li7_m1".to_string(),
                     quantity: BranchQuantity::Yield,
                     energy: vec![1.0e-5, 1.0e9],
                     values: vec![0.25, 0.25],
+                    states: Default::default(),
+                    normalisation: None,
                 },
             ],
         );
@@ -340,6 +352,8 @@ fn coupled_branching_folds_parents_outside_material() {
                 quantity: BranchQuantity::CrossSection,
                 energy: vec![1.0e-5, 1.0e9],
                 values: vec![0.5, 0.5], // flat 0.5 b
+                states: Default::default(),
+                normalisation: None,
             }],
         );
 

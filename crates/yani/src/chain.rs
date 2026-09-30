@@ -125,6 +125,56 @@ pub struct BranchCurve {
     pub energy: Vec<f64>,
     /// Curve values on `energy`: fraction (Yield) or barns (CrossSection).
     pub values: Vec<f64>,
+    /// The evaluated production states summed into this curve, in the order
+    /// they were summed. Empty for a subsection written before these facts
+    /// were stored. Shared, since nothing in the solve reads them and a
+    /// session copies its branch table on every run.
+    pub states: Arc<[BranchState]>,
+    /// The parent evaluation's MF=1 account of what it was normalised to
+    /// (TENDL's "Normalization to other libraries" block), verbatim.
+    pub normalisation: Option<String>,
+}
+
+/// What the evaluation states about one production state behind a
+/// [`BranchCurve`], as the converter recorded it.
+///
+/// Facts only, carried for whoever decides what a list means: nothing in the
+/// fold or the matrix reads them, so a curve's rates are the same with or
+/// without them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BranchState {
+    /// The MT the state was listed under.
+    pub mt: i32,
+    /// The final state's level number (LFS); 0 is the ground state.
+    pub lfs: i32,
+    /// MF=8's LMF for the state, `None` where MF=8 does not name it.
+    pub lmf: Option<i32>,
+    /// Whether the same MT and file also list the product's ground state. A
+    /// list without it gives isomers only.
+    pub list_complete: bool,
+    /// How the level was matched to the target: `ground`, `energy`,
+    /// `near_energy`, `level_index`, `single_isomer`, `no_isomers` or
+    /// `unresolved`.
+    pub level_route: String,
+    /// The level's excitation energy in eV. Where MF=8 names the state (`lmf`
+    /// is `Some`) it is MF=8's ELFS as the tape writes it; otherwise it is
+    /// QM - QI of the MF=9/10 subsection, a difference of two tape values and
+    /// not a tape value itself. For an excited level (`lfs` > 0) a zero means
+    /// the evaluation did not state it, and a negative value is a sentinel,
+    /// not an energy.
+    pub level_energy: f64,
+    /// `level_energy` less the excitation energy of the state it was booked
+    /// to, in eV; `None` where that isomer's energy is unknown or
+    /// `level_energy` is not a stated energy.
+    pub level_energy_difference: Option<f64>,
+    /// The evaluation's MF=3 for `mt` on the curve's `energy` nodes, in barns:
+    /// the tape's value where a node is one of its points and its own law
+    /// between them, not a copy of MF=3. `None` where the file has no MF=3
+    /// section for the MT. A `None` item where MF=3 is not tabulated at that
+    /// node, where its log law meets a zero, or where MF=3 jumps at a node
+    /// the curve does not repeat; a repeated node takes MF=3's left limit
+    /// first and its right limit second.
+    pub mf3_cross_section: Option<Vec<Option<f64>>>,
 }
 
 /// Isomeric-branching curves keyed by parent nuclide then reaction kind.
@@ -1827,6 +1877,8 @@ mod tests {
             quantity,
             energy: energy.to_vec(),
             values: values.to_vec(),
+            states: Default::default(),
+            normalisation: None,
         }
     }
 
