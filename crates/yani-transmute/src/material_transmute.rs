@@ -789,8 +789,6 @@ struct ReplicaOutcome {
     /// The half-lives this replica was solved with, for the nuclides whose
     /// half-life was perturbed; empty when none were.
     half_lives: HashMap<String, f64>,
-    /// Half-life draws that came out non-positive and were floored.
-    half_lives_floored: usize,
     /// Decay-branching draws made, and those clamped to `[0, T]`.
     decay_branchings_sampled: usize,
     decay_branchings_floored: usize,
@@ -1179,6 +1177,8 @@ struct HalfLifeSampling {
     candidates: Vec<(String, f64, f64)>,
     /// Reachable unstable nuclides whose evaluation states no sigma.
     without: std::collections::BTreeSet<String>,
+    /// Reachable unstable nuclides whose stated sigma no draw can carry.
+    not_carried: std::collections::BTreeSet<String>,
 }
 
 /// The chains a replica edits, pruned once to what the material can reach.
@@ -1465,10 +1465,12 @@ fn run_replicas(
     // replica has one set of decay constants throughout.
     let half_life = match (&chains, want_half_life) {
         (Some(c), true) => {
-            let (candidates, without) = crate::uncertainty::half_life_candidates(&c.base);
+            let (candidates, without, not_carried) =
+                crate::uncertainty::half_life_candidates(&c.base);
             Some(HalfLifeSampling {
                 candidates,
                 without,
+                not_carried,
             })
         }
         _ => None,
@@ -1485,32 +1487,41 @@ fn run_replicas(
     // Decay energies: no solve reads them, so they are drawn where decay heat
     // is evaluated from each replica. Here only who has a sigma to draw from.
     let want_decay_energy = request.wants(crate::uncertainty::Source::DecayEnergy);
-    let (decay_energy_perturbed, no_decay_energy_sigma) = if want_decay_energy {
-        let seeds: Vec<&str> = initial
-            .nuclides
-            .keys()
-            .chain(initial.nuclide_data.keys())
-            .map(|s| s.as_str())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        let mut with = std::collections::BTreeSet::new();
-        let mut without = std::collections::BTreeSet::new();
-        for name in yani::reachable_nuclides(chain, &seeds) {
-            let Some(cn) = chain.get(&name) else { continue };
-            if cn.half_life.is_none_or(|t| t <= 0.0) || cn.decay_energy <= 0.0 {
-                continue;
+    let (decay_energy_perturbed, no_decay_energy_sigma, decay_energy_not_carried) =
+        if want_decay_energy {
+            let seeds: Vec<&str> = initial
+                .nuclides
+                .keys()
+                .chain(initial.nuclide_data.keys())
+                .map(|s| s.as_str())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            let mut with = std::collections::BTreeSet::new();
+            let mut without = std::collections::BTreeSet::new();
+            let mut not_carried = std::collections::BTreeSet::new();
+            for name in yani::reachable_nuclides(chain, &seeds) {
+                let Some(cn) = chain.get(&name) else { continue };
+                if cn.half_life.is_none_or(|t| t <= 0.0) {
+                    continue;
+                }
+                // Checked before the zero-energy skip: a sigma stated on a zero
+                // energy is one the data gives and no draw carries, so it is
+                // reported rather than dropped with the nuclides that have none.
+                let lost = crate::uncertainty::has_decay_energy_sigma_not_carried(cn);
+                if lost {
+                    not_carried.insert(name.clone());
+                }
+                if crate::uncertainty::has_decay_energy_sigma(cn) {
+                    with.insert(name);
+                } else if !lost && cn.decay_energy > 0.0 {
+                    without.insert(name);
+                }
             }
-            if crate::uncertainty::has_decay_energy_sigma(cn) {
-                with.insert(name);
-            } else {
-                without.insert(name);
-            }
-        }
-        (with, without)
-    } else {
-        Default::default()
-    };
+            (with, without, not_carried)
+        } else {
+            Default::default()
+        };
 
     // The shares are exact where the fold's partials are the collapse's own
     // split of each rate: on a dilute or self-shielded collapse, not a tallied
@@ -1592,9 +1603,11 @@ fn run_replicas(
     }
     info.decay_energies_perturbed = decay_energy_perturbed.clone();
     info.no_decay_energy_uncertainty = no_decay_energy_sigma;
+    info.decay_energy_uncertainty_not_carried = decay_energy_not_carried;
     if let Some(h) = &half_life {
         info.half_lives_perturbed = h.candidates.iter().map(|(n, _, _)| n.clone()).collect();
         info.no_half_life_uncertainty = h.without.clone();
+        info.half_life_uncertainty_not_carried = h.not_carried.clone();
     }
     let requested: &[crate::uncertainty::Source] = if request.sources.is_empty() {
         crate::uncertainty::Source::IMPLEMENTED
@@ -1665,7 +1678,6 @@ fn run_replicas(
     let one_replica = |replica: u64| -> Result<ReplicaOutcome, String> {
         let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
         let mut rates_sampled = 0usize;
-        let mut half_lives_floored = 0usize;
         let mut decay_branchings_floored = 0usize;
         // A statistical draw of the whole tallied rate vector, the partials
         // re-folded into the branching the way the nominal was, so an
@@ -1683,12 +1695,9 @@ fn run_replicas(
         });
         let edits = ChainEdits {
             half_lives: match &half_life {
-                Some(h) if !h.candidates.is_empty() => crate::uncertainty::sample_half_lives(
-                    &h.candidates,
-                    request.seed,
-                    replica,
-                    &mut half_lives_floored,
-                ),
+                Some(h) if !h.candidates.is_empty() => {
+                    crate::uncertainty::sample_half_lives(&h.candidates, request.seed, replica)
+                }
                 _ => HashMap::new(),
             },
             decay_branchings: match &decay_branching {
@@ -1763,7 +1772,6 @@ fn run_replicas(
             decay_branchings_sampled: edits.decay_branchings.len(),
             decay_branchings_floored,
             half_lives: edits.half_lives,
-            half_lives_floored,
             statistical_floored,
         })
     };
@@ -1794,7 +1802,6 @@ fn run_replicas(
             flux_coverage.bins_sampled += outcome.flux_bins_sampled;
             flux_coverage.bins_floored += outcome.flux_bins_floored;
             info.half_lives_sampled += outcome.half_lives.len();
-            info.half_lives_floored += outcome.half_lives_floored;
             info.decay_branchings_sampled += outcome.decay_branchings_sampled;
             info.decay_branchings_floored += outcome.decay_branchings_floored;
             info.statistical_floored += outcome.statistical_floored;
@@ -3284,10 +3291,12 @@ mod tests {
             fission_yields: None,
             sources: vec![yani::DecaySource {
                 particle: "photon".to_string(),
+                radiation: None,
                 distribution: yani::DecaySourceDistribution::Discrete {
                     energies: vec![1.17e6, 1.33e6],
                     intensities: vec![0.9985 * std::f64::consts::LN_2 / half_life, 4.2e-9],
                 },
+                uncertainty: None,
             }],
             half_life_uncertainty: Some(0.01 * half_life),
             decay_energy_uncertainty: None,

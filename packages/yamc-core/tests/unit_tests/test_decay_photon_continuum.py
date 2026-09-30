@@ -89,6 +89,8 @@ def test_the_contact_dose_integrates_the_continuum(cf252):
 def test_photon_sources_tag_the_continuum_with_its_law(cf252):
     chain = yamc.TransmutationChain(yamc.transmutation_decay_data)
     rows = chain.photon_sources["Cf252"]
-    assert sorted(row[0] for row in rows) == ["discrete", "tabular"]
+    # The gamma lines, the gamma continuum and the x-ray lines: each spectrum
+    # keeps its own rows, since each has its own normalisation.
+    assert sorted(row[0] for row in rows) == ["discrete", "discrete", "tabular"]
     tabular = next(row for row in rows if row[0] == "tabular")
     assert tabular[3] == "linear-linear"

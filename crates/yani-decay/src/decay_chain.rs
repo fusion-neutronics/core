@@ -353,6 +353,8 @@ mod tests {
     fn photon_source() -> Vec<DecaySource> {
         vec![DecaySource {
             particle: "photon".to_string(),
+            radiation: None,
+            uncertainty: None,
             distribution: DecaySourceDistribution::Discrete {
                 energies: vec![1.0e6],
                 intensities: vec![1.0],

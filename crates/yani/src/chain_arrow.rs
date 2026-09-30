@@ -29,7 +29,8 @@ fn section_schema(path: &str) -> Schema {
 
 use crate::chain::{
     BranchCurve, BranchQuantity, BranchState, BranchTable, ChainNuclide, ChainParts, ChainReaction,
-    DecaySource, DecaySourceDistribution, EvaluatedYields, FissionYield, FissionYieldSet,
+    DecaySource, DecaySourceDistribution, DecaySourceUncertainty, EvaluatedYields, FissionYield,
+    FissionYieldSet, SourceCovariance,
 };
 use crate::continuum::Interpolation;
 
@@ -373,17 +374,165 @@ fn source_distribution(
     }
 }
 
-/// The `interpolation` column of a `sources.arrow` batch, absent from a file
-/// written before it.
+/// A `sources.arrow` column a file written before it lacks, `None` there.
 ///
 /// A column that is present with another type is an error, not an absent one:
-/// read as absent it would turn every stated law into "no law" and blame the
-/// file's age for it.
-fn interpolation_codes(batch: &RecordBatch) -> Result<Option<&Int32Array>, Box<dyn Error>> {
-    match batch.schema().index_of("interpolation") {
+/// read as absent, a mistyped `interpolation` would turn every stated law into
+/// "no law" and blame the file's age for it.
+fn optional_col<'a, T: 'static>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> Result<Option<&'a T>, Box<dyn Error>> {
+    match batch.schema().index_of(name) {
         Err(_) => Ok(None),
-        Ok(_) => col::<Int32Array>(batch, "interpolation").map(Some),
+        Ok(_) => col::<T>(batch, name).map(Some),
     }
+}
+
+/// Row `i` of an optional list column, `None` where the column is absent or
+/// the row is null.
+fn optional_list(list: Option<&ListArray>, i: usize) -> Result<Option<Vec<f64>>, Box<dyn Error>> {
+    list.filter(|l| !l.is_null(i))
+        .map(|l| list_f64(l, i))
+        .transpose()
+}
+
+/// Every row of a `sources.arrow` batch that holds data, as `(nuclide,
+/// source)` in file order.
+///
+/// A row with no energies and no intensities is skipped, and with it any
+/// normalisation it states, since there is no line for it to scale. One that
+/// also states a covariance is refused, as there is nothing for it to cover.
+/// One with data on one side only is malformed, and [`source_distribution`]
+/// refuses it. So is a per-line sigma list that does not pair with the
+/// lines, a covariance given in part, or a continuum covariance whose
+/// energies and values do not pair.
+fn read_sources(batch: &RecordBatch) -> Result<Vec<(String, DecaySource)>, Box<dyn Error>> {
+    let nuclides = col::<StringArray>(batch, "nuclide")?;
+    let particles = col::<StringArray>(batch, "particle")?;
+    let types = col::<StringArray>(batch, "type")?;
+    let energies_col = col::<ListArray>(batch, "energies")?;
+    let intensities_col = col::<ListArray>(batch, "intensities")?;
+    let codes = optional_col::<Int32Array>(batch, "interpolation")?;
+    let radiation = optional_col::<StringArray>(batch, "radiation")?;
+    let normalization = optional_col::<Float64Array>(batch, "normalization")?;
+    let normalization_sigma = optional_col::<Float64Array>(batch, "normalization_uncertainty")?;
+    let intensity_sigmas = optional_col::<ListArray>(batch, "intensity_uncertainties")?;
+    let energy_sigmas = optional_col::<ListArray>(batch, "energy_uncertainties")?;
+    let covariance_ls = optional_col::<Int32Array>(batch, "covariance_ls")?;
+    let covariance_lb = optional_col::<Int32Array>(batch, "covariance_lb")?;
+    let covariance_energies = optional_col::<ListArray>(batch, "covariance_energies")?;
+    let covariance_values = optional_col::<ListArray>(batch, "covariance_values")?;
+    let int = |c: Option<&Int32Array>, i: usize| c.filter(|c| !c.is_null(i)).map(|c| c.value(i));
+    let float =
+        |c: Option<&Float64Array>, i: usize| c.filter(|c| !c.is_null(i)).map(|c| c.value(i));
+
+    let mut out = Vec::new();
+    for i in 0..batch.num_rows() {
+        let energies = list_f64(energies_col, i)?;
+        let intensities = list_f64(intensities_col, i)?;
+        let nuclide = nuclides.value(i);
+        if energies.is_empty() && intensities.is_empty() {
+            if int(covariance_lb, i).is_some()
+                || optional_list(covariance_energies, i)?.is_some()
+                || optional_list(covariance_values, i)?.is_some()
+            {
+                return Err(format!(
+                    "sources.arrow: a row of {nuclide} with no energies or intensities states \
+                     a covariance, which has nothing to cover"
+                )
+                .into());
+            }
+            continue;
+        }
+        let distribution = source_distribution(
+            nuclide,
+            types.value(i),
+            int(codes, i),
+            energies,
+            intensities,
+        )?;
+
+        let lines = match &distribution {
+            DecaySourceDistribution::Discrete { energies, .. } => Some(energies.len()),
+            DecaySourceDistribution::Tabular { .. } => None,
+        };
+        let per_line = |list: Option<&ListArray>, what: &str| -> Result<_, Box<dyn Error>> {
+            let Some(values) = optional_list(list, i)? else {
+                return Ok(None);
+            };
+            match lines {
+                Some(n) if n == values.len() => Ok(Some(values)),
+                Some(n) => Err(format!(
+                    "sources.arrow: a row of {nuclide} has {n} lines and {} {what}, which \
+                     must pair one to one",
+                    values.len()
+                )
+                .into()),
+                None => Err(format!(
+                    "sources.arrow: a tabular row of {nuclide} carries {what}, which only lines have"
+                )
+                .into()),
+            }
+        };
+        let intensity_uncertainties = per_line(intensity_sigmas, "intensity_uncertainties")?;
+        let energy_uncertainties = per_line(energy_sigmas, "energy_uncertainties")?;
+
+        let covariance = match (
+            int(covariance_lb, i),
+            optional_list(covariance_energies, i)?,
+            optional_list(covariance_values, i)?,
+        ) {
+            (None, None, None) if int(covariance_ls, i).is_none() => None,
+            // A continuum's covariance is (Ek, Fk) pairs, so its two lists
+            // pair one to one as the tape's NE says.
+            (Some(_), Some(energies), Some(values))
+                if lines.is_none() && energies.len() != values.len() =>
+            {
+                return Err(format!(
+                    "sources.arrow: a tabular row of {nuclide} has {} covariance_energies and \
+                     {} covariance_values, which must pair one to one",
+                    energies.len(),
+                    values.len()
+                )
+                .into())
+            }
+            (Some(lb), Some(energies), Some(values)) => Some(SourceCovariance {
+                ls: int(covariance_ls, i),
+                lb,
+                energies,
+                values,
+            }),
+            _ => {
+                return Err(format!(
+                    "sources.arrow: a row of {nuclide} gives its covariance only in part; \
+                     covariance_lb, covariance_energies and covariance_values go together"
+                )
+                .into())
+            }
+        };
+
+        let uncertainty = DecaySourceUncertainty {
+            normalization: float(normalization, i),
+            normalization_uncertainty: float(normalization_sigma, i),
+            intensity_uncertainties,
+            energy_uncertainties,
+            covariance,
+        };
+        out.push((
+            nuclide.to_string(),
+            DecaySource {
+                particle: particles.value(i).to_string(),
+                radiation: radiation
+                    .filter(|r| !r.is_null(i))
+                    .map(|r| r.value(i).to_string()),
+                distribution,
+                uncertainty: (uncertainty != DecaySourceUncertainty::default())
+                    .then(|| Arc::new(uncertainty)),
+            },
+        ));
+    }
+    Ok(out)
 }
 
 /// Whether a branching row `(kind, target)` should be grafted onto `parent`.
@@ -576,8 +725,6 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
     let sources_path = dir.join("sources.arrow");
     if sources_path.exists() {
         for batch in read_arrow_file(&sources_path)? {
-            let nuclides = col::<StringArray>(&batch, "nuclide")?;
-            let particles = col::<StringArray>(&batch, "particle")?;
             // export_chain_arrow wrote this file without a type column before
             // issue #163, and a row's kind cannot be guessed from its values.
             if batch.schema().index_of("type").is_err() {
@@ -589,30 +736,9 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
                 )
                 .into());
             }
-            let types = col::<StringArray>(&batch, "type")?;
-            let codes = interpolation_codes(&batch)?;
-            let energies_col = col::<ListArray>(&batch, "energies")?;
-            let intensities_col = col::<ListArray>(&batch, "intensities")?;
-            for i in 0..batch.num_rows() {
-                if let Some(nuc) = chain.get_mut(nuclides.value(i)) {
-                    let energies = list_f64(energies_col, i)?;
-                    let intensities = list_f64(intensities_col, i)?;
-                    // Skip sources with no data. A row with data on one side
-                    // only is malformed, and source_distribution refuses it.
-                    if energies.is_empty() && intensities.is_empty() {
-                        continue;
-                    }
-                    let code = codes.filter(|c| !c.is_null(i)).map(|c| c.value(i));
-                    nuc.sources.push(DecaySource {
-                        particle: particles.value(i).to_string(),
-                        distribution: source_distribution(
-                            &nuc.name,
-                            types.value(i),
-                            code,
-                            energies,
-                            intensities,
-                        )?,
-                    });
+            for (name, source) in read_sources(&batch)? {
+                if let Some(nuc) = chain.get_mut(&name) {
+                    nuc.sources.push(source);
                 }
             }
         }
@@ -973,31 +1099,8 @@ pub fn parse_chain_parts_from_bytes(
     // decay/sources.arrow -- optional.
     if let Some(bytes) = parts.decay.get("sources.arrow") {
         for batch in read_section_bytes(bytes, "decay/sources.arrow", "decay/sources.arrow")? {
-            let nuclides = col::<StringArray>(&batch, "nuclide")?;
-            let particles = col::<StringArray>(&batch, "particle")?;
-            let types = col::<StringArray>(&batch, "type")?;
-            let codes = interpolation_codes(&batch)?;
-            let energies_col = col::<ListArray>(&batch, "energies")?;
-            let intensities_col = col::<ListArray>(&batch, "intensities")?;
-            for i in 0..batch.num_rows() {
-                let energies = list_f64(energies_col, i)?;
-                let intensities = list_f64(intensities_col, i)?;
-                if energies.is_empty() && intensities.is_empty() {
-                    continue;
-                }
-                let code = codes.filter(|c| !c.is_null(i)).map(|c| c.value(i));
-                let distribution = source_distribution(
-                    nuclides.value(i),
-                    types.value(i),
-                    code,
-                    energies,
-                    intensities,
-                )?;
-                let nuc = ensure_nuclide(&mut chain, nuclides.value(i));
-                nuc.sources.push(DecaySource {
-                    particle: particles.value(i).to_string(),
-                    distribution,
-                });
+            for (name, source) in read_sources(&batch)? {
+                ensure_nuclide(&mut chain, &name).sources.push(source);
             }
         }
     }
@@ -1294,6 +1397,27 @@ struct SourceColumns {
     energies: ListBuilder<Float64Builder>,
     intensities: ListBuilder<Float64Builder>,
     interpolation: Int32Builder,
+    radiation: StringBuilder,
+    normalization: Float64Builder,
+    normalization_uncertainty: Float64Builder,
+    intensity_uncertainties: ListBuilder<Float64Builder>,
+    energy_uncertainties: ListBuilder<Float64Builder>,
+    covariance_ls: Int32Builder,
+    covariance_lb: Int32Builder,
+    covariance_energies: ListBuilder<Float64Builder>,
+    covariance_values: ListBuilder<Float64Builder>,
+}
+
+/// Append a list, or a null where there is none, so a round trip cannot turn
+/// "not stated" into an empty statement.
+fn append_list(builder: &mut ListBuilder<Float64Builder>, values: Option<&Vec<f64>>) {
+    match values {
+        Some(values) => {
+            builder.values().append_slice(values);
+            builder.append(true);
+        }
+        None => builder.append_null(),
+    }
 }
 
 impl SourceColumns {
@@ -1323,6 +1447,29 @@ impl SourceColumns {
         self.intensities.append(true);
         // Null where the chain states no law, so a round trip cannot invent one.
         self.interpolation.append_option(code);
+        self.radiation.append_option(source.radiation.as_deref());
+        let stated = source.uncertainty.as_deref();
+        let covariance = stated.and_then(|u| u.covariance.as_ref());
+        self.normalization
+            .append_option(stated.and_then(|u| u.normalization));
+        self.normalization_uncertainty
+            .append_option(stated.and_then(|u| u.normalization_uncertainty));
+        append_list(
+            &mut self.intensity_uncertainties,
+            stated.and_then(|u| u.intensity_uncertainties.as_ref()),
+        );
+        append_list(
+            &mut self.energy_uncertainties,
+            stated.and_then(|u| u.energy_uncertainties.as_ref()),
+        );
+        self.covariance_ls
+            .append_option(covariance.and_then(|c| c.ls));
+        self.covariance_lb.append_option(covariance.map(|c| c.lb));
+        append_list(
+            &mut self.covariance_energies,
+            covariance.map(|c| &c.energies),
+        );
+        append_list(&mut self.covariance_values, covariance.map(|c| &c.values));
     }
 
     fn finish(mut self) -> Vec<ArrayRef> {
@@ -1333,6 +1480,15 @@ impl SourceColumns {
             Arc::new(self.energies.finish()),
             Arc::new(self.intensities.finish()),
             Arc::new(self.interpolation.finish()),
+            Arc::new(self.radiation.finish()),
+            Arc::new(self.normalization.finish()),
+            Arc::new(self.normalization_uncertainty.finish()),
+            Arc::new(self.intensity_uncertainties.finish()),
+            Arc::new(self.energy_uncertainties.finish()),
+            Arc::new(self.covariance_ls.finish()),
+            Arc::new(self.covariance_lb.finish()),
+            Arc::new(self.covariance_energies.finish()),
+            Arc::new(self.covariance_values.finish()),
         ]
     }
 }
@@ -2195,8 +2351,12 @@ mod tests {
 
     #[test]
     fn exported_parts_match_the_declared_schemas_and_round_trip() {
-        use crate::chain::{ChainNuclide, ChainReaction, DecaySource, DecaySourceDistribution};
+        use crate::chain::{
+            ChainNuclide, ChainReaction, DecaySource, DecaySourceDistribution,
+            DecaySourceUncertainty, SourceCovariance,
+        };
         use std::collections::HashMap;
+        use std::sync::Arc;
 
         let mut chain: HashMap<String, ChainNuclide> = HashMap::new();
         chain.insert(
@@ -2226,8 +2386,23 @@ mod tests {
                 // Lines, and a continuum under each state its law can be in:
                 // stated either way, and not stated at all.
                 sources: vec![
+                    // Every uncertainty field stated, a 0.0 sigma among
+                    // them, which must come back as 0.0 and not as null.
                     DecaySource {
                         particle: "photon".to_string(),
+                        radiation: Some("gamma".to_string()),
+                        uncertainty: Some(Arc::new(DecaySourceUncertainty {
+                            normalization: Some(1.0),
+                            normalization_uncertainty: Some(0.0),
+                            intensity_uncertainties: Some(vec![6.0e-6, 0.0]),
+                            energy_uncertainties: Some(vec![3.0, 5.0]),
+                            covariance: Some(SourceCovariance {
+                                ls: Some(1),
+                                lb: 5,
+                                energies: vec![1.17e6, 1.33e6],
+                                values: vec![1.0e-4, 2.0e-5, 3.0e-4],
+                            }),
+                        })),
                         distribution: DecaySourceDistribution::Discrete {
                             energies: vec![1.17e6, 1.33e6],
                             intensities: vec![1.0, 1.0],
@@ -2235,6 +2410,34 @@ mod tests {
                     },
                     DecaySource {
                         particle: "photon".to_string(),
+                        radiation: Some("xray".to_string()),
+                        uncertainty: Some(Arc::new(DecaySourceUncertainty {
+                            normalization: Some(0.01),
+                            normalization_uncertainty: None,
+                            intensity_uncertainties: None,
+                            energy_uncertainties: Some(vec![0.0]),
+                            covariance: None,
+                        })),
+                        distribution: DecaySourceDistribution::Discrete {
+                            energies: vec![7.5e3],
+                            intensities: vec![1.0e-3],
+                        },
+                    },
+                    DecaySource {
+                        particle: "photon".to_string(),
+                        radiation: Some("gamma".to_string()),
+                        uncertainty: Some(Arc::new(DecaySourceUncertainty {
+                            normalization: Some(2.0e-3),
+                            normalization_uncertainty: Some(1.0e-4),
+                            intensity_uncertainties: None,
+                            energy_uncertainties: None,
+                            covariance: Some(SourceCovariance {
+                                ls: None,
+                                lb: 2,
+                                energies: vec![1.0e4, 1.0e6],
+                                values: vec![0.01, 0.0],
+                            }),
+                        })),
                         distribution: DecaySourceDistribution::Tabular {
                             energies: vec![1.0e4, 1.0e5, 1.0e6],
                             intensities: vec![2.0e-7, 1.0e-7, 0.0],
@@ -2243,6 +2446,8 @@ mod tests {
                     },
                     DecaySource {
                         particle: "photon".to_string(),
+                        radiation: None,
+                        uncertainty: None,
                         distribution: DecaySourceDistribution::Tabular {
                             energies: vec![0.0, 1.4e5, 1.0e7],
                             intensities: vec![0.0, 9.0e-7, 0.0],
@@ -2251,6 +2456,8 @@ mod tests {
                     },
                     DecaySource {
                         particle: "neutron".to_string(),
+                        radiation: None,
+                        uncertainty: None,
                         distribution: DecaySourceDistribution::Tabular {
                             energies: vec![1.0e3, 1.0e6],
                             intensities: vec![1.0e-9, 1.0e-10],
@@ -2311,7 +2518,8 @@ mod tests {
         let co60 = back.get("Co60").expect("Co60 survives the round trip");
         assert_eq!(
             co60.sources, chain["Co60"].sources,
-            "every source comes back as what it was, the law and its absence included"
+            "every source comes back as what it was: the law and its absence, the \
+             radiation, and each uncertainty stated, a 0.0 as 0.0 and a null as null"
         );
 
         // Q has to come back, not just be declared. Dropping it here is
@@ -2376,7 +2584,7 @@ mod tests {
             intensities.append(true);
             interpolation.append_option(code);
             let schema = Arc::new(super::section_schema("decay/sources.arrow"));
-            let columns: Vec<ArrayRef> = vec![
+            let mut columns: Vec<ArrayRef> = vec![
                 Arc::new(nuclide.finish()),
                 Arc::new(particle.finish()),
                 Arc::new(kind_b.finish()),
@@ -2384,6 +2592,10 @@ mod tests {
                 Arc::new(intensities.finish()),
                 Arc::new(interpolation.finish()),
             ];
+            // Every uncertainty column null: the row states none.
+            for field in &schema.fields()[columns.len()..] {
+                columns.push(arrow_array::new_null_array(field.data_type(), 1));
+            }
             let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
             super::write_arrow_file(&dir.join("decay/sources.arrow"), schema, batch).unwrap();
 
@@ -2400,6 +2612,276 @@ mod tests {
         assert!(write("tabular", Some(7)).contains("not an ENDF law"));
         assert!(write("discrete", Some(1)).contains("only a tabular row"));
         assert!(write("mixture", None).contains("expected 'discrete' or 'tabular'"));
+    }
+
+    /// A `sources.arrow` written before the radiation, normalisation and
+    /// uncertainty columns holds only the first six, and still loads through
+    /// both readers with every one of them unstated: `None`, not zero.
+    #[test]
+    fn a_sources_file_predating_the_uncertainty_columns_states_none() {
+        use arrow_array::builder::{Float64Builder, Int32Builder, ListBuilder, StringBuilder};
+        use arrow_array::{ArrayRef, RecordBatch};
+        use std::sync::Arc;
+
+        let dir =
+            std::env::temp_dir().join(format!("yani-sources-predating-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut chain = std::collections::HashMap::new();
+        chain.insert(
+            "Co60".to_string(),
+            crate::ChainNuclide {
+                name: "Co60".to_string(),
+                half_life: Some(1.66e8),
+                half_life_uncertainty: None,
+                decay_energy: 2.6e6,
+                decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
+                reactions: Vec::new(),
+                decays: Vec::new(),
+                fission_yields: None,
+                sources: Vec::new(),
+            },
+        );
+        super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+        super::export_chain_arrow(&chain, dir.join("flat"), Some("test")).expect("export succeeds");
+
+        let mut nuclide = StringBuilder::new();
+        let mut particle = StringBuilder::new();
+        let mut kind = StringBuilder::new();
+        let mut energies = ListBuilder::new(Float64Builder::new());
+        let mut intensities = ListBuilder::new(Float64Builder::new());
+        let mut interpolation = Int32Builder::new();
+        for (k, e, p, code) in [
+            ("discrete", [1.173e6, 1.332e6], [4.2e-9, 4.2e-9], None),
+            ("tabular", [1.0e4, 1.0e6], [1.0e-15, 0.0], Some(2)),
+        ] {
+            nuclide.append_value("Co60");
+            particle.append_value("photon");
+            kind.append_value(k);
+            energies.values().append_slice(&e);
+            energies.append(true);
+            intensities.values().append_slice(&p);
+            intensities.append(true);
+            interpolation.append_option(code);
+        }
+        let declared = super::section_schema("decay/sources.arrow");
+        let schema = Arc::new(arrow_schema::Schema::new(declared.fields()[..6].to_vec()));
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(nuclide.finish()),
+            Arc::new(particle.finish()),
+            Arc::new(kind.finish()),
+            Arc::new(energies.finish()),
+            Arc::new(intensities.finish()),
+            Arc::new(interpolation.finish()),
+        ];
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        super::write_arrow_file(
+            &dir.join("decay/sources.arrow"),
+            schema.clone(),
+            batch.clone(),
+        )
+        .unwrap();
+        super::write_arrow_file(&dir.join("flat/sources.arrow"), schema, batch).unwrap();
+
+        let parts = parse_chain_parts(&dir.join("decay"), None, None, None).map(|(c, _)| c);
+        let flat = super::parse_chain_arrow(dir.join("flat"));
+        let _ = std::fs::remove_dir_all(&dir);
+        for chain in [parts.unwrap(), flat.unwrap()] {
+            let sources = &chain["Co60"].sources;
+            assert_eq!(sources.len(), 2, "both rows load");
+            for source in sources {
+                assert_eq!(source.radiation, None);
+                assert!(source.uncertainty.is_none(), "{source:?}");
+            }
+        }
+    }
+
+    /// A per-line sigma list that does not pair with the lines, or one on a
+    /// continuum, is refused rather than read against the wrong line.
+    #[test]
+    fn a_sigma_list_that_does_not_fit_its_row_is_refused() {
+        use crate::chain::{
+            ChainNuclide, DecaySource, DecaySourceDistribution, DecaySourceUncertainty,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let read = |distribution, intensity_uncertainties| {
+            let mut chain = HashMap::new();
+            chain.insert(
+                "W187".to_string(),
+                ChainNuclide {
+                    name: "W187".to_string(),
+                    half_life: Some(8.5e4),
+                    half_life_uncertainty: None,
+                    decay_energy: 0.0,
+                    decay_energy_uncertainty: None,
+                    decay_energy_components: Default::default(),
+                    reactions: Vec::new(),
+                    decays: Vec::new(),
+                    fission_yields: None,
+                    sources: vec![DecaySource {
+                        particle: "photon".to_string(),
+                        radiation: Some("gamma".to_string()),
+                        distribution,
+                        uncertainty: Some(Arc::new(DecaySourceUncertainty {
+                            intensity_uncertainties,
+                            ..Default::default()
+                        })),
+                    }],
+                },
+            );
+            let dir = std::env::temp_dir().join(format!(
+                "yani-source-sigmas-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+            let result = parse_chain_parts(&dir.join("decay"), None, None, None);
+            let _ = std::fs::remove_dir_all(&dir);
+            match result {
+                Ok(_) => String::new(),
+                Err(e) => e.to_string(),
+            }
+        };
+        let lines = || DecaySourceDistribution::Discrete {
+            energies: vec![4.8e5, 6.9e5],
+            intensities: vec![1.0e-6, 2.0e-6],
+        };
+        assert_eq!(read(lines(), Some(vec![1.0e-8, 2.0e-8])), "");
+        assert!(read(lines(), Some(vec![1.0e-8])).contains("2 lines and 1 intensity_uncertainties"));
+        let continuum = DecaySourceDistribution::Tabular {
+            energies: vec![1.0e4, 1.0e6],
+            intensities: vec![1.0e-9, 0.0],
+            interpolation: Some(crate::Interpolation::Histogram),
+        };
+        assert!(read(continuum, Some(vec![0.0, 0.0])).contains("only lines have"));
+    }
+
+    /// A row with no lines is skipped, but a covariance on it has nothing to
+    /// cover and is refused rather than dropped.
+    #[test]
+    fn a_covariance_on_a_row_with_no_lines_is_refused() {
+        use crate::chain::{
+            ChainNuclide, DecaySource, DecaySourceDistribution, DecaySourceUncertainty,
+            SourceCovariance,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let read = |covariance| {
+            let mut chain = HashMap::new();
+            chain.insert(
+                "W187".to_string(),
+                ChainNuclide {
+                    name: "W187".to_string(),
+                    half_life: Some(8.5e4),
+                    half_life_uncertainty: None,
+                    decay_energy: 0.0,
+                    decay_energy_uncertainty: None,
+                    decay_energy_components: Default::default(),
+                    reactions: Vec::new(),
+                    decays: Vec::new(),
+                    fission_yields: None,
+                    sources: vec![DecaySource {
+                        particle: "photon".to_string(),
+                        radiation: Some("gamma".to_string()),
+                        distribution: DecaySourceDistribution::Discrete {
+                            energies: Vec::new(),
+                            intensities: Vec::new(),
+                        },
+                        uncertainty: Some(Arc::new(DecaySourceUncertainty {
+                            normalization: Some(1.0),
+                            covariance,
+                            ..Default::default()
+                        })),
+                    }],
+                },
+            );
+            let dir = std::env::temp_dir().join(format!(
+                "yani-empty-row-covariance-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+            let result = parse_chain_parts(&dir.join("decay"), None, None, None);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.map_err(|e| e.to_string())
+        };
+        let (chain, _) = read(None).expect("an empty row without a covariance is skipped");
+        assert!(chain["W187"].sources.is_empty());
+        let message = read(Some(SourceCovariance {
+            ls: Some(1),
+            lb: 5,
+            energies: vec![4.8e5],
+            values: vec![1.0e-4],
+        }))
+        .unwrap_err();
+        assert!(message.contains("nothing to cover"), "{message}");
+    }
+
+    /// A continuum covariance is (Ek, Fk) pairs, so one whose two lists
+    /// differ in length is refused rather than read against the wrong Ek.
+    #[test]
+    fn a_continuum_covariance_that_does_not_pair_is_refused() {
+        use crate::chain::{
+            ChainNuclide, DecaySource, DecaySourceDistribution, DecaySourceUncertainty,
+            SourceCovariance,
+        };
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let read = |values: Vec<f64>| {
+            let mut chain = HashMap::new();
+            chain.insert(
+                "Cf252".to_string(),
+                ChainNuclide {
+                    name: "Cf252".to_string(),
+                    half_life: Some(8.35e7),
+                    half_life_uncertainty: None,
+                    decay_energy: 6.2e6,
+                    decay_energy_uncertainty: None,
+                    decay_energy_components: Default::default(),
+                    reactions: Vec::new(),
+                    decays: Vec::new(),
+                    fission_yields: None,
+                    sources: vec![DecaySource {
+                        particle: "photon".to_string(),
+                        radiation: Some("gamma".to_string()),
+                        distribution: DecaySourceDistribution::Tabular {
+                            energies: vec![1.0e4, 1.0e6],
+                            intensities: vec![1.0e-9, 0.0],
+                            interpolation: Some(crate::Interpolation::LinearLinear),
+                        },
+                        uncertainty: Some(Arc::new(DecaySourceUncertainty {
+                            normalization: Some(1.0),
+                            covariance: Some(SourceCovariance {
+                                ls: None,
+                                lb: 2,
+                                energies: vec![1.0e4, 1.0e6],
+                                values,
+                            }),
+                            ..Default::default()
+                        })),
+                    }],
+                },
+            );
+            let dir = std::env::temp_dir().join(format!(
+                "yani-continuum-covariance-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            super::export_chain_parts(&chain, &dir, Some("test")).expect("export succeeds");
+            let result = parse_chain_parts(&dir.join("decay"), None, None, None);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.map(|_| ()).map_err(|e| e.to_string())
+        };
+        assert_eq!(read(vec![0.01, 0.0]), Ok(()));
+        let message = read(vec![0.01]).unwrap_err();
+        assert!(message.contains("must pair one to one"), "{message}");
     }
 
     /// A flat `sources.arrow` from an export_chain_arrow that wrote no type
@@ -2474,7 +2956,7 @@ mod tests {
         let batch =
             |column: ArrayRef| RecordBatch::try_from_iter([("interpolation", column)]).unwrap();
         let pyarrow_default = batch(Arc::new(Int64Array::from(vec![Some(1)])));
-        let message = super::interpolation_codes(&pyarrow_default)
+        let message = super::optional_col::<Int32Array>(&pyarrow_default, "interpolation")
             .unwrap_err()
             .to_string();
         assert!(
@@ -2483,14 +2965,18 @@ mod tests {
         );
 
         let stated = batch(Arc::new(Int32Array::from(vec![Some(1)])));
-        assert!(super::interpolation_codes(&stated).unwrap().is_some());
+        assert!(super::optional_col::<Int32Array>(&stated, "interpolation")
+            .unwrap()
+            .is_some());
 
         let older = RecordBatch::try_from_iter([(
             "type",
             Arc::new(arrow_array::StringArray::from(vec!["tabular"])) as ArrayRef,
         )])
         .unwrap();
-        assert!(super::interpolation_codes(&older).unwrap().is_none());
+        assert!(super::optional_col::<Int32Array>(&older, "interpolation")
+            .unwrap()
+            .is_none());
     }
 
     /// A fissioning nuclide with the given nominal yield energies, the first
