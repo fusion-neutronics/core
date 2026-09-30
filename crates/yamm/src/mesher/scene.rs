@@ -66,7 +66,7 @@ pub struct SceneFace {
     pub holes: Vec<Vec<SceneFaceEdge>>,
     pub is_planar: bool,
     pub mode: MeshMode,
-    /// Junction-snap flags (issue #70): `boundary_snaps[k]` means edge
+    /// Junction-snap flags: `boundary_snaps[k]` means edge
     /// `k`'s effective head must be snapped to edge `k-1`'s effective
     /// tail after UV evaluation - consecutive edges share an OCC
     /// vertex, but each pcurve evaluates it with its own slop, and the

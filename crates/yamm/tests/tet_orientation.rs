@@ -5,8 +5,8 @@
 //! normals only for a positively oriented tet. The element walk picks its exit
 //! face with `dot(direction, normal) > 0`, so an inverted tet makes it choose an
 //! ENTRY face: the walk hops backwards or leaves the mesh early, and
-//! unstructured track-length tallies read far too low (issue #316 measured
-//! -33%). `yamt` now refuses a mesh with an inverted tet outright, so these
+//! unstructured track-length tallies read far too low (about -33%). `yamt`
+//! refuses a mesh with an inverted tet outright, so these
 //! tests keep the source honest and a mesher regression fails where it is
 //! introduced rather than at load.
 //!

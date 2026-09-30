@@ -465,7 +465,7 @@ fn read_compton(
 
     // The shipped cdf is the raw trapezoid sum over the tabulated half-profile.
     // Normalise both tables over the extrapolated whole profile and fit the
-    // tail the sampler extends each shell with (fusion-neutronics/core#22).
+    // tail the sampler extends each shell with.
     let (profile_tail_slope, profile_negative_mass) = if profile_cdf.is_empty() {
         (Vec::new(), Vec::new())
     } else {

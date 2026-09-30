@@ -41,17 +41,17 @@ pub fn run_multi_cell_transport(
     log_energy_grid: &[f64],
     coarse_log_energy_grid: &[f64],
     // Packed `[n_materials × COARSE_META_COLS]` per-material coarse-grid
-    // descriptor (issue #212): base into `coarse_log_energy_grid`, coarse
+    // descriptor: base into `coarse_log_energy_grid`, coarse
     // length, and per-MT-buffer first-slab base for each material. Drives the
     // kernel's per-material coarse bracket + per-MT stride.
     coarse_meta: &[u32],
     // Concatenated per-material FINE grids backing the resonance-critical
-    // aggregate macro XS + the nuc buffers (issue #212); each material owns its
+    // aggregate macro XS + the nuc buffers; each material owns its
     // fine grid, described by `fine_meta`. Distinct from the GLOBAL
     // `log_energy_grid` (retained for score / photon / decay).
     fine_log_energy_grid: &[f64],
-    // Packed `[n_materials × FINE_META_COLS]` per-material fine-grid descriptor
-    // (issue #212): base into `fine_log_energy_grid` (== aggregate-XS row base),
+    // Packed `[n_materials × FINE_META_COLS]` per-material fine-grid descriptor:
+    // base into `fine_log_energy_grid` (== aggregate-XS row base),
     // fine length, and first-slab element base into `nuc_macro_total`. Drives the
     // kernel's per-material fine bracket + aggregate-XS / nuc-buffer strides.
     fine_meta: &[u32],
@@ -187,14 +187,14 @@ pub fn run_multi_cell_transport(
     // into the device bank. Mutually exclusive with `coupled` (at most one gate
     // is 1).
     decay: &DecayPhotonInputs,
-    // Per-collision nuclide selection (issue #74, Stage 1). Pass
+    // Per-collision nuclide selection. Pass
     // `NuclideSelectInputs::single_nuclide(target_mass_per_material, n_grid)` to
-    // keep the kernel byte-identical to pre-#74 behaviour (every material has
+    // keep the kernel byte-identical to a no-selection kernel (every material has
     // one nuclide, no selection draw); pass `NuclideSelectInputs::from_materials`
     // to enable per-collision selection + per-nuclide elastic AWR for
     // multi-nuclide materials.
     nuclide_select: &NuclideSelectInputs,
-    // Device fission bank (issue #78). Pass `FissionBankInputs::off()` (gate 0)
+    // Device fission bank. Pass `FissionBankInputs::off()` (gate 0)
     // to keep the fission branch on the legacy `weight *= nu_bar` + cap
     // terminator (byte-identical to the pre-bank kernel); pass
     // `FissionBankInputs::on()` (gate 1) to branch the fission chain into the
@@ -208,13 +208,12 @@ pub fn run_multi_cell_transport(
     // 1-element f64 buffer (the `survival_params` pattern) and read by the
     // kernel as `free_gas_threshold[0]`; the CPU twin reads the same value from
     // `TransportInputs`. At the default 400.0 both paths are byte-identical to
-    // the previous hardcode (issue #102).
+    // the previous hardcode.
     free_gas_threshold: f64,
-    // Tally variance accumulation mode (issue #233). `PerStep` is the
-    // byte-identical pre-#233 path; `PerHistory` (Stage 1, non-fissile) flushes
-    // per-history sum + sum_sq into a doubled `tally_out`; `PerSource` (Stage 2,
-    // fissile) flushes per-history sums into the per-source `src_acc` for
-    // cross-launch fission-progeny grouping.
+    // Tally variance accumulation mode. `PerStep` is the mean-only path;
+    // `PerHistory` (non-fissile) flushes per-history sum + sum_sq into a
+    // doubled `tally_out`; `PerSource` (fissile) flushes per-history sums into
+    // the per-source `src_acc` for cross-launch fission-progeny grouping.
     variance: TallyVarianceMode,
 ) -> MultiCellResult {
     // Serialize multi-cell GPU dispatches during this crate's own test runs.
@@ -263,7 +262,7 @@ pub fn run_multi_cell_transport(
         ctx.adapter_info(),
     );
     let n_materials = target_mass_per_material.len();
-    // Per-material COARSE grids (issue #212): each material owns its coarse grid
+    // Per-material COARSE grids: each material owns its coarse grid
     // (its finest single per-nuclide grid), concatenated tight into
     // `coarse_log_energy_grid` and described per material by `coarse_meta`
     // (stride COARSE_META_COLS). The per-MT inelastic buffers ride each
@@ -276,7 +275,7 @@ pub fn run_multi_cell_transport(
         n_materials * COARSE_META_COLS as usize,
         "coarse_meta must be flat [n_materials × COARSE_META_COLS]"
     );
-    // Per-material FINE grids (issue #212): each material owns its fine grid (its
+    // Per-material FINE grids: each material owns its fine grid (its
     // union grid), concatenated tight into `fine_log_energy_grid` and described
     // per material by `fine_meta` (stride FINE_META_COLS). The aggregate macro XS
     // are tight CSR keyed per material (total `sum_m fine_n[m]` ==
@@ -298,8 +297,8 @@ pub fn run_multi_cell_transport(
         })
         .sum();
     // Per-MT inelastic pools + the elastic-angle pool are keyed per-(material,
-    // nuclide) SLAB (#74 Stages 2a / 2b), so their leading dimension is `n_slab`
-    // (= `nuc_awr.len()`), not `n_materials`. Single-nuclide materials give one
+    // nuclide) SLAB, so their leading dimension is `n_slab` (=
+    // `nuc_awr.len()`), not `n_materials`. Single-nuclide materials give one
     // slab each, so for those `n_slab == n_materials`.
     let n_slab = nuclide_select.nuc_awr.len();
     assert_eq!(
@@ -324,9 +323,8 @@ pub fn run_multi_cell_transport(
     );
     assert_eq!(fission_a_per_material.len(), n_materials);
     assert_eq!(fission_b_per_material.len(), n_materials);
-    // Variable-length tight layout (issue #104): chi rows are laid out per
-    // (nuclide slab, fission channel) plus one delayed row per slab by
-    // `chi_slab_meta` (issue #364, fusion-neutronics/core#34 entry 1);
+    // Variable-length tight layout: chi rows are laid out per (nuclide slab,
+    // fission channel) plus one delayed row per slab by `chi_slab_meta`;
     // incident-energy rows are [total ae-rows]; (x, cdf) points are [total
     // x-points]. No fixed per-axis stride.
     let n_fission_eout_ae_rows = fission_eout_n_x_per_material.len();
@@ -393,7 +391,7 @@ pub fn run_multi_cell_transport(
         n_fission_eout_ae_rows,
         "fission_eout_interp must be flat [total ae-rows]"
     );
-    // SPARSE per-MT storage (issue #212). `permt_meta` is flat `[n_slab ×
+    // SPARSE per-MT storage. `permt_meta` is flat `[n_slab ×
     // MT_INELASTIC_COUNT × PERMT_META_COLS]`; the two value buffers are the tight
     // concatenation of every (slab, MT slot)'s stored range, so their length is
     // the sum of `n_stored` over all permt rows, and they must be equal (xs and
@@ -429,7 +427,7 @@ pub fn run_multi_cell_transport(
     assert_eq!(tallies.edges_offsets.len(), n_tallies);
     assert_eq!(tallies.n_bins_per_tally.len(), n_tallies);
     assert_eq!(tallies.out_offsets.len(), n_tallies + 1);
-    // Variable-length tight layout (issue #104): per-(slab,MT) counts/bases are
+    // Variable-length tight layout: per-(slab,MT) counts/bases are
     // [n_slab × MT_INELASTIC_COUNT]; incident-energy rows are [total ae-rows];
     // (mu,cdf,pdf) points are [total mu-points]. No fixed per-axis stride.
     let n_inel_ae_rows = angle_n_mu.len();
@@ -468,7 +466,7 @@ pub fn run_multi_cell_transport(
         n_inel_ae_rows,
         "angle_interp must be flat [total ae-rows]"
     );
-    // Variable-length tight layout (issue #104): per-(slab,MT) scalars/bases are
+    // Variable-length tight layout: per-(slab,MT) scalars/bases are
     // [n_slab × MT_INELASTIC_COUNT]; incident-energy rows are [total ae-rows];
     // (x,cdf,p) points are [total x-points]. No fixed per-axis stride.
     let n_eout_ae_rows = eout_n_x.len();
@@ -522,7 +520,7 @@ pub fn run_multi_cell_transport(
         n_eout_ae_rows,
         "eout_n_discrete must be flat [total ae-rows]"
     );
-    // Variable-length tight layout (issue #104), three nesting levels: per
+    // Variable-length tight layout, three nesting levels: per
     // (slab,MT) slot counts/bases are [n_slab × MT_INELASTIC_COUNT]; the
     // incident-energy ae-rows are [total ae-rows]; the E_out x-points are
     // [total x-points]; the mu points are [total mu-points]. No fixed
@@ -604,12 +602,11 @@ pub fn run_multi_cell_transport(
         n_slab * MT_INELASTIC_COUNT,
         "scatter_in_cm_per_mt must be flat [n_slab × MT_INELASTIC_COUNT]"
     );
-    // Elastic angular tables are keyed per-(material, nuclide) slab (#74
-    // Stage 2a), same `n_slab` leading dimension as the per-MT inelastic pools.
-    // Variable-length tight layout (issue #104): per-slab counts/bases are
-    // `[n_slab]`; the incident-energy rows (`energy_grid`/`n_mu`/`interp`/
-    // `mu_offset`) are `[total ae-rows]`; the (mu,cdf,pdf) points are
-    // `[total mu-points]`. No fixed MAX_* stride.
+    // Elastic angular tables are keyed per-(material, nuclide) slab, same
+    // `n_slab` leading dimension as the per-MT inelastic pools. Variable-length
+    // tight layout: per-slab counts/bases are `[n_slab]`; the incident-energy
+    // rows (`energy_grid`/`n_mu`/`interp`/`mu_offset`) are `[total ae-rows]`;
+    // the (mu,cdf,pdf) points are `[total mu-points]`. No fixed MAX_* stride.
     let n_ae_rows = elastic_angle_n_mu.len();
     assert_eq!(
         elastic_angle_n_energies.len(),
@@ -651,7 +648,7 @@ pub fn run_multi_cell_transport(
         n_materials,
         "temperature_k_per_material must be flat [n_materials]"
     );
-    // Variable-length tight layout (issue #104): per-(slab,MT) scalars/bases
+    // Variable-length tight layout: per-(slab,MT) scalars/bases
     // are [n_slab × MT_INELASTIC_COUNT]; incident-energy rows are [total
     // ae-rows]; (x,p,c,r,a) points are [total x-points]. No fixed per-axis
     // stride.
@@ -706,7 +703,7 @@ pub fn run_multi_cell_transport(
         km_x.len(),
         "km_a must match km_x [total x-points]"
     );
-    // Tight variable-length layout (issue #104): per (slab,MT) slot
+    // Tight variable-length layout: per (slab,MT) slot
     // counts/bases are [n_slab × MT_INELASTIC_COUNT]; the E_in rows are
     // [total rows] (no fixed per-axis stride). `evap_theta` is
     // component-major: [total component-rows].
@@ -790,14 +787,14 @@ pub fn run_multi_cell_transport(
         n_slab * MT_INELASTIC_COUNT,
         "watt_u must be flat [n_slab × MT_INELASTIC_COUNT]"
     );
-    // URR is keyed per-(material, nuclide) SLAB (issue #210): one `urr_meta`
+    // URR is keyed per-(material, nuclide) SLAB: one `urr_meta`
     // row and one `urr_atom_density` / CSR-base entry per global slab.
     assert_eq!(
         urr_meta.len(),
         n_slab * URR_META_COLS,
         "urr_meta must be flat [n_slab × URR_META_COLS]"
     );
-    // Tight CSR (issue #104): `urr_ae_offset` / `urr_cdf_offset` carry one
+    // Tight CSR: `urr_ae_offset` / `urr_cdf_offset` carry one
     // per-slab base each; `urr_energy_grid` / `urr_cdf` / `urr_xs` are
     // concatenated tight (no MAX_URR_* padding). `urr_xs` is the cdf grid ×
     // URR_XS_COLS, so its length is exactly `urr_cdf.len() * URR_XS_COLS`.
@@ -907,7 +904,7 @@ pub fn run_multi_cell_transport(
         client.create_from_slice(bytemuck::cast_slice(fission_eout_n_energies_per_material));
     let fission_eout_ae_off_h =
         client.create_from_slice(bytemuck::cast_slice(fission_eout_ae_offset));
-    // Tight CSR (issue #104): for a model with no fissile material every
+    // Tight CSR: for a model with no fissile material every
     // fission-eout data array is empty (zero ae-rows, zero points). wgpu
     // cannot allocate a zero-length storage buffer, so pad a single sentinel
     // element -- the kernel only reads these when
@@ -970,14 +967,14 @@ pub fn run_multi_cell_transport(
     let fission_eout_p_h = client.create_from_slice(bytemuck::cast_slice(fission_eout_p_slice));
     let fission_eout_interp_h =
         client.create_from_slice(bytemuck::cast_slice(fission_eout_interp_slice));
-    // Pack the per-material f64 scalars (target mass, temperature,
-    // Watt a, Watt b) into a single `[n_mat × MAT_F64_COLS]` upload. Same
-    // packing motivation as `mt_slot_u32_meta`: collapses what would otherwise
-    // be separate scalar bindings into one. The URR-atom-density column
-    // (`COL_URR_ATOM_DENSITY`) is left dead (issue #210 moved URR atom density
-    // to its own per-slab `urr_atom_density` binding); the stride stays 5 so
-    // the kernel's hardcoded `mat_f64_meta.len() / 5` material count and the
-    // other columns' offsets are untouched.
+    // Pack the per-material f64 scalars (target mass, temperature, Watt a, Watt
+    // b) into a single `[n_mat × MAT_F64_COLS]` upload. Same packing motivation
+    // as `mt_slot_u32_meta`: collapses what would otherwise be separate scalar
+    // bindings into one. The URR-atom-density column (`COL_URR_ATOM_DENSITY`)
+    // is left dead (URR atom density lives in its own per-slab
+    // `urr_atom_density` binding); the stride stays 5 so the kernel's hardcoded
+    // `mat_f64_meta.len() / 5` material count and the other columns' offsets
+    // are untouched.
     let mat_f64_meta = pack_mat_f64_meta(
         target_mass_per_material,
         temperature_k_per_material,
@@ -1085,11 +1082,11 @@ pub fn run_multi_cell_transport(
     // free-gas thermal regression test).
     let mt_slot_f64_meta = pack_mt_slot_f64_meta(maxwell_u, watt_u, nbps_total_mass);
     let mt_slot_f64_h = client.create_from_slice(bytemuck::cast_slice(&mt_slot_f64_meta));
-    // Interleave Watt's `a` and `b` parameters into a single
-    // stride-2 buffer to keep one fewer storage-buffer descriptor
-    // binding. Element-parallel to the tight `watt_energy_grid` (issue
-    // #104): `watt_ab[(watt_ae_offset[mat_slot] + i) * 2 + 0]` is a,
-    // `+ 1` is b. Same ordering otherwise.
+    // Interleave Watt's `a` and `b` parameters into a single stride-2 buffer to
+    // keep one fewer storage-buffer descriptor binding. Element-parallel to the
+    // tight `watt_energy_grid`:
+    // `watt_ab[(watt_ae_offset[mat_slot] + i) * 2 + 0]` is a, `+ 1` is b. Same
+    // ordering otherwise.
     let watt_ab = pack_watt_ab_interleaved(watt_a, watt_b);
     let watt_ab_h = client.create_from_slice(bytemuck::cast_slice(&watt_ab));
     let urr_meta_h = client.create_from_slice(bytemuck::cast_slice(urr_meta));
@@ -1114,7 +1111,7 @@ pub fn run_multi_cell_transport(
     let tally_is_collision_h =
         client.create_from_slice(bytemuck::cast_slice(&tallies.is_collision));
     let tally_score_mt_h = client.create_from_slice(bytemuck::cast_slice(&tallies.score_mt));
-    // Mesh (voxel) tally buffers (issue #234). `mesh_params` is padded to a
+    // Mesh (voxel) tally buffers. `mesh_params` is padded to a
     // single dummy slot when no tally carries a mesh (cubecl rejects zero-length
     // buffers; the kernel only reads it when `mesh_direct` and the tally's kind
     // is non-`MESH_NONE`).
@@ -1128,7 +1125,7 @@ pub fn run_multi_cell_transport(
         tallies.mesh_params.clone()
     };
     let tally_mesh_params_h = client.create_from_slice(bytemuck::cast_slice(&mesh_params_padded));
-    // Energy-function tally buffers (issue #271). Padded the same way: with no
+    // Energy-function tally buffers. Padded the same way: with no
     // `energy_function=` / `dose_coefficients=` tally the params buffer would be
     // zero-length, which cubecl rejects. The offsets stay all-equal so every
     // tally's range is empty and the kernel never reads the pad.
@@ -1159,7 +1156,7 @@ pub fn run_multi_cell_transport(
     // 0.0 when off, keeping the kernel byte-identical to the analog run.
     let survival_h = client.create_from_slice(bytemuck::cast_slice(&survival.params));
 
-    // Free-gas resonance/thermal cutoff multiplier (issue #102): a single-
+    // Free-gas resonance/thermal cutoff multiplier: a single-
     // element f64 buffer mirroring `survival_h`. The kernel reads
     // `free_gas_threshold[0]` for its free-gas regime boundary. A buffer (not a
     // comptime arg) because cubecl comptime values must be `Hash` and `f64` is
@@ -1174,8 +1171,8 @@ pub fn run_multi_cell_transport(
     // kernel never reads the tables nor writes the bank; a size-1 bank keeps
     // cubecl happy (it rejects zero-length buffers).
     // Three producers append here: coupled/decay secondary photons, fission
-    // progeny (#78), and any (n,xn) secondary that overflows a thread's
-    // pending stack (issue #111 phase 2). The last one is live on EVERY neutron
+    // progeny, and any (n,xn) secondary that overflows a thread's
+    // pending stack. The last one is live on EVERY neutron
     // run, so the requested capacity is always honoured -- collapsing to a
     // size-1 bank when the first two are off would turn a rare spill into a
     // hard overflow error. A caller whose path cannot use banked neutrons still
@@ -1195,7 +1192,7 @@ pub fn run_multi_cell_transport(
         client.create_from_slice(bytemuck::cast_slice(&coupled.prod_primary_flag));
     let ph_prod_awr_h = client.create_from_slice(bytemuck::cast_slice(&coupled.prod_awr));
     let ph_prod_slot_h = client.create_from_slice(bytemuck::cast_slice(&coupled.prod_dist_slot));
-    // Tight CSR (issue #104): for a coupled-OFF / no-photon-production model the
+    // Tight CSR: for a coupled-OFF / no-photon-production model the
     // per-row (`pa_energy_grid` / `pa_n_mu` / `pa_interp` / `pa_mu_offset`) and
     // per-point (`pa_mu` / `pa_cdf` / `pa_pdf`) angle arrays are empty. wgpu
     // cannot allocate a zero-length storage buffer, so pad a single sentinel
@@ -1285,7 +1282,7 @@ pub fn run_multi_cell_transport(
     let decay_ch_e_h = client.create_from_slice(bytemuck::cast_slice(&decay.ch_energies));
     let decay_ch_cdf_h = client.create_from_slice(bytemuck::cast_slice(&decay.ch_intensity_cdf));
     let decay_meta_h = client.create_from_slice(bytemuck::cast_slice(&decay.meta));
-    // Per-collision nuclide-selection buffers (issue #74).
+    // Per-collision nuclide-selection buffers.
     let nuc_macro_h =
         client.create_from_slice(bytemuck::cast_slice(&nuclide_select.nuc_macro_total));
     let nuc_awr_h = client.create_from_slice(bytemuck::cast_slice(&nuclide_select.nuc_awr));
@@ -1293,8 +1290,7 @@ pub fn run_multi_cell_transport(
         client.create_from_slice(bytemuck::cast_slice(&nuclide_select.mat_nuclide_meta));
     let nuc_partial_h =
         client.create_from_slice(bytemuck::cast_slice(&nuclide_select.nuc_partial_xs));
-    // Per-slab fission chi row table and per-channel fission cross sections
-    // (fusion-neutronics/core#34 entry 1).
+    // Per-slab fission chi row table and per-channel fission cross sections.
     let chi_slab_meta_h =
         client.create_from_slice(bytemuck::cast_slice(&nuclide_select.chi_slab_meta));
     let fission_channel_xs_h =
@@ -1305,14 +1301,14 @@ pub fn run_multi_cell_transport(
     let bank_u32_z = vec![0u32; bank_capacity * crate::common::particle_bank::BANK_U32_STRIDE];
     let bank_f64_h = client.create_from_slice(bytemuck::cast_slice(&bank_f64_z));
     let bank_u32_h = client.create_from_slice(bytemuck::cast_slice(&bank_u32_z));
-    // Per-source index of each banked fission progeny (issue #233 Stage 2), one
+    // Per-source index of each banked fission progeny, one
     // u32 per bank slot (parallel to `bank_u32`), so we never change the shared
     // bank stride. Written by the kernel at each fission reservation.
     let bank_source_idx_z = vec![0u32; bank_capacity];
     let bank_source_idx_h = client.create_from_slice(bytemuck::cast_slice(&bank_source_idx_z));
     let bank_count_h = client.create_from_slice(bytemuck::cast_slice(&[0u64]));
     let bank_overflow_h = client.create_from_slice(bytemuck::cast_slice(&[0u64]));
-    // Lost-particle diagnostics (issue #289): one u64 atomic counter plus a
+    // Lost-particle diagnostics: one u64 atomic counter plus a
     // small stride-packed record buffer. Both are zero-initialised per launch,
     // and the dispatch accumulates the counts across launches.
     let lost_count_h = client.create_from_slice(bytemuck::cast_slice(&[0u64]));
@@ -1327,18 +1323,18 @@ pub fn run_multi_cell_transport(
     let out_steps_h = client.empty(std::mem::size_of_val(seeds));
     let out_e_h = client.empty(std::mem::size_of_val(energies_in));
     let total_out_len = tallies.total_out_len() as usize;
-    // Tally-variance buffers (issue #233). `PerHistory` (Stage 1) doubles
-    // `tally_out` (2nd half = sum_sq); `PerSource` (Stage 2) writes the
-    // per-source `src_acc` instead, so `tally_out` is an unused size-1 dummy.
-    // Both per-history modes share the thread-private touched-list + spill.
-    // `spill_cap` is the PROVEN worst-case distinct bins a single history can
-    // touch beyond the register list (at most one flat bin per tally per step,
-    // over `max_steps` steps; `0` -> size-1 dummy). This is the value the kernel
-    // indexes `spill_base = ABSOLUTE_POS * spill_cap` with, and the dispatch
-    // chunk-sizer uses the same `per_history_spill_cap` so the two never drift.
+    // Tally-variance buffers. `PerHistory` doubles `tally_out` (2nd half =
+    // sum_sq); `PerSource` writes the per-source `src_acc` instead, so
+    // `tally_out` is an unused size-1 dummy. Both per-history modes share the
+    // thread-private touched-list + spill. `spill_cap` is the PROVEN worst-case
+    // distinct bins a single history can touch beyond the register list (at most
+    // one flat bin per tally per step, over `max_steps` steps; `0` -> size-1
+    // dummy). This is the value the kernel indexes
+    // `spill_base = ABSOLUTE_POS * spill_cap` with, and the dispatch chunk-sizer
+    // uses the same `per_history_spill_cap` so the two never drift.
     let per_history = variance.per_history();
     let per_source = variance.per_source();
-    // Issue #234: the mesh path accumulates straight into `src_acc` (no
+    // The mesh path accumulates straight into `src_acc` (no
     // touched-list), so it allocates NO per-history spill (`spill_cap == 0`).
     let mesh_direct = variance.mesh_direct();
     let spill_cap = if mesh_direct {
@@ -1362,10 +1358,10 @@ pub fn run_multi_cell_transport(
     // guarded by the per-history `spill_count`) before reading it, so the spill
     // needs no zero-init and no host->device upload (unlike the accumulating
     // `tally_out` / `src_acc`). Removes an ~n*spill_cap-word host zero + copy per
-    // launch, which dominated large-tally throughput (issue #233 Stage 4).
+    // launch, which dominated large-tally throughput.
     let spill_bin_h = client.empty(spill_len * std::mem::size_of::<u32>());
     let spill_val_h = client.empty(spill_len * std::mem::size_of::<f64>());
-    // Per-(history, tally) totals (fusion-neutronics/core#29): one f64 row per
+    // Per-(history, tally) totals: one f64 row per
     // history in `PerHistory` mode, accumulated by the history-end flush, so it
     // is zero-initialised; a size-1 dummy otherwise.
     let hist_total_len = if matches!(variance, TallyVarianceMode::PerHistory) {
@@ -1375,7 +1371,7 @@ pub fn run_multi_cell_transport(
     };
     let hist_total_zeros = vec![0.0f64; hist_total_len];
     let hist_total_h = client.create_from_slice(bytemuck::cast_slice(&hist_total_zeros));
-    // Per-source accumulator (Stage 2): `chunk_sources * total_bins` fixed-point
+    // Per-source accumulator: `chunk_sources * total_bins` fixed-point
     // words scatter-written by `source_idx`. Size-1 dummy off the fissile path.
     let total_bins = variance.total_bins() as usize;
     let src_acc_len = match variance {
@@ -1386,7 +1382,7 @@ pub fn run_multi_cell_transport(
         _ => 1,
     };
     let src_acc_h = client.create_from_slice(bytemuck::cast_slice(&vec![0u64; src_acc_len]));
-    // Per-particle source index (Stage 2): a fission-generation launch uploads
+    // Per-particle source index: a fission-generation launch uploads
     // the drained progeny's banked indices; a source launch uses identity
     // `[0..n)`; off the fissile path a size-1 dummy the kernel never reads.
     let source_idx_vec: Vec<u32> = match variance {
@@ -1449,7 +1445,7 @@ pub fn run_multi_cell_transport(
             ),
             BufferArg::from_raw_parts(fission_eout_ae_off_h, fission_eout_ae_offset.len()),
             // Lengths reflect the padded slices (>= 1) so they match the
-            // allocated buffers when the tight arrays are empty (issue #104).
+            // allocated buffers when the tight arrays are empty.
             BufferArg::from_raw_parts(fission_eout_eg_h, fission_eout_eg_slice.len()),
             BufferArg::from_raw_parts(fission_eout_n_x_h, fission_eout_n_x_slice.len()),
             BufferArg::from_raw_parts(fission_eout_x_off_h, fission_eout_x_off_slice.len()),
@@ -1548,7 +1544,7 @@ pub fn run_multi_cell_transport(
             BufferArg::from_raw_parts(tally_fixed_point_scales_h, tallies.fixed_point_scales.len()),
             BufferArg::from_raw_parts(tally_is_collision_h, tallies.is_collision.len()),
             BufferArg::from_raw_parts(tally_score_mt_h, tallies.score_mt.len()),
-            // ---- mesh (voxel) tally binning (issue #234) ----
+            // ---- mesh (voxel) tally binning ----
             BufferArg::from_raw_parts(tally_n_mesh_h, tallies.n_mesh_per_tally.len()),
             BufferArg::from_raw_parts(tally_mesh_kind_h, tallies.mesh_kind.len()),
             BufferArg::from_raw_parts(
@@ -1556,12 +1552,12 @@ pub fn run_multi_cell_transport(
                 tallies.mesh_params_offsets.len(),
             ),
             BufferArg::from_raw_parts(tally_mesh_params_h, mesh_params_padded.len()),
-            // ---- energy-function weighting (issue #271) ----
+            // ---- energy-function weighting ----
             BufferArg::from_raw_parts(tally_efunc_offsets_h, tallies.efunc_offsets.len()),
             BufferArg::from_raw_parts(tally_efunc_params_h, efunc_params_padded.len()),
             // ---- survival biasing (implicit capture) ----
             BufferArg::from_raw_parts(survival_h, survival.params.len()),
-            // ---- free-gas threshold (issue #102) ----
+            // ---- free-gas threshold ----
             BufferArg::from_raw_parts(free_gas_threshold_h, free_gas_threshold_slice.len()),
             // ---- coupled neutron->photon (S4b) ----
             BufferArg::from_raw_parts(coupled_enabled_h, coupled.coupled_enabled.len()),
@@ -1651,9 +1647,9 @@ pub fn run_multi_cell_transport(
     let n_steps: Vec<u32> = bytemuck::cast_slice(&client.read_one(out_steps_h).unwrap()).to_vec();
     let final_energies: Vec<f64> =
         bytemuck::cast_slice(&client.read_one(out_e_h).unwrap()).to_vec();
-    // Tally results (issue #233). `PerStep` / `PerHistory` read `tally_out`
+    // Tally results. `PerStep` / `PerHistory` read `tally_out`
     // (first `total_out_len` words = sum; second half = sum_sq for PerHistory).
-    // `PerSource` (fissile) and `PerSourceDirect` (mesh, issue #234) write no
+    // `PerSource` (fissile) and `PerSourceDirect` (mesh) write no
     // `tally_out`; the dispatch reconstructs the tally from the per-source
     // accumulator (`src_acc`) instead.
     let uses_src_acc = variance.uses_src_acc();
@@ -1679,15 +1675,15 @@ pub fn run_multi_cell_transport(
         Vec::new()
     };
     // Read back the device particle bank: coupled photons (S4b), fission
-    // progeny (#78) and (n,xn) spills (issue #111 phase 2) share it. Overflow
-    // > 0 is a hard error per the particle_bank contract -- never a silent drop.
+    // progeny and (n,xn) spills share it. Overflow > 0 is a hard error per the
+    // particle_bank contract -- never a silent drop.
     //
-    // The RECORDS are only fetched when something was actually banked. Since
-    // phase 2 every neutron run allocates a real bank (an (n,xn) spill can
-    // happen on any of them), and copying a `bank_capacity`-sized pair of
-    // arrays back per launch would cost more than the spill it is there to
-    // catch: on a neutron-only run the bank is normally untouched, so this is
-    // the difference between two 8-byte counter reads and ~10 MB of transfer.
+    // The RECORDS are only fetched when something was actually banked. Every
+    // neutron run allocates a real bank (an (n,xn) spill can happen on any of
+    // them), and copying a `bank_capacity`-sized pair of arrays back per launch
+    // would cost more than the spill it is there to catch: on a neutron-only
+    // run the bank is normally untouched, so this is the difference between two
+    // 8-byte counter reads and ~10 MB of transfer.
     let photon_bank = {
         let count = bytemuck::cast_slice::<u8, u64>(&client.read_one(bank_count_h).unwrap())[0];
         let overflow =
@@ -1729,7 +1725,7 @@ pub fn run_multi_cell_transport(
     };
 
     // (n,xn) secondaries that overflowed the kernel's thread-private pending
-    // stack and were handed to the bank (issue #111 phase 2). Counted from the
+    // stack and were handed to the bank. Counted from the
     // `gen` provenance tag rather than a second device counter; the scan is
     // over the banked records only, which is empty on a run that banks nothing.
     //
@@ -1767,7 +1763,7 @@ pub fn run_multi_cell_transport(
 /// Watt `b`) into one `[n_mat × MAT_F64_COLS]` buffer at the kernel's `COL_*`
 /// offsets, collapsing the scalar bindings into one. The
 /// `COL_URR_ATOM_DENSITY` column is intentionally left at zero: URR atom
-/// density moved to its own per-slab `urr_atom_density` binding (issue #210),
+/// density moved to its own per-slab `urr_atom_density` binding,
 /// but the stride stays `MAT_F64_COLS = 5` so the kernel's hardcoded
 /// `mat_f64_meta.len() / 5` material-count derivation and the other columns'
 /// offsets are unchanged.
@@ -1786,7 +1782,7 @@ fn pack_mat_f64_meta(
         meta[off + COL_TEMPERATURE_K as usize] = temperature_k[m];
         meta[off + COL_FISSION_A as usize] = fission_a[m];
         meta[off + COL_FISSION_B as usize] = fission_b[m];
-        // COL_URR_ATOM_DENSITY intentionally left 0 (dead slot, issue #210).
+        // COL_URR_ATOM_DENSITY intentionally left 0 (dead slot).
     }
     meta
 }
@@ -1882,7 +1878,7 @@ mod tests {
         assert_eq!(meta[COL_TEMPERATURE_K as usize], 300.0);
         assert_eq!(meta[COL_FISSION_A as usize], 0.1);
         assert_eq!(meta[COL_FISSION_B as usize], 0.3);
-        // The URR-atom-density column is a dead slot now (issue #210): it must
+        // The URR-atom-density column is a dead slot now: it must
         // stay zero so the kernel never reads a stale per-material value.
         assert_eq!(meta[COL_URR_ATOM_DENSITY as usize], 0.0);
         assert_eq!(meta[cols + COL_TARGET_MASS as usize], 2.0);

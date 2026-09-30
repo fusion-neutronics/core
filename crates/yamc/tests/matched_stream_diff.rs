@@ -1,7 +1,6 @@
-//! Issue #40 (sub-step 4 of #111): matched-stream per-history CPU-vs-GPU
-//! bit-identity diff harness.
+//! Matched-stream per-history CPU-vs-GPU bit-identity diff harness.
 //!
-//! `#111` routed the production CPU collision path onto the GPU's shared
+//! The production CPU collision path runs on the GPU's shared
 //! PCG-32 stream and draw schedule (free-flight `xi1`, nuclide-select `xi_n`,
 //! reaction-type split `xi2`, elastic `xi3`+mu, fission chi, discrete inelastic
 //! levels, continuum / tabulated inelastic). With a per-particle seed of
@@ -25,34 +24,33 @@
 //! histogram of the first interaction where they diverge.
 //!
 //! ## Scope (what matches, what still diverges)
-//! As of #136 the lab azimuth is unified: both the production CPU and the GPU
-//! draw `phi = TAU * next_xi` (one PCG draw, replacing the GPU's old Marsaglia
-//! rejection of 2..16 draws). So an elastic-only history now matches bit-for-bit
-//! END-TO-END -- the whole per-collision energy sequence, not just the first
-//! collision (before #136 the azimuth draw-count mismatch desynced the stream
-//! after collision 0, capping the match at ~61%). At 14 MeV the continuum /
+//! The lab azimuth is unified: both the production CPU and the GPU draw
+//! `phi = TAU * next_xi` (one PCG draw, not a Marsaglia rejection of 2..16
+//! draws, whose draw-count mismatch would desync the stream after collision 0).
+//! So an elastic-only history matches bit-for-bit END-TO-END -- the whole
+//! per-collision energy sequence, not just the first collision. At 14 MeV the continuum /
 //! tabulated inelastic laws are on the shared flat samplers too, and the CPU's
 //! per-MT constituent WALK now visits candidates in the GPU's `MT_SLOTS` order
 //! (`yamc_nuclide::nuclide::INELASTIC_MT_SLOTS`), so the same `xi_mt` selects
 //! the same MT on both sides. Both of those are asserted to be gone. So is the
-//! (n,xn) / (n,n'x) arm (MT 5 / 16 / 17 / 22 / 28 / ...), which `#111` moved off
-//! the legacy `scatter_other` FastRng sampler onto the same shared flat tables
-//! and PCG stream, including the analog (n,xn) secondaries: those are sampled
+//! (n,xn) / (n,n'x) arm (MT 5 / 16 / 17 / 22 / 28 / ...), which runs on the
+//! same shared flat tables and PCG stream (not the legacy `scatter_other`
+//! FastRng sampler), including the analog (n,xn) secondaries: those are sampled
 //! independently on both backends, in the same draw order, and the CPU banks
 //! them into the same history the twin queues them in, so a `(n,2n)` history
 //! stays in lockstep past the multiplying collision. The overall 14 MeV rate
 //! stays reported, not asserted.
-//! The free-gas azimuth (#111 site D) is unified too: the GPU draws the lab
+//! The free-gas azimuth is unified too: the GPU draws the lab
 //! azimuth unconditionally (even when the free-gas vector CM transform already
 //! set the direction, for warp coherence) and skips only the rotation, and the
-//! production CPU now makes that same draw in the same place. The third case
+//! production CPU makes that same draw in the same place. The third case
 //! below -- a 1 eV source in a deuterium moderator, an order of magnitude below
 //! `400*kT`, so EVERY elastic collision is free-gas -- asserts it; the two Fe56
 //! cases sit far above the free-gas threshold and never exercised it.
 //!
 //! ## Reading the reported rates
 //! The rates below are measured on ONE stream, the one `SEED` selects, and are
-//! sample statistics of it. Since #315 the base seed reaches the per-history
+//! sample statistics of it. The base seed reaches the per-history
 //! collision PCG (`history_seed(base_seed, i)`, the shared definition both
 //! backends call), so the spread can be measured: over 12 base seeds the 14 MeV
 //! whole-history rate is 93.4% +/- 0.5 pp (min 92.7%, max 94.3%) and the two
@@ -106,7 +104,7 @@ const ELASTIC_ONLY_ENERGY: f64 = 0.5e6;
 const FAST_ENERGY: f64 = 14.06e6;
 /// Epithermal source, an order of magnitude BELOW `400*kT` (~10.1 eV at 294 K),
 /// so every elastic collision takes the free-gas branch. This is the case that
-/// exercises the free-gas azimuth draw schedule (#111 site D).
+/// exercises the free-gas azimuth draw schedule.
 const THERMAL_ENERGY: f64 = 1.0;
 /// How many `(cpu MT, twin MT)` mismatch pairs to print, most frequent first.
 const MISMATCH_PAIRS_SHOWN: usize = 8;
@@ -338,8 +336,8 @@ struct CaseReport {
     /// Subset of `collision0_same_mt` on an MT the production CPU routes
     /// through the SHARED samplers (`scatter_inelastic_level` /
     /// `scatter_inelastic_shared` for MT 51..=91, `scatter_other_shared` for
-    /// the (n,xn) / (n,n'x) slots). This is the metric #111 sub-step 3 and the
-    /// (n,xn) arm move drove to the last-place-rounding floor. Reported; the
+    /// the (n,xn) / (n,n'x) slots). This metric sits at the last-place-rounding
+    /// floor. Reported; the
     /// assertion is on `collision0_same_mt_shared_physical`.
     collision0_same_mt_shared: usize,
     /// Subset of `collision0_same_mt_shared` that floating-point association
@@ -588,7 +586,7 @@ fn run_case(label: &str, case: &SphereCase, energy_ev: f64, n: usize) -> CaseRep
         // CPU's `ParticleBank` stack, so the two backends emit a history's
         // collisions in the SAME sequence and the diff below stays a
         // measurement of the stream and the samplers rather than of the
-        // scheduling. Since #111 phase 1 every secondary carries its own
+        // scheduling. Since every secondary carries its own
         // identity-derived seed the order cannot change what a secondary
         // samples, which `secondary_drain_order_is_unobservable` proves by
         // running this same twin both ways. The kernel itself stays FIFO.
@@ -743,7 +741,7 @@ fn run_case(label: &str, case: &SphereCase, energy_ev: f64, n: usize) -> CaseRep
         rep.collision0_same_mt
     );
     eprintln!(
-        "    of which shared-sampler MT       : {}   [MT 51..=91 + the (n,xn) slots -- #111 drives this to the last-place floor]",
+        "    of which shared-sampler MT       : {}   [MT 51..=91 + the (n,xn) slots -- expected at the last-place floor]",
         rep.collision0_same_mt_shared
     );
     eprintln!(
@@ -755,7 +753,7 @@ fn run_case(label: &str, case: &SphereCase, energy_ev: f64, n: usize) -> CaseRep
         rep.collision0_same_mt_legacy
     );
     eprintln!(
-        "  collision-0 mismatch, DIFFERENT MT : {}   [per-MT constituent walk order -- unified in #111]",
+        "  collision-0 mismatch, DIFFERENT MT : {}   [per-MT constituent walk order -- unified]",
         rep.collision0_diff_mt
     );
     eprintln!(
@@ -812,10 +810,10 @@ fn run_case(label: &str, case: &SphereCase, energy_ev: f64, n: usize) -> CaseRep
 /// SANITY + headline: below Fe56's inelastic threshold every collision is
 /// elastic or capture, all on the shared PCG stream. The first collision must
 /// be bit-identical between the production CPU and the GPU twin for ~100% of
-/// histories, and since the lab azimuth is unified (#136) the whole history is
-/// too. 0.5 MeV is also far above the free-gas threshold on Fe56, so this case
-/// never enters the free-gas branch and is insensitive to #111 site D -- the
-/// thermal case below is what covers that.
+/// histories, and since the lab azimuth is unified the whole history is too.
+/// 0.5 MeV is also far above the free-gas threshold on Fe56, so this case never
+/// enters the free-gas branch and is insensitive to the free-gas azimuth draw --
+/// the thermal case below is what covers that.
 #[test]
 fn elastic_only_first_collision_is_bit_identical() {
     if !data_present(&FE56) {
@@ -843,16 +841,15 @@ fn elastic_only_first_collision_is_bit_identical() {
         rep.collision0_match,
         rep.both_have_collision
     );
-    // With the lab azimuth unified (#136 / #111), the production CPU and the
-    // GPU twin consume the IDENTICAL PCG stream for the whole elastic history,
-    // so the per-collision energy sequences are bit-identical end-to-end (not
-    // just at collision 0). Before #136 this was ~61% (the Marsaglia-vs-`TAU*xi`
-    // azimuth draw-count mismatch desynced the stream after the first
-    // collision); it is now ~100%.
+    // With the lab azimuth unified, the production CPU and the GPU twin
+    // consume the IDENTICAL PCG stream for the whole elastic history, so the
+    // per-collision energy sequences are bit-identical end-to-end (not just at
+    // collision 0). An azimuth draw-count mismatch (Marsaglia vs `TAU*xi`)
+    // would desync the stream after the first collision and drop this to ~61%.
     let full = rep.fully_identical as f64 / rep.n as f64;
     assert!(
         full >= 0.99,
-        "elastic-only fully bit-identical {:.4} < 0.99 ({} / {}) -- azimuth unification (#136) regressed?",
+        "elastic-only fully bit-identical {:.4} < 0.99 ({} / {}) -- azimuth unification regressed?",
         full,
         rep.fully_identical,
         rep.n
@@ -872,7 +869,7 @@ fn elastic_only_first_collision_is_bit_identical() {
 /// Asserted: (1) elastic first-collisions still match exactly; (2) NO
 /// collision-0 mismatch survives where both backends selected the same MT AND
 /// the CPU sampled it on the shared samplers -- the discrete levels, the
-/// continuum / tabulated laws (#111 sub-step 3) and the (n,xn) / (n,n'x)
+/// continuum / tabulated laws and the (n,xn) / (n,n'x)
 /// channels (the `scatter_other_shared` move) all read the same flat tables off
 /// the PCG stream; and (3) NO collision-0 mismatch survives from the two
 /// backends selecting DIFFERENT MTs -- what the walk-order unification bought,
@@ -883,10 +880,10 @@ fn elastic_only_first_collision_is_bit_identical() {
 /// It is not a stream or sampler divergence: every history matches within
 /// `HISTORY_REL_TOLERANCE` (4000 / 4000), so the gap is the production CPU and
 /// the twin grouping the same closed-form kinematics differently and landing a
-/// few ulp apart, which then compounds along the history. Drain order was the
-/// earlier explanation and is no longer one: #322 gave every secondary an
-/// identity-derived stream, and `secondary_drain_order_is_unobservable` proves
-/// FIFO and LIFO transport the same emission tree identically.
+/// few ulp apart, which then compounds along the history. Drain order is not
+/// the cause: every secondary has an identity-derived stream, and
+/// `secondary_drain_order_is_unobservable` proves FIFO and LIFO transport the
+/// same emission tree identically.
 #[test]
 fn fast_source_divergence_report() {
     if !data_present(&FE56) {
@@ -911,32 +908,17 @@ fn fast_source_divergence_report() {
         );
     }
     // Same-MT kinematics parity on every MT the CPU samples with a shared
-    // sampler, to the last place.
+    // sampler (the discrete levels, continuum / tabulated laws and the (n,xn) /
+    // (n,n'x) MTs via `scatter_other_shared`), to the last place.
     //
-    // Recalibrated three times, every time by TIGHTENING or WIDENING what it
-    // covers, never by loosening the bound:
-    //   1. from `collision0_same_mt` (all MTs) to the shared-sampler subset
-    //      when the walk order was unified (before that, a history whose CPU and
-    //      GPU walks disagreed on the MT counted as a DIFFERENT-MT mismatch and
-    //      never reached this bound);
-    //   2. back over the (n,xn) / (n,n'x) MTs once `scatter_other_shared` put
-    //      them on the same flat tables and PCG stream, bringing 528
-    //      previously-excluded collisions (455 MT 16 + 73 MT 5, of 2661) under
-    //      the assertion at 0;
-    //   3. from `count <= n / 1000` on the raw bit-difference to `== 0` on the
-    //      subset that last-place rounding cannot explain (#315). The two
-    //      backends evaluate the same closed-form discrete-level kinematics with
-    //      a different grouping of multiplies, so a sample can land ONE ulp
-    //      apart; how many do is pure luck of the stream. Measured over 12 base
-    //      seeds (#315 made the base seed reach the collision stream, so this
-    //      can now be sampled at all) the raw count is 3.6 +/- 2.4 with a
-    //      maximum of 8, exceeding the old `n / 1000 == 4` bound on 5 of the 12:
-    //      that bound passed only because the frozen stream happened to give 1.
-    //      The count
-    //      of differences beyond `KINEMATICS_ULP_TOLERANCE` ulp is 0 on every
-    //      one of those 12 seeds, and a genuine sampler or stream divergence is
-    //      ~1e14 ulp, so `== 0` is a strictly stronger statement than the bound
-    //      it replaces.
+    // The bound is `== 0` on the subset that last-place rounding cannot
+    // explain, not on the raw bit-difference. The two backends evaluate the
+    // same closed-form discrete-level kinematics with a different grouping of
+    // multiplies, so a sample can land ONE ulp apart; how many do is pure luck
+    // of the stream. Over 12 base seeds the raw count is 3.6 +/- 2.4 with a
+    // maximum of 8, while the count of differences beyond
+    // `KINEMATICS_ULP_TOLERANCE` ulp is 0 on every one of them. A genuine
+    // sampler or stream divergence is ~1e14 ulp.
     assert_eq!(
         rep.collision0_same_mt_shared_physical,
         0,
@@ -949,12 +931,11 @@ fn fast_source_divergence_report() {
         rep.collision0_same_mt + rep.collision0_diff_mt,
         rep.collision0_same_mt_legacy
     );
-    // Walk-order unification (#111): the CPU visits the non-elastic scatter
+    // Walk-order unification: the CPU visits the non-elastic scatter
     // candidates in the GPU's `MT_SLOTS` order, so a shared `xi_mt` selects the
     // same MT on both backends. Fe56's scatter MTs (2, 5, 16, 51..=89, 91) are
     // all in the slot table, so the two candidate sets and normalizations match
-    // exactly and there is no residual selection mismatch. Was 1141 / 2661
-    // before the reorder.
+    // exactly and there is no residual selection mismatch.
     assert!(
         rep.collision0_diff_mt <= rep.n / 1000,
         "{} collision-0 mismatches selected DIFFERENT MTs -- the CPU's non-elastic \
@@ -973,8 +954,8 @@ fn fast_source_divergence_report() {
     // end-to-end and no reaction arm is off the shared sampler.
     //
     // This is also why the `(n,xn)` entries in the pre-divergence histogram are
-    // NOT an ordering artefact and did not move when issue #111 phase 1 gave
-    // every secondary its own identity-derived stream: an Fe56 history holds at
+    // NOT an ordering artefact, independent of every secondary having its own
+    // identity-derived stream: an Fe56 history holds at
     // most one secondary in the queue at a time (its (n,2n) threshold is ~11
     // MeV, so a walk multiplies once and then drops below it), which makes FIFO
     // and LIFO the same drain. `secondary_drain_order_is_unobservable` uses Be9
@@ -990,15 +971,15 @@ fn fast_source_divergence_report() {
     );
 }
 
-/// FREE-GAS case (#111 site D). A 1 eV source in a deuterium moderator sits an
+/// FREE-GAS case. A 1 eV source in a deuterium moderator sits an
 /// order of magnitude below `400*kT` (~10.1 eV at 294 K), so EVERY elastic
 /// collision takes the free-gas branch, where the vector CM transform writes the
 /// outgoing direction directly. The GPU kernel and its twin still draw the lab
 /// azimuth there (unconditionally, for warp coherence) and skip only the
-/// rotation; the production CPU used to skip the DRAW too, so one fewer value
-/// was consumed at every free-gas collision and the rest of the history
-/// desynchronised. `scatter_elastic` now makes the same unconditional draw in
-/// the same place, so a moderating random walk stays in lockstep end-to-end.
+/// rotation. `scatter_elastic` makes the same unconditional draw in the same
+/// place (skipping the DRAW would consume one fewer value at every free-gas
+/// collision and desynchronise the rest of the history), so a moderating random
+/// walk stays in lockstep end-to-end.
 ///
 /// The other two cases cannot see this: 0.5 MeV and 14 MeV are both far above
 /// the free-gas threshold on Fe56, so `did_run` is false there and the draw
@@ -1023,8 +1004,8 @@ fn thermal_free_gas_history_is_bit_identical() {
         "expected a multi-collision moderating walk, got {:.2} collisions / history",
         rep.cpu_collisions_total as f64 / n as f64
     );
-    // Collision 0 was already matched before site D (the divergent draw is made
-    // at the END of the collision, so it only affects what follows).
+    // Collision 0 does not exercise the free-gas azimuth draw (it is made at the
+    // END of the collision, so it only affects what follows).
     let frac = rep.collision0_match as f64 / rep.both_have_collision as f64;
     assert!(
         frac >= 0.999,
@@ -1033,14 +1014,14 @@ fn thermal_free_gas_history_is_bit_identical() {
         rep.collision0_match,
         rep.both_have_collision
     );
-    // HEADLINE for site D: whole free-gas histories are bit-identical. Before
-    // the unconditional draw this was ~2% (essentially only the single-collision
-    // histories); it is now ~100%.
+    // HEADLINE: whole free-gas histories are bit-identical (~100%). Without the
+    // unconditional CPU draw this drops to ~2% (essentially only the
+    // single-collision histories).
     let full = rep.fully_identical as f64 / rep.n as f64;
     assert!(
         full >= 0.99,
         "free-gas fully bit-identical {:.4} < 0.99 ({} / {}) -- the CPU free-gas path \
-         no longer consumes the lab-azimuth draw the GPU consumes (#111 site D)",
+         no longer consumes the lab-azimuth draw the GPU consumes",
         full,
         rep.fully_identical,
         rep.n
@@ -1103,7 +1084,7 @@ const CR52: SphereCase = SphereCase {
     radius: 15.0,
 };
 
-/// Issue #111 phase 2: how deep the kernel's thread-private (n,xn) stack has to
+/// How deep the kernel's thread-private (n,xn) stack has to
 /// be, measured rather than assumed.
 ///
 /// The kernel keeps [`PEND_SLOTS`] secondaries in registers and spills anything
@@ -1127,7 +1108,7 @@ const CR52: SphereCase = SphereCase {
 /// the kernel spills), because the rate alone cannot say whether a material
 /// that spills wants a deeper in-thread stack or the bank drain: a tail that
 /// stops one slot past `PEND_SLOTS` is a stack-depth question, a long tail is a
-/// drain question (fusion-neutronics/core#20). Six fixtures at 14 MeV:
+/// drain question. Six fixtures at 14 MeV:
 /// beryllium thick and thin, lead with (n,3n) open, iron and chromium for
 /// steel, and tungsten.
 #[test]
@@ -1247,14 +1228,14 @@ fn drain_order_case(case: &SphereCase, energy_ev: f64, n: usize) -> (usize, usiz
     (compared, reordered, multiplying)
 }
 
-/// Issue #111 phase 1, the proof that per-secondary identity seeding works: the
-/// order the in-thread (n,xn) queue is drained in must not be observable.
+/// The proof that per-secondary identity seeding works: the order the
+/// in-thread (n,xn) queue is drained in must not be observable.
 ///
-/// Before phase 1 an in-history secondary simply CONTINUED whatever PCG state
-/// the previous walk left behind, so which secondary went next decided what
-/// each of them sampled. The CPU bank is a LIFO stack and the GPU's in-thread
-/// queue is a FIFO, so the two backends made different physics out of the same
-/// multiplying collision. Every secondary now carries a seed derived from its
+/// If an in-history secondary simply CONTINUED whatever PCG state the previous
+/// walk left behind, which secondary went next would decide what each of them
+/// sampled. The CPU bank is a LIFO stack and the GPU's in-thread queue is a
+/// FIFO, so the two backends would make different physics out of the same
+/// multiplying collision. Every secondary instead carries a seed derived from its
 /// place in the history's emission tree (`secondary_seed(parent seed, ordinal
 /// within that parent)`), and the walk that pops it re-seeds from that, so the
 /// schedule drops out of the answer.
@@ -1266,7 +1247,7 @@ fn drain_order_case(case: &SphereCase, energy_ev: f64, n: usize) -> (usize, usiz
 ///   * the same MULTISET of collisions per history (the sequence necessarily
 ///     differs, that is what "different order" means).
 ///
-/// Nothing is excluded: since phase 2 the twin's queue is unbounded (the kernel
+/// Nothing is excluded: the twin's queue is unbounded (the kernel
 /// keeps the first `PEND_SLOTS` in registers and hands the rest to the device
 /// bank, but either way every secondary is transported), so both drains see the
 /// same SET and any difference between them would be a seeding failure.

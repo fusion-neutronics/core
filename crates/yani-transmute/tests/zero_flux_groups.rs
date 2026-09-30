@@ -1,5 +1,5 @@
 //! A group with no flux in it contributes nothing, so skipping it changes
-//! nothing (issue #576, finding 2).
+//! nothing.
 //!
 //! The collapse is `sigma_eff = sum_g sigma_g phi_g / sum_g phi_g` and the rate
 //! it produces is `sigma_eff * 1e-24 * sum_g phi_g`, so the total flux cancels

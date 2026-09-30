@@ -67,8 +67,7 @@ impl EnergyGroups {
 ///
 /// That is `O(grid_len)` per group replaced by `O(log grid_len)`. On CCFE-709
 /// against an 18,000-point grid it is 1.3e7 comparisons per reaction against
-/// 1.4e4, and it removes the per-group allocation and sort with them
-/// (issue #576, finding 1a).
+/// 1.4e4, and it removes the per-group allocation and sort with them.
 ///
 /// **Runs of equal energies are kept**, where the old `Vec::dedup` collapsed
 /// them. ENDF spells a step discontinuity as a repeated energy, and a repeated
@@ -90,7 +89,7 @@ fn interior(grid: &[f64], e_lo: f64, e_hi: f64) -> &[f64] {
 ///
 /// The index is what lets [`walk_group`] read the cross section straight out of
 /// `reaction.cross_section` instead of bisecting `reaction.energy` for a
-/// position it already has (issue #576, finding 1b).
+/// position it already has.
 fn interior_from(grid: &[f64], e_lo: f64, e_hi: f64) -> (usize, &[f64]) {
     let start = grid.partition_point(|&e| e <= e_lo);
     // `max(start)` only matters for a NaN edge, where both bisections answer 0
@@ -190,12 +189,12 @@ impl Iterator for Merged<'_> {
 /// Everything one group's trapezoid walk can produce, from one walk.
 ///
 /// Three quantities are wanted over the same points of the same group, and each
-/// used to walk them itself (issue #576, finding 2):
+/// used to walk them itself:
 ///
 /// * the dilute group average, always;
 /// * the shielded one, when a lump geometry was given;
-/// * the self-shielding indicator, on the dilute path, which is #564's report
-///   that a dilute run may be over-predicting.
+/// * the self-shielding indicator, on the dilute path, which reports that a
+///   dilute run may be over-predicting.
 ///
 /// The pairs are kept as separate accumulators rather than derived from each
 /// other because they are not the same sum: the indicator divides by the summed
@@ -302,8 +301,7 @@ pub(crate) fn walk_group(
     // An interior point IS a grid point, and its position is already known --
     // `interior_from` returned it. `cross_section_at` would bisect
     // `reaction.energy` to find that same position again, once per point per
-    // group, so the cross section is read by index instead (issue #576,
-    // finding 1b).
+    // group, so the cross section is read by index instead.
     //
     // The carve-out is a run of equal energies, which is how ENDF spells a step
     // discontinuity. `slice::binary_search_by` documents that "if there are
@@ -315,7 +313,7 @@ pub(crate) fn walk_group(
     let grid: &[f64] = &reaction.energy;
     let values: &[f64] = &reaction.cross_section;
     // The Arrow reader enforces this at load (a file where the two disagree
-    // fails to load rather than panicking on the first lookup, issue #507), so
+    // fails to load rather than panicking on the first lookup), so
     // it holds for anything that came from data. Checked anyway, because
     // `group_averaged_xs` is reachable with a hand-built `Reaction` and the
     // index below should not be what discovers it.
@@ -999,7 +997,7 @@ fn add_group_fission_xs_by_yield_point(
 /// The one-group `ReactionRates` (nuclide_name -> reaction_type -> rate [1/s])
 /// and, for every fissionable nuclide that carries yields, the
 /// [`FissionYieldWeights`] folding its tabulated yield vectors against this
-/// spectrum (issue #379). The weights are a normalized shape, so the per-step
+/// spectrum. The weights are a normalized shape, so the per-step
 /// `scale_rates` leaves them correct.
 pub fn compute_multigroup_reaction_rates(
     material: &Material,
@@ -1105,7 +1103,7 @@ pub(crate) fn collapse_with_lists(
     // One nuclide's collapse is independent of every other's: it reads the
     // material, the spectrum and its own chain entry, and writes only its own
     // rates and its own yield weights. So the loop is a map, and only its
-    // driver line is `#[cfg]`-ed (issue #576, finding 5b).
+    // driver line is `#[cfg]`-ed.
     //
     // `entries` is a snapshot of `chain.iter()`, and the merge below walks it
     // in the same order, so even `info.shielded` -- a `Vec` built by pushing --
@@ -1181,7 +1179,7 @@ pub(crate) fn collapse_with_lists(
 ///
 /// Every `info.*` mutation the loop used to make in place is a field here, so
 /// the work is a pure function of its inputs and the merge is the only thing
-/// that touches shared state (issue #576, finding 5b).
+/// that touches shared state.
 struct NuclideCollapse {
     /// Reaction kind -> one-group rate [1/s].
     rates: HashMap<String, f64>,
@@ -1247,8 +1245,7 @@ impl<'a> CollapseSetup<'a> {
         // than per nuclide per reaction. A group with no flux contributes
         // `sigma_g * 0.0` to the collapse and `scale = 0.0` to the yield fold,
         // both of which are exactly `+0.0`, so skipping it is bit-neutral --
-        // and a monoenergetic 14 MeV source in CCFE-709 leaves 1 group of 709
-        // (issue #576, finding 2).
+        // and a monoenergetic 14 MeV source in CCFE-709 leaves 1 group of 709.
         //
         // Only on the dilute path. `info.strongest_factor` mins over every
         // group a shielded run walks, zero-flux ones included, so skipping them
@@ -1530,7 +1527,7 @@ impl Collapse<'_> {
 
             // The fission-rate distribution R_g = sigma_f,g * phi_g is the
             // summand of this very loop, so the yield fold rides along on it
-            // with no extra cross-section work (issue #379).
+            // with no extra cross-section work.
             let fold_yields = fy_set_for(chain_nuclide).filter(|_| mt == MT_FISSION);
             let mut yield_shares = vec![0.0; fold_yields.map_or(0, |s| s.yields.len())];
             // Once per reaction rather than once per group: this is a property
@@ -1538,7 +1535,7 @@ impl Collapse<'_> {
             // reaction was 709 allocations for the same handful of energies.
             let fy_energies: Vec<f64> = fold_yields.map_or_else(Vec::new, |s| s.energies());
 
-            // A dilute run says what it did not correct for (#564). The
+            // A dilute run says what it did not correct for. The
             // indicator uses only this reaction, which is already loaded, so it
             // costs no extra data and no geometry -- but it used to walk every
             // group a second time, with two more `cross_section_at` per window,
@@ -1691,13 +1688,12 @@ fn fy_set_for(chain_nuclide: &ChainNuclide) -> Option<&FissionYieldSet> {
 /// This is the question a one-group rate cannot answer: a rate of 57 mb
 /// against a spectrum that is 89% fast and 0.7% below 100 keV says nothing
 /// about which of those two the rate came from, and the answer decides whether
-/// a disagreement belongs to resonance processing or to the fast cross section
-/// (yani#27).
+/// a disagreement belongs to resonance processing or to the fast cross section.
 ///
 /// Keeping the breakdown for every channel would be the rate map times the
 /// group count, tens of MB on a 709-group structure, which is why
-/// [`per_group_reaction_rates`] is built only when flux uncertainty asks for it
-/// (issue #559). A diagnostic asks about one channel at a time, and walking a
+/// [`per_group_reaction_rates`] is built only when flux uncertainty asks for it.
+/// A diagnostic asks about one channel at a time, and walking a
 /// single reaction over 709 groups is fast enough to do on demand, so nothing
 /// is stored and the default path pays nothing.
 ///
@@ -1762,7 +1758,7 @@ pub fn reaction_rate_spectrum(
 /// Separate rather than an extra return value because it is only ever wanted
 /// when flux uncertainty is requested: it is the rate map times the group
 /// count, which on a 709-group structure is tens of MB, and the default path
-/// should not pay that (issue #559). [`reaction_rate_spectrum`] is the
+/// should not pay that. [`reaction_rate_spectrum`] is the
 /// one-channel form, for asking rather than for perturbing.
 pub fn per_group_reaction_rates(
     material: &Material,
@@ -1782,7 +1778,7 @@ pub fn per_group_reaction_rates(
 
     // Per nuclide and independent, exactly as the collapse it mirrors is, and
     // merged into a map keyed by a name that appears once -- so the order the
-    // results arrive in cannot reach the answer (issue #576, finding 5c).
+    // results arrive in cannot reach the answer.
     let entries: Vec<(&String, &ChainNuclide)> = chain.iter().collect();
     let one = |&(nuclide_name, chain_nuclide): &(&String, &ChainNuclide)| {
         if chain_nuclide.reactions.is_empty() {
@@ -2141,7 +2137,7 @@ mod tests {
         assert!(avg.abs() < 1e-10, "Zero-width group should return 0");
     }
 
-    // --- the point set, now that it is a bisection rather than a scan (#576) ---
+    // --- the point set, now that it is a bisection rather than a scan ---
     //
     // `interior` finds the same points a full scan used to, but by two
     // `partition_point` calls, and it keeps runs of equal energies where
@@ -2233,7 +2229,7 @@ mod tests {
         // ENDF spells a step discontinuity as a repeated energy carrying two
         // different cross sections. The old point set dropped the repeat; the
         // new one keeps it as a zero-width segment. And a point inside such a
-        // run is the carve-out of finding 1b: `binary_search_by` documents that
+        // run is the carve-out of the indexed walk: `binary_search_by` documents that
         // any of the matches could be returned, so which cross section
         // `cross_section_at` hands back there is an implementation detail and
         // the walk must not index around it. The result must not move either
@@ -2334,7 +2330,7 @@ mod tests {
         assert!(zeroed["Fe56"]["(n,gamma)"].abs() < 1e-30);
     }
 
-    // --- fission-yield spectrum fold (issue #379) ---
+    // --- fission-yield spectrum fold ---
 
     fn fy_set(energies: &[f64]) -> FissionYieldSet {
         FissionYieldSet::new(
@@ -2573,7 +2569,7 @@ mod tests {
         // disagrees with `group_averaged_xs`'s coarser one, because
         // `cross_section_at` returns the far side of the jump at the shared
         // energy and refining the interval either side of it changes the
-        // trapezoid. That is documented on this function and predates #576;
+        // trapezoid. That is documented on this function;
         // `the_merged_fold_is_bit_identical_to_the_sorted_one` is what covers
         // the discontinuous case.
         let rxn = on_grid(vec![0.0, 1.0e6, 1.4e7, 2.0e7], vec![0.0, 2.0, 4.0, 5.0]);

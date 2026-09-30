@@ -9,7 +9,7 @@ use super::*;
 /// moves the last bits of every inventory: `Material.transmute()` returned
 /// results that disagreed at ~1e-15 between one run and the next, with no Monte
 /// Carlo anywhere in the path. This is the same defect `matrix.rs` fixed for the
-/// burnup matrix in issue #502, one layer further up.
+/// burnup matrix, one layer further up.
 ///
 /// Sorting a few dozen keys costs nothing at these sizes and is what makes a
 /// golden inventory comparable across runs at all.
@@ -363,10 +363,8 @@ impl Material {
         // --- build result material ---
         // In name order, like every other sum in this file: these two totals
         // normalize every nuclide fraction below and become the mixed
-        // material's density, so summing them in `HashMap` order left a mix of
-        // the same inputs slightly different on each run. This is the one
-        // function `in_name_order` did not reach when the rest of the file was
-        // fixed (issue #576).
+        // material's density, so summing them in `HashMap` order would leave a
+        // mix of the same inputs slightly different on each run.
         let total_atoms_per_cc: f64 = in_name_order(&nuclides_per_cc).iter().map(|(_, v)| v).sum();
         let total_mass_per_cc: f64 = in_name_order(&mass_per_cc).iter().map(|(_, v)| v).sum();
 

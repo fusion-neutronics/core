@@ -771,7 +771,7 @@ pub struct Nuclide {
     /// the 3561 half-lives in ENDF/B-VIII.1), and a consumer must read it
     /// that way: an unstated uncertainty is not one measured to be
     /// negligible, and reporting the first as the second is confidence the
-    /// evaluation never claimed (issue #515).
+    /// evaluation never claimed.
     pub half_life_uncertainty: Option<f64>,
     /// Average energy per decay in eV.
     pub decay_energy: f64,
@@ -902,7 +902,7 @@ impl Nuclide {
 /// themselves: filled one file at a time, a caller never holds more than one
 /// [`Material`]. Holding them all is what made a TENDL chain build peak at
 /// 39 GB and get killed on a 45 GB machine, all of it to harvest the few
-/// hundred KB of scalars in here (issue #53).
+/// hundred KB of scalars in here.
 pub type QValues = BTreeMap<String, BTreeMap<i32, f64>>;
 
 /// Record one neutron evaluation's channel Q values into `into`.
@@ -1367,7 +1367,7 @@ fn energy_key(energy: f64) -> String {
 /// or a walk that leaves the table of elements without finding one. The
 /// second happens when the decay library is small enough that the direction
 /// cannot be judged, the Python reader indexes past the end and raises
-/// `KeyError: -1` there; see issue #22.
+/// `KeyError: -1` there.
 pub fn replace_missing(product: &str, decay_data: &BTreeMap<String, Decay>) -> Option<String> {
     let (z, a, state) = zam(product).ok()?;
     let mut a = a as i64;
@@ -1621,7 +1621,8 @@ mod tests {
     #[test]
     fn a_missing_product_walks_to_one_the_library_has() {
         // An empty library has nothing to walk to, and the walk stops rather
-        // than running off the table; see issue #22.
+        // than running off the table (where the Python reader raises
+        // `KeyError: -1`).
         let empty = BTreeMap::new();
         assert_eq!(replace_missing("Cd116", &empty), None);
         // A neutron has no stand-in at all.

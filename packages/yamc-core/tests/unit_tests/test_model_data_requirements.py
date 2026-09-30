@@ -1,4 +1,4 @@
-"""``Model.required_nuclides`` / ``required_elements`` / ``has_photons`` (issue #246).
+"""``Model.required_nuclides`` / ``required_elements`` / ``has_photons``.
 
 These three used to be computed in Python, in two different places and two
 different ways: ``_export.py`` round-tripped the whole model through

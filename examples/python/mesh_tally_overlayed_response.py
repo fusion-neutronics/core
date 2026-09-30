@@ -75,7 +75,7 @@ tally_p_overlay = yamc.Tally(
     particle="photon")
 
 # 3. Iron *material* response -- the macroscopic neutron heating of iron,
-#    weighted by its real atom density, scored everywhere (NEW in #341).
+#    weighted by its real atom density, scored everywhere.
 tally_n_material = yamc.Tally(
     scores=["heating"],
     response=iron,
@@ -120,7 +120,7 @@ material_total = sum(results[tally_n_material].mean)
 workaround_total = sum(results[tally_n_overlay].mean) * n_fe56
 print(f"\nMaterial response total:           {material_total:.4e} eV / source-particle")
 print(f"Overlay x atom-density (workaround): {workaround_total:.4e} eV / source-particle")
-print("(These should match -- #341 moves the density weighting into the tally.)")
+print("(These should match -- the material response does the density weighting in the tally.)")
 
 # Compare: overlay should score in void region, normal should not
 n_overlay_mean = results[tally_n_overlay].mean

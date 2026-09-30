@@ -1,4 +1,4 @@
-//! Regression guard for the #111 elastic-unification (CPU elastic routed
+//! Regression guard for the elastic unification (CPU elastic routed
 //! through the shared `yamc_physics::gpu::flat::{elastic_mu_cm,
 //! free_gas_elastic}` samplers + a 32-bit PCG stream).
 //!
@@ -7,8 +7,8 @@
 //! the integrated flux stays within 5% of the pre-refactor, OpenMC-validated
 //! CPU baseline. The pre-refactor CPU matched OpenMC; this confirms routing
 //! elastic through the shared samplers preserves that agreement (the
-//! OpenMC-regression localizer for #88 -- a break here would mean the elastic
-//! orchestration is the #88 bug). Prints the full spectrum with `--nocapture`.
+//! OpenMC-regression localizer for the GPU multi-isotope epithermal residual on
+//! alloys: a break here would mean the elastic orchestration is its cause). Prints the full spectrum with `--nocapture`.
 //! Self-skips when the cached isotope data is absent (e.g. CI).
 
 // Per-bin spectrum loops index `flux` and `edges` in lockstep; a range loop
@@ -119,7 +119,7 @@ fn report(name: &str, comp: &[(&str, f64)], density: f64, baseline_sum: f64) {
         vec![]
     };
     let total_c: f64 = c.iter().sum();
-    // Epithermal fraction (1 - 300 eV), the #88 diagnostic band.
+    // Epithermal fraction (1 - 300 eV), the alloy-residual diagnostic band.
     let mut epi = 0.0;
     for i in 0..c.len() {
         let e_lo = edges.get(i).copied().unwrap_or(0.0);

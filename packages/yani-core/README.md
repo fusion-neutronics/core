@@ -52,5 +52,5 @@ stack; pick `yamc` when the spectrum should come from a transport solve.
   ingestion/inhalation dose.
 - Cross sections are read from the continuous-energy library and collapsed
   against your spectrum, so this reads transport-format data files even though
-  it runs no transport. Only the sections activation needs are read (issue
-  #389), which is a small fraction of a library.
+  it runs no transport. Only the sections activation needs are read, which is
+  a small fraction of a library.

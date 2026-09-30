@@ -73,9 +73,9 @@ geometry.hdf
 !crates/**/tests/**/*.h5
 
 # ... except the nuclear-data fixtures under crates/yamc/tests, which are
-# published data rather than source (issue #126). `python
-# scripts/fetch_test_fixtures.py` downloads them into the same ~/.cache/yamc
-# production uses and symlinks them in. Mesh fixtures (crates/yamt/tests/data)
+# published data rather than source. `python scripts/fetch_test_fixtures.py`
+# downloads them into the same ~/.cache/yamc production uses and symlinks them
+# in. Mesh fixtures (crates/yamt/tests/data)
 # and the yani chain fixture are generated here, so they stay committed above.
 crates/yamc/tests/*.arrow
 

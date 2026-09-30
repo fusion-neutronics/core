@@ -1,10 +1,10 @@
-//! Issue #364: the delayed-neutron data the transport path relies on.
+//! The delayed-neutron data the transport path relies on.
 //!
-//! yamc samples nu_TOTAL neutrons per fission but drew every one of them from the
-//! PROMPT spectrum, so its fission source was too hard and its slowing-down flux
-//! read low against OpenMC (U238 -1.5%, U235 -0.65%, Pu239 -0.21%, in beta order).
-//! The fix emits a `beta(E) = nu_d(E) / nu_t(E)` share of the progeny from the
-//! delayed spectrum instead, which is far softer.
+//! yamc samples nu_TOTAL neutrons per fission and emits a
+//! `beta(E) = nu_d(E) / nu_t(E)` share of the progeny from the delayed spectrum,
+//! which is far softer than the prompt one. Drawing every progeny from the PROMPT
+//! spectrum makes the fission source too hard, and the slowing-down flux then reads
+//! low against OpenMC (U238 -1.5%, U235 -0.65%, Pu239 -0.21%, in beta order).
 //!
 //! To keep one spectrum for both backends to sample, the six ENDF delayed groups
 //! are folded once into a single yield-weighted spectrum. That fold is EXACT rather
@@ -18,7 +18,7 @@
 //!     two identical rows spanning the range), so folding the groups' first rows
 //!     loses nothing.
 //!
-//! Plus the two facts that make the fix worth making at all: the delayed spectra
+//! Plus the two facts that make delayed emission matter at all: the delayed spectra
 //! really are much softer than the prompt one, and `beta` is small and falls with
 //! energy.
 
@@ -43,7 +43,7 @@ fn load(name: &str) -> Option<Nuclide> {
         eprintln!("skipping {name} -- endf-b8.1-{name}.arrow cache absent");
         return None;
     }
-    // A read error is a skip like absence is: since #389 a cache directory is
+    // A read error is a skip like absence is: a cache directory is
     // routinely populated at activation scope, holding cross sections and none
     // of the transport sections this needs, and the directory exists either
     // way. CI fetches only the fixture list; without this, any developer
@@ -131,7 +131,7 @@ fn delayed_group_fractions_do_not_depend_on_energy() {
                     (got - want).abs() < 1.0e-6,
                     "{name} group {i} fraction at {e:.1e} eV is {got:.8} against {want:.8} at \
                      {:.1e} eV. The fold weights the groups at ONE reference energy, which is \
-                     only exact while the fractions are energy-independent (#364)",
+                     only exact while the fractions are energy-independent",
                     ENERGIES[0]
                 );
             }
@@ -158,7 +158,7 @@ fn delayed_group_spectra_do_not_depend_on_energy() {
                     (m - first).abs() <= 1.0e-9 * first,
                     "{name} group {g}: incident row {r} has mean {m:.6e} eV against row 0's \
                      {first:.6e} eV. The fold uses row 0 only, which assumes the delayed \
-                     spectra do not vary with incident energy (#364)"
+                     spectra do not vary with incident energy"
                 );
             }
         }
@@ -178,7 +178,7 @@ fn delayed_spectra_are_softer_than_prompt() {
         }) = prompt
         else {
             // Th232's prompt chi is CorrelatedAngleEnergy. The shared flat path
-            // carries its E_out marginal (fusion-neutronics/core#34 entry 2), but
+            // carries its E_out marginal, but
             // this comparison reads tabulated rows straight off the product and
             // only covers the ContinuousTabular encoding.
             eprintln!("{name}: prompt chi is not ContinuousTabular, skipping the comparison");
@@ -194,14 +194,14 @@ fn delayed_spectra_are_softer_than_prompt() {
                 m < 0.5 * prompt_mean,
                 "{name} group {g} mean outgoing energy {m:.4e} eV is not well below the prompt \
                  {prompt_mean:.4e} eV; if the delayed spectrum were as hard as the prompt one \
-                 there would be nothing for #364 to fix"
+                 sampling it from the prompt one would not bias the source"
             );
         }
     }
 }
 
 /// `beta(E) = nu_d / nu_t` is a small, decreasing fraction, and it ORDERS the flux
-/// deficits the fix removes (U238 > U235 > Pu239).
+/// deficits delayed emission removes (U238 > U235 > Pu239).
 #[test]
 fn beta_is_small_and_falls_with_energy() {
     let mut fast: Vec<(&str, f64)> = Vec::new();
@@ -227,7 +227,7 @@ fn beta_is_small_and_falls_with_energy() {
         assert!(
             get("U238") > get("U235") && get("U235") > get("Pu239"),
             "beta at 14 MeV must order U238 > U235 > Pu239 (it is the ordering of the flux \
-             deficits #364 removes): U238 {:.6}, U235 {:.6}, Pu239 {:.6}",
+             deficits delayed emission removes): U238 {:.6}, U235 {:.6}, Pu239 {:.6}",
             get("U238"),
             get("U235"),
             get("Pu239")
@@ -244,7 +244,7 @@ fn a_nuclide_without_delayed_data_reads_none() {
     assert!(
         nuc.delayed_neutrons("294").is_none(),
         "Am240's ENDF/B-VIII.1 evaluation carries no delayed groups, so it must read None and \
-         skip the prompt-or-delayed draw entirely (#364)"
+         skip the prompt-or-delayed draw entirely"
     );
 }
 

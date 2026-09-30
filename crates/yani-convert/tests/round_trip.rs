@@ -1,10 +1,10 @@
 //! Convert real evaluations, then read the result back with yani's own reader.
 //!
-//! The point is to cross the language-free equivalent of the boundary that
-//! issue #379 went through: a writer and a reader that share assumptions can be
-//! wrong together and stay green. Here `yani_convert` writes the files and
-//! `yani::parse_chain_parts` takes them back, which is the reader a real
-//! transmutation run uses.
+//! The point is to cross the language-free equivalent of the writer/reader
+//! boundary where a vocabulary mismatch once went unnoticed: a writer and a
+//! reader that share assumptions can be wrong together and stay green. Here
+//! `yani_convert` writes the files and `yani::parse_chain_parts` takes them
+//! back, which is the reader a real transmutation run uses.
 //!
 //! Fixtures are pulled in with `include_bytes!`, so a fixture that goes missing
 //! is a compile error rather than a test that quietly checks nothing.
@@ -157,7 +157,7 @@ fn yani_reads_what_the_converter_writes() {
 
 /// The decay energy's split into its recoverable-heat components survives,
 /// with each component's own sigma, and the components sum to the total the
-/// chain has always carried (issue #140, item 2).
+/// chain has always carried.
 ///
 /// A component the evaluation does not give must come back absent rather than
 /// as zero, and a stated sigma must not come back as "none stated".
@@ -501,7 +501,7 @@ fn convert_transmutation_writes_a_complete_directory() {
     .expect("yani reads it");
     assert_eq!(back.len(), chain.nuclides.len());
 
-    // data_version is what yamc compares a cached copy against (#366), so an
+    // data_version is what yamc compares a cached copy against, so an
     // unstamped directory is a cache that can never be invalidated.
     for subsection in ["decay", "reactions", "fission_yields"] {
         let text = std::fs::read_to_string(dir.join(subsection).join("provenance.json"))
@@ -536,9 +536,8 @@ fn convert_transmutation_writes_a_complete_directory() {
     // yani::export_chain_parts has the same property.
     //
     // Worth knowing beyond this test: it rules out content hashing as a way to
-    // detect that published data changed, which was one of the options weighed
-    // for issue #366. A hash over these files churns on every rebuild for no
-    // reason. The stamped data_version that was chosen instead does not.
+    // detect that published data changed. A hash over these files churns on
+    // every rebuild for no reason. The stamped data_version does not.
     let again = std::env::temp_dir().join(format!("yani-convert-again-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&again);
     yani_convert::convert_transmutation(
@@ -876,7 +875,7 @@ fn a_single_subsection_can_be_written_without_the_other_inputs() {
 /// [`yani_convert::convert_transmutation_files`] reads each neutron evaluation,
 /// takes its channels' Q values and drops it, so that a sublibrary far larger
 /// than memory can be converted: TENDL's 2848 files parse to about 39 GB held
-/// all at once, which was killed three times on a 45 GB machine (issue #53).
+/// all at once, which was killed three times on a 45 GB machine.
 /// That is only a safe trade if the result is unchanged, so this drives the
 /// same fixtures down both routes and compares the trees byte for byte.
 #[test]

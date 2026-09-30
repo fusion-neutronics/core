@@ -86,7 +86,7 @@ def test_converts_without_the_endf_package(converted):
 
 
 def test_the_output_carries_its_provenance(converted):
-    """`data_version` is what invalidates a stale cache (#366).
+    """`data_version` is what invalidates a stale cache.
 
     A directory without it is one a consumer can never be told to refetch.
     """

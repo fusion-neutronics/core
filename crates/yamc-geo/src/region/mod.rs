@@ -542,10 +542,10 @@ mod tests {
             )))
     }
 
-    // Issue #272: a ring/frame region (`outer_box & (x<-a | x>a | y<-a | y>a)`)
-    // is geometrically finite (the outer box bounds it), so its bounding box
-    // must be the finite ENCLOSING box -- not the empty/inverted box the old
-    // flatten-based algorithm produced by treating the union as an intersection.
+    // A ring/frame region (`outer_box & (x<-a | x>a | y<-a | y>a)`) is
+    // geometrically finite (the outer box bounds it), so its bounding box must
+    // be the finite ENCLOSING box, not the empty/inverted box a flatten-based
+    // algorithm produces by treating the union as an intersection.
     #[test]
     fn test_ring_via_union_bounding_box() {
         use super::{HalfspaceType, Region};

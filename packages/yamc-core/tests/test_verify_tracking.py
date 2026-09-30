@@ -1,4 +1,4 @@
-"""Spatial tracking verification on mesh geometries (issue #254).
+"""Spatial tracking verification on mesh geometries.
 
 Every surface crossing on a mesh geometry is verified spatially: a flight
 segment that passes through a surface foreign to the current volume means
@@ -117,7 +117,7 @@ def test_source_in_implicit_complement_locates_correctly():
     """A source in the gap between two volumes must be located in the
     implicit complement, stream to both cubes, and lose nothing.
 
-    Regression for issue #256: point_in_volume routed its parity count
+    Regression guard: point_in_volume once routed its parity count
     through the nearest-hit-pruned BVH traversal, so find_volume claimed
     almost any point for the first tested volume. Every history whose
     source was NOT inside volume 0 was born in the wrong cell, and the

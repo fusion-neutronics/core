@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn test_quadric_creation_and_transport_use() {
-        // Quadric coefficients survive construction (issue #366).
+        // Quadric coefficients survive construction.
         let q = Surface::new_quadric(
             1.0,
             2.0,

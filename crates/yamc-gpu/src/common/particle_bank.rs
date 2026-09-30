@@ -59,7 +59,7 @@ pub const PTYPE_NEUTRON: u32 = 0;
 pub const PTYPE_PHOTON: u32 = 1;
 
 /// `gen` tag on a banked (n,xn) secondary that overflowed the neutron kernel's
-/// thread-private pending stack (issue #111 phase 2).
+/// thread-private pending stack.
 ///
 /// The `gen` field is informational (the host bounds the drain by counting
 /// passes, not by reading it), so it doubles as a provenance tag: a record

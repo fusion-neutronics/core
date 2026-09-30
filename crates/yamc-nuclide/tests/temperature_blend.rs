@@ -399,8 +399,8 @@ fn the_synthesised_temperature_borrows_the_nearer_urr_table_and_never_none() {
 }
 
 /// A failure means the synthesised temperature duplicates its energy grid once
-/// per reaction, which is the 38 MiB per nuclide that issue #476 removed,
-/// coming back through a path that test did not cover.
+/// per reaction, 38 MiB per nuclide, through a path the loader-side tests do
+/// not cover.
 #[test]
 fn the_synthesised_reactions_are_views_of_one_grid_not_copies_of_it() {
     let mut n = two_temperature_nuclide();

@@ -3,8 +3,8 @@
 //!
 //! Run as: `cargo run --release -p yani-transmute --example collapse_golden`
 //!
-//! Issue #576 rewrites the multigroup collapse for speed under a hard
-//! "no accuracy loss" constraint. Decimal printing hides the last bits, which
+//! Speed work on the multigroup collapse runs under a hard "no accuracy
+//! loss" constraint. Decimal printing hides the last bits, which
 //! is exactly what such a claim is about, so this prints `f64::to_bits` in hex
 //! -- stable Rust has no hex-float format, and the bit pattern is the same
 //! statement -- and the pass condition is that the output is byte-identical

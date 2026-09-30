@@ -1,8 +1,7 @@
-//! GPU against CPU total photon flux across Z (fusion-neutronics/core#34
-//! entry 4, "photoelectric is Z-biased").
+//! GPU against CPU total photon flux across Z ("photoelectric is Z-biased").
 //!
-//! The entry recorded, on 1 MeV photon spheres at 50M histories, the GPU
-//! flux 0.25% low on W and 0.22% low on Pb (15 sigma) and 0.17% / 0.15% high
+//! An earlier measurement recorded, on 1 MeV photon spheres at 50M histories,
+//! the GPU flux 0.25% low on W and 0.22% low on Pb (15 sigma) and 0.17% / 0.15% high
 //! on C and O, crossing zero at mid Z, and asked for a re-measurement at HEAD
 //! before any new theory, since the leading explanation (a truncated GPU
 //! relaxation cascade) has been removed. This runs that sweep on the current
@@ -10,7 +9,7 @@
 //! data, 1 MeV isotropic point source, default 1 keV cutoff, secondary
 //! photons on, total flux GPU against CPU.
 //!
-//! Measured on the stack that carries the Compton Doppler rewrite (#85), 10M
+//! Measured on the stack that carries the Compton Doppler rewrite, 10M
 //! histories at seed 20260913 then 50M at seed 7: W -0.018% / -0.042%,
 //! Pb -0.039% / -0.063%, C -0.009% / +0.011%, O +0.003% / +0.005%. The bias was
 //! four to five times smaller than filed but the same shape, and at 50M

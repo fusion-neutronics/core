@@ -19,7 +19,7 @@ def _run_from_repo_root():
     and friends), which resolve only when pytest is started from the repo root.
     Since the packages were split out, `cd packages/yamc-core && pytest` looks
     like it should work -- the root `pytest.ini` is still discovered from there
-    -- and it failed on every one of them (issue #539).
+    -- and it failed on every one of them.
 
     Rewriting all 175 would be a large diff for no behaviour change, so the CWD
     is normalised here instead and the literals are left alone. Constants that

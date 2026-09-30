@@ -2,7 +2,7 @@
 """MPI collective max_runtime stop verification (run under mpirun).
 
 Runs a wall-time-bounded simulation across the MPI world. The stop decision
-is collective (#230): every rank checks its own elapsed time, an OR-reduce
+is collective: every rank checks its own elapsed time, an OR-reduce
 agrees one global stop bit, and all ranks break at the same chunk checkpoint,
 so the post-loop gather collectives never desync. If the collective stop were
 wrong the ranks would break at different checkpoints and deadlock at the

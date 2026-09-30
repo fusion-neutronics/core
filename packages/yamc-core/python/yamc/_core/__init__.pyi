@@ -2028,7 +2028,7 @@ class MeshGeometry:
         ValueError: If the file is not an Arrow IPC mesh, or if it contains a
             negatively oriented tetrahedron. Transport reads outward tet face
             normals off a fixed vertex ordering, so an inverted tet is rejected
-            rather than silently re-wound (issue #316); regenerate the mesh with
+            rather than silently re-wound; regenerate the mesh with
             a writer that emits positively oriented tets.
     
     Examples:
@@ -2205,7 +2205,7 @@ class Model:
         free_gas_threshold: Free-gas threshold multiplier (default: 400.0).
         max_lost_particles: Max lost particles before abort (default: 10).
             Mesh-geometry transport verifies every surface crossing
-            spatially (issue #254): a crossing whose flight segment passes
+            spatially: a crossing whose flight segment passes
             through a surface foreign to the current volume (overlapping or
             self-intersecting mesh volumes, or a corrupted tracking state)
             records the particle as lost, exactly like a geometry gap.
@@ -4309,7 +4309,7 @@ class Tally:
     @property
     def response(self) -> typing.Optional[typing.Any]:
         r"""
-        The virtual response target (issue #341), or ``None`` for a normal
+        The virtual response target, or ``None`` for a normal
         macroscopic tally.
         
         Mirrors the ``response=`` constructor argument, so one of:
@@ -6117,7 +6117,7 @@ def Torus(axis: typing.Any, x0: builtins.float = 0.0, y0: builtins.float = 0.0, 
     Args:
         axis: Symmetry axis - 'x', 'y', or 'z'. Arbitrary direction vectors are
             NOT yet supported (a torus is degree-4 and the engine only has
-            axis-locked variants; see issue #396); an oblique vector raises
+            axis-locked variants); an oblique vector raises
             ValueError.
         r_major: Major radius (default: 1.0)
         r_minor: Minor radius along the symmetry axis (default: 0.5)
@@ -6151,7 +6151,7 @@ def cad_mesh_to_arrow(path: builtins.str, vertices: typing.Sequence[typing.Seque
     r"""
     Finalize the CAD pipeline's mesh and write it to an Arrow IPC file.
     
-    Runs the whole export in the compiled core (issue #246): assigns each
+    Runs the whole export in the compiled core: assigns each
     triangle and tet the physical group of its first owning solid, offsets the
     per-solid tet blocks into the global vertex array, builds the physical-group
     and surface-to-volume topology metadata, and writes the file. The Python
@@ -6482,7 +6482,7 @@ def cooldown_steps(start: typing.Any, stop: typing.Any, n: builtins.int, spacing
     
     `Cooldown` takes the duration OF THAT STEP, which is the right primitive and
     the wrong thing to type. Anyone plotting a decay curve wants points at
-    cumulative times, and had to difference them by hand (issue #453):
+    cumulative times, and would otherwise have to difference them by hand:
     
     ```text
     HOUR, YEAR = 3600.0, 365.25 * 86400.0

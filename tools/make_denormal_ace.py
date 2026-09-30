@@ -6,7 +6,7 @@ NJOY has to write it in, so it drops the ``e``: ``6.10562372605-318`` rather
 than ``6.10562372605e-318``. Both readers have to put it back.
 
 This surfaced converting TENDL-2025, where Db262, Db263, Db264, Sg272 and
-Sg273 each failed on two malformed tokens out of 772,031; see issue #20. No
+Sg273 each failed on two malformed tokens out of 772,031. No
 ACE file small enough to keep as a fixture contains one, so the table is built
 here, and the golden then holds both readers to the same values.
 

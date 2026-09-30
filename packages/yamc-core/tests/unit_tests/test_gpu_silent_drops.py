@@ -1,4 +1,4 @@
-"""A GPU run must say so when it cannot honour a Model setting (core#23).
+"""A GPU run must say so when it cannot honour a Model setting.
 
 Three settings the GPU dispatch reads differently from the CPU used to be
 reported only under a verbosity flag the user can switch off, so a
@@ -6,9 +6,9 @@ reported only under a verbosity flag the user can switch off, so a
 
 - ``tracking_mode``: the kernels always surface-track. The notice is now
   printed to stderr at every ``verbose`` setting.
-- ``convergence_targets``: every GPU launch loop now stops on them (core#29),
-  neutron, photon and coupled alike, where the run once went silently to the
-  cap with the targets ignored.
+- ``convergence_targets``: every GPU launch loop now stops on them, neutron,
+  photon and coupled alike, where the run once went silently to the cap with
+  the targets ignored.
 - ``gpu_max_steps_per_particle``: a launch that truncated histories under-counts
   the flux. That was a gated warning; it is now an error, so the under-counted
   tallies are never returned.
@@ -66,9 +66,7 @@ def _sphere(nuclide, radius, photon_element=None, **model_kwargs):
 def test_convergence_targets_stop_a_photon_run_on_gpu(run_kwargs):
     # A photon model (secondary photons on, the material carries the Fe photon
     # data) with a loose target: whatever cap or budget sits alongside, the
-    # target is what ends the run, and the aggregate error honours it. Before
-    # core#29 every one of these combinations was refused (and before core#23
-    # the targets were dropped in silence and the run went to the cap).
+    # target is what ends the run, and the aggregate error honours it.
     model = _sphere("Fe56", 10.0, photon_element="Fe", transport_secondary_photons=True)
     model.convergence_targets = [yamc.ConvergenceTarget("relative_error", 0.05, tally="t")]
     r = model.simulate_transport(seed=1, compute="gpu", **run_kwargs)["t"]
@@ -79,7 +77,7 @@ def test_convergence_targets_stop_a_photon_run_on_gpu(run_kwargs):
 @needs_gpu
 def test_convergence_targets_stop_a_neutron_run_on_gpu():
     # A neutron-only model with only a convergence target: no particle cap, no
-    # time budget, the launch loop stops when the target is met (core#29). The
+    # time budget, the launch loop stops when the target is met. The
     # target is loose so the first launch chunk already satisfies it; the point
     # is that the run ends, that the aggregate relative error the GPU reports
     # honours the target, and that a cap set alongside is not what stopped it.

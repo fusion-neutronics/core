@@ -16,8 +16,6 @@
 //! `crates/yamc/tests/delayed_neutron_data.rs`). Folding the groups once therefore
 //! costs no accuracy, and leaves one spectrum for the CPU and GPU to sample
 //! instead of six.
-//!
-//! Issue #364.
 
 use crate::reaction_product::{
     weighted_energy_mixture, AngleEnergyDistribution, EnergyDistribution, FissionChiFlat,

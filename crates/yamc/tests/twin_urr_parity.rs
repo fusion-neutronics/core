@@ -1,12 +1,11 @@
 //! The GPU kernel's CPU twin must reproduce the production CPU's URR
-//! self-shielding (issue #342).
+//! self-shielding.
 //!
-//! The twin used to discard every URR buffer it was handed
-//! (`transport/cpu.rs`: "CPU mirror doesn't currently sample URR"), so a URR
-//! material was invisible to the twin-vs-kernel equivalence tests AND to the
-//! issue-#111 matched-stream harness. That is why the kernel could redraw a
-//! neutron's probability-table band on every transport step, over-predicting
-//! flux ~30% in any multi-material model, without a single test noticing.
+//! A twin that ignores URR makes a URR material invisible to the
+//! twin-vs-kernel equivalence tests AND to the matched-stream harness, so a
+//! kernel that redraws a neutron's probability-table band on every transport
+//! step (over-predicting flux ~30% in any multi-material model) would go
+//! unnoticed.
 //!
 //! The twin needs no GPU, so unlike `gpu_urr_band_hold` this runs in CI.
 //!
@@ -45,11 +44,11 @@ use yamc_tallies::filter::Filter;
 use yamc_tallies::score::{FluxScore, Score};
 use yamc_tallies::tally::Tally;
 
-/// Single-isotope URR: the #342 case.
+/// Single-isotope URR: the band-hold case.
 const ISOTOPE: &str = "W184";
 /// Natural tungsten: four URR isotopes sharing ONE material, so the struck
-/// nuclide is selected among them at every collision. This is the #347 case,
-/// which a subdivided single isotope cannot reach.
+/// nuclide is selected among them at every collision. This is the nuclide-selection
+/// case, which a subdivided single isotope cannot reach.
 const NAT_W: &[(&str, f64)] = &[
     ("W182", 0.2650),
     ("W183", 0.1431),
@@ -72,8 +71,8 @@ fn cache(n: &str) -> String {
 /// `Material`. Flux is tallied in the outermost shell.
 fn build(comp: &[(&str, f64)], n_mats: usize) -> Option<(Model, Arc<Tally>, TransportSettings)> {
     // Usable, not merely present, and not merely a file list either. Naming the
-    // sections a transport load needs was the first attempt and it is not
-    // enough: since #389 a cache directory is routinely left at ACTIVATION
+    // sections a transport load needs is not enough: a cache directory is
+    // routinely left at ACTIVATION
     // scope, carrying `nuclide.arrow` and `reactions.arrow` and none of the
     // products or distributions. That passes a file check, and the loader does
     // not object either, because it narrows a `Full` request to the sections on
@@ -82,7 +81,7 @@ fn build(comp: &[(&str, f64)], n_mats: usize) -> Option<(Model, Arc<Tally>, Tran
     // skipping, which is what a restored CI fixture cache did to this test on
     // windows while every other runner skipped it.
     //
-    // `transport_nuclide` (#108) reads the directory and answers with the scope
+    // `transport_nuclide` reads the directory and answers with the scope
     // that came back, which is the only thing that separates the two shapes.
     let usable = |n: &str| yamc_test_cache::transport_nuclide(n).is_some();
     if comp.iter().any(|(n, _)| !usable(n)) {
@@ -217,11 +216,11 @@ fn twin_reproduces_cpu_urr_self_shielding() {
     assert!(
         (0.94..=1.06).contains(&r_three),
         "three-material twin/CPU flux {r_three:.4} outside [0.94, 1.06] -- \
-         is the twin holding the URR band per energy (#342)?"
+         is the twin holding the URR band per energy?"
     );
 }
 
-/// Natural tungsten in ONE material (issue #347). A nuclide's share of the
+/// Natural tungsten in ONE material. A nuclide's share of the
 /// collision density must follow the cross section that actually governed the
 /// flight, so an in-range URR nuclide is selected -- and its reaction split --
 /// on its PERTURBED total, not the table average. Selecting on smooth totals
@@ -238,6 +237,6 @@ fn twin_reproduces_cpu_urr_nuclide_selection() {
         (0.96..=1.04).contains(&ratio),
         "natural W twin/CPU flux {ratio:.4} outside [0.96, 1.04] -- is the \
          struck nuclide being selected or split on SMOOTH per-nuclide values \
-         while the flight used the URR-perturbed total (#347)?"
+         while the flight used the URR-perturbed total?"
     );
 }

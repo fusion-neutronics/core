@@ -42,15 +42,15 @@ use crate::neutron::xs::{
 /// runs the same stack discipline as the production CPU bank
 /// (`yamc_physics::util::bank::ParticleBank`) and OpenMC's per-particle
 /// secondary bank. [`Fifo`](PendDrain::Fifo) exists on the CPU twin only, as a
-/// verification instrument for issue #111. Since every queued secondary carries
-/// its own identity-derived collision seed, the drain order cannot change a
-/// history's physics, and yamc's
+/// verification instrument. Since every queued secondary carries its own
+/// identity-derived collision seed, the drain order cannot change a history's
+/// physics, and yamc's
 /// `matched_stream_diff::secondary_drain_order_is_unobservable` asserts exactly
 /// that by running the twin both ways and demanding identical tallies.
 ///
-/// Both orders drain the SAME set: the twin's queue is unbounded (issue #111
-/// phase 2), so neither order can drop a secondary and the two runs differ only
-/// in the sequence they are visited in.
+/// Both orders drain the SAME set: the twin's queue is unbounded, so neither
+/// order can drop a secondary and the two runs differ only in the sequence they
+/// are visited in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendDrain {
     /// Oldest queued secondary first.
@@ -69,12 +69,12 @@ pub enum PendDrain {
 /// and transports every one in-thread (it is the mean-only reference, so where a
 /// contribution is accumulated does not matter, only that it is accumulated),
 /// which is safe because a secondary's stream is keyed on its emission ordinal
-/// rather than on where it is transported (issue #322). `nxn` records which kind
+/// rather than on where it is transported. `nxn` records which kind
 /// it is, so the register-queue diagnostics below stay a measure of the kernel's
 /// (n,xn) queue alone.
 #[derive(Debug, Clone, Copy)]
 struct PendEntry {
-    /// Identity-derived collision seed (issue #111 phase 1).
+    /// Identity-derived collision seed.
     seed: u32,
     /// `true` for an (n,xn) secondary (occupies one of the kernel's register
     /// slots), `false` for a fission progeny (goes to the device bank).
@@ -91,7 +91,7 @@ struct PendEntry {
 
 /// Thread-private (n,xn) queue depth in the cubecl kernel. A walk holding more
 /// than this many secondaries at once spills the extras to the device particle
-/// bank, which the host drains in a later pass (issue #111 phase 2).
+/// bank, which the host drains in a later pass.
 ///
 /// Four covers an (n,4n) plus a nested (n,2n) without spilling. Because the
 /// queue is a stack whose slots are RECLAIMED on pop, the depth needed is the
@@ -135,21 +135,21 @@ pub(super) struct TransportInputs<'a> {
     // Energy grid + macro XS
     pub log_energy_grid: &'a [f64],
     /// Concatenated per-material COARSE grids backing the per-MT inelastic
-    /// buffers (issue #212): each material owns its coarse grid, described by
+    /// buffers: each material owns its coarse grid, described by
     /// `coarse_meta`. Bit-twin of the kernel.
     pub coarse_log_energy_grid: &'a [f64],
     /// Packed `[n_materials × COARSE_META_COLS]` per-material coarse-grid
-    /// descriptor (issue #212): base into `coarse_log_energy_grid`, coarse
+    /// descriptor: base into `coarse_log_energy_grid`, coarse
     /// length, and per-MT-buffer first-slab base. Bit-twin of the kernel's
     /// `coarse_meta` binding.
     pub coarse_meta: &'a [u32],
     /// Concatenated per-material FINE grids backing the resonance-critical
-    /// aggregate macro XS + the nuc buffers (issue #212); each material owns its
+    /// aggregate macro XS + the nuc buffers; each material owns its
     /// fine grid, described by `fine_meta`. Distinct from the GLOBAL
     /// `log_energy_grid` (retained for the score lookup). Bit-twin of the kernel.
     pub fine_log_energy_grid: &'a [f64],
-    /// Packed `[n_materials × FINE_META_COLS]` per-material fine-grid descriptor
-    /// (issue #212): base into `fine_log_energy_grid` (== aggregate-XS row base),
+    /// Packed `[n_materials × FINE_META_COLS]` per-material fine-grid descriptor:
+    /// base into `fine_log_energy_grid` (== aggregate-XS row base),
     /// fine length, and first-slab element base into `nuc_macro_total`. Bit-twin
     /// of the kernel's `fine_meta` binding.
     pub fine_meta: &'a [u32],
@@ -159,37 +159,36 @@ pub(super) struct TransportInputs<'a> {
     pub xs_fission_per_material: &'a [f64],
     pub nu_bar_per_material: &'a [f64],
     /// Delayed-neutron fraction `beta(E) = nu_d(E) / nu_t(E)`, same flat
-    /// `[n_materials x fine_n]` shape and indexing as `nu_bar_per_material`
-    /// (issue #364). Bit-twin of the kernel's `beta_delayed_per_material`.
+    /// `[n_materials x fine_n]` shape and indexing as `nu_bar_per_material`.
+    /// Bit-twin of the kernel's `beta_delayed_per_material`.
     pub beta_delayed_per_material: &'a [f64],
     pub target_mass_per_material: &'a [f64],
     pub temperature_k_per_material: &'a [f64],
-    // Per-collision nuclide selection (issue #74). See `NuclideSelectInputs`.
+    // Per-collision nuclide selection. See `NuclideSelectInputs`.
     pub nuc_macro_total: &'a [f64],
     pub nuc_awr: &'a [f64],
     pub mat_nuclide_meta: &'a [u32],
     // Per-(slab, energy) reaction partials, density-weighted, packed
-    // `[n_slab x n_grid x NUC_PARTIAL_COLS]` (#74 Stage 2b). See
+    // `[n_slab x n_grid x NUC_PARTIAL_COLS]`. See
     // `NuclideSelectInputs::nuc_partial_xs`.
     pub nuc_partial_xs: &'a [f64],
-    // Per-slab fission chi row table and per-channel fission cross sections
-    // (fusion-neutronics/core#34 entry 1). See `NuclideSelectInputs::chi_slab_meta`
+    // Per-slab fission chi row table and per-channel fission cross sections.
+    // See `NuclideSelectInputs::chi_slab_meta`
     // and `NuclideSelectInputs::fission_channel_xs`.
     pub chi_slab_meta: &'a [u32],
     pub fission_channel_xs: &'a [f64],
-    // Per-(slab, fine energy) fission yield pairs (fusion-neutronics/core#93).
+    // Per-(slab, fine energy) fission yield pairs.
     // See `NuclideSelectInputs::nuc_fission_yield`.
     pub nuc_fission_yield: &'a [f64],
     // Fission outgoing energy
     pub fission_a_per_material: &'a [f64],
     pub fission_b_per_material: &'a [f64],
-    // Fission chi ROWS (issue #364, fusion-neutronics/core#34 entry 1): one
-    // prompt row per (nuclide slab, fission channel) plus one delayed row per
-    // slab, laid out by `chi_slab_meta`. Every buffer below is indexed by chi
-    // row, not by material.
+    // Fission chi ROWS: one prompt row per (nuclide slab, fission channel) plus
+    // one delayed row per slab, laid out by `chi_slab_meta`. Every buffer below
+    // is indexed by chi row, not by material.
     pub fission_eout_kind_per_material: &'a [u32],
     pub fission_eout_n_energies_per_material: &'a [u32],
-    // Tight CSR (issue #104): `fission_eout_ae_offset` is the per-chi-row
+    // Tight CSR: `fission_eout_ae_offset` is the per-chi-row
     // global ae-row base; `fission_eout_x_offset` the per-ae-row global
     // (x, cdf)-point base.
     pub fission_eout_ae_offset: &'a [u32],
@@ -203,7 +202,7 @@ pub(super) struct TransportInputs<'a> {
     // interp-aware fission E_out inversion.
     pub fission_eout_p_per_material: &'a [f64],
     pub fission_eout_interp_per_material: &'a [u32],
-    // Per-MT inelastic (SPARSE, issue #212). `permt_meta` is `[n_slab ×
+    // Per-MT inelastic (SPARSE). `permt_meta` is `[n_slab ×
     // MT_INELASTIC_COUNT × PERMT_META_COLS]`; the two value buffers hold each
     // (slab, MT slot)'s nonzero coarse-grid range tight, sharing the meta row.
     pub xs_inelastic_per_mt_sparse: &'a [f64],
@@ -221,7 +220,7 @@ pub(super) struct TransportInputs<'a> {
     pub angle_cdf: &'a [f64],
     pub angle_pdf: &'a [f64],
     pub angle_interp: &'a [u32],
-    // Outgoing-energy (uncorrelated tabular). Tight CSR (issue #104):
+    // Outgoing-energy (uncorrelated tabular). Tight CSR:
     // `eout_ae_offset` is the per-(slab,MT) global ae-row base;
     // `eout_x_offset` the per-ae-row global x-point base.
     pub eout_kind: &'a [u32],
@@ -237,11 +236,11 @@ pub(super) struct TransportInputs<'a> {
     pub eout_interp: &'a [u32],
     pub eout_n_discrete: &'a [u32],
     // Correlated angle-energy
-    // Correlated angle-energy (tight CSR, issue #104): `corr_ae_offset` is the
+    // Correlated angle-energy (tight CSR): `corr_ae_offset` is the
     // per-(slab,MT) global ae-row base; `corr_x_offset` the per-ae-row global
     // x-point base; `corr_mu_offset` the per-x-point global mu-point base.
     pub corr_n_energies: &'a [u32],
-    /// Per-MT count of equally-weighted correlated components (issue #111).
+    /// Per-MT count of equally-weighted correlated components.
     /// `>= 2` triggers a per-collision component pick in dispatch.
     pub corr_n_components: &'a [u32],
     pub corr_ae_offset: &'a [u32],
@@ -271,7 +270,7 @@ pub(super) struct TransportInputs<'a> {
     pub elastic_angle_interp: &'a [u32],
     // Kalbach-Mann
     pub km_n_energies: &'a [u32],
-    /// Tight CSR (issue #104): `km_ae_offset` is the per-(slab,MT) global
+    /// Tight CSR: `km_ae_offset` is the per-(slab,MT) global
     /// ae-row base; `km_x_offset` the per-ae-row global x-point base.
     pub km_ae_offset: &'a [u32],
     pub km_energy_grid: &'a [f64],
@@ -287,7 +286,7 @@ pub(super) struct TransportInputs<'a> {
     // Evaporation
     pub evap_n_energies: &'a [u32],
     pub evap_n_components: &'a [u32],
-    /// Tight CSR (issue #104): `evap_ae_offset` is the per-(slab,MT) global
+    /// Tight CSR: `evap_ae_offset` is the per-(slab,MT) global
     /// E_in-row base into `evap_energy_grid` / `evap_u`; `evap_theta_offset`
     /// the per-(slab,MT) base into the component-major `evap_theta`.
     pub evap_ae_offset: &'a [u32],
@@ -300,7 +299,7 @@ pub(super) struct TransportInputs<'a> {
     pub nbps_total_mass: &'a [f64],
     // Maxwell
     pub maxwell_n_energies: &'a [u32],
-    /// Tight CSR (issue #104): per-(slab,MT) global E_in-row base into
+    /// Tight CSR: per-(slab,MT) global E_in-row base into
     /// `maxwell_energy_grid` / `maxwell_theta`.
     pub maxwell_ae_offset: &'a [u32],
     pub maxwell_energy_grid: &'a [f64],
@@ -308,7 +307,7 @@ pub(super) struct TransportInputs<'a> {
     pub maxwell_u: &'a [f64],
     // Watt
     pub watt_n_energies: &'a [u32],
-    /// Tight CSR (issue #104): per-(slab,MT) global E_in-row base into
+    /// Tight CSR: per-(slab,MT) global E_in-row base into
     /// `watt_energy_grid` / `watt_a` / `watt_b`.
     pub watt_ae_offset: &'a [u32],
     pub watt_energy_grid: &'a [f64],
@@ -351,12 +350,12 @@ pub(super) struct TransportInputs<'a> {
     /// same name, default `400.0`). The elastic branch treats the target as a
     /// free Maxwell-Boltzmann gas below `free_gas_threshold * kT` and as a cold
     /// target at or above it. Mirrors the kernel's `free_gas_threshold` buffer;
-    /// both backends pass the same value (issue #102).
+    /// both backends pass the same value.
     pub free_gas_threshold: f64,
     /// Per-(material, nuclide) URR probability tables, bound exactly as the
     /// kernel binds them. The mirror perturbs the macroscopic partials with
     /// these the same way the kernel does, so a URR material is no longer
-    /// invisible to the twin-vs-kernel equivalence tests (issue #342).
+    /// invisible to the twin-vs-kernel equivalence tests.
     pub urr_meta: &'a [u32],
     pub urr_ae_offset: &'a [u32],
     pub urr_cdf_offset: &'a [u32],
@@ -379,21 +378,20 @@ pub(super) fn validate_transport_inputs(
     cell_to_material: &[u32],
     n_cells: usize,
     n_materials: usize,
-    // Per-(material, nuclide) slab count (#74 Stage 2b). Per-MT inelastic
+    // Per-(material, nuclide) slab count. Per-MT inelastic
     // pools are keyed by slab, not material; single-nuclide materials give
     // `n_slab == n_materials`.
     n_slab: usize,
-    // Per-material coarse-grid descriptor (issue #212), packed
+    // Per-material coarse-grid descriptor, packed
     // `[n_materials × COARSE_META_COLS]`, plus the per-material nuclide-selection
     // meta (stride 2) so the tight-CSR per-MT length can be summed over slabs.
     coarse_meta: &[u32],
-    // Per-material FINE-grid descriptor (issue #212), packed
+    // Per-material FINE-grid descriptor, packed
     // `[n_materials × FINE_META_COLS]`, so the tight-CSR aggregate-XS length can
     // be summed over materials (`sum_m fine_n[m]`).
     fine_meta: &[u32],
     mat_nuclide_meta: &[u32],
-    // Per-slab fission chi row table and per-channel fission cross sections
-    // (fusion-neutronics/core#34 entry 1).
+    // Per-slab fission chi row table and per-channel fission cross sections.
     chi_slab_meta: &[u32],
     fission_channel_xs: &[f64],
     nuc_fission_yield: &[f64],
@@ -466,7 +464,7 @@ pub(super) fn validate_transport_inputs(
         "surface_boundaries must match surface_types length"
     );
     // Aggregate macro XS ride the per-material FINE grid, tight CSR
-    // `[sum_m fine_n[m]]` (issue #212). `n_grid` (global) no longer sizes them.
+    // `[sum_m fine_n[m]]`. `n_grid` (global) no longer sizes them.
     assert_eq!(fine_meta.len(), n_materials * FINE_META_COLS as usize);
     let expected_fine_agg: usize = (0..n_materials)
         .map(|m| fine_meta[m * FINE_META_COLS as usize + COL_FINE_N as usize] as usize)
@@ -483,13 +481,12 @@ pub(super) fn validate_transport_inputs(
     );
     assert_eq!(fission_a_per_material.len(), n_materials);
     assert_eq!(fission_b_per_material.len(), n_materials);
-    // Variable-length tight layout (issue #104): per-material counts/bases are
+    // Variable-length tight layout: per-material counts/bases are
     // [n_materials]; incident-energy rows are [total ae-rows]; (x, cdf) points
     // are [total x-points]. No fixed per-axis stride.
     let n_fission_eout_ae_rows = fission_eout_n_x_per_material.len();
-    // Chi rows are laid out per (slab, channel) by `chi_slab_meta` (issue #364,
-    // fusion-neutronics/core#34 entry 1); every row the table points at must
-    // exist.
+    // Chi rows are laid out per (slab, channel) by `chi_slab_meta`; every row
+    // the table points at must exist.
     let n_chi_rows = fission_eout_kind_per_material.len();
     assert_eq!(fission_eout_n_energies_per_material.len(), n_chi_rows);
     assert_eq!(fission_eout_ae_offset.len(), n_chi_rows);
@@ -550,7 +547,7 @@ pub(super) fn validate_transport_inputs(
         .map(|m| mat_nuclide_meta[m * 2 + 1] as usize)
         .sum();
     assert_eq!(total_slabs, n_slab);
-    // SPARSE per-MT storage (issue #212): `permt_meta` is `[n_slab ×
+    // SPARSE per-MT storage: `permt_meta` is `[n_slab ×
     // MT_INELASTIC_COUNT × PERMT_META_COLS]`; the two value buffers are the tight
     // concatenation of every (slab, MT slot)'s stored range (equal length, xs and
     // yield share the range).
@@ -564,7 +561,7 @@ pub(super) fn validate_transport_inputs(
     assert_eq!(xs_inelastic_per_mt_sparse.len(), expected_sparse);
     assert_eq!(yield_per_mt_sparse.len(), expected_sparse);
     assert_eq!(q_inelastic_per_mt.len(), n_slab * MT_INELASTIC_COUNT);
-    // Variable-length tight layout (issue #104): per-(slab,MT) counts/bases are
+    // Variable-length tight layout: per-(slab,MT) counts/bases are
     // [n_slab × MT_INELASTIC_COUNT]; incident-energy rows are [total ae-rows];
     // (mu,cdf) points are [total mu-points]. No fixed per-axis stride.
     let n_inel_ae_rows = angle_n_mu.len();
@@ -574,7 +571,7 @@ pub(super) fn validate_transport_inputs(
     assert_eq!(angle_mu_offset.len(), n_inel_ae_rows);
     assert_eq!(angle_cdf.len(), angle_mu.len());
     assert_eq!(scatter_in_cm_per_mt.len(), n_slab * MT_INELASTIC_COUNT);
-    // Variable-length tight layout (issue #104): per-(slab,MT) scalars/bases are
+    // Variable-length tight layout: per-(slab,MT) scalars/bases are
     // [n_slab × MT_INELASTIC_COUNT]; incident-energy rows are [total ae-rows];
     // (x,cdf,p) points are [total x-points]. No fixed per-axis stride.
     let n_eout_ae_rows = eout_n_x.len();
@@ -588,7 +585,7 @@ pub(super) fn validate_transport_inputs(
     assert_eq!(eout_histogram_interp.len(), n_slab * MT_INELASTIC_COUNT);
     assert_eq!(eout_interp.len(), n_eout_ae_rows);
     assert_eq!(eout_n_discrete.len(), n_eout_ae_rows);
-    // Variable-length tight layout (issue #104), three nesting levels: per
+    // Variable-length tight layout, three nesting levels: per
     // (slab,MT) counts/bases are [n_slab × MT_INELASTIC_COUNT]; ae-rows are
     // [total ae-rows]; E_out x-points are [total x-points]; mu points are
     // [total mu-points]. No fixed per-axis stride.
@@ -633,14 +630,14 @@ pub(super) struct ParticleOutcome {
     pub n_steps: u32,
     pub final_energy: f64,
     /// Set when the history ended in no cell, i.e. it was lost to a geometry
-    /// gap (issue #289). Mirrors the kernel's `record_lost` so the twin reports
+    /// gap. Mirrors the kernel's `record_lost` so the twin reports
     /// the same losses the GPU does.
     pub lost: Option<crate::common::lost_particles::LostParticleRecord>,
     /// (n,xn) secondaries this history queued while [`PEND_SLOTS`] were already
     /// outstanding, i.e. the ones the cubecl kernel would have spilled to the
-    /// device particle bank for the host to drain in a later pass (issue #111
-    /// phase 2). The twin transports them in-thread, so this is a diagnostic
-    /// only: it measures how often the kernel's spill path is reached.
+    /// device particle bank for the host to drain in a later pass. The twin
+    /// transports them in-thread, so this is a diagnostic only: it measures how
+    /// often the kernel's spill path is reached.
     pub n_spilled: u32,
     /// Deepest the pending-secondary stack got during this history, i.e. how
     /// many of the kernel's [`PEND_SLOTS`] register slots were actually needed.
@@ -652,13 +649,12 @@ pub(super) struct ParticleOutcome {
     /// the kernel spills. `max_pend_depth` is the same quantity capped at the
     /// register slots; this one is what the depth histogram bins, so a
     /// spilling history lands in a bin above `PEND_SLOTS` rather than being
-    /// folded into the histories that exactly filled the stack
-    /// (fusion-neutronics/core#20).
+    /// folded into the histories that exactly filled the stack.
     pub peak_pend_depth: u32,
 }
 
-/// One neutron collision recorded by the CPU twin, for the issue-#40
-/// matched-stream per-history CPU-vs-GPU diff harness.
+/// One neutron collision recorded by the CPU twin, for the matched-stream
+/// per-history CPU-vs-GPU diff harness.
 ///
 /// Emitted only when a trace sink (`Some(&mut Vec<_>)`) is passed to
 /// [`transport_one_particle`]; the production / kernel paths pass `None` and
@@ -684,7 +680,7 @@ pub struct CollisionRecord {
 }
 
 /// CPU twin of the kernel's `sample_fission_progeny_energy`: pick the prompt or
-/// the delayed spectrum, then sample it (issue #364).
+/// the delayed spectrum, then sample it.
 ///
 /// `prompt_row` and `delayed_row` are the event's chi rows from
 /// [`select_fission_chi_rows_cpu`]; `mat_idx` supplies the Watt fall-through
@@ -711,8 +707,8 @@ fn fission_progeny_energy_cpu(
     fission_chi_cpu(inputs, chi_row, mat_idx, e_in, state)
 }
 
-/// CPU twin of the kernel's `select_fission_chi_rows`
-/// (fusion-neutronics/core#34 entry 1): the prompt chi row of the channel that
+/// CPU twin of the kernel's `select_fission_chi_rows`:
+/// the prompt chi row of the channel that
 /// fissioned and the struck slab's delayed row. With one channel no draw is
 /// taken; with more, ONE uniform and a cumulative walk over the channels'
 /// fission cross sections interpolated at the collision bracket on the owning
@@ -770,7 +766,7 @@ fn select_fission_chi_rows_cpu(
 /// built about the incident direction, and carries `weight`. The kernel sends
 /// these to the device bank for the host to drain; the twin transports them
 /// in-thread, which is the same physics because each progeny's collision
-/// stream is keyed on its place in the emission tree (issue #322). Capped
+/// stream is keyed on its place in the emission tree. Capped
 /// exactly as the kernel's comptime-bounded loop is, and gated the same way,
 /// so the two draw the same schedule.
 #[allow(clippy::too_many_arguments)]
@@ -863,7 +859,7 @@ fn push_fission_progeny(
 /// twin's fission branch.
 ///
 /// Rows are laid out per (nuclide slab, fission channel) plus one delayed row
-/// per slab by `chi_slab_meta` (issue #364, fusion-neutronics/core#34 entry 1).
+/// per slab by `chi_slab_meta`.
 /// Callers go through [`select_fission_chi_rows_cpu`] and
 /// [`fission_progeny_energy_cpu`], which pick the row.
 fn fission_chi_cpu(
@@ -875,7 +871,7 @@ fn fission_chi_cpu(
 ) -> f64 {
     let fission_kind = inputs.fission_eout_kind_per_material[chi_row];
     let e_tab = if fission_kind == EOUT_KIND_CONTINUOUS_TABULAR {
-        // Tight CSR (issue #104): the material's ae-rows start at `eg_off`;
+        // Tight CSR: the material's ae-rows start at `eg_off`;
         // (x, cdf) are read from the full arrays via the per-row global
         // `fission_eout_x_offset`. No per-axis stride.
         let n_e = inputs.fission_eout_n_energies_per_material[chi_row] as usize;
@@ -896,7 +892,7 @@ fn fission_chi_cpu(
             None
         }
     } else if fission_kind == EOUT_KIND_MAXWELL || fission_kind == EOUT_KIND_EVAPORATION {
-        // Maxwell / Evaporation prompt-fission χ. Tight CSR (issue #104):
+        // Maxwell / Evaporation prompt-fission χ. Tight CSR:
         // each E_in row carries one point, so θ at row i is
         // `fission_eout_x[fission_eout_x_offset[eg_off + i]]` and the scalar
         // `u` is in the material's row-0 single slot
@@ -982,9 +978,9 @@ pub(super) fn transport_one_particle(
     inputs: &TransportInputs<'_>,
     i: usize,
     tally_acc: &mut [u64],
-    // Issue-#40 verification trace sink. `None` on the production / kernel
-    // paths (zero cost, byte-identical stream); `Some` only from the
-    // traced CPU driver, which records one `CollisionRecord` per collision.
+    // Verification trace sink. `None` on the production / kernel paths (zero
+    // cost, byte-identical stream); `Some` only from the traced CPU driver,
+    // which records one `CollisionRecord` per collision.
     mut trace: Option<&mut Vec<CollisionRecord>>,
 ) -> ParticleOutcome {
     let i3 = i * 3;
@@ -996,28 +992,28 @@ pub(super) fn transport_one_particle(
     let mut dy = inputs.directions_in[i3 + 1];
     let mut dz = inputs.directions_in[i3 + 2];
     // Expand the 32-bit per-history seed into the 64-bit PCG state via
-    // splitmix64 (issue #274), exactly as the kernel does in-kernel.
+    // splitmix64, exactly as the kernel does in-kernel.
     // `walk_seed` tracks whose stream the thread is on: the source particle's,
-    // then each popped secondary's own (issue #111).
+    // then each popped secondary's own.
     let mut walk_seed = inputs.seeds[i];
     let mut state = expand_seed(walk_seed);
     let mut walk_secondaries = 0u32;
     let mut alive = 1u32;
     let mut n_steps = 0u32;
     let mut weight = 1.0;
-    // URR band held by this walk (issue #342): the base uniform is drawn once
+    // URR band held by this walk: the base uniform is drawn once
     // per ENERGY, not per step, so an isotope keeps one resonance realisation
     // across boundary crossings and void excursions until a collision moves
     // the neutron off that energy. `None` is the CPU's `NO_URR`.
     let mut urr_held: Option<(f64, f64)> = None;
 
-    // In-thread pending-secondary stack (issue #274): analog multiplicity queues
-    // the extra secondaries and this walk transports them after the current
-    // particle dies, keeping every secondary of the history in this one call.
-    // Each entry carries its own identity-derived collision seed (issue #111
-    // phase 1). Fission progeny join the same stack when the fission bank is on,
-    // so the twin transports the population the production CPU's `ParticleBank`
-    // does, in the same LIFO order.
+    // In-thread pending-secondary stack: analog multiplicity queues the extra
+    // secondaries and this walk transports them after the current particle
+    // dies, keeping every secondary of the history in this one call. Each entry
+    // carries its own identity-derived collision seed. Fission progeny join the
+    // same stack when the fission bank is on, so the twin transports the
+    // population the production CPU's `ParticleBank` does, in the same LIFO
+    // order.
     //
     // The kernel keeps [`PEND_SLOTS`] of the (n,xn) ones in registers and spills
     // deeper ones to the device bank for the host to drain; the twin is a `Vec`,
@@ -1037,7 +1033,7 @@ pub(super) fn transport_one_particle(
     let n_grid = inputs.n_grid;
     let n_cells = inputs.n_cells;
     let n_surfaces = inputs.n_surfaces;
-    // Cell of the previous step, for the lost-particle record (issue #289).
+    // Cell of the previous step, for the lost-particle record.
     let mut last_cell: Option<usize> = None;
     let mut lost: Option<crate::common::lost_particles::LostParticleRecord> = None;
 
@@ -1051,9 +1047,9 @@ pub(super) fn transport_one_particle(
             truncated = true;
         }
         // Current particle finished but secondaries are queued: pop the next one
-        // and keep transporting inside the same history (issue #274), exact twin
+        // and keep transporting inside the same history, exact twin
         // of the kernel's top-of-loop pop -- plus the re-seed of the thread PCG
-        // from the popped secondary's own stream (issue #111), which is what
+        // from the popped secondary's own stream, which is what
         // makes the choice below immaterial.
         if alive == 0 || step >= inputs.max_steps {
             let e = match inputs.pend_drain {
@@ -1079,7 +1075,7 @@ pub(super) fn transport_one_particle(
             walk_secondaries = 0;
             alive = 1;
             // A popped secondary is its own particle and holds no band yet,
-            // matching `Particle::new`'s `NO_URR` (issue #342).
+            // matching `Particle::new`'s `NO_URR`.
             urr_held = None;
             step = 0;
         }
@@ -1101,7 +1097,7 @@ pub(super) fn transport_one_particle(
 
         if cell == CELL_NOT_FOUND {
             // No cell covers this point: a lost particle, exactly as the
-            // kernel's `record_lost` site treats it (issue #289).
+            // kernel's `record_lost` site treats it.
             lost = Some(crate::common::lost_particles::LostParticleRecord {
                 position: [px, py, pz],
                 direction: [dx, dy, dz],
@@ -1114,7 +1110,7 @@ pub(super) fn transport_one_particle(
             let mat_idx = inputs.cell_to_material[cell as usize] as usize;
             // `target_mass` is the density-weighted material average; a
             // multi-nuclide collision overrides it with the struck nuclide's
-            // exact AWR (issue #74), mirrored from the kernel below.
+            // exact AWR, mirrored from the kernel below.
             let mut target_mass = inputs.target_mass_per_material[mat_idx];
 
             // 2. XS lookup. Bracket search runs in log-E (the
@@ -1137,7 +1133,7 @@ pub(super) fn transport_one_particle(
             } else {
                 0.0
             };
-            // Per-material FINE-grid bracket (issue #212); bit-twin of the
+            // Per-material FINE-grid bracket; bit-twin of the
             // kernel's fine bracket. This material owns its fine grid: the slice
             // `fine_log_energy_grid[fine_off .. fine_off + fine_n]` (stride-
             // FINE_META_COLS `fine_meta` cols GRID_OFFSET / N). `idx_lo_f` /
@@ -1162,8 +1158,8 @@ pub(super) fn transport_one_particle(
             } else {
                 0.0
             };
-            // Coarse-grid bracket for the per-MT inelastic / yield buffers
-            // (issue #88 / #212); bit-twin of the kernel's coarse bracket. This
+            // Coarse-grid bracket for the per-MT inelastic / yield buffers;
+            // bit-twin of the kernel's coarse bracket. This
             // material owns its coarse grid: the slice
             // `coarse_log_energy_grid[coarse_base .. coarse_base + coarse_n]`
             // (stride-COARSE_META_COLS `coarse_meta` cols GRID_OFFSET / N).
@@ -1187,7 +1183,7 @@ pub(super) fn transport_one_particle(
             } else {
                 0.0
             };
-            // Aggregate macro XS ride the per-material FINE grid (issue #212):
+            // Aggregate macro XS ride the per-material FINE grid:
             // row base `fine_off`, indices `idx_lo_f` / `idx_hi_f`, factor
             // `frac_f`. Single-material => `fine_off == mat_idx * n_grid`, so
             // byte-identical.
@@ -1206,13 +1202,13 @@ pub(super) fn transport_one_particle(
             let nu_lo = inputs.nu_bar_per_material[fine_off + idx_lo_f];
             let nu_hi = inputs.nu_bar_per_material[fine_off + idx_hi_f];
             let mut nu_bar = nu_lo + (nu_hi - nu_lo) * frac_f;
-            // Delayed fraction on the same fine grid (issue #364).
+            // Delayed fraction on the same fine grid.
             let beta_lo = inputs.beta_delayed_per_material[fine_off + idx_lo_f];
             let beta_hi = inputs.beta_delayed_per_material[fine_off + idx_hi_f];
             let mut beta_delayed = beta_lo + (beta_hi - beta_lo) * frac_f;
 
-            // Per-(material, nuclide) URR probability-table perturbation
-            // (issues #210, #342), twin of the kernel's block. The band base is
+            // Per-(material, nuclide) URR probability-table perturbation,
+            // twin of the kernel's block. The band base is
             // drawn once per ENERGY and held across steps, so the draw fires
             // only when this walk has no band or holds one for another energy;
             // a void or non-URR step leaves a held band intact.
@@ -1470,7 +1466,7 @@ pub(super) fn transport_one_particle(
 
             // 8. Collide or cross.
             if collide_first {
-                // Issue-#40 trace: energy entering this collision and the
+                // Trace: energy entering this collision and the
                 // reaction class chosen below (defaults to absorption; the
                 // scatter / fission branches overwrite it). Only consumed by
                 // the `trace.push` at the end of the collision block.
@@ -1503,12 +1499,12 @@ pub(super) fn transport_one_particle(
                     tally_acc,
                 );
 
-                // Per-collision nuclide selection (issue #74). Exact twin of the
+                // Per-collision nuclide selection. Exact twin of the
                 // kernel block: in a multi-nuclide material, pick the struck
                 // nuclide proportional to its macroscopic total at the collision
                 // energy and override `target_mass` with that nuclide's AWR.
                 // Gated on `count > 1` so single-nuclide materials draw NO random
-                // and stay byte-identical to the pre-#74 stream.
+                // and stay byte-identical to a no-selection stream.
                 let nuc_off = inputs.mat_nuclide_meta[mat_idx * 2] as usize;
                 let nuc_count = inputs.mat_nuclide_meta[mat_idx * 2 + 1] as usize;
                 // Global slab of the struck nuclide (see kernel twin): defaults
@@ -1516,7 +1512,7 @@ pub(super) fn transport_one_particle(
                 // another when `count > 1`. Single-nuclide => `slab == nuc_off`,
                 // the old `mat_idx` row, so behaviour is byte-identical.
                 let mut slab = nuc_off;
-                // Reaction-split partials (#74 Stage 2b): default to the
+                // Reaction-split partials: default to the
                 // material aggregate (exact + byte-identical single-nuclide), a
                 // multi-nuclide collision overrides them with the struck
                 // nuclide's own partials. Mirrors the kernel exactly.
@@ -1525,14 +1521,14 @@ pub(super) fn transport_one_particle(
                 let mut sigma_i_rx = sigma_i;
                 let mut sigma_f_rx = sigma_f;
                 if nuc_count > 1 {
-                    // Per-material FINE grid (issue #212): slab `nuc_off + j`'s
+                    // Per-material FINE grid: slab `nuc_off + j`'s
                     // row base is `fine_nuc_base + j * fine_n`; interpolate in the
                     // FINE bracket. Single-material => `fine_nuc_base == 0`,
                     // `fine_n == n_grid`, byte-identical.
                     // A nuclide's share of the collision density is
                     // proportional to the cross section that actually governed
                     // the flight, so an in-range URR nuclide is weighted by its
-                    // PERTURBED total, not the table average (issue #347).
+                    // PERTURBED total, not the table average.
                     // `urr_weight` reuses the band this walk holds, so flight,
                     // selection and split all ride one sample.
                     let urr_weight = |j: usize| -> f64 {
@@ -1542,7 +1538,7 @@ pub(super) fn transport_one_particle(
                         let smooth_total = smooth_lo + (smooth_hi - smooth_lo) * frac_f;
                         // Only a band held at THIS energy applies. Belt and
                         // braces: a band held from an earlier energy survives
-                        // non-URR steps by design (#342), but it cannot corrupt
+                        // non-URR steps by design, but it cannot corrupt
                         // a weight anyway, because `urr_held` is only set when
                         // `any_in_range` was true at that energy and
                         // `perturb_slab` re-checks the same range per slab -- so
@@ -1594,7 +1590,7 @@ pub(super) fn transport_one_particle(
 
                     // Selected nuclide's density-weighted partials, per-material
                     // FINE grid tight CSR `[sum_m nuc_count_m * fine_n_m x 4]`
-                    // (cols e/a/i/f, issue #212): slab element base is
+                    // (cols e/a/i/f): slab element base is
                     // `fine_nuc_base + (slab - nuc_off) * fine_n`, times 4.
                     // Interpolated in the FINE bracket. Twin of the kernel block.
                     let p_lo = (fine_nuc_base + (slab - nuc_off) * fine_n + idx_lo_f) * 4;
@@ -1602,7 +1598,7 @@ pub(super) fn transport_one_particle(
                     let base =
                         urr_perturb::slab_baseline(inputs.nuc_partial_xs, p_lo, p_hi, frac_f);
                     // Split the struck nuclide on the SAME band its selection
-                    // and the flight used (issue #347); smooth partials here
+                    // and the flight used; smooth partials here
                     // would mis-weight capture against scatter, since the URR
                     // capture fraction moves strongly with the band.
                     let split = urr_held
@@ -1615,8 +1611,8 @@ pub(super) fn transport_one_particle(
                     sigma_a_rx = split.absorption;
                     sigma_i_rx = split.inelastic;
                     sigma_f_rx = split.fission;
-                    // The struck nuclide's own fission yield
-                    // (fusion-neutronics/core#93), twin of the kernel's read.
+                    // The struck nuclide's own fission yield, twin of the
+                    // kernel's read.
                     let y_lo =
                         (fine_nuc_base + (slab - nuc_off) * fine_n + idx_lo_f) * NUC_YIELD_COLS;
                     let y_hi =
@@ -1635,7 +1631,7 @@ pub(super) fn transport_one_particle(
                 let xi2 = (r_xi2 as f64 + 1.0) * (1.0 / 4_294_967_297.0);
                 // Survival biasing (implicit capture): exact twin of the
                 // kernel branch. With the fission bank on this is OpenMC's
-                // scheme (fusion-neutronics/core#25): fission sites first from
+                // scheme: fission sites first from
                 // the PRE-discount weight scaled by `sigma_f / sigma_t`, then
                 // the weight discounted by absorption including fission, then
                 // the survivor always scatters. With the bank off the legacy
@@ -1662,8 +1658,7 @@ pub(super) fn transport_one_particle(
                             n_floor
                         };
                         // The channel that fissioned, one draw only for a
-                        // nuclide with partial channels
-                        // (fusion-neutronics/core#34 entry 1).
+                        // nuclide with partial channels.
                         let rows_sv = select_fission_chi_rows_cpu(
                             inputs, slab, fine_n, idx_lo_f, idx_hi_f, frac_f, &mut state,
                         );
@@ -1708,12 +1703,12 @@ pub(super) fn transport_one_particle(
                         reaction_rec = 2;
                         // Elastic: tabulated CM-frame mu sample
                         // (or isotropic fallback when no data).
-                        // Index by the selected nuclide's global `slab`
-                        // (#74 Stage 2a): per-(material, nuclide) elastic
+                        // Index by the selected nuclide's global `slab`:
+                        // per-(material, nuclide) elastic
                         // angular table. Single-nuclide => `slab == nuc_off`,
                         // the old `mat_idx` row (byte-identical).
                         let n_ae = inputs.elastic_angle_n_energies[slab] as usize;
-                        // Tight CSR layout (issue #104): the slab's incident-
+                        // Tight CSR layout: the slab's incident-
                         // energy rows start at this global ae-row base; the
                         // (mu, cdf, pdf) points are read from the full arrays
                         // via the per-row global `mu_offset`. No MAX_* stride.
@@ -1768,10 +1763,10 @@ pub(super) fn transport_one_particle(
                         let xi_mt = (r_xi_mt as f64 + 1.0) * (1.0 / 4_294_967_297.0);
 
                         // Per-MT inelastic buffers are keyed by the struck
-                        // nuclide's slab (#74 Stage 2b); single-nuclide =>
+                        // nuclide's slab; single-nuclide =>
                         // `slab == mat_idx`'s old row (byte-identical).
                         let mat_mt_off = slab * MT_INELASTIC_COUNT;
-                        // SPARSE per-MT inelastic storage (issue #212), bit-twin of
+                        // SPARSE per-MT inelastic storage, bit-twin of
                         // the kernel. Each (slab, MT slot) has a `permt_meta` row
                         // [value_offset, i_start, n_stored]; the slot's xs at coarse
                         // index `k` is the sparse value when `i_start <= k < i_start
@@ -1827,7 +1822,7 @@ pub(super) fn transport_one_particle(
                             // multi-neutron-out slots (41–42) here.
                             selected_slot = 40;
                         }
-                        // Issue-#40 trace: slot k maps to MT 51+k for the
+                        // Trace: slot k maps to MT 51+k for the
                         // discrete levels (slot 0 = MT 51) and MT 91 for the
                         // continuum (slot 40), matching the production CPU's
                         // recorded inelastic MT.
@@ -1858,7 +1853,7 @@ pub(super) fn transport_one_particle(
                             1.0
                         };
                         let slot_yield = yield_lo + (yield_hi - yield_lo) * frac_c;
-                        // Analog (n,xn) multiplicity (issue #274), exact twin
+                        // Analog (n,xn) multiplicity, exact twin
                         // of the kernel: an integral yield >= 2 keeps the
                         // weight unchanged and samples `yield - 1` extra
                         // independent secondaries below; fractional yields
@@ -2038,8 +2033,7 @@ pub(super) fn transport_one_particle(
                                 n_pend_nxn += 1;
                                 pend.push(PendEntry {
                                     // The secondary's own collision stream,
-                                    // fixed by its place in the emission tree
-                                    // (issue #111).
+                                    // fixed by its place in the emission tree.
                                     seed: secondary_seed(walk_seed, walk_secondaries),
                                     nxn: true,
                                     energy: e_lab_or_cm,
@@ -2064,7 +2058,7 @@ pub(super) fn transport_one_particle(
                         // `fission_bank_enabled[0]`):
                         //   OFF: legacy `weight *= nu_bar` + `FISSION_WEIGHT_CAP`
                         //     terminator (byte-identical to the pre-bank twin).
-                        //   ON: true fission-chain branching (#78). Stochastically
+                        //   ON: true fission-chain branching. Stochastically
                         //     round nu_bar -> N, keep progeny 0 as the current walk
                         //     (weight UNCHANGED), and emit the other N-1 progeny.
                         //     The kernel appends them to the DEVICE bank for the
@@ -2073,8 +2067,8 @@ pub(super) fn transport_one_particle(
                         //     inside this history, exactly as it already does for
                         //     the (n,xn) secondaries the kernel spills. Both give
                         //     the same physics, because each progeny's collision
-                        //     stream is keyed on its place in the emission tree
-                        //     (issue #322), not on where it is transported -- and
+                        //     stream is keyed on its place in the emission tree,
+                        //     not on where it is transported -- and
                         //     it makes the twin's per-history collision sequence
                         //     comparable to the production CPU's, whose
                         //     `ParticleBank` transports fission progeny inside the
@@ -2082,7 +2076,7 @@ pub(super) fn transport_one_particle(
                         let e_incident_fis = energy;
                         // Which of the struck nuclide's fission channels fired,
                         // hence which prompt chi row every progeny of this event
-                        // samples from (fusion-neutronics/core#34 entry 1).
+                        // samples from.
                         let rows_fis = select_fission_chi_rows_cpu(
                             inputs, slab, fine_n, idx_lo_f, idx_hi_f, frac_f, &mut state,
                         );
@@ -2145,15 +2139,15 @@ pub(super) fn transport_one_particle(
 
                     // Lab azimuth: phi = TAU * xi (ONE PCG draw), matching the
                     // production CPU (`scatter.rs` -> `rotate_direction_fast`)
-                    // so the issue-#40 matched stream stays in lockstep past the
-                    // first collision (#136 / #111). std libm cos/sin like the
-                    // production CPU (the kernel uses the cos_f64/sin_f64
-                    // polyfill via `azimuth_cos_sin_phi`; twin and kernel agree
-                    // within ulps, as ln/exp already do -- see
-                    // `assert_gpu_cpu_equiv`). Drawn unconditionally (even when
-                    // free-gas already wrote the direction) so both kernel paths
-                    // consume the same stream; `xi` is computed exactly as
-                    // `next_xi` so the value bit-matches the production CPU.
+                    // so the matched stream stays in lockstep past the first
+                    // collision. std libm cos/sin like the production CPU (the
+                    // kernel uses the cos_f64/sin_f64 polyfill via
+                    // `azimuth_cos_sin_phi`; twin and kernel agree within ulps,
+                    // as ln/exp already do -- see `assert_gpu_cpu_equiv`). Drawn
+                    // unconditionally (even when free-gas already wrote the
+                    // direction) so both kernel paths consume the same stream;
+                    // `xi` is computed exactly as `next_xi` so the value
+                    // bit-matches the production CPU.
                     let s_phi = state;
                     let r_phi = pcg_out(s_phi);
                     state = s_phi.wrapping_mul(PCG_MULT).wrapping_add(PCG_INCR);
@@ -2215,7 +2209,7 @@ pub(super) fn transport_one_particle(
                     }
                 }
 
-                // Issue-#40 trace: record this collision (energy in/out and
+                // Trace: record this collision (energy in/out and
                 // reaction class) once it is fully processed. Off (None) on
                 // the production / kernel paths, so the stream is unchanged.
                 if let Some(t) = trace.as_mut() {

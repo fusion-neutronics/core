@@ -477,7 +477,7 @@ pub fn surface_enclosed_volume(vertices: &[[f64; 3]], triangles: &[[usize; 3]]) 
         }
     }
 
-    // ── NESTED COMPONENTS (issue #37, hollow solids) ──
+    // ── NESTED COMPONENTS (hollow solids) ──
     // A hollow solid's surface has several connected components (outer shell +
     // sealed cavities, e.g. the coil casing around its winding pack). Each
     // component's |signed volume| measures the region IT encloses, but the
@@ -1242,7 +1242,7 @@ pub fn repair_t_junctions(
 /// triangles (e.g. by face id) can then re-bucket exactly instead of
 /// guessing by centroid - the heuristic mis-assigned rim sub-triangles of a
 /// split to the adjacent (shared) face's bucket, which is blanked at
-/// emission, silently LOSING them (issue #33).
+/// emission, silently LOSING them.
 pub fn repair_t_junctions_tracked(
     vertices: &[[f64; 3]],
     triangles: &[[usize; 3]],
@@ -2233,7 +2233,7 @@ pub fn finalize_surface_buckets(
             }
             // Fixpoint: the inner repair caps at 5 passes; conforming a
             // coarse rim to a finely refined shared face can need ~15
-            // cascading splits per edge (issue #33).
+            // cascading splits per edge.
             let mut tris = solid_tris.clone();
             let mut parents: Vec<usize> = (0..tris.len()).collect();
             for _ in 0..12 {

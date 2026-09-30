@@ -46,7 +46,7 @@ def _imprint_assembly(assembly):
     """Imprint a CadQuery assembly into a connected compound.
 
     Uses the BOPAlgo_Builder based imprint with glue="partial" when the
-    installed cadquery supports it (CadQuery/cadquery#2069, faster and
+    installed cadquery supports it (faster and
     lower RAM than BOPAlgo_MakeConnected, same result for touching,
     non-overlapping solids). Older cadquery versions fall back to the
     original single-argument imprint.

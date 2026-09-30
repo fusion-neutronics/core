@@ -124,10 +124,10 @@ pub enum GpuDispatchError {
     /// materials are missing photon data (`photon_data_paths` empty).
     PhotonDataPrep(String),
     /// `Model::ensure_neutron_temperatures_for_gpu` failed -- a material is
-    /// labelled with a temperature its nuclide data cannot be widened to (#481).
+    /// labelled with a temperature its nuclide data cannot be widened to.
     NeutronDataPrep(String),
     /// The device particle bank overflowed (`count > capacity`) -- the coupled
-    /// secondary-photon bank or the #78 fission-progeny bank (one shared bank).
+    /// secondary-photon bank or the fission-progeny bank (one shared bank).
     /// The particle_bank contract forbids silent drops, so this is a hard error
     /// -- raise the per-batch bank capacity (`COUPLED_PHOTONS_PER_NEUTRON` /
     /// `FISSION_PROGENY_PER_NEUTRON`) and rerun.
@@ -148,7 +148,7 @@ pub enum GpuDispatchError {
     /// scores a different material's response across the whole geometry, void
     /// included. The kernel has no machinery for it, and it used to look like an
     /// ordinary tally to the validator, so the GPU silently returned the plain
-    /// cell-material score (issue #288: 11.8x off for a nuclide response).
+    /// cell-material score (11.8x off for a nuclide response).
     OverlayTallyUnsupported {
         tally_index: usize,
     },
@@ -160,11 +160,9 @@ pub enum GpuDispatchError {
     /// Histories in a launch were still transporting when they hit
     /// `Model::gpu_max_steps_per_particle`. Their remaining track length was never
     /// scored, so every tally they touched is under-counted, by an amount
-    /// nothing downstream can correct. This used to be a stderr warning gated
-    /// on `verbose.summary`, so a `verbose=[]` run reported nothing and a
-    /// truncated flux could pass for a converged one
-    /// (fusion-neutronics/core#23). Now it fails the run at the first launch
-    /// that truncates. The CPU never truncates (it runs every history to
+    /// nothing downstream can correct, so the run fails at the first launch
+    /// that truncates, at every verbosity (a truncated flux must not pass for a
+    /// converged one). The CPU never truncates (it runs every history to
     /// completion), so the remedy is a higher cap or the CPU.
     ///
     /// Under MPI this is raised rank-locally like every other launch-loop
@@ -179,7 +177,7 @@ pub enum GpuDispatchError {
         max_steps: u32,
     },
     /// More than `Model::max_lost_particles` histories ended in no cell, i.e.
-    /// the geometry does not cover the space particles reached (issue #289).
+    /// the geometry does not cover the space particles reached.
     /// The GPU twin of the CPU's `handle_lost_particle` abort: same cause, same
     /// remedy, checked at each launch boundary (so the reported count can
     /// overshoot the cap by up to one launch's losses, where the CPU stops at
@@ -334,7 +332,7 @@ pub struct GpuRunResult {
     pub alive: Vec<u32>,
     pub n_steps: Vec<u32>,
     pub final_energies: Vec<f64>,
-    /// Particles the run lost to a geometry gap (issue #289). `lost_count` is
+    /// Particles the run lost to a geometry gap. `lost_count` is
     /// every loss the kernels saw; `lost` carries the diagnostics kept for the
     /// first losses of each launch. Zero / empty for a sound geometry.
     /// `run_on_gpu_with_device` moves `lost` onto `Model::lost_particles`, so
@@ -343,7 +341,7 @@ pub struct GpuRunResult {
     pub lost: Vec<crate::util::lost_particle::LostParticle>,
     /// (n,xn) secondaries this run handed to the device particle bank because
     /// the producing thread's in-thread stack was full, and which were
-    /// therefore transported in a later pass (issue #111 phase 2), on every
+    /// therefore transported in a later pass, on every
     /// path: neutron-only, coupled and mixed all drain them. Rare at 14 MeV
     /// (`nxn_spill_depth_is_sufficient` bounds it below one history in a
     /// thousand) and about one in 4000 on the thick Be9 sphere at 19.9 MeV
@@ -351,7 +349,7 @@ pub struct GpuRunResult {
     /// whether it exercised the spill path rather than assuming it did.
     pub n_spilled_secondaries: u64,
     /// Neutrons the host re-launched from the device bank in later passes:
-    /// fission progeny (#78) and spilled (n,xn) secondaries, on every path
+    /// fission progeny and spilled (n,xn) secondaries, on every path
     /// that drains them. A test that wants to know the drain actually ran, as
     /// opposed to the spill merely being counted, checks this against
     /// `n_spilled_secondaries` (they are equal on a non-fissile model whose
@@ -359,7 +357,7 @@ pub struct GpuRunResult {
     pub n_bank_relaunched: u64,
 }
 
-/// Lost-particle bookkeeping across a run's kernel launches (issue #289).
+/// Lost-particle bookkeeping across a run's kernel launches.
 ///
 /// The kernels count every history that ended in no cell and keep diagnostics
 /// for the first [`yamc_gpu::common::lost_particles::LOST_RECORD_CAPACITY`] of
@@ -432,7 +430,7 @@ impl LostTracker {
 
 /// Warn when several MPI ranks will auto-select the same GPU.
 ///
-/// Since issue #303 the launch chunks are partitioned across ranks, so the total
+/// The launch chunks are partitioned across ranks, so the total
 /// work is right; but every rank auto-selecting the same adapter means they
 /// time-slice one device, which is SLOWER than running serially (measured on one
 /// RADV adapter: 2M histories took 6.1 s at one rank and 12.6 s at two, for the
@@ -469,10 +467,8 @@ fn warn_if_ranks_share_one_device(device: Option<&str>, verbose: bool) {
 ///
 /// Checked after every launch rather than once at the end, so a run that
 /// truncates fails at its first chunk instead of after the whole budget.
-/// This was a `verbose.summary`-gated warning, which a `verbose=[]` run
-/// silenced entirely while still returning the under-counted flux
-/// (fusion-neutronics/core#23). A truncated flux is not a valid answer to
-/// the question asked, so it is an error at every verbosity. The default
+/// A truncated flux is not a valid answer to the question asked, so it is an
+/// error at every verbosity. The default
 /// cap is high enough that this does not fire for normal physics; when it
 /// does, the remedy is a higher cap or the CPU.
 fn fail_if_truncated(alive: &[u32], max_steps: u32) -> Result<(), GpuDispatchError> {
@@ -494,10 +490,8 @@ fn fail_if_truncated(alive: &[u32], max_steps: u32) -> Result<(), GpuDispatchErr
 /// tracking and Woodcock/Hybrid are different estimators of the same
 /// quantity), so this is a notice, not a hard error: rejecting would remove
 /// a working, numerically-correct capability. Printed once per run at every
-/// verbosity: it used to be gated on `verbose.summary`, so a `verbose=[]`
-/// run dropped the request in silence (fusion-neutronics/core#23), and
-/// `Verbose` governs progress output, not whether the user is told their
-/// setting was ignored. Surface tracking (the default) is silent.
+/// verbosity, because `Verbose` governs progress output, not whether the
+/// user is told their setting was ignored. Surface tracking (the default) is silent.
 fn warn_if_tracking_mode_ignored(tracking_mode: crate::model::TrackingMode) {
     use crate::model::TrackingMode;
     if tracking_mode == TrackingMode::Surface {
@@ -531,7 +525,7 @@ pub fn run_on_gpu(
     run_on_gpu_with_device(model, None, settings)
 }
 
-/// Per-source-neutron over-allocation for the device fission bank (#78). One
+/// Per-source-neutron over-allocation for the device fission bank. One
 /// fission emits at most `ceil(nu_bar)` progeny and banks `N - 1` of them; a
 /// fission history can chain several generations within one pass, but the bank
 /// for THIS pass only ever holds the immediate progeny of the particles
@@ -540,7 +534,7 @@ pub fn run_on_gpu(
 /// transported neutron. Overflow is hard-errored after the launch.
 const FISSION_PROGENY_PER_NEUTRON: usize = 8;
 
-/// Generation cap for the device fission-bank drain loop (#78). A sub-critical
+/// Generation cap for the device fission-bank drain loop. A sub-critical
 /// fixed-source fission chain converges geometrically: the banked population
 /// shrinks by ~k_eff (< 1) each generation, so the per-source-neutron tally
 /// contribution from generation g falls off as k_eff^g. For the most reactive
@@ -552,7 +546,7 @@ const FISSION_PROGENY_PER_NEUTRON: usize = 8;
 const MAX_FISSION_GENERATIONS: usize = 50;
 
 /// Device-bank slots reserved per source neutron for (n,xn) secondaries that
-/// overflow a thread's in-thread pending stack (issue #111 phase 2).
+/// overflow a thread's in-thread pending stack.
 ///
 /// The measured need is small but not zero: `nxn_spill_depth_is_sufficient`
 /// (`crates/yamc/tests/matched_stream_diff.rs`) runs the CPU twin over Be9 at 8
@@ -567,9 +561,9 @@ const MAX_FISSION_GENERATIONS: usize = 50;
 #[cfg(not(target_os = "macos"))]
 const NXN_SPILL_SLOTS_PER_SOURCE: usize = 1;
 
-/// Split-progeny seed for weight-w duplication (issue #236). Copy 0 keeps the
+/// Split-progeny seed for weight-w duplication. Copy 0 keeps the
 /// banked seed, so weight-1 progeny (the overwhelming majority) re-launch
-/// bit-identically to before the fix; later copies get an independent
+/// bit-identically to an unsplit chain; later copies get an independent
 /// splitmix32-derived seed so each duplicated neutron transports on its own
 /// stream.
 fn split_progeny_seed(base_seed: u32, k: usize) -> u32 {
@@ -583,7 +577,7 @@ fn split_progeny_seed(base_seed: u32, k: usize) -> u32 {
 }
 
 /// Deterministic uniform in [0, 1) from a seed, for stochastic rounding of a
-/// fractional banked weight (issue #236). The integer (n,2n)/(n,3n) yields make
+/// fractional banked weight. The integer (n,2n)/(n,3n) yields make
 /// the weight integral in practice, so this only fires for a rare
 /// fractional-yield reaction; deriving from the banked seed keeps the result
 /// reproducible (no global RNG state).
@@ -606,17 +600,17 @@ fn uniform_from_seed(seed: u32) -> f64 {
 /// Weight is NOT a kernel input (every source particle starts at weight 1.0), so
 /// a banked progeny whose weight was multiplied by an upstream (n,2n)/(n,3n)
 /// (`weight *= yield` in the kernel) is instead re-launched as `round(w)`
-/// unit-weight neutrons here (issue #236): the analog-equivalent of `w` real
+/// unit-weight neutrons here: the analog-equivalent of `w` real
 /// neutrons, matching the CPU, which banks real (n,xn) neutrons rather than
 /// weight-multiplying. `w == 1` yields exactly one copy with the original seed
 /// (bit-identical to a non-multiplied chain); the integer (n,xn) yields make `w`
 /// integral so the split is exact, with stochastic rounding covering any
-/// fractional-yield case. Dropping the banked weight (the old behaviour) biased
-/// the fixed-source fissile flux ~4% low for a 14 MeV source.
+/// fractional-yield case. Dropping the banked weight would bias the
+/// fixed-source fissile flux ~4% low for a 14 MeV source.
 ///
 /// The returned SoA can therefore be LONGER than `count`; the caller sizes the
 /// launch and the next generation's bank from the emitted length. Also returns
-/// each emitted neutron's ORIGINATING source index (issue #233 Stage 2), read
+/// each emitted neutron's ORIGINATING source index, read
 /// from `bank_source_idx`, so the next generation launch keeps folding into the
 /// right per-source variance sample (every copy inherits its progeny's source).
 fn fission_source_inputs(
@@ -636,7 +630,7 @@ fn fission_source_inputs(
         let f = i * 8;
         let u = i * 4;
         let base_seed = bank_u32[u + 2];
-        // Unit-weight copies of this progeny (issue #236).
+        // Unit-weight copies of this progeny.
         let w = bank_f64[f + 7];
         let floor_w = w.floor();
         let mut n_copies = floor_w.max(0.0) as usize;
@@ -669,7 +663,7 @@ fn fission_source_inputs(
 /// discrete GPU). An unknown name returns `GpuDispatchError::AdapterNotFound`
 /// rather than panicking.
 ///
-/// Lost-particle diagnostics (issue #289) land on `model.lost_particles` here,
+/// Lost-particle diagnostics land on `model.lost_particles` here,
 /// whether the run finished or aborted on `max_lost_particles`, so `compute='gpu'`
 /// exposes them exactly like the CPU path does after its abort.
 pub fn run_on_gpu_with_device(
@@ -700,12 +694,12 @@ fn run_on_gpu_dispatch(
     device: Option<&str>,
     settings: &crate::model::TransportSettings,
 ) -> Result<GpuRunResult, GpuDispatchError> {
-    // GPU stop conditions (#230): a finite particle cap (`total_particles`)
+    // GPU stop conditions: a finite particle cap (`total_particles`)
     // and/or a wall-time budget (`max_runtime`), checked between launches.
     // Convergence targets are not one of them: the launch loop cannot evaluate
-    // a precision target (fusion-neutronics/core#29), and a run that carries
-    // targets alongside a cap used to go silently to the cap, so it is refused
-    // first and in its own words (fusion-neutronics/core#23). `Some(0)` is an
+    // a precision target, and a run that carries targets alongside a cap
+    // would otherwise go silently to the cap, so it is refused first and in
+    // its own words. `Some(0)` is an
     // error (0 is not "unlimited"); `None` + no `max_runtime` has no way to
     // stop, so it is rejected here rather than looping forever. Covers every
     // kernel path since they all route through this entry.
@@ -744,15 +738,15 @@ fn run_on_gpu_dispatch(
     // `run_internal` (`init_photon_data` + `init_bremsstrahlung`).
     // Without it the GPU's TTB / Doppler / relaxation tables come up
     // empty and the kernel silently transports without the
-    // bremsstrahlung photon source the CPU emits -- the cause of issue
-    // #415's photoelectric ~0.38x deficit. No-op for neutron-only
+    // bremsstrahlung photon source the CPU emits (a ~0.38x photoelectric
+    // deficit). No-op for neutron-only
     // models; idempotent otherwise (`&mut Model` exists so every
     // caller gets prepared materials without a separate ensure step).
     // Same reasoning for the neutron side: the CPU gets its temperature widened
     // as a side effect of `calculate_macroscopic_xs` in `run_internal`, which
     // this path skips, so a material relabelled after its data was loaded would
     // reach `extract_material_xs` with reactions it never parsed in and fail
-    // with `TemperatureNotLoaded` (#481). No-op when nothing needs widening.
+    // with `TemperatureNotLoaded`. No-op when nothing needs widening.
     model
         .ensure_neutron_temperatures_for_gpu()
         .map_err(GpuDispatchError::NeutronDataPrep)?;
@@ -816,7 +810,7 @@ fn run_on_gpu_dispatch(
     let validated = validate_tallies(&model.tallies, ParticleType::Neutron)?;
     // Provisional size for the one-shot initial translate; the per-history loop
     // re-samples every launch chunk (total-independent), so it never affects
-    // results or the RNG key (#230 task 1).
+    // results or the RNG key.
     let n_per_batch = INITIAL_TRANSLATE_SAMPLE;
     if settings.total_particles == Some(0) {
         return Err(GpuDispatchError::Translate(
@@ -851,8 +845,8 @@ fn run_on_gpu_dispatch(
     )?;
     // Per-MT fixed-point scales sized from each channel's largest share
     // of the macroscopic total, so tiny high-threshold reaction-rate
-    // tallies don't truncate to 0 (issue #150) while the integer
-    // accumulator stays inside the total tally's envelope (issue #307).
+    // tallies don't truncate to 0 while the integer
+    // accumulator stays inside the total tally's envelope.
     let sigma_t_score_grid = build_sigma_t_score_grid(
         &geometry.materials,
         &score_mts,
@@ -884,7 +878,7 @@ fn run_on_gpu_dispatch(
         println!("GPU: {}", ctx.adapter_info());
     }
 
-    // Batch-free per-history variance split (issue #233 Stages 1 + 2). Both
+    // Batch-free per-history variance split. Both
     // branches produce true per-history variance (batch-means is retired for the
     // neutron path); `total_particles` drops out of the RNG key in both.
     //
@@ -896,12 +890,13 @@ fn run_on_gpu_dispatch(
     // - Everything else routes to the non-fissile fast path
     //   (`run_neutron_per_history`): pure non-fissile, or fissile-with-bank-off
     //   (which multiplies weight in-thread via `weight *= nu_bar`, so each source
-    //   thread is already a complete history -- Stage 1 handles it correctly).
+    //   thread is already a complete history, which the per-history path
+    //   handles correctly).
     let has_fission_xs = inputs.xs_fission_per_material.iter().any(|&x| x > 0.0);
     // A mesh tally rides the per-source-direct variance mode on both loops: the
     // fissile loop keys every launch (source and generation) on the source
     // neutron, so a mesh contribution from a fission descendant folds into its
-    // source's sample exactly as a cell-bin one does (fusion-neutronics/core#30).
+    // source's sample exactly as a cell-bin one does.
     if has_fission_xs && model.gpu_fission_bank {
         return run_neutron_per_history_fissile(
             model,
@@ -1006,7 +1001,7 @@ fn validate_tallies(
     for (idx, t) in tallies.iter().enumerate() {
         let t = t.as_ref();
 
-        // Virtual-overlay tally (issue #288): `multiply_density == false` means
+        // Virtual-overlay tally: `multiply_density == false` means
         // "score this response everywhere, decoupled from the cell material".
         // The kernel always folds the cell material's macroscopic XS, so an
         // overlay tally that reached it came back as the plain cell-material
@@ -1017,7 +1012,7 @@ fn validate_tallies(
         }
 
         // Filters: a spatial binner is required -- a CellFilter, a
-        // MaterialFilter and/or a MeshFilter (issues #234, #271). An optional
+        // MaterialFilter and/or a MeshFilter. An optional
         // EnergyFilter, an optional EnergyFunctionFilter and an optional
         // `ParticleType` filter matching the pass are accepted (the last just
         // gates on something already true). Anything else -- a mismatched
@@ -1033,13 +1028,13 @@ fn validate_tallies(
             match filter {
                 Filter::Cell(_) => have_cell = true,
                 Filter::Energy(_) => have_energy = true,
-                // Material filter (issue #271). A cell's material is fixed for
+                // Material filter. A cell's material is fixed for
                 // the run, so the material bin is a function of the cell index
                 // exactly like the cell bin: `build_tallies_pack` folds both
                 // into the kernel's single spatial `cell_to_bin` dimension.
                 Filter::Material(_) => have_material = true,
                 // Energy-function filter (`energy_function=` /
-                // `dose_coefficients=`, issue #271). Deliberately NOT counted
+                // `dose_coefficients=`). Deliberately NOT counted
                 // as a spatial binner below: it is a multiplicative weight on
                 // the score plus an out-of-range gate, contributing no bins
                 // (`Filter::num_bins() == 1`). The kernel evaluates the
@@ -1050,8 +1045,7 @@ fn validate_tallies(
                 // kernel already transports only that species, so it just gates
                 // on something already true.
                 Filter::ParticleType(pf) if pf.particle_type == expected_particle => {}
-                // Structured-mesh tally filter (issues #234, #279). Rectangular
-                // meshes and cylindrical
+                // Structured-mesh tally filter. Rectangular and cylindrical
                 // meshes are all scored by the kernel's per-kind voxel walk.
                 Filter::Mesh(_) => {
                     have_mesh = true;
@@ -1095,7 +1089,7 @@ fn validate_tallies(
         // derived σ_a fast path: that derives σ_a = σ_t − σ_e − Σσ_inel
         // − σ_f, a small residual of large terms, which diverges from
         // the CPU (~1.3×) via catastrophic cancellation plus a
-        // different inelastic-MT set (issue #415). Routing it through
+        // different inelastic-MT set. Routing it through
         // SCORE_PER_MT(27) makes it read the same tabulated MT-27
         // reaction the CPU's macroscopic grid is built from, so it
         // matches like elastic / (n,γ) do. The kernel's SCORE_ABSORPTION
@@ -1118,7 +1112,7 @@ fn validate_tallies(
             }
         }
         // One entry per score, in score order, so the kernel only ever sees
-        // single-score tallies (issue #271).
+        // single-score tallies.
         for (score_index, score) in t.scores.iter().enumerate() {
             let (score_kind, score_mt) = classify_score(score, expected_particle, idx)?;
             out.push(ValidatedTally {
@@ -1269,7 +1263,7 @@ fn build_tallies_pack(
         // default 2^30 scale would overflow the u64 atomic
         // accumulator; use scale 1.0 for those. Other SCORE_PER_MT
         // reaction-rate tallies get a per-MT scale sized from their
-        // expected magnitude (issue #150): tiny high-threshold
+        // expected magnitude: tiny high-threshold
         // channels (e.g. Fe56 MT111 `(n,2p)`) need a much larger
         // scale than `2^30` so their `~1e-11` per-collision
         // contribution survives the integer rounding instead of
@@ -1294,7 +1288,7 @@ fn build_tallies_pack(
         // and the MaterialFilter are constant per geometry cell -- a cell's
         // material does not change during the run -- so the two are folded into
         // it as the product bin `cell_bin * n_material_bins + material_bin`
-        // (issue #271). That product is exactly the CPU's flat stride for the
+        // That product is exactly the CPU's flat stride for the
         // pair: `get_bin_index_7d` contributes
         // `cell_bin * stride_material + material_bin * stride_nuclide` with
         // `stride_material = n_material_bins * stride_nuclide`, so the
@@ -1306,7 +1300,7 @@ fn build_tallies_pack(
         // A tally with neither filter (e.g. a bare `Tally(mesh=...)`) is
         // spatially unfiltered: every geometry cell maps to bin 0, so the mesh
         // (voxel) dimension is the only spatial binner, matching the CPU's
-        // num_cell_bins == 1 (issue #234).
+        // num_cell_bins == 1.
         let cell_filter = v.tally.get_cell_filter();
         let material_filter = v.tally.get_material_filter();
         if let Some(cf) = cell_filter {
@@ -1387,7 +1381,7 @@ fn build_tallies_pack(
         let parent_prev = *parent_offsets.last().unwrap();
         parent_offsets.push(parent_prev + n_ids_pushed);
 
-        // Mesh (voxel) dimension (issue #234). A tally without a MeshFilter
+        // Mesh (voxel) dimension. A tally without a MeshFilter
         // collapses to n_mesh == 1 (voxel_bin 0), byte-identical to a run
         // without mesh support. A mesh tally carries the mesh's storage size
         // (num_bins) and a packed geometry descriptor the kernel walks per
@@ -1402,8 +1396,8 @@ fn build_tallies_pack(
         n_mesh_per_tally.push(n_mesh);
         mesh_params_offsets.push(mesh_params.len() as u32);
 
-        // Energy-function table (`energy_function=` / `dose_coefficients=`,
-        // issue #271). Note this adds NO factor to `out_offsets` below: the
+        // Energy-function table (`energy_function=` / `dose_coefficients=`).
+        // Note this adds NO factor to `out_offsets` below: the
         // filter reports `num_bins() == 1`, so it multiplies the value rather
         // than widening the output block. A tally without one leaves an empty
         // range, which is how the kernel detects its absence.
@@ -1454,8 +1448,7 @@ fn build_tallies_pack(
 
 /// Pack a mesh tally's geometry descriptor into `mesh_params` (all `f64`) and
 /// push its kind discriminant, returning the mesh's storage size (voxel bin
-/// count). Mirrors the CPU `MeshFilter` layout the kernel walks per step
-/// (issues #234, #279).
+/// count). Mirrors the CPU `MeshFilter` layout the kernel walks per step.
 ///
 /// Rectangular and cylindrical meshes are both packed here and scored by the
 /// kernel's matching per-kind voxel walk.
@@ -1576,7 +1569,7 @@ fn build_xs_score_per_mt(
 /// Macroscopic total cross section per material on the SAME grid and in
 /// the same material order as `xs_score_per_mt`, laid out
 /// `[material × n_grid]`. This is the anchor `per_mt_fixed_point_scales`
-/// divides each per-MT curve by (issue #307).
+/// divides each per-MT curve by.
 ///
 /// Reuses `build_xs_score_per_mt` with the single score MT 1 (total), so
 /// the totals come from exactly the same per-material nuclide + density
@@ -1597,16 +1590,16 @@ fn build_sigma_t_score_grid(
 }
 
 /// ENDF MT 1 -- the total cross section, used as the per-MT fixed-point
-/// scale anchor (issue #307).
+/// scale anchor.
 const MT_TOTAL: i32 = 1;
 
 /// Add one launch's flat kernel tally output for tally `v` into a per-tally-bin
 /// accumulator, mapping the kernel's `spatial -> parent -> energy -> mesh`
-/// stride order (mesh innermost, issue #234) to the tally's 7D bin index.
+/// stride order (mesh innermost) to the tally's 7D bin index.
 ///
 /// The kernel's spatial dimension carries the cell and material bins folded
 /// together as `cell_bin * n_material_bins + material_bin` (see
-/// `build_tallies_pack`, issue #271), so it is divided back out here. A tally
+/// `build_tallies_pack`), so it is divided back out here. A tally
 /// without a `CellFilter` has one cell bin, without a `MaterialFilter` one
 /// material bin and without a `MeshFilter` one mesh bin, so all three collapse
 /// to the pre-mesh `cell -> parent -> energy` mapping (byte-identical). Does
@@ -1658,7 +1651,7 @@ fn accumulate_kernel_tally(v: &ValidatedTally<'_>, out: &[f64], acc: &mut [f64])
 
 /// Finalize per-tally per-bin accumulators (physical `sum` + `sum_sq` over `n`
 /// source histories) into the CPU's per-history Welford representation and
-/// install them (issue #233): `mean = sum/n`, `m2 = (sum_sq - sum^2/n).max(0)`,
+/// install them: `mean = sum/n`, `m2 = (sum_sq - sum^2/n).max(0)`,
 /// `n_histories = n`, `agg = ZERO`. Shared by the neutron and photon
 /// per-history / per-source paths.
 /// Globally-summed per-tally `(sum, sum_sq)` accumulators plus the pooled history
@@ -1719,15 +1712,15 @@ fn reduce_accumulators_across_ranks(
 /// (tally, score). A tally's entries are consecutive and in score order, and
 /// `score` is the outermost dimension of the CPU 7D layout with a stride of one
 /// whole block, so concatenating a tally's blocks in that order IS its bin
-/// array -- which is what lets the kernel stay single-score (issue #271).
+/// array -- which is what lets the kernel stay single-score.
 fn install_grouped_stats(
     validated: &[ValidatedTally<'_>],
     sum_acc: &[Vec<f64>],
     sumsq_acc: &[Vec<f64>],
     n: u64,
     // Per-history aggregate moments, one per tally GROUP in `validated`
-    // order (fusion-neutronics/core#29); `None` on the paths that do not fold
-    // them yet, which install `AggMoments::ZERO` as before.
+    // order; `None` on the paths that do not fold them, which install
+    // `AggMoments::ZERO`.
     aggs: Option<&[AggMoments]>,
 ) {
     let nf = n as f64;
@@ -1783,9 +1776,9 @@ fn install_grouped_stats(
     }
 }
 
-/// Per-history aggregate moments of every tally on a GPU run
-/// (fusion-neutronics/core#29): the `AggMoments` the convergence targets are
-/// defined on, folded launch by launch from each history's total score.
+/// Per-history aggregate moments of every tally on a GPU run: the `AggMoments`
+/// the convergence targets are defined on, folded launch by launch from each
+/// history's total score.
 ///
 /// The GPU per-history path produces per-bin `sum` and `sum_sq`, from which
 /// the aggregate variance cannot be recovered (one history scores several
@@ -1905,7 +1898,7 @@ impl AggFold {
     }
 
     /// The moments combined across MPI ranks (every rank ran a disjoint subset
-    /// of the launch chunks, issue #303), identical on every rank: gathered to
+    /// of the launch chunks), identical on every rank: gathered to
     /// root, folded with the exact pairwise combine, and broadcast back.
     /// Single-process, a copy.
     fn reduced_across_ranks(&self, mpi_ctx: &crate::mpi_context::MpiContext) -> Vec<AggMoments> {
@@ -2014,8 +2007,7 @@ fn finalize_per_history_tallies(
     // `LaunchLoop::new_for_rank`), so these accumulators and the history count
     // are partial. Sum them across ranks before deriving mean / m2, else every
     // rank would normalise its own share by its own count and report a
-    // single-rank answer -- which is what the GPU path did before issue #303,
-    // duplicating the whole run on every rank instead.
+    // single-rank answer while duplicating the whole run on every rank.
     //
     // Per-bin sums and sums-of-squares are plain sums, so an elementwise
     // reduction is exact; there is no Welford fold to do here.
@@ -2030,13 +2022,13 @@ fn finalize_per_history_tallies(
 /// Size of the one-shot initial `translate_*_for_gpu` particle sample. Every
 /// launch chunk re-samples and OVERWRITES the initial particles via
 /// `sample_initial_particles_for_chunk`, so this is provisional only: it is
-/// total-INDEPENDENT and never affects results or the RNG key (#230 task 1 --
-/// `total_particles` is not in the GPU RNG key). `>= 2` so the mixed-source
+/// total-INDEPENDENT and never affects results or the RNG key
+/// (`total_particles` is not in the GPU RNG key). `>= 2` so the mixed-source
 /// path's neutron/photon source-strength split is non-empty on both sides.
 const INITIAL_TRANSLATE_SAMPLE: usize = 2;
 
 /// GPU launch chunk size (histories / source neutrons per launch) for the
-/// per-history variance paths (issue #233). Fixed and total-INDEPENDENT so
+/// per-history variance paths. Fixed and total-INDEPENDENT so
 /// `total_particles` stays out of the RNG key. Capped at `mem_safe_max` (the
 /// tally-shape memory bound -- a fine tally launches smaller chunks) and the
 /// watchdog-safe 100k per-dispatch size. `YAMC_GPU_LAUNCH_CHUNK` overrides it
@@ -2059,9 +2051,9 @@ fn launch_chunk_size(mem_safe_max: usize) -> usize {
 /// photon source): how many histories one launch can hold given that each
 /// carries `per_history_spill_cap` words of per-history variance state.
 ///
-/// This is the whole ballgame for a fine tally (issue #237). The kernel is
+/// This is the whole ballgame for a fine tally. The kernel is
 /// memory-latency bound and has nothing but occupancy to hide that latency, so
-/// throughput tracks the launch chunk almost linearly: on the issue's large
+/// throughput tracks the launch chunk almost linearly: on a large
 /// tally (101 cells x 500 energy) the same run measures 1,686 particles/s at a
 /// 1,330-history chunk and 11,271 at 13,472, a 6.7x span for a 10x chunk. A
 /// fine tally spends its per-history budget on spill and gets a small chunk, so
@@ -2096,8 +2088,8 @@ fn spill_bounded_mem_safe_max(total_out_len: usize, max_steps: u32, n_tallies: u
     budget.checked_div(cap).map_or(usize::MAX, |c| c.max(1))
 }
 
-/// Batch-free per-history variance path for a NON-fissile neutron model (issue
-/// #233 Stage 1). Replaces the batch-means estimator with a true per-history
+/// Batch-free per-history variance path for a NON-fissile neutron model.
+/// Replaces the batch-means estimator with a true per-history
 /// `sum` + `sum_sq`, matching the CPU's per-history Welford:
 ///
 /// - **Fixed launch chunk.** The chunk size is total-INDEPENDENT (the TDR-safe
@@ -2124,7 +2116,7 @@ fn spill_bounded_mem_safe_max(total_out_len: usize, max_steps: u32, n_tallies: u
 /// full-size chunks until `max_runtime` elapses.
 ///
 /// Drives the outer launch/chunk loop for every batch-free GPU path, honouring
-/// the same stop conditions as the CPU (#230): an optional particle cap
+/// the same stop conditions as the CPU: an optional particle cap
 /// (`total_particles`) and/or an optional wall-time budget (`max_runtime`),
 /// stopping at the first satisfied. The GPU can only stop between launches, so
 /// a `max_runtime` overshoot of up to one chunk is expected (documented).
@@ -2145,7 +2137,7 @@ struct LaunchLoop {
     start: Instant,
     idx: usize,
     /// Chunk-index stride: `1` single-process, `mpi_size` under MPI, so rank `r`
-    /// takes global chunks `r, r + size, r + 2*size, ...` (issue #303).
+    /// takes global chunks `r, r + size, r + 2*size, ...`.
     stride: usize,
     /// When the launch handed out by the most recent [`LaunchLoop::next`]
     /// began.
@@ -2158,11 +2150,11 @@ struct LaunchLoop {
 
 #[cfg(not(target_os = "macos"))]
 impl LaunchLoop {
-    /// Rank-partitioned launch loop (issue #303). Single-process callers pass
-    /// `rank = 0, size = 1`, which strides by one and is byte-identical to the
-    /// pre-#303 loop. Rank `r` of `size` walks the
-    /// global chunk indices `r, r + size, ...`, so the ranks cover the serial
-    /// launch sequence exactly once between them.
+    /// Rank-partitioned launch loop. Single-process callers pass
+    /// `rank = 0, size = 1`, which strides by one and is byte-identical to an
+    /// unpartitioned loop. Rank `r` of `size` walks the global chunk indices
+    /// `r, r + size, ...`, so the ranks cover the serial launch sequence exactly
+    /// once between them.
     ///
     /// Partitioning BY CHUNK rather than within a chunk is what makes the result
     /// MPI-stable: `launch_idx * chunk` is the chunk's global seed band, so each
@@ -2225,7 +2217,7 @@ impl LaunchLoop {
 }
 
 /// Print how long one GPU launch took, root rank only and only under
-/// `verbose.summary` (issue #115).
+/// `verbose.summary`.
 ///
 /// One line per launch rather than a total, because the useful signal is the
 /// shape across launches: a chunk size is bounded by memory alone, so a launch
@@ -2265,7 +2257,7 @@ fn run_neutron_per_history(
 ) -> Result<GpuRunResult, GpuDispatchError> {
     use yamc_gpu::neutron::fission_bank_inputs::FissionBankInputs;
 
-    // Fixed, total-independent launch chunk (issue #93's watchdog-safe size, NOT
+    // Fixed, total-independent launch chunk (a driver-watchdog-safe size, NOT
     // derived from `total_particles`). A history that touches more distinct bins
     // than the register touched-list spills the overflow into a per-history
     // global buffer sized `chunk * spill_cap`. `spill_bounded_mem_safe_max` bounds
@@ -2281,10 +2273,10 @@ fn run_neutron_per_history(
     // fires: keep it OFF (a size-1 bank), byte-identical transport.
     let fission_bank = FissionBankInputs::off();
 
-    // A model carrying a mesh tally routes through the per-source direct path
-    // (issue #234): the kernel accumulates each voxel crossing straight into
+    // A model carrying a mesh tally routes through the per-source direct path:
+    // the kernel accumulates each voxel crossing straight into
     // `src_acc` (no touched-list), and the host folds each source's grand total
-    // as one variance sample -- exactly the fissile Stage-2 fold, but with
+    // as one variance sample -- exactly the fissile per-source fold, but with
     // identity source indices (a non-fissile source has no progeny). This keeps
     // a track-length mesh tally O(1) per crossing. `flat_scales` unpacks the
     // fixed-point `src_acc` back to physical units.
@@ -2313,20 +2305,20 @@ fn run_neutron_per_history(
     // Launch chunks until the particle cap is exhausted or `max_runtime`
     // elapses (checked between launches). A capped, budget-free run is
     // byte-identical to the old `0..n_launches` loop.
-    // Lost-particle bookkeeping across this run's launches (issue #289).
+    // Lost-particle bookkeeping across this run's launches.
     let mut lost = LostTracker::default();
     // (n,xn) secondaries handed to the device bank because a thread's in-thread
-    // stack was full (issue #111 phase 2).
+    // stack was full.
     let mut spilled_total: u64 = 0;
     let mut relaunched_total: u64 = 0;
     // Per-history (per-source, once fission progeny join a sample) aggregate
     // moments per tally, folded launch by launch; the convergence targets are
-    // decided on them at every chunk boundary (fusion-neutronics/core#29).
+    // decided on them at every chunk boundary.
     let mut agg = AggFold::new(validated);
-    // Partition the launch chunks across MPI ranks (issue #303): before this the
-    // GPU path had no MPI awareness, so every rank transported the full
-    // `total_particles` and rank 0 reported its own result -- n x the work, and
-    // slower than serial because the ranks contend for one device.
+    // Partition the launch chunks across MPI ranks: without this every rank
+    // would transport the full `total_particles` and rank 0 would report its
+    // own result -- n x the work, and slower than serial because the ranks
+    // contend for one device.
     let mpi_ctx = crate::mpi_context::MpiContext::init();
     let mut sched = LaunchLoop::new_for_rank(
         settings,
@@ -2364,8 +2356,7 @@ fn run_neutron_per_history(
         } else {
             TallyVarianceMode::PerHistory
         };
-        // Slots for (n,xn) secondaries that overflow a thread's in-thread stack
-        // (issue #111 phase 2).
+        // Slots for (n,xn) secondaries that overflow a thread's in-thread stack.
         let spill_capacity = launch_n.saturating_mul(NXN_SPILL_SLOTS_PER_SOURCE).max(1);
 
         let mut kernel = run_kernel_path(
@@ -2434,7 +2425,7 @@ fn run_neutron_per_history(
         // Counted from the launch actually kept, so an escalated chunk (whose
         // discarded first attempt spilled the same secondaries) counts once.
         spilled_total += kernel.n_spilled_secondaries;
-        // Geometry gaps (issue #289): fold this launch's losses in and refuse to
+        // Geometry gaps: fold this launch's losses in and refuse to
         // continue past `max_lost_particles`, as the CPU does. Absorbed from the
         // launch actually kept, so an escalated chunk does not double-count.
         lost.absorb(
@@ -2531,8 +2522,8 @@ fn run_neutron_per_history(
         if sched.hit_time_budget() {
             break;
         }
-        // Convergence targets, decided collectively at the chunk boundary
-        // (fusion-neutronics/core#29), the third stop condition beside the
+        // Convergence targets, decided collectively at the chunk boundary,
+        // the third stop condition beside the
         // particle cap and the time budget.
         if agg.targets_met(model, validated, &mpi_ctx) {
             announce_convergence_stop(model, &mpi_ctx, n_hist_total);
@@ -2559,8 +2550,7 @@ fn run_neutron_per_history(
 
 /// Per-flat-`tally_out`-bin linear (sum) fixed-point scale, used to unpack the
 /// per-source accumulator (`src_acc`) back to physical units. Flat bin `b`
-/// belongs to the tally whose `out_offsets` range contains it (issue #233
-/// Stage 2).
+/// belongs to the tally whose `out_offsets` range contains it.
 fn flat_bin_scales(pack: &TalliesPack) -> Vec<f64> {
     let total = pack.total_out_len() as usize;
     let mut scales = vec![1.0f64; total.max(1)];
@@ -2575,7 +2565,7 @@ fn flat_bin_scales(pack: &TalliesPack) -> Vec<f64> {
 }
 
 /// Fold ONE tally's per-source totals for a chunk into its running per-history
-/// `sum` / `sum_sq` accumulators (issue #233 Stage 3). `per_source_total` is flat
+/// `sum` / `sum_sq` accumulators. `per_source_total` is flat
 /// `chunk_sources * row_stride` (physical, per-`(source, flat_bin)`); the tally
 /// occupies kernel bins `[out_off .. out_off + n_kbins)`. Each source's total in
 /// those bins is one variance sample; the sum and sum-of-squares over sources
@@ -2609,8 +2599,7 @@ fn fold_per_source_tally(
 /// neutron-pass and photon-pass totals -- an unfiltered "dual" (all-particle)
 /// tally scored by both kernels. The neutron and photon contributions of one
 /// source particle are added BEFORE squaring, so their correlation (shared
-/// source) is captured exactly (issue #233 Stage 3, replacing the batch-means
-/// per-batch summing).
+/// source) is captured exactly.
 #[allow(clippy::too_many_arguments)]
 fn fold_per_source_dual(
     v: &ValidatedTally<'_>,
@@ -2641,7 +2630,7 @@ fn fold_per_source_dual(
 }
 
 /// Batch-free per-history variance for a FISSILE neutron model that banks
-/// fission progeny (issue #233 Stage 2). A variance SAMPLE is one source
+/// fission progeny. A variance SAMPLE is one source
 /// neutron plus ALL of its fission descendants (matching the CPU, which
 /// transports progeny recursively inside the source particle's processing and
 /// folds them into one per-history Welford sample). On GPU those descendants
@@ -2651,8 +2640,8 @@ fn fold_per_source_dual(
 /// per-source totals across the source + all generation launches on the host,
 /// then fold each source's grand total in as one sample (`sum += T`,
 /// `sum_sq += T^2`), and finalize `mean = sum/N`, `m2 = sum_sq - sum^2/N` with
-/// `N = the SOURCE-neutron count` (not source + progeny). Non-fissile Stage 1's
-/// fast path is untouched.
+/// `N = the SOURCE-neutron count` (not source + progeny). The non-fissile
+/// per-history fast path is separate.
 #[cfg(not(target_os = "macos"))]
 #[allow(clippy::too_many_arguments)]
 fn run_neutron_per_history_fissile(
@@ -2674,8 +2663,8 @@ fn run_neutron_per_history_fissile(
 
     // Fixed, total-INDEPENDENT source chunk (drops total_particles from the RNG
     // key). The per-source accumulator is `chunk_sources * total_out_len`
-    // fixed-point words; bound it (memory + u32 index) the way Stage 1 bounds the
-    // spill, so a fine tally simply uses a smaller source chunk. The chunk
+    // fixed-point words; bound it (memory + u32 index) the way the per-history
+    // path bounds the spill, so a fine tally simply uses a smaller source chunk. The chunk
     // depends only on the tally shape, not `total_particles`. (The tighter
     // `spill_cap` is `<= total_out_len`, which dominates `per_thread_words`
     // below, so it does not change the chunk here; the src_acc footprint does.)
@@ -2687,10 +2676,10 @@ fn run_neutron_per_history_fissile(
     let mem_safe_max = ((64usize * 1024 * 1024) / per_thread_words).max(1);
     let chunk = launch_chunk_size(mem_safe_max);
     // A mesh tally switches every launch of this loop to the direct per-source
-    // mode (issue #234): each voxel crossing scores straight into `src_acc`
+    // mode: each voxel crossing scores straight into `src_acc`
     // under the history's SOURCE index, which the generation launches carry
     // through `bank_source_idx`, so a descendant's mesh contributions fold into
-    // its source's sample before squaring (fusion-neutronics/core#30).
+    // its source's sample before squaring.
     let has_mesh = pack.mesh_kind.iter().any(|&k| k != MESH_NONE);
 
     // This path is only entered when `model.gpu_fission_bank` is on.
@@ -2720,20 +2709,20 @@ fn run_neutron_per_history_fissile(
     // One chunk = `chunk_sources` source neutrons plus their entire fission
     // cascade. `max_runtime` is checked only at this outer boundary (never
     // mid-cascade), so a source neutron's progeny are always fully counted.
-    // Lost-particle bookkeeping across this run's launches (issue #289).
+    // Lost-particle bookkeeping across this run's launches.
     let mut lost = LostTracker::default();
     // (n,xn) secondaries handed to the device bank alongside the fission
-    // progeny (issue #111 phase 2); they drain together.
+    // progeny; they drain together.
     let mut spilled_total: u64 = 0;
     let mut relaunched_total: u64 = 0;
     // Per-history (per-source, once fission progeny join a sample) aggregate
     // moments per tally, folded launch by launch; the convergence targets are
-    // decided on them at every chunk boundary (fusion-neutronics/core#29).
+    // decided on them at every chunk boundary.
     let mut agg = AggFold::new(validated);
-    // Partition the launch chunks across MPI ranks (issue #303): before this the
-    // GPU path had no MPI awareness, so every rank transported the full
-    // `total_particles` and rank 0 reported its own result -- n x the work, and
-    // slower than serial because the ranks contend for one device.
+    // Partition the launch chunks across MPI ranks: without this every rank
+    // would transport the full `total_particles` and rank 0 would report its
+    // own result -- n x the work, and slower than serial because the ranks
+    // contend for one device.
     let mpi_ctx = crate::mpi_context::MpiContext::init();
     let mut sched = LaunchLoop::new_for_rank(
         settings,
@@ -2888,7 +2877,7 @@ fn run_neutron_per_history_fissile(
     // progeny -- so the reported n_histories / error bar / FOM are per source.
     //
     // Under MPI the accumulators cover only this rank's share of the launch
-    // chunks, so reduce them first (issue #303), exactly as
+    // chunks, so reduce them first, exactly as
     // `finalize_per_history_tallies` does for the other paths. This path derives
     // mean / m2 inline (its N is the source count), so it calls the shared
     // reduction directly rather than going through that helper.
@@ -2914,8 +2903,8 @@ fn run_neutron_per_history_fissile(
 }
 
 /// One launch's banked neutrons, read back from the device particle bank:
-/// fission progeny (#78) and/or (n,xn) secondaries that overflowed a thread's
-/// pending stack (issue #111 phase 2). `src[i]` is the index of the SOURCE
+/// fission progeny and/or (n,xn) secondaries that overflowed a thread's
+/// pending stack. `src[i]` is the index of the SOURCE
 /// neutron record `i` descends from.
 #[cfg(not(target_os = "macos"))]
 struct BankedNeutrons {
@@ -2928,8 +2917,8 @@ struct BankedNeutrons {
 /// Re-transport every neutron the kernel banked, generation by generation,
 /// until the bank empties.
 ///
-/// Two producers feed it: the fission chain (#78) and the (n,xn) spill (issue
-/// #111 phase 2), a secondary produced while its thread already held
+/// Two producers feed it: the fission chain and the (n,xn) spill, a secondary
+/// produced while its thread already held
 /// [`yamc_gpu::neutron::transport::PEND_SLOTS`] others. Both are just neutrons
 /// with a position, a direction, an energy and their own transport seed, so
 /// they drain the same way.
@@ -2975,8 +2964,8 @@ fn drain_banked_neutrons(
         let n_drain = pending_count.min(avail).min(chunk);
         let (gen_inputs, gen_source_idx) =
             fission_source_inputs(inputs, &pending_f64, &pending_u32, &pending_src, n_drain);
-        // Weight-w progeny are re-launched as `round(w)` unit-weight neutrons
-        // (issue #236), so the emitted particle count can exceed `n_drain`;
+        // Weight-w progeny are re-launched as `round(w)` unit-weight neutrons,
+        // so the emitted particle count can exceed `n_drain`;
         // size the launch and this generation's progeny bank from it.
         let n_launch = gen_inputs.seeds.len();
         relaunched += n_launch as u64;
@@ -3013,7 +3002,7 @@ fn drain_banked_neutrons(
         }
         // A generation launch can truncate too, and its histories are not in
         // `alive_all`, so check here or a banked neutron's cut-off track goes
-        // unreported (fusion-neutronics/core#23).
+        // unreported.
         fail_if_truncated(&gen_kernel.alive, max_steps)?;
         spilled += gen_kernel.n_spilled_secondaries;
         accumulate_src_acc(
@@ -3087,8 +3076,7 @@ fn neutron_records(bank: &BankedNeutrons) -> BankedNeutrons {
 /// neutron (`CoupledNxnSpillUnsupported`): their drain was photon-only, so a
 /// spilled secondary would have been filtered out and silently lost. That made
 /// the refusal reachable for any genuinely multiplying material at 14 MeV even
-/// though the neutron-only paths had drained banked neutrons for a long time
-/// (fusion-neutronics/core#20). This is the coupled twin of
+/// though the neutron-only paths drain banked neutrons. This is the coupled twin of
 /// [`drain_banked_neutrons`]: generation by generation it pulls the neutron
 /// records out of the bank, relaunches them through the coupled kernel under
 /// their originating source indices so their tallies fold into the right
@@ -3231,7 +3219,7 @@ fn drain_banked_neutrons_coupled(
 
 /// Unpack a per-source accumulator launch result (`src_acc`, fixed-point,
 /// `chunk_sources * total_out_len` row-major) to physical units and ADD into the
-/// host-side per-`(source, flat_bin)` running total (issue #233 Stage 2). Folds
+/// host-side per-`(source, flat_bin)` running total. Folds
 /// each generation launch's contribution into the source it descends from.
 fn accumulate_src_acc(
     src_acc: &[u64],
@@ -3251,10 +3239,10 @@ fn accumulate_src_acc(
     }
 }
 
-/// Pick the per-source variance mode for a launch: the DIRECT variant (issue
-/// #234) when the pass carries a mesh tally so the kernel fans each voxel
-/// crossing straight into `src_acc`, else the touched-list `PerSource`. Both
-/// share the same `src_acc` row layout, so callers fold identically.
+/// Pick the per-source variance mode for a launch: the DIRECT variant when the
+/// pass carries a mesh tally so the kernel fans each voxel crossing straight
+/// into `src_acc`, else the touched-list `PerSource`. Both share the same
+/// `src_acc` row layout, so callers fold identically.
 fn per_source_variance(
     has_mesh: bool,
     chunk_sources: u32,
@@ -3384,19 +3372,19 @@ pub(super) fn run_on_gpu_photon(
         println!("GPU: {}", ctx.adapter_info());
     }
 
-    // Batch-free per-history variance (issue #233 Stage 3): each source photon IS
-    // a history (its cascade is in-thread), so this is the Stage 1 mechanism on
-    // the photon kernel. Fixed total-independent chunk; per-history sum + sum_sq;
+    // Batch-free per-history variance: each source photon IS a history (its
+    // cascade is in-thread), so this is the non-fissile neutron per-history
+    // mechanism on the photon kernel. Fixed total-independent chunk; per-history sum + sum_sq;
     // finalize into WelfordTallyStats with N = source-photon count.
     let total_out_len = pack.total_out_len() as usize;
-    // Watchdog-clamped memory bound (issue #233 Stage 4), same as the non-fissile
+    // Watchdog-clamped memory bound, same as the non-fissile
     // neutron path. `per_history_spill_cap` is recomputed identically in the
     // photon kernel host for the actual spill allocation + indexing.
     let mem_safe_max =
         spill_bounded_mem_safe_max(total_out_len, max_steps, pack.n_tallies() as usize);
     let chunk = launch_chunk_size(mem_safe_max);
-    // A model carrying a mesh tally routes through the per-source direct path
-    // (issue #234), exactly like the neutron host: the kernel fans each voxel
+    // A model carrying a mesh tally routes through the per-source direct path,
+    // exactly like the neutron host: the kernel fans each voxel
     // crossing straight into `src_acc` (no touched-list) and the host folds each
     // source photon's per-bin grand total as one variance sample. `flat_scales`
     // unpacks the fixed-point `src_acc` back to physical units.
@@ -3421,14 +3409,13 @@ pub(super) fn run_on_gpu_photon(
 
     // Launch chunks until the source-photon cap is exhausted or `max_runtime`
     // elapses (checked between launches).
-    // Lost-particle bookkeeping across this run's launches (issue #289).
+    // Lost-particle bookkeeping across this run's launches.
     let mut lost = LostTracker::default();
-    // Partition the launch chunks across MPI ranks (issue #303): before this the
-    // GPU path had no MPI awareness, so every rank transported the full
-    // `total_particles` and rank 0 reported its own result -- n x the work, and
-    // slower than serial because the ranks contend for one device.
-    // Per-history aggregate moments per tally for the convergence targets
-    // (fusion-neutronics/core#29).
+    // Partition the launch chunks across MPI ranks: without this every rank
+    // would transport the full `total_particles` and rank 0 would report its
+    // own result -- n x the work, and slower than serial because the ranks
+    // contend for one device.
+    // Per-history aggregate moments per tally for the convergence targets.
     let mut agg = AggFold::new(&validated);
     let mpi_ctx = crate::mpi_context::MpiContext::init();
     let mut sched = LaunchLoop::new_for_rank(
@@ -3617,7 +3604,7 @@ fn run_on_gpu_coupled(
     let (neutron_only, photon_only, dual) = classify_coupled_tallies(&model.tallies)?;
     // Boundaries into the PACK, which `validate_tallies` builds one entry per
     // (tally, score) -- so where the pass's own tallies end and the appended
-    // dual ones begin is a score count, not a tally count (issue #271).
+    // dual ones begin is a score count, not a tally count.
     let n_neutron_only: usize = neutron_only.iter().map(|t| t.scores.len()).sum();
     let n_photon_only: usize = photon_only.iter().map(|t| t.scores.len()).sum();
     let neutron_pass: Vec<Arc<Tally>> = neutron_only.iter().chain(dual.iter()).cloned().collect();
@@ -3749,7 +3736,7 @@ fn run_on_gpu_coupled(
         println!("GPU (coupled n->photon): {}", ctx.adapter_info());
     }
 
-    // Batch-free per-SOURCE variance (issue #233 Stage 3). A source neutron's
+    // Batch-free per-SOURCE variance. A source neutron's
     // per-history total spans the neutron launch AND the photon sub-pass that
     // drains its banked secondary/decay photons, so both scatter into the same
     // source-neutron row of a per-source accumulator (keyed by the source index
@@ -3798,14 +3785,14 @@ fn run_on_gpu_coupled(
         .collect();
     let flat_scales_n = flat_bin_scales(&pack_n);
     let flat_scales_p = flat_bin_scales(&pack_p);
-    // Issue #234: a pass carrying a mesh tally routes to the per-source DIRECT
+    // A pass carrying a mesh tally routes to the per-source DIRECT
     // mode (the kernel fans each voxel crossing straight into `src_acc`, no
     // touched-list). `PerSource` and `PerSourceDirect` share the same `src_acc`
     // row layout, so the per-source fold below is identical either way.
     let has_mesh_n = pack_n.mesh_kind.iter().any(|&k| k != MESH_NONE);
     let has_mesh_p = pack_p.mesh_kind.iter().any(|&k| k != MESH_NONE);
-    // Per-source aggregate moments for the convergence targets
-    // (fusion-neutronics/core#29), one fold per tally slice: neutron-only,
+    // Per-source aggregate moments for the convergence targets, one fold per
+    // tally slice: neutron-only,
     // photon-only, and the dual (all-particle) tallies whose sample is the sum
     // of a source's neutron and photon passes.
     let mut agg_n = AggFold::new(&validated_n[..n_neutron_only]);
@@ -3824,12 +3811,12 @@ fn run_on_gpu_coupled(
     // One chunk = a coupled neutron launch plus the full secondary/decay photon
     // drain for those source neutrons. `max_runtime` is checked only at this
     // outer boundary (never mid-drain), so each source row folds completely.
-    // Lost-particle bookkeeping across this run's launches (issue #289).
+    // Lost-particle bookkeeping across this run's launches.
     let mut lost = LostTracker::default();
-    // Partition the launch chunks across MPI ranks (issue #303): before this the
-    // GPU path had no MPI awareness, so every rank transported the full
-    // `total_particles` and rank 0 reported its own result -- n x the work, and
-    // slower than serial because the ranks contend for one device.
+    // Partition the launch chunks across MPI ranks: without this every rank
+    // would transport the full `total_particles` and rank 0 would report its
+    // own result -- n x the work, and slower than serial because the ranks
+    // contend for one device.
     let mpi_ctx = crate::mpi_context::MpiContext::init();
     let mut sched = LaunchLoop::new_for_rank(
         settings,
@@ -3857,7 +3844,7 @@ fn run_on_gpu_coupled(
         // Neutron launch (per-source): scores neutron_pass tallies into src_acc,
         // banks secondary/decay photons stamped with the source neutron index.
         // A mesh in the neutron pass switches it to the direct variant so the
-        // kernel scores the voxel dimension (issue #234).
+        // kernel scores the voxel dimension.
         let variance_n = per_source_variance(
             has_mesh_n,
             chunk_sources as u32,
@@ -3893,8 +3880,7 @@ fn run_on_gpu_coupled(
 
         // Any (n,xn) secondary that spilled to the bank is a real neutron the
         // photon sub-pass below would skip. Finish it first, under its own
-        // source's sample, and collect the photons it emits into the same bank
-        // (fusion-neutronics/core#20).
+        // source's sample, and collect the photons it emits into the same bank.
         let (chunk_spilled, chunk_relaunched, bank) = drain_banked_neutrons_coupled(
             &ctx,
             model,
@@ -4106,7 +4092,7 @@ fn run_on_gpu_coupled(
     })
 }
 
-/// Mixed neutron+photon PRIMARY source (issue #58, E13b). macOS has no f64 GPU
+/// Mixed neutron+photon PRIMARY source. macOS has no f64 GPU
 /// path, so this mirrors the other dispatch entries by returning the same error
 /// `GpuContext::new()` would.
 #[cfg(target_os = "macos")]
@@ -4121,7 +4107,7 @@ fn run_on_gpu_mixed(
 }
 
 /// Transport a model whose source list mixes neutron-emitting and
-/// photon-emitting sources (issue #58, E13b).
+/// photon-emitting sources.
 ///
 /// On the CPU each history is one source particle, drawn from the source list
 /// in proportion to source strength (`Model::sample_source`), then transported
@@ -4130,7 +4116,7 @@ fn run_on_gpu_mixed(
 /// `nb` source particles in a batch, `n_per_batch_n = nb * S_n/(S_n+S_p)` are
 /// drawn from the neutron sources and transported by the neutron kernel, and
 /// the remaining `n_per_batch_p` from the photon sources by the photon kernel.
-/// Both per-type counts are <= `nb` <= the #93 watchdog cap, so neither
+/// Both per-type counts are <= `nb` <= the driver-watchdog cap, so neither
 /// dispatch over-runs.
 ///
 /// Normalisation is the key: each batch is one realisation of `batch_total =
@@ -4196,7 +4182,7 @@ fn run_on_gpu_mixed(
     let (neutron_only, photon_only, dual) = classify_coupled_tallies(&model.tallies)?;
     // Boundaries into the PACK, which `validate_tallies` builds one entry per
     // (tally, score) -- so where the pass's own tallies end and the appended
-    // dual ones begin is a score count, not a tally count (issue #271).
+    // dual ones begin is a score count, not a tally count.
     let n_neutron_only: usize = neutron_only.iter().map(|t| t.scores.len()).sum();
     let n_photon_only: usize = photon_only.iter().map(|t| t.scores.len()).sum();
     let neutron_pass: Vec<Arc<Tally>> = neutron_only.iter().chain(dual.iter()).cloned().collect();
@@ -4274,7 +4260,7 @@ fn run_on_gpu_mixed(
         println!("GPU (mixed neutron+photon source): {}", ctx.adapter_info());
     }
 
-    // Batch-free per-SOURCE variance (issue #233 Stage 3). Each source particle
+    // Batch-free per-SOURCE variance. Each source particle
     // (neutron OR photon) is one variance sample in a UNIFIED index space:
     // `[0, chunk_n)` are the chunk's source neutrons, `[chunk_n, chunk_total)` its
     // source photons. Secondary photons from a source neutron inherit that
@@ -4325,13 +4311,13 @@ fn run_on_gpu_mixed(
         .collect();
     let flat_scales_n = flat_bin_scales(&pack_n);
     let flat_scales_p = flat_bin_scales(&pack_p);
-    // Issue #234: a pass carrying a mesh tally routes to the per-source DIRECT
+    // A pass carrying a mesh tally routes to the per-source DIRECT
     // mode so the kernel scores the voxel dimension. Same `src_acc` layout as
     // `PerSource`, so the unified-sample fold below is unchanged.
     let has_mesh_n = pack_n.mesh_kind.iter().any(|&k| k != MESH_NONE);
     let has_mesh_p = pack_p.mesh_kind.iter().any(|&k| k != MESH_NONE);
-    // Per-source aggregate moments for the convergence targets
-    // (fusion-neutronics/core#29), one fold per tally slice: neutron-only,
+    // Per-source aggregate moments for the convergence targets, one fold per
+    // tally slice: neutron-only,
     // photon-only, and the dual (all-particle) tallies whose sample is the sum
     // of a source's neutron and photon passes.
     let mut agg_n = AggFold::new(&validated_n[..n_neutron_only]);
@@ -4350,12 +4336,12 @@ fn run_on_gpu_mixed(
     // shares) plus the secondary-photon drain. `max_runtime` is checked only at
     // this outer boundary (never between the three sub-passes), so each unified
     // source sample's contributions fold completely.
-    // Lost-particle bookkeeping across this run's launches (issue #289).
+    // Lost-particle bookkeeping across this run's launches.
     let mut lost = LostTracker::default();
-    // Partition the launch chunks across MPI ranks (issue #303): before this the
-    // GPU path had no MPI awareness, so every rank transported the full
-    // `total_particles` and rank 0 reported its own result -- n x the work, and
-    // slower than serial because the ranks contend for one device.
+    // Partition the launch chunks across MPI ranks: without this every rank
+    // would transport the full `total_particles` and rank 0 would report its
+    // own result -- n x the work, and slower than serial because the ranks
+    // contend for one device.
     let mpi_ctx = crate::mpi_context::MpiContext::init();
     let mut sched = LaunchLoop::new_for_rank(
         settings,
@@ -4426,7 +4412,7 @@ fn run_on_gpu_mixed(
             n_steps_all.extend(kernel.n_steps);
             final_energies_all.extend(kernel.final_energies);
             // Finish any spilled (n,xn) secondary before the photon-only pass
-            // below, which would skip it (fusion-neutronics/core#20). The
+            // below, which would skip it. The
             // relaunch's photons join the bank that pass drains.
             let (chunk_spilled, chunk_relaunched, bank) = drain_banked_neutrons_coupled(
                 &ctx,
@@ -4760,7 +4746,7 @@ fn classify_coupled_tallies(
             // capture rate does not -- there is no single correct routing, and
             // guessing would silently drop the photon half of the flux or score
             // a neutron MT on the photon pass. Reject with the two ways out
-            // (issue #271). The CPU has no such constraint: it scores each
+            // The CPU has no such constraint: it scores each
             // particle into whichever scores apply as it goes.
             let mut want = t.scores.iter().map(score_needs_photon_pass);
             let first = want.next().unwrap_or(false);
@@ -5086,23 +5072,23 @@ struct KernelOutput {
     n_steps: Vec<u32>,
     final_energies: Vec<f64>,
     tally_outputs: Vec<Vec<f64>>,
-    // Per-tally per-bin sum-of-squares (batch-free per-history variance, issue
-    // #233). Non-empty only for the `PerHistory` (Stage 1) mode; same
+    // Per-tally per-bin sum-of-squares (batch-free per-history variance).
+    // Non-empty only for the `PerHistory` mode; same
     // shape/order as `tally_outputs`. Empty on the per-step / per-source paths.
     tally_sum_sq: Vec<Vec<f64>>,
     // Per-(history, tally entry) total score, `[n_hist x n_entries]`
-    // (fusion-neutronics/core#29). Non-empty only in `PerHistory` mode; the
+    // Non-empty only in `PerHistory` mode; the
     // per-history sample the aggregate moments are folded from.
     hist_tally_total: Vec<f64>,
-    // Per-source accumulator raw fixed-point words (issue #233 Stage 2,
-    // `PerSource` mode): `chunk_sources * total_out_len`, this launch's
-    // per-`(source, flat_bin)` sum. Empty otherwise.
+    // Per-source accumulator raw fixed-point words (`PerSource` mode):
+    // `chunk_sources * total_out_len`, this launch's per-`(source, flat_bin)`
+    // sum. Empty otherwise.
     src_acc: Vec<u64>,
     // Originating source index of each banked fission progeny, by bank slot
-    // (issue #233 Stage 2). Empty otherwise.
+    // Empty otherwise.
     bank_source_idx: Vec<u32>,
     // Device particle bank: coupled secondary photons (`run_on_gpu_coupled`)
-    // and/or fission progeny (#78, the neutron path's generation loop). The
+    // and/or fission progeny (the neutron path's generation loop). The
     // macOS `run_kernel_path` stub `unreachable!()`s before constructing a
     // `KernelOutput`, so these are never written on macOS; they are always
     // declared so the always-compiled `run_on_gpu_with_device` reads them
@@ -5112,12 +5098,12 @@ struct KernelOutput {
     bank_count: u64,
     bank_overflow: u64,
     // (n,xn) secondaries the kernel handed to the bank because a thread's
-    // in-thread pending stack was full (issue #111 phase 2). Distinguished from
+    // in-thread pending stack was full. Distinguished from
     // banked photons / fission progeny by the record's `gen` tag, so a coupled
     // pass can tell "the bank holds only photons" from "the bank holds a
     // neutron I am about to drop".
     n_spilled_secondaries: u64,
-    // Histories that ended in no cell (issue #289). The caller folds this into
+    // Histories that ended in no cell. The caller folds this into
     // its `LostTracker`, which enforces `max_lost_particles`.
     #[cfg(not(target_os = "macos"))]
     lost: yamc_gpu::common::lost_particles::LostParticleResult,
@@ -5140,7 +5126,7 @@ fn run_coupled_kernel_path(
     decay: &yamc_gpu::neutron::transport::DecayPhotonInputs,
     photon_bank_capacity: usize,
     max_steps: u32,
-    // Tally-variance mode (issue #233 Stage 3): `PerSource` runs the neutron
+    // Tally-variance mode: `PerSource` runs the neutron
     // kernel keyed by source neutron and stamps `bank_source_idx` on every banked
     // secondary/decay photon so the photon sub-pass folds into the same sample.
     variance: TallyVarianceMode<'_>,
@@ -5175,8 +5161,8 @@ fn run_kernel_path(
     fission_bank: &yamc_gpu::neutron::fission_bank_inputs::FissionBankInputs,
     fission_bank_capacity: usize,
     max_steps: u32,
-    // Tally-variance mode (issue #233): `PerHistory` (non-fissile Stage 1),
-    // `PerSource` (fissile Stage 2), or `PerStep`.
+    // Tally-variance mode: `PerHistory` (non-fissile), `PerSource`
+    // (fissile), or `PerStep`.
     variance: TallyVarianceMode<'_>,
 ) -> Result<KernelOutput, GpuDispatchError> {
     use yamc_gpu::neutron::transport::{CoupledPhotonInputs, DecayPhotonInputs};
@@ -5226,7 +5212,7 @@ fn run_kernel_path_impl(
     fission_bank: &yamc_gpu::neutron::fission_bank_inputs::FissionBankInputs,
     photon_bank_capacity: usize,
     max_steps: u32,
-    // Tally-variance mode (issue #233): forwarded to the kernel host, which
+    // Tally-variance mode: forwarded to the kernel host, which
     // accumulates per-history sum/sum_sq (PerHistory) or the per-source
     // accumulator (PerSource), or the per-step path (PerStep).
     variance: TallyVarianceMode<'_>,
@@ -5376,11 +5362,11 @@ fn run_kernel_path_impl(
         // transport byte-identical; the D1S path passes `from_materials(..)`
         // (gate 1). Mutually exclusive with `coupled`.
         decay,
-        // Per-collision nuclide selection (issue #74): per-(material, nuclide)
+        // Per-collision nuclide selection: per-(material, nuclide)
         // macroscopic totals + AWRs so multi-nuclide materials pick the struck
         // nuclide and use its exact elastic AWR (single-nuclide = no-op).
         &inputs.nuclide_select,
-        // Device fission bank (#78). `off()` keeps the legacy `weight *= nu_bar`
+        // Device fission bank. `off()` keeps the legacy `weight *= nu_bar`
         // + cap terminator (byte-identical); the fission-bank path passes
         // `on()` to branch the fission chain into the device bank.
         fission_bank,
@@ -5666,7 +5652,8 @@ mod tests {
     #[test]
     fn validate_accepts_absorption_score() {
         // Absorption routes through SCORE_PER_MT(27) (tabulated MT 27),
-        // NOT the derived SCORE_ABSORPTION fast path -- see #415.
+        // NOT the derived SCORE_ABSORPTION fast path, which diverges from the
+        // CPU through catastrophic cancellation.
         let t = tally_with_score(vec![1], "absorption".parse().unwrap());
         let v = validate_tallies(std::slice::from_ref(&t), ParticleType::Neutron).unwrap();
         assert_eq!(v[0].score_kind, SCORE_PER_MT);
@@ -5787,8 +5774,7 @@ mod tests {
 
     #[test]
     fn validate_accepts_per_mt_reaction_rate() {
-        // ReactionRate(elastic) used to reject pre-#4; now it routes
-        // to SCORE_PER_MT and validates clean.
+        // ReactionRate(elastic) routes to SCORE_PER_MT and validates clean.
         let t = tally_with_score(vec![1], "elastic".parse().unwrap());
         let v = validate_tallies(std::slice::from_ref(&t), ParticleType::Neutron).unwrap();
         assert_eq!(v.len(), 1);
@@ -5825,7 +5811,7 @@ mod tests {
         ));
     }
 
-    // ---- MaterialFilter on the GPU (issue #271) -------------------------
+    // ---- MaterialFilter on the GPU -------------------------------------
     //
     // A cell's material is fixed for the run, so the material bin is folded
     // into the kernel's single spatial dimension alongside the cell bin as
@@ -6014,7 +6000,7 @@ mod tests {
         }
     }
 
-    // ---- EnergyFunctionFilter on the GPU (issue #271) -------------------
+    // ---- EnergyFunctionFilter on the GPU -------------------------------
     //
     // The filter is a multiplicative weight plus an out-of-range gate, not a
     // bin dimension, so it changes the packed table and nothing about the
@@ -6317,7 +6303,7 @@ mod tests {
         assert_eq!(v.len(), 3);
         assert_eq!(v[0].score_kind, SCORE_FLUX);
         assert_eq!(v[1].score_kind, SCORE_TOTAL);
-        // absorption now routes through SCORE_PER_MT(27) -- see #415.
+        // absorption routes through SCORE_PER_MT(27) (tabulated MT 27).
         assert_eq!(v[2].score_kind, SCORE_PER_MT);
     }
 

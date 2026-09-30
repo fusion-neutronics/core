@@ -1,6 +1,6 @@
-//! Issue #237: batch-free per-history GPU variance throughput vs tally size.
+//! Batch-free per-history GPU variance throughput vs tally size.
 //!
-//! The batch-free path (#233) accumulates a history's per-bin totals in a
+//! The batch-free path accumulates a history's per-bin totals in a
 //! `PERHIST_K = 32` register touched-list, spilling the rest to a per-history
 //! global list, and is far slower on a large tally than on a moderate one. The
 //! issue attributed that to the per-step linear scan of the spill list. It is

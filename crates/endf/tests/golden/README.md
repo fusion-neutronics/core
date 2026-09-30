@@ -107,7 +107,7 @@ starts covering one, and when a new parser arrives without coverage.
 and U235, a Case C unresolved region from U235, and a synthetic multi-level
 Breit-Wigner section, but Adler-Adler, R-matrix limited (LRF=7) and unresolved
 Cases A and B are still untested. Cases A and B are additionally unreachable
-through the current dispatch; see issue #15.
+through the current dispatch, which tests LRF where the format uses LRU.
 
 The distribution shapes are tracked the same way, in `DISTRIBUTION_SHAPES`:
 every angular, energy and joint angle-energy shape the dumpers can write has to
@@ -136,8 +136,8 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 | `n-054_Xe_136_trimmed` | MF1, MF3 |
 | `n-003_Li_006_trimmed` | MF6 LAW=2 and LAW=4, MF12, MF14, MF33 |
 | `n-026_Fe_056_trimmed` | MF2 Reich-Moore, MF6 LAW=1, MF12/14, MF33 |
-| `n_2825_28-Ni-58_trimmed.fendl32d` | MF33 LB=0, 1, 4 and 5 from FENDL-3.2d: LB=1 tables with odd and even NP, and the only LB=4 block on any tape (shimwell/endf-python#25) |
-| `n-024_Cr_052_trimmed.endfb81` | MF33 LB=0, 1 and 8 from ENDF/B-VIII.1: the (n,p) tables whose upper half the old LB=0 to 4 split dropped (shimwell/endf-python#25) |
+| `n_2825_28-Ni-58_trimmed.fendl32d` | MF33 LB=0, 1, 4 and 5 from FENDL-3.2d: LB=1 tables with odd and even NP, and the only LB=4 block on any tape |
+| `n-024_Cr_052_trimmed.endfb81` | MF33 LB=0, 1 and 8 from ENDF/B-VIII.1: the (n,p) tables whose upper half a split at NT - NP rather than 2*(NP - LT) drops |
 | `n-092_U_235_trimmed` | MF2 Reich-Moore + Case C URR, MF5 LF=5, MF8, MF10, MF15, MF34, delayed neutron groups |
 | `photoat-001_H_000` | MF23, MF27 |
 | `atom-001_H_000` | MF28 |
@@ -161,12 +161,13 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 
 - **MF2 formalisms beyond Reich-Moore and Breit-Wigner**: R-matrix limited
   (LRF=7), and unresolved Cases A and B. Note that Cases A and B cannot be
-  reached at all through the current dispatch (see issue #15) so a fixture
-  alone will not cover them.
+  reached at all through the current dispatch (it tests LRF where the format
+  uses LRU) so a fixture alone will not cover them.
 - **Adler-Adler (LRF=4)**, which both readers reject rather than parse. A
   fixture would only pin that rejection.
-- **ACE law 5**, which the Python reader cannot read at all (see issue #19),
-  so there is nothing to compare against. Every other ACE law is covered.
+- **ACE law 5**, which the Python reader cannot read at all (it has no ACE
+  reader for the general evaporation spectrum), so there is nothing to compare
+  against. Every other ACE law is covered.
 - **A second ACE table of the same nuclide at another temperature**, which is
   what `add_temperature_from_ace` exists for. Only the "already present" path
   is exercised.

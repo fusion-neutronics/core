@@ -1,4 +1,4 @@
-//! Issue #369: read the `fission_photon.arrow` section the converter writes and
+//! Read the `fission_photon.arrow` section the converter writes and
 //! reproduce OpenMC's delayed-photon scaling exactly.
 //!
 //! This is a CROSS-REPO integration test. The fixtures are real files produced by
@@ -69,7 +69,7 @@ fn u235_tabulated_prompt_matches_openmc() {
     assert!(
         matches!(release.prompt, ReleaseFunction::LinLinTable { .. }),
         "U235's prompt photon release is tabulated in ENDF/B-VIII.1; reading it as a \
-         polynomial is the #369 hazard"
+         polynomial would bias fission photon production"
     );
     assert!(
         matches!(release.delayed, ReleaseFunction::Polynomial(_)),

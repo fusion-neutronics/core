@@ -114,13 +114,13 @@ struct EmptyBuffers {
 fn empty_inelastic_and_angle(n_materials: usize, n_grid: usize) -> EmptyBuffers {
     EmptyBuffers {
         xs_i_per_mat: vec![0.0_f64; n_materials * n_grid],
-        // Sparse per-MT storage (issue #212): no inelastic data => empty value
+        // Sparse per-MT storage: no inelastic data => empty value
         // buffers and all-zero (n_stored == 0) `permt_meta` rows.
         xs_i_per_mt_sparse: Vec::new(),
         permt_meta: vec![0u32; n_materials * MT_INELASTIC_COUNT * PERMT_META_COLS as usize],
         q_per_mt: vec![0.0_f64; n_materials * MT_INELASTIC_COUNT],
         yield_per_mt_sparse: Vec::new(),
-        // Tight CSR (issue #104): no inelastic distributions -> zero ae-rows /
+        // Tight CSR: no inelastic distributions -> zero ae-rows /
         // points, so the per-(material,MT) count arrays carry length and every
         // per-row / per-point data array is empty.
         angle_n_energies: vec![0u32; n_materials * MT_INELASTIC_COUNT],
@@ -148,10 +148,10 @@ fn empty_inelastic_and_angle(n_materials: usize, n_grid: usize) -> EmptyBuffers 
     }
 }
 
-/// Build a `coarse_meta` (issue #212) for the single-nuclide, single-shared-
+/// Build a `coarse_meta` for the single-nuclide, single-shared-
 /// coarse-grid bench layout: every material uses the same coarse grid at base 0,
 /// with one slab each, so the first-slab base into `permt_meta` ROWS is
-/// `m * MT_INELASTIC_COUNT` (the sparse per-MT storage, issue #212).
+/// `m * MT_INELASTIC_COUNT` (the sparse per-MT storage).
 fn single_nuclide_coarse_meta(target_mass: &[f64], coarse_len: usize) -> Vec<u32> {
     let mut meta = Vec::with_capacity(target_mass.len() * 3);
     for m in 0..target_mass.len() {
@@ -162,7 +162,7 @@ fn single_nuclide_coarse_meta(target_mass: &[f64], coarse_len: usize) -> Vec<u32
     meta
 }
 
-/// Build a `fine_log_energy_grid` (issue #212) for the single-nuclide,
+/// Build a `fine_log_energy_grid` for the single-nuclide,
 /// shared-grid bench layout: `log_grid` repeated `n_mat` times, so material
 /// `m`'s aggregate-XS row starts at `m * log_grid.len()`.
 fn single_nuclide_fine_grid(log_grid: &[f64], n_mat: usize) -> Vec<f64> {
@@ -173,7 +173,7 @@ fn single_nuclide_fine_grid(log_grid: &[f64], n_mat: usize) -> Vec<f64> {
     g
 }
 
-/// Build a `fine_meta` (issue #212) matching [`single_nuclide_fine_grid`]:
+/// Build a `fine_meta` matching [`single_nuclide_fine_grid`]:
 /// material `m` has grid/aggregate-XS base `m * n_grid`, fine length `n_grid`,
 /// and nuc first-slab base `m * n_grid` (one nuclide per material).
 fn single_nuclide_fine_meta(target_mass: &[f64], n_grid: usize) -> Vec<u32> {
@@ -496,14 +496,14 @@ fn bench_one(c: &mut Criterion, name: &str, w: &Workload) {
     let mt = yamc_gpu::neutron::xs::MT_INELASTIC_COUNT;
     let urr_meta_cols = yamc_gpu::neutron::xs::URR_META_COLS;
 
-    // Tight CSR (issue #104): the fake material carries no per-MT or elastic
+    // Tight CSR: the fake material carries no per-MT or elastic
     // distributions, so every per-ae-row / per-point data array is empty; only
     // the per-(material,MT) count / CSR-offset arrays keep their fixed length.
     let angle_pdf: Vec<f64> = Vec::new();
-    // Two chi rows per material (issue #364): prompt then delayed.
+    // Two chi rows per material: prompt then delayed.
     let fission_eout_kind = vec![0u32; 2 * n_mat];
     let fission_eout_n_e = vec![0u32; 2 * n_mat];
-    // Tight CSR (issue #104): no fission -> zero ae-rows, zero points, so the
+    // Tight CSR: no fission -> zero ae-rows, zero points, so the
     // data arrays are empty and the per-chi-row ae-offset is all zero.
     let fission_eout_ae_offset = vec![0u32; 2 * n_mat];
     let fission_eout_eg: Vec<f64> = Vec::new();
@@ -556,7 +556,7 @@ fn bench_one(c: &mut Criterion, name: &str, w: &Workload) {
     let watt_b: Vec<f64> = Vec::new();
     let watt_u = vec![0.0_f64; n_mat * mt];
     let urr_meta = vec![0u32; n_mat * urr_meta_cols];
-    // Tight CSR (issue #104): no URR-bearing nuclide in the fake material, so
+    // Tight CSR: no URR-bearing nuclide in the fake material, so
     // the energy / cdf / xs arrays are empty and the per-material bases zero.
     let urr_ae_offset = vec![0u32; n_mat];
     let urr_cdf_offset = vec![0u32; n_mat];

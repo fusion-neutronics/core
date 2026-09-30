@@ -54,10 +54,10 @@ pub enum ResonanceParameters {
     /// Nothing was read for this range.
     ///
     /// Reached for an unresolved range with LRF=1, which the Python reader
-    /// dispatches past without reading: see
-    /// <https://github.com/shimwell/endf-python/issues/15>. [`Unresolved`]
-    /// below implements those cases already, so correcting the dispatch is a
-    /// one-line change once that is settled upstream.
+    /// dispatches past without reading (it tests LRF where the format uses
+    /// LRU). [`Unresolved`] below implements those cases already, so
+    /// correcting the dispatch is a one-line change once that is settled
+    /// upstream.
     Absent,
 }
 
@@ -591,8 +591,7 @@ pub fn parse_mf2(reader: &mut Reader) -> Result<Mf2> {
                 // only selects the formalism within the range. Both readers
                 // tested LRF here, which skipped Cases A and B (LRU=2 with
                 // LRF=1) and left their records unread, so the next range was
-                // parsed from the middle of this one. Fixed in
-                // <https://github.com/shimwell/endf-python/issues/15>.
+                // parsed from the middle of this one.
                 ResonanceParameters::Unresolved(Box::new(parse_unresolved(
                     reader, iso.lfw, lrf, nro,
                 )?))
@@ -648,8 +647,7 @@ mod tests {
     ///
     /// Both readers used to dispatch on LRF here where the format uses LRU, so
     /// this range matched no branch: its parameters were dropped and its
-    /// records were left on the stream. See
-    /// <https://github.com/shimwell/endf-python/issues/15>.
+    /// records were left on the stream.
     #[test]
     fn an_unresolved_range_with_lrf_1_is_read() {
         // Plain decimals, right-justified in the format's 11-column fields.

@@ -12,7 +12,7 @@ Usage::
     python scripts/fetch_test_fixtures.py --check    # report, download nothing
     python scripts/fetch_test_fixtures.py --force    # re-download everything
 
-Already-cached sections are left alone, so re-running is cheap. See issue #126.
+Already-cached sections are left alone, so re-running is cheap.
 
 A cached fixture whose ``data_version`` no longer matches the origin's is
 fetched again from scratch. The runtime rejects data stamped with a release
@@ -48,7 +48,7 @@ FIXTURE_DIR = REPO_ROOT / "crates" / "yamc" / "tests"
 # NEUTRON_SECTIONS / PHOTON_SECTIONS in crates/yamc-nuclide/src/storage/url_cache.rs.
 #
 # An optional section the origin 404s gets the same zero-byte `.absent` marker
-# the runtime cache writes (issue #389). It is not just about re-asking: the
+# the runtime cache writes. It is not just about re-asking: the
 # loader reads the marker as "this nuclide has no such section", and without it
 # a full-scope read of a fixture cannot distinguish that from a half-downloaded
 # directory and fails.
@@ -59,7 +59,7 @@ NEUTRON_SECTIONS = [
     ("nuclide.arrow", True),
     # Optional only until the libraries are republished at format_version 2:
     # the origin still serves version 1, where the grids are columns of
-    # nuclide.arrow and there is no such object (fusion-neutronics/core#100).
+    # nuclide.arrow and there is no such object.
     # `migrate_to_v2` below builds it locally from what was downloaded, so the
     # fixtures this build reads are version 2 either way. Once the republish
     # lands this becomes required and the migration stops finding anything.
@@ -108,39 +108,32 @@ NUCLIDES = [
     # The only ENDF/B-VIII.1 nuclide with non-redundant partial fission
     # channels (MT 19/20/21/38, each with its own prompt spectrum, while its
     # MT 18 is redundant and carries no neutron product). It covers the
-    # per-channel fission chi of issue #425 and the partial-fission-MT draw of
-    # issue #418. It was the set's only fissionable until Th232 below.
+    # per-channel fission chi and the partial-fission-MT draw.
     "U240",
     # Carries the MT 91 continuum-inelastic correlated angle-energy law that
     # crates/yamc/tests/correlated_flat_reference_parity.rs samples 4M times
     # through both the reference sampler and the flattened path the CPU
-    # transport actually calls. Without it here that test self-skips, which it
-    # has done in CI since it was written (issue #371 is the regression it
-    # exists to catch, and it went unguarded). At about 27 MB it is the largest
+    # transport actually calls, catching any divergence between the two.
+    # Without it here that test self-skips. At about 27 MB it is the largest
     # entry in the set, and it buys the only coverage the correlated sampler
     # has.
     "W184",
-    # The only nuclide any test resolves through `yamc_test_cache::nuclide`
-    # that was not in this list, so
-    # `f19_correlated_sampler_matches_legacy_product`
-    # (crates/yamc-gpu/src/neutron/xs/distributions.rs) has taken its "no F19
-    # cache" skip on every run since it was written. It is the sole regression
-    # guard for the MT 16 multi-applicability collapse that issue #155 was
-    # filed about, so until now that fix has been unpinned. About 5 MB, and it
-    # samples MT 16/22/28/91 two million times through both the legacy product
-    # and the flattened path.
+    # Needed by `f19_correlated_sampler_matches_legacy_product`
+    # (crates/yamc-gpu/src/neutron/xs/distributions.rs), which otherwise takes
+    # its "no F19 cache" skip. It is the sole regression guard for the MT 16
+    # multi-applicability collapse. About 5 MB, and it samples MT 16/22/28/91
+    # two million times through both the legacy product and the flattened path.
     "F19",
     # Th232 is one of only three ENDF/B-VIII.1 fissionables whose prompt
     # fission spectrum is a `CorrelatedAngleEnergy` (ENDF File 6 LAW 1), and
     # `crates/yamc/tests/gpu_th232_correlated_chi.rs` is the guard for the fix
-    # that taught the CPU's `prompt_chi_dist` to flatten that encoding
-    # (issue #34 entry 2). Its non-GPU half has self-skipped on every CI run
-    # since it was written.
+    # that taught the CPU's `prompt_chi_dist` to flatten that encoding. Without
+    # it here the test's non-GPU half self-skips.
     #
     # It is also the second fissionable in the set, which is what
     # `crates/yamc/tests/mixed_fissile_yield_fixture.rs` needs: the per-nuclide
-    # nu_bar / beta rows of issue #93 were only ever checked on a U235 / U238
-    # pair, and those two are 370 MB. Th232 with the U240 already here gives
+    # nu_bar / beta rows would otherwise need a U235 / U238 pair, and those two
+    # are 370 MB. Th232 with the U240 already here gives
     # the same extractor guard for nothing further.
     #
     # 54 MB, the second largest entry. The other actinides stay out: U235
@@ -331,8 +324,7 @@ def migrate_to_v2(dirs) -> int:
 
     The origin still publishes ``format_version: 1``, where the union energy
     grids are two columns of ``nuclide.arrow``; this build reads version 2,
-    where they are their own section, one record batch per temperature
-    (fusion-neutronics/core#100). Rather than block every test on the library
+    where they are their own section, one record batch per temperature. Rather than block every test on the library
     being republished, the downloaded fixture is migrated in place by the
     converter's own ``split_energy``, which copies the grids rather than
     recomputing them.

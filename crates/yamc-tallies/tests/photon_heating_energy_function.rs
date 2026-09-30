@@ -1,5 +1,5 @@
-//! Issues #378 / #382: a collision-estimator photon heating score must apply an
-//! energy function as a WEIGHT, not merely as a gate.
+//! A collision-estimator photon heating score must apply an energy function
+//! as a WEIGHT, not merely as a gate.
 //!
 //! The analog photon-heat arm of `score_collision` used to return the deposited
 //! eV straight through, so an `EnergyFunctionFilter` on such a tally dropped
@@ -87,7 +87,7 @@ fn a_flat_energy_function_scales_the_deposit_exactly() {
         assert!(
             (scored - expected).abs() <= 1.0e-9 * expected.abs(),
             "a flat energy function of {c} must scale the analog photon-heat deposit \
-             by exactly {c}: expected {expected}, scored {scored} (#382)"
+             by exactly {c}: expected {expected}, scored {scored}"
         );
     }
 }
@@ -135,7 +135,7 @@ fn the_deposit_does_not_take_the_flux_factor() {
     assert!(
         (scored - DEPOSIT_EV * 3.0).abs() <= 1.0e-9 * DEPOSIT_EV * 3.0,
         "the analog deposit must be scaled by f(E) alone, with no weight/Sigma_t \
-         factor: expected {}, scored {scored} (#382)",
+         factor: expected {}, scored {scored}",
         DEPOSIT_EV * 3.0
     );
 }

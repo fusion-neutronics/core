@@ -25,7 +25,7 @@ serde_json = "1.0"
 
 [dev-dependencies]
 # Resolves the nuclear-data fixture cache the same way the loader does,
-# rather than through `HOME` alone (issue #544).
+# rather than through `HOME` alone.
 yamc-test-cache = { path = "../yamc-test-cache" }
 lzma-rs = "0.3"
 tempfile = "3"

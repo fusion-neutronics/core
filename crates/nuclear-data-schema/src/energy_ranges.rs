@@ -1,11 +1,9 @@
 //! Byte ranges for the per-temperature batches of `energy.arrow`.
 //!
-//! The energy half of fusion-neutronics/core#100. The union energy grids used
-//! to live in `nuclide.arrow` as one `list<list<f64>>` cell, so a client that
-//! wanted one temperature read every one of them: 6.33 MB on U238, against
-//! 8.98 MB for the entire single-temperature JSON bundle the Arrow layout
-//! replaced. They are their own section now, one record batch per temperature,
-//! and this is what says where each batch is.
+//! The union energy grids are their own section, one record batch per
+//! temperature, so a client that wants one temperature does not read every one
+//! of them (6.33 MB on U238, against 8.98 MB for the entire single-temperature
+//! JSON bundle). This is what says where each batch is.
 //!
 //! The same shape as [`crate::reaction_ranges::ReactionRanges`] with one axis
 //! instead of two, and the same adjacency merge, so a load that wants several

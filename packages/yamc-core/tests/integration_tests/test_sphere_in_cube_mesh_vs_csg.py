@@ -13,7 +13,7 @@ same particle count and the same seed, and score flux in each region. Agreement
 cross-checks the whole mesh tracking path (BVH ray-fire, surface crossing,
 volume handoff, material lookup, tally addressing) against a completely
 independent representation of the same model. It is the same style of
-cross-check that cracked issue #316.
+cross-check that exposed the tet-orientation bug in the element walk.
 
 Faceting, and why the CSG radius is not 5
 -----------------------------------------

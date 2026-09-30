@@ -614,8 +614,7 @@ impl Decay {
     /// not that the nuclide decays instantly, ENDF/B-VIII.0's Xe136 is
     /// flagged unstable with a half-life of zero, its real one being some
     /// 10^21 years. `Chain::from_endf` reads it the same way, and so does the
-    /// Python property since issue #23 was fixed, it used to divide by the
-    /// zero and raise `ZeroDivisionError`.
+    /// Python property.
     pub fn decay_constant(&self) -> Option<WithUncertainty> {
         let (t, sigma) = self.half_life?;
         if t == 0.0 {
@@ -1198,7 +1197,7 @@ mod tests {
     }
 
     /// A half-life of zero means "not evaluated", so there is no decay
-    /// constant and no source rates that scale with one. See issue #23.
+    /// constant and no source rates that scale with one.
     #[test]
     fn the_total_is_the_quadrature_of_the_components_it_reports() {
         // The split and the total must be the same fact, or a consumer that

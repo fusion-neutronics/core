@@ -1,4 +1,4 @@
-"""``transmute(materials, schedules)``: several materials in one call (issue #146).
+"""``transmute(materials, schedules)``: several materials in one call.
 
 The plural call must be a faster route to the answers ``Material.transmute``
 gives, never different answers. So each test compares a material solved in a

@@ -1,4 +1,4 @@
-"""Transport agreement for mesh-filled cells (issue #232).
+"""Transport agreement for mesh-filled cells.
 
 The two-region fixture is an exact axis-aligned unit cube split at x=0.5,
 so a pure-CSG twin of the hybrid model exists: identical materials,
@@ -26,8 +26,8 @@ N_PARTICLES = 1_000_000
 # at the original 40 000 histories the fuel and moderator regions had a 3%
 # relative error apiece, so a 5% bound sat inside their own noise and would
 # fire or not depending on the RNG realisation. The Rust twin of this test
-# (`crates/yamc/tests/hybrid_mesh_fill.rs::hybrid_matches_pure_csg_twin`) has
-# used the z criterion since issue #111 for the same reason.
+# (`crates/yamc/tests/hybrid_mesh_fill.rs::hybrid_matches_pure_csg_twin`) uses
+# the z criterion for the same reason.
 #
 # Measured z: complement 0.77, fuel 0.73, moderator 0.19. Unlike the fixture
 # parity tests in `test_arrow_fixture_parity.py`, the two models here differ

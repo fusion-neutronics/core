@@ -19,7 +19,7 @@
 //!   of each element's `ElementMicroXS.heating`). The kernel scores
 //!   photon `Score::Heating` / `Score::HeatingLocal` tallies (MT 301 /
 //!   901) by interpolating this array linearly, exactly mirroring the
-//!   CPU track-length photon-heating estimate (issue #356).
+//!   CPU track-length photon-heating estimate.
 
 use std::sync::Arc;
 
@@ -66,8 +66,8 @@ pub struct GpuPhotonXs {
     /// and concatenated material-major (the order
     /// `PhotonElementSelectInputs::mat_elem_meta` indexes). Each element gets
     /// its own slab from its `coherent_int_form_factor` (Tabulated1D), so the
-    /// kernel reads the per-collision-SELECTED element's form factor (task
-    /// #72), not a single dominant element's (#79). Zero-padded past
+    /// kernel reads the per-collision-SELECTED element's form factor,
+    /// not a single dominant element's. Zero-padded past
     /// `rayleigh_n_points[slab]`.
     pub rayleigh_x2: Vec<f64>,
     /// Per-element integrated form-factor CDF values -- the `y` axis of
@@ -132,7 +132,7 @@ pub fn extract_photon_material_xs(
     let mut xs_heating = vec![0.0_f64; n_mat * n_grid];
     // Rayleigh form factor and the selection-weight macro-total are now keyed
     // by ELEMENT slab (one slab per element, concatenated material-major), so
-    // the kernel can read the per-collision-selected element (task #72).
+    // the kernel can read the per-collision-selected element.
     let mut rayleigh_x2 = vec![0.0_f64; n_slab * MAX_RAYLEIGH_FF];
     let mut rayleigh_cdf = vec![0.0_f64; n_slab * MAX_RAYLEIGH_FF];
     let mut rayleigh_n_points = vec![0u32; n_slab];
@@ -175,7 +175,7 @@ pub fn extract_photon_material_xs(
                 // photoelectric and pair-production components.
                 heat += density * micro.heating;
                 // Per-element macro total -- the selection weight the kernel
-                // samples the interacting element from (task #72), mirroring
+                // samples the interacting element from, mirroring
                 // CPU `Material::sample_element`'s `atom_density × micro.total`.
                 elem_macro_total[(slab_base + e) * n_grid + i] = elem_total;
             }
@@ -188,7 +188,7 @@ pub fn extract_photon_material_xs(
         }
 
         // Rayleigh form factor: dump EACH element's integrated form factor
-        // `F(x², Z)` onto its own slab (task #72 -- the kernel reads the
+        // `F(x², Z)` onto its own slab (the kernel reads the
         // per-collision-selected element's slab, not a single dominant
         // element's). The kernel samples `x²` by inverse-CDF on (x², F(x²)),
         // so it needs both axes side by side.

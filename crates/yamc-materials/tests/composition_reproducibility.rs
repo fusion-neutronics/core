@@ -1,6 +1,6 @@
 //! The atom densities a material starts from must be bit-reproducible.
 //!
-//! Same defect as issue #502, one layer up. `Material::nuclides` is a
+//! Same defect as the burnup matrix in `matrix.rs`, one layer up. `Material::nuclides` is a
 //! `HashMap`, Rust seeds each instance separately, and
 //! `get_atoms_per_barn_cm` summed the fractions straight out of it. Two
 //! materials built from the same composition therefore normalized by totals
@@ -10,8 +10,8 @@
 //! Measured on the steel `tools/bench_transmute.py` benchmarks: 103 of 200
 //! final densities disagreed at ~1e-15 between one process and the next, with
 //! no Monte Carlo anywhere in the path. That is small, but it is also exactly
-//! the size of the difference issue #576's speed work has to prove it does NOT
-//! make, so it had to stop moving before any of that could be checked.
+//! the size of the difference any transmutation speed work has to prove it
+//! does NOT make, so it has to be pinned down before any of that can be checked.
 //!
 //! Rebuilt rather than compared with itself: the map is constructed per
 //! material, so a fresh one is the only way to get a fresh iteration order.

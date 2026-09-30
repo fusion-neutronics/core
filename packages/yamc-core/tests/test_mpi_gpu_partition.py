@@ -1,4 +1,4 @@
-"""`compute='gpu'` under MPI must partition the run, not duplicate it (#303).
+"""`compute='gpu'` under MPI must partition the run, not duplicate it.
 
 Skipped unless yamc has the `mpi` feature, `mpirun` exists and an f64 GPU is
 present. Before the fix the GPU dispatch had no MPI awareness: every rank

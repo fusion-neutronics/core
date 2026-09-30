@@ -20,7 +20,7 @@ pub mod simulation;
 pub mod tally;
 
 // The transmutation-side bindings live in `yani-python` so the standalone
-// `yani` wheel can ship them without any of the transport stack (issue #381).
+// `yani` wheel can ship them without any of the transport stack.
 // Re-exported under their original paths so the rest of this crate, and any
 // `yamc_python::material::...` user, is unaffected by where they live.
 pub use yani_python::{distribution, element, html_repr, material, particle};

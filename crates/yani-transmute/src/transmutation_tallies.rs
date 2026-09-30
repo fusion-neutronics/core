@@ -3,7 +3,7 @@
 /// Scores σ_nuclide_MT(E) * track_length during transport for each nuclide/reaction
 /// pair in transmutable materials. This gives the exact flux-weighted reaction rate
 /// without any group approximation. The branching overlay is scored the same
-/// way (issue #218): every list on one of the material's own nuclides is
+/// way: every list on one of the material's own nuclides is
 /// scored at the collision energy as [`crate::branching_rule`] defines it, one
 /// channel per state, `p_s(E) * TL` next to the `sigma_MT(E) * TL` of the total
 /// it is a share of. The `(n,n')` partials of every other chain parent, which
@@ -16,7 +16,7 @@
 /// overlay is configured, so the same two moments answer a second question:
 /// what rate would a nuclide this tally does NOT carry have seen? Folding them
 /// against its cross sections with a per-bin maximum bounds that rate without
-/// scoring it, which is what deciding whether to carry it needs (issue #404).
+/// scoring it, which is what deciding whether to carry it needs.
 ///
 /// Rate formula: rate_ij [1/s] = mean(σ_ij · TL) * 1e-24 * source_rate / volume
 use std::collections::HashMap;
@@ -92,8 +92,7 @@ struct ScoredList {
 }
 
 /// A fissionable nuclide of this material whose tabulated fission-yield
-/// energies are folded against the continuous-energy fission-rate distribution
-/// (issue #379).
+/// energies are folded against the continuous-energy fission-rate distribution.
 ///
 /// The linear interpolation hats of the tabulated energies are scored with the
 /// same `sigma_MT(E) * TL` the fission total uses, so the fold sees exactly the
@@ -138,7 +137,7 @@ struct MaterialTransmutationData {
     sum_means: Mutex<Vec<f64>>,
     /// Total source particles accumulated across all CPU chunks -- the single
     /// normalization denominator. The CPU chunk count is statistics-neutral and
-    /// must not affect results (issue #128).
+    /// must not affect results.
     total_particles: AtomicUsize,
     /// Flux accumulator (total track length for this batch, f64 as bits)
     flux_batch_accum: AtomicU64,
@@ -285,8 +284,7 @@ const SPECTRUM_BINS_PER_DECADE: usize = 50;
 /// reaction rates the burnup matrix is built from are still the exact
 /// continuous-energy `sum(sigma(E_i) * TL_i)` accumulated per nuclide and MT.
 /// These bins exist so a driver can ask what rate a nuclide the tally does not
-/// carry WOULD have seen, which is what deciding whether to carry it needs
-/// (issue #404).
+/// carry WOULD have seen, which is what deciding whether to carry it needs.
 fn base_spectrum_grid() -> Vec<f64> {
     const MIN_EV: f64 = 1.0e-5;
     const MAX_EV: f64 = 3.0e7;
@@ -478,13 +476,13 @@ impl TransmutationTallies {
     /// * `materials` - Map of material_id -> &Material (for nuclide data)
     /// * `chain` - Transmutation chain (nuclide name -> ChainNuclide)
     /// * `branch` - Isomeric-branching overlay (empty when not configured);
-    ///   its lists are scored at the collision energy (issue #218), and a list
+    ///   its lists are scored at the collision energy, and a list
     ///   that cannot be read (see `ListRule::new`) is an error
     /// * `carried` - Per material, the nuclides worth scoring. A material with
     ///   no entry scores every nuclide it has cross sections for, which is what
     ///   a driver that has not worked out a product bound wants. A material
     ///   with an entry scores only those, which is where the pruning saves its
-    ///   `n_nuclides x n_MTs x n_segments` (issue #404).
+    ///   `n_nuclides x n_MTs x n_segments`.
     ///
     ///   This is a filter rather than something the driver expresses by
     ///   trimming `Material::nuclide_data`, because that map is transport's as
@@ -580,7 +578,7 @@ impl TransmutationTallies {
                 })
                 .collect();
 
-            // Fission-yield fold channels (issue #379). Only meaningful when
+            // Fission-yield fold channels. Only meaningful when
             // the material actually tracks fission, so the whole apparatus
             // stays empty for the fusion materials that never fission.
             let fy_mt_idx = mt_numbers.iter().position(|&mt| mt == MT_FISSION);
@@ -959,7 +957,7 @@ impl TransmutationTallies {
         // Score flux (total track length)
         atomic_add_f64(&mat_data.flux_batch_accum, track_length);
 
-        // Two-moment flux tally on the branch-curve union grid (issue #218):
+        // Two-moment flux tally on the branch-curve union grid:
         // one binary search and two adds reconstruct sum(sigma(E_i)*TL_i)
         // exactly for every piecewise-linear MF=10 partial at extraction time,
         // however many curves the overlay carries. Below the first edge every
@@ -1000,7 +998,7 @@ impl TransmutationTallies {
                             }
 
                             // Split this segment's fission rate across the
-                            // nuclide's tabulated yield energies (issue #379),
+                            // nuclide's tabulated yield energies,
                             // reusing the cross section already in hand. Two
                             // hats are non-zero at most, so two adds.
                             if Some(mt_idx) == mat_data.fy_mt_idx {
@@ -1025,7 +1023,7 @@ impl TransmutationTallies {
             }
         }
 
-        // The branching lists, at the collision energy (issue #218): each
+        // The branching lists, at the collision energy: each
         // state's production as `crate::branching_rule` defines it, against
         // the same `sigma_MT(E)` the total above was scored with, so a
         // reaction's states and its total see the same flux.
@@ -1107,7 +1105,7 @@ impl TransmutationTallies {
     /// `chunk_particles`, then resets the per-chunk accumulators. Normalization
     /// by the total source-particle count happens once, at extraction time
     /// (`get_reaction_rates` / `get_flux`), so the number of CPU chunks the
-    /// transport was split into does not affect results (issue #128).
+    /// transport was split into does not affect results.
     ///
     /// Must be called single-threaded at chunk boundaries.
     pub fn accumulate_batch(&self, chunk_particles: usize) {
@@ -1275,7 +1273,7 @@ impl TransmutationTallies {
     /// registered, which is the set whose cost the pruning exists to cut. This
     /// answers for any nuclide whose cross sections are loaded, at the price of
     /// a bin maximum in place of an exact fold, so a driver can rate a
-    /// candidate product without first paying to score it (issue #404).
+    /// candidate product without first paying to score it.
     ///
     /// Every rate is an upper bound on what scoring the same flux would give
     /// (see [`fold_bin_maxima`]), so feeding these to
@@ -1397,7 +1395,7 @@ impl TransmutationTallies {
     }
 
     /// Spectrum weights folding each fissionable nuclide's tabulated fission
-    /// yields against the flux this material actually saw (issue #379).
+    /// yields against the flux this material actually saw.
     ///
     /// Entry `k` of a nuclide's vector is the share of its fission rate that
     /// the linear interpolation assigns to tabulated point `k`, normalized to
@@ -1502,8 +1500,7 @@ impl TransmutationTallies {
         }
     }
 
-    /// Sum every rank's accumulators into a global total, on every rank
-    /// (issue #287).
+    /// Sum every rank's accumulators into a global total, on every rank.
     ///
     /// Under MPI each rank transports its own share of the histories, so these
     /// accumulators (`sum_means`, the flux sum, the moment sums and the yield
@@ -1980,8 +1977,8 @@ mod tests {
 
     /// The CPU transport chunk count is statistics-neutral: splitting the same
     /// total `Sum(σ·TL)` over more `accumulate_batch` calls must not change the
-    /// extracted reaction rate or flux (regression for issue #128, where the
-    /// tally divided by the chunk count and came out N_chunks times low).
+    /// extracted reaction rate or flux (guards against dividing by the chunk
+    /// count, which comes out N_chunks times low).
     #[test]
     fn reaction_rate_invariant_to_chunk_count() {
         let total_sigma_tl = 5.0_f64; // b·cm summed over ALL source particles
@@ -2114,7 +2111,7 @@ mod tests {
             (1.4e7, 7.0), // flat tails for everything
         ];
         // Split scoring over two chunks: the moment accumulators must be
-        // chunk-count invariant like every other accumulator (issue #128).
+        // chunk-count invariant like every other accumulator.
         for &(e, tl) in &segments[..5] {
             t.score(7, e, tl, &material);
         }
@@ -2245,7 +2242,7 @@ mod tests {
 
     /// The bin-maximum fold must bound the continuous-energy sum it stands in
     /// for, and must be exact where the curve is flat across the bins the flux
-    /// occupies (issue #404). A rate that could come out LOW is the one failure
+    /// occupies. A rate that could come out LOW is the one failure
     /// this cannot have: it would drop a nuclide the solve goes on to populate.
     #[test]
     fn bin_maxima_bound_the_continuous_energy_fold() {
@@ -2310,7 +2307,7 @@ mod tests {
         assert!(grid.windows(2).all(|w| w[0] < w[1]));
     }
 
-    // ---- Per-history statistics (issue #140, item 1) ----
+    // ---- Per-history statistics ----
 
     /// Deterministic pseudo-random histories: `(energy [eV], track length)`
     /// segments, log-uniform in energy from 1e-3 eV to 20 MeV so they cross

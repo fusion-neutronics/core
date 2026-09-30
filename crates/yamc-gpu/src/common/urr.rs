@@ -6,7 +6,7 @@
 //! independent draw from its own probability table (isotopes' resonance
 //! structures are statistically uncorrelated). The transport kernel draws
 //! ONE base uniform per collision and derives each in-range URR nuclide's
-//! band from it by mixing in the nuclide's `ZA` (issue #204). This is the
+//! band from it by mixing in the nuclide's `ZA`. This is the
 //! GPU twin of that mixer; a host test pins it bit-for-bit against the
 //! canonical CPU implementation, and a GPU validation kernel pins the SPIR-V
 //! lowering against the CPU twin on real hardware.
@@ -115,11 +115,11 @@ pub struct UrrSlabPartials {
 /// This is the kernel's single definition of the perturbation. The material
 /// aggregate that governs the flight, the per-nuclide weights that govern which
 /// nuclide is struck, and the partials that govern the reaction split all call
-/// it with the same `r_base`, so all three ride ONE sampled band (issue #347).
+/// it with the same `r_base`, so all three ride ONE sampled band.
 /// `urr_nuclide_random` is a pure function of `(r_base, ZA)`, so recomputing it
 /// per site cannot drift.
 ///
-/// Tight CSR (issue #104): the URR buffers carry no `MAX_URR_*` padding, so
+/// Tight CSR: the URR buffers carry no `MAX_URR_*` padding, so
 /// every bracket search here is bounded by the slab's own counts. A fixed
 /// comptime bound would read past the slab under `launch_unchecked`.
 #[cube]
@@ -159,7 +159,7 @@ pub fn urr_slab_partials(
             let e_first = urr_energy_grid[eg_off as usize];
             let e_last = urr_energy_grid[(eg_off + n_e - 1u32) as usize];
             if energy > e_first && energy < e_last {
-                // Independent per-nuclide band from the shared base (#204).
+                // Independent per-nuclide band from the shared base.
                 let r_urr = urr_nuclide_random(r_base, za);
 
                 // Energy bracket within this slab's tight grid.
@@ -255,7 +255,7 @@ pub fn urr_slab_partials(
                     out_a = n_dens * urr_micro_g;
                     out_f = n_dens * urr_micro_f;
                 }
-                // Smooth-inelastic exclusion (#105): with inelastic_flag <= 0
+                // Smooth-inelastic exclusion: with inelastic_flag <= 0
                 // the CPU drops inelastic from the URR-window total.
                 if inel_flag == 0u32 {
                     out_i = 0.0;

@@ -2,9 +2,8 @@
 //!
 //! Establishes a stable, statistically-comparable baseline for the
 //! `Model::simulate` inner-loop hot path. The point of this bench is to
-//! catch <5% regressions during Phase 1f -- the inner transport loop is
-//! being progressively factored into helpers (handle_lost_particle,
-//! find_or_lose_cell, …, transport_particle) and a one-shot `cargo run
+//! catch <5% regressions in the inner transport loop (handle_lost_particle,
+//! find_or_lose_cell, …, transport_particle); a one-shot `cargo run
 //! --example tbr` is too noisy to detect small per-step regressions.
 //!
 //! Geometry mirrors `examples/tbr.rs`: a 1-cm Li-Be sphere inside a

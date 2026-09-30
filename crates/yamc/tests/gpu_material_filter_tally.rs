@@ -1,4 +1,4 @@
-//! GPU `MaterialFilter` tally support (issue #271), on-hardware.
+//! GPU `MaterialFilter` tally support, on-hardware.
 //!
 //! A cell's material never changes during a run, so a material bin is a pure
 //! function of the cell index -- exactly like a cell bin. The dispatch

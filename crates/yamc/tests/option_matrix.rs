@@ -21,9 +21,8 @@
 //!   `gpu_neutron_full_score_cross` and `gpu_photon_full_score_cross`, which
 //!   need a real f64 adapter and so self-skip on CI (run them single-threaded
 //!   via `cargo test-gpu`). The GPU "✓" cells score the full neutron / photon
-//!   sets; #388 (GPU returned all-zero tallies) is fixed and closed (#412).
-//!   Two reaction-removal channels still diverge from CPU and are flagged
-//!   against #415: neutron `absorption`, photon `photoelectric`.
+//!   sets. Two reaction-removal channels (neutron `absorption`, photon
+//!   `photoelectric`) are flagged as known divergences from the CPU.
 //!
 //! Particle/physics modes (neutron · primary photon · secondary/coupled
 //! photons · D1S decay photons): the CPU behaviour of the photon, coupled,
@@ -371,7 +370,7 @@ mod gpu_guards {
 
     // NOTE: there is intentionally no `gpu_rejects_survival_biasing` guard.
     // Survival biasing (implicit capture + weight-cutoff Russian roulette) is
-    // now SUPPORTED on the GPU neutron kernel (PR #71/#81); the dispatch
+    // now SUPPORTED on the GPU neutron kernel; the dispatch
     // accepts a `VarianceReduction::SurvivalBiasing` entry rather than
     // rejecting it (see `run_on_gpu_with_device`). The GPU-vs-CPU agreement of
     // the survival-biasing path is covered positively by
@@ -407,7 +406,7 @@ mod gpu_guards {
     /// is not a "decay photons are rejected" check; they are accepted, the decay
     /// data is what is missing here.
     /// IGNORED: this test asks for a state the public API forbids, and then
-    /// two further things go wrong. See #43.
+    /// two further things go wrong.
     ///
     /// It sets `use_decay_photons` ALONE. The Python constructor rejects that
     /// outright ("use_decay_photons=True requires transport_secondary_photons
@@ -433,9 +432,10 @@ mod gpu_guards {
     /// error.
     ///
     /// Ignored rather than deleted or weakened to accept whichever error
-    /// surfaces first. The assertion is the right one; #43 says what it needs.
+    /// surfaces first. The assertion is the right one; it needs a model with
+    /// photon data present, decay data absent and a GPU-bounded CSG.
     #[test]
-    #[ignore = "sets use_decay_photons alone, which the API forbids; see above and #43"]
+    #[ignore = "sets use_decay_photons alone, which the API forbids; see above"]
     fn gpu_decay_photons_require_decay_data() {
         let mut m = neutron_csg_model();
         m.use_decay_photons = true;
@@ -469,7 +469,7 @@ mod gpu_guards {
         eprintln!("mesh GPU rejection: {s}");
     }
 
-    /// A CSG geometry whose cell is filled by a mesh body (issue #232)
+    /// A CSG geometry whose cell is filled by a mesh body
     /// passes the GeometryKind::Mesh rejection (it is the Csg variant),
     /// so it needs its own guard in translate_for_gpu.
     #[cfg(feature = "mesh")]
@@ -543,9 +543,9 @@ mod gpu_guards {
     ///   across launches even at a fixed seed) plus low-statistics noise on the
     ///   smaller channels, while still catching a real regression (zero, 2×).
     ///   EXCEPT the known reaction-removal divergences in `known_divergent`
-    ///   (issue #415: neutron `absorption` ~30–35% high, photon `photoelectric`
-    ///   ~60% low), which get a wide **[0.2, 5.0]** guard (still catches a
-    ///   zero/blow-up) until #415 is fixed and the band can be tightened.
+    ///   (neutron `absorption` ~30–35% high, photon `photoelectric` ~60% low),
+    ///   which get a wide **[0.2, 5.0]** guard (still catches a zero/blow-up)
+    ///   until the divergence is fixed and the band can be tightened.
     fn compare_gpu_cpu(
         label: &str,
         names: &[&str],
@@ -591,7 +591,7 @@ mod gpu_guards {
                     ));
                 }
                 let tag = if divergent {
-                    format!("{r:.3} (#415)")
+                    format!("{r:.3} (known divergent)")
                 } else {
                     format!("{r:.3}")
                 };
@@ -622,8 +622,7 @@ mod gpu_guards {
     /// asserts every score (a) comes back finite and non-negative, and
     /// (b) agrees with the CPU reference within a breadth band wherever the
     /// CPU sees a non-zero channel. This is the guard that the GPU "✓" cells
-    /// actually produce CPU-consistent tallies - the all-zero failure
-    /// (#388) is fixed in #412.
+    /// actually produce CPU-consistent tallies (not all zeros).
     ///
     /// Self-skips when no f64 GPU adapter is present, so a plain `cargo test`
     /// stays green on CI (which has no such adapter). On real hardware it must
@@ -683,8 +682,8 @@ mod gpu_guards {
             .collect();
 
         // Verify the match. Every neutron channel now matches within the
-        // band (absorption was fixed in #415 by routing it through the
-        // tabulated MT-27 score path instead of the derived σ_a).
+        // band (absorption is routed through the tabulated MT-27 score path
+        // instead of the derived σ_a).
         compare_gpu_cpu(
             "CSG / neutron / track-length / analog",
             NEUTRON_SCORES,
@@ -694,7 +693,7 @@ mod gpu_guards {
         );
     }
 
-    /// A non-Surface `tracking_mode` is warned about, NOT rejected (#66).
+    /// A non-Surface `tracking_mode` is warned about, NOT rejected.
     /// The GPU always surface-tracks, but surface tracking and Woodcock /
     /// Hybrid are all unbiased estimators of the same flux, so a
     /// `tracking_mode = Woodcock` neutron model must still dispatch `Ok` and
@@ -725,7 +724,7 @@ mod gpu_guards {
                 ..Default::default()
             },
         )
-        .expect("GPU dispatch with tracking_mode=Woodcock must succeed (warn-not-reject, #66)");
+        .expect("GPU dispatch with tracking_mode=Woodcock must succeed (warn-not-reject)");
         let total: f64 = flux.get_mean().iter().sum();
         assert!(
             total > 0.0,
@@ -746,7 +745,7 @@ mod gpu_guards {
     /// At 1.25 MeV Compton dominates, so flux / coherent / incoherent / pair
     /// (pair is just above the 1.022 MeV threshold, so small but nonzero) all
     /// match the CPU within the agreement band; `photoelectric` is the known
-    /// reaction-removal divergence (issue #415) and gets the wide guard.
+    /// reaction-removal divergence and gets the wide guard.
     #[test]
     fn gpu_photon_full_score_cross() {
         use yamc_tallies::filter::particle_type::ParticleTypeFilter;
@@ -854,8 +853,8 @@ mod gpu_guards {
             .expect("GPU dispatch for the supported CSG/primary-photon/track-length/analog slice");
         let gpu: Vec<f64> = gpu_t.iter().map(|t| t.get_mean().iter().sum()).collect();
 
-        // Every photon channel is enforced: the photoelectric ~0.38x deficit
-        // (#415) was the GPU running with empty TTB tables -- `run_on_gpu`
+        // Every photon channel is enforced: a photoelectric ~0.38x deficit
+        // comes from the GPU running with empty TTB tables, so `run_on_gpu`
         // now self-prepares photon data (TTB / Doppler / relaxation), so the
         // bremsstrahlung photon source matches the CPU and photoelectric
         // sits in-band (~1.1).

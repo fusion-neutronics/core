@@ -491,14 +491,14 @@ fn build_photon_sphere_model_with_score(
     // even on the weakest channel (photoelectric in Fe at 1 MeV),
     // comfortably inside the 10 % parity tolerance below. 10k was
     // enough locally but tripped CI on platforms whose float-ordering
-    // landed in the unlucky tail (#208).
+    // landed in the unlucky tail.
     let mut model = Model::new(geometry, vec![source], vec![Arc::new(tally)]);
     model.transport_secondary_photons = true;
     model
 }
 
 /// Shared run settings for the photon sphere: 200k histories at a fixed seed
-/// (noise floor ~3 %, see #208).
+/// (noise floor ~3 %, see `build_photon_sphere_model_with_score`).
 fn photon_sphere_settings() -> TransportSettings {
     TransportSettings {
         total_particles: Some(200_000),

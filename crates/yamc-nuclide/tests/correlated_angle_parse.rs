@@ -1,5 +1,4 @@
-//! Regression for the correlated angle-energy mu-sub-table offset bug (found
-//! while investigating #104).
+//! Regression for the correlated angle-energy mu-sub-table offset bug.
 //!
 //! `parse_correlated` used to set the LAST mu sub-table of each incident-energy
 //! corrtable to span to the end of the whole concatenated `corr_mu_data` array
@@ -22,7 +21,7 @@ fn correlated_mu_subtables_bounded_and_monotonic() {
         eprintln!("skip: cached U238 not present");
         return;
     }
-    // Presence is not enough. Since #389 a cache directory is routinely
+    // Presence is not enough. A cache directory is routinely
     // populated at activation scope, holding cross sections and none of the
     // distributions this reads, and the directory exists either way.
     let Ok(nd) = read_nuclide_from_arrow(&p, &yamc_nuclide::LoadScope::full()) else {

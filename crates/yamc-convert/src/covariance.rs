@@ -15,7 +15,7 @@
 //! other would lose numbers. Likewise a subsection with `mt1 != mt` is a
 //! cross-reaction block whose transpose is the (`mt1`, `mt`) block rather than
 //! itself, so no symmetry is assumed across rows either. Interpreting any of
-//! that is the reader's job (issue #514).
+//! that is the reader's job.
 //!
 //! One row per covariance block, which is one NC or NI sub-subsection of one
 //! subsection. That granularity IS the sparse form: most (MT, MT1) pairs have

@@ -35,7 +35,7 @@ cargo build -p yani
 
 The test suite reads nuclear data from `crates/yamc/tests/*.arrow`. Those are
 published data, not source, so they are **downloaded once** rather than
-committed (issue #126):
+committed:
 
 ```bash
 python scripts/fetch_test_fixtures.py     # ~530 MB, into ~/.cache/yamc
@@ -53,12 +53,11 @@ Without it the root is `<home>/.cache/yamc`, where home is `USERPROFILE` on
 Windows and `HOME` everywhere else.
 
 The tests find it through `yamc_test_cache` (`crates/yamc-test-cache`) rather
-than resolving it themselves. Thirty-five of them used to read `$HOME` directly
-and fall back to a hardcoded developer path, which on Windows resolved to a
-directory that does not exist: every fixture load returned nothing, every test
-took its "data absent" skip path, and the suite reported green having read
-nothing (issue #544). `YAMC_REQUIRE_FIXTURES=1`, which CI sets after the fetch
-step, turns that absence back into a failure.
+than resolving it themselves, so every test agrees with production on where the
+cache is on every OS. A test whose fixture is missing takes its "data absent"
+skip path, so a wrongly resolved cache would read green having read nothing.
+`YAMC_REQUIRE_FIXTURES=1`, which CI sets after the fetch step, turns that
+absence into a failure.
 
 ```bash
 cargo test --workspace

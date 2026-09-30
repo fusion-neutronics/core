@@ -4,11 +4,10 @@
 //! Python reader was a second implementation of the format, in the converter
 //! package that has since been retired. That is a weaker gate than it looks: a
 //! directory can satisfy every schema and still be refused by the loader that
-//! actually consumes it, and writer and reader sharing a vocabulary is how #379
-//! happened (the transmutation writer spelling MT 18 "fission" while the Rust
+//! actually consumes it, and writer and reader sharing a vocabulary is how a
+//! silent fission loss once happened (the transmutation writer spelling MT 18 "fission" while the Rust
 //! consumer's map held only "(n,fission)", invisible to every Python test).
-//! These bind the real loaders, so the gate is the consumer (issues #443,
-//! #525).
+//! These bind the real loaders, so the gate is the consumer.
 //!
 //! A summary rather than the whole nuclide. The gate asks "does yamc accept
 //! this, and does it hold what it should", and materialising megabytes of

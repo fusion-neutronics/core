@@ -1,5 +1,4 @@
-//! Per-collision element-selection inputs for the photon transport kernel
-//! (task #72).
+//! Per-collision element-selection inputs for the photon transport kernel.
 //!
 //! At a photon collision in a multi-element material the transport must pick
 //! *which* element the photon interacts with, proportional to that element's
@@ -9,10 +8,10 @@
 //! cascade). This mirrors the CPU `Material::sample_element` +
 //! `handle_photon_collision` chain exactly.
 //!
-//! Before #72 the GPU carried only the single dominant element's
-//! form-factor / relaxation tables per material (#79), so a material with two
-//! comparable-Z elements (Pb+W, Pb+Bi, ...) modelled only ONE element's
-//! secondary / fluorescence spectrum. This struct restores true per-collision
+//! Carrying only the single dominant element's form-factor / relaxation
+//! tables per material would mean a material with two comparable-Z elements
+//! (Pb+W, Pb+Bi, ...) modelled only ONE element's secondary / fluorescence
+//! spectrum. This struct gives true per-collision
 //! selection: the form-factor / relaxation / pair packs are stored one slab
 //! per ELEMENT (concatenated material-major) and this table both weights the
 //! selection draw and maps a material to its element slab range.
@@ -32,7 +31,7 @@
 //! When a material has exactly one element (`count == 1`) the kernel and the
 //! CPU twin SKIP the selection draw entirely -- the element is trivially the
 //! only one, so no extra random is consumed and the RNG stream is
-//! byte-identical to the #79 single-dominant-element behaviour. The element
+//! byte-identical to the single-dominant-element behaviour. The element
 //! slab index then equals `offset`, which is that material's only element, so
 //! the form-factor / relaxation lookups are unchanged. Every single-element
 //! material in the verification suite is therefore bit-identical.
@@ -57,7 +56,7 @@ pub struct PhotonElementSelectInputs {
 impl PhotonElementSelectInputs {
     /// Degenerate single-element-per-material layout: one slab row per
     /// material, `count == 1`, so the kernel / CPU twin never draws the
-    /// selection random and stays byte-identical to the #79 single-element
+    /// selection random and stays byte-identical to the single-element
     /// behaviour. The macro-total row is a single `n_grid`-wide block of zeros
     /// (never read when `count == 1`). Used for fixtures / void slots.
     pub fn single_element(n_materials: usize, n_grid: usize) -> Self {

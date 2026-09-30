@@ -2,10 +2,9 @@
 
 yamc's surface-adjacency tracker never re-locates particles in space, so a
 topologically consistent but geometrically wrong surface mesh transports
-cleanly, loses no particles, and produces confident wrong tallies (issue
-#252: a reactor radial build meshed into 2.6k twisted triangles at a 0.1 cm
-tolerance request ran at full speed with the thermal shield flux low by
-2.3x). This gate makes such failures loud at meshing time.
+cleanly, loses no particles, and produces confident wrong tallies (a
+reactor radial build meshed into 2.6k twisted triangles at a 0.1 cm tolerance
+request ran at full speed with the thermal shield flux low by 2.3x). This gate makes such failures loud at meshing time.
 
 Two deterministic checks, both against exact OCC properties:
 

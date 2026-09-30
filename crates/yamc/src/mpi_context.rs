@@ -229,7 +229,7 @@ impl MpiContext {
     /// in lockstep rather than acting on its rank-local view. For `size <= 1`
     /// it returns `local`. Used for the collective `max_runtime` early-stop so
     /// ranks break at the same chunk checkpoint and never desync the post-loop
-    /// gather collectives (#230).
+    /// gather collectives.
     pub fn any_rank_true(&self, local: bool) -> bool {
         let mut flag = [if local { 1.0 } else { 0.0 }];
         self.reduce_sum_f64(&mut flag, 0);

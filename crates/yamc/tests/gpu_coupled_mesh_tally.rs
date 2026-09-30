@@ -1,5 +1,5 @@
-//! GPU rectangular mesh tallies on the COUPLED neutron->photon path (issue
-//! #234), on-hardware parity check.
+//! GPU rectangular mesh tallies on the COUPLED neutron->photon path,
+//! on-hardware parity check.
 //!
 //! A 14 MeV neutron point source in an Fe56 sphere with
 //! `transport_secondary_photons = true`. The coupled dispatch scores a

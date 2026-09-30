@@ -694,7 +694,7 @@ impl PyGeometry {
         // We still generate `presampled` above because PyInteractivePlot::new
         // uses it for PNG rendering.
         //
-        // A mesh-filled cell is the exception (issue #291): the browser sampler
+        // A mesh-filled cell is the exception: the browser sampler
         // cannot resolve a fill body from `geometry_json` (fills serialize as an
         // identity fingerprint), so it would draw the bare CSG frame. Ship the
         // fill-aware raster and let `viewer.js` refuse to re-sample.

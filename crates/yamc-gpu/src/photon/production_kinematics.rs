@@ -77,8 +77,8 @@ pub struct PhotonKin {
 /// (slice S2) and the incident neutron energy `e_in`, sample `(E_out, mu)`.
 /// See the module docs for the exact draw order. `seed` is the incoming PCG-32
 /// state, threaded through every draw; the advanced state is returned so the
-/// caller can keep sampling. The photon-angle rows are read via tight CSR
-/// (issue #104): a product's incident-energy rows start at the global ae-row
+/// caller can keep sampling. The photon-angle rows are read via tight CSR:
+/// a product's incident-energy rows start at the global ae-row
 /// `pa_ae_offset[product]`, and each row's mu points start at
 /// `pa_mu_offset[ae_row]` (no `MAX_PHOTON_ANGLE_*` stride). The continuous-
 /// tabular outgoing points are read via the tight CSR `ct_ae_offset` /
@@ -135,7 +135,7 @@ pub fn sample_photon_kinematics(
         let n_ae = pa_n_energies[p as usize];
         // Find the incident-energy bin (i, r) the same way the CPU
         // `AngleDistribution::sample` does (clamp below/above, else
-        // lower-bound index + linear fraction). Tight CSR (issue #104): this
+        // lower-bound index + linear fraction). Tight CSR: this
         // product's rows start at the global ae-row `pa_ae_offset[p]`.
         let ae_off = pa_ae_offset[p as usize];
         let e_first = pa_energy_grid[ae_off as usize];
@@ -184,7 +184,7 @@ pub fn sample_photon_kinematics(
         // Invert the chosen row's tabulated angle CDF (one draw when
         // n_mu >= 2). Default mu = the row's lower endpoint (the closest
         // analogue of the CPU single-point `Tabulated::sample` return).
-        // Tight CSR (issue #104): the row's mu points start at
+        // Tight CSR: the row's mu points start at
         // `pa_mu_offset[row]`.
         let row = ae_off + bin;
         let mu_off = pa_mu_offset[row as usize];
@@ -221,7 +221,7 @@ pub fn sample_photon_kinematics(
         }
     } else if kind == PHOTON_EOUT_KIND_CONTINUOUS_TABULAR {
         let slot = prod_dist_slot[p as usize];
-        // Tight CSR (issue #104): the slot's incident-energy rows start at the
+        // Tight CSR: the slot's incident-energy rows start at the
         // global ae-row `ct_ae_offset[slot]`; the per-row (x, cdf, p) points are
         // read from the full arrays via `ct_x_offset[eg_off_e + bin]` inside the
         // shared sampler. No fixed per-axis stride.
@@ -230,7 +230,7 @@ pub fn sample_photon_kinematics(
         let hist_outer = ct_hist[slot as usize];
         let es = sample_continuous_tabular_eout(
             // e_default = 0.0: an empty (n_x == 0) row drops the photon instead
-            // of emitting the incident neutron energy (issue #175). The second
+            // of emitting the incident neutron energy. The second
             // arg is the incident energy used for bracketing.
             0.0,
             e_in,
@@ -301,7 +301,7 @@ pub fn sample_photon_kinematics_cpu(
         state = st;
         mu = 2.0 * xi - 1.0;
     } else {
-        // Tight CSR (issue #104): this product's rows start at the global
+        // Tight CSR: this product's rows start at the global
         // ae-row `pa_ae_offset[p]`.
         let ae_off = pa_ae_offset[p as usize];
         let e_first = pa_energy_grid[ae_off as usize];
@@ -333,7 +333,7 @@ pub fn sample_photon_kinematics_cpu(
         let (bin, st) = pick_energy_bracket_cpu(r_ab, i_ab, n_ae, state);
         state = st;
 
-        // Tight CSR (issue #104): the row's mu points start at
+        // Tight CSR: the row's mu points start at
         // `pa_mu_offset[row]`.
         let row = ae_off + bin;
         let mu_off = pa_mu_offset[row as usize];
@@ -371,7 +371,7 @@ pub fn sample_photon_kinematics_cpu(
         let n_eout = ct_n_eout[slot as usize];
         let hist_outer = ct_hist[slot as usize];
         let (e, st) = sample_continuous_tabular_eout_cpu(
-            // e_default = 0.0 (see the kernel twin above; issue #175).
+            // e_default = 0.0 (see the kernel twin above).
             0.0,
             e_in,
             eg_off_e,
@@ -476,7 +476,7 @@ fn photon_kinematics_kernel(
 /// `k`. Returns `(e_out, mu, advanced_state)` per sample. For test/validation
 /// use; the photon-angle rows are read via the tight CSR `pa_ae_offset` /
 /// `pa_mu_offset` and the eout continuous-tabular points via the tight CSR
-/// `ct_ae_offset` / `ct_x_offset` (issue #104).
+/// `ct_ae_offset` / `ct_x_offset`.
 #[allow(clippy::too_many_arguments)]
 pub fn run_photon_kinematics(
     ctx: &GpuContext,
@@ -611,7 +611,7 @@ mod tests {
     // Local synthetic-fixture dimensions for the continuous-tabular photon
     // table. The kernel reads via CSR offsets, so these are just the
     // test's own padded-buffer strides (no dependency on the deleted
-    // deleted per-axis GPU caps, issue #104).
+    // deleted per-axis GPU caps).
     const CT_AE: usize = 128;
     const CT_X: usize = 512;
 
@@ -663,7 +663,7 @@ mod tests {
         let prod_awr = vec![0.0, 55.45, 0.0];
         let prod_dist_slot = vec![PHOTON_DIST_SLOT_NONE, PHOTON_DIST_SLOT_NONE, 0u32];
 
-        // ---- per-product angle buffers (tight CSR, issue #104) ----
+        // ---- per-product angle buffers (tight CSR) ----
         // `pa_n_energies` stays per-product; the per-row arrays
         // (`pa_energy_grid` / `pa_n_mu` / `pa_interp`) are concatenated tight,
         // and the per-point arrays (`pa_mu` / `pa_cdf` / `pa_pdf`) tighter
@@ -799,7 +799,7 @@ mod tests {
             ct_p[off + 3] = ct_p[off + 2];
         }
 
-        // Tight CSR offsets (issue #104) describing this fixture's PADDED
+        // Tight CSR offsets describing this fixture's PADDED
         // layout: each slot owns CT_AE rows, each row CT_X points wide. The
         // sampler reads the same padded data through these offsets, so the
         // values stay byte-identical.
@@ -1115,7 +1115,7 @@ mod tests {
         let log_energy_grid: Vec<f64> = grid.energy.iter().map(|e| e.ln()).collect();
         let pp = extract_photon_production_xs(&[(&nuclide, 1.0)], "294", &log_energy_grid).unwrap();
 
-        // Buffer-shape invariants. Tight CSR (issue #104): one ae-row base per
+        // Buffer-shape invariants. Tight CSR: one ae-row base per
         // product; the per-row arrays are sized to the total ae-rows, and the
         // per-point arrays to the total mu-points.
         assert_eq!(pp.pa_n_energies.len(), pp.n_product);
@@ -1131,7 +1131,7 @@ mod tests {
         assert_eq!(pp.pa_pdf.len(), pa_mu_points);
         assert_eq!(pp.ct_n_eout.len(), pp.n_continuous);
         assert_eq!(pp.ct_hist.len(), pp.n_continuous);
-        // Tight CSR (issue #104): one ae-row base per continuous slot; the
+        // Tight CSR: one ae-row base per continuous slot; the
         // per-row arrays are sized to the total ae-rows, and the per-point
         // arrays to the total x-points.
         assert_eq!(pp.ct_ae_offset.len(), pp.n_continuous);
@@ -1174,7 +1174,7 @@ mod tests {
                     panic!("Fe56 photon product {p} not UncorrelatedAngleEnergy");
                 };
 
-                // ---- angle row parity. Tight CSR (issue #104): this product's
+                // ---- angle row parity. Tight CSR: this product's
                 // rows start at the global ae-row `pa_ae_offset[p]`; each row's
                 // mu points start at `pa_mu_offset[ae]`. Full resolution: every
                 // incident energy and every mu point is kept (no subsampling),
@@ -1235,7 +1235,7 @@ mod tests {
                             "product {p} ct has {n_ae} E_in > CT_AE {CT_AE}"
                         );
                         assert_eq!(pp.ct_n_eout[s], n_ae as u32);
-                        // Tight CSR (issue #104): the slot's rows start at the
+                        // Tight CSR: the slot's rows start at the
                         // global ae-row `ct_ae_offset[s]`; each row's x-points
                         // start at `ct_x_offset[eg]`.
                         let eg_base = pp.ct_ae_offset[s] as usize;

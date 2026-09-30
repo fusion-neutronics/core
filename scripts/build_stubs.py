@@ -11,7 +11,7 @@
    moves them to match the runtime layout (`from yamc._core.data import ...`).
 
 Two packages come out of this repo: `yamc` (transport plus everything) and
-`yani` (transmutation only, issue #381). They share their bindings crate, so
+`yani` (transmutation only). They share their bindings crate, so
 they share this script; PACKAGES below is the only place they differ.
 
 Idempotent: running it twice produces the same tree. CI runs this then
@@ -179,8 +179,8 @@ SUBMOD_HEADER = (
 # pyo3-stub-gen collects every `#[gen_stub_pyclass]` in the crate through
 # `inventory`, with no idea which `add_class` calls a particular `#[pymodule]`
 # actually made, so a stub for the transmutation wheel would otherwise advertise
-# the transport-only surface that `register_classes` deliberately skips for it
-# (issue #452). check_public_surface.py fails on exactly this drift.
+# the transport-only surface that `register_classes` deliberately skips for it.
+# check_public_surface.py fails on exactly this drift.
 OMITTED: dict[str, set[str]] = {
     "yani": {
         "AngleDistribution",
@@ -284,7 +284,7 @@ def omit_members(pkg: Package) -> None:
     signatures that DO belong to this wheel refer to them -- ``Reaction.products``
     returns ``list[ReactionProduct]`` and ``NeutronSource.sample`` returns
     ``Particle`` in both wheels. Those objects are real here; what is not real is
-    the top-level name, since ``register_classes`` never binds it (#452). A
+    the top-level name, since ``register_classes`` never binds it. A
     pyclass is usable without ``add_class``; ``add_class`` only puts the name in
     the module namespace.
     """

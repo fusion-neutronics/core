@@ -3460,7 +3460,7 @@ def cooldown_steps(start: typing.Any, stop: typing.Any, n: builtins.int, spacing
     
     `Cooldown` takes the duration OF THAT STEP, which is the right primitive and
     the wrong thing to type. Anyone plotting a decay curve wants points at
-    cumulative times, and had to difference them by hand (issue #453):
+    cumulative times, and would otherwise have to difference them by hand:
     
     ```text
     HOUR, YEAR = 3600.0, 365.25 * 86400.0

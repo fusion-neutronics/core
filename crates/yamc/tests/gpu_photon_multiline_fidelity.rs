@@ -2,7 +2,7 @@
 //! high-Z material whose photon data carries NO atomic-relaxation
 //! tables (fendl-3.2d Pb).
 //!
-//! Such data (issue #41) has all subshell binding energies = 0, so the
+//! Such data has all subshell binding energies = 0, so the
 //! CPU photoelectric path gives the photoelectron the FULL photon energy
 //! and TTB-radiates the whole bremsstrahlung continuum. The GPU kernel
 //! previously fell back to the Doppler K-shell binding energy (~88 keV

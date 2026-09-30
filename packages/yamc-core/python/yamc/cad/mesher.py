@@ -380,7 +380,7 @@ class CadToYamc:
             if problems:
                 detail = "\n  ".join(problems)
                 raise MeshFidelityError(
-                    "Surface mesh deviates grossly from the CAD (issue #252). "
+                    "Surface mesh deviates grossly from the CAD. "
                     "Transport on such a mesh runs without lost particles but "
                     "produces wrong physics. Problems:\n  " + detail + "\n"
                     "Pass fidelity_check=False to bypass this gate."
@@ -523,7 +523,7 @@ class CadToYamc:
         ]
 
         # Physical-group assignment, tet offsetting, surface-to-volume topology
-        # and the Arrow write all run in the Rust core in one call (issue #246).
+        # and the Arrow write all run in the Rust core in one call.
         _cad_mesh_to_arrow(
             path=str(path),
             vertices=mesh.vertices,
@@ -575,7 +575,7 @@ class CadToYamc:
         mesh = self._surface_mesh
 
         # Per-triangle volume/material labels and tet offsetting run in the
-        # Rust core (issue #246); Python keeps only the h5py write.
+        # Rust core; Python keeps only the h5py write.
         volume_ids, material_ids, all_tets, tet_volume_ids = _cad_mesh_labels(
             mesh.triangle_face_ids,
             list(mesh.solid_faces.items()),

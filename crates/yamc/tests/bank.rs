@@ -103,7 +103,7 @@ mod tests {
         let s2 = bank.walk_seed();
         assert_eq!(p2.energy, 14.0e6);
 
-        // Issue #111: the secondary transports on its OWN identity-derived
+        // The secondary transports on its OWN identity-derived
         // stream, keyed on the banking walk's seed and its ordinal there, not
         // on a continuation of the parent's state.
         assert_eq!(s2, SOURCE_SEED, "source particle keeps its history seed");
@@ -116,7 +116,7 @@ mod tests {
         assert!(bank.is_empty());
     }
 
-    /// Issue #111: a walk numbers ITS OWN secondaries from 0, so the seed a
+    /// A walk numbers ITS OWN secondaries from 0, so the seed a
     /// secondary gets is a function of where it sits in the history's emission
     /// tree and not of when the bank happened to hand it out. Popping resets
     /// the ordinal; two walks that each bank one secondary must therefore get

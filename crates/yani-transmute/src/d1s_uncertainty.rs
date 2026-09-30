@@ -1,4 +1,4 @@
-//! Half-life uncertainty on a D1S shutdown dose rate (issue #140, item 5).
+//! Half-life uncertainty on a D1S shutdown dose rate.
 //!
 //! A D1S tally scores, per emitting radionuclide, the dose its decay photons
 //! give per decay, and the time-correction factor (TCF) turns that into a dose
@@ -7,7 +7,7 @@
 //! chain's per-atom intensity over the decay constant it was stored with), a
 //! property of the decay scheme, so the tally needs no re-transport.
 //!
-//! The rule #140 records, one set of decay constants per replica used
+//! The rule of one set of decay constants per replica used
 //! everywhere, is kept by drawing each replica's half-lives from the same
 //! `(seed, replica, nuclide)` streams a transmutation uses and computing that
 //! replica's TCFs, for every campaign of the schedule, from them. Drawing a

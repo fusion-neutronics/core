@@ -1,4 +1,4 @@
-//! `transmute(materials, schedules)`: several materials in one call (issue #146).
+//! `transmute(materials, schedules)`: several materials in one call.
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;

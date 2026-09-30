@@ -675,7 +675,7 @@ pub fn add_vacuum_boundary(data: &mut ArrowMeshData, offset: f64) {
 /// walk depends on; see [`crate::mesh::topology::validate_tet_orientation`].
 pub fn build_topology(data: ArrowMeshData) -> Result<MeshTopology, MeshError> {
     // Refuse a mesh whose tets are not all positively oriented, before any
-    // work is done on it (issue #316).
+    // work is done on it.
     crate::mesh::topology::validate_tet_orientation(&data.tetrahedra, &data.vertices)?;
 
     // Parse surface_volumes from JSON: [[fwd_vol, rev_vol], ...]
@@ -1286,7 +1286,7 @@ mod tests {
 
     /// A negatively oriented tet is refused, not silently re-wound: the
     /// element walk reads outward face normals off `TET_FACE_VERTICES` and
-    /// would otherwise leave through an entry face (issue #316). Swapping the
+    /// would otherwise leave through an entry face. Swapping the
     /// last two vertices of one tet of a good fixture flips exactly that sign.
     #[test]
     fn test_negative_tet_is_rejected() {
@@ -1308,11 +1308,11 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("tetrahedron 3"), "{msg}");
         assert!(msg.contains("negatively oriented"), "{msg}");
-        assert!(msg.contains("#316"), "{msg}");
+        assert!(msg.contains("regenerate it"), "{msg}");
         assert!(msg.contains("yamm"), "{msg}");
     }
 
-    /// Issue #324: every committed fixture's triangle winding must agree with
+    /// Every committed fixture's triangle winding must agree with
     /// the sense recorded in `yamc.surface_volumes`.
     ///
     /// `box.arrow` shipped with all six faces marked forward while three were

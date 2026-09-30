@@ -1,4 +1,4 @@
-//! Issues #378 / #382: the GPU must weight the analog photon-heat deposit by the
+//! The GPU must weight the analog photon-heat deposit by the
 //! energy function, exactly as the CPU does.
 //!
 //! The analog photon-heat block in `crates/yamc-gpu/src/photon/transport.rs`
@@ -13,7 +13,7 @@
 //! weighted and unweighted runs and the relation is deterministic rather than
 //! statistical -- it holds to the accumulator's precision (~3e-9 relative here,
 //! set by the fixed-point atomic, not to the last bit). That makes this test
-//! immune to the collision-vs-track-length convention difference (#356 / #357)
+//! immune to the collision-vs-track-length convention difference
 //! and to GPU/CPU transport noise.
 //!
 //! Which accumulation path this covers: a tallied model with no mesh selects
@@ -155,8 +155,7 @@ fn gpu_analog_photon_heating_takes_the_energy_function() {
         (weighted - expected).abs() <= 1.0e-6 * expected,
         "a flat energy function of {FLAT} must scale the GPU's analog photon-heat \
          tally by exactly {FLAT}: expected {expected}, got {weighted}. A ratio of 1 \
-         means the kernel is gating on the table without weighting by it, which is \
-         the #378 defect; any other ratio means it is applied the wrong number of \
-         times (#382)"
+         means the kernel is gating on the table without weighting by it; any other \
+         ratio means it is applied the wrong number of times"
     );
 }

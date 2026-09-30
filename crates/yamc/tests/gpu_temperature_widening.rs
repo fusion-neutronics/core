@@ -1,4 +1,4 @@
-//! Issue #481, GPU side: the GPU dispatch skips the CPU's material prep, so it
+//! GPU side of the temperature widening: the GPU dispatch skips the CPU's material prep, so it
 //! never picked up the temperature widening that prep does as a side effect.
 //!
 //! `read_nuclear_data` narrows the load to the material's temperature at the

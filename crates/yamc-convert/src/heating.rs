@@ -72,8 +72,8 @@ fn file3_xs(material: &Material, mt: i32, energies: &[f64]) -> Vec<f64> {
     // 1e-9 separates the two cases cleanly. A rounding difference is an ulp;
     // Pa233's MT 318 starts seven decades above the bottom of the grid. Note
     // the direction of the mistake to avoid: endf-python's own snapping uses
-    // 1e-5 RELATIVE, which is wide enough to swallow real grid points (issue
-    // #24). This has to be tight enough not to.
+    // 1e-5 RELATIVE, which is wide enough to swallow real grid points. This
+    // has to be tight enough not to.
     const SAME_POINT: f64 = 1e-9;
     let below = |e: f64| e < first - first.abs() * SAME_POINT;
     let above = |e: f64| e > last + last.abs() * SAME_POINT;

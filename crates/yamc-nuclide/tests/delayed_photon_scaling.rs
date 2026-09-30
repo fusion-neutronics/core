@@ -1,4 +1,4 @@
-//! Issue #369: the delayed-photon scaling must actually reach the fission photon
+//! The delayed-photon scaling must actually reach the fission photon
 //! production.
 //!
 //! A fission releases photons from the fission products' decay as well as promptly,

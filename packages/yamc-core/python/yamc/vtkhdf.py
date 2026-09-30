@@ -258,7 +258,7 @@ def mesh_tally_to_vtkhdf(
             dx, dy, dz = mesh.width
             vol = np.full(n_mesh_bins, dx * dy * dz)
         else:
-            # One boundary crossing for all element volumes (issue #246).
+            # One boundary crossing for all element volumes.
             vol = np.asarray(tally.mesh_element_volumes())
 
     # --- Build CellData dict ------------------------------------------------

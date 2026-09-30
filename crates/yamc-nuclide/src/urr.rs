@@ -15,8 +15,7 @@ use serde::{Deserialize, Serialize};
 /// isotopes' resonance structures are statistically uncorrelated. A single
 /// shared random across a material's nuclides forces their sampled cross
 /// sections to move together, inflating the variance of the macroscopic
-/// `Sigma_t` and over-transmitting neutrons through multi-isotope materials
-/// (issue #204).
+/// `Sigma_t` and over-transmitting neutrons through multi-isotope materials.
 ///
 /// This mirrors OpenMC's `future_prn(nuclide_index, urr_seed)`: one base seed
 /// per collision (redrawn only when the energy changes, so the band is stable
@@ -205,12 +204,7 @@ impl UrrData {
     /// `k`. That is what OpenMC computes -- `nuclide.cpp` does
     /// `upper_bound_index(cdf, r) + 1`, and its `upper_bound_index` is
     /// `std::upper_bound(..) - first - 1`, so the `+ 1` cancels back to a plain
-    /// upper bound (`search.h`).
-    ///
-    /// The description this replaces claimed a genuine `+1` band offset ("for
-    /// `r < cdf[0]`, use band 1, not band 0"), which is neither what the code
-    /// below does nor what OpenMC does. Verified against both while measuring
-    /// issue #364; the code was right and only the comment was wrong.
+    /// upper bound (`search.h`). There is no genuine `+1` band offset.
     fn find_cdf_index(&self, i_energy: usize, r: f64) -> usize {
         let cdf = &self.cdf_values[i_energy];
 
@@ -449,7 +443,7 @@ mod tests {
 
     /// `urr_nuclide_random` must be a deterministic function of (base, za) in
     /// `[0, 1)`, and produce statistically independent streams for the distinct
-    /// ZAs of a real multi-isotope material (issue #204). Correlated per-nuclide
+    /// ZAs of a real multi-isotope material. Correlated per-nuclide
     /// draws are exactly the bug this decorrelation fixes.
     #[test]
     fn test_urr_nuclide_random_decorrelated_and_deterministic() {

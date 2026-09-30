@@ -240,8 +240,8 @@ mod tests {
     #[test]
     fn cylinder_normalizes_non_unit_axis() {
         // A deliberately non-unit axis must produce the same geometry as the
-        // equivalent unit axis (regression for #395: `v - (v·a)a` only rejects
-        // the axial component correctly when |a| = 1).
+        // equivalent unit axis (`v - (v·a)a` only rejects the axial component
+        // correctly when |a| = 1).
         let unit = Surface::new_cylinder([0.0, 0.0, 1.0], [0.0, 0.0, 0.0], 2.0, None, None);
         let scaled = Surface::new_cylinder([0.0, 0.0, 5.0], [0.0, 0.0, 0.0], 2.0, None, None);
 

@@ -81,7 +81,7 @@ impl Material {
     /// built at 294 K holds only 294 K reactions even though its Arrow files
     /// carry every temperature. `available_temperatures` then advertises a
     /// temperature that `loaded_temperatures` cannot serve, and the request dies
-    /// downstream as a missing MT rather than as a temperature problem (#481).
+    /// downstream as a missing MT rather than as a temperature problem.
     ///
     /// The re-request goes back through `get_or_load_nuclide` with a widened
     /// scope so the global cache's own `covers`/`union` logic does the widening
@@ -137,8 +137,8 @@ impl Material {
                 Some(p) => p,
                 None => {
                     // Skipping quietly would put the request back on the path
-                    // that ends in `No cross section data found for MT n`, the
-                    // original #481 symptom with no mention of temperature.
+                    // that ends in `No cross section data found for MT n`, a
+                    // failure with no mention of temperature.
                     return Err(format!(
                         "nuclide '{name}' offers temperature '{wanted}' but only \
                          has {:?} loaded, and there is no path to load it from: \
@@ -154,7 +154,7 @@ impl Material {
             // Widen the temperature axis and nothing else. `LoadScope::full()`
             // here would union to Full with every MT, re-reading the nine
             // full-grid transport sections for a nuclide that `transmute_material`
-            // deliberately loaded at activation scope (issue #401).
+            // deliberately loaded at activation scope.
             let path_map = HashMap::from([(name.clone(), source)]);
             let widened =
                 get_or_load_nuclide(&name, &path_map, &scope.with_temperatures(Some(temps)))?;
@@ -215,7 +215,7 @@ impl Material {
 
             // Widen the covariance axis and nothing else. `LoadScope::full()`
             // would union to Full with every MT and re-read the transport
-            // sections an activation load deliberately skipped (issue #401).
+            // sections an activation load deliberately skipped.
             let path_map = HashMap::from([(name.clone(), source)]);
             let widened = get_or_load_nuclide(&name, &path_map, &scope.with_covariance(true))?;
             self.nuclide_data.insert(name, widened);
@@ -351,11 +351,9 @@ impl Material {
         // only the MTs the transmutation network names, and transport would go
         // looking for one that is not there.
         //
-        // That was unreachable while `Material::transmute` worked on a private
-        // clone. It stopped being so when the preload started writing back into
-        // the caller's material (issue #576, finding 3): transmute a material
-        // and then put it in a Model, and its composition nuclides are present
-        // but too narrow.
+        // The preload writes back into the caller's material rather than a
+        // private clone: transmute a material and then put it in a Model, and
+        // its composition nuclides are present but too narrow.
         //
         // The test is `mts.is_some()` rather than `has_transport_data`, which
         // also demands `SectionScope::Full`. A trimmed data directory carrying
@@ -432,7 +430,7 @@ impl Material {
     ///
     /// Presence in `nuclide_data` is not the same question. A transmutation
     /// preload puts activation-scope entries there, which carry the network's
-    /// cross sections but none of the transport sections (issue #401).
+    /// cross sections but none of the transport sections.
     ///
     /// Only the section and MT axes are tested. Temperature coverage is left
     /// alone: `LoadScope::full()` names every temperature, so testing that axis
@@ -450,8 +448,7 @@ impl Material {
     /// Presence alone is not enough to skip the load: transmutation preloads
     /// its reachable products at activation scope, which carries the network's
     /// cross sections but none of the transport sections. When such a product
-    /// later grows a density and enters transport, it has to be widened here
-    /// (issue #401).
+    /// later grows a density and enters transport, it has to be widened here.
     /// Returns whether data was actually read, so a caller can skip the
     /// cross-section rebuild that only a real load makes necessary.
     pub fn ensure_nuclide_loaded(

@@ -2,11 +2,10 @@
 //!
 //! The headline invariant is `sum(tets) == cell`: the tets tagged to a volume
 //! must sum to the volume its bounding surface encloses. That alone is a weak
-//! test, though, and issue #316 is why. The `cube.msh` fixture it was traced
-//! to left 8.4 percent of the cube uncovered and double-covered 8.3 percent;
-//! the two nearly cancelled, the total volume looked right, and the mesh was
-//! badly broken. Unstructured track-length tallies read 33 percent low for
-//! months behind that cancellation.
+//! test, though: a mesh can leave 8.4 percent of the cube uncovered and
+//! double-cover 8.3 percent, the two nearly cancelling so the total volume
+//! looks right while the mesh is badly broken (and unstructured track-length
+//! tallies read 33 percent low).
 //!
 //! So the volume identity is checked alongside the topology that has to hold
 //! for it to mean anything:

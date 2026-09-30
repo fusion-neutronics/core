@@ -1,4 +1,4 @@
-//! Half-life uncertainty on D1S time-correction factors (issue #140, item 5).
+//! Half-life uncertainty on D1S time-correction factors.
 //!
 //! A TCF is the emitter's activity over the schedule per unit production. For
 //! Mn56 with a 5% half-life sigma:

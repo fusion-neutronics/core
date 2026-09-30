@@ -11,7 +11,7 @@
 //!
 //! The kernel uses only the validated subset of cubecl-spirv ops:
 //! - Polyfill `ln_f64` for the natural log (cubecl-spirv's own `ln` is
-//!   broken on AMD/RADV, see cubecl#1316).
+//!   broken on AMD/RADV).
 //! - Inline PCG-32 for the random sample.
 //! - u32 binary search with the counter-bounded `while` shape that
 //!   cubecl's macro accepts.

@@ -152,8 +152,8 @@ fn tables_match_header(s: &NiSubsection) -> bool {
 /// exactly those lengths is malformed rather than expanded from whatever it
 /// holds. `lb` 0 to 2 have one table, so `lt` must be 0, and `lb` 3 and 4
 /// have two, so it must not be. A block split at the wrong place arrives
-/// exactly this way: every `lb` 0 to 2 block in a `covariance.arrow`
-/// converted before fusion-neutronics/core#166 was fixed has the upper part
+/// exactly this way: an `lb` 0 to 2 block from a `covariance.arrow` written
+/// by an older converter can have the upper part
 /// of its only table in `el`/`fl`, and folding `ek` alone would drop it
 /// without a word. The `lb` 2 to 4 layouts index `fk` and `fl` by interval
 /// on the strength of this check, so they do not repeat it.

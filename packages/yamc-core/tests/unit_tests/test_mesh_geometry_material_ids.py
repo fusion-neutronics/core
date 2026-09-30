@@ -1,12 +1,11 @@
 """Verify that yamc.MeshGeometry auto-assigns material IDs.
 
-This is the regression net for the bug fixed in PR #42: previously the
-constructor took ``HashMap<String, PyMaterial>`` (cloning), so any
-material ID it assigned lived only on the clone -- the user's Python
-``Material`` object kept a ``None`` ID, and a later call like
-``mesh_geom.bounding_box_for_material(li_mat)`` raised
-``ValueError: Material has no id``. The fix uses ``&Bound<PyDict>``
-to mutate the user's Python objects in place.
+The constructor takes ``&Bound<PyDict>`` and mutates the user's Python
+``Material`` objects in place. Taking ``HashMap<String, PyMaterial>`` would
+clone them, so any material ID it assigned would live only on the clone: the
+user's ``Material`` would keep a ``None`` ID, and a later call like
+``mesh_geom.bounding_box_for_material(li_mat)`` would raise
+``ValueError: Material has no id``.
 
 Lives in ``unit_tests/`` (not ``cad/``) so it runs in CI, which installs no
 cadquery.

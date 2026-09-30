@@ -60,7 +60,7 @@ impl GeometryKind {
     }
 
     /// The geometry's vacuum-tagged surfaces, for the Woodcock flight
-    /// exit check (issue #360). The mesh backend returns an empty slice:
+    /// exit check. The mesh backend returns an empty slice:
     /// its `closest_boundary` / ray-fire path already classifies vacuum
     /// boundaries, and exact mesh flight truncation is future work.
     pub(crate) fn vacuum_surfaces(&self) -> &[std::sync::Arc<crate::geo::Surface>] {
@@ -107,12 +107,11 @@ impl GeometryKind {
 
     // ---- Geometry queries ----------------------------------------------------
 
-    /// Segment-occlusion check for spatial tracking verification
-    /// (issue #254): is a foreign surface strictly inside the current
-    /// cell along the accepted crossing segment? Verification targets
-    /// adjacency-tracked crossings, so it covers the mesh backend and
-    /// the mesh fills of a CSG geometry; ordinary CSG cells (which
-    /// re-locate spatially) always return false.
+    /// Segment-occlusion check for spatial tracking verification: is a
+    /// foreign surface strictly inside the current cell along the accepted
+    /// crossing segment? Verification targets adjacency-tracked crossings,
+    /// so it covers the mesh backend and the mesh fills of a CSG geometry;
+    /// ordinary CSG cells (which re-locate spatially) always return false.
     pub(crate) fn crossing_blocked(
         &self,
         cell_index: usize,
@@ -127,7 +126,7 @@ impl GeometryKind {
         }
     }
 
-    /// True when any cell is filled by a mesh body (issue #232). The GPU
+    /// True when any cell is filled by a mesh body. The GPU
     /// kernel and Woodcock/hybrid delta tracking cannot see mesh fills
     /// and reject such models up front.
     pub fn has_mesh_fills(&self) -> bool {

@@ -1,4 +1,4 @@
-//! Issue #272: a ring/frame-shaped MATERIAL cell must run on the GPU.
+//! A ring/frame-shaped MATERIAL cell must run on the GPU.
 //!
 //! `Region::bounding_box()` used to return a non-finite box for a region built
 //! with a union of opposing half-spaces (a rectangular ring, e.g. the tokamak

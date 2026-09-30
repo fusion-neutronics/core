@@ -184,7 +184,7 @@ impl Sampler {
     pub fn new(covariance: &BTreeMap<String, RateCovariance>) -> Self {
         // One eigendecomposition per nuclide, each reading only its own matrix.
         // The results land in a `BTreeMap` keyed by name, so nothing here can
-        // depend on the order they finish in (issue #576, finding 5c).
+        // depend on the order they finish in.
         let entries: Vec<(&String, &RateCovariance)> = covariance.iter().collect();
         let one = |&(name, cov): &(&String, &RateCovariance)| -> Option<(String, Factor)> {
             let n = cov.n();

@@ -8,9 +8,8 @@
 //! rates. Its rate is its integral, and the law decides the integral: the same
 //! points read as a histogram and as linear-linear give different totals.
 //!
-//! Summing the tabulated values as though they were lines is what both chain
-//! readers did before issue #163, which put a continuum's emission low by a
-//! factor of about its grid spacing in eV (roughly 1e4 for Sm158 on
+//! Summing the tabulated values as though they were lines would put a
+//! continuum's emission low by a factor of about its grid spacing in eV (roughly 1e4 for Sm158 on
 //! ENDF/B-VIII.1, 2e5 for Cf252 on JEFF-4.0). [`Continuum`] reads the density
 //! the way the evaluation defines it: its value anywhere, its integral, and
 //! the energy below which a given share of an interval's integral lies, all in

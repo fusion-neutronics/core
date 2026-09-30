@@ -32,8 +32,8 @@ pub struct UnstructuredMeshFilter {
 // identically while a different mesh or volume differs. Same treatment
 // `yamc::geometry::MeshGeometry` already gives mesh geometry.
 //
-// Erroring here instead used to fail EVERY Python run carrying a tet-mesh
-// tally, after the transport had finished (issue #290).
+// Erroring here instead would fail EVERY Python run carrying a tet-mesh
+// tally, after the transport had finished.
 //
 // `deserialize` still fails loudly: a summary cannot reconstruct a mesh, and no
 // path round-trips a tet-tally model from JSON.
@@ -114,8 +114,7 @@ impl UnstructuredMeshFilter {
     /// Bin (tetrahedron) containing the given position, or `None` when
     /// the point lies outside the mesh volume. The bin index is the
     /// global tetrahedron id -- the same mapping `get_bins_crossed`
-    /// uses -- resolved with yamt's element-BVH point query (issue
-    /// #354).
+    /// uses -- resolved with yamt's element-BVH point query.
     pub fn get_bin(&self, position: [f64; 3]) -> Option<usize> {
         self.mesh
             .find_element(self.volume_id, position)
@@ -227,10 +226,9 @@ mod tests {
         );
     }
 
-    /// Regression for issue #290: a tally carrying this filter must serialize,
-    /// because the model fingerprint (computed on every Python
-    /// `simulate_transport`) serializes the whole model. This used to error and
-    /// took every tet-mesh tally run down with it.
+    /// A tally carrying this filter must serialize, because the model
+    /// fingerprint (computed on every Python `simulate_transport`) serializes
+    /// the whole model. An error here takes every tet-mesh tally run down with it.
     #[test]
     fn serializes_a_stable_identity_summary() {
         let mesh = cube_mesh();

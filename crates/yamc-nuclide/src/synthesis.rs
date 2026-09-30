@@ -242,8 +242,8 @@ mod tests {
 
     /// The sets MT 3 is built from must not overlap.
     ///
-    /// This is the check that would have caught issue #23 the day it was
-    /// written, instead of after it reached published data.
+    /// An overlap double-counts a channel in MT 3, and this catches it before it
+    /// reaches published data.
     #[test]
     fn the_summation_groups_are_disjoint() {
         groups_are_disjoint().expect("the ENDF summation rules partition these channels");

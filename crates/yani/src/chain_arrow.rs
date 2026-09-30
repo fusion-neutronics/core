@@ -322,7 +322,7 @@ impl<'a> BranchStateColumns<'a> {
 /// continuum, its ENDF `interpolation` code.
 ///
 /// The type decides the units, so it is never guessed: a `tabular` row holds
-/// a density per eV, and reading it as lines is issue #163. A continuum with
+/// a density per eV, and reading it as lines is wrong. A continuum with
 /// no code keeps `None`, which is what a file written before the column says.
 fn source_distribution(
     nuclide: &str,
@@ -725,8 +725,8 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
     let sources_path = dir.join("sources.arrow");
     if sources_path.exists() {
         for batch in read_arrow_file(&sources_path)? {
-            // export_chain_arrow wrote this file without a type column before
-            // issue #163, and a row's kind cannot be guessed from its values.
+            // Older export_chain_arrow builds wrote this file without a type
+            // column, and a row's kind cannot be guessed from its values.
             if batch.schema().index_of("type").is_err() {
                 return Err(format!(
                     "{} has no 'type' column: it was written by an export_chain_arrow \
@@ -2537,8 +2537,8 @@ mod tests {
     }
 
     /// A `sources.arrow` row whose type or law the reader cannot place is
-    /// refused, not read as lines: that default is what put every continuum
-    /// low by a factor of about its grid spacing in eV (issue #163).
+    /// refused, not read as lines: that default would put every continuum
+    /// low by a factor of about its grid spacing in eV.
     #[test]
     fn a_source_row_the_reader_cannot_place_is_refused() {
         use arrow_array::builder::{Float64Builder, Int32Builder, ListBuilder, StringBuilder};

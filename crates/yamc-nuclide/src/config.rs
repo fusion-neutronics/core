@@ -209,8 +209,8 @@ impl IntoCrossSectionsInput for HashMap<String, String> {
                 // Validate the path through the active storage backend, not
                 // `std::fs`: a browser host's in-memory files (`InMemoryStorage`)
                 // have no filesystem behind them, and `std::path::Path::exists`
-                // was always false there, so every non-keyword path panicked
-                // (fusion-neutronics/core#99). Keywords bypass; the backend's
+                // is always false there, so every non-keyword path would
+                // panic. Keywords bypass; the backend's
                 // `exists` already covers directories.
                 panic!("Cross section file for '{nuclide}' does not exist at path: {path}");
             }

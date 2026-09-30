@@ -19,7 +19,7 @@ pub struct TetMesh {
     pub tets: Vec<[usize; 4]>,
     pub n_boundary: usize,
     /// Vertices that must be treated as ON THE SURFACE, beyond the leading
-    /// `n_boundary` block. The cut-cell clip (#136) introduces vertices that lie
+    /// `n_boundary` block. The cut-cell clip introduces vertices that lie
     /// exactly on boundary triangles but land in the interior index range, and
     /// without this a swap would happily dismantle a clipped boundary face and
     /// undo the conformity the clip just established - measured: the clip leaves
@@ -148,7 +148,7 @@ impl TetMesh {
 
     /// Append a new live tet, registering it in the vertex→tet adjacency.
     ///
-    /// The registration is LOAD-BEARING (issue #60): without it, every tet
+    /// The registration is LOAD-BEARING: without it, every tet
     /// created during a pass is invisible to `tets_around_edge`, so later
     /// splits in the same pass operate on INCOMPLETE rings - the missed
     /// children keep the original edge alive, the next pass re-collects it
@@ -376,7 +376,7 @@ fn swap_edges(mesh: &mut TetMesh, _target_h: f64) -> usize {
         {
             continue;
         }
-        // STALENESS GUARD (issue #60): earlier swaps REUSE tet slots in
+        // STALENESS GUARD: earlier swaps REUSE tet slots in
         // place, so a `face_tets` entry can point at a slot that no longer
         // contains this face - the apex lookup below would then operate on an
         // unrelated tet and the "flip" would commit overlapping garbage.
@@ -530,7 +530,7 @@ pub fn improve_mesh(
     // zoo asserts (and far below any real tet: the smallest legitimate
     // elements are ~(0.1·target)³). Flat pancakes in the 1e-15..1e-12 band
     // survive every flip/swap (their removal configurations are themselves
-    // degenerate - the issue-#47/#60 singleton class), so dropping is the
+    // degenerate - the flat singleton class), so dropping is the
     // only local resolution; the cost is a zero-volume void whose 4 faces
     // show up as cosmetic non-manifold edges in the tet-boundary complex
     // (volume and tallies unaffected - the void carries no measure).

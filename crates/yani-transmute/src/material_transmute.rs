@@ -40,7 +40,7 @@ type PerSpectrum = (
 pub struct MultigroupSpectrum {
     pub boundaries: Vec<f64>,
     pub masses: Vec<f64>,
-    /// The flux's stated error, when the caller knows it (issues #559, #140).
+    /// The flux's stated error, when the caller knows it.
     ///
     /// Relative rather than absolute, as a per-group standard deviation or a
     /// full covariance, because `masses` is a normalized shape and the pulse
@@ -127,7 +127,7 @@ fn collapse_mts(
 ///   loaded INTO it, so a second call finds them already there and does no
 ///   Arrow decoding at all; the composition is not touched. Call
 ///   [`Material::release_nuclear_data`] to give the memory back, which a sweep
-///   over thousands of distinct compositions should do (issue #576, finding 3).
+///   over thousands of distinct compositions should do.
 /// * `spectra` - Distinct multigroup spectra referenced by the steps
 /// * `steps` - The irradiation/cooling timeline
 /// * `chain` - Parsed transmutation chain data
@@ -139,10 +139,10 @@ fn collapse_mts(
 /// `i - 1`, so it carries one entry more than this used to return as a bare
 /// `Vec`. It also carries the per-edge reaction rates each step was solved
 /// with, which the solve computes to build the burnup matrix and used to throw
-/// away (issue #505).
+/// away.
 ///
 /// `uncertainty` asks for nuclear-data uncertainty on the inventory, from the
-/// MF=33 activation cross-section covariance (issue #514). `None` is the
+/// MF=33 activation cross-section covariance. `None` is the
 /// default path: no covariance is read, nothing is folded or factorized, the
 /// step loop runs once, and the result is bit-identical to a build without any
 /// of it.
@@ -312,8 +312,7 @@ pub fn transmute_materials(
     // scales only the rates) leaves them correct.
     //
     // The report is merged across a material's spectra rather than assigned,
-    // so a schedule naming two spectra reports both spectra's nuclides (issue
-    // #576).
+    // so a schedule naming two spectra reports both spectra's nuclides.
     let lists = build_lists(&chain, branch)?;
     let mut shared_spectra: Vec<MultigroupSpectrum> = Vec::new();
     let mut per_spectrum: Vec<PerSpectrum> = Vec::new();
@@ -441,11 +440,11 @@ pub fn transmute_materials(
         }
         // Recorded whether or not shielding ran: "not shielded" and "shielded
         // and nothing moved" are different claims, and a dilute run that
-        // should have been shielded is the case #564 is about.
+        // should have been shielded is the case the report exists for.
         results.shielding_info.insert(id, case_info[c].clone());
         // The spectra it collapsed against, for re-deriving an energy-resolved
         // view of a rate afterwards: a few KB of stored spectrum rather than
-        // the tens of MB the whole breakdown would be (yani#27).
+        // the tens of MB the whole breakdown would be.
         results.collapse.insert(
             id,
             crate::results::CollapseInputs {
@@ -493,7 +492,7 @@ fn validate_case(
         // error anywhere along the way. `Histogram::new` now refuses one at the
         // Python boundary too; this is the guard for the Rust entry point, and
         // it is also what leaves the collapse's point set a function of an
-        // ascending grid alone (issue #576).
+        // ascending grid alone.
         if let Some(bad) = s.boundaries.iter().position(|e| !e.is_finite()) {
             return Err(format!(
                 "spectrum {i}: boundary {bad} is {}, not a finite energy",
@@ -777,8 +776,7 @@ fn solve_case(
         // The per-edge rates are the matrix's own products, which the solve
         // computes to build the burnup matrix and used to throw away. Taken
         // from the same chain and rates the step was solved with, isomeric
-        // overlay included, so a decay-only step records an empty map (issue
-        // #505).
+        // overlay included, so a decay-only step records an empty map.
         edge_rates.push(per_edge_rates(step_chain, &step_rates));
         states.push(current_material.clone());
     }
@@ -809,7 +807,7 @@ fn solve_case(
 ///
 /// Held rather than written into the driver's counters as it goes, so a
 /// replica reads only shared read-only state and the merge order is the
-/// driver's to fix (issue #576, finding 4).
+/// driver's to fix.
 struct ReplicaOutcome {
     /// This replica's inventory at each schedule step.
     densities: Vec<HashMap<String, f64>>,
@@ -835,7 +833,7 @@ struct ReplicaOutcome {
 /// the material itself.
 ///
 /// Into the caller's own `Material` rather than a local clone, which is the
-/// point (issue #576, finding 3). The loaded `Arc<Nuclide>`s used to survive a
+/// point. The loaded `Arc<Nuclide>`s used to survive a
 /// call only inside the returned `TransmutationResults`, because
 /// `GLOBAL_NUCLIDE_CACHE` holds `Weak` references and the stepper's per-step
 /// materials drop `nuclide_data`. A sweep that dropped the previous results
@@ -846,7 +844,8 @@ struct ReplicaOutcome {
 /// memory is the caller's to release with
 /// [`Material::release_nuclear_data`] -- which a sweep over thousands of
 /// DISTINCT compositions should do, and which is why the cache is not simply
-/// made strong (that would undo #401 for every code path in the workspace).
+/// made strong (that would pin every loaded nuclide for the life of the
+/// process, on every code path in the workspace).
 ///
 /// Idempotent, and safe to call yourself before a batch of transmutes.
 pub fn preload_activation_data(
@@ -874,7 +873,7 @@ pub fn preload_activation_data(
     // Only nuclides this material can actually reach need cross sections.
     // Walking the whole chain loads 556 of 3820 nuclides on ENDF/B-8.1
     // whatever is being irradiated, which is where the multi-GB footprint
-    // came from (issue #401).
+    // came from.
     //
     // The closure is exact, not a truncation: the stepper follows a reaction
     // edge only when its parent has a loaded rate
@@ -914,7 +913,7 @@ pub fn preload_activation_data(
     // Skip nuclides whose chain entry has no neutron reactions: they are
     // decay-only sinks (e.g. fission products pulled in by yield edges)
     // and don't need cross-section data -- loading them just triggers
-    // hundreds of wasted downloads (issue #45).
+    // hundreds of wasted downloads.
     let to_load: Vec<(String, String)> = {
         let cfg = yamc_nuclide::config::CONFIG
             .lock()
@@ -942,8 +941,7 @@ pub fn preload_activation_data(
     // and the candidate list is not empty without the closure to narrow it.
     if !to_load.is_empty() {
         // This path runs no transport, so it needs the union energy grid and the
-        // cross sections of the MTs the network names, and nothing else (issue
-        // #389). On the TENDL-2025 conversion that is roughly a fifth of the
+        // cross sections of the MTs the network names, and nothing else. On the TENDL-2025 conversion that is roughly a fifth of the
         // per-nuclide data, and Fe56's nine full-grid transport MTs (total,
         // elastic, nonelastic, inelastic, absorption, disappearance, heating,
         // damage) are 1.36 MB each against 0.14 MB for a threshold reaction.
@@ -963,7 +961,7 @@ pub fn preload_activation_data(
         // never across the parse. Each `Nuclide` is a pure function of its
         // bytes and the scope, and `scope` is one value for every item, so the
         // results do not depend on the order they are produced in -- nor does
-        // the map they land in, which is keyed by name (issue #576, finding 5a).
+        // the map they land in, which is keyed by name.
         // A nuclide the material is MADE of is not optional. `to_load` is the
         // reachable chain closure, most of which is daughters and
         // grand-daughters: a library may legitimately not publish one of those,
@@ -1036,7 +1034,7 @@ pub fn preload_activation_data(
     // every rate lookup below resolves the label through
     // `reactions_for_temp`, which answers `None` and is handled by
     // `return 0.0` / `continue`. That is a silent zero: an irradiation
-    // reporting no activation, with no error anywhere (#481).
+    // reporting no activation, with no error anywhere.
     //
     // Widening goes through the material rather than the loop above because
     // that loop resolves paths from CONFIG, which never sees the explicit
@@ -1127,7 +1125,7 @@ fn replica_steps(
     // INCLUDING its ~556 loaded `Arc<Nuclide>`, once per replica, only so that
     // there is something owned to reassign on the first iteration. The stepper
     // takes a reference, so borrowing the caller's material for step one costs
-    // nothing (issue #576, finding 6).
+    // nothing.
     let mut current: Option<Material> = None;
     let mut out = Vec::with_capacity(steps.len());
     for st in steps {
@@ -1186,8 +1184,7 @@ pub struct TransportTallied {
     pub diagnostics: CoupledDiagnostics,
 }
 
-/// Uncertainty on an independent-mode transport transmutation (issue #140,
-/// item 3), by resampling and re-solving exactly as [`transmute_material`]
+/// Uncertainty on an independent-mode transport transmutation, by resampling and re-solving exactly as [`transmute_material`]
 /// does, with the tally's spectrum standing in for the supplied one.
 ///
 /// Every source in [`crate::uncertainty::Source::IMPLEMENTED`] applies except
@@ -1763,7 +1760,7 @@ fn run_replicas(
 
     // One replica, start to finish, reading nothing that is not shared
     // read-only and writing nothing outside its own return value. That is what
-    // lets a block of them run at once (issue #576, finding 4).
+    // lets a block of them run at once.
     //
     // Its own `FluxCoverage`, not the driver's: `Info::add_flux_coverage`
     // ASSIGNS `spectra_with_sigma` / `spectra_without_sigma`, which were
@@ -2898,7 +2895,7 @@ pub struct CoupledDiagnostics {
     pub mt5: HashMap<String, f64>,
 }
 
-/// Apply the isomeric-branching overlay on the coupled path (issue #218).
+/// Apply the isomeric-branching overlay on the coupled path.
 ///
 /// The tally scores each list the way [`crate::branching_rule`] defines it,
 /// at the collision energies, so its partials are already the productions:
@@ -3170,8 +3167,8 @@ mod tests {
         assert!(err.contains("carries no list facts"), "{err}");
     }
 
-    /// A chain with a two-target `(n,2n)` split for direct-rate tests
-    /// (issue #218): base branching 0.7 ground / 0.3 metastable.
+    /// A chain with a two-target `(n,2n)` split for direct-rate tests:
+    /// base branching 0.7 ground / 0.3 metastable.
     fn split_chain() -> Arc<HashMap<String, ChainNuclide>> {
         Arc::new(HashMap::from([(
             "X".to_string(),
@@ -3223,7 +3220,7 @@ mod tests {
     }
 
     /// Directly-scored `(n,n')` partial rates inject the summed rate and set
-    /// the grafted branching, mirroring the fold's semantics (issue #218).
+    /// the grafted branching, mirroring the fold's semantics.
     #[test]
     fn apply_partials_nnprime_injects_rate_and_branching() {
         let chain = Arc::new(HashMap::from([(

@@ -111,7 +111,7 @@ impl Material {
     ///
     /// The gate is the point. A query for some other temperature computes into
     /// locals and stores nothing, so it cannot leave the cache holding one
-    /// temperature's grid while the label says another (#481).
+    /// temperature's grid while the label says another.
     pub(crate) fn unified_energy_grid_neutron_at(&mut self, temperature: &str) -> Vec<f64> {
         // Ensure nuclides are loaded before proceeding
         if let Err(e) = self.ensure_nuclides_loaded() {
@@ -121,7 +121,7 @@ impl Material {
         // the caller has just named one. Adopt it, so the derived caches are
         // stored rather than thrown away: without this a default-constructed
         // Material queried at an explicit temperature caches nothing, and
-        // `sample_interacting_nuclide` then panics on its own `expect` (#481).
+        // `sample_interacting_nuclide` then panics on its own `expect`.
         if self.temperature.is_empty() {
             self.assign_temperature(temperature);
         }
@@ -137,7 +137,7 @@ impl Material {
         // A nuclide may advertise this temperature without having parsed it in,
         // because the original load was narrowed to the material's own. Widen
         // before validating, or a temperature the data plainly contains is
-        // reported as unavailable (#481). This is the single choke point: the
+        // reported as unavailable. This is the single choke point: the
         // microscopic and macroscopic builders both reach the grid first.
         if let Err(e) = self.ensure_temperature_loaded(temperature) {
             panic!("Error loading temperature '{temperature}': {e}");
@@ -217,7 +217,7 @@ impl Material {
     /// Takes the temperature explicitly so the grid it interpolates onto and
     /// the reactions it reads come from the same temperature. Reading the grid
     /// from a cache filled at one temperature while looking reactions up at
-    /// another produced vectors of mismatched length (#481).
+    /// another produces vectors of mismatched length.
     pub(crate) fn calculate_microscopic_xs_neutron_at(
         &mut self,
         temperature: &str,
@@ -306,10 +306,8 @@ impl Material {
     ///
     /// Every cache write below is gated on `temperature` being the material's
     /// own, so a query for another temperature computes into locals and leaves
-    /// the material untouched. This replaces a set-temperature / compute /
-    /// restore-label sequence that left all thirteen derived caches holding the
-    /// queried temperature's data under the original label, and that lost the
-    /// original label entirely if the computation panicked (#481).
+    /// the material untouched, rather than leaving the derived caches holding
+    /// the queried temperature's data under the material's own label.
     pub(crate) fn calculate_macroscopic_xs_at(
         &mut self,
         temperature: &str,
@@ -399,12 +397,11 @@ impl Material {
         // directly moved the last bit of the macroscopic cross section at most
         // grid points from one run to the next. Measured on the eight-nuclide
         // steel of `tests/macro_xs_reproducibility.rs`, 76352 of 151285 points
-        // of MT 1 differed between two builds in a single process (#598).
+        // of MT 1 differed between two builds in a single process.
         //
-        // Same defect as #502 (`matrix.rs`), #576 (`composition.rs`) and the
-        // four sites of #597. This one was held back from that sweep because it
-        // feeds transport: it is the cross section a collision samples against,
-        // so re-ordering the sum moves transport results in the last bit.
+        // Same defect as `matrix.rs` and `composition.rs` guard against. This
+        // one feeds transport: it is the cross section a collision samples
+        // against, so the summation order moves transport results in the last bit.
         //
         // The rest of this file already sorts wherever it builds an index
         // (the energy grid, `sorted_nuclide_keys`, `macroscopic_xs_mt_numbers`);
@@ -443,7 +440,7 @@ impl Material {
         // Everything below writes derived state onto the material, so it
         // runs only when this really is the material's own temperature.
         // A foreign-temperature query returns its numbers and leaves no
-        // trace (#481).
+        // trace.
         if store {
             // If by_nuclide was requested, convert HashMap to dense Vec aligned with sorted keys
             if by_nuclide {

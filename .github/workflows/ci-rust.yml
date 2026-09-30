@@ -85,7 +85,7 @@ jobs:
           # The fetch step above ran, so the fixtures must now be readable at
           # the cache this build resolves. Without this the data-dependent tests
           # self-skip when they are not, and report green: that is how 35 files
-          # spent months reading nothing on windows-latest (issue #544), where
+          # spent months reading nothing on windows-latest, where
           # `$HOME` does not exist and every cache path resolved under a literal
           # `/home/jon`. crates/yamc/tests/fixture_cache_is_readable.rs is what
           # this switch arms.

@@ -30,19 +30,19 @@ pub fn run_multi_cell_transport_cpu_rayon(
     region_program: &[u32],
     log_energy_grid: &[f64],
     // Concatenated per-material coarse grids backing the per-MT inelastic
-    // buffers (issue #212); each material owns its coarse grid, described by
+    // buffers; each material owns its coarse grid, described by
     // `coarse_meta`. Mirrors the GPU launch so the CPU twin indexes the per-MT
     // buffers identically.
     coarse_log_energy_grid: &[f64],
     // Packed `[n_materials × COARSE_META_COLS]` per-material coarse-grid
-    // descriptor (issue #212). Mirrors the GPU launch's `coarse_meta` binding.
+    // descriptor. Mirrors the GPU launch's `coarse_meta` binding.
     coarse_meta: &[u32],
     // Concatenated per-material FINE grids backing the resonance-critical
-    // aggregate macro XS + nuc buffers (issue #212); each material owns its fine
+    // aggregate macro XS + nuc buffers; each material owns its fine
     // grid, described by `fine_meta`. Mirrors the GPU launch.
     fine_log_energy_grid: &[f64],
-    // Packed `[n_materials × FINE_META_COLS]` per-material fine-grid descriptor
-    // (issue #212). Mirrors the GPU launch's `fine_meta` binding.
+    // Packed `[n_materials × FINE_META_COLS]` per-material fine-grid descriptor.
+    // Mirrors the GPU launch's `fine_meta` binding.
     fine_meta: &[u32],
     xs_elastic_per_material: &[f64],
     xs_absorption_per_material: &[f64],
@@ -163,8 +163,7 @@ pub fn run_multi_cell_transport_cpu_rayon(
     max_steps: u32,
     // Free-gas resonance/thermal cutoff multiplier (model option, default
     // 400.0); the regime boundary is `free_gas_threshold * kT`. Mirrors the
-    // kernel's `free_gas_threshold` buffer so the twin stays bit-equivalent
-    // (issue #102).
+    // kernel's `free_gas_threshold` buffer so the twin stays bit-equivalent.
     free_gas_threshold: f64,
 ) -> MultiCellResult {
     use rayon::prelude::*;
@@ -188,8 +187,8 @@ pub fn run_multi_cell_transport_cpu_rayon(
         xs_score_per_mt_slice.len() / (n_materials.max(1) * n_grid.max(1))
     };
 
-    // Per-MT inelastic pools are keyed per-(material, nuclide) slab (#74
-    // Stages 2a / 2b); single-nuclide materials give `n_slab == n_materials`.
+    // Per-MT inelastic pools are keyed per-(material, nuclide) slab;
+    // single-nuclide materials give `n_slab == n_materials`.
     let n_slab = nuclide_select.nuc_awr.len();
     validate_transport_inputs(
         tallies,
@@ -272,7 +271,7 @@ pub fn run_multi_cell_transport_cpu_rayon(
 
     let inputs = TransportInputs {
         // The kernel's order; the CPU-twin-only `Lifo` is a verification
-        // instrument reached through `run_multi_cell_transport_cpu` (issue #111).
+        // instrument reached through `run_multi_cell_transport_cpu`.
         pend_drain: PendDrain::Fifo,
         seeds,
         energies_in,
@@ -289,11 +288,11 @@ pub fn run_multi_cell_transport_cpu_rayon(
         bvh_prims: &bvh_prims,
         bvh_unb: &bvh_unb,
         log_energy_grid,
-        // Per-material coarse grids (issue #212): the per-MT inelastic buffers
+        // Per-material coarse grids: the per-MT inelastic buffers
         // ride each material's own coarse grid, matching the GPU launch.
         coarse_log_energy_grid,
         coarse_meta,
-        // Per-material fine grids (issue #212): the aggregate macro XS + nuc
+        // Per-material fine grids: the aggregate macro XS + nuc
         // buffers ride each material's own fine grid, matching the GPU launch.
         fine_log_energy_grid,
         fine_meta,
@@ -438,11 +437,11 @@ pub fn run_multi_cell_transport_cpu_rayon(
         n_steps: Vec<u32>,
         final_energies: Vec<f64>,
         tally_acc: Vec<u64>,
-        /// Lost-particle records from this chunk (issue #289), concatenated in
+        /// Lost-particle records from this chunk, concatenated in
         /// chunk order below so the mirror's diagnostics are deterministic.
         lost: Vec<crate::common::lost_particles::LostParticleRecord>,
         /// (n,xn) secondaries this chunk queued past the kernel's in-thread
-        /// stack depth (issue #111 phase 2), summed below.
+        /// stack depth, summed below.
         n_spilled: u64,
         /// Deepest pending-secondary stack seen in this chunk.
         max_pend_depth: u32,
@@ -541,8 +540,8 @@ pub fn run_multi_cell_transport_cpu_rayon(
         final_energies,
         tally_outputs,
         // The CPU mirror is the per-step (mean-only) reference; it emits no
-        // per-history sum-of-squares or per-source accumulator (issue #233
-        // batch-free variance is GPU-only).
+        // per-history sum-of-squares or per-source accumulator (batch-free
+        // variance is GPU-only).
         tally_sum_sq: Vec::new(),
         hist_tally_total: Vec::new(),
         src_acc: Vec::new(),

@@ -1,4 +1,4 @@
-//! On-device per-collision element selection for the photon kernel (task #72).
+//! On-device per-collision element selection for the photon kernel.
 //!
 //! At a photon collision in a multi-element material the transport must pick
 //! *which* element the photon interacts with, sampling element `i` with
@@ -21,7 +21,7 @@
 //!
 //! When a material has `count == 1` the production kernel SKIPS this call
 //! entirely (the element is trivially `offset`), so no random is drawn and the
-//! RNG stream is byte-identical to the #79 single-element path. Both this
+//! RNG stream is byte-identical to the single-element path. Both this
 //! `#[cube]` helper and the CPU twin assume `count >= 1` and always draw; the
 //! caller is responsible for the skip.
 

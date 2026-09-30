@@ -1,5 +1,5 @@
 //! A material transmuted first and transported second must still get its
-//! transport data (issue #576, finding 3).
+//! transport data.
 //!
 //! `Material::transmute` now loads the cross sections it needs INTO the
 //! material rather than into a private clone, so those entries survive the

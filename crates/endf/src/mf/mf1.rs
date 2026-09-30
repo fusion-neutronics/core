@@ -115,8 +115,8 @@ pub const FISSION_ENERGY_COMPONENTS: [&str; 9] =
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mf1Mt458 {
     /// Read from a CONT rather than a HEAD record, so this is the raw float the
-    /// field holds and not the integer every other section reports. See
-    /// <https://github.com/shimwell/endf-python/issues/14>.
+    /// field holds and not the integer every other section reports, matching
+    /// the Python reader.
     pub za: f64,
     pub awr: f64,
     pub lfc: i64,

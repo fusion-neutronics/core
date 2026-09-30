@@ -52,10 +52,10 @@ jobs:
       # side already pins its git dependencies by revision in Cargo.lock, so
       # this is the same rule applied to the one Python dependency.
       #
-      # 6a12e6d is the merge of shimwell/endf-python#26, which fixes the MF=33
-      # LB=0 to 4 table split (shimwell/endf-python#25), into 8f42576, the tip
-      # of `claude/rust-rewrite-python-layer-1upmmo`. Its tree is that of
-      # 306a9eb, the #26 head the two MF33 fixtures' goldens were written
+      # 6a12e6d is the merge of the endf-python fix for the MF=33 LB=0 to 4
+      # table split into 8f42576, the tip of
+      # `claude/rust-rewrite-python-layer-1upmmo`. Its tree is that of 306a9eb,
+      # the head of that fix, which the two MF33 fixtures' goldens were written
       # with. That branch is 44 commits ahead of `local-develop` and not merged
       # into it. Repoint at `local-develop` once the Rust-rewrite work merges
       # there. Bumping it is a deliberate act: a fix to the fork's reader does

@@ -142,8 +142,7 @@ pub fn build_tet_volume_ids(
 /// orderings produce inward normals. The element walk picks its exit face with
 /// `dot(direction, normal) > 0`, so on a negatively oriented tet it selects an
 /// *entry* face instead: the walk hops backwards or stops at the mesh boundary
-/// early, and unstructured track-length tallies read about 33 percent low
-/// (issue #316).
+/// early, and unstructured track-length tallies read about 33 percent low.
 ///
 /// yamt used to re-wind such a tet silently. It no longer does, for two
 /// reasons. Silently repairing a mesh hides the producer's bug, so the same

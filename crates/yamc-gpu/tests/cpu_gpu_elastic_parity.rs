@@ -1,13 +1,13 @@
-//! CPU-vs-GPU parity for the elastic CM-cosine sampler (issues #111, #101, #40).
+//! CPU-vs-GPU parity for the elastic CM-cosine sampler.
 //!
-//! After #111 step 1 the production CPU elastic scatter samples the CM cosine
+//! The production CPU elastic scatter samples the CM cosine
 //! through `yamc_physics::gpu::flat::elastic_mu_cm::sample_elastic_mu_cm` -- the
 //! SAME function the cubecl kernel and its CPU twin use -- fed by the flat
 //! buffers from `AngleDistribution::to_elastic_flat()`. This pins that flat
 //! sampler against the production `AngleDistribution::sample` over a realistic
 //! tabulated angular distribution, so the CPU and GPU elastic angle sampling
-//! cannot drift (the #88 divergence class). It is the per-event (level-1) form
-//! of the #40 matched-stream diff: identical tabulated data, sampled by both
+//! cannot drift. It is the per-event (level-1) form
+//! of the CPU/GPU matched-stream diff: identical tabulated data, sampled by both
 //! paths, compared statistically (the two use different RNGs / draw schedules).
 
 use rand::{rngs::StdRng, SeedableRng};

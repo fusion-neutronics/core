@@ -1,4 +1,4 @@
-"""Hybrid geometry: a CSG Cell filled by a MeshGeometry (issue #232).
+"""Hybrid geometry: a CSG Cell filled by a MeshGeometry.
 
 CI-safe construction and geometry-query tests using the cadquery-free
 two-region fixture (a unit cube split at x=0.5 into "fuel" (x in [0, 0.5])

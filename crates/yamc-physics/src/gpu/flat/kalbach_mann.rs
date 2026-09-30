@@ -52,7 +52,7 @@ pub const KM_INTERP_LINLIN: u32 = 1;
 ///   incident-energy bracket (followed by `n_x - n_discrete`
 ///   continuous points), length `n_e`.
 /// * `x_table`, `p_table`, `c_table`, `r_table`, `a_table` -- flat
-///   tables packed variable-length (issue #104): row `i` occupies
+///   tables packed variable-length: row `i` occupies
 ///   `x_offset[i] .. x_offset[i] + n_x_per_i[i]`. Rows are stored
 ///   back-to-back with no padding.
 /// * `x_offset` -- start index of each incident-energy row in the flat
@@ -105,7 +105,7 @@ pub fn sample_kalbach_mann(
     let xi_kx = next_xi(state);
 
     // Discrete-then-continuous CDF search, matching the CPU reference
-    // `sample_with_discrete_info` (issue #103). The discrete head (first
+    // `sample_with_discrete_info`. The discrete head (first
     // `n_disc` points) is searched with `xi < c[k]` and selects the exact
     // discrete line; the continuous tail is searched from `n_disc` with
     // `xi <= c[k+1]` ("first match wins, else last"), carrying `c_kj` as the
@@ -523,12 +523,12 @@ mod tests {
         );
     }
 
-    /// Flat-vs-production-CPU parity (issue #101/#108). The flat
+    /// Flat-vs-production-CPU parity. The flat
     /// `sample_kalbach_mann` must reproduce the production
     /// `yamc_nuclide::secondary_kalbach::KalbachMann::sample` distribution
     /// (outgoing energy AND Kalbach angle) over a shared fixture. The two use
     /// different RNGs / draw schedules, so this is a statistical comparison
-    /// (like the secondary-sampler parity in PR #110). A 3-bin continuous
+    /// (like the other secondary-sampler parity tests). A 3-bin continuous
     /// Histogram table with constant Kalbach `r`/`a` (so the angular law is a
     /// fixed Kalbach(r, a) regardless of the sampled bin) sampled at the lower
     /// incident-energy knot (`r_interp = 0`, no bracket stretch) isolates the

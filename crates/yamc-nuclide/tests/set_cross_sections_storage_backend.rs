@@ -1,5 +1,4 @@
-//! `set_cross_sections` validates paths through the active storage backend
-//! (fusion-neutronics/core#99).
+//! `set_cross_sections` validates paths through the active storage backend.
 //!
 //! A browser host populates `InMemoryStorage` with `/Li6.arrow/version.json`
 //! and friends and then names `/Li6.arrow` in the config. The check used to go

@@ -1,5 +1,5 @@
 //! Survival biasing on a fissile material: the GPU runs the CPU / OpenMC
-//! scheme (fusion-neutronics/core#25).
+//! scheme.
 //!
 //! Under implicit capture the CPU banks fission progeny from the pre-discount
 //! weight, scaled by `sigma_f / sigma_t`, discounts the survivor by absorption
@@ -11,7 +11,7 @@
 //! in mean AND in the per-history standard deviation the tallies report.
 //!
 //! Two fixtures. U240 is the fissionable this one runs on (its partial
-//! fission channels are why it is a fixture, issue #425); at 14 MeV its
+//! fission channels are why it is a fixture); at 14 MeV its
 //! fission cross section is about 1.3 b against ~6 b total, so roughly one
 //! collision in five banks progeny under this scheme. U235 runs when the
 //! endf-b8.1 cache has it (it is 191 MB and not a fixture), and is the
@@ -192,13 +192,13 @@ fn check(label: &str, cpu: Stats, gpu: Stats) {
         // The per-history standard deviation is what the scheme decides. One
         // known residual remains after the scheme change: the host relaunches
         // a banked progeny of fractional weight w as round(w) unit-weight
-        // copies (`fission_source_inputs`, issue #236), a Russian-roulette
+        // copies (`fission_source_inputs`), a Russian-roulette
         // step the CPU does not take since it transports the progeny at
         // weight w. Under survival biasing every banked weight is fractional,
         // so the GPU's per-history spread sits a little above the CPU's:
         // measured 1.04 on U240 and 1.10 on U235, against 1.00 to 1.02 on the
         // analog controls where the weights are 1. Relaunching at the banked
-        // weight is fusion-neutronics/core#88 and would close it; until then
+        // weight would close it; until then
         // 15% holds the scheme (a mismatched scheme moves this by more, and in
         // the fission-rate std_dev most of all) without asserting the residual
         // away.

@@ -2,7 +2,7 @@
 //! selection used by the single-element-per-material form-factor /
 //! relaxation packs.
 //!
-//! Regression for the multi-element correctness gap (task #72): a trace
+//! Regression for the multi-element correctness gap: a trace
 //! high-Z element in a low-Z bulk (W in polyethylene, or 50/50 WC) must
 //! drive the coherent / incoherent / photoelectric / pair tables, because
 //! those reactions scale steeply with Z and so the high-Z element
@@ -154,13 +154,13 @@ fn extractors_pack_w_relaxation_and_form_factors_for_poly_w() {
     };
     let materials = vec![mat.clone()];
 
-    // #85 packs ONE Rayleigh slab PER ELEMENT (element-major within a material,
+    // The extractor packs ONE Rayleigh slab PER ELEMENT (element-major within a material,
     // concatenated material-major), so the per-collision element selection can
     // read whichever element the photon struck. This material is the only one,
     // so its element slabs start at slab 0 in the order (H, C, W); element `e`
     // lives at slab `e`. Assert that W's OWN slab carries W's coherent
     // form-factor CDF (it must track W, not H), exercising the per-element
-    // packing #85 introduced.
+    // packing.
     let xs = extract_photon_material_xs(&materials);
     let log_grid = xs.log_energy_grid.clone();
     let w_idx = mat.iter().position(|(s, _, _)| s == "W").unwrap();
@@ -184,7 +184,7 @@ fn extractors_pack_w_relaxation_and_form_factors_for_poly_w() {
         "W's packed coherent FF CDF slab should match W's, not H's (err_w={err_w:.3e}, err_h={err_h:.3e})"
     );
 
-    // Atomic relaxation / photoelectric subshells: #85 packs one slab per
+    // Atomic relaxation / photoelectric subshells: the extractor packs one slab per
     // element, so W's OWN slab must carry W's subshells. W has ~22 subshells
     // (capped at the MAX_AR_SHELLS=16 GPU limit); H has 1, C has 4. Comparing
     // W's slab in the poly+W pack against a W-only pack (slab 0 = W) and an

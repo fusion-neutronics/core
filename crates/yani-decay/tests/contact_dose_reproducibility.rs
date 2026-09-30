@@ -10,7 +10,7 @@
 //! `mu` divides every photon-line term, so that reached every per-nuclide dose
 //! and the total. Measured before the fix, `Material.contact_dose()` returned
 //! three distinct values across six processes, and three across eight calls in
-//! a single process. Same defect as issue #502 and issue #576.
+//! a single process.
 //!
 //! The maps here are rebuilt from scratch on every iteration on purpose: a
 //! fresh `HashMap` is the only way to get a fresh iteration order, so reusing

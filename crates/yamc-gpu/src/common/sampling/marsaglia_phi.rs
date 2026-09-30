@@ -68,8 +68,8 @@ pub fn marsaglia_cos_sin_phi(state_in: u64) -> MarsagliaPhi {
 /// `phi = TAU * xi`, then `cos_f64(phi)` / `sin_f64(phi)`. This matches the
 /// production CPU's azimuth draw schedule (`scatter.rs` ->
 /// `rotate_direction_fast`, a single `TAU * next_xi` uniform), so the
-/// per-history matched stream (#40) stays in lockstep past the first collision
-/// (issue #136 / #111). It replaces the variable-draw [`marsaglia_cos_sin_phi`]
+/// per-history matched stream stays in lockstep past the first collision.
+/// It replaces the variable-draw [`marsaglia_cos_sin_phi`]
 /// on the transport azimuth. The `#[cube]` kernel calls this (cos/sin via the
 /// `cos_f64`/`sin_f64` polyfills); the CPU twin in `transport/shared.rs` inlines
 /// std libm `cos`/`sin` so it matches the production CPU bit-for-bit (kernel vs

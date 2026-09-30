@@ -9,7 +9,7 @@
 //! this; those are separate samplers (follow-up extractions). Isolating
 //! the bare Klein-Nishina here lets a distribution test catch a per-scatter
 //! energy-loss bias directly, instead of only via a downstream tally
-//! (the gap that hid #415).
+//! (where a real photoelectric deficit once went unnoticed).
 //!
 //! Kahn's method (valid for `alpha < 3`, i.e. E < ~1.53 MeV; the CPU
 //! switches to a different sampler above that, and so should this kernel

@@ -17,7 +17,7 @@ pub const DEFAULT_CAPACITY: usize = 1000;
 /// per-particle secondary bank uses (`Particle::secondary_bank`, drained with
 /// `back()` / `pop_back()`).
 ///
-/// # Why the order does not matter (issue #111)
+/// # Why the order does not matter
 ///
 /// Every banked particle carries the 32-bit seed of its OWN collision stream,
 /// derived at BANK time from `(the seed of the walk that banked it, its ordinal
@@ -52,7 +52,7 @@ pub struct ParticleBank {
     /// history, across every generation of its chain. Unlike
     /// [`ww_splits`](Self::ww_splits) it bounds nothing: the guard against a
     /// supercritical geometry being transported forever is on the LIVE bank
-    /// depth (issue #348), and this is the diagnostic that names the cause when
+    /// depth, and this is the diagnostic that names the cause when
     /// that guard, or the drain ceiling behind it, fires. Reset by
     /// [`ParticleBank::clear`].
     fission_progeny: usize,
@@ -63,8 +63,7 @@ pub struct ParticleBank {
 /// cross-crate call to them is not inlined. Once they carried the
 /// secondary-seed bookkeeping as well as the `Vec` op, that call overhead
 /// measured as ~3.5% of CPU transport throughput on an (n,2n)-heavy model
-/// (Li6 core + Be9 shell at 14 MeV); with `#[inline]` the same model is back at
-/// parity with the pre-#111 bank.
+/// (Li6 core + Be9 shell at 14 MeV); with `#[inline]` that overhead is gone.
 impl ParticleBank {
     /// Create a new empty particle bank
     pub fn new() -> Self {
@@ -131,7 +130,7 @@ impl ParticleBank {
     ///
     /// The secondary's collision stream is derived HERE, from the banking
     /// walk's seed and the secondary's ordinal within that walk, so it does not
-    /// depend on when the secondary is later popped (issue #111).
+    /// depend on when the secondary is later popped.
     #[inline]
     pub fn bank_secondary(&mut self, particle: Particle) {
         let seed = secondary_seed(self.walk_seed, self.walk_secondaries);
@@ -164,8 +163,8 @@ impl ParticleBank {
     }
 
     /// Collision seed of the walk the last [`pop_particle`](Self::pop_particle)
-    /// started, i.e. the 32-bit value that particle's PCG must be seeded from
-    /// (issue #111). Before any pop this is the seed the source particle was
+    /// started, i.e. the 32-bit value that particle's PCG must be seeded from.
+    /// Before any pop this is the seed the source particle was
     /// added with, or 0 for a bank used without one.
     #[inline]
     pub fn walk_seed(&self) -> u32 {

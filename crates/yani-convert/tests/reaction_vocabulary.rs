@@ -1,4 +1,4 @@
-//! The writer's reaction names must all resolve on the reader's side (#379).
+//! The writer's reaction names must all resolve on the reader's side.
 //!
 //! This crate writes `reactions/reactions.arrow` with the reaction name taken
 //! verbatim from `endf::chain` (`ReactionPath::kind`), and `yani` resolves that
@@ -6,7 +6,7 @@
 //! name the map does not hold resolves to no MT, so the rate is never computed
 //! and the reaction vanishes from the network. Nothing errors.
 //!
-//! That is #379, and it reached published data: the chain files spell MT 18
+//! This has happened, and it reached published data: the chain files spell MT 18
 //! "fission", the consumer's map held only "(n,fission)", so no fission product
 //! was ever produced by transmutation and every test on both sides passed.
 //! Neither side could see the other's vocabulary.
@@ -41,7 +41,7 @@ fn writer_vocabulary() -> Vec<&'static str> {
         .collect()
 }
 
-/// The assertion whose absence was #379.
+/// Every name the writer can emit must resolve to an MT on the reader's side.
 #[test]
 fn every_name_the_writer_can_emit_resolves_on_the_reader_side() {
     let unresolvable: Vec<&str> = writer_vocabulary()
@@ -54,7 +54,7 @@ fn every_name_the_writer_can_emit_resolves_on_the_reader_side() {
         "the transmutation writer can emit reaction names that yani's \
          REACTION_MT_MAP does not resolve: {unresolvable:?}. These fail \
          silently: the name maps to no MT, so the rate is never computed and \
-         the reaction vanishes from the network (#379). Add them to \
+         the reaction vanishes from the network. Add them to \
          REACTION_MT_MAP in crates/yani/src/reactions.rs."
     );
 }
@@ -85,7 +85,7 @@ fn a_shared_name_means_the_same_mt_on_both_sides() {
 
 /// `"fission"` is the spelling that matters, and it must mean MT 18.
 ///
-/// Pinned separately because it is the exact pair #379 got wrong, and because
+/// Pinned separately because it is the exact pair that once went wrong, and because
 /// the alias `"(n,fission)"` sits next to it in the map: whichever is listed
 /// first is what `mt_to_reaction_type` hands back as a rate key, and a key of
 /// `"(n,fission)"` matches no chain reaction.

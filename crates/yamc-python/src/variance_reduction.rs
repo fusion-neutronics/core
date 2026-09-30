@@ -107,13 +107,13 @@ impl PySurvivalBiasing {
 /// 'RegularRectangularMesh'`, which describes a type mismatch rather than
 /// saying weight windows are rectangular-mesh-only and that there is nothing
 /// the caller can pass instead today. The GPU dispatch refusals name their
-/// limitation and their remedy; this matches them (issue #113).
+/// limitation and their remedy; this matches them.
 ///
 /// The cost is that pyo3-stub-gen cannot see through `PyAny`, so both callers
 /// carry `#[gen_stub(override_type(type_repr = "RegularRectangularMesh"))]` on
 /// the argument to put the real static type back. Without it the stub says
 /// `typing.Any`, which silences the type checker entirely and leaves it
-/// disagreeing with the docstring right above it (issue #121). The negative
+/// disagreeing with the docstring right above it. The negative
 /// cases in `packages/yamc-core/tests/typing/sample_errors.py` are what keep
 /// the override honest.
 fn rectangular_mesh(mesh: &Bound<'_, PyAny>, owner: &str) -> PyResult<PyRegularRectangularMesh> {

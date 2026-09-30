@@ -44,7 +44,7 @@ fn fixture() -> Option<PathBuf> {
 /// when the cache was last filled, and the published `Fe56.arrow` has carried
 /// one since the 2026-08-21 republish. Serving it unmodified therefore used to
 /// mean "no index" and now means "index", silently turning the no-index test
-/// into a second copy of the indexed one (issue #580).
+/// into a second copy of the indexed one.
 ///
 /// With the index, it is built by the converter's own `index_reactions` rather
 /// than by a copy of its footer walk, so what the origin serves is what a

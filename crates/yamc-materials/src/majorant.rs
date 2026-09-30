@@ -8,7 +8,7 @@
 //! decide whether the event is real (probability `Σ_t(r, E) / Σ_maj(E)`)
 //! or virtual (no physics happens, the particle just continues).
 //!
-//! # Phase 1 (this file): global majorant
+//! # Global majorant
 //!
 //! `Σ_maj(E)` is constant over space -- the per-energy maximum of `Σ_t`
 //! across every material in the model. Cheap to compute at simulation
@@ -16,10 +16,9 @@
 //! against region maps. The downside is the rejection rate: in fusion
 //! geometries with vacuum + tungsten coexisting, the majorant tracks
 //! tungsten and tracking through vacuum becomes ~all virtual events.
-//! Phase 1.5 (cost-derived fallback) and Phase 2 (per-material local
-//! majorants) address this.
+//! [`LocalMajorant`] (per-material majorants) addresses this.
 //!
-//! # URR handling (Phase 2c)
+//! # URR handling
 //!
 //! Materials with URR (unresolved resonance range) probability-table
 //! data are fully supported. [`GlobalMajorant::new`] queries
@@ -30,18 +29,16 @@
 //!
 //! The result: `Σ_maj ≥ Σ_t(any URR draw)` everywhere, so the
 //! Woodcock rejection probability `p_real = Σ_t / Σ_maj` stays in
-//! `[0, 1]` regardless of which URR sample lands. Phase 2a–2b put
-//! the per-material plumbing in place; this caveat (which used to
-//! say "validate-reject in Phase 1") was lifted in Phase 2c.
+//! `[0, 1]` regardless of which URR sample lands.
 
 use crate::{interpolate_linear, Material};
 
 /// Energy-dependent upper bound on the local total cross section.
 ///
 /// Implementations:
-/// - [`GlobalMajorant`] -- constant over space (Phase 1). `material_id`
+/// - [`GlobalMajorant`] -- constant over space. `material_id`
 ///   is ignored; the same per-energy bound applies everywhere.
-/// - [`LocalMajorant`] -- one majorant per material (Phase 2). Uses
+/// - [`LocalMajorant`] -- one majorant per material. Uses
 ///   `material_id` to select the right per-material bound. Vacuum
 ///   (no material at this position, `material_id = None`) returns 0,
 ///   which the Woodcock loop interprets as "infinite free flight";
@@ -63,7 +60,7 @@ pub trait Majorant: Send + Sync {
     fn sigma_max(&self, material_id: Option<u32>, energy: f64) -> f64;
 }
 
-/// Phase 1 majorant: per-energy maximum `Σ_t` across every material in
+/// Global majorant: per-energy maximum `Σ_t` across every material in
 /// the model. Independent of position.
 ///
 /// Stored as a sorted energy grid plus parallel majorant values. Lookup
@@ -100,9 +97,9 @@ impl GlobalMajorant {
         // At every unified energy, take the per-material max of the
         // URR-aware Σ_t majorant -- equals smooth Σ_t outside any URR
         // range and the worst-case URR-sampled Σ_t inside one. This
-        // is what lets Woodcock run correctly on URR-bearing materials
-        // (Phase 2c); Phase 1's `lookup_xs_by_mt(1, e)` bounded only
-        // smooth Σ_t and biased the rejection loop on URR samples.
+        // is what lets Woodcock run correctly on URR-bearing materials;
+        // bounding only the smooth Σ_t (`lookup_xs_by_mt(1, e)`) would
+        // bias the rejection loop on URR samples.
         let sigma_max: Vec<f64> = energies
             .iter()
             .map(|&e| {
@@ -138,8 +135,8 @@ impl GlobalMajorant {
 impl Majorant for GlobalMajorant {
     /// `material_id` is ignored: the global majorant is uniform over
     /// space. Vacuum (None) still returns the global bound -- safe
-    /// (over-bounds), and consistent with Phase 1 behaviour where the
-    /// rejection loop runs in every cell with material.
+    /// (over-bounds), and consistent with the rejection loop running in
+    /// every cell with material.
     #[inline]
     fn sigma_max(&self, _material_id: Option<u32>, energy: f64) -> f64 {
         self.interp(energy)
@@ -228,7 +225,7 @@ impl Majorant for GlobalPhotonMajorant {
     }
 }
 
-/// Phase 2 majorant: one bound per material, looked up by `material_id`.
+/// Local majorant: one bound per material, looked up by `material_id`.
 ///
 /// Each entry is itself a [`GlobalMajorant`] built over a single
 /// material -- so its "global max" is the per-energy maximum of that

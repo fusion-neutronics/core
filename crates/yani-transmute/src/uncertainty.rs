@@ -40,10 +40,10 @@ use crate::covariance_sample::{lognormal_multiplier, Repair, SigmaReport};
 /// source that contributed nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Source {
-    /// Activation cross sections, from ENDF MF=33 covariance (issue #514).
+    /// Activation cross sections, from ENDF MF=33 covariance.
     CrossSections,
     /// The supplied flux spectrum, from a per-bin standard deviation the caller
-    /// provides (issue #559).
+    /// provides.
     ///
     /// Unlike the others this needs no nuclear data: the flux is the caller's
     /// own input. It contributes only where a sigma was actually given, which
@@ -73,7 +73,7 @@ pub enum Source {
     /// the decay scheme's.
     DecayBranching,
     /// The Monte Carlo statistical uncertainty of transport-tallied reaction
-    /// rates, from their per-history covariance (issue #140, item 1).
+    /// rates, from their per-history covariance.
     ///
     /// Applies to `Model.simulate_transmutation`, whose rates come from
     /// transport; a spectrum run's rates are a deterministic collapse with no
@@ -124,8 +124,8 @@ impl Source {
                 let have: Vec<&str> = Source::IMPLEMENTED.iter().map(|s| s.name()).collect();
                 format!(
                     "unknown uncertainty source {name:?}; this build can perturb {have:?}. \
-                     Fission yields carry published uncertainties that are not read yet \
-                     (issue #140), and reaction branching has none in ENDF-6 to read."
+                     Fission yields carry published uncertainties that are not read yet, \
+                     and reaction branching has none in ENDF-6 to read."
                 )
             })
     }
@@ -417,7 +417,7 @@ pub struct Info {
     ///
     /// A spectrum taken from a published reference set has no stated error, so
     /// it contributes nothing and that has to be visible rather than read as a
-    /// flux known exactly (issue #559).
+    /// flux known exactly.
     pub spectra_with_flux_sigma: usize,
     pub spectra_without_flux_sigma: usize,
     /// Sampled flux bins that went negative and were floored at zero.
@@ -656,7 +656,7 @@ pub struct Ensemble {
     pub decay_energy_seed: Option<u64>,
 }
 
-/// Where an inventory's uncertainty comes from (issue #140, item 4).
+/// Where an inventory's uncertainty comes from.
 ///
 /// Two levels, which answer different questions:
 ///

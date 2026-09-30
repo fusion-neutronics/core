@@ -1,10 +1,10 @@
-//! GPU rectangular mesh-tally support on the PHOTON path (issue #234),
+//! GPU rectangular mesh-tally support on the PHOTON path,
 //! on-hardware parity check.
 //!
 //! A `Tally(mesh=RegularRectangularMesh, scores=[flux])` carries a MeshFilter
 //! and NO CellFilter: it voxel-bins the photon flux by spatial position. The
 //! GPU photon kernel runs the Amanatides-Woo voxel walk per track-length step
-//! (per-source direct-to-`src_acc` variance, issue #234) and must reproduce the
+//! (per-source direct-to-`src_acc` variance) and must reproduce the
 //! CPU photon mesh tally. Runs the SAME Fe-sphere / Co60 photon-source model on
 //! the CPU (`simulate_transport`) and the GPU (`run_on_gpu`) and compares the
 //! per-voxel flux mean and total.

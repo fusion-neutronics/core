@@ -42,7 +42,7 @@ use yamc::geometry::mesh::MeshGeometry;
 ///     ValueError: If the file is not an Arrow IPC mesh, or if it contains a
 ///         negatively oriented tetrahedron. Transport reads outward tet face
 ///         normals off a fixed vertex ordering, so an inverted tet is rejected
-///         rather than silently re-wound (issue #316); regenerate the mesh with
+///         rather than silently re-wound; regenerate the mesh with
 ///         a writer that emits positively oriented tets.
 ///
 /// Examples:
@@ -471,7 +471,7 @@ impl PyMeshGeometry {
             None,
             Some(&presampled),
             // A pure mesh geometry has no CSG fills; the WASM mesh sampler
-            // resolves its volumes directly (issue #291).
+            // resolves its volumes directly.
             false,
             // Mesh geometries don't carry CSG surfaces to hover over.
             None,

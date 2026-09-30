@@ -8,7 +8,7 @@
 //! (`heating_xs_per_material`) built by
 //! `extract_photon_material_xs` -- a density-weighted sum of each
 //! element's `ElementMicroXS.heating`, the SAME aggregation the CPU
-//! `Material::calculate_photon_xs().heating` uses (issue #356, the CPU
+//! `Material::calculate_photon_xs().heating` uses (the CPU
 //! track-length photon-heating estimate). Because GPU and CPU draw
 //! from the identical heating table and interpolate it the same way,
 //! the heating tally should agree to within MC noise + the kernel's

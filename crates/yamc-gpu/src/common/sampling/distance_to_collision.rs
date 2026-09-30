@@ -12,8 +12,7 @@
 //! The kernel uses the inline PCG-32 step (same constants as
 //! `kernels::pcg32` and CPU `GpuRng`, byte-identical sequence) and the
 //! `ln_f64` polyfill from `kernels::polyfills` (because cubecl-spirv
-//! emits invalid SPIR-V for native `f64::ln` on this driver, see
-//! cubecl#1316).
+//! emits invalid SPIR-V for native `f64::ln` on this driver).
 //!
 //! Test strategy: statistical only. The sampled distances follow an
 //! exponential distribution with mean and standard deviation both
