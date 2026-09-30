@@ -25,20 +25,35 @@ __all__ = [
     "atomic_number",
 ]
 
-def dose_coefficients(particle: builtins.str, geometry: builtins.str = 'AP', data_source: builtins.str = 'icrp116') -> DoseCoefficients:
+def dose_coefficients(particle: builtins.str, geometry: typing.Optional[builtins.str] = None, data_source: typing.Optional[builtins.str] = None, dose_quantity: builtins.str = 'effective') -> DoseCoefficients:
     r"""
-    Return effective dose conversion coefficients.
+    Return fluence-to-dose conversion coefficients.
     
-    Provides fluence-to-effective-dose conversion coefficients based on
-    ICRP Publication 74 or 116.
+    ``dose_quantity='effective'`` (the default) returns fluence-to-effective-dose
+    coefficients from ICRP Publication 74 or 116 for an irradiation geometry.
+    
+    ``dose_quantity='ambient'`` returns fluence-to-ambient-dose-equivalent
+    H*(10) coefficients from ICRP Publication 74 (Table A.21 for photons, Table
+    A.42 for neutrons), the ICRU-57 definition most regulations still reference.
+    H*(10) is defined at 10 mm depth in the ICRU sphere in an aligned and
+    expanded field, so it takes no ``geometry``, and ICRP-116 does not tabulate
+    it. It is designed to over-estimate effective dose for area monitoring, but
+    for high-energy neutrons it under-reads it. The tables cover 1 meV to 20 MeV
+    for neutrons and 10 keV to 10 MeV for photons, and are not extrapolated: a
+    tally folded with them scores nothing for particles outside that range.
     
     Args:
         particle (str): 'neutron' or 'photon'.
-        geometry (str): Irradiation geometry. One of:
+        geometry (str, optional): Irradiation geometry for effective dose. One of:
             'AP' (Anterior-Posterior), 'PA' (Posterior-Anterior),
             'LLAT' (Left Lateral), 'RLAT' (Right Lateral),
-            'ROT' (Rotational), 'ISO' (Isotropic)
-        data_source (str): 'icrp74' or 'icrp116' (default: 'icrp116')
+            'ROT' (Rotational), 'ISO' (Isotropic). Defaults to 'AP'. Must not be
+            given for ``dose_quantity='ambient'``.
+        data_source (str, optional): 'icrp74' or 'icrp116'. Defaults to
+            'icrp116' for effective dose and 'icrp74' for ambient dose
+            equivalent, which only ICRP-74 tabulates.
+        dose_quantity (str): 'effective' (default) for effective dose or
+            'ambient' for ambient dose equivalent H*(10).
     
     Returns:
         DoseCoefficients: an object with ``.energy`` (eV), ``.coefficients``
@@ -52,6 +67,9 @@ def dose_coefficients(particle: builtins.str, geometry: builtins.str = 'AP', dat
         dc.energy          # incident energies in eV
         dc.coefficients    # fluence-to-dose coefficients
         dc.units           # 'pSv cm2'
+    
+        # ICRP-74 ambient dose equivalent H*(10)
+        h10 = yamc.data.dose_coefficients('neutron', dose_quantity='ambient')
     
         # Fold them into a flux tally via the energy_function= argument
         dose_tally = yamc.Tally(scores=['flux'], energy_function=dc.as_energy_function())

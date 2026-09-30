@@ -3,6 +3,7 @@
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 use yamc_nuclide::data::effective_dose::{
+    ambient_dose_coefficients as rust_ambient_dose_coefficients,
     dose_coefficients as rust_dose_coefficients, DoseDataSource, DoseGeometry, DoseParticle,
 };
 use yamc_nuclide::data::photon_attenuation::{
@@ -10,8 +11,8 @@ use yamc_nuclide::data::photon_attenuation::{
     mass_energy_absorption_air as rust_mass_energy_absorption_air, CoefficientTable,
 };
 
-/// Fluence-to-effective-dose conversion coefficients, returned by
-/// :func:`yamc.data.dose_coefficients`.
+/// Fluence-to-dose conversion coefficients (effective dose or ambient dose
+/// equivalent H*(10)), returned by :func:`yamc.data.dose_coefficients`.
 ///
 /// Carries the energy grid, the coefficients, and their units, and can
 /// repackage itself for a tally via :meth:`as_energy_function`.
@@ -23,7 +24,9 @@ pub struct PyDoseCoefficients {
     coefficients: Vec<f64>,
     units: String,
     particle: String,
-    geometry: String,
+    dose_quantity: String,
+    /// `None` for ambient dose equivalent, which has no irradiation geometry.
+    geometry: Option<String>,
     data_source: String,
 }
 
@@ -36,7 +39,7 @@ impl PyDoseCoefficients {
         self.energy.clone()
     }
 
-    /// Fluence-to-effective-dose coefficients, one per energy.
+    /// Fluence-to-dose coefficients, one per energy.
     #[getter]
     fn coefficients(&self) -> Vec<f64> {
         self.coefficients.clone()
@@ -59,10 +62,14 @@ impl PyDoseCoefficients {
     }
 
     fn __repr__(&self) -> String {
+        let quantity = match &self.geometry {
+            Some(geometry) => geometry.clone(),
+            None => self.dose_quantity.clone(),
+        };
         format!(
             "DoseCoefficients({}, {}, {}, {} points, {})",
             self.particle,
-            self.geometry,
+            quantity,
             self.data_source,
             self.energy.len(),
             self.units
@@ -70,18 +77,33 @@ impl PyDoseCoefficients {
     }
 }
 
-/// Return effective dose conversion coefficients.
+/// Return fluence-to-dose conversion coefficients.
 ///
-/// Provides fluence-to-effective-dose conversion coefficients based on
-/// ICRP Publication 74 or 116.
+/// ``dose_quantity='effective'`` (the default) returns fluence-to-effective-dose
+/// coefficients from ICRP Publication 74 or 116 for an irradiation geometry.
+///
+/// ``dose_quantity='ambient'`` returns fluence-to-ambient-dose-equivalent
+/// H*(10) coefficients from ICRP Publication 74 (Table A.21 for photons, Table
+/// A.42 for neutrons), the ICRU-57 definition most regulations still reference.
+/// H*(10) is defined at 10 mm depth in the ICRU sphere in an aligned and
+/// expanded field, so it takes no ``geometry``, and ICRP-116 does not tabulate
+/// it. It is designed to over-estimate effective dose for area monitoring, but
+/// for high-energy neutrons it under-reads it. The tables cover 1 meV to 20 MeV
+/// for neutrons and 10 keV to 10 MeV for photons, and are not extrapolated: a
+/// tally folded with them scores nothing for particles outside that range.
 ///
 /// Args:
 ///     particle (str): 'neutron' or 'photon'.
-///     geometry (str): Irradiation geometry. One of:
+///     geometry (str, optional): Irradiation geometry for effective dose. One of:
 ///         'AP' (Anterior-Posterior), 'PA' (Posterior-Anterior),
 ///         'LLAT' (Left Lateral), 'RLAT' (Right Lateral),
-///         'ROT' (Rotational), 'ISO' (Isotropic)
-///     data_source (str): 'icrp74' or 'icrp116' (default: 'icrp116')
+///         'ROT' (Rotational), 'ISO' (Isotropic). Defaults to 'AP'. Must not be
+///         given for ``dose_quantity='ambient'``.
+///     data_source (str, optional): 'icrp74' or 'icrp116'. Defaults to
+///         'icrp116' for effective dose and 'icrp74' for ambient dose
+///         equivalent, which only ICRP-74 tabulates.
+///     dose_quantity (str): 'effective' (default) for effective dose or
+///         'ambient' for ambient dose equivalent H*(10).
 ///
 /// Returns:
 ///     DoseCoefficients: an object with ``.energy`` (eV), ``.coefficients``
@@ -96,6 +118,9 @@ impl PyDoseCoefficients {
 ///     dc.coefficients    # fluence-to-dose coefficients
 ///     dc.units           # 'pSv cm2'
 ///
+///     # ICRP-74 ambient dose equivalent H*(10)
+///     h10 = yamc.data.dose_coefficients('neutron', dose_quantity='ambient')
+///
 ///     # Fold them into a flux tally via the energy_function= argument
 ///     dose_tally = yamc.Tally(scores=['flux'], energy_function=dc.as_energy_function())
 ///
@@ -107,11 +132,12 @@ impl PyDoseCoefficients {
 ///     - ICRP Publication 116: https://doi.org/10.1016/j.icrp.2011.10.001
 #[gen_stub_pyfunction]
 #[pyfunction]
-#[pyo3(signature = (particle, geometry="AP", data_source="icrp116"))]
+#[pyo3(signature = (particle, geometry=None, data_source=None, dose_quantity="effective"))]
 pub fn dose_coefficients(
     particle: &str,
-    geometry: &str,
-    data_source: &str,
+    geometry: Option<&str>,
+    data_source: Option<&str>,
+    dose_quantity: &str,
 ) -> PyResult<PyDoseCoefficients> {
     // Parse particle
     let particle_kind = match particle {
@@ -124,7 +150,57 @@ pub fn dose_coefficients(
         }
     };
 
+    let ambient = match dose_quantity {
+        "effective" => false,
+        "ambient" => true,
+        other => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "dose_quantity must be 'effective' or 'ambient', got '{other}'"
+            )))
+        }
+    };
+
+    // Parse data source, defaulting to the newest publication that
+    // tabulates the requested quantity.
+    let data_source = data_source.unwrap_or(if ambient { "icrp74" } else { "icrp116" });
+    let source = match data_source.to_lowercase().as_str() {
+        "icrp74" => DoseDataSource::ICRP74,
+        "icrp116" => DoseDataSource::ICRP116,
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid data_source '{data_source}'. Must be 'icrp74' or 'icrp116'"
+            )))
+        }
+    };
+
+    if ambient {
+        if let Some(geometry) = geometry {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "geometry='{geometry}' was given with dose_quantity='ambient', but ambient \
+                 dose equivalent H*(10) has no irradiation geometry: it is defined in an \
+                 aligned and expanded field in the ICRU sphere. Omit geometry."
+            )));
+        }
+        let (energy, coefficients) = rust_ambient_dose_coefficients(particle_kind, source)
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "data_source='{data_source}' does not tabulate ambient dose equivalent \
+                     H*(10). Use data_source='icrp74'."
+                ))
+            })?;
+        return Ok(PyDoseCoefficients {
+            energy,
+            coefficients,
+            units: "pSv cm2".to_string(),
+            particle: particle.to_string(),
+            dose_quantity: dose_quantity.to_string(),
+            geometry: None,
+            data_source: data_source.to_lowercase(),
+        });
+    }
+
     // Parse geometry
+    let geometry = geometry.unwrap_or("AP");
     let geom = match geometry.to_uppercase().as_str() {
         "AP" => DoseGeometry::AP,
         "PA" => DoseGeometry::PA,
@@ -139,24 +215,14 @@ pub fn dose_coefficients(
         }
     };
 
-    // Parse data source
-    let source = match data_source.to_lowercase().as_str() {
-        "icrp74" => DoseDataSource::ICRP74,
-        "icrp116" => DoseDataSource::ICRP116,
-        _ => {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Invalid data_source '{data_source}'. Must be 'icrp74' or 'icrp116'"
-            )))
-        }
-    };
-
     let (energy, coefficients) = rust_dose_coefficients(particle_kind, geom, source);
     Ok(PyDoseCoefficients {
         energy,
         coefficients,
         units: "pSv cm2".to_string(),
         particle: particle.to_string(),
-        geometry: geometry.to_uppercase(),
+        dose_quantity: dose_quantity.to_string(),
+        geometry: Some(geometry.to_uppercase()),
         data_source: data_source.to_lowercase(),
     })
 }

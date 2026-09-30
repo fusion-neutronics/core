@@ -88,6 +88,93 @@ class TestDoseCoefficients:
         yamc.data.dose_coefficients("neutron", "AP", "icrp116")
 
 
+def _at(dc, energy):
+    """The tabulated coefficient at ``energy`` (eV), which must be a grid point."""
+    (index,) = [i for i, e in enumerate(dc.energy) if e == pytest.approx(energy)]
+    return dc.coefficients[index]
+
+
+class TestAmbientDoseCoefficients:
+    """Tests for dose_quantity='ambient', ICRP-74 ambient dose equivalent H*(10)."""
+
+    def test_neutron_table_matches_icrp74(self):
+        """ICRP-74 Table A.42: 47 points from 1 meV to 20 MeV."""
+        dc = yamc.data.dose_coefficients("neutron", dose_quantity="ambient")
+
+        assert len(dc.energy) == 47
+        assert dc.units == "pSv cm2"
+        assert dc.energy[0] == pytest.approx(1e-3)
+        assert dc.energy[-1] == pytest.approx(2e7)
+        assert _at(dc, 0.0253) == 10.6
+        assert _at(dc, 1.4e7) == 520.0
+        assert _at(dc, 2e7) == 600.0
+
+    def test_photon_table_matches_icrp74(self):
+        """ICRP-74 Table A.21: 25 points from 10 keV to 10 MeV."""
+        dc = yamc.data.dose_coefficients("photon", dose_quantity="ambient")
+
+        assert len(dc.energy) == 25
+        assert dc.energy[0] == pytest.approx(1e4)
+        assert dc.energy[-1] == pytest.approx(1e7)
+        assert _at(dc, 1e4) == 0.061
+        assert _at(dc, 1e6) == 5.20
+        assert _at(dc, 1e7) == 25.6
+
+    def test_neutron_table_covers_dt_source_energy(self):
+        """A DT source at 14.1 MeV sits inside the tabulation, not past its end."""
+        dc = yamc.data.dose_coefficients("neutron", dose_quantity="ambient")
+        assert dc.energy[-1] > 14.1e6
+
+    def test_ambient_differs_from_effective(self):
+        effective = yamc.data.dose_coefficients("neutron", "AP", "icrp74")
+        ambient = yamc.data.dose_coefficients("neutron", dose_quantity="ambient")
+        # Same 47-point ICRP-74 grid apart from the thermal point (25 meV vs 25.3 meV).
+        assert len(effective.energy) == len(ambient.energy)
+        assert effective.coefficients != ambient.coefficients
+
+    def test_explicit_icrp74_data_source(self):
+        default = yamc.data.dose_coefficients("photon", dose_quantity="ambient")
+        explicit = yamc.data.dose_coefficients(
+            "photon", data_source="icrp74", dose_quantity="ambient"
+        )
+        assert default.coefficients == explicit.coefficients
+
+    def test_repr_names_the_quantity(self):
+        dc = yamc.data.dose_coefficients("photon", dose_quantity="ambient")
+        assert repr(dc) == "DoseCoefficients(photon, ambient, icrp74, 25 points, pSv cm2)"
+
+    @pytest.mark.parametrize("geometry", ["AP", "ISO"])
+    def test_ambient_refuses_geometry(self, geometry):
+        """An explicit geometry is refused, including the effective-dose default."""
+        with pytest.raises(ValueError, match="H\\*\\(10\\) has no irradiation geometry"):
+            yamc.data.dose_coefficients("neutron", geometry, dose_quantity="ambient")
+
+    def test_ambient_refuses_icrp116(self):
+        with pytest.raises(ValueError, match="does not tabulate ambient dose equivalent"):
+            yamc.data.dose_coefficients(
+                "neutron", data_source="icrp116", dose_quantity="ambient"
+            )
+
+    def test_invalid_dose_quantity(self):
+        with pytest.raises(ValueError, match="dose_quantity must be 'effective' or 'ambient'"):
+            yamc.data.dose_coefficients("neutron", dose_quantity="H*(10)")
+
+    @pytest.mark.parametrize("particle", ["neutron", "photon"])
+    def test_matches_openmc(self, particle):
+        """Same ICRP-74 table as openmc.data.dose_coefficients(dose_quantity='ambient')."""
+        openmc_data = pytest.importorskip("openmc.data")
+        try:
+            energy, coeffs = openmc_data.dose_coefficients(
+                particle, data_source="icrp74", dose_quantity="ambient"
+            )
+        except TypeError:
+            pytest.skip("installed OpenMC has no dose_quantity argument")
+
+        dc = yamc.data.dose_coefficients(particle, dose_quantity="ambient")
+        assert dc.energy == pytest.approx(list(energy), rel=1e-12)
+        assert dc.coefficients == list(coeffs)
+
+
 class TestDoseTallyIntegration:
     """Integration tests for dose tallies."""
 

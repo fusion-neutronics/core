@@ -1,7 +1,8 @@
 //! Dose coefficient data and functions for ICRP-74 and ICRP-116.
 //!
 //! Provides energy-dependent fluence-to-effective-dose conversion coefficients
-//! for neutrons and photons in various irradiation geometries.
+//! for neutrons and photons in various irradiation geometries, and
+//! fluence-to-ambient-dose-equivalent H*(10) coefficients from ICRP-74.
 
 /// Irradiation geometry for dose coefficients
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -43,6 +44,8 @@ const ICRP74_NEUTRONS: &str = include_str!("icrp74/neutrons.txt");
 const ICRP116_NEUTRONS: &str = include_str!("icrp116/neutrons.txt");
 const ICRP74_PHOTONS: &str = include_str!("icrp74/photons.txt");
 const ICRP116_PHOTONS: &str = include_str!("icrp116/photons.txt");
+const ICRP74_AMBIENT_NEUTRONS: &str = include_str!("icrp74_ambient/neutrons.txt");
+const ICRP74_AMBIENT_PHOTONS: &str = include_str!("icrp74_ambient/photons.txt");
 
 /// Return effective dose conversion coefficients.
 ///
@@ -96,12 +99,54 @@ pub fn dose_coefficients(
     parse_dose_data(data_str, column_index)
 }
 
+/// Return ambient dose equivalent H*(10) conversion coefficients.
+///
+/// H*(10) is the operational quantity defined at 10 mm depth in the ICRU
+/// sphere in an aligned and expanded field, so it has no irradiation geometry.
+/// It is designed to over-estimate effective dose for area monitoring, but
+/// under-reads it for high-energy neutrons.
+///
+/// ICRP-74 tabulates neutrons from 1 meV to 20 MeV and photons from 10 keV to
+/// 10 MeV. ICRP-116 does not tabulate H*(10), so `DoseDataSource::ICRP116`
+/// returns `None`.
+///
+/// # Returns
+/// * `Some((Vec<f64>, Vec<f64>))` - (energy in eV, dose_coefficients in pSv·cm²)
+///
+/// # Example
+/// ```
+/// use yamc_nuclide::data::effective_dose::{
+///     ambient_dose_coefficients, DoseDataSource, DoseParticle,
+/// };
+///
+/// let (energy, coeffs) =
+///     ambient_dose_coefficients(DoseParticle::Neutron, DoseDataSource::ICRP74).unwrap();
+/// assert_eq!(energy.len(), coeffs.len());
+/// assert!(ambient_dose_coefficients(DoseParticle::Neutron, DoseDataSource::ICRP116).is_none());
+/// ```
+///
+/// # References
+/// - ICRP Publication 74: <https://doi.org/10.1016/S0146-6453(96)90010-X>,
+///   Table A.21 (photons) and Table A.42 (neutrons)
+pub fn ambient_dose_coefficients(
+    particle: DoseParticle,
+    data_source: DoseDataSource,
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    let data_str = match (particle, data_source) {
+        (DoseParticle::Neutron, DoseDataSource::ICRP74) => ICRP74_AMBIENT_NEUTRONS,
+        (DoseParticle::Photon, DoseDataSource::ICRP74) => ICRP74_AMBIENT_PHOTONS,
+        (_, DoseDataSource::ICRP116) => return None,
+    };
+    Some(parse_dose_data(data_str, 1))
+}
+
 /// Parse dose coefficient data from embedded text files.
 ///
 /// The data files have the following format:
 /// - Line 1: Title
 /// - Line 2: Empty
-/// - Line 3: Header (Energy, AP, PA, LLAT, RLAT, ROT, ISO)
+/// - Line 3: Header (Energy, AP, PA, LLAT, RLAT, ROT, ISO for effective dose,
+///   or Energy, H*(10) for ambient dose equivalent)
 /// - Lines 4+: Data rows (energy in MeV, then coefficients)
 fn parse_dose_data(data: &str, column_index: usize) -> (Vec<f64>, Vec<f64>) {
     let mut energies = Vec::new();
@@ -235,6 +280,48 @@ mod tests {
                 "Energy grid must be monotonically increasing"
             );
         }
+    }
+
+    #[test]
+    fn test_icrp74_ambient_neutron_coefficients() {
+        let (energy, coeffs) =
+            ambient_dose_coefficients(DoseParticle::Neutron, DoseDataSource::ICRP74).unwrap();
+
+        // ICRP-74 Table A.42: 47 points from 1 meV to 20 MeV.
+        assert_eq!(energy.len(), 47);
+        assert_eq!(energy.len(), coeffs.len());
+        assert_eq!(energy[0], 1.0e-3);
+        assert_eq!(energy[energy.len() - 1], 2.0e7);
+
+        // 10.6 pSv cm² at thermal (0.0253 eV), 520 at 14 MeV, 600 at 20 MeV.
+        let at = |e: f64| coeffs[energy.iter().position(|&x| (x - e).abs() < 1e-9 * e).unwrap()];
+        assert_eq!(at(2.53e-2), 10.6);
+        assert_eq!(at(1.4e7), 520.0);
+        assert_eq!(at(2.0e7), 600.0);
+    }
+
+    #[test]
+    fn test_icrp74_ambient_photon_coefficients() {
+        let (energy, coeffs) =
+            ambient_dose_coefficients(DoseParticle::Photon, DoseDataSource::ICRP74).unwrap();
+
+        // ICRP-74 Table A.21: 25 points from 10 keV to 10 MeV.
+        assert_eq!(energy.len(), 25);
+        assert_eq!(energy.len(), coeffs.len());
+        assert_eq!(energy[0], 1.0e4);
+        assert_eq!(energy[energy.len() - 1], 1.0e7);
+
+        // 0.061 pSv cm² at 10 keV, 5.20 at 1 MeV, 25.6 at 10 MeV.
+        assert_eq!(coeffs[0], 0.061);
+        let one_mev = energy.iter().position(|&e| e == 1.0e6).unwrap();
+        assert_eq!(coeffs[one_mev], 5.20);
+        assert_eq!(coeffs[coeffs.len() - 1], 25.6);
+    }
+
+    #[test]
+    fn test_icrp116_has_no_ambient_coefficients() {
+        assert!(ambient_dose_coefficients(DoseParticle::Neutron, DoseDataSource::ICRP116).is_none());
+        assert!(ambient_dose_coefficients(DoseParticle::Photon, DoseDataSource::ICRP116).is_none());
     }
 
     #[test]
