@@ -583,7 +583,14 @@ fn attach_evaluated_yields(
         for i in 0..batch.num_rows() {
             let (nuclide, energy, kind) = (nuclides.value(i), energies.value(i), kinds.value(i));
             let products = list_str(products_col, i)?;
-            let yields = list_f64(yields_col, i)?;
+            // Read the items as optional so a null yield is refused rather
+            // than loaded as a stated 0.0, which list_f64 would do.
+            let yields = list_opt_f64(yields_col, i)?
+                .into_iter()
+                .collect::<Option<Vec<f64>>>()
+                .ok_or_else(|| {
+                    format!("{SECTION}: {nuclide} {kind} at {energy} eV has a null yield")
+                })?;
             let uncertainties = if sigmas_col.is_null(i) {
                 vec![None; products.len()]
             } else {
@@ -2395,6 +2402,32 @@ mod tests {
         let err = refusal(&parts);
         assert!(
             err.contains("U235 independent at 0.0253 eV has 3 products, 2 yields"),
+            "got: {err}"
+        );
+    }
+
+    /// A null yield is not a stated one, so it is refused rather than read as
+    /// an exact 0.0.
+    #[test]
+    fn an_evaluated_yield_with_a_null_item_is_refused() {
+        let parts = tampered_sections(|batch| {
+            let mut yields =
+                arrow_array::builder::ListBuilder::new(arrow_array::builder::Float64Builder::new());
+            yields.values().append_value(0.05);
+            yields.values().append_null();
+            yields.values().append_value(0.01);
+            yields.append(true);
+            yields.values().append_slice(&[0.0619]);
+            yields.append(true);
+            vec![replace_column(
+                batch,
+                "yields",
+                std::sync::Arc::new(yields.finish()),
+            )]
+        });
+        let err = refusal(&parts);
+        assert!(
+            err.contains("U235 independent at 0.0253 eV has a null yield"),
             "got: {err}"
         );
     }
