@@ -308,13 +308,12 @@ fn fissile_total_particles_invariance() {
 
 /// Regression guard: fission progeny of an (n,2n)/(n,3n) neutron
 /// (weight-multiplied to ~2 by the GPU's `weight *= yield`) must be re-launched
-/// carrying that weight. Dropping it (ignoring the banked weight in
-/// `fission_source_inputs`, since the kernel starts every source neutron at
-/// weight 1.0) biases the fixed-source fissile flux ~3.5% low for a 14 MeV source
-/// (above the ~5.3 MeV (n,2n) threshold). The dispatch re-launches a weight-w
-/// progeny as `round(w)` unit-weight neutrons. yamc-CPU (analog (n,2n) banking) is the
-/// reference and matches OpenMC; both integrated flux and the MT18 fission rate
-/// must agree to within Monte-Carlo noise.
+/// carrying that weight. Dropping it (relaunching every banked record at
+/// weight 1.0 in `fission_source_inputs`) biases the fixed-source fissile flux
+/// ~3.5% low for a 14 MeV source (above the ~5.3 MeV (n,2n) threshold). The
+/// dispatch relaunches each banked progeny once at its banked weight. yamc-CPU
+/// (analog (n,2n) banking) is the reference and matches OpenMC; both integrated
+/// flux and the MT18 fission rate must agree to within Monte-Carlo noise.
 #[test]
 fn fissile_nxn_progeny_weight_carried() {
     if !data_present(NUCLIDE) || !gpu_available() {

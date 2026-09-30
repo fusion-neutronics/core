@@ -1347,6 +1347,9 @@ pub(crate) fn multi_cell_transport_kernel(
     energies_in: &[f64],
     positions_in: &[f64],
     directions_in: &[f64],
+    // Per-particle starting weight: 1.0 for a source neutron, the banked
+    // weight for a relaunched bank record.
+    weights_in: &[f64],
     cell_aabbs: &[f64],
     cell_to_material: &[u32],
     bvh_aabbs: &[f64],
@@ -2230,14 +2233,16 @@ pub(crate) fn multi_cell_transport_kernel(
     // alive: 1 = transporting, 0 = absorbed or escaped.
     let mut alive = 1u32;
     let mut n_steps = 0u32;
-    // weight: slice-E multiplier for tally accumulation. Starts at
-    // 1.0 and grows by `MT_YIELDS[slot]` whenever an inelastic
+    // weight: slice-E multiplier for tally accumulation. Starts at the
+    // particle's input weight (1.0 for a source neutron, the banked weight for
+    // a relaunched fission progeny or spilled secondary) and grows by
+    // `MT_YIELDS[slot]` whenever an inelastic
     // collision picks a multi-neutron-out MT (slot 41 = MT 16
     // doubles weight, slot 42 = MT 17 triples it). Track-length and
     // absorption tallies are scaled by `weight` so the expected
     // contribution matches `yield` independent neutrons (yamc's CPU
     // side clones the primary; this is the variance-reduction form).
-    let mut weight = 1.0;
+    let mut weight = weights_in[ABSOLUTE_POS];
 
     // `angle_interp` is currently unused in the kernel -- slice B
     // approximates every (mu, cdf) bracket as piecewise-linear in

@@ -32,6 +32,8 @@ pub fn run_multi_cell_transport(
     energies_in: &[f64],
     positions_in: &[f64],
     directions_in: &[f64],
+    // Per-particle starting weight (1.0 for a source neutron), one per seed.
+    weights_in: &[f64],
     cell_aabbs: &[f64],
     cell_to_material: &[u32],
     surface_types: &[u32],
@@ -232,6 +234,11 @@ pub fn run_multi_cell_transport(
     };
 
     let n = seeds.len();
+    assert_eq!(
+        weights_in.len(),
+        n,
+        "weights_in must have one entry per seed"
+    );
     let n_cells = cell_aabbs.len() / 6;
     assert_eq!(
         cell_to_material.len(),
@@ -843,6 +850,7 @@ pub fn run_multi_cell_transport(
     let energies_h = client.create_from_slice(bytemuck::cast_slice(energies_in));
     let positions_h = client.create_from_slice(bytemuck::cast_slice(positions_in));
     let dirs_h = client.create_from_slice(bytemuck::cast_slice(directions_in));
+    let weights_h = client.create_from_slice(bytemuck::cast_slice(weights_in));
     let aabbs_h = client.create_from_slice(bytemuck::cast_slice(cell_aabbs));
     let cell_mat_h = client.create_from_slice(bytemuck::cast_slice(cell_to_material));
     // cubecl rejects zero-sized buffers; fall back to single-slot
@@ -1417,6 +1425,7 @@ pub fn run_multi_cell_transport(
             BufferArg::from_raw_parts(energies_h, n),
             BufferArg::from_raw_parts(positions_h, positions_in.len()),
             BufferArg::from_raw_parts(dirs_h, directions_in.len()),
+            BufferArg::from_raw_parts(weights_h, n),
             BufferArg::from_raw_parts(aabbs_h, cell_aabbs.len()),
             BufferArg::from_raw_parts(cell_mat_h, cell_to_material.len()),
             BufferArg::from_raw_parts(bvh_aabbs_h, bvh_aabbs_data.len()),

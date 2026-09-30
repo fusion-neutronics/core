@@ -75,6 +75,9 @@ pub struct GpuTransportInputs {
     pub positions: Vec<f64>,
     /// Per-particle initial direction, stride 3 (unit vectors).
     pub directions: Vec<f64>,
+    /// Per-particle initial weight: 1.0 for a source neutron, the banked
+    /// weight for a relaunched bank record.
+    pub weights: Vec<f64>,
     /// Cell AABBs, stride 6: `[min_x, min_y, min_z, max_x, max_y, max_z]`.
     pub cell_aabbs: Vec<f64>,
     /// Material index per cell.
@@ -600,12 +603,14 @@ pub fn translate_for_gpu(
     }
     let (seeds, energies, positions, directions) =
         sample_initial_particles(model, n_particles, base_seed);
+    let weights = vec![1.0; seeds.len()];
 
     Ok(GpuTransportInputs {
         seeds,
         energies,
         positions,
         directions,
+        weights,
         cell_aabbs,
         cell_to_material,
         surface_types,

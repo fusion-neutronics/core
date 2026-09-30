@@ -156,6 +156,7 @@ fn compare(
         &inputs.energies,
         &inputs.positions,
         &inputs.directions,
+        &inputs.weights,
         &inputs.cell_aabbs,
         &inputs.cell_to_material,
         &inputs.surface_types,
@@ -295,6 +296,7 @@ fn compare(
         &inputs.energies,
         &inputs.positions,
         &inputs.directions,
+        &inputs.weights,
         &inputs.cell_aabbs,
         &inputs.cell_to_material,
         &inputs.surface_types,
@@ -444,6 +446,7 @@ fn compare(
         &inputs.energies,
         &inputs.positions,
         &inputs.directions,
+        &inputs.weights,
         &inputs.cell_aabbs,
         &inputs.cell_to_material,
         &inputs.surface_types,
@@ -736,6 +739,7 @@ fn compare_bank_on(nuclide: &str, density: f64, radius: f64, energy_ev: f64, n: 
             &inputs.energies,
             &inputs.positions,
             &inputs.directions,
+            &inputs.weights,
             &inputs.cell_aabbs,
             &inputs.cell_to_material,
             &inputs.surface_types,
@@ -895,23 +899,21 @@ fn compare_bank_on(nuclide: &str, density: f64, radius: f64, energy_ev: f64, n: 
         );
         // The host drains the chain across generation launches while the twin runs
         // it in-thread, so this pins the whole bank round-trip: the banked record,
-        // the `round(w)` relaunch, the generation loop and the per-source fold.
+        // its relaunch at the banked weight, the generation loop and the
+        // per-source fold.
         //
-        // Most seeds land at 1e-13 (bit-identical: every banked progeny's stream is
+        // Six of the eight seeds are bit-identical (every banked progeny's stream is
         // keyed on its place in the emission tree, so running the chain in-thread or
-        // across launches gives the same particles). A few do not, and the reason is
-        // the `round(w)` relaunch itself: a banked progeny whose weight is NOT
-        // integral -- an (n,2n) multiply leaves `w = 1.981` on this model -- is
-        // re-expanded by the host into `floor(w) + Bernoulli(frac)` unit-weight
-        // neutrons, so the host transports weight 2.0 where the twin
-        // carries 1.981. That is unbiased but not per-history equal, and one such
-        // progeny in 100k histories moves the total by ~5e-5. It happens on 3 of the
-        // 8 seeds below (worst 5.0e-5) and is unrelated to what this test pins, so
-        // the bound is 5e-4: 10x above the measured worst case, still 4x below the
-        // 0.2% deficit this exists to rule out.
+        // across launches gives the same particles). Two (4242, 31337) keep a
+        // residual of up to 8e-6 that does not come from the relaunch: it is the
+        // same whether a fractional banked weight is carried or rounded. Rounding
+        // it, i.e. relaunching a progeny of weight `w = 1.981` (a fractional
+        // (n,2n) yield on this model) as `floor(w) + Bernoulli(frac)` unit-weight
+        // neutrons, moves seed 99991 by 5.0e-5. The bound is 2e-5: above the
+        // residual, below the rounding.
         let rel = (disp_flux - twin_flux).abs() / twin_flux.abs().max(disp_flux.abs());
         assert!(
-            rel < 5.0e-4,
+            rel < 2.0e-5,
             "seed {seed}: dispatch host drain vs twin in-thread chain differ by {rel:.3e} \
              (twin {twin_flux:.17e}, dispatch {disp_flux:.17e})"
         );
@@ -959,6 +961,7 @@ fn compare_cpu_vs_twin(nuclide: &str, density: f64, radius: f64, energy_ev: f64,
             &inputs.energies,
             &inputs.positions,
             &inputs.directions,
+            &inputs.weights,
             &inputs.cell_aabbs,
             &inputs.cell_to_material,
             &inputs.surface_types,
