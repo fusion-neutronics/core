@@ -748,3 +748,27 @@ def test_a_component_is_named_or_refused():
     iron = _iron()
     with pytest.raises(ValueError, match="component must be one of"):
         iron.decay_heat(component="neutrino")
+
+
+def test_with_no_rate_drawn_the_repair_report_is_empty():
+    """With no rate drawn, the repair report is empty and exact."""
+    iron = _iron()
+    # Half-lives only, so no cross-section rate is drawn whatever covariance
+    # the cached fixture carries, and the weighted inflation has nothing to
+    # weigh. The values of a real repair and the nested layout are pinned in
+    # Rust (covariance_sample.rs and the yani-python data_uncertainty.rs
+    # tests).
+    results = iron.transmute(
+        schedule=_schedule(),
+        data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["half_life"]),
+    )
+    info = results.get_data_uncertainty_info(iron.id or 0)
+    assert info["rates_sampled"] == 0
+    assert info["covariance_repaired"] == []
+    assert info["covariance_repairs"] == []
+    assert info["covariance_repaired_outside_bound"] == []
+    assert info["worst_sigma_inflation"] == 0.0
+    assert info["rate_weighted_sigma_inflation"] is None
+    assert info["sigma_at_least_one"] == {}
+    assert info["sigma_at_least_ten"] == {}
+    assert info["sigma_at_least_one_outside_bound"] == {}

@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use yamc_materials::Material;
 
 use crate::covariance_fold::Coverage;
-use crate::covariance_sample::Clipping;
+use crate::covariance_sample::{Repair, SigmaReport};
 
 /// One input to the Bateman matrix that can be perturbed.
 ///
@@ -277,10 +277,82 @@ pub struct Info {
     /// product of interest, which leaves the count reading as full coverage
     /// while the ensemble perturbs almost nothing.
     pub rate_fraction_covered_total: Option<f64>,
-    /// Covariance matrices that were not positive semi-definite as evaluated,
-    /// and the worst repair that had to be made.
-    pub matrices_clipped: usize,
-    pub worst_relative_clip: f64,
+    /// Nuclides the material can populate whose folded covariance was not
+    /// positive semi-definite on at least one spectrum, past round-off, and
+    /// had its negative eigenvalues clipped to be sampled, with a channel of
+    /// that matrix a draw can move (a positive rate on a spectrum the
+    /// schedule irradiates with).
+    ///
+    /// Populated means `yani::populated_nuclides` bounds the nuclide at or
+    /// above [`crate::DENSITY_FLOOR`] over the schedule at nominal rates. The
+    /// fold covers every chain nuclide with data, which from almost any
+    /// composition is the chain's whole closure, and in the nominal solve a
+    /// nuclide the bound leaves out cannot move any density by as much as
+    /// that floor. A replica's lognormal rates on a wide channel can sit
+    /// orders above nominal, so the bound does not hold for every replica.
+    /// Past round-off means the smallest eigenvalue of the correlation matrix
+    /// is below `-m * 1e-12`, `m` the number of channels with a positive
+    /// stated variance (see `covariance_sample::REPAIR_TOLERANCE`), or a
+    /// channel is stated with a negative variance, or with a zero one and a
+    /// covariance to another channel.
+    ///
+    /// A gap: clipping only ever adds variance, so each of these was sampled
+    /// wider than its evaluation states. How much is in `covariance_repairs`,
+    /// which also keeps the repairs of populated nuclides no draw can move.
+    pub covariance_repaired: BTreeSet<String>,
+    /// One record per repaired (populated nuclide, spectrum): the eigenvalues,
+    /// the share of the stated variance the clipping added, and every
+    /// channel's evaluated sigma beside the sigma it was sampled at. A repair
+    /// of a nuclide outside the populated bound has no record here; its
+    /// nuclide is in `covariance_repaired_outside_bound`.
+    pub covariance_repairs: Vec<Repair>,
+    /// Nuclides outside the populated bound whose covariance needed a repair
+    /// on some spectrum, with a channel a draw can move there (a positive rate
+    /// on a spectrum the schedule irradiates with). A gap: the bound holds at
+    /// nominal rates only, a replica's lognormal draw can populate them, and
+    /// whether one did is not something the stepper's end-of-step densities
+    /// can settle, since the solve applies every reachable nuclide's rates
+    /// within a step. Their per-channel records are not kept.
+    pub covariance_repaired_outside_bound: BTreeSet<String>,
+    /// The largest `sampled / evaluated - 1` over the repaired channels a draw
+    /// can move: a populated nuclide, present at the start or produced, with a
+    /// positive rate on a spectrum the schedule irradiates with. Zero
+    /// with no such repair; infinite when a repair gave a spread to a channel
+    /// whose stated variance is zero or negative.
+    pub worst_sigma_inflation: f64,
+    /// The weighted mean of `sampled / evaluated - 1` over every sampled
+    /// channel of a populated nuclide, each weighted by its unit-flux rate
+    /// times its spectrum's fluence in the schedule times its parent's
+    /// initial density, so a repair on a channel nothing went through reads
+    /// as nothing and one on the channels that carry the reactions reads in
+    /// full, however wide the channels beside them. The weight is the initial
+    /// composition's, so this covers first-generation reactions only: a
+    /// nuclide the material starts without carries no weight, and its repairs
+    /// are in `worst_sigma_inflation` and `covariance_repairs`. On a matrix
+    /// that needed no repair a channel's sampled sigma differs from the
+    /// evaluated one by the decomposition's round-off, which shows here as it
+    /// is. Infinite when a weighted channel with no evaluated sigma was
+    /// sampled with a spread; `None` when no weighted channel has an
+    /// evaluated sigma.
+    pub rate_weighted_sigma_inflation: Option<f64>,
+    /// Sampled channels of populated nuclides with a positive rate on a
+    /// spectrum the schedule irradiates with, keyed by (nuclide, kind), whose
+    /// folded relative sigma `sqrt(C_ii)`, as evaluated and before any repair,
+    /// was at least one, with the largest over the spectra.
+    ///
+    /// At that width the spread depends on the distribution used to carry the
+    /// evaluation's two moments (here a lognormal), not on the evaluation
+    /// alone, so a sigma these dominate is partly this code's choice.
+    pub sigma_at_least_one: BTreeMap<(String, String), f64>,
+    /// The subset at ten or more.
+    pub sigma_at_least_ten: BTreeMap<(String, String), f64>,
+    /// The same as `sigma_at_least_one` for the nuclides outside the
+    /// populated bound: sampled channels with a positive rate on a spectrum
+    /// the schedule irradiates with, evaluated at one or more. Not a gap on
+    /// the nominal bound, but named because a replica's draw on exactly such
+    /// a channel can sit orders above nominal and populate the nuclide. The
+    /// ten-or-more subset reads off the values.
+    pub sigma_at_least_one_outside_bound: BTreeMap<(String, String), f64>,
     /// Cross-section rate draws made, one per perturbed channel per spectrum
     /// per replica.
     ///
@@ -365,7 +437,7 @@ impl Info {
     /// [`Coverage::rate_fraction_total`].
     pub(crate) fn from_fold(
         coverage: &Coverage,
-        clipping: &Clipping,
+        sigmas: &SigmaReport,
         dilute: bool,
     ) -> Result<Self, String> {
         let total = coverage.rate_fraction_total()?;
@@ -384,8 +456,16 @@ impl Info {
                     && coverage.partials_above_rate.is_empty()
                     && coverage.partials_below_rate.is_empty()
             }),
-            matrices_clipped: clipping.matrices_clipped,
-            worst_relative_clip: clipping.worst_relative_clip,
+            // Distinct nuclides, not a count over spectra: one evaluation
+            // folded against three spectra is one evaluation that needed it.
+            covariance_repaired: sigmas.repaired.clone(),
+            covariance_repairs: sigmas.repairs.clone(),
+            covariance_repaired_outside_bound: sigmas.repaired_outside_bound.clone(),
+            worst_sigma_inflation: sigmas.worst_sigma_inflation,
+            rate_weighted_sigma_inflation: sigmas.rate_weighted_sigma_inflation(),
+            sigma_at_least_one: sigmas.sigma_at_least_one.clone(),
+            sigma_at_least_ten: sigmas.sigma_at_least_ten.clone(),
+            sigma_at_least_one_outside_bound: sigmas.sigma_at_least_one_outside_bound.clone(),
             not_perturbed: [
                 "fission yield",
                 "isomeric branching (MF=9/MF=10)",
@@ -428,6 +508,8 @@ impl Info {
             || self.malformed_blocks > 0
             || !self.partials_above_rate.is_empty()
             || !self.partials_below_rate.is_empty()
+            || !self.covariance_repaired.is_empty()
+            || !self.covariance_repaired_outside_bound.is_empty()
             || self.spectra_without_flux_sigma > 0
             || !self.no_half_life_uncertainty.is_empty()
             || !self.no_decay_branching_uncertainty.is_empty()
@@ -867,7 +949,7 @@ mod tests {
     /// and continua both, so a reader does not take their silence for zero.
     #[test]
     fn the_report_names_the_photon_sources_held_at_nominal() {
-        let info = Info::from_fold(&Coverage::default(), &Clipping::default(), true)
+        let info = Info::from_fold(&Coverage::default(), &SigmaReport::default(), true)
             .expect("no shares to check");
         for source in [
             "decay photon line energy and intensity (MF=8 MT=457)",
@@ -939,12 +1021,54 @@ mod tests {
             total_production: 4.0,
             ..Default::default()
         };
-        let clipping = Clipping::default();
-        let dilute = Info::from_fold(&coverage, &clipping, true).expect("shares are shares");
+        let sigmas = SigmaReport::default();
+        let dilute = Info::from_fold(&coverage, &sigmas, true).expect("shares are shares");
         assert_eq!(dilute.rate_fraction_covered_total, Some(0.25));
-        let other = Info::from_fold(&coverage, &clipping, false).expect("shares are shares");
+        let other = Info::from_fold(&coverage, &sigmas, false).expect("shares are shares");
         assert_eq!(other.rate_fraction_covered_total, None);
         assert_eq!(other.rate_fraction_covered, coverage.rate_fraction_covered);
+    }
+
+    /// A repair a draw can move is a gap: the sampled spread is wider than
+    /// the evaluation's. One on two spectra is one repaired nuclide.
+    #[test]
+    fn a_repair_counts_once_per_nuclide_and_is_a_gap() {
+        let repair = |spectrum| Repair {
+            nuclide: "W182".to_string(),
+            spectrum,
+            lambda_min: -1.0e-4,
+            lambda_max: 1.0e-2,
+            clipped_fraction: 0.01,
+            channels: Vec::new(),
+        };
+        let mut sigmas = SigmaReport::default();
+        sigmas.repairs = vec![repair(0), repair(1)];
+        sigmas.repaired = BTreeSet::from(["W182".to_string()]);
+        let info =
+            Info::from_fold(&Coverage::default(), &sigmas, true).expect("no shares to check");
+        assert_eq!(
+            info.covariance_repaired,
+            BTreeSet::from(["W182".to_string()])
+        );
+        assert_eq!(info.covariance_repairs.len(), 2);
+        assert!(info.has_gaps());
+
+        // Outside the populated bound a repair is named, and is a gap too:
+        // the bound is nominal and a replica's draw can populate the nuclide.
+        let mut outside = SigmaReport::default();
+        outside.repaired_outside_bound = BTreeSet::from(["Xe135".to_string()]);
+        let info =
+            Info::from_fold(&Coverage::default(), &outside, true).expect("no shares to check");
+        assert_eq!(
+            info.covariance_repaired_outside_bound,
+            BTreeSet::from(["Xe135".to_string()])
+        );
+        assert!(info.has_gaps());
+        assert!(
+            !Info::from_fold(&Coverage::default(), &SigmaReport::default(), true)
+                .expect("no shares to check")
+                .has_gaps()
+        );
     }
 
     /// A dilute run whose partials disagree with a channel's rate has a
@@ -966,8 +1090,8 @@ mod tests {
                 total_production: 4.0,
                 ..Default::default()
             };
-            let info =
-                Info::from_fold(&coverage, &Clipping::default(), true).expect("shares are shares");
+            let info = Info::from_fold(&coverage, &SigmaReport::default(), true)
+                .expect("shares are shares");
             assert_eq!(info.rate_fraction_covered_total, None);
             assert_eq!(info.rate_fraction_covered, coverage.rate_fraction_covered);
         }
@@ -982,14 +1106,14 @@ mod tests {
             rate_fraction_covered: BTreeMap::from([(("W186".into(), "(n,gamma)".into()), 1.5)]),
             ..Default::default()
         };
-        let err = Info::from_fold(&channel, &Clipping::default(), true).unwrap_err();
+        let err = Info::from_fold(&channel, &SigmaReport::default(), true).unwrap_err();
         assert!(err.contains("W186 (n,gamma)"), "{err}");
         let total = Coverage {
             covered_production: 5.0,
             total_production: 4.0,
             ..Default::default()
         };
-        let err = Info::from_fold(&total, &Clipping::default(), true).unwrap_err();
+        let err = Info::from_fold(&total, &SigmaReport::default(), true).unwrap_err();
         assert!(err.contains("not a share"), "{err}");
     }
 
@@ -997,7 +1121,7 @@ mod tests {
     /// does not have to know the code to see what the sigma leaves out.
     #[test]
     fn the_report_names_every_input_held_at_nominal() {
-        let info = Info::from_fold(&Coverage::default(), &Clipping::default(), true)
+        let info = Info::from_fold(&Coverage::default(), &SigmaReport::default(), true)
             .expect("no shares to check");
         for held in [
             "fission yield",
