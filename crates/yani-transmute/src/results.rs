@@ -877,6 +877,7 @@ mod tests {
             branching: 1.0,
             q_value: Some(0.0),
             branching_uncertainty: None,
+            evaluated_branching: None,
         };
 
         let chain = Arc::new(HashMap::from([
@@ -962,6 +963,7 @@ mod tests {
             branching: 1.0,
             q_value: Some(0.0),
             branching_uncertainty: None,
+            evaluated_branching: None,
         };
         let nuclide = |name: &str, reactions: Vec<yani::ChainReaction>| yani::ChainNuclide {
             name: name.to_string(),

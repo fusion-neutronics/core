@@ -2799,6 +2799,7 @@ mod tests {
             target: Some(target.to_string()),
             branching,
             branching_uncertainty: None,
+            evaluated_branching: None,
             q_value: None,
         };
         let mut chain: HashMap<String, ChainNuclide> = HashMap::new();

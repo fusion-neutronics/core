@@ -689,7 +689,7 @@ pub fn normalise_branch_ratios(branch_ratios: &mut [f64]) {
 }
 
 /// A parent's decay paths: each mode's target, its ratio normalised with
-/// [`normalise_branch_ratios`], and the tape's dBR beside it untouched.
+/// [`normalise_branch_ratios`], and the tape's BR and dBR beside it untouched.
 fn decay_paths(data: &Decay, decay_data: &BTreeMap<String, Decay>) -> Vec<DecayPath> {
     let mut ratios: Vec<f64> = data.modes.iter().map(|m| m.branching_ratio.0).collect();
     normalise_branch_ratios(&mut ratios);
@@ -707,6 +707,7 @@ fn decay_paths(data: &Decay, decay_data: &BTreeMap<String, Decay>) -> Vec<DecayP
                 target,
                 branching_ratio: ratio,
                 branching_ratio_uncertainty: mode.branching_ratio.1,
+                evaluated_branching_ratio: mode.branching_ratio.0,
             }
         })
         .collect()
@@ -739,7 +740,16 @@ pub struct DecayPath {
     /// leaves it as evaluated, but where the parent's ratios do not sum to one
     /// it moves the residual into `branching_ratio` on the parent's largest
     /// mode, so on that one row the two no longer come from the same number.
+    /// `evaluated_branching_ratio` is the number it does come from.
     pub branching_ratio_uncertainty: f64,
+    /// The tape's BR, before [`normalise_branch_ratios`].
+    ///
+    /// Equal to `branching_ratio` except on the largest mode of a parent whose
+    /// evaluated ratios do not sum to one within 1e-9. JEFF-4.0's Ir169 gives
+    /// a single alpha mode of 0.45 +- 0.15, so its `branching_ratio` is 1.0
+    /// and this is 0.45. Stored so the chain keeps the tape's value; how a
+    /// parent whose ratios miss unity should be treated is not decided here.
+    pub evaluated_branching_ratio: f64,
 }
 
 /// One neutron-induced path out of a nuclide.
@@ -1614,8 +1624,30 @@ mod tests {
             .map(|p| p.branching_ratio_uncertainty)
             .collect();
         assert_eq!(sigmas, [0.04, 0.04]);
+        let evaluated: Vec<f64> = paths.iter().map(|p| p.evaluated_branching_ratio).collect();
+        assert_eq!(evaluated, [0.1, 0.91], "the tape's BR is kept beside it");
         assert_eq!(paths[0].kind, "ec/beta+");
         assert_eq!(paths[1].kind, "alpha");
+    }
+
+    #[test]
+    fn a_lone_mode_short_of_unity_keeps_the_tapes_ratio() {
+        // JEFF-4.0's Ir169: one alpha mode of 0.45 +- 0.15, nothing else. The
+        // normalised ratio is 1.0; the tape's 0.45 is what the sigma is on.
+        let data = Decay {
+            modes: vec![crate::decay::DecayMode {
+                parent: "Ir169".to_string(),
+                modes: vec!["alpha"],
+                branching_ratio: (0.45, 0.15),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let paths = decay_paths(&data, &BTreeMap::new());
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].branching_ratio, 1.0);
+        assert_eq!(paths[0].evaluated_branching_ratio, 0.45);
+        assert_eq!(paths[0].branching_ratio_uncertainty, 0.15);
     }
 
     #[test]
@@ -1640,6 +1672,7 @@ mod tests {
                     target: Some(target.to_string()),
                     branching_ratio: 1.0,
                     branching_ratio_uncertainty: 0.0,
+                    evaluated_branching_ratio: 1.0,
                 });
             }
             chain.nuclides.push(n);

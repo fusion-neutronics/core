@@ -207,6 +207,7 @@ mod tests {
             branching: b,
             q_value: None,
             branching_uncertainty: s,
+            evaluated_branching: None,
         }
     }
 

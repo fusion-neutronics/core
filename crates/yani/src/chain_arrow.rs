@@ -685,6 +685,7 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
                         branching: branching.value(i),
                         q_value: None,
                         branching_uncertainty: None,
+                        evaluated_branching: None,
                     });
                 }
             }
@@ -714,6 +715,7 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
                         branching: branching.value(i),
                         q_value: q_values.as_ref().map(|q| q.value(i)),
                         branching_uncertainty: None,
+                        evaluated_branching: None,
                     });
                 }
             }
@@ -1078,6 +1080,12 @@ pub fn parse_chain_parts_from_bytes(
                 .index_of("branching_ratio_uncertainty")
                 .ok()
                 .and_then(|idx| batch.column(idx).as_any().downcast_ref::<Float64Array>());
+            // Optional in the same way: the tape's BR before normalisation.
+            let evaluated = batch
+                .schema()
+                .index_of("evaluated_branching_ratio")
+                .ok()
+                .and_then(|idx| batch.column(idx).as_any().downcast_ref::<Float64Array>());
             for i in 0..batch.num_rows() {
                 let parent = nuclides.value(i);
                 let kind = types.value(i);
@@ -1089,6 +1097,9 @@ pub fn parse_chain_parts_from_bytes(
                     branching: branching.value(i),
                     q_value: None,
                     branching_uncertainty: branching_sigmas
+                        .filter(|column| !column.is_null(i))
+                        .map(|column| column.value(i)),
+                    evaluated_branching: evaluated
                         .filter(|column| !column.is_null(i))
                         .map(|column| column.value(i)),
                 });
@@ -1129,6 +1140,7 @@ pub fn parse_chain_parts_from_bytes(
                     branching: branching.value(i),
                     q_value: q_values.as_ref().map(|q| q.value(i)),
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 });
             }
         }
@@ -1278,6 +1290,7 @@ pub fn parse_chain_parts_from_bytes(
                                 branching: 0.0,
                                 q_value: None,
                                 branching_uncertainty: None,
+                                evaluated_branching: None,
                             });
                         }
                     }
@@ -1503,8 +1516,8 @@ impl SourceColumns {
 /// mode involving spontaneous fission, and one whose stored target is its own
 /// parent: see `modelled_decay_target`), so those rows are written with a null
 /// target where the source file names the parent, a ground state or a
-/// `replace_missing` stand-in. Their branching ratios, and the sigmas on
-/// them, are written unchanged.
+/// `replace_missing` stand-in. Their branching ratios, the sigmas on them and
+/// the evaluated ratios beside them are written unchanged.
 pub fn export_chain_parts<P: AsRef<Path>>(
     chain: &HashMap<String, ChainNuclide>,
     dir: P,
@@ -1585,6 +1598,7 @@ pub fn export_chain_parts<P: AsRef<Path>>(
         let mut q_b = Float64Builder::new();
         let mut br_b = Float64Builder::new();
         let mut br_sigma_b = Float64Builder::new();
+        let mut br_evaluated_b = Float64Builder::new();
         for name in &names {
             let nuc = &chain[*name];
             for r in pick(nuc) {
@@ -1599,6 +1613,7 @@ pub fn export_chain_parts<P: AsRef<Path>>(
                 q_b.append_value(r.q_value.unwrap_or(0.0));
                 br_b.append_value(r.branching);
                 br_sigma_b.append_option(r.branching_uncertainty);
+                br_evaluated_b.append_option(r.evaluated_branching);
             }
         }
         // The two files do NOT share a schema, though they share a shape.
@@ -1617,10 +1632,12 @@ pub fn export_chain_parts<P: AsRef<Path>>(
             columns.push(Arc::new(q_b.finish()));
         }
         columns.push(Arc::new(br_b.finish()));
-        // The mirror image: only decay_modes declares a branching sigma, and
-        // check_batch refuses a reactions file that carries one.
+        // The mirror image: only decay_modes declares a branching sigma and
+        // an evaluated ratio, and check_batch refuses a reactions file that
+        // carries either.
         if section == "decay/decay_modes.arrow" {
             columns.push(Arc::new(br_sigma_b.finish()));
+            columns.push(Arc::new(br_evaluated_b.finish()));
         }
         let batch = RecordBatch::try_new(schema.clone(), columns)?;
         write_arrow_file(path, schema, batch)
@@ -2201,7 +2218,9 @@ mod tests {
         );
     }
 
-    /// A chain of three decay modes: a sigma, a stored 0.0 and none at all.
+    /// A chain of decay modes: a sigma, a stored 0.0 and none at all, and an
+    /// evaluated ratio equal to the normalised one, one that differs (Ir169's
+    /// lone alpha, 0.45 on the tape and 1.0 normalised) and none at all.
     fn chain_with_branching_sigmas() -> std::collections::HashMap<String, crate::ChainNuclide> {
         use crate::chain::{ChainNuclide, ChainReaction, DecayEnergyComponent};
         let mode = |kind: &str, target: &str, branching: f64, sigma: Option<f64>| ChainReaction {
@@ -2210,6 +2229,7 @@ mod tests {
             branching,
             q_value: None,
             branching_uncertainty: sigma,
+            evaluated_branching: sigma.map(|_| branching),
         };
         let nuclide = |name: &str, decays: Vec<ChainReaction>| ChainNuclide {
             name: name.to_string(),
@@ -2250,6 +2270,16 @@ mod tests {
                 "Xx999".to_string(),
                 nuclide("Xx999", vec![mode("beta-", "Yy999", 1.0, None)]),
             ),
+            (
+                "Ir169".to_string(),
+                nuclide(
+                    "Ir169",
+                    vec![ChainReaction {
+                        evaluated_branching: Some(0.45),
+                        ..mode("alpha", "Re165", 1.0, Some(0.15))
+                    }],
+                ),
+            ),
         ])
     }
 
@@ -2273,6 +2303,10 @@ mod tests {
                 n.decays.iter().map(|d| d.branching_uncertainty).collect()
             };
             assert_eq!(sigmas(read), sigmas(written), "{name} dBR");
+            let evaluated = |n: &crate::ChainNuclide| -> Vec<Option<f64>> {
+                n.decays.iter().map(|d| d.evaluated_branching).collect()
+            };
+            assert_eq!(evaluated(read), evaluated(written), "{name} evaluated BR");
             assert_eq!(read.half_life_uncertainty, Some(0.0), "{name}");
             assert_eq!(read.decay_energy_uncertainty, Some(0.0), "{name}");
             assert_eq!(
@@ -2289,12 +2323,20 @@ mod tests {
             back["Xx999"].decays[0].branching_uncertainty, None,
             "a null must not come back as 0.0"
         );
+        let ir169 = &back["Ir169"].decays[0];
+        assert_eq!(
+            (ir169.branching, ir169.evaluated_branching),
+            (1.0, Some(0.45)),
+            "the tape's BR must survive beside the normalised one"
+        );
+        assert_eq!(back["Xx999"].decays[0].evaluated_branching, None);
     }
 
     #[test]
     fn decay_modes_written_before_the_sigma_column_read_as_unstated() {
-        // The published files up to now have four columns. Nullable and last
-        // is what lets them keep loading, with every mode carrying no sigma.
+        // The published files up to now have four or five columns. Nullable
+        // and last is what lets them keep loading, with every mode carrying
+        // no sigma and no evaluated ratio.
         let chain = chain_with_branching_sigmas();
         let dir = std::env::temp_dir().join(format!("yani-old-modes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2320,8 +2362,8 @@ mod tests {
         let old = std::sync::Arc::new(super::Schema::new(declared.fields()[..4].to_vec()));
         assert_eq!(
             declared.fields().len(),
-            5,
-            "this test writes the layout from before the fifth column"
+            6,
+            "this test writes the layout from before the fifth and sixth columns"
         );
         let batch = super::RecordBatch::try_new(
             old.clone(),
@@ -2340,11 +2382,15 @@ mod tests {
             .expect("a file without the column still loads");
         let _ = std::fs::remove_dir_all(&dir);
         let decays: Vec<_> = back.values().flat_map(|n| &n.decays).collect();
-        assert_eq!(decays.len(), 4, "every mode still loads");
+        assert_eq!(decays.len(), 5, "every mode still loads");
         for d in decays {
             assert_eq!(
                 d.branching_uncertainty, None,
                 "a column the file does not have must read as unstated, not zero"
+            );
+            assert_eq!(
+                d.evaluated_branching, None,
+                "a column the file does not have must read as absent"
             );
         }
     }
@@ -2374,6 +2420,7 @@ mod tests {
                     branching: 1.0,
                     q_value: Some(7.492e6),
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
                 decays: vec![ChainReaction {
                     kind: "beta-".to_string(),
@@ -2381,6 +2428,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
                 fission_yields: None,
                 // Lines, and a continuum under each state its law can be in:
