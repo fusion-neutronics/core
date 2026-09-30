@@ -258,6 +258,13 @@ def test_branching_subsection(tmp_path):
 
     assert stats["parents"] >= 2, f"only {stats['parents']} parents read"
     assert (out / "branching" / "branching.arrow").is_file()
+    # The per-list facts reach Python: In115 lists only the isomer, so every
+    # list it gives is isomers only, and each has a line of its own.
+    counts = stats["list_counts"]
+    assert counts.get("MF=10 isomers only", 0) >= 1, counts
+    assert len(stats["list_facts"]) == sum(
+        n for kind, n in counts.items() if kind.startswith("MF=")
+    ), stats["list_facts"]
 
     # The branching call must merge into the manifest, not overwrite it. A
     # library advertising one subsection while shipping four is a real failure
@@ -269,3 +276,46 @@ def test_branching_subsection(tmp_path):
         "fission_yields",
         "branching",
     }
+    # In115 carries no MF=40, so there is no covariance file beside the curves.
+    assert stats["mf40_sections"] == 0
+    assert not (out / "branching" / "branching_covariance.arrow").exists()
+
+
+def test_branching_covariance_is_written_beside_the_curves(tmp_path):
+    """MF=40, from Python: TENDL-2017 Nb93 states the covariance of the ground
+    and isomer partials of (n,n') and (n,2n), one LB=5 block each, and every
+    one is written and placed on its chain target."""
+    inputs = tmp_path / "endf"
+    inputs.mkdir()
+    out = tmp_path / "transmutation_tendl-2017.arrow"
+    stats = yamc.convert_branching(
+        neutron_files=_plain(["n-041_Nb_093_tendl2017_trimmed.endf.xz"], inputs),
+        decay_files=_plain(
+            [
+                "dec-041_Nb_092.endf.xz",
+                "dec-041_Nb_092m1.endf.xz",
+                "dec-041_Nb_093m1.endf.xz",
+            ],
+            inputs,
+        ),
+        output_path=str(out),
+        library="tendl-2017",
+        data_version="2026-09-27.1",
+        created_utc="2026-09-27T00:00:00+00:00",
+    )
+    assert (out / "branching" / "branching_covariance.arrow").is_file()
+    assert stats["mf40_sections"] == 2
+    assert stats["mf40_blocks"] == 4
+    assert stats["mf40_blocks_by_lb"] == {5: 4}
+    assert stats["mf40_nc_blocks"] == 0
+    assert stats["mf40_cross_state_blocks"] == 0
+    assert stats["mf40_unmatched_states"] == []
+    assert stats["mf40_without_blocks"] == []
+    assert stats["mf40_blocks_outside_mf10"] == 0
+    assert stats["mf40_partner_unresolved"] == []
+    assert stats["mf40_states_placed_by_excitation"] == []
+    provenance = json.loads((out / "branching" / "provenance.json").read_text())
+    assert provenance["mf40_without_blocks"] == []
+    assert provenance["mf40_unmatched_states"] == []
+    assert provenance["mf40_partner_unresolved"] == []
+    assert provenance["mf40_states_placed_by_excitation"] == []

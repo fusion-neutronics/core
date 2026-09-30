@@ -84,7 +84,7 @@ pub fn activation_mts(
             }
         }
     }
-    for kinds in branch.values() {
+    for kinds in branch.curves().values() {
         for kind in kinds.keys() {
             if let Some(mt) = reaction_type_to_mt(kind) {
                 mts.insert(mt);
@@ -1522,7 +1522,12 @@ fn run_replicas(
             Default::default()
         };
 
-    let mut info = Info::from_fold(&coverage, &sigmas, shielding.is_none() && !transport);
+    // The shares split each group's rate by energy width, which is the
+    // collapse's own split only under the flat within-group weight.
+    let dilute = shielding.is_none()
+        && !transport
+        && crate::multigroup::within_group_weight() == crate::multigroup::Weighting::FlatInEnergy;
+    let mut info = Info::from_fold(&coverage, &sigmas, dilute)?;
     if half_life.is_none() {
         info.not_perturbed.insert(0, "half-life".to_string());
     }
@@ -2229,7 +2234,7 @@ pub(crate) fn fold_branching_into_chain(
     spectrum: &MultigroupSpectrum,
     rates: &mut ReactionRates,
 ) -> Arc<HashMap<String, ChainNuclide>> {
-    if branch.is_empty() {
+    if branch.curves().is_empty() {
         return Arc::clone(chain);
     }
 
@@ -2253,7 +2258,7 @@ fn build_fold_refine(
     rates: &mut ReactionRates,
     refine: &mut Fractions,
 ) {
-    for (parent, kinds) in branch.iter() {
+    for (parent, kinds) in branch.curves().iter() {
         if !chain.contains_key(parent) {
             continue;
         }
@@ -2717,15 +2722,21 @@ mod tests {
         let chain = Arc::new(map);
 
         let mut branch: BranchTable = BranchTable::new();
-        branch.entry("Pb204".to_string()).or_default().insert(
-            "(n,n')".to_string(),
-            vec![BranchCurve {
-                target: "Pb204_m1".to_string(),
-                quantity: BranchQuantity::CrossSection,
-                energy: vec![1.0, 1.0e8],
-                values: vec![0.1, 0.1], // flat 0.1 barn
-            }],
-        );
+        branch
+            .curves_mut()
+            .entry("Pb204".to_string())
+            .or_default()
+            .insert(
+                "(n,n')".to_string(),
+                vec![BranchCurve {
+                    target: "Pb204_m1".to_string(),
+                    quantity: BranchQuantity::CrossSection,
+                    energy: vec![1.0, 1.0e8],
+                    values: vec![0.1, 0.1], // flat 0.1 barn
+                    states: Default::default(),
+                    normalisation: None,
+                }],
+            );
 
         // Single group spanning the whole grid, unit mass -> sigma_phi = 0.1.
         let spectrum = MultigroupSpectrum {
@@ -2761,12 +2772,16 @@ mod tests {
                 quantity: BranchQuantity::CrossSection,
                 energy: vec![1.0, 1.0e8],
                 values: vec![3.0, 3.0],
+                states: Default::default(),
+                normalisation: None,
             },
             BranchCurve {
                 target: "X_m1".to_string(),
                 quantity: BranchQuantity::CrossSection,
                 energy: vec![1.0, 1.0e8],
                 values: vec![1.0, 1.0],
+                states: Default::default(),
+                normalisation: None,
             },
         ];
         let spectrum = MultigroupSpectrum {

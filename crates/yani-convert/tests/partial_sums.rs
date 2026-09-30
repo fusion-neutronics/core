@@ -31,13 +31,14 @@ fn partials_that_do_not_reconstruct_the_total_are_listed() {
         material(fixture!("dec-049_In_116m1.endf.xz")),
         material(fixture!("dec-049_In_116m2.endf.xz")),
     ];
-    let (_, stats) = yani_convert::branching::extract_branching(
+    let stats = yani_convert::branching::extract_branching(
         &neutron,
         &decay,
         endf::radionuclide_production::ISOMER_ENERGY_TOLERANCE,
         yani_convert::branching::DEFAULT_LINEARIZE_TOL,
     )
-    .expect("branching extracts");
+    .expect("branching extracts")
+    .stats;
     let lines = &stats.partial_sum_mismatches;
     assert_eq!(lines.len(), 1, "{lines:?}");
     // The point reported is where the defect is largest against the nonelastic
