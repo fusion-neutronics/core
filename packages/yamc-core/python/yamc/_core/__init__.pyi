@@ -5314,9 +5314,15 @@ class TransmutationResults:
           averaged with each channel weighted by the production it drove (the
           rate this run used times parent density): the share of the
           production driven from energies where a covariance states a nonzero
-          variance. ``None`` on a decay-only schedule, and on a self-shielded
-          or transport run, where the shares are of the dilute rate and the
-          covered share of the production actually driven is not computed.
+          variance. ``None`` on a decay-only schedule, on a self-shielded or
+          transport run, where the shares are of the dilute rate and the
+          covered share of the production actually driven is not computed,
+          and under the ``1/E`` within-group weight (Rust API only), whose
+          shares are not exact where a covariance edge cuts a group.
+          ``None`` too when a channel is listed in ``partials_above_rate`` or
+          ``partials_below_rate``, whose rate is not the one its share is of:
+          the ``(n,n')`` of a nuclide with a metastable, whose rate is the
+          MF=10 production of the metastables while its covariance is MT 4's.
           Read this before any sigma here. It is a different and much sharper
           question than how many nuclides carry MF=33: an evaluation can state
           covariance for every isotope in the material and none for the
@@ -5332,18 +5338,24 @@ class TransmutationResults:
           to 10 keV, where nearly all of its capture rate is. Every consumed
           self-covariance block counts where it states a nonzero variance,
           relative (LB=1 to 6), absolute (LB=0) and short-range (LB=8) alike.
+          Exact under the default flat within-group weight; under the ``1/E``
+          weight (Rust API only) the rate of a group a covariance edge cuts is
+          split by energy width, not lethargy, so the share is off there.
         - ``partials_above_rate``: per nuclide and channel, where the partial
           rates the covariance was weighted with, zero variance intervals
           included, add up to more than the rate it was divided by, their
-          ratio to it. Each entry is a channel whose sigma is overstated. Three
+          ratio to it. Each entry is a channel whose sigma is overstated. Four
           known causes: a self-shielded rate against dilute partials, which
           lists most channels a relative block names, many a few parts in 1e7
           over, until the fold weights with shielded partials (#166 item 4); a
           tallied rate on a transport run, computed apart from the partials
-          the fold takes from the tally's flux; and the ``1/E`` within-group
-          weight with a covariance edge inside a group. The share in
-          ``rate_fraction_covered`` is measured against the dilute rate, so it
-          is unaffected.
+          the fold takes from the tally's flux; a grafted ``(n,n')``, whose
+          rate is the metastables' MF=10 production while the partials are
+          MT 4's; and the ``1/E`` within-group weight (Rust API only) with a
+          covariance edge inside a group. The share in
+          ``rate_fraction_covered`` is of the dilute rate of the reaction the
+          partials are of, not of the listed rate, and under the ``1/E``
+          weight it is off as well wherever an edge cuts a group.
         - ``partials_below_rate``: keyed the same way, where a covariance grid
           spans the whole flux range and its partial rates add up to less than
           the rate, their ratio to it: a channel whose sigma is understated.
@@ -6079,6 +6091,39 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         lists are complete or isomers only in each file, have no MF=3 section
         for their MT, or are normalised). The same facts are stored per row in
         ``branching.arrow``; they change no rate.
+        The MF=40 production
+        covariance, written as the tape gives it to
+        ``branching/branching_covariance.arrow``, is counted by
+        ``mf40_sections`` (sections read, whatever the MT), ``mf40_blocks``
+        (blocks written), ``mf40_blocks_by_lb`` (the NI blocks by layout),
+        ``mf40_nc_blocks``, ``mf40_unmatched_states`` (one line per product
+        state that matches no MF=9 or MF=10 state, matches several within the
+        tolerance, or is excited with no stated excitation to confirm a level
+        by, written with no target), ``mf40_states_without_chain_kind``
+        (states of an MT with no chain reaction, such as MT 18, written with
+        no reaction),
+        ``mf40_on_yield_channels`` (states matched to a level whose production
+        MF=9 gives as a yield rather than an MF=10 cross section; where that
+        yield is merged with another state's, the row carries the state's own
+        yield with quantity ``"yield"``),
+        ``mf40_mat1_naming_itself`` (sub-subsections whose MAT1 is the
+        evaluation's own MAT, written as given), ``mf40_cross_state_blocks``
+        (blocks other than a state's covariance with itself; key them on MT,
+        LFS, MT1 and XLFS1, since both states can resolve to one target),
+        ``mf40_blocks_outside_mf10`` (blocks whose partner is in another
+        material or has XMF1 other than 10), ``mf40_without_blocks`` (one line
+        per section, state or sub-subsection holding no block, with its tape
+        values, the only part of MF=40 the file cannot show),
+        ``mf40_partner_unresolved`` (one line per sub-subsection written
+        with no partner target because the tape does not pin the partner to
+        one state, among them a partner whose level XLFS1 MF=10 numbers
+        differently from MF=40), and ``mf40_states_placed_by_excitation`` (one
+        line per product state whose target was matched by excitation because
+        MF=9 and MF=10 give its IZAP and LFS no state or one at another
+        excitation; its self blocks name it by MF=40's own LFS). The four line
+        lists are also written to ``branching/provenance.json``. An evaluation
+        set without MF=40 writes no covariance file, and removes one an
+        earlier conversion left there.
     """
 
 def convert_neutron_transport(input_path: builtins.str, output_dir: builtins.str, njoy_exec: builtins.str = 'njoy', temperatures: typing.Optional[typing.Sequence[builtins.float]] = None, library: builtins.str = '', data_version: builtins.str = '', created_utc: typing.Optional[builtins.str] = None, covariance: builtins.bool = False) -> builtins.str:

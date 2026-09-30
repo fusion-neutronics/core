@@ -170,6 +170,22 @@ pub(crate) fn list_of(values: &[Vec<f64>]) -> ArrayRef {
     Arc::new(b.finish())
 }
 
+/// A nullable `list<double>` column, `None` written as a null rather than as
+/// an empty list, so a reader can tell "not given" from "given and empty".
+pub(crate) fn opt_list_of(values: &[Option<Vec<f64>>]) -> ArrayRef {
+    let mut b = ListBuilder::new(Float64Builder::new());
+    for row in values {
+        match row {
+            Some(row) => {
+                b.values().append_slice(row);
+                b.append(true);
+            }
+            None => b.append_null(),
+        }
+    }
+    Arc::new(b.finish())
+}
+
 pub(crate) fn string_lists(values: &[Vec<String>]) -> ArrayRef {
     let mut b = ListBuilder::new(StringBuilder::new());
     for row in values {
@@ -1076,9 +1092,30 @@ pub fn convert_branching_files(
     for partial in partials {
         extractor.absorb(partial);
     }
-    let (rows, stats) = extractor.finish();
+    let branching::Extracted {
+        rows,
+        covariance,
+        stats,
+    } = extractor.finish();
     let dir = out.join("branching");
     branching::write_branching(&rows, &dir)?;
+    branching::write_branching_covariance(&covariance, &dir)?;
+    // What of MF=40 the covariance file does not show, beside the data rather
+    // than only in the returned statistics: the parts that hold no block and
+    // so have no row, the keys the converter left null with the reason, and
+    // the targets it gave by excitation where the two files' LFS disagree.
+    let mut mf40_gaps = serde_json::Map::new();
+    for (key, lines) in [
+        ("mf40_without_blocks", &stats.mf40_without_blocks),
+        ("mf40_unmatched_states", &stats.mf40_unmatched_states),
+        ("mf40_partner_unresolved", &stats.mf40_partner_unresolved),
+        (
+            "mf40_states_placed_by_excitation",
+            &stats.mf40_states_placed_by_excitation,
+        ),
+    ] {
+        mf40_gaps.insert(key.to_string(), serde_json::json!(lines));
+    }
     write_provenance(
         &dir,
         "branching",
@@ -1086,7 +1123,7 @@ pub fn convert_branching_files(
         &provenance.decay_library,
         &provenance.data_version,
         &provenance.created_utc,
-        None,
+        Some(&mf40_gaps),
     )?;
     let parents: Vec<String> = rows
         .iter()

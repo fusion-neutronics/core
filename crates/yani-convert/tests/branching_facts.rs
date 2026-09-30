@@ -44,13 +44,14 @@ fn nb93_rows() -> (Vec<BranchingRow>, yani_convert::branching::BranchingStats) {
         material(local_fixture!("dec-041_Nb_093m1.endf.xz")),
         material(local_fixture!("dec-041_Nb_094m1.endf.xz")),
     ];
-    extract_branching(
+    let extracted = extract_branching(
         &[nb93()],
         &decay,
         ISOMER_ENERGY_TOLERANCE,
         DEFAULT_LINEARIZE_TOL,
     )
-    .expect("branching extracts")
+    .expect("branching extracts");
+    (extracted.rows, extracted.stats)
 }
 
 fn find<'a>(rows: &'a [BranchingRow], reaction: &str, target: &str) -> &'a BranchingRow {
@@ -152,7 +153,7 @@ fn an_isomer_only_list_is_marked_incomplete() {
         material(fixture!("dec-049_In_116m1.endf.xz")),
         material(fixture!("dec-049_In_116m2.endf.xz")),
     ];
-    let (rows, stats) = extract_branching(
+    let yani_convert::branching::Extracted { rows, stats, .. } = extract_branching(
         &neutron,
         &decay,
         ISOMER_ENERGY_TOLERANCE,
@@ -258,8 +259,8 @@ fn the_facts_round_trip_and_leave_the_curves_alone() {
     let with = read_back(&chain, &dir.join("with"));
     let without = read_back(&chain, &dir.join("without"));
 
-    let with_nb = &with["Nb93"];
-    let without_nb = &without["Nb93"];
+    let with_nb = &with.curves()["Nb93"];
+    let without_nb = &without.curves()["Nb93"];
     assert_eq!(with_nb.len(), without_nb.len());
     for (kind, curves) in with_nb {
         let old = &without_nb[kind];
