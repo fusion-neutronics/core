@@ -27,7 +27,11 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::Path;
+use std::sync::Arc;
 
+use arrow_array::builder::{
+    BooleanBuilder, Float64Builder, Int32Builder, ListBuilder, StringBuilder,
+};
 use endf::function::Tabulated1D;
 use endf::mf::covariance::{Mf33Subsection, Mf40, Mf40Subsection};
 use endf::radionuclide_production::{LevelRoute, RadionuclideProduction};
@@ -67,6 +71,173 @@ pub struct BranchingRow {
     pub quantity: String,
     pub energy: Vec<f64>,
     pub values: Vec<f64>,
+    /// The evaluated production states this row is made from, in the order
+    /// they were summed: one, or several when levels (or MTs sharing a
+    /// reaction name) map to the same target.
+    pub states: Vec<StateFacts>,
+    /// The parent evaluation's own account of what it was normalised to, from
+    /// its MF=1 description. See [`normalisation_block`].
+    pub normalisation: Option<String>,
+}
+
+/// What the evaluation states about one production state behind a row.
+///
+/// Facts recorded for whoever decides what the list means, not used to build
+/// the row: nothing here changes `energy` or `values`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StateFacts {
+    /// The MT the state was listed under.
+    pub mt: i32,
+    /// The final state's level number (LFS); 0 is the ground state.
+    pub lfs: i64,
+    /// MF=8's LMF for the state, `None` with no MF=8 subsection for it.
+    pub lmf: Option<i64>,
+    /// Whether the same MT and file (MF=9 or MF=10) also list the ground state
+    /// (LFS = 0) of the same product. A list without it gives isomers only.
+    pub list_complete: bool,
+    /// How the level was matched to the row's target.
+    pub level_route: LevelRoute,
+    /// The level's excitation energy in eV, as
+    /// [`RadionuclideProduction::excitation_energy`] reads it: MF=8's ELFS,
+    /// kept literally, where MF=8 names the state (`lmf` is `Some`, as both
+    /// come from the same MF=8 subsection), and QM - QI of the MF=9/10
+    /// subsection otherwise, which is computed from the tape rather than read
+    /// off it. For an excited level (LFS > 0) a zero means the evaluation did not
+    /// state it (JENDL-5's Cd116 MT=107 writes ELFS = 0.0), and a negative
+    /// value is a sentinel (TENDL-2017's Pu237 MT=44 writes -2^31).
+    pub level_energy: f64,
+    /// `level_energy` less the excitation energy of the state the level was
+    /// booked to (zero for the ground state), in eV. `None` when that isomer's
+    /// energy is unknown to the decay data, or when `level_energy` is not a
+    /// stated energy (zero for an excited level, or negative).
+    pub level_energy_difference: Option<f64>,
+    /// The evaluation's own MF=3 for `mt`, as stated. `None` when the file
+    /// has no MF=3 section for that MT, even where it gives the same total
+    /// through component MTs. Shared between the states of one MT, since a
+    /// TENDL MT=102 section can run to thousands of points.
+    pub mf3: Option<Arc<Tabulated1D>>,
+}
+
+/// The heading TENDL writes over the normalisation block of its MF=1
+/// description.
+const NORMALISATION_HEADING: &str = "Normalization to other libraries";
+
+/// The lines of an evaluation's MF=1 description that say what it was
+/// normalised to, verbatim, or `None` when it says nothing.
+///
+/// TENDL-2025 writes the TALYS input it normalised with under a heading of its
+/// own, for example Nb93's
+/// `library irdff2.0` / `norm mt=16 isom=1 width=0.05 ...`, which says the
+/// (n,2n) isomer partial was normalised to IRDFF-II. The block runs from the
+/// heading to the banner (a line of `*`) that starts the next part. It is kept
+/// whole, commented-out lines included, with only its surrounding blank lines
+/// and each line's trailing padding removed; what a line means is left to the
+/// reader. 101 TENDL-2025 evaluations carry one, and so do 11 JEFF-4.0
+/// evaluations taken from TENDL; TENDL-2017, ENDF/B-VIII.1, JENDL-5 and
+/// FENDL-3.2d have none.
+pub fn normalisation_block(material: &Material) -> Option<String> {
+    let description = &material.mf1_mt451()?.description;
+    let start = description
+        .iter()
+        .position(|line| line.trim() == NORMALISATION_HEADING)?;
+    let body: Vec<&str> = description[start + 1..]
+        .iter()
+        .map(|line| line.trim_end())
+        .take_while(|line| !line.starts_with('*'))
+        .collect();
+    let first = body.iter().position(|line| !line.is_empty())?;
+    let last = body.iter().rposition(|line| !line.is_empty())?;
+    Some(body[first..=last].join("\n"))
+}
+
+/// The tape's own limits of `curve` at `e` from the left and from the right,
+/// `None` for a side the tape states nothing about.
+///
+/// At one of the tape's points these are its stated values, and at a repeated
+/// x (a jump) the first and the last of them. Between points they are the
+/// region's interpolation law, except that a log law over a zero or negative
+/// end states nothing and gives `None`, unless both ends are zero, where the
+/// only value it admits is zero. `Tabulated1D::eval` would give NaN there
+/// (`0 * exp(ln(0/0))`) and returns one side only at a jump, so it is not used.
+fn tape_limits(curve: &Tabulated1D, e: f64) -> (Option<f64>, Option<f64>) {
+    let (Some(&lo), Some(&hi)) = (curve.x.first(), curve.x.last()) else {
+        return (None, None);
+    };
+    if !(lo..=hi).contains(&e) {
+        return (None, None);
+    }
+    let first = curve.x.partition_point(|&x| x < e);
+    let past = curve.x.partition_point(|&x| x <= e);
+    if first < past {
+        // A histogram bin holds its start value up to its end, so arriving
+        // at the point from the left gives the previous point's value.
+        let left = if first > 0 && bin_law(curve, first - 1) == 1 {
+            curve.y[first - 1]
+        } else {
+            curve.y[first]
+        };
+        return (Some(left), Some(curve.y[past - 1]));
+    }
+    // Strictly inside the bin from `first - 1` to `first`.
+    let bin = first - 1;
+    let law = bin_law(curve, bin);
+    let (x0, y0, x1, y1) = (curve.x[bin], curve.y[bin], curve.x[first], curve.y[first]);
+    let value = if matches!(law, 4 | 5) && y0 == 0.0 && y1 == 0.0 {
+        Some(0.0)
+    } else if law_defined(law, x0, y0, x1, y1) {
+        Some(law_value(law, x0, y0, x1, y1, e)).filter(|v| v.is_finite())
+    } else {
+        None
+    };
+    (value, value)
+}
+
+/// A level's energy less that of the state it was booked to, `None` where
+/// either is unknown.
+///
+/// An excited level (LFS > 0) at zero, or any level below zero, is an energy
+/// the evaluation left unstated (an ELFS of 0.0, or a -2^31 sentinel), so it
+/// is not compared: a difference of zero would read as an exact match.
+fn level_energy_difference(lfs: i64, level_energy: f64, booked: Option<f64>) -> Option<f64> {
+    let stated = level_energy > 0.0 || (lfs == 0 && level_energy == 0.0);
+    booked.filter(|_| stated).map(|e| level_energy - e)
+}
+
+/// The interpolation law of the bin from point `bin` to the next: that of the
+/// first region whose last point lies beyond the bin's start, as in `eval`.
+fn bin_law(curve: &Tabulated1D, bin: usize) -> i32 {
+    curve
+        .breakpoints
+        .iter()
+        .zip(&curve.interpolation)
+        .find(|(&b, _)| (bin as i64) < b as i64 - 1)
+        .map_or(*curve.interpolation.last().unwrap_or(&2), |(_, &law)| law)
+}
+
+/// A curve sampled on `energy`, `None` where the tape states nothing there.
+///
+/// Each node takes the tape's own value (see [`tape_limits`]): the stated one
+/// wherever the node is one of the tape's points, the region's law between
+/// them, and none outside the tabulated range. Where `energy` repeats a node
+/// (a jump in the row), the first copy takes the tape's left limit and the
+/// second its right, so a jump the two share is kept whole. A single node on a
+/// jump of the tape alone gets `None` rather than either side, since one
+/// number cannot hold the two values the tape states there.
+fn sampled_on(curve: &Tabulated1D, energy: &[f64]) -> Vec<Option<f64>> {
+    energy
+        .iter()
+        .enumerate()
+        .map(|(i, &e)| {
+            let (left, right) = tape_limits(curve, e);
+            let repeats_next = energy.get(i + 1) == Some(&e);
+            let repeats_previous = i > 0 && energy[i - 1] == e;
+            match (repeats_previous, repeats_next) {
+                (false, true) => left,
+                (true, false) => right,
+                _ => left.filter(|_| left == right),
+            }
+        })
+        .collect()
 }
 
 /// One MF=40 sub-subsection, verbatim, with the key the writer puts in front
@@ -305,9 +476,11 @@ pub fn merge_duplicates(rows: Vec<BranchingRow>) -> (Vec<BranchingRow>, usize) {
             out_x.push(u);
             out_y.push(right);
         }
+        let states: Vec<StateFacts> = group.iter().flat_map(|r| r.states.clone()).collect();
         let mut row = group.into_iter().next().expect("one");
         row.energy = out_x;
         row.values = out_y;
+        row.states = states;
         merged_rows.push(row);
     }
     (merged_rows, merged)
@@ -371,6 +544,18 @@ pub struct BranchingStats {
     /// the one evaluation writing IZAP = 0 elsewhere, FENDL-3.2d's Al27, is
     /// named by its MF=8.
     pub skipped_states: Vec<String>,
+    /// One line per production list (a parent's MT, in MF=9 or MF=10) that
+    /// gave rows: whether the ground state is listed, whether the file has
+    /// the MF=3 the list belongs to, each state's LFS, LMF, target, route and
+    /// level energy difference, and the MF=1 normalisation lines that name
+    /// the MT. The same facts are stored per row in `branching.arrow`; this
+    /// is the copy a build log prints.
+    pub list_facts: Vec<String>,
+    /// How many lists there are of each kind: `"MF=10 complete"`,
+    /// `"MF=10 isomers only"`, the same for MF=9,
+    /// `"no MF=3 section for the MT"` and `"normalised"` (a `norm` line of the
+    /// MF=1 normalisation block names the MT).
+    pub list_counts: BTreeMap<String, usize>,
     /// MF=40 sections read, one per evaluation and MT, whatever the MT.
     pub mf40_sections: usize,
     /// Covariance blocks written, all of them and the NI ones by `lb`.
@@ -675,12 +860,19 @@ impl BranchingExtractor {
         );
         stats.parents += 1;
         let production = endf::radionuclide_production::radionuclide_production(material);
+        let normalisation = normalisation_block(material);
         let mut emitted_any = false;
 
         for (mt, states) in &production {
             let Some(rtype) = mt2type.get(&(*mt as i64)) else {
                 continue;
             };
+            let mf3 = material
+                .mf3(*mt)
+                .map(|section| Arc::new(section.sigma.clone()));
+            // Per file (MF=9 first, then MF=10): the description of each state
+            // that gave a row, and whether every one had its ground listed.
+            let mut list_lines: [(Vec<String>, bool); 2] = [(Vec::new(), true), (Vec::new(), true)];
             if let Some(sum) = partial_sum(material, *mt, states) {
                 if sum.share > PARTIAL_SUM_TOLERANCE {
                     stats.partial_sum_mismatches.push(format!(
@@ -713,6 +905,21 @@ impl BranchingExtractor {
                 );
                 let liso = resolved.liso;
                 let target = endf::gnds_name(z as u32, a as u32, liso as u32);
+                // The tape's own value, kept as a fact: MF=8's ELFS where it
+                // gives one and QM - QI otherwise. excitation_energy() reads
+                // it (an unstated excited level is None there), which is not
+                // what this column records.
+                let level_energy = s.elfs.unwrap_or(s.qm - s.qi);
+                let booked_energy = if liso == 0 {
+                    Some(0.0)
+                } else {
+                    isomers
+                        .get(&(z, a))
+                        .and_then(|table| table.get(&liso))
+                        .and_then(|isomer| isomer.e_iso)
+                };
+                let level_energy_difference =
+                    level_energy_difference(s.lfs, level_energy, booked_energy);
                 if liso > 0 {
                     metastable.insert(target.clone());
                 }
@@ -749,12 +956,31 @@ impl BranchingExtractor {
                     }
                 }
                 let mut curve = None;
-                for (quantity, tab) in [("yield", &s.yields), ("cross_section", &s.cross_section)] {
+                for (file, (quantity, tab)) in
+                    [("yield", &s.yields), ("cross_section", &s.cross_section)]
+                        .into_iter()
+                        .enumerate()
+                {
                     let Some(tab) = tab else { continue };
                     if !is_linear(tab) {
                         stats.linearized_curves += 1;
                     }
                     let (energy, values) = linearize(tab, linearize_tol);
+                    let list_complete = states.iter().any(|g| {
+                        g.zap == s.zap
+                            && g.lfs == 0
+                            && [&g.yields, &g.cross_section][file].is_some()
+                    });
+                    let lmf = s.lmf.map_or("none".to_string(), |lmf| lmf.to_string());
+                    let difference = level_energy_difference
+                        .map_or("unknown".to_string(), |d| format!("{:+.3} keV", d / 1.0e3));
+                    let (lines, all_complete) = &mut list_lines[file];
+                    lines.push(format!(
+                        "LFS {} -> {target} (LMF {lmf}, {}, {difference})",
+                        s.lfs,
+                        resolved.route.label()
+                    ));
+                    *all_complete &= list_complete;
                     // The cross section comes second, so it is the curve of a
                     // state that gives both.
                     curve = Some((quantity, energy.clone(), values.clone()));
@@ -768,6 +994,17 @@ impl BranchingExtractor {
                         quantity: quantity.to_string(),
                         energy,
                         values,
+                        states: vec![StateFacts {
+                            mt: *mt,
+                            lfs: s.lfs,
+                            lmf: s.lmf,
+                            list_complete,
+                            level_route: resolved.route,
+                            level_energy,
+                            level_energy_difference,
+                            mf3: mf3.clone(),
+                        }],
+                        normalisation: normalisation.clone(),
                     });
                     emitted_any = true;
                 }
@@ -779,6 +1016,62 @@ impl BranchingExtractor {
                         excitation: s.excitation_energy(),
                     },
                 );
+            }
+
+            // The build log's copy of the facts just stored, one line per list.
+            let token = format!("mt={mt}");
+            let norm_lines: Vec<&str> = normalisation
+                .iter()
+                .flat_map(|block| block.lines())
+                .filter(|line| {
+                    line.starts_with("library ") || line.split_whitespace().any(|t| t == token)
+                })
+                .collect();
+            // Counted only for a live `norm` line; a commented-out one (`#norm`)
+            // is still printed, since it is in the file.
+            let normalised = norm_lines.iter().any(|line| line.starts_with("norm "));
+            for (file, (lines, complete)) in list_lines.into_iter().enumerate() {
+                if lines.is_empty() {
+                    continue;
+                }
+                let mf = [9, 10][file];
+                let kind = if complete { "complete" } else { "isomers only" };
+                *stats
+                    .list_counts
+                    .entry(format!("MF={mf} {kind}"))
+                    .or_insert(0) += 1;
+                // Only the section for this MT is looked for. An evaluation
+                // can give the same total through component MTs instead (Ag115
+                // in ENDF/B-VIII.1 has MT=600-649 and no MT=103), and those are
+                // not summed into one here.
+                if mf3.is_none() {
+                    *stats
+                        .list_counts
+                        .entry("no MF=3 section for the MT".to_string())
+                        .or_insert(0) += 1;
+                }
+                let mut line = format!(
+                    "{parent} MT{mt} {rtype} MF={mf}: {}, {}; {}",
+                    if complete {
+                        "ground listed"
+                    } else {
+                        "isomers only"
+                    },
+                    if mf3.is_some() {
+                        format!("MF=3 section for MT={mt}")
+                    } else {
+                        format!("no MF=3 section for MT={mt}")
+                    },
+                    lines.join("; ")
+                );
+                if normalised {
+                    *stats
+                        .list_counts
+                        .entry("normalised".to_string())
+                        .or_insert(0) += 1;
+                    line.push_str(&format!("; normalised: {}", norm_lines.join(" | ")));
+                }
+                stats.list_facts.push(line);
             }
         }
         if emitted_any {
@@ -1010,6 +1303,10 @@ impl BranchingExtractor {
             .partial_sum_mismatches
             .extend(stats.partial_sum_mismatches);
         self.stats.skipped_states.extend(stats.skipped_states);
+        self.stats.list_facts.extend(stats.list_facts);
+        for (kind, n) in stats.list_counts {
+            *self.stats.list_counts.entry(kind).or_insert(0) += n;
+        }
         self.stats.mf40_sections += stats.mf40_sections;
         self.stats.mf40_blocks += stats.mf40_blocks;
         for (lb, n) in stats.mf40_blocks_by_lb {
@@ -1278,6 +1575,21 @@ pub fn extract_branching(
 }
 
 /// Write the `branching/` subsection.
+///
+/// The columns after `values` are the per-state facts of [`StateFacts`], one
+/// list item per state in the order the row summed them, and the parent's
+/// [`normalisation_block`]. `mf3_cross_section` holds, per state, the MF=3
+/// for its MT sampled on this row's `energy`, so a reader can set each partial
+/// against the evaluation's own total point by point. It is the tape's value
+/// on the nodes the two grids share and the tape's own law between its points,
+/// not a copy of MF=3: an item is null where MF=3 is not tabulated, where a
+/// log law meets a zero, and on a single node where MF=3 alone jumps (see
+/// [`sampled_on`]), and the whole entry is null where the file has no MF=3
+/// section for the MT. `level_energy` is MF=8's ELFS as the tape gives it
+/// where `lmf` is not null, and QM - QI of the MF=9/10 subsection where it is
+/// (see [`StateFacts::level_energy`]): for an excited level a zero means the
+/// evaluation did not state the energy, and a negative value is a sentinel;
+/// `level_energy_difference` is null for both.
 pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn Error>> {
     std::fs::create_dir_all(dir)?;
     let nuclide: Vec<String> = rows.iter().map(|r| r.nuclide.clone()).collect();
@@ -1286,6 +1598,51 @@ pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn 
     let quantity: Vec<String> = rows.iter().map(|r| r.quantity.clone()).collect();
     let energy: Vec<Vec<f64>> = rows.iter().map(|r| r.energy.clone()).collect();
     let values: Vec<Vec<f64>> = rows.iter().map(|r| r.values.clone()).collect();
+    let normalisation: Vec<Option<String>> = rows.iter().map(|r| r.normalisation.clone()).collect();
+
+    let mut mt = ListBuilder::new(Int32Builder::new());
+    let mut lfs = ListBuilder::new(Int32Builder::new());
+    let mut lmf = ListBuilder::new(Int32Builder::new());
+    let mut list_complete = ListBuilder::new(BooleanBuilder::new());
+    let mut level_route = ListBuilder::new(StringBuilder::new());
+    let mut level_energy = ListBuilder::new(Float64Builder::new());
+    let mut level_energy_difference = ListBuilder::new(Float64Builder::new());
+    let mut mf3 = ListBuilder::new(ListBuilder::new(Float64Builder::new()));
+    for row in rows {
+        for state in &row.states {
+            mt.values().append_value(state.mt);
+            // LFS and LMF are held as the ENDF reader's i64 but stored as
+            // Int32 like MT, which the reader's BranchState matches; a value
+            // that does not fit fails the write rather than wrapping.
+            lfs.values().append_value(i32::try_from(state.lfs)?);
+            lmf.values()
+                .append_option(state.lmf.map(i32::try_from).transpose()?);
+            list_complete.values().append_value(state.list_complete);
+            level_route.values().append_value(state.level_route.label());
+            level_energy.values().append_value(state.level_energy);
+            level_energy_difference
+                .values()
+                .append_option(state.level_energy_difference);
+            match &state.mf3 {
+                Some(curve) => {
+                    for value in sampled_on(curve, &row.energy) {
+                        mf3.values().values().append_option(value);
+                    }
+                    mf3.values().append(true);
+                }
+                None => mf3.values().append(false),
+            }
+        }
+        mt.append(true);
+        lfs.append(true);
+        lmf.append(true);
+        list_complete.append(true);
+        level_route.append(true);
+        level_energy.append(true);
+        level_energy_difference.append(true);
+        mf3.append(true);
+    }
+
     write_section(
         &dir.join("branching.arrow"),
         "branching/branching.arrow",
@@ -1296,6 +1653,15 @@ pub fn write_branching(rows: &[BranchingRow], dir: &Path) -> Result<(), Box<dyn 
             strings(&quantity),
             list_of(&energy),
             list_of(&values),
+            Arc::new(mt.finish()),
+            Arc::new(lfs.finish()),
+            Arc::new(lmf.finish()),
+            Arc::new(list_complete.finish()),
+            Arc::new(level_route.finish()),
+            Arc::new(level_energy.finish()),
+            Arc::new(level_energy_difference.finish()),
+            Arc::new(mf3.finish()),
+            opt_strings(&normalisation),
         ],
     )
 }
@@ -1483,6 +1849,8 @@ mod tests {
             quantity: "cross_section".to_string(),
             energy,
             values,
+            states: Vec::new(),
+            normalisation: None,
         }
     }
 
@@ -1521,6 +1889,74 @@ mod tests {
                 want_a + want_b
             );
         }
+    }
+
+    /// JEFF-4.0's Cs134 MT=102 is one log-log region starting (1e-5, 0),
+    /// (308.92, 0), (308.92, 6.01). `Tabulated1D::eval` gives NaN between the
+    /// two zeros; the tape admits only zero there, and states nothing where a
+    /// log law has one zero end.
+    #[test]
+    fn a_log_law_over_zeros_is_zero_or_unstated_never_nan() {
+        let curve = tab(
+            vec![1e-5, 308.92, 308.92, 1000.0, 2000.0],
+            vec![0.0, 0.0, 6.01, 3.0, 0.0],
+            5,
+        );
+        assert!(curve.eval(10.0).is_nan(), "the case this guards against");
+        let sampled = sampled_on(&curve, &[1e-6, 1e-5, 10.0, 500.0, 1500.0, 2000.0, 3000.0]);
+        assert_eq!(sampled[0], None, "below the table");
+        assert_eq!(sampled[1], Some(0.0), "a tape point");
+        assert_eq!(sampled[2], Some(0.0), "between two zeros");
+        let between = sampled[3].expect("both ends positive");
+        let expected = law_value(5, 308.92, 6.01, 1000.0, 3.0, 500.0);
+        assert_eq!(between, expected);
+        assert_eq!(sampled[4], None, "a log law with one zero end");
+        assert_eq!(sampled[5], Some(0.0), "a tape point");
+        assert_eq!(sampled[6], None, "above the table");
+        assert!(sampled.iter().flatten().all(|v| v.is_finite()));
+    }
+
+    /// At a jump of the tape, a row that repeats the node gets the tape's left
+    /// then right values; a row with a single node there gets neither.
+    #[test]
+    fn a_jump_in_mf3_keeps_both_sides_or_none() {
+        let curve = tab(vec![1.0, 2.0, 2.0, 3.0], vec![1.0, 1.0, 5.0, 5.0], 2);
+        assert_eq!(
+            sampled_on(&curve, &[1.5, 2.0, 2.0, 3.0]),
+            [Some(1.0), Some(1.0), Some(5.0), Some(5.0)]
+        );
+        assert_eq!(
+            sampled_on(&curve, &[1.5, 2.0, 3.0]),
+            [Some(1.0), None, Some(5.0)]
+        );
+        // A row jump where the tape is continuous takes the one value twice.
+        assert_eq!(sampled_on(&curve, &[3.0, 3.0]), [Some(5.0), Some(5.0)]);
+    }
+
+    /// Under a histogram law every point where the value changes is a jump:
+    /// the tape's left limit there is the previous point's value. JENDL-5's
+    /// Eu151 MT=107 has such a region.
+    #[test]
+    fn a_histogram_step_is_a_jump_of_the_tape() {
+        let curve = tab(vec![1.0, 2.0, 3.0], vec![4.0, 6.0, 6.0], 1);
+        assert_eq!(tape_limits(&curve, 2.0), (Some(4.0), Some(6.0)));
+        assert_eq!(
+            sampled_on(&curve, &[1.5, 2.0, 2.0, 2.5]),
+            [Some(4.0), Some(4.0), Some(6.0), Some(6.0)]
+        );
+        assert_eq!(sampled_on(&curve, &[2.0, 3.0]), [None, Some(6.0)]);
+    }
+
+    /// An excited level the evaluation gives no energy for is not compared
+    /// with the state it was booked to. JENDL-5's Cd116 MT=107 LFS=1 writes
+    /// ELFS = 0.0 and TENDL-2017's Pu237 MT=44 LFS=1 writes -2^31.
+    #[test]
+    fn an_unstated_level_energy_has_no_difference() {
+        assert_eq!(level_energy_difference(1, 0.0, Some(0.0)), None);
+        assert_eq!(level_energy_difference(1, -2.147484e9, Some(0.0)), None);
+        assert_eq!(level_energy_difference(0, 0.0, Some(0.0)), Some(0.0));
+        assert_eq!(level_energy_difference(1, 100.0, Some(90.0)), Some(10.0));
+        assert_eq!(level_energy_difference(1, 100.0, None), None);
     }
 
     /// A step jump in the sum survives the merge as a duplicated breakpoint.

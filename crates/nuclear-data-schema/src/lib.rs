@@ -188,6 +188,10 @@ fn i32s(name: &str, nullable: bool) -> Field {
     Field::new(name, list_of(DataType::Int32), nullable)
 }
 
+fn bools(name: &str, nullable: bool) -> Field {
+    Field::new(name, list_of(DataType::Boolean), nullable)
+}
+
 fn utf8s(name: &str, nullable: bool) -> Field {
     Field::new(name, list_of(DataType::Utf8), nullable)
 }
@@ -233,6 +237,18 @@ pub fn branching_branching() -> Schema {
         utf8("quantity", false),
         f64s("energy", false),
         f64s("values", false),
+        // What the evaluation states about each production state summed
+        // into the row, one item per state, and the parent's MF=1
+        // normalisation text. Recorded, not used to build the row.
+        i32s("mt", true),
+        i32s("lfs", true),
+        i32s("lmf", true),
+        bools("list_complete", true),
+        utf8s("level_route", true),
+        f64s("level_energy", true),
+        f64s("level_energy_difference", true),
+        f64ss("mf3_cross_section", true),
+        utf8("normalisation", true),
     ])
     .with_metadata(meta([
         ("filetype", "transmutation-branching"),
