@@ -380,8 +380,8 @@ class DataUncertainty:
 @typing.final
 class DoseCoefficients:
     r"""
-    Fluence-to-effective-dose conversion coefficients, returned by
-    :func:`yani.data.dose_coefficients`.
+    Fluence-to-dose conversion coefficients (effective dose or ambient dose
+    equivalent H*(10)), returned by :func:`yani.data.dose_coefficients`.
     
     Carries the energy grid, the coefficients, and their units, and can
     repackage itself for a tally via :meth:`as_energy_function`.
@@ -394,7 +394,7 @@ class DoseCoefficients:
     @property
     def coefficients(self) -> builtins.list[builtins.float]:
         r"""
-        Fluence-to-effective-dose coefficients, one per energy.
+        Fluence-to-dose coefficients, one per energy.
         """
     @property
     def units(self) -> builtins.str:

@@ -7,7 +7,7 @@
 pub mod effective_dose;
 pub mod photon_attenuation;
 
-pub use effective_dose::{dose_coefficients, DoseDataSource, DoseGeometry, DoseParticle};
+pub use effective_dose::{ambient_dose_coefficients, dose_coefficients, DoseDataSource, DoseGeometry, DoseParticle};
 pub use photon_attenuation::{
     mass_attenuation_coefficient, mass_energy_absorption_air, CoefficientTable,
 };
