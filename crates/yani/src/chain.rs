@@ -53,6 +53,17 @@ pub struct ChainReaction {
     /// converter puts the residual on the parent's largest mode. A consumer
     /// pairing the two should know that row carries a moved ratio.
     pub branching_uncertainty: Option<f64>,
+    /// The tape's BR on a decay mode, before the converter normalised the
+    /// parent's ratios to sum to one.
+    ///
+    /// Read as stored in `decay/decay_modes.arrow`. It equals `branching`
+    /// except on the parent's largest mode where the evaluated ratios miss
+    /// unity (JEFF-4.0's Ir169 has one alpha mode of 0.45, so `branching` is
+    /// 1.0 and this is 0.45). It is the number `branching_uncertainty` was
+    /// evaluated on. `None` on a reaction, or on a file that predates the
+    /// column. Nothing in the solver reads it; it is kept so the file loses
+    /// nothing the tape gives and a re-export writes back what it read.
+    pub evaluated_branching: Option<f64>,
 }
 
 impl ChainReaction {
@@ -1470,6 +1481,7 @@ mod tests {
             branching,
             q_value: None,
             branching_uncertainty: None,
+            evaluated_branching: None,
         }
     }
 

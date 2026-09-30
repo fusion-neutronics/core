@@ -268,26 +268,30 @@ fn tapes() -> BTreeMap<String, endf::decay::Decay> {
         .collect()
 }
 
-/// Every decay mode's dBR in the written file is the tape's own number, the
-/// zeros included.
+/// Every decay mode's BR and dBR in the written file are the tape's own
+/// numbers, the zeros included.
 ///
 /// MT=457 writes 0.0 for an uncertainty it does not state. The file stores
 /// what the tape says and leaves "0.0 means not stated" to the readers, so this
-/// reads the column straight out of the file, not through yani, and compares
-/// it with the parsed tapes.
+/// reads the columns straight out of the file, not through yani, and compares
+/// them with the parsed tapes. `evaluated_branching_ratio` is the tape's BR
+/// before normalisation, beside the normalised `branching_ratio`.
 #[test]
-fn every_branching_sigma_is_written_as_the_tape_gives_it() {
+fn every_branching_ratio_and_sigma_is_written_as_the_tape_gives_it() {
     let c = convert("dbr");
     let tapes = tapes();
 
     let modes = c.dir.join("decay/decay_modes.arrow");
-    let (sigmas, last) = float_column(&modes, "branching_ratio_uncertainty");
+    let (sigmas, _) = float_column(&modes, "branching_ratio_uncertainty");
+    let (evaluated, last) = float_column(&modes, "evaluated_branching_ratio");
+    let (normalised, _) = float_column(&modes, "branching_ratio");
     assert_eq!(
-        last, "branching_ratio_uncertainty",
+        last, "evaluated_branching_ratio",
         "the new column must be appended last"
     );
     let parents = string_column(&modes, "nuclide");
     assert_eq!(parents.len(), sigmas.len());
+    assert_eq!(parents.len(), evaluated.len());
     let mut row = 0;
     for nuclide in &c.chain.nuclides {
         // Stable, or a half-life never evaluated (Xe136): no modes written.
@@ -302,6 +306,12 @@ fn every_branching_sigma_is_written_as_the_tape_gives_it() {
                 sigmas[row],
                 Some(mode.branching_ratio.1),
                 "{} row {row}: the dBR is not the tape's",
+                nuclide.name
+            );
+            assert_eq!(
+                evaluated[row],
+                Some(mode.branching_ratio.0),
+                "{} row {row}: the evaluated BR is not the tape's",
                 nuclide.name
             );
             row += 1;
@@ -331,6 +341,25 @@ fn every_branching_sigma_is_written_as_the_tape_gives_it() {
     assert_eq!(dbr("Cs137"), [Some(1.999988e-3), Some(1.999988e-3)]);
     assert_eq!(dbr("In116"), [Some(6.0e-5), Some(6.0e-5)]);
     assert_eq!(dbr("In116_m1"), [Some(0.0)]);
+    // Cs137's two modes sum to 1 - 1e-8 on the tape, so normalisation puts
+    // the residual on the larger one and only there do the two columns
+    // differ. yani reads both back as stored.
+    let moved: Vec<&String> = normalised
+        .iter()
+        .zip(&evaluated)
+        .zip(&parents)
+        .filter(|((n, e), _)| n != e)
+        .map(|(_, p)| p)
+        .collect();
+    assert_eq!(moved, ["Cs137"], "only Cs137's ratios miss unity");
+    let cs137: Vec<(f64, Option<f64>)> = back["Cs137"]
+        .decays
+        .iter()
+        .map(|d| (d.branching, d.evaluated_branching))
+        .collect();
+    assert_eq!(cs137[0], (0.05300549, Some(0.05300549)), "the smaller mode");
+    assert_eq!(cs137[1].1, Some(0.9469945), "the tape's BR");
+    assert!((cs137[1].0 - 0.94699451).abs() < 1e-15, "{cs137:?}");
     let _ = std::fs::remove_dir_all(&c.dir);
 }
 

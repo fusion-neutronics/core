@@ -109,6 +109,7 @@ fn mode(kind: &str, target: &str, branching: f64) -> ChainReaction {
         branching,
         q_value: None,
         branching_uncertainty: None,
+        evaluated_branching: None,
     }
 }
 

@@ -534,6 +534,13 @@ pub fn decay_decay_modes() -> Schema {
         // the tape's BR, and `branching_ratio` in the same row may carry the
         // normalisation residual on the parent's largest mode.
         f64("branching_ratio_uncertainty", true),
+        // The tape's BR, before `branching_ratio` was normalised. The two
+        // differ only on a parent's largest mode where its ratios do not sum
+        // to one (JEFF-4.0's Ir169 alpha is 0.45 here and 1.0 there), and it
+        // is the value `branching_ratio_uncertainty` belongs to. Nullable and
+        // last, so a file written without it still reads, with no evaluated
+        // ratio on any mode.
+        f64("evaluated_branching_ratio", true),
     ])
 }
 

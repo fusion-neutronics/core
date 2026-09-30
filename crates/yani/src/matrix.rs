@@ -782,6 +782,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
                 vec![],
             ),
@@ -819,6 +820,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
             ),
         );
@@ -858,6 +860,7 @@ mod tests {
                         branching: 0.75,
                         q_value: None,
                         branching_uncertainty: None,
+                        evaluated_branching: None,
                     },
                     ChainReaction {
                         kind: "(n,gamma)".to_string(),
@@ -865,6 +868,7 @@ mod tests {
                         branching: 0.25,
                         q_value: None,
                         branching_uncertainty: None,
+                        evaluated_branching: None,
                     },
                     ChainReaction {
                         kind: "(n,2n)".to_string(),
@@ -872,6 +876,7 @@ mod tests {
                         branching: 1.0,
                         q_value: None,
                         branching_uncertainty: None,
+                        evaluated_branching: None,
                     },
                     // No named product, and no rate given for it below.
                     ChainReaction {
@@ -880,6 +885,7 @@ mod tests {
                         branching: 1.0,
                         q_value: None,
                         branching_uncertainty: None,
+                        evaluated_branching: None,
                     },
                 ],
             ),
@@ -935,6 +941,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
             ),
         );
@@ -983,6 +990,7 @@ mod tests {
                         branching: 1.0,
                         q_value: None,
                         branching_uncertainty: None,
+                        evaluated_branching: None,
                     }],
                 ),
             ),
@@ -1006,6 +1014,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
                 decays: vec![],
                 fission_yields: Some(Arc::new(FissionYieldSet {
@@ -1063,6 +1072,7 @@ mod tests {
                     branching: 0.5,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
                 decays: vec![],
                 fission_yields: Some(Arc::new(FissionYieldSet {
@@ -1131,6 +1141,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
                 vec![],
             ),
@@ -1172,6 +1183,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
             ),
         );
@@ -1215,6 +1227,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
             ),
         );
@@ -1252,6 +1265,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
                 vec![ChainReaction {
                     kind: "(n,p)".to_string(),
@@ -1259,6 +1273,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
             ),
         );
@@ -1274,6 +1289,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
             ),
         );
@@ -1368,6 +1384,7 @@ mod tests {
                         branching: 1.0,
                         q_value: None,
                         branching_uncertainty: None,
+                        evaluated_branching: None,
                     },
                     ChainReaction {
                         kind: "(n,fission)".to_string(),
@@ -1375,6 +1392,7 @@ mod tests {
                         branching: 1.0,
                         q_value: None,
                         branching_uncertainty: None,
+                        evaluated_branching: None,
                     },
                 ],
                 decays: vec![ChainReaction {
@@ -1383,6 +1401,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
                 fission_yields: Some(Arc::new(FissionYieldSet {
                     yields: vec![FissionYield {
@@ -1467,6 +1486,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
                 vec![ChainReaction {
                     kind: "(n,gamma)".to_string(),
@@ -1474,6 +1494,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
             ),
         );
@@ -1513,6 +1534,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
                 decays: vec![],
                 fission_yields: Some(Arc::new(FissionYieldSet {
@@ -1574,6 +1596,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
                 decays: vec![],
                 fission_yields: Some(Arc::new(FissionYieldSet::new(vec![
@@ -1814,6 +1837,7 @@ mod tests {
                         branching: 1.0,
                         q_value: None,
                         branching_uncertainty: None,
+                        evaluated_branching: None,
                     })
                     .collect(),
             ),

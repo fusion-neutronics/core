@@ -1206,6 +1206,7 @@ mod tests {
                         branching: 1.0,
                         q_value: None,
                         branching_uncertainty: None,
+                        evaluated_branching: None,
                     })
                     .collect(),
                 decays: vec![],

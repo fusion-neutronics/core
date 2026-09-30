@@ -3087,6 +3087,7 @@ mod tests {
             target: Some(target.to_string()),
             branching,
             branching_uncertainty: None,
+            evaluated_branching: None,
             q_value: None,
         }
     }
@@ -4119,6 +4120,7 @@ mod tests {
                             target: Some(target.to_string()),
                             branching: 1.0,
                             branching_uncertainty: None,
+                            evaluated_branching: None,
                             q_value: None,
                         })
                         .collect(),
@@ -4192,6 +4194,7 @@ mod tests {
             branching: b,
             q_value: None,
             branching_uncertainty: sigma,
+            evaluated_branching: None,
         };
         let nuclide = |name: &str,
                        half_life: Option<f64>,
@@ -4339,6 +4342,7 @@ mod tests {
                 branching: 1.0,
                 q_value: None,
                 branching_uncertainty: None,
+                evaluated_branching: None,
             }],
             fission_yields: None,
             sources: vec![yani::DecaySource {
