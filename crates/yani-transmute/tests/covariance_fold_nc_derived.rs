@@ -225,7 +225,7 @@ fn o16_np_is_derived_from_its_partials() {
 #[test]
 fn tendl_2017_o16_np_is_derived_from_its_partials() {
     let dir = yamc_test_cache::root().join("tendl-2017-O16.arrow");
-    if !yamc_test_cache::format_version_is_readable(&dir) {
+    if !dir.is_dir() || !yamc_test_cache::format_version_is_readable(&dir) {
         eprintln!("skipping: TENDL-2017 O16 fixture missing or stale");
         return;
     }
@@ -339,7 +339,7 @@ fn h2_n2n_cancelling_derivation_is_the_hand_sandwich() {
         // Cached as the activation subset of MT 1, 2, 16 and 102, which only
         // a load asking for some MTs reads.
         let dir = yamc_test_cache::root().join(format!("{library}-H2.arrow"));
-        if !yamc_test_cache::format_version_is_readable(&dir) {
+        if !dir.is_dir() || !yamc_test_cache::format_version_is_readable(&dir) {
             eprintln!("skipping: {library} H2 fixture missing or stale");
             continue;
         }
