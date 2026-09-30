@@ -1758,6 +1758,7 @@ fn dump_section(d: &mut Dump, path: &str, section: &Section) {
                 }
                 if let Some(c) = &sp_.continuous_covariance {
                     d.int(format!("{sp}/cont_cov/LB"), c.lb);
+                    d.int(format!("{sp}/cont_cov/NE"), c.ne);
                     d.floats(format!("{sp}/cont_cov/Ek"), c.ek.clone());
                     d.floats(format!("{sp}/cont_cov/Fk"), c.fk.clone());
                 }

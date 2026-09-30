@@ -49,7 +49,10 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 /// own mean and variance, so a sampled rate is never negative and nothing is
 /// floored. The correlated Gaussian deviates are kept (a Gaussian copula), so
 /// the ordering between channels is preserved, but the Pearson correlations
-/// come out weaker than evaluated as the sigmas grow.
+/// come out weaker than evaluated as the sigmas grow. Half-lives and decay
+/// energies are drawn the same way, one nuclide at a time: the decay data
+/// states a mean and a sigma for each and no correlation, so the draws carry
+/// exactly what the evaluation states and are never negative.
 ///
 /// Held at their nominal values, with uncertainties of their own that this
 /// does not propagate:
@@ -91,8 +94,9 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///
 /// ``TransmutationResults.get_data_uncertainty_info`` lists every one of these
 /// that applied to a material under ``not_perturbed``, along with any nuclide
-/// whose evaluation carries no covariance and any unstable nuclide whose
-/// half-life has no stated sigma.
+/// whose evaluation carries no covariance, any unstable nuclide whose
+/// half-life or decay energy has no stated sigma, and any whose stated
+/// half-life or decay-energy sigma no draw can carry.
 ///
 /// Args:
 ///     seed (int): Base seed. A given nuclide's perturbation in a given replica
@@ -405,7 +409,13 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
             .cloned()
             .collect::<Vec<_>>(),
     )?;
-    d.set_item("half_lives_floored", info.half_lives_floored)?;
+    d.set_item(
+        "half_life_uncertainty_not_carried",
+        info.half_life_uncertainty_not_carried
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
     d.set_item("half_lives_sampled", info.half_lives_sampled)?;
     for (key, set) in [
         (
@@ -440,6 +450,13 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     d.set_item(
         "no_decay_energy_uncertainty",
         info.no_decay_energy_uncertainty
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    d.set_item(
+        "decay_energy_uncertainty_not_carried",
+        info.decay_energy_uncertainty_not_carried
             .iter()
             .cloned()
             .collect::<Vec<_>>(),

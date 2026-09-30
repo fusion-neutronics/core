@@ -662,9 +662,18 @@ def test_asking_for_half_lives_reports_which_were_sampled():
     )
     info = results.get_data_uncertainty_info(iron.id or 0)
     assert "half-life" not in info["not_perturbed"]
-    # Every reachable unstable nuclide is in exactly one of the two lists.
-    assert not set(info["half_lives_perturbed"]) & set(info["no_half_life_uncertainty"])
-    assert info["half_lives_perturbed"] or info["no_half_life_uncertainty"]
+    # Every reachable unstable nuclide is in exactly one of the three lists.
+    perturbed = set(info["half_lives_perturbed"])
+    without = set(info["no_half_life_uncertainty"])
+    not_carried = set(info["half_life_uncertainty_not_carried"])
+    assert not perturbed & without
+    assert not perturbed & not_carried
+    assert not without & not_carried
+    assert perturbed or without
+    assert isinstance(info["half_life_uncertainty_not_carried"], list)
+    assert isinstance(info["decay_energy_uncertainty_not_carried"], list)
+    # The draw is lognormal, so there is nothing to floor and no count of it.
+    assert "half_lives_floored" not in info
 
 
 
