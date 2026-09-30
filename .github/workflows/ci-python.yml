@@ -1142,6 +1142,15 @@ jobs:
           check yamc-core "$PUBLISH_YAMC" "${TAGGED_YAMC:-}" "${YAMC_OVERRIDE:-}" crates/yamc-python/Cargo.toml
           check yani-core "$PUBLISH_YANI" "${TAGGED_YANI:-}" "${YANI_OVERRIDE:-}" crates/yani-python/Cargo.toml
           exit $fail
+      # Both wheels compile in the data pins (yamc-nuclide's
+      # EXPECTED_DATA_VERSION and EXPECTED_TRANSMUTATION_DATA_VERSION), and a
+      # pin the origin does not serve fails every download, fresh installs
+      # included. So the release waits until the origin carries every pinned
+      # stamp: upload the data first, then tag.
+      - name: The origin serves every pinned data stamp
+        run: >-
+          cargo test -p yamc-nuclide --features download-tls --lib --
+          --ignored origin_serves_every_pinned_data_version --nocapture
 
   # Sort the built wheels into one directory per PyPI project, so each publish
   # job below uploads exactly one project's files.

@@ -472,7 +472,9 @@ static EMBEDDED_INDEX: Lazy<HashMap<&'static str, HashSet<&'static str>>> = Lazy
 /// library had before this existed. Add an entry when a library is published
 /// with a stamp; do not add one speculatively, because an entry whose value no
 /// published data carries invalidates every cache on the first load and then
-/// fails, by design (see `download_and_cache`).
+/// fails, by design (see `download_and_cache`). CI checks both tables against
+/// the live origin (`origin_serves_every_pinned_data_version`), on every pull
+/// request and before a release publishes.
 #[cfg(feature = "download")]
 const EXPECTED_DATA_VERSION: &[(&str, &str)] = &[
     // The 2026-09-02 republish, which restamped every library in the same run,
@@ -2638,6 +2640,84 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The live origin must serve every stamp this build pins. A pin the origin
+    /// does not carry does not serve stale data: it fails every download,
+    /// fresh installs included, so a wheel must never ship one. This fetches one
+    /// marker per pinned row, Fe56's `version.json` for a cross-section row and
+    /// the first published subsection's `provenance.json` for a chain row, and
+    /// fails listing every disagreement.
+    ///
+    /// Ignored by default because it needs the network and reads the origin as
+    /// it is now. CI runs it on every pull request and push and in the release
+    /// gate:
+    ///   cargo test -p yamc-nuclide --features download-tls --lib -- \
+    ///       --ignored origin_serves_every_pinned_data_version
+    #[test]
+    #[ignore]
+    fn origin_serves_every_pinned_data_version() {
+        // A query string the CDN has not seen, so the answer is the origin's
+        // and not a cached copy from before an upload.
+        let bust = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut mismatches = Vec::new();
+        for published in [Published::CrossSections, Published::Transmutation] {
+            let table = published.table_name();
+            for (keyword, pinned) in published.pins() {
+                let marker_url = match published {
+                    Published::CrossSections => format!(
+                        "{}/version.json",
+                        expand_keyword_to_url(keyword, "Fe56", DataKind::Neutron).unwrap()
+                    ),
+                    Published::Transmutation => {
+                        let subsection = keyword_transmutation_subsections(keyword)
+                            .and_then(|s| s.first())
+                            .unwrap_or_else(|| {
+                                panic!("{table} pins {keyword:?}, which publishes no chain")
+                            });
+                        format!(
+                            "{}/provenance.json",
+                            expand_keyword_to_subsection_url(keyword, subsection).unwrap()
+                        )
+                    }
+                };
+                let url = format!("{marker_url}?pin-check={bust}");
+                let served = blocking_get(&url, None)
+                    .and_then(|r| Ok(r.error_for_status()?.text()?))
+                    .map_err(|e| e.to_string())
+                    .and_then(|text| {
+                        serde_json::from_str::<serde_json::Value>(&text).map_err(|e| e.to_string())
+                    })
+                    .map(|v| {
+                        v.get("data_version")
+                            .and_then(|d| d.as_str())
+                            .map(str::to_owned)
+                    });
+                match served {
+                    Ok(Some(served)) if served == *pinned => {
+                        println!("{table} {keyword}: origin serves {served:?}, as pinned");
+                    }
+                    Ok(served) => mismatches.push(format!(
+                        "{table} pins {keyword:?} to {pinned:?}, but {marker_url} carries {}",
+                        served.map_or("no data_version".to_string(), |v| format!("{v:?}"))
+                    )),
+                    Err(e) => mismatches.push(format!(
+                        "{table} pins {keyword:?} to {pinned:?}, but {marker_url} could not be \
+                         read: {e}"
+                    )),
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "the origin does not serve what this build pins. Either the data is not \
+             uploaded yet (upload it before this pin ships) or the pin was not moved with \
+             a republish:\n  {}",
+            mismatches.join("\n  ")
+        );
     }
 
     /// Nothing else ties a keyword to its chain pin, and a keyword with no row

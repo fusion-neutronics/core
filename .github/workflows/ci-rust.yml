@@ -188,6 +188,28 @@ jobs:
           recreate: true
           path: coverage-comment.md
 
+  # The data pins compiled into yamc-nuclide must name the stamps the live
+  # origin serves. A pin the origin does not carry fails every download, fresh
+  # installs included, so a pull request that bumps a pin goes red until the
+  # data is uploaded, and main goes red if the origin moves without the pin.
+  # The release gate in ci-python.yml runs the same test.
+  data-pins:
+    name: Data pins match the origin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        run: rustup update stable && rustup default stable
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          cache-on-failure: true
+      - name: The origin serves every pinned data stamp
+        run: >-
+          cargo test -p yamc-nuclide --features download-tls --lib --
+          --ignored origin_serves_every_pinned_data_version --nocapture
+
   # Test MPI build
   test-mpi:
     name: Test MPI on ${{ matrix.os }}
