@@ -31,7 +31,7 @@
 use std::error::Error;
 use std::path::Path;
 
-use endf::mf::covariance::{Mf33, NcSubsection, NiSubsection};
+use endf::mf::covariance::{Mf33, Mf33Subsection, NcSubsection, NiSubsection};
 use endf::Material;
 
 use crate::sections::{float_lists_or_null, ints, opt_floats, opt_ints, strings, write_section};
@@ -42,8 +42,13 @@ use crate::sections::{float_lists_or_null, ints, opt_floats, opt_ints, strings, 
 /// is the shape [`write_section`] wants and building it directly avoids a
 /// transpose whose only job would be to reintroduce the column order the schema
 /// already fixes.
+///
+/// Public because `branching/branching_covariance.arrow` is the same blocks
+/// with a key in front: MF=40 writes its sub-subsections in MF=33's format, and
+/// the transmutation converter builds those rows here rather than through a
+/// second copy of this layout.
 #[derive(Default)]
-struct Rows {
+pub struct CovarianceRows {
     mt: Vec<i32>,
     subsection_idx: Vec<i32>,
     block_idx: Vec<i32>,
@@ -86,10 +91,6 @@ struct Rows {
     xlfss: Vec<Option<f64>>,
     ei: Vec<Vec<f64>>,
     wei: Vec<Vec<f64>>,
-
-    // The evaluation's own MAT, on every row, so a reader can tell a `mat1`
-    // naming this material from one naming another.
-    mat: Vec<Option<i32>>,
 }
 
 /// A count that came off the tape as `i64`, narrowed for the column.
@@ -97,16 +98,15 @@ struct Rows {
 /// Saturating rather than wrapping: these are ENDF counts and flags, none of
 /// which can legitimately exceed `i32`, and a corrupt tape should not silently
 /// become a plausible small number.
-fn narrow(v: i64) -> i32 {
+pub fn narrow(v: i64) -> i32 {
     v.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
-impl Rows {
+impl CovarianceRows {
     /// The columns every row carries, whatever its kind.
     #[allow(clippy::too_many_arguments)]
     fn push_common(
         &mut self,
-        mat: i32,
         mt: i32,
         subsection_idx: usize,
         block_idx: usize,
@@ -115,7 +115,7 @@ impl Rows {
         mt1: i64,
         xmf1: f64,
         xlfs1: f64,
-        mtl: i64,
+        mtl: Option<i64>,
     ) {
         self.mt.push(mt);
         self.subsection_idx.push(subsection_idx as i32);
@@ -125,8 +125,7 @@ impl Rows {
         self.mt1.push(Some(narrow(mt1)));
         self.xmf1.push(Some(xmf1));
         self.xlfs1.push(Some(xlfs1));
-        self.mtl.push(Some(narrow(mtl)));
-        self.mat.push(Some(mat));
+        self.mtl.push(mtl.map(narrow));
     }
 
     /// Null every `kind = "ni"` column, for a row that is an NC block.
@@ -195,11 +194,12 @@ impl Rows {
     /// A lumped reaction's component: its section's HEAD record and nothing
     /// else, since the format gives a component no subsections.
     ///
-    /// Only `mt`, `mtl` and `mat` carry anything. The HEAD record has no
-    /// MAT1, MT1, XMF1 or XLFS1, so those are null rather than a zero the
-    /// tape never wrote, and the two indices are 0 because the section has
-    /// no subsection or block for them to count.
-    fn push_lumped(&mut self, mat: i32, mt: i32, mtl: i64) {
+    /// Only `mt` and `mtl` carry anything here, and `mat` beside them in
+    /// `covariance.arrow`. The HEAD record has no MAT1, MT1, XMF1 or XLFS1,
+    /// so those are null rather than a zero the tape never wrote, and the two
+    /// indices are 0 because the section has no subsection or block for them
+    /// to count.
+    fn push_lumped(&mut self, mt: i32, mtl: i64) {
         self.mt.push(mt);
         self.subsection_idx.push(0);
         self.block_idx.push(0);
@@ -209,7 +209,6 @@ impl Rows {
         self.xmf1.push(None);
         self.xlfs1.push(None);
         self.mtl.push(Some(narrow(mtl)));
-        self.mat.push(Some(mat));
         self.push_ni_null();
         self.push_nc_null();
     }
@@ -232,12 +231,69 @@ impl Rows {
         self.wei.push(s.wei.clone());
     }
 
-    fn is_empty(&self) -> bool {
+    /// One MF=33-format subsection's blocks, in tape order, returning how
+    /// many rows that was.
+    ///
+    /// NC blocks precede NI blocks within a subsection because that is the
+    /// order they appear on the tape and the order the parser reads them, so
+    /// `block_idx` is a running index over both rather than one per kind.
+    /// `mtl` is the section HEAD's lumped-reaction MT, `None` for a file that
+    /// has no such field (MF=40), which is written as null rather than as a
+    /// zero the tape never stated.
+    pub fn push_subsection(
+        &mut self,
+        mt: i32,
+        subsection_idx: usize,
+        mtl: Option<i64>,
+        sub: &Mf33Subsection,
+    ) -> usize {
+        let mut block_idx = 0;
+        for block in &sub.nc_subsections {
+            self.push_common(
+                mt,
+                subsection_idx,
+                block_idx,
+                "nc",
+                sub.mat1,
+                sub.mt1,
+                sub.xmf1,
+                sub.xlfs1,
+                mtl,
+            );
+            self.push_nc(block);
+            block_idx += 1;
+        }
+        for block in &sub.ni_subsections {
+            self.push_common(
+                mt,
+                subsection_idx,
+                block_idx,
+                "ni",
+                sub.mat1,
+                sub.mt1,
+                sub.xmf1,
+                sub.xlfs1,
+                mtl,
+            );
+            self.push_ni(block);
+            block_idx += 1;
+        }
+        block_idx
+    }
+
+    pub fn is_empty(&self) -> bool {
         self.mt.is_empty()
     }
 
-    /// The columns in the schema's own order.
-    fn columns(&self) -> Vec<arrow_array::ArrayRef> {
+    /// The number of rows, one per block.
+    pub fn len(&self) -> usize {
+        self.mt.len()
+    }
+
+    /// The columns in the schema's own order, all but `covariance.arrow`'s
+    /// trailing `mat`: a file of one evaluation's blocks writes it once per row
+    /// beside these, and `branching_covariance.arrow` has its own in its key.
+    pub fn columns(&self) -> Vec<arrow_array::ArrayRef> {
         vec![
             ints(&self.mt),
             ints(&self.subsection_idx),
@@ -277,7 +333,6 @@ impl Rows {
             opt_floats(&self.xlfss),
             float_lists_or_null(&self.ei),
             float_lists_or_null(&self.wei),
-            opt_ints(&self.mat),
         ]
     }
 }
@@ -298,18 +353,21 @@ fn covariance_mts(material: &Material) -> Vec<i32> {
 
 /// Accumulate one MF=33 section's blocks, in tape order.
 ///
-/// NC blocks precede NI blocks within a subsection because that is the order
-/// they appear on the tape and the order the parser reads them, so `block_idx`
-/// is a running index over both rather than one per kind. Two subsections of
-/// one section may name the same (MAT1, MT1), which is why the position is
-/// carried explicitly instead of being recovered from the keys.
+/// Two subsections of one section may name the same (MAT1, MT1), which is why
+/// the position is carried explicitly instead of being recovered from the keys.
 ///
 /// A section with a nonzero MTL is a lumped reaction's component, and its one
 /// row is its HEAD. ENDF-102 33.2.3 gives such a section no subsections
 /// (NL=0), and one that has them is refused: the lump's component list is read
 /// off these HEAD rows, and a component that also stated a covariance of its
-/// own would leave the fold no exact reading of either.
-fn push_section(rows: &mut Rows, mat: i32, mt: i32, mf33: &Mf33) -> Result<(), Box<dyn Error>> {
+/// own would leave the fold no exact reading of either. `mat` names the
+/// evaluation in that error.
+fn push_section(
+    rows: &mut CovarianceRows,
+    mat: i32,
+    mt: i32,
+    mf33: &Mf33,
+) -> Result<(), Box<dyn Error>> {
     if mf33.mtl != 0 {
         if !mf33.subsections.is_empty() {
             return Err(format!(
@@ -320,43 +378,11 @@ fn push_section(rows: &mut Rows, mat: i32, mt: i32, mf33: &Mf33) -> Result<(), B
             )
             .into());
         }
-        rows.push_lumped(mat, mt, mf33.mtl);
+        rows.push_lumped(mt, mf33.mtl);
         return Ok(());
     }
     for (subsection_idx, sub) in mf33.subsections.iter().enumerate() {
-        let mut block_idx = 0;
-        for block in &sub.nc_subsections {
-            rows.push_common(
-                mat,
-                mt,
-                subsection_idx,
-                block_idx,
-                "nc",
-                sub.mat1,
-                sub.mt1,
-                sub.xmf1,
-                sub.xlfs1,
-                mf33.mtl,
-            );
-            rows.push_nc(block);
-            block_idx += 1;
-        }
-        for block in &sub.ni_subsections {
-            rows.push_common(
-                mat,
-                mt,
-                subsection_idx,
-                block_idx,
-                "ni",
-                sub.mat1,
-                sub.mt1,
-                sub.xmf1,
-                sub.xlfs1,
-                mf33.mtl,
-            );
-            rows.push_ni(block);
-            block_idx += 1;
-        }
+        rows.push_subsection(mt, subsection_idx, Some(mf33.mtl), sub);
     }
     Ok(())
 }
@@ -371,7 +397,7 @@ fn push_section(rows: &mut Rows, mat: i32, mt: i32, mf33: &Mf33) -> Result<(), B
 /// is written here, since that is a download-cache record of a settled 404
 /// rather than anything a conversion produces.
 pub fn write_covariance(material: &Material, dir: &Path) -> Result<bool, Box<dyn Error>> {
-    let mut rows = Rows::default();
+    let mut rows = CovarianceRows::default();
     for mt in covariance_mts(material) {
         if let Some(mf33) = material.mf33(mt) {
             push_section(&mut rows, material.mat, mt, mf33)?;
@@ -382,11 +408,11 @@ pub fn write_covariance(material: &Material, dir: &Path) -> Result<bool, Box<dyn
         return Ok(false);
     }
 
-    write_section(
-        &dir.join("covariance.arrow"),
-        "covariance.arrow",
-        rows.columns(),
-    )?;
+    // The evaluation's own MAT, on every row, so a reader can tell a `mat1`
+    // naming this material from one naming another.
+    let mut columns = rows.columns();
+    columns.push(opt_ints(&vec![Some(material.mat); rows.len()]));
+    write_section(&dir.join("covariance.arrow"), "covariance.arrow", columns)?;
     Ok(true)
 }
 
@@ -400,7 +426,7 @@ mod tests {
     /// lump the fold would never see.
     #[test]
     fn a_component_with_subsections_is_refused() {
-        let mut rows = Rows::default();
+        let mut rows = CovarianceRows::default();
         let head = Mf33 {
             mtl: 852,
             ..Mf33::default()

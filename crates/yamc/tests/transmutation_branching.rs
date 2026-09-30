@@ -125,23 +125,27 @@ fn synthetic_chain() -> Arc<HashMap<String, ChainNuclide>> {
 /// 1/4 for any transport spectrum.
 fn synthetic_branch() -> Arc<BranchTable> {
     let mut branch = BranchTable::new();
-    branch.entry("Li6".to_string()).or_default().insert(
-        "(n,gamma)".to_string(),
-        vec![
-            BranchCurve {
-                target: "Li7".to_string(),
-                quantity: BranchQuantity::CrossSection,
-                energy: vec![1.0e-5, 1.0e9],
-                values: vec![3.0, 3.0],
-            },
-            BranchCurve {
-                target: "Li7_m1".to_string(),
-                quantity: BranchQuantity::CrossSection,
-                energy: vec![1.0e-5, 1.0e9],
-                values: vec![1.0, 1.0],
-            },
-        ],
-    );
+    branch
+        .curves_mut()
+        .entry("Li6".to_string())
+        .or_default()
+        .insert(
+            "(n,gamma)".to_string(),
+            vec![
+                BranchCurve {
+                    target: "Li7".to_string(),
+                    quantity: BranchQuantity::CrossSection,
+                    energy: vec![1.0e-5, 1.0e9],
+                    values: vec![3.0, 3.0],
+                },
+                BranchCurve {
+                    target: "Li7_m1".to_string(),
+                    quantity: BranchQuantity::CrossSection,
+                    energy: vec![1.0e-5, 1.0e9],
+                    values: vec![1.0, 1.0],
+                },
+            ],
+        );
     Arc::new(branch)
 }
 
@@ -206,23 +210,27 @@ fn coupled_branching_repartitions_metastable_split() {
 #[test]
 fn coupled_branching_exact_for_ramp_partials() {
     let mut branch = BranchTable::new();
-    branch.entry("Li6".to_string()).or_default().insert(
-        "(n,gamma)".to_string(),
-        vec![
-            BranchCurve {
-                target: "Li7".to_string(),
-                quantity: BranchQuantity::CrossSection,
-                energy: vec![1.0e2, 5.0e5, 2.0e6],
-                values: vec![0.0, 3.0, 1.5],
-            },
-            BranchCurve {
-                target: "Li7_m1".to_string(),
-                quantity: BranchQuantity::CrossSection,
-                energy: vec![1.0e2, 5.0e5, 2.0e6],
-                values: vec![0.0, 1.0, 0.5],
-            },
-        ],
-    );
+    branch
+        .curves_mut()
+        .entry("Li6".to_string())
+        .or_default()
+        .insert(
+            "(n,gamma)".to_string(),
+            vec![
+                BranchCurve {
+                    target: "Li7".to_string(),
+                    quantity: BranchQuantity::CrossSection,
+                    energy: vec![1.0e2, 5.0e5, 2.0e6],
+                    values: vec![0.0, 3.0, 1.5],
+                },
+                BranchCurve {
+                    target: "Li7_m1".to_string(),
+                    quantity: BranchQuantity::CrossSection,
+                    energy: vec![1.0e2, 5.0e5, 2.0e6],
+                    values: vec![0.0, 1.0, 0.5],
+                },
+            ],
+        );
     let f = meta_fraction(&run(synthetic_chain(), Arc::new(branch)));
     assert!(
         (f - 0.25).abs() < 1e-9,
@@ -236,23 +244,27 @@ fn coupled_branching_exact_for_ramp_partials() {
 #[test]
 fn coupled_branching_scores_mf9_yields() {
     let mut branch = BranchTable::new();
-    branch.entry("Li6".to_string()).or_default().insert(
-        "(n,gamma)".to_string(),
-        vec![
-            BranchCurve {
-                target: "Li7".to_string(),
-                quantity: BranchQuantity::Yield,
-                energy: vec![1.0e-5, 1.0e9],
-                values: vec![0.75, 0.75],
-            },
-            BranchCurve {
-                target: "Li7_m1".to_string(),
-                quantity: BranchQuantity::Yield,
-                energy: vec![1.0e-5, 1.0e9],
-                values: vec![0.25, 0.25],
-            },
-        ],
-    );
+    branch
+        .curves_mut()
+        .entry("Li6".to_string())
+        .or_default()
+        .insert(
+            "(n,gamma)".to_string(),
+            vec![
+                BranchCurve {
+                    target: "Li7".to_string(),
+                    quantity: BranchQuantity::Yield,
+                    energy: vec![1.0e-5, 1.0e9],
+                    values: vec![0.75, 0.75],
+                },
+                BranchCurve {
+                    target: "Li7_m1".to_string(),
+                    quantity: BranchQuantity::Yield,
+                    energy: vec![1.0e-5, 1.0e9],
+                    values: vec![0.25, 0.25],
+                },
+            ],
+        );
     let f = meta_fraction(&run(synthetic_chain(), Arc::new(branch)));
     assert!(
         (f - 0.25).abs() < 1e-9,
@@ -317,15 +329,19 @@ fn coupled_branching_folds_parents_outside_material() {
     let chain = Arc::new(map);
 
     let mut branch = BranchTable::new();
-    branch.entry("Li7".to_string()).or_default().insert(
-        "(n,n')".to_string(),
-        vec![BranchCurve {
-            target: "Li7_m1".to_string(),
-            quantity: BranchQuantity::CrossSection,
-            energy: vec![1.0e-5, 1.0e9],
-            values: vec![0.5, 0.5], // flat 0.5 b
-        }],
-    );
+    branch
+        .curves_mut()
+        .entry("Li7".to_string())
+        .or_default()
+        .insert(
+            "(n,n')".to_string(),
+            vec![BranchCurve {
+                target: "Li7_m1".to_string(),
+                quantity: BranchQuantity::CrossSection,
+                energy: vec![1.0e-5, 1.0e9],
+                values: vec![0.5, 0.5], // flat 0.5 b
+            }],
+        );
 
     let nuclides = run(Arc::clone(&chain), Arc::new(branch));
     let li7m = nuclides.get("Li7_m1").copied().unwrap_or(0.0);
@@ -402,7 +418,13 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
 
     // The same flat 3:1 partials as `synthetic_branch`, onto Li7_m2.
     let mut branch = (*synthetic_branch()).clone();
-    for c in branch.get_mut("Li6").unwrap().get_mut("(n,gamma)").unwrap() {
+    for c in branch
+        .curves_mut()
+        .get_mut("Li6")
+        .unwrap()
+        .get_mut("(n,gamma)")
+        .unwrap()
+    {
         if c.target == "Li7_m1" {
             c.target = "Li7_m2".to_string();
         }
