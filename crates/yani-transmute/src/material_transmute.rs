@@ -3,7 +3,7 @@ use crate::branching_rule::{
     BranchingState, Denominator, DroppedChannel, ListRates, ListRule, Lists,
     BRANCHING_RATE_TOLERANCE, INELASTIC, MT_ANYTHING, MT_INELASTIC,
 };
-use crate::covariance_fold::fold_rate_covariance;
+use crate::covariance_fold::{fold_rate_covariance, reachable_mts};
 use crate::covariance_sample::Sampler;
 use crate::multigroup::{collapse_with_lists, fold_list, scale_rates, Collapsed};
 use crate::results::TransmutationResults;
@@ -95,6 +95,21 @@ pub fn activation_mts(
     }
     if !mts.is_empty() {
         mts.insert(MT_ANYTHING);
+    }
+    mts
+}
+
+/// The MTs a transport-free collapse loads: [`activation_mts`], and with a
+/// shielding chord the total and elastic the correction needs.
+fn collapse_mts(
+    chain: &HashMap<String, yani::ChainNuclide>,
+    branch: &BranchTable,
+    shielding: Option<&Shielding>,
+) -> HashSet<i32> {
+    let mut mts = activation_mts(chain, branch);
+    if shielding.is_some() {
+        mts.insert(1);
+        mts.insert(2);
     }
     mts
 }
@@ -321,7 +336,7 @@ pub fn transmute_materials(
                 Some(&g) => g,
                 None => {
                     let (entry, entry_info, entry_report) =
-                        collapse_one(current, s, &chain, &lists, shielding)
+                        collapse_one(current, s, &chain, branch, &lists, shielding)
                             .map_err(|e| named(c, ids[c], e))?;
                     per_spectrum.push(entry);
                     shared_info.push(entry_info);
@@ -671,6 +686,7 @@ fn collapse_one(
     material: &Material,
     s: &MultigroupSpectrum,
     chain: &Arc<HashMap<String, ChainNuclide>>,
+    branch: &BranchTable,
     lists: &Lists<'_>,
     shielding: Option<&Shielding>,
 ) -> Result<(PerSpectrum, ShieldingInfo, BranchingReport), Box<dyn std::error::Error>> {
@@ -678,8 +694,15 @@ fn collapse_one(
     // treats it as zero. A sliver of flux there is a rounding matter; more
     // than that and every rate on the nuclide would be understated by data
     // that does not exist, so the run stops and says which nuclide and how
-    // much rather than answering as if it knew.
-    let above = crate::multigroup::spectrum_above_evaluation(material, &s.masses, &s.boundaries);
+    // much rather than answering as if it knew. The top is over the MTs a
+    // collapse loads and not over whatever the material holds: an
+    // uncertainty run also holds the partials an NC derivation names
+    // (`ensure_derivations_loaded`), and the global cache can hand a later
+    // run that wider entry, so a top over every held reaction would let the
+    // same spectrum be refused or accepted by what was loaded before.
+    let mts = collapse_mts(chain, branch, shielding);
+    let above =
+        crate::multigroup::spectrum_above_evaluation(material, &s.masses, &s.boundaries, &mts);
     if let Some((name, top, fraction)) = above
         .iter()
         .find(|(_, _, fraction)| *fraction > crate::multigroup::ABOVE_EVALUATION_TOLERANCE)
@@ -929,11 +952,7 @@ pub fn preload_activation_data(
         // in-scattering that fills the dips again. They are the expensive
         // full-grid kind the comment above is about, so they are read only when
         // a chord was actually given and the correction is going to be applied.
-        let mut wanted = activation_mts(chain, branch);
-        if shielding.is_some() {
-            wanted.insert(1);
-            wanted.insert(2);
-        }
+        let wanted = collapse_mts(chain, branch, shielding);
         let scope = LoadScope::activation(wanted)
             .with_temperatures(temp_filter)
             .with_covariance(want_covariance);
@@ -1036,8 +1055,54 @@ pub fn preload_activation_data(
     // covariance, which reads exactly like an evaluation that has none.
     if want_covariance {
         material.ensure_covariance_loaded()?;
+        ensure_derivations_loaded(material, chain)?;
     }
 
+    Ok(())
+}
+
+/// Widen each loaded nuclide to the MTs its NC derivations name.
+///
+/// The load above asks for the chain's MTs, and an NC block derives a channel
+/// from reactions the chain never names: ENDF/B-VIII.1 O16 `(n,p)` is
+/// `600 + ... + 603` and B10 `(n,a)` is `800 + 801`. Only the covariance says
+/// which, so this runs once it is read, and a nuclide whose derivations are
+/// already held is left alone. Loaded at the union with what it holds, so
+/// nothing already read is dropped.
+fn ensure_derivations_loaded(
+    material: &mut Material,
+    chain: &HashMap<String, ChainNuclide>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let short: Vec<(String, LoadScope)> = material
+        .nuclide_data
+        .iter()
+        .filter_map(|(name, nd)| {
+            // `None` is every MT, which holds any derivation.
+            let held = nd.load_scope.mts.as_ref()?;
+            let blocks = nd.covariance.as_ref()?;
+            let reach = reachable_mts(chain.get(name)?, blocks);
+            if reach.iter().all(|mt| held.contains(mt)) {
+                return None;
+            }
+            let mut scope = nd.load_scope.clone();
+            scope.mts = Some(held.iter().copied().chain(reach).collect());
+            Some((name.clone(), scope))
+        })
+        .collect();
+    for (name, scope) in short {
+        let source = material.nuclide_data[&name].data_path.clone().or_else(|| {
+            let cfg = yamc_nuclide::config::CONFIG
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            cfg.get_cross_section(&name)
+        });
+        let Some(source) = source else {
+            continue;
+        };
+        let path_map = HashMap::from([(name.clone(), source)]);
+        let widened = get_or_load_nuclide(&name, &path_map, &scope)?;
+        material.nuclide_data.insert(name, widened);
+    }
     Ok(())
 }
 
@@ -1144,6 +1209,7 @@ pub fn transport_replicas(
     let mut initial = initial.clone();
     if request.wants(crate::uncertainty::Source::CrossSections) {
         initial.ensure_covariance_loaded()?;
+        ensure_derivations_loaded(&mut initial, chain)?;
     }
     // The nominal the replicas scatter around: the same branching fold the
     // step loop applies, at unit source rate, since fractions do not depend on
@@ -2235,8 +2301,8 @@ fn first_order_contributors(
 ///
 /// Merges the way [`Coverage::absorb`](crate::covariance_fold::Coverage::absorb)
 /// does. Sets union; the per-nuclide counts (`skipped_cross_material`,
-/// `skipped_other_file`) and `mirrored_disagree` take the larger, since a
-/// nuclide gives the same ones on every spectrum; `skipped_nc`,
+/// `skipped_other_file`, `skipped_nc`) and `mirrored_disagree` take the
+/// larger, since a nuclide gives the same ones on every spectrum;
 /// `unsupported_layouts` and `malformed` add, once per spectrum. A rate
 /// fraction is kept at its SMALLEST over the spectra: a channel well covered
 /// under one spectrum and barely covered under another is only as well covered

@@ -640,10 +640,13 @@ class DataUncertainty:
     - fission yields and the isomeric-branching overlay from MF=9/MF=10;
     - covariance correlating two evaluations (MAT1 naming another material),
       covariance with a quantity that is not a cross section (XMF1 not 0 or
-      3), covariance derived from other sections (MF=33 NC), the
+      3), covariance derived from other sections by an NC block that cannot
+      be derived (LTY 1-4, or an LTY=0 block counted in ``skipped_nc``), the
       lumped-reaction covariance (MT=851-870) and the resonance-parameter
-      covariance (MF=32), so only the explicit MF=33 blocks of each reaction
-      are sampled;
+      covariance (MF=32). What is sampled is each reaction's explicit MF=33
+      blocks, and for a reaction an LTY=0 NC block states as a sum of others
+      (ENDF/B-VIII.1 O16 (n,p) as MT 600 to 603), the covariance derived from
+      the named reactions' own blocks and the cross blocks between them;
     - the self-shielding correction, when ``self_shielding_chord`` or
       ``self_shielding_shape`` is given: the shielded flux is built once from
       the nominal cross sections and reused by every replica;
@@ -5370,24 +5373,48 @@ class TransmutationResults:
           within-group weight (Rust API only) with a covariance edge inside a
           group. The share in ``rate_fraction_covered`` is of the fold's own
           rate, not of the listed rate, and under the ``1/E`` weight it is off
-          as well wherever an edge cuts a group.
+          as well wherever an edge cuts a group. On a channel derived through
+          an NC block, the partials of the reactions the block names are
+          checked the same way, and the check is also that they add up to the
+          one it derives over the block's range; a sum above it lands here.
         - ``partials_below_rate``: keyed the same way, where a covariance grid
           spans the whole flux range and its partial rates add up to less than
           the rate, their ratio to it: a channel whose sigma is understated.
           The ``1/E`` weight gives one for a reaction falling with energy when
           a covariance edge cuts a group. A grid that stops short of the flux
           range cannot be checked from below, since rate from outside it
-          rightly leaves its partials short.
-        - ``skipped_nc``, ``unsupported_layouts``: covariance blocks that were
-          present but not consumed, counted once per spectrum, so a run over
-          several spectra counts the same block once for each.
-        - ``skipped_cross_material``: per nuclide, blocks on a channel the
-          chain drives that correlate it with another evaluation, not
-          consumed. A block naming the nuclide's own MAT is its own evaluation
-          and is folded. The partner is not checked, so a block is counted
-          whether or not the evaluation it names is in the run.
-          ``skipped_other_file``: the same for blocks whose partner is not a
-          cross section.
+          rightly leaves its partials short. A derived channel whose NC block
+          names reactions adding up to less than the one it derives lands here
+          too: ENDF/B-VIII.1 O16 ``(n,d)`` above 20 MeV, whose cross section
+          holds MT 660 to 669 while the block names 650 to 659.
+        - ``derived_opposing_uncorrelated``: keyed the same way, for a channel
+          derived through an NC block whose terms name two reactions with
+          opposite signs, each with a variance of its own, and no covariance
+          between them: the ``[a, b]`` pairs. The absent block is read as zero,
+          since ENDF-102 33.3.2 a.1 lets a tape leave a zero covariance
+          unstated, and with opposing signs that reading sets the sigma.
+          FENDL-3.2d and TENDL-2017 H2 ``(n,2n)`` is ``σ_1 - σ_2 - σ_102`` and
+          folds to about 22% at 14 MeV and thousands of percent near
+          threshold, the tape's literal statement. Counted in ``has_gaps``.
+        - ``unsupported_layouts``: covariance blocks that were present but not
+          consumed, counted once per spectrum, so a run over several spectra
+          counts the same block once for each.
+        - ``skipped_nc``: per nuclide, NC blocks (a covariance derived from
+          other reactions) that could not be derived. An LTY=0 block is
+          derived from the NI covariances of the reactions it names, cross
+          blocks included, over its own energy range: ENDF/B-VIII.1 O16
+          ``(n,p)`` is stated only that way. Left here are LTY 1 to 4, a block
+          in a cross-reaction subsection, one whose list of reactions is empty
+          or does not match its coefficients, one whose own energy range is
+          empty, one naming a reaction with no cross section, and one met
+          only circularly.
+        - ``skipped_cross_material``: per nuclide, blocks on a reaction the
+          fold reaches (a channel, or one a channel is derived from) that
+          correlate it with another evaluation, not consumed. A block naming
+          the nuclide's own MAT is its own evaluation and is folded. The
+          partner is not checked, so a block is counted whether or not the
+          evaluation it names is in the run. ``skipped_other_file``: the same
+          for blocks whose partner is not a cross section.
         - ``mirrored_disagree``: keyed ``"Nuclide (n,a) (n,b)"``, where a pair
           stored in both orientations has copies that are not each other's
           transpose, the largest difference relative to the largest entry.

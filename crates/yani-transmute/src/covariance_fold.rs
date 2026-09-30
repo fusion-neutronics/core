@@ -29,6 +29,11 @@
 //! boundaries, where the flux density is constant, which makes that term exact
 //! too; see [`Scale::ShortRange`].
 //!
+//! A channel whose covariance the tape derives from other reactions (an NC
+//! block with LTY=0) is folded the same way, through the reactions it names:
+//! its rate is a sum of theirs over the block's energy range, so `r_i` becomes
+//! a sum of their partial rates, each against their own blocks. See [`Term`].
+//!
 //! # What the rate actually is
 //!
 //! [`compute_multigroup_reaction_rates`](crate::compute_multigroup_reaction_rates)
@@ -133,20 +138,21 @@ pub struct Coverage {
     pub covered: BTreeSet<String>,
     /// Nuclides in the chain that had rates but no covariance data at all.
     pub without_data: BTreeSet<String>,
-    /// Per nuclide, its blocks correlating one of its channels with a
+    /// Per nuclide, its blocks correlating one of its reactions with a
     /// reaction of ANOTHER evaluation, not consumed.
     ///
     /// Only genuine ones: a `mat1` naming this evaluation's own MAT is this
     /// evaluation (ENDF-102 33.3.1) and is folded. Only relevant ones: a block
-    /// on a reaction the chain does not drive is not counted, since there is
-    /// no rate for it to be the uncertainty of. Relevant on this nuclide's
-    /// side only: a block is counted whether or not the evaluation `mat1`
-    /// names is in the run, since a MAT is known only from a covariance block
-    /// and a partner in the run with no covariance of its own would have none
-    /// to match. Per nuclide rather than a sum, so a run with several spectra
-    /// counts each block once.
+    /// is counted only on a reaction the fold reaches (a channel, or one a
+    /// channel is derived from), since elsewhere there is no rate for it to
+    /// be the uncertainty of. Relevant on this nuclide's side only: a block
+    /// is counted whether or not the evaluation `mat1` names is in the run,
+    /// since a MAT is known only from a covariance block and a partner in the
+    /// run with no covariance of its own would have none to match. Per
+    /// nuclide rather than a sum, so a run with several spectra counts each
+    /// block once.
     pub skipped_cross_material: BTreeMap<String, usize>,
-    /// Per nuclide, its blocks correlating one of its channels with a
+    /// Per nuclide, its blocks correlating one of its reactions with a
     /// quantity of this evaluation that is not a cross section (`xmf1` other
     /// than 0 or 3, or a final state in `xlfs1`), not consumed. Counted like
     /// [`Coverage::skipped_cross_material`]. No library yani reads has one.
@@ -156,15 +162,30 @@ pub struct Coverage {
     /// largest difference between them relative to the largest entry.
     ///
     /// The kinds are ordered as their MTs, and the copy in the lower MT's
-    /// section is the one folded. JEFF-4.0 Be9 stores 130 of its pairs both
-    /// ways; folding both would count each covariance twice.
+    /// section is the one folded. A reaction the fold reaches only through an
+    /// NC derivation, such as O16 MT 600, is named `MT600`. JEFF-4.0 Be9
+    /// stores 130 of its pairs both ways; folding both would count each
+    /// covariance twice.
     pub mirrored_disagree: BTreeMap<(String, String, String), f64>,
-    /// NC blocks (a covariance derived from other reactions), not consumed.
+    /// Per nuclide, its NC blocks (a covariance derived from other reactions)
+    /// that could not be derived, not consumed.
     ///
-    /// This and the two block counters below add over a run's spectra, so a
-    /// run with several spectra counts a block once per spectrum.
-    pub skipped_nc: usize,
+    /// An LTY=0 block is derived (see [`Term`]) unless it names a reaction the
+    /// evaluation has no cross section for, or one whose own derivation leads
+    /// back to it, or it sits in a cross-reaction subsection, which ENDF-102
+    /// 33.3.2 a.3 does not allow, or its list of reactions is empty or does
+    /// not match its coefficients, or its own `[E1, E2]` is empty. LTY 1 to 4
+    /// derive from ratios to another evaluation's standard and are not
+    /// derived; no library yani reads has one. Counted like
+    /// [`Coverage::skipped_cross_material`]: only blocks on a reaction the
+    /// fold reaches over part of their range, and once per nuclide. A block
+    /// met circularly on one path and derived on another was consumed and is
+    /// not counted.
+    pub skipped_nc: BTreeMap<String, usize>,
     /// Blocks whose `lb` layout is not implemented, counted per `lb`.
+    ///
+    /// This and the block counter below add over a run's spectra, so a run
+    /// with several spectra counts a block once per spectrum.
     pub unsupported_layouts: BTreeMap<i64, usize>,
     /// Blocks not consumed because they break ENDF-102's rules for their
     /// layout: arrays that do not match their own declared sizes, an LB=0 to 2
@@ -182,17 +203,30 @@ pub struct Coverage {
     /// shielded rate the run used. Exactly: that rate integrated over the
     /// energies where the diagonal of the reaction's own covariance, summed
     /// over every self-covariance block the fold consumed, is nonzero, divided
-    /// by that rate over the whole flux range. Rate from an interval a grid
-    /// spans with a variance of zero counts as uncovered, the same as rate
-    /// from outside every grid, because neither carries a stated uncertainty.
-    /// Below one, part of the rate enters the relative covariance's
-    /// denominator and not its numerator; how much that lowers the relative
-    /// sigma also depends on how the stated variance is spread over the
-    /// covered part, so the share is not itself a dilution factor.
+    /// by that rate over the whole flux range. On a derived channel the
+    /// blocks are also those of the reactions it is derived from, each over
+    /// the NC block's energy range only, and the energy counts where any of
+    /// them states a variance. A reaction reached on several paths whose
+    /// coefficients cancel there, to an exact zero, states none for the
+    /// channel. Where the cross sections do not satisfy the derivation
+    /// `σ_MT = Σ c_i σ_MTi` past rounding and the named reactions add up to
+    /// less, the rate they miss, `c (σ_MT - Σ c_i σ_MTi)` for a derivation
+    /// reached with coefficient `c`, is taken off each energy it falls in,
+    /// down to none of it, and [`Coverage::partials_below_rate`] lists the
+    /// channel as well: ENDF/B-VIII.1 O16 `(n,d)` above 20 MeV, where MT 660
+    /// to 669 carry about 7% of the rate at 25 MeV and no covariance.
     ///
-    /// The numerator adds a subset of the denominator's terms in the same
-    /// order, so the share lies in [0, 1] without a clamp as long as no cross
-    /// section or flux in it is negative, which
+    /// Rate from an interval a grid spans with a variance of zero counts as
+    /// uncovered, the same as rate from outside every grid, because neither
+    /// carries a stated uncertainty. Below one, part of the rate enters the
+    /// relative covariance's denominator and not its numerator; how much that
+    /// lowers the relative sigma also depends on how the stated variance is
+    /// spread over the covered part, so the share is not itself a dilution
+    /// factor.
+    ///
+    /// The numerator adds, in the same order, the denominator's terms or
+    /// smaller ones that are not negative, so the share lies in [0, 1] as long
+    /// as no cross section or flux in it is negative, which
     /// [`Coverage::rate_fraction_total`] checks, and it does not depend on how
     /// the rate the covariance is divided by was computed. On a tallied rate,
     /// whose within-bin weighting the fold does not have, it is the share of
@@ -227,10 +261,22 @@ pub struct Coverage {
     /// part of a rate cannot exceed the rate, and this is past rounding, so an
     /// entry means the numerator and the denominator of the relative
     /// covariance were computed two different ways: the channel's relative
-    /// sigma is overstated. The partials are taken under the within-group
-    /// flux the collapse used, flat or shielded, so a rate computed some other
-    /// way, a tallied one among them, can land here. Reported rather than
-    /// clamped away, since the clamp is what used to hide it.
+    /// sigma is overstated. A derived channel's partials are also the named
+    /// reactions', over each NC block's range. Each such term's partials on a
+    /// relative block are compared with its reaction's rate over that range,
+    /// as the fold integrates it, and the ratio is carried over to the rate
+    /// the covariance is divided by with the fold's own rate for the channel
+    /// over that rate, which for the channel's own reaction is the comparison
+    /// above. For every NC block the channel was expanded through, the named
+    /// reactions' rate over the block's range, `Σ c_i R_MTi`, is compared
+    /// with the rate of the reaction it derives over the same range (with
+    /// the channel's own rate where that is zero). A ratio past rounding
+    /// either way lands in this map or the one below, the larger excess or
+    /// the larger shortfall kept. The partials are taken under the
+    /// within-group flux the collapse used, flat or shielded, so a rate
+    /// computed some other way, a tallied one among them, can land here.
+    /// Reported rather than clamped away, since the clamp is what used to
+    /// hide it.
     ///
     /// Under the `1/E` within-group weight (`Weighting::OneOverE`) a dilute
     /// run can land here too. A partial over the part of a group a covariance
@@ -265,8 +311,29 @@ pub struct Coverage {
     /// checked from below: rate from outside it is rate with no stated
     /// uncertainty, which legitimately leaves its partials short of the rate
     /// (see [`Coverage::rate_fraction_covered`]). Absolute and short-range
-    /// blocks are not checked, as above.
+    /// blocks are not checked, as above. A derived channel whose named reactions add up to
+    /// less than the reaction they derive is listed here too, with the
+    /// smallest ratio over its NC blocks (see
+    /// [`Coverage::partials_above_rate`]): ENDF/B-VIII.1 O16 `(n,d)` above
+    /// 20 MeV, where MT 104 holds 660 to 669 and its NC block names 650 to
+    /// 659.
     pub partials_below_rate: BTreeMap<(String, String), f64>,
+    /// Per (nuclide, kind), where a derived channel's terms name two
+    /// reactions that enter it with opposite signs over a common energy
+    /// range, each with a self-covariance block stating a variance there, and
+    /// the evaluation states no block between them, those pairs by kind,
+    /// lower MT first.
+    ///
+    /// The fold reads the absent block as a zero covariance, which ENDF-102
+    /// 33.3.2 a.1 lets a tape leave unstated, and with opposing signs that
+    /// reading decides the channel's sigma: the two variances add where a positive correlation
+    /// would cancel them. FENDL-3.2d and TENDL-2017 H2 `(n,2n)` is
+    /// `σ_1 - σ_2 - σ_102` from 3.339 MeV with self blocks on MT 1, 2 and 102
+    /// only, and folds to about 2400% near threshold and 22% at 14 MeV on
+    /// TENDL-2017, while `σ_1` holds `σ_2` by construction. Reported so the
+    /// sigma is read as the tape's literal statement and not as a measured
+    /// one. Counted as a gap.
+    pub derived_opposing_uncorrelated: BTreeMap<(String, String), BTreeSet<(String, String)>>,
     /// The production this spectrum drove, each channel's weighted by its
     /// share in [`Coverage::rate_fraction_covered`], and the production it
     /// drove in total. Both are per barn-cm per second, and both are weighted
@@ -369,9 +436,10 @@ impl Coverage {
     /// per-nuclide counts and mismatches take the larger,
     /// `rate_fraction_covered` is keyed by (nuclide, kind) and takes the
     /// smaller claim, `partials_above_rate` takes the larger excess and
-    /// `partials_below_rate` the larger shortfall, the smaller ratio. That
-    /// is what lets the fold below run per nuclide in parallel and merge
-    /// afterwards (issue #576, finding 5c).
+    /// `partials_below_rate` the larger shortfall, the smaller ratio, and
+    /// `derived_opposing_uncorrelated` unions its pairs. That is what lets
+    /// the fold below run per nuclide in parallel and merge afterwards (issue
+    /// #576, finding 5c).
     pub fn absorb(&mut self, other: Coverage) {
         self.covered.extend(other.covered);
         self.without_data.extend(other.without_data);
@@ -390,7 +458,10 @@ impl Coverage {
             let e = self.mirrored_disagree.entry(key).or_insert(0.0);
             *e = e.max(d);
         }
-        self.skipped_nc += other.skipped_nc;
+        for (nuclide, n) in other.skipped_nc {
+            let e = self.skipped_nc.entry(nuclide).or_insert(0);
+            *e = (*e).max(n);
+        }
         self.malformed += other.malformed;
         for (lb, n) in other.unsupported_layouts {
             *self.unsupported_layouts.entry(lb).or_insert(0) += n;
@@ -413,6 +484,12 @@ impl Coverage {
                 .and_modify(|r| *r = r.min(ratio))
                 .or_insert(ratio);
         }
+        for (key, pairs) in other.derived_opposing_uncorrelated {
+            self.derived_opposing_uncorrelated
+                .entry(key)
+                .or_default()
+                .extend(pairs);
+        }
         self.covered_production += other.covered_production;
         self.total_production += other.total_production;
     }
@@ -423,11 +500,12 @@ impl Coverage {
             || !self.skipped_cross_material.is_empty()
             || !self.skipped_other_file.is_empty()
             || !self.mirrored_disagree.is_empty()
-            || self.skipped_nc > 0
+            || !self.skipped_nc.is_empty()
             || !self.unsupported_layouts.is_empty()
             || self.malformed > 0
             || !self.partials_above_rate.is_empty()
             || !self.partials_below_rate.is_empty()
+            || !self.derived_opposing_uncorrelated.is_empty()
     }
 }
 
@@ -729,6 +807,68 @@ fn partial_rates(flux: &FluxDensity, reaction: &Reaction, grid: &[f64], scale: S
     }
 }
 
+/// The partial rates of `reaction` over the intervals of `grid`, counting only
+/// the part of each interval inside `range`.
+///
+/// A range that holds the whole grid is [`partial_rates`] itself, bit for bit,
+/// which is every term but a derived one. Otherwise the grid is cut at the
+/// range's ends, the partials are taken on the cut grid, and each interval
+/// keeps the sum of its pieces inside the range. Taken on the cut grid rather
+/// than scaled, because the cross section is not flat across an interval.
+fn partial_rates_within(
+    flux: &FluxDensity,
+    reaction: &Reaction,
+    grid: &[f64],
+    scale: Scale,
+    range: (f64, f64),
+) -> Partials {
+    let (Some(&first), Some(&last)) = (grid.first(), grid.last()) else {
+        return Partials {
+            per_interval: Vec::new(),
+        };
+    };
+    if range.0 <= first && range.1 >= last {
+        return partial_rates(flux, reaction, grid, scale);
+    }
+    // A short-range weight is `sqrt(ΔEk·∫ ψ² dE)` with `ΔEk` the block's own
+    // interval, not the part of it in range, and square roots of pieces do
+    // not add: the integral is restricted, the width is not.
+    if scale == Scale::ShortRange {
+        let per_interval = grid
+            .windows(2)
+            .map(|w| {
+                let (a, b) = (w[0].max(range.0), w[1].min(range.1));
+                if a >= b {
+                    return 0.0;
+                }
+                BARN_TO_CM2 * ((w[1] - w[0]) * flux.density_squared(reaction, a, b)).sqrt()
+            })
+            .collect();
+        return Partials { per_interval };
+    }
+    let mut cut: Vec<f64> = grid
+        .iter()
+        .copied()
+        .chain(
+            [range.0, range.1]
+                .into_iter()
+                .filter(|e| *e > first && *e < last),
+        )
+        .collect();
+    cut.sort_by(f64::total_cmp);
+    cut.dedup();
+    let pieces = partial_rates(flux, reaction, &cut, scale);
+    let mut per_interval = vec![0.0; grid.len() - 1];
+    for (w, part) in cut.windows(2).zip(pieces.per_interval) {
+        if w[0] >= range.0 && w[1] <= range.1 {
+            if let Some(k) = interval_holding(grid, w[0], w[1]) {
+                per_interval[k] += part;
+            }
+        }
+    }
+    Partials { per_interval }
+}
+
 /// Contract `rᵢᵀ C rⱼ`.
 fn contract(block: &ExpandedBlock, row: &Partials, col: &Partials) -> f64 {
     let mut total = 0.0;
@@ -762,6 +902,20 @@ fn contract(block: &ExpandedBlock, row: &Partials, col: &Partials) -> f64 {
 /// numerator and denominator were computed two different ways, and every
 /// such channel is listed with its ratio for the reader to weigh.
 const PARTIALS_ROUNDING: f64 = 1.0e-9;
+
+/// How far the rate of the reactions an NC block names may sit from the rate
+/// of the one it derives and still be rounding, relative to the larger of
+/// that rate and `Σ |c_i| R_MTi` (see [`derivation_mismatch`]).
+///
+/// Wider than [`PARTIALS_ROUNDING`], because the two sides are different
+/// tape values rather than one integral grouped two ways: an ENDF float
+/// carries six or seven significant digits, so a redundant cross section
+/// written as the rounded sum of its parts can sit up to about 5e-6 from the
+/// sum of the rounded parts. This is twice that, as [`MIRROR_ROUNDING`] is.
+/// ENDF/B-VIII.1, FENDL-3.2d, JEFF-4.0 and TENDL-2017 O16 MT 103 agree with
+/// 600 to 603 to 4e-8 at 14 MeV, while 650 to 659 fall 5% short of MT 104
+/// from 20 to 150 MeV.
+const DERIVATION_ROUNDING: f64 = 1.0e-5;
 
 /// The interval of `grid` that holds all of `[a, b]`, if one does.
 fn interval_holding(grid: &[f64], a: f64, b: f64) -> Option<usize> {
@@ -817,55 +971,168 @@ impl Diagonal {
     }
 }
 
-/// The share of `reaction`'s rate over the flux range, as the fold integrates
-/// it, that comes from energies where its own blocks state a nonzero variance,
-/// or `None` when that rate is zero.
-///
-/// Walked on the union of the blocks' edges and the flux range's two ends, so
-/// every cell lies inside one piece of each block or outside it, and a cell
-/// counts when the variances stated over it sum to something nonzero. Summed
-/// rather than tested one by one because the blocks of one subsection add, so
-/// two whose tape values cancel exactly, bit for bit, state no variance there.
-/// No tolerance is applied: values that cancel only to rounding count as
-/// stated, since calling them zero would be a judgement the tape does not
-/// make. Relative and absolute blocks are summed apart, having different
-/// units. Short-range (`lb = 8`) blocks are summed apart from both: their
-/// `Fk` is in barns squared like an absolute block's, but it is the variance
-/// of the average over the block's own interval and scales with the width of
-/// any narrower one, so a cancellation against an absolute value at the
-/// tape's width would not be one at any other.
-///
-/// The covered sum adds a subset of the total's terms in the same order, and
-/// rounded addition of terms that are not negative is monotone, so the share
-/// cannot exceed one. A block that states a variance on every interval across
-/// the whole flux range therefore reads exactly one.
-fn stated_variance_share(
-    flux: &FluxDensity,
-    reaction: &Reaction,
-    diagonals: &[Diagonal],
-) -> Option<f64> {
-    let (&lo, &hi) = (flux.boundaries.first()?, flux.boundaries.last()?);
-    let mut edges: Vec<f64> = diagonals
+/// The edges of the cells over which a channel's leaves and their stated
+/// variances are constant, and finer than which the flux does not resolve a
+/// rate: the flux group `boundaries` cut at every edge of the terms' and
+/// derivations' ranges and of the own blocks of the reactions the terms name.
+fn cell_edges(
+    boundaries: &[f64],
+    terms: &[&Term],
+    derivations: &[&Derivation],
+    diagonals: &BTreeMap<i32, Vec<Diagonal>>,
+) -> Vec<f64> {
+    let (Some(&lo), Some(&hi)) = (boundaries.first(), boundaries.last()) else {
+        return Vec::new();
+    };
+    let mts: BTreeSet<i32> = terms.iter().map(|t| t.mt).collect();
+    let mut edges: Vec<f64> = mts
         .iter()
+        .filter_map(|mt| diagonals.get(mt))
+        .flatten()
         .flat_map(|d| d.pieces.iter().flat_map(|&(lo, hi, _)| [lo, hi]))
-        .chain([lo, hi])
+        .chain(terms.iter().flat_map(|t| [t.range.0, t.range.1]))
+        .chain(derivations.iter().flat_map(|d| [d.range.0, d.range.1]))
+        .filter(|&e| lo < e && e < hi)
+        .chain(boundaries.iter().copied())
         .collect();
     edges.sort_by(f64::total_cmp);
     edges.dedup();
-    let (mut covered, mut total) = (0.0, 0.0);
-    for (w, rate) in edges.windows(2).zip(flux.xs_over(reaction, &edges)) {
-        let (a, b) = (w[0], w[1]);
-        total += rate;
-        let (mut relative, mut absolute, mut short_range) = (0.0, 0.0, 0.0);
-        for d in diagonals {
-            match d.scale {
-                Scale::Relative => relative += d.over(a, b),
-                Scale::Absolute => absolute += d.over(a, b),
-                Scale::ShortRange => short_range += d.over(a, b),
+    edges
+}
+
+/// Whether cell `w` lies inside `range`.
+fn inside(range: (f64, f64), w: &[f64]) -> bool {
+    range.0 <= w[0] && w[1] <= range.1
+}
+
+/// The net coefficient reaction `mt` enters a channel with over cell `w`:
+/// the terms' less the derivations', since a derivation replaces the term it
+/// expands by the reactions it names. Zero where `mt` is expanded, or not
+/// reached.
+fn leaf_coefficient(terms: &[&Term], derivations: &[&Derivation], mt: i32, w: &[f64]) -> f64 {
+    terms
+        .iter()
+        .filter(|t| t.mt == mt && inside(t.range, w))
+        .map(|t| t.coefficient)
+        .sum::<f64>()
+        - derivations
+            .iter()
+            .filter(|d| d.mt == mt && inside(d.range, w))
+            .map(|d| d.coefficient)
+            .sum::<f64>()
+}
+
+/// Whether reaction `mt`'s own blocks state a variance over cell `w`,
+/// summed over them since the blocks of one subsection add, so two whose
+/// tape values cancel exactly, bit for bit, state none. No tolerance is
+/// applied: values that cancel only to rounding count as stated, since
+/// calling them zero would be a judgement the tape does not make. Relative
+/// and absolute blocks are summed apart, having different units. Short-range
+/// (`lb = 8`) blocks are summed apart from both: their `Fk` is in barns
+/// squared like an absolute block's, but it is the variance of the average
+/// over the block's own interval and scales with the width of any narrower
+/// one, so a cancellation against an absolute value at the tape's width would
+/// not be one at any other.
+fn states_variance(diagonals: &BTreeMap<i32, Vec<Diagonal>>, mt: i32, w: &[f64]) -> bool {
+    let (mut relative, mut absolute, mut short_range) = (0.0, 0.0, 0.0);
+    for d in diagonals.get(&mt).into_iter().flatten() {
+        match d.scale {
+            Scale::Relative => relative += d.over(w[0], w[1]),
+            Scale::Absolute => absolute += d.over(w[0], w[1]),
+            Scale::ShortRange => short_range += d.over(w[0], w[1]),
+        }
+    }
+    relative != 0.0 || absolute != 0.0 || short_range != 0.0
+}
+
+/// The share of a channel's rate over the flux range, as the fold integrates
+/// it, that comes from energies where the covariance states a variance for
+/// it, or `None` when that rate is zero.
+///
+/// The channel's rate is carried, cell by cell, by its leaves: the reactions
+/// among `terms` with a nonzero [`leaf_coefficient`] there. Outside every NC
+/// range that is the channel's own reaction; inside one, the reactions the
+/// block names. A leaf states a variance where [`states_variance`] says so.
+/// An expanded reaction's own blocks cover nothing where it is expanded,
+/// since ENDF-102 33.3.3 item 3 has them state zero over the NC range.
+///
+/// A cell counts when at least one leaf states a variance over it, less the
+/// rate of the leaves that state none there, as `|c R|` so that one entering
+/// with a negative coefficient is taken off too, and less the rate any
+/// derivation misses over that cell, where its named reactions add up to
+/// less than the one it derives by more than rounding: rate the covariance
+/// states nothing for. Judged cell by cell, so a shortfall in one cell is
+/// not made up by an excess in another within the same NC range. Down to
+/// none of the cell, and clamped to it. A cell whose leaves all state a
+/// variance, with no derivation short over it, counts whole.
+///
+/// The covered sum adds, in the same order, the total's terms or smaller ones
+/// that are not negative, and rounded addition of such terms is monotone, so
+/// the share cannot exceed one. A reaction whose blocks state a variance on
+/// every interval across the whole flux range therefore reads exactly one.
+fn stated_variance_share(
+    flux: &FluxDensity,
+    reaction: &Reaction,
+    terms: &[&Term],
+    derivations: &[&Derivation],
+    diagonals: &BTreeMap<i32, Vec<Diagonal>>,
+    reactions: &BTreeMap<i32, &Reaction>,
+) -> Option<f64> {
+    let edges = cell_edges(flux.boundaries, terms, derivations, diagonals);
+    if edges.is_empty() {
+        return None;
+    }
+    let mts: BTreeSet<i32> = terms.iter().map(|t| t.mt).collect();
+    let rates: BTreeMap<i32, Vec<f64>> = mts
+        .iter()
+        .map(|&mt| (mt, flux.xs_over(reactions[&mt], &edges)))
+        .collect();
+    // Per cell, the channel's rate no named reaction carries: each
+    // derivation's `coefficient (R_MT - Σ c_i R_MTi)` where that is a
+    // shortfall past rounding, judged against `Σ |c_i R_MTi|` for the reason
+    // given on [`derivation_mismatch`]. Every term of a derivation is itself
+    // a term, so its rates are among `rates`. The gaps add, since a nested
+    // derivation's is the shortfall inside a reaction its parent names.
+    let mut missing = vec![0.0; edges.len() - 1];
+    for d in derivations {
+        for (k, w) in edges.windows(2).enumerate() {
+            if !inside(d.range, w) {
+                continue;
+            }
+            let derived = rates[&d.mt][k];
+            let (mut named, mut magnitude) = (0.0, 0.0);
+            for &(c, mt) in &d.named {
+                let r = c * rates[&mt][k];
+                named += r;
+                magnitude += r.abs();
+            }
+            let gap = derived - named;
+            if gap.abs() > DERIVATION_ROUNDING * magnitude.max(derived.abs()) {
+                missing[k] += (d.coefficient * gap).max(0.0);
             }
         }
-        if relative != 0.0 || absolute != 0.0 || short_range != 0.0 {
-            covered += rate;
+    }
+    let (mut covered, mut total) = (0.0, 0.0);
+    for (k, (w, rate)) in edges
+        .windows(2)
+        .zip(flux.xs_over(reaction, &edges))
+        .enumerate()
+    {
+        total += rate;
+        let (mut stating, mut unstated) = (false, 0.0);
+        for &mt in &mts {
+            let leaf = leaf_coefficient(terms, derivations, mt, w);
+            if leaf == 0.0 {
+                continue;
+            }
+            if states_variance(diagonals, mt, w) {
+                stating = true;
+            } else {
+                unstated += (leaf * rates[&mt][k]).abs();
+            }
+        }
+        if stating {
+            covered += rate - (missing[k] + unstated).min(rate);
         }
     }
     (total != 0.0).then(|| covered / total)
@@ -882,23 +1149,19 @@ fn stated_variance_share(
 const MIRROR_ROUNDING: f64 = 1.0e-5;
 
 /// The cross-reaction pairs, as `(lower MT, higher MT)`, that this
-/// evaluation's explicit blocks give in both orientations, between two of the
-/// chain's kinds (`index`). Whether the nuclide has a rate for both is the
-/// caller's to check.
+/// evaluation's explicit blocks give in both orientations, between two
+/// reactions the fold reaches.
 ///
 /// ENDF-102 puts a pair in the section of its lower MT, with MT1 above MT, but
 /// nothing forbids the transpose in the other section as well, and JEFF-4.0
 /// Be9 has 130 such pairs. The fold fills both halves from one block, so
 /// keeping both copies would count the pair twice.
-fn mirrored_pairs(
-    blocks: &[CovarianceBlock],
-    index: &BTreeMap<i32, usize>,
-) -> BTreeSet<(i32, i32)> {
+fn mirrored_pairs(blocks: &[CovarianceBlock], reached: &BTreeSet<i32>) -> BTreeSet<(i32, i32)> {
     let oriented: BTreeSet<(i32, i32)> = blocks
         .iter()
         .filter(|b| b.is_same_evaluation() && matches!(b.data, CovarianceData::Ni(_)))
         .map(|b| (b.mt, b.partner_mt()))
-        .filter(|(a, b)| a != b && index.contains_key(a) && index.contains_key(b))
+        .filter(|(a, b)| a != b && reached.contains(a) && reached.contains(b))
         .collect();
     oriented
         .iter()
@@ -1029,7 +1292,369 @@ fn kinds_and_mts(chain_nuclide: &ChainNuclide) -> Vec<(String, i32)> {
     out
 }
 
+/// The whole energy axis, the range of every term that is not derived.
+const EVERYWHERE: (f64, f64) = (f64::NEG_INFINITY, f64::INFINITY);
+
+/// One term of a channel's cross section as the covariance sees it:
+/// `coefficient` times reaction `mt`'s cross section over `range`.
+///
+/// A channel is its own reaction everywhere, and each NC block with LTY=0 on
+/// it adds a term per reaction it names: ENDF-102 33.2.2.1 states that over
+/// `[E1, E2]` the cross section is `σ_MT = Σ_i c_i σ_MTi`, and that the
+/// covariance is to be derived as if that held. A perturbation of the channel's
+/// rate is then the sum of its terms' perturbations, so
+///
+/// ```text
+/// Cov(R_a, R_b) = Σ_{t ∈ a, u ∈ b} c_t c_u Σ_{blocks (mt_t, mt_u)} r_tᵀ C r_u
+/// ```
+///
+/// with `r_t` reaction `mt_t`'s partial rates restricted to `range_t`. That is
+/// the sandwich ENDF-102 33.3.2 a.3 leaves to the processing code, exactly: no
+/// covariance is invented, the numbers are the named reactions' own NI blocks
+/// and the cross blocks between them. The own term stays alongside the derived
+/// ones because the blocks of a subsection add (33.2.1); 33.3.3 item 3 has its
+/// NI blocks state zero over `[E1, E2]`, so the two do not overlap on a tape
+/// that follows it. ENDF/B-VIII.1 O16 `(n,p)` is `600 + 601 + 602 + 603` and
+/// states its covariance no other way.
+///
+/// A named reaction may be derived in its turn, as ENDF/B-VIII.1 O16 MT 4 is
+/// from MT 1, 103, 104, 105 and 107, so terms expand until every one is a
+/// reaction whose blocks are explicit, each restricted to the overlap of the
+/// ranges it was reached through.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Term {
+    /// Index of the channel in `kinds`.
+    channel: usize,
+    coefficient: f64,
+    mt: i32,
+    range: (f64, f64),
+}
+
+impl Term {
+    /// Whether this is the channel's own reaction everywhere, rather than a
+    /// term an NC block derives.
+    fn is_own(&self, kinds: &[(String, i32)]) -> bool {
+        self.mt == kinds[self.channel].1 && self.range == EVERYWHERE && self.coefficient == 1.0
+    }
+}
+
+/// An NC block's identity within the evaluation, so one reached from several
+/// channels counts once.
+fn block_key(block: &CovarianceBlock) -> (i32, i32, i32) {
+    (block.mt, block.subsection_idx, block.block_idx)
+}
+
+/// The reactions an LTY=0 block names, as `(c_i, MT_i)`, or `None` when it
+/// cannot be derived: an LTY other than 0, a cross-reaction subsection, an
+/// empty or malformed list, an `XMTI` that is not an MT, a reaction with no
+/// cross section here, or one on the path `through` that led here, the
+/// block's own MT included, which would make the derivation circular.
+fn derivation(
+    block: &CovarianceBlock,
+    reactions: &BTreeMap<i32, &Reaction>,
+    through: &[i32],
+) -> Option<Vec<(f64, i32)>> {
+    let CovarianceData::Nc(nc) = &block.data else {
+        return None;
+    };
+    if nc.lty != 0
+        || block.partner_mt() != block.mt
+        || nc.ci.is_empty()
+        || nc.ci.len() != nc.xmti.len()
+    {
+        return None;
+    }
+    nc.ci
+        .iter()
+        .zip(&nc.xmti)
+        .map(|(&c, &x)| {
+            let mt = x as i32;
+            let named = f64::from(mt) == x
+                && reactions.contains_key(&mt)
+                && !through.contains(&mt)
+                && mt != block.mt;
+            named.then_some((c, mt))
+        })
+        .collect()
+}
+
+/// One NC block as the fold applied it: over `range`, reaction `mt` of
+/// `channel` is `Σ c_i σ_MTi` for the `(c_i, MT_i)` in `named`, and enters the
+/// channel scaled by `coefficient`, the product of the coefficients on the
+/// path that reached it.
+#[derive(Debug, Clone, PartialEq)]
+struct Derivation {
+    channel: usize,
+    mt: i32,
+    coefficient: f64,
+    range: (f64, f64),
+    named: Vec<(f64, i32)>,
+}
+
+/// Every channel's terms, and what the NC blocks on the way did.
+#[derive(Debug, Default)]
+struct Expansion {
+    terms: Vec<Term>,
+    /// Every derivation a term was expanded through, for the check that the
+    /// reactions it names add up to the one it derives.
+    derivations: Vec<Derivation>,
+    /// NC blocks derived on at least one path.
+    derived: BTreeSet<(i32, i32, i32)>,
+    /// NC blocks that could not be derived on some path.
+    underived: BTreeSet<(i32, i32, i32)>,
+}
+
+impl Expansion {
+    /// The NC blocks no path derived. A block circular on one path and
+    /// derived on another was consumed, so it is not among them.
+    fn skipped(&self) -> usize {
+        self.underived.difference(&self.derived).count()
+    }
+}
+
+/// Expand reaction `mt`, scaled by `coefficient` over `range`, into `out`.
+///
+/// `through` is the path of MTs that led here.
+#[allow(clippy::too_many_arguments)]
+fn expand_terms(
+    blocks: &[CovarianceBlock],
+    reactions: &BTreeMap<i32, &Reaction>,
+    channel: usize,
+    mt: i32,
+    coefficient: f64,
+    range: (f64, f64),
+    through: &mut Vec<i32>,
+    out: &mut Expansion,
+) {
+    out.terms.push(Term {
+        channel,
+        coefficient,
+        mt,
+        range,
+    });
+    through.push(mt);
+    for block in blocks {
+        let CovarianceData::Nc(nc) = &block.data else {
+            continue;
+        };
+        // Another evaluation's or another file's NC block is counted with
+        // those, not here.
+        if block.mt != mt || !block.is_same_evaluation() {
+            continue;
+        }
+        // A block whose own range is empty derives nothing anywhere. One
+        // whose range misses the range this term was reached over applies
+        // elsewhere, and is judged on the paths that reach it there.
+        if nc.e1 >= nc.e2 {
+            out.underived.insert(block_key(block));
+            continue;
+        }
+        let within = (range.0.max(nc.e1), range.1.min(nc.e2));
+        if within.0 >= within.1 {
+            continue;
+        }
+        let Some(named) = derivation(block, reactions, through) else {
+            out.underived.insert(block_key(block));
+            continue;
+        };
+        out.derived.insert(block_key(block));
+        out.derivations.push(Derivation {
+            channel,
+            mt,
+            coefficient,
+            range: within,
+            named: named.clone(),
+        });
+        for (c, named_mt) in named {
+            expand_terms(
+                blocks,
+                reactions,
+                channel,
+                named_mt,
+                coefficient * c,
+                within,
+                through,
+                out,
+            );
+        }
+    }
+    through.pop();
+}
+
+/// Every channel's terms, and the NC blocks on the way.
+fn channel_terms(
+    blocks: &[CovarianceBlock],
+    reactions: &BTreeMap<i32, &Reaction>,
+    kinds: &[(String, i32)],
+) -> Expansion {
+    let mut out = Expansion::default();
+    for (channel, (_, mt)) in kinds.iter().enumerate() {
+        // A channel with no cross section has no rate for a covariance to be
+        // the uncertainty of.
+        if reactions.contains_key(mt) {
+            expand_terms(
+                blocks,
+                reactions,
+                channel,
+                *mt,
+                1.0,
+                EVERYWHERE,
+                &mut Vec::new(),
+                &mut out,
+            );
+        }
+    }
+    out
+}
+
+/// Every MT the fold can reach on `chain_nuclide`: its channels' own, and
+/// those the LTY=0 NC blocks on them name, transitively.
+///
+/// An activation load reads only the MTs it is asked for, and the chain names
+/// none of the partials a derivation weights with, such as O16 MT 600 to 603,
+/// so without them [`derivation`] finds no cross section and the channel folds
+/// to nothing. Read off the blocks alone, before any cross section, so the
+/// loader can be asked for them. A named MT the evaluation does not publish is
+/// asked for and not found, and the fold reports its block in
+/// [`Coverage::skipped_nc`].
+pub(crate) fn reachable_mts(
+    chain_nuclide: &ChainNuclide,
+    blocks: &[CovarianceBlock],
+) -> BTreeSet<i32> {
+    let mut reached: BTreeSet<i32> = kinds_and_mts(chain_nuclide)
+        .into_iter()
+        .map(|(_, mt)| mt)
+        .collect();
+    let mut pending: Vec<i32> = reached.iter().copied().collect();
+    while let Some(mt) = pending.pop() {
+        for block in blocks {
+            let CovarianceData::Nc(nc) = &block.data else {
+                continue;
+            };
+            if block.mt != mt
+                || !block.is_same_evaluation()
+                || nc.lty != 0
+                || block.partner_mt() != block.mt
+            {
+                continue;
+            }
+            for &x in &nc.xmti {
+                let named = x as i32;
+                if f64::from(named) == x && reached.insert(named) {
+                    pending.push(named);
+                }
+            }
+        }
+    }
+    reached
+}
+
+/// The named reactions' rate over a derivation's range, over the rate of the
+/// reaction it derives, when the two differ by more than rounding.
+///
+/// ENDF-102 33.2.2.1 derives the covariance as if `σ_MT = Σ c_i σ_MTi` held
+/// over `[E1, E2]`, and the fold builds the numerator from the right side and
+/// divides by the rate of the left. So a ratio away from one means the
+/// library's cross sections do not satisfy the derivation its covariance
+/// states: ENDF/B-VIII.1 O16 MT 104 names 650 to 659, and above 20 MeV its
+/// cross section also holds 660 to 669, which have no covariance.
+///
+/// Rounding acts on each named rate, so the difference is judged against
+/// `Σ |c_i| R_MTi` rather than against the derived rate: with cancelling
+/// coefficients, as in TENDL-2017 H2 `(n,2n)` = `σ_1 - σ_2 - σ_102`, a derived
+/// rate of millibarns is the difference of barns, each rounded to its own
+/// seven digits.
+///
+/// Where the derived rate over the range is zero and the named ones are not,
+/// the ratio is the channel's instead: its rate `channel_rate` plus what the
+/// named reactions add through the derivation's `coefficient`, over
+/// `channel_rate`.
+fn derivation_mismatch(
+    flux: &FluxDensity,
+    reactions: &BTreeMap<i32, &Reaction>,
+    d: &Derivation,
+    channel_rate: f64,
+) -> Option<f64> {
+    let (&lo, &hi) = (flux.boundaries.first()?, flux.boundaries.last()?);
+    let edges = [d.range.0.max(lo), d.range.1.min(hi)];
+    if edges[0] >= edges[1] {
+        return None;
+    }
+    let rate = |mt: i32| flux.xs_over(reactions[&mt], &edges)[0];
+    let derived = rate(d.mt);
+    let (mut named, mut magnitude) = (0.0, 0.0);
+    for &(c, mt) in &d.named {
+        let r = rate(mt);
+        named += c * r;
+        magnitude += (c * r).abs();
+    }
+    if (named - derived).abs() <= DERIVATION_ROUNDING * magnitude.max(derived.abs()) {
+        return None;
+    }
+    if derived != 0.0 {
+        return Some(named / derived);
+    }
+    // Named reactions carry rate over a range where the one they derive has
+    // none, so there is no ratio to it. What they add to the channel's
+    // partials is `coefficient Σ c_i R_MTi`, which is compared with the
+    // channel's own rate instead; a channel with no rate has no covariance
+    // to be wrong about.
+    (channel_rate != 0.0).then(|| 1.0 + d.coefficient * named / channel_rate)
+}
+
+/// The pairs of reactions, lower MT first, that enter one channel with
+/// opposite signs over a common cell of the flux group `boundaries`, each as a leaf there
+/// (see [`leaf_coefficient`]) whose own blocks state a variance over it, and
+/// with no consumed block between them.
+///
+/// ENDF-102 33.3.2 a.1 lets a tape leave a zero covariance between two cross
+/// sections unstated, so an absent block reads as zero, and the fold reads
+/// it so. Where the two enter with the same sign that is the usual
+/// omission. Where they oppose it decides the answer: the two variances add
+/// where a positive correlation would cancel them, and a derivation such as
+/// FENDL-3.2d and TENDL-2017 H2 `(n,2n)` = `σ_1 - σ_2 - σ_102`, whose named
+/// reactions contain the one derived, cannot have its parts uncorrelated in
+/// fact. Such a sigma is the tape's literal statement, so it is reported
+/// rather than altered.
+///
+/// Judged on the leaves, cell by cell, because a pair matters only where
+/// both enter: a channel's own term runs over the whole axis, but where an
+/// NC block derives it, it is replaced by the reactions the block names and
+/// its own blocks state zero (33.3.3 item 3).
+fn opposing_uncorrelated(
+    terms: &[&Term],
+    derivations: &[&Derivation],
+    diagonals: &BTreeMap<i32, Vec<Diagonal>>,
+    correlated: &BTreeSet<(i32, i32)>,
+    boundaries: &[f64],
+) -> BTreeSet<(i32, i32)> {
+    let mts: BTreeSet<i32> = terms.iter().map(|t| t.mt).collect();
+    let mut out = BTreeSet::new();
+    for w in cell_edges(boundaries, terms, derivations, diagonals).windows(2) {
+        // In MT order, so each pair comes lower MT first.
+        let live: Vec<(i32, f64)> = mts
+            .iter()
+            .filter_map(|&mt| {
+                let c = leaf_coefficient(terms, derivations, mt, w);
+                (c != 0.0 && states_variance(diagonals, mt, w)).then_some((mt, c))
+            })
+            .collect();
+        for (k, &(a, ca)) in live.iter().enumerate() {
+            for &(b, cb) in &live[k + 1..] {
+                if ca * cb < 0.0 && !correlated.contains(&(a, b)) {
+                    out.insert((a, b));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Fold one nuclide's covariance blocks against the flux.
+///
+/// `reactions` holds every cross section the nuclide has, not only the
+/// channels', since a derived channel is weighted with the cross sections of
+/// the reactions it is derived from.
 ///
 /// Returns `None` when the nuclide contributed nothing: no covariance data, or
 /// none of it usable. The caller records which of those it was.
@@ -1047,33 +1672,60 @@ fn fold_nuclide(
     if n == 0 {
         return None;
     }
-    let index: BTreeMap<i32, usize> = kinds
-        .iter()
-        .enumerate()
-        .map(|(i, (_, mt))| (*mt, i))
-        .collect();
+    let expansion = channel_terms(blocks, reactions, kinds);
+    let skipped = expansion.skipped();
+    if skipped > 0 {
+        coverage.skipped_nc.insert(nuclide.to_string(), skipped);
+    }
+    let mut by_mt: BTreeMap<i32, Vec<&Term>> = BTreeMap::new();
+    for term in &expansion.terms {
+        by_mt.entry(term.mt).or_default().push(term);
+    }
+    let reached: BTreeSet<i32> = by_mt.keys().copied().collect();
+    // A channel's own name, or `MT<n>` for a reaction the fold reaches only
+    // through a derivation.
+    let name = |mt: i32| -> String {
+        kinds
+            .iter()
+            .find(|(_, k)| *k == mt)
+            .map(|(kind, _)| kind.clone())
+            .unwrap_or_else(|| format!("MT{mt}"))
+    };
 
     // Absolute covariance, in (1/s)^2, before relativizing.
     let mut absolute = vec![0.0; n * n];
     let mut used = 0;
-    // Per MT named by a consumed block, the variance each of its own blocks
-    // states. Kept block by block rather than summed onto one grid, because
-    // the blocks need not share a grid; `stated_variance_share` walks them
-    // together.
-    let mut variances: BTreeMap<i32, Vec<Diagonal>> = BTreeMap::new();
-    // Per MT, the largest sum of partial rates any relative block weighted it
-    // with, zero variance intervals included. The consistency check against
-    // the rate, and not the share: it is what the covariance's numerator was
-    // built from, whatever the block states.
-    let mut weighted_rate: BTreeMap<i32, f64> = BTreeMap::new();
-    // Per MT, the smallest such sum over the relative blocks whose grid spans
-    // the whole flux range, the only ones whose partials must add up to the
-    // rate rather than to at most it.
-    let mut spanning_rate: BTreeMap<i32, f64> = BTreeMap::new();
-    let spans = |grid: &[f64]| match (grid.first(), grid.last()) {
-        (Some(&a), Some(&b)) => {
-            a <= flux.boundaries[0] && b >= flux.boundaries[flux.boundaries.len() - 1]
-        }
+    // The channels a consumed block names, and per reached reaction the
+    // variance each of its own blocks states. Kept block by block rather than
+    // summed onto one grid, because the blocks need not share a grid;
+    // `stated_variance_share` walks them together.
+    let mut named: BTreeSet<usize> = BTreeSet::new();
+    let mut diagonals: BTreeMap<i32, Vec<Diagonal>> = BTreeMap::new();
+    // Per channel, the largest sum of partial rates any relative block of its
+    // own reaction weighted it with, zero variance intervals included. The
+    // consistency check against the rate, and not the share: it is what the
+    // covariance's numerator was built from, whatever the block states.
+    let mut weighted_rate: BTreeMap<usize, f64> = BTreeMap::new();
+    // Per channel, the smallest such sum over the relative blocks of its own
+    // reaction whose grid spans the whole flux range, the only ones whose
+    // partials must add up to the rate rather than to at most it.
+    let mut spanning_rate: BTreeMap<usize, f64> = BTreeMap::new();
+    // The same two for a derived term, whose partials are another reaction's
+    // over its range: as a ratio to that reaction's rate there, as the fold
+    // integrates it, since that is the part of the channel's rate they stand
+    // for. The ratio of the channel's own rate to the one it is divided by
+    // is applied below.
+    let mut derived_weighted: BTreeMap<usize, f64> = BTreeMap::new();
+    let mut derived_spanning: BTreeMap<usize, f64> = BTreeMap::new();
+    // The pairs of distinct reactions a consumed cross block correlates, lower
+    // MT first, for the check that opposing terms of a derivation had one.
+    let mut correlated: BTreeSet<(i32, i32)> = BTreeSet::new();
+    let (flux_lo, flux_hi) = (
+        flux.boundaries[0],
+        flux.boundaries[flux.boundaries.len() - 1],
+    );
+    let spans = |grid: &[f64], range: (f64, f64)| match (grid.first(), grid.last()) {
+        (Some(&a), Some(&b)) => a <= range.0.max(flux_lo) && b >= range.1.min(flux_hi),
         _ => false,
     };
 
@@ -1082,13 +1734,11 @@ fn fold_nuclide(
     // copy's all do. Only two copies that both expand have numbers to
     // compare. A copy left unused that does not expand is a layout gap
     // whichever copy it is: its numbers were never read, so nothing checks
-    // them against the copy that was folded. A pair on a reaction this
-    // nuclide has no rate for is skipped by the fold below, so it reports
-    // nothing here either.
-    let mirrored = mirrored_pairs(blocks, &index);
-    let drives = |mt: i32| reactions.contains_key(&mt);
+    // them against the copy that was folded. Only pairs between two reactions
+    // the fold reaches are listed, so a pair it would skip reports nothing.
+    let mirrored = mirrored_pairs(blocks, &reached);
     let mut skipped_copy: BTreeSet<(i32, i32)> = BTreeSet::new();
-    for &(a, b) in mirrored.iter().filter(|(a, b)| drives(*a) && drives(*b)) {
+    for &(a, b) in &mirrored {
         let (lower_expands, higher_expands) = (
             orientation_expands(blocks, a, b),
             orientation_expands(blocks, b, a),
@@ -1102,10 +1752,9 @@ fn fold_nuclide(
         if lower_expands && higher_expands {
             let mismatch = mirror_mismatch(blocks, a, b);
             if mismatch > MIRROR_ROUNDING {
-                let kind = |mt| kinds[index[&mt]].0.clone();
                 coverage
                     .mirrored_disagree
-                    .insert((nuclide.to_string(), kind(a), kind(b)), mismatch);
+                    .insert((nuclide.to_string(), name(a), name(b)), mismatch);
             }
         } else if !unused_expands {
             // The fold skips this copy before it expands it, so its failures
@@ -1116,14 +1765,14 @@ fn fold_nuclide(
     }
 
     for block in blocks {
-        // Whether this nuclide has a rate for the block's own reaction. The
-        // partner's is checked below for this evaluation's blocks. Another
-        // evaluation's partner is not: its MAT is known only if it has
-        // covariance blocks of its own, so a partner in the run without any
-        // could not be told from one that is absent.
-        let drives_row = index.contains_key(&block.mt) && reactions.contains_key(&block.mt);
+        // Whether the fold reaches the block's own reaction. The partner's is
+        // checked below for this evaluation's blocks. Another evaluation's
+        // partner is not: its MAT is known only if it has covariance blocks of
+        // its own, so a partner in the run without any could not be told from
+        // one that is absent.
+        let reaches_row = reached.contains(&block.mt);
         if block.is_cross_material() {
-            if drives_row {
+            if reaches_row {
                 *coverage
                     .skipped_cross_material
                     .entry(nuclide.to_string())
@@ -1132,7 +1781,7 @@ fn fold_nuclide(
             continue;
         }
         if !block.names_cross_section() {
-            if drives_row {
+            if reaches_row {
                 *coverage
                     .skipped_other_file
                     .entry(nuclide.to_string())
@@ -1142,21 +1791,18 @@ fn fold_nuclide(
         }
         let ni = match &block.data {
             CovarianceData::Ni(ni) => ni,
-            CovarianceData::Nc(_) => {
-                coverage.skipped_nc += 1;
-                continue;
-            }
+            // Consumed by `channel_terms`, as the terms it derives.
+            CovarianceData::Nc(_) => continue,
         };
 
         let (row_mt, col_mt) = (block.mt, block.partner_mt());
-        let (Some(&i), Some(&j)) = (index.get(&row_mt), index.get(&col_mt)) else {
-            // A covariance for a reaction this chain does not drive. Not a gap:
+        let (Some(row_terms), Some(col_terms)) = (by_mt.get(&row_mt), by_mt.get(&col_mt)) else {
+            // A covariance for a reaction the fold does not reach. Not a gap:
             // there is no rate for it to be the uncertainty of.
             continue;
         };
-        let (Some(row_rx), Some(col_rx)) = (reactions.get(&row_mt), reactions.get(&col_mt)) else {
-            continue;
-        };
+        // Every reached MT has a cross section: `channel_terms` checks.
+        let (row_rx, col_rx) = (reactions[&row_mt], reactions[&col_mt]);
         if skipped_copy.contains(&(row_mt, col_mt)) {
             continue;
         }
@@ -1184,42 +1830,119 @@ fn fold_nuclide(
             continue;
         }
 
-        let row = partial_rates(flux, row_rx, &expanded.row_energies, expanded.scale);
-        let col = partial_rates(flux, col_rx, &expanded.col_energies, expanded.scale);
-        let contribution = contract(&expanded, &row, &col);
+        // One set of partials per distinct range, since a reaction reached
+        // through several derivations is usually reached over the same one.
+        let partials = |rx: &Reaction, grid: &[f64], ts: &[&Term]| -> Vec<((f64, f64), Partials)> {
+            let mut out: Vec<((f64, f64), Partials)> = Vec::new();
+            for t in ts {
+                if !out.iter().any(|(r, _)| *r == t.range) {
+                    let p = partial_rates_within(flux, rx, grid, expanded.scale, t.range);
+                    out.push((t.range, p));
+                }
+            }
+            out
+        };
+        let rows = partials(row_rx, &expanded.row_energies, row_terms);
+        let cols = partials(col_rx, &expanded.col_energies, col_terms);
+        let of = |ps: &'_ [((f64, f64), Partials)], range: (f64, f64)| -> usize {
+            ps.iter()
+                .position(|(r, _)| *r == range)
+                .expect("computed above")
+        };
 
-        absolute[i * n + j] += contribution;
-        if i != j {
-            // `rᵀ C r'` is a number, so it is both Cov(R_mt, R_mt1) and its
-            // transpose whichever section the block sits in: a block with MT1
-            // below MT (ENDF/B-VIII.1 Np237 has 22) fills the same two cells
-            // as one written the other way round. Filling both halves counts
-            // the pair once, because a pair the tape also stores the other way
-            // is folded from one copy only (`mirrored_pairs`).
-            absolute[j * n + i] += contribution;
+        // A short-range variance states nothing correlating two parts of one
+        // interval (ENDF-102 section 33.2.2.2), so two terms of the reaction
+        // over different ranges covary only over the part of each interval
+        // both ranges hold: `Fk·ΔEk·∫ ψ² dE` over that overlap. Square-root
+        // weights taken per range and multiplied would give the geometric
+        // mean of the two ranges' integrals instead, so each pair of terms is
+        // contracted against the weights of its overlap. A block that is not
+        // a self-covariance was refused above.
+        if expanded.scale == Scale::ShortRange {
+            for t in row_terms {
+                for u in col_terms {
+                    let overlap = (t.range.0.max(u.range.0), t.range.1.min(u.range.1));
+                    if overlap.0 >= overlap.1 {
+                        continue;
+                    }
+                    let w = partial_rates_within(
+                        flux,
+                        row_rx,
+                        &expanded.row_energies,
+                        expanded.scale,
+                        overlap,
+                    );
+                    absolute[t.channel * n + u.channel] +=
+                        t.coefficient * u.coefficient * contract(&expanded, &w, &w);
+                }
+            }
+        } else {
+            for t in row_terms {
+                let row = &rows[of(&rows, t.range)].1;
+                for u in col_terms {
+                    let col = &cols[of(&cols, u.range)].1;
+                    let contribution =
+                        t.coefficient * u.coefficient * contract(&expanded, row, col);
+                    let (i, j) = (t.channel, u.channel);
+                    absolute[i * n + j] += contribution;
+                    if row_mt != col_mt {
+                        // `rᵀ C r'` is a number, so it is both Cov(R_mt, R_mt1)
+                        // and its transpose whichever section the block sits in: a
+                        // block with MT1 below MT (ENDF/B-VIII.1 Np237 has 22)
+                        // fills the same two cells as one written the other way
+                        // round. A pair the tape also stores the other way is
+                        // folded from one copy only (`mirrored_pairs`). A
+                        // self-covariance block needs no mirror, since every
+                        // ordered pair of terms visits it. Two terms of one
+                        // channel correlated by a cross block land on the same
+                        // cell twice, which is the `2 c_t c_u Cov` of a sum.
+                        absolute[j * n + i] += contribution;
+                    }
+                }
+            }
         }
 
         // Only a reaction's own blocks state its variance. A cross block
         // correlates two reactions and gives neither a variance, so it names
-        // both channels and covers neither.
-        variances.entry(col_mt).or_default();
-        let own = variances.entry(row_mt).or_default();
+        // the channels it reaches and covers none.
+        named.extend(row_terms.iter().chain(col_terms).map(|t| t.channel));
         if row_mt == col_mt {
-            own.push(Diagonal::of(&expanded));
+            diagonals
+                .entry(row_mt)
+                .or_default()
+                .push(Diagonal::of(&expanded));
         }
         if expanded.scale == Scale::Relative {
-            for (mt, partials, grid) in [
-                (row_mt, &row, &expanded.row_energies),
-                (col_mt, &col, &expanded.col_energies),
+            for (ts, ps, grid) in [
+                (row_terms, &rows, &expanded.row_energies),
+                (col_terms, &cols, &expanded.col_energies),
             ] {
-                let sum = partials.total().abs();
-                let e = weighted_rate.entry(mt).or_insert(0.0);
-                *e = e.max(sum);
-                if spans(grid) {
-                    let e = spanning_rate.entry(mt).or_insert(f64::INFINITY);
-                    *e = e.min(sum);
+                for t in ts.iter() {
+                    let sum = ps[of(ps, t.range)].1.total().abs();
+                    let (weighted, spanning, sum) = if t.is_own(kinds) {
+                        (&mut weighted_rate, &mut spanning_rate, sum)
+                    } else {
+                        let within = [t.range.0.max(flux_lo), t.range.1.min(flux_hi)];
+                        if t.coefficient == 0.0 || within[0] >= within[1] {
+                            continue;
+                        }
+                        let rate = BARN_TO_CM2 * flux.xs_over(reactions[&t.mt], &within)[0];
+                        if rate == 0.0 {
+                            continue;
+                        }
+                        (&mut derived_weighted, &mut derived_spanning, sum / rate)
+                    };
+                    let e = weighted.entry(t.channel).or_insert(0.0);
+                    *e = e.max(sum);
+                    if spans(grid, t.range) {
+                        let e = spanning.entry(t.channel).or_insert(f64::INFINITY);
+                        *e = e.min(sum);
+                    }
                 }
             }
+        }
+        if row_mt != col_mt {
+            correlated.insert((row_mt.min(col_mt), row_mt.max(col_mt)));
         }
         used += 1;
     }
@@ -1243,24 +1966,97 @@ fn fold_nuclide(
         }
     }
 
-    for (kind, mt) in kinds {
-        let (Some(diagonals), Some(reaction)) = (variances.get(mt), reactions.get(mt)) else {
+    for (channel, (kind, mt)) in kinds.iter().enumerate() {
+        let Some(reaction) = reactions.get(mt).filter(|_| named.contains(&channel)) else {
             continue;
         };
         let key = (nuclide.to_string(), kind.clone());
-        if let Some(share) = stated_variance_share(flux, reaction, diagonals) {
+        let own_rate = flux.xs_over(reaction, &[flux_lo, flux_hi])[0];
+        // A derived channel's numerator is built from the reactions its NC
+        // blocks name, so its check is that they add up to the reaction they
+        // derive, over each block's range, nested derivations included.
+        let mismatched: Vec<(&Derivation, f64)> = expansion
+            .derivations
+            .iter()
+            .filter(|d| d.channel == channel)
+            .filter_map(|d| Some((d, derivation_mismatch(flux, reactions, d, own_rate)?)))
+            .collect();
+        let terms: Vec<&Term> = expansion
+            .terms
+            .iter()
+            .filter(|t| t.channel == channel)
+            .collect();
+        let derivations: Vec<&Derivation> = expansion
+            .derivations
+            .iter()
+            .filter(|d| d.channel == channel)
+            .collect();
+        let opposing = opposing_uncorrelated(
+            &terms,
+            &derivations,
+            &diagonals,
+            &correlated,
+            flux.boundaries,
+        );
+        if !opposing.is_empty() {
+            coverage.derived_opposing_uncorrelated.insert(
+                key.clone(),
+                opposing
+                    .into_iter()
+                    .map(|(a, b)| (name(a), name(b)))
+                    .collect(),
+            );
+        }
+        if let Some(share) =
+            stated_variance_share(flux, reaction, &terms, &derivations, &diagonals, reactions)
+        {
             coverage.rate_fraction_covered.insert(key.clone(), share);
         }
-        if let (Some(&weighted), Some(&full)) = (weighted_rate.get(mt), rates.get(kind)) {
+        let mut ratios = Vec::new();
+        if let (Some(&weighted), Some(&full)) = (weighted_rate.get(&channel), rates.get(kind)) {
             if full != 0.0 && weighted / full > 1.0 + PARTIALS_ROUNDING {
-                coverage
-                    .partials_above_rate
-                    .insert(key.clone(), weighted / full);
+                ratios.push(weighted / full);
             }
         }
-        if let (Some(&spanning), Some(&full)) = (spanning_rate.get(mt), rates.get(kind)) {
+        if let (Some(&spanning), Some(&full)) = (spanning_rate.get(&channel), rates.get(kind)) {
             if full != 0.0 && spanning / full < 1.0 - PARTIALS_ROUNDING {
-                coverage.partials_below_rate.insert(key, spanning / full);
+                ratios.push(spanning / full);
+            }
+        }
+        // A derived term's partials against its own reaction's rate, carried
+        // over to the rate the covariance is divided by through the fold's
+        // own rate for the channel. On an own term the same product is the
+        // comparison above, so a tallied rate reads alike on both.
+        if let Some(&full) = rates
+            .get(kind)
+            .filter(|&&full| full != 0.0 && own_rate != 0.0)
+        {
+            let to_full = BARN_TO_CM2 * own_rate / full;
+            if let Some(&weighted) = derived_weighted.get(&channel) {
+                if weighted * to_full > 1.0 + PARTIALS_ROUNDING {
+                    ratios.push(weighted * to_full);
+                }
+            }
+            if let Some(&spanning) = derived_spanning.get(&channel) {
+                if spanning * to_full < 1.0 - PARTIALS_ROUNDING {
+                    ratios.push(spanning * to_full);
+                }
+            }
+        }
+        ratios.extend(mismatched.iter().map(|(_, ratio)| *ratio));
+        for ratio in ratios {
+            if ratio > 1.0 {
+                let e = coverage
+                    .partials_above_rate
+                    .entry(key.clone())
+                    .or_insert(ratio);
+                *e = e.max(ratio);
+            } else {
+                let e = coverage
+                    .partials_below_rate
+                    .entry(key.clone())
+                    .or_insert(ratio);
+                *e = e.min(ratio);
             }
         }
     }
@@ -1336,10 +2132,10 @@ pub fn fold_rate_covariance(
         };
 
         let kinds = kinds_and_mts(chain_nuclide);
-        let reactions: BTreeMap<i32, &Reaction> = kinds
-            .iter()
-            .filter_map(|(_, mt)| by_mt.get(mt).map(|r| (*mt, r.as_ref())))
-            .collect();
+        // Every cross section, not only the channels': a derived channel is
+        // weighted with those of the reactions it is derived from.
+        let reactions: BTreeMap<i32, &Reaction> =
+            by_mt.iter().map(|(mt, r)| (*mt, r.as_ref())).collect();
         let nuclide_rates: BTreeMap<String, f64> = rates
             .get(*name)
             .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
@@ -1678,7 +2474,23 @@ mod stated_variance_tests {
             values: vec![0.01],
             scale: Scale::Relative,
         });
-        assert_eq!(stated_variance_share(&flux(), &above, &[d]), None);
+        let own = Term {
+            channel: 0,
+            coefficient: 1.0,
+            mt: 16,
+            range: EVERYWHERE,
+        };
+        assert_eq!(
+            stated_variance_share(
+                &flux(),
+                &above,
+                &[&own],
+                &[],
+                &BTreeMap::from([(16, vec![d])]),
+                &BTreeMap::from([(16, &above)]),
+            ),
+            None
+        );
     }
 
     /// A cross block correlates two reactions and states a variance for
@@ -2630,14 +3442,7 @@ mod same_evaluation_tests {
         let blocks = blocks_from(BE9, "Be9");
         assert!(blocks.iter().all(|b| b.is_same_evaluation()));
 
-        let every: BTreeMap<i32, usize> = blocks
-            .iter()
-            .flat_map(|b| [b.mt, b.partner_mt()])
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .enumerate()
-            .map(|(i, mt)| (mt, i))
-            .collect();
+        let every: BTreeSet<i32> = blocks.iter().flat_map(|b| [b.mt, b.partner_mt()]).collect();
         let mirrored = mirrored_pairs(&blocks, &every);
         assert_eq!(mirrored.len(), 130);
         for &(a, b) in &mirrored {
@@ -2752,5 +3557,682 @@ mod same_evaluation_tests {
         let expected = BTreeMap::from([("Pt194".to_string(), 1)]);
         assert_eq!(first.skipped_cross_material, expected);
         assert_eq!(merged.skipped_cross_material, expected);
+    }
+}
+
+#[cfg(test)]
+mod nc_derived_tests {
+    //! NC blocks with LTY=0: a channel whose covariance is stated only as a
+    //! sum of other reactions', as ENDF/B-VIII.1 O16 `(n,p)` is from its
+    //! partials 600 to 603. Every expected value is the sandwich written out
+    //! by hand with `integrate_xs` over each interval, not the fold's own
+    //! partials.
+
+    use super::*;
+    use endf::mf::covariance::NcSubsection;
+
+    const BOUNDARIES: [f64; 5] = [1.0e-5, 1.0, 1.0e5, 5.0e6, 2.0e7];
+    const FLUX: [f64; 4] = [1.0e10, 3.0e11, 2.0e12, 5.0e12];
+    const GRID: [f64; 3] = [1.0e-5, 1.0e4, 2.0e7];
+    const NP: i32 = 103;
+    const CAPTURE: i32 = 102;
+
+    fn flux() -> FluxDensity<'static> {
+        FluxDensity {
+            boundaries: &BOUNDARIES,
+            flux: &FLUX,
+            shape: None,
+        }
+    }
+
+    /// A cross section of its own shape per MT, so a weighting with the wrong
+    /// reaction's shows.
+    fn reaction(mt: i32) -> Reaction {
+        let k = f64::from(mt % 100 + 1);
+        Reaction {
+            cross_section: vec![k, 0.5 * k, 0.1 * k * k].into(),
+            threshold_idx: 0,
+            energy: vec![1.0e-5, 1.0e5, 2.0e7].into(),
+            mt_number: mt,
+            q_value: 0.0,
+            products: vec![],
+            scatter_in_cm: false,
+            redundant: false,
+        }
+    }
+
+    /// The reactions whose cross section is a combination of others', as
+    /// `(MT, [(c_i, MT_i)])`: what an NC block derives has to hold in the
+    /// cross sections too, or the fold reports that it does not.
+    type Sums<'a> = &'a [(i32, &'a [(f64, i32)])];
+
+    /// Reaction `mt`, summed from its terms where `sums` names it. Every
+    /// reaction shares one energy grid, so the sum is exact pointwise and
+    /// under the trapezoid.
+    fn reaction_in(mt: i32, sums: Sums) -> Reaction {
+        let Some((_, terms)) = sums.iter().find(|(m, _)| *m == mt) else {
+            return reaction(mt);
+        };
+        let mut out = reaction(mt);
+        let parts: Vec<Reaction> = terms.iter().map(|&(_, m)| reaction_in(m, sums)).collect();
+        out.cross_section = (0..out.energy.len())
+            .map(|k| {
+                terms
+                    .iter()
+                    .zip(&parts)
+                    .map(|(&(c, _), r)| c * r.cross_section[k])
+                    .sum()
+            })
+            .collect::<Vec<f64>>()
+            .into();
+        out
+    }
+
+    fn with(mt: i32, mt1: i32, data: CovarianceData) -> CovarianceBlock {
+        CovarianceBlock {
+            mt,
+            subsection_idx: 0,
+            block_idx: 0,
+            mat1: 0,
+            mt1,
+            xmf1: 0.0,
+            xlfs1: 0.0,
+            mtl: 0,
+            mat: 825,
+            data,
+        }
+    }
+
+    /// `lb = 5`, `ls = 1` on `GRID`, upper triangle `[a, b, c]`.
+    fn own(mt: i32, upper: [f64; 3]) -> CovarianceBlock {
+        let ni = NiSubsection {
+            lb: 5,
+            ls: 1,
+            ne: GRID.len() as i64,
+            ek: GRID.to_vec(),
+            fkk: upper.to_vec(),
+            ..Default::default()
+        };
+        with(mt, mt, CovarianceData::Ni(ni))
+    }
+
+    /// `lb = 5`, `ls = 0` on `GRID`: the full 2x2 relative covariance of `mt`
+    /// with `mt1`, row-major.
+    fn cross(mt: i32, mt1: i32, full: [f64; 4]) -> CovarianceBlock {
+        let ni = NiSubsection {
+            lb: 5,
+            ls: 0,
+            ne: GRID.len() as i64,
+            ek: GRID.to_vec(),
+            fkk: full.to_vec(),
+            ..Default::default()
+        };
+        with(mt, mt1, CovarianceData::Ni(ni))
+    }
+
+    /// An LTY=0 block: over `[e1, e2]`, `σ_mt = Σ c_i σ_mt_i`.
+    fn nc(mt: i32, e1: f64, e2: f64, terms: &[(f64, i32)]) -> CovarianceBlock {
+        let data = NcSubsection {
+            lty: 0,
+            e1,
+            e2,
+            nci: terms.len() as i64,
+            ci: terms.iter().map(|t| t.0).collect(),
+            xmti: terms.iter().map(|t| f64::from(t.1)).collect(),
+            ..Default::default()
+        };
+        with(mt, mt, CovarianceData::Nc(data))
+    }
+
+    /// Reaction `mt`'s partial rate over interval `k` of `GRID`, only its part
+    /// inside `[lo, hi]`.
+    fn partial(mt: i32, sums: Sums, k: usize, lo: f64, hi: f64) -> f64 {
+        let (a, b) = (GRID[k].max(lo), GRID[k + 1].min(hi));
+        BARN_TO_CM2 * flux().integrate_xs(&reaction_in(mt, sums), a, b)
+    }
+
+    /// `rᵀ C r'` with `C` full and row-major on `GRID`.
+    fn sandwich(row: [f64; 2], c: [f64; 4], col: [f64; 2]) -> f64 {
+        (0..2)
+            .flat_map(|i| (0..2).map(move |j| (i, j)))
+            .map(|(i, j)| row[i] * c[i * 2 + j] * col[j])
+            .sum()
+    }
+
+    fn partials(mt: i32, sums: Sums, lo: f64, hi: f64) -> [f64; 2] {
+        [partial(mt, sums, 0, lo, hi), partial(mt, sums, 1, lo, hi)]
+    }
+
+    /// The full symmetric matrix of `own`'s upper triangle.
+    fn symmetric(u: [f64; 3]) -> [f64; 4] {
+        [u[0], u[1], u[1], u[2]]
+    }
+
+    /// The rate the collapse gives `mt` over the whole flux range.
+    fn rate(mt: i32, sums: Sums) -> f64 {
+        BARN_TO_CM2 * flux().integrate_xs(&reaction_in(mt, sums), BOUNDARIES[0], BOUNDARIES[4])
+    }
+
+    /// Fold `blocks` with `channels` driven and every MT in `present` given a
+    /// cross section, the ones in `sums` summed from others'.
+    fn fold(
+        blocks: &[CovarianceBlock],
+        channels: &[(&str, i32)],
+        present: &[i32],
+        sums: Sums,
+    ) -> (Option<RateCovariance>, Coverage) {
+        let rxs: Vec<Reaction> = present.iter().map(|&mt| reaction_in(mt, sums)).collect();
+        fold_against(blocks, channels, present, &rxs, 1.0)
+    }
+
+    /// [`fold`] with the cross sections `rxs`, one per MT in `present`, and
+    /// the rates it divides by scaled by `rate_scale`, as a rate computed
+    /// some other way would be.
+    fn fold_against(
+        blocks: &[CovarianceBlock],
+        channels: &[(&str, i32)],
+        present: &[i32],
+        rxs: &[Reaction],
+        rate_scale: f64,
+    ) -> (Option<RateCovariance>, Coverage) {
+        let reactions: BTreeMap<i32, &Reaction> = present.iter().copied().zip(rxs).collect();
+        let kinds: Vec<(String, i32)> = channels
+            .iter()
+            .map(|(k, mt)| (k.to_string(), *mt))
+            .collect();
+        let rates: BTreeMap<String, f64> = kinds
+            .iter()
+            .map(|(k, mt)| {
+                let full =
+                    BARN_TO_CM2 * flux().integrate_xs(reactions[mt], BOUNDARIES[0], BOUNDARIES[4]);
+                (k.clone(), rate_scale * full)
+            })
+            .collect();
+        let mut coverage = Coverage::default();
+        let folded = fold_nuclide(
+            &flux(),
+            blocks,
+            &reactions,
+            &kinds,
+            &rates,
+            "O16",
+            &mut coverage,
+        );
+        (folded, coverage)
+    }
+
+    fn close(got: f64, want: f64) {
+        assert!(want != 0.0);
+        assert!(
+            ((got - want) / want).abs() < 1.0e-12,
+            "got {got:e}, want {want:e}"
+        );
+    }
+
+    const C600: [f64; 3] = [0.04, 0.01, 0.09];
+    const C601: [f64; 3] = [0.01, -0.002, 0.0225];
+    const C600_601: [f64; 4] = [0.003, 0.001, -0.004, 0.02];
+
+    /// `(n,p) = 600 + 601` everywhere, with the two partials correlated: the
+    /// variance is `r600ᵀ C00 r600 + r601ᵀ C11 r601 + 2 r600ᵀ C01 r601` over
+    /// the `(n,p)` rate squared, and the NC block is not reported as skipped.
+    #[test]
+    fn a_sum_of_correlated_partials_is_the_hand_sandwich() {
+        let blocks = [
+            nc(NP, 1.0e-5, 2.0e7, &[(1.0, 600), (1.0, 601)]),
+            own(600, C600),
+            cross(600, 601, C600_601),
+            own(601, C601),
+        ];
+        let sums: Sums = &[(NP, &[(1.0, 600), (1.0, 601)])];
+        let (folded, coverage) = fold(&blocks, &[("(n,p)", NP)], &[NP, 600, 601], sums);
+        let folded = folded.expect("derived");
+        let (r0, r1) = (
+            partials(600, sums, 0.0, f64::INFINITY),
+            partials(601, sums, 0.0, f64::INFINITY),
+        );
+        let absolute = sandwich(r0, symmetric(C600), r0)
+            + sandwich(r1, symmetric(C601), r1)
+            + 2.0 * sandwich(r0, C600_601, r1);
+        close(folded.get(0, 0), absolute / rate(NP, sums).powi(2));
+        assert!(coverage.skipped_nc.is_empty());
+        assert!(!coverage.has_gaps(), "{coverage:?}");
+    }
+
+    /// The derivation applies over `[E1, E2]` only, here cutting the upper
+    /// interval at 3 MeV, and each `c_i` enters with its sign: `c = -1` flips
+    /// the cross term.
+    #[test]
+    fn the_range_and_the_signs_are_the_blocks_own() {
+        const E2: f64 = 3.0e6;
+        let terms = [(1.0, 601), (-1.0, 600)];
+        let blocks = [
+            nc(NP, 1.0e-5, E2, &terms),
+            own(600, C600),
+            cross(600, 601, C600_601),
+            own(601, C601),
+        ];
+        let sums: Sums = &[(NP, &terms)];
+        let (folded, coverage) = fold(&blocks, &[("(n,p)", NP)], &[NP, 600, 601], sums);
+        let (r0, r1) = (partials(600, sums, 0.0, E2), partials(601, sums, 0.0, E2));
+        let absolute = sandwich(r0, symmetric(C600), r0) + sandwich(r1, symmetric(C601), r1)
+            - 2.0 * sandwich(r0, C600_601, r1);
+        close(
+            folded.expect("derived").get(0, 0),
+            absolute / rate(NP, sums).powi(2),
+        );
+        assert!(!coverage.has_gaps(), "{coverage:?}");
+    }
+
+    /// Opposing terms with no block between them fold as uncorrelated, which
+    /// is the tape's statement, and the channel is reported as resting on
+    /// that: the variances add, with nothing to cancel them.
+    #[test]
+    fn opposing_terms_without_a_cross_block_are_reported() {
+        let terms = [(1.0, 601), (-1.0, 600)];
+        let blocks = [
+            nc(NP, 1.0e-5, 2.0e7, &terms),
+            own(600, C600),
+            own(601, C601),
+        ];
+        let sums: Sums = &[(NP, &terms)];
+        let (folded, coverage) = fold(&blocks, &[("(n,p)", NP)], &[NP, 600, 601], sums);
+        let (r0, r1) = (
+            partials(600, sums, 0.0, f64::INFINITY),
+            partials(601, sums, 0.0, f64::INFINITY),
+        );
+        let absolute = sandwich(r0, symmetric(C600), r0) + sandwich(r1, symmetric(C601), r1);
+        close(
+            folded.expect("derived").get(0, 0),
+            absolute / rate(NP, sums).powi(2),
+        );
+        let key = ("O16".to_string(), "(n,p)".to_string());
+        assert_eq!(
+            coverage.derived_opposing_uncorrelated[&key],
+            [("MT600".to_string(), "MT601".to_string())].into()
+        );
+        assert!(coverage.has_gaps());
+    }
+
+    /// A derived channel is correlated with another channel through the cross
+    /// blocks of the reactions it is derived from, and its own NI blocks add
+    /// to the derived part, since the blocks of a subsection add.
+    #[test]
+    fn a_derived_channel_correlates_through_its_partials_cross_blocks() {
+        const C102: [f64; 3] = [0.0025, 0.0, 0.01];
+        const C102_600: [f64; 4] = [0.001, 0.0, 0.002, 0.005];
+        // The own block states variance only above 10 keV and the NC block
+        // derives below it, as ENDF-102 33.3.3 item 3 has it.
+        const OWN_NP: [f64; 3] = [0.0, 0.0, 0.0064];
+        let blocks = [
+            own(CAPTURE, C102),
+            cross(CAPTURE, 600, C102_600),
+            nc(NP, 1.0e-5, 1.0e4, &[(2.0, 600)]),
+            own(NP, OWN_NP),
+            own(600, C600),
+        ];
+        let channels = [("(n,gamma)", CAPTURE), ("(n,p)", NP)];
+        let sums: Sums = &[(NP, &[(2.0, 600)])];
+        let (folded, coverage) = fold(&blocks, &channels, &[CAPTURE, NP, 600], sums);
+        let folded = folded.expect("folded");
+        let all = |mt| partials(mt, sums, 0.0, f64::INFINITY);
+        let r600 = partials(600, sums, 0.0, 1.0e4);
+        let (r102, r103) = (all(CAPTURE), all(NP));
+        let (gamma, np) = (rate(CAPTURE, sums), rate(NP, sums));
+
+        let covariance = 2.0 * sandwich(r102, C102_600, r600);
+        close(folded.get(0, 1), covariance / (gamma * np));
+        close(folded.get(1, 0), covariance / (gamma * np));
+        let variance =
+            sandwich(r103, symmetric(OWN_NP), r103) + 4.0 * sandwich(r600, symmetric(C600), r600);
+        close(folded.get(1, 1), variance / np.powi(2));
+        close(
+            folded.get(0, 0),
+            sandwich(r102, symmetric(C102), r102) / gamma.powi(2),
+        );
+        // Covered where either the own block or the derivation states a
+        // variance, which is the whole range here.
+        let share = coverage.rate_fraction_covered[&("O16".to_string(), "(n,p)".to_string())];
+        assert_eq!(share, 1.0);
+    }
+
+    /// A derivation from a reaction that is itself derived expands to the
+    /// explicit ones, over the overlap of the two ranges, with the
+    /// coefficients multiplied: ENDF/B-VIII.1 O16 MT 4 names MT 103, which is
+    /// `600 + ... + 603`.
+    #[test]
+    fn a_derivation_from_a_derived_reaction_expands_to_the_explicit_ones() {
+        const E2: f64 = 3.0e6;
+        let blocks = [
+            nc(4, 1.0e-5, 2.0e7, &[(3.0, NP)]),
+            nc(NP, 1.0e-5, E2, &[(2.0, 600)]),
+            own(600, C600),
+        ];
+        let sums: Sums = &[(4, &[(3.0, NP)]), (NP, &[(2.0, 600)])];
+        let (folded, coverage) = fold(&blocks, &[("(n,inelastic)", 4)], &[4, NP, 600], sums);
+        let r = partials(600, sums, 0.0, E2);
+        let absolute = 36.0 * sandwich(r, symmetric(C600), r);
+        close(
+            folded.expect("derived").get(0, 0),
+            absolute / rate(4, sums).powi(2),
+        );
+        assert!(!coverage.has_gaps(), "{coverage:?}");
+    }
+
+    /// What cannot be derived is counted once per nuclide and folds nothing:
+    /// a named reaction with no cross section (the whole block is skipped,
+    /// not the part that could be summed), an LTY other than 0, and two
+    /// reactions each derived from the other. An NC block on a reaction the
+    /// fold does not reach is not counted.
+    #[test]
+    fn what_cannot_be_derived_is_counted_and_folds_nothing() {
+        let mut ratio = nc(NP, 1.0e-5, 2.0e7, &[]);
+        if let CovarianceData::Nc(data) = &mut ratio.data {
+            data.lty = 1;
+        }
+        let mut missing = nc(NP, 1.0e-5, 2.0e7, &[(1.0, 600), (1.0, 601)]);
+        missing.block_idx = 1;
+        let unreached = nc(2, 1.0e-5, 2.0e7, &[(1.0, 600)]);
+        let blocks = [ratio, missing, unreached, own(600, C600), own(601, C601)];
+        let (folded, coverage) = fold(&blocks, &[("(n,p)", NP)], &[NP, 600], &[]);
+        assert!(folded.is_none(), "601 has no cross section");
+        assert_eq!(
+            coverage.skipped_nc,
+            BTreeMap::from([("O16".to_string(), 2)])
+        );
+
+        let first = nc(NP, 1.0e-5, 2.0e7, &[(1.0, 600)]);
+        let back = nc(600, 1.0e-5, 2.0e7, &[(1.0, NP)]);
+        let sums: Sums = &[(NP, &[(1.0, 600)])];
+        let (folded, coverage) = fold(
+            &[first, back, own(600, C600)],
+            &[("(n,p)", NP)],
+            &[NP, 600],
+            sums,
+        );
+        // 103 derives from 600, whose block naming 103 is circular and is
+        // skipped; 600's own block still folds through the first derivation.
+        let r = partials(600, sums, 0.0, f64::INFINITY);
+        close(
+            folded.expect("derived").get(0, 0),
+            sandwich(r, symmetric(C600), r) / rate(NP, sums).powi(2),
+        );
+        assert_eq!(
+            coverage.skipped_nc,
+            BTreeMap::from([("O16".to_string(), 1)])
+        );
+    }
+
+    /// A derivation whose named reactions do not add up to the channel's
+    /// cross section over its range is reported with their ratio, below one
+    /// where the channel holds rate the block does not name (ENDF/B-VIII.1
+    /// O16 MT 104 above 20 MeV) and above one the other way. Over the range
+    /// only: the rate outside it is the own blocks' to state.
+    #[test]
+    fn a_derivation_the_cross_sections_do_not_satisfy_is_reported() {
+        const E2: f64 = 3.0e6;
+        let terms = [(1.0, 600), (1.0, 601)];
+        let blocks = [nc(NP, 1.0e-5, E2, &terms), own(600, C600), own(601, C601)];
+        let over =
+            |mt: i32, sums: Sums| flux().integrate_xs(&reaction_in(mt, sums), BOUNDARIES[0], E2);
+        let key = ("O16".to_string(), "(n,p)".to_string());
+
+        // The channel's own cross section, larger than the sum it is said to be.
+        let (_, coverage) = fold(&blocks, &[("(n,p)", NP)], &[NP, 600, 601], &[]);
+        let want = (over(600, &[]) + over(601, &[])) / over(NP, &[]);
+        assert!(want < 1.0);
+        close(coverage.partials_below_rate[&key], want);
+        assert!(coverage.partials_above_rate.is_empty());
+
+        let sums: Sums = &[(NP, &[(0.5, 600), (0.5, 601)])];
+        let (_, coverage) = fold(&blocks, &[("(n,p)", NP)], &[NP, 600, 601], sums);
+        close(coverage.partials_above_rate[&key], 2.0);
+        assert!(coverage.partials_below_rate.is_empty());
+    }
+
+    /// A derived channel divided by a rate computed some other way, such as
+    /// a tallied one, is reported like an own channel would be: the named
+    /// reactions' partials over the derived rate, times the fold's own rate
+    /// over the one divided by. A half rate gives twice, a double one half,
+    /// the latter since `GRID` spans the flux range.
+    #[test]
+    fn a_derived_channel_on_a_rate_computed_another_way_is_reported() {
+        let terms = [(1.0, 600), (1.0, 601)];
+        let blocks = [
+            nc(NP, 1.0e-5, 2.0e7, &terms),
+            own(600, C600),
+            own(601, C601),
+        ];
+        let sums: Sums = &[(NP, &terms)];
+        let present = [NP, 600, 601];
+        let rxs: Vec<Reaction> = present.iter().map(|&mt| reaction_in(mt, sums)).collect();
+        let key = ("O16".to_string(), "(n,p)".to_string());
+        let channels = [("(n,p)", NP)];
+
+        let (_, coverage) = fold_against(&blocks, &channels, &present, &rxs, 0.5);
+        assert!((coverage.partials_above_rate[&key] - 2.0).abs() < 1.0e-12);
+        assert!(coverage.partials_below_rate.is_empty());
+
+        let (_, coverage) = fold_against(&blocks, &channels, &present, &rxs, 2.0);
+        assert!((coverage.partials_below_rate[&key] - 0.5).abs() < 1.0e-12);
+        assert!(coverage.partials_above_rate.is_empty());
+    }
+
+    /// A reaction reached with coefficients that cancel adds nothing to the
+    /// channel's covariance, so its variance covers nothing: here 601 enters
+    /// with `+1` and `-1`, and only 600's upper interval states a variance.
+    #[test]
+    fn cancelling_terms_cover_nothing() {
+        let terms = [(1.0, 600), (1.0, 601), (-1.0, 601)];
+        let blocks = [
+            nc(NP, 1.0e-5, 2.0e7, &terms),
+            own(600, [0.0, 0.0, 0.09]),
+            own(601, C601),
+        ];
+        let sums: Sums = &[(NP, &terms)];
+        let (folded, coverage) = fold(&blocks, &[("(n,p)", NP)], &[NP, 600, 601], sums);
+        let r = partials(600, sums, 0.0, f64::INFINITY);
+        close(
+            folded.expect("derived").get(0, 0),
+            sandwich(r, symmetric([0.0, 0.0, 0.09]), r) / rate(NP, sums).powi(2),
+        );
+        let share = coverage.rate_fraction_covered[&("O16".to_string(), "(n,p)".to_string())];
+        close(
+            share,
+            partial(NP, sums, 1, 0.0, f64::INFINITY) / rate(NP, sums),
+        );
+    }
+
+    /// Where one named partial states a variance over a cell and another
+    /// carries rate there and states none, only the stating one's rate is
+    /// covered, as ENDF/B-VIII.1 O16 `(n,a)` = 800 + ... + 803 is from 20.5
+    /// to 30 MeV, where 800's grid has ended. Here 601 states a variance on
+    /// the lower interval only.
+    #[test]
+    fn a_partial_stating_nothing_over_a_cell_is_not_covered_there() {
+        let terms = [(1.0, 600), (1.0, 601)];
+        let blocks = [
+            nc(NP, 1.0e-5, 2.0e7, &terms),
+            own(600, C600),
+            own(601, [0.01, 0.0, 0.0]),
+        ];
+        let sums: Sums = &[(NP, &terms)];
+        let (_, coverage) = fold(&blocks, &[("(n,p)", NP)], &[NP, 600, 601], sums);
+        let share = coverage.rate_fraction_covered[&("O16".to_string(), "(n,p)".to_string())];
+        let upper_601 = partial(601, sums, 1, 0.0, f64::INFINITY);
+        close(share, 1.0 - upper_601 / rate(NP, sums));
+        assert!(share < 1.0);
+    }
+
+    /// A shortfall in one cell is not made up by an excess in another: here
+    /// `(n,p)` is said to be 600 everywhere, its cross section is above
+    /// 600's below 100 keV and below it above, and the heavy fast flux puts
+    /// the named rate above the derived one over the whole range. Only the
+    /// part of each cell's rate that 600 carries is covered.
+    #[test]
+    fn a_shortfall_in_one_cell_is_not_covered_by_an_excess_in_another() {
+        let blocks = [nc(NP, 1.0e-5, 2.0e7, &[(1.0, 600)]), own(600, C600)];
+        let mut np = reaction(NP);
+        np.cross_section = vec![2.0, 0.5, 0.05].into();
+        let present = [NP, 600];
+        let rxs = [np, reaction(600)];
+        let (_, coverage) = fold_against(&blocks, &[("(n,p)", NP)], &present, &rxs, 1.0);
+        let key = ("O16".to_string(), "(n,p)".to_string());
+        assert!(coverage.partials_above_rate[&key] > 1.0);
+        let cells = [1.0e-5, 1.0, 1.0e4, 1.0e5, 5.0e6, 2.0e7];
+        let (mut carried, mut total) = (0.0, 0.0);
+        for w in cells.windows(2) {
+            let derived = flux().integrate_xs(&rxs[0], w[0], w[1]);
+            let named = flux().integrate_xs(&rxs[1], w[0], w[1]);
+            carried += derived.min(named);
+            total += derived;
+        }
+        let share = coverage.rate_fraction_covered[&key];
+        close(share, carried / total);
+        assert!(share < 1.0);
+    }
+
+    /// A channel's own blocks below an NC range and a derivation above it
+    /// with a `c = -1` partial never enter together, so the absent block
+    /// between the channel and that partial decides nothing and is not
+    /// reported.
+    #[test]
+    fn an_own_block_outside_the_derivation_is_not_opposed_to_its_terms() {
+        const E1: f64 = 1.0e4;
+        let terms = [(1.0, 601), (-1.0, 600)];
+        let blocks = [
+            nc(NP, E1, 2.0e7, &terms),
+            own(NP, [0.0025, 0.0, 0.0]),
+            own(600, [0.0, 0.0, 0.04]),
+            cross(600, 601, [0.0, 0.0, 0.0, 0.001]),
+            own(601, [0.0, 0.0, 0.0225]),
+        ];
+        let sums: Sums = &[(NP, &terms)];
+        let (folded, coverage) = fold(&blocks, &[("(n,p)", NP)], &[NP, 600, 601], sums);
+        assert!(folded.is_some());
+        assert!(
+            coverage.derived_opposing_uncorrelated.is_empty(),
+            "{coverage:?}"
+        );
+        assert!(!coverage.has_gaps(), "{coverage:?}");
+
+        // Without the cross block the two partials do oppose over the range.
+        let (_, coverage) = fold(
+            &[
+                blocks[0].clone(),
+                blocks[1].clone(),
+                blocks[2].clone(),
+                blocks[4].clone(),
+            ],
+            &[("(n,p)", NP)],
+            &[NP, 600, 601],
+            sums,
+        );
+        assert_eq!(
+            coverage.derived_opposing_uncorrelated[&("O16".to_string(), "(n,p)".to_string())],
+            [("MT600".to_string(), "MT601".to_string())].into()
+        );
+    }
+
+    /// Named reactions with rate over a range where the reaction they derive
+    /// has none have no ratio to it, and are reported against the channel's
+    /// whole rate instead of as an infinite ratio: `(n,p)` is zero up to
+    /// 100 keV and the block says it is 600 there.
+    #[test]
+    fn a_derivation_of_a_reaction_with_no_rate_there_is_finite() {
+        const E2: f64 = 1.0e4;
+        let blocks = [nc(NP, 1.0e-5, E2, &[(1.0, 600)]), own(600, C600)];
+        let mut np = reaction(NP);
+        np.cross_section = vec![0.0, 0.0, 5.0].into();
+        let present = [NP, 600];
+        let rxs = [np, reaction(600)];
+        let (_, coverage) = fold_against(&blocks, &[("(n,p)", NP)], &present, &rxs, 1.0);
+        let key = ("O16".to_string(), "(n,p)".to_string());
+        let whole = flux().integrate_xs(&rxs[0], BOUNDARIES[0], BOUNDARIES[4]);
+        let named = flux().integrate_xs(&rxs[1], BOUNDARIES[0], E2);
+        let ratio = coverage.partials_above_rate[&key];
+        assert!(ratio.is_finite());
+        close(ratio, 1.0 + named / whole);
+    }
+
+    /// An LTY=0 block with an empty range of its own, or naming nothing,
+    /// derives nothing and is counted, not consumed in silence.
+    #[test]
+    fn an_empty_range_or_an_empty_list_is_counted() {
+        let backwards = nc(NP, 2.0e7, 1.0e-5, &[(1.0, 600)]);
+        let mut empty = nc(NP, 1.0e-5, 2.0e7, &[]);
+        empty.block_idx = 1;
+        let (folded, coverage) = fold(
+            &[backwards, empty, own(600, C600)],
+            &[("(n,p)", NP)],
+            &[NP, 600],
+            &[],
+        );
+        assert!(folded.is_none());
+        assert_eq!(
+            coverage.skipped_nc,
+            BTreeMap::from([("O16".to_string(), 2)])
+        );
+    }
+
+    /// A block is skipped only if no path derives it. Two channels each
+    /// derived from the other derive each block on one path and meet it
+    /// circularly on the other, and a block whose range misses the range it
+    /// was reached over does not apply there and is not counted.
+    #[test]
+    fn a_block_derived_on_some_path_is_not_counted_as_skipped() {
+        let blocks = [
+            nc(NP, 1.0e-5, 2.0e7, &[(1.0, 600)]),
+            nc(600, 1.0e-5, 2.0e7, &[(1.0, NP)]),
+            own(600, C600),
+        ];
+        let sums: Sums = &[(NP, &[(1.0, 600)])];
+        let channels = [("(n,p)", NP), ("(n,p0)", 600)];
+        let (folded, coverage) = fold(&blocks, &channels, &[NP, 600], sums);
+        assert!(folded.is_some());
+        assert!(coverage.skipped_nc.is_empty(), "{:?}", coverage.skipped_nc);
+
+        let mut ratio = nc(NP, 1.0e5, 2.0e7, &[(1.0, 600)]);
+        if let CovarianceData::Nc(data) = &mut ratio.data {
+            data.lty = 1;
+        }
+        ratio.block_idx = 1;
+        let blocks = [nc(4, 1.0e-5, 1.0e4, &[(3.0, NP)]), ratio, own(NP, C600)];
+        let sums: Sums = &[(4, &[(3.0, NP)])];
+        let (folded, coverage) = fold(&blocks, &[("(n,inelastic)", 4)], &[4, NP], sums);
+        assert!(folded.is_some());
+        assert!(!coverage.has_gaps(), "{coverage:?}");
+    }
+
+    /// A short-range weight restricted to a range keeps the block's own
+    /// interval width and restricts only `∫ ψ² dE`, so the squared weights of
+    /// two ranges that split an interval add up to the whole interval's: the
+    /// variance of its two parts, with nothing correlating them.
+    #[test]
+    fn a_short_range_weight_within_a_range_restricts_only_the_flux_integral() {
+        let rx = reaction(600);
+        let cut = 1.0e6;
+        let whole = partial_rates(&flux(), &rx, &GRID, Scale::ShortRange).per_interval;
+        let below = partial_rates_within(&flux(), &rx, &GRID, Scale::ShortRange, (0.0, cut));
+        let above = partial_rates_within(&flux(), &rx, &GRID, Scale::ShortRange, (cut, 1.0e8));
+        let width = GRID[2] - GRID[1];
+        let want = BARN_TO_CM2 * (width * flux().integrate_density_squared(GRID[1], cut)).sqrt();
+        assert!((below.per_interval[1] / want - 1.0).abs() < 1.0e-12);
+        assert_eq!(below.per_interval[0], whole[0]);
+        assert_eq!(above.per_interval[0], 0.0);
+        let parts = below.per_interval[1].powi(2) + above.per_interval[1].powi(2);
+        assert!((parts / whole[1].powi(2) - 1.0).abs() < 1.0e-12, "{parts}");
+    }
+
+    /// A range that holds the whole grid gives the undivided partials, bit
+    /// for bit, so a nuclide without NC blocks folds as it always has.
+    #[test]
+    fn a_range_over_the_whole_grid_changes_no_bits() {
+        let rx = reaction(600);
+        let whole = partial_rates(&flux(), &rx, &GRID, Scale::Relative).per_interval;
+        for range in [EVERYWHERE, (1.0e-5, 2.0e7), (0.0, 1.0e8)] {
+            let within = partial_rates_within(&flux(), &rx, &GRID, Scale::Relative, range);
+            assert_eq!(within.per_interval, whole);
+        }
     }
 }

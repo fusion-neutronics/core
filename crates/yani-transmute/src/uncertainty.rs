@@ -209,22 +209,29 @@ pub struct Info {
     pub perturbed: BTreeSet<String>,
     /// Nuclides with rates but no usable covariance, so no stated uncertainty.
     pub no_covariance_data: BTreeSet<String>,
-    /// Per nuclide, blocks correlating one of its channels with a reaction of
+    /// Per nuclide, blocks correlating one of its reactions with a reaction of
     /// another evaluation, not consumed. A `mat1` naming the nuclide's own MAT
-    /// is its own evaluation and is folded, and a block on a reaction the
-    /// chain does not drive is not counted. The partner is not checked: a
-    /// block is counted whether or not the evaluation `mat1` names is in the
-    /// run.
+    /// is its own evaluation and is folded, and a block is counted only on a
+    /// reaction the fold reaches (a channel, or one a channel is derived
+    /// from). The partner is not checked: a block is counted whether or not
+    /// the evaluation `mat1` names is in the run.
     pub skipped_cross_material: BTreeMap<String, usize>,
-    /// Per nuclide, blocks correlating one of its channels with a quantity
+    /// Per nuclide, blocks correlating one of its reactions with a quantity
     /// that is not a cross section (`xmf1` other than 0 or 3), not consumed.
+    /// Counted like `skipped_cross_material`.
     pub skipped_other_file: BTreeMap<String, usize>,
     /// Per (nuclide, kind, kind), where a pair stored in both orientations
     /// has copies that are not each other's transpose, the largest difference
     /// relative to the largest entry. The lower MT's copy is the one used.
     pub mirrored_disagree: BTreeMap<(String, String, String), f64>,
-    /// NC blocks (covariance derived from other reactions), not consumed.
-    pub skipped_nc: usize,
+    /// Per nuclide, NC blocks (covariance derived from other reactions) that
+    /// could not be derived, not consumed. LTY=0 blocks are derived from the
+    /// reactions they name; what is left is an LTY other than 0, a block in
+    /// a cross-reaction subsection, one whose list of reactions is empty or
+    /// does not match its coefficients, one whose own energy range is empty,
+    /// one naming a reaction with no cross section, and one met only
+    /// circularly.
+    pub skipped_nc: BTreeMap<String, usize>,
     /// Blocks whose `lb` layout is not implemented, counted per `lb`.
     pub unsupported_layouts: BTreeMap<i64, usize>,
     /// Blocks not consumed because they break ENDF-102's rules for their
@@ -260,15 +267,31 @@ pub struct Info {
     /// within-group weight with a covariance edge inside a group. Its
     /// `rate_fraction_covered` is of the fold's own rate, not of the listed
     /// one, and under the `1/E` weight it is off as well wherever an edge cuts
-    /// a group.
+    /// a group. On a derived channel the partials of the reactions each NC
+    /// block names are checked the same way, and the check is also that they
+    /// add up to the reaction it derives over the block's range, a sum above
+    /// it landing here.
     pub partials_above_rate: BTreeMap<(String, String), f64>,
     /// Per (nuclide, reaction kind), where a relative block's grid spans the
     /// whole flux range and its partial rates add up to less than the rate it
     /// was divided by, their ratio to it: a channel whose relative sigma is
     /// understated. A grid that stops short of the flux range cannot be
     /// checked this way, since rate from outside it rightly leaves its
-    /// partials short.
+    /// partials short. A derived channel whose NC block names reactions that
+    /// add up to less than the one it derives lands here too: ENDF/B-VIII.1
+    /// O16 `(n,d)` above 20 MeV, where its cross section holds MT 660 to 669
+    /// and the block names 650 to 659.
     pub partials_below_rate: BTreeMap<(String, String), f64>,
+    /// Per (nuclide, reaction kind), where a channel derived through an NC
+    /// block names two reactions with opposite signs, each with a variance
+    /// block of its own, and the evaluation states no covariance between
+    /// them, those pairs by kind. The absent block is read as zero, since
+    /// ENDF-102 33.3.2 a.1 lets a tape leave a zero covariance unstated, and
+    /// with opposing signs that reading sets the sigma: FENDL-3.2d and
+    /// TENDL-2017 H2 `(n,2n)` = `σ_1 - σ_2 - σ_102` folds to about 22% at 14
+    /// MeV and thousands of percent near threshold. The tape's literal
+    /// statement, so reported rather than altered, and counted as a gap.
+    pub derived_opposing_uncorrelated: BTreeMap<(String, String), BTreeSet<(String, String)>>,
     /// Mean of the per-channel shares in [`Info::rate_fraction_covered`],
     /// weighted by the production each channel drove (the rate this run used
     /// times parent density): the share of the production driven from
@@ -447,9 +470,11 @@ pub struct Info {
     /// `skipped_other_file`, `skipped_nc`, `unsupported_layouts` and
     /// `malformed_blocks`. A pair stored in both orientations is used once,
     /// and a second copy that disagrees with the first is reported in
-    /// `mirrored_disagree`. A block for a reaction the chain does not drive (a
-    /// partial-level section such as MT=600-849) is neither listed nor
-    /// counted: the chain has no rate for it to be the uncertainty of.
+    /// `mirrored_disagree`. A block on a reaction the fold does not reach
+    /// (neither a channel nor one a channel's NC derivation names) is neither
+    /// listed nor counted: the chain has no rate for it to be the uncertainty
+    /// of. A partial-level section such as MT=600-849 is reached, and its
+    /// blocks folded and counted, when an LTY=0 NC block names it.
     pub not_perturbed: Vec<String>,
     /// Which sources this run perturbed, by name.
     pub sources: Vec<String>,
@@ -474,12 +499,13 @@ impl Info {
             skipped_cross_material: coverage.skipped_cross_material.clone(),
             skipped_other_file: coverage.skipped_other_file.clone(),
             mirrored_disagree: coverage.mirrored_disagree.clone(),
-            skipped_nc: coverage.skipped_nc,
+            skipped_nc: coverage.skipped_nc.clone(),
             unsupported_layouts: coverage.unsupported_layouts.clone(),
             malformed_blocks: coverage.malformed,
             rate_fraction_covered: coverage.rate_fraction_covered.clone(),
             partials_above_rate: coverage.partials_above_rate.clone(),
             partials_below_rate: coverage.partials_below_rate.clone(),
+            derived_opposing_uncorrelated: coverage.derived_opposing_uncorrelated.clone(),
             rate_fraction_covered_total: total.filter(|_| {
                 collapsed_flat
                     && coverage.partials_above_rate.is_empty()
@@ -500,7 +526,7 @@ impl Info {
                 "isomeric branching (MF=9/MF=10)",
                 "covariance with another evaluation (MAT1 naming another material)",
                 "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
-                "NC-derived covariance (MF=33 NC)",
+                "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, or LTY=0 in skipped_nc)",
                 "lumped-reaction covariance (MF=33 MT=851-870)",
                 "resonance-parameter covariance (MF=32)",
                 "decay photon line energy and intensity (MF=8 MT=457)",
@@ -535,11 +561,12 @@ impl Info {
             || !self.skipped_cross_material.is_empty()
             || !self.skipped_other_file.is_empty()
             || !self.mirrored_disagree.is_empty()
-            || self.skipped_nc > 0
+            || !self.skipped_nc.is_empty()
             || !self.unsupported_layouts.is_empty()
             || self.malformed_blocks > 0
             || !self.partials_above_rate.is_empty()
             || !self.partials_below_rate.is_empty()
+            || !self.derived_opposing_uncorrelated.is_empty()
             || !self.covariance_repaired.is_empty()
             || !self.covariance_repaired_outside_bound.is_empty()
             || self.spectra_without_flux_sigma > 0
@@ -1273,7 +1300,7 @@ mod tests {
             "isomeric branching (MF=9/MF=10)",
             "covariance with another evaluation (MAT1 naming another material)",
             "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
-            "NC-derived covariance (MF=33 NC)",
+            "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, or LTY=0 in skipped_nc)",
             "lumped-reaction covariance (MF=33 MT=851-870)",
             "resonance-parameter covariance (MF=32)",
             "decay photon line energy and intensity (MF=8 MT=457)",

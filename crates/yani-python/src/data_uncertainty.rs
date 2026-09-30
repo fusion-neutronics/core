@@ -64,10 +64,13 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 /// - fission yields and the isomeric-branching overlay from MF=9/MF=10;
 /// - covariance correlating two evaluations (MAT1 naming another material),
 ///   covariance with a quantity that is not a cross section (XMF1 not 0 or
-///   3), covariance derived from other sections (MF=33 NC), the
+///   3), covariance derived from other sections by an NC block that cannot
+///   be derived (LTY 1-4, or an LTY=0 block counted in ``skipped_nc``), the
 ///   lumped-reaction covariance (MT=851-870) and the resonance-parameter
-///   covariance (MF=32), so only the explicit MF=33 blocks of each reaction
-///   are sampled;
+///   covariance (MF=32). What is sampled is each reaction's explicit MF=33
+///   blocks, and for a reaction an LTY=0 NC block states as a sum of others
+///   (ENDF/B-VIII.1 O16 (n,p) as MT 600 to 603), the covariance derived from
+///   the named reactions' own blocks and the cross blocks between them;
 /// - the self-shielding correction, when ``self_shielding_chord`` or
 ///   ``self_shielding_shape`` is given: the shielded flux is built once from
 ///   the nominal cross sections and reused by every replica;
@@ -263,7 +266,11 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
         mirrored.set_item(format!("{nuclide} {a} {b}"), mismatch)?;
     }
     d.set_item("mirrored_disagree", mirrored)?;
-    d.set_item("skipped_nc", info.skipped_nc)?;
+    let nc = PyDict::new(py);
+    for (nuclide, n) in &info.skipped_nc {
+        nc.set_item(nuclide, n)?;
+    }
+    d.set_item("skipped_nc", nc)?;
 
     let layouts = PyDict::new(py);
     for (lb, n) in &info.unsupported_layouts {
@@ -302,6 +309,17 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
         below.set_item(format!("{nuclide} {kind}"), ratio)?;
     }
     d.set_item("partials_below_rate", below)?;
+    // A derived channel whose sigma rests on reading an absent covariance
+    // between two opposing terms as zero, each pair as `[a, b]`.
+    let opposing = PyDict::new(py);
+    for ((nuclide, kind), pairs) in &info.derived_opposing_uncorrelated {
+        let pairs: Vec<[&str; 2]> = pairs
+            .iter()
+            .map(|(a, b)| [a.as_str(), b.as_str()])
+            .collect();
+        opposing.set_item(format!("{nuclide} {kind}"), pairs)?;
+    }
+    d.set_item("derived_opposing_uncorrelated", opposing)?;
 
     d.set_item(
         "covariance_repaired",
