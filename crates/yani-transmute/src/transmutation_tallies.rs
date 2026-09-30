@@ -209,10 +209,14 @@ fn build_moment_curves(
     let mut curves_out = Vec::new();
     // Sort parents and kinds so curve order (and thus extraction-time
     // summation order) is deterministic across runs.
-    let mut parents: Vec<&String> = branch.keys().filter(|p| chain.contains_key(*p)).collect();
+    let mut parents: Vec<&String> = branch
+        .curves()
+        .keys()
+        .filter(|p| chain.contains_key(*p))
+        .collect();
     parents.sort();
     for parent in parents {
-        let kinds = &branch[parent];
+        let kinds = &branch.curves()[parent];
         let mut kind_names: Vec<&String> = kinds.keys().collect();
         kind_names.sort();
         for kind in kind_names {
@@ -333,7 +337,7 @@ fn fold_bin_maxima(energy: &[f64], values: &[f64], grid: &[f64], s0: &[f64]) -> 
 fn build_yield_channels(nuclide_names: &[String], branch: &BranchTable) -> Vec<YieldChannel> {
     let mut channels = Vec::new();
     for name in nuclide_names {
-        let Some(kinds) = branch.get(name) else {
+        let Some(kinds) = branch.curves().get(name) else {
             continue;
         };
         let mut kind_names: Vec<&String> = kinds.keys().collect();
@@ -1617,7 +1621,7 @@ mod tests {
 
     fn one_bin_tally_with_branch(branch: &BranchTable) -> TransmutationTallies {
         let mut chain: HashMap<String, ChainNuclide> = HashMap::new();
-        for parent in branch.keys() {
+        for parent in branch.curves().keys() {
             chain.insert(
                 parent.clone(),
                 ChainNuclide {
@@ -1738,34 +1742,42 @@ mod tests {
     /// curve, plus a second parent so union-grid points interleave.
     fn moment_branch() -> BranchTable {
         let mut branch = BranchTable::new();
-        branch.entry("U238".to_string()).or_default().insert(
-            "(n,2n)".to_string(),
-            vec![
-                yani::BranchCurve {
-                    target: "U237".to_string(),
-                    quantity: BranchQuantity::CrossSection,
-                    energy: vec![1.0e6, 3.0e6, 5.0e6],
-                    values: vec![0.0, 2.0, 1.0],
-                },
-                yani::BranchCurve {
-                    target: "U237_m1".to_string(),
-                    quantity: BranchQuantity::CrossSection,
-                    energy: vec![1.0e5, 3.0e6],
-                    values: vec![0.5, 0.5],
-                },
-            ],
-        );
+        branch
+            .curves_mut()
+            .entry("U238".to_string())
+            .or_default()
+            .insert(
+                "(n,2n)".to_string(),
+                vec![
+                    yani::BranchCurve {
+                        target: "U237".to_string(),
+                        quantity: BranchQuantity::CrossSection,
+                        energy: vec![1.0e6, 3.0e6, 5.0e6],
+                        values: vec![0.0, 2.0, 1.0],
+                    },
+                    yani::BranchCurve {
+                        target: "U237_m1".to_string(),
+                        quantity: BranchQuantity::CrossSection,
+                        energy: vec![1.0e5, 3.0e6],
+                        values: vec![0.5, 0.5],
+                    },
+                ],
+            );
         // Second parent whose breakpoints interleave with U238's, so the
         // union grid subdivides U238's segments.
-        branch.entry("Am241".to_string()).or_default().insert(
-            "(n,gamma)".to_string(),
-            vec![yani::BranchCurve {
-                target: "Am242_m1".to_string(),
-                quantity: BranchQuantity::CrossSection,
-                energy: vec![5.0e5, 2.0e6, 4.0e6],
-                values: vec![0.1, 0.3, 0.2],
-            }],
-        );
+        branch
+            .curves_mut()
+            .entry("Am241".to_string())
+            .or_default()
+            .insert(
+                "(n,gamma)".to_string(),
+                vec![yani::BranchCurve {
+                    target: "Am242_m1".to_string(),
+                    quantity: BranchQuantity::CrossSection,
+                    energy: vec![5.0e5, 2.0e6, 4.0e6],
+                    values: vec![0.1, 0.3, 0.2],
+                }],
+            );
         branch
     }
 
@@ -1866,74 +1878,90 @@ mod tests {
     #[test]
     fn curve_selection_policy() {
         let mut branch = BranchTable::new();
-        branch.entry("Ag109".to_string()).or_default().insert(
-            "(n,n')".to_string(),
-            vec![
-                yani::BranchCurve {
-                    target: "Ag109".to_string(), // ground self-loop: dropped
-                    quantity: BranchQuantity::CrossSection,
-                    energy: vec![1.0, 2.0],
-                    values: vec![1.0, 1.0],
-                },
-                yani::BranchCurve {
-                    target: "Ag109_m1".to_string(),
-                    quantity: BranchQuantity::CrossSection,
-                    energy: vec![1.0, 2.0],
-                    values: vec![1.0, 1.0],
-                },
-            ],
-        );
-        branch.entry("Ag109".to_string()).or_default().insert(
-            "(n,gamma)".to_string(),
-            vec![
-                yani::BranchCurve {
-                    target: "Ag110".to_string(),
-                    quantity: BranchQuantity::Yield,
-                    energy: vec![1.0, 2.0],
-                    values: vec![0.9, 0.9],
-                },
-                yani::BranchCurve {
-                    target: "Ag110_m1".to_string(),
-                    quantity: BranchQuantity::Yield,
-                    energy: vec![1.0, 2.0],
-                    values: vec![0.1, 0.1],
-                },
-            ],
-        );
+        branch
+            .curves_mut()
+            .entry("Ag109".to_string())
+            .or_default()
+            .insert(
+                "(n,n')".to_string(),
+                vec![
+                    yani::BranchCurve {
+                        target: "Ag109".to_string(), // ground self-loop: dropped
+                        quantity: BranchQuantity::CrossSection,
+                        energy: vec![1.0, 2.0],
+                        values: vec![1.0, 1.0],
+                    },
+                    yani::BranchCurve {
+                        target: "Ag109_m1".to_string(),
+                        quantity: BranchQuantity::CrossSection,
+                        energy: vec![1.0, 2.0],
+                        values: vec![1.0, 1.0],
+                    },
+                ],
+            );
+        branch
+            .curves_mut()
+            .entry("Ag109".to_string())
+            .or_default()
+            .insert(
+                "(n,gamma)".to_string(),
+                vec![
+                    yani::BranchCurve {
+                        target: "Ag110".to_string(),
+                        quantity: BranchQuantity::Yield,
+                        energy: vec![1.0, 2.0],
+                        values: vec![0.9, 0.9],
+                    },
+                    yani::BranchCurve {
+                        target: "Ag110_m1".to_string(),
+                        quantity: BranchQuantity::Yield,
+                        energy: vec![1.0, 2.0],
+                        values: vec![0.1, 0.1],
+                    },
+                ],
+            );
         // A kind not in REACTION_MT_MAP with only yields: dropped entirely.
-        branch.entry("Ag109".to_string()).or_default().insert(
-            "(n,unmapped)".to_string(),
-            vec![yani::BranchCurve {
-                target: "X".to_string(),
-                quantity: BranchQuantity::Yield,
-                energy: vec![1.0, 2.0],
-                values: vec![1.0, 1.0],
-            }],
-        );
-        // Malformed curves must be dropped, well-formed sibling kept.
-        branch.entry("Ag107".to_string()).or_default().insert(
-            "(n,2n)".to_string(),
-            vec![
-                yani::BranchCurve {
-                    target: "Ag106".to_string(),
-                    quantity: BranchQuantity::CrossSection,
-                    energy: vec![],
-                    values: vec![],
-                },
-                yani::BranchCurve {
-                    target: "Ag106_m1".to_string(),
-                    quantity: BranchQuantity::CrossSection,
-                    energy: vec![1.0, 2.0],
-                    values: vec![1.0], // mismatched lengths
-                },
-                yani::BranchCurve {
-                    target: "Ag106_m2".to_string(),
-                    quantity: BranchQuantity::CrossSection,
+        branch
+            .curves_mut()
+            .entry("Ag109".to_string())
+            .or_default()
+            .insert(
+                "(n,unmapped)".to_string(),
+                vec![yani::BranchCurve {
+                    target: "X".to_string(),
+                    quantity: BranchQuantity::Yield,
                     energy: vec![1.0, 2.0],
                     values: vec![1.0, 1.0],
-                },
-            ],
-        );
+                }],
+            );
+        // Malformed curves must be dropped, well-formed sibling kept.
+        branch
+            .curves_mut()
+            .entry("Ag107".to_string())
+            .or_default()
+            .insert(
+                "(n,2n)".to_string(),
+                vec![
+                    yani::BranchCurve {
+                        target: "Ag106".to_string(),
+                        quantity: BranchQuantity::CrossSection,
+                        energy: vec![],
+                        values: vec![],
+                    },
+                    yani::BranchCurve {
+                        target: "Ag106_m1".to_string(),
+                        quantity: BranchQuantity::CrossSection,
+                        energy: vec![1.0, 2.0],
+                        values: vec![1.0], // mismatched lengths
+                    },
+                    yani::BranchCurve {
+                        target: "Ag106_m2".to_string(),
+                        quantity: BranchQuantity::CrossSection,
+                        energy: vec![1.0, 2.0],
+                        values: vec![1.0, 1.0],
+                    },
+                ],
+            );
 
         let mut chain: HashMap<String, ChainNuclide> = HashMap::new();
         for parent in ["Ag109", "Ag107"] {

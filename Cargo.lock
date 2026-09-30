@@ -6335,6 +6335,8 @@ dependencies = [
  "nuclear-data-schema",
  "rayon",
  "serde_json",
+ "yamc-convert",
+ "yamc-nuclide",
  "yani",
 ]
 
