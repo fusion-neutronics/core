@@ -50,8 +50,9 @@ pub struct RunProvenance {
     pub yamc_version: String,
     /// MPI world size of the run (1 for non-MPI).
     pub mpi_size: i32,
-    /// MPI rank that produced this result (0 for non-MPI). Only rank-0
-    /// results are complete; others are refused by `combine_results`.
+    /// MPI rank that produced this result (0 for non-MPI). Every rank holds
+    /// the same folded tally statistics, so `combine_results` accepts only
+    /// the rank-0 result and refuses the others as duplicates.
     pub mpi_rank: i32,
 }
 

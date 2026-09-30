@@ -19,8 +19,9 @@
 //! - **Fingerprint mismatch**: the runs came from different models
 //!   (geometry, materials, sources, physics settings, or nuclear-data
 //!   libraries -- library differences are named per nuclide).
-//! - **GPU results / non-root MPI results**: carry no (complete)
-//!   Welford merge state.
+//! - **GPU results**: carry no Welford merge state.
+//! - **Non-root MPI results**: every rank holds the same folded
+//!   statistics, so merging a non-root result counts the run twice.
 //! - **Same-name tallies with different configuration**: a structural
 //!   mismatch (scores, filters, bins, estimator, ...) means the merge
 //!   would pool different physical quantities.
@@ -262,8 +263,8 @@ fn validate_provenance(input: &SimulationResults) -> Result<(), String> {
         }
         if run.mpi_size > 1 && run.mpi_rank != 0 {
             return Err(format!(
-                "cannot combine a non-root MPI result (rank {} of {}): only rank 0 holds the \
-                 complete reduced statistics",
+                "cannot combine a non-root MPI result (rank {} of {}): every rank holds the \
+                 same reduced statistics, so pass the rank 0 result only",
                 run.mpi_rank, run.mpi_size
             ));
         }

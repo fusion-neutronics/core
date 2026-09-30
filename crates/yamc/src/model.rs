@@ -2670,14 +2670,16 @@ impl Model {
                 // Under MPI each rank's Welford state covers only its own
                 // particle range. Gather the per-rank raw (mean, m2, n)
                 // state to root and fold in rank order with the same Chen
-                // combine used for thread reduction, so rank 0 installs
-                // the complete statistics. (A moment-space reduce_sum
-                // would be cheaper but reconstructing m2 from summed
-                // squares is catastrophically cancellation-prone, so the
-                // raw state is gathered instead.) Non-root ranks keep
-                // their local partial state; only root results are
-                // complete, and `combine_results` refuses non-root MPI
-                // results via the run provenance.
+                // combine used for thread reduction. (A moment-space
+                // reduce_sum would be cheaper but reconstructing m2 from
+                // summed squares is catastrophically cancellation-prone, so
+                // the raw state is gathered instead.) Root then broadcasts
+                // the folded state, so every rank installs the same complete
+                // statistics and anything read from the tallies after the
+                // run (the DeGVR passes, for one) agrees across ranks. Every
+                // rank holding the same global result is also why
+                // `combine_results` refuses non-root MPI results: combining
+                // two ranks' results would count the run twice.
                 if mpi_size > 1 {
                     use yamc_tallies::welford::WelfordTallyStats;
                     let ranks = mpi_size as usize;
@@ -2687,6 +2689,8 @@ impl Model {
                         .map(|t| t.n_histories)
                         .unwrap_or(0);
                     let rank_n = mpi_ctx.gather_u64(&[n_local], 0);
+                    let mut n_total = [rank_n.as_ref().map_or(0, |n| n.iter().sum())];
+                    mpi_ctx.broadcast_u64(&mut n_total, 0);
                     for stats in global_stats.per_tally.iter_mut() {
                         let bins = stats.mean.len();
                         if bins == 0 {
@@ -2732,6 +2736,14 @@ impl Model {
                                 *stats = folded;
                             }
                         }
+                        mpi_ctx.broadcast_f64(&mut stats.mean, 0);
+                        mpi_ctx.broadcast_f64(&mut stats.m2, 0);
+                        if let Some(c) = stats.comoment.as_mut() {
+                            mpi_ctx.broadcast_f64(c, 0);
+                        }
+                        stats.n_histories = n_total[0];
+                        stats.agg = yamc_tallies::welford::AggMoments::ZERO;
+                        stats.score_pdf = yamc_tallies::welford::ScorePdf::default();
                     }
                 }
                 for (i, tally) in tallies.iter().enumerate() {

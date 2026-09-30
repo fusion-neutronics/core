@@ -137,13 +137,11 @@ def test_tally_reduction():
     model = yamc.Model(geometry, tallies=[tally], source=source)
     results = model.simulate_transport(total_particles=10000, seed=555)
 
-    # Only rank 0 should have complete tally results
+    # Every rank installs the same folded statistics; check them on rank 0
     if rank == 0:
         mean = results[tally].mean
         assert len(mean) > 0, "Tally should have results on rank 0"
         assert all(m >= 0 for m in mean), "Tally values should be non-negative"
-
-    # Note: Non-root ranks may have partial data, but users should only read from rank 0
 
 
 def test_hybrid_mpi_threading():
