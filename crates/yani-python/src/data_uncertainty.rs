@@ -6,7 +6,7 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
@@ -317,8 +317,59 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     }
     d.set_item("derived_opposing_uncorrelated", opposing)?;
 
-    d.set_item("matrices_clipped", info.matrices_clipped)?;
-    d.set_item("worst_relative_clip", info.worst_relative_clip)?;
+    d.set_item(
+        "covariance_repaired",
+        info.covariance_repaired.iter().cloned().collect::<Vec<_>>(),
+    )?;
+    let repairs = PyList::empty(py);
+    for r in &info.covariance_repairs {
+        let entry = PyDict::new(py);
+        entry.set_item("nuclide", &r.nuclide)?;
+        entry.set_item("spectrum", r.spectrum)?;
+        entry.set_item("lambda_min", r.lambda_min)?;
+        entry.set_item("lambda_max", r.lambda_max)?;
+        entry.set_item("clipped_fraction", r.clipped_fraction)?;
+        // Keyed by kind, each the evaluated variance and the evaluated and
+        // sampled relative sigmas, so the widening reads off a single entry.
+        // A negative stated variance has no sigma and reads as None.
+        let channels = PyDict::new(py);
+        for c in &r.channels {
+            let pair = PyDict::new(py);
+            pair.set_item("evaluated_variance", c.evaluated_variance)?;
+            pair.set_item("evaluated_sigma", c.evaluated_sigma())?;
+            pair.set_item("sampled_sigma", c.sampled)?;
+            channels.set_item(&c.kind, pair)?;
+        }
+        entry.set_item("channels", channels)?;
+        repairs.append(entry)?;
+    }
+    d.set_item("covariance_repairs", repairs)?;
+    d.set_item(
+        "covariance_repaired_outside_bound",
+        info.covariance_repaired_outside_bound
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    d.set_item("worst_sigma_inflation", info.worst_sigma_inflation)?;
+    d.set_item(
+        "rate_weighted_sigma_inflation",
+        info.rate_weighted_sigma_inflation,
+    )?;
+    for (key, channels) in [
+        ("sigma_at_least_one", &info.sigma_at_least_one),
+        ("sigma_at_least_ten", &info.sigma_at_least_ten),
+        (
+            "sigma_at_least_one_outside_bound",
+            &info.sigma_at_least_one_outside_bound,
+        ),
+    ] {
+        let wide = PyDict::new(py);
+        for ((nuclide, kind), sigma) in channels {
+            wide.set_item(format!("{nuclide} {kind}"), sigma)?;
+        }
+        d.set_item(key, wide)?;
+    }
     d.set_item("rates_sampled", info.rates_sampled)?;
     d.set_item("spectra_with_flux_sigma", info.spectra_with_flux_sigma)?;
     d.set_item(
@@ -387,4 +438,165 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     d.set_item("sources", info.sources.clone())?;
     d.set_item("has_gaps", info.has_gaps())?;
     Ok(d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yani_transmute::covariance_sample::{ChannelSigma, Repair};
+
+    /// A repaired, wide-sigma report reaches Python with the nested layout the
+    /// docstring promises: channels keyed by kind, a negative stated variance
+    /// as None rather than a zero sigma, and "Nuclide kind" string keys.
+    #[test]
+    fn a_repair_and_a_wide_channel_reach_the_dict() {
+        let info = Info {
+            covariance_repaired: ["W182".to_string()].into(),
+            covariance_repairs: vec![Repair {
+                nuclide: "W182".to_string(),
+                spectrum: 1,
+                lambda_min: -1.0e-4,
+                lambda_max: 1.0e-2,
+                clipped_fraction: 0.5,
+                channels: vec![
+                    ChannelSigma {
+                        kind: "(n,2n)".to_string(),
+                        evaluated_variance: 0.0036,
+                        sampled: 0.084,
+                    },
+                    ChannelSigma {
+                        kind: "(n,a)".to_string(),
+                        evaluated_variance: -0.001,
+                        sampled: 0.02,
+                    },
+                ],
+            }],
+            covariance_repaired_outside_bound: ["Xe135".to_string()].into(),
+            worst_sigma_inflation: f64::INFINITY,
+            rate_weighted_sigma_inflation: Some(0.25),
+            sigma_at_least_one: [(("W186".to_string(), "(n,p)".to_string()), 12.0)].into(),
+            sigma_at_least_ten: [(("W186".to_string(), "(n,p)".to_string()), 12.0)].into(),
+            sigma_at_least_one_outside_bound: [(("W186".to_string(), "(n,p)".to_string()), 12.0)]
+                .into(),
+            ..Default::default()
+        };
+        Python::initialize();
+        Python::attach(|py| {
+            let d = info_to_dict(py, &info).unwrap();
+            let get = |key: &str| d.get_item(key).unwrap().unwrap();
+            assert_eq!(
+                get("covariance_repaired").extract::<Vec<String>>().unwrap(),
+                ["W182"]
+            );
+            assert_eq!(
+                get("covariance_repaired_outside_bound")
+                    .extract::<Vec<String>>()
+                    .unwrap(),
+                ["Xe135"]
+            );
+            assert!(get("worst_sigma_inflation")
+                .extract::<f64>()
+                .unwrap()
+                .is_infinite());
+            assert_eq!(
+                get("rate_weighted_sigma_inflation")
+                    .extract::<f64>()
+                    .unwrap(),
+                0.25
+            );
+            assert!(get("has_gaps").extract::<bool>().unwrap());
+
+            let repairs = get("covariance_repairs");
+            let repair = repairs.get_item(0).unwrap();
+            assert_eq!(
+                repair
+                    .get_item("nuclide")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "W182"
+            );
+            assert_eq!(
+                repair
+                    .get_item("spectrum")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                repair
+                    .get_item("lambda_min")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                -1.0e-4
+            );
+            assert_eq!(
+                repair
+                    .get_item("lambda_max")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                1.0e-2
+            );
+            assert_eq!(
+                repair
+                    .get_item("clipped_fraction")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                0.5
+            );
+            let channels = repair.get_item("channels").unwrap();
+            let n2n = channels.get_item("(n,2n)").unwrap();
+            assert_eq!(
+                n2n.get_item("evaluated_variance")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                0.0036
+            );
+            assert!(
+                (n2n.get_item("evaluated_sigma")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap()
+                    - 0.06)
+                    .abs()
+                    < 1e-15
+            );
+            assert_eq!(
+                n2n.get_item("sampled_sigma")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                0.084
+            );
+            let na = channels.get_item("(n,a)").unwrap();
+            assert_eq!(
+                na.get_item("evaluated_variance")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                -0.001
+            );
+            assert!(na.get_item("evaluated_sigma").unwrap().is_none());
+
+            for key in [
+                "sigma_at_least_one",
+                "sigma_at_least_ten",
+                "sigma_at_least_one_outside_bound",
+            ] {
+                let wide = get(key);
+                assert_eq!(
+                    wide.get_item("W186 (n,p)")
+                        .unwrap()
+                        .extract::<f64>()
+                        .unwrap(),
+                    12.0
+                );
+            }
+        });
+    }
 }

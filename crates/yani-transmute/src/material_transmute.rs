@@ -1322,6 +1322,75 @@ impl ChainEdits {
     }
 }
 
+/// The nuclides whose covariance repairs and wide sigmas the report names:
+/// those `yani::populated_nuclides` bounds at or above [`crate::DENSITY_FLOOR`]
+/// over the whole schedule.
+///
+/// The fold covers every chain nuclide with data, which from almost any
+/// composition is the chain's whole closure, so without this a pure W182
+/// material reports Xe135's repair as its own. The bound never
+/// under-estimates the nominal solve, so there a nuclide left out cannot move
+/// any density by as much as the floor the solver drops a nuclide at. It is
+/// taken at nominal rates, and a replica's lognormal draw on a wide channel
+/// can sit orders above nominal, so it is not a bound on every replica.
+///
+/// Each channel's rate is its time integral over the schedule, the unit-flux
+/// rate times the spectrum's fluence summed over spectra, spread over the
+/// schedule's length, which is what the bound's `rate * total_time` asks for.
+/// With more than one spectrum the edges of every spectrum's folded chain are
+/// all kept, which over-counts a transfer the branching splits differently
+/// between them and so stays a bound.
+fn sigma_report_nuclides(
+    densities: &HashMap<String, f64>,
+    steps: &[TransmuteStep],
+    per_spectrum: &[PerSpectrum],
+    fluence: &[f64],
+) -> HashSet<String> {
+    let total_time: f64 = steps.iter().map(|s| s.dt).sum();
+    if per_spectrum.is_empty() || total_time <= 0.0 {
+        return HashSet::new();
+    }
+    let mut integral: HashMap<&str, HashMap<&str, f64>> = HashMap::new();
+    for ((rates, _, _), f) in per_spectrum.iter().zip(fluence) {
+        for (nuclide, kinds) in rates {
+            let slot = integral.entry(nuclide.as_str()).or_default();
+            for (kind, rate) in kinds {
+                *slot.entry(kind.as_str()).or_insert(0.0) += rate * f;
+            }
+        }
+    }
+    let merged;
+    let chain = if per_spectrum.len() == 1 {
+        per_spectrum[0].2.as_ref()
+    } else {
+        let mut all = per_spectrum[0].2.as_ref().clone();
+        for (_, _, other) in &per_spectrum[1..] {
+            for (name, cn) in other.iter() {
+                if let Some(entry) = all.get_mut(name) {
+                    entry.reactions.extend(cn.reactions.iter().cloned());
+                }
+            }
+        }
+        merged = all;
+        &merged
+    };
+    // Each spectrum's chain already carries its own folded branching, the
+    // splits the nominal solve uses, so there is no overlay left to bound.
+    yani::populated_nuclides(
+        chain,
+        &yani::BranchTable::new(),
+        densities,
+        total_time,
+        crate::DENSITY_FLOOR,
+        |parent, kind| {
+            integral
+                .get(parent)
+                .and_then(|k| k.get(kind))
+                .map_or(0.0, |r| r / total_time)
+        },
+    )
+}
+
 /// Fold the covariance, factorize it, and re-solve until the sigmas settle.
 ///
 /// Replicas are added in blocks and convergence is judged between blocks on the
@@ -1362,12 +1431,28 @@ fn run_replicas(
     // a relative covariance does not move when the flux magnitude does.
     let mut coverage = crate::covariance_fold::Coverage::default();
     let mut samplers = Vec::with_capacity(per_spectrum.len());
-    let mut clipping = crate::covariance_sample::Clipping::default();
+    let mut sigmas = crate::covariance_sample::SigmaReport::default();
+    let densities = initial.get_atoms_per_barn_cm()?;
+    // Each spectrum's fluence over the schedule, so the rate-weighted sigma
+    // headline weighs a spectrum by how much it was actually irradiated with.
+    let mut fluence = vec![0.0; per_spectrum.len()];
+    for step in steps {
+        if let Some((idx, rate)) = step.irradiation {
+            fluence[idx] += rate * step.dt;
+        }
+    }
 
     // Switched off, this folds nothing and every sampler is empty, so the run
     // reports zero uncertainty with `sources` saying why. That is what makes
     // "add a source and watch sigma grow" measurable from one baseline.
     let cross_sections = request.wants(crate::uncertainty::Source::CrossSections);
+    // With nothing folded the report has nothing to restrict, so the bound
+    // over the whole chain is only worth solving when cross sections are on.
+    let populated = if cross_sections {
+        sigma_report_nuclides(&densities, steps, per_spectrum, &fluence)
+    } else {
+        HashSet::new()
+    };
 
     // One sampler per spectrum whether or not cross sections are on, so the
     // index stays the spectrum's own. Switched off, each is built from an empty
@@ -1391,10 +1476,7 @@ fn run_replicas(
         };
 
         let sampler = Sampler::new(&folded);
-        clipping.matrices_clipped += sampler.clipping.matrices_clipped;
-        clipping.worst_relative_clip = clipping
-            .worst_relative_clip
-            .max(sampler.clipping.worst_relative_clip);
+        sigmas.add(idx, &sampler, rates, fluence[idx], &densities, &populated);
         samplers.push(sampler);
     }
 
@@ -1502,7 +1584,7 @@ fn run_replicas(
     // energy width rather than lethargy.
     let collapsed_flat = !transport
         && crate::multigroup::within_group_weight() == crate::multigroup::Weighting::FlatInEnergy;
-    let mut info = Info::from_fold(&coverage, &clipping, collapsed_flat)?;
+    let mut info = Info::from_fold(&coverage, &sigmas, collapsed_flat)?;
     if half_life.is_none() {
         info.not_perturbed.insert(0, "half-life".to_string());
     }
@@ -2717,6 +2799,8 @@ mod tests {
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![1.0, 1.0e8],
                     values: vec![0.1, 0.1], // flat 0.1 barn
+                    states: Default::default(),
+                    normalisation: None,
                 }],
             );
 
@@ -2754,12 +2838,16 @@ mod tests {
                 quantity: BranchQuantity::CrossSection,
                 energy: vec![1.0, 1.0e8],
                 values: vec![3.0, 3.0],
+                states: Default::default(),
+                normalisation: None,
             },
             BranchCurve {
                 target: "X_m1".to_string(),
                 quantity: BranchQuantity::CrossSection,
                 energy: vec![1.0, 1.0e8],
                 values: vec![1.0, 1.0],
+                states: Default::default(),
+                normalisation: None,
             },
         ];
         let spectrum = MultigroupSpectrum {
@@ -3024,6 +3112,78 @@ mod tests {
         let folded = apply_coupled_branching(&chain, &partials, &mut rates);
         assert!(Arc::ptr_eq(&chain, &folded));
         assert!(rates.is_empty());
+    }
+
+    /// A capture-only chain over A, B, Bm and C, one (n,gamma) per edge.
+    fn capture_chain(edges: &[(&str, &str)]) -> Arc<HashMap<String, ChainNuclide>> {
+        let mut map: HashMap<String, ChainNuclide> = HashMap::new();
+        for name in ["A", "B", "Bm", "C"] {
+            map.insert(
+                name.to_string(),
+                ChainNuclide {
+                    name: name.to_string(),
+                    half_life: None,
+                    decay_energy: 0.0,
+                    reactions: edges
+                        .iter()
+                        .filter(|(parent, _)| *parent == name)
+                        .map(|(_, target)| ChainReaction {
+                            kind: "(n,gamma)".to_string(),
+                            target: Some(target.to_string()),
+                            branching: 1.0,
+                            branching_uncertainty: None,
+                            q_value: None,
+                        })
+                        .collect(),
+                    decays: vec![],
+                    fission_yields: None,
+                    sources: Vec::new(),
+                    half_life_uncertainty: None,
+                    decay_energy_uncertainty: None,
+                    decay_energy_components: Default::default(),
+                },
+            );
+        }
+        Arc::new(map)
+    }
+
+    /// The report keeps a product the schedule can bring to the solver's
+    /// floor and drops one two captures away that it cannot, and with two
+    /// spectra it keeps what either spectrum's chain can reach.
+    #[test]
+    fn the_sigma_report_covers_what_the_schedule_can_populate() {
+        let rates: ReactionRates = ["A", "B"]
+            .iter()
+            .map(|n| {
+                (
+                    n.to_string(),
+                    HashMap::from([("(n,gamma)".to_string(), 1.0e-34)]),
+                )
+            })
+            .collect();
+        let densities = HashMap::from([("A".to_string(), 1.0)]);
+        // A fluence of 1e14: each capture moves 1e-20 of its parent, so B
+        // reaches 1e-20 and C 1e-40, under the 1e-30 floor.
+        let steps = [TransmuteStep {
+            dt: 1.0,
+            irradiation: Some((0, 1.0e14)),
+        }];
+        let chain = capture_chain(&[("A", "B"), ("B", "C")]);
+        let one: Vec<PerSpectrum> = vec![(rates.clone(), Default::default(), chain.clone())];
+        assert_eq!(
+            sigma_report_nuclides(&densities, &steps, &one, &[1.0e14]),
+            HashSet::from(["A".to_string(), "B".to_string()])
+        );
+
+        let other = capture_chain(&[("A", "Bm"), ("B", "C")]);
+        let two: Vec<PerSpectrum> = vec![
+            (rates.clone(), Default::default(), chain),
+            (rates, Default::default(), other),
+        ];
+        assert_eq!(
+            sigma_report_nuclides(&densities, &steps, &two, &[1.0e14, 0.0]),
+            HashSet::from(["A".to_string(), "B".to_string(), "Bm".to_string()])
+        );
     }
 
     /// A transport replica that draws its own rates builds its own folded

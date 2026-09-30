@@ -708,8 +708,51 @@ impl PyTransmutationResults {
     ///   their declared sizes, an LB=0 to 2 block carrying a second energy
     ///   table, an LB=3 or 4 block without one or whose tables share no
     ///   energy range, or an LB=8 variance stated between two reactions.
-    /// - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
-    ///   covariance was not positive semi-definite and had to be repaired.
+    /// - ``covariance_repaired``: nuclides the material can populate (bounded
+    ///   at or above the solver's density floor over the schedule at nominal
+    ///   rates; a replica's rates can sit above them) whose folded covariance
+    ///   was not positive semi-definite past round-off, with a channel a draw
+    ///   can move (a positive rate on a spectrum the schedule irradiates
+    ///   with). Past round-off means the correlation matrix has an eigenvalue
+    ///   below ``-m * 1e-12`` (``m`` the number of channels with a positive
+    ///   stated variance), or a channel is stated with a negative
+    ///   variance, or a zero one and a covariance to another channel.
+    ///   Clipping only adds variance, so these were sampled wider than
+    ///   evaluated, and any makes ``has_gaps`` true.
+    ///   ``covariance_repairs`` gives one dict per repaired populated nuclide
+    ///   and spectrum, including repairs no draw can move, with ``lambda_min``,
+    ///   ``lambda_max``, ``clipped_fraction`` (the variance added over the
+    ///   stated trace, ``float('inf')`` when that trace is not positive) and,
+    ///   per channel keyed by kind,
+    ///   ``evaluated_variance`` (the folded diagonal as stated, which can be
+    ///   negative), ``evaluated_sigma`` (``None`` when that variance is
+    ///   negative) and ``sampled_sigma``. A repair of a nuclide outside the
+    ///   populated bound has no dict; ``covariance_repaired_outside_bound``
+    ///   names those with a channel a draw can move. The bound holds at
+    ///   nominal rates only and a replica's rates can populate them, so any
+    ///   also makes ``has_gaps`` true.
+    /// - ``worst_sigma_inflation``: the largest sampled over evaluated sigma,
+    ///   minus one, over the repaired channels of populated nuclides with a
+    ///   positive rate on a spectrum the schedule irradiates with,
+    ///   ``float('inf')`` when a repair gave a spread to a channel whose stated
+    ///   variance is zero or negative. ``rate_weighted_sigma_inflation`` is the
+    ///   weighted mean of sampled over evaluated sigma, minus one, over every
+    ///   sampled channel of a populated nuclide, each weighted by its unit-flux
+    ///   rate times its spectrum's fluence in the schedule times its parent's
+    ///   initial density, so it covers first-generation reactions only (a
+    ///   produced nuclide carries no weight), shows the decomposition's
+    ///   round-off on matrices that needed no repair, and is ``None`` when no
+    ///   weighted channel has an evaluated sigma. Both can be
+    ///   ``float('inf')``, which strict JSON does not accept.
+    /// - ``sigma_at_least_one`` / ``sigma_at_least_ten``: sampled channels of
+    ///   populated nuclides with a positive rate on a spectrum the schedule
+    ///   irradiates with, keyed ``"Nuclide (n,x)"``, whose folded relative
+    ///   sigma as evaluated, before any repair, is at least one or ten. At that
+    ///   width the answer depends on the lognormal chosen to carry the
+    ///   evaluation's two moments, not on the evaluation alone.
+    ///   ``sigma_at_least_one_outside_bound`` is the same for nuclides outside
+    ///   the populated bound, whose wide channels a replica's draw can take
+    ///   past it; the ten-or-more subset reads off its values.
     /// - ``rates_sampled``: cross-section rate draws made. Each is a lognormal
     ///   multiplier matched to the covariance's mean and variance, so none can
     ///   go negative and none is floored.
