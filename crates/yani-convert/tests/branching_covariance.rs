@@ -317,9 +317,9 @@ fn a_cross_state_lb6_block_round_trips() {
     assert_ne!(b.block.xlfs1, b.lfs as f64);
     assert_eq!(b.target.as_deref(), Some("Nb93"));
     assert_eq!(b.target1.as_deref(), Some("Nb93_m1"));
-    // MF=33's helper takes it for a self block, never having compared XLFS1
-    // with LFS; MF=40's does not.
-    assert!(b.block.is_diagonal());
+    // MF=33's helper takes no MF=40 partner for a cross section, so it is no
+    // self block there; MF=40's compares XLFS1 with LFS and is not one either.
+    assert!(!b.block.is_diagonal());
     assert!(!b.is_self_block());
     // The ground's self block is untouched beside it.
     let own = blocks
@@ -876,9 +876,10 @@ fn tape_values_are_written_literally() {
     assert_eq!(b.izap, 0, "IZAP is the tape's");
     assert_eq!(b.block.mat1, NB93_MAT, "MAT1 is the tape's");
     assert_eq!(b.mat, NB93_MAT);
-    // A MAT1 naming the evaluation itself is not another material, whatever
-    // MF=33's helper, which compares with zero, says.
-    assert!(b.block.is_cross_material());
+    // A MAT1 naming the evaluation itself is not another material, for
+    // MF=33's helper too, since the block carries the key's MAT.
+    assert_eq!(b.block.mat, NB93_MAT);
+    assert!(!b.block.is_cross_material());
     assert!(!b.is_cross_material() && b.is_self_block());
     assert_eq!(b.target.as_deref(), Some("Nb93_m1"));
     assert_eq!(b.target1.as_deref(), Some("Nb93_m1"));

@@ -134,6 +134,9 @@ fn block_from_row(
         xmf1: float_or_zero(batch, "xmf1", row),
         xlfs1: float_or_zero(batch, "xlfs1", row),
         mtl: int_or_zero(batch, "mtl", row) as i32,
+        // Both files carry the evaluation's own MAT under this name; null, or
+        // absent in a file written before the column, reads as 0 (unknown).
+        mat: int_or_zero(batch, "mat", row) as i32,
         data,
     })
 }

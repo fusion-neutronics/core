@@ -62,10 +62,12 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///   sigma), and the per-decay photon lines and decay energy of a drawn
 ///   parent, which follow its nominal branching;
 /// - fission yields and the isomeric-branching overlay from MF=9/MF=10;
-/// - covariance correlating two evaluations (MAT1 != 0), covariance derived
-///   from other sections (MF=33 NC), the lumped-reaction covariance
-///   (MT=851-870) and the resonance-parameter covariance (MF=32), so only the
-///   explicit MF=33 blocks of each reaction are sampled;
+/// - covariance correlating two evaluations (MAT1 naming another material),
+///   covariance with a quantity that is not a cross section (XMF1 not 0 or
+///   3), covariance derived from other sections (MF=33 NC), the
+///   lumped-reaction covariance (MT=851-870) and the resonance-parameter
+///   covariance (MF=32), so only the explicit MF=33 blocks of each reaction
+///   are sampled;
 /// - the self-shielding correction, when ``self_shielding_chord`` or
 ///   ``self_shielding_shape`` is given: the shielded flux is built once from
 ///   the nominal cross sections and reused by every replica;
@@ -244,7 +246,23 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
         "no_covariance_data",
         info.no_covariance_data.iter().cloned().collect::<Vec<_>>(),
     )?;
-    d.set_item("skipped_cross_material", info.skipped_cross_material)?;
+    let cross = PyDict::new(py);
+    for (nuclide, n) in &info.skipped_cross_material {
+        cross.set_item(nuclide, n)?;
+    }
+    d.set_item("skipped_cross_material", cross)?;
+    let other_file = PyDict::new(py);
+    for (nuclide, n) in &info.skipped_other_file {
+        other_file.set_item(nuclide, n)?;
+    }
+    d.set_item("skipped_other_file", other_file)?;
+    // Keyed "Nuclide (n,a) (n,b)", the two kinds in MT order, like the
+    // per-channel maps below.
+    let mirrored = PyDict::new(py);
+    for ((nuclide, a, b), mismatch) in &info.mirrored_disagree {
+        mirrored.set_item(format!("{nuclide} {a} {b}"), mismatch)?;
+    }
+    d.set_item("mirrored_disagree", mirrored)?;
     d.set_item("skipped_nc", info.skipped_nc)?;
 
     let layouts = PyDict::new(py);

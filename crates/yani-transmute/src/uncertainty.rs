@@ -209,8 +209,20 @@ pub struct Info {
     pub perturbed: BTreeSet<String>,
     /// Nuclides with rates but no usable covariance, so no stated uncertainty.
     pub no_covariance_data: BTreeSet<String>,
-    /// Blocks correlating with another evaluation (`mat1 != 0`), not consumed.
-    pub skipped_cross_material: usize,
+    /// Per nuclide, blocks correlating one of its channels with a reaction of
+    /// another evaluation, not consumed. A `mat1` naming the nuclide's own MAT
+    /// is its own evaluation and is folded, and a block on a reaction the
+    /// chain does not drive is not counted. The partner is not checked: a
+    /// block is counted whether or not the evaluation `mat1` names is in the
+    /// run.
+    pub skipped_cross_material: BTreeMap<String, usize>,
+    /// Per nuclide, blocks correlating one of its channels with a quantity
+    /// that is not a cross section (`xmf1` other than 0 or 3), not consumed.
+    pub skipped_other_file: BTreeMap<String, usize>,
+    /// Per (nuclide, kind, kind), where a pair stored in both orientations
+    /// has copies that are not each other's transpose, the largest difference
+    /// relative to the largest entry. The lower MT's copy is the one used.
+    pub mirrored_disagree: BTreeMap<(String, String, String), f64>,
     /// NC blocks (covariance derived from other reactions), not consumed.
     pub skipped_nc: usize,
     /// Blocks whose `lb` layout is not implemented, counted per `lb`.
@@ -432,10 +444,12 @@ pub struct Info {
     /// Every input the answer depends on and no source here samples, whether
     /// the data carries an uncertainty for it or not. MF=33 blocks that were
     /// present but could not be used are counted in `skipped_cross_material`,
-    /// `skipped_nc`, `unsupported_layouts` and `malformed_blocks`. A block for
-    /// a reaction the chain does not drive (a partial-level section such as
-    /// MT=600-849) is neither listed nor counted: the chain has no rate for it
-    /// to be the uncertainty of.
+    /// `skipped_other_file`, `skipped_nc`, `unsupported_layouts` and
+    /// `malformed_blocks`. A pair stored in both orientations is used once,
+    /// and a second copy that disagrees with the first is reported in
+    /// `mirrored_disagree`. A block for a reaction the chain does not drive (a
+    /// partial-level section such as MT=600-849) is neither listed nor
+    /// counted: the chain has no rate for it to be the uncertainty of.
     pub not_perturbed: Vec<String>,
     /// Which sources this run perturbed, by name.
     pub sources: Vec<String>,
@@ -457,7 +471,9 @@ impl Info {
         Ok(Self {
             perturbed: coverage.covered.clone(),
             no_covariance_data: coverage.without_data.clone(),
-            skipped_cross_material: coverage.skipped_cross_material,
+            skipped_cross_material: coverage.skipped_cross_material.clone(),
+            skipped_other_file: coverage.skipped_other_file.clone(),
+            mirrored_disagree: coverage.mirrored_disagree.clone(),
             skipped_nc: coverage.skipped_nc,
             unsupported_layouts: coverage.unsupported_layouts.clone(),
             malformed_blocks: coverage.malformed,
@@ -482,7 +498,8 @@ impl Info {
             not_perturbed: [
                 "fission yield",
                 "isomeric branching (MF=9/MF=10)",
-                "cross-material covariance (MAT1 != 0)",
+                "covariance with another evaluation (MAT1 naming another material)",
+                "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
                 "NC-derived covariance (MF=33 NC)",
                 "lumped-reaction covariance (MF=33 MT=851-870)",
                 "resonance-parameter covariance (MF=32)",
@@ -515,7 +532,9 @@ impl Info {
     /// know about.
     pub fn has_gaps(&self) -> bool {
         !self.no_covariance_data.is_empty()
-            || self.skipped_cross_material > 0
+            || !self.skipped_cross_material.is_empty()
+            || !self.skipped_other_file.is_empty()
+            || !self.mirrored_disagree.is_empty()
             || self.skipped_nc > 0
             || !self.unsupported_layouts.is_empty()
             || self.malformed_blocks > 0
@@ -1252,7 +1271,8 @@ mod tests {
         for held in [
             "fission yield",
             "isomeric branching (MF=9/MF=10)",
-            "cross-material covariance (MAT1 != 0)",
+            "covariance with another evaluation (MAT1 naming another material)",
+            "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
             "NC-derived covariance (MF=33 NC)",
             "lumped-reaction covariance (MF=33 MT=851-870)",
             "resonance-parameter covariance (MF=32)",

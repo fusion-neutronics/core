@@ -3,7 +3,11 @@
 //! A faithful dump, not a transformation. Every column is a field of
 //! [`endf::mf::covariance::Mf33Subsection`], [`NiSubsection`] or
 //! [`NcSubsection`], written in the parser's own order and units, so reading
-//! the file back reconstructs exactly what the parser produced.
+//! the file back reconstructs exactly what the parser produced. The one
+//! addition is `mat`, the evaluation's own MAT from the tape's control
+//! columns: `mat1` is kept as written, and ENDF-102 33.3.1 lets it name this
+//! material by its MAT rather than by 0, which a reader can only recognise
+//! with the MAT beside it.
 //!
 //! Nothing is reshaped on the way out. `fkk` keeps the format's packed order
 //! with its own `ls` beside it, because `ls=1` is a triangle whose transpose is
@@ -253,7 +257,14 @@ impl CovarianceRows {
         self.mt.is_empty()
     }
 
-    /// The columns in the schema's own order.
+    /// The number of rows, one per block.
+    pub fn len(&self) -> usize {
+        self.mt.len()
+    }
+
+    /// The columns in the schema's own order, all but `covariance.arrow`'s
+    /// trailing `mat`: a file of one evaluation's blocks writes it once per row
+    /// beside these, and `branching_covariance.arrow` has its own in its key.
     pub fn columns(&self) -> Vec<arrow_array::ArrayRef> {
         vec![
             ints(&self.mt),
@@ -342,10 +353,10 @@ pub fn write_covariance(material: &Material, dir: &Path) -> Result<bool, Box<dyn
         return Ok(false);
     }
 
-    write_section(
-        &dir.join("covariance.arrow"),
-        "covariance.arrow",
-        rows.columns(),
-    )?;
+    // The evaluation's own MAT, on every row, so a reader can tell a `mat1`
+    // naming this material from one naming another.
+    let mut columns = rows.columns();
+    columns.push(opt_ints(&vec![Some(material.mat); rows.len()]));
+    write_section(&dir.join("covariance.arrow"), "covariance.arrow", columns)?;
     Ok(true)
 }

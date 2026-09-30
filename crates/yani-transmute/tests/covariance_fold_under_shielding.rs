@@ -94,6 +94,7 @@ fn block(mt: i32, ni: NiSubsection) -> CovarianceBlock {
         xmf1: 0.0,
         xlfs1: 0.0,
         mtl: 0,
+        mat: 0,
         data: CovarianceData::Ni(ni),
     }
 }

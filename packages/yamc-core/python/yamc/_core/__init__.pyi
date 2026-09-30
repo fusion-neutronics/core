@@ -638,10 +638,12 @@ class DataUncertainty:
       sigma), and the per-decay photon lines and decay energy of a drawn
       parent, which follow its nominal branching;
     - fission yields and the isomeric-branching overlay from MF=9/MF=10;
-    - covariance correlating two evaluations (MAT1 != 0), covariance derived
-      from other sections (MF=33 NC), the lumped-reaction covariance
-      (MT=851-870) and the resonance-parameter covariance (MF=32), so only the
-      explicit MF=33 blocks of each reaction are sampled;
+    - covariance correlating two evaluations (MAT1 naming another material),
+      covariance with a quantity that is not a cross section (XMF1 not 0 or
+      3), covariance derived from other sections (MF=33 NC), the
+      lumped-reaction covariance (MT=851-870) and the resonance-parameter
+      covariance (MF=32), so only the explicit MF=33 blocks of each reaction
+      are sampled;
     - the self-shielding correction, when ``self_shielding_chord`` or
       ``self_shielding_shape`` is given: the shielded flux is built once from
       the nominal cross sections and reused by every replica;
@@ -5376,8 +5378,20 @@ class TransmutationResults:
           a covariance edge cuts a group. A grid that stops short of the flux
           range cannot be checked from below, since rate from outside it
           rightly leaves its partials short.
-        - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
-          covariance blocks that were present but not consumed.
+        - ``skipped_nc``, ``unsupported_layouts``: covariance blocks that were
+          present but not consumed, counted once per spectrum, so a run over
+          several spectra counts the same block once for each.
+        - ``skipped_cross_material``: per nuclide, blocks on a channel the
+          chain drives that correlate it with another evaluation, not
+          consumed. A block naming the nuclide's own MAT is its own evaluation
+          and is folded. The partner is not checked, so a block is counted
+          whether or not the evaluation it names is in the run.
+          ``skipped_other_file``: the same for blocks whose partner is not a
+          cross section.
+        - ``mirrored_disagree``: keyed ``"Nuclide (n,a) (n,b)"``, where a pair
+          stored in both orientations has copies that are not each other's
+          transpose, the largest difference relative to the largest entry.
+          The copy in the lower MT's section is the one folded.
         - ``malformed_blocks``: covariance blocks not consumed because they
           break ENDF-102's rules for their layout: arrays that disagree with
           their declared sizes, an LB=0 to 2 block carrying a second energy

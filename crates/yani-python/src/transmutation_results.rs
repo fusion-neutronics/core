@@ -665,8 +665,20 @@ impl PyTransmutationResults {
     ///   a covariance edge cuts a group. A grid that stops short of the flux
     ///   range cannot be checked from below, since rate from outside it
     ///   rightly leaves its partials short.
-    /// - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
-    ///   covariance blocks that were present but not consumed.
+    /// - ``skipped_nc``, ``unsupported_layouts``: covariance blocks that were
+    ///   present but not consumed, counted once per spectrum, so a run over
+    ///   several spectra counts the same block once for each.
+    /// - ``skipped_cross_material``: per nuclide, blocks on a channel the
+    ///   chain drives that correlate it with another evaluation, not
+    ///   consumed. A block naming the nuclide's own MAT is its own evaluation
+    ///   and is folded. The partner is not checked, so a block is counted
+    ///   whether or not the evaluation it names is in the run.
+    ///   ``skipped_other_file``: the same for blocks whose partner is not a
+    ///   cross section.
+    /// - ``mirrored_disagree``: keyed ``"Nuclide (n,a) (n,b)"``, where a pair
+    ///   stored in both orientations has copies that are not each other's
+    ///   transpose, the largest difference relative to the largest entry.
+    ///   The copy in the lower MT's section is the one folded.
     /// - ``malformed_blocks``: covariance blocks not consumed because they
     ///   break ENDF-102's rules for their layout: arrays that disagree with
     ///   their declared sizes, an LB=0 to 2 block carrying a second energy
