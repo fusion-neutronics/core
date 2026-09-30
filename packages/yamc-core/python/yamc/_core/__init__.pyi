@@ -625,7 +625,10 @@ class DataUncertainty:
     own mean and variance, so a sampled rate is never negative and nothing is
     floored. The correlated Gaussian deviates are kept (a Gaussian copula), so
     the ordering between channels is preserved, but the Pearson correlations
-    come out weaker than evaluated as the sigmas grow.
+    come out weaker than evaluated as the sigmas grow. Half-lives and decay
+    energies are drawn the same way, one nuclide at a time: the decay data
+    states a mean and a sigma for each and no correlation, so the draws carry
+    exactly what the evaluation states and are never negative.
     
     Held at their nominal values, with uncertainties of their own that this
     does not propagate:
@@ -659,8 +662,9 @@ class DataUncertainty:
     
     ``TransmutationResults.get_data_uncertainty_info`` lists every one of these
     that applied to a material under ``not_perturbed``, along with any nuclide
-    whose evaluation carries no covariance and any unstable nuclide whose
-    half-life has no stated sigma.
+    whose evaluation carries no covariance, any unstable nuclide whose
+    half-life or decay energy has no stated sigma, and any whose stated
+    half-life or decay-energy sigma no draw can carry.
     
     Args:
         seed (int): Base seed. A given nuclide's perturbation in a given replica
@@ -5421,8 +5425,18 @@ class TransmutationResults:
         - ``half_lives_perturbed`` / ``no_half_life_uncertainty``: with the
           ``"half_life"`` source, which reachable unstable nuclides had their
           half-life sampled and which state no sigma to sample from.
-          ``half_lives_floored`` / ``half_lives_sampled`` count draws that came
-          out non-positive and had to be floored.
+          ``half_life_uncertainty_not_carried`` names those whose stated sigma
+          no draw can carry (not finite, or not finite relative to the
+          half-life), held at nominal and counted as a gap.
+          ``half_lives_sampled`` counts the draws made. Each is a lognormal
+          matched to the evaluation's mean and sigma, so none can go
+          non-positive and none is floored.
+        - ``decay_energies_perturbed`` / ``no_decay_energy_uncertainty``: the
+          same for the ``"decay_energy"`` source, drawn per nuclide as a
+          lognormal with the stated mean and sigma, per component where the
+          data splits it. ``decay_energy_uncertainty_not_carried`` names those
+          with a sigma stated on a zero energy, or not finite, which no draw
+          can carry; that energy is held at nominal and counted as a gap.
         - ``decay_branchings_perturbed``: with the ``"decay_branching"``
           source, the reachable two-mode parents whose split was sampled. The
           multi-mode parents held at their evaluated ratios, each a gap:
