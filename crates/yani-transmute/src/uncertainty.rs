@@ -227,10 +227,13 @@ pub struct Info {
     /// covariance is divided by, and a share of the dilute rate only: on a
     /// self-shielded or tallied run the covered share of the rate actually
     /// used is not computed. See [`Info::partials_above_rate`] for when that
-    /// rate disagrees with the partials. No entry for a channel whose dilute
-    /// rate over the flux range is zero. Every consumed self-covariance block
-    /// counts where its own diagonal is nonzero, relative (LB=1 to 6),
-    /// absolute (LB=0) and short-range (LB=8) alike.
+    /// rate disagrees with the partials. Exact under the flat within-group
+    /// weight; under `Weighting::OneOverE` a group a covariance edge cuts is
+    /// split by energy width rather than lethargy, so the share is off there.
+    /// No entry for a channel whose dilute rate over the flux range is zero.
+    /// Every consumed self-covariance block counts where its own diagonal is
+    /// nonzero, relative (LB=1 to 6), absolute (LB=0) and short-range (LB=8)
+    /// alike.
     pub rate_fraction_covered: BTreeMap<(String, String), f64>,
     /// Per (nuclide, reaction kind), where the partial rates a relative
     /// covariance block was weighted with, zero variance intervals included,
@@ -259,7 +262,14 @@ pub struct Info {
     /// per-channel shares are of the dilute rate, and shielding moves rate
     /// out of the resonance range, where capture blocks often state zero, so
     /// weighting them by the shielded or tallied production would give a
-    /// figure that is not the share its name claims.
+    /// figure that is not the share its name claims. `None` under
+    /// `Weighting::OneOverE`, whose shares are not exact where a covariance
+    /// edge cuts a group (see [`Info::rate_fraction_covered`]). `None` too
+    /// where a channel is listed in [`Info::partials_above_rate`] or
+    /// [`Info::partials_below_rate`]: its rate is not the one its partials and
+    /// share are of. The `(n,n')` of a nuclide with a metastable is the known
+    /// dilute case, its rate replaced by the MF=10 partials to the metastables
+    /// while its covariance and share are MT 4's.
     ///
     /// The number to read before any sigma here, and not the same question as
     /// how many nuclides carry MF=33: an evaluation can state covariance for
@@ -349,10 +359,17 @@ pub struct Info {
 
 impl Info {
     /// `dilute` is whether the rates the fold was divided by are the dilute
-    /// collapse, the only case in which the production total is the covered
-    /// share.
-    pub(crate) fn from_fold(coverage: &Coverage, clipping: &Clipping, dilute: bool) -> Self {
-        Self {
+    /// collapse under the flat within-group weight. Only then, and with no
+    /// channel's partials disagreeing with its rate, is the production total
+    /// the covered share. An error when a share is not one, see
+    /// [`Coverage::rate_fraction_total`].
+    pub(crate) fn from_fold(
+        coverage: &Coverage,
+        clipping: &Clipping,
+        dilute: bool,
+    ) -> Result<Self, String> {
+        let total = coverage.rate_fraction_total()?;
+        Ok(Self {
             perturbed: coverage.covered.clone(),
             no_covariance_data: coverage.without_data.clone(),
             skipped_cross_material: coverage.skipped_cross_material,
@@ -362,7 +379,11 @@ impl Info {
             rate_fraction_covered: coverage.rate_fraction_covered.clone(),
             partials_above_rate: coverage.partials_above_rate.clone(),
             partials_below_rate: coverage.partials_below_rate.clone(),
-            rate_fraction_covered_total: coverage.rate_fraction_total().filter(|_| dilute),
+            rate_fraction_covered_total: total.filter(|_| {
+                dilute
+                    && coverage.partials_above_rate.is_empty()
+                    && coverage.partials_below_rate.is_empty()
+            }),
             matrices_clipped: clipping.matrices_clipped,
             worst_relative_clip: clipping.worst_relative_clip,
             not_perturbed: [
@@ -387,7 +408,7 @@ impl Info {
             .map(|s| s.to_string())
             .collect(),
             ..Default::default()
-        }
+        })
     }
 
     pub(crate) fn add_flux_coverage(&mut self, c: &crate::flux_uncertainty::FluxCoverage) {
@@ -846,7 +867,8 @@ mod tests {
     /// and continua both, so a reader does not take their silence for zero.
     #[test]
     fn the_report_names_the_photon_sources_held_at_nominal() {
-        let info = Info::from_fold(&Coverage::default(), &Clipping::default(), true);
+        let info = Info::from_fold(&Coverage::default(), &Clipping::default(), true)
+            .expect("no shares to check");
         for source in [
             "decay photon line energy and intensity (MF=8 MT=457)",
             "decay photon continuum normalisation and shape (MF=8 MT=457 continuum and its covariance)",
@@ -969,18 +991,65 @@ mod tests {
             ..Default::default()
         };
         let clipping = Clipping::default();
-        let dilute = Info::from_fold(&coverage, &clipping, true);
+        let dilute = Info::from_fold(&coverage, &clipping, true).expect("shares are shares");
         assert_eq!(dilute.rate_fraction_covered_total, Some(0.25));
-        let other = Info::from_fold(&coverage, &clipping, false);
+        let other = Info::from_fold(&coverage, &clipping, false).expect("shares are shares");
         assert_eq!(other.rate_fraction_covered_total, None);
         assert_eq!(other.rate_fraction_covered, coverage.rate_fraction_covered);
+    }
+
+    /// A dilute run whose partials disagree with a channel's rate has a
+    /// production that is not the rate its share is of, as a grafted `(n,n')`
+    /// weighted by MT 4 has. The total is withheld there too, and the
+    /// per-channel shares and the listed ratio stay.
+    #[test]
+    fn a_dilute_run_with_partials_off_the_rate_reports_no_total() {
+        let key = ("Rh103".to_string(), "(n,n')".to_string());
+        for (above, below) in [
+            (BTreeMap::from([(key.clone(), 4.0)]), BTreeMap::new()),
+            (BTreeMap::new(), BTreeMap::from([(key.clone(), 0.5)])),
+        ] {
+            let coverage = Coverage {
+                rate_fraction_covered: BTreeMap::from([(key.clone(), 0.25)]),
+                partials_above_rate: above,
+                partials_below_rate: below,
+                covered_production: 1.0,
+                total_production: 4.0,
+                ..Default::default()
+            };
+            let info =
+                Info::from_fold(&coverage, &Clipping::default(), true).expect("shares are shares");
+            assert_eq!(info.rate_fraction_covered_total, None);
+            assert_eq!(info.rate_fraction_covered, coverage.rate_fraction_covered);
+        }
+    }
+
+    /// A share outside [0, 1] needs a negative cross section, flux or
+    /// production, which nothing upstream rules out. It fails the run with a
+    /// message naming it rather than panicking or being clamped into range.
+    #[test]
+    fn a_share_outside_zero_to_one_is_an_error() {
+        let channel = Coverage {
+            rate_fraction_covered: BTreeMap::from([(("W186".into(), "(n,gamma)".into()), 1.5)]),
+            ..Default::default()
+        };
+        let err = Info::from_fold(&channel, &Clipping::default(), true).unwrap_err();
+        assert!(err.contains("W186 (n,gamma)"), "{err}");
+        let total = Coverage {
+            covered_production: 5.0,
+            total_production: 4.0,
+            ..Default::default()
+        };
+        let err = Info::from_fold(&total, &Clipping::default(), true).unwrap_err();
+        assert!(err.contains("not a share"), "{err}");
     }
 
     /// Every input held at nominal whatever the run was, named so a reader
     /// does not have to know the code to see what the sigma leaves out.
     #[test]
     fn the_report_names_every_input_held_at_nominal() {
-        let info = Info::from_fold(&Coverage::default(), &Clipping::default(), true);
+        let info = Info::from_fold(&Coverage::default(), &Clipping::default(), true)
+            .expect("no shares to check");
         for held in [
             "fission yield",
             "isomeric branching (MF=9/MF=10)",

@@ -709,7 +709,14 @@ fn attach_evaluated_yields(
         for i in 0..batch.num_rows() {
             let (nuclide, energy, kind) = (nuclides.value(i), energies.value(i), kinds.value(i));
             let products = list_str(products_col, i)?;
-            let yields = list_f64(yields_col, i)?;
+            // Read the items as optional so a null yield is refused rather
+            // than loaded as a stated 0.0, which list_f64 would do.
+            let yields = list_opt_f64(yields_col, i)?
+                .into_iter()
+                .collect::<Option<Vec<f64>>>()
+                .ok_or_else(|| {
+                    format!("{SECTION}: {nuclide} {kind} at {energy} eV has a null yield")
+                })?;
             let uncertainties = if sigmas_col.is_null(i) {
                 vec![None; products.len()]
             } else {
@@ -764,7 +771,7 @@ fn attach_evaluated_yields(
 /// Parse a v2 split chain from bytes, with no filesystem involved.
 ///
 /// The filesystem entry point is [`parse_chain_parts`], which reads the same
-/// eight files and delegates here.
+/// files and delegates here.
 pub fn parse_chain_parts_from_bytes(
     parts: &ChainSections,
 ) -> Result<(HashMap<String, ChainNuclide>, BranchTable), Box<dyn Error>> {
@@ -1066,6 +1073,7 @@ pub fn parse_chain_parts_from_bytes(
                     }
 
                     branch_table
+                        .curves_mut()
                         .entry(parent.to_string())
                         .or_default()
                         .entry(kind)
@@ -1079,6 +1087,16 @@ pub fn parse_chain_parts_from_bytes(
                 }
             }
         }
+    }
+
+    // branching/branching_covariance.arrow -- the optional MF=40 covariance of
+    // those curves. Held whole, as the file's batches: see `BranchTable`.
+    if let Some(bytes) = parts.branching.get("branching_covariance.arrow") {
+        branch_table.set_covariance(read_section_bytes(
+            bytes,
+            "branching/branching_covariance.arrow",
+            "branching/branching_covariance.arrow",
+        )?);
     }
 
     Ok((chain, branch_table))
@@ -1146,6 +1164,13 @@ pub fn parse_chain_parts(
     }
     if let Some(branch_dir) = branch_dir {
         load_optional(branch_dir, "branching.arrow", &mut parts.branching)?;
+        // An `.absent` marker, a settled 404 in the download cache, is not the
+        // file, so it loads as no covariance.
+        load_optional(
+            branch_dir,
+            "branching_covariance.arrow",
+            &mut parts.branching,
+        )?;
     }
 
     parse_chain_parts_from_bytes(&parts)
@@ -2885,6 +2910,32 @@ mod tests {
         );
     }
 
+    /// A null yield is not a stated one, so it is refused rather than read as
+    /// an exact 0.0.
+    #[test]
+    fn an_evaluated_yield_with_a_null_item_is_refused() {
+        let parts = tampered_sections(|batch| {
+            let mut yields =
+                arrow_array::builder::ListBuilder::new(arrow_array::builder::Float64Builder::new());
+            yields.values().append_value(0.05);
+            yields.values().append_null();
+            yields.values().append_value(0.01);
+            yields.append(true);
+            yields.values().append_slice(&[0.0619]);
+            yields.append(true);
+            vec![replace_column(
+                batch,
+                "yields",
+                std::sync::Arc::new(yields.finish()),
+            )]
+        });
+        let err = refusal(&parts);
+        assert!(
+            err.contains("U235 independent at 0.0253 eV has a null yield"),
+            "got: {err}"
+        );
+    }
+
     /// With no nominal yields supplied at all, every evaluated row is an
     /// orphan, and the reader says which file is missing.
     #[test]
@@ -2943,6 +2994,88 @@ mod tests {
         .expect_err("a directory with no decay index must not load")
         .to_string();
         assert!(err.contains("v2 split chain"), "got: {err}");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The MF=40 covariance is loaded when the file is there and only then: a
+    /// settled-404 marker is no covariance, a file that is not the declared
+    /// section is an error rather than a silent "none", and a bytes-fed host
+    /// gets it by handing the file over.
+    #[test]
+    fn the_branching_covariance_loads_only_when_the_file_exists() {
+        let root = std::env::temp_dir().join(format!("yani-branch-cov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut chain: std::collections::HashMap<String, crate::ChainNuclide> =
+            std::collections::HashMap::new();
+        chain.insert(
+            "Nb93".to_string(),
+            crate::ChainNuclide {
+                name: "Nb93".to_string(),
+                half_life: None,
+                half_life_uncertainty: None,
+                decay_energy: 0.0,
+                decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
+                reactions: Vec::new(),
+                decays: Vec::new(),
+                fission_yields: None,
+                sources: Vec::new(),
+            },
+        );
+        super::export_chain_parts(&chain, &root, Some("test")).expect("export succeeds");
+        // A real file of the declared schema, with no rows: what is in a row
+        // is the converter's round trip to test, not this loader's.
+        let schema = std::sync::Arc::new(nuclear_data_schema::branching_branching_covariance());
+        let mut file = Vec::new();
+        {
+            let mut writer =
+                arrow_ipc::writer::FileWriter::try_new(&mut file, &schema).expect("writer");
+            writer
+                .write(&arrow_array::RecordBatch::new_empty(schema.clone()))
+                .expect("write");
+            writer.finish().expect("finish");
+        }
+        let (with, marker, broken) = (root.join("with"), root.join("marker"), root.join("broken"));
+        for dir in [&with, &marker, &broken] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(with.join("branching_covariance.arrow"), &file).unwrap();
+        std::fs::write(marker.join("branching_covariance.arrow.absent"), b"").unwrap();
+        std::fs::write(broken.join("branching_covariance.arrow"), b"not arrow").unwrap();
+
+        let load = |branch: &std::path::Path| {
+            parse_chain_parts(&root.join("decay"), None, None, Some(branch))
+        };
+        let loaded = load(&with).expect("load succeeds").1;
+        let batches = loaded.covariance().expect("the covariance is loaded");
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
+        assert_eq!(batches[0].schema().fields().len(), schema.fields().len());
+        assert!(load(&marker)
+            .expect("load succeeds")
+            .1
+            .covariance()
+            .is_none());
+        assert!(
+            load(&broken).is_err(),
+            "an unreadable covariance is not silence"
+        );
+
+        let mut sections = super::ChainSections::default();
+        sections
+            .insert(
+                "decay",
+                "nuclides.arrow",
+                std::fs::read(root.join("decay/nuclides.arrow")).unwrap(),
+            )
+            .unwrap();
+        let (_, without) = super::parse_chain_parts_from_bytes(&sections).expect("bytes load");
+        assert!(without.covariance().is_none());
+        sections
+            .insert("branching", "branching_covariance.arrow", file)
+            .unwrap();
+        let (_, with_bytes) = super::parse_chain_parts_from_bytes(&sections).expect("bytes load");
+        assert!(with_bytes.covariance().is_some());
 
         std::fs::remove_dir_all(&root).unwrap();
     }

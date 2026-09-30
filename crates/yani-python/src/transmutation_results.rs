@@ -617,9 +617,15 @@ impl PyTransmutationResults {
     ///   averaged with each channel weighted by the production it drove (the
     ///   rate this run used times parent density): the share of the
     ///   production driven from energies where a covariance states a nonzero
-    ///   variance. ``None`` on a decay-only schedule, and on a self-shielded
-    ///   or transport run, where the shares are of the dilute rate and the
-    ///   covered share of the production actually driven is not computed.
+    ///   variance. ``None`` on a decay-only schedule, on a self-shielded or
+    ///   transport run, where the shares are of the dilute rate and the
+    ///   covered share of the production actually driven is not computed,
+    ///   and under the ``1/E`` within-group weight (Rust API only), whose
+    ///   shares are not exact where a covariance edge cuts a group.
+    ///   ``None`` too when a channel is listed in ``partials_above_rate`` or
+    ///   ``partials_below_rate``, whose rate is not the one its share is of:
+    ///   the ``(n,n')`` of a nuclide with a metastable, whose rate is the
+    ///   MF=10 production of the metastables while its covariance is MT 4's.
     ///   Read this before any sigma here. It is a different and much sharper
     ///   question than how many nuclides carry MF=33: an evaluation can state
     ///   covariance for every isotope in the material and none for the
@@ -635,18 +641,24 @@ impl PyTransmutationResults {
     ///   to 10 keV, where nearly all of its capture rate is. Every consumed
     ///   self-covariance block counts where it states a nonzero variance,
     ///   relative (LB=1 to 6), absolute (LB=0) and short-range (LB=8) alike.
+    ///   Exact under the default flat within-group weight; under the ``1/E``
+    ///   weight (Rust API only) the rate of a group a covariance edge cuts is
+    ///   split by energy width, not lethargy, so the share is off there.
     /// - ``partials_above_rate``: per nuclide and channel, where the partial
     ///   rates the covariance was weighted with, zero variance intervals
     ///   included, add up to more than the rate it was divided by, their
-    ///   ratio to it. Each entry is a channel whose sigma is overstated. Three
+    ///   ratio to it. Each entry is a channel whose sigma is overstated. Four
     ///   known causes: a self-shielded rate against dilute partials, which
     ///   lists most channels a relative block names, many a few parts in 1e7
     ///   over, until the fold weights with shielded partials (#166 item 4); a
     ///   tallied rate on a transport run, computed apart from the partials
-    ///   the fold takes from the tally's flux; and the ``1/E`` within-group
-    ///   weight with a covariance edge inside a group. The share in
-    ///   ``rate_fraction_covered`` is measured against the dilute rate, so it
-    ///   is unaffected.
+    ///   the fold takes from the tally's flux; a grafted ``(n,n')``, whose
+    ///   rate is the metastables' MF=10 production while the partials are
+    ///   MT 4's; and the ``1/E`` within-group weight (Rust API only) with a
+    ///   covariance edge inside a group. The share in
+    ///   ``rate_fraction_covered`` is of the dilute rate of the reaction the
+    ///   partials are of, not of the listed rate, and under the ``1/E``
+    ///   weight it is off as well wherever an edge cuts a group.
     /// - ``partials_below_rate``: keyed the same way, where a covariance grid
     ///   spans the whole flux range and its partial rates add up to less than
     ///   the rate, their ratio to it: a channel whose sigma is understated.

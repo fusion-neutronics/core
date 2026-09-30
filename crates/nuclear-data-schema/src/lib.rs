@@ -38,6 +38,10 @@ pub mod reaction_ranges;
 pub fn all_sections() -> Vec<(&'static str, Schema)> {
     vec![
         ("branching/branching.arrow", branching_branching()),
+        (
+            "branching/branching_covariance.arrow",
+            branching_branching_covariance(),
+        ),
         ("bremsstrahlung.arrow", bremsstrahlung()),
         ("compton.arrow", compton()),
         ("covariance.arrow", covariance()),
@@ -232,6 +236,122 @@ pub fn branching_branching() -> Schema {
     ])
     .with_metadata(meta([
         ("filetype", "transmutation-branching"),
+        ("version", "2.0"),
+    ]))
+}
+
+/// `branching/branching_covariance.arrow`
+///
+/// MF=40, the covariance of the radionuclide production cross sections that
+/// `branching.arrow` carries as MF=10 partials: the stated uncertainty of an
+/// isomeric split. Optional, like `covariance.arrow` and for the same reasons:
+/// a library without MF=40 writes no such file, a branching directory published
+/// before it has none, and a reader treats absence as "no covariance", never as
+/// an error.
+///
+/// Every covariance block of every MF=40 section of every evaluation, not a
+/// selection. One row per block, which is one NC or NI block of one
+/// sub-subsection of one product state. Every tape value is written as the tape
+/// gives it: nothing is normalised, and a state the converter could not place
+/// in the chain is still written, with a null `target`. A section with no
+/// product state (NS 0), a product state with no sub-subsection (NL 0), or a
+/// sub-subsection with no block (NC and NI 0), holds no covariance and so has
+/// no row, and the counts NS, NL, NC and NI are not columns, being the row
+/// counts. The converter lists each such part, with its tape values, under
+/// `mf40_without_blocks` in `branching/provenance.json` instead. None of the
+/// published libraries has one.
+///
+/// The first columns are the converter's key, the rest are the tape's:
+///
+/// * `nuclide` is the parent, named as `branching.arrow` names it.
+///   `reaction` is the chain kind the section's MT maps to, null for an MT
+///   with none (TENDL writes MF=40 for MT 18 with IZAP 0).
+/// * `target` is the chain nuclide the product state (`izap`, `lfs`) is the
+///   partial of, which is the `target` of the `branching.arrow` row for
+///   (`nuclide`, `reaction`). Null when no MF=9 or MF=10 state of that MT
+///   matched it, when several states of one chain nuclide sit within the
+///   converter's tolerance of its excitation, since taking the nearest would
+///   guess which partial weights the covariance, or when the state is excited
+///   (`lfs` above 0) with `qm - qi` not positive, since then nothing on the
+///   tape confirms which MF=9 or MF=10 level its `lfs` names; each such state
+///   is listed under `mf40_unmatched_states` in `branching/provenance.json`.
+///   A ground state (`lfs` 0) is taken at zero excitation whatever its
+///   `qm - qi`, as MF=9 and MF=10 grounds are. A match by excitation never puts an excited state on a ground partial,
+///   or the reverse, and one made because MF=9 and MF=10 give the state's
+///   (`izap`, `lfs`) no state or one at another excitation is listed under
+///   `mf40_states_placed_by_excitation` there. `target1` is
+///   the same for the partner state the block correlates this one with, level
+///   `xlfs1` of reaction `mt1`: the match of the one state of `mt1`'s MF=40
+///   section at LFS `xlfs1`, as that state's own row's `target` is. Null when
+///   the partner is in another material, `xmf1` is not 10, `mt1` is 0 (which
+///   the manual gives no meaning in MF=40), or the tape does not pin the
+///   partner to one state. MF=40 gives no IZAP for it, so a level that two
+///   MF=40 states of `mt1` share, or an MF=9 or MF=10 state of another product,
+///   is left null rather than read as this row's own product. So is an `mt1`
+///   with no MF=40 section, or no MF=40 state at `xlfs1`, whose level XLFS1
+///   would have to be read in MF=10's
+///   numbering with no excitation to check it by. The manual numbers XLFS1 as
+///   MF=10 does and MF=40 need not (ENDF/B-VIII.1 Pb204 MT 4, LFS 21 in MF=10
+///   and 1 in MF=40), so `target1` is also null where MF=10 of `mt1` gives the
+///   partner's product no state at LFS `xlfs1`, or one at another excitation
+///   than the MF=40 state there. Each such null is listed under
+///   `mf40_partner_unresolved` in `branching/provenance.json`. A state's block
+///   with itself (`mt1` and `xlfs1` its own `mt` and `lfs`) names the state by
+///   its own subsection's label, so its `target1` is its `target` unless a
+///   second MF=40 state of `mt` carries that label; where that label is not
+///   MF=10's number for the level, the state is one of those listed under
+///   `mf40_states_placed_by_excitation`. Several levels can
+///   resolve to one chain nuclide: JEFF-4.0 U235 MT 4 correlates its ground
+///   (LFS 0) with its 77 eV isomer (XLFS1 1), both U235. So a consumer keys a
+///   block on (`mt`, `lfs`, `mt1`, `xlfs1`), never on (`target`, `target1`).
+/// * `energy` and `values` are this state's own curve, linearized by the
+///   converter exactly as `branching.arrow` has it (the tape's own points
+///   when every region is lin-lin), and are written only when several states
+///   resolved to one target in one quantity, which `branching.arrow` then
+///   carries as their sum. `quantity` says which of the target's curves is
+///   this state's, as `branching.arrow`'s column does: `"cross_section"` for
+///   an MF=10 partial, `"yield"` for an MF=9 yield, whose partial is that
+///   yield times the MF=3 cross section of the MT. It is written for every
+///   placed state (`target` set), merged or not, since one target can have
+///   both a yield row and a cross-section row. A relative covariance of one
+///   state has to be weighted by that state's own partial to fold exactly.
+///   `energy` and `values` null with `quantity` set means the
+///   `branching.arrow` row for (`nuclide`, `reaction`, `target`, `quantity`)
+///   is that state's own curve.
+/// * `mat` is the evaluation's MAT, so a reader can tell a `mat1` naming the
+///   evaluation itself (JEFF-4.0 U235 MT 4 writes its own 9228 there) from a
+///   correlation with another material.
+/// * `za`, `awr` and `lis` are the section HEAD. `state_idx` is the product
+///   state's position in the section and `qm`, `qi`, `izap` and `lfs` its CONT,
+///   verbatim: JEFF-4.0 U235 MT 4 writes IZAP 0 for the target itself, and
+///   ENDF/B-VIII.1 Pb204 MT 4 numbers its isomer LFS 1 here and 21 in MF=10.
+///
+/// Every column after `lfs` is [`covariance`]'s, verbatim and in order, so one
+/// writer and one reader serve both files. `subsection_idx` there is the
+/// sub-subsection's position within its product state, and `mtl` is always
+/// null, since MF=40 has no lumped-reaction flag.
+pub fn branching_branching_covariance() -> Schema {
+    let mut fields = vec![
+        utf8("nuclide", false),
+        utf8("reaction", true),
+        utf8("target", true),
+        utf8("target1", true),
+        f64s("energy", true),
+        f64s("values", true),
+        utf8("quantity", true),
+        i32("mat", false),
+        i32("za", false),
+        f64("awr", false),
+        i32("lis", false),
+        i32("state_idx", false),
+        f64("qm", false),
+        f64("qi", false),
+        i32("izap", false),
+        i32("lfs", false),
+    ];
+    fields.extend(covariance().fields().iter().map(|f| f.as_ref().clone()));
+    Schema::new(fields).with_metadata(meta([
+        ("filetype", "transmutation-branching_covariance"),
         ("version", "2.0"),
     ]))
 }
@@ -751,7 +871,7 @@ mod tests {
         let sections = all_sections();
         assert_eq!(
             sections.len(),
-            21,
+            22,
             "section count changed; update the manifest"
         );
         let mut paths: Vec<&str> = sections.iter().map(|(p, _)| *p).collect();

@@ -2410,10 +2410,10 @@ fn unported_files_keep_their_text() {
 /// below fails when a fixture starts covering one of them, which is the moment
 /// the entry should be deleted.
 ///
-/// MF=32 is here for a different reason: the Python reader does not parse it,
-/// so a fixture would have no golden to compare against. `mf32_tapes.rs`
-/// walks it on the full libraries instead.
-const UNCOVERED_BY_ANY_FIXTURE: [i32; 2] = [32, 40];
+/// MF=32, the only entry today, is here for a different reason: the Python
+/// reader does not parse it, so a fixture would have no golden to compare
+/// against. `mf32_tapes.rs` walks it on the full libraries instead.
+const UNCOVERED_BY_ANY_FIXTURE: [i32; 1] = [32];
 
 /// The MF files that have a Rust parser at all.
 const PORTED: [i32; 22] = [
