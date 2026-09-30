@@ -6,8 +6,9 @@
 /// Provides both CRAM16 (order 16, 8 conjugate pairs) and CRAM48 (order 48,
 /// 24 conjugate pairs). CRAM48 is the default and recommended solver.
 ///
-/// Both dense and sparse variants are provided. The sparse variants use
-/// `faer`'s sparse LU solver with symbolic factorization reuse across poles.
+/// Both dense and sparse variants are provided. The sparse variants solve
+/// block by block over the production graph, with `faer`'s sparse LU (its
+/// symbolic factorization reused across poles) for each block with a cycle.
 ///
 /// Based on:
 /// - Pusa, M. (2010). "Rational Approximations to the Matrix Exponential
@@ -191,11 +192,225 @@ fn solve_complex(
     Ok(x)
 }
 
-/// Sparse CRAM solver core using faer's sparse LU.
+/// A diagonal block of the transmutation matrix in block lower triangular
+/// form.
+enum Block {
+    /// A nuclide on no production cycle. Once its feeders are solved its row
+    /// of `(A dt - theta I) x = y` has one unknown.
+    Single { row: usize, diag: f64 },
+    /// Nuclides that feed one another round a cycle, factored together.
+    Coupled(Box<CoupledBlock>),
+}
+
+/// A strongly connected set of nuclides and the sparse LU of its own
+/// submatrix, the symbolic part computed once and reused for every pole.
+struct CoupledBlock {
+    rows: Vec<usize>,
+    symbolic_mat: SymbolicSparseColMat<usize>,
+    symbolic_lu: sparse_lu::SymbolicLu<usize>,
+    numeric_lu: sparse_lu::NumericLu<usize, c64>,
+    mem_buf: MemBuffer,
+    base_vals: Vec<f64>,
+    diag_idx: Vec<usize>,
+    vals: Vec<c64>,
+    rhs: Mat<c64>,
+}
+
+impl CoupledBlock {
+    /// `local` holds the block's own entries of `A * dt` in block-local
+    /// indices, duplicates allowed.
+    fn new(rows: Vec<usize>, local: &[(usize, usize, f64)]) -> Result<Self, String> {
+        let n = rows.len();
+        // The pattern is A's nonzeros and the full diagonal, since
+        // (A*dt - theta*I) has a nonzero diagonal even where A has none.
+        let mut positions: Vec<(usize, usize)> = Vec::with_capacity(local.len() + n);
+        positions.extend(local.iter().map(|&(r, c, _)| (r, c)));
+        positions.extend((0..n).map(|i| (i, i)));
+        // Sorted by (col, row) for CSC.
+        positions.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        positions.dedup();
+        let find = |r: usize, c: usize| {
+            positions
+                .binary_search_by(|p| p.1.cmp(&c).then(p.0.cmp(&r)))
+                .expect("position is in the pattern")
+        };
+
+        let mut col_ptr: Vec<usize> = vec![0; n + 1];
+        let mut row_idx: Vec<usize> = Vec::with_capacity(positions.len());
+        for &(r, c) in &positions {
+            col_ptr[c + 1] += 1;
+            row_idx.push(r);
+        }
+        for j in 0..n {
+            col_ptr[j + 1] += col_ptr[j];
+        }
+        let diag_idx: Vec<usize> = (0..n).map(|i| find(i, i)).collect();
+        let mut base_vals = vec![0.0f64; positions.len()];
+        for &(r, c, v) in local {
+            base_vals[find(r, c)] += v;
+        }
+
+        let symbolic_mat = SymbolicSparseColMat::<usize>::new_checked(n, n, col_ptr, None, row_idx);
+        let symbolic_lu =
+            sparse_lu::factorize_symbolic_lu(symbolic_mat.as_ref(), Default::default())
+                .map_err(|e| format!("Sparse LU symbolic factorization error: {e:?}"))?;
+        let par = Par::Seq;
+        let factor_req = symbolic_lu.factorize_numeric_lu_scratch::<c64>(par, Default::default());
+        let solve_req = symbolic_lu.solve_in_place_scratch::<c64>(1, par);
+        let mem_buf = MemBuffer::try_new(factor_req.or(solve_req))
+            .map_err(|_| "Failed to allocate sparse LU workspace")?;
+
+        Ok(Self {
+            rows,
+            symbolic_mat,
+            symbolic_lu,
+            numeric_lu: sparse_lu::NumericLu::new(),
+            mem_buf,
+            vals: vec![c64::new(0.0, 0.0); base_vals.len()],
+            base_vals,
+            diag_idx,
+            rhs: Mat::<c64>::zeros(n, 1),
+        })
+    }
+
+    /// Solve `(A_BB dt - theta I) x = rhs` in place in `self.rhs`.
+    fn solve_in_place(&mut self, theta: c64) -> Result<(), String> {
+        let par = Par::Seq;
+        for (v, &bv) in self.vals.iter_mut().zip(&self.base_vals) {
+            *v = c64::new(bv, 0.0);
+        }
+        for &di in &self.diag_idx {
+            self.vals[di] -= theta;
+        }
+        let mat_ref = SparseColMatRef::<usize, c64>::new(self.symbolic_mat.as_ref(), &self.vals);
+        let lu_ref = self
+            .symbolic_lu
+            .factorize_numeric_lu(
+                &mut self.numeric_lu,
+                mat_ref,
+                par,
+                MemStack::new(&mut self.mem_buf),
+                Default::default(),
+            )
+            .map_err(|e| format!("Sparse LU numeric factorization error: {e:?}"))?;
+        lu_ref.solve_in_place_with_conj(
+            Conj::No,
+            self.rhs.as_mut(),
+            par,
+            MemStack::new(&mut self.mem_buf),
+        );
+        Ok(())
+    }
+}
+
+/// The strongly connected components of the production graph, upstream first.
 ///
-/// Key optimization: symbolic factorization is computed once and reused
-/// for all poles, since the sparsity pattern (A*dt - theta*I) is
-/// identical across poles.
+/// An edge runs from `col` to `row` for every off-diagonal nonzero `A[row,
+/// col]`: `col` makes `row`. Every block's feeders from outside it come in an
+/// earlier block. Tarjan's algorithm, iterative so a long decay chain cannot
+/// overflow the stack; it closes a component only after everything downstream
+/// of it, so its order is reversed on the way out.
+fn production_blocks(n: usize, triplets: &[(usize, usize, f64)]) -> Vec<Vec<usize>> {
+    let mut succ_ptr = vec![0usize; n + 1];
+    for &(r, c, v) in triplets {
+        if r != c && v != 0.0 {
+            succ_ptr[c + 1] += 1;
+        }
+    }
+    for i in 0..n {
+        succ_ptr[i + 1] += succ_ptr[i];
+    }
+    let mut fill = succ_ptr.clone();
+    let mut succ = vec![0usize; succ_ptr[n]];
+    for &(r, c, v) in triplets {
+        if r != c && v != 0.0 {
+            succ[fill[c]] = r;
+            fill[c] += 1;
+        }
+    }
+
+    const UNSEEN: usize = usize::MAX;
+    let mut index = vec![UNSEEN; n];
+    let mut low = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut call: Vec<(usize, usize)> = Vec::new();
+    let mut blocks: Vec<Vec<usize>> = Vec::new();
+    let mut next = 0usize;
+    for root in 0..n {
+        if index[root] != UNSEEN {
+            continue;
+        }
+        index[root] = next;
+        low[root] = next;
+        next += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        call.push((root, succ_ptr[root]));
+        while let Some(top) = call.last_mut() {
+            let v = top.0;
+            if top.1 < succ_ptr[v + 1] {
+                let w = succ[top.1];
+                top.1 += 1;
+                if index[w] == UNSEEN {
+                    index[w] = next;
+                    low[w] = next;
+                    next += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    call.push((w, succ_ptr[w]));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+                continue;
+            }
+            call.pop();
+            if let Some(&(parent, _)) = call.last() {
+                low[parent] = low[parent].min(low[v]);
+            }
+            if low[v] == index[v] {
+                let mut block = Vec::new();
+                loop {
+                    let w = stack.pop().expect("v is on the stack");
+                    on_stack[w] = false;
+                    block.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                block.sort_unstable();
+                blocks.push(block);
+            }
+        }
+    }
+    blocks.reverse();
+    blocks
+}
+
+/// Sparse CRAM solver core: block forward substitution over the production
+/// graph, with faer's sparse LU inside each block that has a cycle.
+///
+/// Each pole solves `(A*dt - theta*I) x = y`. Factoring that whole matrix with
+/// partial pivoting is not safe for a short-lived nuclide. Its column holds
+/// `-lambda*dt - theta` on the diagonal and `+lambda*dt` in its daughter's row,
+/// and once `lambda*dt` passes 65.75 the pole at `-44.66 + 62.33i` makes the
+/// daughter's entry the larger, so the pivot swaps the daughter's row in. When
+/// the daughter is the stable bulk of the material, the short-lived nuclide's
+/// unknown is then read off the bulk's equation as a difference of bulk-sized
+/// numbers, and what comes back is a residue near 1e-19 of the bulk rather
+/// than its population. Zr90m held in equilibrium by Y90m in a cooling
+/// zirconium foil is 7e-23 of the bulk; it came back as noise of either sign,
+/// decided by the last bit of the step length, and carried up to a tenth of
+/// the foil's decay heat.
+///
+/// The matrix is block lower triangular in the order the production graph
+/// runs. A nuclide on no cycle is its own block, and once its feeders are
+/// solved its row has one unknown: no pivoting, nothing downstream mixed in,
+/// so it is as accurate as its feeders. Only a genuine cycle (reactions during
+/// irradiation, mostly) is factored, and pivoting inside it can only mix
+/// nuclides that feed one another. It is the same linear system; only where
+/// the rounding lands moves. Where only decay connects nuclides, as in a
+/// cooldown, every block is normally a single nuclide.
 fn cram_solve_sparse(
     triplets: &[(usize, usize, f64)],
     n: usize,
@@ -209,111 +424,80 @@ fn cram_solve_sparse(
         return Ok(n0.to_vec());
     }
 
-    // Build augmented sparsity pattern: A's nonzeros ∪ full diagonal.
-    // We need the full diagonal because (A*dt - theta*I) always has
-    // nonzero diagonal, even if A's diagonal is zero (stable nuclides).
-    //
-    // Step 1: Collect unique (row, col) positions including all diagonal entries.
-    let mut positions: Vec<(usize, usize)> = Vec::with_capacity(triplets.len() + n);
-    for &(r, c, _) in triplets {
-        positions.push((r, c));
-    }
-    for i in 0..n {
-        positions.push((i, i));
-    }
-    // Sort by (col, row) for CSC and deduplicate
-    positions.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
-    positions.dedup();
-    let nnz = positions.len();
-
-    // Step 2: Build CSC index arrays from sorted unique positions.
-    let mut col_ptr: Vec<usize> = vec![0; n + 1];
-    let mut row_idx: Vec<usize> = Vec::with_capacity(nnz);
-    for &(r, c) in &positions {
-        col_ptr[c + 1] += 1;
-        row_idx.push(r);
-    }
-    // Cumulative sum for col_ptr
-    for j in 0..n {
-        col_ptr[j + 1] += col_ptr[j];
+    let components = production_blocks(n, triplets);
+    let mut block_of = vec![0usize; n];
+    let mut local_of = vec![0usize; n];
+    for (b, rows) in components.iter().enumerate() {
+        for (k, &i) in rows.iter().enumerate() {
+            block_of[i] = b;
+            local_of[i] = k;
+        }
     }
 
-    // Record diagonal indices via binary search on sorted positions.
-    let diag_idx: Vec<usize> = (0..n)
-        .map(|i| {
-            positions
-                .binary_search_by(|p| p.1.cmp(&i).then(p.0.cmp(&i)))
-                .expect("diagonal must be present")
-        })
-        .collect();
-
-    // Step 3: Build symbolic sparsity pattern and do symbolic LU factorization (once).
-    let symbolic_mat =
-        SymbolicSparseColMat::<usize>::new_checked(n, n, col_ptr.clone(), None, row_idx.clone());
-    let symbolic_lu = sparse_lu::factorize_symbolic_lu(symbolic_mat.as_ref(), Default::default())
-        .map_err(|e| format!("Sparse LU symbolic factorization error: {e:?}"))?;
-
-    // Step 4: Allocate reusable buffers.
-    let par = Par::Seq;
-    let mut numeric_lu = sparse_lu::NumericLu::<usize, c64>::new();
-    let factor_req = symbolic_lu.factorize_numeric_lu_scratch::<c64>(par, Default::default());
-    let solve_req = symbolic_lu.solve_in_place_scratch::<c64>(1, par);
-    let total_req = factor_req.or(solve_req);
-    let mut mem_buf =
-        MemBuffer::try_new(total_req).map_err(|_| "Failed to allocate sparse LU workspace")?;
-
-    // Pre-compute A*dt values for each CSC position using binary search.
-    let mut base_vals = vec![0.0f64; nnz];
+    // Each row's entries of A*dt split three ways: its diagonal, feeders in
+    // its own block (into the block's matrix) and feeders upstream (onto the
+    // right-hand side).
+    let mut diag = vec![0.0f64; n];
+    let mut upstream: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    let mut local: Vec<Vec<(usize, usize, f64)>> = vec![Vec::new(); components.len()];
     for &(r, c, v) in triplets {
-        // Triplets may have duplicates -- accumulate.
-        // Binary search on sorted (col, row) positions.
-        let idx = positions
-            .binary_search_by(|p| p.1.cmp(&c).then(p.0.cmp(&r)))
-            .expect("triplet position must exist in positions");
-        base_vals[idx] += v * dt;
+        let value = v * dt;
+        if r == c {
+            diag[r] += value;
+        } else if block_of[r] == block_of[c] {
+            local[block_of[r]].push((local_of[r], local_of[c], value));
+        } else {
+            upstream[r].push((c, value));
+        }
+    }
+    let mut blocks = Vec::with_capacity(components.len());
+    for (b, rows) in components.into_iter().enumerate() {
+        if rows.len() == 1 {
+            blocks.push(Block::Single {
+                row: rows[0],
+                diag: diag[rows[0]],
+            });
+        } else {
+            let mut entries = std::mem::take(&mut local[b]);
+            for (k, &i) in rows.iter().enumerate() {
+                entries.push((k, k, diag[i]));
+            }
+            blocks.push(Block::Coupled(Box::new(CoupledBlock::new(rows, &entries)?)));
+        }
     }
 
-    // Step 5: For each pole, fill values and solve.
-    // Pre-allocate buffers reused across all poles.
     let mut y = n0.to_vec();
-    let mut vals = vec![c64::new(0.0, 0.0); nnz];
-    let mut rhs = Mat::<c64>::zeros(n, 1);
-
+    let mut x = vec![c64::new(0.0, 0.0); n];
     for (alpha_i, theta_i) in alpha.iter().zip(theta.iter()) {
-        // Fill complex values: A*dt for all entries, then subtract theta on diagonal.
         let theta_c = c64::new(theta_i.re, theta_i.im);
-        for (v, &bv) in vals.iter_mut().zip(base_vals.iter()) {
-            *v = c64::new(bv, 0.0);
+        let rhs_of = |i: usize, x: &[c64]| {
+            let mut b = c64::new(y[i], 0.0);
+            for &(j, value) in &upstream[i] {
+                b -= x[j] * value;
+            }
+            b
+        };
+        for block in &mut blocks {
+            match block {
+                Block::Single { row, diag } => {
+                    x[*row] = rhs_of(*row, &x) / (c64::new(*diag, 0.0) - theta_c);
+                }
+                Block::Coupled(coupled) => {
+                    for (k, &i) in coupled.rows.iter().enumerate() {
+                        coupled.rhs[(k, 0)] = rhs_of(i, &x);
+                    }
+                    coupled.solve_in_place(theta_c)?;
+                    for (k, &i) in coupled.rows.iter().enumerate() {
+                        x[i] = coupled.rhs[(k, 0)];
+                    }
+                }
+            }
         }
-        for &di in &diag_idx {
-            vals[di] -= theta_c;
-        }
-
-        // Create SparseColMatRef from the symbolic pattern + values.
-        let sym_ref = symbolic_mat.as_ref();
-        let mat_ref = SparseColMatRef::<usize, c64>::new(sym_ref, &vals);
-
-        // Numeric LU factorization (reuses symbolic + numeric buffer).
-        let lu_ref = symbolic_lu
-            .factorize_numeric_lu(
-                &mut numeric_lu,
-                mat_ref,
-                par,
-                MemStack::new(&mut mem_buf),
-                Default::default(),
-            )
-            .map_err(|e| format!("Sparse LU numeric factorization error: {e:?}"))?;
-
-        // Fill RHS and solve in place.
-        for i in 0..n {
-            rhs[(i, 0)] = c64::new(y[i], 0.0);
-        }
-        lu_ref.solve_in_place_with_conj(Conj::No, rhs.as_mut(), par, MemStack::new(&mut mem_buf));
 
         // Accumulate: y += 2 * Re(alpha * x)
         let alpha_c = c64::new(alpha_i.re, alpha_i.im);
         for i in 0..n {
-            let contrib = alpha_c * rhs[(i, 0)];
+            let contrib = alpha_c * x[i];
             y[i] += 2.0 * contrib.re;
         }
     }
@@ -578,5 +762,156 @@ mod tests {
         let n0 = vec![1.0, 2.0];
         let result = cram48_sparse(&triplets, 2, &n0, 0.0).unwrap();
         assert_eq!(result, n0);
+    }
+
+    /// Y90m (3.19 h) feeding Zr90m (0.808 s), the pair a cooling zirconium
+    /// foil holds in equilibrium.
+    const LAMBDA_PARENT: f64 = std::f64::consts::LN_2 / 11_484.0;
+    const LAMBDA_DAUGHTER: f64 = 0.857_643;
+
+    /// The last member of a Bateman chain after `t`, starting from `parent`
+    /// atoms of the first and none of the rest, for distinct decay constants.
+    fn bateman_last(parent: f64, lambdas: &[f64], t: f64) -> f64 {
+        let sum: f64 = lambdas
+            .iter()
+            .enumerate()
+            .map(|(i, &li)| {
+                let denom: f64 = lambdas
+                    .iter()
+                    .enumerate()
+                    .filter(|&(j, _)| j != i)
+                    .map(|(_, &lj)| lj - li)
+                    .product();
+                (-li * t).exp() / denom
+            })
+            .sum();
+        parent * lambdas[..lambdas.len() - 1].iter().product::<f64>() * sum
+    }
+
+    fn assert_close(what: &str, got: f64, want: f64, tol: f64) {
+        let rel = ((got - want) / want).abs();
+        assert!(
+            rel < tol,
+            "{what}: {got:e} against {want:e}, relative {rel:e}"
+        );
+    }
+
+    /// Parent, short-lived daughter, stable bulk 1e16 times the daughter.
+    fn parent_daughter_bulk() -> (Vec<(usize, usize, f64)>, Vec<f64>) {
+        let triplets = vec![
+            (0, 0, -LAMBDA_PARENT),
+            (1, 0, LAMBDA_PARENT),
+            (1, 1, -LAMBDA_DAUGHTER),
+            (2, 1, LAMBDA_DAUGHTER),
+        ];
+        (triplets, vec![1.0e-13, 0.0, 0.1])
+    }
+
+    /// A short-lived daughter held in equilibrium by a long-lived parent, on
+    /// top of the stable bulk it decays into. Past `lambda * dt` of about 66 a
+    /// pivoted LU of the whole matrix read the daughter off the bulk's
+    /// equation and returned a residue of about 1e-19 of the bulk: 0.7% of
+    /// the daughter here, and of either sign.
+    #[test]
+    fn a_short_lived_daughter_is_not_read_off_the_bulk() {
+        let (triplets, n0) = parent_daughter_bulk();
+        let dt = 97.0; // lambda * dt = 83
+        let result = cram48_sparse(&triplets, 3, &n0, dt).unwrap();
+        let exact = bateman_last(n0[0], &[LAMBDA_PARENT, LAMBDA_DAUGHTER], dt);
+        assert_close("daughter", result[1], exact, 1e-12);
+        assert_close(
+            "parent",
+            result[0],
+            n0[0] * (-LAMBDA_PARENT * dt).exp(),
+            1e-12,
+        );
+    }
+
+    /// Stretching the step by a few parts in 1e13 moves the daughter by about
+    /// `lambda_parent * dt` times that, as it moves its parent, and not by
+    /// its own size.
+    #[test]
+    fn a_short_lived_daughter_does_not_hang_on_the_last_bit_of_dt() {
+        let (triplets, n0) = parent_daughter_bulk();
+        let dt = 607.0;
+        let nominal = cram48_sparse(&triplets, 3, &n0, dt).unwrap()[1];
+        for k in 1..=4 {
+            let stretched = dt * (1.0 + k as f64 * 1e-13);
+            let result = cram48_sparse(&triplets, 3, &n0, stretched).unwrap();
+            assert_close("stretched daughter", result[1], nominal, 1e-12);
+        }
+    }
+
+    /// A short-lived daughter of a short-lived daughter, and a short-lived
+    /// nuclide with two parents: each is solved from what feeds it, so the
+    /// chain and the sum over parents come out as Bateman gives them.
+    #[test]
+    fn chains_and_several_parents_of_short_lived_nuclides_match_bateman() {
+        let lambda_granddaughter = std::f64::consts::LN_2 / 0.2;
+        let lambda_other_parent = std::f64::consts::LN_2 / 3_600.0;
+        let dt = 300.0;
+        // 0 parent, 1 daughter, 2 granddaughter, 3 stable bulk, 4 a second
+        // parent of the granddaughter.
+        let triplets = vec![
+            (0, 0, -LAMBDA_PARENT),
+            (1, 0, LAMBDA_PARENT),
+            (1, 1, -LAMBDA_DAUGHTER),
+            (2, 1, LAMBDA_DAUGHTER),
+            (2, 2, -lambda_granddaughter),
+            (3, 2, lambda_granddaughter),
+            (4, 4, -lambda_other_parent),
+            (2, 4, lambda_other_parent),
+        ];
+        let n0 = vec![1.0e-13, 0.0, 0.0, 1.0, 1.0e-14];
+        let result = cram48_sparse(&triplets, 5, &n0, dt).unwrap();
+        assert_close(
+            "daughter",
+            result[1],
+            bateman_last(n0[0], &[LAMBDA_PARENT, LAMBDA_DAUGHTER], dt),
+            1e-12,
+        );
+        let granddaughter =
+            bateman_last(
+                n0[0],
+                &[LAMBDA_PARENT, LAMBDA_DAUGHTER, lambda_granddaughter],
+                dt,
+            ) + bateman_last(n0[4], &[lambda_other_parent, lambda_granddaughter], dt);
+        assert_close("granddaughter", result[2], granddaughter, 1e-12);
+    }
+
+    /// A pair that transmute into each other is one block, factored together,
+    /// upstream of the short-lived nuclide it feeds; the answer agrees with
+    /// the dense solve.
+    #[test]
+    fn a_production_cycle_is_solved_as_one_block() {
+        let n = 4;
+        let mut a = vec![0.0; n * n];
+        // 0 <-> 1 by reactions, 1 -> 2 (short-lived) -> 3 stable.
+        a[0] = -2.0e-4;
+        a[n] = 2.0e-4;
+        a[n + 1] = -3.0e-4;
+        a[1] = 1.0e-4;
+        a[2 * n + 1] = 2.0e-4;
+        a[2 * n + 2] = -LAMBDA_DAUGHTER;
+        a[3 * n + 2] = LAMBDA_DAUGHTER;
+        let n0 = vec![1.0e20, 0.0, 0.0, 0.0];
+        let dt = 3_600.0;
+        let dense = cram48(&a, n, &n0, dt).unwrap();
+        let sparse = cram48_sparse(&dense_to_triplets(&a, n), n, &n0, dt).unwrap();
+        for i in 0..n {
+            assert_close(&format!("nuclide {i}"), sparse[i], dense[i], 1e-12);
+        }
+    }
+
+    /// Tarjan's order: a block comes after every block that feeds it, and a
+    /// cycle is one block.
+    #[test]
+    fn production_blocks_run_upstream_first() {
+        // 3 -> 0 <-> 1 -> 2
+        let triplets = vec![(0, 3, 1.0), (1, 0, 1.0), (0, 1, 1.0), (2, 1, 1.0)];
+        assert_eq!(
+            production_blocks(4, &triplets),
+            vec![vec![3], vec![0, 1], vec![2]]
+        );
     }
 }
