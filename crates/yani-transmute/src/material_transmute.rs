@@ -2726,6 +2726,8 @@ mod tests {
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![1.0, 1.0e8],
                     values: vec![0.1, 0.1], // flat 0.1 barn
+                    states: Default::default(),
+                    normalisation: None,
                 }],
             );
 
@@ -2763,12 +2765,16 @@ mod tests {
                 quantity: BranchQuantity::CrossSection,
                 energy: vec![1.0, 1.0e8],
                 values: vec![3.0, 3.0],
+                states: Default::default(),
+                normalisation: None,
             },
             BranchCurve {
                 target: "X_m1".to_string(),
                 quantity: BranchQuantity::CrossSection,
                 energy: vec![1.0, 1.0e8],
                 values: vec![1.0, 1.0],
+                states: Default::default(),
+                normalisation: None,
             },
         ];
         let spectrum = MultigroupSpectrum {

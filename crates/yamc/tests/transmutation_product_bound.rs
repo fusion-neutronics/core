@@ -184,6 +184,8 @@ fn folded_bound_covers_overlay_only_kinds() {
                 quantity: BranchQuantity::CrossSection,
                 energy: vec![1.0e5, 2.0e7],
                 values: vec![0.0, 2.0],
+                states: Default::default(),
+                normalisation: None,
             }],
         );
     let (_, bounded) = scored_and_bounded(&Arc::new(branch));
