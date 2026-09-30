@@ -120,6 +120,100 @@ def test_reactions_carry_q(converted):
     assert any(v != 0.0 for v in q), "every Q is zero, which is not real data"
 
 
+def test_fission_yield_evaluations_are_stored_as_the_tape_gives_them(tmp_path):
+    """Both MT=454 and MT=459, with DY, beside the nominal yields.
+
+    U235 joins the decay set so the synthetic yields reach the chain. Read with
+    pyarrow, so this checks the file rather than yamc's reading of it.
+    """
+    pytest.importorskip("pyarrow")
+    import pyarrow.ipc as ipc
+
+    inputs = tmp_path / "endf"
+    inputs.mkdir()
+    out = tmp_path / "out"
+    yamc.convert_transmutation(
+        decay_files=_plain([*DECAY, "dec-092_U_235.endf.xz"], inputs),
+        fpy_files=_plain(FPY, inputs),
+        neutron_files=_plain([*NEUTRON, "n-092_U_235_trimmed.endf.xz"], inputs),
+        output_path=str(out),
+        library="endf-b8.1",
+        data_version="2026-08-09.1",
+        subsections=["fission_yields"],
+    )
+
+    nominal = ipc.open_file(out / "fission_yields" / "fission_yields.arrow").read_all()
+    assert nominal.schema.names == ["nuclide", "energy", "products", "yields"]
+
+    table = ipc.open_file(out / "fission_yields" / "evaluated_yields.arrow").read_all()
+    assert table.schema.names == [
+        "nuclide",
+        "energy",
+        "kind",
+        "interpolation",
+        "products",
+        "yields",
+        "yield_uncertainties",
+    ]
+    rows = {(r["kind"], r["energy"]): r for r in table.to_pylist()}
+    assert set(rows) == {
+        (kind, energy)
+        for kind in ("independent", "cumulative")
+        for energy in (0.0253, 5.0e5)
+    }
+    assert {r["nuclide"] for r in rows.values()} == {"U235"}
+
+    thermal = rows[("independent", 0.0253)]
+    assert thermal["interpolation"] is None
+    assert rows[("independent", 5.0e5)]["interpolation"] == 2
+    # Xe135_m1 has no decay data here, so the evaluated file is the only place
+    # its yield survives under its own name.
+    i = thermal["products"].index("Xe135_m1")
+    assert (thermal["yields"][i], thermal["yield_uncertainties"][i]) == (0.0134, 0.0006)
+    cumulative = rows[("cumulative", 0.0253)]
+    i = cumulative["products"].index("Zr95")
+    assert (cumulative["yields"][i], cumulative["yield_uncertainties"][i]) == (0.0605, 0.0018)
+
+
+def test_decay_mode_sigmas_are_stored_as_the_tape_gives_them(converted):
+    """The dBR of every decay mode is in the file, and a 0.0 stays a 0.0.
+
+    MT=457 writes 0.0 for an uncertainty it does not state. The file keeps
+    that number rather than a null standing in for it, and readers take both
+    as "not stated". Read with pyarrow, so this checks the file itself.
+    """
+    pytest.importorskip("pyarrow")
+    import pyarrow.ipc as ipc
+
+    out, _ = converted
+    modes = ipc.open_file(out / "decay" / "decay_modes.arrow").read_all()
+    assert modes.schema.names[-1] == "branching_ratio_uncertainty"
+    assert modes.column("branching_ratio_uncertainty").null_count == 0
+    dbr = {}
+    for nuclide, sigma in zip(
+        modes.column("nuclide").to_pylist(),
+        modes.column("branching_ratio_uncertainty").to_pylist(),
+    ):
+        dbr.setdefault(nuclide, []).append(sigma)
+    # Cs137's two modes carry one stated number each; In116_m1's one mode
+    # states none.
+    assert dbr["Cs137"] == [1.999988e-3, 1.999988e-3]
+    assert dbr["In116_m1"] == [0.0]
+
+
+def test_nuclide_sigmas_are_stored_as_the_tape_gives_them(converted):
+    """A decay-energy sigma the tape writes as 0.0 is 0.0 in the file too."""
+    pytest.importorskip("pyarrow")
+    import pyarrow.ipc as ipc
+
+    out, _ = converted
+    nuclides = ipc.open_file(out / "decay" / "nuclides.arrow").read_all()
+    row = nuclides.column("name").to_pylist().index("Cs137")
+    # Cs137 emits no heavy particles: the tape gives 0.0 +- 0.0.
+    assert nuclides.column("decay_energy_alpha")[row].as_py() == 0.0
+    assert nuclides.column("decay_energy_alpha_uncertainty")[row].as_py() == 0.0
+
+
 def test_missing_inputs_are_refused(tmp_path):
     """A partial chain is a wrong chain, not a smaller one."""
     with pytest.raises(ValueError, match="decay_files"):
@@ -164,6 +258,13 @@ def test_branching_subsection(tmp_path):
 
     assert stats["parents"] >= 2, f"only {stats['parents']} parents read"
     assert (out / "branching" / "branching.arrow").is_file()
+    # The per-list facts reach Python: In115 lists only the isomer, so every
+    # list it gives is isomers only, and each has a line of its own.
+    counts = stats["list_counts"]
+    assert counts.get("MF=10 isomers only", 0) >= 1, counts
+    assert len(stats["list_facts"]) == sum(
+        n for kind, n in counts.items() if kind.startswith("MF=")
+    ), stats["list_facts"]
 
     # The branching call must merge into the manifest, not overwrite it. A
     # library advertising one subsection while shipping four is a real failure
@@ -175,3 +276,46 @@ def test_branching_subsection(tmp_path):
         "fission_yields",
         "branching",
     }
+    # In115 carries no MF=40, so there is no covariance file beside the curves.
+    assert stats["mf40_sections"] == 0
+    assert not (out / "branching" / "branching_covariance.arrow").exists()
+
+
+def test_branching_covariance_is_written_beside_the_curves(tmp_path):
+    """MF=40, from Python: TENDL-2017 Nb93 states the covariance of the ground
+    and isomer partials of (n,n') and (n,2n), one LB=5 block each, and every
+    one is written and placed on its chain target."""
+    inputs = tmp_path / "endf"
+    inputs.mkdir()
+    out = tmp_path / "transmutation_tendl-2017.arrow"
+    stats = yamc.convert_branching(
+        neutron_files=_plain(["n-041_Nb_093_tendl2017_trimmed.endf.xz"], inputs),
+        decay_files=_plain(
+            [
+                "dec-041_Nb_092.endf.xz",
+                "dec-041_Nb_092m1.endf.xz",
+                "dec-041_Nb_093m1.endf.xz",
+            ],
+            inputs,
+        ),
+        output_path=str(out),
+        library="tendl-2017",
+        data_version="2026-09-27.1",
+        created_utc="2026-09-27T00:00:00+00:00",
+    )
+    assert (out / "branching" / "branching_covariance.arrow").is_file()
+    assert stats["mf40_sections"] == 2
+    assert stats["mf40_blocks"] == 4
+    assert stats["mf40_blocks_by_lb"] == {5: 4}
+    assert stats["mf40_nc_blocks"] == 0
+    assert stats["mf40_cross_state_blocks"] == 0
+    assert stats["mf40_unmatched_states"] == []
+    assert stats["mf40_without_blocks"] == []
+    assert stats["mf40_blocks_outside_mf10"] == 0
+    assert stats["mf40_partner_unresolved"] == []
+    assert stats["mf40_states_placed_by_excitation"] == []
+    provenance = json.loads((out / "branching" / "provenance.json").read_text())
+    assert provenance["mf40_without_blocks"] == []
+    assert provenance["mf40_unmatched_states"] == []
+    assert provenance["mf40_partner_unresolved"] == []
+    assert provenance["mf40_states_placed_by_excitation"] == []

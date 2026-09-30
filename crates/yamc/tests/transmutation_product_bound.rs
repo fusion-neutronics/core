@@ -63,6 +63,7 @@ fn rx(kind: &str, target: &str) -> ChainReaction {
         target: Some(target.to_string()),
         branching: 1.0,
         q_value: None,
+        branching_uncertainty: None,
     }
 }
 
@@ -77,6 +78,7 @@ fn stable(name: &str) -> ChainNuclide {
         sources: Vec::new(),
         half_life_uncertainty: None,
         decay_energy_uncertainty: None,
+        decay_energy_components: Default::default(),
     }
 }
 
@@ -102,6 +104,7 @@ fn li6_chain() -> HashMap<String, ChainNuclide> {
             sources: Vec::new(),
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
         },
     );
     for name in ["Li7", "He4", "He6", "He5", "Li5"] {
@@ -118,7 +121,8 @@ fn scored_and_bounded(branch: &BranchTable) -> (Rates, Rates) {
     let chain = li6_chain();
     let cells: HashMap<u32, Vec<usize>> = HashMap::from([(1u32, vec![0usize])]);
     let materials: HashMap<u32, &Material> = HashMap::from([(1u32, &material)]);
-    let tallies = TransmutationTallies::new(&cells, &materials, &chain, branch, &HashMap::new());
+    let tallies = TransmutationTallies::new(&cells, &materials, &chain, branch, &HashMap::new())
+        .expect("tally");
 
     for &(energy, track_length) in SEGMENTS {
         tallies.score(1, energy, track_length, &material);
@@ -170,15 +174,30 @@ fn folded_bound_covers_every_scored_rate() {
 #[test]
 fn folded_bound_covers_overlay_only_kinds() {
     let mut branch = BranchTable::new();
-    branch.entry("Li6".to_string()).or_default().insert(
-        "(n,n')".to_string(),
-        vec![BranchCurve {
-            target: "Li6_m1".to_string(),
-            quantity: BranchQuantity::CrossSection,
-            energy: vec![1.0e5, 2.0e7],
-            values: vec![0.0, 2.0],
-        }],
-    );
+    branch
+        .curves_mut()
+        .entry("Li6".to_string())
+        .or_default()
+        .insert(
+            "(n,n')".to_string(),
+            vec![BranchCurve {
+                target: "Li6_m1".to_string(),
+                quantity: BranchQuantity::CrossSection,
+                energy: vec![1.0e5, 2.0e7],
+                values: vec![0.0, 2.0],
+                states: Arc::from(vec![yani::BranchState {
+                    mt: 4,
+                    lfs: 1,
+                    lmf: Some(10),
+                    list_complete: true,
+                    level_route: "energy".to_string(),
+                    level_energy: 0.0,
+                    level_energy_difference: Some(0.0),
+                    mf3_cross_section: None,
+                }]),
+                normalisation: None,
+            }],
+        );
     let (_, bounded) = scored_and_bounded(&Arc::new(branch));
     let rate = bounded
         .get("Li6")

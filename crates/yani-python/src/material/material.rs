@@ -800,17 +800,26 @@ impl PyMaterial {
     ///     per (str | None): ``None`` (default) for the total, which needs
     ///         ``volume``; ``"cm3"`` for W/cm³, which needs nothing; ``"g"``
     ///         for W/g, which needs only ``density``.
+    ///     component (str | None): ``None`` (default) for the whole decay heat;
+    ///         ``"beta"``, ``"gamma"`` or ``"alpha"`` for one recoverable-heat
+    ///         component alone (the ENDF MT=457 light-particle, electromagnetic
+    ///         and heavy-particle energies). The gamma heat is the part that
+    ///         leaves a thin component; the beta and alpha heat stays put.
+    ///         Raises if a nuclide making decay heat carries no split, which
+    ///         data converted before the split does, rather than understating
+    ///         the component by its share.
     ///
     /// Returns:
     ///     float | dict[str, float]: Decay heat, in W when ``per`` is ``None``,
     ///     W/cm³ when it is ``"cm3"`` and W/g when it is ``"g"``. The unit of a
     ///     ``by_nuclide`` dict's values is the same.
-    #[pyo3(signature = (*, by_nuclide=false, per=None))]
+    #[pyo3(signature = (*, by_nuclide=false, per=None, component=None))]
     fn decay_heat(
         &self,
         py: Python<'_>,
         by_nuclide: bool,
         per: Option<&str>,
+        component: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let volume = self.scale_for(per, "decay_heat")?;
         let atom_densities = self
@@ -819,7 +828,36 @@ impl PyMaterial {
             .map_err(PyValueError::new_err)?;
         let chain = crate::distribution::resolve_chain()?.chain;
 
-        let heats = yani_decay::decay_heat_by_nuclide(&atom_densities, volume, &chain);
+        let heats = match component {
+            None => yani_decay::decay_heat_by_nuclide(&atom_densities, volume, &chain),
+            Some(name) => {
+                let index = yani::DECAY_ENERGY_COMPONENTS
+                    .iter()
+                    .position(|c| *c == name)
+                    .ok_or_else(|| {
+                        PyValueError::new_err(format!(
+                            "component must be one of {:?} or None, got {name:?}",
+                            yani::DECAY_ENERGY_COMPONENTS
+                        ))
+                    })?;
+                yani_decay::decay_heat_component_by_nuclide(&atom_densities, volume, &chain, index)
+                    .map_err(|missing| {
+                        PyValueError::new_err(format!(
+                            "no decay-energy split for {} nuclide(s) that make decay heat \
+                         ({}{}); the transmutation data was converted before the split \
+                         was carried, so their {name} heat is unknown",
+                            missing.len(),
+                            missing
+                                .iter()
+                                .take(8)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            if missing.len() > 8 { ", ..." } else { "" },
+                        ))
+                    })?
+            }
+        };
 
         if by_nuclide {
             let breakdown = PyDict::new(py);
@@ -843,15 +881,23 @@ impl PyMaterial {
     /// ascending in energy. Stable nuclides, nuclides the chain does not know
     /// and non-photon sources contribute nothing.
     ///
+    /// Lines only. Part of some decay spectra is a continuum, a density per eV
+    /// rather than a set of lines, and ``decay_photon_continua()`` returns it.
+    ///
     /// The two lists are the ``(x, p)`` pair the source distributions take, so
-    /// the spectrum round-trips straight into a photon transport run:
+    /// the lines round-trip straight into a photon transport source:
     ///
     ///     >>> energies, rates = activated.decay_photon_spectrum()
     ///     >>> source = PhotonSource(energy=sources.Discrete(energies, rates))
     ///
     /// ``Discrete`` normalizes the weights, so the shape is what transport
-    /// samples; keep ``sum(rates)`` yourself for the absolute emission rate
-    /// (photons/s) that scales the tallies.
+    /// samples. ``sum(rates)`` is the line emission rate (photons/s) only,
+    /// the rate that scales tallies from this source. That source leaves out
+    /// every continuum, which for a continuum emitter can be most of its
+    /// photons (all of them for Sm158 in ENDF/B-VIII.1); the continua emit
+    /// ``sum(c.emission_rate for c in activated.decay_photon_continua())``
+    /// more. No ``sources`` distribution yet holds a linear-linear continuum
+    /// exactly, so a transport source cannot yet carry every continuum.
     ///
     /// Returns:
     ///     tuple[list[float], list[float]]: Line energies (eV) and their
@@ -866,6 +912,47 @@ impl PyMaterial {
         let chain = crate::distribution::resolve_chain()?.chain;
         let lines = yani_decay::decay_photon_lines(&atom_densities, volume, &chain);
         Ok(lines.into_iter().unzip())
+    }
+
+    /// The decay photon continua of the current inventory, one per nuclide
+    /// and continuum, in nuclide-name order.
+    ///
+    /// The part of a decay spectrum ENDF gives as a density over energy rather
+    /// than as lines, which ``decay_photon_spectrum()`` does not include. Each
+    /// continuum keeps its own energy grid and interpolation law, and its
+    /// rates are photons/s/eV (or per cm³ or per g, following ``per``), so
+    /// they are not line rates; ``emission_rate`` is the integral. A material
+    /// whose nuclides have no continuum returns an empty list.
+    ///
+    /// Args:
+    ///     per (str | None): None for the whole material, which needs a
+    ///         ``volume``, or ``'cm3'`` or ``'g'``, as for
+    ///         ``decay_photon_spectrum()``.
+    ///
+    /// Returns:
+    ///     list[PhotonContinuum]: The continua, each with its nuclide,
+    ///     energies, rates, interpolation law and emission rate.
+    ///
+    /// Examples:
+    ///     >>> for continuum in activated.decay_photon_continua():
+    ///     ...     print(continuum.nuclide, continuum.emission_rate)
+    #[pyo3(signature = (*, per=None))]
+    fn decay_photon_continua(
+        &self,
+        per: Option<&str>,
+    ) -> PyResult<Vec<super::photon_continuum::PyPhotonContinuum>> {
+        let volume = self.scale_for(per, "decay_photon_continua")?;
+        let atom_densities = self
+            .internal
+            .get_atoms_per_barn_cm()
+            .map_err(PyValueError::new_err)?;
+        let chain = crate::distribution::resolve_chain()?.chain;
+        Ok(
+            yani_decay::decay_photon_continua(&atom_densities, volume, &chain)
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        )
     }
 
     /// Contact dose rate from the material's own decay photons.
@@ -883,18 +970,20 @@ impl PyMaterial {
     /// for the absorbed dose in air, and the same without the trailing ``E``
     /// for the effective dose. ``mu_material`` is the material's own linear
     /// attenuation coefficient, built from the NIST XCOM mass attenuation
-    /// coefficients of the elements present; the response is the NIST-126 mass
-    /// energy-absorption coefficient of air, or the ICRP-116 photon
+    /// coefficients of the elements present; the response is the NIST-126
+    /// mass energy-absorption coefficient of air, or the ICRP-116 photon
     /// effective-dose coefficient for anterior-posterior irradiation.
     ///
     /// Follows the FISPACT-II manual (UKAEA-CCFE-RE(21)02, Appendix C.7.1) for
-    /// the absorbed-air quantity and agrees with OpenMC's
-    /// ``Material.get_photon_contact_dose_rate``.
+    /// the absorbed-air quantity. For photon lines it agrees with OpenMC's
+    /// ``Material.get_photon_contact_dose_rate``. A photon continuum is
+    /// integrated exactly under its evaluated interpolation law.
     ///
     /// Bremsstrahlung from decay electrons is not modelled, and nuclides whose
     /// radiation the chain file does not describe contribute nothing. Photon
     /// lines outside the tabulated range (1 keV to 20 MeV for the absorbed-air
-    /// quantity, 10 keV to 20 MeV for the effective dose) are dropped.
+    /// quantity, 10 keV to 20 MeV for the effective dose) are dropped, and a
+    /// continuum is integrated over its part of that range.
     ///
     /// Args:
     ///     dose_quantity (str): ``'absorbed-air'`` for the absorbed dose in air
@@ -909,6 +998,17 @@ impl PyMaterial {
     /// Returns:
     ///     float | dict[str, float]: Contact dose rate in Gy/h
     ///     (``'absorbed-air'``) or Sv/h (``'effective'``).
+    ///
+    /// Raises:
+    ///     ValueError: If a nuclide in the material has a photon continuum
+    ///         in the dose tables' range that this build cannot integrate: one
+    ///         whose data states no interpolation law, as transmutation data
+    ///         written before the law was stored does, one tabulated under a
+    ///         law other than histogram or linear-linear, or one whose energy
+    ///         and rate lists are unpaired, whose energies are not finite or
+    ///         descend, or whose rates are negative or not finite. Its
+    ///         integral is unknown, and leaving it out would understate the
+    ///         dose.
     ///
     /// Examples:
     ///     >>> activated.contact_dose()
@@ -954,6 +1054,123 @@ impl PyMaterial {
                 .map_err(PyValueError::new_err)?;
             Ok(total.into_pyobject(py)?.into_any().unbind())
         }
+    }
+
+    /// Clearance index of the current inventory against one regulatory limit set.
+    ///
+    /// Each radionuclide's activity is divided by its limit in the set and the
+    /// ratios are summed; the material meets the limits when the sum is below
+    /// the set's threshold, normally 1. The limit sets cover UK, German, US, EU
+    /// and IAEA clearance, exemption and disposal tables, and come from the
+    /// ``radiological-material-clearance-finder`` crate, whose documentation
+    /// describes each one and where its numbers come from.
+    ///
+    /// Half-lives come from the configured transmutation chain, the same ones
+    /// ``activity()`` and ``decay_heat()`` use, so a nuclide the chain calls
+    /// stable contributes nothing. Specific activities (Bq/g) need nothing
+    /// beyond the composition, and the volumetric US sets (Ci/m3) use the mass
+    /// density the atom densities imply. Only the total activity sets (Bq)
+    /// need ``material.volume``.
+    ///
+    /// Stable isotopes have to stay in the material: they are most of its
+    /// mass, and so most of the Bq/g denominator.
+    ///
+    /// Args:
+    ///     limit_set (str): Name of the limit set, such as
+    ///         ``"UK_EPR16_out_of_scope"`` or ``"StrlSchV_unrestricted"``.
+    ///         ``clearance_indices()`` assesses against every set at once.
+    ///     metal (bool): Whether the material is activated metal, which
+    ///         changes some NRC limits and adds others.
+    ///     apply_default_limit (bool): Whether to apply the set's catch-all
+    ///         limit to nuclides its table does not list. The UK regulations
+    ///         define one, so leaving this on is what they say.
+    ///     exclude_daughters (bool): Whether to leave out daughters whose
+    ///         parent's limit already covers them, as the regulation's own
+    ///         table directs. Turning it off double counts them.
+    ///
+    /// Returns:
+    ///     ClearanceResult: The index, whether it clears, each nuclide's
+    ///     contribution, and any activity no limit in the set covers.
+    ///
+    /// Raises:
+    ///     KeyError: If no limit set has that name.
+    ///     ValueError: If the set is in Bq and the material has no volume.
+    ///
+    /// Examples:
+    ///     >>> result = material.clearance_index("UK_EPR16_out_of_scope")
+    ///     >>> result.index
+    ///     11.24...
+    ///     >>> result.clearable
+    ///     False
+    #[pyo3(signature = (limit_set, *, metal=false, apply_default_limit=true, exclude_daughters=true))]
+    fn clearance_index(
+        &self,
+        limit_set: &str,
+        metal: bool,
+        apply_default_limit: bool,
+        exclude_daughters: bool,
+    ) -> PyResult<super::clearance::PyClearanceResult> {
+        use radiological_material_clearance_finder as clearance;
+        let chain = crate::distribution::resolve_chain()?.chain;
+        let inventory = super::clearance::inventory(&self.internal, &chain)?;
+        let set = clearance::get_limit_set(limit_set).map_err(super::clearance::to_py_err)?;
+        let options = super::clearance::options(metal, apply_default_limit, exclude_daughters);
+        let inner = clearance::clearance_index(&inventory, &set, options)
+            .map_err(super::clearance::to_py_err)?;
+        Ok(super::clearance::PyClearanceResult { inner })
+    }
+
+    /// Clearance indexes of the current inventory against many limit sets.
+    ///
+    /// The same assessment as ``clearance_index()``, once per set. Sets the
+    /// material cannot be assessed against are skipped rather than raising,
+    /// which in practice means the total activity sets (Bq) when the material
+    /// has no ``volume``.
+    ///
+    /// Args:
+    ///     limit_sets (list[str] | None): Names of the limit sets. ``None``
+    ///         (the default) assesses against every available set, which is
+    ///         also the way to see their names.
+    ///     metal (bool): As for ``clearance_index()``.
+    ///     apply_default_limit (bool): As for ``clearance_index()``.
+    ///     exclude_daughters (bool): As for ``clearance_index()``.
+    ///
+    /// Returns:
+    ///     dict[str, ClearanceResult]: Results keyed by limit set name.
+    ///
+    /// Raises:
+    ///     KeyError: If a named limit set does not exist.
+    ///
+    /// Examples:
+    ///     >>> results = material.clearance_indices()
+    ///     >>> [name for name, r in results.items() if r.clearable]
+    ///     ['Fetter', 'NRC_long', ...]
+    #[pyo3(signature = (limit_sets=None, *, metal=false, apply_default_limit=true, exclude_daughters=true))]
+    fn clearance_indices(
+        &self,
+        limit_sets: Option<Vec<String>>,
+        metal: bool,
+        apply_default_limit: bool,
+        exclude_daughters: bool,
+    ) -> PyResult<HashMap<String, super::clearance::PyClearanceResult>> {
+        use radiological_material_clearance_finder as clearance;
+        let chain = crate::distribution::resolve_chain()?.chain;
+        let inventory = super::clearance::inventory(&self.internal, &chain)?;
+        let names: Option<Vec<&str>> = limit_sets
+            .as_ref()
+            .map(|names| names.iter().map(String::as_str).collect());
+        let options = super::clearance::options(metal, apply_default_limit, exclude_daughters);
+        let results = clearance::clearance_indices(&inventory, names.as_deref(), options)
+            .map_err(super::clearance::to_py_err)?;
+        Ok(results
+            .into_iter()
+            .map(|inner| {
+                (
+                    inner.limit_set.clone(),
+                    super::clearance::PyClearanceResult { inner },
+                )
+            })
+            .collect())
     }
 
     /// Compute neutron mean free path at a given energy.
@@ -1078,14 +1295,14 @@ impl PyMaterial {
     ///         steps directly, so its step 0 is the first step.
     ///
     ///     data_uncertainty (DataUncertainty, optional): Ask for nuclear-data
-    ///         uncertainty on the result. The activation cross sections are
-    ///         sampled from their ENDF MF=33 covariance, folded against this
-    ///         material's own spectrum, and the schedule is re-solved until the
-    ///         reported standard deviations settle. Omit it (the default) and
-    ///         nothing is read, folded or sampled: the inventories are
-    ///         bit-identical either way. Read the sigmas with
-    ///         ``get_nuclide_uncertainty``, and what was and was not covered
-    ///         with ``data_uncertainty_info``.
+    ///         uncertainty on the result. Each source ``DataUncertainty`` names
+    ///         is sampled where it applies (``statistical`` needs a transport
+    ///         run, ``flux_spectrum`` a supplied flux sigma), and the schedule
+    ///         is re-solved until the reported standard deviations settle.
+    ///         Omit it (the default) and nothing is read, folded or sampled:
+    ///         the inventories are bit-identical either way. Read the sigmas
+    ///         with ``get_nuclide_uncertainty``, and what was and was not
+    ///         covered with ``get_data_uncertainty_info(id)``.
     ///
     ///     self_shielding_chord (float, optional): Mean chord length ``4V/S`` of
     ///         this material's lump, in cm, which is twice the thickness for a
@@ -1095,7 +1312,7 @@ impl PyMaterial {
     ///         default) and nothing is shielded: the rates are bit-identical to
     ///         a run without it, and no shape is inferred from a geometry this
     ///         material does not have. Read what was done with
-    ///         ``self_shielding_info``.
+    ///         ``get_self_shielding_info(id)``.
     ///
     ///         The flux inside the lump comes from a slowing-down solve, which
     ///         assumes nothing about resonances being narrow. The cheaper
@@ -1155,33 +1372,11 @@ impl PyMaterial {
         let (spectra, steps) = sched.transmute_plan(py)?;
 
         let loaded = crate::distribution::resolve_chain()?;
-
-        // A chord or a shape, never both: they would be two statements of the
-        // same length, and nothing good comes of deciding which one wins.
-        let chord = match (self_shielding_chord, self_shielding_shape.as_ref()) {
-            (Some(_), Some(_)) => {
-                return Err(PyValueError::new_err(
-                    "give self_shielding_chord or self_shielding_shape, not both: a shape \
-                     already determines the chord",
-                ))
-            }
-            (Some(chord), None) => Some(chord),
-            (None, Some(shape)) => {
-                let shape = crate::shapes::shape_of(shape)?;
-                Some(
-                    shape
-                        .chord_cm(self.internal.volume)
-                        .map_err(PyValueError::new_err)?,
-                )
-            }
-            (None, None) => None,
-        };
-        let shielding = match chord {
-            Some(chord) => {
-                Some(yani_transmute::Shielding::new(chord).map_err(PyValueError::new_err)?)
-            }
-            None => None,
-        };
+        let shielding = shielding_request(
+            &self.internal,
+            self_shielding_chord,
+            self_shielding_shape.as_ref(),
+        )?;
 
         // Everything the solve needs, owned and free of the GIL, before it is
         // released. `sched` is a `PyRef` and must go first; the chain is three
@@ -1282,4 +1477,38 @@ impl PyMaterial {
             .map_err(PyValueError::new_err)?;
         Ok(PyMaterial { internal: result })
     }
+}
+
+/// The self-shielding request for `material`, from a chord or a shape.
+///
+/// A chord or a shape, never both: they would be two statements of the same
+/// length, and nothing good comes of deciding which one wins. A shape turns
+/// into a chord through the material's own volume, so one shape given to many
+/// materials gives each its own chord.
+pub(crate) fn shielding_request(
+    material: &yamc_materials::material::Material,
+    chord: Option<f64>,
+    shape: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<yani_transmute::Shielding>> {
+    let chord = match (chord, shape) {
+        (Some(_), Some(_)) => {
+            return Err(PyValueError::new_err(
+                "give self_shielding_chord or self_shielding_shape, not both: a shape \
+                 already determines the chord",
+            ))
+        }
+        (Some(chord), None) => Some(chord),
+        (None, Some(shape)) => {
+            let shape = crate::shapes::shape_of(shape)?;
+            Some(
+                shape
+                    .chord_cm(material.volume)
+                    .map_err(PyValueError::new_err)?,
+            )
+        }
+        (None, None) => None,
+    };
+    chord
+        .map(|c| yani_transmute::Shielding::new(c).map_err(PyValueError::new_err))
+        .transpose()
 }

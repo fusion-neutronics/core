@@ -185,11 +185,56 @@ pub fn convert_transmutation(
 ///     excited production levels were matched to an isomer by energy, by
 ///     energy within a tenth, by level index, as the only isomer, or not at
 ///     all) and ``flagged_levels`` (one line per level that was unresolved,
+///     taken as ground because the decay data has no isomer for its product,
 ///     matched only by the looser energy pass, or matched by energy while its
-///     level index pointed at another isomer), and ``partial_sum_mismatches``
+///     level index pointed at another isomer; every excited level that ends
+///     up at ground is listed), ``partial_sum_mismatches``
 ///     (one line per reaction whose MF=10 partial cross sections do not sum to
 ///     its MF=3 total, or whose MF=9 yields do not sum to one, within two
-///     percent below 20 MeV).
+///     percent below 20 MeV), and ``skipped_states`` (one line per production
+///     state that names no single product nuclide, and so gives no row:
+///     fission, an IZAP of zero that no single MF=8 subsection resolves, or
+///     any other ZAP whose Z or A is not positive), ``list_facts`` (one line
+///     per production list, a parent's MT in MF=9 or MF=10: whether the ground
+///     state is listed, whether the file has an MF=3 section for the MT, each
+///     state's LFS, LMF, target, route and level energy difference, and the
+///     MF=1 normalisation lines naming the MT) and ``list_counts`` (how many
+///     lists are complete or isomers only in each file, have no MF=3 section
+///     for their MT, or are normalised). The same facts are stored per row in
+///     ``branching.arrow``; they change no rate.
+///     The MF=40 production
+///     covariance, written as the tape gives it to
+///     ``branching/branching_covariance.arrow``, is counted by
+///     ``mf40_sections`` (sections read, whatever the MT), ``mf40_blocks``
+///     (blocks written), ``mf40_blocks_by_lb`` (the NI blocks by layout),
+///     ``mf40_nc_blocks``, ``mf40_unmatched_states`` (one line per product
+///     state that matches no MF=9 or MF=10 state, matches several within the
+///     tolerance, or is excited with no stated excitation to confirm a level
+///     by, written with no target), ``mf40_states_without_chain_kind``
+///     (states of an MT with no chain reaction, such as MT 18, written with
+///     no reaction),
+///     ``mf40_on_yield_channels`` (states matched to a level whose production
+///     MF=9 gives as a yield rather than an MF=10 cross section; where that
+///     yield is merged with another state's, the row carries the state's own
+///     yield with quantity ``"yield"``),
+///     ``mf40_mat1_naming_itself`` (sub-subsections whose MAT1 is the
+///     evaluation's own MAT, written as given), ``mf40_cross_state_blocks``
+///     (blocks other than a state's covariance with itself; key them on MT,
+///     LFS, MT1 and XLFS1, since both states can resolve to one target),
+///     ``mf40_blocks_outside_mf10`` (blocks whose partner is in another
+///     material or has XMF1 other than 10), ``mf40_without_blocks`` (one line
+///     per section, state or sub-subsection holding no block, with its tape
+///     values, the only part of MF=40 the file cannot show),
+///     ``mf40_partner_unresolved`` (one line per sub-subsection written
+///     with no partner target because the tape does not pin the partner to
+///     one state, among them a partner whose level XLFS1 MF=10 numbers
+///     differently from MF=40), and ``mf40_states_placed_by_excitation`` (one
+///     line per product state whose target was matched by excitation because
+///     MF=9 and MF=10 give its IZAP and LFS no state or one at another
+///     excitation; its self blocks name it by MF=40's own LFS). The four line
+///     lists are also written to ``branching/provenance.json``. An evaluation
+///     set without MF=40 writes no covariance file, and removes one an
+///     earlier conversion left there.
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
@@ -249,6 +294,28 @@ pub fn convert_branching(
     out.set_item("level_routes", stats.level_routes)?;
     out.set_item("flagged_levels", stats.flagged_levels)?;
     out.set_item("partial_sum_mismatches", stats.partial_sum_mismatches)?;
+    out.set_item("skipped_states", stats.skipped_states)?;
+    out.set_item("list_facts", stats.list_facts)?;
+    out.set_item("list_counts", stats.list_counts)?;
+    out.set_item("mf40_sections", stats.mf40_sections)?;
+    out.set_item("mf40_blocks", stats.mf40_blocks)?;
+    out.set_item("mf40_blocks_by_lb", stats.mf40_blocks_by_lb)?;
+    out.set_item("mf40_nc_blocks", stats.mf40_nc_blocks)?;
+    out.set_item("mf40_unmatched_states", stats.mf40_unmatched_states)?;
+    out.set_item(
+        "mf40_states_without_chain_kind",
+        stats.mf40_states_without_chain_kind,
+    )?;
+    out.set_item("mf40_on_yield_channels", stats.mf40_on_yield_channels)?;
+    out.set_item("mf40_mat1_naming_itself", stats.mf40_mat1_naming_itself)?;
+    out.set_item("mf40_cross_state_blocks", stats.mf40_cross_state_blocks)?;
+    out.set_item("mf40_without_blocks", stats.mf40_without_blocks)?;
+    out.set_item("mf40_blocks_outside_mf10", stats.mf40_blocks_outside_mf10)?;
+    out.set_item("mf40_partner_unresolved", stats.mf40_partner_unresolved)?;
+    out.set_item(
+        "mf40_states_placed_by_excitation",
+        stats.mf40_states_placed_by_excitation,
+    )?;
     Ok(out.unbind())
 }
 
@@ -558,11 +625,16 @@ pub fn convert_photon(
 ///     each with ``parent``, ``mt``, ``reaction`` (the transmutation reaction
 ///     name, or ``None`` for an MT no chain reaction covers) and ``states``.
 ///     Each state has ``excitation_energy_eV``, ``level_index``, ``product``
-///     and ``source``.
+///     and ``source``. ``excitation_energy_eV`` is ``None`` for an excited
+///     state whose evaluation gives neither a positive MF=8 ELFS nor a
+///     positive ``QM - QI``.
 ///
 ///     ``product`` is the product's **ground-state** name even for an excited
 ///     state, because naming the isomer needs decay data to say which
 ///     isomeric ordinal a level is; pair it with ``excitation_energy_eV``.
+///     It is ``None`` for a state naming no single nuclide: fission, a
+///     subsection whose IZAP is zero with no single MF=8 subsection to name
+///     it, or any other ZAP whose Z or A is not positive.
 ///     ``level_index`` is the evaluation's own LFS and is not comparable
 ///     between libraries: Ir190's 377 keV isomer is level 3 in ENDF/B-VIII.1
 ///     and level 37 in JEFF-4.0. ``source`` is ``"cross_section"`` for MF=10

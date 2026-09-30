@@ -94,6 +94,7 @@ CHAIN_SECTIONS = {
         ("provenance.json", True),
         ("fission_yields.arrow", True),
         ("aliases.arrow", False),
+        ("evaluated_yields.arrow", False),
     ],
 }
 
@@ -147,6 +148,12 @@ NUCLIDES = [
     # of this list put together, and nothing needs them that Th232 + U240 does
     # not now cover.
     "Th232",
+    # ENDF/B-VIII.1 lists only the isomer for In115 (n,gamma) and (n,2n) and
+    # for Mo92 (n,p), the ground state being the remainder, and
+    # crates/yani-transmute/tests/isomer_only_branching.rs checks the split
+    # against the library itself, with the branching rows committed beside it.
+    # About 17 MB and 3 MB.
+    "In115", "Mo92",
 ]
 ELEMENTS = ["Be", "Fe", "Li"]
 CHAIN_FIXTURE = "transmutation-endf-b8.1-sfr"

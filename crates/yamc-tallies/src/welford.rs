@@ -352,6 +352,21 @@ pub struct WelfordTallyWorker {
     pub agg: AggMoments,
     /// Empirical PDF of the per-history total score (raw histogram).
     pub score_pdf: ScorePdf,
+    /// Raw per-history products `sum_h x_hi x_hj`, packed upper triangle,
+    /// when the tally asked for its covariance ([`crate::Tally::covariance`]).
+    ///
+    /// Raw sums rather than Welford co-moments: a co-moment update touches
+    /// every pair of bins every history, including the untouched ones whose
+    /// deviation from the running mean is not zero, so it cannot be sparse.
+    /// Raw products change only where a history scored, add across workers,
+    /// runs and ranks, and give the covariance once, at the end.
+    pub comoment: Option<Vec<f64>>,
+}
+
+/// Offset of row `r`'s diagonal in a packed upper triangle of size `n`.
+#[inline]
+pub(crate) fn packed_row(r: usize, n: usize) -> usize {
+    r * n - r * r.saturating_sub(1) / 2
 }
 
 impl WelfordTallyWorker {
@@ -364,6 +379,7 @@ impl WelfordTallyWorker {
             scratch_map: rustc_hash::FxHashMap::with_capacity_and_hasher(256, Default::default()),
             agg: AggMoments::ZERO,
             score_pdf: ScorePdf::new(),
+            comoment: None,
         }
     }
 }
@@ -393,6 +409,19 @@ impl WelfordWorkerState {
                 .collect(),
             n_histories: 0,
         }
+    }
+
+    /// Accumulate per-history products for the tallies flagged in `flags`,
+    /// parallel to the tallies this state was built for. See
+    /// [`WelfordTallyWorker::comoment`].
+    pub fn with_covariance(mut self, flags: &[bool]) -> Self {
+        for (t, &on) in self.tallies.iter_mut().zip(flags) {
+            if on {
+                let n = t.welford.len();
+                t.comoment = Some(vec![0.0; packed_row(n, n)]);
+            }
+        }
+        self
     }
 
     /// Add a per-step contribution to a bin in the currently-in-progress
@@ -426,6 +455,24 @@ impl WelfordWorkerState {
             // walk we already do -- so the tally-level moments / PDF cost one
             // add per touched bin plus a constant per history, never touching
             // the per-event hot path. Untouched tallies record a zero sample.
+            // The history's sparse vector into the products, before the
+            // scratch is drained below. Sorted so each pair is visited once,
+            // with the row the lower index.
+            if let Some(p) = t.comoment.as_mut() {
+                let n = t.welford.len();
+                let mut entries: Vec<(usize, f64)> = t
+                    .scratch_map
+                    .iter()
+                    .map(|(&b, &x)| (b as usize, x))
+                    .collect();
+                entries.sort_unstable_by_key(|e| e.0);
+                for (a, &(i, xi)) in entries.iter().enumerate() {
+                    let row = packed_row(i, n);
+                    for &(j, xj) in &entries[a..] {
+                        p[row + (j - i)] += xi * xj;
+                    }
+                }
+            }
             let mut total = 0.0;
             for (&bin_u32, &x) in t.scratch_map.iter() {
                 let w = &mut t.welford[bin_u32 as usize];
@@ -474,6 +521,11 @@ impl WelfordWorkerState {
             }
             a.agg.combine(&b.agg);
             a.score_pdf.combine(&b.score_pdf);
+            if let (Some(pa), Some(pb)) = (a.comoment.as_mut(), b.comoment.as_ref()) {
+                for (x, y) in pa.iter_mut().zip(pb) {
+                    *x += y;
+                }
+            }
         }
         self.n_histories += other.n_histories;
         self
@@ -494,6 +546,7 @@ impl WelfordWorkerState {
                 let mut m2: Vec<f64> = t.welford.iter().map(|w| w.m2).collect();
                 let agg = t.agg;
                 let score_pdf = t.score_pdf;
+                let comoment = t.comoment;
                 if n_hist == 0 {
                     return WelfordTallyStats {
                         mean,
@@ -501,6 +554,7 @@ impl WelfordWorkerState {
                         n_histories: 0,
                         agg,
                         score_pdf,
+                        comoment,
                     };
                 }
                 for i in 0..mean.len() {
@@ -525,6 +579,7 @@ impl WelfordWorkerState {
                     n_histories: n_hist,
                     agg,
                     score_pdf,
+                    comoment,
                 }
             })
             .collect();
@@ -557,6 +612,9 @@ pub struct WelfordTallyStats {
     /// Raw empirical PDF of the per-history total score. Empty when no
     /// per-history sampling occurred.
     pub score_pdf: ScorePdf,
+    /// Raw per-history products, packed upper triangle, when the tally asked
+    /// for its covariance. They sum across runs and ranks.
+    pub comoment: Option<Vec<f64>>,
 }
 
 impl WelfordTallyStats {
@@ -586,7 +644,22 @@ impl WelfordTallyStats {
             self.n_histories = other.n_histories;
             self.agg = other.agg;
             self.score_pdf = other.score_pdf.clone();
+            self.comoment.clone_from(&other.comoment);
             return Ok(());
+        }
+        match (self.comoment.as_mut(), other.comoment.as_ref()) {
+            (Some(a), Some(b)) => {
+                for (x, y) in a.iter_mut().zip(b) {
+                    *x += y;
+                }
+            }
+            (None, None) => {}
+            _ => {
+                return Err(
+                    "cannot combine a tally carrying a covariance with one that does not"
+                        .to_string(),
+                )
+            }
         }
         let n_a = self.n_histories as f64;
         let n_b = other.n_histories as f64;
@@ -600,6 +673,28 @@ impl WelfordTallyStats {
         self.score_pdf.combine(&other.score_pdf);
         self.n_histories += other.n_histories;
         Ok(())
+    }
+
+    /// Covariance of the bin means, `n x n` row-major, from the raw products:
+    /// `(P_ij - n mu_i mu_j) / ((n - 1) n)`. `None` when the tally did not ask
+    /// for it; zeros below two histories.
+    pub fn covariance_of_mean(&self) -> Option<Vec<f64>> {
+        let p = self.comoment.as_ref()?;
+        let k = self.mean.len();
+        let mut out = vec![0.0; k * k];
+        if self.n_histories <= 1 {
+            return Some(out);
+        }
+        let n = self.n_histories as f64;
+        for i in 0..k {
+            let row = packed_row(i, k);
+            for j in i..k {
+                let c = (p[row + (j - i)] - n * self.mean[i] * self.mean[j]) / ((n - 1.0) * n);
+                out[i * k + j] = c;
+                out[j * k + i] = c;
+            }
+        }
+        Some(out)
     }
 
     /// Standard error of the mean per bin: `sqrt(m2 / ((n-1) * n))`.
@@ -865,5 +960,80 @@ mod tests {
         }
         let s = p.tail_slope();
         assert!(s > 0.0 && s < 3.0, "got {s}");
+    }
+
+    /// The covariance of the bin means from the raw products matches a
+    /// two-pass covariance over the full per-history vectors, zeros of the
+    /// histories that did not touch a bin included, whether the histories
+    /// ran on one worker or were split over two.
+    #[test]
+    fn covariance_matches_two_pass_and_combines() {
+        let histories: [&[(usize, f64)]; 6] = [
+            &[(0, 2.0), (1, 7.0)],
+            &[(0, 4.0), (2, 1.0)],
+            &[(1, 3.0)],
+            &[],
+            &[(0, 5.0), (1, 5.0), (2, 2.0)],
+            &[(2, 4.0)],
+        ];
+        let bins = 3;
+        let run = |hs: &[&[(usize, f64)]]| {
+            let mut w = WelfordWorkerState::new(&[bins]).with_covariance(&[true]);
+            for h in hs {
+                for &(b, v) in h.iter() {
+                    w.add_contribution(0, b, v);
+                }
+                w.finish_history();
+            }
+            w
+        };
+        let single = run(&histories).finalize();
+        let split = run(&histories[..2])
+            .combine(run(&histories[2..]))
+            .finalize();
+
+        let n = histories.len() as f64;
+        let x: Vec<Vec<f64>> = histories
+            .iter()
+            .map(|h| {
+                let mut v = vec![0.0; bins];
+                for &(b, val) in h.iter() {
+                    v[b] += val;
+                }
+                v
+            })
+            .collect();
+        let mean: Vec<f64> = (0..bins)
+            .map(|i| x.iter().map(|r| r[i]).sum::<f64>() / n)
+            .collect();
+        for stats in [&single.per_tally[0], &split.per_tally[0]] {
+            let cov = stats.covariance_of_mean().expect("asked for");
+            for i in 0..bins {
+                for j in 0..bins {
+                    let two_pass = x
+                        .iter()
+                        .map(|r| (r[i] - mean[i]) * (r[j] - mean[j]))
+                        .sum::<f64>()
+                        / (n - 1.0)
+                        / n;
+                    assert!(
+                        (cov[i * bins + j] - two_pass).abs() < 1e-12,
+                        "cov[{i}][{j}] = {} vs {two_pass}",
+                        cov[i * bins + j]
+                    );
+                }
+                // The diagonal is the per-bin standard error squared.
+                let se = stats.std_err()[i];
+                assert!((cov[i * bins + i] - se * se).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn no_covariance_unless_asked() {
+        let mut w = WelfordWorkerState::new(&[2]);
+        w.add_contribution(0, 0, 1.0);
+        w.finish_history();
+        assert!(w.finalize().per_tally[0].covariance_of_mean().is_none());
     }
 }

@@ -38,6 +38,10 @@ pub mod reaction_ranges;
 pub fn all_sections() -> Vec<(&'static str, Schema)> {
     vec![
         ("branching/branching.arrow", branching_branching()),
+        (
+            "branching/branching_covariance.arrow",
+            branching_branching_covariance(),
+        ),
         ("bremsstrahlung.arrow", bremsstrahlung()),
         ("compton.arrow", compton()),
         ("covariance.arrow", covariance()),
@@ -49,6 +53,10 @@ pub fn all_sections() -> Vec<(&'static str, Schema)> {
         ("energy.arrow", energy()),
         ("fission_photon.arrow", fission_photon()),
         ("fission_yields/aliases.arrow", fission_yields_aliases()),
+        (
+            "fission_yields/evaluated_yields.arrow",
+            fission_yields_evaluated_yields(),
+        ),
         (
             "fission_yields/fission_yields.arrow",
             fission_yields_fission_yields(),
@@ -180,6 +188,10 @@ fn i32s(name: &str, nullable: bool) -> Field {
     Field::new(name, list_of(DataType::Int32), nullable)
 }
 
+fn bools(name: &str, nullable: bool) -> Field {
+    Field::new(name, list_of(DataType::Boolean), nullable)
+}
+
 fn utf8s(name: &str, nullable: bool) -> Field {
     Field::new(name, list_of(DataType::Utf8), nullable)
 }
@@ -225,9 +237,145 @@ pub fn branching_branching() -> Schema {
         utf8("quantity", false),
         f64s("energy", false),
         f64s("values", false),
+        // What the evaluation states about each production state summed
+        // into the row, one item per state, and the parent's MF=1
+        // normalisation text. Recorded, not used to build the row.
+        i32s("mt", true),
+        i32s("lfs", true),
+        i32s("lmf", true),
+        bools("list_complete", true),
+        utf8s("level_route", true),
+        f64s("level_energy", true),
+        f64s("level_energy_difference", true),
+        f64ss("mf3_cross_section", true),
+        utf8("normalisation", true),
     ])
     .with_metadata(meta([
         ("filetype", "transmutation-branching"),
+        ("version", "2.0"),
+    ]))
+}
+
+/// `branching/branching_covariance.arrow`
+///
+/// MF=40, the covariance of the radionuclide production cross sections that
+/// `branching.arrow` carries as MF=10 partials: the stated uncertainty of an
+/// isomeric split. Optional, like `covariance.arrow` and for the same reasons:
+/// a library without MF=40 writes no such file, a branching directory published
+/// before it has none, and a reader treats absence as "no covariance", never as
+/// an error.
+///
+/// Every covariance block of every MF=40 section of every evaluation, not a
+/// selection. One row per block, which is one NC or NI block of one
+/// sub-subsection of one product state. Every tape value is written as the tape
+/// gives it: nothing is normalised, and a state the converter could not place
+/// in the chain is still written, with a null `target`. A section with no
+/// product state (NS 0), a product state with no sub-subsection (NL 0), or a
+/// sub-subsection with no block (NC and NI 0), holds no covariance and so has
+/// no row, and the counts NS, NL, NC and NI are not columns, being the row
+/// counts. The converter lists each such part, with its tape values, under
+/// `mf40_without_blocks` in `branching/provenance.json` instead. None of the
+/// published libraries has one.
+///
+/// The first columns are the converter's key, the rest are the tape's:
+///
+/// * `nuclide` is the parent, named as `branching.arrow` names it.
+///   `reaction` is the chain kind the section's MT maps to, null for an MT
+///   with none (TENDL writes MF=40 for MT 18 with IZAP 0).
+/// * `target` is the chain nuclide the product state (`izap`, `lfs`) is the
+///   partial of, which is the `target` of the `branching.arrow` row for
+///   (`nuclide`, `reaction`). Null when no MF=9 or MF=10 state of that MT
+///   matched it, when several states of one chain nuclide sit within the
+///   converter's tolerance of its excitation, since taking the nearest would
+///   guess which partial weights the covariance, or when the state is excited
+///   (`lfs` above 0) with `qm - qi` not positive, since then nothing on the
+///   tape confirms which MF=9 or MF=10 level its `lfs` names; each such state
+///   is listed under `mf40_unmatched_states` in `branching/provenance.json`.
+///   A ground state (`lfs` 0) is taken at zero excitation whatever its
+///   `qm - qi`, as MF=9 and MF=10 grounds are. A match by excitation never puts an excited state on a ground partial,
+///   or the reverse, and one made because MF=9 and MF=10 give the state's
+///   (`izap`, `lfs`) no state or one at another excitation is listed under
+///   `mf40_states_placed_by_excitation` there. `target1` is
+///   the same for the partner state the block correlates this one with, level
+///   `xlfs1` of reaction `mt1`: the match of the one state of `mt1`'s MF=40
+///   section at LFS `xlfs1`, as that state's own row's `target` is. Null when
+///   the partner is in another material, `xmf1` is not 10, `mt1` is 0 (which
+///   the manual gives no meaning in MF=40), or the tape does not pin the
+///   partner to one state. MF=40 gives no IZAP for it, so a level that two
+///   MF=40 states of `mt1` share, or an MF=9 or MF=10 state of another product,
+///   is left null rather than read as this row's own product. So is an `mt1`
+///   with no MF=40 section, or no MF=40 state at `xlfs1`, whose level XLFS1
+///   would have to be read in MF=10's
+///   numbering with no excitation to check it by. The manual numbers XLFS1 as
+///   MF=10 does and MF=40 need not (ENDF/B-VIII.1 Pb204 MT 4, LFS 21 in MF=10
+///   and 1 in MF=40), so `target1` is also null where MF=10 of `mt1` gives the
+///   partner's product no state at LFS `xlfs1`, or one at another excitation
+///   than the MF=40 state there. Each such null is listed under
+///   `mf40_partner_unresolved` in `branching/provenance.json`. A state's block
+///   with itself (`mt1` and `xlfs1` its own `mt` and `lfs`) names the state by
+///   its own subsection's label, so its `target1` is its `target` unless a
+///   second MF=40 state of `mt` carries that label; where that label is not
+///   MF=10's number for the level, the state is one of those listed under
+///   `mf40_states_placed_by_excitation`. Several levels can
+///   resolve to one chain nuclide: JEFF-4.0 U235 MT 4 correlates its ground
+///   (LFS 0) with its 77 eV isomer (XLFS1 1), both U235. So a consumer keys a
+///   block on (`mt`, `lfs`, `mt1`, `xlfs1`), never on (`target`, `target1`).
+/// * `energy` and `values` are this state's own curve, linearized by the
+///   converter exactly as `branching.arrow` has it (the tape's own points
+///   when every region is lin-lin), and are written only when several states
+///   resolved to one target in one quantity, which `branching.arrow` then
+///   carries as their sum. `quantity` says which of the target's curves is
+///   this state's, as `branching.arrow`'s column does: `"cross_section"` for
+///   an MF=10 partial, `"yield"` for an MF=9 yield, whose partial is that
+///   yield times the MF=3 cross section of the MT. It is written for every
+///   placed state (`target` set), merged or not, since one target can have
+///   both a yield row and a cross-section row. A relative covariance of one
+///   state has to be weighted by that state's own partial to fold exactly.
+///   `energy` and `values` null with `quantity` set means the
+///   `branching.arrow` row for (`nuclide`, `reaction`, `target`, `quantity`)
+///   is that state's own curve.
+/// * `mat` is the evaluation's MAT, so a reader can tell a `mat1` naming the
+///   evaluation itself (JEFF-4.0 U235 MT 4 writes its own 9228 there) from a
+///   correlation with another material.
+/// * `za`, `awr` and `lis` are the section HEAD. `state_idx` is the product
+///   state's position in the section and `qm`, `qi`, `izap` and `lfs` its CONT,
+///   verbatim: JEFF-4.0 U235 MT 4 writes IZAP 0 for the target itself, and
+///   ENDF/B-VIII.1 Pb204 MT 4 numbers its isomer LFS 1 here and 21 in MF=10.
+///
+/// Every column after `lfs` is [`covariance`]'s, verbatim and in order, except
+/// its trailing `mat`, which is the key's `mat` above, so one writer and one
+/// reader serve both files. `subsection_idx` there is the
+/// sub-subsection's position within its product state, and `mtl` is always
+/// null, since MF=40 has no lumped-reaction flag.
+pub fn branching_branching_covariance() -> Schema {
+    let mut fields = vec![
+        utf8("nuclide", false),
+        utf8("reaction", true),
+        utf8("target", true),
+        utf8("target1", true),
+        f64s("energy", true),
+        f64s("values", true),
+        utf8("quantity", true),
+        i32("mat", false),
+        i32("za", false),
+        f64("awr", false),
+        i32("lis", false),
+        i32("state_idx", false),
+        f64("qm", false),
+        f64("qi", false),
+        i32("izap", false),
+        i32("lfs", false),
+    ];
+    // `covariance.arrow`'s trailing `mat` is the key's `mat` here.
+    fields.extend(
+        covariance()
+            .fields()
+            .iter()
+            .filter(|f| f.name() != "mat")
+            .map(|f| f.as_ref().clone()),
+    );
+    Schema::new(fields).with_metadata(meta([
+        ("filetype", "transmutation-branching_covariance"),
         ("version", "2.0"),
     ]))
 }
@@ -294,15 +442,27 @@ pub fn compton() -> Schema {
 /// the same `(mt, subsection_idx, block_idx)`, and that triple is the key.
 ///
 /// `mt` is the reaction the section belongs to and `mt1`/`mat1` the reaction it
-/// is correlated with, so the diagonal blocks are the rows with `mat1 == 0 &&
-/// (mt1 == 0 || mt1 == mt)`. Those are the only rows for which the matrix is
-/// symmetric in itself: an off-diagonal block's transpose is the (`mt1`, `mt`)
-/// block, not the block itself.
+/// is correlated with. `mat1` is written as the tape has it: ENDF-102 33.3.1
+/// allows both 0 and the evaluation's own MAT (the `mat` column) for this
+/// material, and `xmf1` both 0 and 3 for a cross section. So the diagonal
+/// blocks are the rows with `mat1` either of those, `xmf1` 0 or 3,
+/// `xlfs1 == 0` and `mt1 == 0 || mt1 == mt`. Those are the only rows for which
+/// the matrix is symmetric in itself: an off-diagonal block's transpose is the
+/// (`mt1`, `mt`) block, not the block itself.
 ///
 /// The `kind` discriminator selects which columns are populated, the way
 /// `distributions.arrow` uses `type`: `"ni"` for a covariance given explicitly,
 /// where `lb` selects the layout again within it, and `"nc"` for one derived
 /// from other reactions. Everything not belonging to a row's variant is null.
+///
+/// `"lumped"` is the one row that is not a block. ENDF-102 33.2.3 writes a
+/// component of a lumped reaction as a section with only its HEAD record,
+/// `[MAT, 33, MT / ZA, AWR, 0, MTL, 0, NL=0]`, and that record is the only
+/// place the format says which reactions a lumped MT 851-870 is the sum of.
+/// Such a section has no blocks and so no other row, and it is written as
+/// one row carrying `mt`, `mtl` and `mat`, with both indices 0 and every
+/// other column null. The lumped reactions of an evaluation are therefore
+/// exactly its `"lumped"` rows grouped by `mtl`.
 pub fn covariance() -> Schema {
     Schema::new(vec![
         // Which pair of reactions this block belongs to. Rows are written in
@@ -318,12 +478,14 @@ pub fn covariance() -> Schema {
         f64("xlfs1", true),
         // MTL from the section HEAD: the reaction this one is lumped into, 0
         // when it is not lumped. Per section rather than per block, so it
-        // repeats across a section's rows.
+        // repeats across a section's rows. Nonzero on a "lumped" row, which
+        // is the component's whole section.
         i32("mtl", true),
-        // kind = "ni". `lb` selects which of the rest are populated: 0-4 use
-        // `lt`, `np` and both (E, F) tables; 5 uses `ls`, `ne`, `ek` and `fkk`;
-        // 6 uses `ner`, `nec`, `er`, `ec` and `fkl`; 8 and 9 use `lt`, `np` and
-        // the first table only.
+        // kind = "ni". `lb` selects which of the rest are populated: 0-2 use
+        // `lt` (always 0), `np` and the first (E, F) table, `ek`/`fk`; 3 and 4
+        // add the second, `el`/`fl`, of `lt` pairs; 5 uses `ls`, `ne`, `ek`
+        // and `fkk`; 6 uses `ner`, `nec`, `er`, `ec` and `fkl`; 8 and 9 use
+        // `lt`, `np` and the first table only.
         i32("lb", true),
         i32("ls", true),
         i32("lt", true),
@@ -356,6 +518,12 @@ pub fn covariance() -> Schema {
         f64("xlfss", true),
         f64s("ei", true),
         f64s("wei", true),
+        // The evaluation's own MAT, repeated on every row. ENDF-102 33.3.1
+        // lets `mat1` name this material rather than 0, so without it a
+        // reader cannot tell a block within this evaluation from one with
+        // another. Null in a file written before the column existed, and a
+        // reader then knows only `mat1 == 0` as this evaluation.
+        i32("mat", true),
     ])
 }
 
@@ -366,6 +534,13 @@ pub fn decay_decay_modes() -> Schema {
         utf8("type", false),
         utf8("target", true),
         f64("branching_ratio", false),
+        // The evaluation's dBR, as MT=457 writes it. Nullable and last, so a
+        // file written without it still reads. A 0.0 is the format's "not
+        // stated" and is stored as 0.0; readers take null and 0.0 alike as
+        // not stated, never as an exact ratio (issue #140). It is the dBR on
+        // the tape's BR, and `branching_ratio` in the same row may carry the
+        // normalisation residual on the parent's largest mode.
+        f64("branching_ratio_uncertainty", true),
     ])
 }
 
@@ -376,10 +551,24 @@ pub fn decay_nuclides() -> Schema {
         f64("half_life", true),
         f64("decay_energy", false),
         // Nullable and last, so a file written without it still reads.
-        // Null means the evaluation stated no uncertainty, which is not
-        // the same as stating zero (issue #515).
+        // Each sigma is stored as the evaluation writes it, and MT=457 writes
+        // 0.0 for "not stated". Readers take null (no value, or a file that
+        // predates the column) and 0.0 alike as not stated, which is not the
+        // same as stated to be zero (issue #515).
         f64("half_life_uncertainty", true),
         f64("decay_energy_uncertainty", true),
+        // The decay energy split into its recoverable-heat components (ENDF
+        // MT=457 light particle, electromagnetic, heavy particle) with each
+        // one's sigma. Nullable and last for the same reason: a file written
+        // before them still reads, with no split. A null energy is a
+        // component not given, not one given as zero; the sigmas follow the
+        // rule above (issue #140).
+        f64("decay_energy_beta", true),
+        f64("decay_energy_beta_uncertainty", true),
+        f64("decay_energy_gamma", true),
+        f64("decay_energy_gamma_uncertainty", true),
+        f64("decay_energy_alpha", true),
+        f64("decay_energy_alpha_uncertainty", true),
     ])
     .with_metadata(meta([
         ("filetype", "transmutation-decay"),
@@ -395,6 +584,46 @@ pub fn decay_sources() -> Schema {
         utf8("type", false),
         f64s("energies", false),
         f64s("intensities", false),
+        // The ENDF interpolation code (INT) a `tabular` row's density is read
+        // with between its points, null on a `discrete` row. A continuum's
+        // integral depends on it, and the libraries use more than one: JEFF-4.0
+        // gives 16 photon continua as linear-linear beside 44 histograms.
+        // Nullable and last, so a file written before it still reads; there a
+        // continuum states no law and cannot be integrated (issue #163).
+        i32("interpolation", true),
+        // What MT=457 states about each row's uncertainty, stored as written
+        // so nothing the evaluation gives is lost (issue #163). All nullable
+        // and last, so an older file still reads; a file that has them is
+        // refused by a build that predates them (check_batch rejects columns
+        // it does not declare). On the sigma columns a null and a 0.0 both
+        // mean "not stated", never an exact value: evaluations write 0.0 for
+        // a sigma they did not give.
+        //
+        // The radiation type the row was read from ("gamma", "xray", ...).
+        // Each row is one spectrum's lines or its continuum, never a merge of
+        // two. The normalisation belongs to that part alone: the key it is
+        // shared under is (nuclide, radiation, type), so an LCON=2 spectrum
+        // gives a discrete row with FD and a tabular row with its own FC.
+        utf8("radiation", true),
+        // FD on a discrete row, FC on a tabular one, as written: the value
+        // `intensities` were already scaled by, so a 0.0 here is a stated
+        // zero, not a missing value. Its sigma is common to every line of
+        // the row.
+        f64("normalization", true),
+        f64("normalization_uncertainty", true),
+        // Per line, in the units of `intensities`: decay constant * FD * dRI.
+        // Null on a tabular row, whose points carry no sigma.
+        f64s("intensity_uncertainties", true),
+        // Per line dER [eV]. Null on a tabular row.
+        f64s("energy_uncertainties", true),
+        // The spectrum's covariance where it states one (LCOV != 0), packed
+        // as the tape packs it: LS and LB, then the energies and the values
+        // (LB=5 packed matrix for lines, LB=2 pairs for a continuum; LS is
+        // null there).
+        i32("covariance_ls", true),
+        i32("covariance_lb", true),
+        f64s("covariance_energies", true),
+        f64s("covariance_values", true),
     ])
 }
 
@@ -498,6 +727,45 @@ pub fn fission_yields_aliases() -> Schema {
         utf8("nuclide", false),
         utf8("fission_yield_parent", false),
     ])
+}
+
+/// `fission_yields/evaluated_yields.arrow`
+///
+/// The yield evaluations exactly as the tapes give them, one row per
+/// (fissioning nuclide, incident energy, kind). `kind` is `"independent"`
+/// (MT=454) or `"cumulative"` (MT=459). `products` are named from the tape's
+/// ZAFP and FPS and kept in tape order, including products the decay library
+/// has no data for; `yields` and `yield_uncertainties` are its Y and DY
+/// verbatim, so an evaluator's 0.0 is 0.0 here. A reader treats a null or 0.0
+/// DY as not stated, never as an exact yield. `interpolation` is the ENDF law
+/// from the next lower energy to this one, null at the lowest energy, where the
+/// tape puts LE in that field instead.
+///
+/// A separate file from [`fission_yields_fission_yields`] because that one is
+/// derived and this is not: there a product the decay library lacks is mapped
+/// onto a stand-in, products landing on the same name are summed, and every
+/// energy is padded to one product list. A DY cannot sit beside such a sum
+/// without the correlation of its parts, which no evaluation publishes. Being
+/// a file of its own also means a consumer that never asks for it (the
+/// browser) is not sent it, and an older build never reads it.
+///
+/// There is no correlation column because no evaluation publishes yield
+/// correlations (ENDF/B-VIII.1, JEFF-4.0 and JENDL-5.0 carry only MF=8
+/// MT=454/459). One would be appended when an evaluation has one.
+pub fn fission_yields_evaluated_yields() -> Schema {
+    Schema::new(vec![
+        utf8("nuclide", false),
+        f64("energy", false),
+        utf8("kind", false),
+        i32("interpolation", true),
+        utf8s("products", false),
+        f64s("yields", false),
+        f64s("yield_uncertainties", true),
+    ])
+    .with_metadata(meta([
+        ("filetype", "transmutation-fission_yields_evaluated"),
+        ("version", "2.0"),
+    ]))
 }
 
 /// `fission_yields/fission_yields.arrow`
@@ -646,7 +914,7 @@ mod tests {
         let sections = all_sections();
         assert_eq!(
             sections.len(),
-            20,
+            22,
             "section count changed; update the manifest"
         );
         let mut paths: Vec<&str> = sections.iter().map(|(p, _)| *p).collect();

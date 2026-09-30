@@ -82,6 +82,10 @@ impl Model {
     ///   threads, `max_runtime`). Every transport step uses the same settings,
     ///   so `total_particles` / `max_runtime` are applied afresh to each
     ///   step's transport solve (a per-step budget, not a whole-run one).
+    /// * `uncertainty` - Resample the single transport of independent mode
+    ///   and re-solve, for every source [`yani_transmute::transport_replicas`]
+    ///   applies. `None` is the default path, bit-identical to a build without
+    ///   it; with the coupled method it is an error.
     ///
     /// Product cross sections are loaded for the material's whole reachable
     /// closure (`yani::reachable_nuclides`) and then narrowed to the products
@@ -94,6 +98,7 @@ impl Model {
     ///
     /// # Returns
     /// TransmutationResults containing material compositions at each timestep
+    #[allow(clippy::too_many_arguments)]
     pub fn transmute(
         &mut self,
         method: &str,
@@ -102,6 +107,7 @@ impl Model {
         branch: Arc<yani::BranchTable>,
         parts: yani::ChainParts,
         settings: &crate::model::TransportSettings,
+        uncertainty: Option<&yani_transmute::uncertainty::DataUncertainty>,
     ) -> Result<TransmutationResults, Box<dyn std::error::Error>> {
         // Validate method
         let is_independent = match method {
@@ -114,6 +120,20 @@ impl Model {
                 .into())
             }
         };
+        // Coupled mode re-runs transport every step, so its rates carry noise
+        // that feeds forward through the compositions; resampling one step's
+        // rates would not describe that, and a number that quietly means
+        // something else is worse than none.
+        if uncertainty.is_some() && !is_independent {
+            return Err(
+                "data_uncertainty is supported with method=\"independent\" only: \
+                        the coupled method re-runs transport every step, and propagating \
+                        its step-to-step statistical noise is out of scope"
+                    .into(),
+            );
+        }
+        let want_statistics =
+            uncertainty.is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::Statistical));
 
         // Expand the schedule into per-step timesteps / source rates. The
         // schedule guarantees at least one step, and equal lengths by
@@ -215,7 +235,7 @@ impl Model {
                     &chain,
                     &branch,
                     &HashMap::new(),
-                ))
+                )?)
             };
             self.run_internal::<NoOpTracker>(settings, None, Some(Arc::clone(&scout)), false)?;
             Some(scout)
@@ -392,6 +412,7 @@ impl Model {
                         let initial = material.get_atoms_per_barn_cm()?;
                         let mut keep = yani::populated_nuclides(
                             &chain,
+                            &branch,
                             &initial,
                             total_time,
                             yani_transmute::DENSITY_FLOOR,
@@ -480,16 +501,25 @@ impl Model {
         // Create flux-weighted transmutation tallies. Normalization is by the
         // true total source-particle count, accumulated chunk by chunk during
         // transport (issue #128), so no particle count is needed up front.
-        let dep_tallies = Arc::new(TransmutationTallies::new(
-            &transmutable_cells,
-            &materials_for_init,
-            &chain,
-            &branch,
-            &carried,
-        ));
+        let dep_tallies = {
+            let tallies = TransmutationTallies::new(
+                &transmutable_cells,
+                &materials_for_init,
+                &chain,
+                &branch,
+                &carried,
+            )?;
+            // The per-history covariance the statistical source samples from.
+            // Off otherwise, so the default run allocates nothing for it.
+            Arc::new(if want_statistics {
+                tallies.with_history_statistics()
+            } else {
+                tallies
+            })
+        };
 
         // Initialize results
-        let mut results = TransmutationResults::new(timesteps.to_vec(), source_rates.to_vec());
+        let mut results = TransmutationResults::new(timesteps.to_vec());
 
         // Track full compositions (including all chain products) across steps.
         // The cell material only has transport nuclides (with HDF5 data),
@@ -524,7 +554,7 @@ impl Model {
                 }
             }
 
-            results.add_initial(mat_id, initial_material.clone());
+            results.add_initial(mat_id, initial_material.clone(), source_rates.to_vec());
             full_compositions.insert(mat_id, initial_material);
         }
 
@@ -533,6 +563,15 @@ impl Model {
         // Re-extracted per step in coupled mode, once up front in independent
         // mode; empty for every material with nothing fissionable in it.
         let mut fy_weights: HashMap<u32, FissionYieldWeights> = HashMap::new();
+
+        let mut tallied: HashMap<u32, yani_transmute::TransportTallied> = HashMap::new();
+        // The initial compositions the replicas start from, sum mode, with
+        // the nuclear data the fold reads.
+        let initial_for_replicas: HashMap<u32, Material> = if uncertainty.is_some() {
+            full_compositions.clone()
+        } else {
+            HashMap::new()
+        };
 
         // Independent mode: run transport ONCE and extract micro rates (per-source-particle).
         // These are scaled by each step's source_rate during transmutation.
@@ -550,6 +589,42 @@ impl Model {
 
             // Extract rates with source_rate=1.0 to get per-source-particle micro rates
             let mut micro_rates: HashMap<u32, ReactionRates> = HashMap::new();
+            // With uncertainty asked for, everything the replicas resample,
+            // at the same unit source rate.
+            if let Some(request) = uncertainty {
+                for (&mat_id, cell_indices) in &transmutable_cells {
+                    let slot = self.geometry.cells()[cell_indices[0]]
+                        .material_idx
+                        .expect("transmutable cell must have a material");
+                    let material = self.geometry.materials()[slot as usize].as_ref();
+                    let volume = material.volume.unwrap_or(1.0);
+                    let Some(spectrum) = dep_tallies.flux_spectrum(mat_id) else {
+                        continue;
+                    };
+                    let statistics =
+                        if request.wants(yani_transmute::uncertainty::Source::Statistical) {
+                            dep_tallies.get_reaction_rate_covariance(mat_id, volume, 1.0)
+                        } else {
+                            None
+                        };
+                    tallied.insert(
+                        mat_id,
+                        yani_transmute::TransportTallied {
+                            rates: dep_tallies.get_reaction_rates(mat_id, volume, 1.0),
+                            partials: if branch.curves().is_empty() {
+                                HashMap::new()
+                            } else {
+                                dep_tallies.get_partial_rates(mat_id, volume, 1.0)
+                            },
+                            fy_weights: dep_tallies.get_fission_yield_weights(mat_id),
+                            spectrum,
+                            statistics,
+                            branch: Arc::clone(&branch),
+                            diagnostics: dep_tallies.get_branching_diagnostics(mat_id, volume, 1.0),
+                        },
+                    );
+                }
+            }
             for (&mat_id, cell_indices) in &transmutable_cells {
                 let slot = self.geometry.cells()[cell_indices[0]]
                     .material_idx
@@ -681,30 +756,49 @@ impl Model {
                 HashMap::new()
             };
 
-            // Isomeric-branching overlay: every chain parent gets exact
-            // continuous-energy splits (issue #218). MF=10 partials are folded
-            // from the tally's union-grid flux moments (covering products that
-            // build up during the step too), MF=9 yields are scored directly
-            // at the collision energies, and the (n,n') metastable production
-            // rates are injected from the same folds. When no branching
+            // Isomeric-branching overlay: every list on a material nuclide is
+            // scored at the collision energies as `yani_transmute::
+            // branching_rule` defines it (issue #218), and the (n,n') partials
+            // of every other chain parent are folded from the tally's
+            // union-grid flux moments (covering products that build up during
+            // the step too), their rates injected. When no branching
             // subsection is configured the overlay is empty and the physics is
-            // identical to before.
+            // identical to before. MT=5, whose products are not modelled, is
+            // measured and reported either way.
             let mut folded_chains: HashMap<u32, Arc<HashMap<String, ChainNuclide>>> =
                 HashMap::new();
-            if source_rate > 0.0 && !branch.is_empty() {
+            let mut step_reports: HashMap<u32, Arc<yani_transmute::BranchingReport>> =
+                HashMap::new();
+            if source_rate > 0.0 {
                 for (&mat_id, cell_indices) in &transmutable_cells {
                     let slot = self.geometry.cells()[cell_indices[0]]
                         .material_idx
                         .expect("transmutable cell must have a material");
                     let cell_material = self.geometry.materials()[slot as usize].as_ref();
                     let volume = cell_material.volume.unwrap_or(1.0);
-                    let partials = dep_tallies.get_partial_rates(mat_id, volume, source_rate);
-                    if partials.is_empty() {
-                        continue;
-                    }
+                    let diagnostics =
+                        dep_tallies.get_branching_diagnostics(mat_id, volume, source_rate);
+                    let partials = if branch.curves().is_empty() {
+                        HashMap::new()
+                    } else {
+                        dep_tallies.get_partial_rates(mat_id, volume, source_rate)
+                    };
                     let mat_rates = rates.entry(mat_id).or_default();
-                    let folded = apply_coupled_branching(&chain, &partials, mat_rates);
-                    folded_chains.insert(mat_id, folded);
+                    let named = |e: String| -> Box<dyn std::error::Error> {
+                        format!("material {mat_id}, step {}: {e}", step + 1).into()
+                    };
+                    let (folded, report) = apply_coupled_branching(
+                        &chain,
+                        &branch,
+                        &partials,
+                        mat_rates,
+                        Some(&diagnostics),
+                    )
+                    .map_err(named)?;
+                    if !partials.is_empty() {
+                        folded_chains.insert(mat_id, folded);
+                    }
+                    step_reports.insert(mat_id, Arc::new(report));
                 }
             }
 
@@ -777,6 +871,11 @@ impl Model {
                     .map(|mat_rates| yani::per_edge_rates(edge_chain, mat_rates))
                     .unwrap_or_default();
                 results.add_step_rates(mat_id, edges);
+                results
+                    .branching_report
+                    .entry(mat_id)
+                    .or_default()
+                    .push(step_reports.get(&mat_id).cloned().unwrap_or_default());
 
                 // In independent mode, skip transport material updates (geometry is frozen)
                 if !is_independent {
@@ -959,6 +1058,31 @@ impl Model {
             transmutation_loop_start.elapsed().as_secs_f64()
         );
 
+        // Uncertainty: resample what the single transport produced and re-solve
+        // the same schedule, per material, independently of the nominal loop
+        // above, which is untouched and so bit-identical either way.
+        if let Some(request) = uncertainty {
+            for (mat_id, material) in &initial_for_replicas {
+                let Some(transport) = tallied.get(mat_id) else {
+                    continue;
+                };
+                let (ensemble, info) = yani_transmute::transport_replicas(
+                    material,
+                    transport,
+                    &timesteps,
+                    &source_rates,
+                    &chain,
+                    parts,
+                    request,
+                )?;
+                results.uncertainty.insert(*mat_id, ensemble);
+                results.uncertainty_info.insert(*mat_id, info);
+                if let Some(c) = transport.statistics.clone() {
+                    results.rate_covariance.insert(*mat_id, c);
+                }
+            }
+        }
+
         Ok(results)
     }
 }
@@ -1030,5 +1154,246 @@ mod tests {
     fn an_unrated_nuclide_ranks_as_a_scatterer() {
         let material = fe56();
         assert_eq!(peak_cross_section(&material, "Cs137"), 20.0);
+    }
+
+    /// `RUNS` independent transport runs of a 14 MeV point source in a 10 cm
+    /// Fe56 sphere, each with its own history-statistics tally carrying
+    /// `reactions` (kind, product), on two threads so the per-worker scratch
+    /// and the stripe fold both run for real. `None` without the Fe56
+    /// transport fixture.
+    fn fe56_statistics_runs(
+        runs: u64,
+        particles: usize,
+        reactions: &[(&str, &str)],
+    ) -> Option<(Material, Vec<Arc<TransmutationTallies>>)> {
+        use crate::geo::{BoundaryType, HalfspaceType, Region, Surface};
+        use crate::geometry::cell::Cell;
+        use crate::geometry::Geometry;
+        use yamc_source::distribution::angular::AngularDistribution;
+        use yamc_source::distribution::energy::Discrete;
+        use yamc_source::distribution::spatial::Point;
+        use yamc_source::source::{
+            ParticleSource, Source, SourceEnergyDistribution, SourceSpatialDistribution,
+        };
+
+        let Some(fe56_path) = yamc_test_cache::transport_nuclide("Fe56") else {
+            eprintln!("skipping -- Fe56 transport fixture absent");
+            return None;
+        };
+        let mut material = Material::new(
+            HashMap::from([("Fe56".to_string(), 1.0)]),
+            "atom",
+            "g/cc",
+            Some(7.874),
+        )
+        .unwrap();
+        material.set_temperature("294");
+        material
+            .read_nuclear_data(&HashMap::from([("Fe56".to_string(), fe56_path)]), None)
+            .unwrap();
+        material.set_material_id(1);
+        material.transmutable = true;
+        let chain: HashMap<String, ChainNuclide> = HashMap::from([(
+            "Fe56".to_string(),
+            ChainNuclide {
+                name: "Fe56".to_string(),
+                half_life: None,
+                decay_energy: 0.0,
+                reactions: reactions
+                    .iter()
+                    .map(|(kind, target)| yani::ChainReaction {
+                        kind: kind.to_string(),
+                        target: Some(target.to_string()),
+                        branching: 1.0,
+                        q_value: None,
+                        branching_uncertainty: None,
+                    })
+                    .collect(),
+                decays: vec![],
+                fission_yields: None,
+                sources: Vec::new(),
+                half_life_uncertainty: None,
+                decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
+            },
+        )]);
+
+        let mut out = Vec::new();
+        for run in 0..runs {
+            let sphere = Arc::new(Surface::sphere(
+                0.0,
+                0.0,
+                0.0,
+                10.0,
+                Some(1),
+                Some(BoundaryType::Vacuum),
+            ));
+            let region = Region::new_from_halfspace(HalfspaceType::Below(sphere));
+            let cell = Cell::new(Some(1), region, None, Some(0));
+            let geometry = Geometry::new(vec![cell], vec![Arc::new(material.clone())]).unwrap();
+            let source = ParticleSource::Neutron(Source {
+                space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
+                angle: AngularDistribution::Isotropic,
+                energy: SourceEnergyDistribution::Discrete(
+                    Discrete::new(vec![1.406e7], vec![1.0]).unwrap(),
+                ),
+                strength: 1.0,
+            });
+            let mut model = Model::new(geometry, vec![source], vec![]);
+            model.verbose = crate::model::Verbose::silent();
+
+            let cells: HashMap<u32, Vec<usize>> = HashMap::from([(1u32, vec![0usize])]);
+            let for_init: HashMap<u32, &Material> = HashMap::from([(1u32, &material)]);
+            let tallies = Arc::new(
+                TransmutationTallies::new(
+                    &cells,
+                    &for_init,
+                    &chain,
+                    &yani::BranchTable::new(),
+                    &HashMap::new(),
+                )
+                .expect("no branching to read")
+                .with_history_statistics(),
+            );
+            let settings = crate::model::TransportSettings {
+                total_particles: Some(particles),
+                seed: 1000 + run,
+                threads: Some(2),
+                ..Default::default()
+            };
+            model
+                .run_internal::<NoOpTracker>(&settings, None, Some(Arc::clone(&tallies)), false)
+                .unwrap();
+            out.push(tallies);
+        }
+        Some((material, out))
+    }
+
+    /// Measured over predicted variance, from each run's predicted variance
+    /// of a quantity and the quantity's value in each run.
+    fn spread_ratio(values: &[f64], predicted: &[f64]) -> f64 {
+        let n = values.len() as f64;
+        let avg = values.iter().sum::<f64>() / n;
+        let measured = values.iter().map(|v| (v - avg).powi(2)).sum::<f64>() / (n - 1.0);
+        measured / (predicted.iter().sum::<f64>() / n)
+    }
+
+    /// With 16 runs the measured variance is a chi-squared on 15 degrees of
+    /// freedom over its expectation, so a correct prediction lands in
+    /// [0.42, 1.83] 95% of the time. The bounds are a little wider and the
+    /// seeds fixed, so the tests below are deterministic.
+    const SPREAD_BOUNDS: std::ops::RangeInclusive<f64> = 0.35..=2.2;
+
+    /// The statistical uncertainty the transmutation tally's per-history
+    /// covariance predicts must match the actual spread between independent
+    /// transport runs (issue #140, item 1).
+    ///
+    /// Two quantities are checked: the total track length, which is the sum
+    /// over every bin and so rests almost entirely on the cross-bin
+    /// covariance, and the fast-band track length above 1 MeV.
+    #[test]
+    fn history_covariance_predicts_the_run_to_run_spread() {
+        const PARTICLES: usize = 1500;
+        let Some((_, runs)) = fe56_statistics_runs(16, PARTICLES, &[("(n,gamma)", "Fe57")]) else {
+            return;
+        };
+
+        let mut predicted = [Vec::new(), Vec::new()];
+        let mut means = [Vec::new(), Vec::new()];
+        for tallies in &runs {
+            let cov = tallies.history_covariance(1).unwrap();
+            assert_eq!(cov.n_histories, PARTICLES as u64);
+            let b = cov.n_bins();
+            let total: Vec<f64> = (0..cov.dim()).map(|i| (i < b) as u8 as f64).collect();
+            let fast: Vec<f64> = (0..cov.dim())
+                .map(|i| (i < b && cov.grid[i] >= 1.0e6) as u8 as f64)
+                .collect();
+            let (m_total, v_total) = cov.linear_combination(&total);
+            let (m_fast, v_fast) = cov.linear_combination(&fast);
+
+            // The folded total is the tally's own flux numerator.
+            let flux_tl = tallies.get_flux(1, 1.0, 1.0);
+            assert!(
+                (m_total - flux_tl).abs() <= 1e-9 * flux_tl,
+                "summed s0 {m_total:e} vs flux track length {flux_tl:e}"
+            );
+            for (q, (m, v)) in [(m_total, v_total), (m_fast, v_fast)]
+                .into_iter()
+                .enumerate()
+            {
+                means[q].push(m);
+                predicted[q].push(v);
+            }
+        }
+        for (q, name) in [(0, "total"), (1, "fast")] {
+            let ratio = spread_ratio(&means[q], &predicted[q]);
+            eprintln!("{name}: measured / predicted variance = {ratio:.3}");
+            assert!(
+                SPREAD_BOUNDS.contains(&ratio),
+                "{name}: measured over predicted variance {ratio:.3}"
+            );
+        }
+    }
+
+    /// Every reaction rate's predicted sigma must match its run-to-run
+    /// spread, over rates spanning a 1/v capture, threshold reactions from a
+    /// few MeV up, and one near the 14 MeV source. The rates reported must be
+    /// the accessor's, and a rate difference must get its variance from the
+    /// cross terms too: two fast threshold rates scored by the same histories
+    /// are positively correlated, and their difference is checked against the
+    /// runs as well.
+    #[test]
+    fn rate_covariance_predicts_the_run_to_run_spread() {
+        const REACTIONS: &[(&str, &str)] = &[
+            ("(n,gamma)", "Fe57"),
+            ("(n,p)", "Mn56"),
+            ("(n,a)", "Cr53"),
+            ("(n,2n)", "Fe55"),
+        ];
+        let (volume, source_rate) = (4.0 / 3.0 * std::f64::consts::PI * 1000.0, 1.0e14);
+        let Some((_, runs)) = fe56_statistics_runs(16, 1500, REACTIONS) else {
+            return;
+        };
+
+        let kinds: Vec<&str> = REACTIONS.iter().map(|(k, _)| *k).collect();
+        let mut values = vec![Vec::new(); kinds.len() + 1];
+        let mut predicted = vec![Vec::new(); kinds.len() + 1];
+        let mut correlation = Vec::new();
+        for tallies in &runs {
+            let rc = tallies
+                .get_reaction_rate_covariance(1, volume, source_rate)
+                .unwrap();
+            let rates = tallies.get_reaction_rates(1, volume, source_rate);
+            let idx: Vec<usize> = kinds
+                .iter()
+                .map(|k| rc.index_of("Fe56", k, None).expect("every tallied rate"))
+                .collect();
+            for (q, &i) in idx.iter().enumerate() {
+                let expected = rates["Fe56"][kinds[q]];
+                assert!((rc.rates[i] - expected).abs() <= 1e-12 * expected);
+                values[q].push(rc.rates[i]);
+                predicted[q].push(rc.covariance(i, i));
+            }
+            // (n,p) minus (n,a): its variance needs the cross term.
+            let (p, a) = (idx[1], idx[2]);
+            values[kinds.len()].push(rc.rates[p] - rc.rates[a]);
+            predicted[kinds.len()]
+                .push(rc.covariance(p, p) + rc.covariance(a, a) - 2.0 * rc.covariance(p, a));
+            correlation.push(rc.correlation(p, a));
+        }
+        for (q, name) in kinds.iter().chain(&["(n,p) - (n,a)"]).enumerate() {
+            let ratio = spread_ratio(&values[q], &predicted[q]);
+            eprintln!("{name}: measured / predicted variance = {ratio:.3}");
+            assert!(
+                SPREAD_BOUNDS.contains(&ratio),
+                "{name}: measured over predicted variance {ratio:.3}"
+            );
+        }
+        let mean_corr = correlation.iter().sum::<f64>() / correlation.len() as f64;
+        eprintln!("corr((n,p), (n,a)) = {mean_corr:.3}");
+        assert!(
+            mean_corr > 0.2,
+            "fast threshold rates should correlate, got {mean_corr:.3}"
+        );
     }
 }

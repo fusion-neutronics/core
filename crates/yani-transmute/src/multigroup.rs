@@ -3,7 +3,7 @@
 /// Computes effective one-group cross sections and reaction rates from a
 /// user-provided multigroup flux spectrum, enabling standalone transmutation
 /// without re-running transport at each timestep.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 
 use yamc_materials::material::Material;
@@ -12,6 +12,7 @@ use yamc_nuclide::reaction::Reaction;
 use yani::{ChainNuclide, FissionYieldSet, FissionYieldWeights, ReactionRates};
 
 use super::reaction_type_to_mt;
+use crate::branching_rule::{Bound, ListRates, Lists, MT_ANYTHING};
 use crate::self_shielding::{flux_shape, mixture_total, FluxShape, Shielding, ShieldingInfo};
 
 /// MT for total fission, whose rate distribution weights the yield fold.
@@ -103,10 +104,10 @@ fn interior_from(grid: &[f64], e_lo: f64, e_hi: f64) -> (usize, &[f64]) {
 ///
 /// `e_lo` is left out because every caller already holds it and wants to
 /// evaluate there once before the loop rather than re-evaluate it as the left
-/// end of the first segment.
-///
-/// Shared with [`crate::self_shielding`], which integrates over the same points
-/// so that a shielded average and a dilute one differ only by the weight.
+/// end of the first segment. The one-grid case of
+/// [`group_points_after_merged`], kept for the tests that check the bisected
+/// point set against a scan.
+#[cfg(test)]
 pub(crate) fn group_points_after(
     grid: &[f64],
     e_lo: f64,
@@ -118,8 +119,8 @@ pub(crate) fn group_points_after(
         .chain(std::iter::once(e_hi))
 }
 
-/// As [`group_points_after`], over two grids at once: their interiors merged in
-/// non-decreasing order, then `e_hi`.
+/// The evaluation points of one group after its lower edge, over two grids at
+/// once: their interiors merged in non-decreasing order, then `e_hi`.
 ///
 /// For an integrand that bends on two grids -- the cross section and the
 /// fission-yield hats, or a branching curve and the cross section -- where the
@@ -237,6 +238,18 @@ impl GroupTerms {
         } else {
             self.dilute(e_lo, e_hi)
         }
+    }
+
+    /// `∫ σ φ dE` under the shielded flux shape, the numerator of
+    /// [`GroupTerms::shielded`].
+    pub(crate) fn shielded_integral(&self) -> f64 {
+        self.shielded_num
+    }
+
+    /// `∫ φ dE` under the shielded flux shape, the denominator of
+    /// [`GroupTerms::shielded`].
+    pub(crate) fn shielded_weight(&self) -> f64 {
+        self.shielded_den
     }
 
     /// The group average under the shielded flux shape, or 0.0 where the shape
@@ -408,6 +421,238 @@ pub(crate) fn walk_group(
     terms
 }
 
+/// One group's averages of a branching list's productions, under the weight
+/// the transport total is averaged with.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ListGroup {
+    /// Per curve of the list, in barns.
+    pub(crate) production: Vec<f64>,
+    /// The transport total, over the same points.
+    pub(crate) total: f64,
+    /// The production clipped as impossible.
+    pub(crate) clipped: f64,
+    /// The production resting on a held fraction.
+    pub(crate) extrapolated: f64,
+}
+
+/// Walk one group's points for a branching list, the way [`walk_group`] walks
+/// the transport total, and average every state's production under the same
+/// weight: the shielded flux shape when there is one, else `weighting`.
+///
+/// The points are the list's own nodes merged with the total's grid, so both
+/// bend only at a point. A share list's production is the product of two
+/// factors (see [`Bound::point`]), each linear on a segment where the data
+/// is, and is integrated as their exact product there: for a yield that is
+/// exact, and for a complete list of partials consistent with the total it
+/// is the trapezoid of each partial, so the fold gives back the evaluation's
+/// own partials. An absolute partial is linear on each segment and its
+/// trapezoid is exact. Like [`walk_group`], the walk stops at
+/// the total's last energy, and the flux above it only adds to the shielded
+/// denominator. Without a total (an `(n,n')` parent with no MT=4) the walk
+/// covers the whole group.
+pub(crate) fn walk_list_group(
+    bound: &Bound<'_, '_>,
+    e_lo: f64,
+    e_hi: f64,
+    shape: Option<&FluxShape>,
+    weighting: Weighting,
+    scratch: &mut [Vec<f64>; 2],
+) -> ListGroup {
+    let n = bound.rule.curves.len();
+    let mut out = ListGroup {
+        production: vec![0.0; n],
+        ..Default::default()
+    };
+    if e_lo >= e_hi {
+        return out;
+    }
+    let absolute = bound.rule.is_absolute();
+    let empty: &[f64] = &[];
+    let grid: &[f64] = bound.total.map_or(empty, |r| &r.energy[..]);
+    let e_end = match bound.total {
+        Some(_) => e_hi.min(grid.last().copied().unwrap_or(e_lo)),
+        None => e_hi,
+    };
+    let phi_at = |e: f64| shape.map_or(0.0, |s| s.at(e));
+
+    // Numerators under each weight, and the denominators the weight needs.
+    let mut flat = vec![0.0; n];
+    let mut lethargy = vec![0.0; n];
+    let mut shielded = vec![0.0; n];
+    let (mut t_flat, mut t_leth, mut t_shield) = (0.0, 0.0, 0.0);
+    let (mut c_flat, mut c_leth, mut c_shield) = (0.0, 0.0, 0.0);
+    let (mut x_flat, mut x_leth, mut x_shield) = (0.0, 0.0, 0.0);
+    let (mut leth_den, mut shield_den) = (0.0, 0.0);
+
+    if e_end > e_lo {
+        let [prev, cur] = scratch;
+        prev.resize(n, 0.0);
+        cur.resize(n, 0.0);
+        let mut prev_e = e_lo;
+        let mut prev_t = bound.total_at(e_lo);
+        let mut prev_point = bound.point(e_lo, prev_t, prev);
+        let mut prev_phi = phi_at(e_lo);
+        let points = group_points_after_merged(&bound.rule.nodes, grid, e_lo, e_end);
+        for e in points {
+            let t = bound.total_at(e);
+            let point = bound.point(e, t, cur);
+            let phi = phi_at(e);
+            let de = e - prev_e;
+            let held = prev_point.extrapolated || point.extrapolated;
+            let lethargic = de > 0.0 && prev_e > 0.0 && e > 0.0;
+            let (w_prev, w) = if lethargic {
+                (1.0 / prev_e, 1.0 / e)
+            } else {
+                (0.0, 0.0)
+            };
+            let phi_mean = 0.5 * (prev_phi + phi);
+            let mut seg_sum = 0.0;
+            let (b0, b1) = (prev_point.factor, point.factor);
+            // A held split's factors are its own, not a neighbour's, so a
+            // segment ending on one takes the trapezoid of the production.
+            let trapezoid = absolute || prev_point.held || point.held;
+            for k in 0..n {
+                let (f0, f1) = if trapezoid && !absolute {
+                    (prev[k] * b0, cur[k] * b1)
+                } else {
+                    (prev[k], cur[k])
+                };
+                let (seg, leth) = if trapezoid {
+                    (0.5 * (f0 + f1) * de, 0.5 * (f0 * w_prev + f1 * w) * de)
+                } else {
+                    (
+                        de * (2.0 * f0 * b0 + f0 * b1 + f1 * b0 + 2.0 * f1 * b1) / 6.0,
+                        0.5 * (f0 * b0 * w_prev + f1 * b1 * w) * de,
+                    )
+                };
+                flat[k] += seg;
+                seg_sum += seg;
+                if de > 0.0 {
+                    if lethargic {
+                        lethargy[k] += leth;
+                    }
+                    if shape.is_some() {
+                        shielded[k] += seg * phi_mean;
+                    }
+                }
+            }
+            let t_seg = 0.5 * (prev_t + t) * de;
+            let c_seg = 0.5 * (prev_point.clipped + point.clipped) * de;
+            let x_seg = if held { seg_sum } else { 0.0 };
+            t_flat += t_seg;
+            c_flat += c_seg;
+            x_flat += x_seg;
+            if de > 0.0 {
+                if lethargic {
+                    t_leth += 0.5 * (prev_t * w_prev + t * w) * de;
+                    c_leth += 0.5 * (prev_point.clipped * w_prev + point.clipped * w) * de;
+                    if held && seg_sum > 0.0 {
+                        let leth_sum: f64 = (0..n)
+                            .map(|k| {
+                                if absolute {
+                                    0.5 * (prev[k] * w_prev + cur[k] * w) * de
+                                } else {
+                                    0.5 * (prev[k] * b0 * w_prev + cur[k] * b1 * w) * de
+                                }
+                            })
+                            .sum();
+                        x_leth += leth_sum;
+                    }
+                    leth_den += 0.5 * (w_prev + w) * de;
+                }
+                if shape.is_some() {
+                    t_shield += t_seg * phi_mean;
+                    c_shield += c_seg * phi_mean;
+                    x_shield += x_seg * phi_mean;
+                    shield_den += phi_mean * de;
+                }
+            }
+            prev_e = e;
+            prev_t = t;
+            prev_point = point;
+            prev_phi = phi;
+            std::mem::swap(prev, cur);
+        }
+    }
+    if shape.is_some() && e_end < e_hi {
+        let from = e_end.max(e_lo);
+        shield_den += 0.5 * (phi_at(from) + phi_at(e_hi)) * (e_hi - from);
+    }
+
+    let width = e_hi - e_lo;
+    let average = |flat: f64, leth: f64, shield: f64| -> f64 {
+        if shape.is_some() {
+            if shield_den > 0.0 {
+                shield / shield_den
+            } else {
+                0.0
+            }
+        } else {
+            match weighting {
+                Weighting::FlatInEnergy => flat / width,
+                Weighting::OneOverE if leth_den > 0.0 => leth / leth_den,
+                Weighting::OneOverE => flat / width,
+            }
+        }
+    };
+    for k in 0..n {
+        out.production[k] = average(flat[k], lethargy[k], shielded[k]);
+    }
+    out.total = average(t_flat, t_leth, t_shield);
+    out.clipped = average(c_flat, c_leth, c_shield);
+    out.extrapolated = average(x_flat, x_leth, x_shield);
+    out
+}
+
+/// Fold a branching list over a spectrum: each state's production, the
+/// transport total, and the clipped and held production, each `sum_g
+/// sigma_g phi_g` in barns times flux, with the factor that makes them rates
+/// at `source_rate` (per atom).
+///
+/// `groups` are the groups worth walking (every group with flux on the dilute
+/// path), and `shape` the parent's shielded flux shape, if any: the same two
+/// the parent's transport rates are collapsed with, so a list and its total
+/// see one spectrum under one weight.
+pub(crate) fn fold_list(
+    bound: &Bound<'_, '_>,
+    multigroup_flux: &[f64],
+    group_boundaries: &[f64],
+    groups: impl Iterator<Item = usize>,
+    shape: Option<&FluxShape>,
+    source_rate: f64,
+) -> ListRates {
+    let n = bound.rule.curves.len();
+    let mut out = ListRates {
+        production: vec![0.0; n],
+        has_total: bound.total.is_some(),
+        ..Default::default()
+    };
+    let weighting = within_group_weight();
+    let mut scratch = [Vec::with_capacity(n), Vec::with_capacity(n)];
+    for g in groups {
+        let phi = multigroup_flux[g];
+        let group = walk_list_group(
+            bound,
+            group_boundaries[g],
+            group_boundaries[g + 1],
+            shape,
+            weighting,
+            &mut scratch,
+        );
+        for k in 0..n {
+            out.production[k] += group.production[k] * phi;
+        }
+        out.total += group.total * phi;
+        out.clipped += group.clipped * phi;
+        out.extrapolated += group.extrapolated * phi;
+    }
+    // Kept as folded, with the factor that makes them rates beside it: a
+    // share is a ratio of two of these, and scaling both first would round
+    // it differently from the fold it replaces.
+    out.to_rate = 1.0e-24 * source_rate;
+    out
+}
+
 /// The share of a spectrum's flux above `top`, with the flux flat inside each
 /// group, which is what the fold assumes.
 pub(crate) fn fraction_above(multigroup_flux: &[f64], group_boundaries: &[f64], top: f64) -> f64 {
@@ -435,10 +680,14 @@ pub(crate) fn fraction_above(multigroup_flux: &[f64], group_boundaries: &[f64], 
 /// material part of the spectrum is involved. TENDL evaluations end at 200
 /// MeV and ENDF/B's at 20 MeV, and CCFE-709 runs to 1 GeV, so a spectrum with
 /// flux in its top groups can reach this with either library.
+///
+/// The top is the last energy of the reactions in `mts` the nuclide holds,
+/// so it does not depend on which other reactions happen to be loaded.
 pub fn spectrum_above_evaluation(
     material: &Material,
     multigroup_flux: &[f64],
     group_boundaries: &[f64],
+    mts: &HashSet<i32>,
 ) -> Vec<(String, f64, f64)> {
     let mut names: Vec<&String> = material.nuclide_data.keys().collect();
     names.sort();
@@ -457,7 +706,9 @@ pub fn spectrum_above_evaluation(
             continue;
         };
         let top = reactions
-            .values()
+            .iter()
+            .filter(|(mt, _)| mts.contains(mt))
+            .map(|(_, r)| r)
             .filter_map(|r| r.energy.last().copied())
             .fold(f64::NEG_INFINITY, f64::max);
         if !top.is_finite() {
@@ -784,6 +1035,44 @@ pub fn compute_multigroup_reaction_rates_shielded(
     source_rate: f64,
     shielding: Option<&Shielding>,
 ) -> (ReactionRates, FissionYieldWeights, ShieldingInfo) {
+    let collapsed = collapse_with_lists(
+        material,
+        chain,
+        &Lists::new(),
+        multigroup_flux,
+        group_boundaries,
+        source_rate,
+        shielding,
+    );
+    (collapsed.rates, collapsed.fy_weights, collapsed.info)
+}
+
+/// Everything one collapse produces.
+pub(crate) struct Collapsed {
+    pub(crate) rates: ReactionRates,
+    pub(crate) fy_weights: FissionYieldWeights,
+    pub(crate) info: ShieldingInfo,
+    /// Per parent, each of its branching lists folded (see
+    /// [`crate::branching_rule`]), in the order `lists` holds them. Only for
+    /// parents the collapse walked, which are those with transport data.
+    pub(crate) lists: HashMap<String, Vec<ListRates>>,
+    /// Per parent with an MT=5 cross section, its MT=5 rate, which no chain
+    /// reaction carries.
+    pub(crate) mt5: HashMap<String, f64>,
+}
+
+/// As [`compute_multigroup_reaction_rates_shielded`], also folding each
+/// parent's branching lists in the same walk as its transport totals, and
+/// each parent's MT=5 rate.
+pub(crate) fn collapse_with_lists(
+    material: &Material,
+    chain: &HashMap<String, ChainNuclide>,
+    lists: &Lists<'_>,
+    multigroup_flux: &[f64],
+    group_boundaries: &[f64],
+    source_rate: f64,
+    shielding: Option<&Shielding>,
+) -> Collapsed {
     let mut rates: ReactionRates = HashMap::new();
     let mut fy_weights: FissionYieldWeights = HashMap::new();
 
@@ -793,14 +1082,24 @@ pub fn compute_multigroup_reaction_rates_shielded(
         info.chord_cm = Some(s.chord_cm);
     }
 
+    let mut folded_lists: HashMap<String, Vec<ListRates>> = HashMap::new();
+    let mut mt5: HashMap<String, f64> = HashMap::new();
+    let empty = |rates, fy_weights, info| Collapsed {
+        rates,
+        fy_weights,
+        info,
+        lists: HashMap::new(),
+        mt5: HashMap::new(),
+    };
+
     // If source_rate is zero, return empty rates (decay only)
     if source_rate == 0.0 {
-        return (rates, fy_weights, info);
+        return empty(rates, fy_weights, info);
     }
 
     // Total scalar flux = sum of group fluxes
     let Some(setup) = CollapseSetup::new(material, multigroup_flux, shielding) else {
-        return (rates, fy_weights, info);
+        return empty(rates, fy_weights, info);
     };
 
     // One nuclide's collapse is independent of every other's: it reads the
@@ -822,7 +1121,7 @@ pub fn compute_multigroup_reaction_rates_shielded(
     );
     let collapsed: Vec<Option<NuclideCollapse>> = {
         let one = |&(name, chain_nuclide): &(&String, &ChainNuclide)| {
-            context.collapse_nuclide(name, chain_nuclide)
+            context.collapse_nuclide(name, chain_nuclide, lists.get(name.as_str()))
         };
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -854,6 +1153,12 @@ pub fn compute_multigroup_reaction_rates_shielded(
         if collapsed.shielded {
             info.shielded.push((*name).clone());
         }
+        if !collapsed.lists.is_empty() {
+            folded_lists.insert((*name).clone(), collapsed.lists);
+        }
+        if let Some(rate) = collapsed.mt5 {
+            mt5.insert((*name).clone(), rate);
+        }
         // A `min` over a set, so its order does not reach the answer. The
         // `dilute > 0.0` guard inside the walk is what keeps a NaN out of it.
         if let Some(factor) = collapsed.strongest_factor {
@@ -862,7 +1167,13 @@ pub fn compute_multigroup_reaction_rates_shielded(
         }
     }
 
-    (rates, fy_weights, info)
+    Collapsed {
+        rates,
+        fy_weights,
+        info,
+        lists: folded_lists,
+        mt5,
+    }
 }
 
 /// Everything one nuclide's collapse produces, held rather than written
@@ -885,6 +1196,10 @@ struct NuclideCollapse {
     would_shield: Option<f64>,
     /// The strongest suppression any of its groups saw, on the shielded path.
     strongest_factor: Option<f64>,
+    /// Its branching lists, folded in the order they were handed in.
+    lists: Vec<ListRates>,
+    /// Its MT=5 rate, where it has an MT=5 cross section.
+    mt5: Option<f64>,
 }
 
 /// Everything derived from the material and the spectrum that every nuclide's
@@ -978,6 +1293,59 @@ impl<'a> CollapseSetup<'a> {
             active: &self.active,
             total_flux: self.total_flux,
         }
+    }
+}
+
+/// The per-nuclide flux shapes a shielded collapse weights its group averages
+/// with, for a consumer that has to integrate against the same flux.
+///
+/// Recomputed with the collapse's own [`CollapseSetup`] and
+/// [`Collapse::shape_for`], so a shape handed out here is the same shape the
+/// rate came from, not a separate model of it. The solve runs again, on the
+/// same inputs in the same order (the mixture total is summed in name order),
+/// so it gives the same bits. The covariance fold is the consumer: its partial
+/// rates have to sum to the shielded rate it divides them by.
+pub(crate) struct CollapseShapes<'a> {
+    material: &'a Material,
+    multigroup_flux: &'a [f64],
+    group_boundaries: &'a [f64],
+    shielding: &'a Shielding,
+    setup: CollapseSetup<'a>,
+}
+
+impl<'a> CollapseShapes<'a> {
+    /// `None` on the dilute path, where no shape is built, and where the
+    /// spectrum carries no flux, which the collapse drives nothing with.
+    pub(crate) fn new(
+        material: &'a Material,
+        multigroup_flux: &'a [f64],
+        group_boundaries: &'a [f64],
+        shielding: Option<&'a Shielding>,
+    ) -> Option<Self> {
+        let shielding = shielding?;
+        let setup = CollapseSetup::new(material, multigroup_flux, Some(shielding))?;
+        Some(Self {
+            material,
+            multigroup_flux,
+            group_boundaries,
+            shielding,
+            setup,
+        })
+    }
+
+    /// The shape `nuclide`'s group averages were taken under, or `None` where
+    /// the collapse took them dilute: no data at the temperature in use, or a
+    /// name the mass number cannot be read from.
+    pub(crate) fn shape_for(&self, nuclide: &str) -> Option<FluxShape> {
+        let context = self.setup.context(
+            self.material,
+            self.multigroup_flux,
+            self.group_boundaries,
+            1.0,
+            Some(self.shielding),
+        );
+        let reactions = context.reactions_for(nuclide)?;
+        context.shape_for(nuclide, reactions).0
     }
 }
 
@@ -1126,6 +1494,7 @@ impl Collapse<'_> {
         &self,
         nuclide_name: &str,
         chain_nuclide: &ChainNuclide,
+        lists: Option<&Vec<crate::branching_rule::ListRule<'_>>>,
     ) -> Option<NuclideCollapse> {
         if chain_nuclide.reactions.is_empty() {
             return None;
@@ -1140,6 +1509,8 @@ impl Collapse<'_> {
             shielded: false,
             would_shield: None,
             strongest_factor: None,
+            lists: Vec::new(),
+            mt5: None,
         };
 
         let (shape, not_shielded, shielded) = self.shape_for(nuclide_name, reactions);
@@ -1240,6 +1611,43 @@ impl Collapse<'_> {
                 // rate = σ_eff [barn] × 1e-24 [cm²/barn] × total_flux [n/cm²/s] × source_rate
                 let rate = sigma_eff * 1.0e-24 * self.total_flux * self.source_rate;
                 out.rates.insert(rx_type.to_string(), rate);
+            }
+        }
+
+        // The branching lists, each in the walk its transport total was
+        // collapsed with: the same groups and the same flux shape, so a state's
+        // share and the total it is a share of see one spectrum under one
+        // weight (see `crate::branching_rule`).
+        for rule in lists.into_iter().flatten() {
+            let total = rule
+                .mt
+                .and_then(|mt| reactions.get(&mt))
+                .map(|r| r.as_ref());
+            let tails = rule.tails(total);
+            let bound = Bound {
+                rule,
+                total,
+                tail: &tails,
+            };
+            out.lists.push(fold_list(
+                &bound,
+                self.multigroup_flux,
+                self.group_boundaries,
+                self.active.iter().copied(),
+                shape.as_ref(),
+                self.source_rate,
+            ));
+        }
+
+        // MT=5, which no chain reaction carries and whose products are not
+        // modelled: its rate is only measured, against the removal rate.
+        if let Some(reaction) = reactions.get(&MT_ANYTHING) {
+            let mut sigma_phi_sum = 0.0;
+            self.walk_channel(reaction, shape.as_ref(), None, |_, sigma_g, phi| {
+                sigma_phi_sum += sigma_g * phi;
+            });
+            if sigma_phi_sum > 0.0 {
+                out.mt5 = Some(sigma_phi_sum * 1.0e-24 * self.source_rate);
             }
         }
 
@@ -1935,6 +2343,8 @@ mod tests {
                 .map(|&energy| yani::FissionYield {
                     energy,
                     products: vec![],
+                    independent: None,
+                    cumulative: None,
                 })
                 .collect(),
         )

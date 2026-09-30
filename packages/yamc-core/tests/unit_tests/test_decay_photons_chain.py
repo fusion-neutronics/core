@@ -63,11 +63,27 @@ def test_chain_photon_sources():
 
     mn56 = sources["Mn56"]
     assert len(mn56) >= 1
-    energies, intensities = mn56[0]
+    kind, energies, intensities, interpolation = mn56[0]
+    assert kind == "discrete"
+    assert interpolation is None, "a line has no law between points"
     assert len(energies) == len(intensities)
     assert len(energies) > 0
     assert all(e > 0 for e in energies)
     assert all(i > 0 for i in intensities)
+
+
+def test_chain_photon_continua_are_tagged():
+    """A continuum says it is one, so its per-eV values are never read as lines.
+
+    Sm158 in ENDF/B-VIII.1 has no photon lines, only a continuum. Its law is
+    unstated in data written before the interpolation column and histogram
+    (the only law ENDF/B-VIII.1 uses for decay continua) in data written after.
+    """
+    sm158 = yamc.TransmutationChain(CHAIN_FILE).photon_sources["Sm158"]
+    assert [row[0] for row in sm158] == ["tabular"]
+    kind, energies, densities, interpolation = sm158[0]
+    assert interpolation in (None, "histogram")
+    assert len(energies) == len(densities) > 100
 
 
 def test_load_nonexistent_chain():
@@ -115,6 +131,23 @@ def test_chain_isomer_decays_to_its_ground_state():
 
     assert decays["W185_m1"] == [("IT", "W185", 1.0)]
     assert decays["Ta182_m1"] == [("IT", "Ta182", 1.0)]
+
+
+def test_chain_spontaneous_fission_names_no_daughter():
+    """A fission branch keeps its ratio and names no product.
+
+    The file stores Cf252's sf target as Cf252 itself, and an isomer's as its
+    ground state. Neither is made: fission products of sf are not in the chain.
+    """
+    decays = yamc.TransmutationChain(CHAIN_FILE).decays
+
+    assert decays["Cf252"] == [("alpha", "Cm248", 0.96908), ("sf", None, 0.03092)]
+    assert ("sf", None) in [(kind, target) for kind, target, _ in decays["Am242_m2"]]
+    for name, modes in decays.items():
+        for kind, target, _ in modes:
+            assert target != name, f"{name} {kind}"
+            if "sf" in kind.split(","):
+                assert target is None, f"{name} {kind} -> {target}"
 
 
 def test_chain_absent_target_is_none_not_the_string():

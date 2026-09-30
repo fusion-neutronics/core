@@ -37,6 +37,7 @@ pub mod particle;
 pub mod read;
 mod shapes;
 pub mod transmutation_results;
+pub mod transmute;
 
 pub use transmutation_results::PyTransmutationResults;
 
@@ -67,6 +68,8 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
     m.add_class::<material::PyDoseCoefficients>()?;
     m.add_class::<material::PyPhotonCoefficients>()?;
     m.add_class::<material::PyMaterial>()?;
+    m.add_class::<material::PyClearanceResult>()?;
+    m.add_class::<material::PyPhotonContinuum>()?;
     m.add_class::<material::PyEnriched>()?;
     m.add_function(wrap_pyfunction!(material::enriched, m)?)?;
     m.add_class::<material::PyNuclide>()?;
@@ -74,6 +77,7 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
     m.add_class::<material::PyChain>()?;
     m.add_class::<element::PyElement>()?;
     m.add_class::<PyTransmutationResults>()?;
+    m.add_function(wrap_pyfunction!(transmute::transmute, m)?)?;
     m.add_class::<transmutation_results::PyEstimate>()?;
     m.add_class::<transmutation_results::PyLineEstimate>()?;
     m.add_class::<data_uncertainty::PyDataUncertainty>()?;
@@ -161,6 +165,10 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
         &data
     )?)?;
     data.add_function(wrap_pyfunction!(material::natural_abundance, &data)?)?;
+    data.add_function(wrap_pyfunction!(
+        material::natural_abundance_records,
+        &data
+    )?)?;
     data.add_function(wrap_pyfunction!(material::split_nuclide, &data)?)?;
     data.add_function(wrap_pyfunction!(material::element_nuclides, &data)?)?;
     data.add_function(wrap_pyfunction!(material::element_names, &data)?)?;

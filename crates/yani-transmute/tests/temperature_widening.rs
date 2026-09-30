@@ -61,13 +61,13 @@ fn fraction_remaining(m: &Material, chain: Arc<HashMap<String, yani::ChainNuclid
     let spectra = [MultigroupSpectrum {
         boundaries: vec![1.0e-5, 2.0e7],
         masses: vec![1.0],
-        relative_std_dev: None,
+        flux_error: None,
     }];
     let steps = [TransmuteStep {
         dt: 365.0 * 24.0 * 3600.0,
         irradiation: Some((0, 1.0e15)),
     }];
-    let branch = HashMap::new();
+    let branch = yani::BranchTable::new();
     let out = transmute_material(
         &mut m.clone(),
         &spectra,

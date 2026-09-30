@@ -97,14 +97,142 @@ pub fn relative_std_dev(flux: &[f64], std_dev: &[f64]) -> Option<Vec<f64>> {
     )
 }
 
+/// A spectrum's stated error, relative to its own values.
+///
+/// A Monte Carlo spectrum's bins are scored by the same histories and are
+/// correlated. A per-bin standard deviation treats them as independent, which
+/// understates the error of anything summed over a band whose bins move
+/// together, and a band is exactly what a reaction rate sums over. The
+/// covariance form keeps the correlations (issue #140, item 6).
+#[derive(Clone, Debug, PartialEq)]
+pub enum FluxError {
+    /// Per-bin relative standard deviation, bins independent.
+    RelativeStdDev(Vec<f64>),
+    /// Full relative covariance, `C_ij / (phi_i phi_j)`, carried as its
+    /// lower-triangular factor.
+    RelativeCovariance(RelativeFluxCovariance),
+}
+
+impl FluxError {
+    /// Number of bins it describes.
+    pub fn len(&self) -> usize {
+        match self {
+            FluxError::RelativeStdDev(v) => v.len(),
+            FluxError::RelativeCovariance(c) => c.n,
+        }
+    }
+
+    /// Whether it describes no bins.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// An exact identity for keying a shared collapse.
+    pub(crate) fn key_bits(&self) -> Vec<u64> {
+        let (tag, values) = match self {
+            FluxError::RelativeStdDev(v) => (0u64, v),
+            FluxError::RelativeCovariance(c) => (1u64, &c.factor),
+        };
+        std::iter::once(tag)
+            .chain(values.iter().map(|x| x.to_bits()))
+            .collect()
+    }
+}
+
+/// A spectrum's relative covariance, factorized.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RelativeFluxCovariance {
+    n: usize,
+    /// Lower-triangular factor, row-major `n x n`, with `L L^T` the relative
+    /// covariance.
+    factor: Vec<f64>,
+}
+
+impl RelativeFluxCovariance {
+    /// From the absolute covariance of the spectrum's own values, `flux`.
+    ///
+    /// Checked rather than trusted, since a covariance that is not one would
+    /// sample nonsense without complaint: it must be square with one row per
+    /// bin, symmetric, and positive semi-definite. A bin with no flux has no
+    /// relative error to state and is taken as exact, as in
+    /// [`relative_std_dev`].
+    pub fn from_absolute(flux: &[f64], covariance: &[Vec<f64>]) -> Result<Self, String> {
+        let n = flux.len();
+        if covariance.len() != n || covariance.iter().any(|row| row.len() != n) {
+            return Err(format!(
+                "the flux covariance must be {n} x {n}, one row and column per spectrum bin"
+            ));
+        }
+        let scale = (0..n)
+            .map(|i| covariance[i][i].abs())
+            .fold(0.0_f64, f64::max)
+            .max(f64::MIN_POSITIVE);
+        for (i, row) in covariance.iter().enumerate() {
+            if !row[i].is_finite() || row[i] < 0.0 {
+                return Err(format!(
+                    "flux covariance diagonal entry {i} is {}; a variance is finite and \
+                     non-negative",
+                    row[i]
+                ));
+            }
+            for (j, &a) in row.iter().enumerate().take(i) {
+                let b = covariance[j][i];
+                if !a.is_finite() || (a - b).abs() > 1.0e-9 * scale {
+                    return Err(format!(
+                        "the flux covariance is not symmetric: entry ({i}, {j}) is {a} and \
+                         ({j}, {i}) is {b}"
+                    ));
+                }
+            }
+        }
+        // Relative covariance, symmetrized.
+        let rel = |i: usize, j: usize| -> f64 {
+            if flux[i] > 0.0 && flux[j] > 0.0 {
+                0.5 * (covariance[i][j] + covariance[j][i]) / (flux[i] * flux[j])
+            } else {
+                0.0
+            }
+        };
+        let rel_scale = (0..n).map(|i| rel(i, i)).fold(0.0_f64, f64::max);
+        let mut l = vec![0.0; n * n];
+        for j in 0..n {
+            let mut d = rel(j, j);
+            for k in 0..j {
+                d -= l[j * n + k] * l[j * n + k];
+            }
+            if d < -1.0e-9 * rel_scale {
+                return Err(format!(
+                    "the flux covariance is not positive semi-definite: bin {j} has a \
+                     negative remaining variance ({d:.3e} relative)"
+                ));
+            }
+            if d <= 1.0e-12 * rel_scale {
+                continue;
+            }
+            let pivot = d.sqrt();
+            l[j * n + j] = pivot;
+            for i in (j + 1)..n {
+                let mut v = rel(i, j);
+                for k in 0..j {
+                    v -= l[i * n + k] * l[j * n + k];
+                }
+                l[i * n + j] = v / pivot;
+            }
+        }
+        Ok(RelativeFluxCovariance { n, factor: l })
+    }
+}
+
 /// One replica's per-bin flux perturbations, `delta_g`.
 ///
-/// Drawn from the spectrum's own relative sigma, once per replica and shared
-/// across every nuclide. Floored at `-1` so a sampled flux cannot go negative:
-/// a negative flux is not a physical state, and a bin whose relative error
-/// exceeds 100% -- normal in the tail of a tally -- would otherwise produce one.
+/// Drawn from the spectrum's own relative error, once per replica and shared
+/// across every nuclide: independently per bin for a standard deviation, and
+/// through the factor for a covariance, so correlated bins move together.
+/// Floored at `-1` so a sampled flux cannot go negative: a negative flux is
+/// not a physical state, and a bin whose relative error exceeds 100% -- normal
+/// in the tail of a tally -- would otherwise produce one.
 pub fn flux_deviates(
-    relative: &[f64],
+    error: &FluxError,
     base_seed: u64,
     replica: u64,
     spectrum_index: usize,
@@ -117,13 +245,28 @@ pub fn flux_deviates(
     let seed = yamc_rng::secondary_seed(replica_seed, FLUX_STREAM ^ spectrum_index as u32);
     let mut state = yamc_rng::expand_seed(seed);
 
-    let z = crate::covariance_sample::standard_normals(&mut state, relative.len());
-    relative
-        .iter()
-        .zip(z)
-        .map(|(sigma, z)| {
+    let n = error.len();
+    let z = crate::covariance_sample::standard_normals(&mut state, n);
+    let delta: Vec<f64> = match error {
+        FluxError::RelativeStdDev(relative) => relative
+            .iter()
+            .zip(&z)
+            .map(|(sigma, z)| sigma * z)
+            .collect(),
+        FluxError::RelativeCovariance(c) => (0..n)
+            .map(|i| {
+                c.factor[i * n..i * n + i + 1]
+                    .iter()
+                    .zip(&z)
+                    .map(|(l, z)| l * z)
+                    .sum()
+            })
+            .collect(),
+    };
+    delta
+        .into_iter()
+        .map(|d| {
             coverage.bins_sampled += 1;
-            let d = sigma * z;
             if d < -1.0 {
                 coverage.bins_floored += 1;
                 -1.0
@@ -136,7 +279,7 @@ pub fn flux_deviates(
 
 /// Keeps the flux stream clear of the per-nuclide cross-section streams, which
 /// are keyed on a hash of the nuclide name.
-const FLUX_STREAM: u32 = 0xF10D_5EED;
+pub(crate) const FLUX_STREAM: u32 = 0xF10D_5EED;
 
 /// Apply one replica's flux perturbation to a set of unit-flux rates.
 ///
@@ -275,7 +418,7 @@ mod tests {
     #[test]
     fn deviates_are_a_pure_function_of_seed_replica_and_spectrum() {
         let mut c = FluxCoverage::default();
-        let rel = vec![0.05, 0.10, 0.20];
+        let rel = FluxError::RelativeStdDev(vec![0.05, 0.10, 0.20]);
         let a = flux_deviates(&rel, 42, 7, 0, &mut c);
         let b = flux_deviates(&rel, 42, 7, 0, &mut c);
         assert_eq!(a, b, "same inputs, same answer");
@@ -289,7 +432,7 @@ mod tests {
     #[test]
     fn a_zero_sigma_bin_does_not_move() {
         let mut c = FluxCoverage::default();
-        let d = flux_deviates(&[0.0, 0.1], 1, 0, 0, &mut c);
+        let d = flux_deviates(&FluxError::RelativeStdDev(vec![0.0, 0.1]), 1, 0, 0, &mut c);
         assert_eq!(d[0], 0.0);
     }
 
@@ -300,7 +443,7 @@ mod tests {
         let mut floored_any = false;
         for k in 0..400 {
             // 300% relative: a large share of draws fall below -1.
-            let d = flux_deviates(&[3.0], 9, k, 0, &mut c);
+            let d = flux_deviates(&FluxError::RelativeStdDev(vec![3.0]), 9, k, 0, &mut c);
             assert!(d[0] >= -1.0, "a flux bin cannot go negative");
             floored_any |= d[0] == -1.0;
         }
@@ -312,7 +455,8 @@ mod tests {
     #[test]
     fn the_sampled_spread_matches_the_stated_flux_error() {
         let mut c = FluxCoverage::default();
-        let rel = vec![0.05, 0.10];
+        let stated = vec![0.05, 0.10];
+        let rel = FluxError::RelativeStdDev(stated.clone());
         let n = 20_000;
         let (mut s, mut sq) = ([0.0; 2], [0.0; 2]);
         for k in 0..n {
@@ -323,11 +467,85 @@ mod tests {
             }
         }
         let nf = n as f64;
-        for (i, want) in rel.iter().enumerate() {
+        for (i, want) in stated.iter().enumerate() {
             let mean = s[i] / nf;
             let sd = (sq[i] / nf - mean * mean).sqrt();
             assert!(mean.abs() < 0.01, "mean {mean} for bin {i}");
             assert!((sd - want).abs() < 0.01, "sd {sd} != {want} for bin {i}");
         }
+    }
+
+    /// A covariance with no off-diagonal terms is the per-bin standard
+    /// deviation it contains, draw for draw.
+    #[test]
+    fn a_diagonal_covariance_draws_as_the_standard_deviation_does() {
+        let flux = [10.0, 20.0, 40.0];
+        let sd = [0.5, 3.0, 2.0];
+        let cov: Vec<Vec<f64>> = (0..3)
+            .map(|i| {
+                (0..3)
+                    .map(|j| if i == j { sd[i] * sd[i] } else { 0.0 })
+                    .collect()
+            })
+            .collect();
+        let as_cov = FluxError::RelativeCovariance(
+            RelativeFluxCovariance::from_absolute(&flux, &cov).unwrap(),
+        );
+        let as_sd = FluxError::RelativeStdDev(relative_std_dev(&flux, &sd).unwrap());
+        let mut c = FluxCoverage::default();
+        for k in 0..20 {
+            let a = flux_deviates(&as_cov, 5, k, 0, &mut c);
+            let b = flux_deviates(&as_sd, 5, k, 0, &mut c);
+            for (x, y) in a.iter().zip(&b) {
+                assert!((x - y).abs() < 1e-12, "{x} vs {y}");
+            }
+        }
+    }
+
+    /// Fully correlated bins move together, which independent standard
+    /// deviations cannot express, and the draws reproduce the correlation.
+    #[test]
+    fn correlated_bins_move_together() {
+        let flux = [1.0, 2.0];
+        // 10% on each, correlation 0.8.
+        let (s0, s1) = (0.1, 0.2);
+        let cov = vec![vec![s0 * s0, 0.8 * s0 * s1], vec![0.8 * s0 * s1, s1 * s1]];
+        let e = FluxError::RelativeCovariance(
+            RelativeFluxCovariance::from_absolute(&flux, &cov).unwrap(),
+        );
+        let mut c = FluxCoverage::default();
+        let draws: Vec<Vec<f64>> = (0..20000)
+            .map(|k| flux_deviates(&e, 1, k, 0, &mut c))
+            .collect();
+        let n = draws.len() as f64;
+        let m = |i: usize| draws.iter().map(|d| d[i]).sum::<f64>() / n;
+        let v = |i: usize, j: usize| {
+            let (mi, mj) = (m(i), m(j));
+            draws.iter().map(|d| (d[i] - mi) * (d[j] - mj)).sum::<f64>() / (n - 1.0)
+        };
+        let corr = v(0, 1) / (v(0, 0) * v(1, 1)).sqrt();
+        assert!((v(0, 0).sqrt() / 0.1 - 1.0).abs() < 0.03);
+        assert!((v(1, 1).sqrt() / 0.1 - 1.0).abs() < 0.03);
+        assert!((corr - 0.8).abs() < 0.02, "correlation {corr}");
+    }
+
+    #[test]
+    fn a_covariance_that_is_not_one_is_refused() {
+        let flux = [1.0, 1.0];
+        let asymmetric = vec![vec![1.0, 0.5], vec![0.2, 1.0]];
+        assert!(RelativeFluxCovariance::from_absolute(&flux, &asymmetric)
+            .unwrap_err()
+            .contains("not symmetric"));
+        let indefinite = vec![vec![1.0, 2.0], vec![2.0, 1.0]];
+        assert!(RelativeFluxCovariance::from_absolute(&flux, &indefinite)
+            .unwrap_err()
+            .contains("not positive semi-definite"));
+        let wrong_shape = vec![vec![1.0]];
+        assert!(RelativeFluxCovariance::from_absolute(&flux, &wrong_shape)
+            .unwrap_err()
+            .contains("2 x 2"));
+        // Singular but semi-definite (fully correlated) is a covariance.
+        let singular = vec![vec![1.0, 1.0], vec![1.0, 1.0]];
+        assert!(RelativeFluxCovariance::from_absolute(&flux, &singular).is_ok());
     }
 }

@@ -96,6 +96,19 @@ impl PyTallyResult {
         self.inner.particles_per_chunk
     }
 
+    /// Covariance of the bin means, a ``num_bins x num_bins`` nested list in
+    /// the same bin order as ``mean``, or ``None`` unless the tally was built
+    /// with ``covariance=True``. Its diagonal is ``standard_deviation``
+    /// squared; for an energy-binned flux tally it is what
+    /// ``Pulse(flux_covariance=...)`` takes.
+    #[getter]
+    pub fn covariance(&self) -> Option<Vec<Vec<f64>>> {
+        let n = self.inner.mean.len();
+        self.inner
+            .covariance()
+            .map(|c| c.chunks(n.max(1)).map(|row| row.to_vec()).collect())
+    }
+
     /// Raw per-bin Welford sum of squared deviations: the exact merge
     /// state behind ``standard_deviation``. Empty when the producing
     /// path recorded no Welford state (e.g. GPU runs).

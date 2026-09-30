@@ -291,7 +291,7 @@ fn test_transmutation_results_structure() {
     let timesteps = vec![86400.0, 86400.0, 86400.0]; // 3 days
     let source_rates = vec![1e14, 1e14, 0.0]; // 2 days irradiation, 1 day cooling
 
-    let mut results = TransmutationResults::new(timesteps.clone(), source_rates.clone());
+    let mut results = TransmutationResults::new(timesteps.clone());
 
     // Add initial material
     let mut mat0 = Material::new(
@@ -302,7 +302,7 @@ fn test_transmutation_results_structure() {
     )
     .unwrap();
     mat0.set_material_id(1);
-    results.add_initial(1, mat0.clone());
+    results.add_initial(1, mat0.clone(), source_rates.clone());
 
     // Add step results
     let mut mat1 = mat0.clone();

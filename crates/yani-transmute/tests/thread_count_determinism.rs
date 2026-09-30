@@ -9,7 +9,7 @@
 //! and an explicit 7-thread pool -- `install` scopes the nested `par_iter`s the
 //! driver runs -- and everything the caller can read must agree **to the last
 //! bit**: the inventories, the per-replica ensemble, the sigmas, the sample
-//! count and the truncation counters.
+//! count and the sampling counters.
 //!
 //! Seven rather than a power of two on purpose: a bug that only shows when the
 //! work does not divide evenly is exactly the kind this is looking for.
@@ -66,7 +66,9 @@ fn spectra(with_sigma: bool) -> Vec<MultigroupSpectrum> {
     vec![MultigroupSpectrum {
         boundaries: GROUPS.to_vec(),
         masses: FLUX.iter().map(|f| f / total).collect(),
-        relative_std_dev: with_sigma.then(|| vec![0.05; FLUX.len()]),
+        flux_error: with_sigma.then(|| {
+            yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(vec![0.05; FLUX.len()])
+        }),
     }]
 }
 
@@ -95,7 +97,7 @@ struct Answer {
     sigmas: Vec<(usize, String, u64)>,
     samples: usize,
     converged: bool,
-    truncations: Option<String>,
+    counters: Option<String>,
 }
 
 fn run(threads: usize, uncertainty: bool) -> Answer {
@@ -155,7 +157,7 @@ fn run(threads: usize, uncertainty: bool) -> Answer {
             }
         }
 
-        let info = results.uncertainty_info.as_ref();
+        let info = results.uncertainty_info.get(&0);
         Answer {
             densities,
             replicas,
@@ -165,10 +167,9 @@ fn run(threads: usize, uncertainty: bool) -> Answer {
             // The counters a replica merges back, which is where a parallel
             // merge that folded a local's zeros over the driver's totals would
             // show.
-            truncations: info.map(|i| {
+            counters: info.map(|i| {
                 format!(
-                    "{} {} {} {} {}",
-                    i.rates_floored,
+                    "{} {} {} {}",
                     i.rates_sampled,
                     i.flux_bins_floored,
                     i.flux_bins_sampled,

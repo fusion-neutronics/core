@@ -270,7 +270,12 @@ impl TransmutationResults {
         &self,
         material_id: u32,
         step: usize,
-        evaluate: impl Fn(&HashMap<String, f64>, Option<f64>) -> Result<T, String>,
+        chain: &HashMap<String, ChainNuclide>,
+        evaluate: impl Fn(
+            &HashMap<String, f64>,
+            Option<f64>,
+            &HashMap<String, ChainNuclide>,
+        ) -> Result<T, String>,
     ) -> Result<Option<(T, Vec<T>)>, String> {
         // Looked up before the material, so a run that asked for no
         // uncertainty answers "not requested" rather than complaining about a
@@ -283,23 +288,47 @@ impl TransmutationResults {
             .ok_or_else(|| format!("no material {material_id} at step {step}"))?;
         let densities = material.get_atoms_per_barn_cm()?;
         let volume = material.volume;
-        let nominal = evaluate(&densities, volume)?;
+        let nominal = evaluate(&densities, volume, chain)?;
 
-        let per_replica = if step == 0 {
-            // Step 0 is the initial composition: an input rather than a
-            // result, so every replica starts from it, they all evaluate to
-            // the nominal value, and the spread is a measured zero -- not the
-            // unmeasured one an empty ensemble would report. The ensemble
-            // stores nothing for step 0, so say it here rather than
-            // special-casing the statistics downstream.
-            vec![nominal.clone(); ensemble.replicas()]
+        // Step 0 is the initial composition: an input rather than a result,
+        // so every replica starts from it. The ensemble stores nothing for
+        // step 0, so the nominal inventory stands in for every replica's.
+        let inventories: Vec<&HashMap<String, f64>> = if step == 0 {
+            vec![&densities; ensemble.replicas()]
         } else {
             self.uncertainty_inventories(material_id, step)
                 .unwrap_or_default()
-                .into_iter()
-                .map(|inventory| evaluate(inventory, volume))
-                .collect::<Result<Vec<_>, _>>()?
         };
+        let half_lives = ensemble.half_lives();
+        let decay_energy_seed = ensemble.decay_energy_seed;
+        let no_half_lives = HashMap::new();
+        let per_replica = inventories
+            .into_iter()
+            .enumerate()
+            .map(|(k, inventory)| {
+                let sampled = half_lives.get(k).filter(|h| !h.is_empty());
+                if sampled.is_none() && decay_energy_seed.is_none() {
+                    // Every replica evaluates to exactly what the nominal
+                    // chain gives, which at step 0 is the nominal value
+                    // itself: a measured zero spread, not the unmeasured one
+                    // an empty ensemble would report.
+                    return evaluate(inventory, volume, chain);
+                }
+                // A replica solved with perturbed half-lives is evaluated with
+                // them too: its activity is lambda_k N_k, never lambda N_k, or
+                // the cancellation that makes a saturated activity insensitive
+                // to its own half-life is lost. So even step 0 has a spread
+                // then, the initial radionuclides' own. Its decay energies are
+                // drawn for it here, since they never entered the solve.
+                let chain_k = replica_chain(
+                    chain,
+                    inventory,
+                    sampled.unwrap_or(&no_half_lives),
+                    decay_energy_seed.map(|seed| (seed, k as u64)),
+                );
+                evaluate(inventory, volume, &chain_k)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Some((nominal, per_replica)))
     }
 
@@ -311,7 +340,7 @@ impl TransmutationResults {
         chain: &HashMap<String, ChainNuclide>,
         quantity: Quantity,
     ) -> Result<Option<Evaluated>, String> {
-        self.fold_replicas(material_id, step, |densities, volume| {
+        self.fold_replicas(material_id, step, chain, |densities, volume, chain| {
             quantity.by_nuclide(densities, volume, chain)
         })
     }
@@ -399,7 +428,9 @@ impl TransmutationResults {
     ///
     /// Ascending in energy, coincident lines summed, exactly as
     /// `Material.decay_photon_spectrum` returns them -- and over the union of
-    /// the lines that appear in the nominal run and in any replica. A line a
+    /// the lines that appear in the nominal run and in any replica. Lines
+    /// only, as there: a continuum is a density per eV, which has no place in
+    /// a list of line rates, and it is not reported here. A line a
     /// replica does not emit is a zero in it, and
     /// [`LineEstimate::emitting`](LineEstimate) says how many replicas emitted
     /// it at all, which is the part the zero-fill would otherwise hide.
@@ -412,7 +443,7 @@ impl TransmutationResults {
         chain: &HashMap<String, ChainNuclide>,
     ) -> Result<Option<Vec<LineEstimate>>, String> {
         Ok(self
-            .fold_replicas(material_id, step, |densities, volume| {
+            .fold_replicas(material_id, step, chain, |densities, volume, chain| {
                 let volume = require_volume(volume, "decay_photon_spectrum")?;
                 Ok(yani_decay::decay_photon_lines(densities, volume, chain))
             })?
@@ -471,6 +502,38 @@ impl TransmutationResults {
     }
 }
 
+/// The chain entries an inventory's derived quantities read, with one
+/// replica's half-lives substituted.
+///
+/// Only the nuclides in the inventory: activity, decay heat, decay photons and
+/// contact dose all evaluate each nuclide from its own entry, so the rest of a
+/// 3800-nuclide chain would be copied per replica for nothing.
+fn replica_chain(
+    chain: &HashMap<String, ChainNuclide>,
+    inventory: &HashMap<String, f64>,
+    half_lives: &HashMap<String, f64>,
+    decay_energy: Option<(u64, u64)>,
+) -> HashMap<String, ChainNuclide> {
+    inventory
+        .keys()
+        .filter_map(|name| {
+            let mut cn = chain.get(name)?.clone();
+            if let Some(t) = half_lives.get(name) {
+                crate::uncertainty::set_half_life(&mut cn, *t);
+            }
+            if let Some((seed, replica)) = decay_energy {
+                if let Some((total, parts)) =
+                    crate::uncertainty::sample_decay_energy(&cn, seed, replica)
+                {
+                    cn.decay_energy = total;
+                    cn.decay_energy_components = parts;
+                }
+            }
+            Some((name.clone(), cn))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,11 +555,14 @@ mod tests {
                 half_life_uncertainty: None,
                 decay_energy: 2_503_000.0,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
                 reactions: vec![],
                 decays: vec![],
                 fission_yields: None,
                 sources: vec![yani::DecaySource {
                     particle: "photon".to_string(),
+                    radiation: None,
+                    uncertainty: None,
                     distribution: yani::DecaySourceDistribution::Discrete {
                         energies: vec![1_173_228.0, 1_332_492.0],
                         intensities: vec![0.9985 * lambda, 0.9998 * lambda],
@@ -512,6 +578,7 @@ mod tests {
                 half_life_uncertainty: None,
                 decay_energy: 0.0,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
                 reactions: vec![],
                 decays: vec![],
                 fission_yields: None,
@@ -535,6 +602,7 @@ mod tests {
                         half_life_uncertainty: None,
                         decay_energy: 2_522_640.3,
                         decay_energy_uncertainty: None,
+                        decay_energy_components: Default::default(),
                         reactions: vec![],
                         decays: vec![],
                         fission_yields: None,
@@ -559,8 +627,8 @@ mod tests {
 
     /// One material, one step, and `replicas` inventories after it.
     fn results(nominal: &[(&str, f64)], replicas: &[Vec<(&str, f64)>]) -> TransmutationResults {
-        let mut results = TransmutationResults::new(vec![1.0], vec![0.0]);
-        results.add_initial(7, material(nominal));
+        let mut results = TransmutationResults::new(vec![1.0]);
+        results.add_initial(7, material(nominal), vec![0.0]);
         results.add_step(7, material(nominal));
         let mut ensemble = Ensemble::new(1);
         for replica in replicas {
@@ -749,8 +817,8 @@ mod tests {
     /// distinguishable from a measured zero.
     #[test]
     fn a_run_without_uncertainty_reports_none_rather_than_zero() {
-        let mut results = TransmutationResults::new(vec![1.0], vec![0.0]);
-        results.add_initial(7, material(&[("Fe56", 1.0)]));
+        let mut results = TransmutationResults::new(vec![1.0]);
+        results.add_initial(7, material(&[("Fe56", 1.0)]), vec![0.0]);
         results.add_step(7, material(&[("Fe56", 1.0)]));
 
         assert_eq!(results.activity_uncertainty(7, 1, &chain()), Ok(None));

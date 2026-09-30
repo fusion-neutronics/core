@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use yani::{ChainNuclide, DecaySourceDistribution};
+use yani::{ChainNuclide, Continuum, DecaySourceDistribution, Interpolation, UnreadableContinuum};
 
 /// Electron-volt to joule conversion (2019 SI redefinition).
 const EV_TO_J: f64 = 1.602_176_634e-19;
@@ -91,6 +91,50 @@ pub fn decay_heat_by_nuclide(
     heats
 }
 
+/// One component of each nuclide's decay heat [W]: its activity times that
+/// component's mean energy (`component` indexes
+/// [`yani::DECAY_ENERGY_COMPONENTS`]: beta, gamma, alpha).
+///
+/// The components answer questions the total cannot: the gamma heat is what
+/// leaves a thin component and deposits in its neighbours, the beta and alpha
+/// heat stays where it is made, and each has its own uncertainty.
+///
+/// `Err` names every nuclide that makes decay heat but whose data carries no
+/// split, which a file written before the split does for every nuclide.
+/// Reporting a component heat without them would understate it by an unknown
+/// amount, so there is no partial answer.
+pub fn decay_heat_component_by_nuclide(
+    atom_densities: &HashMap<String, f64>,
+    volume: f64,
+    chain: &HashMap<String, ChainNuclide>,
+    component: usize,
+) -> Result<HashMap<String, f64>, Vec<String>> {
+    let mut heats = HashMap::new();
+    let mut missing = Vec::new();
+    for (nuclide, activity) in activity_by_nuclide(atom_densities, volume, chain) {
+        let Some(cn) = chain.get(&nuclide) else {
+            continue;
+        };
+        if cn.decay_energy <= 0.0 {
+            continue;
+        }
+        let Some(part) = cn.decay_energy_components.get(component).copied().flatten() else {
+            missing.push(nuclide);
+            continue;
+        };
+        let heat = activity * part.energy * EV_TO_J;
+        if heat > 0.0 {
+            heats.insert(nuclide, heat);
+        }
+    }
+    if missing.is_empty() {
+        Ok(heats)
+    } else {
+        missing.sort();
+        Err(missing)
+    }
+}
+
 /// Total decay heat of a material inventory [W]. See [`decay_heat_by_nuclide`].
 pub fn decay_heat_total(
     atom_densities: &HashMap<String, f64>,
@@ -102,6 +146,10 @@ pub fn decay_heat_total(
 
 /// The discrete decay photon lines an inventory emits: `(energy [eV], photons
 /// per second)`, ascending in energy, coincident energies summed.
+///
+/// Lines only. A continuum is a density per eV rather than a set of rates, so
+/// it has no place in this list, and summing its tabulated values as lines is
+/// the defect issue #163 found. [`decay_photon_continua`] returns it.
 ///
 /// The chain records each line's intensity **per atom per second**, not per
 /// decay: it is the emission probability already multiplied by the nuclide's
@@ -134,18 +182,9 @@ pub fn decay_photon_lines(
         let Some(chain_nuclide) = chain.get(name.as_str()) else {
             continue;
         };
-        for source in &chain_nuclide.sources {
-            if source.particle != "photon" {
-                continue;
-            }
-            let DecaySourceDistribution::Discrete {
-                energies,
-                intensities,
-            } = &source.distribution;
-            for (energy, intensity) in energies.iter().zip(intensities) {
-                if *intensity > 0.0 {
-                    *lines.entry(energy.to_bits()).or_insert(0.0) += atoms * intensity;
-                }
+        for (energy, intensity) in chain_nuclide.photon_lines() {
+            if intensity > 0.0 {
+                *lines.entry(energy.to_bits()).or_insert(0.0) += atoms * intensity;
             }
         }
     }
@@ -153,6 +192,81 @@ pub fn decay_photon_lines(
         .into_iter()
         .map(|(bits, rate)| (f64::from_bits(bits), rate))
         .collect()
+}
+
+/// One nuclide's decay photon continuum within an inventory.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhotonContinuum {
+    /// The emitting nuclide.
+    pub nuclide: String,
+    /// Tabulated energies [eV], ascending.
+    pub energies: Vec<f64>,
+    /// The emission-rate density at each energy [photons/s/eV]: the chain's
+    /// per-atom density times the nuclide's atom count.
+    pub rates: Vec<f64>,
+    /// How `rates` is read between the energies, `None` where the chain
+    /// states no law.
+    pub interpolation: Option<Interpolation>,
+}
+
+impl PhotonContinuum {
+    /// Photons per second over the whole continuum, its integral under its
+    /// law.
+    pub fn emission_rate(&self) -> Result<f64, UnreadableContinuum> {
+        Ok(Continuum::new(&self.energies, &self.rates, self.interpolation)?.integral())
+    }
+}
+
+/// The decay photon continua an inventory emits, one per nuclide and
+/// continuum, in nuclide-name order.
+///
+/// The counterpart of [`decay_photon_lines`] for the part of a decay spectrum
+/// ENDF gives as a density. Each continuum stays on its own grid and keeps its
+/// own law: two continua cannot be summed point by point unless they share
+/// both, so merging them would mean resampling one onto the other.
+///
+/// Atom counts scale the chain's per-atom densities exactly as they scale line
+/// intensities, and nuclides the chain does not know are skipped. A continuum
+/// whose law the chain does not state is still returned, with `None` for it,
+/// so the caller can see what it cannot integrate.
+pub fn decay_photon_continua(
+    atom_densities: &HashMap<String, f64>,
+    volume: f64,
+    chain: &HashMap<String, ChainNuclide>,
+) -> Vec<PhotonContinuum> {
+    let mut names: Vec<&String> = atom_densities.keys().collect();
+    names.sort();
+
+    let mut continua = Vec::new();
+    for name in names {
+        let atoms = atom_densities[name] * BARN_PER_CM_SQ * volume;
+        if atoms <= 0.0 {
+            continue;
+        }
+        let Some(chain_nuclide) = chain.get(name.as_str()) else {
+            continue;
+        };
+        for source in &chain_nuclide.sources {
+            if source.particle != "photon" {
+                continue;
+            }
+            let DecaySourceDistribution::Tabular {
+                energies,
+                intensities,
+                interpolation,
+            } = &source.distribution
+            else {
+                continue;
+            };
+            continua.push(PhotonContinuum {
+                nuclide: name.clone(),
+                energies: energies.clone(),
+                rates: intensities.iter().map(|d| atoms * d).collect(),
+                interpolation: *interpolation,
+            });
+        }
+    }
+    continua
 }
 
 #[cfg(test)]
@@ -170,6 +284,7 @@ mod tests {
             sources: vec![],
             half_life_uncertainty: None,
             decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
         }
     }
 
@@ -263,5 +378,132 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["Mn56"]
         );
+    }
+
+    /// The components of a split decay energy sum to the whole decay heat,
+    /// and each is its own share of it.
+    #[test]
+    fn component_heats_sum_to_the_decay_heat() {
+        let mut chain = test_chain();
+        let parts = [0.8e6, 1.6e6, 0.12264e6];
+        let mn56 = chain.get_mut("Mn56").unwrap();
+        mn56.decay_energy = parts.iter().sum();
+        for (slot, energy) in mn56.decay_energy_components.iter_mut().zip(parts) {
+            *slot = Some(yani::DecayEnergyComponent {
+                energy,
+                uncertainty: None,
+            });
+        }
+        let densities = HashMap::from([("Mn56".to_string(), 1.0e-12)]);
+        let whole = decay_heat_total(&densities, 2.0, &chain);
+        let by_part: Vec<f64> = (0..3)
+            .map(|c| total(&decay_heat_component_by_nuclide(&densities, 2.0, &chain, c).unwrap()))
+            .collect();
+        assert!((by_part.iter().sum::<f64>() - whole).abs() < 1e-12 * whole);
+        assert!((by_part[1] / whole - 1.6e6 / mn56_total(&chain)).abs() < 1e-12);
+    }
+
+    fn mn56_total(chain: &HashMap<String, ChainNuclide>) -> f64 {
+        chain["Mn56"].decay_energy
+    }
+
+    /// Sm158 as ENDF/B-VIII.1 gives it has no lines at all, only a continuum;
+    /// here a coarse histogram of the same kind beside one line.
+    fn chain_with_a_continuum(
+        interpolation: Option<Interpolation>,
+    ) -> HashMap<String, ChainNuclide> {
+        let lambda = std::f64::consts::LN_2 / 318.0;
+        let mut sm158 = nuclide("Sm158", Some(318.0), 1.0e6);
+        sm158.sources = vec![
+            yani::DecaySource {
+                particle: "photon".to_string(),
+                radiation: None,
+                uncertainty: None,
+                distribution: DecaySourceDistribution::Discrete {
+                    energies: vec![2.0e5],
+                    intensities: vec![0.5 * lambda],
+                },
+            },
+            yani::DecaySource {
+                particle: "photon".to_string(),
+                radiation: None,
+                uncertainty: None,
+                distribution: DecaySourceDistribution::Tabular {
+                    energies: vec![1.0e4, 1.0e5, 1.0e6],
+                    intensities: vec![2.0e-5 * lambda, 1.0e-6 * lambda, 0.0],
+                    interpolation,
+                },
+            },
+            // A continuum of another particle is not a photon source.
+            yani::DecaySource {
+                particle: "electron".to_string(),
+                radiation: None,
+                uncertainty: None,
+                distribution: DecaySourceDistribution::Tabular {
+                    energies: vec![1.0e4, 1.0e6],
+                    intensities: vec![1.0e-6 * lambda, 0.0],
+                    interpolation,
+                },
+            },
+        ];
+        HashMap::from([("Sm158".to_string(), sm158)])
+    }
+
+    /// Lines and continuum come back apart, each in its own units: the line in
+    /// photons/s, the continuum in photons/s/eV with its law, and the lines
+    /// list never holds a continuum's values (issue #163).
+    #[test]
+    fn a_continuum_is_returned_apart_from_the_lines() {
+        let chain = chain_with_a_continuum(Some(Interpolation::Histogram));
+        let densities = HashMap::from([("Sm158".to_string(), 1.0e-12)]);
+        let atoms = 1.0e-12 * 1.0e24 * 2.0;
+        let lambda = std::f64::consts::LN_2 / 318.0;
+
+        assert_eq!(
+            decay_photon_lines(&densities, 2.0, &chain),
+            vec![(2.0e5, atoms * 0.5 * lambda)]
+        );
+
+        let continua = decay_photon_continua(&densities, 2.0, &chain);
+        assert_eq!(
+            continua.len(),
+            1,
+            "the electron continuum is not a photon one"
+        );
+        let c = &continua[0];
+        assert_eq!(c.nuclide, "Sm158");
+        assert_eq!(c.energies, vec![1.0e4, 1.0e5, 1.0e6]);
+        assert_eq!(c.interpolation, Some(Interpolation::Histogram));
+        assert_eq!(c.rates[1], atoms * 1.0e-6 * lambda);
+        // 2e-5 per eV over 9e4 eV, then 1e-6 per eV over 9e5 eV: 2.7 photons
+        // per decay.
+        let expected = atoms * lambda * (2.0e-5 * 9.0e4 + 1.0e-6 * 9.0e5);
+        let rate = c.emission_rate().unwrap();
+        assert!(
+            (rate / expected - 1.0).abs() < 1e-14,
+            "{rate} != {expected}"
+        );
+    }
+
+    /// A continuum with no stated law still comes back, so a caller sees it,
+    /// but has no emission rate to give.
+    #[test]
+    fn a_continuum_without_a_law_is_returned_but_not_integrated() {
+        let chain = chain_with_a_continuum(None);
+        let densities = HashMap::from([("Sm158".to_string(), 1.0e-12)]);
+        let continua = decay_photon_continua(&densities, 1.0, &chain);
+        assert_eq!(continua[0].interpolation, None);
+        assert_eq!(continua[0].emission_rate(), Err(UnreadableContinuum::NoLaw));
+    }
+
+    /// Data without the split cannot give a component, and says which
+    /// nuclides it could not split rather than reporting a partial heat.
+    #[test]
+    fn a_component_heat_without_the_split_names_what_is_missing() {
+        let chain = test_chain();
+        let densities = HashMap::from([("Mn56".to_string(), 1.0e-12), ("Fe56".to_string(), 1.0)]);
+        let err = decay_heat_component_by_nuclide(&densities, 2.0, &chain, 1).unwrap_err();
+        // Fe56 is stable and makes no heat, so only Mn56 is missing.
+        assert_eq!(err, vec!["Mn56".to_string()]);
     }
 }

@@ -3,7 +3,7 @@ name = "yamc-particle"
 version = "0.1.0"
 edition = "2021"
 description = "Runtime particle state for yamc -- `Particle` struct and friends"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "yamc_particle"

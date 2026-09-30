@@ -12,15 +12,20 @@
 //! collectives [`TransmutationTallies::reduce_across_ranks`] drives through
 //! [`CollectiveOps`].
 
+pub mod branching_rule;
 pub mod covariance_fold;
 pub mod covariance_sample;
+pub mod d1s_uncertainty;
+mod decay_branching_uncertainty;
 pub mod derived;
 pub mod flux_uncertainty;
+mod history_statistics;
 mod material_transmute;
 pub mod multigroup;
 mod results;
 mod schedule;
 pub mod self_shielding;
+pub mod statistical;
 mod transmutation;
 mod transmutation_stepper;
 mod transmutation_tallies;
@@ -58,9 +63,14 @@ pub use yani::{
     ChainNuclide, ChainReaction, FissionYieldWeights, LoadedChain, ReactionRates,
 };
 
+pub use branching_rule::{
+    BranchingChannel, BranchingReport, BranchingState, DroppedChannel, UnmodelledRate,
+    BRANCHING_RATE_TOLERANCE,
+};
 pub use material_transmute::{
     activation_mts, apply_coupled_branching, preload_activation_data, transmute_material,
-    transmute_material_shielded, MultigroupSpectrum, TransmuteStep,
+    transmute_material_shielded, transmute_materials, transport_replicas, CoupledDiagnostics,
+    MultigroupSpectrum, TransmuteCase, TransmuteStep, TransportTallied,
 };
 
 /// Load the transmutation chain assembled from the configured per-subsection
@@ -120,10 +130,13 @@ pub fn load_configured_chain() -> Result<yani::LoadedChain, Box<dyn std::error::
     )
 }
 pub use derived::{Estimate, LineEstimate};
+pub use history_statistics::{HistoryCovariance, RateCovariance, RateLabel, YieldChannelLabel};
 pub use multigroup::{
     compute_multigroup_reaction_rates, reaction_rate_spectrum, scale_rates, EnergyGroups,
 };
-pub use results::{CollapseInputs, RateSpectrum, TransmutationResults};
+pub use results::{
+    CollapseInputs, CollapseReuse, RateSpectrum, TransmutationResults, UncertaintyBreakdown,
+};
 pub use schedule::{duration_to_seconds, Schedule, ScheduleStep};
 pub use self_shielding::{Shape, Shielding, ShieldingInfo};
 pub use transmutation::TransmutationDriver;

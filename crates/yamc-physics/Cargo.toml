@@ -3,7 +3,7 @@ name = "yamc-physics"
 version = "0.1.0"
 edition = "2021"
 description = "Collision physics for yamc -- scatter/inelastic kinematics, secondary photon production, thick-target bremsstrahlung, D1S, particle banking"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "yamc_physics"

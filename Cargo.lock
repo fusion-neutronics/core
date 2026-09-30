@@ -3865,6 +3865,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "radiological-material-clearance-finder"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5dde677db92be3ceb7a166bc7116a6eb05237fd10833318c0a59271e218657b"
+dependencies = [
+ "roxmltree",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rand"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4094,6 +4105,15 @@ name = "robust"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e27ee8bb91ca0adcf0ecb116293afa12d393f9c2b9b9cd54d33e8078fe19839"
+
+[[package]]
+name = "roxmltree"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "rsqlite-vfs"
@@ -6315,6 +6335,8 @@ dependencies = [
  "nuclear-data-schema",
  "rayon",
  "serde_json",
+ "yamc-convert",
+ "yamc-nuclide",
  "yani",
 ]
 
@@ -6333,6 +6355,7 @@ dependencies = [
  "endf",
  "pyo3",
  "pyo3-stub-gen",
+ "radiological-material-clearance-finder",
  "rand 0.10.1",
  "serde_json",
  "yamc-convert",

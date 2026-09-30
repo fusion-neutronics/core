@@ -30,7 +30,7 @@ const POPULATED: &[&str] = &[
 
 fn main() {
     let root = std::path::Path::new(CHAIN);
-    let (chain, _branch) = yani::parse_chain_parts(
+    let (chain, branch) = yani::parse_chain_parts(
         &root.join("decay"),
         Some(&root.join("reactions")),
         Some(&root.join("fission_yields")),
@@ -70,7 +70,7 @@ fn main() {
     for flux in [1e12_f64, 1e14, 1e16] {
         for sigma_b in [0.001_f64, 0.1, 1.0, 100.0] {
             let rate = flux * sigma_b * 1e-24;
-            let kept = yani::populated_nuclides(&chain, &seeds, year, FLOOR, |_, _| rate);
+            let kept = yani::populated_nuclides(&chain, &branch, &seeds, year, FLOOR, |_, _| rate);
             // Every kept nuclide must be reachable; the bound cannot invent one.
             assert!(
                 kept.is_subset(&reachable),
@@ -115,13 +115,14 @@ fn main() {
                 // Grow: unrated parents contribute nothing.
                 loop {
                     rounds += 1;
-                    let kept = yani::populated_nuclides(&chain, &seeds, year, FLOOR, |p, _| {
-                        if rated.contains(p) {
-                            rate
-                        } else {
-                            0.0
-                        }
-                    });
+                    let kept =
+                        yani::populated_nuclides(&chain, &branch, &seeds, year, FLOOR, |p, _| {
+                            if rated.contains(p) {
+                                rate
+                            } else {
+                                0.0
+                            }
+                        });
                     let grew = !kept.is_subset(&rated);
                     rated.extend(kept.iter().cloned());
                     if !grew {
@@ -130,7 +131,7 @@ fn main() {
                 }
                 // Verify: unrated parents at the ceiling.
                 rounds += 1;
-                answer = yani::populated_nuclides(&chain, &seeds, year, FLOOR, |p, _| {
+                answer = yani::populated_nuclides(&chain, &branch, &seeds, year, FLOOR, |p, _| {
                     if rated.contains(p) {
                         rate
                     } else {
@@ -143,7 +144,8 @@ fn main() {
                     break;
                 }
             }
-            let direct = yani::populated_nuclides(&chain, &seeds, year, FLOOR, |_, _| rate);
+            let direct =
+                yani::populated_nuclides(&chain, &branch, &seeds, year, FLOOR, |_, _| rate);
             assert_eq!(
                 answer, direct,
                 "growing and verifying must land on the same set as rating everything"

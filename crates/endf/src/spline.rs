@@ -1,6 +1,6 @@
 //! Not-a-knot cubic spline interpolation.
 //!
-//! The bremsstrahlung cross sections in `BREMX.DAT` are tabulated on 57
+//! The Seltzer-Berger bremsstrahlung cross sections are tabulated on 57
 //! electron energies and resampled onto a 200-point grid before use. The
 //! Python package does that with `scipy.interpolate.CubicSpline`, whose
 //! default boundary condition is **not-a-knot**, the first two segments at
@@ -10,7 +10,7 @@
 //!
 //! This is a direct transcription of what SciPy does, so the two agree to
 //! within a few units in the last place. Verified against SciPy over the whole
-//! of `BREMX.DAT` (100 elements by 30 reduced photon energies by 200 sampled
+//! of the Seltzer-Berger table (100 elements by 30 reduced photon energies by 200 sampled
 //! energies) where the worst relative difference is 4.3e-16.
 //!
 //! Only what the photon data needs: one dependent variable, strictly

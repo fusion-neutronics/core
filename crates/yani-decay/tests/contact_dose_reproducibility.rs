@@ -62,11 +62,14 @@ fn chain() -> HashMap<String, ChainNuclide> {
                 half_life_uncertainty: None,
                 decay_energy: 1.0e6,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
                 reactions: vec![],
                 decays: vec![],
                 fission_yields: None,
                 sources: vec![DecaySource {
                     particle: "photon".to_string(),
+                    radiation: None,
+                    uncertainty: None,
                     distribution: DecaySourceDistribution::Discrete {
                         energies,
                         intensities,

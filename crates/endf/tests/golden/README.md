@@ -89,16 +89,19 @@ ported.
 
 ## Coverage still wanted
 
-Every ENDF file the Python package parses now has a Rust parser, and all but one
-are exercised by a fixture. The exception is
+Every ENDF file the Python package parses now has a Rust parser, and every one
+is exercised by a fixture. MF 40 was the last, and the TENDL-2017 Nb93 trim now
+covers it.
 
-    MF 40 (radionuclide production covariances)
+MF 32 (resonance parameter covariances) has a Rust parser the Python package
+does not, so it is kept out of the golden comparison entirely: there is no
+reader to generate a golden from, and a hand-written one would only restate
+the parser. It is covered by the unit tests in `src/mf/mf32.rs` and by
+`tests/mf32_tapes.rs`, which walks every MF=32 section of six libraries.
 
-which is structurally complete and unverified end to end, though the MF33
-subsection parser it delegates to is covered. The list is pinned in `golden.rs`
-as `UNCOVERED_BY_ANY_FIXTURE` and checked, so it cannot drift in either
-direction: the test fails both when a fixture starts covering one, and when a
-new parser arrives without coverage.
+It is pinned in `golden.rs` as `UNCOVERED_BY_ANY_FIXTURE` and checked, so the
+list cannot drift in either direction: the test fails both when a fixture
+starts covering one, and when a new parser arrives without coverage.
 
 `MF2` is worth a line of its own. It has real Reich-Moore parameters from Fe56
 and U235, a Case C unresolved region from U235, and a synthetic multi-level
@@ -128,9 +131,13 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 | `n-095_Am_242_trimmed` | MF1, a metastable target |
 | `n-049_In-115_trimmed` | MF3, MF8, MF9, MF10: isomer production |
 | `n-077_Ir_191_trimmed` | MF1, MF3 (incl. MT3), MF8, MF9, MF10: TENDL-2017 (n,2n) partials that sum to less than MF3 |
+| `n-041_Nb_093_tendl2017_trimmed` | MF1, MF3, MF8, MF9, MF10, MF33, MF40: TENDL-2017 radionuclide production covariance |
+| `dec-041_Nb_092`, `dec-041_Nb_092m1`, `dec-041_Nb_093m1` | MF8 MT=457 decay data: the isomer table the Nb93 production levels resolve against |
 | `n-054_Xe_136_trimmed` | MF1, MF3 |
 | `n-003_Li_006_trimmed` | MF6 LAW=2 and LAW=4, MF12, MF14, MF33 |
 | `n-026_Fe_056_trimmed` | MF2 Reich-Moore, MF6 LAW=1, MF12/14, MF33 |
+| `n_2825_28-Ni-58_trimmed.fendl32d` | MF33 LB=0, 1, 4 and 5 from FENDL-3.2d: LB=1 tables with odd and even NP, and the only LB=4 block on any tape (shimwell/endf-python#25) |
+| `n-024_Cr_052_trimmed.endfb81` | MF33 LB=0, 1 and 8 from ENDF/B-VIII.1: the (n,p) tables whose upper half the old LB=0 to 4 split dropped (shimwell/endf-python#25) |
 | `n-092_U_235_trimmed` | MF2 Reich-Moore + Case C URR, MF5 LF=5, MF8, MF10, MF15, MF34, delayed neutron groups |
 | `photoat-001_H_000` | MF23, MF27 |
 | `atom-001_H_000` | MF28 |
@@ -140,6 +147,9 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 | eight more `dec-*` | The decay evaluations that close the chain fixture |
 | `dec-049_In_116m2` | MF8 MT=457 decay data: an isomeric transition down to m1 |
 | `dec-072_Hf_177m1` | MF8 MT=457 decay data: an isomeric transition whose average energies exceed its Q |
+| `dec-098_Cf_252.jeff40` | MF8 MT=457 decay data from JEFF-4.0: a linear-linear photon continuum (LCON=2) beside the lines, and a log-linear neutron continuum |
+| `dec-089_Ac_227.jeff40` | MF8 MT=457 decay data from JEFF-4.0: gamma and x-ray lines at a shared energy, and energies repeated inside one spectrum |
+| `dec-092_U_235` | MF8 MT=457 decay data: a fissioning parent, so the `synthetic-nfy.endf` yields reach a chain |
 | `Li6.ace` | An ACE Type 1 table; AND in all three shapes, DLW laws 3, 33 and 44, 15 reactions with photon production |
 | `synthetic-urr.ace` | The unresolved resonance block, which no small real table has |
 | `synthetic-laws.ace` | DLW laws 2, 4, 7, 9, 11, 61 and 66 |
@@ -149,10 +159,6 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 
 ### Fixtures still wanted
 
-- **MF40**, the one parser nothing exercises. It needs an evaluation with
-  radionuclide production covariances, and none small enough to keep here has
-  them. Unlike the shapes below, MF40 reuses the MF33 subsection parser that
-  Li6, Fe56 and U235 do cover, so what is untested is the wrapper around it.
 - **MF2 formalisms beyond Reich-Moore and Breit-Wigner**: R-matrix limited
   (LRF=7), and unresolved Cases A and B. Note that Cases A and B cannot be
   reached at all through the current dispatch (see issue #15) so a fixture
@@ -174,8 +180,10 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 - **A delayed neutron group whose applicability varies with energy.** U235
   gives each group a constant share, which is the usual case; the branch that
   takes the product on the union of two grids is unexercised.
-- **Other libraries.** Everything here is ENDF/B-VIII.0 except the ACE table,
-  which is TENDL-2023.1. JEFF-4.0, JENDL-5 and TENDL-2025 differ in which
+- **Other libraries.** Nearly everything here is ENDF/B-VIII.0. The exceptions
+  are the ACE table (TENDL-2023.1), Ir191 (TENDL-2017), the Sn111 decay file
+  (JENDL-5) and the two MF33 fixtures (FENDL-3.2d Ni58 and ENDF/B-VIII.1
+  Cr52). JEFF-4.0, JENDL-5 and TENDL-2025 differ in which
   optional records they write and how strictly they follow the format, which is
   exactly what a format reader gets wrong.
 

@@ -1452,7 +1452,7 @@ impl Model {
             &chain,
             &all_nuclides,
             nuclide_registry,
-        );
+        )?;
         if is_root && self.verbose.summary {
             let n_nuclides = data.iter().filter(|v| !v.is_empty()).count();
             let n_channels: usize = data
@@ -1754,6 +1754,19 @@ impl Model {
         // Every tally uses per-history Welford now.
         let any_welford = !tallies.is_empty();
         let welford_tally_num_bins: Vec<usize> = tallies.iter().map(|t| t.num_bins()).collect();
+        let welford_covariance: Vec<bool> = tallies.iter().map(|t| t.covariance).collect();
+        for (i, t) in tallies.iter().enumerate() {
+            if t.covariance && t.num_bins() > yamc_tallies::tally::MAX_COVARIANCE_BINS {
+                return Err(format!(
+                    "tally {i} asks for its covariance over {} bins; covariance is \
+                     limited to {} bins, since it costs bins^2 / 2 doubles per worker \
+                     thread. It is meant for spectra, not meshes: tally the spectrum \
+                     you need the covariance of on its own.",
+                    t.num_bins(),
+                    yamc_tallies::tally::MAX_COVARIANCE_BINS
+                ));
+            }
+        }
 
         // Per-history Welford worker state, hoisted out of the per-batch
         // rayon fold so allocation happens once per simulation instead of
@@ -1769,11 +1782,18 @@ impl Model {
         let welford_workers: Vec<parking_lot::Mutex<yamc_tallies::welford::WelfordWorkerState>> =
             (0..n_rayon_threads)
                 .map(|_| {
-                    parking_lot::Mutex::new(yamc_tallies::welford::WelfordWorkerState::new(
-                        &welford_tally_num_bins,
-                    ))
+                    parking_lot::Mutex::new(
+                        yamc_tallies::welford::WelfordWorkerState::new(&welford_tally_num_bins)
+                            .with_covariance(&welford_covariance),
+                    )
                 })
                 .collect();
+
+        // The transmutation tally's per-history statistics, when on, keep a
+        // scratch vector per rayon worker the same way; size it for this pool.
+        if let Some(dep_tallies) = &transmutation_tallies {
+            dep_tallies.prepare_history_workers(n_rayon_threads)?;
+        }
 
         // Per-tally convergence history (aggregate statistics versus number
         // of histories), recorded at each batch checkpoint from the per-worker
@@ -2332,6 +2352,11 @@ impl Model {
                                 // No-op when no tally uses per-history Welford
                                 // (zero-sized scratch ⇒ touched_bins empty).
                                 welford_worker.finish_history();
+                                // Same boundary for the transmutation tally's
+                                // per-history statistics; a no-op when off.
+                                if let Some(dep_tallies) = transport_ctx.transmutation_tallies {
+                                    dep_tallies.finish_history();
+                                }
                                 // Lock automatically released at end of scope.
 
                                 // Return state for the next iteration
@@ -2675,6 +2700,14 @@ impl Model {
                         }
                         let means = mpi_ctx.gather_f64(&stats.mean, 0);
                         let m2s = mpi_ctx.gather_f64(&stats.m2, 0);
+                        // A covariance's raw products are sums, so they reduce
+                        // rather than fold. Every rank carries them or none do:
+                        // the flag is the tally's, and every rank has the same
+                        // tallies.
+                        let mut summed_comoment = stats.comoment.clone().map(|mut c| {
+                            mpi_ctx.reduce_sum_f64(&mut c, 0);
+                            c
+                        });
                         if let (Some(means), Some(m2s), Some(rank_n)) =
                             (means, m2s, rank_n.as_ref())
                         {
@@ -2690,6 +2723,7 @@ impl Model {
                                     // only for single-process runs. (follow-up)
                                     agg: yamc_tallies::welford::AggMoments::ZERO,
                                     score_pdf: yamc_tallies::welford::ScorePdf::default(),
+                                    comoment: None,
                                 };
                                 match &mut folded {
                                     None => folded = Some(rank_stats),
@@ -2698,7 +2732,9 @@ impl Model {
                                         .expect("rank Welford states share bin counts"),
                                 }
                             }
-                            if let Some(folded) = folded {
+                            if let Some(mut folded) = folded {
+                                // Raw products add across ranks.
+                                folded.comoment = summed_comoment.take();
                                 *stats = folded;
                             }
                         }

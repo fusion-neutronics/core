@@ -14,6 +14,7 @@ use yamc_nuclide::nuclide::{FastXSGrid, Nuclide};
 use yamc_particle::particle::{Particle, ParticleType};
 use yani::chain::{ChainNuclide, DecaySourceDistribution};
 use yani::reactions::reaction_type_to_mt;
+use yani::{Continuum, Interpolation};
 
 // =============================================================================
 // Data structures for precomputed D1S photon data
@@ -38,12 +39,72 @@ pub struct DecayPhotonChannel {
     pub target_name: String,
     /// Interned id for `target_name`; stamped on each D1S photon's `parent_nuclide`.
     pub target_id: yamc_nuclide::nuclide_registry::NuclideId,
-    /// Discrete photon energies from decay spectrum [eV].
-    pub energies: Vec<f64>,
-    /// Discrete photon intensities (emission rates from chain).
-    pub intensities: Vec<f64>,
+    /// What the channel's photon energies are drawn from.
+    pub spectrum: DecayPhotonSpectrum,
     /// Constant yield = branching × photon_per_decay.
     pub yield_constant: f64,
+}
+
+/// The energy spectrum of one D1S channel: one decay source of the emitter.
+pub enum DecayPhotonSpectrum {
+    /// Discrete lines [eV], each drawn in proportion to its intensity (the
+    /// chain's emission rate).
+    Lines {
+        energies: Vec<f64>,
+        intensities: Vec<f64>,
+    },
+    /// A continuum, drawn from its density exactly under its law.
+    /// `cumulative[i]` is the density's integral from the first energy up to
+    /// `energies[i + 1]`.
+    Continuum {
+        energies: Vec<f64>,
+        densities: Vec<f64>,
+        interpolation: Interpolation,
+        cumulative: Vec<f64>,
+    },
+}
+
+impl DecayPhotonSpectrum {
+    /// The channel spectrum of a chain decay continuum. It has to have a law
+    /// this build reads; the caller has already checked that through
+    /// [`DecaySourceDistribution::emission_rate`].
+    fn continuum(
+        energies: &[f64],
+        densities: &[f64],
+        interpolation: Option<Interpolation>,
+    ) -> DecayPhotonSpectrum {
+        let continuum = Continuum::new(energies, densities, interpolation)
+            .expect("the emission rate was integrated, so the law is readable");
+        let cumulative = continuum
+            .interval_integrals()
+            .scan(0.0, |sum, part| {
+                *sum += part;
+                Some(*sum)
+            })
+            .collect();
+        DecayPhotonSpectrum::Continuum {
+            energies: energies.to_vec(),
+            densities: densities.to_vec(),
+            interpolation: interpolation.expect("checked by Continuum::new"),
+            cumulative,
+        }
+    }
+
+    /// Draw one photon energy [eV].
+    fn sample<R: rand::Rng>(&self, rng: &mut R) -> f64 {
+        match self {
+            DecayPhotonSpectrum::Lines {
+                energies,
+                intensities,
+            } => sample_discrete_energy(energies, intensities, rng),
+            DecayPhotonSpectrum::Continuum {
+                energies,
+                densities,
+                interpolation,
+                cumulative,
+            } => sample_continuum_energy(energies, densities, *interpolation, cumulative, rng),
+        }
+    }
 }
 
 impl DecayPhotonNuclideData {
@@ -69,11 +130,16 @@ impl DecayPhotonNuclideData {
 /// Source nuclide names are interned into the registry so the hot path can
 /// look up D1S data via a single Vec index instead of a string-keyed HashMap.
 /// Nuclides without any D1S channels get an empty inner Vec.
+///
+/// Each photon decay source of an emitter is one channel: its lines, or its
+/// continuum, whose photons per decay are its integral rather than the sum of
+/// its per-eV values. `Err` names an emitter whose continuum states no law this
+/// build reads, since its photon yield per decay would be unknown.
 pub fn precompute_decay_photon_data(
     chain: &HashMap<String, ChainNuclide>,
     nuclides: &HashMap<String, Arc<Nuclide>>,
     registry: &mut yamc_nuclide::nuclide_registry::NuclideRegistry,
-) -> Vec<Vec<DecayPhotonNuclideData>> {
+) -> Result<Vec<Vec<DecayPhotonNuclideData>>, String> {
     let mut per_nuclide: HashMap<
         yamc_nuclide::nuclide_registry::NuclideId,
         Vec<DecayPhotonNuclideData>,
@@ -93,8 +159,10 @@ pub fn precompute_decay_photon_data(
             let mut photon_prod = vec![0.0f64; n_energy];
 
             for reaction in &chain_nuclide.reactions {
-                let target_name = match &reaction.target {
-                    Some(t) => t.as_str(),
+                // A reaction back into its own parent (Pu245 (n,p)) leaves the
+                // parent's count unchanged, so it makes no emitter to channel.
+                let target_name = match reaction.produced_target(nuc_name) {
+                    Some(t) => t,
                     None => continue,
                 };
 
@@ -125,20 +193,58 @@ pub fn precompute_decay_photon_data(
                         _ => continue,
                     };
                     let path_branching = path.path_branching();
+                    // A path that carries no weight is skipped before any
+                    // continuum is read, so an unreadable one only fails the
+                    // setup when it would enter the source.
+                    if reaction.branching * path_branching <= 0.0 {
+                        continue;
+                    }
 
+                    // One channel per continuum, then one for all the lines:
+                    // the chain keeps the gamma and x-ray lines apart, and
+                    // drawing them from one channel is the same distribution
+                    // with fewer channels to walk per collision. It is also
+                    // the channel list, yields and line order this setup had
+                    // when the file stored them merged.
+                    let mut spectra: Vec<(f64, DecayPhotonSpectrum)> = Vec::new();
                     for source in &emitter.sources {
+                        let DecaySourceDistribution::Tabular {
+                            energies,
+                            intensities,
+                            interpolation,
+                        } = &source.distribution
+                        else {
+                            continue;
+                        };
                         if source.particle != "photon" {
                             continue;
                         }
-                        let DecaySourceDistribution::Discrete {
-                            energies,
-                            intensities,
-                        } = &source.distribution;
+                        // photon_per_decay = emission rate / λ (the chain
+                        // stores rates, λ × yield per decay): the continuum
+                        // integrated.
+                        let emission_rate = source.distribution.emission_rate().map_err(|why| {
+                            format!("D1S: the decay photon continuum of {} {why}", path.emitter)
+                        })?;
+                        spectra.push((
+                            emission_rate,
+                            DecayPhotonSpectrum::continuum(energies, intensities, *interpolation),
+                        ));
+                    }
+                    let lines = emitter.photon_lines();
+                    if !lines.is_empty() {
+                        let (energies, intensities): (Vec<f64>, Vec<f64>) =
+                            lines.into_iter().unzip();
+                        spectra.push((
+                            intensities.iter().sum(),
+                            DecayPhotonSpectrum::Lines {
+                                energies,
+                                intensities,
+                            },
+                        ));
+                    }
 
-                        // photon_per_decay = sum(emission_rates) / λ
-                        // (chain stores emission rates = λ × yield_per_decay)
-                        let photon_per_decay: f64 =
-                            intensities.iter().sum::<f64>() / emitter_lambda;
+                    for (emission_rate, spectrum) in spectra {
+                        let photon_per_decay = emission_rate / emitter_lambda;
                         let yield_constant = reaction.branching * path_branching * photon_per_decay;
 
                         if yield_constant <= 0.0 {
@@ -155,8 +261,7 @@ pub fn precompute_decay_photon_data(
                             xs: xs_vec.clone(),
                             target_name: path.emitter.clone(),
                             target_id,
-                            energies: energies.clone(),
-                            intensities: intensities.clone(),
+                            spectrum,
                             yield_constant,
                         });
                     }
@@ -186,7 +291,7 @@ pub fn precompute_decay_photon_data(
             flat[slot] = data;
         }
     }
-    flat
+    Ok(flat)
 }
 
 // =============================================================================
@@ -244,8 +349,8 @@ pub fn sample_decay_photons<R: rand::Rng>(
 
     let selected = &decay_photon_data.channels[selected_idx];
 
-    // Sample energy from discrete decay spectrum
-    let energy = sample_discrete_energy(&selected.energies, &selected.intensities, rng);
+    // Sample energy from the channel's lines or continuum
+    let energy = selected.spectrum.sample(rng);
     if energy <= 0.0 {
         return;
     }
@@ -361,6 +466,34 @@ fn sample_discrete_energy<R: rand::Rng>(energies: &[f64], intensities: &[f64], r
 
     // Fallback: return last energy (floating-point edge case)
     *energies.last().unwrap_or(&0.0)
+}
+
+/// Sample an energy from a continuum with one draw: pick the interval by its
+/// share of the integral, then invert the running integral inside it exactly.
+fn sample_continuum_energy<R: rand::Rng>(
+    energies: &[f64],
+    densities: &[f64],
+    interpolation: Interpolation,
+    cumulative: &[f64],
+    rng: &mut R,
+) -> f64 {
+    let Some(&total) = cumulative.last() else {
+        return 0.0;
+    };
+    if total <= 0.0 {
+        return 0.0;
+    }
+    // The channel was built through Continuum::new, so the per-draw path skips
+    // the O(n) checks.
+    let continuum = Continuum::already_checked(energies, densities, interpolation);
+    let target = rng.random::<f64>() * total;
+    // The first interval whose running integral passes the target; intervals
+    // that hold nothing never do.
+    let i = cumulative
+        .partition_point(|&c| c <= target)
+        .min(cumulative.len() - 1);
+    let below = if i == 0 { 0.0 } else { cumulative[i - 1] };
+    continuum.energy_within(i, target - below)
 }
 
 /// Sample an isotropic direction (uniform on unit sphere).
@@ -537,12 +670,14 @@ mod tests {
                     target: Some("Mn56".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 decays: vec![],
                 fission_yields: None,
                 sources: vec![],
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
 
@@ -558,6 +693,8 @@ mod tests {
                 fission_yields: None,
                 sources: vec![DecaySource {
                     particle: "photon".to_string(),
+                    radiation: None,
+                    uncertainty: None,
                     distribution: DecaySourceDistribution::Discrete {
                         energies: vec![846764.0, 1810726.0],
                         intensities: vec![7.381e-5, 2.030e-5],
@@ -565,6 +702,7 @@ mod tests {
                 }],
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
 
@@ -572,7 +710,8 @@ mod tests {
         let mut nuclides: HashMap<String, Arc<Nuclide>> = HashMap::new();
         nuclides.insert("Fe56".to_string(), Arc::new(nuclide));
         let mut registry = yamc_nuclide::nuclide_registry::NuclideRegistry::new();
-        let decay_photon_data = precompute_decay_photon_data(&chain, &nuclides, &mut registry);
+        let decay_photon_data =
+            precompute_decay_photon_data(&chain, &nuclides, &mut registry).unwrap();
 
         let nuclide = nuclides.get("Fe56").unwrap();
         let fe56_id = registry
@@ -711,12 +850,14 @@ mod tests {
                     target: Some("ParentA".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 decays: vec![],
                 fission_yields: None,
                 sources: vec![],
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
         // ParentA: unstable, beta-decays to DaughterB, emits NO photons.
@@ -732,11 +873,13 @@ mod tests {
                     target: Some("DaughterB".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 fission_yields: None,
                 sources: vec![],
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
         // DaughterB: unstable, emits a gamma line.
@@ -751,6 +894,8 @@ mod tests {
                 fission_yields: None,
                 sources: vec![DecaySource {
                     particle: "photon".to_string(),
+                    radiation: None,
+                    uncertainty: None,
                     distribution: DecaySourceDistribution::Discrete {
                         energies: vec![1000000.0],
                         intensities: vec![1.0e-3],
@@ -758,13 +903,15 @@ mod tests {
                 }],
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
 
         let mut nuclides: HashMap<String, Arc<Nuclide>> = HashMap::new();
         nuclides.insert("Fe56".to_string(), Arc::new(nuclide));
         let mut registry = yamc_nuclide::nuclide_registry::NuclideRegistry::new();
-        let decay_photon_data = precompute_decay_photon_data(&chain, &nuclides, &mut registry);
+        let decay_photon_data =
+            precompute_decay_photon_data(&chain, &nuclides, &mut registry).unwrap();
 
         let fe56_id = registry
             .lookup("Fe56")
@@ -800,6 +947,251 @@ mod tests {
         assert_eq!(n, 1000, "one daughter photon per collision");
     }
 
+    /// A continuum channel draws its energies from the density, not from its
+    /// tabulated points: a histogram's intervals in proportion to their
+    /// integrals and uniformly inside each, and a linear-linear density with
+    /// the mean its shape implies.
+    #[test]
+    fn a_continuum_channel_samples_its_density() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        // Mass 1e4 * 1e-4 = 1 in [1e4, 2e4) and 1e5 * 3e-5 = 3 in [2e4, 1.2e5).
+        let histogram = DecayPhotonSpectrum::continuum(
+            &[1.0e4, 2.0e4, 1.2e5],
+            &[1.0e-4, 3.0e-5, 0.0],
+            Some(Interpolation::Histogram),
+        );
+        let mut rng = StdRng::seed_from_u64(11);
+        let n = 40_000;
+        let draws: Vec<f64> = (0..n).map(|_| histogram.sample(&mut rng)).collect();
+        assert!(draws.iter().all(|e| (1.0e4..=1.2e5).contains(e)));
+        let low = draws.iter().filter(|e| **e < 2.0e4).count() as f64 / n as f64;
+        assert!((low - 0.25).abs() < 0.01, "share below 20 keV: {low}");
+        // Uniform inside the lower interval: its mean is its midpoint.
+        let lower: Vec<f64> = draws.iter().copied().filter(|e| *e < 2.0e4).collect();
+        let mean = lower.iter().sum::<f64>() / lower.len() as f64;
+        assert!((mean / 1.5e4 - 1.0).abs() < 0.01, "mean {mean}");
+
+        // A triangle rising from zero at 0 to its peak at 1 MeV: mean 2/3 MeV.
+        let triangle = DecayPhotonSpectrum::continuum(
+            &[0.0, 1.0e6],
+            &[0.0, 2.0e-6],
+            Some(Interpolation::LinearLinear),
+        );
+        let mean = (0..n).map(|_| triangle.sample(&mut rng)).sum::<f64>() / n as f64;
+        assert!((mean / (2.0e6 / 3.0) - 1.0).abs() < 0.01, "mean {mean}");
+    }
+
+    /// The photon yield per decay of a continuum is its integral over the
+    /// decay constant, beside the lines' sum, one channel each. Read as lines
+    /// its per-eV values gave a yield smaller by the grid spacing in eV. The
+    /// gamma and x-ray lines, separate sources in the chain, are one channel.
+    #[test]
+    fn a_continuum_is_a_channel_with_its_integral_as_yield() {
+        if !td("Fe56.arrow").exists() {
+            eprintln!("Skipping: Fe56.arrow not found");
+            return;
+        }
+        use yani::chain::{ChainReaction, DecaySource};
+
+        let nuclide = yamc_nuclide::nuclide_loader::load_nuclide(
+            td("Fe56.arrow"),
+            &yamc_nuclide::LoadScope::full(),
+        )
+        .expect("Failed to load Fe56.arrow");
+        let half_life = 3.84e6;
+        let lambda = std::f64::consts::LN_2 / half_life;
+        let emitter = |interpolation| ChainNuclide {
+            name: "Fe57x".to_string(),
+            half_life: Some(half_life),
+            decay_energy: 0.0,
+            reactions: vec![],
+            decays: vec![],
+            fission_yields: None,
+            sources: vec![
+                DecaySource {
+                    particle: "photon".to_string(),
+                    radiation: Some("gamma".to_string()),
+                    uncertainty: None,
+                    distribution: DecaySourceDistribution::Discrete {
+                        energies: vec![1.1e6, 6.0e4],
+                        intensities: vec![0.5 * lambda, 0.05 * lambda],
+                    },
+                },
+                DecaySource {
+                    particle: "photon".to_string(),
+                    radiation: Some("gamma".to_string()),
+                    uncertainty: None,
+                    distribution: DecaySourceDistribution::Tabular {
+                        energies: vec![1.0e4, 1.0e6],
+                        intensities: vec![2.0e-6 * lambda, 0.0],
+                        interpolation,
+                    },
+                },
+                DecaySource {
+                    particle: "photon".to_string(),
+                    radiation: Some("xray".to_string()),
+                    uncertainty: None,
+                    distribution: DecaySourceDistribution::Discrete {
+                        energies: vec![6.0e4],
+                        intensities: vec![0.05 * lambda],
+                    },
+                },
+            ],
+            half_life_uncertainty: None,
+            decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
+        };
+        let chain_with = |interpolation| {
+            let mut chain: HashMap<String, ChainNuclide> = HashMap::new();
+            chain.insert(
+                "Fe56".to_string(),
+                ChainNuclide {
+                    name: "Fe56".to_string(),
+                    half_life: None,
+                    decay_energy: 0.0,
+                    reactions: vec![ChainReaction {
+                        kind: "(n,gamma)".to_string(),
+                        target: Some("Fe57x".to_string()),
+                        branching: 1.0,
+                        branching_uncertainty: None,
+                        q_value: None,
+                    }],
+                    decays: vec![],
+                    fission_yields: None,
+                    sources: vec![],
+                    half_life_uncertainty: None,
+                    decay_energy_uncertainty: None,
+                    decay_energy_components: Default::default(),
+                },
+            );
+            chain.insert("Fe57x".to_string(), emitter(interpolation));
+            chain
+        };
+        let mut nuclides: HashMap<String, Arc<Nuclide>> = HashMap::new();
+        nuclides.insert("Fe56".to_string(), Arc::new(nuclide));
+
+        let mut registry = yamc_nuclide::nuclide_registry::NuclideRegistry::new();
+        let data = precompute_decay_photon_data(
+            &chain_with(Some(Interpolation::Histogram)),
+            &nuclides,
+            &mut registry,
+        )
+        .unwrap();
+        let fe56 = registry.lookup("Fe56").unwrap();
+        let channels = &data[fe56.get() as usize - 1][0].channels;
+        assert_eq!(
+            channels.len(),
+            2,
+            "one channel for the continuum, one for the gamma and x-ray lines together"
+        );
+        assert!(matches!(
+            channels[0].spectrum,
+            DecayPhotonSpectrum::Continuum { .. }
+        ));
+        // 2e-6 per eV across 990 keV: 1.98 photons per decay.
+        assert!(
+            (channels[0].yield_constant - 1.98).abs() < 1e-12,
+            "{}",
+            channels[0].yield_constant
+        );
+        let DecayPhotonSpectrum::Lines {
+            energies,
+            intensities,
+        } = &channels[1].spectrum
+        else {
+            panic!("the lines are the last channel");
+        };
+        // Ascending, and the gamma and the x-ray at 60 keV are one line.
+        assert_eq!(energies, &[6.0e4, 1.1e6]);
+        assert_eq!(intensities, &[0.05 * lambda + 0.05 * lambda, 0.5 * lambda]);
+        assert!((channels[1].yield_constant - 0.6).abs() < 1e-12);
+
+        let mut registry = yamc_nuclide::nuclide_registry::NuclideRegistry::new();
+        let error = precompute_decay_photon_data(&chain_with(None), &nuclides, &mut registry)
+            .err()
+            .expect("a continuum with no law has no yield to give");
+        assert!(
+            error.contains("Fe57x") && error.contains("interpolation"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn test_decay_photon_skips_a_reaction_into_its_own_parent() {
+        // ENDF/B-VIII.1's Pu245 (n,p) names Pu245 itself, through an Np245 with
+        // no decay data. Here Fe56's cross sections stand in for an unstable
+        // emitter carrying such an (n,p) and an (n,gamma) to DaughterB. The
+        // (n,p) leaves the parent's count where it was, so it gets no channel
+        // and DaughterB's is the only one.
+        if !td("Fe56.arrow").exists() {
+            eprintln!("Skipping: Fe56.arrow not found");
+            return;
+        }
+
+        use yani::chain::{ChainReaction, DecaySource, DecaySourceDistribution};
+
+        let nuclide = yamc_nuclide::nuclide_loader::load_nuclide(
+            td("Fe56.arrow"),
+            &yamc_nuclide::LoadScope::full(),
+        )
+        .expect("Failed to load Fe56.arrow");
+
+        let rx = |kind: &str, target: &str| ChainReaction {
+            kind: kind.to_string(),
+            target: Some(target.to_string()),
+            branching: 1.0,
+            q_value: None,
+            branching_uncertainty: None,
+        };
+        let emitter = |name: &str, reactions: Vec<ChainReaction>| ChainNuclide {
+            name: name.to_string(),
+            half_life: Some(3600.0),
+            decay_energy: 0.0,
+            reactions,
+            decays: vec![],
+            fission_yields: None,
+            sources: vec![DecaySource {
+                particle: "photon".to_string(),
+                radiation: None,
+                uncertainty: None,
+                distribution: DecaySourceDistribution::Discrete {
+                    energies: vec![1000000.0],
+                    intensities: vec![1.0e-3],
+                },
+            }],
+            half_life_uncertainty: None,
+            decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
+        };
+        let chain = HashMap::from([
+            (
+                "Fe56".to_string(),
+                emitter(
+                    "Fe56",
+                    vec![rx("(n,p)", "Fe56"), rx("(n,gamma)", "DaughterB")],
+                ),
+            ),
+            ("DaughterB".to_string(), emitter("DaughterB", vec![])),
+        ]);
+
+        let mut nuclides: HashMap<String, Arc<Nuclide>> = HashMap::new();
+        nuclides.insert("Fe56".to_string(), Arc::new(nuclide));
+        let mut registry = yamc_nuclide::nuclide_registry::NuclideRegistry::new();
+        let decay_photon_data =
+            precompute_decay_photon_data(&chain, &nuclides, &mut registry).unwrap();
+
+        let fe56_id = registry.lookup("Fe56").expect("Fe56 makes DaughterB");
+        let temp = &decay_photon_data[fe56_id.get() as usize - 1][0];
+        let targets: Vec<&str> = temp
+            .channels
+            .iter()
+            .map(|c| c.target_name.as_str())
+            .collect();
+        assert_eq!(targets, vec!["DaughterB"]);
+    }
+
     #[test]
     fn test_decay_photon_nuclide_not_in_chain() {
         use rand::rngs::StdRng;
@@ -821,7 +1213,8 @@ mod tests {
         let mut nuclides: HashMap<String, Arc<Nuclide>> = HashMap::new();
         nuclides.insert("Fe56".to_string(), Arc::new(nuclide));
         let mut registry = yamc_nuclide::nuclide_registry::NuclideRegistry::new();
-        let decay_photon_data = precompute_decay_photon_data(&chain, &nuclides, &mut registry);
+        let decay_photon_data =
+            precompute_decay_photon_data(&chain, &nuclides, &mut registry).unwrap();
 
         // Fe56 not in chain → no D1S data (and the registry stays empty of
         // source-nuclide entries, so the flat Vec is empty).

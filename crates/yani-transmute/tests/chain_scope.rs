@@ -33,6 +33,7 @@ fn chain_driven_by(parent: &str) -> Arc<HashMap<String, yani::ChainNuclide>> {
         half_life_uncertainty: None,
         decay_energy: 0.0,
         decay_energy_uncertainty: None,
+        decay_energy_components: Default::default(),
         reactions,
         decays: Vec::new(),
         fission_yields: None,
@@ -43,6 +44,7 @@ fn chain_driven_by(parent: &str) -> Arc<HashMap<String, yani::ChainNuclide>> {
         target: Some("Fe57".to_string()),
         branching: 1.0,
         q_value: Some(0.0),
+        branching_uncertainty: None,
     };
     Arc::new(HashMap::from([
         (parent.to_string(), nuclide(parent, vec![capture])),
@@ -67,7 +69,7 @@ fn spectrum() -> MultigroupSpectrum {
     MultigroupSpectrum {
         boundaries: vec![1.0e-5, 1.0e6, 2.0e7],
         masses: vec![0.5, 0.5],
-        relative_std_dev: None,
+        flux_error: None,
     }
 }
 

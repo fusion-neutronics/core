@@ -59,3 +59,16 @@ Status badges are deliberately absent. GitHub serves `badge.svg` through an
 image proxy that fetches anonymously, so a badge for a private repository
 returns 404 whether or not the reader is signed in, which makes badges here
 permanently broken images rather than a signal. The Actions tab works normally.
+
+## Licence
+
+Dual-licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this work by you, as defined in the Apache-2.0 license, shall
+be dual-licensed as above, without any additional terms or conditions.

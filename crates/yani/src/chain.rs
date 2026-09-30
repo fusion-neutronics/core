@@ -7,7 +7,10 @@ use std::error::Error;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use arrow_array::RecordBatch;
 use once_cell::sync::Lazy;
+
+use crate::continuum::{Continuum, Interpolation, UnreadableContinuum};
 
 type ChainMap = HashMap<String, ChainNuclide>;
 type ChainCache = RwLock<HashMap<String, Arc<ChainMap>>>;
@@ -17,7 +20,13 @@ type ChainCache = RwLock<HashMap<String, Arc<ChainMap>>>;
 pub struct ChainReaction {
     /// Reaction type name, e.g. "(n,gamma)", "(n,fission)", "beta-", "alpha"
     pub kind: String,
-    /// Target nuclide produced (if any)
+    /// Target nuclide produced (if any).
+    ///
+    /// On a decay mode read from a chain file this is also `None` where the
+    /// chain models no product: any mode involving spontaneous fission, and a
+    /// mode whose stored target is its own parent. The reader decides this, so
+    /// every consumer treats the branch as removing the parent and making
+    /// nothing, rather than each one having to recognise `sf`.
     pub target: Option<String>,
     /// Branching ratio for this channel
     pub branching: f64,
@@ -31,6 +40,39 @@ pub struct ChainReaction {
     /// Without it, loading a chain and re-exporting it silently returned a
     /// `reactions/reactions.arrow` with no Q column at all.
     pub q_value: Option<f64>,
+    /// The evaluation's standard deviation on `branching`, on a decay mode.
+    ///
+    /// Read as stored in `decay/decay_modes.arrow`, which holds the MT=457
+    /// dBR literally. So `Some(0.0)` is the format's "not stated", exactly as
+    /// `None` is (a reaction, or a file that predates the column), and both
+    /// must be read as not stated rather than as an exact ratio. Kept
+    /// literally so that re-exporting a chain writes back what it read.
+    ///
+    /// It is the tape's dBR on the tape's BR, while `branching` may not be the
+    /// tape's BR: where a parent's evaluated ratios do not sum to one, the
+    /// converter puts the residual on the parent's largest mode. A consumer
+    /// pairing the two should know that row carries a moved ratio.
+    pub branching_uncertainty: Option<f64>,
+}
+
+impl ChainReaction {
+    /// The nuclide this channel of `parent` makes, or `None` where it makes
+    /// none.
+    ///
+    /// That is [`target`](Self::target) unless the target is `parent` itself.
+    /// A reaction can name its own parent: ENDF/B-VIII.1's Pu245 (n,p) goes to
+    /// an Np245 with no decay data, which `replace_missing` walks back to Pu245
+    /// by beta-, and TENDL has some ninety more (n,p) rows like it. Such a
+    /// channel leaves the parent's count where it was, so anything asking what
+    /// a reaction produces (production routes, product bounds, D1S emitters)
+    /// reads it as producing nothing. The Bateman matrix reads `target` instead:
+    /// it charges the rate as loss and adds it back as gain, and the two cancel.
+    ///
+    /// Decay modes never name their parent here, because the chain reader has
+    /// already dropped those targets.
+    pub fn produced_target(&self, parent: &str) -> Option<&str> {
+        self.target.as_deref().filter(|t| *t != parent)
+    }
 }
 
 /// The physical quantity tabulated in an isomeric-branching curve.
@@ -53,10 +95,12 @@ pub enum BranchQuantity {
 /// Worth stating plainly, because the name says "branch ratios" and the
 /// setting sits beside `cross_section_data` as though the two were disjoint.
 /// A [`BranchQuantity::CrossSection`] curve is a partial cross section in
-/// barns, not a dimensionless fraction, and for `(n,n')` it is the *only*
-/// thing the metastable production rate is computed from: `build_fold_refine`
-/// folds it directly and grafts the result into the rates, without consulting
-/// the parent's own evaluation at all.
+/// barns, not a dimensionless fraction. For `(n,n')`, and for a list that
+/// gives a reaction's isomers alone, the partial is an absolute production:
+/// yani-transmute's branching rule folds it directly, and for `(n,n')` it is
+/// the *only* thing the metastable production rate is computed from. Only a
+/// complete list, its ground state listed too, is read as shares of the
+/// transport total alone.
 ///
 /// Two consequences follow, and neither is obvious from the setting names.
 ///
@@ -83,12 +127,106 @@ pub struct BranchCurve {
     pub energy: Vec<f64>,
     /// Curve values on `energy`: fraction (Yield) or barns (CrossSection).
     pub values: Vec<f64>,
+    /// The evaluated production states summed into this curve, in the order
+    /// they were summed. Empty for a subsection written before these facts
+    /// were stored, which the branching rule refuses. Shared, since a session
+    /// copies its branch table on every run.
+    pub states: Arc<[BranchState]>,
+    /// The parent evaluation's MF=1 account of what it was normalised to
+    /// (TENDL's "Normalization to other libraries" block), verbatim.
+    pub normalisation: Option<String>,
+}
+
+/// What the evaluation states about one production state behind a
+/// [`BranchCurve`], as the converter recorded it.
+///
+/// Facts only: the branching rule in yani-transmute reads `list_complete` to
+/// decide what the list's values mean, and reports the rest.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BranchState {
+    /// The MT the state was listed under.
+    pub mt: i32,
+    /// The final state's level number (LFS); 0 is the ground state.
+    pub lfs: i32,
+    /// MF=8's LMF for the state, `None` where MF=8 does not name it.
+    pub lmf: Option<i32>,
+    /// Whether the same MT and file also list the product's ground state. A
+    /// list without it gives isomers only.
+    pub list_complete: bool,
+    /// How the level was matched to the target: `ground`, `energy`,
+    /// `near_energy`, `level_index`, `single_isomer`, `no_isomers` or
+    /// `unresolved`.
+    pub level_route: String,
+    /// The level's excitation energy in eV. Where MF=8 names the state (`lmf`
+    /// is `Some`) it is MF=8's ELFS as the tape writes it; otherwise it is
+    /// QM - QI of the MF=9/10 subsection, a difference of two tape values and
+    /// not a tape value itself. For an excited level (`lfs` > 0) a zero means
+    /// the evaluation did not state it, and a negative value is a sentinel,
+    /// not an energy.
+    pub level_energy: f64,
+    /// `level_energy` less the excitation energy of the state it was booked
+    /// to, in eV; `None` where that isomer's energy is unknown or
+    /// `level_energy` is not a stated energy.
+    pub level_energy_difference: Option<f64>,
+    /// The evaluation's MF=3 for `mt` on the curve's `energy` nodes, in barns:
+    /// the tape's value where a node is one of its points and its own law
+    /// between them, not a copy of MF=3. `None` where the file has no MF=3
+    /// section for the MT. A `None` item where MF=3 is not tabulated at that
+    /// node, where its log law meets a zero, or where MF=3 jumps at a node
+    /// the curve does not repeat; a repeated node takes MF=3's left limit
+    /// first and its right limit second.
+    pub mf3_cross_section: Option<Vec<Option<f64>>>,
 }
 
 /// Isomeric-branching curves keyed by parent nuclide then reaction kind.
-/// `branch_table[parent][kind]` is the list of per-final-state curves for that
-/// reaction. Empty when no `branching/` subsection was supplied.
-pub type BranchTable = HashMap<String, HashMap<String, Vec<BranchCurve>>>;
+/// `branch_table.curves()[parent][kind]` is the list of per-final-state curves
+/// for that reaction. Empty when no `branching/` subsection was supplied.
+///
+/// The table also holds the subsection's `branching_covariance.arrow`, the
+/// MF=40 covariance of the MF=10 partials, when the subsection carries one.
+/// That is kept as the file's record batches, schema-checked and otherwise
+/// as written: it is every MF=40 block of the library, not only those of this
+/// chain's parents, and turning a row into a covariance block is the
+/// covariance reader's job (`yamc-nuclide`), which this crate does not depend
+/// on. Nothing here reads it, so the curves and every nominal result are what
+/// they are without it.
+#[derive(Clone, Debug, Default)]
+pub struct BranchTable {
+    curves: HashMap<String, HashMap<String, Vec<BranchCurve>>>,
+    covariance: Option<Vec<RecordBatch>>,
+}
+
+impl BranchTable {
+    /// An empty table with no covariance.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The per-final-state curves, `curves[parent][kind]`.
+    pub fn curves(&self) -> &HashMap<String, HashMap<String, Vec<BranchCurve>>> {
+        &self.curves
+    }
+
+    /// The curves, to add to or edit.
+    pub fn curves_mut(&mut self) -> &mut HashMap<String, HashMap<String, Vec<BranchCurve>>> {
+        &mut self.curves
+    }
+
+    /// The rows of `branching_covariance.arrow`, when the subsection has one.
+    ///
+    /// `None` for a library without MF=40 (JENDL-5.0), for a subsection
+    /// published before the file existed, and for a bytes-fed host that did not
+    /// hand the file over. None of those is an error: there is simply no
+    /// stated covariance of the isomeric split.
+    pub fn covariance(&self) -> Option<&[RecordBatch]> {
+        self.covariance.as_deref()
+    }
+
+    /// Attach the covariance batches read from the subsection.
+    pub fn set_covariance(&mut self, batches: Vec<RecordBatch>) {
+        self.covariance = Some(batches);
+    }
+}
 
 /// A parsed transmutation chain plus its optional isomeric-branching overlay.
 ///
@@ -140,6 +278,37 @@ pub struct FissionYield {
     pub energy: f64,
     /// Product nuclide names and their yields (fractional per fission)
     pub products: Vec<(String, f64)>,
+    /// The evaluation's independent yields (MT=454) at this energy, exactly
+    /// as the tape gives them. `products` is derived from these and is what
+    /// the solver reads. `None` where the chain carries no evaluated yields.
+    pub independent: Option<EvaluatedYields>,
+    /// The evaluation's cumulative yields (MT=459) at this energy. Carried,
+    /// not solved with: a cumulative yield already includes the decay the
+    /// solver models, so using it as a source would count that decay twice.
+    pub cumulative: Option<EvaluatedYields>,
+}
+
+/// One set of evaluated fission product yields, as the tape gives them.
+///
+/// Not the same list as [`FissionYield::products`]. That one names chain
+/// nuclides, so a product with no decay data is mapped onto a stand-in and
+/// products that land on the same name are summed. These are the tape's own
+/// products in tape order, and each `uncertainties` entry is the DY of the
+/// `yields` entry beside it. A summed yield has no stated DY, since it would
+/// need the correlation of its parts and no evaluation publishes one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EvaluatedYields {
+    /// Product names from the tape's ZAFP and FPS, e.g. `"Xe135_m1"`.
+    pub products: Vec<String>,
+    /// The tape's Y, per fission.
+    pub yields: Vec<f64>,
+    /// The tape's DY, one per product. An evaluator's 0.0 is kept as
+    /// `Some(0.0)`, and it and `None` both mean "not stated", never an exact
+    /// yield.
+    pub uncertainties: Vec<Option<f64>>,
+    /// The ENDF interpolation law from the next lower energy to this one.
+    /// `None` at the lowest energy, where the tape states no law.
+    pub interpolation: Option<i32>,
 }
 
 /// Complete fission yield data for a nuclide (may have multiple energies).
@@ -227,25 +396,167 @@ fn bracket(e_lo: f64, e_hi: f64, hi: usize, energy: f64) -> [(usize, f64); 2] {
 }
 
 /// Distribution data for a decay photon source.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum DecaySourceDistribution {
-    /// Discrete line spectrum: each (energy, intensity) pair is a spectral line.
+    /// Discrete line spectrum: each (energy, intensity) pair is a spectral
+    /// line, its intensity the emission rate per atom [1/s].
     Discrete {
         energies: Vec<f64>,
         intensities: Vec<f64>,
     },
+    /// A continuum: `intensities` is the emission-rate density per atom
+    /// [1/s/eV] at each of `energies` [eV], read between them by
+    /// `interpolation`. `None` there is a file that states no law, which a
+    /// `decay/sources.arrow` written before the column does for every
+    /// continuum; see [`crate::continuum`].
+    Tabular {
+        energies: Vec<f64>,
+        intensities: Vec<f64>,
+        interpolation: Option<Interpolation>,
+    },
+}
+
+impl DecaySourceDistribution {
+    /// Particles emitted per atom per second: the lines summed, or the
+    /// continuum integrated under its law.
+    pub fn emission_rate(&self) -> Result<f64, UnreadableContinuum> {
+        match self {
+            DecaySourceDistribution::Discrete { intensities, .. } => Ok(intensities.iter().sum()),
+            DecaySourceDistribution::Tabular {
+                energies,
+                intensities,
+                interpolation,
+            } => Ok(Continuum::new(energies, intensities, *interpolation)?.integral()),
+        }
+    }
+
+    /// The stored values: a line's emission rate, or a continuum's density.
+    ///
+    /// Either is the per-decay yield times the decay constant, so a change of
+    /// half-life rescales both the same way.
+    pub fn intensities_mut(&mut self) -> &mut Vec<f64> {
+        match self {
+            DecaySourceDistribution::Discrete { intensities, .. }
+            | DecaySourceDistribution::Tabular { intensities, .. } => intensities,
+        }
+    }
 }
 
 /// A decay photon source associated with a nuclide.
 ///
 /// In D1S chain files, nuclides may have source entries describing the decay
 /// gamma spectrum emitted when the nuclide decays.
-#[derive(Clone, Debug)]
+///
+/// A decay evaluation gives one spectrum per radiation type, and the chain
+/// keeps each spectrum's lines and its continuum as separate sources: a
+/// nuclide emitting gammas and x-rays has two photon line sources. Each
+/// spectrum has its own normalisation, whose sigma is common to its lines
+/// only, so merging them would lose which sigma belongs to which line. Read
+/// [`ChainNuclide::photon_lines`] for the lines together.
+#[derive(Clone, Debug, PartialEq)]
 pub struct DecaySource {
     /// Particle type emitted (e.g. "photon")
     pub particle: String,
+    /// The ENDF radiation type the source was read from, e.g. `"gamma"` or
+    /// `"xray"`. `None` where the file does not say, as a
+    /// `decay/sources.arrow` written before the column does not.
+    pub radiation: Option<String>,
     /// The energy distribution of emitted particles
     pub distribution: DecaySourceDistribution,
+    /// What the evaluation states about the source's uncertainty, `None`
+    /// where the file carries nothing. Nothing reads it to perturb a result
+    /// yet; it is kept so that nothing the evaluation gives is lost.
+    ///
+    /// Behind an `Arc` for the reason [`ChainNuclide::fission_yields`] is:
+    /// the chain is deep-cloned per transmutation, and these are as many
+    /// numbers again as the lines themselves.
+    pub uncertainty: Option<Arc<DecaySourceUncertainty>>,
+}
+
+impl DecaySource {
+    /// Multiply the stored rates, and the sigmas stated in the same units,
+    /// by `factor`.
+    ///
+    /// The rates are a per-decay yield times the decay constant, so a new
+    /// half-life rescales them, and each line's intensity sigma is the
+    /// per-decay sigma times the same constant. The normalisation and the
+    /// energy sigmas are per decay and do not move.
+    pub fn scale_rates(&mut self, factor: f64) {
+        for value in self.distribution.intensities_mut() {
+            *value *= factor;
+        }
+        let stated = self
+            .uncertainty
+            .as_ref()
+            .is_some_and(|u| u.intensity_uncertainties.is_some());
+        if stated {
+            let uncertainty = Arc::make_mut(self.uncertainty.as_mut().expect("checked above"));
+            for sigma in uncertainty.intensity_uncertainties.iter_mut().flatten() {
+                *sigma *= factor;
+            }
+        }
+    }
+}
+
+/// The uncertainties an evaluation states for one decay source, as ENDF
+/// MT=457 writes them.
+///
+/// Every field is literal: a 0.0 the evaluation wrote stays 0.0. On the
+/// sigma fields (`normalization_uncertainty`, `intensity_uncertainties` and
+/// `energy_uncertainties`) a reader must take both `None` and 0.0 as "not
+/// stated", never as an exact value, because the libraries write 0.0 for a
+/// sigma they did not give. `normalization` is not a sigma: it is the value
+/// the intensities were scaled by, so a stated 0.0 there means the
+/// intensities are exactly zero as written. JENDL-5.0, for one, puts a
+/// reference line's sigma in the normalisation and writes 0.0 on the line.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DecaySourceUncertainty {
+    /// The spectrum's normalisation: FD for lines, FC for a continuum. It
+    /// is already multiplied into the source's intensities.
+    pub normalization: Option<f64>,
+    /// Its sigma, common to every line of the spectrum (fully correlated
+    /// between them).
+    pub normalization_uncertainty: Option<f64>,
+    /// Each line's intensity sigma, in the units of its intensity (decay
+    /// constant times FD times dRI). `None` on a continuum, whose points
+    /// carry no sigma.
+    pub intensity_uncertainties: Option<Vec<f64>>,
+    /// Each line's energy sigma dER [eV]. `None` on a continuum.
+    pub energy_uncertainties: Option<Vec<f64>>,
+    /// The spectrum's covariance, where the evaluation states one.
+    pub covariance: Option<SourceCovariance>,
+}
+
+/// A spectrum's covariance as MT=457 packs it, unpacked no further.
+///
+/// For lines (LB=5) `energies` are the values written before the packed
+/// matrix `values`, and `ls` is its symmetry flag. For a continuum (LB=2)
+/// `values` pair one to one with `energies`, and `ls` is `None`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceCovariance {
+    /// The LB=5 symmetry flag LS; `None` on a continuum.
+    pub ls: Option<i32>,
+    /// The LB flag, which says how `values` is laid out.
+    pub lb: i32,
+    /// ER for the lines, Ek for a continuum [eV].
+    pub energies: Vec<f64>,
+    /// The packed matrix for the lines, the Fk list for a continuum.
+    pub values: Vec<f64>,
+}
+
+/// The names of a nuclide's decay-energy components, in the order
+/// [`ChainNuclide::decay_energy_components`] stores them.
+pub const DECAY_ENERGY_COMPONENTS: [&str; 3] = ["beta", "gamma", "alpha"];
+
+/// One recoverable-heat component of a decay energy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DecayEnergyComponent {
+    /// Mean energy per decay [eV].
+    pub energy: f64,
+    /// The evaluation's standard deviation on it [eV], as the file stores it.
+    /// `None` and `Some(0.0)` both mean none was stated (0.0 is how MT=457
+    /// writes that), never that the energy is exact.
+    pub uncertainty: Option<f64>,
 }
 
 /// A nuclide in the transmutation chain
@@ -255,19 +566,33 @@ pub struct ChainNuclide {
     pub name: String,
     /// Half-life in seconds (None for stable nuclides)
     pub half_life: Option<f64>,
-    /// The evaluation's standard deviation on the half-life, in seconds.
+    /// The evaluation's standard deviation on the half-life, in seconds, as
+    /// the file stores it.
     ///
-    /// `None` where none was published or the file predates the column,
-    /// which is not the same as zero (issue #515).
+    /// `None` where the file has no value or predates the column, and
+    /// `Some(0.0)` where the evaluation wrote 0.0, which is how MT=457 says
+    /// "not stated". Both are an unstated sigma and neither is zero: every
+    /// consumer takes a sigma only when it is positive (issue #515).
     pub half_life_uncertainty: Option<f64>,
     /// Mean decay energy released per decay [eV].
     pub decay_energy: f64,
     /// The evaluation's standard deviation on `decay_energy`, in eV.
     ///
-    /// `None` where none was published or the file predates the column. Decay
-    /// heat is `activity * decay_energy`, so this scales the reported watts
-    /// directly rather than diluting through a chain (issue #515).
+    /// `None` where the file has no value or predates the column; `Some(0.0)`
+    /// where every component's sigma was written as 0.0. Both mean not
+    /// stated, as for `half_life_uncertainty`. Decay heat is
+    /// `activity * decay_energy`, so this scales the reported watts directly
+    /// rather than diluting through a chain (issue #515).
     pub decay_energy_uncertainty: Option<f64>,
+    /// `decay_energy` split into its recoverable-heat components, in
+    /// [`DECAY_ENERGY_COMPONENTS`] order (beta, gamma, alpha), each with the
+    /// evaluation's own sigma. `None` for a component the data does not give,
+    /// including every component of a file that predates the split.
+    ///
+    /// The ENDF MT=457 components behind the names: light particles (beta,
+    /// conversion and Auger electrons), electromagnetic (gammas and x-rays),
+    /// heavy particles (alphas, protons, neutrons, fission fragments).
+    pub decay_energy_components: [Option<DecayEnergyComponent>; 3],
     /// Neutron-induced reactions
     pub reactions: Vec<ChainReaction>,
     /// Radioactive decay modes
@@ -284,6 +609,44 @@ pub struct ChainNuclide {
     pub fission_yields: Option<Arc<FissionYieldSet>>,
     /// Decay photon sources (empty if nuclide has no decay gamma data)
     pub sources: Vec<DecaySource>,
+}
+
+impl ChainNuclide {
+    /// The nuclide's decay photon lines as one list of `(energy [eV], rate
+    /// per atom [1/s])`, ascending in energy.
+    ///
+    /// Every photon line source contributes, so the gamma and x-ray lines,
+    /// which the chain keeps apart, come back together, and lines at the same
+    /// energy are summed in the order the sources list them. That is exactly
+    /// the merged list `decay/sources.arrow` stored before it kept the spectra
+    /// apart, to the last bit, which is why the line consumers read this
+    /// rather than the sources.
+    pub fn photon_lines(&self) -> Vec<(f64, f64)> {
+        let mut lines: Vec<(f64, f64)> = self
+            .sources
+            .iter()
+            .filter(|source| source.particle == "photon")
+            .filter_map(|source| match &source.distribution {
+                DecaySourceDistribution::Discrete {
+                    energies,
+                    intensities,
+                } => Some(energies.iter().copied().zip(intensities.iter().copied())),
+                DecaySourceDistribution::Tabular { .. } => None,
+            })
+            .flatten()
+            .collect();
+        // Stable, so the lines at one energy stay in source order and are
+        // summed in it.
+        lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+        lines.dedup_by(|later, kept| {
+            let same = later.0 == kept.0;
+            if same {
+                kept.1 += later.1;
+            }
+            same
+        });
+        lines
+    }
 }
 
 /// Global cache for parsed chain files.
@@ -479,7 +842,12 @@ pub fn reachable_nuclides(
 /// * a single edge transfers at most the parent's whole bound, because an atom
 ///   cannot transmute more than once;
 /// * decay uses the exact `1 - exp(-ln2 t / T_half)` fraction, needing no
-///   cross-section data at all.
+///   cross-section data at all;
+/// * a reaction `branch` has curves for is split by the largest share the
+///   overlay's fold could give each target (see `overlay_branching_bounds`),
+///   never by the chain's own value alone: grafted metastable channels sit in
+///   the loaded chain at a 0.0 placeholder, and the fold rewrites every split
+///   it covers.
 ///
 /// `reaction_rate(parent, kind)` gives that channel's per-atom rate in 1/s, i.e.
 /// the one-group cross section folded with the flux. Only parents already loaded
@@ -519,6 +887,7 @@ pub fn reachable_nuclides(
 /// either.
 pub fn populated_nuclides<F>(
     chain: &HashMap<String, ChainNuclide>,
+    branch: &BranchTable,
     seeds: &HashMap<String, f64>,
     total_time: f64,
     floor: f64,
@@ -566,12 +935,36 @@ where
     // and reused every sweep.
     let mut edges: Vec<(&str, &str, f64)> = Vec::new();
     for (name, cn) in chain.iter() {
+        // The overlay's fold rewrites the split of any reaction it has curves
+        // for, so the chain's own branching is not a bound on those edges.
+        let overlay = branch.curves().get(name);
+        let mut overlay_bounds: HashMap<&str, HashMap<&str, f64>> = HashMap::new();
         for rx in &cn.reactions {
-            let frac = (reaction_rate(name, &rx.kind) * total_time).min(1.0) * rx.branching;
+            let mut branching = rx.branching;
+            if let (Some(kinds), Some(target)) = (overlay, rx.target.as_deref()) {
+                if let Some(curves) = kinds.get(&rx.kind) {
+                    let per_target = overlay_bounds
+                        .entry(rx.kind.as_str())
+                        .or_insert_with(|| overlay_branching_bounds(name, cn, &rx.kind, curves));
+                    if let Some(&bound) = per_target.get(target) {
+                        branching = branching.max(bound);
+                    }
+                }
+            }
+            // Tested before the product: an unbounded overlay branching is
+            // infinite, and a channel that never runs must not turn it into NaN.
+            let reacted = (reaction_rate(name, &rx.kind) * total_time).min(1.0);
+            if reacted <= 0.0 {
+                continue;
+            }
+            let frac = reacted * branching;
             if frac <= 0.0 {
                 continue;
             }
-            if let Some(target) = &rx.target {
+            // A reaction back into its own parent moves no atoms, so it is not
+            // an edge: taking it as one would feed the parent's bound from
+            // itself.
+            if let Some(target) = rx.produced_target(name) {
                 if chain.contains_key(target) {
                     edges.push((name, target, frac));
                 }
@@ -674,6 +1067,190 @@ where
         .filter(|&(_, b)| b >= floor)
         .map(|(name, _)| name.to_string())
         .collect()
+}
+
+/// The largest branching the overlay's fold can give each target of one of
+/// `parent`'s reactions, over every spectrum.
+///
+/// Grafted metastable channels enter the loaded chain at 0.0 and the fold
+/// sets them from the curves, while a channel the base chain already carries
+/// has its split re-partitioned, so neither the placeholder nor the base value
+/// bounds what the solve uses. Mirrors `build_fold_refine` and `refine_chain`
+/// in yani-transmute (and `apply_coupled_branching`, which shares the latter):
+///
+/// * `(n,n')`: a target's branching becomes its share of the summed metastable
+///   partials, the ground self-loop excluded;
+/// * any other kind: the branching mass the chain puts on the targets with
+///   curves is re-split in proportion to those targets' curves, MF=10 partials
+///   taking precedence over MF=9 yields when a reaction has both.
+///
+/// Every such share is a ratio of two integrals of the same non-negative
+/// weight (the flux, times the transport cross section for yields), so it
+/// never exceeds the ratio of the curves themselves at the worst energy, which
+/// is what is returned: exact for a spectrum concentrated there, never below
+/// the fold for any other. Targets without a curve are left out, since the
+/// fold never touches their branching.
+///
+/// That argument needs every curve non-negative, which nothing upstream
+/// checks, so a selected curve with a negative point gives the loose bound
+/// instead. For `(n,n')` that is 1.0: the fold drops non-positive rates before
+/// normalising, so each share stays within the unit interval. Any other kind
+/// normalises by a sum that negative curves can cancel toward zero, so no
+/// finite value bounds its re-split and the edge is bounded by infinity, kept
+/// whenever its reaction runs at all.
+fn overlay_branching_bounds<'a>(
+    parent: &str,
+    cn: &'a ChainNuclide,
+    kind: &str,
+    curves: &'a [BranchCurve],
+) -> HashMap<&'a str, f64> {
+    let well_formed = |c: &&BranchCurve| !c.energy.is_empty() && c.energy.len() == c.values.len();
+    let selected: Vec<&BranchCurve> = if kind == "(n,n')" {
+        curves
+            .iter()
+            .filter(well_formed)
+            .filter(|c| c.quantity == BranchQuantity::CrossSection && c.target != parent)
+            .collect()
+    } else {
+        let quantity = if curves
+            .iter()
+            .any(|c| c.quantity == BranchQuantity::CrossSection)
+        {
+            BranchQuantity::CrossSection
+        } else {
+            BranchQuantity::Yield
+        };
+        curves
+            .iter()
+            .filter(well_formed)
+            .filter(|c| c.quantity == quantity)
+            .collect()
+    };
+    let negative = selected.iter().any(|c| c.values.iter().any(|&v| v < 0.0));
+
+    let mut bounds = HashMap::new();
+    if kind == "(n,n')" {
+        // The share is of every partial, whether or not the chain carries its
+        // target, and is assigned as the branching outright.
+        for c in &selected {
+            let own: Vec<&BranchCurve> = selected
+                .iter()
+                .copied()
+                .filter(|o| o.target == c.target)
+                .collect();
+            bounds.entry(c.target.as_str()).or_insert_with(|| {
+                if negative {
+                    1.0
+                } else {
+                    largest_share(&own, &selected)
+                }
+            });
+        }
+        return bounds;
+    }
+
+    // The fold only moves the mass already on the covered targets, and splits
+    // it over those targets alone, once per chain edge. The base value stays in
+    // the bound through the caller's `max`, for spectra where nothing is folded.
+    let covered: Vec<&ChainReaction> = cn
+        .reactions
+        .iter()
+        .filter(|r| r.kind == kind)
+        .filter(|r| {
+            r.target
+                .as_deref()
+                .is_some_and(|t| selected.iter().any(|c| c.target == t))
+        })
+        .collect();
+    let mass: f64 = covered.iter().map(|r| r.branching).sum();
+    let denominator: Vec<&BranchCurve> = covered
+        .iter()
+        .flat_map(|r| {
+            let t = r.target.as_deref();
+            selected
+                .iter()
+                .copied()
+                .filter(move |c| Some(c.target.as_str()) == t)
+        })
+        .collect();
+    for r in &covered {
+        let target = r.target.as_deref().expect("covered edges have a target");
+        let own: Vec<&BranchCurve> = selected
+            .iter()
+            .copied()
+            .filter(|c| c.target == target)
+            .collect();
+        bounds.entry(target).or_insert_with(|| {
+            if negative {
+                f64::INFINITY
+            } else {
+                largest_share(&own, &denominator) * mass
+            }
+        });
+    }
+    bounds
+}
+
+/// The supremum over energy of `sum(numerator) / sum(denominator)`, curves
+/// interpolated as the fold interpolates them: linearly, zero below the first
+/// point, flat above the last. `numerator` must be a subset of `denominator`.
+///
+/// Between two breakpoints of the union grid both sums are linear, so their
+/// ratio is monotone there and the supremum sits at a breakpoint, approached
+/// from one side or the other (a threshold or a doubled point is a step). A
+/// side where the denominator vanishes has a numerator vanishing with it, and
+/// then the ratio is constant across the segment, so the segment's midpoint
+/// stands in for it.
+fn largest_share(numerator: &[&BranchCurve], denominator: &[&BranchCurve]) -> f64 {
+    let mut grid: Vec<f64> = denominator
+        .iter()
+        .flat_map(|c| c.energy.iter().copied())
+        .collect();
+    grid.sort_by(f64::total_cmp);
+    grid.dedup();
+
+    let sum = |curves: &[&BranchCurve], e: f64, from_left: bool| -> f64 {
+        curves
+            .iter()
+            .map(|c| curve_limit(&c.energy, &c.values, e, from_left))
+            .sum()
+    };
+    let mut best: f64 = 0.0;
+    let mut consider = |e: f64, from_left: bool| {
+        let d = sum(denominator, e, from_left);
+        if d > 0.0 {
+            best = best.max(sum(numerator, e, from_left) / d);
+        }
+    };
+    for (i, &e) in grid.iter().enumerate() {
+        consider(e, true);
+        consider(e, false);
+        if let Some(&next) = grid.get(i + 1) {
+            consider(0.5 * (e + next), false);
+        }
+    }
+    best
+}
+
+/// A piecewise-linear curve's one-sided limit at `e`, zero below its first
+/// point and flat above its last. At a doubled breakpoint the left limit takes
+/// the first value and the right limit the last.
+fn curve_limit(energy: &[f64], values: &[f64], e: f64, from_left: bool) -> f64 {
+    let last = energy.len() - 1;
+    if e < energy[0] || (from_left && e == energy[0]) {
+        return 0.0;
+    }
+    if e > energy[last] || (!from_left && e == energy[last]) {
+        return values[last];
+    }
+    // The segment [energy[i - 1], energy[i]] the limit is taken along.
+    let i = if from_left {
+        energy.partition_point(|&x| x < e)
+    } else {
+        energy.partition_point(|&x| x <= e)
+    };
+    let (e0, e1, v0, v1) = (energy[i - 1], energy[i], values[i - 1], values[i]);
+    v0 + (v1 - v0) * (e - e0) / (e1 - e0)
 }
 
 /// Shared BFS behind [`reachable_nuclides`] and [`reduce_chain`], so the two
@@ -781,6 +1358,57 @@ pub fn reduce_chain(
 mod tests {
     use super::*;
 
+    fn source(particle: &str, distribution: DecaySourceDistribution) -> DecaySource {
+        DecaySource {
+            particle: particle.to_string(),
+            radiation: None,
+            distribution,
+            uncertainty: None,
+        }
+    }
+
+    /// The gamma and x-ray line sources come back as one ascending list,
+    /// a shared energy summed in source order; a continuum and other
+    /// particles stay out.
+    #[test]
+    fn photon_lines_merge_every_photon_line_source() {
+        let lines = |energies: Vec<f64>, intensities: Vec<f64>| DecaySourceDistribution::Discrete {
+            energies,
+            intensities,
+        };
+        let nuclide = ChainNuclide {
+            name: "Xx1".to_string(),
+            half_life: Some(1.0),
+            half_life_uncertainty: None,
+            decay_energy: 0.0,
+            decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
+            reactions: vec![],
+            decays: vec![],
+            fission_yields: None,
+            sources: vec![
+                source(
+                    "photon",
+                    lines(vec![3.0e5, 1.0e5, 3.0e5], vec![0.1, 0.2, 0.3]),
+                ),
+                source(
+                    "photon",
+                    DecaySourceDistribution::Tabular {
+                        energies: vec![1.0e4, 1.0e6],
+                        intensities: vec![1.0, 0.0],
+                        interpolation: Some(Interpolation::Histogram),
+                    },
+                ),
+                source("electron", lines(vec![2.0e5], vec![5.0])),
+                source("photon", lines(vec![3.0e5, 2.0e4], vec![0.7, 0.4])),
+            ],
+        };
+        assert_eq!(
+            nuclide.photon_lines(),
+            vec![(2.0e4, 0.4), (1.0e5, 0.2), (3.0e5, 0.1 + 0.3 + 0.7)]
+        );
+    }
+
     // =========================================================================
     // Ejectile nuclide extraction tests
     // =========================================================================
@@ -841,6 +1469,7 @@ mod tests {
             target: target.map(|s| s.to_string()),
             branching,
             q_value: None,
+            branching_uncertainty: None,
         }
     }
 
@@ -860,6 +1489,7 @@ mod tests {
             fission_yields: None,
             sources: Vec::new(),
             decay_energy_uncertainty: None,
+            decay_energy_components: Default::default(),
         }
     }
 
@@ -943,6 +1573,8 @@ mod tests {
                     ("Cs137".into(), 0.062),
                     ("Sr90".into(), 0.058),
                 ],
+                independent: None,
+                cumulative: None,
             }],
         }));
         chain.insert("U235".into(), u235);
@@ -988,7 +1620,14 @@ mod tests {
         let chain = test_fixture_chain();
         let closure = reachable_nuclides(&chain, &["Fe56"]);
         for rate in [0.0, 1e-20, 1e-6, 1.0, 1e6] {
-            let kept = populated_nuclides(&chain, &fe56_seed(), 3.15e7, 1e-30, |_, _| rate);
+            let kept = populated_nuclides(
+                &chain,
+                &BranchTable::new(),
+                &fe56_seed(),
+                3.15e7,
+                1e-30,
+                |_, _| rate,
+            );
             for name in &kept {
                 assert!(
                     closure.contains(name),
@@ -1006,7 +1645,17 @@ mod tests {
         let closure = reachable_nuclides(&chain, &["Fe56"]);
         let sizes: Vec<usize> = [1e-30, 1e-12, 1e-8, 1e-4, 1.0]
             .iter()
-            .map(|&rate| populated_nuclides(&chain, &fe56_seed(), 3.15e7, 1e-30, |_, _| rate).len())
+            .map(|&rate| {
+                populated_nuclides(
+                    &chain,
+                    &BranchTable::new(),
+                    &fe56_seed(),
+                    3.15e7,
+                    1e-30,
+                    |_, _| rate,
+                )
+                .len()
+            })
             .collect();
         for pair in sizes.windows(2) {
             assert!(
@@ -1014,7 +1663,14 @@ mod tests {
                 "a harder-driven run reached fewer nuclides: {sizes:?}"
             );
         }
-        let hardest = populated_nuclides(&chain, &fe56_seed(), 3.15e7, 1e-30, |_, _| 1.0);
+        let hardest = populated_nuclides(
+            &chain,
+            &BranchTable::new(),
+            &fe56_seed(),
+            3.15e7,
+            1e-30,
+            |_, _| 1.0,
+        );
         assert_eq!(
             hardest.len(),
             closure.len(),
@@ -1028,11 +1684,59 @@ mod tests {
         // the daughter has to survive even when every reaction rate is zero.
         let chain = test_fixture_chain();
         let seeds: HashMap<String, f64> = [("Mn56".to_string(), 1.0)].into_iter().collect();
-        let kept = populated_nuclides(&chain, &seeds, 3.15e7, 1e-30, |_, _| 0.0);
+        let kept = populated_nuclides(
+            &chain,
+            &BranchTable::new(),
+            &seeds,
+            3.15e7,
+            1e-30,
+            |_, _| 0.0,
+        );
         assert!(
             kept.contains("Fe56"),
             "decay daughter dropped though decay needs no cross section: {kept:?}"
         );
+    }
+
+    #[test]
+    fn populated_does_not_feed_a_parent_from_its_own_reaction() {
+        // ENDF/B-VIII.1's Pu245 (n,p) leads back to Pu245, through an Np245
+        // with no decay data. Over one second at these rates (n,p) touches
+        // every atom and (n,gamma) makes 2e-30 of Pu246, under the floor. Fed
+        // from itself Pu245 would climb to the ceiling of 8, and Pu246 to
+        // 1.6e-29 with it, over the floor.
+        let chain: HashMap<String, ChainNuclide> = [
+            nuc(
+                "Pu245",
+                None,
+                vec![
+                    rx("(n,p)", Some("Pu245"), 1.0),
+                    rx("(n,gamma)", Some("Pu246"), 1.0),
+                ],
+                vec![],
+            ),
+            nuc("Pu246", None, vec![], vec![]),
+        ]
+        .into_iter()
+        .map(|n| (n.name.clone(), n))
+        .collect();
+        let seeds: HashMap<String, f64> = [("Pu245".to_string(), 1.0)].into_iter().collect();
+        let kept = populated_nuclides(
+            &chain,
+            &BranchTable::new(),
+            &seeds,
+            1.0,
+            1e-29,
+            |_, kind| {
+                if kind == "(n,p)" {
+                    1.0
+                } else {
+                    2e-30
+                }
+            },
+        );
+        assert!(kept.contains("Pu245"), "{kept:?}");
+        assert!(!kept.contains("Pu246"), "{kept:?}");
     }
 
     #[test]
@@ -1042,13 +1746,20 @@ mod tests {
         // the closure alone cannot do.
         let chain = test_fixture_chain();
         // One hop transfers 1e-20 of the seed, two hops 1e-40, floor is 1e-30.
-        let kept = populated_nuclides(&chain, &fe56_seed(), 1.0, 1e-30, |_, kind| {
-            if kind.starts_with("(n,") {
-                1e-20
-            } else {
-                0.0
-            }
-        });
+        let kept = populated_nuclides(
+            &chain,
+            &BranchTable::new(),
+            &fe56_seed(),
+            1.0,
+            1e-30,
+            |_, kind| {
+                if kind.starts_with("(n,") {
+                    1e-20
+                } else {
+                    0.0
+                }
+            },
+        );
         assert!(kept.contains("Fe57"), "one hop should survive: {kept:?}");
         assert!(
             !kept.contains("Fe58"),
@@ -1072,7 +1783,9 @@ mod tests {
         chain.insert("Sink".to_string(), nuc("Sink", None, vec![], vec![]));
         let seeds: HashMap<String, f64> = [("Seed".to_string(), 1.0)].into_iter().collect();
         // Each of the 20 edges alone is under the floor; together they clear it.
-        let kept = populated_nuclides(&chain, &seeds, 1.0, 1e-30, |_, _| 1e-31);
+        let kept = populated_nuclides(&chain, &BranchTable::new(), &seeds, 1.0, 1e-30, |_, _| {
+            1e-31
+        });
         assert!(
             kept.contains("Sink"),
             "twenty sub-floor pathways should add up to clear the floor: {kept:?}"
@@ -1108,13 +1821,20 @@ mod tests {
         let floor = 1e-30;
 
         // Every intermediate really is under the floor on its own.
-        let ceiling_sweep = populated_nuclides(&chain, &seeds, 1.0, floor, |parent, _| {
-            if parent == "Seed" {
-                1e-32
-            } else {
-                1.0 // the ceiling: no nuclide can react faster than every atom
-            }
-        });
+        let ceiling_sweep = populated_nuclides(
+            &chain,
+            &BranchTable::new(),
+            &seeds,
+            1.0,
+            floor,
+            |parent, _| {
+                if parent == "Seed" {
+                    1e-32
+                } else {
+                    1.0 // the ceiling: no nuclide can react faster than every atom
+                }
+            },
+        );
         assert!(
             !ceiling_sweep.contains("Mid0"),
             "an intermediate at 1e-32 is under the floor and should not be kept"
@@ -1126,18 +1846,258 @@ mod tests {
         );
 
         // Rating the unloaded intermediates at zero silently loses the sink.
-        let zeroed = populated_nuclides(&chain, &seeds, 1.0, floor, |parent, _| {
-            if parent == "Seed" {
-                1e-32
-            } else {
-                0.0
-            }
-        });
+        let zeroed = populated_nuclides(
+            &chain,
+            &BranchTable::new(),
+            &seeds,
+            1.0,
+            floor,
+            |parent, _| {
+                if parent == "Seed" {
+                    1e-32
+                } else {
+                    0.0
+                }
+            },
+        );
         assert!(
             !zeroed.contains("Sink"),
             "zeroing unloaded parents should be what loses the sink, \
              otherwise this test is not demonstrating the hazard"
         );
+    }
+
+    fn curve(
+        target: &str,
+        quantity: BranchQuantity,
+        energy: &[f64],
+        values: &[f64],
+    ) -> BranchCurve {
+        BranchCurve {
+            target: target.to_string(),
+            quantity,
+            energy: energy.to_vec(),
+            values: values.to_vec(),
+            states: Default::default(),
+            normalisation: None,
+        }
+    }
+
+    /// Li6 capture split 3:1 between Li7 and a metastable the loader grafted
+    /// at 0.0, which itself captures to Li8.
+    fn grafted_capture() -> (HashMap<String, ChainNuclide>, BranchTable) {
+        let mut chain = HashMap::new();
+        chain.insert(
+            "Li6".into(),
+            nuc(
+                "Li6",
+                None,
+                vec![
+                    rx("(n,gamma)", Some("Li7"), 1.0),
+                    rx("(n,gamma)", Some("Li7_m1"), 0.0),
+                ],
+                vec![],
+            ),
+        );
+        chain.insert("Li7".into(), nuc("Li7", None, vec![], vec![]));
+        chain.insert(
+            "Li7_m1".into(),
+            nuc(
+                "Li7_m1",
+                None,
+                vec![rx("(n,gamma)", Some("Li8"), 1.0)],
+                vec![],
+            ),
+        );
+        chain.insert("Li8".into(), nuc("Li8", None, vec![], vec![]));
+        let mut branch = BranchTable::new();
+        branch.curves_mut().entry("Li6".into()).or_default().insert(
+            "(n,gamma)".into(),
+            vec![
+                curve(
+                    "Li7",
+                    BranchQuantity::CrossSection,
+                    &[1e-5, 2e7],
+                    &[3.0, 3.0],
+                ),
+                curve(
+                    "Li7_m1",
+                    BranchQuantity::CrossSection,
+                    &[1e-5, 2e7],
+                    &[1.0, 1.0],
+                ),
+            ],
+        );
+        (chain, branch)
+    }
+
+    #[test]
+    fn grafted_metastable_enters_the_bound_at_its_overlay_share() {
+        let (chain, branch) = grafted_capture();
+        let seeds: HashMap<String, f64> = [("Li6".to_string(), 1.0)].into_iter().collect();
+        // Li7_m1 reaches 1e-10 x 1/4 and Li8 a further 1e-10 times that.
+        let kept = populated_nuclides(&chain, &branch, &seeds, 1.0, 1e-22, |_, _| 1e-10);
+        assert!(kept.contains("Li7_m1"), "{kept:?}");
+        assert!(
+            kept.contains("Li8"),
+            "the metastable's own capture: {kept:?}"
+        );
+
+        // Read from the placeholder, the metastable and its product vanish.
+        let bare = populated_nuclides(&chain, &BranchTable::new(), &seeds, 1.0, 1e-22, |_, _| {
+            1e-10
+        });
+        assert!(
+            !bare.contains("Li7_m1") && !bare.contains("Li8"),
+            "{bare:?}"
+        );
+
+        let bounds = overlay_branching_bounds(
+            "Li6",
+            &chain["Li6"],
+            "(n,gamma)",
+            &branch.curves()["Li6"]["(n,gamma)"],
+        );
+        assert_eq!(bounds["Li7_m1"], 0.25);
+        assert_eq!(bounds["Li7"], 0.75);
+    }
+
+    #[test]
+    fn overlay_bound_covers_a_base_split_the_fold_raises() {
+        // The base chain's 0.9/0.1 split is not a bound once equal partials
+        // re-split it to 0.5/0.5.
+        let (mut chain, mut branch) = grafted_capture();
+        let li6 = chain.get_mut("Li6").unwrap();
+        li6.reactions[0].branching = 0.9;
+        li6.reactions[1].branching = 0.1;
+        branch
+            .curves_mut()
+            .get_mut("Li6")
+            .unwrap()
+            .get_mut("(n,gamma)")
+            .unwrap()[0]
+            .values = vec![1.0, 1.0];
+        let bounds = overlay_branching_bounds(
+            "Li6",
+            &chain["Li6"],
+            "(n,gamma)",
+            &branch.curves()["Li6"]["(n,gamma)"],
+        );
+        assert_eq!(bounds["Li7_m1"], 0.5);
+    }
+
+    #[test]
+    fn inelastic_overlay_bound_is_the_share_of_the_state_changing_partials() {
+        let cn = nuc(
+            "Rh103",
+            None,
+            vec![
+                rx("(n,n')", Some("Rh103_m1"), 0.0),
+                rx("(n,n')", Some("Rh103_m2"), 0.0),
+            ],
+            vec![],
+        );
+        let curves = vec![
+            curve(
+                "Rh103_m1",
+                BranchQuantity::CrossSection,
+                &[1e5, 2e7],
+                &[1.0, 1.0],
+            ),
+            curve(
+                "Rh103_m2",
+                BranchQuantity::CrossSection,
+                &[1e5, 2e7],
+                &[3.0, 3.0],
+            ),
+            // The ground self-loop moves nothing and is not in the share.
+            curve(
+                "Rh103",
+                BranchQuantity::CrossSection,
+                &[1e5, 2e7],
+                &[100.0, 100.0],
+            ),
+        ];
+        let bounds = overlay_branching_bounds("Rh103", &cn, "(n,n')", &curves);
+        assert_eq!(bounds["Rh103_m1"], 0.25);
+        assert_eq!(bounds["Rh103_m2"], 0.75);
+    }
+
+    #[test]
+    fn negative_curves_give_the_loose_overlay_bound() {
+        // Curves of 2 and -1 fold to shares of 2 and -1, so the re-split puts
+        // twice the chain's mass on Li7: neither the pointwise ratio nor the
+        // mass bounds that, and only an unbounded edge stays a bound.
+        let (chain, mut branch) = grafted_capture();
+        let curves = branch
+            .curves_mut()
+            .get_mut("Li6")
+            .unwrap()
+            .get_mut("(n,gamma)")
+            .unwrap();
+        curves[0].values = vec![2.0, 2.0];
+        curves[1].values = vec![-1.0, -1.0];
+        let bounds = overlay_branching_bounds(
+            "Li6",
+            &chain["Li6"],
+            "(n,gamma)",
+            &branch.curves()["Li6"]["(n,gamma)"],
+        );
+        assert_eq!(bounds["Li7"], f64::INFINITY);
+        assert_eq!(bounds["Li7_m1"], f64::INFINITY);
+
+        // An unbounded edge whose reaction never runs is no edge, not NaN.
+        let seeds: HashMap<String, f64> = [("Li6".to_string(), 1.0)].into_iter().collect();
+        let idle = populated_nuclides(&chain, &branch, &seeds, 1.0, 1e-22, |_, _| 0.0);
+        assert!(
+            !idle.contains("Li7") && !idle.contains("Li7_m1"),
+            "{idle:?}"
+        );
+        let running = populated_nuclides(&chain, &branch, &seeds, 1.0, 1e-22, |_, _| 1e-10);
+        assert!(running.contains("Li7_m1"), "{running:?}");
+
+        // The (n,n') fold drops non-positive rates before normalising, so its
+        // shares stay within one however the curves go.
+        let cn = nuc(
+            "Rh103",
+            None,
+            vec![
+                rx("(n,n')", Some("Rh103_m1"), 0.0),
+                rx("(n,n')", Some("Rh103_m2"), 0.0),
+            ],
+            vec![],
+        );
+        let cs = BranchQuantity::CrossSection;
+        let curves = vec![
+            curve("Rh103_m1", cs, &[1e5, 2e7], &[1.0, -1.0]),
+            curve("Rh103_m2", cs, &[1e5, 2e7], &[3.0, 3.0]),
+        ];
+        let bounds = overlay_branching_bounds("Rh103", &cn, "(n,n')", &curves);
+        assert_eq!(bounds["Rh103_m1"], 1.0);
+        assert_eq!(bounds["Rh103_m2"], 1.0);
+    }
+
+    #[test]
+    fn largest_share_takes_the_worst_energy_including_steps() {
+        let cs = BranchQuantity::CrossSection;
+        // The metastable alone below the ground state's threshold step: the
+        // share is 1 just under 1 MeV, however small above.
+        let meta = curve("m", cs, &[1e3, 2e7], &[1.0, 1.0]);
+        let ground = curve("g", cs, &[1e6, 2e7], &[99.0, 99.0]);
+        assert_eq!(largest_share(&[&meta], &[&meta, &ground]), 1.0);
+        assert_eq!(largest_share(&[&ground], &[&meta, &ground]), 0.99);
+
+        // Proportional ramps from a shared zero: 0/0 at the threshold, 1/4
+        // everywhere else.
+        let meta = curve("m", cs, &[1e2, 5e5, 2e6], &[0.0, 1.0, 0.5]);
+        let ground = curve("g", cs, &[1e2, 5e5, 2e6], &[0.0, 3.0, 1.5]);
+        assert!((largest_share(&[&meta], &[&meta, &ground]) - 0.25).abs() < 1e-15);
+
+        // A doubled breakpoint is a step, and both sides count.
+        let meta = curve("m", cs, &[1.0, 1e6, 1e6, 2e7], &[1.0, 1.0, 0.0, 0.0]);
+        let ground = curve("g", cs, &[1.0, 2e7], &[1.0, 1.0]);
+        assert_eq!(largest_share(&[&meta], &[&meta, &ground]), 0.5);
+        assert_eq!(largest_share(&[&ground], &[&meta, &ground]), 1.0);
     }
 
     #[test]
@@ -1204,6 +2164,8 @@ mod tests {
         FissionYield {
             energy,
             products: vec![],
+            independent: None,
+            cumulative: None,
         }
     }
 

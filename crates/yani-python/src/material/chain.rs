@@ -106,6 +106,12 @@ impl PyChain {
     /// Write the chain to a split (v2) chain directory with `decay/`,
     /// `reactions/` and `fission_yields/` subsection subdirs.
     ///
+    /// Decay modes the chain models no product for (any mode involving
+    /// spontaneous fission, and a mode whose stored daughter is the parent
+    /// itself) are written with no target, as :attr:`decays` reports them.
+    /// Loading the export gives the same chain, but for those rows the file
+    /// does not repeat the target the source file stored.
+    ///
     /// Args:
     ///     path (str): Output directory path.
     pub fn export_to_arrow(&self, path: &str) -> PyResult<()> {
@@ -155,7 +161,14 @@ impl PyChain {
     ///     dict[str, list[tuple[str, str | None, float]]]: nuclide name ->
     ///     list of (reaction_type, target, branching_ratio). ``target`` is
     ///     ``None`` for a channel that names no single product, which in
-    ///     practice means fission.
+    ///     practice means fission. ``target`` can also be the parent itself,
+    ///     where the evaluation's product has no decay data and the chain
+    ///     builder stepped from it to a nuclide that has: ENDF/B-VIII.1's
+    ///     Pu245 ``(n,p)`` makes Np245, which has none, and the beta- step
+    ///     from it lands back on Pu245. Such a channel leaves the parent's
+    ///     count unchanged and makes no product, so a production-route walk
+    ///     should skip it, as :meth:`TransmutationResults.get_production_routes`
+    ///     does.
     #[getter]
     pub fn reactions(&self, py: Python) -> Py<PyAny> {
         let dict = PyDict::new(py);
@@ -184,11 +197,14 @@ impl PyChain {
     ///     one parent summing to 1. Modes carry the evaluation's own
     ///     spellings: ``"beta-"``, ``"ec/beta+"``, ``"alpha"``, ``"IT"``,
     ///     ``"sf"``, ``"p"``, ``"n"``, and multi-particle emissions written as
-    ///     ``"beta-,n"``. ``daughter`` is the parent itself on ``"sf"``, whose
-    ///     products come from the fission yields rather than from the edge, and
-    ///     ``None`` where the mode's product is outside the chain. Stable
-    ///     nuclides have no decay modes and are omitted, as they are from
-    ///     :attr:`half_lives`.
+    ///     ``"beta-,n"``. ``daughter`` is ``None`` where the chain models no
+    ///     product: on any mode involving spontaneous fission (``"sf"``,
+    ///     ``"ec/beta+,sf"``), whose fission products the chain does not
+    ///     carry, on a mode whose stored daughter is the parent itself, and where
+    ///     the mode's product is outside the chain. The branching is kept, so a
+    ///     parent still decays at its full half-life and that share of it
+    ///     leaves the chain. Stable nuclides have no decay modes and are
+    ///     omitted, as they are from :attr:`half_lives`.
     #[getter]
     pub fn decays(&self, py: Python) -> Py<PyAny> {
         let dict = PyDict::new(py);
@@ -204,9 +220,29 @@ impl PyChain {
 
     /// Decay photon sources of each nuclide that has them (D1S data).
     ///
+    /// A source is lines or a continuum, and the two are in different units,
+    /// so each one says which it is. Each ENDF spectrum is its own source, so
+    /// a nuclide emitting gammas and x-rays has one line source for each.
+    /// Each has its own normalisation in the data file, which this tuple does
+    /// not expose, and the tuple does not say which radiation a source is,
+    /// so the gamma and x-ray sources cannot be told apart from Python. In
+    /// data that keeps the spectra apart (``decay/sources.arrow`` with a
+    /// ``radiation`` column), lines are listed as the evaluation writes them:
+    /// an energy can appear in both sources, and can repeat within one. Older
+    /// data holds one merged line source per nuclide, sorted by energy with
+    /// coincident energies summed.
+    /// ``Material.decay_photon_spectrum()`` sums the lines by energy.
+    ///
     /// Returns:
-    ///     dict[str, list[tuple[list[float], list[float]]]]: nuclide name ->
-    ///     list of (energies, intensities) for each photon source.
+    ///     dict[str, list[tuple[str, list[float], list[float], str | None]]]:
+    ///     nuclide name -> one ``(type, energies, intensities, interpolation)``
+    ///     per photon source. A ``"discrete"`` source lists lines, each
+    ///     intensity its emission rate per atom [1/s], and its interpolation is
+    ///     None. A ``"tabular"`` one is a continuum: each intensity is the
+    ///     emission-rate density per atom [1/s/eV] at that energy, read between
+    ///     energies by ``interpolation``, the ENDF law by name (e.g.
+    ///     ``"histogram"`` or ``"linear-linear"``), which is None where the
+    ///     data states no law.
     #[getter]
     pub fn photon_sources(&self, py: Python) -> Py<PyAny> {
         let dict = PyDict::new(py);
@@ -217,16 +253,23 @@ impl PyChain {
             let sources = PyList::empty(py);
             for src in &nuclide.sources {
                 if src.particle == "photon" {
-                    match &src.distribution {
+                    let row = match &src.distribution {
                         DecaySourceDistribution::Discrete {
                             energies,
                             intensities,
-                        } => {
-                            sources
-                                .append((energies.clone(), intensities.clone()))
-                                .unwrap();
-                        }
-                    }
+                        } => ("discrete", energies.clone(), intensities.clone(), None),
+                        DecaySourceDistribution::Tabular {
+                            energies,
+                            intensities,
+                            interpolation,
+                        } => (
+                            "tabular",
+                            energies.clone(),
+                            intensities.clone(),
+                            interpolation.map(|law| law.name()),
+                        ),
+                    };
+                    sources.append(row).unwrap();
                 }
             }
             if !sources.is_empty() {

@@ -16,9 +16,8 @@
 //!   at all: it would have to expand every alias into a full copy of its
 //!   parent's yields and lose the relationship.
 //! * `yani::export_chain_parts` exists to round-trip a chain yani already
-//!   holds. That is a different job from converting an evaluation, and reusing
-//!   it would have meant widening the in-memory type to carry fields the solver
-//!   never reads.
+//!   holds. That is a different job from converting an evaluation, and the
+//!   fields above are exactly the ones such a round trip has no source for.
 //!
 //! Decay source spectra are the one thing [`endf::Chain`] does not carry, so
 //! they are read from the same decay evaluations separately and joined by
@@ -33,8 +32,8 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow_array::builder::{Float64Builder, ListBuilder, StringBuilder};
-use arrow_array::{ArrayRef, RecordBatch};
+use arrow_array::builder::{Float64Builder, Int32Builder, ListBuilder, StringBuilder};
+use arrow_array::{ArrayRef, Int32Array, RecordBatch};
 use arrow_ipc::writer::{FileWriter, IpcWriteOptions};
 use arrow_ipc::CompressionType;
 use arrow_schema::{ArrowError, Schema};
@@ -77,14 +76,19 @@ pub(crate) fn write_section(
 /// The decay photon, electron and other particle spectra, by nuclide.
 ///
 /// [`endf::Chain`] describes who decays into what, not what comes out, so this
-/// reads the same decay evaluations a second time. [`endf::Decay::sources`]
+/// reads the same decay evaluations a second time. [`endf::Decay::spectrum_sources`]
 /// returns intensities already multiplied by the decay constant and the
 /// spectrum normalisation, which is the per atom per second convention the
 /// format stores. Reading `Decay::spectra` instead would be low by both
 /// factors, silently.
+///
+/// One row per spectrum's lines and one per its continuum, never a merge:
+/// the gamma and x-ray spectra have their own normalisation and its sigma is
+/// common to their lines only, so merging them loses which sigma is whose.
 pub fn decay_sources(
     decay: &[Material],
 ) -> Result<BTreeMap<String, Vec<SourceRow>>, Box<dyn Error>> {
+    use endf::univariate::Univariate;
     let mut out: BTreeMap<String, Vec<SourceRow>> = BTreeMap::new();
     for material in decay {
         let Ok(d) = Decay::from_material(material) else {
@@ -98,10 +102,24 @@ pub fn decay_sources(
             continue;
         }
         let name = d.nuclide.name.clone();
-        for (particle, dist) in d.sources()? {
-            for row in flatten(particle, &dist) {
-                out.entry(name.clone()).or_default().push(row);
-            }
+        for source in d.spectrum_sources()? {
+            let (kind, energies, intensities, interpolation) = match source.distribution {
+                Univariate::Discrete(lines) => ("discrete", lines.x, lines.p, None),
+                Univariate::Tabular(t) => ("tabular", t.x, t.p, Some(t.interpolation.endf_code())),
+                _ => unreachable!("a spectrum source is lines or a continuum"),
+            };
+            out.entry(name.clone()).or_default().push(SourceRow {
+                particle: source.particle.to_string(),
+                kind: kind.to_string(),
+                energies,
+                intensities,
+                interpolation,
+                radiation: source.radiation.to_string(),
+                normalization: source.normalization,
+                intensity_uncertainties: source.intensity_uncertainties,
+                energy_uncertainties: source.energy_uncertainties,
+                covariance: source.covariance,
+            });
         }
     }
     Ok(out)
@@ -114,44 +132,24 @@ pub struct SourceRow {
     /// `"discrete"` or `"tabular"`.
     pub kind: String,
     pub energies: Vec<f64>,
+    /// Per atom per second: a line's emission rate on a `discrete` row, the
+    /// emission-rate density per eV at each energy on a `tabular` one.
     pub intensities: Vec<f64>,
-}
-
-/// Flatten one distribution into rows.
-///
-/// A mixture becomes one row per component with the component's probability
-/// multiplied into its intensities, which is what keeps the total emission rate
-/// right without the format needing a mixture concept.
-fn flatten(particle: &str, dist: &endf::univariate::Univariate) -> Vec<SourceRow> {
-    use endf::univariate::Univariate;
-    match dist {
-        Univariate::Discrete(d) => vec![SourceRow {
-            particle: particle.to_string(),
-            kind: "discrete".to_string(),
-            energies: d.x.clone(),
-            intensities: d.p.clone(),
-        }],
-        Univariate::Tabular(t) => vec![SourceRow {
-            particle: particle.to_string(),
-            kind: "tabular".to_string(),
-            energies: t.x.clone(),
-            intensities: t.p.clone(),
-        }],
-        Univariate::Mixture(m) => m
-            .probability
-            .iter()
-            .zip(m.distribution.iter())
-            .flat_map(|(w, d)| {
-                flatten(particle, d).into_iter().map(move |mut row| {
-                    for value in &mut row.intensities {
-                        *value *= w;
-                    }
-                    row
-                })
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
+    /// The ENDF interpolation code a `tabular` row is read with, `None` on a
+    /// `discrete` one. Without it the continuum has no integral: the same
+    /// points read as a histogram and as linear-linear give different totals.
+    pub interpolation: Option<i32>,
+    /// The spectrum the row was read from, e.g. `"gamma"` or `"xray"`.
+    pub radiation: String,
+    /// FD on a `discrete` row, FC on a `tabular` one, with its sigma, as the
+    /// tape writes them.
+    pub normalization: (f64, f64),
+    /// Per line, in the units of `intensities`. `None` on a `tabular` row.
+    pub intensity_uncertainties: Option<Vec<f64>>,
+    /// Per line dER [eV]. `None` on a `tabular` row.
+    pub energy_uncertainties: Option<Vec<f64>>,
+    /// The spectrum's stated covariance, where it has one.
+    pub covariance: Option<endf::SpectrumCovariance>,
 }
 
 pub(crate) fn list_of(values: &[Vec<f64>]) -> ArrayRef {
@@ -159,6 +157,41 @@ pub(crate) fn list_of(values: &[Vec<f64>]) -> ArrayRef {
     for row in values {
         b.values().append_slice(row);
         b.append(true);
+    }
+    Arc::new(b.finish())
+}
+
+/// A nullable `list<double>` column, `None` written as a null rather than as
+/// an empty list, so a reader can tell "not given" from "given and empty".
+pub(crate) fn opt_list_of(values: &[Option<Vec<f64>>]) -> ArrayRef {
+    let mut b = ListBuilder::new(Float64Builder::new());
+    for row in values {
+        match row {
+            Some(row) => {
+                b.values().append_slice(row);
+                b.append(true);
+            }
+            None => b.append_null(),
+        }
+    }
+    Arc::new(b.finish())
+}
+
+pub(crate) fn string_lists(values: &[Vec<String>]) -> ArrayRef {
+    let mut b = ListBuilder::new(StringBuilder::new());
+    for row in values {
+        for v in row {
+            b.values().append_value(v);
+        }
+        b.append(true);
+    }
+    Arc::new(b.finish())
+}
+
+pub(crate) fn opt_ints(values: &[Option<i32>]) -> ArrayRef {
+    let mut b = Int32Builder::new();
+    for v in values {
+        b.append_option(*v);
     }
     Arc::new(b.finish())
 }
@@ -212,12 +245,19 @@ pub fn write_decay(
     let mut decay_energies = Vec::new();
     let mut half_life_sigmas = Vec::new();
     let mut decay_energy_sigmas = Vec::new();
+    // [component][nuclide], (energy, sigma).
+    let mut component_energies: [Vec<Option<f64>>; 3] = Default::default();
+    let mut component_sigmas: [Vec<Option<f64>>; 3] = Default::default();
     for n in &chain.nuclides {
         names.push(n.name.clone());
         half_lives.push(n.half_life);
         decay_energies.push(n.decay_energy);
         half_life_sigmas.push(n.half_life_uncertainty);
         decay_energy_sigmas.push(n.decay_energy_uncertainty);
+        for (c, part) in n.decay_energy_components.iter().enumerate() {
+            component_energies[c].push(part.map(|(e, _)| e));
+            component_sigmas[c].push(part.map(|(_, s)| s));
+        }
     }
     write_section(
         &dir.join("nuclides.arrow"),
@@ -228,6 +268,12 @@ pub fn write_decay(
             floats(&decay_energies),
             opt_floats(&half_life_sigmas),
             opt_floats(&decay_energy_sigmas),
+            opt_floats(&component_energies[0]),
+            opt_floats(&component_sigmas[0]),
+            opt_floats(&component_energies[1]),
+            opt_floats(&component_sigmas[1]),
+            opt_floats(&component_energies[2]),
+            opt_floats(&component_sigmas[2]),
         ],
     )?;
 
@@ -235,12 +281,14 @@ pub fn write_decay(
     let mut kind = Vec::new();
     let mut target = Vec::new();
     let mut branching = Vec::new();
+    let mut branching_sigmas = Vec::new();
     for n in &chain.nuclides {
         for d in &n.decay_modes {
             nuc.push(n.name.clone());
             kind.push(d.kind.clone());
             target.push(d.target.clone());
             branching.push(d.branching_ratio);
+            branching_sigmas.push(d.branching_ratio_uncertainty);
         }
     }
     write_section(
@@ -251,32 +299,72 @@ pub fn write_decay(
             strings(&kind),
             opt_strings(&target),
             floats(&branching),
+            floats(&branching_sigmas),
         ],
     )?;
 
-    let mut nuc = Vec::new();
-    let mut particle = Vec::new();
-    let mut kind = Vec::new();
-    let mut energies = Vec::new();
-    let mut intensities = Vec::new();
-    for (name, rows) in sources {
-        for row in rows {
-            nuc.push(name.clone());
-            particle.push(row.particle.clone());
-            kind.push(row.kind.clone());
-            energies.push(row.energies.clone());
-            intensities.push(row.intensities.clone());
+    let rows: Vec<(&String, &SourceRow)> = sources
+        .iter()
+        .flat_map(|(name, rows)| rows.iter().map(move |row| (name, row)))
+        .collect();
+    let text = |f: fn(&SourceRow) -> &String| -> Vec<String> {
+        rows.iter().map(|(_, row)| f(row).clone()).collect()
+    };
+    let lists = |f: fn(&SourceRow) -> Option<&Vec<f64>>| -> ArrayRef {
+        opt_list_of(
+            &rows
+                .iter()
+                .map(|(_, row)| f(row).cloned())
+                .collect::<Vec<_>>(),
+        )
+    };
+    let ints = |f: fn(&SourceRow) -> Option<i32>| -> ArrayRef {
+        let mut b = Int32Builder::new();
+        for (_, row) in &rows {
+            b.append_option(f(row));
         }
+        Arc::new(b.finish())
+    };
+    let numbers = |f: fn(&SourceRow) -> f64| -> ArrayRef {
+        floats(&rows.iter().map(|(_, row)| f(row)).collect::<Vec<_>>())
+    };
+    let nuclides: Vec<String> = rows.iter().map(|(name, _)| (*name).clone()).collect();
+    // LS and LB are flags of a few values, but they are I11 fields on the
+    // tape, so one past i32 is refused rather than wrapped.
+    let flag = |name: &str, what: &str, v: i64| -> Result<i32, Box<dyn Error>> {
+        i32::try_from(v)
+            .map_err(|_| format!("{name}: decay covariance {what} {v} does not fit in i32").into())
+    };
+    let mut ls = Vec::with_capacity(rows.len());
+    let mut lb = Vec::with_capacity(rows.len());
+    for (name, row) in &rows {
+        let c = row.covariance.as_ref();
+        ls.push(
+            c.and_then(|c| c.ls)
+                .map(|v| flag(name, "LS", v))
+                .transpose()?,
+        );
+        lb.push(c.map(|c| flag(name, "LB", c.lb)).transpose()?);
     }
     write_section(
         &dir.join("sources.arrow"),
         "decay/sources.arrow",
         vec![
-            strings(&nuc),
-            strings(&particle),
-            strings(&kind),
-            list_of(&energies),
-            list_of(&intensities),
+            strings(&nuclides),
+            strings(&text(|r| &r.particle)),
+            strings(&text(|r| &r.kind)),
+            lists(|r| Some(&r.energies)),
+            lists(|r| Some(&r.intensities)),
+            ints(|r| r.interpolation),
+            strings(&text(|r| &r.radiation)),
+            numbers(|r| r.normalization.0),
+            numbers(|r| r.normalization.1),
+            lists(|r| r.intensity_uncertainties.as_ref()),
+            lists(|r| r.energy_uncertainties.as_ref()),
+            Arc::new(Int32Array::from(ls)),
+            Arc::new(Int32Array::from(lb)),
+            lists(|r| r.covariance.as_ref().map(|c| &c.energies)),
+            lists(|r| r.covariance.as_ref().map(|c| &c.values)),
         ],
     )?;
     Ok(())
@@ -360,27 +448,36 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
         }
     }
 
-    let mut product_lists = ListBuilder::new(StringBuilder::new());
-    for row in &products {
-        for p in row {
-            product_lists.values().append_value(p);
-        }
-        product_lists.append(true);
-    }
+    // Built before anything is written, since it can refuse the chain: a
+    // refusal after fission_yields.arrow is on disk would leave a nominal file
+    // with nothing beside it, which reads as a library published before the
+    // evaluated yields existed.
+    let evaluated = evaluated_yields_columns(chain)?;
     write_section(
         &dir.join("fission_yields.arrow"),
         "fission_yields/fission_yields.arrow",
         vec![
             strings(&nuc),
             floats(&energy),
-            Arc::new(product_lists.finish()),
+            string_lists(&products),
             list_of(&yields),
         ],
     )?;
-
-    // Written only when there is something to say, matching the Python
-    // converter: a library with no borrowed yields leaves no aliases file.
-    if !alias_nuc.is_empty() {
+    // Both optional files are written only when there is something to say,
+    // matching the Python converter. When there is not, one left by an earlier
+    // run into the same directory is removed: a reader loads whatever is
+    // present and would attach it to yields it was not derived from.
+    match evaluated {
+        Some(columns) => write_section(
+            &dir.join("evaluated_yields.arrow"),
+            "fission_yields/evaluated_yields.arrow",
+            columns,
+        )?,
+        None => remove_stale(&dir.join("evaluated_yields.arrow"))?,
+    }
+    if alias_nuc.is_empty() {
+        remove_stale(&dir.join("aliases.arrow"))?;
+    } else {
         write_section(
             &dir.join("aliases.arrow"),
             "fission_yields/aliases.arrow",
@@ -388,6 +485,100 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
         )?;
     }
     Ok(())
+}
+
+/// Remove an optional file this run has nothing to write into, if an earlier
+/// run left one.
+fn remove_stale(path: &Path) -> Result<(), Box<dyn Error>> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("removing stale {}: {e}", path.display()).into())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The columns of `fission_yields/evaluated_yields.arrow`: every yield
+/// evaluation exactly as its tape gives it, both MT=454 and MT=459, with DY.
+/// `None` when no nuclide has an evaluation, so no file is written.
+///
+/// Nothing here is derived. Where `fission_yields.arrow` maps products onto
+/// the decay library and sums the ones that meet, this keeps the tape's
+/// products, values and uncertainties as they are, so an evaluator's 0.0 DY is
+/// written as 0.0. Only owners get rows: a nuclide that borrows its yields is
+/// in `aliases.arrow`, as it is for the nominal yields.
+///
+/// Every row is at an energy the owner has a nominal row for, since a reader
+/// attaches it there. An evaluation that breaks that (cumulative yields with
+/// no independent ones beside them) is refused rather than written as a file
+/// no reader could load.
+fn evaluated_yields_columns(chain: &Chain) -> Result<Option<Vec<ArrayRef>>, Box<dyn Error>> {
+    let mut nuc = Vec::new();
+    let mut energy = Vec::new();
+    let mut kind = Vec::new();
+    let mut interpolation = Vec::new();
+    let mut products: Vec<Vec<String>> = Vec::new();
+    let mut yields: Vec<Vec<f64>> = Vec::new();
+    let mut sigmas: Vec<Vec<f64>> = Vec::new();
+
+    for n in &chain.nuclides {
+        if n.borrowed_yields_from.is_some() {
+            continue;
+        }
+        let Some(evaluation) = &n.yield_evaluation else {
+            continue;
+        };
+        let nominal = n.yield_energies();
+        for (label, sets, laws) in [
+            (
+                "independent",
+                &evaluation.independent,
+                &evaluation.independent_interpolation,
+            ),
+            (
+                "cumulative",
+                &evaluation.cumulative,
+                &evaluation.cumulative_interpolation,
+            ),
+        ] {
+            for ((e, set), law) in evaluation.energies.iter().zip(sets).zip(laws) {
+                if !nominal.contains(e) {
+                    return Err(format!(
+                        "{}: {label} yields at {e} eV have no independent yields at \
+                         that energy for the chain to be built from. The fission \
+                         yield tape for {} gives MT={} at an energy the chain has no \
+                         MT=454 yields for; leave that tape out of the fission yield \
+                         inputs, or extend evaluated_yields.arrow so rows need not sit \
+                         on a nominal one",
+                        n.name,
+                        n.name,
+                        if label == "independent" { 454 } else { 459 }
+                    )
+                    .into());
+                }
+                nuc.push(n.name.clone());
+                energy.push(*e);
+                kind.push(label.to_string());
+                interpolation.push(law.map(i32::try_from).transpose()?);
+                products.push(set.iter().map(|p| p.name.clone()).collect());
+                yields.push(set.iter().map(|p| p.yield_.0).collect());
+                sigmas.push(set.iter().map(|p| p.yield_.1).collect());
+            }
+        }
+    }
+
+    if nuc.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(vec![
+        strings(&nuc),
+        floats(&energy),
+        strings(&kind),
+        opt_ints(&interpolation),
+        string_lists(&products),
+        list_of(&yields),
+        list_of(&sigmas),
+    ]))
 }
 
 /// Provenance and the chain manifest, matching what the Python converter
@@ -928,9 +1119,30 @@ pub fn convert_branching_files(
     for partial in partials {
         extractor.absorb(partial);
     }
-    let (rows, stats) = extractor.finish();
+    let branching::Extracted {
+        rows,
+        covariance,
+        stats,
+    } = extractor.finish();
     let dir = out.join("branching");
     branching::write_branching(&rows, &dir)?;
+    branching::write_branching_covariance(&covariance, &dir)?;
+    // What of MF=40 the covariance file does not show, beside the data rather
+    // than only in the returned statistics: the parts that hold no block and
+    // so have no row, the keys the converter left null with the reason, and
+    // the targets it gave by excitation where the two files' LFS disagree.
+    let mut mf40_gaps = serde_json::Map::new();
+    for (key, lines) in [
+        ("mf40_without_blocks", &stats.mf40_without_blocks),
+        ("mf40_unmatched_states", &stats.mf40_unmatched_states),
+        ("mf40_partner_unresolved", &stats.mf40_partner_unresolved),
+        (
+            "mf40_states_placed_by_excitation",
+            &stats.mf40_states_placed_by_excitation,
+        ),
+    ] {
+        mf40_gaps.insert(key.to_string(), serde_json::json!(lines));
+    }
     write_provenance(
         &dir,
         "branching",
@@ -938,7 +1150,7 @@ pub fn convert_branching_files(
         &provenance.decay_library,
         &provenance.data_version,
         &provenance.created_utc,
-        None,
+        Some(&mf40_gaps),
     )?;
     let parents: Vec<String> = rows
         .iter()

@@ -59,17 +59,26 @@ density-effect parameter delta against energy, which is a different quantity
 from what this file carries. If a machine-readable ICRU-37 or Sternheimer
 tabulation turns up, this is the one function that would change.
 
-### Bremsstrahlung: vendored, and a known open question
+### Bremsstrahlung: Seltzer's own tabulation, vendored
 
-Byte-identical to the file OpenMC and the Python package both carry as
-`BREMX.DAT`, which was already whitespace-separated text and needed no
-conversion. Only the name is different, so a reader can tell what it is without
-opening it.
+The file is S. M. Seltzer's BREMSPEC-2 tabulation, National Bureau of Standards,
+5 September 1984, the machine-readable form of the tables published in Seltzer
+and Berger, *At. Data Nucl. Data Tables* **35** (1986) 345. Its header says so.
+It was already whitespace-separated text and is carried unchanged. As a work of
+the US federal government it carries no US copyright. Cite Seltzer and Berger
+(1986) for it.
 
-G4EMLOW does ship the Seltzer and Berger data under `brem_SB/`, but on a
-different grid: 32 reduced photon energies against this file's 30. Adopting it
-would move every cross section, so it is a physics change rather than a
-provenance cleanup. Tracked in #437.
+The Geant4 G4EMLOW data set also ships Seltzer-Berger data, under `brem_SB/`,
+and it is not used here, for two reasons. First, its terms say the data are not
+for commercial use and must be used within Geant4. Second, it is not a
+different calculation: the tables are identical, digit for digit, to the
+PENELOPE 2008 set that NIST supplied, which agrees with this file to its
+printed precision everywhere except the last three reduced photon energies at
+the tip (k/T of 0.99995 and above) and adds two points at k/T = 0.025 and 0.075.
+
+A newer calculation exists: Poškus's partial-wave BremsLib (CC BY 4.0), which
+computes directly the 2 to 30 MeV band that Seltzer and Berger interpolate.
+Adopting it is a physics change, tracked in #141.
 
 ## Why plain text
 

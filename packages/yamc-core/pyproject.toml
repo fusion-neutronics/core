@@ -14,10 +14,10 @@ dynamic = ["version"]
 description = "Yet Another Monte Carlo -- neutron transport with mesh geometry support"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
-# Ship the project's own MIT license plus the generated third-party license
+license = "MIT OR Apache-2.0"
+# Ship the project's own licenses plus the generated third-party license
 # bundle (regenerated and license-gated in CI by .github/workflows/licenses.yml).
-license-files = ["LICENSE", "THIRD-PARTY-LICENSES.html"]
+license-files = ["LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-LICENSES.html"]
 dependencies = []
 
 [project.optional-dependencies]

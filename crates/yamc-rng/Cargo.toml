@@ -3,7 +3,7 @@ name = "yamc-rng"
 version = "0.1.0"
 edition = "2021"
 description = "Shared PCG random-number stream for yamc -- per-history and per-secondary seeding, mirrored by the GPU kernel"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "yamc_rng"

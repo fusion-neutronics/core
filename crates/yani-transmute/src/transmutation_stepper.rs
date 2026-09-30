@@ -350,11 +350,13 @@ mod tests {
                     target: Some("Ni60".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 fission_yields: None,
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
         chain.insert(
@@ -369,6 +371,7 @@ mod tests {
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
         chain
@@ -437,12 +440,14 @@ mod tests {
                     target: Some("Cr51".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 decays: vec![],
                 fission_yields: None,
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
         chain.insert(
@@ -457,11 +462,13 @@ mod tests {
                     target: Some("V51".to_string()),
                     branching: 1.0,
                     q_value: None,
+                    branching_uncertainty: None,
                 }],
                 fission_yields: None,
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
         chain.insert(
@@ -476,6 +483,7 @@ mod tests {
                 sources: Vec::new(),
                 half_life_uncertainty: None,
                 decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
             },
         );
 

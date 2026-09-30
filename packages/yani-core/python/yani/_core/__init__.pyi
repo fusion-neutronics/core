@@ -9,6 +9,7 @@ from . import sources as sources
 from . import _decay_photons as _decay_photons
 from . import materials as materials
 __all__ = [
+    "ClearanceResult",
     "Cooldown",
     "DataUncertainty",
     "DoseCoefficients",
@@ -21,6 +22,7 @@ __all__ = [
     "NeutronSource",
     "Nuclide",
     "PhotonCoefficients",
+    "PhotonContinuum",
     "Pulse",
     "PulseSchedule",
     "Reaction",
@@ -50,6 +52,7 @@ __all__ = [
     "set_transmutation_decay_data",
     "set_transmutation_fission_yields",
     "set_transmutation_reactions",
+    "transmute",
 ]
 
 @typing.final
@@ -73,6 +76,139 @@ class AngleDistribution:
         r"""
         Sample scattering cosine (mu) for a given incoming energy
         """
+
+@typing.final
+class ClearanceResult:
+    r"""
+    The outcome of assessing a material against one clearance limit set.
+    
+    Every regulation here uses the same arithmetic: each radionuclide's
+    activity divided by its tabulated limit, summed. The material meets the
+    limits when that sum, ``index``, is below ``threshold``. The per-nuclide
+    dicts are ordered largest first.
+    
+    Examples:
+        >>> result = material.clearance_index("UK_EPR16_out_of_scope")
+        >>> result.clearable
+        False
+        >>> result.dominant(2)
+        [('Co60', 11.2...), ('Cs137', 0.029...)]
+        >>> print(result)
+    """
+    @property
+    def limit_set(self) -> builtins.str:
+        r"""
+        Name of the limit set assessed against.
+        """
+    @property
+    def index(self) -> builtins.float:
+        r"""
+        The sum of activity-to-limit ratios.
+        """
+    @property
+    def threshold(self) -> builtins.float:
+        r"""
+        The value the index must stay below, normally 1.
+        """
+    @property
+    def units(self) -> builtins.str:
+        r"""
+        Activity units the comparison was made in: ``"Bq/g"``, ``"Ci/m3"`` or
+        ``"Bq"``.
+        """
+    @property
+    def clearable(self) -> builtins.bool:
+        r"""
+        Whether the material meets this set's limits.
+        """
+    @property
+    def out_of_scope(self) -> builtins.bool:
+        r"""
+        Whether the regulation excludes this material outright, which for the
+        UK sets means every radionuclide present is shorter lived than 100 s.
+        """
+    @property
+    def by_nuclide(self) -> dict[str, float]:
+        r"""
+        Each nuclide's contribution to the index, largest first.
+        """
+    @property
+    def activities(self) -> dict[str, float]:
+        r"""
+        Each nuclide's activity in ``units``, largest first.
+        """
+    @property
+    def limits_used(self) -> dict[str, float]:
+        r"""
+        The limit applied to each nuclide, after any metal, per-gram, dynamic or
+        secular equilibrium adjustment.
+        """
+    @property
+    def defaulted(self) -> builtins.list[builtins.str]:
+        r"""
+        Nuclides that took the set's catch-all limit because the table does
+        not list them.
+        """
+    @property
+    def excluded(self) -> dict[str, str]:
+        r"""
+        Nuclide to the reason its activity was left out, which is always that a
+        parent's limit already accounts for it in full.
+        """
+    @property
+    def credited(self) -> dict[str, float]:
+        r"""
+        Nuclide to the activity a parent accounted for, where the parent could
+        only support part of it. The remainder was assessed against the
+        nuclide's own limit.
+        """
+    @property
+    def uncovered(self) -> dict[str, float]:
+        r"""
+        Activity present with no limit and no catch-all, so absent from the
+        index entirely. The number to check before trusting a comfortable index.
+        """
+    @property
+    def unlimited(self) -> builtins.list[builtins.str]:
+        r"""
+        Nuclides present that the source explicitly places no limit on.
+        """
+    @property
+    def uncovered_activity(self) -> builtins.float:
+        r"""
+        Total activity with no limit, in ``units``.
+        """
+    @property
+    def uncovered_fraction(self) -> builtins.float:
+        r"""
+        Share of total activity that falls outside the sum, from 0 to 1.
+        """
+    @property
+    def material_name(self) -> builtins.str:
+        r"""
+        The material's name, carried through for reporting.
+        """
+    def assessed_activity(self, nuclide: builtins.str) -> builtins.float:
+        r"""
+        The activity actually charged against the limit for one nuclide: its
+        total activity, less any part a parent accounted for.
+        
+        Args:
+            nuclide (str): Nuclide name, such as ``"Co60"``.
+        """
+    def dominant(self, count: builtins.int = 10) -> builtins.list[tuple[builtins.str, builtins.float]]:
+        r"""
+        The nuclides contributing most to the index, largest first.
+        
+        Args:
+            count (int): How many to return.
+        """
+    def to_dict(self) -> dict[str, object]:
+        r"""
+        A JSON-serialisable copy of the result.
+        """
+    def __str__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str: ...
 
 @typing.final
 class Cooldown:
@@ -102,13 +238,87 @@ class DataUncertainty:
     Pass one to :meth:`Material.transmute` and the result carries a standard
     deviation on every nuclide density alongside the mean.
     
-    What it covers is the **activation cross sections**, sampled from the ENDF
-    MF=33 covariance folded against this material's own spectrum. Half-lives,
-    decay branching ratios, fission yields and the isomeric-branching overlay
-    are held at their evaluated values; they carry uncertainties of their own
-    that this does not propagate. ``TransmutationResults.data_uncertainty_info``
-    says so per run, along with any nuclide whose evaluation carries no
-    covariance at all.
+    What it can cover, by source (``DataUncertainty.available_sources()``):
+    
+    - ``"cross_sections"``: the activation cross sections, sampled from the
+      ENDF MF=33 covariance folded against this material's own spectrum;
+    - ``"flux_spectrum"``: the spectrum itself, from the per-bin
+      ``flux_std_dev`` given on a ``Pulse``;
+    - ``"half_life"``: every reachable nuclide's half-life, from the decay
+      data's own standard deviation. A replica's half-lives are used in its
+      solve AND in the activity, decay heat and dose evaluated from it, so a
+      saturated activity (``lambda N = R``) is correctly insensitive to its
+      own half-life rather than inheriting the density's spread;
+    - ``"decay_branching"``: the decay branching ratios of every reachable
+      parent with exactly two modes and one stated sigma between them (both
+      state the same one, or one states it and the other is its complement),
+      whose smaller ratio is at least five sigmas from zero. One draw per
+      parent moves one mode up and the other down by the same amount, so the
+      pair's total is kept. Other multi-mode parents stay at their evaluated
+      ratios and the report names them by why;
+    - ``"statistical"``: the Monte Carlo uncertainty of transport-tallied
+      reaction rates, from their per-history covariance. It applies to
+      ``Model.simulate_transmutation``, as ``"flux_spectrum"`` applies only to
+      ``Material.transmute``; each call ignores the other's, and the report's
+      ``sources`` lists what actually applied;
+    - ``"decay_energy"``: each nuclide's mean decay energy, from the sigma the
+      decay data gives each recoverable-heat component (beta, gamma, alpha),
+      or the total's where it gives no split. It moves decay heat only: a decay
+      energy never enters the solve, so the inventory and activity are
+      untouched.
+    
+    Each cross-section draw is a lognormal multiplier with the covariance's
+    own mean and variance, so a sampled rate is never negative and nothing is
+    floored. The correlated Gaussian deviates are kept (a Gaussian copula), so
+    the ordering between channels is preserved, but the Pearson correlations
+    come out weaker than evaluated as the sigmas grow. Half-lives and decay
+    energies are drawn the same way, one nuclide at a time: the decay data
+    states a mean and a sigma for each and no correlation, so the draws carry
+    exactly what the evaluation states and are never negative.
+    
+    Held at their nominal values, with uncertainties of their own that this
+    does not propagate:
+    
+    - the decay branching ratios ``"decay_branching"`` does not sample (three
+      or more modes, unequal sigmas, too wide to sample untruncated, or no
+      sigma), and the per-decay photon lines and decay energy of a drawn
+      parent, which follow its nominal branching;
+    - fission yields and the isomeric-branching overlay from MF=9/MF=10;
+    - covariance correlating two evaluations (MAT1 naming another material),
+      covariance with a quantity that is not a cross section (XMF1 not 0 or
+      3), covariance derived from other sections by an NC block that cannot
+      be derived (LTY 1-4, or an LTY=0 block counted in ``skipped_nc``), the
+      covariance of a lumped reaction (MT=851-870) with several components
+      that no derivation names, listed in ``lumped_covariance_not_assignable``,
+      and the resonance-parameter covariance (MF=32). What is sampled is each
+      reaction's explicit MF=33 blocks, the blocks of a lumped reaction whose
+      one component it is, and for a reaction an LTY=0 NC block states as a
+      sum of others (ENDF/B-VIII.1 O16 (n,p) as MT 600 to 603, U235 MT 4 as
+      MT 51 plus the lumped MT 851), the covariance derived from the named
+      reactions' own blocks and the cross blocks between them;
+    - the self-shielding correction, when ``self_shielding_chord`` or
+      ``self_shielding_shape`` is given: the shielded flux is built once from
+      the nominal cross sections and reused by every replica;
+    - on a transport run, the flux's response to a perturbed cross section:
+      there is one transport, not one per replica. The tallied values
+      themselves are still drawn by the ``"statistical"`` source;
+    - decay photon line energies and intensities (MF=8 MT=457), the decay
+      photon continuum normalisation and shape (MF=8 MT=457 continuum and its
+      covariance), photon attenuation (XCOM), air energy absorption (NIST
+      SRD 126), the ICRP-116 fluence-to-dose coefficients and the contact-dose
+      build-up factor;
+    - the material's composition, density, natural isotopic abundances and the
+      AME2020 atomic masses used to convert mass fractions;
+    - any source switched off with ``sources``, or with nothing to act on (a
+      spectrum given without ``flux_std_dev``). When only some of a material's
+      spectra have one, the entry is ``"flux spectrum (spectra without a sigma
+      only)"`` and ``spectra_without_flux_sigma`` gives the count.
+    
+    ``TransmutationResults.get_data_uncertainty_info`` lists every one of these
+    that applied to a material under ``not_perturbed``, along with any nuclide
+    whose evaluation carries no covariance, any unstable nuclide whose
+    half-life or decay energy has no stated sigma, and any whose stated
+    half-life or decay-energy sigma no draw can carry.
     
     Args:
         seed (int): Base seed. A given nuclide's perturbation in a given replica
@@ -129,6 +339,11 @@ class DataUncertainty:
             being ignored. A source that has not landed yet must not look like
             one that contributed nothing. ``DataUncertainty.available_sources()``
             lists what there is.
+        attribution (bool): Also say where the uncertainty comes from, read
+            with ``TransmutationResults.get_uncertainty_breakdown``. Off by
+            default because it costs further solves: one ensemble per source,
+            each source alone, and one deterministic solve per contributor. It
+            changes none of the numbers the run otherwise reports.
     
     Examples:
         >>> results = iron.transmute(
@@ -145,8 +360,13 @@ class DataUncertainty:
     @property
     def samples(self) -> typing.Optional[builtins.int]: ...
     @property
+    def attribution(self) -> builtins.bool:
+        r"""
+        Whether the run also says where the uncertainty comes from.
+        """
+    @property
     def sources(self) -> builtins.list[builtins.str]: ...
-    def __new__(cls, seed: builtins.int = 1, samples: typing.Optional[builtins.int] = None, sources: typing.Optional[typing.Sequence[builtins.str]] = None) -> DataUncertainty: ...
+    def __new__(cls, seed: builtins.int = 1, samples: typing.Optional[builtins.int] = None, sources: typing.Optional[typing.Sequence[builtins.str]] = None, attribution: builtins.bool = False) -> DataUncertainty: ...
     @staticmethod
     def available_sources() -> builtins.list[builtins.str]:
         r"""
@@ -206,7 +426,29 @@ class DoseResult:
     @property
     def std_dev(self) -> typing.Any:
         r"""
-        Standard error on `mean`, same shape.
+        Standard error on `mean`, same shape: the transport's statistical
+        uncertainty alone.
+        """
+    @property
+    def data_std_dev(self) -> typing.Optional[typing.Any]:
+        r"""
+        The nuclear-data uncertainty on `mean`, same shape, when
+        ``time_correct_tally`` was given ``data_uncertainty``; ``None``
+        otherwise. From the half-lives behind the time-correction factors.
+        """
+    @property
+    def total_std_dev(self) -> typing.Optional[typing.Any]:
+        r"""
+        `std_dev` and `data_std_dev` in quadrature, when both exist. They are
+        independent: one is the transport's sampling, the other the evaluated
+        half-lives.
+        """
+    @property
+    def data_uncertainty_info(self) -> typing.Optional[typing.Any]:
+        r"""
+        What the nuclear-data uncertainty covered, when asked for: the
+        half-lives sampled, those with no stated sigma, the replica count and
+        whether it settled.
         """
     @property
     def by_nuclide(self) -> typing.Any:
@@ -657,7 +899,7 @@ class Material:
             Bq/cm³ when it is ``"cm3"`` and Bq/g when it is ``"g"``. The unit of
             a ``by_nuclide`` dict's values is the same.
         """
-    def decay_heat(self, *, by_nuclide: builtins.bool = False, per: typing.Optional[builtins.str] = None) -> typing.Any:
+    def decay_heat(self, *, by_nuclide: builtins.bool = False, per: typing.Optional[builtins.str] = None, component: typing.Optional[builtins.str] = None) -> typing.Any:
         r"""
         Calculate decay heat from the current material inventory.
         
@@ -671,6 +913,14 @@ class Material:
             per (str | None): ``None`` (default) for the total, which needs
                 ``volume``; ``"cm3"`` for W/cm³, which needs nothing; ``"g"``
                 for W/g, which needs only ``density``.
+            component (str | None): ``None`` (default) for the whole decay heat;
+                ``"beta"``, ``"gamma"`` or ``"alpha"`` for one recoverable-heat
+                component alone (the ENDF MT=457 light-particle, electromagnetic
+                and heavy-particle energies). The gamma heat is the part that
+                leaves a thin component; the beta and alpha heat stays put.
+                Raises if a nuclide making decay heat carries no split, which
+                data converted before the split does, rather than understating
+                the component by its share.
         
         Returns:
             float | dict[str, float]: Decay heat, in W when ``per`` is ``None``,
@@ -689,19 +939,52 @@ class Material:
         ascending in energy. Stable nuclides, nuclides the chain does not know
         and non-photon sources contribute nothing.
         
+        Lines only. Part of some decay spectra is a continuum, a density per eV
+        rather than a set of lines, and ``decay_photon_continua()`` returns it.
+        
         The two lists are the ``(x, p)`` pair the source distributions take, so
-        the spectrum round-trips straight into a photon transport run:
+        the lines round-trip straight into a photon transport source:
         
             >>> energies, rates = activated.decay_photon_spectrum()
             >>> source = PhotonSource(energy=sources.Discrete(energies, rates))
         
         ``Discrete`` normalizes the weights, so the shape is what transport
-        samples; keep ``sum(rates)`` yourself for the absolute emission rate
-        (photons/s) that scales the tallies.
+        samples. ``sum(rates)`` is the line emission rate (photons/s) only,
+        the rate that scales tallies from this source. That source leaves out
+        every continuum, which for a continuum emitter can be most of its
+        photons (all of them for Sm158 in ENDF/B-VIII.1); the continua emit
+        ``sum(c.emission_rate for c in activated.decay_photon_continua())``
+        more. No ``sources`` distribution yet holds a linear-linear continuum
+        exactly, so a transport source cannot yet carry every continuum.
         
         Returns:
             tuple[list[float], list[float]]: Line energies (eV) and their
             emission rates (photons/s).
+        """
+    def decay_photon_continua(self, *, per: typing.Optional[builtins.str] = None) -> builtins.list[PhotonContinuum]:
+        r"""
+        The decay photon continua of the current inventory, one per nuclide
+        and continuum, in nuclide-name order.
+        
+        The part of a decay spectrum ENDF gives as a density over energy rather
+        than as lines, which ``decay_photon_spectrum()`` does not include. Each
+        continuum keeps its own energy grid and interpolation law, and its
+        rates are photons/s/eV (or per cm³ or per g, following ``per``), so
+        they are not line rates; ``emission_rate`` is the integral. A material
+        whose nuclides have no continuum returns an empty list.
+        
+        Args:
+            per (str | None): None for the whole material, which needs a
+                ``volume``, or ``'cm3'`` or ``'g'``, as for
+                ``decay_photon_spectrum()``.
+        
+        Returns:
+            list[PhotonContinuum]: The continua, each with its nuclide,
+            energies, rates, interpolation law and emission rate.
+        
+        Examples:
+            >>> for continuum in activated.decay_photon_continua():
+            ...     print(continuum.nuclide, continuum.emission_rate)
         """
     def contact_dose(self, *, dose_quantity: builtins.str = 'absorbed-air', build_up: builtins.float = 2.0, by_nuclide: builtins.bool = False) -> typing.Any:
         r"""
@@ -720,18 +1003,20 @@ class Material:
         for the absorbed dose in air, and the same without the trailing ``E``
         for the effective dose. ``mu_material`` is the material's own linear
         attenuation coefficient, built from the NIST XCOM mass attenuation
-        coefficients of the elements present; the response is the NIST-126 mass
-        energy-absorption coefficient of air, or the ICRP-116 photon
+        coefficients of the elements present; the response is the NIST-126
+        mass energy-absorption coefficient of air, or the ICRP-116 photon
         effective-dose coefficient for anterior-posterior irradiation.
         
         Follows the FISPACT-II manual (UKAEA-CCFE-RE(21)02, Appendix C.7.1) for
-        the absorbed-air quantity and agrees with OpenMC's
-        ``Material.get_photon_contact_dose_rate``.
+        the absorbed-air quantity. For photon lines it agrees with OpenMC's
+        ``Material.get_photon_contact_dose_rate``. A photon continuum is
+        integrated exactly under its evaluated interpolation law.
         
         Bremsstrahlung from decay electrons is not modelled, and nuclides whose
         radiation the chain file does not describe contribute nothing. Photon
         lines outside the tabulated range (1 keV to 20 MeV for the absorbed-air
-        quantity, 10 keV to 20 MeV for the effective dose) are dropped.
+        quantity, 10 keV to 20 MeV for the effective dose) are dropped, and a
+        continuum is integrated over its part of that range.
         
         Args:
             dose_quantity (str): ``'absorbed-air'`` for the absorbed dose in air
@@ -747,6 +1032,17 @@ class Material:
             float | dict[str, float]: Contact dose rate in Gy/h
             (``'absorbed-air'``) or Sv/h (``'effective'``).
         
+        Raises:
+            ValueError: If a nuclide in the material has a photon continuum
+                in the dose tables' range that this build cannot integrate: one
+                whose data states no interpolation law, as transmutation data
+                written before the law was stored does, one tabulated under a
+                law other than histogram or linear-linear, or one whose energy
+                and rate lists are unpaired, whose energies are not finite or
+                descend, or whose rates are negative or not finite. Its
+                integral is unknown, and leaving it out would understate the
+                dose.
+        
         Examples:
             >>> activated.contact_dose()
             380.088...
@@ -754,6 +1050,83 @@ class Material:
             {'Co60': 380.088...}
             >>> activated.contact_dose(dose_quantity='effective')
             380.728...
+        """
+    def clearance_index(self, limit_set: builtins.str, *, metal: builtins.bool = False, apply_default_limit: builtins.bool = True, exclude_daughters: builtins.bool = True) -> ClearanceResult:
+        r"""
+        Clearance index of the current inventory against one regulatory limit set.
+        
+        Each radionuclide's activity is divided by its limit in the set and the
+        ratios are summed; the material meets the limits when the sum is below
+        the set's threshold, normally 1. The limit sets cover UK, German, US, EU
+        and IAEA clearance, exemption and disposal tables, and come from the
+        ``radiological-material-clearance-finder`` crate, whose documentation
+        describes each one and where its numbers come from.
+        
+        Half-lives come from the configured transmutation chain, the same ones
+        ``activity()`` and ``decay_heat()`` use, so a nuclide the chain calls
+        stable contributes nothing. Specific activities (Bq/g) need nothing
+        beyond the composition, and the volumetric US sets (Ci/m3) use the mass
+        density the atom densities imply. Only the total activity sets (Bq)
+        need ``material.volume``.
+        
+        Stable isotopes have to stay in the material: they are most of its
+        mass, and so most of the Bq/g denominator.
+        
+        Args:
+            limit_set (str): Name of the limit set, such as
+                ``"UK_EPR16_out_of_scope"`` or ``"StrlSchV_unrestricted"``.
+                ``clearance_indices()`` assesses against every set at once.
+            metal (bool): Whether the material is activated metal, which
+                changes some NRC limits and adds others.
+            apply_default_limit (bool): Whether to apply the set's catch-all
+                limit to nuclides its table does not list. The UK regulations
+                define one, so leaving this on is what they say.
+            exclude_daughters (bool): Whether to leave out daughters whose
+                parent's limit already covers them, as the regulation's own
+                table directs. Turning it off double counts them.
+        
+        Returns:
+            ClearanceResult: The index, whether it clears, each nuclide's
+            contribution, and any activity no limit in the set covers.
+        
+        Raises:
+            KeyError: If no limit set has that name.
+            ValueError: If the set is in Bq and the material has no volume.
+        
+        Examples:
+            >>> result = material.clearance_index("UK_EPR16_out_of_scope")
+            >>> result.index
+            11.24...
+            >>> result.clearable
+            False
+        """
+    def clearance_indices(self, limit_sets: typing.Optional[typing.Sequence[builtins.str]] = None, *, metal: builtins.bool = False, apply_default_limit: builtins.bool = True, exclude_daughters: builtins.bool = True) -> builtins.dict[builtins.str, ClearanceResult]:
+        r"""
+        Clearance indexes of the current inventory against many limit sets.
+        
+        The same assessment as ``clearance_index()``, once per set. Sets the
+        material cannot be assessed against are skipped rather than raising,
+        which in practice means the total activity sets (Bq) when the material
+        has no ``volume``.
+        
+        Args:
+            limit_sets (list[str] | None): Names of the limit sets. ``None``
+                (the default) assesses against every available set, which is
+                also the way to see their names.
+            metal (bool): As for ``clearance_index()``.
+            apply_default_limit (bool): As for ``clearance_index()``.
+            exclude_daughters (bool): As for ``clearance_index()``.
+        
+        Returns:
+            dict[str, ClearanceResult]: Results keyed by limit set name.
+        
+        Raises:
+            KeyError: If a named limit set does not exist.
+        
+        Examples:
+            >>> results = material.clearance_indices()
+            >>> [name for name, r in results.items() if r.clearable]
+            ['Fetter', 'NRC_long', ...]
         """
     def mean_free_path_neutron(self, energy: builtins.float) -> typing.Optional[builtins.float]:
         r"""
@@ -838,14 +1211,14 @@ class Material:
                 steps directly, so its step 0 is the first step.
         
             data_uncertainty (DataUncertainty, optional): Ask for nuclear-data
-                uncertainty on the result. The activation cross sections are
-                sampled from their ENDF MF=33 covariance, folded against this
-                material's own spectrum, and the schedule is re-solved until the
-                reported standard deviations settle. Omit it (the default) and
-                nothing is read, folded or sampled: the inventories are
-                bit-identical either way. Read the sigmas with
-                ``get_nuclide_uncertainty``, and what was and was not covered
-                with ``data_uncertainty_info``.
+                uncertainty on the result. Each source ``DataUncertainty`` names
+                is sampled where it applies (``statistical`` needs a transport
+                run, ``flux_spectrum`` a supplied flux sigma), and the schedule
+                is re-solved until the reported standard deviations settle.
+                Omit it (the default) and nothing is read, folded or sampled:
+                the inventories are bit-identical either way. Read the sigmas
+                with ``get_nuclide_uncertainty``, and what was and was not
+                covered with ``get_data_uncertainty_info(id)``.
         
             self_shielding_chord (float, optional): Mean chord length ``4V/S`` of
                 this material's lump, in cm, which is twice the thickness for a
@@ -855,7 +1228,7 @@ class Material:
                 default) and nothing is shielded: the rates are bit-identical to
                 a run without it, and no shape is inferred from a geometry this
                 material does not have. Read what was done with
-                ``self_shielding_info``.
+                ``get_self_shielding_info(id)``.
         
                 The flux inside the lump comes from a slowing-down solve, which
                 assumes nothing about resonances being narrow. The cheaper
@@ -1402,6 +1775,59 @@ class PhotonCoefficients:
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
+class PhotonContinuum:
+    r"""
+    One nuclide's decay photon continuum within a material's inventory.
+    
+    ENDF gives part of some decay spectra as a density over energy rather than
+    as lines: the spontaneous-fission photons of an actinide, or the whole
+    photon emission of a nuclide far from stability, whose lines were never
+    measured. The values are a rate per eV, so they are not line rates and
+    cannot be added to ``decay_photon_spectrum()``'s. Their rate is the
+    integral, which ``emission_rate`` gives. Both follow the ``per`` argument
+    of ``decay_photon_continua()``: for the whole material, or per cm³ or per g.
+    """
+    @property
+    def nuclide(self) -> builtins.str:
+        r"""
+        The emitting nuclide.
+        """
+    @property
+    def energies(self) -> builtins.list[builtins.float]:
+        r"""
+        Tabulated energies [eV], ascending.
+        """
+    @property
+    def rates(self) -> builtins.list[builtins.float]:
+        r"""
+        The emission-rate density at each energy: photons/s/eV for the whole
+        material, or per cm³ or per g following the ``per`` argument the
+        continuum was requested with.
+        """
+    @property
+    def interpolation(self) -> typing.Optional[builtins.str]:
+        r"""
+        How ``rates`` is read between the energies: the ENDF law by name
+        (``"histogram"``, ``"linear-linear"``, ...), or None where the data
+        states no law, which data written before the law was stored does.
+        """
+    @property
+    def emission_rate(self) -> builtins.float:
+        r"""
+        The emission rate over the whole continuum, its integral read under its
+        law: photons/s for the whole material, or per cm³ or per g following
+        the ``per`` argument the continuum was requested with.
+        
+        Raises:
+            ValueError: If the law is not stated, or is one this build does not
+                integrate, or if the energy and rate lists are unpaired, the
+                energies are not finite or descend, or the rates are negative
+                or not finite. The integral is then unknown, and no number is
+                returned in its place.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
 class PhotonSource:
     r"""
     A photon particle source with spatial, energy, and angular distributions.
@@ -1499,6 +1925,11 @@ class Pulse:
         The per-bin flux standard deviation, or ``None`` if none was given.
         """
     @property
+    def flux_covariance(self) -> typing.Optional[builtins.list[builtins.list[builtins.float]]]:
+        r"""
+        The flux covariance, or ``None`` if none was given.
+        """
+    @property
     def rate(self) -> builtins.float:
         r"""
         Source emission rate in particles/second.
@@ -1508,7 +1939,7 @@ class Pulse:
         r"""
         Pulse duration in seconds.
         """
-    def __new__(cls, rate: builtins.float, duration: typing.Any, source: typing.Optional[typing.Any] = None, flux_std_dev: typing.Optional[typing.Sequence[builtins.float]] = None) -> Pulse:
+    def __new__(cls, rate: builtins.float, duration: typing.Any, source: typing.Optional[typing.Any] = None, flux_std_dev: typing.Optional[typing.Sequence[builtins.float]] = None, flux_covariance: typing.Optional[typing.Sequence[typing.Sequence[builtins.float]]] = None) -> Pulse:
         r"""
         Create an irradiation pulse.
         
@@ -1534,6 +1965,19 @@ class Pulse:
                 contributes nothing and says so in
                 ``data_uncertainty_info["spectra_without_flux_sigma"]`` rather
                 than reading as a flux known exactly.
+        
+                Treats the bins as independent. A spectrum from a Monte Carlo
+                tally is not: its bins are scored by the same histories and
+                move together, and a per-bin sigma then understates the error
+                of every rate that sums over a band. Give ``flux_covariance``
+                instead when the correlations are known.
+            flux_covariance: The full covariance of the ``Histogram`` values, a
+                square matrix (nested lists or a 2-D array) with one row and
+                column per bin, in the square of their units. The alternative
+                to ``flux_std_dev``, whose diagonal it contains: give one or
+                the other. It must be symmetric and positive semi-definite, and
+                is checked. Each replica's flux perturbation is drawn through
+                its factor, so correlated bins move together.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -1561,7 +2005,7 @@ class PulseSchedule:
         Number of steps in the schedule.
         """
     def __repr__(self) -> builtins.str: ...
-    def time_correct_tally(self, results: typing.Any, steps: typing.Optional[typing.Any] = None) -> DoseResult:
+    def time_correct_tally(self, results: typing.Any, steps: typing.Optional[typing.Any] = None, data_uncertainty: typing.Optional[DataUncertainty] = None) -> DoseResult:
         r"""
         Time-correct a decay-photon tally into shutdown dose rate(s).
         
@@ -1579,8 +2023,23 @@ class PulseSchedule:
         The transmutation network is assembled from the configured per-subsection
         sources (``yani.transmutation_decay_data`` etc.).
         
+            data_uncertainty (DataUncertainty, optional): Also propagate the
+                nuclear-data uncertainty of the time correction. Only the
+                ``"half_life"`` source acts on it: a time-correction factor is an
+                activity over the schedule, and the tally's in-line photon yield
+                is per decay, so the half-lives enter through the correction and
+                nowhere else. Each replica draws every half-life feeding an
+                emitter once and uses it for every campaign, so one evaluation
+                is one uncertainty; the draws are those a transmutation with the
+                same seed makes. Read ``.data_std_dev`` and ``.total_std_dev``.
+                Decay branching ratios also shape a time correction and are held
+                at nominal here, which ``.data_uncertainty_info`` lists under
+                ``not_perturbed``.
+        
         Returns:
-            DoseResult with ``.mean`` / ``.std_dev`` / ``.by_nuclide`` / ``.times``.
+            DoseResult with ``.mean`` / ``.std_dev`` / ``.by_nuclide`` / ``.times``,
+            and ``.data_std_dev`` / ``.total_std_dev`` /
+            ``.data_uncertainty_info`` when ``data_uncertainty`` was given.
         """
 
 @typing.final
@@ -1759,7 +2218,14 @@ class TransmutationChain:
             dict[str, list[tuple[str, str | None, float]]]: nuclide name ->
             list of (reaction_type, target, branching_ratio). ``target`` is
             ``None`` for a channel that names no single product, which in
-            practice means fission.
+            practice means fission. ``target`` can also be the parent itself,
+            where the evaluation's product has no decay data and the chain
+            builder stepped from it to a nuclide that has: ENDF/B-VIII.1's
+            Pu245 ``(n,p)`` makes Np245, which has none, and the beta- step
+            from it lands back on Pu245. Such a channel leaves the parent's
+            count unchanged and makes no product, so a production-route walk
+            should skip it, as :meth:`TransmutationResults.get_production_routes`
+            does.
         """
     @property
     def decays(self) -> typing.Any:
@@ -1782,20 +2248,43 @@ class TransmutationChain:
             one parent summing to 1. Modes carry the evaluation's own
             spellings: ``"beta-"``, ``"ec/beta+"``, ``"alpha"``, ``"IT"``,
             ``"sf"``, ``"p"``, ``"n"``, and multi-particle emissions written as
-            ``"beta-,n"``. ``daughter`` is the parent itself on ``"sf"``, whose
-            products come from the fission yields rather than from the edge, and
-            ``None`` where the mode's product is outside the chain. Stable
-            nuclides have no decay modes and are omitted, as they are from
-            :attr:`half_lives`.
+            ``"beta-,n"``. ``daughter`` is ``None`` where the chain models no
+            product: on any mode involving spontaneous fission (``"sf"``,
+            ``"ec/beta+,sf"``), whose fission products the chain does not
+            carry, on a mode whose stored daughter is the parent itself, and where
+            the mode's product is outside the chain. The branching is kept, so a
+            parent still decays at its full half-life and that share of it
+            leaves the chain. Stable nuclides have no decay modes and are
+            omitted, as they are from :attr:`half_lives`.
         """
     @property
     def photon_sources(self) -> typing.Any:
         r"""
         Decay photon sources of each nuclide that has them (D1S data).
         
+        A source is lines or a continuum, and the two are in different units,
+        so each one says which it is. Each ENDF spectrum is its own source, so
+        a nuclide emitting gammas and x-rays has one line source for each.
+        Each has its own normalisation in the data file, which this tuple does
+        not expose, and the tuple does not say which radiation a source is,
+        so the gamma and x-ray sources cannot be told apart from Python. In
+        data that keeps the spectra apart (``decay/sources.arrow`` with a
+        ``radiation`` column), lines are listed as the evaluation writes them:
+        an energy can appear in both sources, and can repeat within one. Older
+        data holds one merged line source per nuclide, sorted by energy with
+        coincident energies summed.
+        ``Material.decay_photon_spectrum()`` sums the lines by energy.
+        
         Returns:
-            dict[str, list[tuple[list[float], list[float]]]]: nuclide name ->
-            list of (energies, intensities) for each photon source.
+            dict[str, list[tuple[str, list[float], list[float], str | None]]]:
+            nuclide name -> one ``(type, energies, intensities, interpolation)``
+            per photon source. A ``"discrete"`` source lists lines, each
+            intensity its emission rate per atom [1/s], and its interpolation is
+            None. A ``"tabular"`` one is a continuum: each intensity is the
+            emission-rate density per atom [1/s/eV] at that energy, read between
+            energies by ``interpolation``, the ENDF law by name (e.g.
+            ``"histogram"`` or ``"linear-linear"``), which is None where the
+            data states no law.
         """
     def __new__(cls, path: builtins.str) -> TransmutationChain:
         r"""
@@ -1833,6 +2322,12 @@ class TransmutationChain:
         Write the chain to a split (v2) chain directory with `decay/`,
         `reactions/` and `fission_yields/` subsection subdirs.
         
+        Decay modes the chain models no product for (any mode involving
+        spontaneous fission, and a mode whose stored daughter is the parent
+        itself) are written with no target, as :attr:`decays` reports them.
+        Loading the export gives the same chain, but for those rows the file
+        does not repeat the target the source file stored.
+        
         Args:
             path (str): Output directory path.
         """
@@ -1856,9 +2351,16 @@ class TransmutationResults:
         Timesteps used [s].
         """
     @property
-    def source_rates(self) -> builtins.list[builtins.float]:
+    def collapse_reuse(self) -> typing.Optional[dict]:
         r"""
-        Source rates used [n/cm^2/s].
+        How much of the multigroup collapse work was shared, or ``None`` for a
+        transport-coupled solve, which does none.
+        
+        A dict with ``performed``, the collapses actually run, and
+        ``requested``, one per distinct spectrum per material. Materials with
+        the same spectrum, composition, temperature and shielding collapse to
+        the same rates and share one, so ``performed`` below ``requested`` is
+        the saving ``transmute`` made over solving them one at a time.
         """
     @property
     def num_steps(self) -> builtins.int:
@@ -1866,75 +2368,74 @@ class TransmutationResults:
         Number of transmutation steps.
         """
     @property
-    def data_uncertainty_info(self) -> typing.Optional[dict]:
-        r"""
-        What the nuclear-data uncertainty covered, and what it did not.
-        
-        ``None`` when the transmutation was run without ``data_uncertainty``.
-        Otherwise a dict whose job is to make gaps visible rather than let them
-        read as confidence:
-        
-        - ``perturbed`` / ``no_covariance_data``: which nuclides had usable
-          MF=33 covariance and which had none.
-        - ``rate_fraction_covered_total``: the share of the production this run
-          drove that a covariance actually spans, weighted by rate and by parent
-          density. Read this before any sigma here. It is a different and much
-          sharper question than how many nuclides carry MF=33: an evaluation can
-          state covariance for every isotope in the material and none for the
-          channel making the product of interest, and the count then reads as
-          full coverage while the ensemble perturbs almost nothing.
-        - ``rate_fraction_covered``: per nuclide and channel, the share of the
-          reaction rate the covariance grid actually spans. Below one means part
-          of the rate carries no stated uncertainty and the sigma is diluted.
-        - ``skipped_nc``, ``skipped_cross_material``, ``unsupported_layouts``:
-          covariance blocks that were present but not consumed.
-        - ``matrices_clipped`` / ``worst_relative_clip``: evaluations whose
-          covariance was not positive semi-definite and had to be repaired.
-        - ``rates_floored`` / ``rates_sampled``: samples that went negative and
-          were truncated at zero, which biases the mean upward when common.
-        - ``not_perturbed``: the sources this does not propagate at all.
-        - ``samples`` / ``converged``: how many replicas ran, and whether the
-          sigmas settled or the cap was hit.
-        """
-    @property
-    def self_shielding_info(self) -> typing.Optional[dict]:
-        r"""
-        What the self-shielding did, or ``None`` if the run was not shielded.
-        
-        Always present. ``chord_cm`` of ``None`` means the run was dilute and
-        nothing was corrected; otherwise it says how: the ``method`` and
-        ``chord_cm`` used, which nuclides were ``shielded``, which were
-        ``not_shielded`` and why, and ``strongest_factor``, the smallest factor
-        any group average was multiplied by. A run reporting ``1.0`` there
-        shielded nothing in practice, which is a different statement from not
-        having tried.
-        
-        ``would_shield`` is the other direction, and is filled only on a dilute
-        run: nuclides whose own resonances are structured enough to have
-        suppressed a reaction, each mapped to how strongly.
-        
-        It is an indicator, not a correction and not a bound. There is no
-        geometry in it: the weight is ``1 / (1 + N * sigma_x)`` on that one
-        reaction and that nuclide's own density, which fixes the background at
-        1/cm, while the correction proper uses ``1 / chord_cm`` against the
-        material's total. So the number scales with how strongly a nuclide's own
-        resonances could bite without predicting what a given lump would see,
-        and it can sit either side of the real factor: a lump thinner than a
-        centimetre of chord shields less, and a material whose other nuclides
-        dominate the total at the resonance dips the flux further than this one
-        reaction can express.
-        
-        On the FNS tungsten foil, ``would_shield`` reads 0.634 for W186 while
-        the slowing-down correction on the same foil and spectrum saturates at
-        0.730 from a millimetre of chord upward. Read it as "this answer may be
-        high, and this is a resonance absorber", which is the warning a dilute
-        run should carry rather than silence. Read the size of the effect off a
-        shielded run, by asking for one.
-        """
-    @property
     def material_ids(self) -> builtins.list[builtins.int]:
         r"""
         List of material IDs that were transmuted.
+        """
+    def get_source_rates(self, material_id: builtins.int) -> typing.Optional[builtins.list[builtins.float]]:
+        r"""
+        The rate each step drove a material at, one per timestep, zero for a
+        cooldown.
+        
+        A spectrum solve (``Material.transmute``, ``transmute``) gives each
+        material's own flux magnitude in n/cm^2/s, which differs between
+        materials given their own schedules. ``Model.simulate_transmutation``
+        gives the source strength in n/s, the same for every material.
+        
+        Args:
+            material_id: Material ID number.
+        
+        Returns:
+            List of rates, or None if the material is not in the results.
+        """
+    def get_uncertainty_breakdown(self, material_id: builtins.int, nuclide: builtins.str, step: builtins.int) -> typing.Optional[dict]:
+        r"""
+        Where a nuclide's uncertainty at one step comes from.
+        
+        Present when the run was asked for it with
+        ``DataUncertainty(attribution=True)``, and ``None`` otherwise. A dict:
+        
+        - ``variance``: the total, resampled, the square of
+          ``get_nuclide_uncertainty``;
+        - ``by_source``: each source alone, resampled the same way, so this
+          says how much is statistical and how much is each kind of nuclear
+          data. The sources are independent and these sum to the total;
+        - ``unattributed``: what that sum leaves, interaction and sampling
+          noise, small when the attribution holds;
+        - ``contributors``: first order, a list of ``(source, nuclide,
+          reaction, variance)``, largest reach first. Within the cross sections
+          a nuclide's whole evaluation has ``reaction`` of ``None`` and each
+          channel alone names it; a half-life has ``None``. A decay branching
+          contributor is a two-mode parent's one degree of freedom, with
+          ``reaction`` of ``None``. It says which evaluation to look at; the
+          total is the resampled one.
+        
+        Args:
+            material_id: Material ID number.
+            nuclide: Nuclide name.
+            step: As in ``get_nuclide_uncertainty``: 0 is the initial
+                composition, which carries none.
+        """
+    def get_reaction_rate_uncertainty(self, material_id: builtins.int, step: builtins.int) -> typing.Optional[builtins.list[tuple[builtins.str, builtins.str, typing.Optional[builtins.str], builtins.float, builtins.float]]]:
+        r"""
+        The statistical uncertainty of each transport-tallied reaction rate
+        at one step.
+        
+        Present for ``Model.simulate_transmutation`` run with
+        ``data_uncertainty`` including the ``"statistical"`` source, and
+        ``None`` otherwise. Each entry is ``(nuclide, reaction, target, rate,
+        std_dev)`` in 1/s per atom: a reaction total has ``target`` of ``None``,
+        an isomeric partial names its final state. The rates are the tally's,
+        scaled by the step's source rate, exactly as the step's solve used them
+        before the branching fold.
+        
+        The rates are correlated, having been scored by the same histories,
+        and the inventory sigmas are computed with those correlations. These
+        standard deviations alone do not carry them.
+        
+        Args:
+            material_id: Material ID number.
+            step: Schedule step index, as in ``get_reaction_rates``.
         """
     def get_nuclide_evolution(self, material_id: builtins.int, nuclide: builtins.str) -> typing.Optional[builtins.list[builtins.float]]:
         r"""
@@ -1982,7 +2483,8 @@ class TransmutationResults:
         
             A nuclide whose evaluation carries no covariance also reports 0.0.
             That is not a claim of certainty -- check
-            ``data_uncertainty_info["no_covariance_data"]``, which lists exactly
+            ``get_data_uncertainty_info(material_id)["no_covariance_data"]``,
+            which lists exactly
             those nuclides.
         """
     def get_nuclide_uncertainty_evolution(self, material_id: builtins.int, nuclide: builtins.str) -> typing.Optional[builtins.list[builtins.float]]:
@@ -2087,6 +2589,12 @@ class TransmutationResults:
         Needs no ``volume``, unlike the other three, because the estimate takes
         the material for a half-space.
         
+        The band is the spread of the replicas' inventories alone (each with
+        its own half-lives when the ``"half_life"`` source is on). The decay
+        photon line intensities, photon attenuation (XCOM), air energy
+        absorption (NIST SRD 126), ICRP-116 dose coefficients and the build-up
+        factor are held at their nominal values and contribute nothing to it.
+        
         Args:
             material_id: Material ID number.
             step: Timestep index (0 = initial composition).
@@ -2111,7 +2619,14 @@ class TransmutationResults:
         not emit counts as a zero in it -- the same rule the densities follow,
         and the only one under which two lines' spreads are taken over the same
         sample -- and ``LineEstimate.emitting`` reports how many replicas
-        emitted it, which is what the zero-fill would otherwise hide.
+        emitted it, which is what the zero-fill would otherwise hide. Lines
+        only, as there: a photon continuum is not a line and is not reported
+        here.
+        
+        The band is the spread of the replicas' inventories alone (each with
+        its own half-lives when the ``"half_life"`` source is on). The line
+        intensities per decay are held at their nominal values and contribute
+        nothing to it.
         
             >>> lines = results.get_decay_photon_spectrum_uncertainty(mid, step)
             >>> [(l.energy, l.nominal, l.std_dev) for l in lines[:2]]
@@ -2126,6 +2641,258 @@ class TransmutationResults:
         
         Raises:
             ValueError: if the material has no ``volume`` in cm^3.
+        """
+    def get_data_uncertainty_info(self, material_id: builtins.int) -> typing.Optional[dict]:
+        r"""
+        What the nuclear-data uncertainty covered for one material, and what it
+        did not.
+        
+        ``None`` when the transmutation was run without ``data_uncertainty``, or
+        the material is not in the results.
+        Otherwise a dict whose job is to make gaps visible rather than let them
+        read as confidence:
+        
+        - ``perturbed`` / ``no_covariance_data``: which nuclides had usable
+          MF=33 covariance and which had none.
+        - ``rate_fraction_covered_total``: the per-channel shares below,
+          averaged with each channel weighted by the production it drove (the
+          rate this run used times parent density): the share of the
+          production driven from energies where a covariance states a nonzero
+          variance. ``None`` on a decay-only schedule; on a transport run,
+          where the shares are of the dilute rate over the tally spectrum and
+          the covered share of the tallied production is not computed; and
+          under the ``1/E`` within-group weight (Rust API only), whose shares
+          are not exact where a covariance edge cuts a group. ``None`` too when
+          a channel is listed in ``partials_above_rate`` or
+          ``partials_below_rate``, whose rate is not the one its share is of:
+          the ``(n,n')`` of a nuclide with a metastable, whose rate is the
+          MF=10 production of the metastables while its covariance is MT 4's.
+          Read this before any sigma here. It is a different and much sharper
+          question than how many nuclides carry MF=33: an evaluation can state
+          covariance for every isotope in the material and none for the
+          channel making the product of interest, and the count then reads as
+          full coverage while the ensemble perturbs almost nothing.
+        - ``rate_fraction_covered``: per nuclide and channel, the share of the
+          reaction rate from energies where the evaluation states a nonzero
+          variance for it, the rate being the dilute one on a dilute run and
+          the shielded one on a self-shielded run. Below one means part of the
+          rate carries no stated uncertainty and dilutes the sigma; on a
+          transport run it is a share of the dilute rate over the tally
+          spectrum, and the dilution applied differs from it. An
+          interval the covariance grid spans with a variance of zero counts as
+          uncovered: ENDF/B-VIII.1 W186 ``(n,gamma)`` states zero from 1e-5 eV
+          to 10 keV, where nearly all of its capture rate is. Every consumed
+          self-covariance block counts where it states a nonzero variance,
+          relative (LB=1 to 6), absolute (LB=0) and short-range (LB=8) alike.
+          Exact under the default flat within-group weight; under the ``1/E``
+          weight (Rust API only) the rate of a group a covariance edge cuts is
+          split by energy width, not lethargy, so the share is off there.
+        - ``partials_above_rate``: per nuclide and channel, where the partial
+          rates the covariance was weighted with, zero variance intervals
+          included, add up to more than the rate it was divided by, their
+          ratio to it. Each entry is a channel whose sigma is overstated. Three
+          known causes: a tallied rate on a transport run, which the transport
+          can self-shield within its bins, against partials weighted flat
+          within each bin; a grafted ``(n,n')``, whose rate is the metastables'
+          MF=10 production while the partials are MT 4's; and the ``1/E``
+          within-group weight (Rust API only) with a covariance edge inside a
+          group. The share in ``rate_fraction_covered`` is of the fold's own
+          rate, not of the listed rate, and under the ``1/E`` weight it is off
+          as well wherever an edge cuts a group. On a channel derived through
+          an NC block, the partials of the reactions the block names are
+          checked the same way, and the check is also that they add up to the
+          one it derives over the block's range; a sum above it lands here.
+        - ``partials_below_rate``: keyed the same way, where a covariance grid
+          spans the whole flux range and its partial rates add up to less than
+          the rate, their ratio to it: a channel whose sigma is understated.
+          The ``1/E`` weight gives one for a reaction falling with energy when
+          a covariance edge cuts a group. A grid that stops short of the flux
+          range cannot be checked from below, since rate from outside it
+          rightly leaves its partials short. A derived channel whose NC block
+          names reactions adding up to less than the one it derives lands here
+          too: ENDF/B-VIII.1 O16 ``(n,d)`` above 20 MeV, whose cross section
+          holds MT 660 to 669 while the block names 650 to 659.
+        - ``derived_opposing_uncorrelated``: keyed the same way, for a channel
+          derived through an NC block whose terms name two reactions with
+          opposite signs, each with a variance of its own, and no covariance
+          between them: the ``[a, b]`` pairs. The absent block is read as zero,
+          since ENDF-102 33.3.2 a.1 lets a tape leave a zero covariance
+          unstated, and with opposing signs that reading sets the sigma.
+          FENDL-3.2d and TENDL-2017 H2 ``(n,2n)`` is ``σ_1 - σ_2 - σ_102`` and
+          folds to about 22% at 14 MeV and thousands of percent near
+          threshold, the tape's literal statement. Counted in ``has_gaps``.
+        - ``lumped_covariance_not_assignable``: keyed ``"Nuclide MT852"``, a
+          lumped reaction (MT 851-870) with several components, to their kinds
+          (``"MT91"`` for one that is not a channel). ENDF-102 33.2.3 states
+          its covariance for the sum of the components and for none of them. A
+          lump with one component is that component, and its covariance is
+          folded as the component's. A lump an LTY=0 block names is folded
+          through that derivation, with its cross section the sum of its
+          components': ENDF/B-VIII.1 and TENDL-2017 U235 and U238 MT 4 is MT 51
+          plus MT 851. Any other lump is listed here and not folded, since
+          giving the sum's covariance to a component would be an assumption:
+          ENDF/B-VIII.1, FENDL-3.2d and JEFF-4.0 W180 to W186 give ``(n,2n)``
+          only as MT 852, the sum of MT 16 and 41, listed as ``"(n,2n)"`` and
+          ``"(n,2np)"`` when the chain carries both, and W186 MT 854 as
+          ``"(n,np)"`` and ``"MT91"``. Listed where the fold reaches a
+          component, or the reaction holding one as a level (MT 103 for MT 600
+          to 649, and so on). Counted in ``has_gaps``.
+        - ``unsupported_layouts``: covariance blocks that were present but not
+          consumed, counted once per spectrum, so a run over several spectra
+          counts the same block once for each.
+        - ``skipped_nc``: per nuclide, NC blocks (a covariance derived from
+          other reactions) that could not be derived. An LTY=0 block is
+          derived from the NI covariances of the reactions it names, cross
+          blocks included, over its own energy range: ENDF/B-VIII.1 O16
+          ``(n,p)`` is stated only that way. Left here are LTY 1 to 4, a block
+          in a cross-reaction subsection, one whose list of reactions is empty
+          or does not match its coefficients, one whose own energy range is
+          empty, one naming a reaction with no cross section, and one met
+          only circularly.
+        - ``skipped_cross_material``: per nuclide, blocks on a reaction the
+          fold reaches (a channel, or one a channel is derived from) that
+          correlate it with another evaluation, not consumed. A block naming
+          the nuclide's own MAT is its own evaluation and is folded. The
+          partner is not checked, so a block is counted whether or not the
+          evaluation it names is in the run. ``skipped_other_file``: the same
+          for blocks whose partner is not a cross section.
+        - ``mirrored_disagree``: keyed ``"Nuclide (n,a) (n,b)"``, where a pair
+          stored in both orientations has copies that are not each other's
+          transpose, the largest difference relative to the largest entry.
+          The copy in the lower MT's section is the one folded.
+        - ``malformed_blocks``: covariance blocks not consumed because they
+          break ENDF-102's rules for their layout: arrays that disagree with
+          their declared sizes, an LB=0 to 2 block carrying a second energy
+          table, an LB=3 or 4 block without one or whose tables share no
+          energy range, or an LB=8 variance stated between two reactions.
+        - ``covariance_repaired``: nuclides the material can populate (bounded
+          at or above the solver's density floor over the schedule at nominal
+          rates; a replica's rates can sit above them) whose folded covariance
+          was not positive semi-definite past round-off, with a channel a draw
+          can move (a positive rate on a spectrum the schedule irradiates
+          with). Past round-off means the correlation matrix has an eigenvalue
+          below ``-m * 1e-12`` (``m`` the number of channels with a positive
+          stated variance), or a channel is stated with a negative
+          variance, or a zero one and a covariance to another channel.
+          Clipping only adds variance, so these were sampled wider than
+          evaluated, and any makes ``has_gaps`` true.
+          ``covariance_repairs`` gives one dict per repaired populated nuclide
+          and spectrum, including repairs no draw can move, with ``lambda_min``,
+          ``lambda_max``, ``clipped_fraction`` (the variance added over the
+          stated trace, ``float('inf')`` when that trace is not positive) and,
+          per channel keyed by kind,
+          ``evaluated_variance`` (the folded diagonal as stated, which can be
+          negative), ``evaluated_sigma`` (``None`` when that variance is
+          negative) and ``sampled_sigma``. A repair of a nuclide outside the
+          populated bound has no dict; ``covariance_repaired_outside_bound``
+          names those with a channel a draw can move. The bound holds at
+          nominal rates only and a replica's rates can populate them, so any
+          also makes ``has_gaps`` true.
+        - ``worst_sigma_inflation``: the largest sampled over evaluated sigma,
+          minus one, over the repaired channels of populated nuclides with a
+          positive rate on a spectrum the schedule irradiates with,
+          ``float('inf')`` when a repair gave a spread to a channel whose stated
+          variance is zero or negative. ``rate_weighted_sigma_inflation`` is the
+          weighted mean of sampled over evaluated sigma, minus one, over every
+          sampled channel of a populated nuclide, each weighted by its unit-flux
+          rate times its spectrum's fluence in the schedule times its parent's
+          initial density, so it covers first-generation reactions only (a
+          produced nuclide carries no weight), shows the decomposition's
+          round-off on matrices that needed no repair, and is ``None`` when no
+          weighted channel has an evaluated sigma. Both can be
+          ``float('inf')``, which strict JSON does not accept.
+        - ``sigma_at_least_one`` / ``sigma_at_least_ten``: sampled channels of
+          populated nuclides with a positive rate on a spectrum the schedule
+          irradiates with, keyed ``"Nuclide (n,x)"``, whose folded relative
+          sigma as evaluated, before any repair, is at least one or ten. At that
+          width the answer depends on the lognormal chosen to carry the
+          evaluation's two moments, not on the evaluation alone.
+          ``sigma_at_least_one_outside_bound`` is the same for nuclides outside
+          the populated bound, whose wide channels a replica's draw can take
+          past it; the ten-or-more subset reads off its values.
+        - ``rates_sampled``: cross-section rate draws made. Each is a lognormal
+          multiplier matched to the covariance's mean and variance, so none can
+          go negative and none is floored.
+        - ``half_lives_perturbed`` / ``no_half_life_uncertainty``: with the
+          ``"half_life"`` source, which reachable unstable nuclides had their
+          half-life sampled and which state no sigma to sample from.
+          ``half_life_uncertainty_not_carried`` names those whose stated sigma
+          no draw can carry (not finite, or not finite relative to the
+          half-life), held at nominal and counted as a gap.
+          ``half_lives_sampled`` counts the draws made. Each is a lognormal
+          matched to the evaluation's mean and sigma, so none can go
+          non-positive and none is floored.
+        - ``decay_energies_perturbed`` / ``no_decay_energy_uncertainty``: the
+          same for the ``"decay_energy"`` source, drawn per nuclide as a
+          lognormal with the stated mean and sigma, per component where the
+          data splits it. ``decay_energy_uncertainty_not_carried`` names those
+          with a sigma stated on a zero energy, or not finite, which no draw
+          can carry; that energy is held at nominal and counted as a gap.
+        - ``decay_branchings_perturbed``: with the ``"decay_branching"``
+          source, the reachable two-mode parents whose split was sampled. The
+          multi-mode parents held at their evaluated ratios, each a gap:
+          ``no_decay_branching_uncertainty`` (no mode states a sigma),
+          ``decay_branchings_three_or_more_modes`` (a sigma, but no stated
+          covariance to share it between three or more modes),
+          ``decay_branchings_unequal_sigmas`` (two modes stating different
+          sigmas) and ``decay_branchings_too_wide`` (the smaller ratio under
+          five sigmas). ``decay_branchings_floored`` /
+          ``decay_branchings_sampled`` count draws clamped to the pair's total
+          and draws made.
+        - ``statistical_rates``: with the ``"statistical"`` source on a
+          transport run, how many tallied rates were sampled from their
+          covariance; ``statistical_floored`` / ``statistical_sampled`` count
+          draws that came out negative and were floored.
+        - ``not_perturbed``: every input this run held at its nominal value,
+          such as the MF=32 resonance-parameter covariance, the photon and dose
+          data, the material composition, any source switched off, and, where
+          they applied, the self-shielding correction, the flux's response to a
+          perturbed cross section on a transport run, and the per-branch decay
+          emission of a parent whose branching was drawn.
+        - ``samples`` / ``converged``: how many replicas ran, and whether the
+          sigmas settled or the cap was hit.
+        
+        Args:
+            material_id: Material ID number.
+        """
+    def get_self_shielding_info(self, material_id: builtins.int) -> typing.Optional[dict]:
+        r"""
+        What the self-shielding did for one material.
+        
+        Present for every material of a spectrum solve, shielded or not, and
+        ``None`` for a transport-coupled solve or a material not in the
+        results. ``chord_cm`` of ``None`` means the run was dilute and
+        nothing was corrected; otherwise it says how: the ``method`` and
+        ``chord_cm`` used, which nuclides were ``shielded``, which were
+        ``not_shielded`` and why, and ``strongest_factor``, the smallest factor
+        any group average was multiplied by. A run reporting ``1.0`` there
+        shielded nothing in practice, which is a different statement from not
+        having tried.
+        
+        ``would_shield`` is the other direction, and is filled only on a dilute
+        run: nuclides whose own resonances are structured enough to have
+        suppressed a reaction, each mapped to how strongly.
+        
+        It is an indicator, not a correction and not a bound. There is no
+        geometry in it: the weight is ``1 / (1 + N * sigma_x)`` on that one
+        reaction and that nuclide's own density, which fixes the background at
+        1/cm, while the correction proper uses ``1 / chord_cm`` against the
+        material's total. So the number scales with how strongly a nuclide's own
+        resonances could bite without predicting what a given lump would see,
+        and it can sit either side of the real factor: a lump thinner than a
+        centimetre of chord shields less, and a material whose other nuclides
+        dominate the total at the resonance dips the flux further than this one
+        reaction can express.
+        
+        On the FNS tungsten foil, ``would_shield`` reads 0.634 for W186 while
+        the slowing-down correction on the same foil and spectrum saturates at
+        0.730 from a millimetre of chord upward. Read it as "this answer may be
+        high, and this is a resonance absorber", which is the warning a dilute
+        run should carry rather than silence. Read the size of the effect off a
+        shielded run, by asking for one.
+        
+        Args:
+            material_id: Material ID number.
         """
     def get_material_nuclides(self, material_id: builtins.int, step: builtins.int) -> typing.Optional[builtins.dict[builtins.str, builtins.float]]:
         r"""
@@ -2194,7 +2961,7 @@ class TransmutationResults:
         Args:
             material_id: Material ID number.
             step: Schedule step index, the same index as ``timesteps`` and
-                ``source_rates``. This is one less than the ``step`` the
+                ``get_source_rates``. This is one less than the ``step`` the
                 composition getters take, where 0 is the initial composition.
         
         Returns:
@@ -2325,6 +3092,52 @@ class TransmutationResults:
             {'parent': 'W186', 'reaction': '(n,2n)', 'production': 9.35e-14,
              'split': [('W185_m1', 0.535), ('W185', 0.465)]}
         """
+    def get_branching_report(self, material_id: builtins.int, step: builtins.int) -> typing.Optional[dict]:
+        r"""
+        What the isomeric-branching rule did over one step's spectrum.
+        
+        The branching evaluation gives the split and the cross-section library
+        the total. How a list's values are read is decided by how the
+        evaluation gives them, which the converter records: a complete MF=10
+        list (its ground state listed) and every MF=9 list are shares of the
+        transport total, applied at each energy; an MF=10 list of isomers only,
+        and every ``(n,n')`` list, are absolute productions, the ground state
+        taking the rest. This says, per channel, which of those applied and how
+        much of the parent's removal rate rests on anything the evaluation
+        does not give.
+        
+        A run refuses when a channel's clipped or held production is more than
+        0.1% of that parent's neutron removal rate, so what comes back here is
+        below that. MT=5's share is reported whatever its size: its products
+        are not modelled yet.
+        
+        Args:
+            material_id: Material ID number.
+            step: Schedule step index, as ``get_reaction_rates`` takes it.
+        
+        Returns:
+            dict | None: ``channels``, ``dropped`` and ``unmodelled_mt5``, or
+            None if the material or the step is unknown. Each channel has
+            ``parent``, ``reaction``, ``mt``, ``file`` (9 or 10),
+            ``representation`` (``"share"`` or ``"absolute"``), ``complete``,
+            ``completeness_source``, ``denominator``, ``states`` (each with
+            ``target``, ``lfs``, ``level_route``, ``level_energy_difference``
+            and ``share``, its share of the reaction), ``removal_share`` (the
+            reaction's share of the parent's removal rate), ``clipped_share``
+            and ``extrapolated_share`` (of the same removal rate),
+            ``own_total_excess`` (``(energy_ev, ratio)`` where the listed values
+            most exceed the evaluation's own total, or None) and
+            ``normalisation``. Each dropped channel has ``parent``,
+            ``reaction``, ``target``, ``reason`` and ``removal_share`` (None
+            where it cannot be folded). ``unmodelled_mt5`` is
+            ``[(nuclide, share)]``, MT=5's share of each parent's removal
+            rate, largest first. Empty for a decay-only step.
+        
+        Examples:
+            >>> report = results.get_branching_report(material_id=1, step=0)
+            >>> report["channels"][0]["representation"]
+            'absolute'
+        """
     def get_production_routes(self, material_id: builtins.int, product: builtins.str, step: builtins.int, reaction_depth: builtins.int = 1, decay_depth: builtins.int = 3) -> typing.Optional[typing.Any]:
         r"""
         Every way a product was made over one step, weighted by how much of it
@@ -2411,11 +3224,56 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         excited production levels were matched to an isomer by energy, by
         energy within a tenth, by level index, as the only isomer, or not at
         all) and ``flagged_levels`` (one line per level that was unresolved,
+        taken as ground because the decay data has no isomer for its product,
         matched only by the looser energy pass, or matched by energy while its
-        level index pointed at another isomer), and ``partial_sum_mismatches``
+        level index pointed at another isomer; every excited level that ends
+        up at ground is listed), ``partial_sum_mismatches``
         (one line per reaction whose MF=10 partial cross sections do not sum to
         its MF=3 total, or whose MF=9 yields do not sum to one, within two
-        percent below 20 MeV).
+        percent below 20 MeV), and ``skipped_states`` (one line per production
+        state that names no single product nuclide, and so gives no row:
+        fission, an IZAP of zero that no single MF=8 subsection resolves, or
+        any other ZAP whose Z or A is not positive), ``list_facts`` (one line
+        per production list, a parent's MT in MF=9 or MF=10: whether the ground
+        state is listed, whether the file has an MF=3 section for the MT, each
+        state's LFS, LMF, target, route and level energy difference, and the
+        MF=1 normalisation lines naming the MT) and ``list_counts`` (how many
+        lists are complete or isomers only in each file, have no MF=3 section
+        for their MT, or are normalised). The same facts are stored per row in
+        ``branching.arrow``; they change no rate.
+        The MF=40 production
+        covariance, written as the tape gives it to
+        ``branching/branching_covariance.arrow``, is counted by
+        ``mf40_sections`` (sections read, whatever the MT), ``mf40_blocks``
+        (blocks written), ``mf40_blocks_by_lb`` (the NI blocks by layout),
+        ``mf40_nc_blocks``, ``mf40_unmatched_states`` (one line per product
+        state that matches no MF=9 or MF=10 state, matches several within the
+        tolerance, or is excited with no stated excitation to confirm a level
+        by, written with no target), ``mf40_states_without_chain_kind``
+        (states of an MT with no chain reaction, such as MT 18, written with
+        no reaction),
+        ``mf40_on_yield_channels`` (states matched to a level whose production
+        MF=9 gives as a yield rather than an MF=10 cross section; where that
+        yield is merged with another state's, the row carries the state's own
+        yield with quantity ``"yield"``),
+        ``mf40_mat1_naming_itself`` (sub-subsections whose MAT1 is the
+        evaluation's own MAT, written as given), ``mf40_cross_state_blocks``
+        (blocks other than a state's covariance with itself; key them on MT,
+        LFS, MT1 and XLFS1, since both states can resolve to one target),
+        ``mf40_blocks_outside_mf10`` (blocks whose partner is in another
+        material or has XMF1 other than 10), ``mf40_without_blocks`` (one line
+        per section, state or sub-subsection holding no block, with its tape
+        values, the only part of MF=40 the file cannot show),
+        ``mf40_partner_unresolved`` (one line per sub-subsection written
+        with no partner target because the tape does not pin the partner to
+        one state, among them a partner whose level XLFS1 MF=10 numbers
+        differently from MF=40), and ``mf40_states_placed_by_excitation`` (one
+        line per product state whose target was matched by excitation because
+        MF=9 and MF=10 give its IZAP and LFS no state or one at another
+        excitation; its self blocks name it by MF=40's own LFS). The four line
+        lists are also written to ``branching/provenance.json``. An evaluation
+        set without MF=40 writes no covariance file, and removes one an
+        earlier conversion left there.
     """
 
 def convert_neutron_transport(input_path: builtins.str, output_dir: builtins.str, njoy_exec: builtins.str = 'njoy', temperatures: typing.Optional[typing.Sequence[builtins.float]] = None, library: builtins.str = '', data_version: builtins.str = '', created_utc: typing.Optional[builtins.str] = None, covariance: builtins.bool = False) -> builtins.str:
@@ -2758,11 +3616,16 @@ def radionuclide_production(neutron_files: typing.Sequence[builtins.str]) -> lis
         each with ``parent``, ``mt``, ``reaction`` (the transmutation reaction
         name, or ``None`` for an MT no chain reaction covers) and ``states``.
         Each state has ``excitation_energy_eV``, ``level_index``, ``product``
-        and ``source``.
+        and ``source``. ``excitation_energy_eV`` is ``None`` for an excited
+        state whose evaluation gives neither a positive MF=8 ELFS nor a
+        positive ``QM - QI``.
     
         ``product`` is the product's **ground-state** name even for an excited
         state, because naming the isomer needs decay data to say which
         isomeric ordinal a level is; pair it with ``excitation_energy_eV``.
+        It is ``None`` for a state naming no single nuclide: fission, a
+        subsection whose IZAP is zero with no single MF=8 subsection to name
+        it, or any other ZAP whose Z or A is not positive.
         ``level_index`` is the evaluation's own LFS and is not comparable
         between libraries: Ir190's 377 keV isomer is level 3 in ENDF/B-VIII.1
         and level 37 in JEFF-4.0. ``source`` is ``"cross_section"`` for MF=10
@@ -2920,5 +3783,71 @@ def set_transmutation_reactions(value: typing.Optional[builtins.str | typing.Lit
     a material with no reaction rates. A rate that then needs it is refused
     when the burnup matrix is built, naming the nuclide and the reaction,
     rather than being solved as though the reaction produced nothing.
+    """
+
+def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | typing.Sequence[PulseSchedule], data_uncertainty: typing.Optional[DataUncertainty] = None, self_shielding_chord: typing.Optional[builtins.float] = None, self_shielding_shape: shapes.SphereLump | shapes.CubeLump | shapes.FoilLump | shapes.CylinderLump | shapes.WireLump | None = None) -> TransmutationResults:
+    r"""
+    Transmute several materials over one timeline in one call.
+    
+    The plural of ``Material.transmute``, for a mesh from a transport run, a
+    component broken into regions, or a sweep over compositions. The answer for
+    each material is exactly what ``material.transmute(schedule)`` gives it, and
+    the result is one ``TransmutationResults`` keyed by each material's ``id``,
+    the same shape ``Model.simulate_transmutation`` returns.
+    
+    What a Python loop would repeat is done once instead: the chain is read
+    once, each nuclide's cross sections are decoded once and shared by every
+    material that needs them, and a multigroup collapse runs once for every
+    distinct combination of spectrum, composition, temperature and shielding.
+    Cells of one steel that saw the same spectrum share a collapse, whatever
+    their flux magnitudes. ``results.collapse_reuse`` says how many collapses
+    were shared. The materials' solves then run in parallel.
+    
+    Args:
+        materials (list[Material]): The materials, each with a distinct ``id``,
+            since the results are keyed by it. As with ``Material.transmute``,
+            the cross sections each needs are loaded into it and kept, and the
+            composition is not modified.
+        schedules (PulseSchedule | list[PulseSchedule]): One schedule for every
+            material, or one per material in the same order. Each material's
+            schedule carries its own spectra (the pulse sources) and flux
+            magnitudes (the pulse rates), which is how each cell of a mesh gets
+            its own flux. They must share one timeline, the same durations and
+            irradiation on the same steps, because the result has one series of
+            times.
+        data_uncertainty (DataUncertainty, optional): Nuclear-data uncertainty,
+            applied to every material as ``Material.transmute`` applies it to
+            one. The same seed perturbs a given evaluation the same way in every
+            material.
+        self_shielding_chord (float, optional): One chord length ``4V/S`` in cm,
+            for every material. See ``Material.transmute``.
+        self_shielding_shape (SphereLump | CubeLump | FoilLump | CylinderLump | WireLump, optional):
+            One lump shape for every material, turned into a chord through each
+            material's own ``volume``. Give this or ``self_shielding_chord``,
+            not both.
+    
+    Returns:
+        TransmutationResults: Keyed by each material's ``id``. Per material,
+            ``get_source_rates(id)`` gives its flux magnitudes and
+            ``get_self_shielding_info(id)`` its shielding report.
+    
+    Raises:
+        ValueError: If two materials share an id, the timelines differ, the
+            number of schedules does not match the number of materials, or
+            any single material would fail ``Material.transmute``, in which
+            case the message names the material.
+        TypeError: If ``schedules`` is neither a PulseSchedule nor a list of
+            them, or the same Material object is given twice.
+    
+    Examples:
+        >>> schedules = [
+        ...     yani.PulseSchedule([
+        ...         yani.Pulse(rate=flux[i], duration=(1, "y"), source=spectra[i]),
+        ...         yani.Cooldown(duration=(1, "d")),
+        ...     ])
+        ...     for i in range(len(cells))
+        ... ]
+        >>> results = yani.transmute(cells, schedules)
+        >>> results.get_final_material(cells[3].id)
     """
 

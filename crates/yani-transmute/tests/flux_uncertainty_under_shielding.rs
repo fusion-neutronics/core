@@ -68,7 +68,12 @@ fn run(data: &str, shielding: Option<&Shielding>, with_sigma: bool) -> Transmuta
     let spectra = vec![MultigroupSpectrum {
         boundaries: GROUPS.to_vec(),
         masses: FLUX.iter().map(|f| f / total).collect(),
-        relative_std_dev: with_sigma.then(|| vec![RELATIVE_SIGMA; FLUX.len()]),
+        flux_error: with_sigma.then(|| {
+            yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(vec![
+                RELATIVE_SIGMA;
+                FLUX.len()
+            ])
+        }),
     }];
     let steps = vec![TransmuteStep {
         dt: 86400.0,
@@ -80,6 +85,7 @@ fn run(data: &str, shielding: Option<&Shielding>, with_sigma: bool) -> Transmuta
         // Only the flux, so nothing here needs MF=33 covariance and the
         // ensemble's spread is the flux sigma alone.
         sources: vec![Source::FluxSpectrum],
+        attribution: false,
     };
     transmute_material_shielded(
         &mut iron(data),
@@ -221,7 +227,9 @@ fn an_unperturbed_shielded_replica_is_the_nominal_run() {
         masses: FLUX.iter().map(|f| f / total).collect(),
         // A flux the caller states is exact still requests the source, so the
         // per-group terms are built and used, with every deviate zero.
-        relative_std_dev: Some(vec![0.0; FLUX.len()]),
+        flux_error: Some(yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(
+            vec![0.0; FLUX.len()],
+        )),
     }];
     let steps = vec![TransmuteStep {
         dt: 86400.0,
@@ -231,6 +239,7 @@ fn an_unperturbed_shielded_replica_is_the_nominal_run() {
         seed: 1,
         samples: Some(2),
         sources: vec![Source::FluxSpectrum],
+        attribution: false,
     };
     let results = transmute_material_shielded(
         &mut iron(&data),
@@ -258,4 +267,28 @@ fn an_unperturbed_shielded_replica_is_the_nominal_run() {
             "replica {replica} perturbed nothing and must be the nominal run"
         );
     }
+}
+
+/// A shielded run says its shielding was held at nominal; a dilute one has no
+/// shielding to hold and must not claim it.
+#[test]
+fn a_shielded_run_reports_its_shielding_held_at_nominal() {
+    let Some(data) = yamc_test_cache::nuclide("Fe56") else {
+        eprintln!("skipping: Fe56 fixture missing");
+        return;
+    };
+    let shielding = Shielding::new(CHORD_CM).expect("a positive chord");
+    let id = iron(&data).material_id.unwrap_or(0);
+    let held = |results: &TransmutationResults| {
+        results
+            .uncertainty_info
+            .get(&id)
+            .expect("info is reported")
+            .not_perturbed
+            .iter()
+            .any(|s| s == "self-shielding correction")
+    };
+
+    assert!(held(&run(&data, Some(&shielding), true)));
+    assert!(!held(&run(&data, None, true)));
 }

@@ -99,7 +99,7 @@ Every step is **bit-identical** to `vanilla`:
   fission-yield weights -- and its output is byte-identical throughout;
 - `crates/yani-transmute/tests/thread_count_determinism.rs` runs the same case
   in a 1-thread and a 7-thread pool and compares the inventories, the
-  **per-replica** ensemble, the sigmas, the sample count and the truncation
+  **per-replica** ensemble, the sigmas, the sample count and the sampling
   counters to the last bit.
 
 One thing had to be fixed before any of that could be checked at all:

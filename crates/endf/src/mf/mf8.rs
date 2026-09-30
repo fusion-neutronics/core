@@ -59,9 +59,10 @@ pub struct FissionYields {
     pub energy: f64,
     pub nn: i64,
     pub nfp: i64,
-    /// LE+1 for the first energy, the interpolation scheme for the rest. The
-    /// format overloads the same field, and so does the Python reader, which
-    /// keys it `LE` on the first entry and `I` on the others.
+    /// LE for the first energy (the HEAD holds LE+1), the interpolation
+    /// scheme from the previous energy for the rest. The format overloads the
+    /// same field, and so does the Python reader, which keys it `LE` on the
+    /// first entry and `I` on the others.
     pub le_or_interpolation: i64,
     pub products: Vec<FissionProduct>,
 }
@@ -161,6 +162,8 @@ pub struct ContinuousSpectrum {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ContinuousCovariance {
     pub lb: i64,
+    /// NE, the number of (Ek, Fk) pairs the LIST header states.
+    pub ne: i64,
     pub ek: Vec<f64>,
     pub fk: Vec<f64>,
 }
@@ -380,6 +383,7 @@ pub fn parse_mf8_mt457(reader: &mut Reader) -> Result<Mf8Mt457> {
             let list = reader.list_record()?;
             spectrum.continuous_covariance = Some(ContinuousCovariance {
                 lb: list.cont.l2,
+                ne: list.cont.n2,
                 ek: column(&list.values, 0, 2),
                 fk: column(&list.values, 1, 2),
             });

@@ -184,11 +184,27 @@ pub struct Tally {
     /// overlay. Only meaningful when `multiply_density == false`.
     pub overlay_material: Option<std::collections::BTreeMap<String, f64>>,
 
+    /// Also accumulate the covariance of the bin means, history by history.
+    ///
+    /// Off by default. A per-bin standard deviation treats the bins as
+    /// independent, and bins scored by the same histories are not, so
+    /// anything summed over them (a reaction rate over a spectrum) inherits an
+    /// understated error. The covariance keeps the correlations. It costs
+    /// `bins^2 / 2` doubles per worker and a sparse outer product per history,
+    /// so it is refused above [`MAX_COVARIANCE_BINS`]: it is meant for spectra,
+    /// not meshes.
+    pub covariance: bool,
+
     /// Internal scoring state: atomic per-bin values, finalized per-history
     /// Welford statistics, score-index caches, and the overlay XS cache. All
     /// `Tally` scoring methods delegate to this accumulator internally.
     pub(crate) accumulator: TallyAccumulator,
 }
+
+/// The most bins a tally may carry a covariance for. At this size the
+/// per-worker products are about 17 MB; the covariance is meant for spectra
+/// (a 709-group structure is 2 MB), not for meshes.
+pub const MAX_COVARIANCE_BINS: usize = 2048;
 
 /// On-disk shape of [`Tally`] -- only the user-supplied configuration.
 #[derive(PartialEq, serde::Serialize, serde::Deserialize)]
@@ -212,6 +228,10 @@ pub struct TallySerde {
     /// deterministic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlay_material: Option<std::collections::BTreeMap<String, f64>>,
+    /// Covariance of the bin means. `#[serde(default, skip_serializing_if)]`
+    /// keeps older serialized tallies reading, as off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub covariance: bool,
 }
 
 impl Tally {
@@ -232,6 +252,7 @@ impl Tally {
             multiply_density: self.multiply_density,
             estimator: self.estimator,
             overlay_material: self.overlay_material.clone(),
+            covariance: self.covariance,
         }
     }
 }
@@ -271,6 +292,7 @@ impl From<TallySerde> for Tally {
         t.multiply_density = s.multiply_density;
         t.estimator = s.estimator;
         t.overlay_material = s.overlay_material;
+        t.covariance = s.covariance;
         // Allocate accumulator storage now that the bin layout is known.
         // `initialize_batches_shared` (which `model.simulate_transport`
         // calls) only resets the values vec; it won't allocate it.
@@ -1767,6 +1789,7 @@ impl Tally {
             particles_per_chunk: AtomicU32::new(0),
             multiply_density: true,
             overlay_material: None,
+            covariance: false,
             estimator: crate::Estimator::default(),
             accumulator: TallyAccumulator::new(),
         }
@@ -2132,6 +2155,28 @@ impl Tally {
     /// state. Empty if no Welford state was installed (e.g. GPU runs).
     /// This is the exact merge state `combine_results` consumes;
     /// `get_std_dev` is derived from it.
+    /// Raw per-history products of the bin scores, packed upper triangle,
+    /// when the tally asked for its covariance and a run installed them.
+    pub fn get_comoment(&self) -> Option<Vec<f64>> {
+        self.accumulator
+            .welford_finalized
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|stats| stats.comoment.clone())
+    }
+
+    /// Covariance of the bin means, `num_bins x num_bins` row-major, when the
+    /// tally asked for it ([`Tally::covariance`]) and a run has finished.
+    pub fn get_covariance(&self) -> Option<Vec<f64>> {
+        self.accumulator
+            .welford_finalized
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|stats| stats.covariance_of_mean())
+    }
+
     pub fn get_m2(&self) -> Vec<f64> {
         if let Some(stats) = self
             .accumulator
@@ -2256,6 +2301,7 @@ impl Tally {
             aggregate_figure_of_merit: 0.0,
             agg: self.get_agg(),
             score_pdf: self.get_score_pdf(),
+            comoment: self.get_comoment(),
             convergence_history: self.get_convergence_history(),
             shape,
             dim_labels,
@@ -2281,6 +2327,7 @@ impl Tally {
             particles_per_chunk: AtomicU32::new(0),
             multiply_density: true,
             overlay_material: None,
+            covariance: false,
             estimator: crate::Estimator::default(),
             accumulator: TallyAccumulator::new(),
         }
@@ -2779,6 +2826,7 @@ mod tests {
             n_histories: 1,
             agg: crate::welford::AggMoments::ZERO,
             score_pdf: crate::welford::ScorePdf::default(),
+            comoment: None,
         };
         arc.install_finalized(stats);
         // Unwrap the Arc back -- tests want owned Tally to mutate filters etc.
