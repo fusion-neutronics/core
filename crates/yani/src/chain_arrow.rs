@@ -11,7 +11,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow_array::builder::{Float64Builder, Int32Builder, ListBuilder, StringBuilder};
-use arrow_array::{Array, ArrayRef, Float64Array, Int32Array, ListArray, RecordBatch, StringArray};
+use arrow_array::{
+    Array, ArrayRef, BooleanArray, Float64Array, Int32Array, ListArray, RecordBatch, StringArray,
+};
 use arrow_ipc::reader::FileReader;
 use arrow_ipc::writer::FileWriter;
 use arrow_schema::{DataType, Field, Schema};
@@ -26,8 +28,8 @@ fn section_schema(path: &str) -> Schema {
 }
 
 use crate::chain::{
-    BranchCurve, BranchQuantity, BranchTable, ChainNuclide, ChainParts, ChainReaction, DecaySource,
-    DecaySourceDistribution, EvaluatedYields, FissionYield, FissionYieldSet,
+    BranchCurve, BranchQuantity, BranchState, BranchTable, ChainNuclide, ChainParts, ChainReaction,
+    DecaySource, DecaySourceDistribution, EvaluatedYields, FissionYield, FissionYieldSet,
 };
 use crate::continuum::Interpolation;
 
@@ -110,6 +112,209 @@ fn list_str(list: &ListArray, i: usize) -> Result<Vec<String>, Box<dyn Error>> {
         .downcast_ref::<StringArray>()
         .ok_or("list<str> inner type mismatch")?;
     Ok((0..strs.len()).map(|j| strs.value(j).to_string()).collect())
+}
+
+/// The per-state columns of `branching/branching.arrow`, when the file has
+/// them. A subsection written before they existed has none, and its curves
+/// carry no states; one with some but not all is not a file this converter
+/// wrote, and is refused. The columns are nullable at row level too: a row
+/// whose state lists are all null states no facts and reads as no states
+/// (its normalisation still read), and a row with only some of them null is
+/// refused.
+struct BranchStateColumns<'a> {
+    mt: &'a ListArray,
+    lfs: &'a ListArray,
+    lmf: &'a ListArray,
+    list_complete: &'a ListArray,
+    level_route: &'a ListArray,
+    level_energy: &'a ListArray,
+    level_energy_difference: &'a ListArray,
+    mf3_cross_section: &'a ListArray,
+    normalisation: &'a StringArray,
+}
+
+const BRANCH_STATE_COLUMNS: [&str; 9] = [
+    "mt",
+    "lfs",
+    "lmf",
+    "list_complete",
+    "level_route",
+    "level_energy",
+    "level_energy_difference",
+    "mf3_cross_section",
+    "normalisation",
+];
+
+/// The `level_route` labels the converter writes, one per
+/// `endf::radionuclide_production::LevelRoute`.
+const LEVEL_ROUTES: [&str; 7] = [
+    "ground",
+    "energy",
+    "near_energy",
+    "level_index",
+    "single_isomer",
+    "no_isomers",
+    "unresolved",
+];
+
+impl<'a> BranchStateColumns<'a> {
+    fn from_batch(batch: &'a RecordBatch) -> Result<Option<Self>, Box<dyn Error>> {
+        let schema = batch.schema();
+        let present: Vec<&str> = BRANCH_STATE_COLUMNS
+            .into_iter()
+            .filter(|name| schema.index_of(name).is_ok())
+            .collect();
+        if present.is_empty() {
+            return Ok(None);
+        }
+        if present.len() != BRANCH_STATE_COLUMNS.len() {
+            return Err(format!(
+                "branching.arrow has the state columns {present:?} but not all of \
+                 {BRANCH_STATE_COLUMNS:?}; it was not written by one converter"
+            )
+            .into());
+        }
+        Ok(Some(BranchStateColumns {
+            mt: col(batch, "mt")?,
+            lfs: col(batch, "lfs")?,
+            lmf: col(batch, "lmf")?,
+            list_complete: col(batch, "list_complete")?,
+            level_route: col(batch, "level_route")?,
+            level_energy: col(batch, "level_energy")?,
+            level_energy_difference: col(batch, "level_energy_difference")?,
+            mf3_cross_section: col(batch, "mf3_cross_section")?,
+            normalisation: col(batch, "normalisation")?,
+        }))
+    }
+
+    /// Row `i`'s states and normalisation text.
+    ///
+    /// `nodes` is the row's energy grid length, which every sampled MF=3 must
+    /// match.
+    fn row(
+        &self,
+        i: usize,
+        nodes: usize,
+    ) -> Result<(Vec<BranchState>, Option<String>), Box<dyn Error>> {
+        let normalisation =
+            (!self.normalisation.is_null(i)).then(|| self.normalisation.value(i).to_string());
+        let lists = [
+            self.mt,
+            self.lfs,
+            self.lmf,
+            self.list_complete,
+            self.level_route,
+            self.level_energy,
+            self.level_energy_difference,
+            self.mf3_cross_section,
+        ];
+        let nulls = lists.iter().filter(|list| list.is_null(i)).count();
+        if nulls == lists.len() {
+            return Ok((Vec::new(), normalisation));
+        }
+        if nulls > 0 {
+            return Err(format!(
+                "branching.arrow row {i} has {nulls} of its {} state columns null; \
+                 they are null together or not at all",
+                lists.len()
+            )
+            .into());
+        }
+        fn items<T: 'static + Array + Clone>(
+            list: &ListArray,
+            i: usize,
+            name: &str,
+        ) -> Result<T, Box<dyn Error>> {
+            list.value(i)
+                .as_any()
+                .downcast_ref::<T>()
+                .cloned()
+                .ok_or_else(|| format!("branching.arrow {name} has an unexpected item type").into())
+        }
+        let mt: Int32Array = items(self.mt, i, "mt")?;
+        let lfs: Int32Array = items(self.lfs, i, "lfs")?;
+        let lmf: Int32Array = items(self.lmf, i, "lmf")?;
+        let complete: BooleanArray = items(self.list_complete, i, "list_complete")?;
+        let route: StringArray = items(self.level_route, i, "level_route")?;
+        let energy: Float64Array = items(self.level_energy, i, "level_energy")?;
+        let difference: Float64Array =
+            items(self.level_energy_difference, i, "level_energy_difference")?;
+        let mf3: ListArray = items(self.mf3_cross_section, i, "mf3_cross_section")?;
+        let n = mt.len();
+        let lengths = [
+            lfs.len(),
+            lmf.len(),
+            complete.len(),
+            route.len(),
+            energy.len(),
+            difference.len(),
+            mf3.len(),
+        ];
+        if lengths.iter().any(|&len| len != n) {
+            return Err(format!(
+                "branching.arrow row {i} has {n} states in mt but {lengths:?} in the other state columns"
+            )
+            .into());
+        }
+        // A null here would read as 0, false or "", which a reader would take
+        // for a stated value; only lmf, the difference and MF=3 may be unstated.
+        let required: [(&str, &dyn Array); 5] = [
+            ("mt", &mt),
+            ("lfs", &lfs),
+            ("list_complete", &complete),
+            ("level_route", &route),
+            ("level_energy", &energy),
+        ];
+        if let Some((name, _)) = required.iter().find(|(_, items)| items.null_count() > 0) {
+            return Err(format!(
+                "branching.arrow row {i} has a null item in {name}, which every state states"
+            )
+            .into());
+        }
+        if let Some(label) = route.iter().flatten().find(|l| !LEVEL_ROUTES.contains(l)) {
+            return Err(format!(
+                "branching.arrow row {i} has level_route {label:?}, not one of {LEVEL_ROUTES:?}"
+            )
+            .into());
+        }
+        let option = |array: &dyn Array, j: usize| !array.is_null(j);
+        let mut states = Vec::with_capacity(n);
+        for j in 0..n {
+            let mf3_cross_section = if mf3.is_null(j) {
+                None
+            } else {
+                let values = mf3.value(j);
+                let values = values
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or("branching.arrow mf3_cross_section has an unexpected item type")?;
+                if values.len() != nodes {
+                    return Err(format!(
+                        "branching.arrow row {i} state {j}: mf3_cross_section has {} values \
+                         on {nodes} energy nodes",
+                        values.len()
+                    )
+                    .into());
+                }
+                Some(
+                    (0..values.len())
+                        .map(|k| option(values, k).then(|| values.value(k)))
+                        .collect(),
+                )
+            };
+            states.push(BranchState {
+                mt: mt.value(j),
+                lfs: lfs.value(j),
+                lmf: option(&lmf, j).then(|| lmf.value(j)),
+                list_complete: complete.value(j),
+                level_route: route.value(j).to_string(),
+                level_energy: energy.value(j),
+                level_energy_difference: option(&difference, j).then(|| difference.value(j)),
+                mf3_cross_section,
+            });
+        }
+        Ok((states, normalisation))
+    }
 }
 
 /// One `sources.arrow` row as a distribution, from its `type` and, for a
@@ -929,6 +1134,7 @@ pub fn parse_chain_parts_from_bytes(
                 let quantities = col::<StringArray>(&batch, "quantity")?;
                 let energy_col = col::<ListArray>(&batch, "energy")?;
                 let values_col = col::<ListArray>(&batch, "values")?;
+                let state_cols = BranchStateColumns::from_batch(&batch)?;
                 for i in 0..batch.num_rows() {
                     let parent = nuclides.value(i);
                     if !chain.contains_key(parent) {
@@ -946,6 +1152,10 @@ pub fn parse_chain_parts_from_bytes(
                     if energy.is_empty() || energy.len() != values.len() {
                         continue;
                     }
+                    let (states, normalisation) = match &state_cols {
+                        Some(columns) => columns.row(i, energy.len())?,
+                        None => (Vec::new(), None),
+                    };
 
                     // Graft the metastable-production channel when the base
                     // chain lacks it (see the block comment above and
@@ -980,6 +1190,8 @@ pub fn parse_chain_parts_from_bytes(
                             quantity,
                             energy,
                             values,
+                            states: states.into(),
+                            normalisation,
                         });
                 }
             }
@@ -1629,7 +1841,145 @@ pub fn export_chain_arrow<P: AsRef<Path>>(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_chain_parts, should_graft};
+    use super::{parse_chain_parts, should_graft, BranchStateColumns};
+
+    use std::sync::Arc;
+
+    use arrow_array::builder::{
+        BooleanBuilder, Float64Builder, Int32Builder, ListBuilder, StringBuilder,
+    };
+    use arrow_array::{ArrayRef, RecordBatch};
+
+    /// One branching row's state columns: `mt` has `states` items, `lfs` has
+    /// `lfs_items`, and the one state's sampled MF=3 has `mf3_values`.
+    fn state_columns(
+        states: usize,
+        lfs_items: usize,
+        mf3_values: usize,
+    ) -> Vec<(&'static str, ArrayRef)> {
+        fn ints(n: usize) -> ArrayRef {
+            let mut b = ListBuilder::new(Int32Builder::new());
+            b.values().append_slice(&vec![1; n]);
+            b.append(true);
+            Arc::new(b.finish())
+        }
+        fn floats(n: usize) -> ArrayRef {
+            let mut b = ListBuilder::new(Float64Builder::new());
+            b.values().append_slice(&vec![0.0; n]);
+            b.append(true);
+            Arc::new(b.finish())
+        }
+        let mut complete = ListBuilder::new(BooleanBuilder::new());
+        let mut route = ListBuilder::new(StringBuilder::new());
+        let mut mf3 = ListBuilder::new(ListBuilder::new(Float64Builder::new()));
+        for _ in 0..states {
+            complete.values().append_value(true);
+            route.values().append_value("energy");
+            mf3.values().values().append_slice(&vec![1.0; mf3_values]);
+            mf3.values().append(true);
+        }
+        complete.append(true);
+        route.append(true);
+        mf3.append(true);
+        let mut normalisation = StringBuilder::new();
+        normalisation.append_null();
+        vec![
+            ("mt", ints(states)),
+            ("lfs", ints(lfs_items)),
+            ("lmf", ints(states)),
+            ("list_complete", Arc::new(complete.finish()) as ArrayRef),
+            ("level_route", Arc::new(route.finish())),
+            ("level_energy", floats(states)),
+            ("level_energy_difference", floats(states)),
+            ("mf3_cross_section", Arc::new(mf3.finish())),
+            ("normalisation", Arc::new(normalisation.finish())),
+        ]
+    }
+
+    fn read_row(columns: Vec<(&'static str, ArrayRef)>, nodes: usize) -> Result<(), String> {
+        let batch = RecordBatch::try_from_iter(columns).expect("batch");
+        let parsed = BranchStateColumns::from_batch(&batch).map_err(|e| e.to_string())?;
+        parsed
+            .expect("state columns present")
+            .row(0, nodes)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// The three shapes a branching file written by one converter cannot have
+    /// are refused rather than read as some other set of facts.
+    #[test]
+    fn inconsistent_state_columns_are_refused() {
+        assert_eq!(read_row(state_columns(1, 1, 3), 3), Ok(()));
+
+        let mut missing = state_columns(1, 1, 3);
+        missing.retain(|(name, _)| *name != "lmf");
+        let err = read_row(missing, 3).unwrap_err();
+        assert!(err.contains("but not all of"), "{err}");
+
+        let err = read_row(state_columns(2, 1, 3), 3).unwrap_err();
+        assert!(err.contains("states in mt but"), "{err}");
+
+        let err = read_row(state_columns(1, 1, 2), 3).unwrap_err();
+        assert!(
+            err.contains("mf3_cross_section has 2 values on 3 energy nodes"),
+            "{err}"
+        );
+
+        let mut null_item = state_columns(1, 1, 3);
+        let mut complete = ListBuilder::new(BooleanBuilder::new());
+        complete.values().append_null();
+        complete.append(true);
+        null_item
+            .iter_mut()
+            .find(|(name, _)| *name == "list_complete")
+            .expect("list_complete")
+            .1 = Arc::new(complete.finish());
+        let err = read_row(null_item, 3).unwrap_err();
+        assert!(err.contains("null item in list_complete"), "{err}");
+
+        let mut unknown_route = state_columns(1, 1, 3);
+        let mut route = ListBuilder::new(StringBuilder::new());
+        route.values().append_value("nearest");
+        route.append(true);
+        unknown_route
+            .iter_mut()
+            .find(|(name, _)| *name == "level_route")
+            .expect("level_route")
+            .1 = Arc::new(route.finish());
+        let err = read_row(unknown_route, 3).unwrap_err();
+        assert!(err.contains("level_route \"nearest\""), "{err}");
+    }
+
+    /// A row whose state lists are all null states no facts and reads as no
+    /// states; one with only some of them null is refused.
+    #[test]
+    fn a_row_with_null_state_lists_reads_as_no_states() {
+        fn nulled(names: &[&str]) -> Vec<(&'static str, ArrayRef)> {
+            state_columns(1, 1, 3)
+                .into_iter()
+                .map(|(name, array)| {
+                    if names.contains(&name) {
+                        (name, arrow_array::new_null_array(array.data_type(), 1))
+                    } else {
+                        (name, array)
+                    }
+                })
+                .collect()
+        }
+        let all: Vec<&str> = super::BRANCH_STATE_COLUMNS[..8].to_vec();
+        let batch = RecordBatch::try_from_iter(nulled(&all)).expect("batch");
+        let (states, normalisation) = BranchStateColumns::from_batch(&batch)
+            .expect("columns")
+            .expect("state columns present")
+            .row(0, 3)
+            .expect("an all-null row reads");
+        assert!(states.is_empty());
+        assert_eq!(normalisation, None);
+
+        let err = read_row(nulled(&["lmf"]), 3).unwrap_err();
+        assert!(err.contains("null together or not at all"), "{err}");
+    }
 
     /// Everything export_chain_parts writes must match the declared schema, and
     /// read back through parse_chain_parts.
