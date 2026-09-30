@@ -21,6 +21,12 @@
 //! subsection. That granularity IS the sparse form: most (MT, MT1) pairs have
 //! no cross terms and simply have no row, with nothing thresholded and no small
 //! value dropped.
+//!
+//! The one row that is not a block is a component of a lumped reaction
+//! (ENDF-102 33.2.3): a section with a nonzero MTL and no subsections, whose
+//! HEAD record is the only statement of which reactions the lumped MT 851-870
+//! sums. Dropping it would lose that index, so it is written as a
+//! `kind = "lumped"` row.
 
 use std::error::Error;
 use std::path::Path;
@@ -185,6 +191,28 @@ impl CovarianceRows {
         self.push_nc_null();
     }
 
+    /// A lumped reaction's component: its section's HEAD record and nothing
+    /// else, since the format gives a component no subsections.
+    ///
+    /// Only `mt` and `mtl` carry anything here, and `mat` beside them in
+    /// `covariance.arrow`. The HEAD record has no MAT1, MT1, XMF1 or XLFS1,
+    /// so those are null rather than a zero the tape never wrote, and the two
+    /// indices are 0 because the section has no subsection or block for them
+    /// to count.
+    fn push_lumped(&mut self, mt: i32, mtl: i64) {
+        self.mt.push(mt);
+        self.subsection_idx.push(0);
+        self.block_idx.push(0);
+        self.kind.push("lumped".to_string());
+        self.mat1.push(None);
+        self.mt1.push(None);
+        self.xmf1.push(None);
+        self.xlfs1.push(None);
+        self.mtl.push(Some(narrow(mtl)));
+        self.push_ni_null();
+        self.push_nc_null();
+    }
+
     /// One NC block: a covariance derived from other reactions.
     fn push_nc(&mut self, s: &NcSubsection) {
         self.push_ni_null();
@@ -327,25 +355,52 @@ fn covariance_mts(material: &Material) -> Vec<i32> {
 ///
 /// Two subsections of one section may name the same (MAT1, MT1), which is why
 /// the position is carried explicitly instead of being recovered from the keys.
-fn push_section(rows: &mut CovarianceRows, mt: i32, mf33: &Mf33) {
+///
+/// A section with a nonzero MTL is a lumped reaction's component, and its one
+/// row is its HEAD. ENDF-102 33.2.3 gives such a section no subsections
+/// (NL=0), and one that has them is refused: the lump's component list is read
+/// off these HEAD rows, and a component that also stated a covariance of its
+/// own would leave the fold no exact reading of either. `mat` names the
+/// evaluation in that error.
+fn push_section(
+    rows: &mut CovarianceRows,
+    mat: i32,
+    mt: i32,
+    mf33: &Mf33,
+) -> Result<(), Box<dyn Error>> {
+    if mf33.mtl != 0 {
+        if !mf33.subsections.is_empty() {
+            return Err(format!(
+                "MAT {mat} MF=33 MT={mt} is a component of lumped reaction MT={} but has {} \
+                 subsections; ENDF-102 33.2.3 requires NL=0 for a lumped reaction's component",
+                mf33.mtl,
+                mf33.subsections.len()
+            )
+            .into());
+        }
+        rows.push_lumped(mt, mf33.mtl);
+        return Ok(());
+    }
     for (subsection_idx, sub) in mf33.subsections.iter().enumerate() {
         rows.push_subsection(mt, subsection_idx, Some(mf33.mtl), sub);
     }
+    Ok(())
 }
 
-/// Write `covariance.arrow`, one row per covariance block.
+/// Write `covariance.arrow`, one row per covariance block, plus one per
+/// lumped reaction's component HEAD.
 ///
 /// Returns whether a file was written. An evaluation with no MF=33 at all, or
-/// one whose MF=33 sections hold no blocks, writes nothing: absence is how this
-/// section says "no covariance", and the reader treats a missing file that way
-/// rather than as an error. No `.absent` marker is written here, since that is
-/// a download-cache record of a settled 404 rather than anything a conversion
-/// produces.
+/// one whose MF=33 sections hold no blocks and name no lumped reaction, writes
+/// nothing: absence is how this section says "no covariance", and the reader
+/// treats a missing file that way rather than as an error. No `.absent` marker
+/// is written here, since that is a download-cache record of a settled 404
+/// rather than anything a conversion produces.
 pub fn write_covariance(material: &Material, dir: &Path) -> Result<bool, Box<dyn Error>> {
     let mut rows = CovarianceRows::default();
     for mt in covariance_mts(material) {
         if let Some(mf33) = material.mf33(mt) {
-            push_section(&mut rows, mt, mf33);
+            push_section(&mut rows, material.mat, mt, mf33)?;
         }
     }
 
@@ -359,4 +414,30 @@ pub fn write_covariance(material: &Material, dir: &Path) -> Result<bool, Box<dyn
     columns.push(opt_ints(&vec![Some(material.mat); rows.len()]));
     write_section(&dir.join("covariance.arrow"), "covariance.arrow", columns)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use endf::mf::covariance::Mf33Subsection;
+
+    /// A lumped reaction's component is its HEAD alone. One that also carries
+    /// subsections is out of format and refused, not written as blocks whose
+    /// lump the fold would never see.
+    #[test]
+    fn a_component_with_subsections_is_refused() {
+        let mut rows = CovarianceRows::default();
+        let head = Mf33 {
+            mtl: 852,
+            ..Mf33::default()
+        };
+        push_section(&mut rows, 7443, 16, &head).expect("a HEAD alone is a component");
+        assert_eq!(rows.mtl, [Some(852)]);
+        let with_blocks = Mf33 {
+            subsections: vec![Mf33Subsection::default()],
+            ..head
+        };
+        let err = push_section(&mut rows, 7443, 16, &with_blocks).unwrap_err();
+        assert!(err.to_string().contains("NL=0"), "{err}");
+    }
 }

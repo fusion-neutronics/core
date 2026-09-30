@@ -454,6 +454,15 @@ pub fn compton() -> Schema {
 /// `distributions.arrow` uses `type`: `"ni"` for a covariance given explicitly,
 /// where `lb` selects the layout again within it, and `"nc"` for one derived
 /// from other reactions. Everything not belonging to a row's variant is null.
+///
+/// `"lumped"` is the one row that is not a block. ENDF-102 33.2.3 writes a
+/// component of a lumped reaction as a section with only its HEAD record,
+/// `[MAT, 33, MT / ZA, AWR, 0, MTL, 0, NL=0]`, and that record is the only
+/// place the format says which reactions a lumped MT 851-870 is the sum of.
+/// Such a section has no blocks and so no other row, and it is written as
+/// one row carrying `mt`, `mtl` and `mat`, with both indices 0 and every
+/// other column null. The lumped reactions of an evaluation are therefore
+/// exactly its `"lumped"` rows grouped by `mtl`.
 pub fn covariance() -> Schema {
     Schema::new(vec![
         // Which pair of reactions this block belongs to. Rows are written in
@@ -469,7 +478,8 @@ pub fn covariance() -> Schema {
         f64("xlfs1", true),
         // MTL from the section HEAD: the reaction this one is lumped into, 0
         // when it is not lumped. Per section rather than per block, so it
-        // repeats across a section's rows.
+        // repeats across a section's rows. Nonzero on a "lumped" row, which
+        // is the component's whole section.
         i32("mtl", true),
         // kind = "ni". `lb` selects which of the rest are populated: 0-2 use
         // `lt` (always 0), `np` and the first (E, F) table, `ek`/`fk`; 3 and 4

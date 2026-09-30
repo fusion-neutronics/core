@@ -292,6 +292,20 @@ pub struct Info {
     /// MeV and thousands of percent near threshold. The tape's literal
     /// statement, so reported rather than altered, and counted as a gap.
     pub derived_opposing_uncorrelated: BTreeMap<(String, String), BTreeSet<(String, String)>>,
+    /// Per (nuclide, lumped MT), a lumped reaction (MT 851-870) with several
+    /// components, whose covariance ENDF-102 33.2.3 states for their sum and
+    /// for none of them, with the components by kind (`MT<n>` for one that
+    /// is not a channel). A lump with a single component is that component
+    /// and is folded as its covariance, and a lump an LTY=0 block names is
+    /// folded through that derivation, with its cross section the sum of its
+    /// components' (ENDF/B-VIII.1 and TENDL-2017 U235 and U238 MT 4 is MT 51
+    /// plus MT 851). Listed only where neither holds, since giving the sum's
+    /// covariance to a component would be an assumption, for a lump with
+    /// blocks of its own where the fold reaches a component, or the redundant
+    /// reaction holding one as a level: ENDF/B-VIII.1, FENDL-3.2d and
+    /// JEFF-4.0 W180 to W186 give `(n,2n)` only as MT 852, the sum of MT 16
+    /// and 41. Counted as a gap.
+    pub lumped_covariance_not_assignable: BTreeMap<(String, i32), BTreeSet<String>>,
     /// Mean of the per-channel shares in [`Info::rate_fraction_covered`],
     /// weighted by the production each channel drove (the rate this run used
     /// times parent density): the share of the production driven from
@@ -468,13 +482,15 @@ pub struct Info {
     /// the data carries an uncertainty for it or not. MF=33 blocks that were
     /// present but could not be used are counted in `skipped_cross_material`,
     /// `skipped_other_file`, `skipped_nc`, `unsupported_layouts` and
-    /// `malformed_blocks`. A pair stored in both orientations is used once,
-    /// and a second copy that disagrees with the first is reported in
-    /// `mirrored_disagree`. A block on a reaction the fold does not reach
-    /// (neither a channel nor one a channel's NC derivation names) is neither
-    /// listed nor counted: the chain has no rate for it to be the uncertainty
-    /// of. A partial-level section such as MT=600-849 is reached, and its
-    /// blocks folded and counted, when an LTY=0 NC block names it.
+    /// `malformed_blocks`, and lumped reactions that could not be given to a
+    /// reaction in `lumped_covariance_not_assignable`. A pair stored in both
+    /// orientations is used once, and a second copy that disagrees with the
+    /// first is reported in `mirrored_disagree`. A block on a reaction the
+    /// fold does not reach (neither a channel nor one a channel's NC
+    /// derivation names) is neither listed nor counted: the chain has no rate
+    /// for it to be the uncertainty of. A partial-level section such as
+    /// MT=600-849 is reached, and its blocks folded and counted, when an LTY=0
+    /// NC block names it.
     pub not_perturbed: Vec<String>,
     /// Which sources this run perturbed, by name.
     pub sources: Vec<String>,
@@ -506,6 +522,7 @@ impl Info {
             partials_above_rate: coverage.partials_above_rate.clone(),
             partials_below_rate: coverage.partials_below_rate.clone(),
             derived_opposing_uncorrelated: coverage.derived_opposing_uncorrelated.clone(),
+            lumped_covariance_not_assignable: coverage.lumped_covariance_not_assignable.clone(),
             rate_fraction_covered_total: total.filter(|_| {
                 collapsed_flat
                     && coverage.partials_above_rate.is_empty()
@@ -527,7 +544,7 @@ impl Info {
                 "covariance with another evaluation (MAT1 naming another material)",
                 "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
                 "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, or LTY=0 in skipped_nc)",
-                "lumped-reaction covariance (MF=33 MT=851-870)",
+                "lumped-reaction covariance of several components no derivation names (MF=33 MT=851-870, in lumped_covariance_not_assignable)",
                 "resonance-parameter covariance (MF=32)",
                 "decay photon line energy and intensity (MF=8 MT=457)",
                 "decay photon continuum normalisation and shape (MF=8 MT=457 continuum and its covariance)",
@@ -567,6 +584,7 @@ impl Info {
             || !self.partials_above_rate.is_empty()
             || !self.partials_below_rate.is_empty()
             || !self.derived_opposing_uncorrelated.is_empty()
+            || !self.lumped_covariance_not_assignable.is_empty()
             || !self.covariance_repaired.is_empty()
             || !self.covariance_repaired_outside_bound.is_empty()
             || self.spectra_without_flux_sigma > 0
@@ -1201,6 +1219,32 @@ mod tests {
         );
     }
 
+    /// A lumped reaction the fold could not give to any reaction reaches the
+    /// report as it is, and is a gap by itself.
+    #[test]
+    fn an_unassignable_lump_is_carried_into_the_report_as_a_gap() {
+        let lump = (
+            ("W186".to_string(), 852),
+            BTreeSet::from(["(n,2n)".to_string(), "(n,2np)".to_string()]),
+        );
+        let coverage = Coverage {
+            lumped_covariance_not_assignable: BTreeMap::from([lump]),
+            ..Default::default()
+        };
+        let info =
+            Info::from_fold(&coverage, &SigmaReport::default(), true).expect("shares are shares");
+        assert_eq!(
+            info.lumped_covariance_not_assignable,
+            coverage.lumped_covariance_not_assignable
+        );
+        assert!(info.has_gaps());
+        assert!(
+            !Info::from_fold(&Coverage::default(), &SigmaReport::default(), true)
+                .expect("shares are shares")
+                .has_gaps()
+        );
+    }
+
     /// A repair a draw can move is a gap: the sampled spread is wider than
     /// the evaluation's. One on two spectra is one repaired nuclide.
     #[test]
@@ -1301,7 +1345,7 @@ mod tests {
             "covariance with another evaluation (MAT1 naming another material)",
             "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
             "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, or LTY=0 in skipped_nc)",
-            "lumped-reaction covariance (MF=33 MT=851-870)",
+            "lumped-reaction covariance of several components no derivation names (MF=33 MT=851-870, in lumped_covariance_not_assignable)",
             "resonance-parameter covariance (MF=32)",
             "decay photon line energy and intensity (MF=8 MT=457)",
             "photon attenuation coefficient (XCOM)",

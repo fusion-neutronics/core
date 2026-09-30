@@ -409,7 +409,7 @@ fn o16_na_above_800s_grid_covers_only_the_stating_partials() {
         .filter(|b| b.mt == 800 && b.partner_mt() == 800)
         .filter_map(|b| match &b.data {
             CovarianceData::Ni(ni) => expand_ni(ni).ok(),
-            CovarianceData::Nc(_) => None,
+            CovarianceData::Nc(_) | CovarianceData::Lumped => None,
         })
         .flat_map(|e| e.row_energies.last().copied())
         .fold(0.0, f64::max);

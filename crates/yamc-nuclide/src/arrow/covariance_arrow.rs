@@ -100,6 +100,7 @@ pub fn read_covariance(
             &batch,
             row,
             &format!("{nuclide} covariance.arrow"),
+            true,
         )?);
     }
 
@@ -108,20 +109,28 @@ pub fn read_covariance(
 
 /// One row's block, in the columns `covariance.arrow` and
 /// `branching_covariance.arrow` share. `what` names the file in errors.
+/// `lumped` is whether a lumped reaction's component row (`kind = "lumped"`)
+/// may appear, which only MF=33 has: MF=40 has no MTL.
 fn block_from_row(
     batch: &arrow_array::RecordBatch,
     row: usize,
     what: &str,
+    lumped: bool,
 ) -> Result<CovarianceBlock, Box<dyn Error>> {
     let kind = get_str(batch, "kind", row)?;
     let data = match kind.as_str() {
         "ni" => CovarianceData::Ni(ni_from_row(batch, row)),
         "nc" => CovarianceData::Nc(nc_from_row(batch, row)),
+        "lumped" if lumped => CovarianceData::Lumped,
         other => {
-            return Err(format!(
-                "{what} row {row}: unknown kind {other:?}; expected \"ni\" or \"nc\""
-            )
-            .into())
+            let expected = if lumped {
+                "\"ni\", \"nc\" or \"lumped\""
+            } else {
+                "\"ni\" or \"nc\""
+            };
+            return Err(
+                format!("{what} row {row}: unknown kind {other:?}; expected {expected}").into(),
+            );
         }
     };
     Ok(CovarianceBlock {
@@ -191,7 +200,7 @@ pub fn branching_covariance_blocks(
                 qi: float("qi")?,
                 izap: int("izap")?,
                 lfs: int("lfs")?,
-                block: block_from_row(batch, row, &what)?,
+                block: block_from_row(batch, row, &what, false)?,
             });
         }
     }
