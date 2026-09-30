@@ -59,9 +59,10 @@ pub struct FissionYields {
     pub energy: f64,
     pub nn: i64,
     pub nfp: i64,
-    /// LE+1 for the first energy, the interpolation scheme for the rest. The
-    /// format overloads the same field, and so does the Python reader, which
-    /// keys it `LE` on the first entry and `I` on the others.
+    /// LE for the first energy (the HEAD holds LE+1), the interpolation
+    /// scheme from the previous energy for the rest. The format overloads the
+    /// same field, and so does the Python reader, which keys it `LE` on the
+    /// first entry and `I` on the others.
     pub le_or_interpolation: i64,
     pub products: Vec<FissionProduct>,
 }
