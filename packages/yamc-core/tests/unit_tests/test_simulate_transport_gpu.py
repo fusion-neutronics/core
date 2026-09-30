@@ -833,10 +833,10 @@ def test_simulate_transport_invalid_compute():
 
 
 def test_max_steps_per_particle_default_is_100000():
-    # The default was raised 1000 -> 100_000 (d743159): the GPU kernel
-    # enforces the cap as a hard loop bound, and a 14 MeV neutron in a
-    # weak absorber (pure H2) needs many hundreds of elastic collisions
-    # before leaking, so the old cap truncated ~10% of the track length.
+    # The GPU kernel enforces the cap as a hard loop bound, and a 14 MeV
+    # neutron in a weak absorber (pure H2) needs many hundreds of elastic
+    # collisions before leaking, so a cap of 1000 would truncate ~10% of the
+    # track length.
     _, model, _ = _build_model_with_flux_tally(total_particles=50)
     assert model.gpu_max_steps_per_particle == 100_000
 

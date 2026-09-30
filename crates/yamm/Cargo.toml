@@ -5,10 +5,10 @@
 # / OCC-free / transport-neutral; yamc's bindings live in
 # crates/yamc-python/src/{cad,cad_scene}.rs.
 #
-# Sync point: cad-to-dagmc-mesher v0.3.0 (upstream 276cd6c). `src/` differs from
+# Sync point: cad-to-dagmc-mesher v0.3.0. `src/` differs from
 # upstream only in comments -- transport-facing wording in volume/{mod,types}.rs
 # and this repo's ASCII/banner house style. To re-sync, three-way merge each
-# file with the recorded upstream commit as the base, which keeps those local
+# file with upstream's v0.3.0 as the base, which keeps those local
 # edits; do not copy upstream's files over the top.
 [package]
 name = "yamm"
