@@ -17,8 +17,23 @@ use yamc::geometry::Geometry;
 use yamc::model::{Model, TransportSettings};
 use yamc_materials::Material;
 use yamc_source::source::{ParticleSource, Source};
-use yani::{BranchCurve, BranchQuantity, BranchTable, ChainNuclide, ChainReaction};
+use yani::{BranchCurve, BranchQuantity, BranchState, BranchTable, ChainNuclide, ChainReaction};
 use yani_transmute::{Schedule, ScheduleStep};
+
+/// The converter's facts for a state whose list names its ground state
+/// (`complete`) or gives its isomers alone.
+fn facts(target: &str, complete: bool) -> Arc<[BranchState]> {
+    Arc::from(vec![BranchState {
+        mt: 102,
+        lfs: if target.contains("_m") { 1 } else { 0 },
+        lmf: Some(10),
+        list_complete: complete,
+        level_route: "energy".to_string(),
+        level_energy: 0.0,
+        level_energy_difference: Some(0.0),
+        mf3_cross_section: None,
+    }])
+}
 
 fn li6_model() -> Model {
     let sphere = Surface {
@@ -137,7 +152,7 @@ fn synthetic_branch() -> Arc<BranchTable> {
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![1.0e-5, 1.0e9],
                     values: vec![3.0, 3.0],
-                    states: Default::default(),
+                    states: facts("Li7", true),
                     normalisation: None,
                 },
                 BranchCurve {
@@ -145,7 +160,7 @@ fn synthetic_branch() -> Arc<BranchTable> {
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![1.0e-5, 1.0e9],
                     values: vec![1.0, 1.0],
-                    states: Default::default(),
+                    states: facts("Li7_m1", true),
                     normalisation: None,
                 },
             ],
@@ -226,7 +241,7 @@ fn coupled_branching_exact_for_ramp_partials() {
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![1.0e2, 5.0e5, 2.0e6],
                     values: vec![0.0, 3.0, 1.5],
-                    states: Default::default(),
+                    states: facts("Li7", true),
                     normalisation: None,
                 },
                 BranchCurve {
@@ -234,7 +249,7 @@ fn coupled_branching_exact_for_ramp_partials() {
                     quantity: BranchQuantity::CrossSection,
                     energy: vec![1.0e2, 5.0e5, 2.0e6],
                     values: vec![0.0, 1.0, 0.5],
-                    states: Default::default(),
+                    states: facts("Li7_m1", true),
                     normalisation: None,
                 },
             ],
@@ -264,7 +279,7 @@ fn coupled_branching_scores_mf9_yields() {
                     quantity: BranchQuantity::Yield,
                     energy: vec![1.0e-5, 1.0e9],
                     values: vec![0.75, 0.75],
-                    states: Default::default(),
+                    states: facts("Li7", true),
                     normalisation: None,
                 },
                 BranchCurve {
@@ -272,7 +287,7 @@ fn coupled_branching_scores_mf9_yields() {
                     quantity: BranchQuantity::Yield,
                     energy: vec![1.0e-5, 1.0e9],
                     values: vec![0.25, 0.25],
-                    states: Default::default(),
+                    states: facts("Li7_m1", true),
                     normalisation: None,
                 },
             ],
@@ -352,7 +367,7 @@ fn coupled_branching_folds_parents_outside_material() {
                 quantity: BranchQuantity::CrossSection,
                 energy: vec![1.0e-5, 1.0e9],
                 values: vec![0.5, 0.5], // flat 0.5 b
-                states: Default::default(),
+                states: facts("Li7_m1", true),
                 normalisation: None,
             }],
         );
@@ -368,6 +383,137 @@ fn coupled_branching_folds_parents_outside_material() {
     let nuclides = run(chain, Arc::new(BranchTable::new()));
     let li7m = nuclides.get("Li7_m1").copied().unwrap_or(0.0);
     assert_eq!(li7m, 0.0, "no overlay must mean no (n,n') production");
+}
+
+/// Li6 capture shaped as ENDF/B-VIII.1 gives In115's: the base chain carries
+/// the ground state at 1.0 and the isomer grafted at 0.0.
+fn isomer_only_chain() -> Arc<HashMap<String, ChainNuclide>> {
+    let mut map = (*synthetic_chain()).clone();
+    let li6 = map.get_mut("Li6").expect("Li6");
+    for rx in &mut li6.reactions {
+        rx.branching = if rx.target.as_deref() == Some("Li7") {
+            1.0
+        } else {
+            0.0
+        };
+    }
+    Arc::new(map)
+}
+
+fn only_the_isomer(curve: BranchCurve) -> Arc<BranchTable> {
+    let mut branch = BranchTable::new();
+    branch
+        .curves_mut()
+        .entry("Li6".to_string())
+        .or_default()
+        .insert("(n,gamma)".to_string(), vec![curve]);
+    Arc::new(branch)
+}
+
+/// An overlay listing only the isomer, the ground state being the remainder.
+/// A flat MF=9 yield of 0.2 is the isomer's share exactly, the yield channel
+/// and the total being scored against the same `sigma * TL`. Normalized over
+/// the one listed state, and then confined to the zero mass its grafted edge
+/// carried, it used to make no Li7_m1 at all.
+#[test]
+fn coupled_isomer_only_yield_is_a_share_of_the_tallied_total() {
+    let branch = only_the_isomer(BranchCurve {
+        target: "Li7_m1".to_string(),
+        quantity: BranchQuantity::Yield,
+        energy: vec![1.0e-5, 1.0e9],
+        values: vec![0.2, 0.2],
+        states: facts("Li7_m1", false),
+        normalisation: None,
+    });
+    let f = meta_fraction(&run(isomer_only_chain(), branch));
+    assert!(
+        (f - 0.2).abs() < 1e-9,
+        "expected the flat 0.2 yield as the isomer's share, got {f}"
+    );
+}
+
+/// An MF=10 partial at 0.2 of Li6's own capture cross section, on that cross
+/// section's grid up to `top` [eV].
+fn fifth_of_the_capture(top: f64) -> BranchCurve {
+    let mut li6 = Material::new(
+        HashMap::from([("Li6".to_string(), 1.0)]),
+        "atom",
+        "g/cc",
+        Some(0.5),
+    )
+    .unwrap();
+    li6.set_temperature("294");
+    li6.read_nuclear_data(
+        &HashMap::from([("Li6".to_string(), "tests/Li6.arrow".to_string())]),
+        None,
+    )
+    .unwrap();
+    let capture = &li6.nuclide_data["Li6"]
+        .reactions_for_temp("294")
+        .expect("Li6 at 294 K")[&102];
+    let (energy, values): (Vec<f64>, Vec<f64>) = capture
+        .energy
+        .iter()
+        .zip(capture.cross_section.iter())
+        .filter(|(e, _)| **e <= top)
+        .map(|(e, x)| (*e, 0.2 * x))
+        .unzip();
+    BranchCurve {
+        target: "Li7_m1".to_string(),
+        quantity: BranchQuantity::CrossSection,
+        energy,
+        values,
+        states: facts("Li7_m1", false),
+        normalisation: None,
+    }
+}
+
+/// The MF=10 form: a partial at 0.2 of Li6's capture cross section, on that
+/// cross section's grid, is 0.2 of the tallied total, and Li7 keeps the other
+/// 0.8.
+#[test]
+fn coupled_isomer_only_partial_is_a_share_of_the_tallied_total() {
+    let branch = only_the_isomer(fifth_of_the_capture(f64::INFINITY));
+    let f = meta_fraction(&run(isomer_only_chain(), branch));
+    assert!(
+        (f - 0.2).abs() < 1e-9,
+        "expected 0.2 of the capture total as the isomer's share, got {f}"
+    );
+}
+
+/// The same partial stopping at 10 keV, under a 1 MeV source whose flux runs
+/// on above it. Past its last point an isomer-only partial follows the tallied
+/// total at the share it ends on, and that is the evaluation's fraction held,
+/// not its data. Here most of the capture lies above 10 keV, so the run is
+/// refused and says why, where it used to answer 0.2 on the held share alone.
+#[test]
+fn coupled_isomer_only_partial_past_its_last_point_is_refused() {
+    let branch = only_the_isomer(fifth_of_the_capture(1.0e4));
+    let mut model = li6_model();
+    let schedule = Schedule::new(vec![ScheduleStep {
+        rate: 1.0e12,
+        dt: 3600.0,
+        is_pulse: true,
+    }])
+    .unwrap();
+    let settings = TransportSettings {
+        total_particles: Some(2000),
+        ..Default::default()
+    };
+    let err = model
+        .transmute(
+            "coupled",
+            &schedule,
+            isomer_only_chain(),
+            branch,
+            Default::default(),
+            &settings,
+            None,
+        )
+        .expect_err("refused")
+        .to_string();
+    assert!(err.contains("Li6 (n,gamma)"), "{err}");
+    assert!(err.contains("tabulates no split"), "{err}");
 }
 
 /// A metastable the overlay grafts onto the chain enters it at branching 0.0,

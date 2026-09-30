@@ -5711,6 +5711,52 @@ class TransmutationResults:
             {'parent': 'W186', 'reaction': '(n,2n)', 'production': 9.35e-14,
              'split': [('W185_m1', 0.535), ('W185', 0.465)]}
         """
+    def get_branching_report(self, material_id: builtins.int, step: builtins.int) -> typing.Optional[dict]:
+        r"""
+        What the isomeric-branching rule did over one step's spectrum.
+        
+        The branching evaluation gives the split and the cross-section library
+        the total. How a list's values are read is decided by how the
+        evaluation gives them, which the converter records: a complete MF=10
+        list (its ground state listed) and every MF=9 list are shares of the
+        transport total, applied at each energy; an MF=10 list of isomers only,
+        and every ``(n,n')`` list, are absolute productions, the ground state
+        taking the rest. This says, per channel, which of those applied and how
+        much of the parent's removal rate rests on anything the evaluation
+        does not give.
+        
+        A run refuses when a channel's clipped or held production is more than
+        0.1% of that parent's neutron removal rate, so what comes back here is
+        below that. MT=5's share is reported whatever its size: its products
+        are not modelled yet.
+        
+        Args:
+            material_id: Material ID number.
+            step: Schedule step index, as ``get_reaction_rates`` takes it.
+        
+        Returns:
+            dict | None: ``channels``, ``dropped`` and ``unmodelled_mt5``, or
+            None if the material or the step is unknown. Each channel has
+            ``parent``, ``reaction``, ``mt``, ``file`` (9 or 10),
+            ``representation`` (``"share"`` or ``"absolute"``), ``complete``,
+            ``completeness_source``, ``denominator``, ``states`` (each with
+            ``target``, ``lfs``, ``level_route``, ``level_energy_difference``
+            and ``share``, its share of the reaction), ``removal_share`` (the
+            reaction's share of the parent's removal rate), ``clipped_share``
+            and ``extrapolated_share`` (of the same removal rate),
+            ``own_total_excess`` (``(energy_ev, ratio)`` where the listed values
+            most exceed the evaluation's own total, or None) and
+            ``normalisation``. Each dropped channel has ``parent``,
+            ``reaction``, ``target``, ``reason`` and ``removal_share`` (None
+            where it cannot be folded). ``unmodelled_mt5`` is
+            ``[(nuclide, share)]``, MT=5's share of each parent's removal
+            rate, largest first. Empty for a decay-only step.
+        
+        Examples:
+            >>> report = results.get_branching_report(material_id=1, step=0)
+            >>> report["channels"][0]["representation"]
+            'absolute'
+        """
     def get_production_routes(self, material_id: builtins.int, product: builtins.str, step: builtins.int, reaction_depth: builtins.int = 1, decay_depth: builtins.int = 3) -> typing.Optional[typing.Any]:
         r"""
         Every way a product was made over one step, weighted by how much of it
