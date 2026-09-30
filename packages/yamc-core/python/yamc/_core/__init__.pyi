@@ -6192,8 +6192,9 @@ def combine_results(*results: typing.Any) -> SimulationResults:
       source, physics settings and nuclear-data libraries -- library
       mismatches are reported per nuclide);
     - tallies with the same name must have identical configurations;
-    - GPU-produced and non-root MPI results are refused (no complete
-      Welford merge state).
+    - GPU-produced results are refused (no Welford merge state), as are
+      non-root MPI results (every rank holds the same statistics, so a
+      non-root result would count the run twice).
     
     Tallies present in only some inputs are carried through unchanged
     with a ``UserWarning`` (their statistics come from the runs that
