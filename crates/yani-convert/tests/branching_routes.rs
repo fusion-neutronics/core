@@ -43,13 +43,14 @@ fn routes_are_counted_and_excited_levels_taken_as_ground_are_flagged() {
         material(fixture!("dec-049_In_116m1.endf.xz")),
         material(fixture!("dec-049_In_116m2.endf.xz")),
     ];
-    let (rows, stats) = yani_convert::branching::extract_branching(
-        &neutron,
-        &decay,
-        endf::radionuclide_production::ISOMER_ENERGY_TOLERANCE,
-        yani_convert::branching::DEFAULT_LINEARIZE_TOL,
-    )
-    .expect("branching extracts");
+    let yani_convert::branching::Extracted { rows, stats, .. } =
+        yani_convert::branching::extract_branching(
+            &neutron,
+            &decay,
+            endf::radionuclide_production::ISOMER_ENERGY_TOLERANCE,
+            yani_convert::branching::DEFAULT_LINEARIZE_TOL,
+        )
+        .expect("branching extracts");
     assert!(!rows.is_empty());
     assert_eq!(stats.metastable_targets, vec!["In116_m1".to_string()]);
     assert_eq!(stats.level_routes.get("energy"), Some(&1));
@@ -80,13 +81,14 @@ fn a_zero_izap_is_named_by_mf8() {
         material(local_fixture!("dec-013_Al_026m1.endf.xz")),
         material(local_fixture!("dec-011_Na_024m1.endf.xz")),
     ];
-    let (rows, stats) = yani_convert::branching::extract_branching(
-        &neutron,
-        &decay,
-        endf::radionuclide_production::ISOMER_ENERGY_TOLERANCE,
-        yani_convert::branching::DEFAULT_LINEARIZE_TOL,
-    )
-    .expect("branching extracts");
+    let yani_convert::branching::Extracted { rows, stats, .. } =
+        yani_convert::branching::extract_branching(
+            &neutron,
+            &decay,
+            endf::radionuclide_production::ISOMER_ENERGY_TOLERANCE,
+            yani_convert::branching::DEFAULT_LINEARIZE_TOL,
+        )
+        .expect("branching extracts");
 
     let found: Vec<(&str, &str, &str)> = rows
         .iter()
@@ -153,13 +155,14 @@ fn a_zero_izap_mf8_does_not_name_is_skipped_with_its_reason() {
         material(local_fixture!("dec-013_Al_026m1.endf.xz")),
         material(local_fixture!("dec-011_Na_024m1.endf.xz")),
     ];
-    let (rows, stats) = yani_convert::branching::extract_branching(
-        std::slice::from_ref(&al27),
-        &decay,
-        endf::radionuclide_production::ISOMER_ENERGY_TOLERANCE,
-        yani_convert::branching::DEFAULT_LINEARIZE_TOL,
-    )
-    .expect("branching extracts");
+    let yani_convert::branching::Extracted { rows, stats, .. } =
+        yani_convert::branching::extract_branching(
+            std::slice::from_ref(&al27),
+            &decay,
+            endf::radionuclide_production::ISOMER_ENERGY_TOLERANCE,
+            yani_convert::branching::DEFAULT_LINEARIZE_TOL,
+        )
+        .expect("branching extracts");
 
     let found: Vec<(&str, &str)> = rows
         .iter()
