@@ -15,9 +15,12 @@ path = "src/lib.rs"
 endf = { path = "../endf" }
 nuclear-data-schema = { path = "../nuclear-data-schema" }
 # The redundant-MT sums (`yamc_nuclide::synthesis`) are shared with the
-# loader, which builds the transport lookup from them at load time. No
-# features: the sums need the ENDF summation rules and nothing of the reader.
-yamc-nuclide = { path = "../yamc-nuclide", default-features = false }
+# loader, which builds the transport lookup from them at load time. `arrow` is
+# on because yamc-nuclide does not build without its reader: the lazy loads
+# behind `Nuclide`'s accessors go through it. Inside the workspace another
+# crate usually turns it on, so leaving it off here only fails when this crate
+# is built alone, as `cargo run -p yamc-convert --bin split_energy` does.
+yamc-nuclide = { path = "../yamc-nuclide", default-features = false, features = ["arrow"] }
 arrow-array = "60"
 arrow-schema = "60"
 arrow-ipc = { version = "60", features = ["lz4"] }
@@ -30,8 +33,8 @@ yamc-test-cache = { path = "../yamc-test-cache" }
 lzma-rs = "0.3"
 tempfile = "3"
 # The reader is the only judge that matters: a conversion can satisfy every
-# schema and still produce something yamc refuses to load. The tests need the
-# reader itself, which the library dependency above deliberately leaves out.
+# schema and still produce something yamc refuses to load. The tests drive the
+# reader directly, and the ranged download below.
 yamc-nuclide = { path = "../yamc-nuclide", default-features = false, features = [
     "arrow",
     # The ranged-download test drives the real loader against a local origin.
