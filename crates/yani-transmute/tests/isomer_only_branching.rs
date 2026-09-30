@@ -162,7 +162,7 @@ fn isomer_only(mt: i32) -> Arc<[BranchState]> {
 fn branch() -> BranchTable {
     let (e16, xs16) = n2n();
     let mut branch = BranchTable::new();
-    let kinds = branch.entry("In115".to_string()).or_default();
+    let kinds = branch.curves_mut().entry("In115".to_string()).or_default();
     kinds.insert(
         "(n,gamma)".to_string(),
         vec![BranchCurve {

@@ -232,10 +232,14 @@ fn build_moment_curves(
     let mut curves_out = Vec::new();
     // Sort parents so curve order (and thus extraction-time summation order)
     // is deterministic across runs.
-    let mut parents: Vec<&String> = branch.keys().filter(|p| chain.contains_key(*p)).collect();
+    let mut parents: Vec<&String> = branch
+        .curves()
+        .keys()
+        .filter(|p| chain.contains_key(*p))
+        .collect();
     parents.sort();
     for parent in parents {
-        let Some(curves) = branch[parent].get(INELASTIC) else {
+        let Some(curves) = branch.curves()[parent].get(INELASTIC) else {
             continue;
         };
         for c in curves {
@@ -369,7 +373,7 @@ fn build_lists(
             .get(name)
             .and_then(|nd| nd.reactions_for_temp(material.temperature()));
         if let (Some(kinds), Some(reactions), Some(chain_nuclide)) =
-            (branch.get(name), reactions, chain.get(name))
+            (branch.curves().get(name), reactions, chain.get(name))
         {
             let mut kind_names: Vec<&String> = kinds.keys().collect();
             kind_names.sort();
@@ -543,7 +547,11 @@ impl TransmutationTallies {
                 if has(MT_ANYTHING) {
                     mt_set.insert(MT_ANYTHING);
                 }
-                if branch.get(name).is_some_and(|k| k.contains_key(INELASTIC)) && has(MT_INELASTIC)
+                if branch
+                    .curves()
+                    .get(name)
+                    .is_some_and(|k| k.contains_key(INELASTIC))
+                    && has(MT_INELASTIC)
                 {
                     mt_set.insert(MT_INELASTIC);
                 }
@@ -1913,7 +1921,7 @@ mod tests {
 
     fn one_bin_tally_with_branch(branch: &BranchTable) -> TransmutationTallies {
         let mut chain: HashMap<String, ChainNuclide> = HashMap::new();
-        for parent in branch.keys() {
+        for parent in branch.curves().keys() {
             chain.insert(
                 parent.clone(),
                 ChainNuclide {
@@ -2046,23 +2054,31 @@ mod tests {
             normalisation: None,
         };
         let mut branch = BranchTable::new();
-        branch.entry("U238".to_string()).or_default().insert(
-            "(n,n')".to_string(),
-            vec![
-                partial("U238_m1", vec![1.0e6, 3.0e6, 5.0e6], vec![0.0, 2.0, 1.0]),
-                partial("U238_m2", vec![1.0e5, 3.0e6], vec![0.5, 0.5]),
-            ],
-        );
+        branch
+            .curves_mut()
+            .entry("U238".to_string())
+            .or_default()
+            .insert(
+                "(n,n')".to_string(),
+                vec![
+                    partial("U238_m1", vec![1.0e6, 3.0e6, 5.0e6], vec![0.0, 2.0, 1.0]),
+                    partial("U238_m2", vec![1.0e5, 3.0e6], vec![0.5, 0.5]),
+                ],
+            );
         // Second parent whose breakpoints interleave with U238's, so the
         // union grid subdivides U238's segments.
-        branch.entry("Am241".to_string()).or_default().insert(
-            "(n,n')".to_string(),
-            vec![partial(
-                "Am241_m1",
-                vec![5.0e5, 2.0e6, 4.0e6],
-                vec![0.1, 0.3, 0.2],
-            )],
-        );
+        branch
+            .curves_mut()
+            .entry("Am241".to_string())
+            .or_default()
+            .insert(
+                "(n,n')".to_string(),
+                vec![partial(
+                    "Am241_m1",
+                    vec![5.0e5, 2.0e6, 4.0e6],
+                    vec![0.1, 0.3, 0.2],
+                )],
+            );
         branch
     }
 
@@ -2172,19 +2188,27 @@ mod tests {
             normalisation: None,
         };
         let mut branch = BranchTable::new();
-        branch.entry("Ag109".to_string()).or_default().insert(
-            "(n,n')".to_string(),
-            vec![
-                partial("Ag109", vec![1.0, 2.0], vec![1.0, 1.0]), // self row
-                partial("Ag109_m1", vec![1.0, 2.0], vec![1.0, 1.0]),
-                partial("Ag109_m2", vec![], vec![]), // malformed
-                partial("Ag109_m3", vec![1.0, 2.0], vec![1.0]), // mismatched
-            ],
-        );
-        branch.entry("Ag107".to_string()).or_default().insert(
-            "(n,2n)".to_string(),
-            vec![partial("Ag106_m1", vec![1.0, 2.0], vec![1.0, 1.0])],
-        );
+        branch
+            .curves_mut()
+            .entry("Ag109".to_string())
+            .or_default()
+            .insert(
+                "(n,n')".to_string(),
+                vec![
+                    partial("Ag109", vec![1.0, 2.0], vec![1.0, 1.0]), // self row
+                    partial("Ag109_m1", vec![1.0, 2.0], vec![1.0, 1.0]),
+                    partial("Ag109_m2", vec![], vec![]), // malformed
+                    partial("Ag109_m3", vec![1.0, 2.0], vec![1.0]), // mismatched
+                ],
+            );
+        branch
+            .curves_mut()
+            .entry("Ag107".to_string())
+            .or_default()
+            .insert(
+                "(n,2n)".to_string(),
+                vec![partial("Ag106_m1", vec![1.0, 2.0], vec![1.0, 1.0])],
+            );
         let chain: HashMap<String, ChainNuclide> = ["Ag109", "Ag107"]
             .into_iter()
             .map(|p| {
@@ -2819,6 +2843,7 @@ mod tests {
         }
         let mut branch = BranchTable::new();
         branch
+            .curves_mut()
             .entry("In115".to_string())
             .or_default()
             .insert("(n,2n)".to_string(), curves);
@@ -2971,7 +2996,13 @@ mod tests {
     fn a_partial_above_the_total_is_clipped_and_measured() {
         let material = indium_n2n(vec![1.0e7, 2.0e7], vec![2.0, 2.0]);
         let (chain, mut branch) = isomer_only_n2n(false);
-        for c in branch.get_mut("In115").unwrap().get_mut("(n,2n)").unwrap() {
+        for c in branch
+            .curves_mut()
+            .get_mut("In115")
+            .unwrap()
+            .get_mut("(n,2n)")
+            .unwrap()
+        {
             c.values = vec![3.0, 3.0];
         }
         let t = one_material_tally(&material, &chain, &branch);

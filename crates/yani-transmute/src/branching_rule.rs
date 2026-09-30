@@ -582,7 +582,7 @@ pub(crate) fn build_lists<'a>(
     branch: &'a yani::BranchTable,
 ) -> Result<Lists<'a>, String> {
     let mut out: Lists<'a> = HashMap::new();
-    for (parent, kinds) in branch {
+    for (parent, kinds) in branch.curves() {
         if !chain.contains_key(parent) {
             continue;
         }

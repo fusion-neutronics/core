@@ -7,6 +7,7 @@ use std::error::Error;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use arrow_array::RecordBatch;
 use once_cell::sync::Lazy;
 
 use crate::continuum::{Continuum, Interpolation, UnreadableContinuum};
@@ -178,9 +179,54 @@ pub struct BranchState {
 }
 
 /// Isomeric-branching curves keyed by parent nuclide then reaction kind.
-/// `branch_table[parent][kind]` is the list of per-final-state curves for that
-/// reaction. Empty when no `branching/` subsection was supplied.
-pub type BranchTable = HashMap<String, HashMap<String, Vec<BranchCurve>>>;
+/// `branch_table.curves()[parent][kind]` is the list of per-final-state curves
+/// for that reaction. Empty when no `branching/` subsection was supplied.
+///
+/// The table also holds the subsection's `branching_covariance.arrow`, the
+/// MF=40 covariance of the MF=10 partials, when the subsection carries one.
+/// That is kept as the file's record batches, schema-checked and otherwise
+/// as written: it is every MF=40 block of the library, not only those of this
+/// chain's parents, and turning a row into a covariance block is the
+/// covariance reader's job (`yamc-nuclide`), which this crate does not depend
+/// on. Nothing here reads it, so the curves and every nominal result are what
+/// they are without it.
+#[derive(Clone, Debug, Default)]
+pub struct BranchTable {
+    curves: HashMap<String, HashMap<String, Vec<BranchCurve>>>,
+    covariance: Option<Vec<RecordBatch>>,
+}
+
+impl BranchTable {
+    /// An empty table with no covariance.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The per-final-state curves, `curves[parent][kind]`.
+    pub fn curves(&self) -> &HashMap<String, HashMap<String, Vec<BranchCurve>>> {
+        &self.curves
+    }
+
+    /// The curves, to add to or edit.
+    pub fn curves_mut(&mut self) -> &mut HashMap<String, HashMap<String, Vec<BranchCurve>>> {
+        &mut self.curves
+    }
+
+    /// The rows of `branching_covariance.arrow`, when the subsection has one.
+    ///
+    /// `None` for a library without MF=40 (JENDL-5.0), for a subsection
+    /// published before the file existed, and for a bytes-fed host that did not
+    /// hand the file over. None of those is an error: there is simply no
+    /// stated covariance of the isomeric split.
+    pub fn covariance(&self) -> Option<&[RecordBatch]> {
+        self.covariance.as_deref()
+    }
+
+    /// Attach the covariance batches read from the subsection.
+    pub fn set_covariance(&mut self, batches: Vec<RecordBatch>) {
+        self.covariance = Some(batches);
+    }
+}
 
 /// A parsed transmutation chain plus its optional isomeric-branching overlay.
 ///
@@ -763,7 +809,7 @@ where
     for (name, cn) in chain.iter() {
         // The overlay's fold rewrites the split of any reaction it has curves
         // for, so the chain's own branching is not a bound on those edges.
-        let overlay = branch.get(name);
+        let overlay = branch.curves().get(name);
         let mut overlay_bounds: HashMap<&str, HashMap<&str, f64>> = HashMap::new();
         for rx in &cn.reactions {
             let mut branching = rx.branching;
@@ -1686,7 +1732,7 @@ mod tests {
         );
         chain.insert("Li8".into(), nuc("Li8", None, vec![], vec![]));
         let mut branch = BranchTable::new();
-        branch.entry("Li6".into()).or_default().insert(
+        branch.curves_mut().entry("Li6".into()).or_default().insert(
             "(n,gamma)".into(),
             vec![
                 curve(
@@ -1731,7 +1777,7 @@ mod tests {
             "Li6",
             &chain["Li6"],
             "(n,gamma)",
-            &branch["Li6"]["(n,gamma)"],
+            &branch.curves()["Li6"]["(n,gamma)"],
         );
         assert_eq!(bounds["Li7_m1"], 0.25);
         assert_eq!(bounds["Li7"], 0.75);
@@ -1745,12 +1791,18 @@ mod tests {
         let li6 = chain.get_mut("Li6").unwrap();
         li6.reactions[0].branching = 0.9;
         li6.reactions[1].branching = 0.1;
-        branch.get_mut("Li6").unwrap().get_mut("(n,gamma)").unwrap()[0].values = vec![1.0, 1.0];
+        branch
+            .curves_mut()
+            .get_mut("Li6")
+            .unwrap()
+            .get_mut("(n,gamma)")
+            .unwrap()[0]
+            .values = vec![1.0, 1.0];
         let bounds = overlay_branching_bounds(
             "Li6",
             &chain["Li6"],
             "(n,gamma)",
-            &branch["Li6"]["(n,gamma)"],
+            &branch.curves()["Li6"]["(n,gamma)"],
         );
         assert_eq!(bounds["Li7_m1"], 0.5);
     }
@@ -1798,14 +1850,19 @@ mod tests {
         // twice the chain's mass on Li7: neither the pointwise ratio nor the
         // mass bounds that, and only an unbounded edge stays a bound.
         let (chain, mut branch) = grafted_capture();
-        let curves = branch.get_mut("Li6").unwrap().get_mut("(n,gamma)").unwrap();
+        let curves = branch
+            .curves_mut()
+            .get_mut("Li6")
+            .unwrap()
+            .get_mut("(n,gamma)")
+            .unwrap();
         curves[0].values = vec![2.0, 2.0];
         curves[1].values = vec![-1.0, -1.0];
         let bounds = overlay_branching_bounds(
             "Li6",
             &chain["Li6"],
             "(n,gamma)",
-            &branch["Li6"]["(n,gamma)"],
+            &branch.curves()["Li6"]["(n,gamma)"],
         );
         assert_eq!(bounds["Li7"], f64::INFINITY);
         assert_eq!(bounds["Li7_m1"], f64::INFINITY);

@@ -207,27 +207,31 @@ fn branch() -> Arc<BranchTable> {
         }])
     };
     let mut branch = BranchTable::new();
-    branch.entry("In115".to_string()).or_default().insert(
-        "(n,gamma)".to_string(),
-        vec![
-            BranchCurve {
-                target: "In116".to_string(),
-                quantity: BranchQuantity::Yield,
-                energy: energy.clone(),
-                values: isomer.iter().map(|y| 1.0 - y).collect(),
-                states: facts(0),
-                normalisation: None,
-            },
-            BranchCurve {
-                target: "In116_m1".to_string(),
-                quantity: BranchQuantity::Yield,
-                energy,
-                values: isomer,
-                states: facts(1),
-                normalisation: None,
-            },
-        ],
-    );
+    branch
+        .curves_mut()
+        .entry("In115".to_string())
+        .or_default()
+        .insert(
+            "(n,gamma)".to_string(),
+            vec![
+                BranchCurve {
+                    target: "In116".to_string(),
+                    quantity: BranchQuantity::Yield,
+                    energy: energy.clone(),
+                    values: isomer.iter().map(|y| 1.0 - y).collect(),
+                    states: facts(0),
+                    normalisation: None,
+                },
+                BranchCurve {
+                    target: "In116_m1".to_string(),
+                    quantity: BranchQuantity::Yield,
+                    energy,
+                    values: isomer,
+                    states: facts(1),
+                    normalisation: None,
+                },
+            ],
+        );
     Arc::new(branch)
 }
 

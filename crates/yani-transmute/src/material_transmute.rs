@@ -84,7 +84,7 @@ pub fn activation_mts(
             }
         }
     }
-    for kinds in branch.values() {
+    for kinds in branch.curves().values() {
         for kind in kinds.keys() {
             if kind == INELASTIC {
                 mts.insert(MT_INELASTIC);
@@ -1457,7 +1457,12 @@ fn run_replicas(
         Default::default()
     };
 
-    let mut info = Info::from_fold(&coverage, &clipping, shielding.is_none() && !transport);
+    // The shares split each group's rate by energy width, which is the
+    // collapse's own split only under the flat within-group weight.
+    let dilute = shielding.is_none()
+        && !transport
+        && crate::multigroup::within_group_weight() == crate::multigroup::Weighting::FlatInEnergy;
+    let mut info = Info::from_fold(&coverage, &clipping, dilute)?;
     if half_life.is_none() {
         info.not_perturbed.insert(0, "half-life".to_string());
     }
@@ -2756,7 +2761,7 @@ pub fn apply_coupled_branching(
     let mut parents: Vec<&String> = partial_rates.keys().collect();
     parents.sort();
     for parent in parents {
-        let (Some(kinds), true) = (branch.get(parent), chain.contains_key(parent)) else {
+        let (Some(kinds), true) = (branch.curves().get(parent), chain.contains_key(parent)) else {
             continue;
         };
         let tallied_kinds = &partial_rates[parent];
@@ -2937,16 +2942,20 @@ mod tests {
             nuclide_entry("Pb204", vec![edge("(n,n')", "Pb204_m1", 1.0)]),
         )]));
         let mut branch: BranchTable = BranchTable::new();
-        branch.entry("Pb204".to_string()).or_default().insert(
-            "(n,n')".to_string(),
-            vec![curve(
-                "Pb204_m1",
-                BranchQuantity::CrossSection,
-                &[1.0, 1.0e8],
-                &[0.1, 0.1],
-                true,
-            )],
-        );
+        branch
+            .curves_mut()
+            .entry("Pb204".to_string())
+            .or_default()
+            .insert(
+                "(n,n')".to_string(),
+                vec![curve(
+                    "Pb204_m1",
+                    BranchQuantity::CrossSection,
+                    &[1.0, 1.0e8],
+                    &[0.1, 0.1],
+                    true,
+                )],
+            );
         let (rates, folded, report) =
             fold(&dummy_material(), &chain, &branch, &one_group(1.0, 1.0e8)).unwrap();
         let rate = rates["Pb204"]["(n,n')"];
@@ -2990,6 +2999,7 @@ mod tests {
         );
         legacy.states = Arc::from(Vec::new());
         branch
+            .curves_mut()
             .entry("In115".to_string())
             .or_default()
             .insert("(n,2n)".to_string(), vec![legacy]);
@@ -3012,25 +3022,29 @@ mod tests {
     /// X's `(n,2n)` as a complete MF=10 list naming both states.
     fn split_branch() -> BranchTable {
         let mut branch = BranchTable::new();
-        branch.entry("X".to_string()).or_default().insert(
-            "(n,2n)".to_string(),
-            vec![
-                curve(
-                    "X_g",
-                    BranchQuantity::CrossSection,
-                    &[1.0, 1.0e8],
-                    &[1.0, 1.0],
-                    true,
-                ),
-                curve(
-                    "X_m1",
-                    BranchQuantity::CrossSection,
-                    &[1.0, 1.0e8],
-                    &[1.0, 1.0],
-                    true,
-                ),
-            ],
-        );
+        branch
+            .curves_mut()
+            .entry("X".to_string())
+            .or_default()
+            .insert(
+                "(n,2n)".to_string(),
+                vec![
+                    curve(
+                        "X_g",
+                        BranchQuantity::CrossSection,
+                        &[1.0, 1.0e8],
+                        &[1.0, 1.0],
+                        true,
+                    ),
+                    curve(
+                        "X_m1",
+                        BranchQuantity::CrossSection,
+                        &[1.0, 1.0e8],
+                        &[1.0, 1.0],
+                        true,
+                    ),
+                ],
+            );
         branch
     }
 
@@ -3054,16 +3068,20 @@ mod tests {
             nuclide_entry("Pb204", vec![edge("(n,n')", "Pb204_m1", 1.0)]),
         )]));
         let mut branch = BranchTable::new();
-        branch.entry("Pb204".to_string()).or_default().insert(
-            "(n,n')".to_string(),
-            vec![curve(
-                "Pb204_m1",
-                BranchQuantity::CrossSection,
-                &[1.0, 1.0e8],
-                &[0.1, 0.1],
-                true,
-            )],
-        );
+        branch
+            .curves_mut()
+            .entry("Pb204".to_string())
+            .or_default()
+            .insert(
+                "(n,n')".to_string(),
+                vec![curve(
+                    "Pb204_m1",
+                    BranchQuantity::CrossSection,
+                    &[1.0, 1.0e8],
+                    &[0.1, 0.1],
+                    true,
+                )],
+            );
         let mut partials: PartialRates = HashMap::new();
         partials.entry("Pb204".to_string()).or_default().insert(
             "(n,n')".to_string(),
@@ -3133,21 +3151,25 @@ mod tests {
         };
         // The list as ENDF/B-VIII.1 gives it: Xe135 and Xe135_m1, complete.
         let mut branch = BranchTable::new();
-        branch.entry("La139".to_string()).or_default().insert(
-            "(n,d3He)".to_string(),
-            ["Xe135", "Xe135_m1"]
-                .iter()
-                .map(|t| {
-                    curve(
-                        t,
-                        BranchQuantity::CrossSection,
-                        &[1.0, 1.0e8],
-                        &[1.0, 1.0],
-                        true,
-                    )
-                })
-                .collect(),
-        );
+        branch
+            .curves_mut()
+            .entry("La139".to_string())
+            .or_default()
+            .insert(
+                "(n,d3He)".to_string(),
+                ["Xe135", "Xe135_m1"]
+                    .iter()
+                    .map(|t| {
+                        curve(
+                            t,
+                            BranchQuantity::CrossSection,
+                            &[1.0, 1.0e8],
+                            &[1.0, 1.0],
+                            true,
+                        )
+                    })
+                    .collect(),
+            );
         let mut partials: PartialRates = HashMap::new();
         partials.entry("La139".to_string()).or_default().insert(
             "(n,d3He)".to_string(),
@@ -3205,7 +3227,12 @@ mod tests {
     fn apply_partials_sums_duplicate_targets() {
         let chain = split_chain();
         let mut branch = split_branch();
-        let list = branch.get_mut("X").unwrap().get_mut("(n,2n)").unwrap();
+        let list = branch
+            .curves_mut()
+            .get_mut("X")
+            .unwrap()
+            .get_mut("(n,2n)")
+            .unwrap();
         let duplicate = list[0].clone();
         list.insert(1, duplicate);
         let mut partials: PartialRates = HashMap::new();
@@ -3327,6 +3354,7 @@ mod tests {
     fn indium_branch(kind: &str, curves: Vec<BranchCurve>) -> BranchTable {
         let mut branch = BranchTable::new();
         branch
+            .curves_mut()
             .entry("In115".to_string())
             .or_default()
             .insert(kind.to_string(), curves);
@@ -3777,7 +3805,7 @@ mod tests {
                 false,
             )],
         );
-        branch.get_mut("In115").unwrap().insert(
+        branch.curves_mut().get_mut("In115").unwrap().insert(
             "(n,2n)".to_string(),
             vec![curve(
                 "In114_m1",

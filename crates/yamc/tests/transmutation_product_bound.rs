@@ -174,26 +174,30 @@ fn folded_bound_covers_every_scored_rate() {
 #[test]
 fn folded_bound_covers_overlay_only_kinds() {
     let mut branch = BranchTable::new();
-    branch.entry("Li6".to_string()).or_default().insert(
-        "(n,n')".to_string(),
-        vec![BranchCurve {
-            target: "Li6_m1".to_string(),
-            quantity: BranchQuantity::CrossSection,
-            energy: vec![1.0e5, 2.0e7],
-            values: vec![0.0, 2.0],
-            states: Arc::from(vec![yani::BranchState {
-                mt: 4,
-                lfs: 1,
-                lmf: Some(10),
-                list_complete: true,
-                level_route: "energy".to_string(),
-                level_energy: 0.0,
-                level_energy_difference: Some(0.0),
-                mf3_cross_section: None,
-            }]),
-            normalisation: None,
-        }],
-    );
+    branch
+        .curves_mut()
+        .entry("Li6".to_string())
+        .or_default()
+        .insert(
+            "(n,n')".to_string(),
+            vec![BranchCurve {
+                target: "Li6_m1".to_string(),
+                quantity: BranchQuantity::CrossSection,
+                energy: vec![1.0e5, 2.0e7],
+                values: vec![0.0, 2.0],
+                states: Arc::from(vec![yani::BranchState {
+                    mt: 4,
+                    lfs: 1,
+                    lmf: Some(10),
+                    list_complete: true,
+                    level_route: "energy".to_string(),
+                    level_energy: 0.0,
+                    level_energy_difference: Some(0.0),
+                    mf3_cross_section: None,
+                }]),
+                normalisation: None,
+            }],
+        );
     let (_, bounded) = scored_and_bounded(&Arc::new(branch));
     let rate = bounded
         .get("Li6")

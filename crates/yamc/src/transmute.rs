@@ -611,7 +611,7 @@ impl Model {
                         mat_id,
                         yani_transmute::TransportTallied {
                             rates: dep_tallies.get_reaction_rates(mat_id, volume, 1.0),
-                            partials: if branch.is_empty() {
+                            partials: if branch.curves().is_empty() {
                                 HashMap::new()
                             } else {
                                 dep_tallies.get_partial_rates(mat_id, volume, 1.0)
@@ -778,7 +778,7 @@ impl Model {
                     let volume = cell_material.volume.unwrap_or(1.0);
                     let diagnostics =
                         dep_tallies.get_branching_diagnostics(mat_id, volume, source_rate);
-                    let partials = if branch.is_empty() {
+                    let partials = if branch.curves().is_empty() {
                         HashMap::new()
                     } else {
                         dep_tallies.get_partial_rates(mat_id, volume, source_rate)
