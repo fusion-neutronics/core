@@ -132,4 +132,9 @@ fn a_one_over_e_fold_with_an_edge_inside_a_group_is_reported() {
     assert!(one_over_e.has_gaps());
     let share = one_over_e.rate_fraction_covered[&key];
     assert!((0.0..=1.0).contains(&share), "{share}");
+    // The flat run's total is the covered share of its production. The 1/E
+    // run's shares split a cut group by energy width, not lethargy, so it
+    // reports no total rather than one that is not exact.
+    assert!(flat.rate_fraction_covered_total.is_some());
+    assert_eq!(one_over_e.rate_fraction_covered_total, None);
 }

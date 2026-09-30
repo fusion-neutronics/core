@@ -672,6 +672,19 @@ fn branching_is_written_and_joins_the_manifest() {
         out.join("branching/provenance.json").is_file(),
         "branching has no provenance"
     );
+    // What of MF=40 the covariance file cannot show is recorded beside it.
+    let record: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.join("branching/provenance.json")).expect("provenance"),
+    )
+    .expect("json");
+    for key in [
+        "mf40_without_blocks",
+        "mf40_unmatched_states",
+        "mf40_partner_unresolved",
+        "mf40_states_placed_by_excitation",
+    ] {
+        assert!(record[key].is_array(), "branching provenance has no {key}");
+    }
 
     // All four subsections in one manifest: the branching call must not have
     // overwritten what the chain call recorded.
@@ -697,10 +710,14 @@ fn branching_is_written_and_joins_the_manifest() {
     .expect("yani reads the chain and its branching subsection");
     assert!(!chain.is_empty(), "no chain came back");
     assert!(
-        !branch.is_empty(),
+        !branch.curves().is_empty(),
         "yani read the directory but found no branching curves"
     );
-    let curves: usize = branch.values().map(|by_reaction| by_reaction.len()).sum();
+    let curves: usize = branch
+        .curves()
+        .values()
+        .map(|by_reaction| by_reaction.len())
+        .sum();
     assert!(curves > 0, "the branching table has no curves in it");
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -976,12 +993,22 @@ fn streaming_the_neutron_files_writes_the_same_tree_as_holding_them() {
 /// The rows, the flagged levels and the partial-sum lines are all ordered, and
 /// the counters are sums, so a merge that lost the order or forgot a statistic
 /// would change the written subsection without changing anything else.
+/// TENDL-2017 Nb93 is added for its MF=40, so the covariance rows and the
+/// MF=40 statistics are merged too.
 #[test]
 fn absorbing_partials_in_file_order_matches_adding_one_at_a_time() {
     use yani_convert::branching::{BranchingExtractor, DEFAULT_LINEARIZE_TOL};
 
-    let decay = materials(DECAY);
-    let neutron = materials(NEUTRON);
+    let mut decay = materials(DECAY);
+    decay.extend(materials(&[
+        fixture!("dec-041_Nb_092.endf.xz"),
+        fixture!("dec-041_Nb_092m1.endf.xz"),
+        fixture!("dec-041_Nb_093m1.endf.xz"),
+    ]));
+    let mut neutron = materials(NEUTRON);
+    neutron.extend(materials(&[fixture!(
+        "n-041_Nb_093_tendl2017_trimmed.endf.xz"
+    )]));
     let build = || BranchingExtractor::new(&decay, 3000.0, DEFAULT_LINEARIZE_TOL);
 
     let mut sequential = build();
@@ -998,14 +1025,17 @@ fn absorbing_partials_in_file_order_matches_adding_one_at_a_time() {
         merged.absorb(partial);
     }
 
-    let (rows_one_at_a_time, stats_one_at_a_time) = sequential.finish();
-    let (rows_merged, stats_merged) = merged.finish();
+    let one_at_a_time = sequential.finish();
+    let merged = merged.finish();
     assert!(
-        !rows_one_at_a_time.is_empty(),
+        !one_at_a_time.rows.is_empty(),
         "the fixtures produced no branching rows, so this proves nothing"
     );
-    assert_eq!(rows_merged, rows_one_at_a_time);
-    assert_eq!(stats_merged, stats_one_at_a_time);
+    assert!(
+        !one_at_a_time.covariance.is_empty(),
+        "the fixtures produced no MF=40 rows, so the covariance merge is unproven"
+    );
+    assert_eq!(merged, one_at_a_time);
 }
 
 /// Both yield evaluations reach the file exactly as the tape gives them, and
