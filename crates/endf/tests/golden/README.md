@@ -89,13 +89,9 @@ ported.
 
 ## Coverage still wanted
 
-Every ENDF file the Python package parses now has a Rust parser, and all but one
-are exercised by a fixture. The exception is
-
-    MF 40 (radionuclide production covariances)
-
-which is structurally complete and unverified end to end, though the MF33
-subsection parser it delegates to is covered.
+Every ENDF file the Python package parses now has a Rust parser, and every one
+is exercised by a fixture. MF 40 was the last, and the TENDL-2017 Nb93 trim now
+covers it.
 
 MF 32 (resonance parameter covariances) has a Rust parser the Python package
 does not, so it is kept out of the golden comparison entirely: there is no
@@ -103,10 +99,9 @@ reader to generate a golden from, and a hand-written one would only restate
 the parser. It is covered by the unit tests in `src/mf/mf32.rs` and by
 `tests/mf32_tapes.rs`, which walks every MF=32 section of six libraries.
 
-Both are pinned in `golden.rs`
-as `UNCOVERED_BY_ANY_FIXTURE` and checked, so the list cannot drift in either
-direction: the test fails both when a fixture starts covering one, and when a
-new parser arrives without coverage.
+It is pinned in `golden.rs` as `UNCOVERED_BY_ANY_FIXTURE` and checked, so the
+list cannot drift in either direction: the test fails both when a fixture
+starts covering one, and when a new parser arrives without coverage.
 
 `MF2` is worth a line of its own. It has real Reich-Moore parameters from Fe56
 and U235, a Case C unresolved region from U235, and a synthetic multi-level
@@ -136,6 +131,8 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 | `n-095_Am_242_trimmed` | MF1, a metastable target |
 | `n-049_In-115_trimmed` | MF3, MF8, MF9, MF10: isomer production |
 | `n-077_Ir_191_trimmed` | MF1, MF3 (incl. MT3), MF8, MF9, MF10: TENDL-2017 (n,2n) partials that sum to less than MF3 |
+| `n-041_Nb_093_tendl2017_trimmed` | MF1, MF3, MF8, MF9, MF10, MF33, MF40: TENDL-2017 radionuclide production covariance |
+| `dec-041_Nb_092`, `dec-041_Nb_092m1`, `dec-041_Nb_093m1` | MF8 MT=457 decay data: the isomer table the Nb93 production levels resolve against |
 | `n-054_Xe_136_trimmed` | MF1, MF3 |
 | `n-003_Li_006_trimmed` | MF6 LAW=2 and LAW=4, MF12, MF14, MF33 |
 | `n-026_Fe_056_trimmed` | MF2 Reich-Moore, MF6 LAW=1, MF12/14, MF33 |
@@ -161,10 +158,6 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 
 ### Fixtures still wanted
 
-- **MF40**, the one parser nothing exercises. It needs an evaluation with
-  radionuclide production covariances, and none small enough to keep here has
-  them. Unlike the shapes below, MF40 reuses the MF33 subsection parser that
-  Li6, Fe56 and U235 do cover, so what is untested is the wrapper around it.
 - **MF2 formalisms beyond Reich-Moore and Breit-Wigner**: R-matrix limited
   (LRF=7), and unresolved Cases A and B. Note that Cases A and B cannot be
   reached at all through the current dispatch (see issue #15) so a fixture

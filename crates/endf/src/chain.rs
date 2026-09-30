@@ -1028,8 +1028,14 @@ impl Chain {
                 .replaced
                 .push((nuclide.name.clone(), nuclide.decay_energy, energy));
             nuclide.decay_energy = energy;
-            nuclide.decay_energy_uncertainty = Some(sigma);
             nuclide.decay_energy_components = candidate.decay_energy_components();
+            // The same rule as from_endf, so a fill can never write a sigma
+            // for a quadrature of nothing, whatever the candidate filter says.
+            nuclide.decay_energy_uncertainty = nuclide
+                .decay_energy_components
+                .iter()
+                .any(Option::is_some)
+                .then_some(sigma);
             nuclide.decay_energy_source = Some(format!("filled:{library}"));
         }
         Ok(report)

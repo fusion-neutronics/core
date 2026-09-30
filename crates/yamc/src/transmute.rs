@@ -611,7 +611,7 @@ impl Model {
                         mat_id,
                         yani_transmute::TransportTallied {
                             rates: dep_tallies.get_reaction_rates(mat_id, volume, 1.0),
-                            partials: if branch.is_empty() {
+                            partials: if branch.curves().is_empty() {
                                 HashMap::new()
                             } else {
                                 dep_tallies.get_partial_rates(mat_id, volume, 1.0)
@@ -764,7 +764,7 @@ impl Model {
             // identical to before.
             let mut folded_chains: HashMap<u32, Arc<HashMap<String, ChainNuclide>>> =
                 HashMap::new();
-            if source_rate > 0.0 && !branch.is_empty() {
+            if source_rate > 0.0 && !branch.curves().is_empty() {
                 for (&mat_id, cell_indices) in &transmutable_cells {
                     let slot = self.geometry.cells()[cell_indices[0]]
                         .material_idx
