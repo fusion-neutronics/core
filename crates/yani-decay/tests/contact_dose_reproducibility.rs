@@ -68,6 +68,8 @@ fn chain() -> HashMap<String, ChainNuclide> {
                 fission_yields: None,
                 sources: vec![DecaySource {
                     particle: "photon".to_string(),
+                    radiation: None,
+                    uncertainty: None,
                     distribution: DecaySourceDistribution::Discrete {
                         energies,
                         intensities,

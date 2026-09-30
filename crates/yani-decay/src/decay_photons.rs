@@ -326,6 +326,8 @@ mod tests {
                 fission_yields: None,
                 sources: vec![DecaySource {
                     particle: "photon".to_string(),
+                    radiation: None,
+                    uncertainty: None,
                     distribution: DecaySourceDistribution::Discrete {
                         energies: vec![846764.0],
                         intensities: vec![7.381e-5],
@@ -372,6 +374,8 @@ mod tests {
                 fission_yields: None,
                 sources: vec![DecaySource {
                     particle: "photon".to_string(),
+                    radiation: None,
+                    uncertainty: None,
                     distribution: DecaySourceDistribution::Discrete {
                         energies: vec![1173228.0, 1332492.0],
                         intensities: vec![4.161e-9, 4.167e-9],
@@ -456,6 +460,8 @@ mod tests {
             fission_yields: None,
             sources: vec![DecaySource {
                 particle: "photon".to_string(),
+                radiation: None,
+                uncertainty: None,
                 distribution: DecaySourceDistribution::Discrete {
                     energies: vec![3.3e5],
                     intensities: vec![1.0e-5],
@@ -760,6 +766,8 @@ mod tests {
                 fission_yields: None,
                 sources: vec![DecaySource {
                     particle: "photon".to_string(),
+                    radiation: None,
+                    uncertainty: None,
                     distribution: DecaySourceDistribution::Discrete {
                         energies: vec![1.0e6],
                         intensities: vec![1.0e-3],

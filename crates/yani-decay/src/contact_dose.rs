@@ -347,48 +347,42 @@ pub fn contact_dose_by_nuclide(
         };
 
         let mut folded = 0.0;
+        for (energy, intensity) in chain_nuclide.photon_lines() {
+            if intensity <= 0.0 || energy < lowest || energy > highest {
+                continue;
+            }
+            let mut term = response.interpolate(energy) / attenuation.at(energy) * intensity;
+            if weigh_by_energy {
+                term *= energy;
+            }
+            folded += term;
+        }
         for source in &chain_nuclide.sources {
             if source.particle != "photon" {
                 continue;
             }
-            match &source.distribution {
-                DecaySourceDistribution::Discrete {
-                    energies,
-                    intensities,
-                } => {
-                    for (&energy, &intensity) in energies.iter().zip(intensities) {
-                        if intensity <= 0.0 || energy < lowest || energy > highest {
-                            continue;
-                        }
-                        let mut term =
-                            response.interpolate(energy) / attenuation.at(energy) * intensity;
-                        if weigh_by_energy {
-                            term *= energy;
-                        }
-                        folded += term;
-                    }
-                }
-                DecaySourceDistribution::Tabular {
-                    energies,
-                    intensities,
-                    interpolation,
-                } => {
-                    let (Some(&first), Some(&last)) = (energies.first(), energies.last()) else {
-                        continue;
-                    };
-                    if last <= lowest || first >= highest {
-                        continue;
-                    }
-                    let continuum =
-                        Continuum::new(energies, intensities, *interpolation).map_err(|why| {
-                            format!(
-                                "The decay photon continuum of {name} {why}. A contact dose \
-                                 without it would be understated by an unknown amount."
-                            )
-                        })?;
-                    continua.push((folds.len(), continuum));
-                }
+            let DecaySourceDistribution::Tabular {
+                energies,
+                intensities,
+                interpolation,
+            } = &source.distribution
+            else {
+                continue;
+            };
+            let (Some(&first), Some(&last)) = (energies.first(), energies.last()) else {
+                continue;
+            };
+            if last <= lowest || first >= highest {
+                continue;
             }
+            let continuum =
+                Continuum::new(energies, intensities, *interpolation).map_err(|why| {
+                    format!(
+                        "The decay photon continuum of {name} {why}. A contact dose \
+                        without it would be understated by an unknown amount."
+                    )
+                })?;
+            continua.push((folds.len(), continuum));
         }
         folds.push((name, density, folded));
     }
@@ -463,6 +457,8 @@ mod tests {
             fission_yields: None,
             sources: vec![DecaySource {
                 particle: "photon".to_string(),
+                radiation: None,
+                uncertainty: None,
                 distribution: DecaySourceDistribution::Discrete {
                     energies: vec![1_173_228.0, 1_332_492.0],
                     intensities: vec![0.9985 * lambda, 0.9998 * lambda],
@@ -678,6 +674,8 @@ mod tests {
                 "Fe59",
                 vec![DecaySource {
                     particle: "photon".to_string(),
+                    radiation: None,
+                    uncertainty: None,
                     distribution: DecaySourceDistribution::Tabular {
                         energies,
                         intensities: densities,

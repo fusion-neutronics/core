@@ -16,9 +16,11 @@
 //! ```
 //!
 //! - `s0_c`, the track length in base-grid bin `c`, so any rate folded from
-//!   the spectrum (the MF=10 partials, or a nuclide the tally does not score)
-//!   gets its covariance as `a^T Sigma a` for its fold weights `a`;
-//! - `y_k`, each MF=9 yield channel, scored directly;
+//!   the spectrum (the `(n,n')` partials of parents the tally does not score,
+//!   or a nuclide it does not carry) gets its covariance as `a^T Sigma a` for
+//!   its fold weights `a`;
+//! - `y_k`, each state of a branching list scored directly at the collision
+//!   energy, on one of the material's own nuclides;
 //! - `r_j`, each `sum(sigma * TL)` the tally scores for a nuclide and MT.
 //!
 //! The scored rates are in the vector themselves rather than folded from the
@@ -27,7 +29,7 @@
 //! the resonance, so weighting every track in the bin by one averaged cross
 //! section misstates how the rate fluctuates. For Fe56 capture it overstated
 //! the variance about threefold against independent runs, where the smooth
-//! MF=10 curves fold to within a fraction of a percent. Scored directly, the
+//! partial curves fold to within a fraction of a percent. Scored directly, the
 //! rates' covariance is exact, resonances and all.
 //!
 //! The spectrum is taken on the fixed base spectrum grid, not on the full
@@ -254,7 +256,7 @@ pub(crate) struct HistoryStatistics {
     /// Material id -> its position in `blocks` and in each worker's scratch.
     slot_of: std::collections::HashMap<u32, usize>,
     blocks: Vec<Block>,
-    /// MF=9 yield channels per slot, which is where its scored rates start.
+    /// Yield channels per slot, which is where its scored rates start.
     n_yields: Vec<usize>,
     /// One scratch set per rayon worker, sized by
     /// [`HistoryStatistics::prepare_workers`] before transport starts.
@@ -277,7 +279,7 @@ impl History<'_> {
         self.scratch[self.slot].add(c, tl);
     }
 
-    /// A contribution to MF=9 yield channel `k`.
+    /// A contribution to yield channel `k`.
     #[inline]
     pub(crate) fn add_yield(&mut self, k: usize, value: f64) {
         let at = self.stats.grid.len() + k;
@@ -294,7 +296,7 @@ impl History<'_> {
 }
 
 impl HistoryStatistics {
-    /// `materials` is `(material id, MF=9 yield channels, scored rates)`.
+    /// `materials` is `(material id, yield channels, scored rates)`.
     pub(crate) fn new(
         base_grid: Vec<f64>,
         union_grid: &[f64],
@@ -451,14 +453,14 @@ impl HistoryStatistics {
     }
 }
 
-/// An MF=9 yield channel's place in the moment vector: `(parent, reaction
-/// kind, final-state target)`.
+/// A yield channel's place in the moment vector: `(parent, reaction kind,
+/// final-state target)`.
 pub type YieldChannelLabel = (String, String, String);
 
 /// The per-history mean and covariance of one material's tally vector.
 ///
 /// The vector is laid out as `(s0_c, y_k, r_j)`: the track length in base-grid
-/// bin `c`, the MF=9 yield channels in the order of
+/// bin `c`, the directly scored yield channels in the order of
 /// [`yield_channels`](Self::yield_channels), and the scored `sum(sigma * TL)`
 /// per nuclide and MT in the order of [`rate_channels`](Self::rate_channels).
 /// Everything is per source particle and unnormalized, in the units the tally
@@ -470,7 +472,8 @@ pub struct HistoryCovariance {
     /// Base-grid edges [eV]. Bin `c` is `[grid[c], grid[c+1])`; the last bin
     /// runs to infinity.
     pub grid: Vec<f64>,
-    /// The MF=9 yield channels, in order.
+    /// The directly scored yield channels, in order: one per producing state
+    /// of each branching list scored on one of the material's own nuclides.
     pub yield_channels: Vec<YieldChannelLabel>,
     /// The scored rates, `(nuclide, MT)`, in order, including pairs that
     /// scored nothing.
@@ -500,7 +503,7 @@ impl HistoryCovariance {
         c
     }
 
-    /// Index of MF=9 yield channel `k`.
+    /// Index of yield channel `k`.
     pub fn yield_index(&self, k: usize) -> usize {
         self.n_bins() + k
     }

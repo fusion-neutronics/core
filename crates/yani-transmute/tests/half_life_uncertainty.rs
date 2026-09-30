@@ -125,7 +125,6 @@ fn a_saturated_activity_is_insensitive_to_its_own_half_life() {
         "an unstable nuclide without a sigma is reported, not assumed exact"
     );
     assert!(info.has_gaps());
-    assert_eq!(info.half_lives_floored, 0);
     assert_eq!(info.half_lives_sampled, 512);
 
     // Step 1 is the end of irradiation, step 2 the end of the cooldown.
