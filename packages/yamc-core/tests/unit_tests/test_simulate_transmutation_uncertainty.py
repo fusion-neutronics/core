@@ -139,3 +139,46 @@ def test_each_rate_has_a_statistical_sigma():
 def test_the_coupled_method_is_refused():
     with pytest.raises(RuntimeError, match="independent"):
         _run(method="coupled", data_uncertainty=STATISTICAL)
+
+
+CROSS_SECTIONS = yamc.DataUncertainty(seed=1, samples=64, sources=["cross_sections"])
+
+
+def _relative_fe57_sigma(results):
+    return results.get_nuclide_uncertainty(MAT_ID, "Fe57", 1) / results.get_nuclide_density(
+        MAT_ID, "Fe57", 1
+    )
+
+
+def test_the_cross_section_sigma_matches_a_supplied_spectrum():
+    """The fold against the tallied flux gives what the same flux gives supplied.
+
+    The sphere's flux is thermal, so ``Material.transmute`` under a thermal
+    histogram folds the same Fe56 (n,gamma) covariance. The fold divides
+    partial rates taken from the spectrum by the tallied rates, so a spectrum
+    on another normalization shows up here as a sigma off by orders of
+    magnitude, a sigma that moves with the particle count, and every channel
+    listed in ``partials_above_rate``.
+    """
+    sigmas = []
+    for particles in (2000, 8000):
+        results = _run(particles=particles, data_uncertainty=CROSS_SECTIONS)
+        info = results.get_data_uncertainty_info(MAT_ID)
+        assert info["partials_above_rate"] == {}
+        assert not info["has_gaps"]
+        sigmas.append(_relative_fe57_sigma(results))
+    assert sigmas[0] == pytest.approx(sigmas[1], rel=0.01)
+
+    material = yamc.Material(
+        composition={"Fe56": 1.0}, density=7.87, volume=4188.79, temperature=294, id=MAT_ID
+    )
+    material.read_nuclear_data({"Fe56": os.path.join(TESTS_DIR, "Fe56.arrow")})
+    thermal = yamc.NeutronSource(
+        position=(0, 0, 0), energy=yamc.sources.Histogram([1.0e-3, 1.0], [1.0])
+    )
+    schedule = yamc.PulseSchedule([
+        yamc.Pulse(rate=1.0e14, duration=HOUR, source=thermal),
+        yamc.Cooldown(duration=HOUR),
+    ])
+    supplied = material.transmute(schedule, data_uncertainty=CROSS_SECTIONS)
+    assert sigmas[0] == pytest.approx(_relative_fe57_sigma(supplied), rel=0.05)

@@ -1170,8 +1170,9 @@ pub struct TransportTallied {
     pub partials: PartialRates,
     /// Fission-yield spectrum weights.
     pub fy_weights: FissionYieldWeights,
-    /// The tallied flux shape, for folding MF=33 covariance against. Its
-    /// magnitude does not matter; the fold is relative.
+    /// The tallied flux, for folding MF=33 covariance against, at the same
+    /// normalization as `rates`: the fold divides partial rates taken from it
+    /// by `rates`, so its magnitude matters.
     pub spectrum: MultigroupSpectrum,
     /// The statistical covariance of `rates` and `partials`, when the tally
     /// carried history statistics.

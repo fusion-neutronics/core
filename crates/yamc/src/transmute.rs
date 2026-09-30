@@ -597,7 +597,7 @@ impl Model {
                         .expect("transmutable cell must have a material");
                     let material = self.geometry.materials()[slot as usize].as_ref();
                     let volume = material.volume.unwrap_or(1.0);
-                    let Some(spectrum) = dep_tallies.flux_spectrum(mat_id) else {
+                    let Some(spectrum) = dep_tallies.flux_spectrum(mat_id, volume) else {
                         continue;
                     };
                     let statistics =

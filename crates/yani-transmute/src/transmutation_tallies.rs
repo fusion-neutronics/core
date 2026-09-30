@@ -899,22 +899,37 @@ impl TransmutationTallies {
         Some(RateCovariance::from_parts(labels, rates, n, covariance))
     }
 
-    /// The flux shape this material's tally saw, on the union grid, as a
-    /// multigroup spectrum: each bin's track length. `None` when the material
-    /// is not tallied or nothing was scored.
+    /// The flux this material's tally saw, on the union grid, as a multigroup
+    /// spectrum: each bin's track length per source particle per cm³, the
+    /// normalization [`Self::get_reaction_rates`] gives the rates at unit
+    /// source rate. `None` when the material is not tallied, nothing was
+    /// scored, or `volume` is not positive.
     ///
-    /// For folding MF=33 covariance against the transport spectrum, which is
-    /// relative and so needs only the shape. The union grid's last bin runs to
-    /// infinity; it is closed at ten times its lower edge, which for the base
-    /// grid is 300 MeV and holds no flux in any fixed-source problem this code
-    /// runs.
-    pub fn flux_spectrum(&self, material_id: u32) -> Option<crate::MultigroupSpectrum> {
+    /// For folding MF=33 covariance against the transport spectrum. The fold
+    /// takes partial rates `1e-24 · Σ_g σ_g φ_g` from this spectrum and divides
+    /// them by the tallied rates, so the two must share a normalization: raw
+    /// track-length sums would make every partial `particles · volume` times
+    /// the rate it is divided by. The union grid's last bin runs to infinity;
+    /// it is closed at ten times its lower edge, which for the base grid is
+    /// 300 MeV and holds no flux in any fixed-source problem this code runs.
+    pub fn flux_spectrum(
+        &self,
+        material_id: u32,
+        volume: f64,
+    ) -> Option<crate::MultigroupSpectrum> {
         let mat_data = self.materials.get(&material_id)?;
-        let s0 = mat_data
+        let total_particles = mat_data.total_particles.load(Ordering::Relaxed);
+        if total_particles == 0 || volume <= 0.0 {
+            return None;
+        }
+        let per_source = 1.0 / (total_particles as f64 * volume);
+        let s0: Vec<f64> = mat_data
             .moment_s0
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .clone();
+            .iter()
+            .map(|v| v * per_source)
+            .collect();
         if s0.iter().all(|v| *v <= 0.0) {
             return None;
         }
@@ -2036,6 +2051,38 @@ mod tests {
             rel(flux_1, flux_10) < 1e-12,
             "flux varies with chunk count: {flux_1:e} vs {flux_10:e}"
         );
+    }
+
+    /// The spectrum the transport fold receives is on the rates' own
+    /// normalization: with a flat cross section, `1e-24 · σ · Σ_g φ_g` from
+    /// the spectrum reproduces the tallied rate. Raw track-length sums came
+    /// out `particles · volume` times too large, which inflated every folded
+    /// relative sigma by that factor.
+    #[test]
+    fn flux_spectrum_shares_the_rates_normalization() {
+        let sigma = 2.5_f64; // b, flat
+        let n_particles = 1000usize;
+        let volume = 100.0_f64; // cm³
+        let track_lengths = [300.0_f64, 500.0]; // cm, summed over all histories
+
+        let t = one_bin_tally();
+        let mat = t.materials.get(&7).unwrap();
+        assert!(mat.moment_s0_batch.len() >= track_lengths.len());
+        for (g, &tl) in track_lengths.iter().enumerate() {
+            atomic_add_f64(&mat.moment_s0_batch[g], tl);
+        }
+        let total_tl: f64 = track_lengths.iter().sum();
+        atomic_add_f64(&mat.batch_accum[0], sigma * total_tl);
+        t.accumulate_batch(n_particles);
+
+        let rate = t.get_reaction_rates(7, volume, 1.0)["U238"]["(n,gamma)"];
+        let spectrum = t.flux_spectrum(7, volume).unwrap();
+        let from_spectrum = 1.0e-24 * sigma * spectrum.masses.iter().sum::<f64>();
+        assert!(
+            ((from_spectrum - rate) / rate).abs() < 1e-12,
+            "spectrum-derived rate {from_spectrum:e} vs tallied rate {rate:e}"
+        );
+        assert!(t.flux_spectrum(7, 0.0).is_none());
     }
 
     /// A branch table with two U238 `(n,n')` partials whose curves exercise
