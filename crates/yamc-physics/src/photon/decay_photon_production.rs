@@ -65,39 +65,28 @@ pub enum DecayPhotonSpectrum {
 }
 
 impl DecayPhotonSpectrum {
-    /// The channel spectrum of a chain decay source. A continuum has to have a
-    /// law this build reads; the caller has already checked that through
+    /// The channel spectrum of a chain decay continuum. It has to have a law
+    /// this build reads; the caller has already checked that through
     /// [`DecaySourceDistribution::emission_rate`].
-    fn from_source(distribution: &DecaySourceDistribution) -> DecayPhotonSpectrum {
-        match distribution {
-            DecaySourceDistribution::Discrete {
-                energies,
-                intensities,
-            } => DecayPhotonSpectrum::Lines {
-                energies: energies.clone(),
-                intensities: intensities.clone(),
-            },
-            DecaySourceDistribution::Tabular {
-                energies,
-                intensities,
-                interpolation,
-            } => {
-                let continuum = Continuum::new(energies, intensities, *interpolation)
-                    .expect("the emission rate was integrated, so the law is readable");
-                let cumulative = continuum
-                    .interval_integrals()
-                    .scan(0.0, |sum, part| {
-                        *sum += part;
-                        Some(*sum)
-                    })
-                    .collect();
-                DecayPhotonSpectrum::Continuum {
-                    energies: energies.clone(),
-                    densities: intensities.clone(),
-                    interpolation: interpolation.expect("checked by Continuum::new"),
-                    cumulative,
-                }
-            }
+    fn continuum(
+        energies: &[f64],
+        densities: &[f64],
+        interpolation: Option<Interpolation>,
+    ) -> DecayPhotonSpectrum {
+        let continuum = Continuum::new(energies, densities, interpolation)
+            .expect("the emission rate was integrated, so the law is readable");
+        let cumulative = continuum
+            .interval_integrals()
+            .scan(0.0, |sum, part| {
+                *sum += part;
+                Some(*sum)
+            })
+            .collect();
+        DecayPhotonSpectrum::Continuum {
+            energies: energies.to_vec(),
+            densities: densities.to_vec(),
+            interpolation: interpolation.expect("checked by Continuum::new"),
+            cumulative,
         }
     }
 
@@ -211,17 +200,50 @@ pub fn precompute_decay_photon_data(
                         continue;
                     }
 
+                    // One channel per continuum, then one for all the lines:
+                    // the chain keeps the gamma and x-ray lines apart, and
+                    // drawing them from one channel is the same distribution
+                    // with fewer channels to walk per collision. It is also
+                    // the channel list, yields and line order this setup had
+                    // when the file stored them merged.
+                    let mut spectra: Vec<(f64, DecayPhotonSpectrum)> = Vec::new();
                     for source in &emitter.sources {
+                        let DecaySourceDistribution::Tabular {
+                            energies,
+                            intensities,
+                            interpolation,
+                        } = &source.distribution
+                        else {
+                            continue;
+                        };
                         if source.particle != "photon" {
                             continue;
                         }
-
                         // photon_per_decay = emission rate / λ (the chain
-                        // stores rates, λ × yield per decay): the lines
-                        // summed, or the continuum integrated.
+                        // stores rates, λ × yield per decay): the continuum
+                        // integrated.
                         let emission_rate = source.distribution.emission_rate().map_err(|why| {
                             format!("D1S: the decay photon continuum of {} {why}", path.emitter)
                         })?;
+                        spectra.push((
+                            emission_rate,
+                            DecayPhotonSpectrum::continuum(energies, intensities, *interpolation),
+                        ));
+                    }
+                    let lines = emitter.photon_lines();
+                    if !lines.is_empty() {
+                        let (energies, intensities): (Vec<f64>, Vec<f64>) =
+                            lines.into_iter().unzip();
+                        spectra.push((
+                            intensities.iter().sum(),
+                            DecayPhotonSpectrum::Lines {
+                                energies,
+                                intensities,
+                            },
+                        ));
+                    }
+
+                    for (emission_rate, spectrum) in spectra {
                         let photon_per_decay = emission_rate / emitter_lambda;
                         let yield_constant = reaction.branching * path_branching * photon_per_decay;
 
@@ -239,7 +261,7 @@ pub fn precompute_decay_photon_data(
                             xs: xs_vec.clone(),
                             target_name: path.emitter.clone(),
                             target_id,
-                            spectrum: DecayPhotonSpectrum::from_source(&source.distribution),
+                            spectrum,
                             yield_constant,
                         });
                     }
@@ -671,6 +693,8 @@ mod tests {
                 fission_yields: None,
                 sources: vec![DecaySource {
                     particle: "photon".to_string(),
+                    radiation: None,
+                    uncertainty: None,
                     distribution: DecaySourceDistribution::Discrete {
                         energies: vec![846764.0, 1810726.0],
                         intensities: vec![7.381e-5, 2.030e-5],
@@ -870,6 +894,8 @@ mod tests {
                 fission_yields: None,
                 sources: vec![DecaySource {
                     particle: "photon".to_string(),
+                    radiation: None,
+                    uncertainty: None,
                     distribution: DecaySourceDistribution::Discrete {
                         energies: vec![1000000.0],
                         intensities: vec![1.0e-3],
@@ -931,11 +957,11 @@ mod tests {
         use rand::SeedableRng;
 
         // Mass 1e4 * 1e-4 = 1 in [1e4, 2e4) and 1e5 * 3e-5 = 3 in [2e4, 1.2e5).
-        let histogram = DecayPhotonSpectrum::from_source(&DecaySourceDistribution::Tabular {
-            energies: vec![1.0e4, 2.0e4, 1.2e5],
-            intensities: vec![1.0e-4, 3.0e-5, 0.0],
-            interpolation: Some(Interpolation::Histogram),
-        });
+        let histogram = DecayPhotonSpectrum::continuum(
+            &[1.0e4, 2.0e4, 1.2e5],
+            &[1.0e-4, 3.0e-5, 0.0],
+            Some(Interpolation::Histogram),
+        );
         let mut rng = StdRng::seed_from_u64(11);
         let n = 40_000;
         let draws: Vec<f64> = (0..n).map(|_| histogram.sample(&mut rng)).collect();
@@ -948,18 +974,19 @@ mod tests {
         assert!((mean / 1.5e4 - 1.0).abs() < 0.01, "mean {mean}");
 
         // A triangle rising from zero at 0 to its peak at 1 MeV: mean 2/3 MeV.
-        let triangle = DecayPhotonSpectrum::from_source(&DecaySourceDistribution::Tabular {
-            energies: vec![0.0, 1.0e6],
-            intensities: vec![0.0, 2.0e-6],
-            interpolation: Some(Interpolation::LinearLinear),
-        });
+        let triangle = DecayPhotonSpectrum::continuum(
+            &[0.0, 1.0e6],
+            &[0.0, 2.0e-6],
+            Some(Interpolation::LinearLinear),
+        );
         let mean = (0..n).map(|_| triangle.sample(&mut rng)).sum::<f64>() / n as f64;
         assert!((mean / (2.0e6 / 3.0) - 1.0).abs() < 0.01, "mean {mean}");
     }
 
     /// The photon yield per decay of a continuum is its integral over the
     /// decay constant, beside the lines' sum, one channel each. Read as lines
-    /// its per-eV values gave a yield smaller by the grid spacing in eV.
+    /// its per-eV values gave a yield smaller by the grid spacing in eV. The
+    /// gamma and x-ray lines, separate sources in the chain, are one channel.
     #[test]
     fn a_continuum_is_a_channel_with_its_integral_as_yield() {
         if !td("Fe56.arrow").exists() {
@@ -985,17 +1012,30 @@ mod tests {
             sources: vec![
                 DecaySource {
                     particle: "photon".to_string(),
+                    radiation: Some("gamma".to_string()),
+                    uncertainty: None,
                     distribution: DecaySourceDistribution::Discrete {
-                        energies: vec![1.1e6],
-                        intensities: vec![0.5 * lambda],
+                        energies: vec![1.1e6, 6.0e4],
+                        intensities: vec![0.5 * lambda, 0.05 * lambda],
                     },
                 },
                 DecaySource {
                     particle: "photon".to_string(),
+                    radiation: Some("gamma".to_string()),
+                    uncertainty: None,
                     distribution: DecaySourceDistribution::Tabular {
                         energies: vec![1.0e4, 1.0e6],
                         intensities: vec![2.0e-6 * lambda, 0.0],
                         interpolation,
+                    },
+                },
+                DecaySource {
+                    particle: "photon".to_string(),
+                    radiation: Some("xray".to_string()),
+                    uncertainty: None,
+                    distribution: DecaySourceDistribution::Discrete {
+                        energies: vec![6.0e4],
+                        intensities: vec![0.05 * lambda],
                     },
                 },
             ],
@@ -1044,23 +1084,29 @@ mod tests {
         assert_eq!(
             channels.len(),
             2,
-            "one channel for the lines, one for the continuum"
+            "one channel for the continuum, one for the gamma and x-ray lines together"
         );
         assert!(matches!(
             channels[0].spectrum,
-            DecayPhotonSpectrum::Lines { .. }
-        ));
-        assert!(matches!(
-            channels[1].spectrum,
             DecayPhotonSpectrum::Continuum { .. }
         ));
-        assert!((channels[0].yield_constant - 0.5).abs() < 1e-12);
         // 2e-6 per eV across 990 keV: 1.98 photons per decay.
         assert!(
-            (channels[1].yield_constant - 1.98).abs() < 1e-12,
+            (channels[0].yield_constant - 1.98).abs() < 1e-12,
             "{}",
-            channels[1].yield_constant
+            channels[0].yield_constant
         );
+        let DecayPhotonSpectrum::Lines {
+            energies,
+            intensities,
+        } = &channels[1].spectrum
+        else {
+            panic!("the lines are the last channel");
+        };
+        // Ascending, and the gamma and the x-ray at 60 keV are one line.
+        assert_eq!(energies, &[6.0e4, 1.1e6]);
+        assert_eq!(intensities, &[0.05 * lambda + 0.05 * lambda, 0.5 * lambda]);
+        assert!((channels[1].yield_constant - 0.6).abs() < 1e-12);
 
         let mut registry = yamc_nuclide::nuclide_registry::NuclideRegistry::new();
         let error = precompute_decay_photon_data(&chain_with(None), &nuclides, &mut registry)
@@ -1108,6 +1154,8 @@ mod tests {
             fission_yields: None,
             sources: vec![DecaySource {
                 particle: "photon".to_string(),
+                radiation: None,
+                uncertainty: None,
                 distribution: DecaySourceDistribution::Discrete {
                     energies: vec![1000000.0],
                     intensities: vec![1.0e-3],

@@ -561,6 +561,8 @@ mod tests {
                 fission_yields: None,
                 sources: vec![yani::DecaySource {
                     particle: "photon".to_string(),
+                    radiation: None,
+                    uncertainty: None,
                     distribution: yani::DecaySourceDistribution::Discrete {
                         energies: vec![1_173_228.0, 1_332_492.0],
                         intensities: vec![0.9985 * lambda, 0.9998 * lambda],
