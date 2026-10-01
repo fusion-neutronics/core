@@ -3,7 +3,9 @@ use crate::branching_rule::{
     BranchingState, Denominator, DroppedChannel, ListRates, ListRule, Lists,
     BRANCHING_RATE_TOLERANCE, INELASTIC, MT_ANYTHING, MT_INELASTIC,
 };
-use crate::covariance_fold::{fold_rate_covariance, reachable_mts};
+use crate::covariance_fold::{
+    fold_cross_covariance, fold_rate_covariance, reachable_mts, FoldSpectrum,
+};
 use crate::covariance_sample::Sampler;
 use crate::multigroup::{collapse_with_lists, fold_list, scale_rates, Collapsed};
 use crate::results::TransmutationResults;
@@ -1453,7 +1455,8 @@ fn run_replicas(
     let statistical_in = statistical;
     let statistical = statistical.filter(|s| want_statistical && !s.rates.is_empty());
 
-    // One fold and one factorization per distinct spectrum, not per replica.
+    // One fold per distinct spectrum and one factorization per nuclide, not
+    // per replica.
     // The fold is relativized, so the per-step `scale_rates` leaves it correct:
     // a relative covariance does not move when the flux magnitude does.
     let mut coverage = crate::covariance_fold::Coverage::default();
@@ -1485,6 +1488,7 @@ fn run_replicas(
     // index stays the spectrum's own. Switched off, each is built from an empty
     // covariance map and perturbs nothing, which is cheaper than folding and
     // keeps every other source indexable by the same `idx`.
+    let mut folds = Vec::with_capacity(per_spectrum.len());
     for (idx, (rates, _, folded_chain)) in per_spectrum.iter().enumerate() {
         let folded = if cross_sections {
             let spectrum = &spectra[idx];
@@ -1501,8 +1505,33 @@ fn run_replicas(
         } else {
             std::collections::BTreeMap::new()
         };
-
-        let sampler = Sampler::new(&folded);
+        folds.push(folded);
+    }
+    // One evaluation is one uncertainty, so a nuclide's rates under two
+    // spectra are correlated through it. The cross blocks carry that, and the
+    // samplers factorize each nuclide once over all its spectra, so every
+    // spectrum's draw is its own rows of one factor applied to the same
+    // deviates. One spectrum needs no cross block and factorizes exactly as
+    // it would alone.
+    let mut cross = std::collections::BTreeMap::new();
+    if cross_sections {
+        let fold_spectrum = |idx: usize| FoldSpectrum {
+            chain: &per_spectrum[idx].2,
+            rates: &per_spectrum[idx].0,
+            multigroup_flux: &spectra[idx].masses,
+            group_boundaries: &spectra[idx].boundaries,
+        };
+        for a in 0..per_spectrum.len() {
+            for b in a + 1..per_spectrum.len() {
+                cross.insert(
+                    (a, b),
+                    fold_cross_covariance(initial, &fold_spectrum(a), &fold_spectrum(b), shielding),
+                );
+            }
+        }
+    }
+    for (idx, sampler) in Sampler::joint(&folds, &cross).into_iter().enumerate() {
+        let rates = &per_spectrum[idx].0;
         sigmas.add(idx, &sampler, rates, fluence[idx], &densities, &populated);
         samplers.push(sampler);
     }
@@ -1816,8 +1845,10 @@ fn run_replicas(
         };
 
         // Every spectrum's rates are perturbed by the SAME replica index,
-        // so a nuclide irradiated under two spectra in one schedule moves
-        // together in both. Perturbing them independently would treat one
+        // and each spectrum's sampler holds its own rows of one factor per
+        // nuclide over all the spectra, so a nuclide irradiated under two
+        // spectra in one schedule moves in both as the folded cross
+        // covariance says. Perturbing them independently would treat one
         // evaluation as two.
         let mut perturbed = Vec::with_capacity(per_spectrum.len());
         for (idx, (rates, weights, folded_chain)) in per_spectrum.iter().enumerate() {
@@ -2070,7 +2101,7 @@ fn first_order_contributors(
         type Job = (usize, String, usize, String);
         let mut jobs: Vec<Job> = Vec::new();
         for (a, sampler) in samplers.iter().enumerate() {
-            for (name, kinds, _) in sampler.factors() {
+            for (name, kinds, _, _) in sampler.factors() {
                 for (i, kind) in kinds.iter().enumerate() {
                     let rate = per_spectrum[a].0.get(name).and_then(|r| r.get(kind));
                     if rate.is_some_and(|r| *r > 0.0) {
@@ -2104,11 +2135,10 @@ fn first_order_contributors(
         let mut channel: HashMap<(String, String), PerStep> = HashMap::new();
         for ((a, name, i, kind), sens) in jobs.iter().zip(results) {
             let sens = sens?;
-            let (_, kinds, l) = samplers[*a]
+            let (_, _, l, n) = samplers[*a]
                 .factors()
-                .find(|(n, _, _)| *n == name)
+                .find(|(n, _, _, _)| *n == name)
                 .expect("the job came from this factor");
-            let n = kinds.len();
             let row = &l[i * n..(i + 1) * n];
             for target in [
                 block

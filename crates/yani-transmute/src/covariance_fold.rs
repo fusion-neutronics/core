@@ -808,6 +808,41 @@ impl FluxDensity<'_> {
             .map(|(phi, w)| phi * phi / (w[1] - w[0]))
             .sum()
     }
+
+    /// `∫_a^b ψ(E) ψ'(E) dE` with `ψ'` another spectrum's density, in
+    /// (n/cm^2/s)^2 per eV. The short-range term of a covariance between the
+    /// same reaction's rates under two spectra; see [`fold_cross_covariance`].
+    ///
+    /// The interval is cut at both spectra's group boundaries, so each piece
+    /// sits inside one group of each and carries a flat density from each,
+    /// split from the collapse's term by [`FluxDensity::flux_over`] as
+    /// [`FluxDensity::density_squared`] splits a shielded one. With `other`
+    /// the same spectrum it is that integral.
+    fn density_product(&self, other: &FluxDensity, reaction: &Reaction, a: f64, b: f64) -> f64 {
+        if a >= b {
+            return 0.0;
+        }
+        let mut inner: Vec<f64> = self
+            .boundaries
+            .iter()
+            .chain(other.boundaries)
+            .copied()
+            .filter(|&e| e > a && e < b)
+            .collect();
+        inner.sort_by(f64::total_cmp);
+        inner.dedup();
+        let mut cuts = Vec::with_capacity(inner.len() + 2);
+        cuts.push(a);
+        cuts.extend(inner);
+        cuts.push(b);
+        let mine = self.flux_over(reaction, &cuts);
+        let theirs = other.flux_over(reaction, &cuts);
+        mine.iter()
+            .zip(&theirs)
+            .zip(cuts.windows(2))
+            .map(|((p, q), w)| p * q / (w[1] - w[0]))
+            .sum()
+    }
 }
 
 /// Reaction `i`'s partial rates over one block's grid.
@@ -2482,6 +2517,259 @@ pub fn fold_rate_covariance(
     }
 
     (out, coverage)
+}
+
+/// One spectrum of a schedule, as [`fold_cross_covariance`] reads it: the
+/// chain it was collapsed with (which fixes each nuclide's channels and their
+/// order), its unit-flux rates and its group fluxes.
+pub struct FoldSpectrum<'a> {
+    pub chain: &'a std::collections::HashMap<String, ChainNuclide>,
+    pub rates: &'a ReactionRates,
+    pub multigroup_flux: &'a [f64],
+    pub group_boundaries: &'a [f64],
+}
+
+/// The relative covariance between every nuclide's rates under spectrum `a`
+/// and its rates under spectrum `b`, row-major `n_a × n_b` over the channels
+/// [`fold_rate_covariance`] gives each spectrum, in the same order.
+///
+/// One evaluation states one uncertainty on a cross section, so the rates it
+/// drives under two spectra are correlated:
+///
+/// ```text
+/// Cov(R^a_i, R^b_j) = Σ_{k,l} C_ij[k,l] · r^a_i[k] · r^b_j[l]
+/// ```
+///
+/// the fold's own contraction with each side's partials taken under its own
+/// spectrum. Two identical spectra give exactly the diagonal fold's matrix.
+/// A short-range (`lb = 8`) variance correlates two averages only through the
+/// energies both weight, so its term is `Fk·ΔEk·∫ ψ_a ψ_b dE` over the
+/// interval, see [`FluxDensity::density_product`].
+///
+/// The blocks consumed and skipped are exactly [`fold_nuclide`]'s, read off
+/// the same rules, so this block and the two diagonal ones are one covariance.
+/// It reports no coverage: everything it could miss, the diagonal fold of
+/// each spectrum has already reported. A nuclide either spectrum's fold has
+/// no data for is left out.
+pub fn fold_cross_covariance(
+    material: &Material,
+    a: &FoldSpectrum,
+    b: &FoldSpectrum,
+    shielding: Option<&Shielding>,
+) -> BTreeMap<String, Vec<f64>> {
+    let valid = |s: &FoldSpectrum| {
+        !s.multigroup_flux.is_empty() && s.group_boundaries.len() == s.multigroup_flux.len() + 1
+    };
+    if !valid(a) || !valid(b) {
+        return BTreeMap::new();
+    }
+    let shapes_a = CollapseShapes::new(material, a.multigroup_flux, a.group_boundaries, shielding);
+    let shapes_b = CollapseShapes::new(material, b.multigroup_flux, b.group_boundaries, shielding);
+
+    let mut names: Vec<&String> = a
+        .rates
+        .keys()
+        .filter(|n| b.rates.contains_key(*n))
+        .collect();
+    names.sort();
+
+    let one = |name: &&String| -> Option<(String, Vec<f64>)> {
+        let (chain_a, chain_b) = (a.chain.get(*name)?, b.chain.get(*name)?);
+        let nuclide_data = material.nuclide_data.get(*name)?;
+        let blocks = nuclide_data.covariance.as_ref()?;
+        let temperature = if material.temperature().is_empty() {
+            crate::default_temperature(nuclide_data)?
+        } else {
+            material.temperature().to_string()
+        };
+        let by_mt = nuclide_data.reactions_for_temp(&temperature)?;
+        let reactions: BTreeMap<i32, &Reaction> =
+            by_mt.iter().map(|(mt, r)| (*mt, r.as_ref())).collect();
+        let rates_of = |s: &FoldSpectrum| -> BTreeMap<String, f64> {
+            s.rates
+                .get(*name)
+                .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
+                .unwrap_or_default()
+        };
+        let shape_a = shapes_a.as_ref().and_then(|s| s.shape_for(name));
+        let shape_b = shapes_b.as_ref().and_then(|s| s.shape_for(name));
+        let flux_a = FluxDensity {
+            boundaries: a.group_boundaries,
+            flux: a.multigroup_flux,
+            shape: shape_a.as_ref(),
+        };
+        let flux_b = FluxDensity {
+            boundaries: b.group_boundaries,
+            flux: b.multigroup_flux,
+            shape: shape_b.as_ref(),
+        };
+        let relative = fold_nuclide_cross(
+            [&flux_a, &flux_b],
+            blocks,
+            &reactions,
+            [&kinds_and_mts(chain_a), &kinds_and_mts(chain_b)],
+            [&rates_of(a), &rates_of(b)],
+        )?;
+        Some(((*name).clone(), relative))
+    };
+
+    let folded: Vec<Option<(String, Vec<f64>)>> = {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use rayon::prelude::*;
+            names.par_iter().map(one).collect()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            names.iter().map(one).collect()
+        }
+    };
+    folded.into_iter().flatten().collect()
+}
+
+/// [`fold_nuclide`]'s contraction between two spectra, with none of its
+/// reporting: the relative `n_a × n_b` block, or `None` where the diagonal
+/// fold would have used no block either.
+///
+/// Each side expands its own channels, since the chain each spectrum was
+/// collapsed with fixes them. A block between two different reactions is
+/// not symmetric across spectra the way it is within one: `Cov(R^a_mt,
+/// R^b_mt1)` and `Cov(R^a_mt1, R^b_mt)` weight it with different partials,
+/// so both orientations are contracted.
+fn fold_nuclide_cross(
+    flux: [&FluxDensity; 2],
+    blocks: &[CovarianceBlock],
+    reactions: &BTreeMap<i32, &Reaction>,
+    kinds: [&[(String, i32)]; 2],
+    rates: [&BTreeMap<String, f64>; 2],
+) -> Option<Vec<f64>> {
+    let (n_a, n_b) = (kinds[0].len(), kinds[1].len());
+    if n_a == 0 || n_b == 0 {
+        return None;
+    }
+    let blocks = single_component_lumps(blocks);
+    let blocks = blocks.as_ref();
+    let sums = lump_cross_sections(blocks, reactions);
+    let mut reactions = reactions.clone();
+    reactions.extend(sums.iter().map(|r| (r.mt_number, r)));
+    let reactions = &reactions;
+    let expansions = [
+        channel_terms(blocks, reactions, kinds[0]),
+        channel_terms(blocks, reactions, kinds[1]),
+    ];
+    let mut by_mt: [BTreeMap<i32, Vec<&Term>>; 2] = [BTreeMap::new(), BTreeMap::new()];
+    for (side, expansion) in expansions.iter().enumerate() {
+        for term in &expansion.terms {
+            by_mt[side].entry(term.mt).or_default().push(term);
+        }
+    }
+    // Which copy of a mirrored pair is folded depends only on the blocks, so
+    // over the union of what both sides reach it is the copy each diagonal
+    // fold used.
+    let reached: BTreeSet<i32> = by_mt[0].keys().chain(by_mt[1].keys()).copied().collect();
+    let mut skipped_copy: BTreeSet<(i32, i32)> = BTreeSet::new();
+    for (lo, hi) in mirrored_pairs(blocks, &reached) {
+        if orientation_expands(blocks, lo, hi) || !orientation_expands(blocks, hi, lo) {
+            skipped_copy.insert((hi, lo));
+        } else {
+            skipped_copy.insert((lo, hi));
+        }
+    }
+
+    let mut absolute = vec![0.0; n_a * n_b];
+    let mut used = 0;
+    for block in blocks {
+        if block.is_cross_material() || !block.names_cross_section() {
+            continue;
+        }
+        let CovarianceData::Ni(ni) = &block.data else {
+            continue;
+        };
+        let (row_mt, col_mt) = (block.mt, block.partner_mt());
+        if skipped_copy.contains(&(row_mt, col_mt)) {
+            continue;
+        }
+        let Ok(expanded) = expand_ni(ni) else {
+            continue;
+        };
+        if expanded.is_empty() || (expanded.scale == Scale::ShortRange && row_mt != col_mt) {
+            continue;
+        }
+        // Cov(R^a over `mt_a`, R^b over `mt_b`), with `mt_a` on the block's
+        // rows when `a_on_rows`, else on its columns. A block counts wherever
+        // one side reaches one of its reactions and the other side the other,
+        // whether or not either diagonal fold reaches both: the cross block
+        // is a slice of the same `P C Pᵀ` as the diagonal ones, which is what
+        // keeps the joint matrix positive semidefinite.
+        let mut orient = |mt_a: i32, mt_b: i32, a_on_rows: bool| -> bool {
+            let (Some(ta), Some(tb)) = (by_mt[0].get(&mt_a), by_mt[1].get(&mt_b)) else {
+                return false;
+            };
+            let (rx_a, rx_b) = (reactions[&mt_a], reactions[&mt_b]);
+            let (grid_a, grid_b) = if a_on_rows {
+                (&expanded.row_energies, &expanded.col_energies)
+            } else {
+                (&expanded.col_energies, &expanded.row_energies)
+            };
+            for t in ta {
+                for u in tb {
+                    let contribution = if expanded.scale == Scale::ShortRange {
+                        // A self-covariance (refused otherwise above): the
+                        // two terms covary over the energies both ranges
+                        // hold, weighted by both spectra there.
+                        let overlap = (t.range.0.max(u.range.0), t.range.1.min(u.range.1));
+                        if overlap.0 >= overlap.1 {
+                            continue;
+                        }
+                        let grid = &expanded.row_energies;
+                        let mut total = 0.0;
+                        for (k, w) in grid.windows(2).enumerate().take(expanded.n_rows()) {
+                            let (lo, hi) = (w[0].max(overlap.0), w[1].min(overlap.1));
+                            let shared = flux[0].density_product(flux[1], rx_a, lo, hi);
+                            total += expanded.get(k, k) * (w[1] - w[0]) * shared;
+                        }
+                        BARN_TO_CM2 * BARN_TO_CM2 * total
+                    } else {
+                        let pa =
+                            partial_rates_within(flux[0], rx_a, grid_a, expanded.scale, t.range);
+                        let pb =
+                            partial_rates_within(flux[1], rx_b, grid_b, expanded.scale, u.range);
+                        if a_on_rows {
+                            contract(&expanded, &pa, &pb)
+                        } else {
+                            contract(&expanded, &pb, &pa)
+                        }
+                    };
+                    absolute[t.channel * n_b + u.channel] +=
+                        t.coefficient * u.coefficient * contribution;
+                }
+            }
+            true
+        };
+        let mut touched = orient(row_mt, col_mt, true);
+        if row_mt != col_mt {
+            touched |= orient(col_mt, row_mt, false);
+        }
+        used += usize::from(touched);
+    }
+    if used == 0 {
+        return None;
+    }
+
+    // Relativized with each side's FULL rates, as the diagonal fold is.
+    let mut relative = vec![0.0; n_a * n_b];
+    for i in 0..n_a {
+        for j in 0..n_b {
+            if let (Some(&ri), Some(&rj)) =
+                (rates[0].get(&kinds[0][i].0), rates[1].get(&kinds[1][j].0))
+            {
+                if ri != 0.0 && rj != 0.0 {
+                    relative[i * n_b + j] = absolute[i * n_b + j] / (ri * rj);
+                }
+            }
+        }
+    }
+    Some(relative)
 }
 
 #[cfg(test)]
@@ -5025,5 +5313,75 @@ mod lumped_tests {
             .insert(key.clone(), ["MT41".to_string()].into());
         a.absorb(b);
         assert_eq!(a.lumped_covariance_not_assignable[&key].len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod cross_density_tests {
+    use super::*;
+
+    fn reaction() -> Reaction {
+        Reaction {
+            cross_section: vec![1.0, 1.0].into(),
+            threshold_idx: 0,
+            energy: vec![1.0e-5, 2.0e7].into(),
+            mt_number: 102,
+            q_value: 0.0,
+            products: vec![],
+            scatter_in_cm: false,
+            redundant: false,
+        }
+    }
+
+    /// With itself, the product is the short-range integral the diagonal fold
+    /// already uses.
+    #[test]
+    fn a_spectrum_with_itself_is_its_density_squared() {
+        let (bounds, flux) = ([1.0, 3.0, 4.0, 10.0], [2.0, 5.0, 3.0]);
+        let f = FluxDensity {
+            boundaries: &bounds,
+            flux: &flux,
+            shape: None,
+        };
+        let rx = reaction();
+        for (a, b) in [(1.0, 10.0), (2.0, 3.5), (3.5, 9.0)] {
+            let product = f.density_product(&f, &rx, a, b);
+            let squared = f.density_squared(&rx, a, b);
+            assert!(
+                (product - squared).abs() <= 1e-12 * squared,
+                "[{a}, {b}]: {product} vs {squared}"
+            );
+        }
+    }
+
+    /// Two group structures: `∫ ψ_a ψ_b dE` by hand over the union of their
+    /// boundaries, with each density flat in its own groups and zero outside
+    /// its range.
+    #[test]
+    fn two_group_structures_integrate_over_the_union_of_their_boundaries() {
+        // a: [0, 2] carries 4, [2, 6] carries 8 -> densities 2 and 2.
+        // b: [1, 4] carries 9 -> density 3, and nothing past 4.
+        let (ba, fa) = ([0.0, 2.0, 6.0], [4.0, 8.0]);
+        let (bb, fb) = ([1.0, 4.0], [9.0]);
+        let a = FluxDensity {
+            boundaries: &ba,
+            flux: &fa,
+            shape: None,
+        };
+        let b = FluxDensity {
+            boundaries: &bb,
+            flux: &fb,
+            shape: None,
+        };
+        let rx = reaction();
+        // Over [0, 6] only [1, 4] has both: 2 * 3 * 3 = 18.
+        let v = a.density_product(&b, &rx, 0.0, 6.0);
+        assert!((v - 18.0).abs() < 1e-12, "{v}");
+        assert!(
+            (b.density_product(&a, &rx, 0.0, 6.0) - v).abs() < 1e-12,
+            "symmetric"
+        );
+        // Over [3, 5]: [3, 4] only, 2 * 3 * 1 = 6.
+        assert!((a.density_product(&b, &rx, 3.0, 5.0) - 6.0).abs() < 1e-12);
     }
 }

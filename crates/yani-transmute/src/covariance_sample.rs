@@ -157,11 +157,20 @@ struct Eigen {
     clipped_fraction: f64,
 }
 
-/// One nuclide's factorized covariance.
+/// One nuclide's factorized covariance, as one spectrum sees it.
+///
+/// A schedule's spectra share one factorization per nuclide (see
+/// [`Sampler::joint`]): this holds the rows of the joint `L` that drive this
+/// spectrum's channels, over all of its columns, so every spectrum applies its
+/// own rows to the same deviates. With one spectrum the rows are the whole,
+/// square factor.
 struct Factor {
     kinds: Vec<String>,
-    /// Row-major `n × n`, `L = V √Λ`.
+    /// Row-major `kinds.len() × cols`, rows of `L = V √Λ`.
     l: Vec<f64>,
+    /// Columns of `L`: the joint matrix's dimension, the number of standard
+    /// normals a replica draws for this nuclide.
+    cols: usize,
     /// Per-channel relative standard deviation, `sqrt(sum_j L[i][j]^2)`.
     ///
     /// The marginal each row of `L` produces. Kept because the lognormal
@@ -170,100 +179,212 @@ struct Factor {
     sigma: Vec<f64>,
     /// Per-channel `C_ii` as folded, before any repair, negative or not.
     evaluated_variance: Vec<f64>,
-    /// Set when the matrix is not PSD past [`REPAIR_TOLERANCE`].
+    /// Set when the joint matrix is not PSD past [`REPAIR_TOLERANCE`].
     repair: Option<Eigen>,
 }
 
-/// The per-nuclide factorizations, built once and reused for every replica.
+/// One spectrum's view of the per-nuclide factorizations, built once and
+/// reused for every replica.
 pub struct Sampler {
     factors: BTreeMap<String, Factor>,
 }
 
+/// One nuclide's whole factorization, before it is split by spectrum.
+struct Joint {
+    l: Vec<f64>,
+    n: usize,
+    repair: Option<Eigen>,
+    evaluated_variance: Vec<f64>,
+}
+
+/// Factorize one relative covariance, `L = V √Λ` with negative eigenvalues
+/// clipped to zero.
+fn factorize(cov: &RateCovariance) -> Joint {
+    let n = cov.n();
+    let (values, vectors) = jacobi_eigen(&cov.relative, n);
+
+    let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+    let repair = needs_repair(cov).then(|| {
+        let trace: f64 = (0..n).map(|i| cov.get(i, i)).sum();
+        let clipped: f64 = values.iter().filter(|v| **v < 0.0).map(|v| -v).sum();
+        Eigen {
+            lambda_min: min,
+            lambda_max: max,
+            clipped_fraction: if trace > 0.0 {
+                clipped / trace
+            } else {
+                f64::INFINITY
+            },
+        }
+    });
+
+    // Column j of V is eigenvector j, so L[i][j] = V[i][j] · √λ_j.
+    let mut l = vec![0.0; n * n];
+    for j in 0..n {
+        let s = values[j].max(0.0).sqrt();
+        if s == 0.0 {
+            continue;
+        }
+        for i in 0..n {
+            l[i * n + j] = vectors[i * n + j] * s;
+        }
+    }
+    Joint {
+        l,
+        n,
+        repair,
+        evaluated_variance: (0..n).map(|i| cov.get(i, i)).collect(),
+    }
+}
+
 impl Sampler {
-    /// Factorize every nuclide's relative covariance.
+    /// Factorize every nuclide's relative covariance under one spectrum.
     pub fn new(covariance: &BTreeMap<String, RateCovariance>) -> Self {
-        // One eigendecomposition per nuclide, each reading only its own matrix.
-        // The results land in a `BTreeMap` keyed by name, so nothing here can
-        // depend on the order they finish in.
-        let entries: Vec<(&String, &RateCovariance)> = covariance.iter().collect();
-        let one = |&(name, cov): &(&String, &RateCovariance)| -> Option<(String, Factor)> {
-            let n = cov.n();
-            if n == 0 {
-                return None;
-            }
-            let (values, vectors) = jacobi_eigen(&cov.relative, n);
+        Self::joint(std::slice::from_ref(covariance), &BTreeMap::new())
+            .pop()
+            .expect("one spectrum in, one sampler out")
+    }
 
-            let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
-            let repair = needs_repair(cov).then(|| {
-                let trace: f64 = (0..n).map(|i| cov.get(i, i)).sum();
-                let clipped: f64 = values.iter().filter(|v| **v < 0.0).map(|v| -v).sum();
-                Eigen {
-                    lambda_min: min,
-                    lambda_max: max,
-                    clipped_fraction: if trace > 0.0 {
-                        clipped / trace
-                    } else {
-                        f64::INFINITY
-                    },
-                }
-            });
+    /// Factorize each nuclide once across every spectrum of a schedule, and
+    /// return one sampler per spectrum, in order.
+    ///
+    /// `per_spectrum[a]` is spectrum `a`'s fold, and `cross[(a, b)]`, `a < b`,
+    /// the relative covariance between a nuclide's rates under `a` and under
+    /// `b` (row-major `n_a × n_b`, from
+    /// [`fold_cross_covariance`](crate::covariance_fold::fold_cross_covariance)).
+    /// A nuclide's channels under every spectrum that folded it are stacked
+    /// into one matrix and factorized once, and each spectrum's sampler keeps
+    /// its own rows of that factor.
+    ///
+    /// That is what makes one nuclide's draws under two spectra correlated as
+    /// the evaluation says: the deviates are drawn per nuclide, so the two
+    /// spectra's perturbations are `L_a z` and `L_b z` with `L_a L_bᵀ` the
+    /// folded cross block. Factorizing each spectrum on its own and sharing
+    /// `z` would give `L_a L_bᵀ` of two unrelated eigenbases instead, which can
+    /// be anything from -1 to 1 and is zero as easily as one. A missing cross
+    /// block reads as uncorrelated.
+    ///
+    /// With one spectrum the stacked matrix is that spectrum's own, so the
+    /// factor and every draw are bit-identical to factorizing it alone.
+    pub fn joint(
+        per_spectrum: &[BTreeMap<String, RateCovariance>],
+        cross: &BTreeMap<(usize, usize), BTreeMap<String, Vec<f64>>>,
+    ) -> Vec<Self> {
+        let names: BTreeSet<&String> = per_spectrum.iter().flat_map(|c| c.keys()).collect();
+        let names: Vec<&String> = names.into_iter().collect();
 
-            // L = V √Λ, with negative eigenvalues clipped to zero. Column j of
-            // V is eigenvector j, so L[i][j] = V[i][j] · √λ_j.
-            let mut l = vec![0.0; n * n];
-            for j in 0..n {
-                let s = values[j].max(0.0).sqrt();
-                if s == 0.0 {
-                    continue;
-                }
-                for i in 0..n {
-                    l[i * n + j] = vectors[i * n + j] * s;
-                }
-            }
-
-            // The marginal each row produces, which is what the lognormal
-            // transform is matched against. Computed here rather than per
-            // replica: it is a property of the factorization, not of a draw.
-            let sigma: Vec<f64> = (0..n)
-                .map(|i| {
-                    l[i * n..(i + 1) * n]
-                        .iter()
-                        .map(|v| v * v)
-                        .sum::<f64>()
-                        .sqrt()
-                })
+        // One eigendecomposition per nuclide, each reading only its own
+        // matrices. The results land in `BTreeMap`s keyed by name, so nothing
+        // here can depend on the order they finish in.
+        let one = |name: &&String| -> Vec<(usize, Factor)> {
+            let present: Vec<(usize, &RateCovariance)> = per_spectrum
+                .iter()
+                .enumerate()
+                .filter_map(|(a, c)| c.get(*name).filter(|c| c.n() > 0).map(|c| (a, c)))
                 .collect();
-
-            Some((
-                name.clone(),
-                Factor {
-                    kinds: cov.kinds.clone(),
-                    l,
-                    sigma,
-                    evaluated_variance: (0..n).map(|i| cov.get(i, i)).collect(),
-                    repair,
-                },
-            ))
+            let mut offsets = Vec::with_capacity(present.len());
+            let mut total = 0;
+            for (_, c) in &present {
+                offsets.push(total);
+                total += c.n();
+            }
+            if total == 0 {
+                return Vec::new();
+            }
+            let stacked = if present.len() == 1 {
+                present[0].1.clone()
+            } else {
+                let mut relative = vec![0.0; total * total];
+                for (p, &(a, ca)) in present.iter().enumerate() {
+                    let (oa, na) = (offsets[p], ca.n());
+                    for i in 0..na {
+                        for j in 0..na {
+                            relative[(oa + i) * total + oa + j] = ca.get(i, j);
+                        }
+                    }
+                    for (q, &(b, cb)) in present.iter().enumerate().skip(p + 1) {
+                        let (ob, nb) = (offsets[q], cb.n());
+                        let Some(block) = cross.get(&(a, b)).and_then(|m| m.get(*name)) else {
+                            continue;
+                        };
+                        assert_eq!(
+                            block.len(),
+                            na * nb,
+                            "the cross block of {name} between spectra {a} and {b} does not \
+                             match their channels"
+                        );
+                        for i in 0..na {
+                            for j in 0..nb {
+                                let v = block[i * nb + j];
+                                relative[(oa + i) * total + ob + j] = v;
+                                relative[(ob + j) * total + oa + i] = v;
+                            }
+                        }
+                    }
+                }
+                RateCovariance {
+                    kinds: present.iter().flat_map(|(_, c)| c.kinds.clone()).collect(),
+                    relative,
+                }
+            };
+            let joint = factorize(&stacked);
+            present
+                .iter()
+                .zip(&offsets)
+                .map(|(&(a, c), &offset)| {
+                    let rows = offset..offset + c.n();
+                    let l: Vec<f64> = joint.l[rows.start * joint.n..rows.end * joint.n].to_vec();
+                    // The marginal each row produces, which is what the
+                    // lognormal transform is matched against.
+                    let sigma = l
+                        .chunks_exact(joint.n)
+                        .map(|row| row.iter().map(|v| v * v).sum::<f64>().sqrt())
+                        .collect();
+                    (
+                        a,
+                        Factor {
+                            kinds: c.kinds.clone(),
+                            l,
+                            cols: joint.n,
+                            sigma,
+                            evaluated_variance: joint.evaluated_variance[rows].to_vec(),
+                            repair: joint.repair,
+                        },
+                    )
+                })
+                .collect()
         };
 
-        let factorized: Vec<Option<(String, Factor)>> = {
+        let factorized: Vec<(&String, Vec<(usize, Factor)>)> = {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 use rayon::prelude::*;
-                entries.par_iter().map(one).collect()
+                names.par_iter().map(|n| (*n, one(n))).collect()
             }
             #[cfg(target_arch = "wasm32")]
             {
-                entries.iter().map(one).collect()
+                names.iter().map(|n| (*n, one(n))).collect()
             }
         };
-        Sampler {
-            factors: factorized.into_iter().flatten().collect(),
+        let mut out: Vec<Sampler> = (0..per_spectrum.len())
+            .map(|_| Sampler {
+                factors: BTreeMap::new(),
+            })
+            .collect();
+        for (name, factors) in factorized {
+            for (a, factor) in factors {
+                out[a].factors.insert(name.clone(), factor);
+            }
         }
+        out
     }
 
     /// Every matrix this sampler had to repair, tagged with `spectrum`.
+    ///
+    /// A nuclide folded under several spectra is factorized once over all of
+    /// them, so a repair of that joint matrix is listed under each spectrum it
+    /// spans, with that spectrum's channels and the joint eigenvalues.
     pub fn repairs(&self, spectrum: usize) -> Vec<Repair> {
         self.factors
             .iter()
@@ -312,13 +433,15 @@ impl Sampler {
         self.factors.is_empty()
     }
 
-    /// The nuclides carrying a factor, with each one's reaction kinds and its
-    /// row-major factor `L` (`L L^T` the relative covariance of those kinds'
-    /// rates), for first-order attribution.
-    pub(crate) fn factors(&self) -> impl Iterator<Item = (&String, &[String], &[f64])> {
+    /// The nuclides carrying a factor, with each one's reaction kinds, its
+    /// row-major factor rows `L` (`L L^T` the relative covariance of those
+    /// kinds' rates) and their column count, for first-order attribution.
+    /// The columns are the nuclide's joint deviates, shared by every spectrum
+    /// of the schedule, so contributions over spectra add column by column.
+    pub(crate) fn factors(&self) -> impl Iterator<Item = (&String, &[String], &[f64], usize)> {
         self.factors
             .iter()
-            .map(|(name, f)| (name, f.kinds.as_slice(), f.l.as_slice()))
+            .map(|(name, f)| (name, f.kinds.as_slice(), f.l.as_slice(), f.cols))
     }
 
     /// The relative perturbations one replica applies, per nuclide and kind.
@@ -329,17 +452,17 @@ impl Sampler {
         let replica_seed = yamc_rng::history_seed(base_seed, replica);
         let mut out = BTreeMap::new();
         for (name, factor) in &self.factors {
-            let n = factor.kinds.len();
             // Keyed on the NAME, not on a position, so a nuclide's stream does
-            // not move when a different nuclide joins or leaves the material.
+            // not move when a different nuclide joins or leaves the material,
+            // and every spectrum's sampler draws the same deviates for it.
             let seed = yamc_rng::secondary_seed(replica_seed, name_ordinal(name));
             let mut state = yamc_rng::expand_seed(seed);
-            let z = standard_normals(&mut state, n);
+            let z = standard_normals(&mut state, factor.cols);
 
             // delta = L z, one row of the factor at a time.
             let delta: Vec<f64> = factor
                 .l
-                .chunks_exact(n)
+                .chunks_exact(factor.cols)
                 .map(|row| row.iter().zip(&z).map(|(l, z)| l * z).sum())
                 .collect();
             out.insert(name.clone(), delta);
@@ -1493,5 +1616,117 @@ mod tests {
         let (out, sampled) = s.perturb(&rates, 1, 0);
         assert_eq!(out, rates);
         assert_eq!(sampled, 0);
+    }
+
+    /// Two spectra seeing one evaluation `C` through `D_a` and `D_b`, just
+    /// either side of the tie `C_11 = C_22` where a cyclic Jacobi rotation
+    /// changes sign: `(C_a, C_b, X)` with `X = D_a C D_b` the cross block.
+    fn either_side_of_the_tie() -> (RateCovariance, RateCovariance, Vec<f64>) {
+        let c = [0.01, 0.009, 0.009, 0.01];
+        let (da, db) = ([1.01_f64.sqrt(), 1.0], [0.99_f64.sqrt(), 1.0]);
+        let scaled = |l: [f64; 2], r: [f64; 2]| -> Vec<f64> {
+            (0..4).map(|k| l[k / 2] * c[k] * r[k % 2]).collect()
+        };
+        let kinds = ["(n,gamma)", "(n,p)"];
+        (
+            cov(&kinds, scaled(da, da)),
+            cov(&kinds, scaled(db, db)),
+            scaled(da, db),
+        )
+    }
+
+    fn rows_of(s: &Sampler, name: &str) -> (Vec<f64>, usize) {
+        let (_, _, l, cols) = s.factors().find(|(n, ..)| *n == name).expect("factor");
+        (l.to_vec(), cols)
+    }
+
+    /// `L_a L_bᵀ` over the shared columns is the folded cross block.
+    #[test]
+    fn the_joint_factor_reproduces_the_cross_block() {
+        let (ca, cb, x) = either_side_of_the_tie();
+        let joint = Sampler::joint(
+            &[
+                BTreeMap::from([("X".to_string(), ca)]),
+                BTreeMap::from([("X".to_string(), cb)]),
+            ],
+            &BTreeMap::from([((0, 1), BTreeMap::from([("X".to_string(), x.clone())]))]),
+        );
+        let (la, n) = rows_of(&joint[0], "X");
+        let (lb, m) = rows_of(&joint[1], "X");
+        assert_eq!((n, m), (4, 4), "one factor over both spectra' channels");
+        for i in 0..2 {
+            for j in 0..2 {
+                let v: f64 = (0..n).map(|k| la[i * n + k] * lb[j * n + k]).sum();
+                assert!(
+                    (v - x[i * 2 + j]).abs() < 1e-12,
+                    "({i},{j}): {v} vs {}",
+                    x[i * 2 + j]
+                );
+            }
+        }
+    }
+
+    /// The bug the joint factor fixes: two separate factorizations sharing
+    /// the deviates give `L_a L_bᵀ` of two unrelated eigenbases, which here
+    /// is nowhere near the cross block, while the joint draws track it.
+    #[test]
+    fn separate_factors_miss_the_cross_correlation_and_the_joint_one_does_not() {
+        let (ca, cb, x) = either_side_of_the_tie();
+        let rho_true = x[0] / (ca.get(0, 0) * cb.get(0, 0)).sqrt();
+        let correlation = |a: &Sampler, b: &Sampler| -> f64 {
+            let n = 4000;
+            let (mut sab, mut saa, mut sbb) = (0.0, 0.0, 0.0);
+            for r in 0..n {
+                let da = a.deviates(7, r)["X"][0];
+                let db = b.deviates(7, r)["X"][0];
+                sab += da * db;
+                saa += da * da;
+                sbb += db * db;
+            }
+            sab / (saa * sbb).sqrt()
+        };
+
+        let alone_a = Sampler::new(&BTreeMap::from([("X".to_string(), ca.clone())]));
+        let alone_b = Sampler::new(&BTreeMap::from([("X".to_string(), cb.clone())]));
+        let separate = correlation(&alone_a, &alone_b);
+
+        let joint = Sampler::joint(
+            &[
+                BTreeMap::from([("X".to_string(), ca)]),
+                BTreeMap::from([("X".to_string(), cb)]),
+            ],
+            &BTreeMap::from([((0, 1), BTreeMap::from([("X".to_string(), x)]))]),
+        );
+        let together = correlation(&joint[0], &joint[1]);
+
+        assert!(
+            rho_true > 0.99,
+            "the setup is near-identical spectra: {rho_true}"
+        );
+        assert!(
+            (together - rho_true).abs() < 0.02,
+            "joint draws correlate at {together}, the fold says {rho_true}"
+        );
+        assert!(
+            (separate - rho_true).abs() > 0.5,
+            "separate factors correlate at {separate}; this case is meant to show \
+             them missing the fold's {rho_true}"
+        );
+    }
+
+    /// A nuclide only one spectrum folded is factorized exactly as it would
+    /// be alone, so its draws are bit-identical.
+    #[test]
+    fn a_nuclide_under_one_spectrum_draws_as_it_would_alone() {
+        let c = cov(&["(n,gamma)", "(n,p)"], vec![0.04, 0.012, 0.012, 0.09]);
+        let alone = Sampler::new(&BTreeMap::from([("X".to_string(), c.clone())]));
+        let joint = Sampler::joint(
+            &[BTreeMap::new(), BTreeMap::from([("X".to_string(), c)])],
+            &BTreeMap::new(),
+        );
+        assert!(joint[0].is_empty());
+        for r in 0..8 {
+            assert_eq!(alone.deviates(3, r), joint[1].deviates(3, r));
+        }
     }
 }
