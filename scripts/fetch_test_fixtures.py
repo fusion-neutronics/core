@@ -173,31 +173,21 @@ FETCH_ATTEMPTS = 4
 FETCH_BACKOFF_SECONDS = 2.0
 
 
-def fetch(url: str, dest: pathlib.Path, required: bool, force: bool) -> str:
-    """Fetch one section. Returns 'cached', 'downloaded', or 'absent'."""
-    marker = dest.with_name(dest.name + ABSENT_SUFFIX)
-    if (dest.exists() or marker.exists()) and not force:
-        return "cached"
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    payload = None
+def read_url(request: urllib.request.Request) -> bytes:
+    """The body at ``request``, retrying a failed transport.
+
+    A reset, timeout or truncated body is the connection failing rather than
+    the origin answering, so it is retried with backoff. An HTTP status is the
+    origin's answer and is raised to the caller as the ``HTTPError`` it is.
+    """
     for attempt in range(1, FETCH_ATTEMPTS + 1):
         try:
             with urllib.request.urlopen(request, timeout=600) as response:
-                payload = response.read()
-            break
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404 and not required:
-                # Record the 404 the way the runtime cache does. Without this
-                # the loader cannot tell "this nuclide has no total_nu" from
-                # "this fixture is half-downloaded", and a full-scope read
-                # fails with a bare NotFound (Fe58, which has no total_nu, did
-                # exactly that).
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                marker.write_bytes(b"")
-                return "absent"
-            # Any other HTTP status is the origin answering, so retrying it
-            # only turns one clear failure into four slow ones.
-            raise SystemExit(f"failed to fetch {url}: {exc}")
+                return response.read()
+        # `HTTPError` is a `URLError`, so it is let through before the
+        # transport failures are caught.
+        except urllib.error.HTTPError:
+            raise
         # `http.client.HTTPException` is the body going wrong after the headers
         # arrived: `IncompleteRead` when the connection drops mid-transfer, which
         # is the shape a reset takes once `read()` has started. It is not a
@@ -211,11 +201,38 @@ def fetch(url: str, dest: pathlib.Path, required: bool, force: bool) -> str:
         ) as exc:
             if attempt == FETCH_ATTEMPTS:
                 raise SystemExit(
-                    f"failed to fetch {url} after {FETCH_ATTEMPTS} attempts: {exc}"
+                    f"failed to fetch {request.full_url} after {FETCH_ATTEMPTS} attempts: {exc}"
                 ) from exc
             delay = FETCH_BACKOFF_SECONDS * 2 ** (attempt - 1)
-            print(f"{url}: {exc}; retrying in {delay:.0f}s ({attempt}/{FETCH_ATTEMPTS})")
+            print(
+                f"{request.full_url}: {exc}; retrying in {delay:.0f}s "
+                f"({attempt}/{FETCH_ATTEMPTS})"
+            )
             time.sleep(delay)
+    raise AssertionError("unreachable: the last attempt returns or exits")
+
+
+def fetch(url: str, dest: pathlib.Path, required: bool, force: bool) -> str:
+    """Fetch one section. Returns 'cached', 'downloaded', or 'absent'."""
+    marker = dest.with_name(dest.name + ABSENT_SUFFIX)
+    if (dest.exists() or marker.exists()) and not force:
+        return "cached"
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        payload = read_url(request)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404 and not required:
+            # Record the 404 the way the runtime cache does. Without this
+            # the loader cannot tell "this nuclide has no total_nu" from
+            # "this fixture is half-downloaded", and a full-scope read
+            # fails with a bare NotFound (Fe58, which has no total_nu, did
+            # exactly that).
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_bytes(b"")
+            return "absent"
+        # Any other HTTP status is the origin answering, so retrying it
+        # only turns one clear failure into four slow ones.
+        raise SystemExit(f"failed to fetch {url}: {exc}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(payload)
     # A section that used to be absent and is now published must lose its
@@ -232,6 +249,9 @@ def restamped(base_url: str, dest_dir: pathlib.Path, stamp: str) -> bool:
     False when nothing is cached yet: there is nothing to be stale. An
     unreadable cached stamp counts as stale, since the fixture cannot be
     trusted either way.
+
+    One request per cached fixture, so a warm cache makes as many of these as
+    a cold one makes downloads, and they go through the same retry.
     """
     cached = dest_dir / stamp
     if not cached.is_file():
@@ -242,8 +262,7 @@ def restamped(base_url: str, dest_dir: pathlib.Path, stamp: str) -> bool:
         return True
     request = urllib.request.Request(f"{base_url}/{stamp}", headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(request, timeout=600) as response:
-            remote = json.loads(response.read()).get("data_version")
+        remote = json.loads(read_url(request)).get("data_version")
     except (urllib.error.HTTPError, ValueError) as exc:
         raise SystemExit(f"failed to fetch {base_url}/{stamp}: {exc}")
     return remote != local
