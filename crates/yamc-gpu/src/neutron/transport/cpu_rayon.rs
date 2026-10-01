@@ -22,6 +22,8 @@ pub fn run_multi_cell_transport_cpu_rayon(
     energies_in: &[f64],
     positions_in: &[f64],
     directions_in: &[f64],
+    // Per-particle starting weight (1.0 for a source neutron), one per seed.
+    weights_in: &[f64],
     cell_aabbs: &[f64],
     cell_to_material: &[u32],
     surface_types: &[u32],
@@ -169,6 +171,11 @@ pub fn run_multi_cell_transport_cpu_rayon(
     use rayon::prelude::*;
 
     let n = seeds.len();
+    assert_eq!(
+        weights_in.len(),
+        n,
+        "weights_in must have one entry per seed"
+    );
     let n_cells = cell_aabbs.len() / 6;
     let n_surfaces = surface_types.len();
     let n_grid = log_energy_grid.len();
@@ -277,6 +284,7 @@ pub fn run_multi_cell_transport_cpu_rayon(
         energies_in,
         positions_in,
         directions_in,
+        weights_in,
         cell_aabbs,
         cell_to_material,
         surface_types,

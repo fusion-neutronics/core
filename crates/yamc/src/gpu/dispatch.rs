@@ -352,8 +352,8 @@ pub struct GpuRunResult {
     /// fission progeny and spilled (n,xn) secondaries, on every path
     /// that drains them. A test that wants to know the drain actually ran, as
     /// opposed to the spill merely being counted, checks this against
-    /// `n_spilled_secondaries` (they are equal on a non-fissile model whose
-    /// secondaries all carry unit weight).
+    /// `n_spilled_secondaries` (they are equal on a non-fissile model, since
+    /// every banked record is relaunched exactly once).
     pub n_bank_relaunched: u64,
 }
 
@@ -561,58 +561,24 @@ const MAX_FISSION_GENERATIONS: usize = 50;
 #[cfg(not(target_os = "macos"))]
 const NXN_SPILL_SLOTS_PER_SOURCE: usize = 1;
 
-/// Split-progeny seed for weight-w duplication. Copy 0 keeps the
-/// banked seed, so weight-1 progeny (the overwhelming majority) re-launch
-/// bit-identically to an unsplit chain; later copies get an independent
-/// splitmix32-derived seed so each duplicated neutron transports on its own
-/// stream.
-fn split_progeny_seed(base_seed: u32, k: usize) -> u32 {
-    if k == 0 {
-        return base_seed;
-    }
-    let mut z = base_seed.wrapping_add((k as u32).wrapping_mul(0x9E37_79B9));
-    z = (z ^ (z >> 16)).wrapping_mul(0x85EB_CA6B);
-    z = (z ^ (z >> 13)).wrapping_mul(0xC2B2_AE35);
-    z ^ (z >> 16)
-}
-
-/// Deterministic uniform in [0, 1) from a seed, for stochastic rounding of a
-/// fractional banked weight. The integer (n,2n)/(n,3n) yields make
-/// the weight integral in practice, so this only fires for a rare
-/// fractional-yield reaction; deriving from the banked seed keeps the result
-/// reproducible (no global RNG state).
-fn uniform_from_seed(seed: u32) -> f64 {
-    let mut z = seed.wrapping_mul(0x9E37_79B9);
-    z = (z ^ (z >> 16)).wrapping_mul(0x85EB_CA6B);
-    z = (z ^ (z >> 13)).wrapping_mul(0xC2B2_AE35);
-    z ^= z >> 16;
-    (z as f64) * (1.0 / 4_294_967_296.0)
-}
-
 /// Build the transport inputs for one fission-bank generation: clone the shared
 /// geometry / cross-section inputs and replace the source particle SoA (seeds,
-/// energies, positions, directions) with the first `count` banked neutrons.
-/// The bank record layout is `bank_f64[8*i] = [E, px, py, pz, dx, dy, dz, w]`
-/// and `bank_u32[4*i] = [ptype, cell, seed, gen]` (see
+/// energies, positions, directions, weights) with the first `count` banked
+/// neutrons. The bank record layout is
+/// `bank_f64[8*i] = [E, px, py, pz, dx, dy, dz, w]` and
+/// `bank_u32[4*i] = [ptype, cell, seed, gen]` (see
 /// `yamc_gpu::common::particle_bank`). In the neutron-only dispatch every banked
 /// record is a fission-progeny neutron, so no `ptype` filter is needed.
 ///
-/// Weight is NOT a kernel input (every source particle starts at weight 1.0), so
-/// a banked progeny whose weight was multiplied by an upstream (n,2n)/(n,3n)
-/// (`weight *= yield` in the kernel) is instead re-launched as `round(w)`
-/// unit-weight neutrons here: the analog-equivalent of `w` real
-/// neutrons, matching the CPU, which banks real (n,xn) neutrons rather than
-/// weight-multiplying. `w == 1` yields exactly one copy with the original seed
-/// (bit-identical to a non-multiplied chain); the integer (n,xn) yields make `w`
-/// integral so the split is exact, with stochastic rounding covering any
-/// fractional-yield case. Dropping the banked weight would bias the
-/// fixed-source fissile flux ~4% low for a 14 MeV source.
+/// Each record is relaunched once, with its banked seed, at its banked weight
+/// `w`, which is what the CPU does with its banked progeny. Under survival
+/// biasing `w` is the parent's fractional pre-discount weight; an (n,xn)
+/// spill record carries the weight of the walk that spilled it. Dropping the
+/// banked weight would bias the fixed-source fissile flux low.
 ///
-/// The returned SoA can therefore be LONGER than `count`; the caller sizes the
-/// launch and the next generation's bank from the emitted length. Also returns
-/// each emitted neutron's ORIGINATING source index, read
-/// from `bank_source_idx`, so the next generation launch keeps folding into the
-/// right per-source variance sample (every copy inherits its progeny's source).
+/// Also returns each emitted neutron's ORIGINATING source index, read from
+/// `bank_source_idx`, so the next generation launch keeps folding into the
+/// right per-source variance sample.
 fn fission_source_inputs(
     base: &super::translate::GpuTransportInputs,
     bank_f64: &[f64],
@@ -625,35 +591,22 @@ fn fission_source_inputs(
     let mut energies = Vec::with_capacity(count);
     let mut positions = Vec::with_capacity(count * 3);
     let mut directions = Vec::with_capacity(count * 3);
+    let mut weights = Vec::with_capacity(count);
     let mut source_idx = Vec::with_capacity(count);
     for (i, &sidx) in bank_source_idx.iter().take(count).enumerate() {
         let f = i * 8;
-        let u = i * 4;
-        let base_seed = bank_u32[u + 2];
-        // Unit-weight copies of this progeny.
-        let w = bank_f64[f + 7];
-        let floor_w = w.floor();
-        let mut n_copies = floor_w.max(0.0) as usize;
-        let frac = w - floor_w;
-        if frac > 0.0 && uniform_from_seed(base_seed) < frac {
-            n_copies += 1;
-        }
-        for k in 0..n_copies {
-            energies.push(bank_f64[f]);
-            positions.push(bank_f64[f + 1]);
-            positions.push(bank_f64[f + 2]);
-            positions.push(bank_f64[f + 3]);
-            directions.push(bank_f64[f + 4]);
-            directions.push(bank_f64[f + 5]);
-            directions.push(bank_f64[f + 6]);
-            seeds.push(split_progeny_seed(base_seed, k));
-            source_idx.push(sidx);
-        }
+        energies.push(bank_f64[f]);
+        positions.extend_from_slice(&bank_f64[f + 1..f + 4]);
+        directions.extend_from_slice(&bank_f64[f + 4..f + 7]);
+        weights.push(bank_f64[f + 7]);
+        seeds.push(bank_u32[i * 4 + 2]);
+        source_idx.push(sidx);
     }
     out.seeds = seeds;
     out.energies = energies;
     out.positions = positions;
     out.directions = directions;
+    out.weights = weights;
     (out, source_idx)
 }
 
@@ -2342,6 +2295,7 @@ fn run_neutron_per_history(
         inputs.energies = energies;
         inputs.positions = positions;
         inputs.directions = directions;
+        inputs.weights = vec![1.0; inputs.seeds.len()];
 
         // Per-history variance is only meaningful with real tallies; with none,
         // run the per-step path. A mesh model uses the per-source direct path.
@@ -2744,6 +2698,7 @@ fn run_neutron_per_history_fissile(
         inputs.energies = energies;
         inputs.positions = positions;
         inputs.directions = directions;
+        inputs.weights = vec![1.0; inputs.seeds.len()];
 
         // Host-side per-(source, flat_bin) grand total (physical), accumulated
         // across the source + every generation launch of THIS chunk.
@@ -2964,9 +2919,6 @@ fn drain_banked_neutrons(
         let n_drain = pending_count.min(avail).min(chunk);
         let (gen_inputs, gen_source_idx) =
             fission_source_inputs(inputs, &pending_f64, &pending_u32, &pending_src, n_drain);
-        // Weight-w progeny are re-launched as `round(w)` unit-weight neutrons,
-        // so the emitted particle count can exceed `n_drain`;
-        // size the launch and this generation's progeny bank from it.
         let n_launch = gen_inputs.seeds.len();
         relaunched += n_launch as u64;
         let gen_cap = n_launch.saturating_mul(FISSION_PROGENY_PER_NEUTRON).max(1);
@@ -3837,6 +3789,7 @@ fn run_on_gpu_coupled(
         inputs.energies = energies;
         inputs.positions = positions;
         inputs.directions = directions;
+        inputs.weights = vec![1.0; inputs.seeds.len()];
 
         let bank_capacity = chunk_sources
             .saturating_mul(COUPLED_PHOTONS_PER_NEUTRON)
@@ -4379,6 +4332,7 @@ fn run_on_gpu_mixed(
             n_inputs.energies = energies;
             n_inputs.positions = positions;
             n_inputs.directions = directions;
+            n_inputs.weights = vec![1.0; n_inputs.seeds.len()];
         }
         let bank_capacity = this_n.saturating_mul(COUPLED_PHOTONS_PER_NEUTRON).max(1);
         let mut pst_n = vec![0.0f64; chunk_total * total_out_len_n];
@@ -5225,6 +5179,7 @@ fn run_kernel_path_impl(
         &inputs.energies,
         &inputs.positions,
         &inputs.directions,
+        &inputs.weights,
         &inputs.cell_aabbs,
         &inputs.cell_to_material,
         &inputs.surface_types,
@@ -6330,7 +6285,7 @@ mod tests {
 
 #[cfg(all(test, not(target_os = "macos")))]
 mod neutron_records_tests {
-    use super::{neutron_records, BankedNeutrons};
+    use super::{fission_source_inputs, neutron_records, BankedNeutrons};
     use yamc_gpu::common::particle_bank::{
         BANK_F64_STRIDE, BANK_U32_STRIDE, PTYPE_NEUTRON, PTYPE_PHOTON,
     };
@@ -6393,5 +6348,53 @@ mod neutron_records_tests {
         let n = neutron_records(&bank);
         assert_eq!(n.count, 1);
         assert_eq!(n.src, vec![3]);
+    }
+
+    /// Each banked record is relaunched exactly once, with its own seed and at
+    /// its banked weight, fractional or not. Splitting a record into `round(w)`
+    /// unit-weight copies is a Russian-roulette step the CPU never takes, and
+    /// it inflates the GPU's per-history variance under survival biasing.
+    #[test]
+    fn banked_records_relaunch_once_at_their_weight() {
+        use yamc_source::distribution::angular::AngularDistribution;
+        use yamc_source::distribution::energy::Discrete;
+        use yamc_source::distribution::spatial::Point;
+        use yamc_source::source::{
+            ParticleSource, Source, SourceEnergyDistribution, SourceSpatialDistribution,
+        };
+        let source = ParticleSource::Neutron(Source {
+            space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
+            angle: AngularDistribution::Isotropic,
+            energy: SourceEnergyDistribution::Discrete(
+                Discrete::new(vec![1.0e6], vec![1.0]).unwrap(),
+            ),
+            strength: 1.0,
+        });
+        let geometry = crate::geometry::Geometry::new(Vec::new(), Vec::new()).unwrap();
+        let model = crate::model::Model::new(geometry, vec![source], Vec::new());
+        let base = super::translate_for_gpu(&model, 1, 1).unwrap();
+        assert_eq!(base.weights, vec![1.0]);
+
+        let (mut f, mut u, mut s) = (Vec::new(), Vec::new(), Vec::new());
+        for (tag, src) in [(1.0, 5), (2.0, 6), (3.0, 7)] {
+            record(&mut f, &mut u, &mut s, tag, PTYPE_NEUTRON, src);
+        }
+        // Weights: a fractional survival-biased progeny, one above 1 (a
+        // fractional (n,xn) yield) and a unit-weight one.
+        let weights = [0.37, 1.981, 1.0];
+        for (i, w) in weights.iter().enumerate() {
+            f[i * BANK_F64_STRIDE + 7] = *w;
+        }
+        // Only the first two records are drained.
+        let (out, src) = fission_source_inputs(&base, &f, &u, &s, 2);
+        assert_eq!(out.seeds, vec![1001, 1002]);
+        assert_eq!(out.weights, vec![0.37, 1.981]);
+        assert_eq!(out.energies, vec![f[0], f[BANK_F64_STRIDE]]);
+        assert_eq!(out.positions[..3], f[1..4]);
+        assert_eq!(
+            out.directions[3..],
+            f[BANK_F64_STRIDE + 4..BANK_F64_STRIDE + 7]
+        );
+        assert_eq!(src, vec![5, 6]);
     }
 }

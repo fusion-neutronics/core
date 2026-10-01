@@ -189,21 +189,16 @@ fn check(label: &str, cpu: Stats, gpu: Stats) {
             (mean_ratio - 1.0).abs() < 0.01,
             "{label} {name}: GPU/CPU mean ratio {mean_ratio:.5}"
         );
-        // The per-history standard deviation is what the scheme decides. One
-        // known residual remains after the scheme change: the host relaunches
-        // a banked progeny of fractional weight w as round(w) unit-weight
-        // copies (`fission_source_inputs`), a Russian-roulette
-        // step the CPU does not take since it transports the progeny at
-        // weight w. Under survival biasing every banked weight is fractional,
-        // so the GPU's per-history spread sits a little above the CPU's:
-        // measured 1.04 on U240 and 1.10 on U235, against 1.00 to 1.02 on the
-        // analog controls where the weights are 1. Relaunching at the banked
-        // weight would close it; until then
-        // 15% holds the scheme (a mismatched scheme moves this by more, and in
-        // the fission-rate std_dev most of all) without asserting the residual
-        // away.
+        // The per-history standard deviation is what the scheme decides, and
+        // it also depends on how the host relaunches banked progeny. Under
+        // survival biasing every banked weight is fractional; relaunching each
+        // record as round(w) unit-weight copies (a Russian-roulette step the
+        // CPU never takes) put the GPU's spread at 1.03 of the CPU's on U240
+        // and 1.10 on U235. Relaunched at the banked weight, both fixtures
+        // read within 0.3%, and the analog controls within 0.8%. 3% holds the
+        // scheme and the relaunch without asserting noise.
         assert!(
-            (sd_ratio - 1.0).abs() < 0.15,
+            (sd_ratio - 1.0).abs() < 0.03,
             "{label} {name}: GPU/CPU per-history std_dev ratio {sd_ratio:.4}; the two \
              backends are not running the same implicit-capture scheme"
         );

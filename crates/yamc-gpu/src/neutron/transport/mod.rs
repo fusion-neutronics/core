@@ -187,7 +187,7 @@ pub const REGION_CROSS_EPS: f64 = 1e-8;
 // NOTE: this counts the kernel's READ-ONLY `&[T]` slice parameters only, which
 // is what the lockstep test in `tests.rs` checks; `&mut [T]` outputs (including
 // the lost-particle `lost_count` / `lost_f64` pair) are not included.
-pub const KERNEL_STORAGE_BUFFER_COUNT: u32 = 184;
+pub const KERNEL_STORAGE_BUFFER_COUNT: u32 = 185;
 
 /// Compile-time cap on the number of secondary photons banked per neutron
 /// collision (coupled neutron->photon production, S4b). cubecl needs a bounded

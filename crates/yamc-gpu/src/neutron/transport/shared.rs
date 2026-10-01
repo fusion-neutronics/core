@@ -119,6 +119,8 @@ pub(super) struct TransportInputs<'a> {
     pub energies_in: &'a [f64],
     pub positions_in: &'a [f64],
     pub directions_in: &'a [f64],
+    /// Per-particle starting weight, the kernel's `weights_in`.
+    pub weights_in: &'a [f64],
     // CSG geometry
     pub cell_aabbs: &'a [f64],
     pub cell_to_material: &'a [u32],
@@ -1000,7 +1002,7 @@ pub(super) fn transport_one_particle(
     let mut walk_secondaries = 0u32;
     let mut alive = 1u32;
     let mut n_steps = 0u32;
-    let mut weight = 1.0;
+    let mut weight = inputs.weights_in[i];
     // URR band held by this walk: the base uniform is drawn once
     // per ENERGY, not per step, so an isotope keeps one resonance realisation
     // across boundary crossings and void excursions until a collision moves

@@ -167,8 +167,7 @@ pub const SECONDARY_SEED_MIX_B: u32 = 0xC2B2_AE35;
 /// * `k + 1` (rather than `k`) keeps secondary 0 off the parent's own key.
 /// * A 32-bit finaliser (two `u32` multiplies), not the 64-bit splitmix64 of
 ///   [`expand_seed`]: this runs inside the GPU kernel, where 64-bit multiplies
-///   are emulated. It is the same mixer `yamc::gpu::dispatch`'s
-///   `split_progeny_seed` uses for the device bank's weight-split copies.
+///   are emulated.
 /// * Across DIFFERENT parents the streams collide at the `2^-32` birthday floor
 ///   that any 32-bit per-particle seed has (see [`history_seed`]); the GPU seed
 ///   buffer is `u32`, which is what fixes that width.

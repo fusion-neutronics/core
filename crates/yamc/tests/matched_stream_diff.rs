@@ -397,6 +397,7 @@ fn run_twin(
         &inputs.energies,
         &inputs.positions,
         &inputs.directions,
+        &inputs.weights,
         &inputs.cell_aabbs,
         &inputs.cell_to_material,
         &inputs.surface_types,
