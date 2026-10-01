@@ -20,8 +20,9 @@ on:
       - "crates/endf/**"
       - "tools/**"
       - ".github/workflows/ci-endf-goldens.yml"
+  # Every pull request, whatever its base, so a PR stacked on another
+  # PR's branch is tested before it is retargeted at main.
   pull_request:
-    branches: [main]
     paths:
       - "crates/endf/**"
       - "tools/**"
