@@ -1,4 +1,4 @@
-"""Plots of a mesh-filled CSG cell must show the mesh body (issue #291).
+"""Plots of a mesh-filled CSG cell must show the mesh body.
 
 ``Model.plot`` / ``Geometry.plot`` return an interactive plot whose HTML is
 normally re-sampled in the browser from the geometry JSON. A fill serializes as

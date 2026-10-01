@@ -311,7 +311,7 @@ fn physical_groups_json(material_tags: &[String], boundary_tags: &[(String, Vec<
 
 /// Finalize the CAD pipeline's mesh and write it to an Arrow IPC file.
 ///
-/// Runs the whole export in the compiled core (issue #246): assigns each
+/// Runs the whole export in the compiled core: assigns each
 /// triangle and tet the physical group of its first owning solid, offsets the
 /// per-solid tet blocks into the global vertex array, builds the physical-group
 /// and surface-to-volume topology metadata, and writes the file. The Python

@@ -1,4 +1,4 @@
-"""PulseSchedule: decay-photon shutdown-dose-rate post-processing (#483).
+"""PulseSchedule: decay-photon shutdown-dose-rate post-processing.
 
 PulseSchedule replaces the three verbatim openmc.deplete.d1s free functions
 (get_radionuclides_from_chain / time_correction_factors / apply_time_correction)
@@ -225,7 +225,7 @@ def test_simulate_transmutation_rejects_multiple_distinct_sources():
         model.simulate_transmutation(method="coupled", schedule=sched, total_particles=1)
 
 
-# --- nuclear-data uncertainty on the time correction (issue #140, item 5) ----
+# --- nuclear-data uncertainty on the time correction --------------------------
 #
 # The numbers are pinned in Rust (yani-transmute/tests/d1s_uncertainty.rs).
 # Here: the switch, the shapes, and the quadrature.

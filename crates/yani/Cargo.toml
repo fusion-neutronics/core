@@ -22,9 +22,7 @@ nuclear-data-schema = { path = "../nuclear-data-schema" }
 # `Par::Seq` explicitly, and that is the only `Par` in the crate. Measured on
 # `examples/cram_perf.rs` (the 3820-nuclide ENDF chain), building with the
 # feature and without it are the same to within run-to-run spread: 314.3 ms
-# against 314.1 ms, best of several. An earlier version of this comment
-# credited it with 5-6%, which the hardcoded `Par::Seq` cannot have been
-# collecting (issue #576).
+# against 314.1 ms, best of several.
 #
 # `Par::Seq` is deliberate and must stay. faer partitions work as a function of
 # thread count, so under partial-pivoting LU the same matrix can round

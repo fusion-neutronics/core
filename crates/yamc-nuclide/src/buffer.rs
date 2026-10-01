@@ -1,5 +1,5 @@
 //! A contiguous `f64` array that can share its allocation with whoever
-//! produced the bytes (issue #476, task 1).
+//! produced the bytes.
 //!
 //! Every large numeric array on [`Nuclide`](crate::nuclide::Nuclide),
 //! [`Reaction`](crate::reaction::Reaction) and

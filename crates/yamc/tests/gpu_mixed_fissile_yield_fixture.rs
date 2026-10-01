@@ -1,4 +1,4 @@
-//! The per-nuclide fission-yield rows of issue #93, on a fissile pair that is
+//! The per-nuclide fission-yield rows of the GPU kernel, on a fissile pair that is
 //! in the CI fixture set.
 //!
 //! `gpu_mixed_fissile_yield.rs` is the original guard for that fix: in a
@@ -8,7 +8,7 @@
 //! whenever U235 dominated `sigma_f`. It reaches U235 and U238 through
 //! `yamc_test_cache::nuclide`, neither of which is a fixture (191 MB and
 //! 179 MB), so it has self-skipped on every CI run since it was written and
-//! the fix has been unguarded there (fusion-neutronics/core#110, working note).
+//! the fix has been unguarded there.
 //!
 //! What the extractor half of that test actually asserts is nuclide-agnostic:
 //! `extract_per_nuclide_inelastic` must give each row of the pool exactly the

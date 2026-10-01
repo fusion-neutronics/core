@@ -1,4 +1,4 @@
-//! CPU/GPU parity across the tally SCORE matrix (issue #111, migration step 6).
+//! CPU/GPU parity across the tally SCORE matrix.
 //!
 //! The two backends resolve a score to a cross section by different means: the
 //! CPU looks the MT up live against the material's nuclide tables
@@ -12,8 +12,7 @@
 //! production, heating, damage) and the discrete charged-particle and inelastic
 //! levels (MT 600-602/649, 800-801, 51-53, 91), on a single-nuclide material, a
 //! multi-nuclide one, and a URR one -- the three axes where GPU scoring has
-//! historically drifted (#212 per-material grids, #307 per-MT scaling, #347
-//! multi-nuclide URR).
+//! historically drifted (per-material grids, per-MT scaling, multi-nuclide URR).
 //!
 //! Self-skips without an f64 GPU adapter or the cached data.
 #![cfg(all(feature = "gpu", not(target_os = "macos")))]
@@ -40,8 +39,7 @@ use yamc_tallies::tally::Tally;
 const HISTORIES: usize = 200_000;
 /// Generous next to the ~0.3% Monte-Carlo spread these tallies show at 200k
 /// histories, and still far inside the defects it guards: the per-material
-/// grid smearing of #212 was 40%, the multi-nuclide URR mis-weighting of #347
-/// was 5%.
+/// grid smearing was 40%, the multi-nuclide URR mis-weighting was 5%.
 const TOL: f64 = 0.03;
 
 fn cache(n: &str) -> String {

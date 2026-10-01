@@ -13,7 +13,7 @@
 //!   - `a`     -- `Z / FINE_STRUCTURE`, the Born parameter
 //!   - `c`     -- Coulomb correction, a closed-form polynomial in `a²`
 //!
-//! These get packed ONE slab per element (task #72), concatenated
+//! These get packed ONE slab per element, concatenated
 //! material-major -- same per-element slab convention as the Rayleigh,
 //! Doppler, IFF, and atomic-relaxation extractors. The kernel's
 //! per-collision element selection indexes whichever element the photon
@@ -28,7 +28,7 @@ use yamc_element::photon::{PhotonInteraction, REDUCED_SCREENING_RADII};
 /// constant in `multi_cell_photon_transport.rs`.
 pub const FINE_STRUCTURE: f64 = 137.035_999_084;
 
-/// Per-ELEMENT pair-production scalars ready for the GPU kernel (task #72).
+/// Per-ELEMENT pair-production scalars ready for the GPU kernel.
 /// Slab dimension = total elements across materials, element-major within a
 /// material and concatenated material-major, so the kernel indexes whichever
 /// element the per-collision selection struck.
@@ -75,7 +75,7 @@ fn coulomb_correction(a: f64) -> f64 {
                 + a2 * (-0.002_01 + a2 * (0.000_49 + a2 * (-0.000_12 + a2 * 0.000_03))))))
 }
 
-/// Pack per-ELEMENT pair-production constants (task #72). `materials` is the
+/// Pack per-ELEMENT pair-production constants. `materials` is the
 /// same per-material `(name, element, density)` triples shape the other photon
 /// extractors take. Emits one slab per element (concatenated material-major);
 /// an element with no atoms or Z out of range leaves `has_data = 0` for its
@@ -86,7 +86,7 @@ pub fn extract_pair_production_for_gpu(
     let n_slab: usize = materials.iter().map(|m| m.len()).sum();
     let mut pack = GpuPairProduction::empty_for_slabs(n_slab);
 
-    // One slab per element (task #72): pair physics for whichever element the
+    // One slab per element: pair physics for whichever element the
     // per-collision selection struck (mirrors CPU `Material::sample_element`).
     let mut slab = 0usize;
     for mat_elements in materials {

@@ -258,7 +258,7 @@ fn volume_at(path: &str, point: [f64; 3]) -> yamt::VolumeId {
 ///
 /// What existed before covered the two halves separately and never together:
 /// `test_unstructured_estimator_validation.rs` uses the fixture as a tally
-/// overlay on a CSG *sphere* (issue #316), and `geometry/mesh.rs` only asks
+/// overlay on a CSG *sphere*, and `geometry/mesh.rs` only asks
 /// the fixture-as-geometry for point location and closest-boundary distances,
 /// with no transport at all. This is the first check that a particle tracked
 /// through the mesh skin (six `boundary:vacuum` surfaces, adjacency handoff at
@@ -306,8 +306,8 @@ fn cube_arrow_geometry_and_tet_tally_match_csg_with_structured_mesh() {
 /// lived inside `crates/yamt` and tested the loader, the topology build or the
 /// element walk in isolation. It is the only fixture carrying two tetrahedral
 /// volumes that share a conformal interface, which is exactly the geometry
-/// that issue #316 broke (the walk leaked across the volume boundary and read
-/// 33% low), so a per-region comparison is the check it was missing.
+/// where the element walk once broke (it leaked across the volume boundary
+/// and read 33% low), so a per-region comparison is the check it was missing.
 ///
 /// Reference: the identical solid as two CSG half boxes, tallied on a
 /// structured 2x1x1 mesh over `[0, 1]^3` whose split plane coincides with the

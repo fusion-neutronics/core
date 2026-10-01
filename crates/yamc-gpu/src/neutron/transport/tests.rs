@@ -8,12 +8,11 @@
 
 use super::*;
 use crate::common::tallies::TallyVarianceMode;
-// Issue #104: the per-MT distribution and elastic-angle fixtures now use the
-// tight variable-length CSR layout (per-(material,MT) count / CSR-offset arrays
-// stay `[n_slab * MT_INELASTIC_COUNT]` or `[n_slab]`, all per-row / per-point
-// data arrays are sized exactly to the rows/points present). The old fixed
-// per-family subsampling caps are gone; no-distribution fixtures have zero
-// rows/points, so those data arrays are simply empty.
+// The per-MT distribution and elastic-angle fixtures use the tight
+// variable-length CSR layout (per-(material,MT) count / CSR-offset arrays are
+// `[n_slab * MT_INELASTIC_COUNT]` or `[n_slab]`, all per-row / per-point data
+// arrays are sized exactly to the rows/points present). No-distribution
+// fixtures have zero rows/points, so those data arrays are simply empty.
 use crate::common::geometry::boundary_distance::{
     SURFACE_CONE, SURFACE_PARAM_STRIDE, SURFACE_QUADRIC, SURFACE_SPHERE, SURFACE_XTORUS,
     SURFACE_YTORUS,
@@ -84,11 +83,11 @@ fn kernel_storage_buffer_count_matches_signature() {
     );
 }
 
-/// Build a `coarse_meta` (issue #212) for the single-nuclide, single-shared-
+/// Build a `coarse_meta` for the single-nuclide, single-shared-
 /// coarse-grid test layout: every material uses the same coarse grid at base 0
 /// (`grid_offset = 0`, `coarse_n = coarse_len`), and since each material has one
 /// nuclide its first-slab base into `permt_meta` ROWS is `m * MT_INELASTIC_COUNT`
-/// (the sparse per-MT storage, issue #212). This reproduces the global
+/// (the sparse per-MT storage). This reproduces the global
 /// `slab * MT_INELASTIC_COUNT + slot` per-MT indexing exactly.
 fn single_nuclide_coarse_meta(target_mass_per_material: &[f64], coarse_len: usize) -> Vec<u32> {
     let mut meta = Vec::with_capacity(target_mass_per_material.len() * 3);
@@ -100,7 +99,7 @@ fn single_nuclide_coarse_meta(target_mass_per_material: &[f64], coarse_len: usiz
     meta
 }
 
-/// Build a `fine_log_energy_grid` (issue #212) for the single-nuclide,
+/// Build a `fine_log_energy_grid` for the single-nuclide,
 /// shared-grid test layout: every material's fine grid IS `log_grid`, so the
 /// per-material concatenation is `log_grid` repeated `n_mat` times. Material
 /// `m`'s row then starts at `m * log_grid.len()`, matching the `[n_mat × n_grid]`
@@ -113,10 +112,10 @@ fn single_nuclide_fine_grid(log_grid: &[f64], n_mat: usize) -> Vec<f64> {
     g
 }
 
-/// Build a `fine_meta` (issue #212) matching [`single_nuclide_fine_grid`]:
-/// material `m` has grid/aggregate-XS base `m * n_grid`, fine length `n_grid`,
-/// and (single nuclide per material) nuc first-slab base `m * n_grid`. Reproduces
-/// the pre-#212 shared-grid indexing exactly.
+/// Build a `fine_meta` matching [`single_nuclide_fine_grid`]: material `m` has
+/// grid/aggregate-XS base `m * n_grid`, fine length `n_grid`, and (single nuclide
+/// per material) nuc first-slab base `m * n_grid`. Reproduces shared-grid
+/// indexing exactly.
 fn single_nuclide_fine_meta(target_mass_per_material: &[f64], n_grid: usize) -> Vec<u32> {
     let mut meta = Vec::with_capacity(target_mass_per_material.len() * 3);
     for m in 0..target_mass_per_material.len() {
@@ -222,7 +221,7 @@ pub(super) struct DefaultAngleBuffers {
 }
 
 pub(super) fn default_angle_buffers(n_materials: usize) -> DefaultAngleBuffers {
-    // Tight CSR (issue #104): a no-distribution fixture has zero ae-rows and
+    // Tight CSR: a no-distribution fixture has zero ae-rows and
     // zero points across every per-MT family, so the per-(material,MT) count /
     // CSR-offset arrays stay `[n_materials * MT_INELASTIC_COUNT]` (all zero)
     // and every per-row / per-point data array is empty. Mirrors
@@ -321,7 +320,7 @@ pub(super) fn flux_abs_pack_for(cell_aabbs: &[f64], log_edges: &[f64]) -> Tallie
     TalliesPack::flux_abs_pack((cell_aabbs.len() / 6) as u32, log_edges)
 }
 
-/// Issue #234: the CPU-twin mesh-tally accumulator (`accumulate_tallies`)
+/// The CPU-twin mesh-tally accumulator (`accumulate_tallies`)
 /// fans one track-length step across the voxels it crosses, weighting each by
 /// its in-voxel length fraction and writing into `out_off + (cell*n_bins +
 /// energy) * n_mesh + voxel` (mesh innermost). This pins the flat-index
@@ -485,6 +484,7 @@ fn two_cube_geometry_runs_cleanly() {
         &energies,
         &positions,
         &directions,
+        &vec![1.0; seeds.len()],
         &cell_aabbs,
         &cell_to_material,
         &surface_types,
@@ -506,7 +506,7 @@ fn two_cube_geometry_runs_cleanly() {
         &vec![2.249e-6_f64; target_mass_per_material.len()], // fission_b (Watt default)
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_kind
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_n_energies
-        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR, #104)
+        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR)
         &[],                        // fission_eout_energy_grid (no fission -> empty tight)
         &[],                        // fission_eout_n_x
         &[],                        // fission_eout_x_offset
@@ -521,7 +521,7 @@ fn two_cube_geometry_runs_cleanly() {
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT * PERMT_META_COLS as usize], // permt_meta
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        // Tight CSR (issue #104): no inelastic distributions -> zero ae-rows /
+        // Tight CSR: no inelastic distributions -> zero ae-rows /
         // points, so the per-row / per-point data arrays are empty and only the
         // per-(material,MT) count / offset arrays carry length.
         &[], // angle_energy_grid
@@ -544,7 +544,7 @@ fn two_cube_geometry_runs_cleanly() {
         &[],                                                              // eout_interp
         &[],                                                              // eout_n_discrete
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components (issue #111)
+        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_ae_offset
         &[],                                                              // corr_energy_grid
         &[],                                                              // corr_n_x
@@ -737,6 +737,7 @@ fn two_distinct_materials() {
         &energies,
         &positions,
         &directions,
+        &vec![1.0; seeds.len()],
         &cell_aabbs,
         &cell_to_material,
         &surface_types,
@@ -758,7 +759,7 @@ fn two_distinct_materials() {
         &vec![2.249e-6_f64; target_mass_per_material.len()], // fission_b (Watt default)
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_kind
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_n_energies
-        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR, #104)
+        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR)
         &[],                                // fission_eout_energy_grid (no fission -> empty tight)
         &[],                                // fission_eout_n_x
         &[],                                // fission_eout_x_offset
@@ -773,7 +774,7 @@ fn two_distinct_materials() {
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT * PERMT_META_COLS as usize], // permt_meta
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        // Tight CSR (issue #104): no inelastic distributions -> zero ae-rows /
+        // Tight CSR: no inelastic distributions -> zero ae-rows /
         // points, so the per-row / per-point data arrays are empty and only the
         // per-(material,MT) count / offset arrays carry length.
         &[], // angle_energy_grid
@@ -796,7 +797,7 @@ fn two_distinct_materials() {
         &[],                                                              // eout_interp
         &[],                                                              // eout_n_discrete
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components (issue #111)
+        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_ae_offset
         &[],                                                              // corr_energy_grid
         &[],                                                              // corr_n_x
@@ -965,6 +966,7 @@ fn run_equiv(
         &energies,
         &positions,
         &directions,
+        &vec![1.0; seeds.len()],
         &cell_aabbs,
         &cell_to_material,
         &surface_types,
@@ -986,7 +988,7 @@ fn run_equiv(
         &vec![2.249e-6_f64; target_mass_per_material.len()], // fission_b (Watt default)
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_kind
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_n_energies
-        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR, #104)
+        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR)
         &[],                                // fission_eout_energy_grid (no fission -> empty tight)
         &[],                                // fission_eout_n_x
         &[],                                // fission_eout_x_offset
@@ -1001,7 +1003,7 @@ fn run_equiv(
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT * PERMT_META_COLS as usize], // permt_meta
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        // Tight CSR (issue #104): no inelastic distributions -> zero ae-rows /
+        // Tight CSR: no inelastic distributions -> zero ae-rows /
         // points, so the per-row / per-point data arrays are empty and only the
         // per-(material,MT) count / offset arrays carry length.
         &[], // angle_energy_grid
@@ -1024,7 +1026,7 @@ fn run_equiv(
         &[],                                                              // eout_interp
         &[],                                                              // eout_n_discrete
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components (issue #111)
+        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_ae_offset
         &[],                                                              // corr_energy_grid
         &[],                                                              // corr_n_x
@@ -1110,6 +1112,7 @@ fn run_equiv(
         &energies,
         &positions,
         &directions,
+        &vec![1.0; seeds.len()],
         &cell_aabbs,
         &cell_to_material,
         &surface_types,
@@ -1117,7 +1120,7 @@ fn run_equiv(
         &surface_boundaries,
         &region_program,
         &log_grid,
-        // #88 coarse grid: equal to the fine grid for this single-material fixture.
+        // Coarse grid: equal to the fine grid for this single-material fixture.
         &log_grid,
         &single_nuclide_coarse_meta(&target_mass_per_material, log_grid.len()),
         &single_nuclide_fine_grid(&log_grid, target_mass_per_material.len()),
@@ -1132,7 +1135,7 @@ fn run_equiv(
         &vec![2.249e-6_f64; target_mass_per_material.len()], // fission_b (Watt default)
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_kind
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_n_energies
-        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR, #104)
+        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR)
         &[],                                // fission_eout_energy_grid (no fission -> empty tight)
         &[],                                // fission_eout_n_x
         &[],                                // fission_eout_x_offset
@@ -1147,7 +1150,7 @@ fn run_equiv(
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT * PERMT_META_COLS as usize], // permt_meta
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        // Tight CSR (issue #104): no inelastic distributions -> zero ae-rows /
+        // Tight CSR: no inelastic distributions -> zero ae-rows /
         // points, so the per-row / per-point data arrays are empty and only the
         // per-(material,MT) count / offset arrays carry length.
         &[], // angle_energy_grid
@@ -1170,7 +1173,7 @@ fn run_equiv(
         &[],                                                              // eout_interp
         &[],                                                              // eout_n_discrete
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components (issue #111)
+        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_ae_offset
         &[],                                                              // corr_energy_grid
         &[],                                                              // corr_n_x
@@ -1882,6 +1885,7 @@ fn energy_bin_assignment_is_correct() {
         &energies,
         &positions,
         &directions,
+        &vec![1.0; seeds.len()],
         &cell_aabbs,
         &cell_to_material,
         &surface_types,
@@ -1903,7 +1907,7 @@ fn energy_bin_assignment_is_correct() {
         &vec![2.249e-6_f64; target_mass_per_material.len()], // fission_b (Watt default)
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_kind
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_n_energies
-        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR, #104)
+        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR)
         &[],                        // fission_eout_energy_grid (no fission -> empty tight)
         &[],                        // fission_eout_n_x
         &[],                        // fission_eout_x_offset
@@ -1918,7 +1922,7 @@ fn energy_bin_assignment_is_correct() {
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT * PERMT_META_COLS as usize], // permt_meta
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        // Tight CSR (issue #104): no inelastic distributions -> zero ae-rows /
+        // Tight CSR: no inelastic distributions -> zero ae-rows /
         // points, so the per-row / per-point data arrays are empty and only the
         // per-(material,MT) count / offset arrays carry length.
         &[], // angle_energy_grid
@@ -1941,7 +1945,7 @@ fn energy_bin_assignment_is_correct() {
         &[],                                                              // eout_interp
         &[],                                                              // eout_n_discrete
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components (issue #111)
+        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_ae_offset
         &[],                                                              // corr_energy_grid
         &[],                                                              // corr_n_x
@@ -2077,6 +2081,7 @@ fn flux_times_sigma_a_matches_absorption() {
         &energies,
         &positions,
         &directions,
+        &vec![1.0; seeds.len()],
         &cell_aabbs,
         &cell_to_material,
         &surface_types,
@@ -2098,7 +2103,7 @@ fn flux_times_sigma_a_matches_absorption() {
         &vec![2.249e-6_f64; target_mass_per_material.len()], // fission_b (Watt default)
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_kind
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_n_energies
-        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR, #104)
+        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR)
         &[],                        // fission_eout_energy_grid (no fission -> empty tight)
         &[],                        // fission_eout_n_x
         &[],                        // fission_eout_x_offset
@@ -2113,7 +2118,7 @@ fn flux_times_sigma_a_matches_absorption() {
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT * PERMT_META_COLS as usize], // permt_meta
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        // Tight CSR (issue #104): no inelastic distributions -> zero ae-rows /
+        // Tight CSR: no inelastic distributions -> zero ae-rows /
         // points, so the per-row / per-point data arrays are empty and only the
         // per-(material,MT) count / offset arrays carry length.
         &[], // angle_energy_grid
@@ -2136,7 +2141,7 @@ fn flux_times_sigma_a_matches_absorption() {
         &[],                                                              // eout_interp
         &[],                                                              // eout_n_discrete
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components (issue #111)
+        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_ae_offset
         &[],                                                              // corr_energy_grid
         &[],                                                              // corr_n_x
@@ -2272,6 +2277,7 @@ fn cpu_rayon_matches_cpu_seq() {
         &energies,
         &positions,
         &directions,
+        &vec![1.0; seeds.len()],
         &cell_aabbs,
         &cell_to_material,
         &surface_types,
@@ -2279,7 +2285,7 @@ fn cpu_rayon_matches_cpu_seq() {
         &vec![0u32; surface_types.len()],
         &vec![0u32; (cell_aabbs.len() / 6) + 1], // region_program: zero header = identity region (AABB-only fixture)
         &log_grid,
-        // #88 coarse grid: equal to the fine grid for this single-material fixture.
+        // Coarse grid: equal to the fine grid for this single-material fixture.
         &log_grid,
         &single_nuclide_coarse_meta(&target_mass, log_grid.len()),
         &single_nuclide_fine_grid(&log_grid, target_mass.len()),
@@ -2294,7 +2300,7 @@ fn cpu_rayon_matches_cpu_seq() {
         &vec![2.249e-6_f64; target_mass.len()], // fission_b (Watt default)
         &vec![0u32; 2 * target_mass.len()], // fission_eout_kind
         &vec![0u32; 2 * target_mass.len()], // fission_eout_n_energies
-        &vec![0u32; 2 * target_mass.len()], // fission_eout_ae_offset (tight CSR, #104)
+        &vec![0u32; 2 * target_mass.len()], // fission_eout_ae_offset (tight CSR)
         &[],                                // fission_eout_energy_grid (no fission -> empty tight)
         &[],                                // fission_eout_n_x
         &[],                                // fission_eout_x_offset
@@ -2329,7 +2335,7 @@ fn cpu_rayon_matches_cpu_seq() {
         &[],                                                 // eout_interp
         &[],                                                 // eout_n_discrete
         &vec![0u32; target_mass.len() * MT_INELASTIC_COUNT],
-        &vec![0u32; target_mass.len() * MT_INELASTIC_COUNT], // corr_n_components (issue #111)
+        &vec![0u32; target_mass.len() * MT_INELASTIC_COUNT], // corr_n_components
         &vec![0u32; target_mass.len() * MT_INELASTIC_COUNT], // corr_ae_offset
         &[],
         &[],
@@ -2410,6 +2416,7 @@ fn cpu_rayon_matches_cpu_seq() {
         &energies,
         &positions,
         &directions,
+        &vec![1.0; seeds.len()],
         &cell_aabbs,
         &cell_to_material,
         &surface_types,
@@ -2417,7 +2424,7 @@ fn cpu_rayon_matches_cpu_seq() {
         &vec![0u32; surface_types.len()],
         &vec![0u32; (cell_aabbs.len() / 6) + 1], // region_program: zero header = identity region (AABB-only fixture)
         &log_grid,
-        // #88 coarse grid: equal to the fine grid for this single-material fixture.
+        // Coarse grid: equal to the fine grid for this single-material fixture.
         &log_grid,
         &single_nuclide_coarse_meta(&target_mass, log_grid.len()),
         &single_nuclide_fine_grid(&log_grid, target_mass.len()),
@@ -2432,7 +2439,7 @@ fn cpu_rayon_matches_cpu_seq() {
         &vec![2.249e-6_f64; target_mass.len()], // fission_b (Watt default)
         &vec![0u32; 2 * target_mass.len()], // fission_eout_kind
         &vec![0u32; 2 * target_mass.len()], // fission_eout_n_energies
-        &vec![0u32; 2 * target_mass.len()], // fission_eout_ae_offset (tight CSR, #104)
+        &vec![0u32; 2 * target_mass.len()], // fission_eout_ae_offset (tight CSR)
         &[],                                // fission_eout_energy_grid (no fission -> empty tight)
         &[],                                // fission_eout_n_x
         &[],                                // fission_eout_x_offset
@@ -2467,7 +2474,7 @@ fn cpu_rayon_matches_cpu_seq() {
         &[],                                                 // eout_interp
         &[],                                                 // eout_n_discrete
         &vec![0u32; target_mass.len() * MT_INELASTIC_COUNT],
-        &vec![0u32; target_mass.len() * MT_INELASTIC_COUNT], // corr_n_components (issue #111)
+        &vec![0u32; target_mass.len() * MT_INELASTIC_COUNT], // corr_n_components
         &vec![0u32; target_mass.len() * MT_INELASTIC_COUNT], // corr_ae_offset
         &[],
         &[],
@@ -2618,6 +2625,7 @@ fn ztorus_in_multi_cell_geometry() {
         &energies,
         &positions,
         &directions,
+        &vec![1.0; seeds.len()],
         &cell_aabbs,
         &cell_to_material,
         &surface_types,
@@ -2639,7 +2647,7 @@ fn ztorus_in_multi_cell_geometry() {
         &vec![2.249e-6_f64; target_mass_per_material.len()], // fission_b (Watt default)
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_kind
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_n_energies
-        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR, #104)
+        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR)
         &[],                        // fission_eout_energy_grid (no fission -> empty tight)
         &[],                        // fission_eout_n_x
         &[],                        // fission_eout_x_offset
@@ -2654,7 +2662,7 @@ fn ztorus_in_multi_cell_geometry() {
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT * PERMT_META_COLS as usize], // permt_meta
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        // Tight CSR (issue #104): no inelastic distributions -> zero ae-rows /
+        // Tight CSR: no inelastic distributions -> zero ae-rows /
         // points, so the per-row / per-point data arrays are empty and only the
         // per-(material,MT) count / offset arrays carry length.
         &[], // angle_energy_grid
@@ -2677,7 +2685,7 @@ fn ztorus_in_multi_cell_geometry() {
         &[],                                                              // eout_interp
         &[],                                                              // eout_n_discrete
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components (issue #111)
+        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_ae_offset
         &[],                                                              // corr_energy_grid
         &[],                                                              // corr_n_x
@@ -2819,6 +2827,7 @@ fn cylinder_in_multi_cell_geometry() {
         &energies,
         &positions,
         &directions,
+        &vec![1.0; seeds.len()],
         &cell_aabbs,
         &cell_to_material,
         &surface_types,
@@ -2840,7 +2849,7 @@ fn cylinder_in_multi_cell_geometry() {
         &vec![2.249e-6_f64; target_mass_per_material.len()], // fission_b (Watt default)
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_kind
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_n_energies
-        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR, #104)
+        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR)
         &[],                        // fission_eout_energy_grid (no fission -> empty tight)
         &[],                        // fission_eout_n_x
         &[],                        // fission_eout_x_offset
@@ -2855,7 +2864,7 @@ fn cylinder_in_multi_cell_geometry() {
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT * PERMT_META_COLS as usize], // permt_meta
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        // Tight CSR (issue #104): no inelastic distributions -> zero ae-rows /
+        // Tight CSR: no inelastic distributions -> zero ae-rows /
         // points, so the per-row / per-point data arrays are empty and only the
         // per-(material,MT) count / offset arrays carry length.
         &[], // angle_energy_grid
@@ -2878,7 +2887,7 @@ fn cylinder_in_multi_cell_geometry() {
         &[],                                                              // eout_interp
         &[],                                                              // eout_n_discrete
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components (issue #111)
+        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_ae_offset
         &[],                                                              // corr_energy_grid
         &[],                                                              // corr_n_x
@@ -3112,6 +3121,7 @@ fn real_endf_two_material_geometry() {
         &energies,
         &positions,
         &directions,
+        &vec![1.0; seeds.len()],
         &cell_aabbs,
         &cell_to_material,
         &surface_types,
@@ -3133,7 +3143,7 @@ fn real_endf_two_material_geometry() {
         &vec![2.249e-6_f64; target_mass_per_material.len()], // fission_b (Watt default)
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_kind
         &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_n_energies
-        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR, #104)
+        &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR)
         &[],                                // fission_eout_energy_grid (no fission -> empty tight)
         &[],                                // fission_eout_n_x
         &[],                                // fission_eout_x_offset
@@ -3148,7 +3158,7 @@ fn real_endf_two_material_geometry() {
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT * PERMT_META_COLS as usize], // permt_meta
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        // Tight CSR (issue #104): no inelastic distributions -> zero ae-rows /
+        // Tight CSR: no inelastic distributions -> zero ae-rows /
         // points, so the per-row / per-point data arrays are empty and only the
         // per-(material,MT) count / offset arrays carry length.
         &[], // angle_energy_grid
@@ -3171,7 +3181,7 @@ fn real_endf_two_material_geometry() {
         &[],                                                              // eout_interp
         &[],                                                              // eout_n_discrete
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components (issue #111)
+        &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components
         &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_ae_offset
         &[],                                                              // corr_energy_grid
         &[],                                                              // corr_n_x
@@ -3412,7 +3422,7 @@ fn angle_helper_recovers_forward_peak_from_cdf() {
     let slot: usize = 0;
     let mat_slot = slot; // single material × slot 0
     bufs.n_energies[mat_slot] = 1; // one incident-energy slice
-                                   // Tight CSR (#104): slot 0 -> ae-row 0 -> mu-points 0,1.
+                                   // Tight CSR: slot 0 -> ae-row 0 -> mu-points 0,1.
     bufs.energy_grid = vec![1.0]; // 1 ae-row: dummy E_in
     bufs.n_mu = vec![2]; // 1 ae-row
     bufs.interp = vec![ANGLE_INTERP_HISTOGRAM]; // 1 ae-row
@@ -3529,7 +3539,7 @@ fn angle_helper_cm_to_lab_forward_peak() {
     let mut bufs = default_angle_buffers(1);
     let slot: usize = 0;
     bufs.n_energies[slot] = 1;
-    // Tight CSR (#104): slot 0 -> ae-row 0 -> mu-points 0,1.
+    // Tight CSR: slot 0 -> ae-row 0 -> mu-points 0,1.
     bufs.energy_grid = vec![1.0];
     bufs.n_mu = vec![2];
     bufs.interp = vec![ANGLE_INTERP_HISTOGRAM];
@@ -3650,7 +3660,7 @@ fn eout_helper_recovers_tabulated_e_out() {
     // into the narrow [6.9, 7.1] MeV window.
     bufs.eout_kind[slot] = 1; // EOUT_KIND_CONTINUOUS_TABULAR
     bufs.eout_n_energies[slot] = 1;
-    // Tight CSR (#104): slot 0 -> ae-row 0 -> x-points 0,1.
+    // Tight CSR: slot 0 -> ae-row 0 -> x-points 0,1.
     bufs.eout_energy_grid = vec![1.0]; // 1 ae-row: dummy E_in
     bufs.eout_n_x = vec![2]; // 1 ae-row
     bufs.eout_x_offset = vec![0u32]; // 1 ae-row -> x-point 0
@@ -3876,7 +3886,7 @@ fn corr_helper_recovers_tabulated_e_out_and_mu() {
     bufs.eout_kind[slot] = 2; // EOUT_KIND_CORRELATED
     bufs.corr_n_energies[slot] = 1;
     bufs.corr_n_components[slot] = 1; // single component: no selector draw
-                                      // Tight CSR (#104): slot 0 -> ae-row 0 -> x-points 0,1 -> mu-points 0,1.
+                                      // Tight CSR: slot 0 -> ae-row 0 -> x-points 0,1 -> mu-points 0,1.
     bufs.corr_energy_grid = vec![1.0]; // 1 ae-row
     bufs.corr_n_x = vec![2]; // 1 ae-row -> 2 x-points
     bufs.corr_interp = vec![0u32]; // 1 ae-row
@@ -4052,7 +4062,7 @@ fn mt_slots_and_yields_layout() {
         assert_eq!(MT_SLOTS[slot], mt, "slot {slot} should hold MT {mt}");
         assert_eq!(MT_YIELDS[slot], y, "slot {slot} (MT {mt}) yield");
     }
-    // Breakup channels in slots 56..=61 (issue #106), appended in ascending
+    // Breakup channels in slots 56..=61, appended in ascending
     // MT order so the walk order they had as untabled MTs is preserved.
     let breakup: [(usize, i32, u32); 6] = [
         (56, 11, 2), // (n,2nd)
@@ -4237,6 +4247,7 @@ fn coupled_photon_emission_fe56() {
             &energies,
             &positions,
             &directions,
+            &vec![1.0; seeds.len()],
             &cell_aabbs,
             &cell_to_material,
             &surface_types,
@@ -4256,10 +4267,10 @@ fn coupled_photon_emission_fe56() {
             &vec![0.0_f64; xs_a.len()], // beta_delayed_per_material
             &vec![0.988e6_f64; target_mass_per_material.len()],
             &vec![2.249e-6_f64; target_mass_per_material.len()],
-            // Two chi rows per material (issue #364): prompt then delayed.
+            // Two chi rows per material: prompt then delayed.
             &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_kind
             &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_n_energies
-            &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR, #104)
+            &vec![0u32; 2 * target_mass_per_material.len()], // fission_eout_ae_offset (tight CSR)
             &[], // fission_eout_energy_grid (no fission -> empty tight)
             &[], // fission_eout_n_x
             &[], // fission_eout_x_offset
@@ -4297,7 +4308,7 @@ fn coupled_photon_emission_fe56() {
             &[],
             &[],
             &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT],
-            &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components (issue #111)
+            &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_n_components
             &vec![0u32; target_mass_per_material.len() * MT_INELASTIC_COUNT], // corr_ae_offset
             &[],
             &[],
@@ -4532,7 +4543,7 @@ fn csr_offsets_from_counts(n_energies: &[u32]) -> Vec<u32> {
 }
 
 /// Compress DENSE per-MT inelastic xs / yield `[n_slab × MT_INELASTIC_COUNT ×
-/// n_grid]` buffers into the SPARSE layout the kernel now consumes (issue #212):
+/// n_grid]` buffers into the SPARSE layout the kernel now consumes:
 /// `(xs_sparse, yield_sparse, permt_meta)`. Bit-for-bit mirror of the
 /// `extract.rs` compression + `translate.rs::push_permt_meta` assembly: each
 /// (slab, MT slot) stores only its nonzero-xs range `[i_start, i_end)`, and
@@ -4637,7 +4648,7 @@ fn run_inelastic_eout_equiv(
     assert_eq!(cfg.maxwell_n_energies.len(), n_mat * mt);
     assert_eq!(cfg.watt_n_energies.len(), n_mat * mt);
 
-    // Tight CSR bases over the per-(slab,MT) row counts (issue #104).
+    // Tight CSR bases over the per-(slab,MT) row counts.
     let maxwell_ae_offset = csr_offsets_from_counts(&cfg.maxwell_n_energies);
     let watt_ae_offset = csr_offsets_from_counts(&cfg.watt_n_energies);
     assert_eq!(cfg.maxwell_theta.len(), cfg.maxwell_energy_grid.len());
@@ -4649,7 +4660,7 @@ fn run_inelastic_eout_equiv(
     // branches override when their slot is selected.
     let q_inelastic_per_mt = vec![0.0_f64; n_mat * mt];
     let yield_per_mt = vec![1.0_f64; n_mat * mt * n_grid];
-    // Sparse per-MT storage (issue #212): compress the dense xs / yield into the
+    // Sparse per-MT storage: compress the dense xs / yield into the
     // tight (value, i_start, n_stored) layout both backends now consume.
     let (xs_i_mt_sparse, yield_mt_sparse, permt_meta) =
         dense_per_mt_to_sparse(&cfg.xs_inelastic_per_mt, &yield_per_mt, n_mat, n_grid);
@@ -4669,6 +4680,7 @@ fn run_inelastic_eout_equiv(
         &energies,
         &positions,
         &directions,
+        &vec![1.0; seeds.len()],
         &cell_aabbs,
         &cell_to_material,
         &surface_types,
@@ -4690,7 +4702,7 @@ fn run_inelastic_eout_equiv(
         &vec![2.249e-6_f64; n_mat],
         &vec![0u32; 2 * n_mat], // fission_eout_kind
         &vec![0u32; 2 * n_mat], // fission_eout_n_energies
-        &vec![0u32; 2 * n_mat], // fission_eout_ae_offset (tight CSR, #104)
+        &vec![0u32; 2 * n_mat], // fission_eout_ae_offset (tight CSR)
         &[],                    // fission_eout_energy_grid (no fission -> empty tight)
         &[],                    // fission_eout_n_x
         &[],                    // fission_eout_x_offset
@@ -4725,7 +4737,7 @@ fn run_inelastic_eout_equiv(
         &[],                     // eout_interp
         &[],                     // eout_n_discrete
         &vec![0u32; n_mat * mt],
-        &vec![0u32; n_mat * mt], // corr_n_components (issue #111)
+        &vec![0u32; n_mat * mt], // corr_n_components
         &vec![0u32; n_mat * mt], // corr_ae_offset
         &[],
         &[],
@@ -4812,6 +4824,7 @@ fn run_inelastic_eout_equiv(
         &energies,
         &positions,
         &directions,
+        &vec![1.0; seeds.len()],
         &cell_aabbs,
         &cell_to_material,
         &surface_types,
@@ -4831,10 +4844,10 @@ fn run_inelastic_eout_equiv(
         &vec![0.0_f64; n_grid], // beta_delayed_per_material
         &vec![0.988e6_f64; n_mat],
         &vec![2.249e-6_f64; n_mat],
-        // Two chi rows per material (issue #364): prompt then delayed.
+        // Two chi rows per material: prompt then delayed.
         &vec![0u32; 2 * n_mat], // fission_eout_kind
         &vec![0u32; 2 * n_mat], // fission_eout_n_energies
-        &vec![0u32; 2 * n_mat], // fission_eout_ae_offset (tight CSR, #104)
+        &vec![0u32; 2 * n_mat], // fission_eout_ae_offset (tight CSR)
         &[],                    // fission_eout_energy_grid (no fission -> empty tight)
         &[],                    // fission_eout_n_x
         &[],                    // fission_eout_x_offset
@@ -4869,7 +4882,7 @@ fn run_inelastic_eout_equiv(
         &[],
         &[],
         &vec![0u32; n_mat * mt],
-        &vec![0u32; n_mat * mt], // corr_n_components (issue #111)
+        &vec![0u32; n_mat * mt], // corr_n_components
         &vec![0u32; n_mat * mt],
         &[],
         &[],
@@ -4952,8 +4965,8 @@ fn run_inelastic_eout_equiv(
     (gpu, cpu)
 }
 
-/// Belt-and-braces regression for issue #104's inelastic Maxwell / Watt CSR
-/// migration. No ENDF/B-VIII.1 nuclide ships an inelastic Maxwell or Watt
+/// Belt-and-braces regression for the inelastic Maxwell / Watt tight CSR
+/// layout. No ENDF/B-VIII.1 nuclide ships an inelastic Maxwell or Watt
 /// distribution (both are fission-spectrum laws), so the kernel's inelastic
 /// Maxwell/Watt branch is unexercised by any real-data fixture. This builds a
 /// synthetic single-material cube whose per-MT inelastic walk lands on a

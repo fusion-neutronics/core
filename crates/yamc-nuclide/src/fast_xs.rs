@@ -80,8 +80,8 @@ impl FastXSGrid {
     /// the file carries at this temperature, redundant rows included: the
     /// synthesised sums exclude them by rule, not by their absence, and a total
     /// built over a subset would be silently short. `photon_release` scales the
-    /// photon production of fission channels for the delayed photons (issue
-    /// #369); `None` leaves that scaling off, as an evaluation without fission
+    /// photon production of fission channels for the delayed photons; `None`
+    /// leaves that scaling off, as an evaluation without fission
     /// energy release data does.
     ///
     /// `label` names the nuclide and temperature in an error.
@@ -308,7 +308,7 @@ impl FastXSGrid {
         }
 
         // Delayed-photon scaling f(E) = (prompt + delayed) / prompt, one value
-        // per grid point (issue #369), applied to fission photon production
+        // per grid point, applied to fission photon production
         // only. Empty when the evaluation has no fission energy release data,
         // in which case every consumer takes its `f = 1.0` branch.
         let delayed_photon_scaling: F64Buffer = match photon_release {

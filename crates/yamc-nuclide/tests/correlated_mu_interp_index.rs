@@ -1,4 +1,4 @@
-//! Regression for issue #484: `corr_mu_interp` indexed by code, not by point.
+//! Regression for `corr_mu_interp` indexed by code, not by point.
 //!
 //! `corr_mu_interp` holds one interpolation code per outgoing-energy point of a
 //! correlated distribution, values in `{0, 1, 2}`. `parse_correlated` used the

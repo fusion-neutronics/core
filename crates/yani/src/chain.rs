@@ -53,6 +53,17 @@ pub struct ChainReaction {
     /// converter puts the residual on the parent's largest mode. A consumer
     /// pairing the two should know that row carries a moved ratio.
     pub branching_uncertainty: Option<f64>,
+    /// The tape's BR on a decay mode, before the converter normalised the
+    /// parent's ratios to sum to one.
+    ///
+    /// Read as stored in `decay/decay_modes.arrow`. It equals `branching`
+    /// except on the parent's largest mode where the evaluated ratios miss
+    /// unity (JEFF-4.0's Ir169 has one alpha mode of 0.45, so `branching` is
+    /// 1.0 and this is 0.45). It is the number `branching_uncertainty` was
+    /// evaluated on. `None` on a reaction, or on a file that predates the
+    /// column. Nothing in the solver reads it; it is kept so the file loses
+    /// nothing the tape gives and a re-export writes back what it read.
+    pub evaluated_branching: Option<f64>,
 }
 
 impl ChainReaction {
@@ -572,7 +583,7 @@ pub struct ChainNuclide {
     /// `None` where the file has no value or predates the column, and
     /// `Some(0.0)` where the evaluation wrote 0.0, which is how MT=457 says
     /// "not stated". Both are an unstated sigma and neither is zero: every
-    /// consumer takes a sigma only when it is positive (issue #515).
+    /// consumer takes a sigma only when it is positive.
     pub half_life_uncertainty: Option<f64>,
     /// Mean decay energy released per decay [eV].
     pub decay_energy: f64,
@@ -582,7 +593,7 @@ pub struct ChainNuclide {
     /// where every component's sigma was written as 0.0. Both mean not
     /// stated, as for `half_life_uncertainty`. Decay heat is
     /// `activity * decay_energy`, so this scales the reported watts directly
-    /// rather than diluting through a chain (issue #515).
+    /// rather than diluting through a chain.
     pub decay_energy_uncertainty: Option<f64>,
     /// `decay_energy` split into its recoverable-heat components, in
     /// [`DECAY_ENERGY_COMPONENTS`] order (beta, gamma, alpha), each with the
@@ -604,8 +615,8 @@ pub struct ChainNuclide {
     /// that a handful of branching fractions can be rewritten. The yields are
     /// never one of them, and they are most of the bytes: a fissile nuclide
     /// carries ~1000 product name `String`s per tabulated energy, so cloning
-    /// 3820 entries copied millions of small allocations to change none of them
-    /// (issue #576, finding 8). Most read sites reach through `Deref` unchanged.
+    /// 3820 entries copied millions of small allocations to change none of them.
+    /// Most read sites reach through `Deref` unchanged.
     pub fission_yields: Option<Arc<FissionYieldSet>>,
     /// Decay photon sources (empty if nuclide has no decay gamma data)
     pub sources: Vec<DecaySource>,
@@ -1271,7 +1282,7 @@ fn walk(
     // fissile network walks every product of every yield vector of every
     // fissionable parent, which came to ~300k `String` allocations per
     // `Material::transmute` call, all but a few thousand of them freed
-    // immediately (issue #576, finding 8). Testing membership first costs one
+    // immediately. Testing membership first costs one
     // extra hash lookup on the rare miss and saves the allocation on every hit.
     fn discover(name: &str, visited: &mut HashSet<String>, next_frontier: &mut Vec<String>) {
         if !visited.contains(name) {
@@ -1470,6 +1481,7 @@ mod tests {
             branching,
             q_value: None,
             branching_uncertainty: None,
+            evaluated_branching: None,
         }
     }
 
@@ -2158,7 +2170,7 @@ mod tests {
         assert!(names.contains("Sr90"), "fission product");
     }
 
-    // --- fission-yield energy interpolation (issue #379) ---
+    // --- fission-yield energy interpolation ---
 
     fn fy_at(energy: f64) -> FissionYield {
         FissionYield {

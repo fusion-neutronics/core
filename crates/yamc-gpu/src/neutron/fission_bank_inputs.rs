@@ -1,4 +1,4 @@
-//! Runtime gate for the device fission particle bank (issue #78).
+//! Runtime gate for the device fission particle bank.
 //!
 //! Mirrors the gate-flag idiom of [`super::survival_biasing::SurvivalBiasingInputs`]
 //! and [`CoupledPhotonInputs`](super::transport::CoupledPhotonInputs): a single

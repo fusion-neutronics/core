@@ -1,4 +1,4 @@
-//! Coplanar-region 2-D constrained re-triangulation (issue #31 endgame).
+//! Coplanar-region 2-D constrained re-triangulation.
 //!
 //! THE PROBLEM. A flat boundary face (LShaped's reflex caps, cylinder end
 //! caps) puts many mesh vertices EXACTLY in one plane. The base Delaunay's
@@ -7,10 +7,9 @@
 //! region (the sheet seen from above vs from below). A boundary segment whose
 //! diagonal lost those ties is then missing from BOTH sheets, and every 3-D
 //! repair tool dead-ends on the exact-zero predicates: edge splits make
-//! degenerate children, flips reject zero-volume configurations (#42 guards),
-//! cavity re-triangulation rebuilds the same ties in its local DT, and SoS
-//! merely renames the flat tets without removing them (see the #31 design
-//! notes).
+//! degenerate children, flips reject zero-volume configurations, cavity
+//! re-triangulation rebuilds the same ties in its local DT, and SoS merely
+//! renames the flat tets without removing them.
 //!
 //! THE FIX (this module). Stop fighting the flats in 3-D. The in-plane
 //! structure is purely 2-D, and in 2-D constrained edge recovery by flips

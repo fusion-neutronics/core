@@ -22,8 +22,7 @@
 //! That is the point: the strongest tests in `sections.rs` need an ENDF tree
 //! and an njoy binary that no CI job provides, so they report green by not
 //! running. Nothing here can do that. A test that cannot reach its writer with
-//! vendored bytes is not written at all, and is recorded in the pull request
-//! instead of added as a silent skip.
+//! vendored bytes is not written at all, rather than added as a silent skip.
 
 #![allow(dead_code)]
 

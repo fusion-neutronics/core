@@ -3,7 +3,7 @@
 //! Materials, nuclides, reactions, chains, elements, irradiation schedules and
 //! the inventories a transmutation produces. Everything here is transport-free:
 //! the crate graph stops at `yani-transmute` / `yamc-materials` and never
-//! reaches geometry, tallies, meshing or the `yamc` crate (issue #381).
+//! reaches geometry, tallies, meshing or the `yamc` crate.
 //!
 //! Two consumers register the same classes:
 //!
@@ -55,7 +55,7 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
     // there is nothing an inventory calculation does with a scattering cosine,
     // and `create_test_reaction_product` is a test helper that was never meant
     // to be public at all. Registering them top-level on the transmutation
-    // wheel put them in its documented API. Issue #452.
+    // wheel would put them in its documented API.
     let transport = package == "yamc";
     if transport {
         m.add_class::<material::PyAngleDistribution>()?;
@@ -97,7 +97,7 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
     m.add_class::<distribution::PyDoseResult>()?;
 
     // The built-in energy group structures as data, not just as a name that can
-    // be passed somewhere: the edges behind `"CCFE-709"` (issue #492).
+    // be passed somewhere: the edges behind `"CCFE-709"`.
     m.add_function(wrap_pyfunction!(group_structures::group_structure, m)?)?;
     m.add_function(wrap_pyfunction!(
         group_structures::group_structure_names,

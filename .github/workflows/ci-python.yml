@@ -3,8 +3,9 @@ name: Python CI
 on:
   push:
     branches: [main]
+  # Every pull request, whatever its base, so a PR stacked on another
+  # PR's branch is tested before it is retargeted at main.
   pull_request:
-    branches: [main]
   release:
     types: [published]
   # A release tag NAMES EVERY PROJECT IT PUBLISHES, AND THE VERSION EACH GOES
@@ -86,10 +87,9 @@ jobs:
   # A release tag names every project it publishes, but only the publish jobs
   # ever consulted it, so a `yani-core-0.10.0` tag still ran the three yamc-core
   # wheel builds plus `test` and `test-mpi` and made the yani release wait on
-  # them (issue #534). The grammar also lived in three places, which is how a
-  # tag could mean one thing to `verify-versions` and another to a publish gate.
-  # It lives here now, and every job below reads these outputs instead of the
-  # tag.
+  # them. The grammar also lived in three places, which is how a tag could mean
+  # one thing to `verify-versions` and another to a publish gate. It lives here
+  # now, and every job below reads these outputs instead of the tag.
   plan:
     name: Plan what this run builds and publishes
     runs-on: ubuntu-latest
@@ -416,7 +416,7 @@ jobs:
           name: wheels-linux-${{ matrix.target }}
           path: packages/yamc-core/dist
 
-  # Build the standalone transmutation wheel (issue #381). One target is
+  # Build the standalone transmutation wheel. One target is
   # enough: it is the same abi3 wheel machinery as yamc's, over a strict subset
   # of the crates, so a second platform would only re-test maturin.
   yani-wheel:
@@ -520,10 +520,8 @@ jobs:
       # makes the absences packages/yani-core/tests asserts mean anything, and
       # it is why that suite cannot live in the `test` job.
       #
-      # It replaces an inline heredoc that asserted a subset of the same names.
-      # pytest.ini has named this testpath since #533 and no job ran it, so the
-      # suite and the heredoc were drifting apart with only the heredoc gating
-      # anything (issue #535).
+      # A testpath that pytest.ini names but no job runs gates nothing, so the
+      # suite runs here rather than an inline heredoc of a subset of its names.
       # `--remap-path-prefix` is a silent no-op when its prefix does not match,
       # so a runner-image change that moves the home directory would quietly
       # start shipping it. This is the step that notices. See
@@ -706,19 +704,17 @@ jobs:
         run: |
           brew install open-mpi
 
-      # Same fix as the MPI job in ci-rust.yml (#39), which this job did not
-      # get. `mpi-sys` bakes an absolute `-L` into its build-script output and
-      # cargo will not re-run a build script whose Rust-side inputs have not
-      # changed, so a cache saved when the macOS image carried open-mpi 5.0.9
-      # keeps pointing at /opt/homebrew/Cellar/open-mpi/5.0.9/lib after the
-      # image moves on, and the link fails with `ld: library 'mpi' not found`
-      # on a full cache hit.
+      # Same fix as the MPI job in ci-rust.yml. `mpi-sys` bakes an absolute `-L`
+      # into its build-script output and cargo will not re-run a build script
+      # whose Rust-side inputs have not changed, so a cache saved when the macOS
+      # image carried open-mpi 5.0.9 keeps pointing at
+      # /opt/homebrew/Cellar/open-mpi/5.0.9/lib after the image moves on, and
+      # the link fails with `ld: library 'mpi' not found` on a full cache hit.
       #
-      # #39 only re-keyed the ci-rust.yml job, because that one caches through
-      # an explicit `Swatinem/rust-cache` step. This one cached through
-      # `actions-rust-lang/setup-rust-toolchain`, which does it internally and
-      # keys on the job rather than on the native library, so it poisoned
-      # itself across runs in exactly the same way. That is why a pull request
+      # The ci-rust.yml job caches through an explicit `Swatinem/rust-cache`
+      # step. This one caches through `actions-rust-lang/setup-rust-toolchain`,
+      # which does it internally and keys on the job rather than on the native
+      # library, so it poisons itself across runs in exactly the same way. That is why a pull request
       # could pass here and fail there, or pass or fail by which runner image
       # it drew.
       - name: Record the native MPI version for the cache key
@@ -884,12 +880,10 @@ jobs:
 
   # The only job that puts BOTH wheels in one interpreter.
   #
-  # pytests/parity is owned by neither package for exactly that reason, and
-  # until this job existed its `importorskip("yani")` calls skipped on every
-  # run: the `test` job installs the yamc wheel and the `yani-wheel` job
-  # installs the yani one, so no interpreter in CI had ever held both (issue
-  # #535). The test whose docstring says it guards that splitting the bindings
-  # out (#381) changed no physics had never guarded anything here.
+  # pytests/parity is owned by neither package for exactly that reason. Its
+  # `importorskip("yani")` calls skip anywhere else: the `test` job installs the
+  # yamc wheel and the `yani-wheel` job installs the yani one, so no other
+  # interpreter in CI holds both.
   #
   # ubuntu only, and one Python. This proves the two wheels are the same code,
   # which is a property of the bindings crate rather than of a platform, and
@@ -954,8 +948,7 @@ jobs:
       - name: Run the parity suite
         env:
           # Fail rather than skip. This is the job that has both wheels, so a
-          # missing one is the bug, and a green run over ten skips is the exact
-          # report that hid #535.
+          # missing one is the bug, and a green run over ten skips would hide it.
           YAMC_PARITY_REQUIRE_WHEELS: "1"
         run: pytest pytests/parity -v
 
@@ -997,7 +990,7 @@ jobs:
           ruff check .
 
       # The workspace carries a `[profile.release]` whose whole point is the
-      # published wheels (issue #576), and a wheel job reaches it only through
+      # published wheels, and a wheel job reaches it only through
       # `--release`. maturin's default is the dev profile, so dropping the flag
       # would not fail anything -- it would quietly ship an unoptimized
       # extension, which is the kind of regression nothing else here notices.
@@ -1043,7 +1036,7 @@ jobs:
           python scripts/build_stubs.py
           # Both wheels' stub trees, because build_stubs.py writes both and they
           # do not hold the same names: yani's __all__ has the transport surface
-          # filtered out of it (#452), so it drifts on its own.
+          # filtered out of it, so it drifts on its own.
           # --porcelain catches both modified tracked files and brand-new
           # untracked stubs (a new submodule .pyi), which `git diff` would miss.
           stubs="packages/yamc-core/python/yamc/_core/ packages/yani-core/python/yani/_core/"
@@ -1098,8 +1091,7 @@ jobs:
           # constructor can name the rectangular-mesh-only limitation itself.
           # Grepping for the expected type is what proves the
           # `#[gen_stub(override_type(...))]` override survived: with the bare
-          # `typing.Any` pyo3-stub-gen infers, these three lines go quiet
-          # (issue #121).
+          # `typing.Any` pyo3-stub-gen infers, these three lines go quiet.
           echo "$out" | grep -q 'Argument "mesh" to "WeightWindowBounds".*expected "RegularRectangularMesh".*\[arg-type\]' || { echo "::error::missing expected WeightWindowBounds mesh [arg-type] error" >&2; exit 1; }
           echo "$out" | grep -q 'Argument "mesh" to "WeightWindowGeneratorDeGVR".*expected "RegularRectangularMesh".*\[arg-type\]' || { echo "::error::missing expected WeightWindowGeneratorDeGVR mesh [arg-type] error" >&2; exit 1; }
           echo "$out" | grep -q 'Argument "particle" to "WeightWindowGeneratorDeGVR".*\[arg-type\]' || { echo "::error::missing expected WeightWindowGeneratorDeGVR particle [arg-type] error" >&2; exit 1; }
@@ -1113,9 +1105,8 @@ jobs:
   verify-versions:
     name: Versions match the tag and are unpublished
     needs: [plan]
-    # Only what this run will actually upload, which is the difference from the
-    # old gate: a yani-core release used to echo both projects' versions and so
-    # read in the log like a double release (issue #534).
+    # Only what this run will actually upload, so a single-project release does
+    # not echo both projects' versions and read in the log like a double release.
     if: >-
       needs.plan.outputs.publish_yamc == 'true' ||
       needs.plan.outputs.publish_yani == 'true'
@@ -1174,6 +1165,15 @@ jobs:
           check yamc-core "$PUBLISH_YAMC" "${TAGGED_YAMC:-}" "${YAMC_OVERRIDE:-}" crates/yamc-python/Cargo.toml
           check yani-core "$PUBLISH_YANI" "${TAGGED_YANI:-}" "${YANI_OVERRIDE:-}" crates/yani-python/Cargo.toml
           exit $fail
+      # Both wheels compile in the data pins (yamc-nuclide's
+      # EXPECTED_DATA_VERSION and EXPECTED_TRANSMUTATION_DATA_VERSION), and a
+      # pin the origin does not serve fails every download, fresh installs
+      # included. So the release waits until the origin carries every pinned
+      # stamp: upload the data first, then tag.
+      - name: The origin serves every pinned data stamp
+        run: >-
+          cargo test -p yamc-nuclide --features download-tls --lib --
+          --ignored origin_serves_every_pinned_data_version --nocapture
 
   # Sort the built wheels into one directory per PyPI project, so each publish
   # job below uploads exactly one project's files.
@@ -1332,8 +1332,7 @@ jobs:
 
   # What actually went out, stated once at the end.
   #
-  # The complaint that started #534 was that a single-project release READ like
-  # a double release in the log. A run that publishes nothing looks identical to
+  # A single-project release must not READ like a double release in the log. A run that publishes nothing looks identical to
   # one that published everything unless something says so, and the failure mode
   # this whole file has to avoid is a release that quietly publishes nothing at
   # all. So the plan is echoed, and each project the plan named is confirmed to

@@ -122,6 +122,7 @@ fn chain() -> Arc<HashMap<String, ChainNuclide>> {
         target: Some(target.to_string()),
         branching,
         branching_uncertainty: None,
+        evaluated_branching: None,
         q_value: Some(0.0),
     };
     let mut map = HashMap::new();

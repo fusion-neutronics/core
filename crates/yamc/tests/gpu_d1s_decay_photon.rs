@@ -290,7 +290,7 @@ fn gpu_d1s_decay_photon_matches_cpu() {
 
     // (b) Decay emission does not perturb neutron transport (child-seed
     // isolation). This is bit-exact at the kernel level (yamc-gpu
-    // `cpu_gpu_equivalence`). Since issue #233 Stage 3 the D1S run is ALSO
+    // `cpu_gpu_equivalence`). The D1S run is ALSO
     // batch-free (per-source) and uses the SAME fixed launch chunk as the
     // neutron-only baseline, so both transport the identical source neutrons and
     // agree to a tight band (only f64 round-off in the per-source vs per-history

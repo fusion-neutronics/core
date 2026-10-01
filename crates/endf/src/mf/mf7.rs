@@ -62,8 +62,7 @@ pub struct ScatteringLawTemperature {
     pub beta: f64,
     /// The Python reader stores the outer LT here rather than the LI it reads
     /// from the record, so the interpolation flag is lost. Reproduced so the
-    /// two agree; see
-    /// <https://github.com/shimwell/endf-python/issues/16>.
+    /// two agree.
     pub lt: i64,
     pub s: Vec<f64>,
 }
@@ -210,7 +209,7 @@ pub fn parse_mf7_mt4(reader: &mut Reader) -> Result<Mf7Mt4> {
                     t: list.cont.c1,
                     beta: list.cont.c2,
                     // The record's own LI is read and discarded upstream; the
-                    // outer LT is stored instead. See issue #16.
+                    // outer LT is stored instead, matching the Python reader.
                     lt,
                     s: list.values,
                 });

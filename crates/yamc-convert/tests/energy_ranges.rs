@@ -1,7 +1,6 @@
 //! The union energy grids as their own section, one batch per temperature.
 //!
-//! The energy half of fusion-neutronics/core#100. Three claims, in order of how
-//! much they would cost to get wrong:
+//! Three claims, in order of how much they would cost to get wrong:
 //!
 //! 1. A version 1 folder migrates without changing a single number. The grids
 //!    are copied, so this is checkable exactly rather than to a tolerance.
@@ -267,7 +266,7 @@ fn the_fe56_fixture_serves_one_temperature_from_its_own_batch() {
     );
 
     // nuclide.arrow is metadata now, so the identity of a nuclide is cheap to
-    // ask for. Before #100 this file carried every grid.
+    // ask for.
     let meta = std::fs::metadata(dir.join("nuclide.arrow")).unwrap().len();
     eprintln!("Fe56 nuclide.arrow: {meta} bytes");
     assert!(

@@ -74,7 +74,7 @@ assert_type(yamc.materials.pnnl.citation, str)
 # `mesh` is `&Bound<PyAny>` in the bindings so the constructor can raise a
 # refusal that names the rectangular-mesh-only limitation, which pyo3-stub-gen
 # cannot see through. A `#[gen_stub(override_type(...))]` on the argument puts
-# the real type back (issue #121), and `assert_type` below would not fail if it
+# the real type back, and `assert_type` below would not fail if it
 # regressed to `Any`, so the negative cases in sample_errors.py are what guard
 # it. These prove the accepting side still type-checks.
 ww_mesh = yamc.RegularRectangularMesh(

@@ -8,7 +8,7 @@
 //! It exists because it was in two places and they disagreed. `Material` cached
 //! a `temperature_k` that `set_temperature` never updated, so the CPU free-gas
 //! kernel ran every material at 294 K, while the GPU parsed the label itself
-//! and got it right (issue #478). Two parsers is one more than can be kept in
+//! and got it right. Two parsers is one more than can be kept in
 //! step, and the failure is silent: 294 K is the common case, so every test
 //! passed.
 

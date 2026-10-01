@@ -1,8 +1,7 @@
 //! Diagnostic: compare σ_capture(E) under three interpolation laws.
 //! 1. CPU exact: linear-in-linear-E on the actinide's own grid.
-//! 2. GPU OLD: linear-in-log-E (current pre-Phase-6 behavior).
-//! 3. GPU NEW: linear-in-linear-E via exp() of stored log grid
-//!    (Phase 6's reconstruction).
+//! 2. GPU OLD: linear-in-log-E.
+//! 3. GPU NEW: linear-in-linear-E via exp() of stored log grid.
 //!
 //! For 1/v-like capture cross sections, (2) should over-estimate vs (1);
 //! (3) should match (1) exactly.
@@ -40,7 +39,7 @@ fn gpu_old_log(e: f64, log_grid: &[f64], xs: &[f64]) -> f64 {
 }
 
 fn gpu_new_lin_via_exp(e: f64, log_grid: &[f64], xs: &[f64]) -> f64 {
-    // Phase 6: bracket search in log-E, frac in linear-E reconstructed via exp.
+    // Bracket search in log-E, frac in linear-E reconstructed via exp.
     let log_e = e.ln();
     let n = log_grid.len();
     if log_e <= log_grid[0] {

@@ -1,6 +1,6 @@
-"""Weight-window feature-combination matrix (follow-up survey on issue #271).
+"""Weight-window feature-combination matrix.
 
-The #271 survey covered tallies, scores, physics modes and backends but only
+An earlier survey covered tallies, scores, physics modes and backends but only
 touched weight windows at the surface. This sweeps the WW axes: generation
 (particle, mesh, energy groups, source type, tracking mode), application
 (tally kind, estimator, tracking mode, geometry kind, composition with other

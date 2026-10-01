@@ -1,4 +1,4 @@
-//! GPU `EnergyFunctionFilter` tally support (issue #271), on-hardware.
+//! GPU `EnergyFunctionFilter` tally support, on-hardware.
 //!
 //! `energy_function=` (and its sugar `dose_coefficients=`) is not a bin
 //! dimension: it multiplies the score by a tabulated curve interpolated at the

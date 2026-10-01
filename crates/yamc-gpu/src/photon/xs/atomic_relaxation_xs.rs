@@ -9,7 +9,7 @@
 //! Mirrors the CPU's `PhotonInteraction::sample_photoelectric_subshell`
 //! and `atomic_relaxation` paths in `yamc-element/src/photon.rs`.
 //!
-//! Scope: ONE slab per element (task #72), concatenated material-major --
+//! Scope: ONE slab per element, concatenated material-major --
 //! the kernel's per-collision element selection indexes whichever element
 //! the photon struck, mirroring CPU `Material::sample_element`. (Same
 //! per-element slab convention as the Rayleigh / Doppler / IFF / pair
@@ -28,7 +28,7 @@ pub const MAX_AR_SHELLS: usize = 16;
 pub const MAX_AR_TRANS: usize = 32;
 
 /// Per-ELEMENT atomic-relaxation pack ready for upload to the GPU photon
-/// kernel (task #72). Slab dimension = total elements across materials,
+/// kernel. Slab dimension = total elements across materials,
 /// element-major within a material and concatenated material-major.
 ///
 /// Layout: per element-slab `e`, scalar fields sit at slot `e`. Per-shell
@@ -82,8 +82,7 @@ impl GpuAtomicRelaxation {
     /// A degenerate empty pack -- same shape as the populated case so
     /// the kernel launcher can pass uniform arguments -- but
     /// `has_data[slab] = 0` everywhere so the kernel falls back to the
-    /// no-cascade photoelectric path. `n_slab` is the element-slab count
-    /// (task #72).
+    /// no-cascade photoelectric path. `n_slab` is the element-slab count.
     pub fn empty_for_slabs(n_slab: usize, n_grid: usize) -> Self {
         let n_slab = n_slab.max(1);
         let n_grid = n_grid.max(1);
@@ -101,7 +100,7 @@ impl GpuAtomicRelaxation {
     }
 }
 
-/// Pack per-ELEMENT atomic-relaxation tables (task #72).
+/// Pack per-ELEMENT atomic-relaxation tables.
 ///
 /// `materials` is the per-material `(name, element, density)` triples
 /// list (same shape as the other photon extractors). `log_energy_grid`
@@ -126,7 +125,7 @@ pub fn extract_atomic_relaxation_for_gpu(
 
     let mut pack = GpuAtomicRelaxation::empty_for_slabs(n_slab, n_grid);
 
-    // One slab per element (task #72): the per-collision element selection
+    // One slab per element: the per-collision element selection
     // indexes whichever element the photon struck (mirrors CPU
     // `Material::sample_element` -> that element's subshells / cascade).
     let mut slab = 0usize;

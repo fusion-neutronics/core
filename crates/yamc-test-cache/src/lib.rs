@@ -7,7 +7,7 @@
 //! format!("{home}/.cache/yamc/endf-b8.1-{n}.arrow")
 //! ```
 //!
-//! which is wrong twice over (issue #544). `HOME` is not a Windows variable, so
+//! which is wrong twice over. `HOME` is not a Windows variable, so
 //! on `windows-latest` every one of those paths resolved under a literal
 //! `/home/jon`, nothing loaded, and the tests took their "data absent" skip
 //! path and passed while reading nothing. `scripts/fetch_test_fixtures.py`
@@ -70,8 +70,8 @@ pub fn on_ci() -> bool {
 /// resolves it: `YAMC_CACHE_DIR` when set, else `<home>/.cache/yamc`.
 ///
 /// Panics when neither resolves. That is a broken environment rather than an
-/// empty cache, and the two must not look alike: skipping on it is what let
-/// #544 hide for as long as it did.
+/// empty cache, and the two must not look alike: skipping on it lets a
+/// wrongly resolved cache pass silently.
 pub fn root() -> PathBuf {
     yamc_nuclide::url_cache::cache_root().expect(
         "no nuclear-data cache location: set YAMC_CACHE_DIR, or HOME (USERPROFILE on Windows)",
@@ -150,7 +150,7 @@ pub fn have(nuclide: &str) -> bool {
 /// The fixture for `nuclide` when it carries the TRANSPORT sections, or `None`.
 ///
 /// What a test that samples a secondary needs, and a stricter question than
-/// [`nuclide`]. Since #389 a cache directory is routinely left at activation
+/// [`nuclide`]. A cache directory is routinely left at activation
 /// scope, holding `reactions.arrow` and none of the products or distributions:
 /// the directory is there, `nuclide` says yes, and the loader does not object
 /// either, because `narrow_to_present_sections` narrows a `Full` request to
@@ -210,9 +210,9 @@ pub fn element(element: &str) -> Option<String> {
 /// the tests that want them need NJOY as well. They skip everywhere but a
 /// machine that has both.
 ///
-/// Here rather than spelled out per test because the home half is the same rule
-/// (issue #544): `std::env::var("HOME")` resolves to nothing on Windows, and
-/// four sites in `yamc-convert` built a path under an empty string when it did.
+/// Here rather than spelled out per test because the home half is the same rule:
+/// `std::env::var("HOME")` resolves to nothing on Windows, and a per-test path
+/// built from it lands under an empty string.
 pub fn endf_evaluations() -> PathBuf {
     if let Some(dir) = std::env::var_os("YAMC_ENDF_DIR").filter(|v| !v.is_empty()) {
         return PathBuf::from(dir);

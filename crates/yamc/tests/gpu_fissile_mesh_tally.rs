@@ -1,5 +1,4 @@
-//! Mesh tallies on a fissile model with the GPU fission bank on
-//! (fusion-neutronics/core#30).
+//! Mesh tallies on a fissile model with the GPU fission bank on.
 //!
 //! The dispatch used to refuse this combination because the fissile loop
 //! accumulates per SOURCE neutron across fission generations while a mesh

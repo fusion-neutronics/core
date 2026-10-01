@@ -1,4 +1,4 @@
-//! Task #68 decisive measurement: is the GPU-high COLLISION-estimator photon
+//! Decisive measurement: is the GPU-high COLLISION-estimator photon
 //! heating (~1.008 in pure-photon mode) a real bias or just the collision
 //! estimator's higher variance?
 //!
@@ -191,7 +191,7 @@ fn gpu_photon_heating_collision_bias() {
     let n_per_batch = 100_000usize;
     let n_batches = 10usize; // 1M histories per seed
 
-    println!("\n# Task #68: collision-estimator photon-heating GPU/CPU, 1.25 MeV Fe sphere");
+    println!("\n# Collision-estimator photon-heating GPU/CPU, 1.25 MeV Fe sphere");
     println!(
         "\n{} histories per seed ({n_per_batch} x {n_batches}).",
         n_per_batch * n_batches

@@ -1,5 +1,5 @@
 //! Validation kernel for the PCG-32 RNG (64-bit state, 32-bit output
-//! word, PCG-XSH-RR 64/32; issue #274), expressed as a cubecl
+//! word, PCG-XSH-RR 64/32), expressed as a cubecl
 //! `#[cube]` function so it compiles down to SPIR-V on the Vulkan
 //! backend (and to other backends unchanged when we add them).
 //!
@@ -18,7 +18,7 @@ use cubecl::prelude::*;
 /// Expand a 32-bit per-history seed into a 64-bit PCG state via splitmix64
 /// (`#[cube]` twin of `yamc_rng::expand_seed`). The kernel seeds
 /// each history's RNG with this so the CPU (which applies the same expansion in
-/// `yamc-physics`) and GPU consume the identical 64-bit stream (issue #274).
+/// `yamc-physics`) and GPU consume the identical 64-bit stream.
 ///
 /// KERNEL-ONLY: the body uses plain `+`/`*` (cubecl wraps on the GPU), so
 /// calling this on the host overflow-panics in debug builds. Host code must
@@ -34,7 +34,7 @@ pub fn expand_seed(seed: u32) -> u64 {
 
 /// Derive an in-history secondary's 32-bit seed from its parent walk's seed and
 /// its ordinal among that walk's secondaries (`#[cube]` twin of
-/// `yamc_rng::secondary_seed`; issue #111).
+/// `yamc_rng::secondary_seed`).
 ///
 /// The kernel's in-thread (n,xn) queue stores this per entry and re-seeds the
 /// thread PCG from it on pop, so a secondary's physics is a function of its
@@ -78,7 +78,7 @@ pub struct Pcg32Draw {
 
 /// PCG-XSH-RR 64->32 output permutation of a state word (no advance). `#[cube]`
 /// twin of `yamc_rng::pcg_xsh_rr`, for probe/sampling kernels
-/// that previously inlined the 32-bit output with `OUT_MULT` (issue #274).
+/// that previously inlined the 32-bit output with `OUT_MULT`.
 #[cube]
 pub fn pcg_out(state: u64) -> u32 {
     let xorshifted = (((state >> 18) ^ state) >> 27) as u32;
@@ -89,8 +89,8 @@ pub fn pcg_out(state: u64) -> u32 {
 #[cube]
 pub fn pcg_next(state: u64) -> Pcg32Draw {
     // PCG-XSH-RR 64->32 output permutation of the current state, then advance
-    // the 64-bit LCG (issue #274). Mirrors `yamc_rng::pcg_xsh_rr`
-    // + the LCG step, kept bit-identical for the #40 CPU/GPU matched stream.
+    // the 64-bit LCG. Mirrors `yamc_rng::pcg_xsh_rr`
+    // + the LCG step, kept bit-identical for the CPU/GPU matched stream.
     let xorshifted = (((state >> 18) ^ state) >> 27) as u32;
     let rot = (state >> 59) as u32;
     let rand = (xorshifted >> rot) | (xorshifted << ((32u32 - rot) & 31u32));
@@ -308,12 +308,12 @@ mod tests {
         assert_eq!(gpu_out, cpu_out, "GPU PCG-32 output diverges from CPU");
     }
 
-    /// The in-history secondary seeder (issue #111) must give the same 32-bit
+    /// The in-history secondary seeder must give the same 32-bit
     /// answer in the kernel and on the host. The kernel body uses plain
     /// `+` / `*`, which cubecl wraps on the GPU, and the host body uses
     /// `wrapping_*`; if those ever stop agreeing, a secondary would transport
     /// on one stream on the CPU and a different one on the GPU and the whole
-    /// per-history bit-identity of #111 would silently break. Exact integer
+    /// per-history CPU/GPU bit-identity would silently break. Exact integer
     /// arithmetic, so this is equality, not a tolerance.
     #[test]
     fn gpu_secondary_seed_matches_cpu() {

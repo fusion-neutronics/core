@@ -53,7 +53,7 @@ pub fn activity_by_nuclide(
 /// runs, so a total summed in it moves in the last bit. In a single answer that
 /// is invisible; over an ensemble it is not, because two replicas holding the
 /// identical inventory then disagree and manufacture a spread where there is
-/// none (issue #558). Same reason [`decay_photon_lines`] walks its nuclides
+/// none. Same reason [`decay_photon_lines`] walks its nuclides
 /// sorted.
 pub fn total(by_nuclide: &HashMap<String, f64>) -> f64 {
     let mut names: Vec<&String> = by_nuclide.keys().collect();
@@ -148,8 +148,9 @@ pub fn decay_heat_total(
 /// per second)`, ascending in energy, coincident energies summed.
 ///
 /// Lines only. A continuum is a density per eV rather than a set of rates, so
-/// it has no place in this list, and summing its tabulated values as lines is
-/// the defect issue #163 found. [`decay_photon_continua`] returns it.
+/// it has no place in this list, and summing its tabulated values as lines
+/// would be wrong by about its grid spacing in eV. [`decay_photon_continua`]
+/// returns it.
 ///
 /// The chain records each line's intensity **per atom per second**, not per
 /// decay: it is the emission probability already multiplied by the nuclide's
@@ -334,7 +335,7 @@ mod tests {
     /// Two maps of the same content iterate in different orders, and a total
     /// summed in that order moves in the last bit. Invisible in one answer;
     /// over an ensemble it makes two identical inventories disagree and puts a
-    /// spread on a quantity that has none (issue #558).
+    /// spread on a quantity that has none.
     #[test]
     fn a_total_does_not_depend_on_the_map_it_came_out_of() {
         let pairs = [
@@ -451,7 +452,7 @@ mod tests {
 
     /// Lines and continuum come back apart, each in its own units: the line in
     /// photons/s, the continuum in photons/s/eV with its law, and the lines
-    /// list never holds a continuum's values (issue #163).
+    /// list never holds a continuum's values.
     #[test]
     fn a_continuum_is_returned_apart_from_the_lines() {
         let chain = chain_with_a_continuum(Some(Interpolation::Histogram));
@@ -494,6 +495,52 @@ mod tests {
         let continua = decay_photon_continua(&densities, 1.0, &chain);
         assert_eq!(continua[0].interpolation, None);
         assert_eq!(continua[0].emission_rate(), Err(UnreadableContinuum::NoLaw));
+    }
+
+    /// Zr90m (0.808 s, 2.32 MeV) held in equilibrium by Y90m (3.19 h) in a
+    /// cooling zirconium foil, carried step by step through the cooling
+    /// schedule of the FNS 5 minute experiment. Its heat is `lambda * N * E`
+    /// of a population 1e-22 of the bulk, and at every step it has to be the
+    /// Bateman value, not a residue of the bulk that comes and goes with the
+    /// last bit of the step length.
+    #[test]
+    fn an_equilibrium_daughter_heats_from_its_population_at_every_step() {
+        let lambda_parent = std::f64::consts::LN_2 / 11_484.0;
+        let half_life_daughter = 0.8082;
+        let lambda_daughter = std::f64::consts::LN_2 / half_life_daughter;
+        let energy = 2.319_98e6;
+        let mut chain = HashMap::new();
+        chain.insert("Y90_m1".to_string(), nuclide("Y90_m1", Some(11_484.0), 0.0));
+        chain.insert(
+            "Zr90_m1".to_string(),
+            nuclide("Zr90_m1", Some(half_life_daughter), energy),
+        );
+        chain.insert("Zr90".to_string(), nuclide("Zr90", None, 0.0));
+        let names = ["Y90_m1", "Zr90_m1", "Zr90"];
+        let triplets = vec![
+            (0, 0, -lambda_parent),
+            (1, 0, lambda_parent),
+            (1, 1, -lambda_daughter),
+            (2, 1, lambda_daughter),
+        ];
+        let parent0 = 1.0e-15;
+        let mut n = vec![parent0, 0.0, 2.2e-2];
+        let mut elapsed = 0.0;
+        for dt in [35.0, 66.0, 97.0, 126.0, 126.0, 187.0, 247.0, 427.0, 607.0] {
+            n = yani::cram48_sparse(&triplets, 3, &n, dt).unwrap();
+            elapsed += dt;
+            let densities: HashMap<String, f64> =
+                names.iter().map(|s| s.to_string()).zip(n.clone()).collect();
+            let heat = decay_heat_by_nuclide(&densities, 1.0, &chain);
+            let exact_atoms = parent0 * lambda_parent / (lambda_daughter - lambda_parent)
+                * ((-lambda_parent * elapsed).exp() - (-lambda_daughter * elapsed).exp());
+            let exact = exact_atoms * BARN_PER_CM_SQ * lambda_daughter * energy * EV_TO_J;
+            let got = heat.get("Zr90_m1").copied().unwrap_or(0.0);
+            assert!(
+                ((got - exact) / exact).abs() < 1e-11,
+                "after {elapsed} s: Zr90m heat {got:e} W, Bateman {exact:e} W"
+            );
+        }
     }
 
     /// Data without the split cannot give a component, and says which

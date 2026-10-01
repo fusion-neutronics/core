@@ -19,9 +19,9 @@ use yamc_nuclide::reaction_product::Tabulated1D;
 
 const MASS_ELECTRON_EV: f64 = 0.510_998_950_00e6;
 
-// #421 FIXED: `rayleigh_propose` now uses `f_max = F(x²_max)` (interpolated)
+// `rayleigh_propose` uses `f_max = F(x²_max)` (interpolated)
 // instead of the full-table integral, matching the CPU. This test (GPU
-// Rayleigh µ distribution == CPU `rayleigh_scatter`) now passes.
+// Rayleigh µ distribution == CPU `rayleigh_scatter`) pins that.
 #[test]
 fn gpu_rayleigh_matches_cpu_distribution() {
     let ctx = match GpuContext::new() {

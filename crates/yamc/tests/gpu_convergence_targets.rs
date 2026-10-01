@@ -1,4 +1,4 @@
-//! Convergence targets on the GPU (fusion-neutronics/core#29).
+//! Convergence targets on the GPU.
 //!
 //! A `Model.convergence_targets` entry is defined on a tally's per-history
 //! AGGREGATE moments (the total score of each history across the tally's bins),

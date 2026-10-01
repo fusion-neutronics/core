@@ -1,4 +1,4 @@
-"""``simulate_transmutation`` must not depend on the MPI rank count (#287).
+"""``simulate_transmutation`` must not depend on the MPI rank count.
 
 Skipped unless yamc was built with the ``mpi`` feature and ``mpirun`` is
 available. Runs ``verify_mpi_transmutation.py`` serially and under

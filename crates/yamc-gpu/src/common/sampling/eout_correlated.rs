@@ -47,7 +47,7 @@ pub struct CorrelatedEoutSample {
 
 /// Sample a correlated (File-6 Law-1) outgoing energy. `eg_off_c` is the slot's
 /// global base ae-row into the per-incident-energy buffers
-/// (`corr_ae_offset[mat_slot]` with tight CSR storage, issue #104);
+/// (`corr_ae_offset[mat_slot]` with tight CSR storage);
 /// `corr_x_offset` gives the global x-point start of each ae-row's
 /// `(x, cdf, p)` points in the flat `corr_x` / `corr_cdf` / `corr_p` arrays
 /// (row `eg_off_c + bin_e` starts at `corr_x_offset[eg_off_c + bin_e]`). The
@@ -119,7 +119,7 @@ pub fn sample_correlated_eout(
         let n_disc = corr_n_discrete[(eg_off_c + bin_e) as usize];
         let interp_kind = corr_interp[(eg_off_c + bin_e) as usize];
         // Discrete-then-continuous CDF search matching the CPU reference
-        // `sample_with_discrete_info` (issue #103): discrete head (first
+        // `sample_with_discrete_info`: discrete head (first
         // `n_disc` points) searched with `xi < c[k]` (exact line), continuous
         // tail from `n_disc` with `xi <= c[k+1]`, carrying `c_j`. The previous
         // single scan collapsed every discrete line onto index 0. For
@@ -215,7 +215,7 @@ pub fn sample_correlated_eout(
         }
         e_out = e_sampled;
         // Angular sub-table at the NEARER of the two bracketing E_out points,
-        // measured on the CDF (issue #371). Taking `j` unconditionally, as this
+        // measured on the CDF. Taking `j` unconditionally, as this
         // did, biases μ wherever adjacent sub-tables differ -- which is exactly
         // at a spectrum's falling edge. Reads `corr_cdf` only, so the draw
         // schedule is unchanged.
@@ -307,7 +307,7 @@ pub fn sample_correlated_eout_cpu(
 
         let n_disc = corr_n_discrete[(eg_off_c + bin_e) as usize];
         let interp_kind = corr_interp[(eg_off_c + bin_e) as usize];
-        // Discrete-then-continuous CDF search (issue #103); bit-twin of the
+        // Discrete-then-continuous CDF search; bit-twin of the
         // `#[cube]` scan above. See its comment.
         let mut j = 0u32;
         let mut c_j = corr_cdf[x_off as usize];
@@ -394,7 +394,7 @@ pub fn sample_correlated_eout_cpu(
         }
         e_out = e_sampled;
         // Angular sub-table at the NEARER of the two bracketing E_out points,
-        // measured on the CDF (issue #371). Taking `j` unconditionally, as this
+        // measured on the CDF. Taking `j` unconditionally, as this
         // did, biases μ wherever adjacent sub-tables differ -- which is exactly
         // at a spectrum's falling edge. Reads `corr_cdf` only, so the draw
         // schedule is unchanged.
@@ -549,8 +549,8 @@ mod tests {
 
         let (energy_grid, n_x, x, cdf, p, interp, n_disc) = fixture();
         // CSR x-offsets for the dense (MX-strided) fixture: ae-row `r` starts
-        // at `r * MX` in the per-x-point arrays (issue #104 -- the sampler now
-        // takes per-row offsets rather than a `max_corr_x` stride).
+        // at `r * MX` in the per-x-point arrays (the sampler takes per-row
+        // offsets rather than a `max_corr_x` stride).
         let x_offset: Vec<u32> = (0..n_x.len()).map(|r| (r * MX) as u32).collect();
 
         // (eg_off_c, n_corr, incident energies) per case. Slot 0 (eg_off=0,

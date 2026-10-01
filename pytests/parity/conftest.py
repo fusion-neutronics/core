@@ -16,10 +16,9 @@ where the same failure in a test module is confined to that one file, and that
 is what the `importorskip` calls in these tests still rely on.
 
 `YAMC_PARITY_REQUIRE_WHEELS` turns that around for the one job whose whole
-purpose is to have both, which is what issue #535 is about: these tests had
-never run anywhere, because no CI job installed both wheels and `importorskip`
-therefore skipped on every run, including the test whose docstring says it
-guards that splitting the bindings out (#381) changed no physics.
+purpose is to have both. Without it a CI job that failed to install one wheel
+would skip every test here and still report green, including the test that
+guards that splitting the bindings out changed no physics.
 """
 
 import importlib

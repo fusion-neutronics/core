@@ -269,8 +269,8 @@ def test_coupled_photon_spectrum(nuclide):
     carry signal. At dof=3 the chi2/dof statistic is itself very noisy (its
     spread ~ sqrt(2/dof) is large), so a fixed-seed realization easily swings
     it past 2.0 even when the spectrum is statistically fine; an RNG stream
-    change (issue #111) that reshuffles histories is enough to tip it. The
-    64-bit stream (issue #274) landed the Fe56 realization at chi2/dof 2.86
+    change that reshuffles histories is enough to tip it. The
+    64-bit stream landed the Fe56 realization at chi2/dof 2.86
     (dof=41): with the known shape residuals the statistic's mean sits well
     above 1, so its realization spread is wider than the pure-noise
     sqrt(2/dof). The 3.0 bar absorbs that while still flagging a genuine

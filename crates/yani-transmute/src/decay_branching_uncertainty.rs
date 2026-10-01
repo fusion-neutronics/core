@@ -1,5 +1,5 @@
 //! Decay branching ratio uncertainty, for the parents where the evaluation
-//! fixes the joint distribution exactly (issue #140).
+//! fixes the joint distribution exactly.
 //!
 //! MT=457 gives each decay mode a ratio and a sigma, and no covariance between
 //! the modes. The ratios of a parent sum to a fixed total, so the modes cannot
@@ -207,6 +207,7 @@ mod tests {
             branching: b,
             q_value: None,
             branching_uncertainty: s,
+            evaluated_branching: None,
         }
     }
 

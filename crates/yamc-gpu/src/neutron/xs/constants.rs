@@ -48,7 +48,7 @@ pub const MT_CAPTURE: i32 = 102;
 ///   MT 23 (n,n'3α)        MT 24 (n,2nα)   MT 25 (n,3nα)
 ///   MT 37 (n,4n)          MT 41 (n,2np)   MT 44 (n,n'2p)   MT 45 (n,n'pα)
 ///
-/// Slots 56..=61 close the same gap for the breakup channels (issue #106):
+/// Slots 56..=61 close the same gap for the breakup channels:
 ///   MT 11 (n,2nd)   MT 29 (n,n'3α)   MT 30 (n,2n2α)
 ///   MT 35 (n,n'd2α) MT 36 (n,n't2α)  MT 42 (n,3np)
 /// Nearly absent from ENDF/B-VIII.1 but near-universal in TENDL (MT 11 in
@@ -60,7 +60,7 @@ pub const MT_CAPTURE: i32 = 102;
 /// GPU); `MT_YIELDS` below is the constant-yield reference (its
 /// `round()` value), used only for documentation / test fixtures.
 ///
-/// Owned by yamc-nuclide (issue #111): this table is not just a buffer
+/// Owned by yamc-nuclide: this table is not just a buffer
 /// layout, it is the order the per-collision reaction-type cumulative
 /// walk visits candidates in, so the production CPU's
 /// `FastXSGrid::sample_inelastic_scatter_reaction` walks it too and a
@@ -74,7 +74,7 @@ pub use yamc_nuclide::nuclide::INELASTIC_MT_SLOTS as MT_SLOTS;
 /// ((n,2n)); 3 for MT 17 ((n,3n)); 1 for the slice-F charged-particle-
 /// out + neutron MTs (slots 43..=47). Slots 48..=55 carry the
 /// closed-coverage MTs' nominal multiplicity, and slots 56..=61 the
-/// breakup channels' (issue #106). The kernel does NOT read
+/// breakup channels'. The kernel does NOT read
 /// this table at runtime -- it multiplies the surviving neutron's
 /// weight by the energy-dependent `yield_per_mt` value (the actual
 /// product yield curve). `MT_YIELDS` is kept as the constant-yield
@@ -108,7 +108,7 @@ pub const MT_YIELDS: [u32; 62] = [
 /// buffers. Materials whose nuclides don't have a particular MT have
 /// zero xs in that slot -- the kernel just never selects it.
 ///
-/// Re-exported from yamc-physics (issue #111): the shared inelastic
+/// Re-exported from yamc-physics: the shared inelastic
 /// dispatcher bakes the slot count into its
 /// `slab * MT_INELASTIC_COUNT + slot` addressing, and yamc-physics
 /// cannot depend on yamc-gpu. It derives the count from the same
@@ -131,7 +131,7 @@ pub const MT_INELASTIC_LAST: i32 = 91;
 /// `TabulatedInterp` discriminants. The kernel reads this per (MT slot ×
 /// incident-energy index) value to pick the CDF-inversion branch.
 ///
-/// Owned by yamc-physics (issue #111): the shared flat samplers branch on
+/// Owned by yamc-physics: the shared flat samplers branch on
 /// them and the shared per-law extraction
 /// (`yamc_physics::gpu::flat::eout_extract`) writes them, and yamc-physics
 /// cannot depend on yamc-gpu. Re-exported here so the kernel, extraction,
@@ -139,7 +139,7 @@ pub const MT_INELASTIC_LAST: i32 = 91;
 pub use yamc_physics::gpu::flat::elastic_mu_cm::{ANGLE_INTERP_HISTOGRAM, ANGLE_INTERP_LINLIN};
 
 /// Outgoing-energy distribution kind discriminants (`EOUT_KIND_*`).
-/// Owned by yamc-physics (issue #111): the shared inelastic dispatcher
+/// Owned by yamc-physics: the shared inelastic dispatcher
 /// branches on them, and yamc-physics cannot depend on yamc-gpu. See
 /// `yamc_physics::gpu::flat::inelastic_dispatch` for the per-kind
 /// documentation; re-exported here so the kernel, extraction, and test
@@ -152,7 +152,7 @@ pub use yamc_physics::gpu::flat::inelastic_dispatch::{
 
 /// Per-slot multi-component caps for the Evaporation / correlated
 /// angle-energy mixtures (`MAX_EVAP_COMPONENTS` / `MAX_CORR_COMPONENTS`,
-/// both 4). Owned by yamc-physics (issue #111): the shared per-law
+/// both 4). Owned by yamc-physics: the shared per-law
 /// extraction (`EvapSlot::from_evaps` / `CorrSlot::from_components` in
 /// `yamc_physics::gpu::flat::eout_extract`) is what enforces them, and
 /// yamc-physics cannot depend on yamc-gpu. See that module for the
@@ -169,11 +169,11 @@ pub const URR_XS_TOTAL: usize = 0;
 pub const URR_XS_ELASTIC: usize = 1;
 pub const URR_XS_FISSION: usize = 2;
 pub const URR_XS_NGAMMA: usize = 3;
-/// Column count for `urr_meta` -- packed `[n_slab × URR_META_COLS]`
-/// u32 buffer of per-(material, nuclide) URR flags (issue #210: URR is
-/// applied to EVERY in-range URR nuclide, so the buffer is keyed on the
-/// global slab index, one row per (material, nuclide), including non-URR
-/// slabs with `PRESENT = 0` and the void slab). Layout:
+/// Column count for `urr_meta` -- packed `[n_slab × URR_META_COLS]` u32 buffer
+/// of per-(material, nuclide) URR flags (URR is applied to EVERY in-range URR
+/// nuclide, so the buffer is keyed on the global slab index, one row per
+/// (material, nuclide), including non-URR slabs with `PRESENT = 0` and the void
+/// slab). Layout:
 ///   0 = URR_META_PRESENT          : 0 = no URR data on this nuclide, 1 = present
 ///   1 = URR_META_N_ENERGIES       : number of energy grid points
 ///   2 = URR_META_N_CDF            : number of CDF bands per energy
@@ -183,7 +183,7 @@ pub const URR_XS_NGAMMA: usize = 3;
 ///   6 = URR_META_MULTIPLY_SMOOTH  : 0 = table values are absolute XS, 1 = factors to multiply smooth XS
 ///   7 = URR_META_ZA               : the nuclide's `Z*1000+A` stream key (`Nuclide::urr_stream_key`),
 ///                                   mixed into the per-collision base seed to give each isotope an
-///                                   independent probability-table band (issue #204)
+///                                   independent probability-table band
 pub const URR_META_COLS: usize = 8;
 pub const URR_META_PRESENT: usize = 0;
 pub const URR_META_N_ENERGIES: usize = 1;
@@ -195,7 +195,7 @@ pub const URR_META_MULTIPLY_SMOOTH: usize = 6;
 pub const URR_META_ZA: usize = 7;
 
 /// Column count for `permt_meta` -- the packed per-(slab, MT slot) descriptor
-/// for the SPARSE per-MT inelastic storage (issue #212 follow-up). Lives here
+/// for the SPARSE per-MT inelastic storage. Lives here
 /// (not in `transport`, which consumes it) because it is pure buffer-layout
 /// metadata shared with the translate layer, which must also build on the
 /// macOS stub build where `transport` is `#[cfg]`-gated out.

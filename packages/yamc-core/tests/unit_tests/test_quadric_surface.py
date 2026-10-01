@@ -1,4 +1,4 @@
-"""General quadric surface (issue #366).
+"""General quadric surface.
 
 The quadric is a catch-all primitive; the dedicated variants
 are its oracles. A sphere written as a quadric must reproduce the
@@ -24,8 +24,8 @@ def _build(boundary_surface):
 
 
 def test_quadric_accepts_name():
-    # name= is accepted for consistency with Sphere/Cylinder/Plane/Cone/Torus
-    # (issue #504). It is additive: a named quadric is otherwise identical to
+    # name= is accepted for consistency with Sphere/Cylinder/Plane/Cone/Torus.
+    # It is additive: a named quadric is otherwise identical to
     # an unnamed one.
     named = yamc.Quadric(a=1.0, b=1.0, c=1.0, k=-100.0, boundary="vacuum",
                          name="ellipsoid")

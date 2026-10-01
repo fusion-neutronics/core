@@ -30,8 +30,8 @@ pub fn write_total_nu(data: &IncidentNeutron, dir: &Path) -> Result<bool, Box<dy
     // partials rather than the MT 18 total that is MT 19. Looking only at
     // MT 18 found nothing for U240 and every nuclide like it, so no
     // total_nu.arrow was written; the reader then falls back to treating the
-    // fission product's own yield as the nu-bar, which is the PROMPT yield.
-    // That is issue #364 again, one nuclide at a time and without a message.
+    // fission product's own yield as the nu-bar, which is the PROMPT yield: a
+    // silent undercount of fission neutrons, one nuclide at a time.
     let Some(total) = FISSION_MTS.iter().find_map(|mt| {
         data.reactions
             .get(mt)
@@ -112,7 +112,7 @@ fn release_columns(c: &Component) -> ReleaseColumns {
     }
 }
 
-/// Write `fission_photon.arrow` (issue #369).
+/// Write `fission_photon.arrow`.
 ///
 /// The prompt and delayed photon terms of the fission energy release, which
 /// scale the fission photon yield. Both rows are written or neither: the

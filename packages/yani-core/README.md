@@ -48,9 +48,18 @@ stack; pick `yamc` when the spectrum should come from a transport solve.
 
 - One stepper (`ForwardEulerStepper`, beginning-of-step rates). No
   predictor-corrector.
-- No pathway analysis, no sensitivity or uncertainty propagation, and no
-  ingestion/inhalation dose.
+- Uncertainty is by resampling: pass `data_uncertainty=yani.DataUncertainty()`
+  to `transmute` for a standard deviation on inventories, activity, decay heat
+  and dose. It perturbs MF=33 cross sections, half-lives, decay energies,
+  two-mode decay branching and a supplied flux spectrum's stated error. Other
+  inputs (MF=32 resonance covariance, self-shielding, photon line
+  intensities, the material composition) are held at nominal, and
+  `get_data_uncertainty_info` lists every one it held. There are no
+  first-order sensitivity coefficients.
+- Pathways are reported per product (`get_production_routes`), but there is no
+  automatic pathway search across the whole inventory.
+- No ingestion or inhalation dose.
 - Cross sections are read from the continuous-energy library and collapsed
   against your spectrum, so this reads transport-format data files even though
-  it runs no transport. Only the sections activation needs are read (issue
-  #389), which is a small fraction of a library.
+  it runs no transport. Only the sections activation needs are read, which is
+  a small fraction of a library.

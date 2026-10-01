@@ -170,7 +170,7 @@ fn extract_sources(source: &Bound<'_, PyAny>) -> PyResult<Vec<ParticleSource>> {
 ///     free_gas_threshold: Free-gas threshold multiplier (default: 400.0).
 ///     max_lost_particles: Max lost particles before abort (default: 10).
 ///         Mesh-geometry transport verifies every surface crossing
-///         spatially (issue #254): a crossing whose flight segment passes
+///         spatially: a crossing whose flight segment passes
 ///         through a surface foreign to the current volume (overlapping or
 ///         self-intersecting mesh volumes, or a corrupted tracking state)
 ///         records the particle as lost, exactly like a geometry gap.
@@ -361,7 +361,7 @@ impl PyModel {
             sources,
             free_gas_threshold,
             transport_secondary_photons,
-            // GPU fission-chain bank (#78); default-on, no effect without
+            // GPU fission-chain bank; default-on, no effect without
             // fissile material or on the CPU path.
             gpu_fission_bank,
             photon_cutoff_energy,
@@ -714,7 +714,7 @@ impl PyModel {
         // Accepted so the request can be REFUSED in words rather than being
         // unreachable: without the argument there was no way to ask for the GPU
         // here at all, which reads as "not thought about" rather than "not
-        // supported" (issue #339).
+        // supported".
         if compute.trim() != "cpu" {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "generate_weight_windows only supports compute='cpu': the GPU kernels do not \
@@ -1022,8 +1022,8 @@ impl PyModel {
             self.warn_if_max_steps_ignored(py, "simulate_transport(compute='cpu')")?;
             return self.simulate_transport_cpu(&settings, capture_tracks, py);
         }
-        // Convergence targets stop the GPU launch loops between launches
-        // (fusion-neutronics/core#29), so they need no refusal here.
+        // Convergence targets stop the GPU launch loops between launches, so
+        // they need no refusal here.
         let device: Option<String> = if compute == "gpu" {
             None
         } else {
@@ -1277,7 +1277,7 @@ impl PyModel {
             })
         };
 
-        // A mesh-filled CSG cell (issue #291) must ship its raster too: the
+        // A mesh-filled CSG cell must ship its raster too: the
         // browser sampler reads `geometry_json`, where a fill is only an identity
         // fingerprint, so it would draw the bare CSG frame and hide the fill body
         // the particles actually see. `presampled` resolves fills (it goes
@@ -1458,7 +1458,7 @@ impl PyModel {
         py: Python<'_>,
     ) -> PyResult<PyTransmutationResults> {
         // As on `generate_weight_windows`: present so the answer is a sentence
-        // rather than a missing argument (issue #339).
+        // rather than a missing argument.
         if compute.trim() != "cpu" {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "simulate_transmutation only supports compute='cpu': the depletion solve has \

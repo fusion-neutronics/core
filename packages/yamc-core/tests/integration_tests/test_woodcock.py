@@ -42,7 +42,7 @@ def _build_li6_sphere_model(*, tracking_mode: str = "surface", seed: int = 42,
     source = yamc.NeutronSource(position=[0.0, 0.0, 0.0],
                                 energy=yamc.sources.Discrete([1e6], [1.0]))
 
-    # Collision estimator -- the only one supported by Phase 1 Woodcock.
+    # Collision estimator, the natural one for Woodcock tracking.
     tally = yamc.Tally(scores=[105], name="mt_105_rxrate",
                        cells=cell, estimator="collision")
 
@@ -148,8 +148,8 @@ def _build_fe_photon_model(*, source, tracking_mode="surface", photon_only,
                            estimator="collision", radius=10.0, seed=7,
                            total_particles=20_000):
     """Iron sphere with neutron (Fe56) + photon (Fe) data. Photon flux
-    tally (collision estimator is free of the Phase 4.0 track-length
-    leakage bias, so it gives a clean Woodcock-vs-Surface match)."""
+    tally (collision estimator is free of the track-length leakage
+    bias, so it gives a clean Woodcock-vs-Surface match)."""
     sphere = yamc.Sphere(x0=0.0, y0=0.0, z0=0.0, radius=radius,
                          boundary="vacuum")
     material = yamc.Material(composition={"Fe56": 1.0}, density=7.874,
@@ -233,7 +233,7 @@ def test_woodcock_coupled_neutron_photon():
 # ---------------------------------------------------------------------------
 #
 # These close the remaining "smaller gap" interactions from the Woodcock
-# roadmap (issue #231): free-gas thermal scattering and D1S decay photons
+# roadmap: free-gas thermal scattering and D1S decay photons
 # composing with delta tracking, plus an xfail regression that pins the
 # known URR + Woodcock self-shielding bias.
 
@@ -371,7 +371,7 @@ def test_woodcock_urr_matches_surface():
 
 
 def test_woodcock_disjoint_bodies_gap_is_zero():
-    """Woodcock flights terminate at true vacuum exits (issue #360).
+    """Woodcock flights terminate at true vacuum exits.
 
     Two disjoint vacuum-bounded Be9 spheres with a +x beam from the
     centre of the first: every mesh bin past body A's boundary (x=3)

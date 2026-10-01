@@ -1,6 +1,6 @@
 //! The fixtures a job downloaded must be the fixtures its tests can read.
 //!
-//! Issue #544: 35 test files resolved the cache through `$HOME` alone, which is
+//! 35 test files once resolved the cache through `$HOME` alone, which is
 //! not a Windows variable, so on `windows-latest` every one of them resolved
 //! under a literal `/home/jon`, found nothing, and took its "data absent" skip
 //! path. They passed while reading nothing, and the whole suite finished in

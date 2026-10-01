@@ -1,4 +1,4 @@
-//! GPU cylindrical mesh-tally support (issue #279), on-hardware parity check.
+//! GPU cylindrical mesh-tally support, on-hardware parity check.
 //!
 //! A `Tally(mesh=CylindricalMesh, scores=[flux])` carries a MeshFilter and NO
 //! CellFilter: it voxel-bins by `(r, phi, z)` position. The GPU path runs the

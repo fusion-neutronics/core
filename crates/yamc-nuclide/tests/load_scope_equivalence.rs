@@ -1,4 +1,4 @@
-//! Issue #389: a transmutation-scoped load must be a strict subset of a full
+//! A transmutation-scoped load must be a strict subset of a full
 //! load, never a different one.
 //!
 //! `Material.transmute()` reads only the union energy grid and the cross

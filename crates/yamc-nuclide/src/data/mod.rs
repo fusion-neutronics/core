@@ -7,7 +7,7 @@
 pub mod effective_dose;
 pub mod photon_attenuation;
 
-pub use effective_dose::{dose_coefficients, DoseDataSource, DoseGeometry, DoseParticle};
+pub use effective_dose::{ambient_dose_coefficients, dose_coefficients, DoseDataSource, DoseGeometry, DoseParticle};
 pub use photon_attenuation::{
     mass_attenuation_coefficient, mass_energy_absorption_air, CoefficientTable,
 };
@@ -328,14 +328,12 @@ pub static ELEMENT_NAMES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(
 /// worth naming, because deriving this map naively drops it: MT 18's own name
 /// is `"(n,fission)"`, and a tally asking for `"fission"` would stop resolving.
 ///
-/// This map is deliberately NOT widened with aliases. The synthesized sums used
-/// to be written into `reactions.arrow` as `(n,non-elastic)`, `(n,inelastic)`
-/// and `(n,disappearance)`, none of which resolve here, so a label copied out
-/// of a data file was rejected. That was fixed at the source rather than
-/// papered over: the converter has written `(n,nonelastic)`, `(n,level)` and
-/// `(n,disappear)` since #438, and the 2026-08-21 republish reissued every
-/// library with them (#439). Adding aliases now would only re-admit the
-/// spellings nothing produces any more.
+/// This map is deliberately NOT widened with aliases. The converter writes the
+/// synthesized sums into `reactions.arrow` as `(n,nonelastic)`, `(n,level)` and
+/// `(n,disappear)`, and the 2026-08-21 republish reissued every library with
+/// them. Aliases for the older `(n,non-elastic)`, `(n,inelastic)` and
+/// `(n,disappearance)` spellings would only re-admit labels nothing produces
+/// any more.
 pub static REACTION_MT: Lazy<HashMap<&'static str, i32>> = Lazy::new(|| {
     let mut map = HashMap::new();
 

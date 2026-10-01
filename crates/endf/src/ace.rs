@@ -415,9 +415,8 @@ mod tests {
         assert_eq!(parse_float("1.234567-120").unwrap(), 1.234567e-120);
         // The exact tokens that made TENDL-2025's Db262 and its neighbours
         // unreadable: a three-digit exponent overflows the field NJOY has to
-        // write it in, so the `e` goes. See issue #20, and
-        // `tests/synthetic-denormal.ace.xz`, which pins both readers on a
-        // whole file.
+        // write it in, so the `e` goes. `tests/synthetic-denormal.ace.xz`
+        // pins both readers on a whole file.
         assert_eq!(
             parse_float("6.10562372605-318").unwrap(),
             6.10562372605e-318

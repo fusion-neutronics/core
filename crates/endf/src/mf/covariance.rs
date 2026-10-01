@@ -134,9 +134,8 @@ pub fn parse_mf33_subsection(reader: &mut Reader) -> Result<Mf33Subsection> {
                 ..Default::default()
             }
         };
-        // One entry per subsection, whatever LTY is. Both readers used to
-        // append the LTY=0 case twice; see
-        // <https://github.com/shimwell/endf-python/issues/12>.
+        // One entry per subsection, whatever LTY is (the LTY=0 case must not
+        // be appended a second time).
         sub.nc_subsections.push(subsub);
     }
 
@@ -156,12 +155,9 @@ pub fn parse_mf33_subsection(reader: &mut Reader) -> Result<Mf33Subsection> {
                 subsub.lt = list.cont.l1;
                 subsub.np = list.cont.n2;
                 // The first table holds NP - LT pairs and the second LT
-                // (ENDF-102 section 33.2.2.2). This parser and endf-python's
-                // mf33.py, the golden reader, both used to split at NT - NP,
-                // which is right only when LT = NP / 2: with LT = 0 it moved
-                // the upper half of the only table into `el`/`fl`. See
-                // fusion-neutronics/core#166 and
-                // <https://github.com/shimwell/endf-python/issues/25>.
+                // (ENDF-102 section 33.2.2.2). Splitting at NT - NP instead is
+                // right only when LT = NP / 2: with LT = 0 it would move the
+                // upper half of the only table into `el`/`fl`.
                 let split = (2 * (subsub.np - subsub.lt)).clamp(0, v.len() as i64) as usize;
                 let (k, l) = v.split_at(split);
                 subsub.ek = column(k, 0, 2);
@@ -233,9 +229,8 @@ pub fn parse_mf33(reader: &mut Reader) -> Result<Mf33> {
 pub struct Mf34SubSubsection {
     /// The symmetry flag of each covariance block.
     pub ls: Vec<f64>,
-    /// The covariance matrix type of each block. Both readers used to fill
-    /// this with LS; see
-    /// <https://github.com/shimwell/endf-python/issues/18>.
+    /// The covariance matrix type of each block, read from its own field
+    /// rather than copied from LS.
     pub lb: Vec<f64>,
     pub nt: Vec<f64>,
     pub ne: Vec<f64>,
@@ -265,10 +260,6 @@ pub struct Mf34 {
     pub ltt: i64,
     pub nmt1: i64,
     /// One per (MAT1, MT1) pair the section covers.
-    ///
-    /// Both readers used to build these and then drop them on the floor, so
-    /// this was always empty; see
-    /// <https://github.com/shimwell/endf-python/issues/18>.
     pub subsections: Vec<Mf34Subsection>,
 }
 
@@ -402,8 +393,6 @@ mod tests {
     }
 
     /// MF=34 keeps its subsections, and LB holds LB rather than a copy of LS.
-    /// Both were broken; see
-    /// <https://github.com/shimwell/endf-python/issues/18>.
     #[test]
     fn mf34_keeps_its_subsections_and_reads_lb() {
         // NMT1=1; one (L, L1) pair; one NI block with LS=7 and LB=5, chosen
@@ -487,7 +476,7 @@ mod tests {
     }
 
     /// LB 0 to 4 split at 2*(NP - LT) values. Splitting at NT - NP agrees only
-    /// when LT = NP / 2; see fusion-neutronics/core#166.
+    /// when LT = NP / 2.
     #[test]
     fn mf33_lb1_keeps_its_one_table_whole() {
         // LT=0, LB=1, NT=6, NP=3: one table. NP is odd, so the old split also

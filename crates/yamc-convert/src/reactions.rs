@@ -8,7 +8,7 @@
 //!
 //! Written one record batch per (MT, temperature), which no other section does,
 //! so a consumer can range-read a single cross section out of the middle
-//! without decoding the rest (fusion-neutronics/core#100). Each row's
+//! without decoding the rest. Each row's
 //! `xs_temperatures`, `xs_values` and `xs_threshold_idx` therefore carry one
 //! element. The schema is the one the reader has always taken, and the reader
 //! selects its temperature by searching each row's list and skipping the rows
@@ -21,8 +21,7 @@
 //! for MT 3, `(n,inelastic)` for MT 4, `(n,disappearance)` for MT 101. That was
 //! kept to match the published files, and it meant the format had two
 //! vocabularies for the same MTs, only one of which `yamc_nuclide::REACTION_MT`
-//! could resolve. Reading a label out of a file and tallying it did not work
-//! (issue #438).
+//! could resolve. Reading a label out of a file and tallying it did not work.
 //!
 //! Nothing reads this column back: the reader keys everything by `mt`, and no
 //! Rust, Python or verification code touches `label`. It is there for a person
@@ -154,7 +153,7 @@ pub fn write_reactions(data: &IncidentNeutron, dir: &Path) -> Result<(), Box<dyn
         // a row written here would carry an empty cross section at every one of
         // them. The loader skips its grid length check in exactly that
         // situation (nuclide_arrow.rs:496), so the row would load as a reaction
-        // that resolves to a name and carries nothing (issue #12).
+        // that resolves to a name and carries nothing.
         if !synthesized.values().any(|per_mt| per_mt.contains_key(&mt)) {
             continue;
         }

@@ -132,149 +132,15 @@ pub fn union_grid(a: &[f64], b: &[f64]) -> Vec<f64> {
     out
 }
 
-/// A cursor over one sorted grid, for evaluating it at the union's points.
-///
-/// The union is walked in order and so is each source, so a moving cursor makes
-/// the whole blend linear in the grid size where a binary search per point
-/// would be `n log n`. The interpolation itself is the same lin-lin form
-/// [`crate::interpolation::interpolate_linear`] uses, including its refusal to
-/// extrapolate: below the first point or above the last, the endpoint value is
-/// returned.
-struct GridWalk<'a> {
-    x: &'a [f64],
-    at: usize,
-}
-
-impl<'a> GridWalk<'a> {
-    fn new(x: &'a [f64]) -> Self {
-        GridWalk { x, at: 0 }
-    }
-
-    /// Advance to the interval containing `e` and return `(idx, frac)` such
-    /// that a column `y` evaluates to `y[idx] + frac * (y[idx + 1] - y[idx])`,
-    /// or `(idx, 0.0)` when `idx` is the last point.
-    fn locate(&mut self, e: f64) -> (usize, f64) {
-        if self.x.len() < 2 {
-            return (0, 0.0);
-        }
-        if e <= self.x[0] {
-            self.at = 0;
-            return (0, 0.0);
-        }
-        let last = self.x.len() - 1;
-        if e >= self.x[last] {
-            self.at = last;
-            return (last, 0.0);
-        }
-        while self.at + 1 < last && self.x[self.at + 1] <= e {
-            self.at += 1;
-        }
-        while self.at > 0 && self.x[self.at] > e {
-            self.at -= 1;
-        }
-        let (x1, x2) = (self.x[self.at], self.x[self.at + 1]);
-        let frac = if x2 > x1 { (e - x1) / (x2 - x1) } else { 0.0 };
-        (self.at, frac)
-    }
-}
-
-/// One source column evaluated at a located point.
-#[inline]
-fn at(y: &[f64], (idx, frac): (usize, f64)) -> f64 {
-    if y.is_empty() {
-        return 0.0;
-    }
-    let i = idx.min(y.len() - 1);
-    if frac == 0.0 || i + 1 >= y.len() {
-        return y[i];
-    }
-    y[i] + frac * (y[i + 1] - y[i])
-}
-
 /// `(1 - w) * lo + w * hi`, with both sides evaluated at the same energy.
 #[inline]
 fn mix(lo: f64, hi: f64, w: f64) -> f64 {
     lo + w * (hi - lo)
 }
 
-/// Blend one row-major `[n_energies, n_mts]` matrix onto the union grid.
-fn blend_matrix(
-    lo: &[f64],
-    hi: &[f64],
-    n_mts: usize,
-    w: f64,
-    union: &[f64],
-    lo_grid: &[f64],
-    hi_grid: &[f64],
-) -> F64Buffer {
-    if n_mts == 0 {
-        return F64Buffer::empty();
-    }
-    let mut out = Vec::with_capacity(union.len() * n_mts);
-    let mut lo_walk = GridWalk::new(lo_grid);
-    let mut hi_walk = GridWalk::new(hi_grid);
-    for &e in union {
-        let li = lo_walk.locate(e);
-        let hi_i = hi_walk.locate(e);
-        for j in 0..n_mts {
-            let lo_v = column_at(lo, n_mts, j, li);
-            let hi_v = column_at(hi, n_mts, j, hi_i);
-            out.push(mix(lo_v, hi_v, w));
-        }
-    }
-    F64Buffer::from_slice(&out)
-}
-
-/// Column `j` of a row-major matrix, interpolated at a located point.
-#[inline]
-fn column_at(m: &[f64], n_mts: usize, j: usize, (idx, frac): (usize, f64)) -> f64 {
-    if m.is_empty() || n_mts == 0 {
-        return 0.0;
-    }
-    let rows = m.len() / n_mts;
-    if rows == 0 {
-        return 0.0;
-    }
-    let i = idx.min(rows - 1);
-    let v1 = m[i * n_mts + j];
-    if frac == 0.0 || i + 1 >= rows {
-        return v1;
-    }
-    let v2 = m[(i + 1) * n_mts + j];
-    v1 + frac * (v2 - v1)
-}
-
-/// Blend one flat per-energy column onto the union grid.
-fn blend_column(
-    lo: &[f64],
-    hi: &[f64],
-    w: f64,
-    union: &[f64],
-    lo_grid: &[f64],
-    hi_grid: &[f64],
-) -> F64Buffer {
-    if lo.is_empty() && hi.is_empty() {
-        return F64Buffer::empty();
-    }
-    let mut lo_walk = GridWalk::new(lo_grid);
-    let mut hi_walk = GridWalk::new(hi_grid);
-    let values: Vec<f64> = union
-        .iter()
-        .map(|&e| {
-            let l = at(lo, lo_walk.locate(e));
-            let h = at(hi, hi_walk.locate(e));
-            mix(l, h, w)
-        })
-        .collect();
-    F64Buffer::from_slice(&values)
-}
-
 /// Why a blend could not be built.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlendError {
-    /// One of the two sources has no energy grid, so there is nothing to blend
-    /// against.
-    EmptyGrid { which: &'static str },
     /// The two temperatures do not carry the same reaction channels in the same
     /// order.
     ///
@@ -294,11 +160,6 @@ pub enum BlendError {
 impl std::fmt::Display for BlendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BlendError::EmptyGrid { which } => write!(
-                f,
-                "the {which} bracketing temperature has no energy grid, so an \
-                 intermediate temperature cannot be built from it"
-            ),
             BlendError::ChannelsDiffer {
                 group,
                 lower,
@@ -316,38 +177,13 @@ impl std::fmt::Display for BlendError {
 
 impl std::error::Error for BlendError {}
 
-fn same_channels(group: &'static str, lower: &[i32], upper: &[i32]) -> Result<(), BlendError> {
-    if lower == upper {
-        return Ok(());
-    }
-    Err(BlendError::ChannelsDiffer {
-        group,
-        lower: lower.to_vec(),
-        upper: upper.to_vec(),
-    })
-}
-
-/// Blend two temperatures' lookup accelerators onto their union grid.
+/// Refuse to build a lookup for two bracketing temperatures whose lookups do
+/// not carry the same channels in the same order.
 ///
-/// The MT-number vectors are COPIED from the lower source rather than rebuilt.
-/// That is load-bearing: `build_inelastic_walk_order` appends untabled MTs in
-/// storage order, so reordering the columns would change which channel a given
-/// draw selects and desynchronise the CPU from the GPU. The columns are blended
-/// in place, the labels are carried over unchanged.
-///
-/// The `Arc<Reaction>` arrays are left empty. Only [`synthesise_temperature`]
-/// can fill them, because they must point into the blended reaction map rather
-/// than at either source's reactions.
-pub fn blend_fast_xs(lo: &FastXSGrid, hi: &FastXSGrid, w: f64) -> Result<FastXSGrid, BlendError> {
-    let lo_grid = lo.energy.as_slice();
-    let hi_grid = hi.energy.as_slice();
-    if lo_grid.is_empty() {
-        return Err(BlendError::EmptyGrid { which: "lower" });
-    }
-    if hi_grid.is_empty() {
-        return Err(BlendError::EmptyGrid { which: "upper" });
-    }
-
+/// Checked on the two loaded lookups rather than on the blended one, because the
+/// blended reactions are the union of both sides' MTs and a channel only one
+/// side carries would build a column without complaint.
+fn same_lookup_channels(lo: &FastXSGrid, hi: &FastXSGrid) -> Result<(), BlendError> {
     same_channels("scattering", &lo.scatter_mt_numbers, &hi.scatter_mt_numbers)?;
     same_channels("fission", &lo.fission_mt_numbers, &hi.fission_mt_numbers)?;
     same_channels(
@@ -359,137 +195,26 @@ pub fn blend_fast_xs(lo: &FastXSGrid, hi: &FastXSGrid, w: f64) -> Result<FastXSG
         "absorption",
         &lo.absorption_mt_numbers,
         &hi.absorption_mt_numbers,
-    )?;
+    )
+}
 
-    let union = union_grid(lo_grid, hi_grid);
-    let energy = F64Buffer::from_slice(&union);
-
-    // The four summed channels, blended together so one walk serves all of
-    // them.
-    let mut xs = Vec::with_capacity(union.len());
-    {
-        let mut lo_walk = GridWalk::new(lo_grid);
-        let mut hi_walk = GridWalk::new(hi_grid);
-        for &e in &union {
-            let li = lo_walk.locate(e);
-            let hi_i = hi_walk.locate(e);
-            let mut row = [0.0f64; 4];
-            for (k, slot) in row.iter_mut().enumerate() {
-                let l = lo.xs.get(li.0.min(lo.xs.len().saturating_sub(1)));
-                let h = hi.xs.get(hi_i.0.min(hi.xs.len().saturating_sub(1)));
-                let lv = match (l, li.1) {
-                    (Some(r), 0.0) => r[k],
-                    (Some(r), frac) => {
-                        let next = lo.xs.get(li.0 + 1).unwrap_or(r);
-                        r[k] + frac * (next[k] - r[k])
-                    }
-                    (None, _) => 0.0,
-                };
-                let hv = match (h, hi_i.1) {
-                    (Some(r), 0.0) => r[k],
-                    (Some(r), frac) => {
-                        let next = hi.xs.get(hi_i.0 + 1).unwrap_or(r);
-                        r[k] + frac * (next[k] - r[k])
-                    }
-                    (None, _) => 0.0,
-                };
-                *slot = mix(lv, hv, w);
-            }
-            xs.push(row);
-        }
+fn same_channels(group: &'static str, lower: &[i32], upper: &[i32]) -> Result<(), BlendError> {
+    if lower == upper {
+        return Ok(());
     }
-
-    let (log_e_min, inv_log_delta, log_grid_index) = build_log_grid_index(&union);
-    let elastic_idx = lo.scatter_mt_numbers.iter().position(|&mt| mt == 2);
-
-    Ok(FastXSGrid {
-        log_grid_index,
-        log_e_min,
-        inv_log_delta,
-        xs,
-        scatter_mt_xs: blend_matrix(
-            lo.scatter_mt_xs.as_slice(),
-            hi.scatter_mt_xs.as_slice(),
-            lo.scatter_mt_numbers.len(),
-            w,
-            &union,
-            lo_grid,
-            hi_grid,
-        ),
-        scatter_mt_numbers: lo.scatter_mt_numbers.clone(),
-        scatter_mt_reactions: Vec::new(),
-        elastic_idx,
-        inelastic_walk_order: FastXSGrid::build_inelastic_walk_order(
-            &lo.scatter_mt_numbers,
-            elastic_idx,
-        ),
-        reaction_absorption: None,
-        fission_mt_xs: blend_matrix(
-            lo.fission_mt_xs.as_slice(),
-            hi.fission_mt_xs.as_slice(),
-            lo.fission_mt_numbers.len(),
-            w,
-            &union,
-            lo_grid,
-            hi_grid,
-        ),
-        fission_mt_numbers: lo.fission_mt_numbers.clone(),
-        fission_mt_reactions: Vec::new(),
-        has_partial_fission: lo.has_partial_fission,
-        xs_ngamma: blend_column(
-            lo.xs_ngamma.as_slice(),
-            hi.xs_ngamma.as_slice(),
-            w,
-            &union,
-            lo_grid,
-            hi_grid,
-        ),
-        photon_prod: blend_column(
-            lo.photon_prod.as_slice(),
-            hi.photon_prod.as_slice(),
-            w,
-            &union,
-            lo_grid,
-            hi_grid,
-        ),
-        photon_rxn_xs: blend_matrix(
-            lo.photon_rxn_xs.as_slice(),
-            hi.photon_rxn_xs.as_slice(),
-            lo.photon_rxn_mt_numbers.len(),
-            w,
-            &union,
-            lo_grid,
-            hi_grid,
-        ),
-        photon_rxn_mt_numbers: lo.photon_rxn_mt_numbers.clone(),
-        photon_rxn_reactions: Vec::new(),
-        absorption_mt_xs: blend_matrix(
-            lo.absorption_mt_xs.as_slice(),
-            hi.absorption_mt_xs.as_slice(),
-            lo.absorption_mt_numbers.len(),
-            w,
-            &union,
-            lo_grid,
-            hi_grid,
-        ),
-        absorption_mt_numbers: lo.absorption_mt_numbers.clone(),
-        delayed_photon_scaling: blend_column(
-            lo.delayed_photon_scaling.as_slice(),
-            hi.delayed_photon_scaling.as_slice(),
-            w,
-            &union,
-            lo_grid,
-            hi_grid,
-        ),
-        energy,
+    Err(BlendError::ChannelsDiffer {
+        group,
+        lower: lower.to_vec(),
+        upper: upper.to_vec(),
     })
 }
 
 /// Blend the per-MT reactions the samplers read.
 ///
-/// Separate from the accelerator because the CPU's inelastic and absorption
-/// constituent draws, and the GPU extractor, both go through
-/// `reactions[temp_idx]` rather than through `fast_xs`.
+/// The CPU's inelastic and absorption constituent draws and the GPU extractor
+/// read these through `reactions[temp_idx]`, and the synthesised temperature's
+/// lookup is then built from them by [`FastXSGrid::build`], exactly as a loaded
+/// temperature's is built from the reactions read off disk.
 ///
 /// Every reaction is evaluated with [`Reaction::cross_section_at`], which
 /// already returns zero below a threshold, so a threshold that MOVES between
@@ -535,9 +260,8 @@ pub fn blend_reactions(
                 cross_section: F64Buffer::from_slice(&values[threshold_idx..]),
                 threshold_idx,
                 // A view of the one grid the whole synthesised temperature
-                // shares, not a copy: a copy per reaction is what issue #476
-                // removed, and a synthesised temperature must not bring it
-                // back.
+                // shares, not a copy: a synthesised temperature must not
+                // duplicate the grid once per reaction.
                 energy: grid.tail(threshold_idx),
                 mt_number: mt,
                 q_value: template.q_value,
@@ -584,56 +308,55 @@ pub fn synthesise_temperature(
         } => (lo_idx, hi_idx, weight),
     };
 
-    let blended_fast_xs = match (nuclide.fast_xs.get(lo_idx), nuclide.fast_xs.get(hi_idx)) {
+    // An XsOnly load leaves the lookup empty on purpose. The blended
+    // temperature is then also without one, which is the same shape its
+    // neighbours have and is what a reaction-rate collapse reads.
+    let build_lookup = match (nuclide.fast_xs.get(lo_idx), nuclide.fast_xs.get(hi_idx)) {
         (Some(lo), Some(hi)) if !lo.energy.is_empty() && !hi.energy.is_empty() => {
-            Some(blend_fast_xs(lo, hi, w)?)
+            same_lookup_channels(lo, hi)?;
+            true
         }
-        // An XsOnly load leaves the accelerator empty on purpose. The blended
-        // temperature is then also without one, which is the same shape its
-        // neighbours have and is what a reaction-rate collapse reads.
-        _ => None,
+        _ => false,
     };
 
-    // One grid for the whole synthesised temperature. The accelerator's, when
-    // there is one, so the reactions and the energy map are views of the same
-    // allocation rather than three copies.
-    let grid = match &blended_fast_xs {
-        Some(f) => f.energy.clone(),
-        None => {
-            let by_label = |idx: usize| -> F64Buffer {
-                nuclide
-                    .loaded_temperatures
-                    .get(idx)
-                    .and_then(|t| nuclide.energy.as_ref().and_then(|m| m.get(t)))
-                    .cloned()
-                    .unwrap_or_else(F64Buffer::empty)
-            };
-            let lo = by_label(lo_idx);
-            let hi = by_label(hi_idx);
-            F64Buffer::from_slice(&union_grid(lo.as_slice(), hi.as_slice()))
-        }
+    // One grid for the whole synthesised temperature, shared by the reactions,
+    // the lookup and the energy map rather than copied into each.
+    let grid = {
+        let by_label = |idx: usize| -> F64Buffer {
+            nuclide
+                .loaded_temperatures
+                .get(idx)
+                .and_then(|t| nuclide.energy.as_ref().and_then(|m| m.get(t)))
+                .cloned()
+                .unwrap_or_else(F64Buffer::empty)
+        };
+        let lo = by_label(lo_idx);
+        let hi = by_label(hi_idx);
+        F64Buffer::from_slice(&union_grid(lo.as_slice(), hi.as_slice()))
     };
 
     let lo_reactions = nuclide.reactions.get(lo_idx).cloned().unwrap_or_default();
     let hi_reactions = nuclide.reactions.get(hi_idx).cloned().unwrap_or_default();
     let mut blended_reactions = blend_reactions(&lo_reactions, &hi_reactions, &grid, w);
-
-    // Rewire the accelerator's reaction pointers into the blended map, so the
-    // samplers that go through `fast_xs` and the ones that go through
-    // `reactions` are looking at the same cross sections.
-    let fast = blended_fast_xs.map(|mut f| {
-        let pick = |mts: &[i32]| -> Vec<Arc<Reaction>> {
-            mts.iter()
-                .filter_map(|mt| blended_reactions.get(mt).cloned())
-                .collect()
-        };
-        f.scatter_mt_reactions = pick(&f.scatter_mt_numbers);
-        f.fission_mt_reactions = pick(&f.fission_mt_numbers);
-        f.photon_rxn_reactions = pick(&f.photon_rxn_mt_numbers);
-        f.reaction_absorption = blended_reactions.get(&101).cloned();
-        f
-    });
     blended_reactions.shrink_to_fit();
+
+    // Built from the blended reactions by the same builder the loader runs on
+    // every loaded temperature, so the two cannot disagree. That includes the
+    // column order: the builder lays the MT columns out in ascending MT, and
+    // `build_inelastic_walk_order` depends on that storage order, so a
+    // synthesised temperature walks its inelastic channels in the same order
+    // as its neighbours and the CPU stays in step with the GPU.
+    let fast = if build_lookup {
+        let name = nuclide.name.as_deref().unwrap_or("nuclide");
+        Some(FastXSGrid::build(
+            &grid,
+            &blended_reactions,
+            nuclide.fission_photon_release.as_ref(),
+            &format!("{name} at {wanted} K (blended)"),
+        )?)
+    } else {
+        None
+    };
 
     // The nearer bracketing table, never None. See the module doc for why a
     // None here is the most expensive silent failure available.

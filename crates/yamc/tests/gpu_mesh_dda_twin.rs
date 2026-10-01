@@ -1,5 +1,5 @@
 //! Local (GPU-free) correctness gate for the rectangular mesh voxel-walk that
-//! the GPU mesh-tally path uses (issue #234).
+//! the GPU mesh-tally path uses.
 //!
 //! `yamc_gpu::common::tallies::rect_mesh_crossings` is the plain-Rust twin of
 //! the `#[cube]` kernel's inline Amanatides-Woo DDA. It operates on the packed

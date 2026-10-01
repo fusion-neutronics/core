@@ -1,4 +1,4 @@
-"""Convergence targets must be respected under MPI (#241, #303).
+"""Convergence targets must be respected under MPI.
 
 Skipped unless yamc was built with the ``mpi`` feature and ``mpirun`` is
 available. Runs ``verify_mpi_convergence.py`` serially and at 2 ranks, then
@@ -73,7 +73,7 @@ def test_convergence_target_stops_the_same_way_under_mpi():
 
 
 def test_an_uncapped_mpi_run_stops_on_its_convergence_target():
-    """An uncapped MPI run with targets set is legal, and terminates (#303).
+    """An uncapped MPI run with targets set is legal, and terminates.
 
     It used to be refused before the run started: the guard rejected
     ``total_particles=None`` with no ``max_runtime`` under MPI because the only

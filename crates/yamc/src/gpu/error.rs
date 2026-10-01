@@ -11,7 +11,7 @@ use std::fmt;
 pub enum GpuTranslateError {
     /// Mesh geometry isn't supported by the GPU kernel -- only CSG.
     MeshGeometryUnsupported,
-    /// A CSG cell is filled by a mesh body (issue #232); the kernel has
+    /// A CSG cell is filled by a mesh body; the kernel has
     /// no mesh-in-cell tracking.
     MeshFillUnsupported,
     /// A cell uses a region that the GPU kernel can't represent.
@@ -35,7 +35,7 @@ pub enum GpuTranslateError {
     /// absorption -- usually means the source data is missing the MT.
     MissingReactionData { material: String, mt: i32 },
     /// A nuclide carries neutron-emitting MTs the kernel has no slot for, at a
-    /// cross section large enough to bias the answer (issue #106). Those
+    /// cross section large enough to bias the answer. Those
     /// channels fall into the GPU's derived absorption, so it would kill
     /// neutrons the CPU scatters. Refused rather than run quietly wrong.
     UnslottedScatterMts { material: String, detail: String },

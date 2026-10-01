@@ -11,17 +11,16 @@
 //!
 //! * URR applies to EVERY in-range URR nuclide of the material, each drawing
 //!   its own band from the shared per-collision base via
-//!   `urr_nuclide_random(base, ZA)` (issue #204), because isotopes' resonance
+//!   `urr_nuclide_random(base, ZA)`, because isotopes' resonance
 //!   structures are statistically independent.
 //! * The unperturbed partials are the floor; each nuclide contributes a
 //!   macroscopic delta against its own `nuc_partial_xs` smooth baseline. The
 //!   summed deltas are applied and clamped ONCE, since a single nuclide's
 //!   self-shielding delta is legitimately negative.
-//! * The band itself is held per ENERGY by the caller, not redrawn per step
-//!   (issue #342).
+//! * The band itself is held per ENERGY by the caller, not redrawn per step.
 //!
-//! Tight CSR (issue #104): the URR buffers carry no `MAX_URR_*` padding, so
-//! every bracket search is bounded by the slab's own counts.
+//! Tight CSR: the URR buffers carry no `MAX_URR_*` padding, so every bracket
+//! search is bounded by the slab's own counts.
 
 use crate::neutron::xs::{URR_META_COLS, URR_XS_COLS};
 
@@ -63,8 +62,7 @@ pub(super) struct UrrPerturbation {
     /// should substitute the perturbed macros for the smooth `xs_score_per_mt`.
     pub fired: bool,
     /// How much the sampled bands moved the material's macroscopic capture,
-    /// to be ADDED to the smooth MT 102 the score loop already looked up
-    /// (fusion-neutronics/core#106).
+    /// to be ADDED to the smooth MT 102 the score loop already looked up.
     ///
     /// A delta rather than the absolute value: the absolute one has to be
     /// built out of the material's disappearance partial, which carries every
@@ -171,8 +169,8 @@ impl<'a> UrrTables<'a> {
 /// This is the single place the perturbation is defined. All three consumers
 /// call it with the same `r_base`, so the material aggregate that governs the
 /// flight, the per-nuclide weights that govern which nuclide is struck, and the
-/// partials that govern the reaction split all ride the SAME sampled band
-/// (issue #347). `urr_nuclide_random` is a pure function of `(r_base, ZA)`, so
+/// partials that govern the reaction split all ride the SAME sampled band.
+/// `urr_nuclide_random` is a pure function of `(r_base, ZA)`, so
 /// recomputing it at each site is free of drift by construction.
 pub(super) fn perturb_slab(
     tables: &UrrTables<'_>,
@@ -197,7 +195,7 @@ pub(super) fn perturb_slab(
         return None;
     }
 
-    // Independent per-nuclide band from the shared base (issue #204).
+    // Independent per-nuclide band from the shared base.
     let r_urr = crate::common::urr::urr_nuclide_random_cpu(r_base, za);
     let (urr_e, urr_f, urr_g) = tables.sample_slab(slab, energy, r_urr);
 
@@ -219,7 +217,7 @@ pub(super) fn perturb_slab(
         elastic: m_e,
         absorption: m_g,
         fission: m_f,
-        // Smooth-inelastic exclusion (issue #105): with `inelastic_flag <= 0`
+        // Smooth-inelastic exclusion: with `inelastic_flag <= 0`
         // the CPU drops inelastic from the URR-window total.
         inelastic: if inel_flag == 0 { 0.0 } else { base.inelastic },
     })

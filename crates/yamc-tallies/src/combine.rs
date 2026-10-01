@@ -19,8 +19,9 @@
 //! - **Fingerprint mismatch**: the runs came from different models
 //!   (geometry, materials, sources, physics settings, or nuclear-data
 //!   libraries -- library differences are named per nuclide).
-//! - **GPU results / non-root MPI results**: carry no (complete)
-//!   Welford merge state.
+//! - **GPU results**: carry no Welford merge state.
+//! - **Non-root MPI results**: every rank holds the same folded
+//!   statistics, so merging a non-root result counts the run twice.
 //! - **Same-name tallies with different configuration**: a structural
 //!   mismatch (scores, filters, bins, estimator, ...) means the merge
 //!   would pool different physical quantities.
@@ -60,9 +61,9 @@ const PARTICLE_SEED_STRIDE_INV: u64 = 18157105691312717821;
 /// Run A's particle seeds are `{seed_a + g * S : g in [0, n_a)}` and
 /// likewise for B. They collide iff `seed_b - seed_a == k * S (mod 2^64)`
 /// for some integer `k` with `-n_b < k < n_a` (particle `g` of A is born
-/// exactly where particle `g - k` of B is). Since #315 the collision
-/// stream is keyed on the base seed too, so an overlap of this kind no
-/// longer makes the two histories identical; it still makes them
+/// exactly where particle `g - k` of B is). The collision stream is keyed
+/// on the base seed too, so an overlap of this kind does not make the
+/// two histories identical; it still makes them
 /// correlated (same source births), which is enough to invalidate a
 /// pooled error bar, so the refusal stands. Multiplying the seed delta
 /// by the stride's modular inverse recovers `k`. This subsumes the
@@ -262,8 +263,8 @@ fn validate_provenance(input: &SimulationResults) -> Result<(), String> {
         }
         if run.mpi_size > 1 && run.mpi_rank != 0 {
             return Err(format!(
-                "cannot combine a non-root MPI result (rank {} of {}): only rank 0 holds the \
-                 complete reduced statistics",
+                "cannot combine a non-root MPI result (rank {} of {}): every rank holds the \
+                 same reduced statistics, so pass the rank 0 result only",
                 run.mpi_rank, run.mpi_size
             ));
         }

@@ -1,5 +1,5 @@
 //! Both backends must score `(n,gamma)` as MT 102 inside a probability-table
-//! band, not as disappearance (fusion-neutronics/core#106).
+//! band, not as disappearance.
 //!
 //! The kernel and the CPU both corrected a capture score inside the band by
 //! REPLACING the smooth value with the perturbed macroscopic disappearance, and

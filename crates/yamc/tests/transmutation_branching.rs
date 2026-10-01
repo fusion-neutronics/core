@@ -1,4 +1,4 @@
-//! End-to-end coupled-path isomeric branching (issue #218): the per-final-state
+//! End-to-end coupled-path isomeric branching: the per-final-state
 //! partials are scored directly at the collision energy during transport and
 //! re-partition the chain's ground/metastable split.
 //!
@@ -113,6 +113,7 @@ fn synthetic_chain() -> Arc<HashMap<String, ChainNuclide>> {
                     branching: 0.7,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 },
                 ChainReaction {
                     kind: "(n,gamma)".to_string(),
@@ -120,6 +121,7 @@ fn synthetic_chain() -> Arc<HashMap<String, ChainNuclide>> {
                     branching: 0.3,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 },
             ],
             decays: vec![],
@@ -319,6 +321,7 @@ fn coupled_branching_folds_parents_outside_material() {
                 branching: 1.0,
                 q_value: None,
                 branching_uncertainty: None,
+                evaluated_branching: None,
             }],
             decays: vec![],
             fission_yields: None,
@@ -343,6 +346,7 @@ fn coupled_branching_folds_parents_outside_material() {
                 branching: 1.0,
                 q_value: None,
                 branching_uncertainty: None,
+                evaluated_branching: None,
             }],
             decays: vec![],
             fission_yields: None,
@@ -545,6 +549,7 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
                     target: Some("Li7".to_string()),
                     branching: 1.0,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                     q_value: None,
                 },
                 // Exactly what `parse_chain_parts_from_bytes` grafts.
@@ -553,6 +558,7 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
                     target: Some("Li7_m2".to_string()),
                     branching: 0.0,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                     q_value: None,
                 },
             ],
@@ -571,6 +577,7 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
         target: Some("Li8".to_string()),
         branching: 1.0,
         branching_uncertainty: None,
+        evaluated_branching: None,
         q_value: None,
     });
     map.insert("Li7_m2".to_string(), li7m);

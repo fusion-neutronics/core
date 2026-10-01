@@ -689,7 +689,7 @@ pub fn normalise_branch_ratios(branch_ratios: &mut [f64]) {
 }
 
 /// A parent's decay paths: each mode's target, its ratio normalised with
-/// [`normalise_branch_ratios`], and the tape's dBR beside it untouched.
+/// [`normalise_branch_ratios`], and the tape's BR and dBR beside it untouched.
 fn decay_paths(data: &Decay, decay_data: &BTreeMap<String, Decay>) -> Vec<DecayPath> {
     let mut ratios: Vec<f64> = data.modes.iter().map(|m| m.branching_ratio.0).collect();
     normalise_branch_ratios(&mut ratios);
@@ -707,6 +707,7 @@ fn decay_paths(data: &Decay, decay_data: &BTreeMap<String, Decay>) -> Vec<DecayP
                 target,
                 branching_ratio: ratio,
                 branching_ratio_uncertainty: mode.branching_ratio.1,
+                evaluated_branching_ratio: mode.branching_ratio.0,
             }
         })
         .collect()
@@ -739,7 +740,16 @@ pub struct DecayPath {
     /// leaves it as evaluated, but where the parent's ratios do not sum to one
     /// it moves the residual into `branching_ratio` on the parent's largest
     /// mode, so on that one row the two no longer come from the same number.
+    /// `evaluated_branching_ratio` is the number it does come from.
     pub branching_ratio_uncertainty: f64,
+    /// The tape's BR, before [`normalise_branch_ratios`].
+    ///
+    /// Equal to `branching_ratio` except on the largest mode of a parent whose
+    /// evaluated ratios do not sum to one within 1e-9. JEFF-4.0's Ir169 gives
+    /// a single alpha mode of 0.45 +- 0.15, so its `branching_ratio` is 1.0
+    /// and this is 0.45. Stored so the chain keeps the tape's value; how a
+    /// parent whose ratios miss unity should be treated is not decided here.
+    pub evaluated_branching_ratio: f64,
 }
 
 /// One neutron-induced path out of a nuclide.
@@ -771,7 +781,7 @@ pub struct Nuclide {
     /// the 3561 half-lives in ENDF/B-VIII.1), and a consumer must read it
     /// that way: an unstated uncertainty is not one measured to be
     /// negligible, and reporting the first as the second is confidence the
-    /// evaluation never claimed (issue #515).
+    /// evaluation never claimed.
     pub half_life_uncertainty: Option<f64>,
     /// Average energy per decay in eV.
     pub decay_energy: f64,
@@ -902,7 +912,7 @@ impl Nuclide {
 /// themselves: filled one file at a time, a caller never holds more than one
 /// [`Material`]. Holding them all is what made a TENDL chain build peak at
 /// 39 GB and get killed on a 45 GB machine, all of it to harvest the few
-/// hundred KB of scalars in here (issue #53).
+/// hundred KB of scalars in here.
 pub type QValues = BTreeMap<String, BTreeMap<i32, f64>>;
 
 /// Record one neutron evaluation's channel Q values into `into`.
@@ -1367,7 +1377,7 @@ fn energy_key(energy: f64) -> String {
 /// or a walk that leaves the table of elements without finding one. The
 /// second happens when the decay library is small enough that the direction
 /// cannot be judged, the Python reader indexes past the end and raises
-/// `KeyError: -1` there; see issue #22.
+/// `KeyError: -1` there.
 pub fn replace_missing(product: &str, decay_data: &BTreeMap<String, Decay>) -> Option<String> {
     let (z, a, state) = zam(product).ok()?;
     let mut a = a as i64;
@@ -1614,14 +1624,37 @@ mod tests {
             .map(|p| p.branching_ratio_uncertainty)
             .collect();
         assert_eq!(sigmas, [0.04, 0.04]);
+        let evaluated: Vec<f64> = paths.iter().map(|p| p.evaluated_branching_ratio).collect();
+        assert_eq!(evaluated, [0.1, 0.91], "the tape's BR is kept beside it");
         assert_eq!(paths[0].kind, "ec/beta+");
         assert_eq!(paths[1].kind, "alpha");
     }
 
     #[test]
+    fn a_lone_mode_short_of_unity_keeps_the_tapes_ratio() {
+        // JEFF-4.0's Ir169: one alpha mode of 0.45 +- 0.15, nothing else. The
+        // normalised ratio is 1.0; the tape's 0.45 is what the sigma is on.
+        let data = Decay {
+            modes: vec![crate::decay::DecayMode {
+                parent: "Ir169".to_string(),
+                modes: vec!["alpha"],
+                branching_ratio: (0.45, 0.15),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let paths = decay_paths(&data, &BTreeMap::new());
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].branching_ratio, 1.0);
+        assert_eq!(paths[0].evaluated_branching_ratio, 0.45);
+        assert_eq!(paths[0].branching_ratio_uncertainty, 0.15);
+    }
+
+    #[test]
     fn a_missing_product_walks_to_one_the_library_has() {
         // An empty library has nothing to walk to, and the walk stops rather
-        // than running off the table; see issue #22.
+        // than running off the table (where the Python reader raises
+        // `KeyError: -1`).
         let empty = BTreeMap::new();
         assert_eq!(replace_missing("Cd116", &empty), None);
         // A neutron has no stand-in at all.
@@ -1639,6 +1672,7 @@ mod tests {
                     target: Some(target.to_string()),
                     branching_ratio: 1.0,
                     branching_ratio_uncertainty: 0.0,
+                    evaluated_branching_ratio: 1.0,
                 });
             }
             chain.nuclides.push(n);

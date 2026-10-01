@@ -541,7 +541,7 @@ pub fn Cone(
 /// Args:
 ///     axis: Symmetry axis - 'x', 'y', or 'z'. Arbitrary direction vectors are
 ///         NOT yet supported (a torus is degree-4 and the engine only has
-///         axis-locked variants; see issue #396); an oblique vector raises
+///         axis-locked variants); an oblique vector raises
 ///         ValueError.
 ///     r_major: Major radius (default: 1.0)
 ///     r_minor: Minor radius along the symmetry axis (default: 0.5)
@@ -576,7 +576,7 @@ pub fn Torus(
     // `r_minor_2` the transverse minor radius (engine `c`); equal => circular.
     let c = r_minor_2.unwrap_or(r_minor);
     // The engine only has axis-locked X/Y/ZTorus variants. An arbitrary-axis
-    // torus (degree-4, not a quadric) needs a new engine variant -- see #396.
+    // torus (degree-4, not a quadric) needs a new engine variant.
     let mut surface = match parallel_basis_index(&a) {
         Some(0) => Surface::new_xtorus(
             x0,
@@ -610,7 +610,7 @@ pub fn Torus(
         ),
         _ => {
             return Err(PyValueError::new_err(
-                "arbitrary-axis torus is not yet supported; use axis='x', 'y', or 'z' (see issue #396)",
+                "arbitrary-axis torus is not yet supported; use axis='x', 'y', or 'z'",
             ));
         }
     };

@@ -380,8 +380,8 @@ class DataUncertainty:
 @typing.final
 class DoseCoefficients:
     r"""
-    Fluence-to-effective-dose conversion coefficients, returned by
-    :func:`yani.data.dose_coefficients`.
+    Fluence-to-dose conversion coefficients (effective dose or ambient dose
+    equivalent H*(10)), returned by :func:`yani.data.dose_coefficients`.
     
     Carries the energy grid, the coefficients, and their units, and can
     repackage itself for a tally via :meth:`as_energy_function`.
@@ -394,7 +394,7 @@ class DoseCoefficients:
     @property
     def coefficients(self) -> builtins.list[builtins.float]:
         r"""
-        Fluence-to-effective-dose coefficients, one per energy.
+        Fluence-to-dose coefficients, one per energy.
         """
     @property
     def units(self) -> builtins.str:
@@ -3460,7 +3460,7 @@ def cooldown_steps(start: typing.Any, stop: typing.Any, n: builtins.int, spacing
     
     `Cooldown` takes the duration OF THAT STEP, which is the right primitive and
     the wrong thing to type. Anyone plotting a decay curve wants points at
-    cumulative times, and had to difference them by hand (issue #453):
+    cumulative times, and would otherwise have to difference them by hand:
     
     ```text
     HOUR, YEAR = 3600.0, 365.25 * 86400.0

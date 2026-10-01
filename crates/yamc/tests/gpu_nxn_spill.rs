@@ -1,13 +1,10 @@
-//! Issue #111 phase 2: the GPU must never lose an (n,xn) secondary.
+//! The GPU must never lose an (n,xn) secondary.
 //!
 //! The neutron kernel transports a history's extra (n,xn) neutrons in the same
-//! thread, on a stack of `PEND_SLOTS` thread-private slots. Before phase 2 the
-//! slots were append-only, so the cap counted every secondary a history ever
-//! queued rather than the ones outstanding, and past it the kernel reverted to
-//! weight multiplication -- different physics from the CPU, which banks and
-//! transports real neutrons. Phase 2 reclaims the slot on pop and, when the
-//! stack is genuinely full, hands the secondary to the DEVICE PARTICLE BANK for
-//! the host to drain in a later pass.
+//! thread, on a stack of `PEND_SLOTS` thread-private slots. The kernel reclaims
+//! a slot on pop (so the cap counts outstanding secondaries, not every one a
+//! history ever queued) and, when the stack is genuinely full, hands the
+//! secondary to the DEVICE PARTICLE BANK for the host to drain in a later pass.
 //!
 //! The later pass is what these tests are about. A spilled secondary finishes
 //! in a different launch from the rest of its history, so its contributions
@@ -30,7 +27,7 @@
 //! The coupled (neutron -> photon) and mixed-source passes used to refuse a
 //! launch that spilled at all, because their bank drain was photon-only and a
 //! banked neutron would have been filtered out and lost. They drain banked
-//! neutrons now too (fusion-neutronics/core#20); the last test here runs the
+//! neutrons now too; the last test here runs the
 //! same spilling fixture with secondary photons on and holds both backends to
 //! the same agreement.
 //!
@@ -363,7 +360,7 @@ fn non_spilling_model_is_unaffected() {
     assert!((gpu_sd / cpu_sd - 1.0).abs() < 0.05);
 }
 
-/// The coupled pass drains spilled (n,xn) secondaries too (core#20).
+/// The coupled pass drains spilled (n,xn) secondaries too.
 ///
 /// Same spilling fixture as `spilled_secondaries_keep_mean_and_std_dev`, with
 /// secondary-photon transport on so the dispatch takes the coupled path. That

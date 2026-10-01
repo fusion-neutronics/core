@@ -7,8 +7,7 @@
 //! [`LoadScope::activation`] already drops them, but only after the download:
 //! `yamc-nuclide/src/load_scope.rs` says outright that filtering there "saves
 //! parse time and retained memory, **not bytes read**". A plotter wants less
-//! still: one MT at the one temperature it draws, where the file carries six
-//! (fusion-neutronics/core#100).
+//! still: one MT at the one temperature it draws, where the file carries six.
 //!
 //! The file is written one record batch per (MT, temperature), so every cross
 //! section is *already* a contiguous byte range in the published object.

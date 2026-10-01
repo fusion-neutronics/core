@@ -28,7 +28,7 @@ const TWO_PI: f64 = std::f64::consts::TAU;
 /// (the model option of the same name, default `400.0`): the free-gas
 /// regime boundary is `free_gas_threshold * kT`. The CPU production
 /// path, the GPU kernel, and this CPU twin all pass the same value, so
-/// the regime boundary cannot drift between backends (issue #102).
+/// the regime boundary cannot drift between backends.
 ///
 /// # Returns
 /// `(dx, dy, dz, e_out, did_run)` where `did_run = true` indicates
@@ -270,8 +270,8 @@ mod tests {
         );
     }
 
-    /// A non-default `free_gas_threshold` moves the regime boundary
-    /// (issue #102). At one fixed energy / temperature, a low threshold
+    /// A non-default `free_gas_threshold` moves the regime boundary.
+    /// At one fixed energy / temperature, a low threshold
     /// puts the neutron above the boundary (cold-target, `did_run =
     /// false`) while a high threshold puts it below (free gas, `did_run
     /// = true`). Guards against any backend re-hardcoding `400`.

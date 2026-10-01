@@ -1,4 +1,4 @@
-//! Fission chi per channel on the GPU (fusion-neutronics/core#34 entry 1).
+//! Fission chi per channel on the GPU.
 //!
 //! U240 is the one ENDF/B-VIII.1 fissionable whose evaluation carries the
 //! partial fission channels MT 19 / 20 / 21 / 38, each with its own prompt

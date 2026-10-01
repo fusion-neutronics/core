@@ -1,7 +1,7 @@
 //! ONE reaction's complete inelastic kinematics data in the flat layout
 //! [`sample_inelastic_kinematics`](super::inelastic_dispatch::sample_inelastic_kinematics)
 //! reads, plus the lazily-populated cache that lets the CPU production
-//! transport obtain it per collision without re-flattening (issue #111).
+//! transport obtain it per collision without re-flattening.
 //!
 //! yamc-gpu builds the same arrays for a whole material: every MT slot of
 //! every nuclide concatenated into global CSR buffers, addressed as
@@ -47,15 +47,15 @@ use yamc_nuclide::reaction::Reaction;
 use yamc_nuclide::reaction_product::{AngleEnergyDistribution, ElasticAngleFlat};
 
 /// Flatten a reaction's elastic angular distribution into the tight,
-/// variable-length [`ElasticAngleFlat`] layout (issue #104), reusing the
+/// variable-length [`ElasticAngleFlat`] layout, reusing the
 /// exact same `AngleDistribution::to_elastic_flat` the CPU transport uses
 /// so both backends sample byte-identical data with no stride-subsampling.
 /// Returns an empty table (kernel falls back to isotropic) when the
 /// reaction has no usable neutron angular data.
 ///
-/// Moved here from yamc-gpu's `neutron::xs::distributions` (issue #111) so
-/// [`InelasticFlat::from_reaction`] and the GPU's `build_per_mt_angle_buffers`
-/// share one definition; yamc-gpu re-exports it at its old path.
+/// Lives here rather than in yamc-gpu so [`InelasticFlat::from_reaction`] and
+/// the GPU's `build_per_mt_angle_buffers` share one definition; yamc-gpu
+/// re-exports it.
 pub fn elastic_flat_from_reaction(reaction: &Reaction) -> ElasticAngleFlat {
     let angle = super::eout_extract::first_neutron_product(reaction).and_then(|p| {
         p.distribution.iter().find_map(|d| match d {
@@ -426,7 +426,7 @@ impl InelasticFlat {
 }
 
 /// Lazily-populated cache of [`InelasticFlat`] bundles, keyed by
-/// (nuclide identity, MT) (issue #111).
+/// (nuclide identity, MT).
 ///
 /// Mirrors `yamc_nuclide::reaction_product::InelasticAngleFlatCache`: entries
 /// are built on the first collision that needs them and handed out as `Arc`

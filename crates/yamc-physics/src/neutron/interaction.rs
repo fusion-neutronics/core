@@ -328,15 +328,15 @@ pub use yamc_nuclide::sampling::{sample_maxwell_spectrum, sample_watt_spectrum_p
 /// # Returns
 /// Vector of fission neutron particles (may be empty in rare cases)
 /// `chi_flat` is the prompt fission spectrum pre-flattened for the shared
-/// GPU/CPU flat samplers (issue #111 fission sub-step). When it carries data,
+/// GPU/CPU flat samplers. When it carries data,
 /// the outgoing energy is drawn through `sample_fission_chi_flat` and the
 /// isotropic emission angle through the per-particle PCG `pcg` stream, so the
 /// CPU fission chi and the GPU kernel share one sampling implementation.
 /// `FissionChiFlat::None` (an unmigrated/degenerate chi kind) falls back to the
 /// legacy `prompt_product.sample` on `rng`, byte-identical to the prior path.
 ///
-/// On the shared path the PCG draws come in the GPU kernel's fission order
-/// (issue #111), which is what lets a fission collision stay bit-identical
+/// On the shared path the PCG draws come in the GPU kernel's fission order,
+/// which is what lets a fission collision stay bit-identical
 /// between the two backends:
 ///   1. the CONTINUING progeny's chi -- before the multiplicity draw,
 ///   2. the stochastic-rounding uniform that turns `nu_bar` into `N`,
@@ -449,8 +449,8 @@ pub fn sample_fission_neutrons<R: Rng>(
         neutrons.insert(0, first);
     } else {
         // Legacy path for chi kinds not yet flattened (e.g. equiprobable
-        // Tabulated): byte-identical to the pre-#111 fission sampling, all draws
-        // on `rng`. No GPU counterpart to align with, so every progeny -- the
+        // Tabulated): all draws on `rng`, not the shared PCG stream. No GPU
+        // counterpart to align with, so every progeny -- the
         // continuing one included -- takes its energy and angle from the
         // product's own distribution in emission order.
         for _ in 0..n_neutrons {
@@ -467,7 +467,7 @@ pub fn sample_fission_neutrons<R: Rng>(
 }
 
 /// One fission progeny's outgoing energy: pick the emitting spectrum, then sample
-/// it (issue #364).
+/// it.
 ///
 /// `fission_nu` is nu_TOTAL, so the batch already has the right COUNT; what makes
 /// the source spectrum right is that a `beta(E)` fraction of those neutrons are
@@ -475,7 +475,7 @@ pub fn sample_fission_neutrons<R: Rng>(
 /// ~2.0 MeV prompt). Sampling every progeny from the prompt spectrum made yamc's
 /// fission source too hard and its slowing-down flux low against OpenMC, by an
 /// amount that tracked `beta` across the actinides (U238 -1.5%, U235 -0.65%,
-/// Pu239 -0.21%; issue #364).
+/// Pu239 -0.21%).
 ///
 /// The choice costs ONE uniform, drawn only when the evaluation actually carries
 /// delayed data (`beta > 0`). That condition is a property of the nuclide's data,

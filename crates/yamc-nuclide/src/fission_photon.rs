@@ -1,4 +1,4 @@
-//! Fission energy release functions for the delayed-photon scaling (issue #369).
+//! Fission energy release functions for the delayed-photon scaling.
 //!
 //! A fission releases photons from the fission products' decay as well as
 //! promptly, and an evaluation's prompt photon production does not include them.
@@ -40,8 +40,7 @@ impl ReleaseFunction {
     /// `interpolation` and `breakpoints` are the raw ENDF arrays. Anything other
     /// than a single linear-linear region is an error: silently treating a
     /// log-log region as linear would bias fission photon production by a few
-    /// percent with nothing to show for it, which is precisely how #369 stayed
-    /// invisible for so long.
+    /// percent with nothing to show for it.
     pub fn from_tabulated(
         x: Vec<f64>,
         y: Vec<f64>,
@@ -68,7 +67,7 @@ impl ReleaseFunction {
                 "{context}: fission energy release table is multi-region \
                  (interpolation {interpolation:?}, breakpoints {breakpoints:?}). Only a \
                  single linear-linear region is supported; evaluating this as one \
-                 region would give the wrong photon production (#369)"
+                 region would give the wrong photon production"
             ));
         }
         if let Some(&scheme) = interpolation.first() {
@@ -77,7 +76,7 @@ impl ReleaseFunction {
                     "{context}: fission energy release table uses ENDF interpolation \
                      scheme {scheme}, but only {ENDF_LIN_LIN} (linear-linear) is \
                      supported. Treating it as linear-linear would silently bias \
-                     fission photon production (#369)"
+                     fission photon production"
                 ));
             }
         }

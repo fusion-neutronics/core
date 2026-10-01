@@ -3,8 +3,9 @@ name: Rust tests
 on:
   push:
     branches: [ main ]
+  # Every pull request, whatever its base, so a PR stacked on another
+  # PR's branch is tested before it is retargeted at main.
   pull_request:
-    branches: [ main ]
   release:
     types: [published]
   workflow_dispatch:
@@ -80,12 +81,17 @@ jobs:
         run: python scripts/fetch_test_fixtures.py
       - name: Build
         run: cargo build --workspace --verbose
+      - name: Build the converter on its own
+        # A workspace build unifies features across crates, so a crate that
+        # leaves out a feature it needs still builds there. The fixture fetch
+        # step runs these binaries alone, which is where that fails.
+        run: cargo build -p yamc-convert --bins
       - name: Test
         env:
           # The fetch step above ran, so the fixtures must now be readable at
           # the cache this build resolves. Without this the data-dependent tests
           # self-skip when they are not, and report green: that is how 35 files
-          # spent months reading nothing on windows-latest (issue #544), where
+          # spent months reading nothing on windows-latest, where
           # `$HOME` does not exist and every cache path resolved under a literal
           # `/home/jon`. crates/yamc/tests/fixture_cache_is_readable.rs is what
           # this switch arms.
@@ -187,6 +193,28 @@ jobs:
           header: coverage
           recreate: true
           path: coverage-comment.md
+
+  # The data pins compiled into yamc-nuclide must name the stamps the live
+  # origin serves. A pin the origin does not carry fails every download, fresh
+  # installs included, so a pull request that bumps a pin goes red until the
+  # data is uploaded, and main goes red if the origin moves without the pin.
+  # The release gate in ci-python.yml runs the same test.
+  data-pins:
+    name: Data pins match the origin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        run: rustup update stable && rustup default stable
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          cache-on-failure: true
+      - name: The origin serves every pinned data stamp
+        run: >-
+          cargo test -p yamc-nuclide --features download-tls --lib --
+          --ignored origin_serves_every_pinned_data_version --nocapture
 
   # Test MPI build
   test-mpi:

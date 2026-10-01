@@ -1,4 +1,4 @@
-"""A decayed-away nuclide must not come back as decay heat (issue #410).
+"""A decayed-away nuclide must not come back as decay heat.
 
 CRAM48's LU fill couples every row to the largest density in the solve, so a
 component roughly 22 decades below it carries the solve's arithmetic rather than

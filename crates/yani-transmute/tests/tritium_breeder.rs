@@ -1,7 +1,7 @@
 //! Tritium production in a breeder blanket, with its nuclear-data uncertainty.
 //!
 //! The tracking benchmark for the uncertainty work. It exists to be re-run as
-//! each source is added (issue #520), so the inventory sigma can be watched
+//! each source is added, so the inventory sigma can be watched
 //! growing rather than asserted about in the abstract, and it prints a row for
 //! that purpose as well as asserting.
 //!

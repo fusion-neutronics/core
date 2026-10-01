@@ -1,8 +1,8 @@
 //! The answer must not depend on how many cores ran it.
 //!
-//! Issue #576 parallelises the Arrow decode, the per-nuclide collapse and the
-//! uncertainty replicas, under a hard "no accuracy loss" constraint. The whole
-//! argument for each of them is that the work is independent and merged in a
+//! The Arrow decode, the per-nuclide collapse and the uncertainty replicas run
+//! in parallel, under a hard "no accuracy loss" constraint. The whole argument
+//! for each of them is that the work is independent and merged in a
 //! fixed order, so nothing about the answer can depend on the thread count.
 //!
 //! This is the guard on that. The same case runs in an explicit 1-thread pool

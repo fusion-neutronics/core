@@ -1,7 +1,7 @@
 # Gates the wasm32-unknown-unknown build for the full `yamc` crate
 # (with `--features wasm`). The original blockers (getrandom feature
 # wiring, faer/rayon → atomic-wait, the silent bit-rot in the
-# wasm-bindgen modules) were resolved in #169, #170, #173, #174.
+# wasm-bindgen modules) are resolved.
 # A failure here means a wasm-side regression -- please don't merge it
 # without understanding why.
 name: WASM tests
@@ -9,8 +9,9 @@ name: WASM tests
 on:
   push:
     branches: [ main ]
+  # Every pull request, whatever its base, so a PR stacked on another
+  # PR's branch is tested before it is retargeted at main.
   pull_request:
-    branches: [ main ]
   release:
     types: [published]
   workflow_dispatch:

@@ -2,7 +2,7 @@
 
 `group_structure(name)` hands back the edges behind a name like `"CCFE-709"`,
 which is what lets a caller relate a multigroup spectrum to the energies it
-belongs to (issue #492). These tests pin the registry contents, the shape of
+belongs to. These tests pin the registry contents, the shape of
 what comes back, and that it is the same data the solver bins on.
 """
 

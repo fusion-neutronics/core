@@ -1,4 +1,4 @@
-//! GPU per-MT reaction-rate fixed-point overflow regression (issue #307).
+//! GPU per-MT reaction-rate fixed-point overflow regression.
 //!
 //! The kernel accumulates tallies into a `u64` atomic reinterpreted as a
 //! two's-complement `i64`, with a per-MT fixed-point scale sized host-side.
@@ -163,7 +163,7 @@ fn gpu_b10_discrete_inelastic_rates_are_positive_and_match_cpu() {
         assert!(
             gpu[i] > 0.0,
             "GPU B10 MT{mt} reaction rate is negative ({:.6e}); the fixed-point \
-             accumulator wrapped (issue #307)",
+             accumulator wrapped",
             gpu[i]
         );
         // Positivity alone is not enough: a wrap can land back in positive

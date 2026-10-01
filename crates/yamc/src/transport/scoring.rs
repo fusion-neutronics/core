@@ -8,10 +8,8 @@ use super::*;
 /// the segment's end position so the caller can pass it to a tracker
 /// (surface-crossing event) without recomputing.
 ///
-/// Extracted from the inner transport loop in [`Model::simulate`] as
-/// step 5 of Phase 1f. The same scoring code was duplicated in both
-/// the surface-crossing and the collision branches; both branches now
-/// call this helper. `#[inline(always)]` keeps the call-site free.
+/// Shared by the surface-crossing and the collision branches of the
+/// inner transport loop. `#[inline(always)]` keeps the call-site free.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn score_track_length_segment(
@@ -146,8 +144,8 @@ pub(crate) fn score_collision_event(
 /// contribution to the cell / mesh voxel that actually contains the
 /// delta-collision point. Cross-cell flights, escapes (the post-flight
 /// point is outside, so nothing is scored), and void-region flux are
-/// therefore all handled exactly, removing the Phase 4.0 segment-
-/// attribution bias.
+/// therefore all handled exactly, with none of the bias of attributing a
+/// whole flight segment to a single cell.
 ///
 /// Implemented by reusing [`Tally::score_collision`] with
 /// `total_xs = Sigma_maj`. Only fires for TrackLength tallies;
@@ -155,9 +153,8 @@ pub(crate) fn score_collision_event(
 /// [`score_collision_event`]. Tallies eligible per
 /// [`woodcock_mesh_track_length_eligible`] are skipped here too: they
 /// are scored with the true track-length estimator along each flight
-/// segment via `score_woodcock_mesh_track_length` instead (issue
-/// #350), so this collision-density path covers only the remaining
-/// ineligible class.
+/// segment via `score_woodcock_mesh_track_length` instead, so this
+/// collision-density path covers only the remaining ineligible class.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn score_woodcock_flight_estimator(
     particle: &yamc_particle::particle::Particle,
@@ -181,7 +178,7 @@ pub(crate) fn score_woodcock_flight_estimator(
         }
         if mesh_eligible {
             // Scored with the TRUE track-length estimator along the
-            // full flight segment instead (issue #350).
+            // full flight segment instead.
             continue;
         }
         tally.score_collision(

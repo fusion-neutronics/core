@@ -122,8 +122,7 @@ impl AngleEnergy {
             )?),
             // Law 5 is the general evaporation spectrum, which neither this
             // reader nor the Python one nor OpenMC implements. Both of those
-            // now raise NotImplementedError; this is the same refusal. See
-            // issue #19.
+            // now raise NotImplementedError; this is the same refusal.
             5 => {
                 return Err(Error::Unsupported {
                     what: "ACE law 5, the general evaporation spectrum",
@@ -316,7 +315,8 @@ mod tests {
 
     #[test]
     fn law_5_reports_the_gap_rather_than_guessing() {
-        // The Python reader dies with an AttributeError here; see issue #19.
+        // The Python reader has no ACE reader for law 5 and dies with an
+        // AttributeError here.
         assert!(AngleEnergy::from_ace(&table_with_law(5.0), 0, 1, None).is_err());
     }
 }

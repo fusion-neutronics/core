@@ -1,5 +1,4 @@
-//! Th232's correlated prompt chi on the shared fission path
-//! (fusion-neutronics/core#34 entry 2).
+//! Th232's correlated prompt chi on the shared fission path.
 //!
 //! Th232, Pa231 and Pa233 are the only fissionable nuclides in ENDF/B-VIII.1
 //! whose prompt fission spectrum is a `CorrelatedAngleEnergy` (ENDF File 6

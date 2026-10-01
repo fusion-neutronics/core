@@ -2,7 +2,7 @@
 //! energy-binned guard that the sphere-based GPU tests structurally cannot
 //! provide.
 //!
-//! Three #415-family GPU bugs passed every sphere-based test and were only
+//! Three GPU photoelectric-deficit bugs passed every sphere-based test and were only
 //! visible in this configuration:
 //! - empty TTB tables (no bremsstrahlung source -> deep-tail bins zero),
 //! - energy-bin edge convention (discrete 1 MeV line on a group boundary
@@ -203,7 +203,7 @@ fn gpu_photon_broomstick_spectrum_matches_cpu() {
         let meaningful = c >= 1e-4 * cpu_max;
         let (ratio_str, ok) = if meaningful {
             let r = g / c;
-            // [0.75, 1.30]: tight enough to fail on all three #415-family
+            // [0.75, 1.30]: tight enough to fail on all three of those
             // bugs (deep-tail 0.0, line-bin 0.011, scattered 0.66-0.73);
             // loose enough for MC noise + the known few-% GPU offset at
             // these statistics.

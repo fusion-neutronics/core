@@ -10,11 +10,9 @@ name: Commit authors
 #   * Who it credits. `Co-Authored-By:` trailers and tool attribution footers,
 #     which are plain text in the message body and reach no API field at all.
 #     A commit can therefore carry `Co-Authored-By: Claude <...>` and still
-#     report `author.login: shimwell`, which is exactly what happened in
-#     example-endf-to-transmutation-to-validation#20: the account check passed
-#     on its own terms and the trailer went in anyway, and only a human reading
-#     the message caught it. Reading the message is the only way to see it, so
-#     that is what the second check does.
+#     report `author.login: shimwell`, so the account check passes on its own
+#     terms while the trailer goes in anyway. Reading the message is the only
+#     way to see it, so that is what the second check does.
 #
 # Neither check can do the other's job, which is why there are two. The account
 # check cannot see a trailer, because a trailer reaches none of the fields it

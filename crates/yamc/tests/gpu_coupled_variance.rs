@@ -1,5 +1,5 @@
-//! Batch-free per-history variance for the photon / coupled paths (issue #233
-//! Stage 3). The photon-source path is per-history (each source photon is a
+//! Batch-free per-history variance for the photon / coupled paths. The
+//! photon-source path is per-history (each source photon is a
 //! history, cascade in-thread); the coupled path is per-source (a source
 //! neutron's secondary photons, transported in the photon sub-pass, fold back
 //! into the source neutron's variance sample via a `source_idx` threaded through
@@ -17,7 +17,7 @@
 //!
 //! `--test-threads=1` used to be required, because the launch-chunk override is
 //! a process-global env var and a test that set it changed what its concurrent
-//! siblings launched (issue #344). `GpuTest` serialises the binary instead, so
+//! siblings launched. `GpuTest` serialises the binary instead, so
 //! the plain invocation above is now the right one.
 
 #![cfg(all(feature = "gpu", not(target_os = "macos")))]
@@ -57,8 +57,7 @@ fn data_present() -> bool {
 /// `launch_chunk_size`, so a test that sets it changes what every test running
 /// CONCURRENTLY in the same binary launches. The module header used to tell the
 /// reader to pass `--test-threads=1`; a plain `cargo test` does not, so the
-/// documented local GPU gate failed three tests that all passed serially
-/// (issue #344).
+/// documented local GPU gate failed three tests that all passed serially.
 ///
 /// Two things make this correct where a lock around the set/remove pair alone
 /// would not:

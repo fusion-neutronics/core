@@ -1,19 +1,18 @@
-//! Task #72 verification: per-collision ELEMENT selection in the GPU photon
-//! kernel for a material with two comparable-Z elements.
+//! Per-collision ELEMENT selection in the GPU photon kernel for a material
+//! with two comparable-Z elements.
 //!
-//! Before #72 the GPU carried only ONE dominant element's form-factor /
-//! relaxation slab per material (#79), so a Pb+W (or Pb+Bi, ...) mixture --
-//! two elements with comparable Z and comparable macroscopic contribution --
-//! modelled only ONE element's coherent / incoherent / photoelectric /
-//! relaxation physics per collision. The secondary / fluorescence / scattered
-//! spectrum was therefore wrong. With true per-collision element selection the
-//! kernel samples WHICH element the photon struck (proportional to that
+//! Carrying only ONE dominant element's form-factor / relaxation slab per
+//! material would make a Pb+W (or Pb+Bi, ...) mixture -- two elements with
+//! comparable Z and comparable macroscopic contribution -- model only ONE
+//! element's coherent / incoherent / photoelectric / relaxation physics per
+//! collision, getting the secondary / fluorescence / scattered spectrum wrong.
+//! With true per-collision element selection the kernel samples WHICH element the photon struck (proportional to that
 //! element's macroscopic-total contribution, mirroring CPU
 //! `Material::sample_element`) and runs THAT element's secondary physics.
 //!
 //! This test compares the GPU photon flux spectrum against the CPU reference
 //! for a 50/50 Pb/W sphere at an ~8 MeV photon source. The full-spectrum flux
-//! and the low-energy scatter/fluorescence band (the channel #72 fixes) should
+//! and the low-energy scatter/fluorescence band (the channel element selection affects) should
 //! both land near 1.0. It also pins that a SINGLE-element W sphere stays
 //! correct (the count==1 fast path skips the selection draw).
 //!
@@ -150,7 +149,7 @@ fn build_model(geometry: Geometry, tallies: Vec<Arc<Tally>>) -> (Model, Transpor
     model.gpu_max_steps_per_particle = MAX_STEPS;
     model.tracking_mode = TrackingMode::Surface;
     // TTB electron treatment -> the full relaxation / form-factor / pair
-    // machinery (the per-element packs task #72 touches) is active.
+    // machinery (the per-element packs) is active.
     model.transport_secondary_photons = true;
     model.photon_cutoff_energy = 1000.0;
     let settings = TransportSettings {
@@ -302,7 +301,7 @@ fn pb_w_two_high_z_recovers() {
 }
 
 /// Single-element W: the count==1 fast path skips selection; GPU vs CPU stays
-/// correct (and unchanged from the #79 behaviour).
+/// correct.
 #[test]
 fn single_element_w_unchanged() {
     if !data_present() {

@@ -75,6 +75,9 @@ pub struct GpuTransportInputs {
     pub positions: Vec<f64>,
     /// Per-particle initial direction, stride 3 (unit vectors).
     pub directions: Vec<f64>,
+    /// Per-particle initial weight: 1.0 for a source neutron, the banked
+    /// weight for a relaunched bank record.
+    pub weights: Vec<f64>,
     /// Cell AABBs, stride 6: `[min_x, min_y, min_z, max_x, max_y, max_z]`.
     pub cell_aabbs: Vec<f64>,
     /// Material index per cell.
@@ -94,14 +97,13 @@ pub struct GpuTransportInputs {
     /// kernel evaluates this so nested / overlapping cells resolve to the
     /// same cell the CPU picks, not just the first matching AABB.
     pub region_program: Vec<u32>,
-    /// `ln(energy)` GLOBAL fine grid -- the union of every material's union grid
-    /// (issue #212). Retained ONLY for the grid-shared score / photon / decay
-    /// lookups (`xs_score_per_mt`, `photon_prod`, `decay_*`), which stay on this
-    /// one grid. The resonance-critical aggregate macro XS + nuc buffers moved to
-    /// the per-material `fine_log_energy_grid` below.
+    /// `ln(energy)` GLOBAL fine grid -- the union of every material's union grid. Retained ONLY for
+    /// the grid-shared score / photon / decay lookups (`xs_score_per_mt`, `photon_prod`,
+    /// `decay_*`), which stay on this one grid. The resonance-critical aggregate macro XS + nuc
+    /// buffers moved to the per-material `fine_log_energy_grid` below.
     pub log_energy_grid: Vec<f64>,
-    /// `ln(energy)` FINE grids, one PER MATERIAL, concatenated tight (issue
-    /// #212). Each material owns its fine grid (its union grid); `fine_meta`
+    /// `ln(energy)` FINE grids, one PER MATERIAL, concatenated tight. Each
+    /// material owns its fine grid (its union grid); `fine_meta`
     /// records each material's base + length here. Backs the per-material
     /// aggregate macro XS (`xs_elastic_per_material` etc.) and the
     /// per-(material, nuclide) `nuc_macro_total` / `nuc_partial_xs`. Linear
@@ -110,13 +112,13 @@ pub struct GpuTransportInputs {
     /// one material's grid (RAM). A single-material problem has one grid at base
     /// 0 (its union == the global union), byte-identical to the old shared grid.
     pub fine_log_energy_grid: Vec<f64>,
-    /// Packed `[n_materials × FINE_META_COLS]` per-material fine-grid descriptor
-    /// (issue #212). Columns (see `COL_FINE_*`): base into `fine_log_energy_grid`
-    /// (== per-material aggregate-XS row base), fine length, and first-slab
-    /// element base into `nuc_macro_total`. Includes the synthetic void slot.
+    /// Packed `[n_materials × FINE_META_COLS]` per-material fine-grid descriptor. Columns (see
+    /// `COL_FINE_*`): base into `fine_log_energy_grid` (== per-material aggregate-XS row base),
+    /// fine length, and first-slab element base into `nuc_macro_total`. Includes the synthetic void
+    /// slot.
     pub fine_meta: Vec<u32>,
-    /// `ln(energy)` COARSE grids, one PER MATERIAL, concatenated tight (issue
-    /// #212). Each material owns its coarse grid (its finest single per-nuclide
+    /// `ln(energy)` COARSE grids, one PER MATERIAL, concatenated tight. Each
+    /// material owns its coarse grid (its finest single per-nuclide
     /// grid); `coarse_meta` records each material's base + length here. Backs the
     /// SPARSE per-MT inelastic buffers (`xs_inelastic_per_mt_sparse`,
     /// `yield_per_mt_sparse`, keyed by `permt_meta`) only.
@@ -124,7 +126,7 @@ pub struct GpuTransportInputs {
     /// old single shared coarse grid.
     pub coarse_log_energy_grid: Vec<f64>,
     /// Packed `[n_materials × COARSE_META_COLS]` per-material coarse-grid
-    /// descriptor (issue #212). Columns (see `COL_COARSE_*`): base into
+    /// descriptor. Columns (see `COL_COARSE_*`): base into
     /// `coarse_log_energy_grid`, coarse length, and per-MT-buffer first-slab
     /// base. Includes the synthetic void material slot when present.
     pub coarse_meta: Vec<u32>,
@@ -137,7 +139,7 @@ pub struct GpuTransportInputs {
     /// across MT 51..=91 (discrete levels + continuum). Used to pick
     /// the inelastic *branch* in collision sampling.
     pub xs_inelastic_per_material: Vec<f64>,
-    /// SPARSE per-MT inelastic xs values (issue #212). Concatenated tight in
+    /// SPARSE per-MT inelastic xs values. Concatenated tight in
     /// (slab, MT slot) order: each slot contributes only its nonzero
     /// (above-threshold) coarse-grid range, located by `permt_meta`. The dense
     /// `[n_slab × MT_INELASTIC_COUNT × coarse_n]` buffer was 90-99.9% zeros and
@@ -145,7 +147,7 @@ pub struct GpuTransportInputs {
     /// grid; this shrinks it 10-1700x, f64-exact.
     pub xs_inelastic_per_mt_sparse: Vec<f64>,
     /// Packed `[n_slab × MT_INELASTIC_COUNT × PERMT_META_COLS]` per-(slab, MT
-    /// slot) descriptor (issue #212): `[value_offset, i_start, n_stored]` (see
+    /// slot) descriptor: `[value_offset, i_start, n_stored]` (see
     /// `COL_PERMT_*`). `value_offset` is the base into
     /// `xs_inelastic_per_mt_sparse` / `yield_per_mt_sparse` (both share it),
     /// `i_start` the first nonzero coarse-grid index (relative to the material's
@@ -162,7 +164,7 @@ pub struct GpuTransportInputs {
     /// the kernel samples a fission collision.
     pub nu_bar_per_material: Vec<f64>,
     /// Delayed-neutron fraction `beta(E) = nu_d(E) / nu_t(E)`, same tight
-    /// per-material fine-grid CSR shape as `nu_bar_per_material` (issue #364).
+    /// per-material fine-grid CSR shape as `nu_bar_per_material`.
     pub beta_delayed_per_material: Vec<f64>,
     /// Per-material Watt-spectrum `a` parameter (eV) for the fission
     /// χ-spectrum sampler. Length `n_materials`.
@@ -173,30 +175,30 @@ pub struct GpuTransportInputs {
     /// `EOUT_KIND_CONTINUOUS_TABULAR` (1) selects the tabulated sampler;
     /// `EOUT_KIND_WATT` (7) keeps the Watt-rejection fallback. Chi rows are
     /// laid out per (nuclide slab, fission channel) plus one delayed row per
-    /// slab (issue #364, fusion-neutronics/core#34 entry 1); the row table is
+    /// slab; the row table is
     /// `nuclide_select.chi_slab_meta`. One entry per chi row.
     pub fission_eout_kind_per_material: Vec<u32>,
     /// Per-chi-row count of populated E_in points in
     /// `fission_eout_energy_grid`. One entry per chi row.
     pub fission_eout_n_energies_per_material: Vec<u32>,
-    /// CSR base (issue #104): global ae-row where each chi row's
+    /// CSR base: global ae-row where each chi row's
     /// incident-energy rows start in the tight
     /// `fission_eout_energy_grid_per_material` / `fission_eout_n_x_per_material`.
     /// One entry per chi row; the row's count is
     /// `fission_eout_n_energies_per_material[chi_row]`.
     pub fission_eout_ae_offset: Vec<u32>,
-    /// Per-material fission incident-energy grid, tight CSR (issue #104):
+    /// Per-material fission incident-energy grid, tight CSR:
     /// rows concatenated across materials, length `sum(n_energies)`.
     pub fission_eout_energy_grid_per_material: Vec<f64>,
-    /// Per-material E_out-point count per E_in slice, tight CSR
-    /// (issue #104): length `sum(n_energies)` (one entry per ae-row).
+    /// Per-material E_out-point count per E_in slice, tight CSR: length `sum(n_energies)` (one
+    /// entry per ae-row).
     pub fission_eout_n_x_per_material: Vec<u32>,
-    /// CSR base (issue #104): index into the tight
+    /// CSR base: index into the tight
     /// `fission_eout_x_per_material` / `fission_eout_cdf_per_material` where
     /// each ae-row's `(x, cdf)` points start. Length = total ae-rows
     /// (`sum(n_energies)`); row length is `fission_eout_n_x_per_material[ae]`.
     pub fission_eout_x_offset: Vec<u32>,
-    /// Per-material tabulated E_out values, tight CSR (issue #104): rows
+    /// Per-material tabulated E_out values, tight CSR: rows
     /// concatenated back-to-back, length `sum(fission_eout_n_x)`.
     pub fission_eout_x_per_material: Vec<f64>,
     /// Per-material CDF for `fission_eout_x_per_material`, same shape.
@@ -206,7 +208,7 @@ pub struct GpuTransportInputs {
     /// rows without a usable PDF (sampler falls back to linear-in-c).
     pub fission_eout_p_per_material: Vec<f64>,
     /// Per-ae-row interpolation discriminant for the fission E_out
-    /// inversion, tight CSR (issue #104): length `sum(n_energies)` (one
+    /// inversion, tight CSR: length `sum(n_energies)` (one
     /// entry per ae-row, like `fission_eout_n_x_per_material`). `0` =
     /// histogram, `1` = lin-lin.
     pub fission_eout_interp_per_material: Vec<u32>,
@@ -216,7 +218,7 @@ pub struct GpuTransportInputs {
     /// Slot `k` is MT `MT_INELASTIC_FIRST + k`'s Q-value, used by the
     /// kernel's level-inelastic kinematics formula.
     pub q_inelastic_per_mt: Vec<f64>,
-    /// SPARSE per-MT outgoing-neutron yield ν(E) values (issue #212).
+    /// SPARSE per-MT outgoing-neutron yield ν(E) values.
     /// Concatenated tight in (slab, MT slot) order, parallel to
     /// `xs_inelastic_per_mt_sparse` and located by the SAME `permt_meta`
     /// row (identical `value_offset` / `i_start` / `n_stored`). Stored over each
@@ -233,14 +235,13 @@ pub struct GpuTransportInputs {
     /// inelastic angular sampling.
     pub angle_n_energies: Vec<u32>,
     /// CSR base: global ae-row where (slab, MT) slot's incident-energy rows
-    /// start in the tight `angle_energy_grid` / `n_mu` / `interp` arrays
-    /// (issue #104). Length `n_slabs * MT_INELASTIC_COUNT`; slot count is
-    /// `angle_n_energies[mat_slot]`.
+    /// start in the tight `angle_energy_grid` / `n_mu` / `interp` arrays. Length `n_slabs *
+    /// MT_INELASTIC_COUNT`; slot count is `angle_n_energies[mat_slot]`.
     pub angle_ae_offset: Vec<u32>,
     pub angle_energy_grid: Vec<f64>,
     pub angle_n_mu: Vec<u32>,
     /// CSR base: index into the tight `angle_mu` / `cdf` / `pdf` arrays where
-    /// ae-row's `(mu, cdf, pdf)` points start (issue #104). Length = total
+    /// ae-row's `(mu, cdf, pdf)` points start. Length = total
     /// ae-rows; row length is `angle_n_mu[ae]`.
     pub angle_mu_offset: Vec<u32>,
     pub angle_mu: Vec<f64>,
@@ -261,14 +262,14 @@ pub struct GpuTransportInputs {
     pub eout_n_energies: Vec<u32>,
     /// CSR base: global ae-row where (slab, MT) slot's incident-energy rows
     /// start in the tight `eout_energy_grid` / `n_x` / `interp` /
-    /// `n_discrete` arrays (issue #104). Length `n_slabs *
+    /// `n_discrete` arrays. Length `n_slabs *
     /// MT_INELASTIC_COUNT`; slot count is `eout_n_energies[mat_slot]`.
     pub eout_ae_offset: Vec<u32>,
     pub eout_histogram_interp: Vec<u32>,
     pub eout_energy_grid: Vec<f64>,
     pub eout_n_x: Vec<u32>,
     /// CSR base: index into the tight `eout_x` / `cdf` / `p` arrays where
-    /// ae-row's `(x, cdf, p)` points start (issue #104). Length = total
+    /// ae-row's `(x, cdf, p)` points start. Length = total
     /// ae-rows; row length is `eout_n_x[ae]`.
     pub eout_x_offset: Vec<u32>,
     pub eout_x: Vec<f64>,
@@ -281,20 +282,20 @@ pub struct GpuTransportInputs {
     /// `yamc_gpu::neutron::xs::GpuNuclideXs` for the per-material
     /// shapes; this struct concatenates them across materials.
     pub corr_n_energies: Vec<u32>,
-    /// Per-MT count of equally-weighted correlated components (issue #111),
+    /// Per-MT count of equally-weighted correlated components,
     /// length `n_slabs * MT_INELASTIC_COUNT`. `>= 2` triggers a per-collision
     /// component pick; component `c` occupies the `corr_n_energies /
     /// corr_n_components` rows at `corr_ae_offset[slot] + c * n_per_comp`.
     pub corr_n_components: Vec<u32>,
     /// CSR base: global ae-row where (slab, MT) slot's incident-energy rows
     /// start in the tight `corr_energy_grid` / `corr_n_x` / `corr_interp` /
-    /// `corr_n_discrete` arrays (issue #104). Length `n_slabs *
+    /// `corr_n_discrete` arrays. Length `n_slabs *
     /// MT_INELASTIC_COUNT`; slot count is `corr_n_energies[mat_slot]`.
     pub corr_ae_offset: Vec<u32>,
     pub corr_energy_grid: Vec<f64>,
     pub corr_n_x: Vec<u32>,
     /// CSR base: global x-point where ae-row's `(x, cdf, p)` / `n_mu` /
-    /// `mu_interp` entries start (issue #104). Length = total ae-rows; row
+    /// `mu_interp` entries start. Length = total ae-rows; row
     /// length is `corr_n_x[ae]`.
     pub corr_x_offset: Vec<u32>,
     pub corr_x: Vec<f64>,
@@ -304,7 +305,7 @@ pub struct GpuTransportInputs {
     pub corr_n_discrete: Vec<u32>,
     pub corr_n_mu: Vec<u32>,
     /// CSR base: global mu-point where the x-point's `(mu, cdf, pdf)`
-    /// sub-table starts (issue #104). Length = total x-points; indexed by the
+    /// sub-table starts. Length = total x-points; indexed by the
     /// global x-point index (`corr_x_offset[ae] + j`).
     pub corr_mu_offset: Vec<u32>,
     pub corr_mu: Vec<f64>,
@@ -325,7 +326,7 @@ pub struct GpuTransportInputs {
     /// Free-gas resonance/thermal cutoff multiplier (`model.free_gas_threshold`,
     /// default `400.0`). The free-gas regime boundary is
     /// `free_gas_threshold · k_B · T`. Uploaded to the kernel as a 1-element
-    /// f64 buffer; the CPU path and CPU twin pass the same value (issue #102).
+    /// f64 buffer; the CPU path and CPU twin pass the same value.
     pub free_gas_threshold: f64,
     /// Elastic (MT 2) angular distribution, concatenated across
     /// materials. Same tight CSR layout as the per-MT inelastic angular
@@ -341,15 +342,15 @@ pub struct GpuTransportInputs {
     /// tabulated data -> isotropic `mu_cm = 1 - 2·xi3`".
     pub elastic_angle_n_energies: Vec<u32>,
     /// CSR base: global ae-row index where slab `s`'s rows start in the
-    /// tight `elastic_angle_energy_grid` / `n_mu` / `interp` arrays (issue
-    /// #104). Length `n_slabs`; slab `s` spans `ae_offset[s] ..
+    /// tight `elastic_angle_energy_grid` / `n_mu` / `interp` arrays.
+    /// Length `n_slabs`; slab `s` spans `ae_offset[s] ..
     /// ae_offset[s] + n_energies[s]`.
     pub elastic_angle_ae_offset: Vec<u32>,
     pub elastic_angle_energy_grid: Vec<f64>,
     pub elastic_angle_n_mu: Vec<u32>,
     /// CSR base: index into the tight `elastic_angle_mu` / `cdf` / `pdf`
-    /// arrays where ae-row `ae`'s `(mu, cdf, pdf)` points start (issue
-    /// #104). Length = total ae-rows; row length is `elastic_angle_n_mu[ae]`.
+    /// arrays where ae-row `ae`'s `(mu, cdf, pdf)` points start.
+    /// Length = total ae-rows; row length is `elastic_angle_n_mu[ae]`.
     pub elastic_angle_mu_offset: Vec<u32>,
     pub elastic_angle_mu: Vec<f64>,
     pub elastic_angle_cdf: Vec<f64>,
@@ -365,7 +366,7 @@ pub struct GpuTransportInputs {
     pub km_n_energies: Vec<u32>,
     /// CSR base: global ae-row where (slab, MT) slot's incident-energy rows
     /// start in the tight `km_energy_grid` / `km_n_x` / `km_interp` /
-    /// `km_n_discrete` arrays (issue #104). Length `n_slabs *
+    /// `km_n_discrete` arrays. Length `n_slabs *
     /// MT_INELASTIC_COUNT`; slot count is `km_n_energies[mat_slot]`.
     pub km_ae_offset: Vec<u32>,
     pub km_energy_grid: Vec<f64>,
@@ -373,8 +374,8 @@ pub struct GpuTransportInputs {
     pub km_n_discrete: Vec<u32>,
     pub km_n_x: Vec<u32>,
     /// CSR base: index into the tight `km_x` / `km_p` / `km_c` / `km_r` /
-    /// `km_a` arrays where ae-row's `(x, p, c, r, a)` points start (issue
-    /// #104). Length = total ae-rows; row length is `km_n_x[ae]`.
+    /// `km_a` arrays where ae-row's `(x, p, c, r, a)` points start.
+    /// Length = total ae-rows; row length is `km_n_x[ae]`.
     pub km_x_offset: Vec<u32>,
     pub km_x: Vec<f64>,
     pub km_p: Vec<f64>,
@@ -389,7 +390,7 @@ pub struct GpuTransportInputs {
     /// (`[n_materials × MT_INELASTIC_COUNT]`). `>= 2` selects the
     /// multi-component evaporation mixture sampler.
     pub evap_n_components: Vec<u32>,
-    /// Tight CSR bases (issue #104). `evap_ae_offset` is the per-(slab,MT)
+    /// Tight CSR bases. `evap_ae_offset` is the per-(slab,MT)
     /// global E_in-row base into `evap_energy_grid` / `evap_u` (slot row count
     /// is `evap_n_energies[mat_slot]`); `evap_theta_offset` is the per-(slab,MT)
     /// global base into the component-major `evap_theta`, where component `c`'s
@@ -407,7 +408,7 @@ pub struct GpuTransportInputs {
     /// materials. The kernel routes to these buffers when
     /// `eout_kind[mat_slot] == EOUT_KIND_MAXWELL`.
     pub maxwell_n_energies: Vec<u32>,
-    /// Tight CSR base (issue #104): the per-(slab,MT) global E_in-row base into
+    /// Tight CSR base: the per-(slab,MT) global E_in-row base into
     /// `maxwell_energy_grid` / `maxwell_theta`; slot row count is
     /// `maxwell_n_energies[mat_slot]`.
     pub maxwell_ae_offset: Vec<u32>,
@@ -420,7 +421,7 @@ pub struct GpuTransportInputs {
     /// `b(E_in)` are tabulated on a shared incident-energy grid;
     /// `u` is the per-slot restriction energy.
     pub watt_n_energies: Vec<u32>,
-    /// Tight CSR base (issue #104): the per-(slab,MT) global E_in-row base into
+    /// Tight CSR base: the per-(slab,MT) global E_in-row base into
     /// `watt_energy_grid` / `watt_a` / `watt_b`; slot row count is
     /// `watt_n_energies[mat_slot]`.
     pub watt_ae_offset: Vec<u32>,
@@ -429,14 +430,14 @@ pub struct GpuTransportInputs {
     pub watt_b: Vec<f64>,
     pub watt_u: Vec<f64>,
     /// Per-(material, nuclide) URR (unresolved resonance region) probability
-    /// table data, concatenated across the global slab index (issue #210: URR
-    /// is applied to every in-range URR nuclide, so it is slab-keyed, one row
-    /// per (material, nuclide), including the void slab). See
+    /// table data, concatenated across the global slab index (URR is
+    /// applied to every in-range URR nuclide, so it is slab-keyed, one row per
+    /// (material, nuclide), including the void slab). See
     /// `yamc_gpu::neutron::xs::URR_META_*` / `URR_XS_*` for the packings.
     /// Non-URR slabs have `urr_meta[.., PRESENT] = 0` and a zero-length table;
     /// the kernel keeps their smooth XS.
     pub urr_meta: Vec<u32>,
-    /// Tight CSR bases (issue #104), one entry per slab.
+    /// Tight CSR bases, one entry per slab.
     /// `urr_ae_offset[slab]` is the global base into `urr_energy_grid`
     /// (sum of prior slabs' `n_energies`); `urr_cdf_offset[slab]` is
     /// the global base into `urr_cdf` (sum of prior slabs'
@@ -450,9 +451,9 @@ pub struct GpuTransportInputs {
     pub urr_xs: Vec<f64>,
     /// Per-slab atom density (atoms/barn-cm), one entry per slab (0 for
     /// non-URR slabs). Scales a URR nuclide's perturbed micro XS to a
-    /// macroscopic contribution (issue #210).
+    /// macroscopic contribution.
     pub urr_atom_density: Vec<f64>,
-    /// Per-collision nuclide-selection inputs (issue #74, Stage 1): per-
+    /// Per-collision nuclide-selection inputs: per-
     /// (material, nuclide) macroscopic totals + AWRs + slab offset table.
     /// Multi-nuclide materials select the struck nuclide per collision and use
     /// its exact AWR for elastic kinematics; single-nuclide materials are a
@@ -522,7 +523,7 @@ pub fn translate_for_gpu(
     // surface with no collision (track-length flux still accrues;
     // reaction-rate / total / heating score 0). See `GpuNuclideXs::void`.
     if has_void {
-        // Void material's coarse grid (issue #212): a minimal 2-point grid. The
+        // Void material's coarse grid: a minimal 2-point grid. The
         // void never collides (sigma_t = 0), but the kernel still computes the
         // coarse bracket for its cell every step, so the grid needs >= 2
         // monotonic points; its per-MT slab (never read) stays tiny. Reuse the
@@ -542,8 +543,8 @@ pub fn translate_for_gpu(
             .coarse_meta
             .push(translated.coarse_log_energy_grid.len() as u32);
         translated.coarse_meta.push(void_coarse_log.len() as u32);
-        // COL_COARSE_MT_BASE: the void slab's base into `permt_meta` ROWS (issue
-        // #212). Equals `nuc_off * MT_INELASTIC_COUNT`, which is the current
+        // COL_COARSE_MT_BASE: the void slab's base into `permt_meta` ROWS.
+        // Equals `nuc_off * MT_INELASTIC_COUNT`, which is the current
         // permt_meta row count (all real slabs appended, void not yet).
         translated
             .coarse_meta
@@ -551,7 +552,7 @@ pub fn translate_for_gpu(
         translated
             .coarse_log_energy_grid
             .extend_from_slice(&void_coarse_log);
-        // Void material's fine grid (issue #212): the same minimal 2-point grid
+        // Void material's fine grid: the same minimal 2-point grid
         // rationale as the coarse grid above (never collides, but the kernel
         // still computes the fine bracket for its cell). Record the packed
         // `fine_meta` row (grid offset == aggregate-XS base, fine_n, nuc base ==
@@ -581,7 +582,7 @@ pub fn translate_for_gpu(
         let void_xs = GpuNuclideXs::void(void_fine_log, void_coarse_log);
         append_material_xs(&mut translated, &void_xs);
         // One empty per-MT slab for the void slot (its single nuclide never
-        // collides), keeping the slab-major per-MT buffers aligned (#74 2b).
+        // collides), keeping the slab-major per-MT buffers aligned.
         append_void_per_mt_slab(&mut translated, &void_xs);
         // One empty elastic-angle slab for the void slot (its single nuclide
         // never collides), keeping the slab table aligned with `nuclide_select`.
@@ -602,12 +603,14 @@ pub fn translate_for_gpu(
     }
     let (seeds, energies, positions, directions) =
         sample_initial_particles(model, n_particles, base_seed);
+    let weights = vec![1.0; seeds.len()];
 
     Ok(GpuTransportInputs {
         seeds,
         energies,
         positions,
         directions,
+        weights,
         cell_aabbs,
         cell_to_material,
         surface_types,
@@ -1021,21 +1024,21 @@ struct TranslatedMaterials {
     log_energy_grid: Vec<f64>,
     coarse_log_energy_grid: Vec<f64>,
     /// Packed `[n_materials × COARSE_META_COLS]` per-material coarse-grid
-    /// descriptor (issue #212), pushed one row per material (real then void).
+    /// descriptor, pushed one row per material (real then void).
     coarse_meta: Vec<u32>,
-    /// Concatenated per-material FINE grids (issue #212).
+    /// Concatenated per-material FINE grids.
     fine_log_energy_grid: Vec<f64>,
-    /// Packed `[n_materials × FINE_META_COLS]` per-material fine-grid descriptor
-    /// (issue #212), pushed one row per material (real then void).
+    /// Packed `[n_materials × FINE_META_COLS]` per-material fine-grid descriptor, pushed one row
+    /// per material (real then void).
     fine_meta: Vec<u32>,
     xs_elastic_per_material: Vec<f64>,
     xs_absorption_per_material: Vec<f64>,
     xs_inelastic_per_material: Vec<f64>,
     /// SPARSE per-MT inelastic xs values, concatenated tight in (slab, MT slot)
-    /// order (issue #212). Located by `permt_meta`.
+    /// order. Located by `permt_meta`.
     xs_inelastic_per_mt_sparse: Vec<f64>,
     /// Packed `[n_slab × MT_INELASTIC_COUNT × PERMT_META_COLS]` per-(slab, MT
-    /// slot) sparse descriptor `[value_offset, i_start, n_stored]` (issue #212).
+    /// slot) sparse descriptor `[value_offset, i_start, n_stored]`.
     permt_meta: Vec<u32>,
     xs_fission_per_material: Vec<f64>,
     nu_bar_per_material: Vec<f64>,
@@ -1055,7 +1058,7 @@ struct TranslatedMaterials {
     target_mass_per_material: Vec<f64>,
     q_inelastic_per_mt: Vec<f64>,
     /// SPARSE per-MT yield values, parallel to `xs_inelastic_per_mt_sparse` and
-    /// located by the same `permt_meta` row (issue #212).
+    /// located by the same `permt_meta` row.
     yield_per_mt_sparse: Vec<f64>,
     angle_n_energies: Vec<u32>,
     angle_ae_offset: Vec<u32>,
@@ -1139,14 +1142,14 @@ struct TranslatedMaterials {
     watt_b: Vec<f64>,
     watt_u: Vec<f64>,
     urr_meta: Vec<u32>,
-    // Tight CSR bases (issue #104), one entry per slab (issue #210).
+    // Tight CSR bases, one entry per slab.
     urr_ae_offset: Vec<u32>,
     urr_cdf_offset: Vec<u32>,
     urr_energy_grid: Vec<f64>,
     urr_cdf: Vec<f64>,
     urr_xs: Vec<f64>,
     urr_atom_density: Vec<f64>,
-    /// Per-collision nuclide-selection inputs (issue #74): per-(material,
+    /// Per-collision nuclide-selection inputs: per-(material,
     /// nuclide) macroscopic totals + AWRs + the slab offset table.
     nuclide_select: NuclideSelectInputs,
 }
@@ -1403,13 +1406,12 @@ fn translate_materials(
         urr_atom_density: Vec::new(),
         nuclide_select: NuclideSelectInputs::default(),
     };
-    // FINE energy grid (issue #212). The GPU keeps every material's smooth macro
+    // FINE energy grid. The GPU keeps every material's smooth macro
     // XS on ONE shared FINE grid, so that grid must be the UNION of every
     // material's union grid, NOT the first material's. Otherwise a material with
     // finer resonance structure than the first is resampled onto a coarser grid,
     // smearing its resonances; on a multi-material problem that biased the
-    // epithermal flux by up to ~40% (PR #209 flagged it as "extra epithermal loss
-    // for materials with finer grids"). The FINE grid (resonance-critical, backs
+    // epithermal flux by up to ~40%. The FINE grid (resonance-critical, backs
     // the per-nuclide totals / partials and hence Sigma_t) is the global union.
     //
     // The COARSE grid backing the memory-bounded 3D per-MT inelastic buffers is
@@ -1445,25 +1447,25 @@ fn translate_materials(
     if !global_fine.is_empty() {
         out.log_energy_grid = global_fine.iter().map(|e| e.ln()).collect();
     }
-    // Per-collision nuclide-selection data (issue #74): for each material a
+    // Per-collision nuclide-selection data: for each material a
     // `(macro_total_rows, awr, partials)` triple, assembled into
     // `NuclideSelectInputs` after the loop once the master grid is fixed. Built
     // from the SAME master linear grid as the aggregate XS so the kernel's
     // `idx_lo/idx_hi/frac` align. `partials` is the packed per-nuclide
-    // reaction-partial block (`[n_nuclides x n_grid x NUC_PARTIAL_COLS]`, #74
-    // Stage 2b) driving the per-nuclide reaction-type split.
+    // reaction-partial block (`[n_nuclides x n_grid x NUC_PARTIAL_COLS]`)
+    // driving the per-nuclide reaction-type split.
     let mut nuc_select_materials: Vec<(Vec<f64>, Vec<f64>, Vec<f64>)> =
         Vec::with_capacity(materials.len());
     // Per-slab fission chi row table and per-channel fission cross sections
-    // (fusion-neutronics/core#34 entry 1), filled by `append_fission_chi_slabs`
-    // per material in slab order and installed on `nuclide_select` after the loop.
+    // filled by `append_fission_chi_slabs` per material in slab order and
+    // installed on `nuclide_select` after the loop.
     let mut chi_slab_meta: Vec<u32> = Vec::new();
     let mut fission_channel_xs: Vec<f64> = Vec::new();
-    // Per-(slab, fine energy) fission yield pairs (fusion-neutronics/core#93),
+    // Per-(slab, fine energy) fission yield pairs,
     // packed per material in slab order and installed after the loop.
     let mut nuc_fission_yield: Vec<f64> = Vec::new();
     // Running element base into the tight-CSR `nuc_macro_total` / `nuc_partial_xs`
-    // for the NEXT material's first slab (issue #212). Advances by `nuc_count *
+    // for the NEXT material's first slab. Advances by `nuc_count *
     // fine_n` per material; recorded in `fine_meta` col COL_FINE_NUC_BASE.
     let mut nuc_element_base: u32 = 0;
 
@@ -1487,11 +1489,11 @@ fn translate_materials(
             weighted.push((nuclide_arc.as_ref(), *density));
         }
 
-        // This material's OWN coarse grid (issue #212): its UNION grid (union of
+        // This material's OWN coarse grid: its UNION grid (union of
         // its finest single per-nuclide grid, appended tight to the concatenated
         // coarse grid so no material's inelastic thresholds smear onto another's
-        // grid (issue #212). Finest-single (not the material's union) keeps the
-        // per-MT 3D buffers bounded (dual-grid, #88): the union would push the
+        // grid. Finest-single (not the material's union) keeps the
+        // per-MT 3D buffers bounded (dual-grid): the union would push the
         // concatenated per-MT buffer past the GPU's ~4 GB maxStorageBufferRange
         // on multi-material problems (silent bind failure -> zero flux), for only
         // a ~0.5% accuracy gain visible on adversarial multi-isotope materials.
@@ -1511,7 +1513,7 @@ fn translate_materials(
             .push(out.coarse_log_energy_grid.len() as u32);
         out.coarse_meta.push(mat_coarse.len() as u32);
         // COL_COARSE_MT_BASE: this material's first-slab base into `permt_meta`
-        // ROWS (issue #212). Equals `nuc_off * MT_INELASTIC_COUNT`, which is the
+        // ROWS. Equals `nuc_off * MT_INELASTIC_COUNT`, which is the
         // current permt_meta row count (prior slabs appended, this material's not
         // yet); `append_per_nuclide_inelastic` below fills the rows.
         out.coarse_meta
@@ -1519,7 +1521,7 @@ fn translate_materials(
         out.coarse_log_energy_grid
             .extend(mat_coarse.iter().map(|e| e.ln()));
 
-        // This material's OWN fine grid (issue #212): its UNION grid (union of
+        // This material's OWN fine grid: its UNION grid (union of
         // its nuclides' grids), appended tight to `fine_log_energy_grid` so no
         // material's resonance structure smears onto another's. Backs this
         // material's aggregate macro XS and per-(nuclide) totals / partials.
@@ -1574,13 +1576,12 @@ fn translate_materials(
             }
         })?;
 
-        // No resample (issue #212): `extract_material_xs` builds its aggregate
+        // No resample: `extract_material_xs` builds its aggregate
         // macro XS on `union_energy_grid(weighted)` == `mat_fine`, this material's
         // OWN fine grid, so `mat_xs.xs_*` already has length `mat_fine.len()`.
         // Appending it tight concatenates the per-material CSR the kernel indexes
-        // via `fine_meta`. (Previously every material was resampled onto the
-        // first material's grid, issue #208; per-material grids remove both the
-        // resample and its smearing while cutting RAM.)
+        // via `fine_meta`. Per-material grids avoid resampling onto a shared
+        // grid (and the smearing that causes) while cutting RAM.
         debug_assert_eq!(
             mat_xs.log_energy_grid.len(),
             mat_fine.len(),
@@ -1589,10 +1590,9 @@ fn translate_materials(
         append_material_xs(&mut out, &mat_xs);
 
         // Fission chi rows per (nuclide, fission channel) plus one delayed row
-        // per nuclide (fusion-neutronics/core#34 entry 1), slab-major in
-        // `weighted` order so the kernel indexes them by the struck nuclide's
-        // global slab. The per-channel cross sections ride this material's FINE
-        // grid, the bracket the kernel already holds at the collision.
+        // per nuclide, slab-major in `weighted` order so the kernel indexes them by the struck
+        // nuclide's global slab. The per-channel cross sections ride this material's FINE grid, the
+        // bracket the kernel already holds at the collision.
         let chi_pool =
             extract_fission_chi_per_nuclide(&weighted, material.temperature(), &mat_fine).map_err(
                 |e| GpuTranslateError::CellRegionUnsupported {
@@ -1608,7 +1608,7 @@ fn translate_materials(
         );
 
         // Per-collision nuclide-selection rows for this material, on THIS
-        // material's OWN fine grid (`mat_fine`, linear, issue #212). Rows are
+        // material's OWN fine grid (`mat_fine`, linear). Rows are
         // nuclide-major `[n_nuclides x fine_n]`; AWRs are per nuclide in the same
         // order as `weighted` (matching `extract_per_nuclide_macro_total_xs`).
         // The per-MT inelastic XS / Q / yield ride the per-material COARSE grid
@@ -1627,7 +1627,7 @@ fn translate_materials(
 
         // Per-nuclide elastic (MT 2) angular pool, slab-major in the same
         // nuclide order as `weighted` (= the selection `chosen` order), so the
-        // kernel indexes by the selected nuclide's global slab (#74 Stage 2a).
+        // kernel indexes by the selected nuclide's global slab.
         let elastic_pool = extract_per_nuclide_elastic_angle(&weighted, material.temperature())
             .map_err(|e| GpuTranslateError::CellRegionUnsupported {
                 cell_id: None,
@@ -1635,11 +1635,10 @@ fn translate_materials(
             })?;
         append_elastic_angle_slabs(&mut out, &elastic_pool);
 
-        // Per-(material, nuclide) inelastic distribution + reaction-partial pool
-        // (#74 Stage 2b), slab-major in the same nuclide order. Appended to the
-        // slab-keyed per-MT buffers, and the partials packed for the reaction
-        // split. Built on THIS material's own fine (partials) / coarse (per-MT)
-        // grids (issue #212).
+        // Per-(material, nuclide) inelastic distribution + reaction-partial pool, slab-major in the
+        // same nuclide order. Appended to the slab-keyed per-MT buffers, and the partials packed
+        // for the reaction split. Built on THIS material's own fine (partials) / coarse (per-MT)
+        // grids.
         let inel_pool = extract_per_nuclide_inelastic(
             &weighted,
             material.temperature(),
@@ -1656,7 +1655,7 @@ fn translate_materials(
         nuc_select_materials.push((per_nuc.macro_total_xs, awr, partials));
     }
 
-    // Tight-CSR concatenation of the per-material nuc rows (issue #212): each
+    // Tight-CSR concatenation of the per-material nuc rows: each
     // material's rows have length `nuc_count × fine_n[m]`, so the builder must
     // NOT assume a uniform grid; it derives each material's `fine_n` from its own
     // row block.
@@ -1685,13 +1684,13 @@ fn append_material_xs(out: &mut TranslatedMaterials, x: &GpuNuclideXs) {
         };
     }
     // Per-MATERIAL aggregate XS (leading dim n_materials) + per-(material,
-    // nuclide) URR (leading dim n_slab, issue #210). The per-MT inelastic
+    // nuclide) URR (leading dim n_slab). The per-MT inelastic
     // distribution pools are NOT appended here: they are keyed per-(material,
-    // nuclide) slab (#74 Stage 2b) and appended by `append_per_nuclide_inelastic`
+    // nuclide) slab and appended by `append_per_nuclide_inelastic`
     // from the per-nuclide pool. (For the void slot, `append_void_per_mt_slab`
     // appends one empty slab from this same aggregate.)
     //
-    // Tight CSR bases (issue #104): the URR tables are keyed per SLAB now, so
+    // Tight CSR bases: the URR tables are keyed per SLAB now, so
     // push one `urr_ae_offset` / `urr_cdf_offset` base per nuclide slab, each
     // reflecting the concatenated length BEFORE that slab's rows are appended
     // (mirrors the `push_*_csr_offsets` helpers). The per-slab counts come from
@@ -1725,9 +1724,8 @@ fn append_material_xs(out: &mut TranslatedMaterials, x: &GpuNuclideXs) {
     out.temperature_k_per_material.push(x.temperature_k);
 }
 
-/// Append ONE fission chi row onto the tight per-row CSR buffers (issue #104;
-/// rows per (slab, channel) plus a delayed row per slab, issue #364 and
-/// fusion-neutronics/core#34 entry 1) and return its row index. Records the
+/// Append ONE fission chi row onto the tight per-row CSR buffers (rows
+/// per (slab, channel) plus a delayed row per slab) and return its row index. Records the
 /// row's bases BEFORE extending the data arrays, so they reflect the prior
 /// length (mirrors `push_eout_csr_offsets`): `fission_eout_ae_offset` gets the
 /// row's first ae-row in the concatenated `fission_eout_n_x` / `energy_grid`,
@@ -1757,8 +1755,8 @@ fn push_fission_eout_row(out: &mut TranslatedMaterials, slot: &FissionEoutSlot) 
     row
 }
 
-/// Append one material's per-nuclide fission chi rows (fusion-neutronics/core#34
-/// entry 1), one slab per nuclide in `weighted` order (the slab order of
+/// Append one material's per-nuclide fission chi rows, one slab
+/// per nuclide in `weighted` order (the slab order of
 /// `nuclide_select`): each nuclide's prompt rows, one per fission channel, then
 /// its delayed row, with the slab's `chi_slab_meta` entry recording the prompt
 /// base, channel count, delayed row and (for a multi-channel nuclide) its
@@ -1790,17 +1788,17 @@ fn append_fission_chi_slabs(
 }
 
 /// Append a material's per-(material, nuclide) inelastic distribution pool onto
-/// the slab-major per-MT buffers (#74 Stage 2b). One block per nuclide,
+/// the slab-major per-MT buffers. One block per nuclide,
 /// concatenated in `mat_nuclide_meta` slab order so the kernel indexes by the
 /// struck nuclide's global `slab`. A single-nuclide material appends exactly one
 /// slab, byte-identical to the material-blended per-MT data the pre-Stage-2b
 /// `append_material_xs` produced.
-/// Build the per-MT inelastic angular CSR offsets (issue #104) for one slab's
+/// Build the per-MT inelastic angular CSR offsets for one slab's
 /// worth of MT slots being appended: `angle_ae_offset` (per (slab,MT) slot, the
 /// global ae-row start) and `angle_mu_offset` (per ae-row, the global mu-point
 /// start), computed from the tight `n_energies` / `n_mu` counts. Must be called
 /// BEFORE the tight data arrays are extended, so the bases reflect prior length.
-/// Build the SPARSE per-MT `permt_meta` rows (issue #212) for one slab's worth
+/// Build the SPARSE per-MT `permt_meta` rows for one slab's worth
 /// of MT slots being appended: one `[value_offset, i_start, n_stored]` row per
 /// (slab, MT slot). `value_offset` is the global base into
 /// `xs_inelastic_per_mt_sparse` / `yield_per_mt_sparse` (both share it), derived
@@ -1834,7 +1832,7 @@ fn push_angle_csr_offsets(out: &mut TranslatedMaterials, n_energies: &[u32], n_m
     }
 }
 
-/// Build the per-MT outgoing-energy CSR offsets (issue #104) for one slab's
+/// Build the per-MT outgoing-energy CSR offsets for one slab's
 /// worth of MT slots being appended: `eout_ae_offset` (per (slab,MT) slot, the
 /// global ae-row start) and `eout_x_offset` (per ae-row, the global x-point
 /// start), computed from the tight `eout_n_energies` / `eout_n_x` counts. Must
@@ -1856,7 +1854,7 @@ fn push_eout_csr_offsets(out: &mut TranslatedMaterials, n_energies: &[u32], n_x:
     }
 }
 
-/// Build the per-MT correlated angle-energy CSR offsets (issue #104) for one
+/// Build the per-MT correlated angle-energy CSR offsets for one
 /// slab's worth of MT slots being appended, three nesting levels:
 /// `corr_ae_offset` (per (slab,MT) slot, the global ae-row start),
 /// `corr_x_offset` (per ae-row, the global E_out x-point start) and
@@ -1892,7 +1890,7 @@ fn push_corr_csr_offsets(
     }
 }
 
-/// Build the per-MT Kalbach-Mann CSR offsets (issue #104) for one slab's worth
+/// Build the per-MT Kalbach-Mann CSR offsets for one slab's worth
 /// of MT slots being appended: `km_ae_offset` (per (slab,MT) slot, the global
 /// ae-row start) and `km_x_offset` (per ae-row, the global x-point start),
 /// computed from the tight `km_n_energies` / `km_n_x` counts. Kalbach-Mann's mu
@@ -1915,7 +1913,7 @@ fn push_km_csr_offsets(out: &mut TranslatedMaterials, n_energies: &[u32], n_x: &
     }
 }
 
-/// Build the per-MT Evaporation CSR offsets (issue #104) for one slab's worth of
+/// Build the per-MT Evaporation CSR offsets for one slab's worth of
 /// MT slots being appended: `evap_ae_offset` (per (slab,MT) slot, the global
 /// E_in-row start into the tight `evap_energy_grid` / `evap_u`) and
 /// `evap_theta_offset` (per (slab,MT) slot, the global start into the
@@ -1938,7 +1936,7 @@ fn push_evap_csr_offsets(out: &mut TranslatedMaterials, n_energies: &[u32], n_co
     }
 }
 
-/// Build the per-MT Maxwell CSR offset (issue #104) for one slab's worth of MT
+/// Build the per-MT Maxwell CSR offset for one slab's worth of MT
 /// slots being appended: `maxwell_ae_offset` (per (slab,MT) slot, the global
 /// E_in-row start into the tight `maxwell_energy_grid` / `maxwell_theta`),
 /// computed from the tight `maxwell_n_energies` counts. Must be called BEFORE
@@ -1952,7 +1950,7 @@ fn push_maxwell_csr_offsets(out: &mut TranslatedMaterials, n_energies: &[u32]) {
     }
 }
 
-/// Build the per-MT Watt CSR offset (issue #104) for one slab's worth of MT
+/// Build the per-MT Watt CSR offset for one slab's worth of MT
 /// slots being appended: `watt_ae_offset` (per (slab,MT) slot, the global
 /// E_in-row start into the tight `watt_energy_grid` / `watt_a` / `watt_b`),
 /// computed from the tight `watt_n_energies` counts. Must be called BEFORE the
@@ -2067,7 +2065,7 @@ fn pack_nuc_partials(p: &PerNuclideInelastic, n_grid: usize) -> Vec<f64> {
 
 /// Pack a material's per-(nuclide, energy) fission yield into the flat
 /// `[n_nuclides x n_grid x NUC_YIELD_COLS]` block the kernel reads after
-/// selecting the struck nuclide (fusion-neutronics/core#93): column
+/// selecting the struck nuclide: column
 /// `NUC_YIELD_NU_BAR` the nuclide's `nu_bar(E)`, column `NUC_YIELD_BETA` its
 /// delayed fraction, laid out like `pack_nuc_partials`.
 fn pack_nuc_yield(p: &PerNuclideInelastic, n_grid: usize) -> Vec<f64> {
@@ -2081,13 +2079,13 @@ fn pack_nuc_yield(p: &PerNuclideInelastic, n_grid: usize) -> Vec<f64> {
     packed
 }
 
-/// Append one empty per-MT slab for the synthetic void material (#74 Stage 2b).
+/// Append one empty per-MT slab for the synthetic void material.
 /// The void's single nuclide never collides, so the data is never read; this
 /// just keeps the slab-major per-MT buffer lengths aligned with the slab table.
 /// Reuses the void `GpuNuclideXs`'s all-empty per-MT fields (one slab's worth).
 fn append_void_per_mt_slab(out: &mut TranslatedMaterials, x: &GpuNuclideXs) {
     // Void slab: one empty (n_stored == 0) `permt_meta` row per MT slot; no
-    // sparse XS / yield values (issue #212). `q_inelastic_per_mt` on the void
+    // sparse XS / yield values. `q_inelastic_per_mt` on the void
     // `GpuNuclideXs` is one slab wide (MT_INELASTIC_COUNT), giving the slot count.
     let n_slots = x.q_inelastic_per_mt.len();
     let zeros = vec![0u32; n_slots];
@@ -2168,11 +2166,11 @@ fn append_void_per_mt_slab(out: &mut TranslatedMaterials, x: &GpuNuclideXs) {
 }
 
 /// Append a material's per-nuclide elastic-angle pool onto the slab-major
-/// `out.elastic_angle_*` buffers (issue #74, Stage 2a). One slab row per
+/// `out.elastic_angle_*` buffers. One slab row per
 /// nuclide, concatenated in `mat_nuclide_meta` slab order so the kernel can
 /// index by the selected nuclide's global `slab`.
 fn append_elastic_angle_slabs(out: &mut TranslatedMaterials, pool: &PerNuclideElasticAngle) {
-    // Build the global CSR bases for this material's slabs/rows (issue #104)
+    // Build the global CSR bases for this material's slabs/rows
     // BEFORE extending the tight data arrays. `ae_offset[slab]` is the global
     // ae-row where the slab starts; `mu_offset[ae]` the global mu-point where
     // the row's (mu, cdf, pdf) start. Lengths come from `n_energies` / `n_mu`.
@@ -2227,8 +2225,7 @@ fn sample_initial_particles(
 /// The per-history PCG seed is
 /// [`yamc_rng::history_seed`]`(base_seed, global_index)`, the
 /// same call the CPU transport loop makes, so a history is on the same stream
-/// on both backends (issue #40) and the base seed reaches the collision
-/// physics (issue #315).
+/// on both backends and the base seed reaches the collision physics.
 pub fn sample_initial_particles_for_batch(
     model: &Model,
     n_particles: usize,
@@ -2265,15 +2262,15 @@ pub fn sample_initial_particles_for_batch(
 }
 
 /// Sample initial states for a FIXED-size launch chunk of the batch-free
-/// per-history-variance neutron path (issue #233). Unlike
+/// per-history-variance neutron path. Unlike
 /// [`sample_initial_particles_for_batch`], the per-particle PCG seed band is
 /// keyed off the GLOBAL history index `launch_idx * chunk_size + i` (via
 /// `seed_offset = launch_idx * chunk_size`), NOT `launch_idx * n_particles`.
 /// Because `chunk_size` is total-independent (the TDR-safe launch size, not
 /// derived from `total_particles`), the seed for global history `h` is the
 /// same regardless of how many histories the run requests -- so GPU results
-/// are invariant to `total_particles` (removing it from the RNG key, #230
-/// task 1). The last chunk of a run may transport fewer than `chunk_size`
+/// are invariant to `total_particles` (removing it from the RNG key).
+/// The last chunk of a run may transport fewer than `chunk_size`
 /// histories (`n_particles < chunk_size`); the offset still uses the full
 /// `chunk_size` stride so the global index stays contiguous.
 ///
@@ -2343,9 +2340,9 @@ mod tests {
         // and two per-material scalars (`target_mass`, `fission_watt_a` ->
         // `fission_a_per_material`). (The per-MT inelastic distributions like
         // `angle_mu` are no longer appended here -- they moved to per-(material,
-        // nuclide) slabs in #74 Stage 2b, appended by `append_per_nuclide_inelastic`.)
+        // nuclide) slabs, appended by `append_per_nuclide_inelastic`.)
         //
-        // URR is keyed per SLAB now (issue #210): each material carries one
+        // URR is keyed per SLAB now: each material carries one
         // `urr_meta` row per nuclide, and the per-slab CSR bases come from those
         // rows' `N_ENERGIES` / `N_CDF`. `a` has one URR slab (2 energy points, 2
         // cdf bands => 4 cdf cells), `b` one URR slab (1 energy point, 2 bands).
@@ -2387,8 +2384,8 @@ mod tests {
         assert_eq!(out.xs_elastic_per_material, vec![1.0, 2.0, 3.0]);
         assert_eq!(out.urr_xs, vec![0.5, 0.1, 0.2, 0.3]);
         assert_eq!(out.urr_atom_density, vec![7.0, 8.0]);
-        // Tight CSR bases (issue #104), now one per slab (issue #210): each
-        // slab's base is the prior concatenated length. `a`'s slab starts at 0
+        // Tight CSR bases, now one per slab: each slab's base is the prior
+        // concatenated length. `a`'s slab starts at 0
         // with 2 energy points / 4 cdf cells, so `b`'s slab starts at 2 / 4.
         assert_eq!(out.urr_ae_offset, vec![0, 2]);
         assert_eq!(out.urr_cdf_offset, vec![0, 4]);
@@ -2719,7 +2716,7 @@ mod tests {
         );
     }
 
-    /// Batch-free per-history variance (issue #233): the fixed-chunk seeding
+    /// Batch-free per-history variance: the fixed-chunk seeding
     /// keys the per-particle PCG seed off the GLOBAL history index, so it is
     /// invariant to how many histories the run requests. Requesting N vs 2N
     /// particles from the same (launch_idx, chunk_size) yields the SAME
@@ -2785,7 +2782,7 @@ mod tests {
             "later-chunk seed prefix total-independent"
         );
 
-        // Issue #315: the base seed reaches the per-history collision stream.
+        // The base seed reaches the per-history collision stream.
         // A different `TransportSettings::seed` must move every history's seed,
         // otherwise re-running with a new seed only re-samples the source.
         let (s_other, _, _, _) =

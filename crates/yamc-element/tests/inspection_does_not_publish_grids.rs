@@ -9,7 +9,7 @@
 //! collision. A different-length grid then panics out of the Doppler sampler; a
 //! same-length one with different values changes every sample and says nothing.
 //!
-//! `yamc.read_element_from_arrow` (issue #443) is exactly that caller, so it
+//! `yamc.read_element_from_arrow` is exactly that caller, so it
 //! goes through `inspect_photon_interaction_from_arrow` instead.
 //!
 //! One test, not two: the grids are process-global and first-write-wins, so the

@@ -2,7 +2,7 @@
 //!
 //! `simulate_transmutation` decides which products to carry by rating every
 //! chain nuclide against a flux spectrum and dropping the ones a bound says
-//! cannot reach the solver's density floor (issue #404). The rating is a
+//! cannot reach the solver's density floor. The rating is a
 //! per-bin cross-section maximum folded against the tallied flux, standing in
 //! for the continuous-energy `sum(sigma(E_i) * TL_i)` the tally accumulates for
 //! the nuclides it does carry.
@@ -64,6 +64,7 @@ fn rx(kind: &str, target: &str) -> ChainReaction {
         branching: 1.0,
         q_value: None,
         branching_uncertainty: None,
+        evaluated_branching: None,
     }
 }
 

@@ -8,9 +8,8 @@
 //! the sibling `flat` samplers; this function only owns the layout-
 //! aware data extraction and the dispatch.
 //!
-//! Moved here from yamc-gpu's `neutron::transport::dispatch` (issue
-//! #111, stream unification) so the CPU production transport, which
-//! builds without the `gpu` feature, and yamc-gpu's host-side twin
+//! Lives here rather than in yamc-gpu so the CPU production transport,
+//! which builds without the `gpu` feature, and yamc-gpu's host-side twin
 //! call one single-source-of-truth dispatcher. yamc-gpu re-exports
 //! this module's constants from its `neutron::xs` layout module and
 //! compile-time asserts `MT_INELASTIC_COUNT == MT_SLOTS.len()`.
@@ -22,7 +21,7 @@ use yamc_nuclide::nuclide::INELASTIC_MT_SLOTS;
 /// zero xs in that slot -- the kernel just never selects it.
 ///
 /// Derived from yamc-nuclide's [`INELASTIC_MT_SLOTS`], the single
-/// definition of the slot order (issue #111): the CPU's per-collision
+/// definition of the slot order: the CPU's per-collision
 /// reaction walk and the GPU's per-MT slot sweep are the same sequence,
 /// so the two must not be able to drift apart. The dispatcher below
 /// bakes this count into its `slab * MT_INELASTIC_COUNT + slot`
@@ -140,7 +139,7 @@ pub const EOUT_KIND_CORRELATED: u32 = 2;
 /// the flat per-MT buffer layout: slice-B tabulated CM angular sample
 /// (with `xi3` isotropic fallback), then the per-slot `eout_kind`
 /// dispatch, then the optional CM-to-lab conversion. Shared by the CPU
-/// production transport and yamc-gpu's host-side twin (issue #111).
+/// production transport and yamc-gpu's host-side twin.
 ///
 /// Returns `(mu, e_out, ok)`. `ok == false` means the sampled CM
 /// energy was non-positive or the CM-to-lab conversion failed; `e_out`
@@ -235,7 +234,7 @@ pub fn sample_inelastic_kinematics(
     // (μ, CDF, PDF) table with linlin/histogram interp) and uses the
     // same `xi3` isotropic fallback when the slot is empty; delegate
     // to `yamc-physics::flat::elastic_mu_cm`.
-    // Tight CSR layout (issue #104): the slot's incident-energy rows start at
+    // Tight CSR layout: the slot's incident-energy rows start at
     // this global base; (mu, cdf, pdf) are read from the full arrays via the
     // per-row global `mu_offset`. No per-axis stride.
     let eg_off = angle_ae_offset[mat_slot] as usize;
@@ -265,7 +264,7 @@ pub fn sample_inelastic_kinematics(
         // discrete head, linlin/histogram per-bracket interp, and a
         // global `histogram_outer` flag that suppresses both the
         // stochastic bracket pick and the bracket-bound stretch.
-        // Tight CSR layout (issue #104): the slot's ae-rows start at
+        // Tight CSR layout: the slot's ae-rows start at
         // `eg_off_e`; (x, p, cdf) are read from the full arrays via the
         // per-row global `x_offset`. No per-axis stride.
         let eg_off_e = eout_ae_offset[mat_slot] as usize;
@@ -296,7 +295,7 @@ pub fn sample_inelastic_kinematics(
         // isotropic fallback) survives.
         let n_corr_total = corr_n_energies[mat_slot] as usize;
         if n_corr_total > 0 {
-            // Multi-component mixture (issue #111): the neutron product carried
+            // Multi-component mixture: the neutron product carried
             // several equally-weighted correlated laws (F19 MT16 n,2n, two at
             // 0.5/0.5). Pick one uniformly per collision -- mirrors the CPU
             // `ReactionProduct::sample_distribution_index` for equal
@@ -311,7 +310,7 @@ pub fn sample_inelastic_kinematics(
             } else {
                 0
             };
-            // Tight CSR layout (issue #104), three nesting levels: the chosen
+            // Tight CSR layout, three nesting levels: the chosen
             // component's ae-rows start at `eg_off_c`; the per-row (x, p, cdf) /
             // n_mu / mu_interp and the per-x-point mu sub-tables are read from
             // the full arrays via the per-row `corr_x_offset` and per-x-point
@@ -350,7 +349,7 @@ pub fn sample_inelastic_kinematics(
         let mat_slot = slab * MT_INELASTIC_COUNT + selected_slot;
         let n_e = km_n_energies[mat_slot] as usize;
         if n_e > 0 {
-            // Tight CSR (issue #104): the slot's ae-rows start at `eg_off`;
+            // Tight CSR: the slot's ae-rows start at `eg_off`;
             // (x, p, c, r, a) are read from the full arrays via the per-row
             // global `x_offset`. No per-axis stride.
             let eg_off = km_ae_offset[mat_slot] as usize;
@@ -379,7 +378,7 @@ pub fn sample_inelastic_kinematics(
         let mat_slot = slab * MT_INELASTIC_COUNT + selected_slot;
         let n_pts = evap_n_energies[mat_slot] as usize;
         if n_pts > 0 {
-            // Tight CSR (issue #104): the slot's E_in rows start at
+            // Tight CSR: the slot's E_in rows start at
             // `evap_ae_offset[mat_slot]`; component-major theta at
             // `evap_theta_offset[mat_slot]`. No per-axis stride.
             let off = evap_ae_offset[mat_slot] as usize;
@@ -450,7 +449,7 @@ pub fn sample_inelastic_kinematics(
         let mat_slot = slab * MT_INELASTIC_COUNT + selected_slot;
         let n_pts = maxwell_n_energies[mat_slot] as usize;
         if n_pts > 0 {
-            // Tight CSR (issue #104): the slot's E_in rows start at
+            // Tight CSR: the slot's E_in rows start at
             // `maxwell_ae_offset[mat_slot]`. No per-axis stride.
             let off = maxwell_ae_offset[mat_slot] as usize;
             if let Some(e_max) = crate::gpu::flat::maxwell::sample_maxwell(
@@ -469,7 +468,7 @@ pub fn sample_inelastic_kinematics(
         let mat_slot = slab * MT_INELASTIC_COUNT + selected_slot;
         let n_pts = watt_n_energies[mat_slot] as usize;
         if n_pts > 0 {
-            // Tight CSR (issue #104): the slot's E_in rows start at
+            // Tight CSR: the slot's E_in rows start at
             // `watt_ae_offset[mat_slot]`. No per-axis stride.
             let off = watt_ae_offset[mat_slot] as usize;
             if let Some(e_w) = crate::gpu::flat::watt::sample_watt_inelastic(
@@ -491,7 +490,7 @@ pub fn sample_inelastic_kinematics(
         let mat_slot = slab * MT_INELASTIC_COUNT + selected_slot;
         let n_eout = eout_n_energies[mat_slot] as usize;
         if n_eout > 0 {
-            // Tight CSR (issue #104): the slot's ae-rows start at `eg_off`;
+            // Tight CSR: the slot's ae-rows start at `eg_off`;
             // the equiprobable bins are read from the full `eout_x` via the
             // per-row global `x_offset`. No per-axis stride.
             let eg_off = eout_ae_offset[mat_slot] as usize;

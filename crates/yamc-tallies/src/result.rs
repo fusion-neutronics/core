@@ -5,9 +5,8 @@
 //! relative error, counts) plus metadata (shape, dim-labels,
 //! batch counts) and a reference back to the config `Tally` that produced it.
 //!
-//! This type is additive in PR A: `Tally` is unchanged, and `Tally::finalize`
-//! produces a `TallyResult` without disturbing any existing code paths. PR B
-//! builds `SimulationResults` on top of this type.
+//! `Tally::finalize` produces a `TallyResult` without disturbing the tally's
+//! accumulation state, and `SimulationResults` is built on top of this type.
 //!
 //! ## Shape & dim labels
 //!

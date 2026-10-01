@@ -5,7 +5,7 @@
 //! cubecl-spirv at the time: native `Atomic<f64>::fetch_add` isn't
 //! exposed by the driver (`atomic_f64.rs`), and on cubecl 0.10
 //! `Atomic<u64>::compare_exchange_weak` panicked inside cubecl-spirv
-//! during shader compile (`atomic_u64_cas.rs`, filed as cubecl#1318 and
+//! during shader compile (`atomic_u64_cas.rs`, an upstream cubecl-spirv bug,
 //! working again since cubecl 0.11.0-pre.3). The next viable shape is
 //! plain u64 atomic add: scale every f64 contribution by a fixed factor (e.g. 2^30),
 //! drop the fractional bits, and accumulate as u64. Convert back to

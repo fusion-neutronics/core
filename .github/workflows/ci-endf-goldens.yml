@@ -20,8 +20,9 @@ on:
       - "crates/endf/**"
       - "tools/**"
       - ".github/workflows/ci-endf-goldens.yml"
+  # Every pull request, whatever its base, so a PR stacked on another
+  # PR's branch is tested before it is retargeted at main.
   pull_request:
-    branches: [main]
     paths:
       - "crates/endf/**"
       - "tools/**"
@@ -41,8 +42,8 @@ jobs:
       # The fork is load-bearing twice over. The reader has to be the fork
       # (upstream has no Chain, no from_njoy, no radionuclide_production), and
       # it has to be the revision that teaches it to read `.xz`, because every
-      # fixture here is stored compressed. `local-develop` has the first and not
-      # the second, so it cannot regenerate these.
+      # fixture here is stored compressed. The fork's main development line has
+      # the first and not the second, so it cannot regenerate these.
       #
       # Pinned to a commit, not to the branch that carries it. A mutable ref
       # means the oracle can be redefined without a commit here: a new push to
@@ -52,15 +53,12 @@ jobs:
       # side already pins its git dependencies by revision in Cargo.lock, so
       # this is the same rule applied to the one Python dependency.
       #
-      # 6a12e6d is the merge of shimwell/endf-python#26, which fixes the MF=33
-      # LB=0 to 4 table split (shimwell/endf-python#25), into 8f42576, the tip
-      # of `claude/rust-rewrite-python-layer-1upmmo`. Its tree is that of
-      # 306a9eb, the #26 head the two MF33 fixtures' goldens were written
-      # with. That branch is 44 commits ahead of `local-develop` and not merged
-      # into it. Repoint at `local-develop` once the Rust-rewrite work merges
-      # there. Bumping it is a deliberate act: a fix to the fork's reader does
-      # not reach these goldens until someone changes this line, which is the
-      # trade a reproducible oracle asks for.
+      # The pinned commit is the endf-python reader with its fix for the MF=33
+      # LB=0 to 4 table split, the reader the two MF33 fixtures' goldens were
+      # written with. That work is not on the fork's main development line
+      # yet; repoint there once it is. Bumping it is a deliberate act: a fix to
+      # the fork's reader does not reach these goldens until someone changes
+      # this line, which is the trade a reproducible oracle asks for.
       - name: Install the endf reader the goldens are generated from
         run: |
           pip install "endf @ git+https://github.com/shimwell/endf-python@6a12e6d0cdce74f47b1a3578addece194c266a86"

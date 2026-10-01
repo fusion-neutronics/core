@@ -13,7 +13,7 @@
 //!
 //! Per particle, on the GPU:
 //! 1. Compute `log_E = ln(E)` via the polyfill (cubecl-spirv f64 ln is
-//!    broken on this driver, see cubecl#1316).
+//!    broken on this driver).
 //! 2. Binary search `log_energy_grid` for the first index `idx` where
 //!    `log_energy_grid[idx] >= log_E`.
 //! 3. Linear interpolate between `(log_energy_grid[idx-1],

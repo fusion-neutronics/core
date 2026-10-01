@@ -44,7 +44,7 @@ fn main() {
     }
 
     // Spread the fission-yield fold evenly over every tabulated energy: the
-    // worst case for issue #379's combination, since each product then draws
+    // worst case for the spectrum-weighted yield fold, since each product draws
     // on all of a nuclide's yield vectors rather than the one or two a real
     // spectrum reaches.
     let mut fy_weights: FissionYieldWeights = HashMap::new();

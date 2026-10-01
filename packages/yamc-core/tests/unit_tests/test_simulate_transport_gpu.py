@@ -217,7 +217,7 @@ def test_simulate_transport_gpu_vacuum_kills_particles_at_surface():
 
     That second geometry is open (nothing bounds the space outside the
     sphere), so every escaping particle is a LOST particle: the CPU has
-    always said so, and since issue #289 the GPU does too. The run
+    always said so, and the GPU does too. The run
     therefore needs `max_lost_particles` raised to be allowed at all --
     which is the point of the diagnostic, not a flaw in it. Counting
     losses does not change transport, so the flux comparison below is
@@ -457,9 +457,8 @@ def test_simulate_transport_gpu_multi_batch_produces_nonzero_stddev():
     """Splitting `total_particles` into multiple GPU launches via the
     tally's `particles_per_cache_write` chunking should produce
     independent realisations (one launch per chunk with a distinct RNG
-    stream), giving a non-zero per-bin standard deviation. Pre-#7 the
-    dispatch ran a single launch over the full particle count,
-    collapsing the variance estimator to zero.
+    stream), giving a non-zero per-bin standard deviation. A single launch over
+    the full particle count would collapse the variance estimator to zero.
     """
     sphere = yamc.Sphere(radius=10.0, boundary='vacuum')
     material = yamc.Material(
@@ -834,10 +833,10 @@ def test_simulate_transport_invalid_compute():
 
 
 def test_max_steps_per_particle_default_is_100000():
-    # The default was raised 1000 -> 100_000 (d743159): the GPU kernel
-    # enforces the cap as a hard loop bound, and a 14 MeV neutron in a
-    # weak absorber (pure H2) needs many hundreds of elastic collisions
-    # before leaking, so the old cap truncated ~10% of the track length.
+    # The GPU kernel enforces the cap as a hard loop bound, and a 14 MeV
+    # neutron in a weak absorber (pure H2) needs many hundreds of elastic
+    # collisions before leaking, so a cap of 1000 would truncate ~10% of the
+    # track length.
     _, model, _ = _build_model_with_flux_tally(total_particles=50)
     assert model.gpu_max_steps_per_particle == 100_000
 
@@ -845,7 +844,7 @@ def test_max_steps_per_particle_default_is_100000():
 def test_max_steps_per_particle_kwarg_propagates():
     """The constructor kwarg reaches the kernel: a cap of 5 steps on a
     2.5-mean-free-path iron sphere binds on nearly every history, and a
-    binding cap is an error naming the cap (core#23), which is the only
+    binding cap is an error naming the cap, which is the only
     observable way the value could have reached the dispatch."""
     sphere = yamc.Sphere(radius=10.0, boundary='vacuum')
     material = yamc.Material(
@@ -871,7 +870,7 @@ def test_max_steps_per_particle_kwarg_propagates():
 
 def test_gpu_max_runtime_uncapped_runs():
     """total_particles=None + max_runtime runs the GPU launch loop until the
-    wall-time budget elapses (the uncapped/time-capped GPU loop, #230 task 2),
+    wall-time budget elapses (the uncapped/time-capped GPU loop),
     scoring a valid tally for the histories completed."""
     tally, model, _ = _build_model_with_flux_tally()
     results = model.simulate_transport(compute='gpu', max_runtime=(1, 's'), seed=42)
@@ -899,7 +898,7 @@ def test_gpu_rejects_no_stop_condition():
         model.simulate_transport(compute='gpu')
 
 
-# ---- MaterialFilter on the GPU (issue #271) ------------------------------
+# ---- MaterialFilter on the GPU -----------------------------------------------
 #
 # `materials=` used to be rejected on the GPU ("filters must be a spatial
 # binner ..."). A cell's material is fixed for the run, so the dispatch now
@@ -1028,7 +1027,7 @@ def test_simulate_transport_gpu_material_filter_matches_cpu():
         )
 
 
-# ---- EnergyFunctionFilter on the GPU (issue #271) ------------------------
+# ---- EnergyFunctionFilter on the GPU -----------------------------------------
 #
 # `energy_function=` and its sugar `dose_coefficients=` used to be rejected on
 # the GPU. They are not a bin dimension: the score is multiplied by a tabulated

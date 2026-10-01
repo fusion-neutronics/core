@@ -96,7 +96,8 @@ repos:
 
       # A pyclass is usable without add_class, so a stub can advertise a name
       # the wheel never binds, and only an installed wheel can tell. This is
-      # what caught `split_nuclide` being routed to the wrong module (#573).
+      # catches a function such as `split_nuclide` being routed to the wrong
+      # module.
       - id: public-surface
         name: public surface matches the runtime
         entry: .venv/bin/python scripts/check_public_surface.py

@@ -319,9 +319,7 @@ pub struct TransportSettings {
     /// [`yamc_rng::history_seed`], the single definition shared
     /// with the GPU seed buffer). Two runs differing only in `seed` are
     /// therefore independent realisations of the whole simulation, so their
-    /// spread is a valid run-to-run error estimate (before issue #315 the
-    /// collision stream ignored the seed and only the source was re-sampled,
-    /// which made that spread a large under-estimate). Give each run a distinct
+    /// spread is a valid run-to-run error estimate. Give each run a distinct
     /// seed when accumulating statistics across runs with `combine_results`.
     /// Default: 1.
     pub seed: u64,
@@ -371,7 +369,7 @@ pub struct Model {
     /// to ask "will any photons be in flight?". Default: false
     pub transport_secondary_photons: bool,
     /// Whether the GPU transport uses a device FISSION PARTICLE BANK to follow
-    /// the true fission chain (issue #78) instead of the legacy
+    /// the true fission chain instead of the legacy
     /// `weight *= nu_bar` + weight-cap terminator. When enabled the GPU
     /// stochastically rounds nu_bar to an integer N at each fission, continues
     /// one progeny, and banks the other N-1 to transport in subsequent
@@ -407,7 +405,7 @@ pub struct Model {
     /// any history was still transporting at the cap fails the run with
     /// [`GpuDispatchError::HistoriesTruncated`](crate::gpu::GpuDispatchError),
     /// because the under-counted flux it would return is not a valid
-    /// answer (fusion-neutronics/core#23). Raise the cap or run on the CPU.
+    /// answer. Raise the cap or run on the CPU.
     pub gpu_max_steps_per_particle: u32,
     /// Whether to use decay photons (D1S method). Default: false
     pub use_decay_photons: bool,
@@ -421,7 +419,7 @@ pub struct Model {
     /// CPU only. The GPU kernels always surface-track: a Woodcock or Hybrid
     /// request on the GPU prints a one-line notice to stderr at every
     /// verbosity and proceeds, since the surface-tracked flux is an unbiased
-    /// estimate of the same quantity (fusion-neutronics/core#23).
+    /// estimate of the same quantity.
     #[serde(default)]
     pub tracking_mode: TrackingMode,
     /// Variance-reduction techniques applied during transport. Empty (the
@@ -453,11 +451,12 @@ pub struct Model {
     /// once, and the single decision bit broadcast, so a borderline target
     /// cannot flip on summation order. Runtime config; not serialized.
     ///
-    /// CPU only. The GPU dispatch refuses a model carrying targets with
-    /// [`GpuDispatchError::ConvergenceTargetsUnsupported`](crate::gpu::GpuDispatchError)
-    /// rather than running to the particle cap while ignoring them
-    /// (fusion-neutronics/core#23); GPU convergence stopping is
-    /// fusion-neutronics/core#29.
+    /// Honoured on the GPU as well. The GPU dispatch folds the same aggregate
+    /// moments the CPU does, launch by launch, and evaluates the targets at
+    /// each launch boundary with the CPU predicate (`convergence_targets_met`)
+    /// on the rank-combined moments, so both backends stop on the same
+    /// criterion. The GPU checks at launch boundaries rather than CPU
+    /// checkpoints, so the particle count at the stop can differ.
     #[serde(skip)]
     pub convergence_targets: Vec<yamc_tallies::ConvergenceTarget>,
 }
@@ -482,7 +481,7 @@ impl Model {
     /// a run has to fetch.
     ///
     /// Reads the flat material store rather than walking cells, so it covers
-    /// mesh-backed models as well as CSG (issue #246).
+    /// mesh-backed models as well as CSG.
     pub fn required_nuclides(&self) -> Vec<String> {
         let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for mat in self.geometry.materials() {
@@ -1090,11 +1089,11 @@ impl Model {
     pub fn ensure_photon_data_for_gpu(&mut self) -> Result<(), String> {
         // Gate on `has_photons()`, not `transport_secondary_photons`: a pure
         // photon source needs the same TTB / Doppler / relaxation prep as
-        // the coupled mode. Gating on the coupling flag alone left the GPU's
-        // TTB tables empty for photon-source models, silencing the entire
-        // bremsstrahlung photon source the CPU emits -- the cause of issue
-        // #415's photoelectric ~0.38x deficit (the CPU's low-energy photon
-        // spectrum comes from TTB photons that never existed on the GPU).
+        // the coupled mode. Gating on the coupling flag alone would leave the
+        // GPU's TTB tables empty for photon-source models, silencing the entire
+        // bremsstrahlung photon source the CPU emits and producing a large
+        // low-energy photoelectric deficit (the CPU's low-energy photon
+        // spectrum comes from TTB photons).
         if !self.has_photons() {
             return Ok(());
         }
@@ -1156,7 +1155,7 @@ impl Model {
     /// The CPU recovers because `run_internal` calls `calculate_macroscopic_xs`,
     /// which widens on the way to building the grid. The GPU dispatch skips that
     /// block, so it reaches `extract_material_xs` with the narrow data and fails
-    /// with `TemperatureNotLoaded` (#481).
+    /// with `TemperatureNotLoaded`.
     ///
     /// An empty label is resolved rather than skipped. The CPU resolves it in
     /// `calculate_macroscopic_xs` via `resolve_temperature`, which adopts the
@@ -1595,7 +1594,7 @@ impl Model {
         // A capped run (`Some(total)`) splits `total` into `derive_chunk_count`
         // chunks whose sizes come lazily from `derive_chunk_size` (bounded by
         // `MAX_PARTICLES_PER_CPU_CHUNK` so a huge total never materialises a
-        // giant schedule, issue #193). An uncapped run (`None`) has no finite
+        // giant schedule). An uncapped run (`None`) has no finite
         // count: the batch loop instead draws sizes from `uncapped_chunk_size`
         // and runs until `max_runtime`/convergence trips. `num_chunks` (used
         // only to seed the tally batch counter, which finalize overwrites with
@@ -1676,7 +1675,7 @@ impl Model {
             // what the model transports, narrowed by the tally's ParticleType
             // filter. Missing data for a species that will score is fatal --
             // continuing would score the plain, un-responded quantity (or a flat
-            // zero) behind a warning (issue #288). Missing data for a species
+            // zero) behind a warning. Missing data for a species
             // that cannot score is irrelevant and stays a warning.
             let model_has_neutrons = self
                 .sources
@@ -1945,7 +1944,7 @@ impl Model {
             // when the technique is off (the bool gates all use).
             let survival = self.survival_biasing().copied().unwrap_or_default();
             // Per-tally eligibility for true track-length scoring along
-            // Woodcock flight segments (issue #350); surface tracking
+            // Woodcock flight segments; surface tracking
             // never consults it, so it stays all-false there.
             let woodcock_tl_mesh_eligible: Vec<bool> =
                 if self.tracking_mode == TrackingMode::Surface {
@@ -1963,7 +1962,7 @@ impl Model {
             // but silent: particles outside it go analog and the only symptom
             // is that the window did not help. Said once here, where the mesh
             // and the geometry are both in hand, rather than counted per
-            // collision (issue #113).
+            // collision.
             if self.verbose.summary {
                 let bounds = self.geometry.bounding_box();
                 for ww in &weight_window_refs {
@@ -1979,7 +1978,7 @@ impl Model {
                 }
             }
             // Flattened per-(nuclide, MT) inelastic kinematics tables, built
-            // lazily on first use and shared across threads (issue #111). Its
+            // lazily on first use and shared across threads. Its
             // keys are nuclide addresses, so it is deliberately scoped to this
             // run: it is dropped here, well before the nuclide data it was
             // filled from.
@@ -2159,14 +2158,13 @@ impl Model {
                                 // Reseed FastRng for this particle (avoids struct allocation)
                                 rng.reseed(particle_seed);
 
-                                // Root of this history's collision-stream tree
-                                // (issues #111, #274, #315). Built by the shared
-                                // `history_seed` -- the single definition of
+                                // Root of this history's collision-stream tree.
+                                // Built by the shared `history_seed` -- the single definition of
                                 // per-history seeding, also used to build the
                                 // GPU seed buffer -- so the CPU and GPU consume
                                 // the identical 64-bit stream and per-history
-                                // diffing (#40) is bit-exact. Keyed on the base
-                                // seed as well as the global index (#315), so
+                                // diffing is bit-exact. Keyed on the base
+                                // seed as well as the global index, so
                                 // re-running with a different `seed` gives an
                                 // independent collision realisation, not just a
                                 // re-sampled source. The source particle
@@ -2239,7 +2237,7 @@ impl Model {
                                 // ceiling. Reaching it means the history is not draining
                                 // at all, which in practice means a multiplying (near- or
                                 // supercritical) chain, so it ABORTS rather than breaking
-                                // out (issue #348): truncating here would discard every
+                                // out: truncating here would discard every
                                 // still-queued particle's weight and bias every tally low,
                                 // silently. The fission-progeny path has its own, earlier
                                 // and better-diagnosed ceiling
@@ -2249,17 +2247,15 @@ impl Model {
                                 const MAX_PARTICLES_PER_HISTORY: usize = 50_000;
 
                                 while let Some(mut particle) = particle_bank.pop_particle() {
-                                    // Start this walk on ITS OWN stream (issue
-                                    // #111). The seed came from the particle's
-                                    // place in the history's emission tree, not
-                                    // from where the parent's state happened to
-                                    // be when the walk was scheduled, so the
-                                    // drain order no longer selects the physics
-                                    // and the GPU's in-thread FIFO reproduces
-                                    // this LIFO stack's results. For the source
-                                    // particle (always the first pop) this is
-                                    // `source_seed`, so a history with no
-                                    // secondaries is byte-identical to before.
+                                    // Start this walk on ITS OWN stream. The seed
+                                    // came from the particle's place in the
+                                    // history's emission tree, not from where the
+                                    // parent's state happened to be when the walk
+                                    // was scheduled, so the drain order does not
+                                    // select the physics and the GPU's in-thread
+                                    // FIFO reproduces this LIFO stack's results.
+                                    // For the source particle (always the first
+                                    // pop) this is `source_seed`.
                                     pcg_state = yamc_rng::expand_seed(
                                         particle_bank.walk_seed(),
                                     );
@@ -2411,8 +2407,8 @@ impl Model {
                 }
                 if let Some(dep_tallies) = &transmutation_tallies {
                     // Pass the real per-chunk source-particle count so the tally
-                    // normalizes by the true total, not the CPU chunk count
-                    // (issue #128). Mirrors the main tally above.
+                    // normalizes by the true total, not the CPU chunk count.
+                    // Mirrors the main tally above.
                     dep_tallies.accumulate_batch(chunk_size);
                 }
 
@@ -2430,7 +2426,7 @@ impl Model {
                     // Per-tally aggregate moments for THIS rank. Under MPI they are
                     // reduced below before any convergence target is tested, so the
                     // decision is made on the true global statistics rather than a
-                    // rank's own share (issue #241).
+                    // rank's own share.
                     let mut local_aggs: Vec<yamc_tallies::welford::AggMoments> =
                         Vec::with_capacity(tallies.len());
                     for (ti, tally) in tallies.iter().enumerate() {
@@ -2663,7 +2659,7 @@ impl Model {
         // global stats onto each WelfordPerHistory tally so its
         // `get_mean` / `get_std_dev` / `total_mean` / `total_std` route
         // through the per-history Welford state. Tallies using BatchedSumSq
-        // or Welford (Stage 1) are left alone -- their sum / sum_sq /
+        // or Welford are left alone -- their sum / sum_sq /
         // mean / m2 have already been populated by accumulate_batch in
         // the per-batch loop above.
         if any_welford {
@@ -2676,14 +2672,16 @@ impl Model {
                 // Under MPI each rank's Welford state covers only its own
                 // particle range. Gather the per-rank raw (mean, m2, n)
                 // state to root and fold in rank order with the same Chen
-                // combine used for thread reduction, so rank 0 installs
-                // the complete statistics. (A moment-space reduce_sum
-                // would be cheaper but reconstructing m2 from summed
-                // squares is catastrophically cancellation-prone, so the
-                // raw state is gathered instead.) Non-root ranks keep
-                // their local partial state; only root results are
-                // complete, and `combine_results` refuses non-root MPI
-                // results via the run provenance.
+                // combine used for thread reduction. (A moment-space
+                // reduce_sum would be cheaper but reconstructing m2 from
+                // summed squares is catastrophically cancellation-prone, so
+                // the raw state is gathered instead.) Root then broadcasts
+                // the folded state, so every rank installs the same complete
+                // statistics and anything read from the tallies after the
+                // run (the DeGVR passes, for one) agrees across ranks. Every
+                // rank holding the same global result is also why
+                // `combine_results` refuses non-root MPI results: combining
+                // two ranks' results would count the run twice.
                 if mpi_size > 1 {
                     use yamc_tallies::welford::WelfordTallyStats;
                     let ranks = mpi_size as usize;
@@ -2693,6 +2691,8 @@ impl Model {
                         .map(|t| t.n_histories)
                         .unwrap_or(0);
                     let rank_n = mpi_ctx.gather_u64(&[n_local], 0);
+                    let mut n_total = [rank_n.as_ref().map_or(0, |n| n.iter().sum())];
+                    mpi_ctx.broadcast_u64(&mut n_total, 0);
                     for stats in global_stats.per_tally.iter_mut() {
                         let bins = stats.mean.len();
                         if bins == 0 {
@@ -2738,6 +2738,14 @@ impl Model {
                                 *stats = folded;
                             }
                         }
+                        mpi_ctx.broadcast_f64(&mut stats.mean, 0);
+                        mpi_ctx.broadcast_f64(&mut stats.m2, 0);
+                        if let Some(c) = stats.comoment.as_mut() {
+                            mpi_ctx.broadcast_f64(c, 0);
+                        }
+                        stats.n_histories = n_total[0];
+                        stats.agg = yamc_tallies::welford::AggMoments::ZERO;
+                        stats.score_pdf = yamc_tallies::welford::ScorePdf::default();
                     }
                 }
                 for (i, tally) in tallies.iter().enumerate() {
@@ -2751,7 +2759,7 @@ impl Model {
 
         // Transmutation accumulators are rank-local while their normalisation
         // denominator is global, so they must be summed across ranks before any
-        // rate is read (issue #287); without this every inventory came out low
+        // rate is read; without this every inventory came out low
         // by exactly 1/n_ranks. Runs before the barrier below since it is itself
         // collective.
         if let Some(dep_tallies) = &transmutation_tallies {
@@ -3058,10 +3066,10 @@ pub(crate) fn runtime_budget_exhausted(max_runtime: Option<f64>, elapsed_secs: f
 /// The loop consults `max_runtime` and refreshes the per-tally convergence
 /// snapshot only at chunk boundaries, so bounding the chunk size bounds how far
 /// past a wall-clock budget a run can overshoot, and keeps a huge
-/// `total_particles` from being scheduled as a few enormous chunks. Issue #193:
-/// a `1e12` total made each of the old 10 chunks `1e11`, whose per-chunk
-/// allocation failed outright, and `max_runtime` was only consulted between
-/// those never-finishing chunks so it never took effect. Mirrors the GPU path's
+/// `total_particles` from being scheduled as a few enormous chunks. Without the
+/// cap, a `1e12` total split into 10 chunks gives `1e11`-particle chunks whose
+/// allocation fails outright, and `max_runtime`, consulted only between those
+/// never-finishing chunks, never takes effect. Mirrors the GPU path's
 /// `MAX_PARTICLES_PER_GPU_DISPATCH`, without the watchdog motivation.
 ///
 /// Sized to keep the per-chunk re-init cost negligible on realistic runs while
@@ -3194,7 +3202,7 @@ mod tests {
     /// validation, it was a trap: the model reported no photons, so
     /// `ensure_photon_data_for_gpu` returned before its missing-data check,
     /// and the coupled path then panicked where that check exists to produce a
-    /// clean error. Issue #43.
+    /// clean error.
     ///
     /// No nuclear data is read, so this runs anywhere.
     #[test]
@@ -3701,8 +3709,8 @@ mod tests {
             derive_chunk_count(1_000_000),
             1_000_000 / MAX_PARTICLES_PER_CPU_CHUNK
         );
-        // A very large total is handled without a giant chunk or a giant Vec
-        // (issue #193): the count scales up and every chunk stays within the
+        // A very large total is handled without a giant chunk or a giant Vec:
+        // the count scales up and every chunk stays within the
         // cap. The loop evaluates sizes lazily, so nothing this large is built.
         // 1e12 only fits a 64-bit usize; a 32-bit target (wasm32) cannot even
         // represent a run this large, so gate the stress value to 64-bit.

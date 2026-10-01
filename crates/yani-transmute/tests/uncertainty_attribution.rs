@@ -1,4 +1,4 @@
-//! Where the inventory uncertainty comes from (issue #140, item 4).
+//! Where the inventory uncertainty comes from.
 //!
 //! Fe56 irradiated, then cooled, with two independent sources: a 5% sigma on
 //! Mn56's half-life and a 10% error on every flux bin. The attribution has to

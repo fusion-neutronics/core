@@ -402,7 +402,7 @@ function formatTick(v) {
 }
 
 async function sample() {
-  // Mesh-filled CSG cells (issue #291): this sampler works from GEOMETRY_JSON,
+  // Mesh-filled CSG cells: this sampler works from GEOMETRY_JSON,
   // where a fill carries only an identity fingerprint, so it would draw the bare
   // CSG frame and hide the very body the particles see. The server-rendered
   // raster is the only correct view of such a model, so keep showing it and say
@@ -993,7 +993,7 @@ async function init() {
 
   if (HAS_MESH_FILLS) {
     // Nothing to initialise: `sample()` short-circuits to the server-rendered
-    // raster for a filled model (issue #291).
+    // raster for a filled model.
     status.textContent = '';
     return;
   }

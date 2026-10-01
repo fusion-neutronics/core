@@ -1,5 +1,5 @@
 //! Splitting a step changes nothing, because the burnup matrix does not depend
-//! on the composition (issue #563).
+//! on the composition.
 //!
 //! `accumulate_matrix` (`crates/yani/src/matrix.rs`) takes the chain, the
 //! reaction rates and the fission-yield weights. It does NOT take the

@@ -25,7 +25,7 @@ pub type CollisionData<'a> = (
 /// into a [`CollisionData`] by the caller.
 pub type SelectedNuclide<'a> = (&'a str, &'a Arc<Nuclide>, Option<NuclideId>);
 
-/// Free-flight sample on the smooth (non-URR) PCG path (issue #111): the
+/// Free-flight sample on the smooth (non-URR) PCG path: the
 /// sampled `distance` plus the energy-grid bracket (`i_grid`, interpolation
 /// fraction `f`) and material total `sigma_t` at the collision energy, so the
 /// caller can select the struck nuclide *after* the surface-vs-collision min
@@ -39,7 +39,7 @@ pub struct SmoothFlight {
     /// URR probability-table band this flight sampled against, when the
     /// material had a URR nuclide in range at this energy. Threaded back onto
     /// the particle so the nuclide selection, the reaction split and the tally
-    /// scoring at this collision all reuse the SAME band (issues #204, #342).
+    /// scoring at this collision all reuse the SAME band.
     pub urr_random: Option<f64>,
 }
 use std::sync::Arc;
@@ -55,7 +55,7 @@ mod photon;
 #[derive(Debug, Clone, Default)]
 pub struct MaterialFastXS {
     /// Maps a log(E) bin index to a starting index in the energy grid. 32-bit
-    /// for the same reason as `FastXSGrid::log_grid_index` (issue #482): the
+    /// for the same reason as `FastXSGrid::log_grid_index`: the
     /// values are grid indices, and a grid long enough to overflow `u32` would
     /// be 34 GB of `f64`. Built monotone here, so nothing to validate.
     log_grid_index: Vec<u32>,
@@ -303,10 +303,9 @@ pub struct Material {
     pub volume: Option<f64>,
     /// Temperature label, the key that selects a cross-section set (e.g. `"294"`).
     ///
-    /// Private, and `temperature_k` with it, because the two must agree and
-    /// nothing kept them in step when they were public: `temperature_k` was set
-    /// once in `Material::new` and never again, so the CPU free-gas kernel ran
-    /// every material at 294 K (issue #478). Go through
+    /// Private, and `temperature_k` with it, because the two must agree: a
+    /// stale `temperature_k` makes the CPU free-gas kernel run the material at
+    /// the wrong temperature. Go through
     /// [`Material::set_temperature`], which maintains both, or
     /// [`Material::temperature`] to read.
     ///
@@ -409,8 +408,7 @@ pub struct UrrMacroXs {
     pub fission: f64, // MT 18
     /// MT 102 (n,gamma). The URR nuclides' share is the probability table's
     /// perturbed value; every other nuclide contributes its own MT 102, so a
-    /// capture tally does not collect the material's charged-particle channels
-    /// (fusion-neutronics/core#106).
+    /// capture tally does not collect the material's charged-particle channels.
     pub capture: f64,
     /// MT 27 (= disappearance + fission). Disappearance rather than capture,
     /// so this stays what MT 27 means: the URR nuclides' share is the same
@@ -615,10 +613,9 @@ impl Material {
     /// `nuclide_data` map to install rather than always cloning the
     /// template's.
     ///
-    /// `from_nuclide_densities_without_data` used to clone that map and then
-    /// throw it away, which on a transmutation step is 556 `Arc` increments and
-    /// 556 decrements, on refcounts every thread shares -- once per step per
-    /// replica, to produce an empty map (issue #576, finding 6).
+    /// Cloning that map only to throw it away would cost, on a transmutation
+    /// step, 556 `Arc` increments and 556 decrements on refcounts every thread
+    /// shares, once per step per replica, to produce an empty map.
     fn from_nuclide_densities_with(
         nuclide_densities: HashMap<String, f64>,
         template: &Material,
@@ -747,7 +744,7 @@ impl Material {
     ///
     /// `Material::transmute` loads the cross sections it needs into the
     /// material and leaves them there, so a second call on the same material
-    /// does no Arrow decoding at all (issue #576, finding 3). On a chain like
+    /// does no Arrow decoding at all. On a chain like
     /// ENDF/B-8.1 that is a few hundred nuclides, which is the right trade for
     /// a material transmuted more than once and the wrong one for a sweep over
     /// thousands of DISTINCT compositions -- so the release is explicit rather
@@ -788,7 +785,7 @@ impl Material {
     /// documented as parallel to it, so clearing one and not the other leaves
     /// `calculate_photon_xs` indexing `cached_element_atom_densities[idx]` for
     /// `idx` in `0..cached_elements.len()` past the end of an emptied vector --
-    /// guarded only by a `debug_assert_eq!`, so a release build panics (#481).
+    /// guarded only by a `debug_assert_eq!`, so a release build panics.
     pub fn invalidate_temperature_caches(&mut self) {
         self.macroscopic_xs_neutron.clear();
         self.macroscopic_xs_neutron_total_by_nuclide = None;
@@ -857,7 +854,7 @@ impl Material {
     ///
     /// URR semantics: when any nuclide in the material has URR probability-table data covering
     /// `energy`, a single per-collision base seed (`urr_random`) is drawn and **each in-range
-    /// URR nuclide derives an independent probability-table band from it** (issue #204), so a
+    /// URR nuclide derives an independent probability-table band from it**, so a
     /// multi-isotope material samples statistically independent resonance structure per isotope.
     /// The URR-modified Σ_t is then used for both distance sampling and nuclide selection.
     /// If `cached_urr_random` is `Some`, the base seed is reused for consistency across XS
@@ -913,8 +910,8 @@ impl Material {
 
         if self.has_urr_in_range(energy) {
             // URR path: one per-collision base seed, from which each in-range URR
-            // nuclide derives an *independent* probability-table band (issue #204,
-            // see `nuclide_macro_total_with_urr` -> `urr_sample_for_nuclide`).
+            // nuclide derives an *independent* probability-table band (see
+            // `nuclide_macro_total_with_urr` -> `urr_sample_for_nuclide`).
             // Pass 1 computes URR-modified per-nuclide contributions and Σ_t_urr;
             // Pass 2 samples the struck nuclide using those URR-modified contributions.
             let urr_random = cached_urr_random.unwrap_or_else(|| rng.random::<f64>());
@@ -983,7 +980,7 @@ impl Material {
     }
 
     /// Sample the free-flight distance on the smooth (non-URR) PCG path, drawing
-    /// `xi1` from the per-particle PCG `state` (issue #111).
+    /// `xi1` from the per-particle PCG `state`.
     ///
     /// This is the front half of the shared GPU/CPU collision path: the GPU
     /// kernel draws the flight as its *first* per-step PCG sample
@@ -1015,7 +1012,7 @@ impl Material {
         }
 
         // URR: the base uniform is drawn once per ENERGY and BEFORE the flight,
-        // matching the kernel's per-step order (issues #342, #111). A band the
+        // matching the kernel's per-step order. A band the
         // particle already holds at this energy is reused, so a boundary
         // crossing does not redraw. Every draw below is `next_xi`, the mapping
         // the GPU uses, so the two streams stay aligned.
@@ -1048,7 +1045,7 @@ impl Material {
 
     /// Material macroscopic total with every in-range URR nuclide perturbed by
     /// the band `urr_random` selects for it. Each nuclide derives its own band
-    /// from the shared base (issue #204), so isotopes stay uncorrelated.
+    /// from the shared base, so isotopes stay uncorrelated.
     fn urr_macro_total(&self, energy: f64, i_grid: usize, f: f64, urr_random: f64) -> f64 {
         (0..self.nuclide_count_for_selection())
             .map(|idx| self.nuclide_total_with_urr(energy, idx, i_grid, f, urr_random))
@@ -1104,7 +1101,7 @@ impl Material {
     }
 
     /// Select the struck nuclide on the smooth (non-URR) PCG path, drawing
-    /// `xi_n` from the per-particle PCG `state` (issue #111). Call only on a real
+    /// `xi_n` from the per-particle PCG `state`. Call only on a real
     /// collision (after the surface-vs-collision min), using the bracket from
     /// [`Material::smooth_flight`].
     ///
@@ -1136,7 +1133,7 @@ impl Material {
         };
         // A nuclide's share of the collision density follows the cross section
         // that actually governed the flight, so an in-range URR nuclide is
-        // weighted by its PERTURBED total (issue #347). Without a band this is
+        // weighted by its PERTURBED total. Without a band this is
         // the plain smooth total.
         let smooth_nuc_xs = |idx: usize| -> f64 {
             match urr_random {
@@ -1247,13 +1244,12 @@ impl Material {
             .unwrap_or(0.0);
         let xs_inelastic = (xs_scattering - xs_elastic).max(0.0);
         // `xs_absorption` is `FastXSGrid::lookup`'s disappearance PARTIAL, which
-        // already excludes fission (the four partials sum to the total). This is
-        // the SCORING-side twin of the transport-side bug fixed in #154: OpenMC
+        // already excludes fission (the four partials sum to the total). OpenMC
         // writes `capture *= (micro.absorption - micro.fission)` because ITS
-        // absorption includes fission, and importing that expression here
-        // subtracted fission a second time, clamping in-band capture to zero for
-        // every nuclide whose fission exceeds its capture. In-band that made a
-        // capture tally read zero and an absorption tally (built as
+        // absorption includes fission; importing that expression here would
+        // subtract fission a second time, clamping in-band capture to zero for
+        // every nuclide whose fission exceeds its capture. In-band that would
+        // make a capture tally read zero and an absorption tally (built as
         // `macro_capture + macro_fission`) report just the fission rate.
         let xs_capture = xs_absorption;
         let xs_ngamma = if !urr.multiply_smooth && !fast_grid.xs_ngamma.is_empty() {
@@ -1265,7 +1261,7 @@ impl Material {
         let smooth_absorption = xs_capture + xs_fission;
         // `urr_random` is the per-collision base seed shared across the
         // material's nuclides; derive this nuclide's independent probability
-        // table band from it (issue #204). Isotopes' resonance structures are
+        // table band from it. Isotopes' resonance structures are
         // statistically independent, so each must draw its own band rather than
         // all sharing one random (which over-transmits multi-isotope materials).
         let r = yamc_nuclide::urr::urr_nuclide_random(urr_random, nuclide.urr_stream_key());
@@ -1366,13 +1362,11 @@ impl Material {
                 macro_elastic += self.lookup_nuclide_macro_xs_by_mt(name, n_density, 2, energy);
                 macro_fission += self.lookup_nuclide_macro_xs_by_mt(name, n_density, 18, energy);
                 // Two accumulators, because the two scores want different
-                // things from a nuclide whose tables are not in range
-                // (fusion-neutronics/core#106). MT 27 is built below as
-                // `disappearance + fission`, OpenMC's
+                // things from a nuclide whose tables are not in range. MT 27
+                // is built below as `disappearance + fission`, OpenMC's
                 // `micro.absorption = capture + fission` where its `capture` is
                 // `absorption - fission`; asking MT 102 for that would drop the
-                // charged-particle absorption channels and, before #362,
-                // returned zero outright for a fissile nuclide. An (n,gamma)
+                // charged-particle absorption channels. An (n,gamma)
                 // tally wants MT 102 itself: OpenMC substitutes disappearance
                 // only for the nuclide whose `use_ptable` is set, so a Be9 or a
                 // Cr52 beside a URR nuclide keeps its own capture rather than
@@ -1414,7 +1408,7 @@ impl Material {
     ///
     /// URR semantics match those used for tally scoring: all in-range URR nuclides
     /// receive URR-modified contributions, each deriving an independent probability
-    /// table band from the shared base seed (issue #204); non-URR nuclides keep their
+    /// table band from the shared base seed; non-URR nuclides keep their
     /// smooth contributions. For single-URR-nuclide materials this matches the Σ_t used
     /// internally by `sample_collision_data`; for multi-nuclide materials with multiple
     /// URR nuclides it may differ slightly (`sample_collision_data` applies URR only to
@@ -1624,7 +1618,7 @@ impl Material {
                         // scores `macro_xs().absorption * flux`. `absorption`
                         // from `lookup` is the disappearance PARTIAL (its four
                         // partials sum to the total), so fission is added back
-                        // here (issue #362).
+                        // here.
                         27 => absorption + fission,
                         // MT 101, neutron disappearance: the partial as stored.
                         101 => absorption,
@@ -1638,7 +1632,7 @@ impl Material {
                         // against fission 2.91 b) and, where fission is absent,
                         // still conflated capture with the charged-particle
                         // channels the partial also holds -- 149x high for Fe56
-                        // at 14 MeV, 5x for W184 (issue #362).
+                        // at 14 MeV, 5x for W184.
                         102 => {
                             let (i_grid, f) = fast_grid.lookup_grid_index(energy);
                             if fast_grid.xs_ngamma.is_empty() {
@@ -1707,7 +1701,7 @@ impl Material {
     /// Private, and it must stay that way: a caller that changes the
     /// temperature without invalidating the derived caches leaves the material
     /// reporting one temperature while its cached grid and cross sections
-    /// belong to another (#481). Use [`Material::set_temperature`].
+    /// belong to another. Use [`Material::set_temperature`].
     fn assign_temperature(&mut self, temperature: impl AsRef<str>) {
         let label = yamc_nuclide::temperature::strip_k(temperature.as_ref());
         self.temperature_k = yamc_nuclide::temperature::label_to_kelvin_or_default(label);
@@ -1717,9 +1711,9 @@ impl Material {
     /// Set the temperature and drop everything derived from the old one.
     ///
     /// Invalidation goes through [`Material::invalidate_temperature_caches`]
-    /// rather than clearing a hand-written subset. The subset this used to clear left
-    /// `cached_microscopic_xs`, `fast_xs` and both by-nuclide tables holding
-    /// the previous temperature's data (#481), and `fast_xs` surviving an
+    /// rather than clearing a hand-written subset. A hand-written subset can
+    /// easily leave `cached_microscopic_xs`, `fast_xs` or the by-nuclide tables
+    /// holding the previous temperature's data, and `fast_xs` surviving an
     /// emptied grid is itself a panic: `MaterialFastXS::lookup_total` indexes
     /// `energy_grid[0]` unguarded.
     pub fn set_temperature(&mut self, temperature: impl AsRef<str>) {
@@ -1748,8 +1742,7 @@ impl Material {
         // 1. Use provided temperature if given.
         // Normalised, because callers pass the on-disk spelling: nuclide data
         // is keyed by the stripped form, so `"900K"` would otherwise be
-        // rejected as unavailable while `"900"` succeeded on the same data
-        // (#481).
+        // rejected as unavailable while `"900"` succeeded on the same data.
         // Sorted once, and reused by every check below, so one message shape
         // serves all of them.
         let mut sorted_all: Vec<String> = all_temps.iter().cloned().collect();
@@ -1766,8 +1759,8 @@ impl Material {
         if let Some(temp) = provided {
             let label = yamc_nuclide::temperature::strip_k(temp);
             // Validated rather than returned unchecked. An unservable label
-            // used to pass straight through and fail much later as a missing
-            // MT, which is the #481 symptom with no mention of temperature.
+            // passed straight through would fail much later as a missing MT,
+            // with no mention of temperature.
             // Skipped when there is no nuclide data at all, so the photon-only
             // path below still works.
             if !sorted_all.is_empty() {
@@ -2454,8 +2447,8 @@ mod tests {
         );
     }
 
-    /// Issue #478: `temperature_k` was set once in `Material::new` and never
-    /// again, so every material transported at 294 K whatever its label said.
+    /// `temperature_k` must follow the label, or the material transports at
+    /// 294 K whatever its label says.
     #[test]
     fn temperature_k_tracks_the_label() {
         let mut m = Material::new(HashMap::new(), "atom", "sum", None).unwrap();
@@ -2483,12 +2476,12 @@ mod tests {
             m.temperature(),
             "600",
             "the label must be stored stripped, because nuclide data is keyed \
-             by the stripped form and `get_temp_idx` compares exactly (#481)"
+             by the stripped form and `get_temp_idx` compares exactly"
         );
     }
 
-    /// Issue #481: `set_temperature` cleared four of the temperature-dependent
-    /// caches and left the rest holding the previous temperature's data.
+    /// `set_temperature` must clear every temperature-dependent cache, not
+    /// leave some holding the previous temperature's data.
     ///
     /// `fast_xs` mattered most: it is the "already built, skip" guard at
     /// `model.rs`, so a material whose temperature changed after a build was
@@ -2541,11 +2534,11 @@ mod tests {
         );
     }
 
-    /// Issue #481: a query for a temperature other than the material's own used
-    /// to overwrite the material's caches, then hand the label back, leaving
-    /// every cache holding the queried temperature's data under the original
-    /// label. The builders now take the temperature explicitly and only write
-    /// through when it is the material's own.
+    /// A query for a temperature other than the material's own must not
+    /// overwrite the material's caches, which would leave them holding the
+    /// queried temperature's data under the original label. The builders take
+    /// the temperature explicitly and only write through when it is the
+    /// material's own.
     #[test]
     fn a_foreign_temperature_query_leaves_the_caches_alone() {
         let mut m = Material::new(HashMap::new(), "atom", "sum", None).unwrap();

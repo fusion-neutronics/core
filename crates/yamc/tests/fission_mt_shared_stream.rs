@@ -1,4 +1,4 @@
-//! Issue #418, divergence (a): selecting among the partial fission MTs
+//! Selecting among the partial fission MTs
 //! (18/19/20/21/38) was the last collision-path draw still coming off `FastRng`
 //! instead of the per-particle PCG state the rest of the path moved to.
 //!

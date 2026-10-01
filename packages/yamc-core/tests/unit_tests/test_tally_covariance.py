@@ -1,4 +1,4 @@
-"""``Tally(covariance=True)``: the covariance of the bin means (issue #140, item 6).
+"""``Tally(covariance=True)``: the covariance of the bin means.
 
 A per-bin standard deviation treats the bins as independent. Bins scored by
 the same histories are not, and anything summed over them inherits the

@@ -1,4 +1,4 @@
-//! Mesh fills for hybrid CSG + CAD-mesh geometry (issue #232).
+//! Mesh fills for hybrid CSG + CAD-mesh geometry.
 //!
 //! A CSG [`Cell`] can be *filled* by a surface-mesh body: inside the cell's
 //! region a particle is either inside one of the mesh volumes (scoring that
@@ -192,7 +192,7 @@ impl MeshFill {
         )
     }
 
-    /// Spatial cross-check for adjacency tracking (issue #254): does a
+    /// Spatial cross-check for adjacency tracking: does a
     /// surface foreign to `volume` intersect the open CSG-frame segment?
     #[inline]
     pub fn segment_blocked_world(

@@ -2,7 +2,7 @@
 //! angular distribution on the verification nuclides. Historical
 //! diagnostic from when the GPU flat buffers used fixed per-axis caps
 //! and stride-subsampled anything larger; the GPU now stores these
-//! tables tight / variable-length (issue #104), so the reference
+//! tables tight / variable-length, so the reference
 //! counts below are kept only as a data-resolution audit.
 //!
 //! Source: the elastic reaction's first neutron product's

@@ -1,9 +1,9 @@
-//! GPU/CPU parity for the URR probability-table band-hold rule (issue #342).
+//! GPU/CPU parity for the URR probability-table band-hold rule.
 //!
 //! A neutron's URR band is drawn once per ENERGY, not once per transport step:
 //! OpenMC advances its URR seed only when the energy changes
 //! (`physics.cpp:164`) and the CPU does the same via `Particle.urr_random` /
-//! `urr_energy` (PR #207, which is what moved a W shell from 0.919 to ~1.00
+//! `urr_energy` (holding the band is what moved a W shell from 0.919 to ~1.00
 //! against OpenMC). The kernel used to redraw the base uniform on every step,
 //! so an isotope spanning more than one material presented a fresh, independent
 //! resonance realisation at each boundary crossing.
@@ -168,6 +168,6 @@ fn urr_band_survives_material_boundaries() {
     assert!(
         (0.96..=1.04).contains(&three),
         "three-material GPU/CPU flux {three:.4} outside [0.96, 1.04] -- \
-         is the kernel redrawing the URR band per step again (#342)?"
+         is the kernel redrawing the URR band per step again?"
     );
 }

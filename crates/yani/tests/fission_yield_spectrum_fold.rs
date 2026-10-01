@@ -1,4 +1,4 @@
-//! Issue #379: fission product inventory must follow the neutron spectrum.
+//! Fission product inventory must follow the neutron spectrum.
 //!
 //! Drives the matrix builder with the real ENDF/B-VIII.1 U235 and Pu239 yield
 //! tables from the test chain, once with all the weight on the thermal point

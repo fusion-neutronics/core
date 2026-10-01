@@ -1,4 +1,4 @@
-//! Batch-free GPU per-history variance for FISSILE models (issue #233 Stage 2).
+//! Batch-free GPU per-history variance for FISSILE models.
 //!
 //! A fissile model banks fission progeny and transports them in separate
 //! generation launches, so a source neutron's per-history total (which is
@@ -146,7 +146,7 @@ fn build_model(
     model.verbose = Verbose::silent();
     model.gpu_max_steps_per_particle = MAX_STEPS;
     model.tracking_mode = TrackingMode::Surface;
-    model.gpu_fission_bank = true; // the per-source (Stage 2) path
+    model.gpu_fission_bank = true; // the per-source path
     let settings = TransportSettings {
         total_particles: Some(total_particles),
         seed: SEED,
@@ -180,9 +180,9 @@ fn fissile_gpu_cpu_per_history_std_dev_parity() {
         return;
     }
     // Enough source neutrons that the std_dev estimate is well-resolved on both
-    // backends. The GPU flux MEAN now matches the CPU within Monte-Carlo noise
-    // (the ~4% fixed-source fissile deficit from dropping (n,xn)-multiplied
-    // progeny weight was fixed in issue #236; see fissile_nxn_progeny_weight_carried).
+    // backends. The GPU flux MEAN matches the CPU within Monte-Carlo noise
+    // ((n,xn)-multiplied progeny weight is carried; see
+    // fissile_nxn_progeny_weight_carried).
     // The per-source std_dev, however, still runs ~20% high: that is the
     // per-source estimator itself (one variance sample = a source neutron plus
     // all its descendants, quantised then squared once per source), a
@@ -262,11 +262,11 @@ fn fissile_gpu_cpu_per_history_std_dev_parity() {
         (0.7..=1.4).contains(&median),
         "fissile median GPU/CPU std_dev ratio {median:.3} outside [0.7, 1.4] (per-source grouping broken)"
     );
-    // The mean must match the CPU (== OpenMC) within MC noise now that the #236
-    // (n,xn) progeny-weight drop is fixed (was ~4-5% low before the fix).
+    // The mean must match the CPU (== OpenMC) within MC noise (dropping the
+    // (n,xn) progeny weight reads ~4-5% low).
     assert!(
         worst_mean_dev < 0.03,
-        "fissile worst well-populated-bin mean deviation {:.1}% exceeds 3% (mean regressed -- issue #236?)",
+        "fissile worst well-populated-bin mean deviation {:.1}% exceeds 3% (mean regressed -- (n,xn) progeny weight dropped?)",
         100.0 * worst_mean_dev
     );
 }
@@ -306,15 +306,14 @@ fn fissile_total_particles_invariance() {
     );
 }
 
-/// Regression guard for issue #236: fission progeny of an (n,2n)/(n,3n) neutron
+/// Regression guard: fission progeny of an (n,2n)/(n,3n) neutron
 /// (weight-multiplied to ~2 by the GPU's `weight *= yield`) must be re-launched
-/// carrying that weight. The bug dropped it (`fission_source_inputs` ignored the
-/// banked weight and the kernel starts every source neutron at weight 1.0),
-/// biasing the fixed-source fissile flux ~3.5% low for a 14 MeV source (above the
-/// ~5.3 MeV (n,2n) threshold). The fix re-launches a weight-w progeny as
-/// `round(w)` unit-weight neutrons. yamc-CPU (analog (n,2n) banking) is the
-/// reference and matches OpenMC; both integrated flux and the MT18 fission rate
-/// must agree to within Monte-Carlo noise.
+/// carrying that weight. Dropping it (relaunching every banked record at
+/// weight 1.0 in `fission_source_inputs`) biases the fixed-source fissile flux
+/// ~3.5% low for a 14 MeV source (above the ~5.3 MeV (n,2n) threshold). The
+/// dispatch relaunches each banked progeny once at its banked weight. yamc-CPU
+/// (analog (n,2n) banking) is the reference and matches OpenMC; both integrated
+/// flux and the MT18 fission rate must agree to within Monte-Carlo noise.
 #[test]
 fn fissile_nxn_progeny_weight_carried() {
     if !data_present(NUCLIDE) || !gpu_available() {
@@ -343,7 +342,7 @@ fn fissile_nxn_progeny_weight_carried() {
         assert!(
             (0.98..=1.02).contains(&ratio),
             "{score} GPU/CPU ratio {ratio:.4} outside [0.98, 1.02] -- (n,xn) progeny \
-             weight likely dropped again (issue #236)"
+             weight likely dropped"
         );
     }
 }

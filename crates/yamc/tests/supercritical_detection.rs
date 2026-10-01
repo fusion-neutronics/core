@@ -1,4 +1,4 @@
-//! Issue #348: a supercritical geometry handed to a fixed-source solver.
+//! A supercritical geometry handed to a fixed-source solver.
 //!
 //! yamc is fixed-source only. Before this guard, a supercritical model was
 //! never noticed: the fission chain multiplied per history, the per-history

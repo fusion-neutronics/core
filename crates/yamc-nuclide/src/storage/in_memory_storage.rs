@@ -93,7 +93,7 @@ impl Storage for InMemoryStorage {
         // `Cursor<Arc<[u8]>>` is `Read + Seek` (any `AsRef<[u8]>` is), so the
         // reader streams straight out of the stored bytes. Copying them into a
         // `Vec` first meant the browser path held a second full copy of every
-        // fetched section for the duration of its parse (issue #476).
+        // fetched section for the duration of its parse.
         Ok(Box::new(Cursor::new(Arc::clone(bytes))))
     }
 

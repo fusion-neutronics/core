@@ -284,8 +284,8 @@ impl AngleDistribution {
     /// Every shape is handled, including the two an ACE table produces. The
     /// Python reader fills only the Legendre and tabulated entries and returns
     /// whatever `np.empty` gave it for the rest, so its answer for ACE data is
-    /// not merely different but changes between calls; see issue #21. There is
-    /// no behaviour to match, so this computes them.
+    /// not merely different but changes between calls. There is no behaviour
+    /// to match, so this computes them.
     pub fn forward_fraction(&self, mu_cutoff: f64) -> Vec<f64> {
         let mut fractions = vec![0.0; self.energy.len()];
         for (i, mu_i) in self.mu.iter().enumerate() {

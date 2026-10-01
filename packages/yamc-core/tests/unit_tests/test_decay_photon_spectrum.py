@@ -1,4 +1,4 @@
-"""The decay photon line spectrum of an activated inventory (issue #381 C3).
+"""The decay photon line spectrum of an activated inventory.
 
 Irradiated natural iron is the clean check: its short-lived activity is
 dominated by Mn56, whose 846.8 keV gamma is emitted on essentially every decay,

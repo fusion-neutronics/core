@@ -5,7 +5,7 @@
 //! left a caller holding 709 flux values with no access to the energies they
 //! belong to. These two functions hand over the edges themselves, so a
 //! spectrum can be plotted, tabulated, or folded against a cross section on
-//! its own grid. Issue #492.
+//! its own grid.
 
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::gen_stub_pyfunction;

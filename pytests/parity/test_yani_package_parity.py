@@ -3,7 +3,7 @@
 ``yani`` is built from the same ``yani-python`` crate that ``yamc`` links, so a
 material and schedule built through either package has to step to the same
 inventory, bit for bit. That is the guard that splitting the bindings out
-(issue #381) changed no physics.
+changed no physics.
 
 Skipped unless the standalone ``yani`` wheel is installed alongside ``yamc``;
 ``maturin develop -m packages/yani-core/pyproject.toml`` puts it there.

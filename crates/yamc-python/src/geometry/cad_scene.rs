@@ -133,7 +133,7 @@ pub fn mesh_faces_scene_resolved(
 // property: transport reads tet face normals off a fixed face table that only
 // points outward for positively oriented tets, and an inverted tet makes the
 // element walk pick an entry face as its exit, so unstructured track-length
-// tallies read far too low (issue #316). A violation surfaces here as a
+// tallies read far too low. A violation surfaces here as a
 // RuntimeError out of `mesh_volume`. Connectivity then reaches the Arrow file
 // unchanged apart from a constant per-solid vertex offset
 // (`yamt::mesh::cad_build::flatten_tet_blocks`), so the invariant survives

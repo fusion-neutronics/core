@@ -1,12 +1,11 @@
-//! Acceptance test for #58 (E13b): a model whose source list mixes a neutron
+//! Acceptance test: a model whose source list mixes a neutron
 //! source and a photon source.
 //!
 //! Each history is one source particle, drawn by source strength. The GPU runs
 //! the neutron share through the COUPLED kernel (which also emits secondary
 //! photons -- the CPU auto-enables this for any photon-source model), and the
 //! photon pass transports both those neutron-induced secondaries and the primary
-//! photon source, folding everything per source particle. Pre-#58 such a model
-//! was rejected at translation (`NonNeutronSource` / `PhotonSourceOnNeutronPath`).
+//! photon source, folding everything per source particle.
 //!
 //! The GPU result must match the CPU mixed-source run statistically (PCG-32 vs
 //! 64-bit RNG => parity within MC error, not bit-exact). We check three tally

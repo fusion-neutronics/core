@@ -93,7 +93,7 @@ pub use material_transmute::{
 /// is also resolved and returned in `LoadedChain::branch`: the chain then
 /// carries grafted `(n,n')` metastable channels. On the coupled path the
 /// verbatim energy-dependent curves are scored directly at the collision
-/// energy during transport (see `transmutation_tallies`, issue #218); the
+/// energy during transport (see `transmutation_tallies`); the
 /// flux-given `Material::transmute` path folds them against the user's
 /// multigroup spectrum (see `material_transmute`). When unset, the overlay is
 /// empty and physics matches the plain three-part chain.

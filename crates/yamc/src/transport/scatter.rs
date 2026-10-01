@@ -5,13 +5,13 @@ use super::*;
 
 /// MT 2 elastic scattering, routed through the shared GPU/CPU samplers
 /// `yamc_physics::gpu::flat::{elastic_mu_cm, free_gas_elastic}` driven by a
-/// threaded 64-bit PCG state (issues #111, #274). The CPU and the GPU kernel +
-/// CPU-twin now sample the *same* tabulated CM angular distribution and the
+/// threaded 64-bit PCG state. The CPU and the GPU kernel +
+/// CPU-twin sample the *same* tabulated CM angular distribution and the
 /// *same* free-gas thermal kinematics, so the two transport paths cannot drift
-/// (the cause of the #88 epithermal divergence class).
+/// (separate samplers are what produce epithermal GPU/CPU divergence).
 ///
 /// Draw schedule (PCG `next_xi`, in the kernel/twin order): `xi3` (the angle
-/// seed, drawn once at the reaction-type split and passed in -- issue #111)
+/// seed, drawn once at the reaction-type split and passed in)
 /// seeds the isotropic fallback, then `elastic_mu_cm` (bracket + CDF inversion),
 /// then `free_gas_elastic`, then ONE lab-azimuth draw
 /// `phi = TAU * next_xi(pcg)`. For the cold-target high-energy regime
@@ -19,14 +19,14 @@ use super::*;
 /// the closed-form two-body kinematics are applied, rotated by that azimuth
 /// (equivalent to the previous full CM transform with a target at rest).
 ///
-/// The azimuth draw is UNCONDITIONAL (issue #111 site D): the GPU kernel and
+/// The azimuth draw is UNCONDITIONAL: the GPU kernel and
 /// its CPU twin draw it in the common tail after the reaction branch, for warp
 /// coherence, and skip only the ROTATION when the free-gas vector CM transform
 /// already wrote the direction (that transform is not reducible to a
 /// `(mu_lab, phi)` rotation about the incident direction). Skipping the draw as
 /// well would consume one fewer value on the free-gas path and desynchronise
 /// the rest of the history from the GPU stream -- worth ~100% of thermal
-/// moderating histories in the issue-#40 matched-stream harness.
+/// moderating histories in a matched-stream GPU/CPU comparison.
 ///
 /// Always returns `true` (the free-gas sampler handles the near-zero CM-speed
 /// case internally instead of terminating the history).
@@ -34,7 +34,7 @@ use super::*;
 /// `free_gas_threshold` (the model option, default `400.0`) sets the free-gas
 /// regime boundary at `free_gas_threshold * kT`. It is forwarded to the shared
 /// `free_gas_elastic` sampler, which the GPU kernel + CPU twin pass the same
-/// value, so the boundary cannot drift between backends (issue #102).
+/// value, so the boundary cannot drift between backends.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn scatter_elastic(
     particle: &mut yamc_particle::particle::Particle,
@@ -43,7 +43,7 @@ pub(super) fn scatter_elastic(
     constituent_reaction: &Reaction,
     free_gas_threshold: f64,
     particle_idx: usize,
-    // Angle seed drawn once at the reaction-type split (issue #111), mirroring
+    // Angle seed drawn once at the reaction-type split, mirroring
     // the kernel/twin `xi3`. Replaces the draw this function used to make.
     xi3: f64,
     pcg: &mut u64,
@@ -105,7 +105,7 @@ pub(super) fn scatter_elastic(
             pcg,
         );
 
-    // (3) Lab azimuth, drawn UNCONDITIONALLY here (issue #111 site D). The GPU
+    // (3) Lab azimuth, drawn UNCONDITIONALLY here. The GPU
     // kernel and its CPU twin make this draw in the common tail after the
     // reaction branch, i.e. immediately after the free-gas sampler on the
     // elastic arm, whether or not free-gas already wrote the direction, and
@@ -223,7 +223,7 @@ pub(super) fn scatter_inelastic(
 }
 
 /// CONTINUUM / tabulated inelastic (MT 50-91, MT 875-890) on the shared PCG
-/// stream (issue #111 sub-step 3): the same
+/// stream: the same
 /// `yamc_physics::gpu::flat::inelastic_dispatch::sample_inelastic_kinematics`
 /// the GPU kernel and its CPU twin call, driven by the threaded 64-bit PCG
 /// state instead of the legacy `FastRng`.
@@ -326,7 +326,7 @@ pub(super) fn scatter_inelastic_shared(
 }
 
 /// DISCRETE inelastic levels (MT 51-90, and LevelInelastic MT 875-890) with
-/// closed-form-Q kinematics on the shared PCG stream (issue #111 sub-step 3).
+/// closed-form-Q kinematics on the shared PCG stream.
 ///
 /// Routed here (from the analog single-nuclide path) only when the constituent's
 /// first neutron product carries a `LevelInelastic` energy distribution. The CM
@@ -427,7 +427,7 @@ pub(super) fn scatter_inelastic_level(
 
 /// (n,xn) / (n,n'x) channels -- MT 5 / 16 / 17 / 22 / 28 / 32 / 33 / 34 / ...,
 /// everything outside the `50..=91 | 875..=890` inelastic series -- on the
-/// shared PCG stream (issue #111). The GPU twin samples these MTs from the same
+/// shared PCG stream. The GPU twin samples these MTs from the same
 /// flat tables through the same `sample_inelastic_kinematics` dispatcher, so
 /// after this routing a collision on one of them is bit-identical across the two
 /// backends instead of diverging in [`scatter_other`]'s legacy `FastRng`
@@ -446,7 +446,7 @@ pub(super) fn scatter_inelastic_level(
 ///     [`scatter_inelastic_shared`] does. The walk's azimuth comes AFTER the
 ///     secondaries, as it does in the kernel.
 ///
-/// MULTIPLICITY (issue #274 convention, unchanged here): an integral yield
+/// MULTIPLICITY: an integral yield
 /// banks `yield - 1` extra neutrons at the walk's weight; a fractional yield
 /// multiplies the walk's weight instead. Each extra neutron is sampled
 /// INDEPENDENTLY from the reaction's distributions, as the GPU kernel does.

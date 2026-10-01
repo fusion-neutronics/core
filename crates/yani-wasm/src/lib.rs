@@ -132,8 +132,8 @@ impl YaniSession {
     ///
     /// `file` is `nuclide.arrow`, `energy.arrow`, `reactions.arrow` or
     /// `version.json`, matching `NEUTRON_XS_ONLY_SECTIONS`. `energy.arrow`
-    /// carries the union energy grids, which moved out of `nuclide.arrow` in
-    /// fusion-neutronics/core#100; a host that does not upload it gets a load
+    /// carries the union energy grids, which are their own section rather than
+    /// columns of `nuclide.arrow` from format version 2; a host that does not upload it gets a load
     /// error naming it, not a silent answer. The bytes land at
     /// `/{nuclide}.arrow/{file}`
     /// in the virtual filesystem and the nuclear-data config is pointed at that
@@ -388,8 +388,8 @@ impl YaniSession {
             )
         };
         // `&mut`, because the solve loads the cross sections it needs into the
-        // material and keeps them there, so a second run does no fetching
-        // (issue #576, finding 3). In the browser that matters more than
+        // material and keeps them there, so a second run does no fetching. In
+        // the browser that matters more than
         // anywhere: the data comes over the network.
         let material = self.material.as_mut().ok_or("no material set")?;
         let volume = material
@@ -446,8 +446,7 @@ impl YaniSession {
                 // Through `yani_decay::total`, which sorts, rather than
                 // summing the map directly: `HashMap` order is a property of
                 // the instance, so a total taken in it moves in the last bit
-                // between runs. The Python bindings have always gone through
-                // it; this session was never updated (issue #558).
+                // between runs. The Python bindings go through it too.
                 "activity": yani_decay::total(&activity),
                 "decay_heat": yani_decay::total(&heat),
                 "activity_by_nuclide": activity,

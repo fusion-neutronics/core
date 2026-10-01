@@ -1,4 +1,4 @@
-"""Decay photon continua from Python, on a real JEFF-4.0 actinide (issue #163).
+"""Decay photon continua from Python, on a real JEFF-4.0 actinide.
 
 JEFF-4.0 Cf252 gives its gamma spectrum as three weak lines beside a
 linear-linear continuum, the spontaneous-fission photons, at FC = 0.249957

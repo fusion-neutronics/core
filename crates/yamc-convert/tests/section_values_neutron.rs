@@ -270,7 +270,7 @@ fn nuclide_columns_are_the_parsed_tables_own_numbers() {
         );
     }
 
-    // The grids are their own section since #100, one row per temperature. The
+    // The grids are their own section, one row per temperature. The
     // rule they are ordered by is unchanged and still asserted, because it is
     // the order the published files are in even though nothing zips them
     // positionally any more.
@@ -852,11 +852,11 @@ fn the_synthesized_rows_are_the_sum_of_the_rows_beside_them() {
 /// synthesized rather than writing one whose xs_temperatures, xs_values and
 /// xs_threshold_idx are all empty.
 ///
-/// It used to write those three rows, which was issue #12: an evaluation with
-/// no nuclide grid gained three reactions carrying no cross section at all, and
-/// the loader skips its own grid length check in exactly that situation
-/// (nuclide_arrow.rs:496), so they loaded as silently empty reactions rather
-/// than as an error. The row count is the assertion that pins the fix.
+/// Writing those three rows would give an evaluation with no nuclide grid three
+/// reactions carrying no cross section at all, and the loader skips its own grid
+/// length check in exactly that situation (nuclide_arrow.rs:496), so they would
+/// load as silently empty reactions rather than as an error. The row count is
+/// the assertion that pins this.
 #[test]
 fn the_endf_route_writes_no_synthetic_rows_and_keys_its_cross_sections_at_0k() {
     let data = endf_nuclide(LI6_ENDF);
@@ -877,7 +877,7 @@ fn the_endf_route_writes_no_synthetic_rows_and_keys_its_cross_sections_at_0k() {
 
     // Exactly the evaluation's own reactions. MT 1 and MT 4 are among them; MT
     // 3, 27 and 101 are not, and with no grid to synthesize them on they are
-    // left out rather than written empty (issue #12).
+    // left out rather than written empty.
     let expected: Vec<i32> = data.reactions.keys().copied().collect();
     assert_eq!(expected.len(), 38);
     assert_eq!(written_mts(&batch), expected);
@@ -983,8 +983,7 @@ fn constructed_two_temperature_nuclide_separates_the_two_temperature_columns() {
     yamc_convert::nuclide::write_energy(&data, dir.path()).expect("energy.arrow is written");
     let energy = section(dir.path(), "energy.arrow");
     let temperatures = str_list(&batch, "temperatures", 0);
-    // One row per temperature since #100, where these were a second pair of
-    // columns on nuclide.arrow's single row.
+    // One row per temperature in energy.arrow.
     let energy_temperatures: Vec<String> = (0..energy.num_rows())
         .map(|row| str_at(&energy, "temperature", row))
         .collect();
