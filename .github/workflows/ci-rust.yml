@@ -3,8 +3,9 @@ name: Rust tests
 on:
   push:
     branches: [ main ]
+  # Every pull request, whatever its base, so a PR stacked on another
+  # PR's branch is tested before it is retargeted at main.
   pull_request:
-    branches: [ main ]
   release:
     types: [published]
   workflow_dispatch:
