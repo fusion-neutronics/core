@@ -3,7 +3,7 @@
 use super::*;
 
 /// Per-history ceiling on the LIVE particle bank, enforced at fission events.
-/// Exceeding it is a hard error, not a cap (issue #348).
+/// Exceeding it is a hard error, not a cap.
 ///
 /// yamc is fixed-source only. In a subcritical model each source neutron seeds
 /// a chain that dies out, so the bank drains back to empty; in a supercritical
@@ -96,12 +96,11 @@ pub(super) fn charge_fission_progeny(
 /// compatibility) and the sampled neutrons, each carrying the incident
 /// particle's current weight.
 /// The prompt fission neutron product's first angle-energy distribution, the
-/// source of the per-nuclide flat chi cache (issue #111). The cache flattens
-/// an `UncorrelatedAngleEnergy` (its energy part) and, since
-/// fusion-neutronics/core#34 entry 2, a `CorrelatedAngleEnergy` (its E_out
-/// marginal, the angle dropped for the isotropic emission the shared path
-/// uses), so Th232, Pa231 and Pa233 sample on the shared PCG stream like every
-/// other fissionable instead of the legacy per-product sampler.
+/// source of the per-nuclide flat chi cache. The cache flattens an
+/// `UncorrelatedAngleEnergy` (its energy part) and a `CorrelatedAngleEnergy`
+/// (its E_out marginal, the angle dropped for the isotropic emission the shared
+/// path uses), so Th232, Pa231 and Pa233 sample on the shared PCG stream like
+/// every other fissionable instead of the legacy per-product sampler.
 fn prompt_chi_dist(
     product: &yamc_nuclide::reaction_product::ReactionProduct,
 ) -> Option<&AngleEnergyDistribution> {
@@ -118,7 +117,7 @@ fn prompt_chi_dist(
 /// and U240 off photons alone), because fission must always produce neutrons.
 ///
 /// The returned MT keys the per-channel chi cache, so it names the channel the
-/// products actually came from rather than the sampled one (issue #425). Keying
+/// products actually came from rather than the sampled one. Keying
 /// a fallback channel's spectrum under the sampled channel's slot would be the
 /// same cross-channel mix the per-MT key exists to prevent.
 ///
@@ -171,7 +170,7 @@ pub(super) fn sample_fission_event(
     particle: &yamc_particle::particle::Particle,
     nu_scale: f64,
     mu_xi: f64,
-    // Per-particle PCG state for the shared fission-chi path (issue #111).
+    // Per-particle PCG state for the shared fission-chi path.
     pcg: &mut u64,
     rng: &mut FastRng,
 ) -> (i32, yamc_physics::neutron::interaction::SecondaryNeutrons) {
@@ -179,7 +178,7 @@ pub(super) fn sample_fission_event(
 
     // Fission - sample which fission reaction based on partial cross sections.
     // This samples among MT 18, 19, 20, 21, 38 on the shared PCG stream, the
-    // last collision-path draw that was still coming off `rng` (issue #418).
+    // last collision-path draw that was still coming off `rng`.
     // The uniform is drawn only when the evaluation actually carries partial
     // channels: see `FastXSGrid::sample_fission_reaction` for why a draw taken
     // for a single-channel nuclide would desynchronise the CPU from the kernel.
@@ -209,7 +208,7 @@ pub(super) fn sample_fission_event(
 
     // The MT whose products end up supplying the chi, which is the sampled one
     // unless the fallback has to go looking elsewhere. It keys the chi cache, so
-    // it has to track the products rather than the sampled reaction (issue #425).
+    // it has to track the products rather than the sampled reaction.
     let (resolved_chi_mt, neutron_products) =
         resolve_chi_products(sampled_fission_rxn, channel_mts, channel_rxns);
     let chi_mt = resolved_chi_mt.unwrap_or(tally_mt);
@@ -222,7 +221,7 @@ pub(super) fn sample_fission_event(
         };
 
     // Resolve the prompt fission chi, flattened for the shared GPU/CPU flat
-    // samplers and cached per (nuclide, fission MT) (issues #111, #425). Keyed by
+    // samplers and cached per (nuclide, fission MT). Keyed by
     // MT because an evaluation with partial fission channels carries a different
     // prompt spectrum on each: the spectrum is fixed per CHANNEL, not per nuclide.
     let chi_flat = nuclide.fission_chi_flat_cache.get_or_build(
@@ -232,7 +231,7 @@ pub(super) fn sample_fission_event(
             .and_then(prompt_chi_dist),
     );
 
-    // Delayed neutrons (issue #364). `nu_bar` is nu_TOTAL, so the batch already
+    // Delayed neutrons. `nu_bar` is nu_TOTAL, so the batch already
     // has the right count; what the delayed groups add is that a `beta` fraction of
     // those neutrons are born from the (much softer) delayed spectrum instead of
     // the prompt one. `None` for a nuclide with no delayed data, which leaves both
@@ -308,7 +307,7 @@ mod chi_product_resolution_tests {
         assert_eq!(products.len(), 1);
     }
 
-    /// Issue #425. When the sampled channel carries no neutron product, the chi
+    /// When the sampled channel carries no neutron product, the chi
     /// comes from a DIFFERENT channel, and the returned MT has to name that one.
     /// Reporting the sampled MT instead would file the fallback channel's
     /// spectrum under the sampled channel's cache slot, which is exactly the

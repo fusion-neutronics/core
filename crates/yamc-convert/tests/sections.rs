@@ -94,7 +94,7 @@ fn nuclide_section_matches_the_parsed_table() {
     // energy grid. For a pure ACE table they must agree, and a mismatch means
     // the energy map and the kT list came apart.
     //
-    // The grids are `energy.arrow` since #100, one row and one record batch
+    // The grids are `energy.arrow`, one row and one record batch
     // per temperature, so this reads every batch rather than one cell.
     let temps = batch
         .column_by_name("temperatures")
@@ -329,14 +329,11 @@ fn reactions_section_matches_the_published_file() {
     let theirs = labels(&ref_dir.join("reactions.arrow"));
     assert!(mine.len() > 5, "only {} reactions were written", mine.len());
 
-    // The canonical names for the synthesized sums (issue #438). The published
-    // data used to spell these `(n,non-elastic)`, `(n,inelastic)` and
-    // `(n,disappearance)`, which are not the format's names and did not resolve
-    // through `REACTION_MT`, so a score read out of a published file was
-    // rejected. The converter has written the canonical names since #438, and
-    // the 2026-08-21 republish brought the published files into line (issue
-    // #439), so this is no longer a deliberate difference: it is the spelling
-    // both sides now agree on, pinned here so neither drifts back.
+    // The canonical names for the synthesized sums. Spellings such as
+    // `(n,non-elastic)`, `(n,inelastic)` and `(n,disappearance)` are not the
+    // format's names and do not resolve through `REACTION_MT`, so a score read
+    // out of a file carrying them is rejected. The converter and the published
+    // files agree on the canonical spelling, pinned here so neither drifts back.
     let renamed: std::collections::HashMap<i32, &str> = [
         (3, "(n,nonelastic)"),
         (4, "(n,level)"),
@@ -363,7 +360,7 @@ fn reactions_section_matches_the_published_file() {
     }
 
     // Every other MT must agree with the published file. A disagreement there
-    // is the #379 shape: a vocabulary split under one filename. The renamed
+    // is a vocabulary split under one filename. The renamed
     // ones are exempt, and ONLY those: a fourth label drifting would fail here.
     for (mt, (label, _)) in &mine {
         if renamed.contains_key(mt) {
@@ -399,10 +396,10 @@ fn reactions_section_matches_the_published_file() {
 
 /// The synthesized total must reproduce the evaluation's own total.
 ///
-/// The closed-form check, and the one that would have caught issue #23: MT 1 is
-/// elastic plus everything else, and the ACE table carries its own MT 1 to
-/// compare against. A double-counted channel shows up here as a total above the
-/// evaluated one, with every individual number still looking reasonable.
+/// The closed-form check: MT 1 is elastic plus everything else, and the ACE
+/// table carries its own MT 1 to compare against. A double-counted channel
+/// shows up here as a total above the evaluated one, with every individual
+/// number still looking reasonable.
 #[test]
 fn the_synthesized_total_reproduces_the_evaluated_total() {
     let data = li6();
@@ -501,7 +498,7 @@ fn an_ace_conversion_loads_through_yamcs_own_reader() {
         serde_json::from_str(&std::fs::read_to_string(out.join("version.json")).expect("marker"))
             .expect("json");
     assert_eq!(marker["data_version"], "rust-check");
-    // 2 since the union energy grids moved into their own section (#100). The
+    // 2 since the union energy grids moved into their own section. The
     // loader below refuses anything else, so this pins the writer and the
     // reader to the same number from opposite sides.
     assert_eq!(marker["format_version"], 2);
@@ -787,7 +784,7 @@ fn a_transport_conversion_loads_under_a_full_scope() {
 /// MT 4), so the format had two vocabularies and only one of them resolved:
 /// `yamc.Tally(scores=["(n,inelastic)"])` was an "Unknown score" even though
 /// that string came straight out of `reactions.arrow`. 77 of 80 published
-/// nuclides carry the unresolvable spelling (issue #438).
+/// nuclides carried the unresolvable spelling.
 ///
 /// Nothing reads the label back, so no test caught it. This one asserts the
 /// round trip a person makes by hand: read a name out of a file, use it as a
@@ -860,7 +857,7 @@ fn every_label_written_resolves_back_to_its_mt() {
 /// fission product's own yield as the nu-bar, which is the PROMPT yield.
 ///
 /// That is a several-percent undercount of fission neutrons with nothing on
-/// disk or in a log to say so, which is issue #364 one nuclide at a time.
+/// disk or in a log to say so, one nuclide at a time.
 ///
 /// Needs NJOY and a real evaluation, so it announces a loud skip.
 #[test]

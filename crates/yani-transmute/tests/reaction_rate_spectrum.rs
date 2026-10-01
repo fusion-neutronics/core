@@ -1,5 +1,4 @@
-//! An energy-resolved rate must sum to the one-group rate it decomposes
-//! (yani#27).
+//! An energy-resolved rate must sum to the one-group rate it decomposes.
 //!
 //! `get_reaction_rate_spectrum` exists to say which part of a spectrum drove a
 //! channel, which a collapsed rate cannot: 57 mb of `W186(n,gamma)` against a

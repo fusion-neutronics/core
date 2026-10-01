@@ -32,8 +32,8 @@ pub const MAX_INCOHERENT_FF: usize = 64;
 /// GPU photon kernel. Slab dimension = total elements across materials,
 /// element-major within a material and concatenated material-major (the order
 /// `PhotonElementSelectInputs::mat_elem_meta` indexes), so the kernel reads
-/// the per-collision-SELECTED element's `S(x, Z)` (task #72), not a single
-/// dominant element's (#79).
+/// the per-collision-SELECTED element's `S(x, Z)`, not a single
+/// dominant element's.
 #[derive(Clone, Debug)]
 pub struct GpuIncoherentFormFactor {
     /// Per-element `x` (momentum transfer) grid, flat
@@ -67,7 +67,7 @@ impl GpuIncoherentFormFactor {
 
 /// Pack per-ELEMENT incoherent form-factor tables for the GPU photon kernel.
 ///
-/// One slab per element (task #72): copy each element's
+/// One slab per element: copy each element's
 /// `incoherent_form_factor` `(x, y)` Tabulated1D into its slab. If the source
 /// table has more than `MAX_INCOHERENT_FF` points, subsample uniformly in
 /// index space. The per-collision element selection then indexes the slab of

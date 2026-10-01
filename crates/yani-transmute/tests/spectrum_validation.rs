@@ -4,10 +4,10 @@
 //! `w[1] <= w[0]`, which a NaN passes: every comparison against a NaN is false.
 //! Such a boundary reached the multigroup collapse, gave a NaN group average, a
 //! NaN reaction rate and an inventory of NaNs, with no error anywhere along the
-//! way. Issue #576.
+//! way.
 //!
 //! It is also the only input under which the collapse's point set could depend
-//! on anything but an ascending grid, which is what finding 1a's bisection
+//! on anything but an ascending grid, which is what the collapse's bisection
 //! rests on -- so it is checked here rather than assumed.
 //!
 //! Needs no nuclear data: every case is refused before a cross section is read.

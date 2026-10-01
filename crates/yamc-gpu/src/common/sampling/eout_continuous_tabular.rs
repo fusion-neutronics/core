@@ -35,7 +35,7 @@ pub struct EoutSample {
 
 /// Sample a `ContinuousTabular` outgoing energy. `eg_off_e` is the slot's
 /// base ae-row into the per-incident-energy buffers (`eout_ae_offset[mat_slot]`
-/// with tight CSR storage, issue #104); `eout_x_offset` gives the global start
+/// with tight CSR storage); `eout_x_offset` gives the global start
 /// of each ae-row's `(x, cdf, p)` points in the flat `eout_x` / `eout_cdf` /
 /// `eout_p` arrays (row `eg_off_e + bin` starts at `eout_x_offset[eg_off_e +
 /// bin]`). `hist_outer` is the slot's `histogram_interp` flag. The flat buffers
@@ -107,7 +107,7 @@ pub fn sample_continuous_tabular_eout(
         let xi_x = d_xi_x.xi;
 
         // Discrete-then-continuous CDF search matching the CPU reference
-        // `sample_with_discrete_info` (issue #103): the discrete head (first
+        // `sample_with_discrete_info`: the discrete head (first
         // `n_disc` points) is searched with `xi < c[k]` (selects the exact
         // line); the continuous tail from `n_disc` with `xi <= c[k+1]`,
         // carrying `c_j` as the CPU does. The previous single scan collapsed
@@ -209,7 +209,7 @@ pub fn sample_continuous_tabular_eout(
         // line stored as a one-point ContinuousTabular row): emit that energy.
         // Returning `e_default` here was wrong -- on the coupled-photon path
         // `e_default` was the incident NEUTRON energy, so these one-point rows
-        // emitted spurious ~14 MeV photons (issue #175). Matches the CPU
+        // emitted spurious ~14 MeV photons. Matches the CPU
         // single-point `TabulatedProbability` sample. No RNG draw, so the kernel
         // and its CPU twin stay in lock-step.
         let x_off = eout_x_offset[(eg_off_e + bin_e) as usize];
@@ -288,7 +288,7 @@ pub fn sample_continuous_tabular_eout_cpu(
         state = s_xi_x.wrapping_mul(PCG_MULT).wrapping_add(PCG_INCR);
         let xi_x = (r_xi_x as f64 + 1.0) * (1.0 / 4_294_967_297.0);
 
-        // Discrete-then-continuous CDF search (issue #103); bit-twin of the
+        // Discrete-then-continuous CDF search; bit-twin of the
         // `#[cube]` scan above. See its comment.
         let mut j = 0u32;
         let mut c_j = eout_cdf[x_off as usize];
@@ -376,7 +376,7 @@ pub fn sample_continuous_tabular_eout_cpu(
         e_cm = e_sampled;
     } else if n_x == 1 {
         // Single tabulated outgoing energy: emit it (bit-twin of the `#[cube]`
-        // n_x == 1 branch above; issue #175).
+        // n_x == 1 branch above).
         let x_off = eout_x_offset[(eg_off_e + bin_e) as usize];
         e_cm = eout_x[x_off as usize];
     }
@@ -505,7 +505,7 @@ mod tests {
 
         // Slot 2, single incident energy with a SINGLE outgoing point
         // (n_x == 1): a fixed level-inelastic-style gamma line. The sampler must
-        // emit this point, not e_default (issue #175).
+        // emit this point, not e_default.
         let s2 = 2 * AE;
         energy_grid[s2] = 1.0e6;
         n_x[s2] = 1;
@@ -534,8 +534,8 @@ mod tests {
 
         let (energy_grid, n_x, x, cdf, p, interp, n_disc) = fixture();
         // CSR x-offsets for the padded fixture: row `(slot*AE + ae)` starts at
-        // `(slot*AE + ae) * MX` (issue #104 -- the sampler now takes per-row
-        // offsets rather than a `max_eout_x` stride).
+        // `(slot*AE + ae) * MX` (the sampler takes per-row offsets rather than a
+        // `max_eout_x` stride).
         let x_offset: Vec<u32> = (0..n_x.len()).map(|r| (r * MX) as u32).collect();
 
         // Build the per-sample arrays: slot 0 (eg_off=0, n_eout=2) swept over
@@ -571,7 +571,7 @@ mod tests {
         let n = seeds.len();
 
         // CPU reference. Expand each 32-bit seed to the 64-bit PCG state
-        // exactly as the kernel does (host wrapping splitmix64, issue #274).
+        // exactly as the kernel does (host wrapping splitmix64).
         let mut cpu_e = vec![0.0_f64; n];
         let mut cpu_state = vec![0u64; n];
         for i in 0..n {
@@ -663,7 +663,7 @@ mod tests {
                 );
             }
             // Slot 2 (n_x == 1) must emit the tabulated point, not the -1
-            // sentinel default (issue #175).
+            // sentinel default.
             if eg_off[i] == (2 * AE) as u32 {
                 assert!(
                     (cpu_e[i] - 3.0e4).abs() < 1e-6,
@@ -678,7 +678,7 @@ mod tests {
         );
     }
 
-    /// Regression for issue #175: a single-point (`n_x == 1`) incident-energy
+    /// Regression: a single-point (`n_x == 1`) incident-energy
     /// row (e.g. a fixed level-inelastic gamma line) must emit the tabulated
     /// point, NOT the `e_default` fallback. Returning `e_default` (the incident
     /// neutron energy on the coupled-photon path) produced spurious ~14 MeV
@@ -723,7 +723,7 @@ mod tests {
     }
 
     /// An empty (`n_x == 0`) row has nothing to sample and returns `e_default`,
-    /// so coupled-photon callers pass 0.0 and drop the secondary (issue #175).
+    /// so coupled-photon callers pass 0.0 and drop the secondary.
     #[test]
     fn empty_row_returns_default() {
         let energy_grid = vec![1.0e6_f64];

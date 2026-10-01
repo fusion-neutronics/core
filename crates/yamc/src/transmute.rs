@@ -25,7 +25,7 @@ use yani_transmute::{
 /// Ten decades below the nuclide that dominates the material is seven below
 /// anything a Monte Carlo solve resolves and eight below nuclear-data
 /// uncertainty, so what it buys is memory rather than accuracy: a UO2 sphere
-/// goes from 1262 promotions to 113 (issue #412).
+/// goes from 1262 promotions to 113.
 const TRANSPORT_SHARE: f64 = 1.0e-10;
 
 /// The largest genuine cross section [barns] a nuclide's loaded data shows, or
@@ -56,7 +56,7 @@ fn peak_cross_section(material: &Material, name: &str) -> f64 {
 }
 
 impl Model {
-    /// Run coupled transport-transmutation calculation (Phase 1b - tally-based).
+    /// Run coupled transport-transmutation calculation (tally-based).
     ///
     /// Transport runs each timestep with updated compositions. Per-material tallies
     /// are used to extract flux and reaction rates, normalized by material volumes.
@@ -213,7 +213,7 @@ impl Model {
         // mode the resulting product set is reused by every step, so the extra
         // solve amortises; in independent mode it is the price of the single
         // pruned solve that follows, which is cheaper than the unpruned one it
-        // replaces at any particle count worth running (issue #404).
+        // replaces at any particle count worth running.
         #[cfg(feature = "debug_timing")]
         let scout_start = std::time::Instant::now();
 
@@ -256,11 +256,10 @@ impl Model {
         // Load cross sections for every product the material can reach, then
         // keep the ones the irradiation can actually populate.
         //
-        // What to load used to be bounded by a caller-supplied hop count that
-        // defaulted to zero, i.e. no products loaded at all. A hop count cannot
-        // express the right answer: how far a product chain runs depends on the
-        // fluence, not on graph distance (issue #401). The reachable closure is
-        // derived from the composition instead, so there is nothing to set.
+        // A caller-supplied hop count cannot express the right answer: how far
+        // a product chain runs depends on the fluence, not on graph distance.
+        // The reachable closure is derived from the composition instead, so
+        // there is nothing to set.
         //
         // Reachability is blunt, though: it saturates on one large strongly
         // connected component, so Fe56, water and steel all reach the same 461
@@ -271,7 +270,7 @@ impl Model {
         //
         // The closure is large, so these load at activation scope: the MTs the
         // network names and no transport sections, the same scope
-        // `transmute_material` uses (issue #389). A product enters the run at
+        // `transmute_material` uses. A product enters the run at
         // zero density and so cannot be collided on; if one later grows a
         // density, the coupled loop's `ensure_nuclide_loaded` widens it to
         // transport scope on demand.
@@ -309,7 +308,7 @@ impl Model {
 
                 // Filter to nuclides not already loaded, and skip decay-only
                 // sinks: chain nodes with no neutron reactions don't need
-                // cross-section data (issue #45).
+                // cross-section data.
                 let to_load: Vec<&String> = reachable
                     .iter()
                     .filter(|n| !material.nuclide_data.contains_key(*n))
@@ -500,7 +499,7 @@ impl Model {
 
         // Create flux-weighted transmutation tallies. Normalization is by the
         // true total source-particle count, accumulated chunk by chunk during
-        // transport (issue #128), so no particle count is needed up front.
+        // transport, so no particle count is needed up front.
         let dep_tallies = {
             let tallies = TransmutationTallies::new(
                 &transmutable_cells,
@@ -559,7 +558,7 @@ impl Model {
         }
 
         // Per-material spectrum weights folding each fissionable nuclide's
-        // tabulated fission yields against the flux it saw (issue #379).
+        // tabulated fission yields against the flux it saw.
         // Re-extracted per step in coupled mode, once up front in independent
         // mode; empty for every material with nothing fissionable in it.
         let mut fy_weights: HashMap<u32, FissionYieldWeights> = HashMap::new();
@@ -598,7 +597,7 @@ impl Model {
                         .expect("transmutable cell must have a material");
                     let material = self.geometry.materials()[slot as usize].as_ref();
                     let volume = material.volume.unwrap_or(1.0);
-                    let Some(spectrum) = dep_tallies.flux_spectrum(mat_id) else {
+                    let Some(spectrum) = dep_tallies.flux_spectrum(mat_id, volume) else {
                         continue;
                     };
                     let statistics =
@@ -635,7 +634,7 @@ impl Model {
 
                 // The fission-yield fold is a normalized shape, so the single
                 // transport of independent mode fixes it for every step just as
-                // it fixes the micro rates (issue #379).
+                // it fixes the micro rates.
                 let mat_weights = dep_tallies.get_fission_yield_weights(mat_id);
                 if !mat_weights.is_empty() {
                     fy_weights.insert(mat_id, mat_weights);
@@ -758,7 +757,7 @@ impl Model {
 
             // Isomeric-branching overlay: every list on a material nuclide is
             // scored at the collision energies as `yani_transmute::
-            // branching_rule` defines it (issue #218), and the (n,n') partials
+            // branching_rule` defines it, and the (n,n') partials
             // of every other chain parent are folded from the tally's
             // union-grid flux moments (covering products that build up during
             // the step too), their rates injected. When no branching
@@ -860,7 +859,7 @@ impl Model {
                 full_compositions.insert(mat_id, transmuted_material.clone());
 
                 // The rates this step was actually solved with, split over the
-                // edges they drove (issue #490). Same two inputs the stepper
+                // edges they drove. Same two inputs the stepper
                 // took, so the numbers are the burnup matrix's own, and both
                 // methods report the same thing: only where `rates` came from
                 // differs, and the chain is whichever this material was folded
@@ -894,16 +893,16 @@ impl Model {
                     // transport-scope data. This covers nuclides transmutation
                     // has just created, and equally the preloaded products that
                     // hold only activation-scope cross sections and have now
-                    // grown a density (issue #401); `ensure_nuclide_loaded` is
+                    // grown a density; `ensure_nuclide_loaded` is
                     // the one place that decides which of those need reading.
                     let new_nuclides_loaded = {
                         // Promote to transport scope only what can reach the
-                        // transport answer (issue #412). The test used to be
-                        // "does this nuclide have a density?", and after one
-                        // step of fission 1269 of them do; reading full
-                        // transport data for all of them takes 21 GB, most of
-                        // it for 895 decay-only sinks that the product loader
-                        // had deliberately declined to read at all.
+                        // transport answer. "Does this nuclide have a
+                        // density?" is too broad: after one step of fission
+                        // 1269 of them do, and reading full transport data for
+                        // all of them takes 21 GB, most of it for 895
+                        // decay-only sinks that the product loader had
+                        // deliberately declined to read at all.
                         //
                         // Density alone is the wrong test in the other
                         // direction: Xe135 at 3e-11 atoms/b-cm still holds
@@ -1113,8 +1112,8 @@ mod tests {
         material
     }
 
-    /// The ranking behind which nuclides earn transport-scope data (issue #412)
-    /// is `density x peak cross section`, so the peak has to be in barns. The
+    /// The ranking behind which nuclides earn transport-scope data is
+    /// `density x peak cross section`, so the peak has to be in barns. The
     /// heating and damage-energy tables sit in the same reaction map in
     /// eV-barns and run millions of times higher; ranked on those, every
     /// nuclide's order would be set by its Q values.
@@ -1207,6 +1206,7 @@ mod tests {
                         branching: 1.0,
                         q_value: None,
                         branching_uncertainty: None,
+                        evaluated_branching: None,
                     })
                     .collect(),
                 decays: vec![],
@@ -1286,7 +1286,7 @@ mod tests {
 
     /// The statistical uncertainty the transmutation tally's per-history
     /// covariance predicts must match the actual spread between independent
-    /// transport runs (issue #140, item 1).
+    /// transport runs.
     ///
     /// Two quantities are checked: the total track length, which is the sum
     /// over every bin and so rests almost entirely on the cross-bin

@@ -1,4 +1,4 @@
-//! Regression test for #93: large GPU runs on a heavy-scattering nuclide must
+//! Regression test: large GPU runs on a heavy-scattering nuclide must
 //! not lose the device.
 //!
 //! The GPU path splits `total_particles` into equal per-dispatch batches. The

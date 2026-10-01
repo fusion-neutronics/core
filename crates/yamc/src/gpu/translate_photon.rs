@@ -48,7 +48,7 @@ use yamc_materials::material::Material;
 /// kernel changes (slice 2) read this; current kernel ignores it.
 #[derive(Debug, Clone)]
 pub struct GpuPhotonTransportInputs {
-    /// `Model::photon_cutoff_energy` in eV (issue #286). Carried here so every
+    /// `Model::photon_cutoff_energy` in eV. Carried here so every
     /// photon launch (primary, coupled sub-pass, mixed, D1S) applies the model's
     /// cutoff instead of the kernel's old hardcoded 1 keV default.
     pub photon_cutoff_energy: f64,
@@ -77,7 +77,7 @@ pub struct GpuPhotonTransportInputs {
     pub rayleigh_x2: Vec<f64>,
     pub rayleigh_cdf: Vec<f64>,
     pub rayleigh_n_points: Vec<u32>,
-    /// Per-collision element-selection inputs (task #72): the per-(element,
+    /// Per-collision element-selection inputs: the per-(element,
     /// energy) macroscopic-total weight table and the per-material element-slab
     /// `[offset, count]` meta. The kernel samples the interacting element by
     /// macro-XS contribution (mirroring CPU `Material::sample_element`), then
@@ -161,7 +161,7 @@ pub fn translate_photon_for_gpu(
     // so the void row is never sampled.)
     let n_void = usize::from(has_void);
     let photon_xs = build_photon_xs(&geometry.materials, n_void);
-    // Total element-slab count (task #72): every per-element pack (rayleigh,
+    // Total element-slab count: every per-element pack (rayleigh,
     // Doppler, IFF, AR, pair) is keyed by this slab count, and the TTB-off
     // empty packs must match so the kernel's `elem_slab` indexing is in bounds.
     // Void slots contribute zero elements, so this equals the sum of real
@@ -173,7 +173,7 @@ pub fn translate_photon_for_gpu(
     let atomic_relaxation =
         build_atomic_relaxation(&geometry.materials, &photon_xs.log_energy_grid, n_void);
     let pair = build_pair_production(&geometry.materials, n_void);
-    // Per-collision element-selection inputs (task #72). The macro-total weight
+    // Per-collision element-selection inputs. The macro-total weight
     // table and per-material element counts come from `build_photon_xs`; void
     // slots have count 0 (the kernel never reaches selection for them).
     let element_select = PhotonElementSelectInputs::from_flat(

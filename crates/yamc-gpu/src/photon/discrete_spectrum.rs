@@ -7,10 +7,9 @@
 //! transport must pick line `i` with probability
 //! `intensity_i / Sum_j intensity_j` and return `energy_i`.
 //!
-//! This slice (phase 3a of the coupled neutron->photon / D1S work) proves
-//! the **line-selection walk** in isolation, the photon-production analogue
-//! of the neutron [`crate::neutron::nuclide_select`] walk. Given a
-//! spectrum's per-line energies + intensities and a PCG seed, it picks a
+//! This module proves the **line-selection walk** in isolation, the
+//! photon-production analogue of the neutron [`crate::neutron::nuclide_select`]
+//! walk. Given a spectrum's per-line energies + intensities and a PCG seed, it picks a
 //! line. The walk is pure integer-PCG + f64 add/mul (no FMA, no
 //! transcendentals), so the GPU kernel and the
 //! [`sample_discrete_photon_energy_cpu`] 32-bit-PCG twin agree

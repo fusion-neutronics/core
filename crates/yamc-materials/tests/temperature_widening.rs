@@ -1,5 +1,5 @@
-//! Issue #481: a material could only ever be queried at the one temperature its
-//! nuclear data was loaded at.
+//! A material must be queryable at any temperature its nuclear data offers,
+//! not only the one its data was loaded at.
 //!
 //! `read_nuclear_data` narrows the load scope to `self.temperature`, so a
 //! material built at 294 K holds only 294 K reactions even though its Arrow
@@ -117,9 +117,8 @@ fn the_k_suffix_is_the_same_temperature() {
 
 /// Querying another temperature must not change what the material itself reports.
 ///
-/// This is the #481 coherence regression, and it could not be written before the
-/// widening landed: the 900 K query panicked long before it could poison
-/// anything.
+/// A coherence regression: the 900 K query must neither panic nor leave the
+/// material's caches holding 900 K data under its own label.
 #[test]
 fn a_query_at_another_temperature_does_not_poison_the_material() {
     let Some(cache) = h1_cache() else {

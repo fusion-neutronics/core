@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GPU histories must be partitioned across MPI ranks, not duplicated (#303).
+"""GPU histories must be partitioned across MPI ranks, not duplicated.
 
 Run under ``mpirun``; prints ``RANKS=<n> histories=<n> flux=<x>`` from rank 0 plus
 ``OK``. The wrapper compares against a serial GPU run: the pooled flux must be

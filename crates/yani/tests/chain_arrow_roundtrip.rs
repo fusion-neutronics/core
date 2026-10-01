@@ -122,7 +122,7 @@ fn arrow_writer_roundtrip() {
         }
 
         // Exactly, the kind and the law included: a continuum that came back
-        // as lines would be read in the wrong units (issue #163).
+        // as lines would be read in the wrong units.
         assert_eq!(a.sources, b.sources, "{name}: sources");
 
         match (&a.fission_yields, &b.fission_yields) {

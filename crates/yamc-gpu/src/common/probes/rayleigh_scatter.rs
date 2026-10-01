@@ -58,9 +58,9 @@ pub fn rayleigh_propose(
     let x2_max = kappa * kappa;
     // f_max = F(x²_max): interpolate the integrated form factor at the
     // kinematic limit, matching the CPU `coherent_int_form_factor.evaluate
-    // (x²_max)`. (#421: previously used the full-table integral
-    // `rayleigh_cdf[last]`, which sampled x² beyond x²_max -> mu clamped to
-    // -1 -> excess backscatter.) Edge-clamp + binary-search lin-interp; when
+    // (x²_max)`. Using the full-table integral `rayleigh_cdf[last]` instead
+    // would sample x² beyond x²_max -> mu clamped to -1 -> excess
+    // backscatter. Edge-clamp + binary-search lin-interp; when
     // x²_max exceeds the table the clamp recovers the old full integral.
     let x2_first = rayleigh_x2[ff_off as usize];
     let x2_last = rayleigh_x2[(ff_off + n_ff - 1u32) as usize];

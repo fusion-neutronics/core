@@ -10,8 +10,8 @@
 //! Status: all three run unconditionally since cubecl 0.11.0-pre.3.
 //!
 //! On cubecl-spirv 0.10 + Vulkan/RADV the two larger tests failed and
-//! were `#[ignore]`d, against an upstream bug rather than a yamc one
-//! (<https://github.com/tracel-ai/cubecl/issues/1336>): above ~544
+//! were `#[ignore]`d, against an upstream cubecl-spirv bug rather than a
+//! yamc one: above ~544
 //! bytes of total thread-private state, cubecl-spirv silently demoted
 //! some `Function`-storage variables to a location that raced across
 //! threads, regardless of whether the cascade stack was held as
@@ -302,7 +302,7 @@ fn launch(
         &inputs.element_select.mat_elem_meta,
         pack,
         5_000,
-        1000.0, // photon_cutoff_energy (default, issue #286)
+        1000.0, // photon_cutoff_energy (default)
         yamc_gpu::common::tallies::TallyVarianceMode::PerStep,
     )
 }

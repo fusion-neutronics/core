@@ -21,8 +21,7 @@ pub struct Reaction {
     /// temperature, offset by `threshold_idx`, rather than a copy of it. A copy
     /// per reaction was the single largest allocation in a load: ENDF/B-VIII.1
     /// Fe56 carries ~42k grid points and 90 reactions per temperature, so the
-    /// duplicated grid came to 38 MiB against 2.3 MiB of actual grids
-    /// (issue #476).
+    /// duplicated grid came to 38 MiB against 2.3 MiB of actual grids.
     #[serde(skip, default)]
     pub energy: F64Buffer, // Reaction-specific energy grid
     /// ENDF/MT reaction identifier.
@@ -52,7 +51,7 @@ impl Reaction {
     /// Indexes `cross_section` with a position found in `energy`, which is sound
     /// because the two are the same length: the reader establishes that when it
     /// attaches the grid, so a file where they disagree fails to load rather
-    /// than panicking here on the first lookup (issue #507).
+    /// than panicking here on the first lookup.
     #[inline]
     pub fn cross_section_at(&self, energy: f64) -> Option<f64> {
         if self.energy.is_empty() || self.cross_section.is_empty() {
@@ -151,14 +150,14 @@ mod tests {
         assert_eq!(rxn.cross_section_at(0.5), Some(0.0));
     }
 
-    /// Issue #507: a NaN query used to reach `partial_cmp(..).unwrap()`.
+    /// A NaN query must not reach `partial_cmp(..).unwrap()`.
     #[test]
     fn a_nan_query_has_no_cross_section() {
         let rxn = reaction(vec![1.0, 2.0, 3.0], vec![10.0, 20.0, 30.0]);
         assert_eq!(rxn.cross_section_at(f64::NAN), None);
     }
 
-    /// Issue #507: a NaN on the grid itself is a corrupt file, not a panic.
+    /// A NaN on the grid itself is a corrupt file, not a panic.
     #[test]
     fn a_nan_on_the_grid_does_not_panic() {
         let rxn = reaction(vec![1.0, f64::NAN, 3.0], vec![10.0, 20.0, 30.0]);
@@ -166,7 +165,7 @@ mod tests {
         rxn.cross_section_at(2.5);
     }
 
-    /// Issue #507: an unsorted grid can put the insertion point at 0, where
+    /// An unsorted grid can put the insertion point at 0, where
     /// `idx - 1` would wrap on a `usize`.
     #[test]
     fn an_unsorted_grid_does_not_underflow() {

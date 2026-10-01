@@ -19,7 +19,7 @@ use yamc_gpu::neutron::transport::{
 /// Run the twin over `inputs`, scoring into `pack`.
 ///
 /// `max_steps` bounds the per-history step count; `capture_trace` turns on the
-/// per-collision record the issue-#40 matched-stream harness diffs.
+/// per-collision record the matched-stream harness diffs.
 pub fn run_twin(
     inputs: &yamc::gpu::GpuTransportInputs,
     pack: &TalliesPack,
@@ -33,6 +33,7 @@ pub fn run_twin(
         &inputs.energies,
         &inputs.positions,
         &inputs.directions,
+        &inputs.weights,
         &inputs.cell_aabbs,
         &inputs.cell_to_material,
         &inputs.surface_types,

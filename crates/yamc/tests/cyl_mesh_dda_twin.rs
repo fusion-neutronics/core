@@ -1,5 +1,5 @@
 //! Local (GPU-free) correctness gate for the cylindrical mesh voxel-walk that
-//! the GPU mesh-tally path uses (issue #279).
+//! the GPU mesh-tally path uses.
 //!
 //! `yamc_gpu::common::tallies::cyl_mesh_crossings` / `cyl_mesh_bin_at` are the
 //! plain-Rust twins of the `#[cube]` kernel's analytic (r, phi, z) DDA. They

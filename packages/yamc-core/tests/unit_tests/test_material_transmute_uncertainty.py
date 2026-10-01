@@ -364,7 +364,7 @@ def test_the_report_says_which_sources_were_on():
     assert results.get_data_uncertainty_info(iron.id or 0)["sources"] == ["cross_sections"]
 
 
-# --- flux spectrum uncertainty (issue #559) -----------------------------------
+# --- flux spectrum uncertainty ------------------------------------------------
 
 def _pulse(flux_std_dev=None):
     spectrum = yamc.NeutronSource(
@@ -457,7 +457,7 @@ def test_a_spectrum_without_an_error_is_reported_not_assumed_exact():
     assert results.get_nuclide_uncertainty(iron.id or 0, "Mn56", 1) == 0.0
 
 
-# --- derived quantities (issue #558) ------------------------------------------
+# --- derived quantities -------------------------------------------------------
 #
 # Activity and decay heat are functions of a whole inventory, so their sigma has
 # to come from evaluating the ensemble per replica. The two ways of getting a
@@ -547,7 +547,7 @@ def test_the_estimate_repr_says_what_it_is():
     assert "replicas=0" in text
 
 
-# --- the photon spectrum and the contact dose (issue #558, items 2 and 3) -----
+# --- the photon spectrum and the contact dose ---------------------------------
 #
 # The committed fixture chain carries no photon sources at all, so the spectrum
 # is empty and the contact dose is zero against it. That makes these binding
@@ -677,7 +677,7 @@ def test_asking_for_half_lives_reports_which_were_sampled():
 
 
 
-# --- flux covariance (issue #140, item 6) --------------------------------------
+# --- flux covariance ----------------------------------------------------------
 #
 # The sampling is pinned in Rust (flux_uncertainty.rs and
 # tests/flux_covariance.rs). Here: the argument, its checks, and that a
@@ -759,7 +759,7 @@ def test_correlated_bins_move_the_inventory_more_than_independent_ones():
     assert independent < 0.9 * correlated
 
 
-# --- attribution (issue #140, item 4) -------------------------------------------
+# --- attribution --------------------------------------------------------------
 #
 # The numbers are pinned in Rust (tests/uncertainty_attribution.rs, and the
 # cross-section case in tests/data_uncertainty.rs). Here: the switch and the
@@ -795,7 +795,7 @@ def test_the_breakdown_says_which_source_carries_the_variance():
     assert results.get_uncertainty_breakdown(mid, "Mn56", 0)["variance"] == 0.0
 
 
-# --- decay energy (issue #140, item 2) -----------------------------------------
+# --- decay energy -------------------------------------------------------------
 #
 # The component split and its uncertainty are pinned in Rust
 # (yani-convert/tests/round_trip.rs, yani-decay, and

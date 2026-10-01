@@ -123,7 +123,7 @@ impl PyMaterial {
     /// natively has and `volume` is only ever the multiplier that makes it
     /// extensive (`atoms = density * BARN_PER_CM_SQ * volume`). Every one of
     /// them is therefore linear in this factor, which is what lets one helper
-    /// serve all three (issue #567).
+    /// serve all three.
     ///
     /// * `None` (the default) asks for the total, so the factor is the volume
     ///   and the error when it is unset is the same one as before.
@@ -1380,8 +1380,7 @@ impl PyMaterial {
 
         // Everything the solve needs, owned and free of the GIL, before it is
         // released. `sched` is a `PyRef` and must go first; the chain is three
-        // `Arc`s, and the uncertainty request is a plain struct (issue #576,
-        // finding 7).
+        // `Arc`s, and the uncertainty request is a plain struct.
         //
         // `Model.transmute` has released the GIL for as long as it has existed
         // and this was the outlier: one `Material.transmute` froze the whole

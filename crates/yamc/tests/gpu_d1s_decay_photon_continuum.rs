@@ -1,14 +1,13 @@
-//! D1S decay photons drawn from a continuum on the GPU (issue #163).
+//! D1S decay photons drawn from a continuum on the GPU.
 //!
 //! The Fe56 sphere of `gpu_d1s_decay_photon.rs`, with Mn56's photon lines
 //! swapped for two continua: one linear-linear and one histogram, on grids
 //! chosen so their shapes put different shares in each energy bin. The CPU
 //! draws them with `sample_continuum_energy`; the GPU kernel must draw the
-//! same spectrum, which before issue #163 it could not (the dispatch refused
-//! every continuum channel). A photon flux tally binned in energy by parent
-//! compares the two per bin, so a kernel that dropped a continuum, read its
-//! points as lines or inverted its integral wrongly moves photons between
-//! bins and fails the band.
+//! same spectrum. A photon flux tally binned in energy by parent compares the
+//! two per bin, so a kernel that dropped a continuum, read its points as lines
+//! or inverted its integral wrongly moves photons between bins and fails the
+//! band.
 
 #![cfg(all(feature = "gpu", not(target_os = "macos")))]
 

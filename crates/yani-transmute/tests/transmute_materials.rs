@@ -1,4 +1,4 @@
-//! Several materials transmuted in one call (issue #146).
+//! Several materials transmuted in one call.
 //!
 //! The plural entry point must be a faster way to get the answers the
 //! single-material one gives, never different answers. So the main check is

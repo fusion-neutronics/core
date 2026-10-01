@@ -216,7 +216,7 @@ def test_transmute_does_not_require_the_transmutable_flag():
         assert dict(a.nuclides) == dict(b.nuclides), f"step {step} differs"
 
 
-# --- per-edge reaction rates (issue #505) ------------------------------------
+# --- per-edge reaction rates --------------------------------------------------
 
 def test_transmute_returns_results_carrying_per_edge_rates():
     """``transmute()`` hands back the object whose methods it advertises.
@@ -282,7 +282,7 @@ def test_step_materials_pairs_with_the_rate_index():
     )
 
 
-# --- energy-resolved reaction rates (issue #27) -------------------------------
+# --- energy-resolved reaction rates -------------------------------------------
 
 def test_the_rate_spectrum_sums_to_the_collapsed_rate():
     """The breakdown must decompose the rate the solve used, not resemble it.

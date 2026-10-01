@@ -1,9 +1,9 @@
-//! GPU rectangular mesh-tally support (issue #234), on-hardware parity check.
+//! GPU rectangular mesh-tally support, on-hardware parity check.
 //!
 //! A `Tally(mesh=RegularRectangularMesh, scores=[flux])` carries a MeshFilter
 //! and NO CellFilter: it voxel-bins by spatial position. The GPU path runs the
 //! Amanatides-Woo voxel walk in the kernel (per-source direct-to-`src_acc`
-//! variance, issue #234) and must reproduce the CPU mesh tally. This test runs
+//! variance) and must reproduce the CPU mesh tally. This test runs
 //! the SAME single-nuclide sphere model on the CPU (`simulate_transport`) and
 //! the GPU (`run_on_gpu`) and compares the per-voxel flux mean and std_dev.
 //!

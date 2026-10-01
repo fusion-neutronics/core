@@ -12,7 +12,7 @@ use super::delaunay3d::{self, Delaunay3D, Tet, INFINITE};
 use super::dethash::{HashMap, HashSet};
 use super::predicates3d::{in_sphere, orient_3d, orient_3d_sos};
 
-// ── Recovery instrumentation (issue #37) ──
+// ── Recovery instrumentation ──
 // Counts how often the O(#tets) crossing-scan FALLBACKS actually fire during
 // segment recovery (the primary path is `finddirection`, O(degree)). Reported
 // under YAMM_CARVE_DBG; the counter increments are unconditional but negligible.
@@ -32,7 +32,7 @@ fn is_hull_tet(t: &Tet) -> bool {
     t.verts.contains(&INFINITE)
 }
 
-// ── Per-flip volume audit (issue #37, YAMM_FLIPVOL) ──
+// ── Per-flip volume audit (YAMM_FLIPVOL) ──
 // Every flip replaces a set of tets with another set covering the SAME region,
 // so the summed FINITE tet volume must be unchanged. A nonzero Δ identifies the
 // primitive (and whether hull tets were involved) that leaks cover - the
@@ -96,7 +96,7 @@ fn flipvol_of_candidates(tets: &Delaunay3D, cands: &[[usize; 4]]) -> f64 {
     s
 }
 
-/// TRANSACTIONAL VOLUME GUARD (issue #37): a flip replaces a set of tets with
+/// TRANSACTIONAL VOLUME GUARD: a flip replaces a set of tets with
 /// another set that must tile the SAME region, so the summed finite volume is
 /// invariant. The orientation/convexity predicates in the primitives are
 /// necessary but NOT sufficient on reflex / near-degenerate configurations -
@@ -619,8 +619,8 @@ const GRAZE_T_BAND: f64 = 1e-2;
 
 /// First crossing of segment (a, b) PAST the endpoint-grazing band: the
 /// minimum-parameter face crossing with `t ∈ (GRAZE_T_BAND, 1−GRAZE_T_BAND)`,
-/// endpoint-incident tets included. The curved-wall long-chord class (issue
-/// #57) enters the mesh at a shallow angle, so its FIRST crossing grazes an
+/// endpoint-incident tets included. The curved-wall long-chord class
+/// enters the mesh at a shallow angle, so its FIRST crossing grazes an
 /// endpoint and gets rejected - but the chord crosses many more faces, and
 /// splitting at the first non-grazing one is exactly as conformal and
 /// productive (it removes that crossing). O(#tets); only runs after the
@@ -633,10 +633,10 @@ fn first_segment_crossing_point_past_graze(
     first_segment_crossing_point_impl(tets, a, b, false, GRAZE_T_BAND)
 }
 
-/// NEAR-COPLANAR BLOCKING EDGE (issue #57 layer 4, the irreducible class):
+/// NEAR-COPLANAR BLOCKING EDGE (layer 4, the irreducible class):
 /// the segment lies within fp dust of a mesh face's plane and crosses that
 /// face IN-PLANE - so the elementary obstruction is a mesh EDGE (u, v)
-/// crossing the open segment at near-zero separation, exactly the #31
+/// crossing the open segment at near-zero separation, exactly the
 /// coplanar `AcrossEdge` with `orient_3d(a,b,u,v) ≈ 1e-16` instead of an
 /// exact zero. The march cannot see it (no transversal crossing exists) and
 /// every flip is rejected by the volume guards (near-zero children).
@@ -658,15 +658,16 @@ fn first_segment_crossing_point_past_graze(
 /// reference-point / voe machinery), and inter-segment distance within the
 /// codebase's established dust standard (`dist² ≤ |ab|²·1e-24`, the
 /// vertex-on-edge tolerance). O(#tets); failure-path only.
-/// Mesh edge passing exactly THROUGH a segment endpoint (issue #57 layer 4b):
+/// Mesh edge passing exactly THROUGH a segment endpoint (layer 4b):
 /// endpoint `e ∈ {a, b}` lies ON the open edge (u, v) within the codebase's
 /// dust standard (`dist² ≤ |uv|²·1e-24`, the vertex-on-edge tolerance), with
 /// the projection strictly interior. This is exactly the voe class - but the
 /// march never reports it here (the surrounding configuration is the
 /// near-tangent plane where `finddirection` dead-ends), so it needs a direct
 /// scan. The caller resolves it topologically via `split_edge_at_vertex`
-/// (no Steiner point, exactly the #55/#59 machinery - including the
-/// sliver-cluster surgery for rings already containing the vertex).
+/// (no Steiner point, the same machinery as the vertex-on-edge class,
+/// including the sliver-cluster surgery for rings already containing the
+/// vertex).
 /// Protected (surface) edges are skipped. O(#tets); failure-path only.
 fn edge_through_endpoint(
     tets: &Delaunay3D,
@@ -789,7 +790,7 @@ fn nearest_inplane_edge_crossing(
 }
 
 /// TetGen-style REFERENCE-POINT split position for a segment with no usable
-/// face crossing (issue #57's near-tangent class: the blocking face is almost
+/// face crossing (the near-tangent class: the blocking face is almost
 /// parallel to the segment, so the plane-crossing parameter is ill-defined
 /// or outside the segment). The obstruction is then governed by the mesh
 /// vertex closest to the OPEN segment: split at that vertex's projection.
@@ -1904,8 +1905,8 @@ fn ring_apex_cycle(tets: &Delaunay3D, p: usize, q: usize, ring: &[usize]) -> Opt
     // construction; rejecting the ring here is what keeps the corruption away
     // from a predicate that cannot sign it.
     //
-    // Ported from fusion-energy/cad-to-dagmc-mesher#158 (its issue #157), where
-    // this aborted a two-solid assembly sharing a curved interface.
+    // Ported from the upstream cad-to-dagmc-mesher, where this aborted a
+    // two-solid assembly sharing a curved interface.
     for k in 0..n {
         if w[k] != INFINITE && w[..k].contains(&w[k]) {
             return None; // pinched link polygon: not a clean cyclic chain
@@ -2553,7 +2554,7 @@ fn recover_face_by_edge_flips(tets: &mut Delaunay3D, a: usize, b: usize, c: usiz
         }
 
         // Collect every interior edge that pierces the interior of (a, b, c).
-        // LOCALIZED (issue #30 perf): a piercing edge belongs to a tet whose
+        // LOCALIZED (for performance): a piercing edge belongs to a tet whose
         // closure intersects the closed triangle, and that set (the triangle
         // "pipe") is face-connected and reaches the triangle's rim - so a BFS
         // from the vertex stars of {a, b, c}, admitting only tets whose AABB
@@ -3027,7 +3028,7 @@ pub fn recover_edge_by_flips(tets: &mut Delaunay3D, a: usize, b: usize) -> bool 
 /// elements** (`psegs`/`pfaces`, the refined surface's segments/faces): no flip
 /// is allowed to destroy another boundary segment or face while recovering
 /// `(a, b)`. Without this guard, recovering one segment freely flips away a
-/// neighbouring already-recovered segment (issue #37: the dominant cause of the
+/// neighbouring already-recovered segment (the dominant cause of the
 /// residual - a recovered edge destroyed by the next segment's recovery, never
 /// re-recovered). A segment whose only obstruction IS a protected boundary
 /// element correctly falls through to Steiner refinement instead of clobbering
@@ -3205,7 +3206,7 @@ fn recover_edge_by_flips_budgeted(
                 // Neither march found a flippable obstruction. Fall back to the
                 // legacy direct-creation heuristics (2-3 / 3-2 near the edge) -
                 // passing `protect` so this arm cannot destroy a recovered
-                // neighbour either (the same #37 guard as the arms above).
+                // neighbour either (the same guard as the arms above).
                 if try_create_edge_by_flip(tets, a, b, &protect) {
                     return true;
                 }
@@ -3236,7 +3237,7 @@ fn recover_edge_by_flips_budgeted(
 /// PROTECTED: `protect` carries the already-recovered boundary segments/faces;
 /// neither the 2-3 nor the 3-2 flip below may destroy one (the same guard the
 /// rest of segment recovery applies). Without it, this fallback arm re-opens the
-/// #37 neighbour-clobber that the rest of the path closes. Pass an all-empty
+/// neighbour-clobber that the rest of the path closes. Pass an all-empty
 /// `ProtectedBoundary` to recover the historical (unprotected) behaviour.
 fn try_create_edge_by_flip(
     tets: &mut Delaunay3D,
@@ -3829,8 +3830,8 @@ fn delaunize_cavity(
 /// face-connected to the stars through such tets, so the BFS visits a superset
 /// of them in O(local). Falls back to the full tet range when the index is
 /// inactive or the local region exceeds the sanity cap (correctness preserved;
-/// issue #47 - the per-call full scan made legacy `recover_faces` grind for
-/// ~40 min on a 306k-face boundary).
+/// a per-call full scan makes legacy `recover_faces` grind for ~40 min on a
+/// 306k-face boundary).
 fn collect_tri_local_candidates(tets: &Delaunay3D, a: usize, b: usize, c: usize) -> Vec<usize> {
     let pa = tets.vertices[a];
     let pb = tets.vertices[b];
@@ -3896,7 +3897,7 @@ fn collect_tri_local_candidates(tets: &Delaunay3D, a: usize, b: usize, c: usize)
 /// cavity enlargement (TetGen-style delaunizecavity).
 ///
 /// 1. Find the cavity: the tets the open triangle [a,b,c] passes through -
-///    edge-piercing tets, plus (for an UNOBSTRUCTED missing facet, issue #37)
+///    edge-piercing tets, plus (for an UNOBSTRUCTED missing facet)
 ///    the edge-wedge / vertex-cone tets of the triangle "pipe".
 /// 2. Separate surrounding vertices into above/below the face plane
 /// 3. Build a local Delaunay on each side
@@ -3944,7 +3945,7 @@ fn recover_face_by_cavity(
     // Include tets incident to face vertices (they may share a crossing edge
     // like the ring of tets around an edge that pierces the face).
     // Only skip tets that already contain face [a,b,c] as a tet face.
-    // O(local) candidate collection (issue #47): a crossing tet's AABB overlaps
+    // O(local) candidate collection: a crossing tet's AABB overlaps
     // the triangle AABB and the crossing set is face-connected to the vertex
     // stars, so the star-BFS superset suffices; full-scan fallback inside.
     let mut cavity_set: HashSet<usize> = HashSet::default();
@@ -4003,7 +4004,7 @@ fn recover_face_by_cavity(
         }
     }
 
-    // Triangle-"pipe" seed (issue #37, the UNOBSTRUCTED missing facet): the open
+    // Triangle-"pipe" seed (the UNOBSTRUCTED missing facet): the open
     // triangle's interior also passes through tets that touch it only at its
     // boundary - through the WEDGE of tets at each target edge and the CONE of
     // tets at each target vertex. Collect the tets whose wedge/cone strictly
@@ -4837,7 +4838,7 @@ pub fn lawson_restore(
             // Locate the finite tet T that contains new_vertex AND has `linkface`
             // as the face opposite new_vertex (i.e. T = {new_vertex} ∪ linkface).
             // O(degree) via the vertex index (was a full O(#tets) scan per popped
-            // link face - the dominant recovery cost on large meshes, issue #37).
+            // link face - the dominant recovery cost on large meshes).
             // The match is unique (a face has one tet on new_vertex's side), so no
             // ordering is needed and the index slice is iterated alloc-free.
             let t = if tets.index_active() {
@@ -5391,7 +5392,7 @@ pub fn recover_segments_with_steiner(
     // The budget must scale with the INITIALLY MISSING count, not the total
     // segment count: NestedCylinder has 5112 segments of which 1367 are
     // missing - n_seg0/8 = 639 splits could never cover the work even with
-    // every split productive (issue #47 cluster B). O(missing × degree) to
+    // every split productive. O(missing × degree) to
     // count (the incidence index is active here).
     let n_missing0 = queue
         .iter()
@@ -5423,7 +5424,7 @@ pub fn recover_segments_with_steiner(
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(16);
-    // ── WORK BOUND (issue #136) ──
+    // ── WORK BOUND ──
     // The two dominant costs of this pass are both O(#tets) PER OPERATION.
     // Measured on AnnularSector (656 splits, 1.4s, YAMM_SEG_PROF):
     //
@@ -5502,13 +5503,13 @@ pub fn recover_segments_with_steiner(
     let mut n_ec_ins_ok = 0usize;
     let mut n_rp_found = 0usize;
     let mut n_rp_ins_ok = 0usize;
-    // Coplanar-region recovery (issue #31): kill switch + failure memo (verts
+    // Coplanar-region recovery: kill switch + failure memo (verts
     // of regions whose analysis bailed, so later segments of the same broken
     // region skip the region BFS).
     let no_copl = std::env::var("YAMM_NO_COPL_REGION").is_ok();
     let mut copl_failed: HashSet<usize> = HashSet::default();
     let mut n_copl_ok = 0usize;
-    // ── Volume-invariant probe (issue #37, YAMM_VOLCHECK): every operation in
+    // ── Volume-invariant probe (YAMM_VOLCHECK): every operation in
     // this pass must preserve the total finite tet volume (the mesh partitions
     // the hull). A nonzero Δ after an op pinpoints an overlapping/gapping
     // commit. Diagnostic only: O(#tets) per probe.
@@ -5550,7 +5551,7 @@ pub fn recover_segments_with_steiner(
         };
     }
 
-    // ── Per-phase timers (issue #37, gated by YAMM_SEG_PROF) ──
+    // ── Per-phase timers (gated by YAMM_SEG_PROF) ──
     // Identified `lawson_restore` as ~71% of recovery (since converted to
     // O(degree)); now the lens for the next per-split costs (insert, protected).
     let prof = std::env::var("YAMM_SEG_PROF").is_ok();
@@ -5609,7 +5610,7 @@ pub fn recover_segments_with_steiner(
 
     // Protected boundary sets (all refined surface segments/faces). Threaded into
     // every flip-based recovery so recovering one segment cannot destroy an
-    // already-recovered neighbour (issue #37). Rebuilt only when `cur_faces`
+    // already-recovered neighbour. Rebuilt only when `cur_faces`
     // changes (a Steiner / AcrossVert split) - O(#faces) per split, not per call.
     let (mut psegs, mut pfaces, mut pinc) = protected_sets_from_faces(cur_faces);
 
@@ -5635,7 +5636,7 @@ pub fn recover_segments_with_steiner(
             dump_prof!();
             return false; // not converging - clean fallback (gate-validated)
         }
-        // DIVERGENCE bail (issue #57): a converging recovery's queue only
+        // DIVERGENCE bail: a converging recovery's queue only
         // shrinks (modulo transient sub-segment churn); a queue that has
         // OUTGROWN the entire initial segment count means every split breeds
         // more missing sub-segments than it closes - the measured signature
@@ -5749,7 +5750,7 @@ pub fn recover_segments_with_steiner(
             volprobe!("acrossvert", a, b);
             continue;
         }
-        // COPLANAR-REGION recovery (issue #31, the endgame): a segment in the
+        // COPLANAR-REGION recovery (the endgame): a segment in the
         // interior of a FLAT surface region whose obstruction survived all the
         // flip machinery is the in-plane pillow class - zero-volume tets
         // bridging two triangulations of the same planar region, unfixable by
@@ -5843,7 +5844,7 @@ pub fn recover_segments_with_steiner(
             // start). The obstruction is still discoverable from the OTHER
             // end: re-march b -> a. The crossing point is a point on the
             // segment either way; the vertex-on-edge resolution below is
-            // endpoint-symmetric (issues #31/#47 flat-cap class - half its
+            // endpoint-symmetric (flat-cap class - half its
             // members are only marchable from one side).
             let rev = finddirection(tets, b, a);
             if !matches!(rev, Obstruction::Boundary) {
@@ -5858,7 +5859,7 @@ pub fn recover_segments_with_steiner(
             // falls back to the legacy scan.
             _ => None,
         };
-        // VERTEX-ON-EDGE degeneracy (issues #31/#47, the flat-cap class): the
+        // VERTEX-ON-EDGE degeneracy (the flat-cap class): the
         // march reports a crossing edge but the crossing parameter is exactly
         // at a segment ENDPOINT - the endpoint vertex lies ON the open edge
         // (u, v) (a surface Steiner vertex on an in-plane cap edge; measured
@@ -5964,7 +5965,7 @@ pub fn recover_segments_with_steiner(
             );
         }
         if crossing_pt.is_none() {
-            // Every crossing grazes an endpoint - the issue-#57 class: the
+            // Every crossing grazes an endpoint - the near-tangent class: the
             // chord runs almost entirely inside one or two large tets, with
             // an endpoint nearly coplanar with the blocking face (which is
             // also why the flip arsenal rejected it: the 2-3 flip's child is
@@ -5978,7 +5979,7 @@ pub fn recover_segments_with_steiner(
             crossing_pt = cp.filter(|p| endpoint_clearance2(p, 1e-6));
         }
         if crossing_pt.is_none() {
-            // Layer 4b (issue #57): a mesh edge passes exactly THROUGH one of
+            // Layer 4b: a mesh edge passes exactly THROUGH one of
             // the segment endpoints - the voe class, but invisible to the
             // march in the near-tangent neighbourhood. Resolve topologically
             // (no Steiner point, no budget) and re-attempt the segment.
@@ -5995,7 +5996,7 @@ pub fn recover_segments_with_steiner(
                 }
             }
         }
-        // NOTE (issue #57 post-mortem): a "dust-coplanar covering face"
+        // NOTE: a "dust-coplanar covering face"
         // exemption from the no-progress cap was tried here - the theory
         // being that midpoint splits on such faces are convergent
         // conforming-Delaunay refinement. The convergence trace refuted it on
@@ -6016,8 +6017,8 @@ pub fn recover_segments_with_steiner(
             } else {
                 n_no_cross += 1;
             }
-            // Sample the first few unproductive segments (issue #47 cluster B,
-            // the hull-chord class): what does the march actually see?
+            // Sample the first few unproductive segments (the hull-chord
+            // class): what does the march actually see?
             if dbg && n_grazed + n_no_cross <= 8 {
                 let obs_ab = finddirection(tets, a, b);
                 let obs_ba = finddirection(tets, b, a);
@@ -6025,7 +6026,7 @@ pub fn recover_segments_with_steiner(
                     "    [seg DBG] UNPRODUCTIVE ({a},{b}) len={:.4} grazed={grazed} depth={depth} obs(a->b)={obs_ab:?} obs(b->a)={obs_ba:?} pa={pa:?} pb={pb:?}",
                     seg_len2.sqrt()
                 );
-                // Nearest off-segment vertices (the issue-#57 blocker probe):
+                // Nearest off-segment vertices (the near-tangent blocker probe):
                 // distance to the OPEN segment, projection within the band.
                 let mut near: Vec<(f64, usize, f64)> = Vec::new();
                 let d = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
@@ -6111,7 +6112,7 @@ pub fn recover_segments_with_steiner(
                         );
                     }
                 }
-                // Segment walk (issue #57 layer 4): sample points along the
+                // Segment walk (layer 4): sample points along the
                 // open segment and report which tet contains each (full
                 // scan, exact orientations) - ground truth for what the
                 // marching/crossing machinery should have seen.
@@ -6153,7 +6154,7 @@ pub fn recover_segments_with_steiner(
                     }
                     eprintln!("    [seg WALK] ({a},{b}): {}", chain.join(" "));
                 }
-                // Obstructing-face anatomy (issue #57 layer 4): geometry of
+                // Obstructing-face anatomy (layer 4): geometry of
                 // the blocking face and its two supports.
                 for obs in [&obs_ab, &obs_ba] {
                     let Obstruction::AcrossFace { ti, face } = obs else {
@@ -6224,8 +6225,8 @@ pub fn recover_segments_with_steiner(
         let m_opt = match crossing_pt {
             Some(p) => timed!(t_insert, tets.insert_steiner_local(p)),
             None => {
-                // No usable interior crossing at all - the near-tangent class
-                // (issue #57). Most specific first: a mesh edge crossing the
+                // No usable interior crossing at all - the near-tangent class.
+                // Most specific first: a mesh edge crossing the
                 // segment in-plane at dust distance (layer 4 - split the
                 // blocking edge at the crossing point, exactly the convergent
                 // 2-D constrained-insertion move). Then the TetGen-style
@@ -6300,7 +6301,7 @@ pub fn recover_segments_with_steiner(
             continue;
         }
         splits += 1;
-        // Convergence trace (issue #57): queue trend vs split count - a
+        // Convergence trace: queue trend vs split count - a
         // draining queue means the cascade converges and only needs budget; a
         // growing one means refinement is breeding sub-segments faster than
         // it closes them (the small-input-angle signature).
@@ -6362,8 +6363,8 @@ pub fn recover_segments_with_steiner(
         // edges of the refined surface and must be present for the facet pass to
         // close. (a, m) ends at the first crossing so it should close immediately;
         // re-queue (with incremented depth) any that still resist. Omitting the
-        // (m, w) cross-edges left a residual class of un-recovered sub-segments
-        // (issue #37) - they were never re-queued at all.
+        // (m, w) cross-edges would leave a residual class of un-recovered
+        // sub-segments that are never re-queued at all.
         for w in std::iter::once(a)
             .chain(std::iter::once(b))
             .chain(opp_w.iter().copied())
@@ -6413,9 +6414,9 @@ pub fn recover_segments_with_steiner(
 ///
 /// Returns the DISTINCT opposite vertices `w` of the split facets. Each split
 /// introduces a NEW cross-edge `(m, w)` - a real edge of the refined surface
-/// that must also be recovered. The caller queues those (the loop previously
-/// re-queued only the two halves `(a, m)`/`(m, b)`, leaving the `(m, w)` cross-
-/// edges silently un-recovered → a residual class of missing sub-segments, #37).
+/// that must also be recovered. The caller queues those (re-queuing only the
+/// two halves `(a, m)`/`(m, b)` would leave the `(m, w)` cross-edges silently
+/// un-recovered, a residual class of missing sub-segments).
 fn split_incident_faces_on_edge(
     cur_faces: &mut Vec<[usize; 3]>,
     a: usize,
@@ -6441,7 +6442,7 @@ fn split_incident_faces_on_edge(
                 // exactly the split halves carried by the neighbouring
                 // faces' children, so the surface stays edge-balanced.
                 // (Arises when an existing vertex resolves the split point,
-                // issue #57's on-vertex Steiner class.)
+                // the on-vertex Steiner class.)
                 continue;
             }
             out.push([a, m, w]);
@@ -6507,7 +6508,7 @@ pub fn recover_facets_with_steiner(tets: &mut Delaunay3D, cur_faces: &mut Vec<[u
         // Constrained cavity re-triangulation (TetGen delaunizecavity) for a
         // facet flips cannot close - in particular the UNOBSTRUCTED missing
         // facet (all edges present, nothing piercing its interior; the local
-        // fan straddles the plane but never closes the base - issue #37). All
+        // fan straddles the plane but never closes the base). All
         // OTHER surface facets in flight are passed as WALLS: the cavity never
         // swallows or grows across one, so they become required boundary faces
         // of the re-triangulation and are preserved. Uses existing vertices only

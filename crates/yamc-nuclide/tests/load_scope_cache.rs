@@ -1,4 +1,4 @@
-//! Issue #389: the global nuclide cache must not hand a narrow load to a caller
+//! The global nuclide cache must not hand a narrow load to a caller
 //! that needs a wide one, and must not thrash between two narrow callers.
 //!
 //! One test, deliberately. The cache is process-global and keyed by

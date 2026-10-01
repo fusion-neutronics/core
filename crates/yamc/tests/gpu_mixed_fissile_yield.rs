@@ -1,5 +1,4 @@
-//! Fission yield of the struck nuclide in a mixed fissile material
-//! (fusion-neutronics/core#93).
+//! Fission yield of the struck nuclide in a mixed fissile material.
 //!
 //! In a multi-nuclide material the kernel selects the struck nuclide and
 //! splits the reaction on that nuclide's own partials, but the number of

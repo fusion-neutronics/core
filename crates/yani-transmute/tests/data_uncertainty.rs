@@ -464,7 +464,7 @@ fn adding_a_source_never_decreases_the_uncertainty() {
     );
 }
 
-// --- flux spectrum uncertainty (issue #559) -----------------------------------
+// --- flux spectrum uncertainty -----------------------------------------------
 
 /// A spectrum given with a per-bin error moves the inventory.
 ///

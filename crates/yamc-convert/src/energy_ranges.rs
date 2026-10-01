@@ -1,11 +1,9 @@
 //! Byte ranges of each temperature's record batch within `energy.arrow`.
 //!
-//! The union energy grids are the floor under every other saving
-//! (fusion-neutronics/core#100). On U238 they are 6.33 MB, against 8.98 MB for
-//! the whole single-temperature JSON bundle the Arrow layout replaced, so no
-//! amount of slicing `reactions.arrow` helps a plotter until the grids move
-//! too. They used to be two columns of one row of `nuclide.arrow`, which is all
-//! or nothing: read the cell and you have read all six temperatures.
+//! The union energy grids are the floor under every other saving. On U238 they
+//! are 6.33 MB, against 8.98 MB for the whole single-temperature JSON bundle, so
+//! no amount of slicing `reactions.arrow` helps a plotter unless the grids can
+//! be fetched one temperature at a time too.
 //!
 //! They are their own section now, written one record batch per temperature, so
 //! each grid is already a contiguous byte range in the published object. This

@@ -9,7 +9,7 @@
 //! - [`distributions`] -- flat per-MT buffer builders (angle, eout,
 //!   correlated, Kalbach-Mann, evaporation, n-body, Maxwell, Watt, URR).
 //!   The per-law single-reaction extraction they call lives in
-//!   `yamc_physics::gpu::flat::eout_extract` (issue #111) and is
+//!   `yamc_physics::gpu::flat::eout_extract` and is
 //!   re-exported from `distributions` at its old paths.
 //! - [`extract`] -- the public `extract_*` entry points that assemble the
 //!   above into `GpuNuclideXs` / per-MT score buffers.

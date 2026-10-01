@@ -961,7 +961,7 @@ pub fn build_interactive_html(
     colors: Option<&HashMap<i32, String>>,
     source_dist_json: Option<&str>,
     presampled: Option<&PresampledGrid>,
-    // `true` when the geometry has mesh-filled cells (issue #291). The browser
+    // `true` when the geometry has mesh-filled cells. The browser
     // sampler works from `geometry_json`, whose fills carry only an identity
     // fingerprint rather than triangles, so it cannot see a fill body: it would
     // draw the bare CSG frame and hide exactly the geometry the particles see.
@@ -1219,7 +1219,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans
 // Embedded data
 const GEOMETRY_JSON = {geometry_json_literal};
 const GEOMETRY_KIND = "{geometry_kind}";
-// Mesh-filled CSG cells (issue #291): the browser sampler cannot resolve fill
+// Mesh-filled CSG cells: the browser sampler cannot resolve fill
 // bodies, so the server-rendered raster below is the only correct view and
 // re-sampling is refused rather than silently drawing the bare CSG frame.
 const HAS_MESH_FILLS = {has_mesh_fills};

@@ -1,4 +1,4 @@
-"""Tests for the mesh fidelity gate (issue #252).
+"""Tests for the mesh fidelity gate.
 
 The gate compares the assembled surface mesh against exact OCC face areas
 and solid volumes, so a topologically consistent but geometrically wrong

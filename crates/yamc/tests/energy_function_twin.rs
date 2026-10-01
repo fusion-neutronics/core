@@ -1,4 +1,4 @@
-//! Gate test for the packed energy-function descriptor (issue #271).
+//! Gate test for the packed energy-function descriptor.
 //!
 //! `energy_function=` / `dose_coefficients=` interpolate a natural cubic spline
 //! in LINEAR energy. The GPU cannot solve a spline, so the dispatch ships the

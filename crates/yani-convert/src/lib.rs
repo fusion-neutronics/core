@@ -282,6 +282,7 @@ pub fn write_decay(
     let mut target = Vec::new();
     let mut branching = Vec::new();
     let mut branching_sigmas = Vec::new();
+    let mut evaluated = Vec::new();
     for n in &chain.nuclides {
         for d in &n.decay_modes {
             nuc.push(n.name.clone());
@@ -289,6 +290,7 @@ pub fn write_decay(
             target.push(d.target.clone());
             branching.push(d.branching_ratio);
             branching_sigmas.push(d.branching_ratio_uncertainty);
+            evaluated.push(d.evaluated_branching_ratio);
         }
     }
     write_section(
@@ -300,6 +302,7 @@ pub fn write_decay(
             opt_strings(&target),
             floats(&branching),
             floats(&branching_sigmas),
+            floats(&evaluated),
         ],
     )?;
 
@@ -585,7 +588,7 @@ fn evaluated_yields_columns(chain: &Chain) -> Result<Option<Vec<ArrayRef>>, Box<
 /// writes so a consumer cannot tell which produced a directory.
 ///
 /// `data_version` identifies the published release rather than the code, and is
-/// what yamc compares a cached copy against (issue #366). It is supplied by the
+/// what yamc compares a cached copy against. It is supplied by the
 /// build: only the build knows whether a run is a new release or a resumed one.
 ///
 /// `extra` is merged into the record: what one subsection has to say about
@@ -695,7 +698,7 @@ pub struct Provenance {
     pub decay_library: String,
     /// The published release this output belongs to. Identifies the DATA, not
     /// the code: two rebuilds from one converter are different data and must
-    /// invalidate a cache (issue #366).
+    /// invalidate a cache.
     pub data_version: String,
     /// Supplied rather than read from the clock, so a caller that wants a
     /// reproducible directory can fix it.
@@ -975,7 +978,7 @@ pub fn convert_transmutation_files(
     // chain wants nothing from a neutron evaluation but its channels' Q values,
     // and holding the parsed set to get them peaked at 39 GB over TENDL's 2848
     // files, which is more than an ordinary machine has: it was killed three
-    // times on a 45 GB one (issue #53).
+    // times on a 45 GB one.
     //
     // One map per file, in parallel, merged in file order afterwards. The files
     // are independent, and merging in order leaves the result identical to a
@@ -1085,7 +1088,7 @@ pub fn convert_branching_files(
     };
     let decay = read(decay_files)?;
 
-    // Streamed, like the Q values above and for the same reason (issue #53).
+    // Streamed, like the Q values above and for the same reason.
     // The branching pass gets away with holding its neutron set today only
     // because the driver scopes the call to the parents of a reactions
     // subsection, a few hundred rather than a few thousand evaluations, which

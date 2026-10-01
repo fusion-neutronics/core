@@ -10,9 +10,8 @@
 //! [`EoutSlot::from_reaction`] also assigns the slot's `EOUT_KIND_*` code, the
 //! discriminant [`inelastic_dispatch`](super::inelastic_dispatch) branches on.
 //!
-//! Moved here verbatim from yamc-gpu's `neutron::xs::distributions` (issue
-//! #111, stream unification) so the CPU production transport, which builds
-//! without the `gpu` feature, and the GPU host-side extraction share ONE
+//! Lives here rather than in yamc-gpu so the CPU production transport, which
+//! builds without the `gpu` feature, and the GPU host-side extraction share ONE
 //! flattening implementation and therefore identical buffer contents.
 //! yamc-gpu keeps what is genuinely GPU-buffer-layout work: the
 //! `build_per_mt_*_buffers` loops that concatenate these per-slot arrays
@@ -54,7 +53,7 @@ use yamc_nuclide::secondary_correlated::{
 /// A product with more components than this keeps only the first
 /// `MAX_EVAP_COMPONENTS` (none observed in endf-b8.1).
 ///
-/// Owned here (issue #111) rather than in yamc-gpu's layout constants:
+/// Owned here rather than in yamc-gpu's layout constants:
 /// [`EvapSlot::from_evaps`] is the code that enforces the cap, and
 /// yamc-physics cannot depend on yamc-gpu. yamc-gpu re-exports it.
 pub const MAX_EVAP_COMPONENTS: usize = 4;
@@ -64,7 +63,7 @@ pub const MAX_EVAP_COMPONENTS: usize = 4;
 /// 0.5/0.5) keeps them ALL: the CPU
 /// (`ReactionProduct::sample_distribution_index`) draws one component per
 /// collision, so collapsing to `distribution[0]` biases the (n,xn)
-/// outgoing-energy spectrum (the +9% MT16 residual, issue #111). The rows
+/// outgoing-energy spectrum (the +9% MT16 residual). The rows
 /// are stored component-major in the tight `corr_*` buffers (component `c`
 /// occupies the `n_per_comp` rows at `corr_ae_offset[slot] + c *
 /// n_per_comp`); the kernel/twin draw one uniform per collision to select
@@ -73,13 +72,13 @@ pub const MAX_EVAP_COMPONENTS: usize = 4;
 /// distribution (`distribution[0]`), so behaviour is unchanged for any such
 /// exotic case. 2 covers every multi-law correlated product in endf-b8.1.
 ///
-/// Owned here (issue #111) rather than in yamc-gpu's layout constants:
+/// Owned here rather than in yamc-gpu's layout constants:
 /// [`CorrSlot::from_components`] is the code that enforces the cap, and
 /// yamc-physics cannot depend on yamc-gpu. yamc-gpu re-exports it.
 pub const MAX_CORR_COMPONENTS: usize = 4;
 
 /// Per-MT outgoing-energy distribution slice extracted from a
-/// `Reaction`. Tight variable-length layout (issue #104): the per-row
+/// `Reaction`. Tight variable-length layout: the per-row
 /// arrays carry exactly `n_energies` incident-energy rows and the
 /// `(x, p, cdf)` arrays carry exactly `sum(n_x)` outgoing points, back
 /// to back with no per-axis padding or stride
@@ -118,7 +117,7 @@ impl EoutSlot {
     /// kernel falls back to the closed-form Q-value energy formula
     /// for these slots. Public so yamc-gpu's slice-S3 photon-production
     /// extractor can append an empty continuous-tabular slot. Tight
-    /// layout (issue #104): no rows, so every per-row / per-point `Vec`
+    /// layout: no rows, so every per-row / per-point `Vec`
     /// is empty.
     pub fn empty() -> Self {
         Self {
@@ -241,7 +240,7 @@ impl EoutSlot {
     /// `EOUT_KIND_TABULATED` since the sampler is a uniform bin pick,
     /// not CDF inversion (the parallel `cdf` / `p` arrays are still
     /// grown row-for-row with `x` so all three share one `x_offset`).
-    /// Tight, full-resolution layout (issue #104): every incident
+    /// Tight, full-resolution layout: every incident
     /// energy and every outgoing bin is kept; rows are concatenated
     /// with no per-axis padding or subsampling.
     fn from_tabulated_equiprobable(energy: &[f64], energy_out: &[Vec<f64>]) -> Self {
@@ -343,7 +342,7 @@ impl EoutSlot {
         slot.n_x.reserve(n_e);
         slot.interp.reserve(n_e);
         slot.n_discrete.reserve(n_e);
-        // Tight, full-resolution layout (issue #104): keep every incident
+        // Tight, full-resolution layout: keep every incident
         // energy and every outgoing point; rows are concatenated with no
         // per-axis padding or stride-subsampling, so the
         // GPU samples the same data the CPU does. `n_discrete` carries over
@@ -415,7 +414,7 @@ impl EoutSlot {
 /// Used when `EoutSlot::from_reaction` returns
 /// `EOUT_KIND_CORRELATED` for that slot -- the eout buffers stay
 /// empty and the `corr_*` buffers carry the joint `(E_out, mu)`
-/// CDF data. Tight, variable-length layout (issue #104): the three
+/// CDF data. Tight, variable-length layout: the three
 /// nesting levels (E_in rows -> E_out x-points -> mu points) are
 /// concatenated full-resolution with no `MAX_CORR_*` stride and no
 /// subsampling, so GPU and CPU sample byte-identical data. The
@@ -435,7 +434,7 @@ pub struct CorrSlot {
     /// (F19 MT16 n,2n, two laws at 0.5/0.5): the CPU draws one component
     /// per collision (`ReactionProduct::sample_distribution_index`), so
     /// collapsing to `distribution[0]` biases the (n,xn) spectrum (the +9%
-    /// MT16 residual, issue #111). The kernel/twin draw one uniform per
+    /// MT16 residual). The kernel/twin draw one uniform per
     /// collision to pick the component when `>= 2`. Per-component rows are
     /// `n_per_comp = n_energies / n_components`; component `c` starts at
     /// row `c * n_per_comp`.
@@ -476,7 +475,7 @@ impl CorrSlot {
 
     /// Pull `CorrelatedAngleEnergy` data from a reaction's first neutron
     /// product, encode it into the tight `corr_*` buffers at full
-    /// resolution (no subsampling, issue #104). When the product carries
+    /// resolution (no subsampling). When the product carries
     /// MORE THAN ONE correlated law gated by EQUAL applicability (the
     /// only multi-law correlated case in endf-b8.1: F19 MT16 n,2n with two
     /// 0.5/0.5 laws), all components are kept component-major so the
@@ -567,7 +566,7 @@ impl CorrSlot {
 
     /// Pack one `CorrTable` (E_out CDF + per-bin angular sub-table)
     /// onto the tail of the slot's tight buffers (no `MAX_CORR_*`
-    /// stride, issue #104). Appends one per-E_in row plus its
+    /// stride). Appends one per-E_in row plus its
     /// `m_out` E_out x-points and their mu sub-tables in order.
     fn pack_corr_table(slot: &mut Self, table: &CorrTable) {
         let m_out = table.e_out.len();
@@ -652,7 +651,7 @@ impl CorrSlot {
 }
 
 /// Per-MT Kalbach-Mann slice extracted from a reaction's first
-/// neutron product. Tight variable-length layout (issue #104): the
+/// neutron product. Tight variable-length layout: the
 /// per-row arrays carry exactly `n_energies` incident-energy rows and
 /// the `(x, p, cdf, r, a)` arrays carry exactly `sum(n_x)` outgoing
 /// points, back to back with no per-axis padding or
@@ -715,7 +714,7 @@ impl KalbachSlot {
         slot.interp.reserve(n_e);
         slot.n_discrete.reserve(n_e);
         slot.n_x.reserve(n_e);
-        // Tight, full-resolution layout (issue #104): keep every incident
+        // Tight, full-resolution layout: keep every incident
         // energy and every outgoing point; rows are concatenated with no
         // per-axis padding or stride-subsampling, so the GPU
         // samples the same data the CPU does. A missing / empty `KMTable`
@@ -738,7 +737,7 @@ impl KalbachSlot {
     /// Append one `KMTable` (E_out PDF/CDF + per-bin `(r, a)`) onto the
     /// slot's tight concatenated buffers as a single incident-energy row.
     /// Pushes exactly one entry onto each per-row array and `n_x` points
-    /// onto each per-point array (issue #104).
+    /// onto each per-point array.
     fn pack_table(slot: &mut Self, table: &yamc_nuclide::secondary_kalbach::KMTable) {
         let m_in = table.e_out.len();
         if m_in == 0 {
@@ -799,7 +798,7 @@ pub struct EvapSlot {
     pub energy_grid: Vec<f64>, // length n_energies (shared incident-energy grid)
     /// Component-major `θ(E_in)`: `theta[c * n_energies + i]` is component
     /// `c`'s theta at `energy_grid[i]`. Length `n_components * n_energies`
-    /// (tight, issue #104). Each component is resampled onto the shared grid
+    /// (tight). Each component is resampled onto the shared grid
     /// (the components' native breakpoint counts differ, e.g. 10 vs 2 in Ba140
     /// MT16, so a shared grid avoids per-component grid bookkeeping).
     pub theta: Vec<f64>,
@@ -877,7 +876,7 @@ impl EvapSlot {
         // Shared incident-energy grid: union of every component's theta
         // breakpoints, sorted/deduped. The components share an E_in domain
         // (their applicability ranges coincide), so a shared grid loses no
-        // resolution. Tight, full-resolution layout (issue #104): every grid
+        // resolution. Tight, full-resolution layout: every grid
         // point is kept (no per-axis stride-subsampling), so the GPU
         // samples the same θ(E_in) the CPU does. The per-(slab,MT) CSR bases
         // (`evap_ae_offset` / `evap_theta_offset`) are built at concatenation
@@ -1105,8 +1104,8 @@ impl NbpsSlot {
 /// across different MTs needs no special-casing on the extractor.
 pub struct MaxwellSlot {
     pub n_energies: u32,
-    pub energy_grid: Vec<f64>, // length n_energies (tight, issue #104)
-    pub theta: Vec<f64>,       // length n_energies (tight, issue #104)
+    pub energy_grid: Vec<f64>, // length n_energies (tight)
+    pub theta: Vec<f64>,       // length n_energies (tight)
     pub u: f64,
 }
 
@@ -1143,7 +1142,7 @@ impl MaxwellSlot {
             return Self::empty();
         }
         let n_in = theta_x.len().min(theta_y.len());
-        // Tight, full-resolution layout (issue #104): keep every incident-energy
+        // Tight, full-resolution layout: keep every incident-energy
         // point (no per-axis stride-subsampling), so the GPU samples the
         // same θ(E_in) grid the CPU does. The per-slot CSR base is built at
         // concatenation time in `translate.rs` from the `n_energies` counts.
@@ -1167,9 +1166,9 @@ impl MaxwellSlot {
 /// grid, plus a restriction energy `u`.
 pub struct WattSlot {
     pub n_energies: u32,
-    pub energy_grid: Vec<f64>, // length n_energies (tight, issue #104)
-    pub a: Vec<f64>,           // length n_energies (tight, issue #104)
-    pub b: Vec<f64>,           // length n_energies (tight, issue #104)
+    pub energy_grid: Vec<f64>, // length n_energies (tight)
+    pub a: Vec<f64>,           // length n_energies (tight)
+    pub b: Vec<f64>,           // length n_energies (tight)
     pub u: f64,
 }
 
@@ -1215,7 +1214,7 @@ impl WattSlot {
             return Self::empty();
         }
         let n_a = a_x.len().min(a_y.len());
-        // Tight, full-resolution layout (issue #104): keep every incident-energy
+        // Tight, full-resolution layout: keep every incident-energy
         // point on `a`'s master grid (no per-axis stride-subsampling), so
         // the GPU samples the same a(E_in) / b(E_in) the CPU does. The per-slot
         // CSR base (`watt_ae_offset`) is built at concatenation time in

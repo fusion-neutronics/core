@@ -1,5 +1,4 @@
-//! Per-collision nuclide-selection inputs for the neutron transport kernel
-//! (issue #74, Stage 1).
+//! Per-collision nuclide-selection inputs for the neutron transport kernel.
 //!
 //! At a collision in a multi-nuclide material the transport must pick *which*
 //! nuclide is struck, proportional to that nuclide's macroscopic total cross
@@ -30,27 +29,26 @@
 //! When a material has exactly one nuclide (`count == 1`) the kernel and the CPU
 //! twin SKIP the selection draw entirely -- the nuclide is trivially the only
 //! one, so no extra random is consumed and the RNG stream is byte-identical to
-//! pre-Stage-1 behaviour. [`Self::single_nuclide`] builds the degenerate
-//! one-nuclide-per-material layout used by every fixture / caller that does not
-//! yet thread real per-nuclide data; with it, Stage 1 is a no-op and the kernel
-//! reproduces today's results bit-for-bit.
+//! a kernel without nuclide selection. [`Self::single_nuclide`] builds the
+//! degenerate one-nuclide-per-material layout used by every fixture / caller that
+//! does not thread real per-nuclide data; with it, selection is a no-op and the
+//! results are bit-for-bit those of a single-nuclide kernel.
 
 /// Number of per-(slab, energy) reaction-partial columns packed into
 /// [`NuclideSelectInputs::nuc_partial_xs`]: elastic / absorption / inelastic /
-/// fission, in that column order (issue #74, Stage 2b). The kernel reads them
-/// after selecting the struck nuclide to split the reaction type from THAT
-/// nuclide's own partials, mirroring CPU `Nuclide::sample_reaction_type`.
+/// fission, in that column order. The kernel reads them after selecting the
+/// struck nuclide to split the reaction type from THAT nuclide's own partials,
+/// mirroring CPU `Nuclide::sample_reaction_type`.
 pub const NUC_PARTIAL_COLS: usize = 4;
 pub const NUC_PARTIAL_ELASTIC: usize = 0;
 pub const NUC_PARTIAL_ABSORPTION: usize = 1;
 pub const NUC_PARTIAL_INELASTIC: usize = 2;
 pub const NUC_PARTIAL_FISSION: usize = 3;
 
-/// Columns of [`NuclideSelectInputs::chi_slab_meta`], the per-slab fission chi
-/// row table (fusion-neutronics/core#34 entry 1). For slab `s` the row
-/// `chi_slab_meta[s * CHI_SLAB_META_COLS ..]` holds: the first of its prompt chi
-/// rows, its fission channel count, its delayed chi row, and its element base
-/// into [`NuclideSelectInputs::fission_channel_xs`].
+/// Columns of [`NuclideSelectInputs::chi_slab_meta`], the per-slab fission chi row
+/// table. For slab `s` the row `chi_slab_meta[s * CHI_SLAB_META_COLS ..]` holds: the
+/// first of its prompt chi rows, its fission channel count, its delayed chi row, and
+/// its element base into [`NuclideSelectInputs::fission_channel_xs`].
 pub const CHI_SLAB_META_COLS: usize = 4;
 pub const CHI_SLAB_PROMPT_ROW: usize = 0;
 pub const CHI_SLAB_N_CHANNELS: usize = 1;
@@ -58,7 +56,7 @@ pub const CHI_SLAB_DELAYED_ROW: usize = 2;
 pub const CHI_SLAB_CHANNEL_XS_BASE: usize = 3;
 
 /// Columns of [`NuclideSelectInputs::nuc_fission_yield`], the per-(slab, fine
-/// energy) fission yield pair (fusion-neutronics/core#93): the struck nuclide's
+/// energy) fission yield pair: the struck nuclide's
 /// own `nu_bar(E)` and delayed fraction `beta(E)`.
 pub const NUC_YIELD_COLS: usize = 2;
 pub const NUC_YIELD_NU_BAR: usize = 0;
@@ -83,10 +81,10 @@ pub struct NuclideSelectInputs {
     /// fission. After selecting nuclide `s`, the kernel splits the reaction
     /// type four-way from these (mirroring CPU `Nuclide::sample_reaction_type`,
     /// whose scattering = elastic + inelastic). Packing the four partials into
-    /// one buffer adds a single storage-buffer binding (#74 Stage 2b).
+    /// one buffer adds a single storage-buffer binding.
     pub nuc_partial_xs: Vec<f64>,
-    /// Per-slab fission chi row table, packed `[n_slab x CHI_SLAB_META_COLS]`
-    /// (fusion-neutronics/core#34 entry 1). The `fission_eout_*` chi buffers are
+    /// Per-slab fission chi row table, packed `[n_slab x CHI_SLAB_META_COLS]`.
+    /// The `fission_eout_*` chi buffers are
     /// indexed by ROW, and this table says which rows belong to which struck
     /// nuclide: `CHI_SLAB_PROMPT_ROW` is the first of the slab's prompt rows, one
     /// per fission channel (the non-redundant MTs among 18 / 19 / 20 / 21 / 38,
@@ -107,7 +105,7 @@ pub struct NuclideSelectInputs {
     pub fission_channel_xs: Vec<f64>,
     /// Per-(slab, fine energy) fission yield, packed `[n_slab x fine_n x
     /// NUC_YIELD_COLS]` on the owning material's FINE grid like
-    /// `nuc_partial_xs` (fusion-neutronics/core#93): column `NUC_YIELD_NU_BAR`
+    /// `nuc_partial_xs`: column `NUC_YIELD_NU_BAR`
     /// is the nuclide's own `nu_bar(E)` (total neutrons per fission), column
     /// `NUC_YIELD_BETA` its delayed fraction `nu_d(E) / nu_t(E)`. After
     /// selecting the struck nuclide in a multi-nuclide material the kernel
@@ -138,7 +136,7 @@ fn two_rows_per_slab(n_slab: usize) -> Vec<u32> {
 impl NuclideSelectInputs {
     /// Degenerate single-nuclide-per-material layout: one slab row per material,
     /// `count == 1`, so the kernel / CPU twin never draws the selection random
-    /// and stays byte-identical to pre-Stage-1 behaviour. `target_mass_per_material`
+    /// and stays byte-identical to a kernel without nuclide selection. `target_mass_per_material`
     /// supplies each material's (single) AWR; the macro-total row is a single
     /// `n_grid`-wide block of zeros (never read when `count == 1`).
     pub fn single_nuclide(target_mass_per_material: &[f64], n_grid: usize) -> Self {
@@ -163,8 +161,8 @@ impl NuclideSelectInputs {
         }
     }
 
-    /// Install the per-(slab, fine energy) fission yield pairs
-    /// (fusion-neutronics/core#93), `[n_slab x fine_n x NUC_YIELD_COLS]` in the
+    /// Install the per-(slab, fine energy) fission yield pairs,
+    /// `[n_slab x fine_n x NUC_YIELD_COLS]` in the
     /// same tight CSR as `nuc_partial_xs`.
     pub fn set_fission_yield(&mut self, nuc_fission_yield: Vec<f64>) {
         assert_eq!(
@@ -176,7 +174,7 @@ impl NuclideSelectInputs {
     }
 
     /// Replace the chi row table and the per-channel fission cross sections
-    /// (fusion-neutronics/core#34 entry 1) once the caller has laid the chi rows
+    /// once the caller has laid the chi rows
     /// out per (slab, channel). `chi_slab_meta` must hold one
     /// `CHI_SLAB_META_COLS` row per slab; an empty `fission_channel_xs` is padded
     /// to one element.
@@ -278,7 +276,7 @@ impl NuclideSelectInputs {
     }
 
     /// Like [`Self::from_materials_with_partials`] but each material may ride its
-    /// OWN fine grid (issue #212): the row/partial blocks are concatenated tight
+    /// OWN fine grid: the row/partial blocks are concatenated tight
     /// without assuming a uniform `n_grid`, so material `m`'s block is
     /// `nuc_count[m] × fine_n[m]` (and `× NUC_PARTIAL_COLS` for the partials).
     /// Each material's `fine_n` is derived from its own row block

@@ -11,7 +11,7 @@ def test_tally_axis_coords_labels_known_dims():
     from yamc import _tally_axis_coords
 
     # A reaction-rate score, not flux: a per-nuclide axis folds the nuclide's
-    # cross section in, which flux has none of (issue #305).
+    # cross section in, which flux has none of.
     tally = yamc.Tally(
         scores=["(n,gamma)"],
         nuclides=["Li6", "Li7", "total"],

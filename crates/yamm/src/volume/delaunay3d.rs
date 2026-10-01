@@ -113,7 +113,7 @@ pub struct Delaunay3D {
     /// every LIVE tet (finite AND hull) that has finite vertex `v`. Lets the
     /// boundary-recovery edge/face/ring existence queries run in O(degree)
     /// instead of O(#tets) - the cost that made the conforming path too slow on
-    /// fine meshes (issue #30).
+    /// fine meshes.
     ///
     /// INACTIVE (empty) during base construction: `new()` builds via `insert()`
     /// (Bowyer-Watson), which is hot and runs *before* the index exists, so it
@@ -935,7 +935,7 @@ impl Delaunay3D {
                 return None;
             }
             let (x, y) = (others[0], others[1]);
-            // A ZERO-VOLUME ring tet (a flat-sandwich member, issue #31) is
+            // A ZERO-VOLUME ring tet (a flat-sandwich member) is
             // allowed to produce zero-volume children: flat parent → flat
             // children is exactly volume-preserving and keeps the sandwich
             // conformal as the surface refines. Only a POSITIVE parent
@@ -1069,8 +1069,8 @@ impl Delaunay3D {
     /// the open segment (a, b): every ring tet `{a, b, x, y}` is replaced by
     /// `{a, w, x, y}` and `{w, b, x, y}`. Exactly volume-preserving (w is on
     /// the segment), no new vertices. This resolves the VERTEX-ON-EDGE
-    /// degeneracy behind issue #47's flat-cap unproductive class (= #31's
-    /// coplanar family): a surface Steiner vertex sits exactly ON an in-plane
+    /// degeneracy behind the flat-cap unproductive class (the coplanar
+    /// family): a surface Steiner vertex sits exactly ON an in-plane
     /// edge of the cap triangulation, every crossing query for segments ending
     /// at that vertex degenerates (crossing parameter t == 1 within fp), and
     /// recovery churns midpoint splits forever. Splitting the edge AT the
@@ -1109,9 +1109,9 @@ impl Delaunay3D {
         // {a, b, w, x} has three collinear vertices and decomposes into the
         // two triangles {a,w,x}, {w,b,x} - no tet at all). These are DELETED;
         // their external faces re-glue to the split children (or to each
-        // other where the whole face neighbourhood is deleted). This was
-        // previously an unconditional transactional bail - the dominant
-        // `voe split REJECTED` mode of the issue-#31/#47 flat-cap class.
+        // other where the whole face neighbourhood is deleted). An
+        // unconditional transactional bail here would be the dominant
+        // `voe split REJECTED` mode of the flat-cap class.
         let mut kept: Vec<usize> = Vec::new();
         let mut deleted: Vec<usize> = Vec::new();
         for &ti in &ring {
@@ -1202,7 +1202,7 @@ impl Delaunay3D {
         let mut children: Vec<Child> = Vec::with_capacity(kept.len() * 2);
         for &ti in &kept {
             let v = self.tets[ti].verts;
-            // Flat parent → flat children allowed (issue #31 sandwich; see
+            // Flat parent → flat children allowed (flat sandwich; see
             // split_edge_on_constraint).
             let parent_flat = !v.contains(&INFINITE)
                 && orient_3d(
@@ -1458,7 +1458,7 @@ impl Delaunay3D {
 
         for &(ti, apex) in &incident {
             let v = self.tets[ti].verts;
-            // Flat parent → flat children allowed (issue #31 sandwich; see
+            // Flat parent → flat children allowed (flat sandwich; see
             // split_edge_on_constraint).
             let parent_flat = !v.contains(&INFINITE)
                 && orient_3d(
@@ -1670,9 +1670,8 @@ impl Delaunay3D {
             // for a finite, non-degenerate tet that contains the point and
             // classify there. Without this, the four face orientations are
             // all -0.0 with tol = 0, the classifier reads "on a vertex" and
-            // bails - the terminal `insert failed` mode behind issue #47
-            // cluster B (NestedCylinder & friends) after hundreds of good
-            // splits.
+            // bails - the terminal `insert failed` mode (NestedCylinder &
+            // friends) after hundreds of good splits.
             let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
             let mut seen: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
             seen.insert(ti);
@@ -1728,7 +1727,7 @@ impl Delaunay3D {
             // a finite, non-degenerate tet containing the point. O(#tets),
             // but it only runs when a walk lands in a flat sliver - rare -
             // and correctness here decides whether the whole conforming
-            // attempt survives (issue #47 cluster B).
+            // attempt survives.
             let mut found: Option<(usize, [f64; 4], f64)> = None;
             for ci in 0..self.tets.len() {
                 if !self.is_live(ci) || self.tets[ci].is_hull() {
@@ -1933,7 +1932,7 @@ impl Delaunay3D {
                         // The split refused - typically because the point
                         // divides the edge OUTSIDE the splittable interior,
                         // i.e. it coincides with an endpoint within fp (the
-                        // almost-3-zeros configuration of issue #57's
+                        // almost-3-zeros configuration of the
                         // near-tangent class). Resolve to that existing
                         // vertex, exactly like the 3-zeros arm below.
                         let (pu, pw) = (self.vertices[edge[0]], self.vertices[edge[1]]);
@@ -1959,9 +1958,9 @@ impl Delaunay3D {
                 // IS (within tolerance) that existing vertex. Inserting would
                 // create a near-duplicate vertex; instead REPORT the existing
                 // one, turning the caller's split into the vertex-on-segment
-                // resolution (issue #57: a Steiner crossing point landing on
-                // an existing vertex previously hard-failed the whole
-                // conforming attempt). The caller's follow-ups - facet split
+                // resolution (a Steiner crossing point landing on an existing
+                // vertex would otherwise hard-fail the whole conforming
+                // attempt). The caller's follow-ups - facet split
                 // at m, Lawson restoration around m, child recoveries - are
                 // all valid for an existing vertex.
                 let nz = (0..4).find(|i| !zeros.contains(i))?;
@@ -2260,8 +2259,7 @@ mod tests {
     /// default (it allocates ~150k points); run with
     /// `cargo test --release delaunay_build_scaling -- --ignored --nocapture`.
     ///
-    /// Profiling findings (kept here as the record behind issue #30's base-build
-    /// ceiling):
+    /// Profiling findings (the record behind the base-build ceiling):
     /// - Point LOCATION is O(1)/point with Morton insertion order: ~10 walk
     ///   steps/point, ZERO linear-scan fallbacks, ~1-3% of build time. A
     ///   point-location hierarchy would therefore buy nothing.
@@ -2283,7 +2281,7 @@ mod tests {
     ///   regardless of index order. A real win would need a fundamentally
     ///   different cache-aware construction (block/divide-and-conquer or BRIO
     ///   with spatial blocking to bound the active front) - a major rewrite, and
-    ///   unwarranted since fine targets don't need the conforming path. See #30.
+    ///   unwarranted since fine targets don't need the conforming path.
     #[test]
     #[ignore]
     fn delaunay_build_scaling() {

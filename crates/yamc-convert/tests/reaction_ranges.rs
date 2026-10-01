@@ -3,7 +3,7 @@
 //! file. If that fails, an activation run silently gets different cross
 //! sections from a transport run over the same data.
 //!
-//! And the claim the temperature split rests on (fusion-neutronics/core#100): a
+//! And the claim the temperature split rests on: a
 //! file rewritten one batch per (MT, temperature) loads to the same reactions
 //! as the one-batch-per-MT file it came from, and one temperature of one MT
 //! splices to a batch carrying that cross section alone.
@@ -485,9 +485,9 @@ fn a_file_too_short_to_sniff_still_errors() {
 
 /// A copy of the fixture with its `reactions.arrow` rewritten one batch per
 /// (MT, temperature) and reindexed: what `split_reactions` does to a published
-/// folder. Only the sections an activation load reads are copied, which since
-/// #100 includes `energy.arrow`: the union grids every cross section is
-/// interpolated against used to be columns of `nuclide.arrow`.
+/// folder. Only the sections an activation load reads are copied, which
+/// includes `energy.arrow`: the union grids every cross section is
+/// interpolated against.
 fn split_copy_of(dir: &Path) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
     for section in ["nuclide.arrow", "energy.arrow", "version.json"] {
@@ -502,7 +502,7 @@ fn split_copy_of(dir: &Path) -> tempfile::TempDir {
     tmp
 }
 
-/// The reader claim of fusion-neutronics/core#100: the loader selects its
+/// The reader claim of the temperature split: the loader selects its
 /// temperature by searching each row's list and skipping rows that do not
 /// carry it, so a file rewritten one row per (MT, temperature) loads to the
 /// same reactions, at every temperature, as the one-row-per-MT file it came
@@ -600,7 +600,7 @@ fn a_per_temperature_rewrite_loads_the_same_reactions() {
     assert!(compared > 100, "compared only {compared} cross sections");
 }
 
-/// The client claim of fusion-neutronics/core#100: one temperature of one MT
+/// The client claim of the temperature split: one temperature of one MT
 /// is one batch, and it carries that cross section and nothing else.
 #[test]
 fn one_temperature_of_one_mt_splices_to_that_cross_section_alone() {

@@ -547,7 +547,7 @@ impl Bound<'_, '_> {
 
 /// Linear interpolation of `(energy, values)` at `e`: zero below the first grid
 /// point (threshold), flat above the last. Shared with the transmutation tally,
-/// which evaluates branching curves at the collision energy (issue #218).
+/// which evaluates branching curves at the collision energy.
 pub(crate) fn curve_interp(energy: &[f64], values: &[f64], e: f64) -> f64 {
     if e <= energy[0] {
         // At/just below threshold the value is the first point only if e ==
@@ -735,14 +735,14 @@ pub(crate) fn removal_rate(rates: &yani::ReactionRates, parent: &str) -> f64 {
 /// libraries under a D-T spectrum (Fe54 38 to 60% of its removal, Fe56 12 to
 /// 23%, Mn55 8%, Cr52 2.4%) and under a fission one (Fe56 0.8%, Mn55 1.0%),
 /// which is where most runs are; whether to refuse there, or to model MT=5
-/// first, is an open decision on issue #140.
+/// first, is an open decision.
 ///
 /// `mt5` is each parent's MT=5 rate on the same footing as `rates`.
 pub(crate) fn measure_unmodelled_mt5(
     rates: &yani::ReactionRates,
     mt5: &HashMap<String, f64>,
 ) -> Vec<UnmodelledRate> {
-    // TODO(#140): model MT=5 residual production (MF=6 LIP, MF=10 MT=5 and the
+    // TODO: model MT=5 residual production (MF=6 LIP, MF=10 MT=5 and the
     // light-particle gas) as an (n,X) reaction; until then, decide whether a
     // share above the tolerance refuses the run.
     let mut out: Vec<UnmodelledRate> = mt5

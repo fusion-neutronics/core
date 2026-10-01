@@ -1,4 +1,4 @@
-//! Device-side lost-particle diagnostics (issue #289).
+//! Device-side lost-particle diagnostics.
 //!
 //! A particle is *lost* when its position is inside no cell: the geometry
 //! does not cover the space it reached. On the CPU this is a hard, loud

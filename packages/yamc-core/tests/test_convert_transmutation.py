@@ -86,7 +86,7 @@ def test_converts_without_the_endf_package(converted):
 
 
 def test_the_output_carries_its_provenance(converted):
-    """`data_version` is what invalidates a stale cache (#366).
+    """`data_version` is what invalidates a stale cache.
 
     A directory without it is one a consumer can never be told to refetch.
     """
@@ -187,7 +187,10 @@ def test_decay_mode_sigmas_are_stored_as_the_tape_gives_them(converted):
 
     out, _ = converted
     modes = ipc.open_file(out / "decay" / "decay_modes.arrow").read_all()
-    assert modes.schema.names[-1] == "branching_ratio_uncertainty"
+    assert modes.schema.names[-2:] == [
+        "branching_ratio_uncertainty",
+        "evaluated_branching_ratio",
+    ]
     assert modes.column("branching_ratio_uncertainty").null_count == 0
     dbr = {}
     for nuclide, sigma in zip(
@@ -199,6 +202,32 @@ def test_decay_mode_sigmas_are_stored_as_the_tape_gives_them(converted):
     # states none.
     assert dbr["Cs137"] == [1.999988e-3, 1.999988e-3]
     assert dbr["In116_m1"] == [0.0]
+
+
+def test_decay_modes_keep_the_tapes_branching_ratio(converted):
+    """The tape's BR is stored beside the normalised one the solver uses.
+
+    Cs137's two modes sum to 1 - 1e-8 on the tape, so the residual is put on
+    the larger one. ``evaluated_branching_ratio`` keeps the tape's number,
+    which is the one its dBR was evaluated on.
+    """
+    pytest.importorskip("pyarrow")
+    import pyarrow.ipc as ipc
+
+    out, _ = converted
+    modes = ipc.open_file(out / "decay" / "decay_modes.arrow").read_all()
+    assert modes.column("evaluated_branching_ratio").null_count == 0
+    rows = {}
+    for nuclide, normalised, evaluated in zip(
+        modes.column("nuclide").to_pylist(),
+        modes.column("branching_ratio").to_pylist(),
+        modes.column("evaluated_branching_ratio").to_pylist(),
+    ):
+        rows.setdefault(nuclide, []).append((normalised, evaluated))
+    moved = sorted(n for n, r in rows.items() for a, b in r if a != b)
+    assert moved == ["Cs137"]
+    assert [e for _, e in rows["Cs137"]] == [0.05300549, 0.9469945]
+    assert rows["Cs137"][1][0] == pytest.approx(0.94699451, abs=1e-15)
 
 
 def test_nuclide_sigmas_are_stored_as_the_tape_gives_them(converted):

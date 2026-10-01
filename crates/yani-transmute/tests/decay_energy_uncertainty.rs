@@ -1,4 +1,4 @@
-//! Decay-energy uncertainty on decay heat (issue #140, item 2).
+//! Decay-energy uncertainty on decay heat.
 //!
 //! Co60 cooling on its own, with sigmas placed on its beta and gamma energies.
 //! A decay energy does not enter the Bateman matrix, so the inventory, and with

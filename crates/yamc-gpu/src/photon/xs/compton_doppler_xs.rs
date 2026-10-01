@@ -37,7 +37,7 @@ pub const MAX_COMPTON_PZ: usize = 64;
 pub const MAX_COMPTON_RELAX: usize = 2;
 
 /// Per-ELEMENT Compton Doppler-broadening tables ready for upload to the GPU
-/// photon kernel (task #72). Slab dimension = total elements across materials,
+/// photon kernel. Slab dimension = total elements across materials,
 /// element-major within a material and concatenated material-major.
 ///
 /// Layout: per element-slab `e`, the per-shell scalar fields sit at
@@ -72,7 +72,7 @@ pub struct GpuComptonDoppler {
     pub profile_cdf: Vec<f64>,
     /// Per-material per-shell slope of the log-linear tail past the last
     /// tabulated point, flat `[n_materials × MAX_COMPTON_SHELLS]`. Mirror of
-    /// the CPU `profile_tail_slope` (fusion-neutronics/core#22).
+    /// the CPU `profile_tail_slope`.
     pub profile_tail_slope: Vec<f64>,
     /// Per-material per-shell `K_i(1/alpha)`, the accessible mass of the
     /// negative-momentum branch, flat `[n_materials × MAX_COMPTON_SHELLS]`.
@@ -109,7 +109,7 @@ impl GpuComptonDoppler {
     /// no element data is available. Same shape as the populated case
     /// (uniform argument shape on the kernel launcher) but
     /// `has_data[slab] = 0` so the kernel skips sampling. `n_slab` is the
-    /// element-slab count (task #72).
+    /// element-slab count.
     pub fn empty_for_slabs(n_slab: usize) -> Self {
         let n_slab = n_slab.max(1);
         let n_pz = 1u32;
@@ -165,7 +165,7 @@ pub fn extract_compton_doppler_for_gpu(
     let mut subshell_w0 = vec![0.0_f64; n_slab.max(1) * MAX_COMPTON_SHELLS];
     let mut subshell_cnt = vec![0u32; n_slab.max(1) * MAX_COMPTON_SHELLS];
 
-    // One slab per element (task #72): the per-collision element selection
+    // One slab per element: the per-collision element selection
     // indexes whichever element the photon struck, mirroring CPU
     // `Material::sample_element` -> that element's Doppler profile.
     let mut slab = 0usize;

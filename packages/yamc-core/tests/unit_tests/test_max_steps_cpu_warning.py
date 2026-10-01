@@ -1,4 +1,4 @@
-"""`gpu_max_steps_per_particle` warns when it is set and then ignored (#302).
+"""`gpu_max_steps_per_particle` warns when it is set and then ignored.
 
 Only the GPU kernel applies the cap: it needs a bound in its loop condition
 (driver watchdog, lockstep workgroups). CPU transport runs `while particle.alive`
@@ -31,7 +31,7 @@ def _model(**kwargs):
     sphere = yamc.Sphere(radius=10.0, boundary="vacuum")
     cells = [yamc.Cell(name="core", region=sphere.below, material=material)]
     # The geometry assigns the cell ids, so it must exist before a CellFilter is
-    # built from those cells (issue #305).
+    # built from those cells.
     geometry = yamc.Geometry(cells)
     tally = yamc.Tally(scores=["flux"], name="t", cells=cells)
     source = yamc.NeutronSource(

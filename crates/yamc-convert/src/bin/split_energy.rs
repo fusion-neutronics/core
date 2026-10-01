@@ -3,9 +3,9 @@
 //!
 //! A library published with the grids inside `nuclide.arrow` makes a client
 //! that wants one temperature read all six, and makes a client that wants only
-//! to know what a nuclide IS read 6.33 MB of U238 grids to find out
-//! (fusion-neutronics/core#100). This rewrites each folder into the version 2
-//! layout, copying the grids rather than recomputing them, so NJOY does not run
+//! to know what a nuclide IS read 6.33 MB of U238 grids to find out. This
+//! rewrites each folder into the version 2 layout, copying the grids rather
+//! than recomputing them, so NJOY does not run
 //! again and every value is what it was. `version.json` is then set to
 //! `format_version: 2` and given an `energy_ranges` index.
 //!

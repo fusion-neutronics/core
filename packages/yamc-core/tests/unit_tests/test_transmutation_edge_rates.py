@@ -1,4 +1,4 @@
-"""Per-edge reaction rates carried onto TransmutationResults (issue #490).
+"""Per-edge reaction rates carried onto TransmutationResults.
 
 The solve computes the rate of every production edge to build its burnup
 matrix, and used to discard them, leaving a consumer able to enumerate the

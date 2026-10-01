@@ -1,5 +1,5 @@
 """Tests for the simulation stop conditions on ``simulate_transport`` /
-``simulate_transmutation`` (issue #230).
+``simulate_transmutation``.
 
 A run ends at the first satisfied of {``total_particles`` exhausted,
 ``max_runtime`` elapsed, convergence targets met}. ``total_particles`` is
@@ -85,8 +85,7 @@ def test_uncapped_run_stops_on_convergence():
 )
 def test_gpu_coupled_uncapped_run_stops_on_convergence():
     # The coupled (secondary photons on) GPU launch loop stops on the target
-    # too (fusion-neutronics/core#29); before, a model that transported photons
-    # was refused. No cap, no budget: the target alone ends the run.
+    # too. No cap, no budget: the target alone ends the run.
     model = _build_model(
         photon_data={"Li": "tests/Li.arrow"}, transport_secondary_photons=True
     )
@@ -105,7 +104,7 @@ def test_gpu_coupled_uncapped_run_stops_on_convergence():
 def test_gpu_uncapped_run_stops_on_convergence():
     # The GPU twin of test_uncapped_run_stops_on_convergence: no cap, no
     # budget, the launch loop ends when the target is met and the aggregate
-    # relative error it reports honours it (fusion-neutronics/core#29).
+    # relative error it reports honours it.
     model = _build_model()
     model.convergence_targets = [
         yamc.ConvergenceTarget("relative_error", 0.10, tally="tbr")

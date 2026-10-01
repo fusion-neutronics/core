@@ -43,11 +43,11 @@ pub struct FissionChiDraw {
 /// Sample one fission outgoing energy from chi row `chi_row`.
 ///
 /// Rows are laid out per struck nuclide by `NuclideSelectInputs::chi_slab_meta`:
-/// one prompt row per fission channel plus one delayed row
-/// (fusion-neutronics/core#34 entry 1); [`select_fission_chi_rows`] picks them.
+/// one prompt row per fission channel plus one delayed row;
+/// [`select_fission_chi_rows`] picks them.
 /// `e_in` is the incident neutron energy. `watt_a` / `watt_b` are the material's
-/// Watt parameters (the fall-through law). The fission chi table is tight CSR
-/// (issue #104): `fission_eout_ae_offset[chi_row]` is the row's first
+/// Watt parameters (the fall-through law). The fission chi table is tight CSR:
+/// `fission_eout_ae_offset[chi_row]` is the row's first
 /// ae-row in `fission_eout_n_x_per_material` / `fission_eout_energy_grid_per_material`,
 /// and `fission_eout_x_offset[ae_row]` is each ae-row's start in
 /// `fission_eout_x_per_material` / `fission_eout_cdf_per_material` /
@@ -201,8 +201,8 @@ pub fn sample_fission_chi(
             }
         }
     } else if fission_kind == 6u32 {
-        // Maxwell prompt-fission chi (ENDF File 5, Law 7). Tight CSR
-        // (issue #104): each E_in row carries one point, so θ at row k is
+        // Maxwell prompt-fission chi (ENDF File 5, Law 7). Tight CSR:
+        // each E_in row carries one point, so θ at row k is
         // `x[fission_eout_x_offset[eg_off_f + k]]` and the scalar `u` is in
         // the material's row-0 single slot
         // `cdf[fission_eout_x_offset[eg_off_f]]`.
@@ -262,7 +262,7 @@ pub fn sample_fission_chi(
         }
     } else if fission_kind == 4u32 {
         // Evaporation prompt-fission chi (ENDF File 5, Law 9). Same tight
-        // CSR θ / u packing as the Maxwell branch (issue #104).
+        // CSR θ / u packing as the Maxwell branch.
         let n_fae = fission_eout_n_energies_per_material[chi_row as usize];
         if n_fae > 0u32 {
             let eg_off_f = fission_eout_ae_offset[chi_row as usize];
@@ -346,8 +346,7 @@ pub struct FissionChiRows {
     pub state: u64,
 }
 
-/// Pick the chi rows for a fission in nuclide slab `slab`
-/// (fusion-neutronics/core#34 entry 1).
+/// Pick the chi rows for a fission in nuclide slab `slab`.
 ///
 /// Reads the slab's row in `chi_slab_meta` (`CHI_SLAB_META_COLS` wide: prompt
 /// row base, channel count, delayed row, channel-xs base). With one channel the
@@ -426,7 +425,7 @@ pub fn select_fission_chi_rows(
 }
 
 /// Sample one fission progeny's outgoing energy, choosing the prompt or the
-/// delayed spectrum first (issue #364).
+/// delayed spectrum first.
 ///
 /// `prompt_row` and `delayed_row` are the event's chi rows from
 /// [`select_fission_chi_rows`]. `beta` is the material's delayed fraction

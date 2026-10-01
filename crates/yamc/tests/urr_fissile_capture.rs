@@ -1,4 +1,4 @@
-//! Issue #154: a fissile nuclide's URR-adjusted CAPTURE must survive the band.
+//! A fissile nuclide's URR-adjusted CAPTURE must survive the band.
 //!
 //! `Nuclide::urr_adjusted_reaction_xs` derived capture as
 //! `(xs_absorption - xs_fission).max(0.0)`, but `FastXSGrid::lookup` already
@@ -11,7 +11,7 @@
 //! Consequences, all measured: the CPU lost ALL in-band capture, its in-band flux
 //! read 17% high against the GPU, only 48.95% of in-band histories were
 //! bit-identical to the GPU twin, and the integral flux on a fissile sphere sat
-//! 0.2% apart end to end (issue #154, 6-7 sigma).
+//! 0.2% apart end to end (6-7 sigma).
 //!
 //! W184 -- the only URR fixture in the matched-stream harnesses -- has no fission
 //! at all, so subtracting it was harmless and the bug was invisible there.
@@ -98,7 +98,7 @@ fn u235_urr_adjusted_capture_is_positive_in_band() {
             assert!(
                 p.sigma_a > 0.0,
                 "E={e:.3e}, urr_random={urr_random:.4}: URR-adjusted capture is \
-                 {:.6e}, so the band destroyed it (#154)",
+                 {:.6e}, so the band destroyed it",
                 p.sigma_a
             );
             assert!(

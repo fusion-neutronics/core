@@ -1,4 +1,4 @@
-//! Batch-free GPU per-history variance (issue #233 Stage 1).
+//! Batch-free GPU per-history variance.
 //!
 //! Two on-hardware checks for the NON-fissile neutron path:
 //!
@@ -25,7 +25,7 @@
 //!
 //! `--test-threads=1` used to be required: the launch-chunk override is a
 //! process-global env var, so a test that set it changed what its concurrent
-//! siblings launched (issue #344). `GpuTest` serialises the binary instead.
+//! siblings launched. `GpuTest` serialises the binary instead.
 
 #![cfg(all(feature = "gpu", not(target_os = "macos")))]
 
@@ -76,8 +76,7 @@ fn gpu_available() -> bool {
 /// `launch_chunk_size`, so a test that sets it changes what every test running
 /// CONCURRENTLY in the same binary launches. The module header used to tell the
 /// reader to pass `--test-threads=1`; a plain `cargo test` does not, so the
-/// documented local GPU gate failed three tests that all passed serially
-/// (issue #344).
+/// documented local GPU gate failed three tests that all passed serially.
 ///
 /// Two things make this correct where a lock around the set/remove pair alone
 /// would not:
@@ -126,7 +125,7 @@ impl Drop for GpuTest {
 }
 
 /// Single-nuclide sphere (r=RADIUS, `Below` so the GPU AABB pass accepts it),
-/// vacuum boundary. Non-fissile nuclides only (this path is Stage 1).
+/// vacuum boundary. Non-fissile nuclides only.
 fn nuclide_sphere(nuclide: &str, density: f64) -> (Geometry, u32) {
     let sphere = Surface {
         surface_id: Some(1),
@@ -285,8 +284,8 @@ fn total_particles_invariance() {
     eprintln!("total_particles_invariance: {n} histories bit-identical across N and 2N");
 }
 
-/// Multi-CHUNK invariance (issue #233 Stage 2; addresses a Stage 1 review gap
-/// where the invariance test only used a single launch chunk). `YAMC_GPU_LAUNCH_CHUNK`
+/// Multi-CHUNK invariance (the invariance test above uses a single launch
+/// chunk). `YAMC_GPU_LAUNCH_CHUNK`
 /// forces a small chunk so N and 2N each span several launches; the shared
 /// prefix (the first N source histories) must still be bit-identical, proving
 /// the global-history-index seeding is total-independent ACROSS chunk

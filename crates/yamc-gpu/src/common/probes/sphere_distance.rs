@@ -31,8 +31,8 @@
 //!
 //! # Why no `f64::INFINITY` sentinel
 //!
-//! Cubecl's tracking issue tracelai/cubecl#68 documents that
-//! `F64::new(f64::INFINITY)` doesn't expand cleanly. To avoid it, this
+//! In cubecl `F64::new(f64::INFINITY)` doesn't expand cleanly (a known
+//! upstream limitation). To avoid it, this
 //! kernel uses a large finite sentinel `MISS_SENTINEL = 1e30` for
 //! "no intersection" cases. Callers check `dist >= MISS_SENTINEL` to
 //! detect misses. f64 has plenty of headroom above `1e30` so this

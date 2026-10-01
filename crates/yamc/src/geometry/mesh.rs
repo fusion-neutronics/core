@@ -216,7 +216,7 @@ impl MeshGeometry {
     /// True when a surface that does not bound `cell_index`'s volume
     /// intersects the open segment from `origin` towards the accepted
     /// crossing at distance `t_max`. Used by the spatial tracking
-    /// verification path (issue #254): for valid geometry no foreign
+    /// verification path: for valid geometry no foreign
     /// surface can lie strictly inside the current volume, so a hit
     /// means the mesh volumes overlap or self-intersect and adjacency
     /// tracking is about to go wrong. Works for the implicit complement

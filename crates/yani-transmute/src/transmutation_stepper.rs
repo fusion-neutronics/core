@@ -17,7 +17,7 @@ use yani::{
 /// One atom per cubic metre, near enough. This is the solver's own definition
 /// of "populated", so it is also what a driver deciding which nuclides are
 /// worth carrying should test a bound against
-/// (`yani::populated_nuclides`, issue #404) rather than inventing a second
+/// (`yani::populated_nuclides`) rather than inventing a second
 /// threshold that could disagree with this one.
 pub const DENSITY_FLOOR: f64 = 1e-30;
 
@@ -33,7 +33,7 @@ pub trait TransmutationStepper: Send + Sync {
     /// * `chain` - Transmutation chain data
     /// * `rates` - Reaction rates (sigma * phi) for this material
     /// * `fy_weights` - Spectrum weights over each fissionable nuclide's
-    ///   tabulated fission-yield energies (issue #379). Required for every
+    ///   tabulated fission-yield energies. Required for every
     ///   nuclide with yields and a non-zero fission rate.
     /// * `parts` - Which optional subsections `chain` was built from, so a rate
     ///   needing one that was left out is refused rather than solved without it
@@ -127,17 +127,14 @@ impl TransmutationStepper for ForwardEulerStepper {
         // Where an exact answer exists, use it instead of the solver's. A
         // nuclide that nothing feeds over this step obeys `n(dt) = n0 *
         // exp(A_ii dt)` and nothing else, where `A_ii` is its own diagonal, so
-        // its row needs no linear solve at all; CRAM48's LU fill couples every
-        // row to the largest density in the solve, and what it returns for
-        // those rows is a residue around 1e-22 of that largest density rather
-        // than the answer.
+        // its row needs no linear solve at all, and the closed form is exact
+        // where the solver only approximates it.
         //
-        // That residue is invisible in an inventory and loud in the outputs
+        // A wrong density there is invisible in an inventory and loud in the outputs
         // that weight by a decay constant, which spans ten orders of magnitude
         // across the chain: cooled reactor graphite reported two thirds of its
         // decay heat from B12, a 20.2 ms emitter, on a density the solver had
-        // invented after a cooldown that should have reduced it by exp(-2.96e6)
-        // (issue #410).
+        // invented after a cooldown that should have reduced it by exp(-2.96e6).
         //
         // Being fed has to be traced, not just read off the matrix row: a
         // parent that starts at zero and grows during the step feeds its
@@ -351,6 +348,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
                 fission_yields: None,
                 sources: Vec::new(),
@@ -441,6 +439,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
                 decays: vec![],
                 fission_yields: None,
@@ -463,6 +462,7 @@ mod tests {
                     branching: 1.0,
                     q_value: None,
                     branching_uncertainty: None,
+                    evaluated_branching: None,
                 }],
                 fission_yields: None,
                 sources: Vec::new(),

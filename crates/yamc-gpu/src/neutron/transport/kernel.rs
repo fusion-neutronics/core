@@ -42,7 +42,7 @@ use crate::photon::production_select::{sample_photon_count, sample_photon_produc
 // scan against the `COL_*` constants than dropping just the first.
 
 /// Thread-private touched-list capacity for batch-free per-history
-/// variance (issue #233). A history accumulates each distinct
+/// variance. A history accumulates each distinct
 /// `(tally, cell, energy)` bin it touches into this register array,
 /// then flushes `sum` + `sum_sq` once at history end. `32` entries
 /// (`u32` bin index + `f64` running total) cover essentially every
@@ -55,8 +55,8 @@ use crate::photon::production_select::{sample_photon_count, sample_photon_produc
 pub const PERHIST_K: u32 = 32;
 
 /// Energy-function weight for the table packed at `off` in
-/// `TalliesPack::efunc_params` (`energy_function=` / `dose_coefficients=`,
-/// issue #271). `#[cube]` twin of `common::tallies::energy_function_weight`.
+/// `TalliesPack::efunc_params` (`energy_function=` / `dose_coefficients=`).
+/// `#[cube]` twin of `common::tallies::energy_function_weight`.
 ///
 /// Callers MUST range-test before calling: the CPU drops the whole scoring
 /// event when the energy falls outside the table, which is a different
@@ -109,13 +109,13 @@ pub(crate) fn energy_function_weight_kernel(params: &[f64], off: u32, energy: f6
 }
 
 /// `#[cube]` twin of `crate::common::tallies::rect_mesh_crossings` + the mesh
-/// branch of the CPU `accumulate_tallies`, specialised to the issue-#234
-/// mesh_direct per-source variance path. Walks the step segment
-/// `r0 -> r0 + d*dir` across a rectangular row-major mesh (packed descriptor
-/// at `mesh_params[mo..]`, layout `[ll(3), ur(3), inv_width(3), width(3),
-/// shape(3)]`) with an Amanatides-Woo DDA and atomic-adds each voxel's
-/// `d * length_fraction * score * weight` (fixed-point at `scale`, symmetric
-/// round) into `src_acc[src_base + base + voxel]`.
+/// branch of the CPU `accumulate_tallies`, specialised to the mesh_direct
+/// per-source variance path. Walks the step segment `r0 -> r0 + d*dir` across a
+/// rectangular row-major mesh (packed descriptor at `mesh_params[mo..]`, layout
+/// `[ll(3), ur(3), inv_width(3), width(3), shape(3)]`) with an Amanatides-Woo
+/// DDA and atomic-adds each voxel's `d * length_fraction * score * weight`
+/// (fixed-point at `scale`, symmetric round) into
+/// `src_acc[src_base + base + voxel]`.
 ///
 /// The arithmetic mirrors the CPU twin exactly (segment length from `r1 - r0`,
 /// `d * lf * score * weight` in that association) so the summed mean is
@@ -513,8 +513,8 @@ pub(crate) fn mesh_rect_score_src_acc(
 /// `#[cube]` twin of `crate::common::tallies::rect_mesh_bin_at` /
 /// `RegularRectangularMesh::get_bin`: the row-major voxel index for a point in
 /// a rectangular mesh (packed descriptor at `mesh_params[mo..]`), or
-/// `u32::MAX` if the point is outside the mesh. Used by the collision estimator
-/// (issue #234). Floors are `as u32` casts of non-negative reals.
+/// `u32::MAX` if the point is outside the mesh. Used by the collision estimator.
+/// Floors are `as u32` casts of non-negative reals.
 #[allow(clippy::manual_clamp)]
 #[cube]
 pub(crate) fn rect_mesh_bin_at_kernel(
@@ -567,7 +567,7 @@ pub(crate) fn rect_mesh_bin_at_kernel(
 }
 
 // =====================================================================
-// Cylindrical mesh scoring (issue #279)
+// Cylindrical mesh scoring
 //
 // `#[cube]` mirrors of the plain-Rust twins in `crate::common::tallies`
 // (`cyl_mesh_crossings` / `cyl_mesh_bin_at`), themselves faithful ports of
@@ -1196,8 +1196,8 @@ pub struct BankedProgeny {
 /// all N before the reaction split, because under implicit capture fission
 /// never happens to the survivor: OpenMC's `sample_neutron_reaction` creates
 /// the fission sites from the un-discounted weight first, then discounts by
-/// absorption including fission, then the survivor scatters
-/// (fusion-neutronics/core#25). The loop is comptime-bounded at
+/// absorption including fission, then the survivor scatters.
+/// The loop is comptime-bounded at
 /// `FISSION_BANK_PROGENY_CAP` and guarded by `k < n_to_bank`, so its draw
 /// schedule (one chi draw, one mu draw, one azimuth draw per progeny) is the
 /// same as the CPU twin's `push_fission_progeny`.
@@ -1270,7 +1270,7 @@ fn bank_fission_progeny(
 
             // Isotropic-in-lab direction: uniform mu in [-1, 1] plus a
             // `TAU * xi` azimuth (ONE draw, like every other azimuth in this
-            // kernel since #136 / #111), rotating the incident direction.
+            // kernel), rotating the incident direction.
             let d_mu = crate::common::pcg32::draw_uniform(state);
             state = d_mu.state;
             let mu_b = 1.0 - 2.0 * d_mu.xi;
@@ -1299,7 +1299,7 @@ fn bank_fission_progeny(
             }
 
             // The progeny's own collision stream, fixed by its place in the
-            // emission tree (issue #111 / #322). Derived before the capacity
+            // emission tree. Derived before the capacity
             // check so the numbering cannot depend on how full the bank was.
             let f_seed = crate::common::pcg32::secondary_seed(walk_seed, walk_secondaries);
 
@@ -1322,7 +1322,7 @@ fn bank_fission_progeny(
                 // `gen` is informational; the host bounds the drain by counting
                 // passes.
                 bank_u32[u + 3] = 1u32;
-                // Per-source variance (issue #233 Stage 2): the SOURCE neutron
+                // Per-source variance: the SOURCE neutron
                 // this progeny descends from, inherited through generations.
                 bank_source_idx[fslot as usize] = my_source_idx;
             } else {
@@ -1347,6 +1347,9 @@ pub(crate) fn multi_cell_transport_kernel(
     energies_in: &[f64],
     positions_in: &[f64],
     directions_in: &[f64],
+    // Per-particle starting weight: 1.0 for a source neutron, the banked
+    // weight for a relaunched bank record.
+    weights_in: &[f64],
     cell_aabbs: &[f64],
     cell_to_material: &[u32],
     bvh_aabbs: &[f64],
@@ -1363,7 +1366,7 @@ pub(crate) fn multi_cell_transport_kernel(
     region_program: &[u32],
     log_energy_grid: &[f64],
     // COARSE grid backing the sparse per-MT inelastic buffers
-    // (xs_inelastic_per_mt_sparse, yield_per_mt_sparse). Issue #212: every
+    // (xs_inelastic_per_mt_sparse, yield_per_mt_sparse). Every
     // material carries its OWN coarse grid (its finest single per-nuclide grid),
     // concatenated tight here; the coarse bracket is keyed per material via
     // `coarse_meta`, so no material's inelastic thresholds are smeared onto
@@ -1371,14 +1374,14 @@ pub(crate) fn multi_cell_transport_kernel(
     // single-material problem.
     coarse_log_energy_grid: &[f64],
     // Packed `[n_mat × COARSE_META_COLS]` (stride 3u32) per-material coarse-grid
-    // descriptor (issue #212). Columns: 0 = base into `coarse_log_energy_grid`,
+    // descriptor. Columns: 0 = base into `coarse_log_energy_grid`,
     // 1 = this material's coarse length, 2 = base into `permt_meta` ROWS for the
     // material's first slab (= nuc_off * MT_INELASTIC_COUNT). Single-material
     // problems have `[0, coarse_len, 0]`, so indexing is byte-identical.
     coarse_meta: &[u32],
     // FINE grid backing the resonance-critical buffers: the per-material
     // aggregate macro XS below (`xs_elastic_per_material` etc.) and the
-    // per-(material, nuclide) `nuc_macro_total` / `nuc_partial_xs` (issue #212).
+    // per-(material, nuclide) `nuc_macro_total` / `nuc_partial_xs`.
     // Every material carries its OWN fine grid (its union grid), concatenated
     // tight here; the fine bracket and the aggregate-XS / nuc-buffer strides are
     // keyed per material via `fine_meta`, so no material's resonance structure is
@@ -1387,7 +1390,7 @@ pub(crate) fn multi_cell_transport_kernel(
     // lookups. Equal to `log_energy_grid` for a single-material problem.
     fine_log_energy_grid: &[f64],
     // Packed `[n_mat × FINE_META_COLS]` (stride 3u32) per-material fine-grid
-    // descriptor (issue #212). Columns: 0 = base into `fine_log_energy_grid`
+    // descriptor. Columns: 0 = base into `fine_log_energy_grid`
     // (ALSO the per-material aggregate-XS row base), 1 = this material's fine
     // length, 2 = base into `nuc_macro_total` (element units) for the material's
     // first slab. Single-material problems have `[0, fine_len, 0]`, so indexing
@@ -1414,7 +1417,7 @@ pub(crate) fn multi_cell_transport_kernel(
     nu_bar_per_material: &[f64],
     // Delayed-neutron fraction beta(E) = nu_d(E) / nu_t(E), same flat
     // `[n_materials x n_grid]` shape and fine-grid indexing as
-    // `nu_bar_per_material` (issue #364). Per fission progeny the kernel draws one
+    // `nu_bar_per_material`. Per fission progeny the kernel draws one
     // uniform against this and takes the outgoing energy from the DELAYED chi row
     // instead of the prompt one when it lands below beta. Zero everywhere for a
     // material with no delayed data, which costs no draw and leaves the stream
@@ -1443,13 +1446,13 @@ pub(crate) fn multi_cell_transport_kernel(
     //     for nuclides whose χ uses none of the above encodings.
     fission_eout_kind_per_material: &[u32],
     fission_eout_n_energies_per_material: &[u32],
-    // Chi ROWS (issue #364, fusion-neutronics/core#34 entry 1): one prompt row
-    // per (nuclide slab, fission channel) plus one delayed row per slab, laid
-    // out by `chi_slab_meta` below, so every `*_per_material` buffer here is
-    // indexed by chi row, not by material. A nuclide with no delayed data
-    // carries an empty delayed row and `beta == 0`.
+    // Chi ROWS: one prompt row per (nuclide slab, fission channel) plus one
+    // delayed row per slab, laid out by `chi_slab_meta` below, so every
+    // `*_per_material` buffer here is indexed by chi row, not by material. A
+    // nuclide with no delayed data carries an empty delayed row and
+    // `beta == 0`.
     //
-    // Tight CSR (issue #104): `fission_eout_ae_offset[chi_row]` is the row's
+    // Tight CSR: `fission_eout_ae_offset[chi_row]` is the row's
     // first ae-row into `fission_eout_n_x` / `energy_grid`;
     // `fission_eout_x_offset[ae_row]` is the ae-row's first (x, cdf) point.
     fission_eout_ae_offset: &[u32],
@@ -1477,7 +1480,7 @@ pub(crate) fn multi_cell_transport_kernel(
     // Pre-pack each was its own per-material f64 binding; the pack
     // saves 3 storage-buffer descriptor bindings.
     mat_f64_meta: &[f64],
-    // SPARSE per-MT inelastic xs values (issue #212). Concatenated tight in
+    // SPARSE per-MT inelastic xs values. Concatenated tight in
     // (slab, MT slot) order: each (slab, MT slot) stores only its nonzero
     // (above-threshold) coarse-grid range, located by `permt_meta`. The dense
     // `[n_slab × MT_INELASTIC_COUNT × coarse_n]` buffer was 90-99.9% zeros and
@@ -1488,33 +1491,33 @@ pub(crate) fn multi_cell_transport_kernel(
     // `k` is MT `MT_INELASTIC_FIRST + k`'s Q-value, used in the
     // closed-form inelastic energy formula.
     q_inelastic_per_mt: &[f64],
-    // SPARSE per-MT outgoing-neutron yield ν(E) values (issue #212). Parallel to
+    // SPARSE per-MT outgoing-neutron yield ν(E) values. Parallel to
     // `xs_inelastic_per_mt_sparse`, located by the SAME `permt_meta` row. Stored
     // over each slot's nonzero-XS range; the kernel uses 1.0 outside that range
     // (the dense default, since the dense `yield_per_mt` was 1.0 wherever XS was
     // 0), so the yield interpolation stays bit-identical.
     yield_per_mt_sparse: &[f64],
     // Packed `[n_slab × MT_INELASTIC_COUNT × PERMT_META_COLS]` (stride 3u32)
-    // per-(slab, MT slot) sparse descriptor (issue #212): col 0 = value_offset
+    // per-(slab, MT slot) sparse descriptor: col 0 = value_offset
     // (base into `xs_inelastic_per_mt_sparse` / `yield_per_mt_sparse`), col 1 =
     // i_start (first nonzero coarse-grid index, relative to the material's coarse
     // grid), col 2 = n_stored (contiguous stored-point count; 0 = absent slot).
     // Indexed `permt_meta[(slab * MT_INELASTIC_COUNT + slot) * 3 + col]`.
     permt_meta: &[u32],
     // Per-MT angular distribution (Tabular `(mu, cdf)` slices on a
-    // tabulated incident-energy grid). Tight variable-length CSR layout
-    // (issue #104): per-(slab,MT) `angle_n_energies` / `angle_ae_offset`
+    // tabulated incident-energy grid). Tight variable-length CSR layout:
+    // per-(slab,MT) `angle_n_energies` / `angle_ae_offset`
     // index into the back-to-back ae-row arrays, and per-ae-row
     // `angle_n_mu` / `angle_mu_offset` index the back-to-back mu-point
     // arrays. `angle_n_energies[slab * MT_INELASTIC_COUNT + slot] = 0`
     // means the kernel falls back to isotropic-in-CM sampling.
     //
-    // #74 Stage 2b: every per-MT inelastic pool below (angle / eout / corr /
-    // km / evap / maxwell / watt / nbps + xs/q/yield) is keyed per-(material,
-    // nuclide) SLAB, not per material -- the leading `mat_slot` factor is the
-    // struck nuclide's global `slab`, not `mat_idx`. Single-nuclide materials
-    // have `slab == mat_idx`'s old row, so the layout (and result) is
-    // byte-identical there. `n_slab = sum_mat n_nuclides`.
+    // Every per-MT inelastic pool below (angle / eout / corr / km / evap /
+    // maxwell / watt / nbps + xs/q/yield) is keyed per-(material, nuclide)
+    // SLAB, not per material -- the leading `mat_slot` factor is the struck
+    // nuclide's global `slab`, not `mat_idx`. Single-nuclide materials have
+    // `slab == mat_idx`'s old row, so the layout (and result) is byte-identical
+    // there. `n_slab = sum_mat n_nuclides`.
     //
     // Slot indexing:
     //   mat_slot = slab * 41 + slot              // [n_slab × 41]
@@ -1522,13 +1525,13 @@ pub(crate) fn multi_cell_transport_kernel(
     //   mu_off   = ae_off * 33                   // [n_slab × 41 × 32 × 33]
     angle_n_energies: &[u32],
     // CSR base: global ae-row where (slab, MT) slot's rows start in the tight
-    // angle_energy_grid / n_mu / interp arrays (issue #104). n_ae for the slot
+    // angle_energy_grid / n_mu / interp arrays. n_ae for the slot
     // is angle_n_energies[mat_slot].
     angle_ae_offset: &[u32],
     angle_energy_grid: &[f64],
     angle_n_mu: &[u32],
     // CSR base: index into the tight angle_mu / cdf / pdf arrays where ae-row's
-    // (mu, cdf, pdf) points start (issue #104). Row length is angle_n_mu[ae].
+    // (mu, cdf, pdf) points start. Row length is angle_n_mu[ae].
     angle_mu_offset: &[u32],
     angle_mu: &[f64],
     angle_cdf: &[f64],
@@ -1559,20 +1562,20 @@ pub(crate) fn multi_cell_transport_kernel(
     // `COL_SCATTER_IN_CM` then drives the optional CM→lab
     // conversion.
     //
-    // Tight CSR layout for the eout buffers (issue #104):
+    // Tight CSR layout for the eout buffers:
     //   mat_slot    = mat_idx * 41 + slot          [n_mat × 41]
     //   eg_off_e    = eout_ae_offset[mat_slot]      (slot's first ae-row)
     //   x_off       = eout_x_offset[eg_off_e + bin] (row's first x-point)
     // No fixed per-axis stride.
     mt_slot_u32_meta: &[u32],
     // CSR base: global ae-row where (slab, MT) slot's incident-energy rows
-    // start in the tight eout_energy_grid / n_x / interp / n_discrete arrays
-    // (issue #104). n_eout for the slot is the packed COL_EOUT_N_ENERGIES.
+    // start in the tight eout_energy_grid / n_x / interp / n_discrete arrays.
+    // n_eout for the slot is the packed COL_EOUT_N_ENERGIES.
     eout_ae_offset: &[u32],
     eout_energy_grid: &[f64],
     eout_n_x: &[u32],
     // CSR base: index into the tight eout_x / cdf / p arrays where ae-row's
-    // (x, cdf, p) points start (issue #104). Row length is eout_n_x[ae].
+    // (x, cdf, p) points start. Row length is eout_n_x[ae].
     eout_x_offset: &[u32],
     eout_x: &[f64],
     eout_cdf: &[f64],
@@ -1588,13 +1591,13 @@ pub(crate) fn multi_cell_transport_kernel(
     // Per (MT slot, E_in slice) interpolation discriminant for the
     // inner Tabular (0 = Histogram, 1 = LinLin). Same encoding as
     // `angle_interp` / `corr_mu_interp`. One entry per ae-row
-    // (tight CSR, issue #104).
+    // (tight CSR).
     eout_interp: &[u32],
     // Per (MT slot, E_in slice) discrete-line prefix count. The first
     // `n_discrete` bins of each Tabular are discrete photon lines
     // (delta functions); kernel returns the bin endpoint and skips
     // bracket-bound stretch when the sampled bin is `< n_discrete`.
-    // One entry per ae-row (tight CSR, issue #104).
+    // One entry per ae-row (tight CSR).
     eout_n_discrete: &[u32],
     // Per-MT correlated angle-energy distribution (slice D). When
     // `eout_kind == EOUT_KIND_CORRELATED = 2` and
@@ -1605,7 +1608,7 @@ pub(crate) fn multi_cell_transport_kernel(
     // `corr_mu_cdf`). The slice-B per-MT angular table is bypassed
     // for these slots since `mu` is joint with `E_out`.
     //
-    // Tight CSR layout for the corr buffers (issue #104), three nesting
+    // Tight CSR layout for the corr buffers, three nesting
     // levels (per (slab,MT) slot -> incident-energy ae-rows -> E_out
     // x-points -> mu points):
     //   mat_slot   = mat_idx * 41 + slot           [n_mat × 41]
@@ -1630,7 +1633,7 @@ pub(crate) fn multi_cell_transport_kernel(
     // Per (MT slot, E_in slice) interpolation discriminant for the
     // outgoing-energy Tabular (0 = Histogram, 1 = LinLin). Same
     // encoding as `angle_interp` / `eout_interp`. One entry per ae-row
-    // (tight CSR, issue #104).
+    // (tight CSR).
     corr_interp: &[u32],
     // Per (MT slot, E_in slice) discrete-line prefix count. Same
     // semantics as `eout_n_discrete`: bins `< n_discrete` are
@@ -1663,14 +1666,14 @@ pub(crate) fn multi_cell_transport_kernel(
     // the norm; isotropic only fires when the nuclide library
     // genuinely lacks an MT 2 angular table.
     elastic_angle_n_energies: &[u32],
-    // CSR base: global ae-row where slab s's incident-energy rows start in
-    // the tight elastic_angle_energy_grid / n_mu / interp arrays (issue
-    // #104). n_ae for slab s is elastic_angle_n_energies[s].
+    // CSR base: global ae-row where slab s's incident-energy rows start in the
+    // tight elastic_angle_energy_grid / n_mu / interp arrays. n_ae for slab s
+    // is elastic_angle_n_energies[s].
     elastic_angle_ae_offset: &[u32],
     elastic_angle_energy_grid: &[f64],
     elastic_angle_n_mu: &[u32],
     // CSR base: index into the tight elastic_angle_mu / cdf / pdf arrays
-    // where ae-row's (mu, cdf, pdf) points start (issue #104). Row length
+    // where ae-row's (mu, cdf, pdf) points start. Row length
     // is elastic_angle_n_mu[ae].
     elastic_angle_mu_offset: &[u32],
     elastic_angle_mu: &[f64],
@@ -1702,7 +1705,7 @@ pub(crate) fn multi_cell_transport_kernel(
     // When `eout_kind[mat_slot] == EOUT_KIND_KALBACH_MANN` the
     // kernel samples (E_out_cm, mu_cm) from these buffers
     // (replacing the level-inelastic closed-form energy and any
-    // slice-B angular table). Tight CSR layout (issue #104):
+    // slice-B angular table). Tight CSR layout:
     //   mat_slot   = mat_idx * MT_INELASTIC_COUNT + slot
     //   eg_off_k   = km_ae_offset[mat_slot]      (slot's first ae-row)
     //   x_off      = km_x_offset[eg_off_k + bin] (row's first x-point)
@@ -1725,7 +1728,7 @@ pub(crate) fn multi_cell_transport_kernel(
     km_c: &[f64],
     km_r: &[f64],
     km_a: &[f64],
-    // Per-MT Evaporation distribution data. Tight CSR layout (issue #104):
+    // Per-MT Evaporation distribution data. Tight CSR layout:
     //   COL_EVAP_N_ENERGIES (in mt_slot_u32_meta) : θ(E_in) point count n_tae
     //   eg_off    = evap_ae_offset[mat_slot]      (slot's first E_in row)
     //   theta_off = evap_theta_offset[mat_slot] + comp * n_tae (component row)
@@ -1744,16 +1747,16 @@ pub(crate) fn multi_cell_transport_kernel(
     // slice-B / isotropic value already computed above (UAE
     // angular table when present, isotropic 1 - 2·xi3 otherwise).
     // CSR base: per-(slab,MT) global E_in-row start into evap_energy_grid /
-    // evap_u (issue #104). Slot row count is COL_EVAP_N_ENERGIES.
+    // evap_u. Slot row count is COL_EVAP_N_ENERGIES.
     evap_ae_offset: &[u32],
-    // CSR base: per-(slab,MT) global start into the component-major evap_theta
-    // (issue #104). Component `c`'s row begins at
+    // CSR base: per-(slab,MT) global start into the component-major evap_theta.
+    // Component `c`'s row begins at
     // `evap_theta_offset[mat_slot] + c * n_tae`.
     evap_theta_offset: &[u32],
     evap_energy_grid: &[f64],
     evap_theta: &[f64],
     evap_u: &[f64],
-    // Per-MT Maxwell distribution data. Tight CSR layout (issue #104):
+    // Per-MT Maxwell distribution data. Tight CSR layout:
     //   COL_MAXWELL_N_ENERGIES (in mt_slot_u32_meta) : θ(E_in) point count
     //   mg_off = maxwell_ae_offset[mat_slot]         (slot's first E_in row)
     //   maxwell_energy_grid[mg_off + i]
@@ -1772,7 +1775,7 @@ pub(crate) fn multi_cell_transport_kernel(
     maxwell_energy_grid: &[f64],
     maxwell_theta: &[f64],
     // Per-MT inelastic Watt distribution data (ENDF File 5, Law 11).
-    // Tight CSR layout (issue #104):
+    // Tight CSR layout:
     //   COL_WATT_N_ENERGIES (in mt_slot_u32_meta) : a/b tabulation point count
     //   wg_off = watt_ae_offset[mat_slot]         (slot's first E_in row)
     //   watt_energy_grid[wg_off + i]
@@ -1812,22 +1815,22 @@ pub(crate) fn multi_cell_transport_kernel(
     // example.
     mt_slot_f64_meta: &[f64],
     // Per-(material, nuclide) URR (unresolved resonance region) probability
-    // table data, keyed on the global slab index (issue #210: URR is applied
-    // to EVERY in-range URR nuclide of the material, each with an independent
+    // table data, keyed on the global slab index (URR is applied to EVERY
+    // in-range URR nuclide of the material, each with an independent
     // probability-table band, so it is slab-keyed and aligns 1:1 with
     // `mat_nuclide_meta` / `nuc_partial_xs`). `urr_meta` carries the per-slab
     // flags (present, n_energies, n_cdf, interp, inelastic/absorption/
     // multiply-smooth bits, and the per-nuclide `ZA` stream key -- see
-    // `URR_META_*` constants). Tight CSR (issue #104): `urr_ae_offset[slab]`
-    // is the per-slab base into the concatenated `urr_energy_grid` and
-    // `urr_cdf_offset[slab]` the base into `urr_cdf`; `n_energies` / `n_cdf`
-    // come from `urr_meta` (NO MAX_URR_* caps). `urr_xs` reuses the
-    // `urr_cdf_offset` base (the cdf cell index × `URR_XS_COLS`) and holds the
-    // four columns (total / elastic / fission / n_gamma). The smooth baselines
-    // the per-nuclide URR delta is taken against come from `nuc_partial_xs`
-    // (already density-weighted macroscopic, per slab), so no per-material
-    // smooth-micro buffer is needed. `urr_atom_density[slab]` scales a URR
-    // nuclide's perturbed micro XS up to a macroscopic contribution.
+    // `URR_META_*` constants). Tight CSR: `urr_ae_offset[slab]` is the per-slab
+    // base into the concatenated `urr_energy_grid` and `urr_cdf_offset[slab]`
+    // the base into `urr_cdf`; `n_energies` / `n_cdf` come from `urr_meta` (NO
+    // MAX_URR_* caps). `urr_xs` reuses the `urr_cdf_offset` base (the cdf cell
+    // index × `URR_XS_COLS`) and holds the four columns (total / elastic /
+    // fission / n_gamma). The smooth baselines the per-nuclide URR delta is
+    // taken against come from `nuc_partial_xs` (already density-weighted
+    // macroscopic, per slab), so no per-material smooth-micro buffer is needed.
+    // `urr_atom_density[slab]` scales a URR nuclide's perturbed micro XS up to
+    // a macroscopic contribution.
     urr_meta: &[u32],
     urr_ae_offset: &[u32],
     urr_cdf_offset: &[u32],
@@ -1882,7 +1885,7 @@ pub(crate) fn multi_cell_transport_kernel(
     // `urr_fired` is always false there and the substitution is a
     // no-op (matched-stream bit-equivalence preserved).
     tally_score_mt: &[u32],
-    // ----------------------- mesh (voxel) tally binning (issue #234) --------
+    // ----------------------- mesh (voxel) tally binning --------
     // Per-tally spatial mesh dimension. A `MESH_NONE` tally has
     // `tally_n_mesh[t] == 1` and `voxel_bin == 0`, so the flat index
     // `out_off + (cell_bin * n_bins + e) * n_mesh + voxel` collapses to the
@@ -1896,7 +1899,7 @@ pub(crate) fn multi_cell_transport_kernel(
     tally_mesh_kind: &[u32],
     tally_mesh_params_offsets: &[u32],
     tally_mesh_params: &[f64],
-    // ----------------------- energy-function weighting (issue #271) ---------
+    // ----------------------- energy-function weighting ---------
     // Per-tally `energy_function=` / `dose_coefficients=` table. Unlike every
     // other per-tally payload here this is NOT a bin dimension: it multiplies
     // the score by a tabulated curve evaluated at the particle's LINEAR energy
@@ -1933,8 +1936,7 @@ pub(crate) fn multi_cell_transport_kernel(
     // as a free Maxwell gas below `free_gas_threshold[0] * kt` and as a cold
     // target at/above it. Passed as a 1-element f64 buffer (like
     // `survival_params`) because cubecl comptime values must be `Hash` and
-    // `f64` is not; the CPU twin reads the same value from `TransportInputs`
-    // (issue #102).
+    // `f64` is not; the CPU twin reads the same value from `TransportInputs`.
     free_gas_threshold: &[f64],
     // ----------------------- coupled neutron->photon (S4b) -----------------
     // Runtime gate (1 element). When `coupled_enabled[0] == 0` NO photon RNG
@@ -1973,7 +1975,7 @@ pub(crate) fn multi_cell_transport_kernel(
     // GLOBAL continuous-tabular slot per product (already offset by the
     // material's ct base on the host).
     photon_prod_dist_slot: &[u32],
-    // Per-product angular table (tight CSR, issue #104), concatenated.
+    // Per-product angular table (tight CSR), concatenated.
     // `photon_pa_ae_offset[product]` is the global ae-row base into the
     // per-row arrays; `photon_pa_mu_offset[ae_row]` the per-row mu-point base.
     photon_pa_n_energies: &[u32],
@@ -1985,7 +1987,7 @@ pub(crate) fn multi_cell_transport_kernel(
     photon_pa_cdf: &[f64],
     photon_pa_pdf: &[f64],
     photon_pa_interp: &[u32],
-    // Per-continuous-slot outgoing-energy table (tight CSR, issue #104),
+    // Per-continuous-slot outgoing-energy table (tight CSR),
     // concatenated. `photon_ct_ae_offset[slot]` is the global ae-row base;
     // `photon_ct_x_offset[ae_row]` the per-row outgoing-point base.
     photon_ct_ae_offset: &[u32],
@@ -2043,7 +2045,7 @@ pub(crate) fn multi_cell_transport_kernel(
     // col 0 = `pp_base` (aggregate-row offset), col 1 = `ch_base` (global index
     // of the material's first channel), col 2 = `ch_count`.
     decay_meta: &[u32],
-    // ----------------------- per-collision nuclide selection (issue #74) ----
+    // ----------------------- per-collision nuclide selection ----
     // Per-(material, nuclide) macroscopic total xs on the shared grid, flat
     // `[n_slab x n_grid]` (nuclide-major within a material, concatenated
     // material-major). Slab row `s` starts at `s * n_grid`. At a collision in a
@@ -2052,7 +2054,7 @@ pub(crate) fn multi_cell_transport_kernel(
     // against one scaled uniform draw to pick the struck nuclide, then overrides
     // `target_mass` with that nuclide's AWR so elastic kinematics use the exact
     // per-nuclide mass. Gated on `count > 1`: single-nuclide materials draw NO
-    // selection random and stay byte-identical to the pre-#74 stream.
+    // selection random and stay byte-identical to a no-selection stream.
     nuc_macro_total: &[f64],
     // Per-(material, nuclide) AWR, flat `[n_slab]`. Indexed by the global slab.
     nuc_awr: &[f64],
@@ -2060,7 +2062,7 @@ pub(crate) fn multi_cell_transport_kernel(
     // material's slab base, `mat_nuclide_meta[mat*2 + 1]` its nuclide count.
     mat_nuclide_meta: &[u32],
     // Per-(slab, energy) reaction partials, DENSITY-WEIGHTED, packed
-    // `[n_slab x n_grid x NUC_PARTIAL_COLS]` (#74 Stage 2b). The entry for slab
+    // `[n_slab x n_grid x NUC_PARTIAL_COLS]`. The entry for slab
     // `s`, grid point `i`, column `c` is `nuc_partial_xs[(s * n_grid + i) * 4 +
     // c]`; columns are elastic(0) / absorption(1) / inelastic(2) / fission(3).
     // After selecting nuclide `s` (count > 1), the kernel splits the reaction
@@ -2069,8 +2071,8 @@ pub(crate) fn multi_cell_transport_kernel(
     // `sigma_*`. Single-nuclide materials never read this (the aggregate split
     // is exact and byte-identical).
     nuc_partial_xs: &[f64],
-    // Per-slab fission chi row table, packed `[n_slab x CHI_SLAB_META_COLS]`
-    // (fusion-neutronics/core#34 entry 1): for the struck slab, the first of
+    // Per-slab fission chi row table, packed `[n_slab x CHI_SLAB_META_COLS]`:
+    // for the struck slab, the first of
     // its prompt chi rows (one per fission channel), its channel count, its
     // delayed row and its element base into `fission_channel_xs`. A fission in
     // a slab with more than one channel draws one uniform and walks the
@@ -2082,14 +2084,14 @@ pub(crate) fn multi_cell_transport_kernel(
     // `chi_slab_meta`) + `channel * fine_n` + fine index.
     fission_channel_xs: &[f64],
     // Per-(slab, fine energy) fission yield pairs, packed `[n_slab x fine_n x
-    // NUC_YIELD_COLS]` like `nuc_partial_xs` (fusion-neutronics/core#93):
+    // NUC_YIELD_COLS]` like `nuc_partial_xs`:
     // column 0 the nuclide's own `nu_bar(E)`, column 1 its delayed fraction.
     // After selecting the struck nuclide (count > 1) the fission branch takes
     // both from here instead of the material's fission-weighted averages, so a
     // fission in one nuclide is paired with that nuclide's yield, as on the
     // CPU. Single-nuclide materials never read it.
     nuc_fission_yield: &[f64],
-    // Runtime gate for the device fission bank (issue #78, 1 element). When
+    // Runtime gate for the device fission bank (1 element). When
     // `fission_bank_enabled[0] == 0` the fission branch keeps the legacy
     // `weight *= nu_bar` + `FISSION_WEIGHT_CAP` terminator (byte-identical to a
     // pre-bank run). When `1` it stochastically rounds nu_bar to N, continues
@@ -2105,7 +2107,7 @@ pub(crate) fn multi_cell_transport_kernel(
     bank_count: &mut [Atomic<u64>],
     bank_overflow: &mut [Atomic<u64>],
     // Exit diagnostics. For a history that popped in-thread (n,xn)
-    // secondaries (issue #274) these describe the LAST transported
+    // secondaries these describe the LAST transported
     // secondary, not the primary walk: `out_n_steps` restarts per popped
     // particle and `out_alive` / `out_final_energy` are the final
     // particle's. Do not gate lost-particle or truncation detection on
@@ -2114,7 +2116,7 @@ pub(crate) fn multi_cell_transport_kernel(
     out_n_steps: &mut [u32],
     out_final_energy: &mut [f64],
     tally_out: &mut [Atomic<u64>],
-    // Per-(history, tally) total score (fusion-neutronics/core#29): row
+    // Per-(history, tally) total score: row
     // `ABSOLUTE_POS`, one f64 per tally entry, the sum of this history's
     // per-bin totals over the tally's bins. Written by the `PerHistory`
     // history-end flush only, with a plain add (each thread owns its row, no
@@ -2123,7 +2125,7 @@ pub(crate) fn multi_cell_transport_kernel(
     // variance modes (the per-source paths derive the same totals host-side
     // from `src_acc`).
     hist_tally_total: &mut [f64],
-    // Batch-free per-history variance spill (issue #233). Per-history
+    // Batch-free per-history variance spill. Per-history
     // overflow list for a history touching MORE than `PERHIST_K` distinct
     // bins: each thread owns the slice `[ABSOLUTE_POS * spill_cap ..
     // + spill_cap)` (no cross-thread access, so no atomics). `spill_bin`
@@ -2132,13 +2134,13 @@ pub(crate) fn multi_cell_transport_kernel(
     // `per_history_var` is false or `spill_cap == 0`.
     spill_bin: &mut [u32],
     spill_val: &mut [f64],
-    // Per-source variance (issue #233 Stage 2, fissile). `source_idx[i]` is the
+    // Per-source variance (fissile). `source_idx[i]` is the
     // index (within the launch chunk of ORIGINAL source neutrons) of the source
     // neutron thread `i` descends from: identity `i` for a source launch, the
     // banked parent's index for a fission-generation launch. When
     // `per_source_var`, a history flushes its per-bin totals into
     // `src_acc[source_idx[i] * total_bins + bin]` (fixed-point sum, atomic:
-    // progeny of one source can race the same slot) INSTEAD of the Stage 1
+    // progeny of one source can race the same slot) INSTEAD of the per-history
     // sum/sum_sq flush -- so a source's contributions accumulate across the
     // source + every generation launch before being squared at finalize.
     // `bank_source_idx[slot]` records the originating source index of each
@@ -2148,7 +2150,7 @@ pub(crate) fn multi_cell_transport_kernel(
     source_idx: &[u32],
     src_acc: &mut [Atomic<u64>],
     bank_source_idx: &mut [u32],
-    // Lost-particle diagnostics (issue #289). `lost_count` is a single-element
+    // Lost-particle diagnostics. `lost_count` is a single-element
     // u64 atomic counting every history that ended in no cell; `lost_f64` keeps
     // the first `lost_f64.len() / LOST_F64_STRIDE` records for the host to turn
     // into `LostParticle` diagnostics. The host enforces `max_lost_particles`
@@ -2168,7 +2170,7 @@ pub(crate) fn multi_cell_transport_kernel(
     // `>= 0`). Comptime so the per-thread base `ABSOLUTE_POS * spill_cap`
     // folds to a constant stride.
     #[comptime] spill_cap: u32,
-    // Per-source variance mode (issue #233 Stage 2). When true the history flush
+    // Per-source variance mode. When true the history flush
     // targets `src_acc` keyed by `source_idx` instead of the sum/sum_sq halves
     // of `tally_out`. Implies `per_history_var` (the touched-list still gathers
     // each thread's own steps).
@@ -2176,17 +2178,17 @@ pub(crate) fn multi_cell_transport_kernel(
     // Per-source accumulator row stride (= `total_out_len`). Comptime so the
     // per-source base `source_idx[i] * total_bins` folds cleanly.
     #[comptime] total_bins: u32,
-    // Mesh-tally variance path (issue #234). When true, every tally contribution
-    // (each voxel crossing of a track-length mesh tally, or a single bin for a
-    // non-mesh tally) is atomic-added, in the SUM fixed-point scale, DIRECTLY
-    // into `src_acc[source_idx[i] * total_bins + flat_idx]` -- bypassing the
+    // Mesh-tally variance path. When true, every tally contribution (each voxel
+    // crossing of a track-length mesh tally, or a single bin for a non-mesh
+    // tally) is atomic-added, in the SUM fixed-point scale, DIRECTLY into
+    // `src_acc[source_idx[i] * total_bins + flat_idx]` -- bypassing the
     // touched-list entirely (no O(distinct^2) dedup, no per-thread spill). The
     // host squares each source's grand total at finalize (per-source variance,
-    // exactly as the fissile Stage-2 path). Set together with `per_source_var`
+    // exactly as the fissile per-source path). Set together with `per_source_var`
     // (the host uses the same src_acc/source_idx/finalize infrastructure);
     // `spill_cap` is 0 and the touched-list stays empty, so the history-end
     // flush is a no-op. Only mesh models use this; non-mesh launches keep the
-    // Stage 1/2 touched-list path (byte-identical).
+    // per-history / per-source touched-list path (byte-identical).
     #[comptime] mesh_direct: bool,
 ) {
     if ABSOLUTE_POS >= seeds.len() {
@@ -2204,7 +2206,7 @@ pub(crate) fn multi_cell_transport_kernel(
     let mut dz = directions_in[i3 + 2];
     // Seed of the walk this thread is currently transporting: the source
     // particle's to begin with, then each popped (n,xn) secondary's own
-    // identity-derived seed (issue #111). It is the parent half of the key
+    // identity-derived seed. It is the parent half of the key
     // `secondary_seed` uses for anything this walk queues.
     let mut walk_seed = seeds[ABSOLUTE_POS];
     let mut state = crate::common::pcg32::expand_seed(walk_seed);
@@ -2213,10 +2215,10 @@ pub(crate) fn multi_cell_transport_kernel(
     // from 0 and the numbering does not depend on the drain order.
     let mut walk_secondaries = 0u32;
 
-    // Held URR probability-table band for this walk (issue #342). The base
+    // Held URR probability-table band for this walk. The base
     // uniform is drawn ONCE per energy, not once per step: OpenMC advances its
     // URR seed only when the energy changes (`physics.cpp:164`) and the CPU
-    // does the same (`Particle.urr_energy` / `urr_random`, PR #207), so the
+    // does the same (`Particle.urr_energy` / `urr_random`), so the
     // same isotope keeps one resonance realisation across boundary crossings
     // and void excursions until a collision moves the neutron off that energy.
     // `urr_held` is the CPU's `NO_URR` sentinel in flag form. The two f64
@@ -2231,14 +2233,16 @@ pub(crate) fn multi_cell_transport_kernel(
     // alive: 1 = transporting, 0 = absorbed or escaped.
     let mut alive = 1u32;
     let mut n_steps = 0u32;
-    // weight: slice-E multiplier for tally accumulation. Starts at
-    // 1.0 and grows by `MT_YIELDS[slot]` whenever an inelastic
+    // weight: slice-E multiplier for tally accumulation. Starts at the
+    // particle's input weight (1.0 for a source neutron, the banked weight for
+    // a relaunched fission progeny or spilled secondary) and grows by
+    // `MT_YIELDS[slot]` whenever an inelastic
     // collision picks a multi-neutron-out MT (slot 41 = MT 16
     // doubles weight, slot 42 = MT 17 triples it). Track-length and
     // absorption tallies are scaled by `weight` so the expected
     // contribution matches `yield` independent neutrons (yamc's CPU
     // side clones the primary; this is the variance-reduction form).
-    let mut weight = 1.0;
+    let mut weight = weights_in[ABSOLUTE_POS];
 
     // `angle_interp` is currently unused in the kernel -- slice B
     // approximates every (mu, cdf) bracket as piecewise-linear in
@@ -2254,7 +2258,7 @@ pub(crate) fn multi_cell_transport_kernel(
     let n_bvh_nodes: u32 = (bvh_aabbs.len() / 6) as u32;
     let n_bvh_unbounded: u32 = bvh_unbounded.len() as u32;
 
-    // Batch-free per-history variance (issue #233): thread-private
+    // Batch-free per-history variance: thread-private
     // touched-list. `th_bin[j]` = flat `tally_out` bin index, `th_val[j]` =
     // this history's running total for that bin. Declared UNCONDITIONALLY (a
     // conditional `Array::new` trips a cubecl-SPIRV/RADV codegen quirk), so
@@ -2265,7 +2269,7 @@ pub(crate) fn multi_cell_transport_kernel(
     let mut th_val = Array::<f64>::new(PERHIST_K as usize);
     let mut th_count = 0u32;
     let mut spill_count = 0u32;
-    // In-thread (n,xn) pending-secondary STACK (issue #274). Analog
+    // In-thread (n,xn) pending-secondary STACK. Analog
     // multiplicity: an integral multi-neutron yield keeps the walk's weight
     // unchanged and pushes the extra secondaries here; when the current
     // particle dies the thread pops the most recent one and keeps
@@ -2286,10 +2290,10 @@ pub(crate) fn multi_cell_transport_kernel(
     // drain and transport in a later pass -- nothing is dropped and nothing
     // reverts to weight multiplication.
     //
-    // `pend_seed` carries each entry's identity-derived collision seed (issue
-    // #111): the thread re-seeds its PCG from it on pop rather than letting the
-    // parent's state carry over, so where a secondary is transported (this
-    // stack, or a later host pass) cannot change what it samples. 16 bytes of
+    // `pend_seed` carries each entry's identity-derived collision seed: the
+    // thread re-seeds its PCG from it on pop rather than letting the parent's
+    // state carry over, so where a secondary is transported (this stack, or a
+    // later host pass) cannot change what it samples. 16 bytes of
     // thread-private state beside the 256 the eight f64 arrays already cost.
     let mut pend_seed = Array::<u32>::new(PEND_SLOTS);
     let mut pend_e = Array::<f64>::new(PEND_SLOTS);
@@ -2305,7 +2309,7 @@ pub(crate) fn multi_cell_transport_kernel(
     // so this is a constant stride multiply. `usize` to match the kernel's
     // buffer-index type (ABSOLUTE_POS).
     let spill_base = ABSOLUTE_POS * spill_cap as usize;
-    // Per-source variance (issue #233 Stage 2): the source neutron this thread
+    // Per-source variance: the source neutron this thread
     // descends from, and its base row in `src_acc`. Only read/used when
     // `per_source_var` (else `source_idx` is a size-1 dummy). Stamped into every
     // fission progeny this thread banks so descendants inherit it.
@@ -2316,7 +2320,7 @@ pub(crate) fn multi_cell_transport_kernel(
     let src_base = my_source_idx as usize * total_bins as usize;
 
     // Cell this history occupied on the previous step, for the lost-particle
-    // record (issue #289). `4_294_967_295` = "none yet", i.e. a source particle
+    // record. `4_294_967_295` = "none yet", i.e. a source particle
     // born outside every cell. Kept as u32 (not f64) so the running
     // read-modify-write is free of the cubecl f64-literal-init quirk; widened
     // at the single record site.
@@ -2327,19 +2331,18 @@ pub(crate) fn multi_cell_transport_kernel(
     // (n,xn) secondary) hits `max_steps` while still alive. The pop below
     // resets `alive` and `step` for the next secondary, so `alive` at loop
     // exit alone would only describe the LAST walk and a truncated primary
-    // whose secondary then finished normally would go unreported
-    // (fusion-neutronics/core#23).
+    // whose secondary then finished normally would go unreported.
     let mut truncated = 0u32;
     while (alive == 1u32 && step < max_steps) || pend_n > 0u32 {
         if alive == 1u32 && step >= max_steps {
             truncated = 1u32;
         }
         // Current particle finished but (n,xn) secondaries are queued: pop
-        // the most recent one and keep transporting inside the same history
-        // (issue #274). The per-history accumulators carry over; the
+        // the most recent one and keep transporting inside the same history.
+        // The per-history accumulators carry over; the
         // particle registers reset, and so does the RNG -- the popped
         // secondary starts on the stream its identity picked out when it
-        // was queued (issue #111), not on the tail of whatever the previous
+        // was queued, not on the tail of whatever the previous
         // walk left behind. Popping frees the slot for a later push.
         if alive == 0u32 || step >= max_steps {
             pend_n -= 1u32;
@@ -2358,7 +2361,7 @@ pub(crate) fn multi_cell_transport_kernel(
             alive = 1u32;
             step = 0u32;
             // A popped secondary is its own particle and holds no band yet,
-            // matching `Particle::new`'s `NO_URR` (issue #342).
+            // matching `Particle::new`'s `NO_URR`.
             urr_held = 0u32;
         }
         // 1. Find current cell via stackless BVH traversal (rope
@@ -2473,7 +2476,7 @@ pub(crate) fn multi_cell_transport_kernel(
             // cover the space it reached. The CPU calls this a LOST particle
             // (`handle_lost_particle`): it records the diagnostic and aborts
             // the run once `max_lost_particles` is exceeded. Record it here
-            // for the same treatment host-side (issue #289) instead of
+            // for the same treatment host-side instead of
             // silently ending the history, which used to make a model with a
             // geometry gap "succeed" on GPU while refusing to run on CPU.
             //
@@ -2506,7 +2509,7 @@ pub(crate) fn multi_cell_transport_kernel(
             let mat_meta_off = mat_idx * 5u32;
             // `target_mass` is the density-weighted material average; for a
             // multi-nuclide material the per-collision nuclide-selection block
-            // below overrides it with the struck nuclide's exact AWR (issue #74).
+            // below overrides it with the struck nuclide's exact AWR.
             let mut target_mass = mat_f64_meta[(mat_meta_off + 0u32) as usize];
             // GLOBAL grid length -- backs the grid-shared score / photon / decay
             // lookups (their buffers stay on `log_energy_grid`); the aggregate
@@ -2560,7 +2563,7 @@ pub(crate) fn multi_cell_transport_kernel(
                 frac = (energy - e_lo) / denom;
             }
             // Fine-grid bracket for the resonance-critical per-material aggregate
-            // macro XS + the per-(material, nuclide) nuc buffers (issue #212).
+            // macro XS + the per-(material, nuclide) nuc buffers.
             // This material's own fine grid is the slice
             // `fine_log_energy_grid[fine_off .. fine_off + fine_n]` (stride-3
             // `fine_meta` cols GRID_OFFSET / N). `idx_lo_f` / `idx_hi_f` stay
@@ -2602,8 +2605,8 @@ pub(crate) fn multi_cell_transport_kernel(
             if denom_f > 0.0 {
                 frac_f = (energy - e_lo_f) / denom_f;
             }
-            // Coarse-grid bracket for the per-MT inelastic / yield buffers
-            // (issue #88 / #212). This material's own coarse grid is the slice
+            // Coarse-grid bracket for the per-MT inelastic / yield buffers.
+            // This material's own coarse grid is the slice
             // `coarse_log_energy_grid[coarse_base .. coarse_base + coarse_n]`
             // (stride-3 `coarse_meta` cols 0 / 1). `idx_lo_c` / `idx_hi_c` stay
             // RELATIVE to `coarse_base` so they double as the per-MT-buffer
@@ -2640,7 +2643,7 @@ pub(crate) fn multi_cell_transport_kernel(
             if denom_c > 0.0 {
                 frac_c = (energy - e_lo_c) / denom_c;
             }
-            // Aggregate macro XS ride the per-material FINE grid (issue #212):
+            // Aggregate macro XS ride the per-material FINE grid:
             // row base `fine_off`, energy index `idx_lo_f` / `idx_hi_f`, factor
             // `frac_f`. Single-material => `fine_off == mat_idx * n_grid`, so
             // byte-identical.
@@ -2659,24 +2662,23 @@ pub(crate) fn multi_cell_transport_kernel(
             let nu_lo = nu_bar_per_material[(fine_off + idx_lo_f) as usize];
             let nu_hi = nu_bar_per_material[(fine_off + idx_hi_f) as usize];
             let mut nu_bar = nu_lo + (nu_hi - nu_lo) * frac_f;
-            // Delayed fraction on the same fine grid (issue #364).
+            // Delayed fraction on the same fine grid.
             let beta_lo = beta_delayed_per_material[(fine_off + idx_lo_f) as usize];
             let beta_hi = beta_delayed_per_material[(fine_off + idx_hi_f) as usize];
             let mut beta_delayed = beta_lo + (beta_hi - beta_lo) * frac_f;
 
-            // Per-(material, nuclide) URR probability-table sampling (issue
-            // #210). URR is applied to EVERY in-range URR nuclide of the
-            // material, each drawing an independent probability-table band
-            // (issue #204), mirroring CPU `Material::compute_urr_macro_xs`.
-            // The unperturbed `sigma_e` / `sigma_a` / `sigma_f` / `sigma_i`
-            // stay the floor; each URR nuclide adds a macroscopic delta taken
-            // against its own `nuc_partial_xs` smooth baseline. The summed
-            // deltas are applied and clamped ONCE after the slab loop (an
-            // individual nuclide's self-shielding delta is legitimately
-            // negative), while the per-slab micro-XS >= 0 clamps stay inside
-            // the loop.
+            // Per-(material, nuclide) URR probability-table sampling. URR is
+            // applied to EVERY in-range URR nuclide of the material, each
+            // drawing an independent probability-table band, mirroring CPU
+            // `Material::compute_urr_macro_xs`. The unperturbed `sigma_e` /
+            // `sigma_a` / `sigma_f` / `sigma_i` stay the floor; each URR
+            // nuclide adds a macroscopic delta taken against its own
+            // `nuc_partial_xs` smooth baseline. The summed deltas are applied
+            // and clamped ONCE after the slab loop (an individual nuclide's
+            // self-shielding delta is legitimately negative), while the
+            // per-slab micro-XS >= 0 clamps stay inside the loop.
             //
-            // Tight CSR (issue #104): the URR energy / cdf / xs buffers are
+            // Tight CSR: the URR energy / cdf / xs buffers are
             // packed without the old MAX_URR_* padding, so the bracket-find
             // loops MUST be variable-bound -- a fixed comptime bound would
             // read past a slab's tight region (launch_unchecked has no bounds
@@ -2690,7 +2692,7 @@ pub(crate) fn multi_cell_transport_kernel(
             // band the step sampled). `urr_fired` is set when any URR nuclide
             // is sampled this step; `urr_capture_delta` is how much those
             // bands moved the material's macroscopic capture, to be ADDED to
-            // the smooth MT 102 (fusion-neutronics/core#106). Both stay at
+            // the smooth MT 102. Both stay at
             // their defaults when no URR nuclide fires.
             let mut urr_fired = false;
             let mut urr_capture_delta = 0.0_f64;
@@ -2725,16 +2727,16 @@ pub(crate) fn multi_cell_transport_kernel(
             }
 
             if urr_any_in_range {
-                // One base uniform per ENERGY (issues #204, #342); each
-                // nuclide's band is decorrelated from it by
-                // `urr_nuclide_random(base, ZA)`. A band already held at this
-                // exact energy is reused, so crossing into another material,
-                // or streaming back through a void, keeps the isotope on the
-                // one resonance realisation it presented before. Drawing per
-                // step instead decorrelates the realisation across crossings
-                // and over-predicts transmitted flux ~30% (issue #342).
-                // Held bands are only ever touched here, so a void or
-                // non-URR step leaves the band intact, matching PR #207.
+                // One base uniform per ENERGY; each nuclide's band is
+                // decorrelated from it by `urr_nuclide_random(base, ZA)`. A
+                // band already held at this exact energy is reused, so crossing
+                // into another material, or streaming back through a void,
+                // keeps the isotope on the one resonance realisation it
+                // presented before. Drawing per step instead decorrelates the
+                // realisation across crossings and over-predicts transmitted
+                // flux ~30%. Held bands are only ever touched here, so a void
+                // or non-URR step leaves the band intact, matching the CPU
+                // `Particle`'s held band.
                 if urr_held == 0u32 || urr_energy != energy {
                     let d_urr = crate::common::pcg32::draw_uniform(state);
                     state = d_urr.state;
@@ -2756,7 +2758,7 @@ pub(crate) fn multi_cell_transport_kernel(
                     let slab = urr_nuc_off + ku;
                     // Smooth macroscopic baselines for this slab from
                     // `nuc_partial_xs` (density-weighted, per-material FINE
-                    // grid, issue #212): col 0 elastic, col 1 absorption
+                    // grid): col 0 elastic, col 1 absorption
                     // (capture + other_abs, EXCLUDING fission), col 2
                     // inelastic, col 3 fission. Same FINE bracket the smooth
                     // macro lookup used.
@@ -2829,7 +2831,7 @@ pub(crate) fn multi_cell_transport_kernel(
                 // capture, for the MT 102 score below. The perturbed
                 // disappearance (`new_a`) is NOT that number: it carries every
                 // nuclide's (n,p) and (n,alpha) as well, and scoring capture
-                // from it collected those too (fusion-neutronics/core#106).
+                // from it collected those too.
                 // Only the URR nuclides' own disappearance moved, and inside a
                 // band that movement is the capture movement, so the delta
                 // added to the smooth MT 102 is what capture wants.
@@ -3089,7 +3091,7 @@ pub(crate) fn multi_cell_transport_kernel(
                         }
                     }
 
-                    // Energy-function weighting (issue #271). Applied to
+                    // Energy-function weighting. Applied to
                     // `score` rather than to `contrib` so the mesh DDA helpers
                     // below, which take `score` by value, pick it up for free.
                     // An out-of-range energy drops the whole event (CPU
@@ -3131,7 +3133,7 @@ pub(crate) fn multi_cell_transport_kernel(
                     let _ = n_t_cells;
                     if in_range && ef_in_range {
                         if mesh_direct {
-                            // Issue #234: mesh models accumulate each contribution
+                            // Mesh models accumulate each contribution
                             // straight into the per-source accumulator (no touched
                             // list). A MESH_NONE tally in a mesh model writes its
                             // single bin; a mesh tally fans the step across voxels.
@@ -3144,7 +3146,7 @@ pub(crate) fn multi_cell_transport_kernel(
                                 let base = out_off + ce * n_mesh;
                                 let mo = tally_mesh_params_offsets[t as usize];
                                 // Cylindrical (kind 3) vs rectangular (1/2)
-                                // voxel walk (issue #279).
+                                // voxel walk.
                                 if tally_mesh_kind[t as usize] == 3u32 {
                                     cyl_mesh_score_src_acc(
                                         tally_mesh_params,
@@ -3184,7 +3186,7 @@ pub(crate) fn multi_cell_transport_kernel(
                                 }
                             }
                         } else if per_history_var {
-                            // Batch-free per-history variance (issue #233):
+                            // Batch-free per-history variance:
                             // accumulate this history's per-bin PHYSICAL total
                             // locally (dedup on tally_idx). Squared + summed at
                             // history end. Overflow past PERHIST_K goes to the
@@ -3313,7 +3315,7 @@ pub(crate) fn multi_cell_transport_kernel(
                             }
                         }
 
-                        // Energy-function weighting (issue #271), same rule as
+                        // Energy-function weighting, same rule as
                         // the per-step block: multiply the score, or drop the
                         // event when the incident energy is off the table.
                         let ef_lo_c = tally_efunc_offsets[tc as usize];
@@ -3349,18 +3351,18 @@ pub(crate) fn multi_cell_transport_kernel(
                         let tally_idx_c = out_off_c + cell_bin_c * n_bins_c + bin_c;
                         if in_range_c && ef_in_range_c {
                             if mesh_direct {
-                                // Issue #234: collision estimator bins at the
-                                // collision point (position already advanced by
-                                // `d`). A mesh tally scores the single voxel
-                                // containing the point (dropped if outside the
-                                // mesh, matching the CPU `get_bin` -> None).
+                                // Collision estimator bins at the collision
+                                // point (position already advanced by `d`). A
+                                // mesh tally scores the single voxel containing
+                                // the point (dropped if outside the mesh,
+                                // matching the CPU `get_bin` -> None).
                                 if tally_mesh_kind[tc as usize] == 0u32 {
                                     src_acc[src_base + tally_idx_c as usize]
                                         .fetch_add(u64::reinterpret(scaled_c));
                                 } else {
                                     let mo = tally_mesh_params_offsets[tc as usize];
                                     // Cylindrical (kind 3) vs rectangular (1/2)
-                                    // point binning (issue #279).
+                                    // point binning.
                                     let voxel = if tally_mesh_kind[tc as usize] == 3u32 {
                                         cyl_mesh_bin_at_kernel(tally_mesh_params, mo, px, py, pz)
                                     } else {
@@ -3375,7 +3377,7 @@ pub(crate) fn multi_cell_transport_kernel(
                                     }
                                 }
                             } else if per_history_var {
-                                // Batch-free per-history variance (issue #233):
+                                // Batch-free per-history variance:
                                 // same touched-list + spill accumulation as the
                                 // per-step (track-length) block above, for the
                                 // collision-estimator contribution.
@@ -3577,7 +3579,7 @@ pub(crate) fn multi_cell_transport_kernel(
                             // attempt: the advance keeps successive photons on
                             // distinct sub-streams, and its output word is the
                             // banked u32 transport seed (the sub-pass expands
-                            // it back to a 64-bit state, issue #274). Drawn
+                            // it back to a 64-bit state). Drawn
                             // BEFORE the e_out / capacity gates so the child
                             // stream schedule stays unconditional.
                             let d_seed = crate::common::pcg32::pcg_next(photon_state);
@@ -3588,8 +3590,8 @@ pub(crate) fn multi_cell_transport_kernel(
                             // a NONE-classified law); the CPU
                             // `sample_secondary_photons` drops these (e_out <= 0),
                             // so skip the bank rather than emit a zero-energy
-                            // photon (issue #175). All RNG draws stay
-                            // unconditional, so the stream is unchanged.
+                            // photon. All RNG draws stay unconditional, so the
+                            // stream is unchanged.
                             if kin.e_out > 0.0 {
                                 let capacity = (bank_f64.len() / 8) as u64;
                                 let slot = bank_count[0].fetch_add(1u64);
@@ -3608,7 +3610,7 @@ pub(crate) fn multi_cell_transport_kernel(
                                     bank_u32[u + 1] = cell;
                                     bank_u32[u + 2] = d_seed.rand;
                                     bank_u32[u + 3] = 0u32;
-                                    // Per-source variance (issue #233 Stage 3): stamp the
+                                    // Per-source variance: stamp the
                                     // originating source neutron so the coupled photon
                                     // sub-pass folds this secondary into the same sample.
                                     bank_source_idx[slot as usize] = my_source_idx;
@@ -3812,12 +3814,12 @@ pub(crate) fn multi_cell_transport_kernel(
                                 bank_u32[u + 1] = cell;
                                 // Banked u32 transport seed: the XSH-RR output
                                 // word of the (dead-after-this) child state; the
-                                // sub-pass expands it back to a 64-bit state
-                                // (issue #274). No advance, so the child stream
+                                // sub-pass expands it back to a 64-bit state.
+                                // No advance, so the child stream
                                 // schedule is unchanged.
                                 bank_u32[u + 2] = crate::common::pcg32::pcg_out(dstate);
                                 bank_u32[u + 3] = parent_id;
-                                // Per-source variance (issue #233 Stage 3): D1S decay
+                                // Per-source variance: D1S decay
                                 // photons descend from the source neutron (via the
                                 // activated nuclide), so they inherit its source index.
                                 bank_source_idx[dslot as usize] = my_source_idx;
@@ -3828,17 +3830,16 @@ pub(crate) fn multi_cell_transport_kernel(
                     }
                 }
 
-                // 8c. Per-collision nuclide selection (issue #74). In a
-                // multi-nuclide material, pick which nuclide is struck
-                // proportional to its macroscopic total xs at the collision
-                // energy, then override `target_mass` with that nuclide's AWR so
-                // the elastic kinematics below use the exact per-nuclide mass
-                // (the material-average mass under-moderates -- an H2O sphere
-                // loses ~half its thermal flux). The reaction-type four-way
-                // split stays driven by the (already correct) aggregate
-                // macroscopic partials; only the elastic AWR is per-nuclide in
-                // Stage 1. Gated on `count > 1`: a single-nuclide material draws
-                // NO random here and is byte-identical to the pre-#74 stream.
+                // 8c. Per-collision nuclide selection. In a multi-nuclide material,
+                // pick which nuclide is struck proportional to its macroscopic total
+                // xs at the collision energy, then override `target_mass` with that
+                // nuclide's AWR so the elastic kinematics below use the exact
+                // per-nuclide mass (the material-average mass under-moderates -- an
+                // H2O sphere loses ~half its thermal flux). The reaction-type
+                // four-way split is driven by the selected nuclide's own reaction
+                // partials (below). Gated on `count > 1`: a single-nuclide material
+                // draws NO random here and is byte-identical to a no-selection
+                // stream.
                 let nuc_off = mat_nuclide_meta[(mat_idx * 2u32) as usize];
                 let nuc_count = mat_nuclide_meta[(mat_idx * 2u32 + 1u32) as usize];
                 // Global slab of the struck nuclide: `nuc_off` (the material's
@@ -3858,8 +3859,8 @@ pub(crate) fn multi_cell_transport_kernel(
                 let mut sigma_f_rx = sigma_f;
                 if nuc_count > 1u32 {
                     // Per-nuclide macro total at the collision energy, linearly
-                    // interpolated in the FINE bracket `[idx_lo_f, idx_hi_f]`
-                    // (issue #212). Sum is the selection denominator (equals the
+                    // interpolated in the FINE bracket `[idx_lo_f, idx_hi_f]`.
+                    // Sum is the selection denominator (equals the
                     // smooth Σ_t when no URR). `nuc_macro_total` rides the
                     // per-material FINE grid: slab `nuc_off + j`'s row base is
                     // `fine_nuc_base + j * fine_n`; single-material =>
@@ -3867,10 +3868,10 @@ pub(crate) fn multi_cell_transport_kernel(
                     // A nuclide's share of the collision density follows the
                     // cross section that actually governed the flight, so an
                     // in-range URR nuclide is weighted by its PERTURBED total,
-                    // not the table average (issue #347). `urr_band_live` is 1
+                    // not the table average. `urr_band_live` is 1
                     // only when this walk holds a band drawn at THIS energy.
                     // Belt and braces: a band held from an earlier energy
-                    // survives non-URR steps by design (#342), but it cannot
+                    // survives non-URR steps by design, but it cannot
                     // corrupt a weight anyway, since `urr_held` is only set when
                     // some slab was in range at that energy and
                     // `urr_slab_partials` re-checks the same range per slab, so
@@ -3990,18 +3991,18 @@ pub(crate) fn multi_cell_transport_kernel(
                     slab = nuc_off + chosen;
                     target_mass = nuc_awr[slab as usize];
 
-                    // Reaction-type partials for the SELECTED nuclide (#74
-                    // Stage 2b): density-weighted elastic / absorption /
-                    // inelastic / fission interpolated at the collision bracket.
-                    // Replaces the material-aggregate split so a chosen nuclide's
-                    // inelastic branch is sampled in proportion to ITS own
-                    // inelastic xs (the H2O / natFe fix). `nuc_partial_xs` rides
-                    // the per-material FINE grid, packed tight-CSR
-                    // `[sum_m nuc_count_m * fine_n_m x 4]` (cols e/a/i/f, issue
-                    // #212): slab `slab`'s element base is `fine_nuc_base +
-                    // (slab - nuc_off) * fine_n`, times 4. Single-material =>
-                    // `fine_nuc_base == 0`, `nuc_off == 0`, `fine_n == n_grid`,
-                    // byte-identical.
+                    // Reaction-type partials for the SELECTED nuclide:
+                    // density-weighted elastic / absorption / inelastic / fission
+                    // interpolated at the collision bracket. Replaces the
+                    // material-aggregate split so a chosen nuclide's inelastic
+                    // branch is sampled in proportion to ITS own inelastic xs
+                    // (the H2O / natFe fix). `nuc_partial_xs` rides the
+                    // per-material FINE grid, packed tight-CSR
+                    // `[sum_m nuc_count_m * fine_n_m x 4]` (cols e/a/i/f): slab
+                    // `slab`'s element base is
+                    // `fine_nuc_base + (slab - nuc_off) * fine_n`, times 4.
+                    // Single-material => `fine_nuc_base == 0`, `nuc_off == 0`,
+                    // `fine_n == n_grid`, byte-identical.
                     let p_lo = (fine_nuc_base + (slab - nuc_off) * fine_n + idx_lo_f) * 4u32;
                     let p_hi = (fine_nuc_base + (slab - nuc_off) * fine_n + idx_hi_f) * 4u32;
                     let e_lo_p = nuc_partial_xs[p_lo as usize];
@@ -4016,9 +4017,8 @@ pub(crate) fn multi_cell_transport_kernel(
                     let f_lo_p = nuc_partial_xs[(p_lo + 3u32) as usize];
                     let f_hi_p = nuc_partial_xs[(p_hi + 3u32) as usize];
                     sigma_f_rx = f_lo_p + (f_hi_p - f_lo_p) * frac_f;
-                    // The struck nuclide's own fission yield
-                    // (fusion-neutronics/core#93): same element index as the
-                    // partials, two columns.
+                    // The struck nuclide's own fission yield: same element
+                    // index as the partials, two columns.
                     let y_lo = (fine_nuc_base + (slab - nuc_off) * fine_n + idx_lo_f) * 2u32;
                     let y_hi = (fine_nuc_base + (slab - nuc_off) * fine_n + idx_hi_f) * 2u32;
                     let nu_lo_s = nuc_fission_yield[y_lo as usize];
@@ -4028,7 +4028,7 @@ pub(crate) fn multi_cell_transport_kernel(
                     let b_hi_s = nuc_fission_yield[(y_hi + 1u32) as usize];
                     beta_delayed = b_lo_s + (b_hi_s - b_lo_s) * frac_f;
                     // Split the struck nuclide on the SAME band its selection
-                    // and the flight used (issue #347). Smooth partials here
+                    // and the flight used. Smooth partials here
                     // would mis-weight capture against scatter: the URR capture
                     // fraction moves strongly with the band (W184 at 50 keV is
                     // 7.3% in a low band against 1.95% mid-band).
@@ -4070,16 +4070,16 @@ pub(crate) fn multi_cell_transport_kernel(
                 state = d_xi2.state;
                 let xi2 = d_xi2.xi;
                 // Survival biasing (implicit capture). With the device fission
-                // bank on this is OpenMC's scheme (`sample_neutron_reaction`,
-                // fusion-neutronics/core#25): fission sites first, from the
-                // PRE-discount weight and scaled by `sigma_f / sigma_t`, since
-                // under implicit capture fission never happens to the
-                // survivor; then the weight is discounted by absorption
-                // INCLUDING fission, `weight *= (sigma_e + sigma_i) / sigma_t`;
-                // then the survivor always scatters, split between elastic and
-                // inelastic only. That is what the production CPU does
-                // (`transport/mod.rs`, `survival_capture`), so the two backends
-                // now run the same per-history scheme on fissile materials.
+                // bank on this is OpenMC's scheme (`sample_neutron_reaction`):
+                // fission sites first, from the PRE-discount weight and scaled
+                // by `sigma_f / sigma_t`, since under implicit capture fission
+                // never happens to the survivor; then the weight is discounted
+                // by absorption INCLUDING fission,
+                // `weight *= (sigma_e + sigma_i) / sigma_t`; then the survivor
+                // always scatters, split between elastic and inelastic only.
+                // That is what the production CPU does (`transport/mod.rs`,
+                // `survival_capture`), so the two backends now run the same
+                // per-history scheme on fissile materials.
                 //
                 // With the bank OFF the fission branch below is the legacy
                 // `weight *= nu_bar` multiply, which has no "bank the sites"
@@ -4090,10 +4090,10 @@ pub(crate) fn multi_cell_transport_kernel(
                 // boundaries and RNG schedule byte-for-byte, and a pure
                 // absorber falls through to the analog kill below.
                 // Reaction-type split runs against the SELECTED nuclide's
-                // partials (#74 Stage 2b). For single-nuclide materials the
-                // `*_rx` values equal the material-aggregate (URR-perturbed)
-                // `sigma_*` exactly, and `sigma_t_rx == sigma_t`, so the split
-                // is byte-identical to the pre-Stage-2b flow.
+                // partials. For single-nuclide materials the `*_rx` values
+                // equal the material-aggregate (URR-perturbed) `sigma_*`
+                // exactly, and `sigma_t_rx == sigma_t`, so the split is
+                // byte-identical to a material-aggregate split.
                 let survival_on = survival_params[0] != 0.0;
                 let bank_on = fission_bank_enabled[0] == 1u32;
                 let sigma_t_rx = sigma_e_rx + sigma_a_rx + sigma_i_rx + sigma_f_rx;
@@ -4120,8 +4120,7 @@ pub(crate) fn multi_cell_transport_kernel(
                         let watt_a_sv = mat_f64_meta[(mat_meta_off + 2u32) as usize];
                         let watt_b_sv = mat_f64_meta[(mat_meta_off + 3u32) as usize];
                         // The channel that fissioned, one draw only for a
-                        // nuclide with partial channels
-                        // (fusion-neutronics/core#34 entry 1).
+                        // nuclide with partial channels.
                         let rows_sv = crate::common::sampling::fission_chi::select_fission_chi_rows(
                             slab,
                             fine_n,
@@ -4220,24 +4219,22 @@ pub(crate) fn multi_cell_transport_kernel(
                         // schedule, so RNG-stream parity with their
                         // pre-fix flow is preserved.
                         //
-                        // ENDF MT 2 elastic at MeV is heavily forward-
-                        // peaked for heavy targets (Pb, Ac, U, …);
-                        // the pre-fix isotropic fallback gave too many
-                        // particles a back-scatter and inflated their
-                        // residence time in the cell, biasing flux /
-                        // (n,γ) tallies upward (~10% on the actinide
-                        // verification spheres). Tabulated CDF
-                        // inversion brings GPU within statistical
-                        // noise of CPU.
-                        // Index by the selected nuclide's global `slab`
-                        // (#74 Stage 2a): the elastic angular table is now
-                        // per-(material, nuclide), not material-blended. A
-                        // single-nuclide material has `slab == nuc_off`, the
-                        // same row as the pre-Stage-2a `mat_idx` layout.
+                        // ENDF MT 2 elastic at MeV is heavily forward-peaked
+                        // for heavy targets (Pb, Ac, U, …); the pre-fix
+                        // isotropic fallback gave too many particles a
+                        // back-scatter and inflated their residence time in the
+                        // cell, biasing flux / (n,γ) tallies upward (~10% on
+                        // the actinide verification spheres). Tabulated CDF
+                        // inversion brings GPU within statistical noise of CPU.
+                        // Index by the selected nuclide's global `slab`: the
+                        // elastic angular table is now per-(material, nuclide),
+                        // not material-blended. A single-nuclide material has
+                        // `slab == nuc_off`, the same row as a `mat_idx`-keyed
+                        // layout.
                         let n_ae_e = elastic_angle_n_energies[slab as usize];
                         let mut mu_cm = 1.0 - 2.0 * xi3;
                         if n_ae_e > 0u32 {
-                            // Tight CSR layout (issue #104): the slab's
+                            // Tight CSR layout: the slab's
                             // incident-energy rows start at this global base
                             // in the variable-length elastic arrays; no fixed
                             // per-axis stride.
@@ -4562,14 +4559,14 @@ pub(crate) fn multi_cell_transport_kernel(
                         // any mismatch fails loudly at the dispatch
                         // boundary.
                         // Per-MT inelastic buffers are keyed per-(material,
-                        // nuclide) SLAB (#74 Stage 2b), not per material: the
+                        // nuclide) SLAB, not per material: the
                         // chosen nuclide's own discrete-level / continuum
                         // inelastic distributions are sampled. Single-nuclide
                         // materials have `slab == mat_idx`'s old row, so the
                         // index (and result) is byte-identical.
                         let mt_count = MT_INELASTIC_COUNT as u32;
                         let mat_mt_off = slab * mt_count;
-                        // SPARSE per-MT inelastic storage (issue #212). Each (slab,
+                        // SPARSE per-MT inelastic storage. Each (slab,
                         // MT slot) has a `permt_meta` row [value_offset, i_start,
                         // n_stored]: the slot's xs at coarse index `k` is
                         // `xs_inelastic_per_mt_sparse[value_offset + (k - i_start)]`
@@ -4657,7 +4654,7 @@ pub(crate) fn multi_cell_transport_kernel(
                                 [(sel_value_offset + (idx_hi_c - sel_i_start)) as usize];
                         }
                         let slot_yield = yield_lo + (yield_hi - yield_lo) * frac_c;
-                        // Analog (n,xn) multiplicity (issue #274): an integral
+                        // Analog (n,xn) multiplicity: an integral
                         // yield >= 2 keeps the walk's weight UNCHANGED; the
                         // kinematics loop below samples `yield - 1` extra
                         // independent secondaries from this same slot and
@@ -4698,8 +4695,8 @@ pub(crate) fn multi_cell_transport_kernel(
 
                         // Sample the outgoing (mu, E) kinematics `n_out` times
                         // from this slot's distributions: iteration 0 is the
-                        // continuing walk (bit-identical to the pre-#274 body
-                        // when n_out == 1); iterations 1.. are the extra
+                        // continuing walk (bit-identical to a single-secondary
+                        // walk when n_out == 1); iterations 1.. are the extra
                         // analog (n,xn) secondaries, each rotated around the
                         // INCIDENT direction and pushed to the in-thread
                         // stack (or, past its depth, to the device bank).
@@ -4732,7 +4729,7 @@ pub(crate) fn multi_cell_transport_kernel(
                             // launcher asserts the per-row / per-point buffer
                             // lengths agree so any mismatch fails loudly at
                             // the dispatch boundary.
-                            // Slab-keyed slot index (#74 Stage 2b): the per-MT
+                            // Slab-keyed slot index: the per-MT
                             // angle / eout / corr / km / evap / maxwell / watt /
                             // nbps pools are now per-(material, nuclide). Single-
                             // nuclide => `slab * mt_count` equals the old
@@ -4742,7 +4739,7 @@ pub(crate) fn multi_cell_transport_kernel(
                             let mut mu_sampled = 1.0 - 2.0 * xi3_k;
                             if n_ae > 0u32 {
                                 // Bracket the incident energy on the slot's tabulated
-                                // grid. Tight CSR layout (issue #104): the slot's rows
+                                // grid. Tight CSR layout: the slot's rows
                                 // start at this global base; no fixed per-axis stride.
                                 let eg_off = angle_ae_offset[mat_slot as usize];
                                 let mut i_ae = 0u32;
@@ -4782,7 +4779,7 @@ pub(crate) fn multi_cell_transport_kernel(
                                 // CDF inversion within the picked bracket. Mirrors
                                 // CPU's `TabulatedAngleDistribution::sample`
                                 // (reaction_product.rs:128-139), same shape as the
-                                // elastic LinLin form (PR #116); applies to every
+                                // elastic LinLin form; applies to every
                                 // MT in MT_SLOTS (discrete-level and continuum
                                 // inelastic, multi-neutron-out, charged-particle).
                                 let n_mu = angle_n_mu[(eg_off + bin) as usize];
@@ -4837,7 +4834,7 @@ pub(crate) fn multi_cell_transport_kernel(
                             let kind = mt_slot_u32_meta[(meta_off + 0u32) as usize];
                             let n_eout = mt_slot_u32_meta[(meta_off + 1u32) as usize];
                             if kind == 1u32 && n_eout > 0u32 {
-                                // Tight CSR (issue #104): the slot's ae-rows start at
+                                // Tight CSR: the slot's ae-rows start at
                                 // this global base; the shared sampler reads each
                                 // row's (x, cdf, p) via `eout_x_offset`. No stride.
                                 let eg_off_e = eout_ae_offset[mat_slot as usize];
@@ -4857,7 +4854,7 @@ pub(crate) fn multi_cell_transport_kernel(
                                 // COL_CORR_N_ENERGIES.
                                 let n_corr_total = mt_slot_u32_meta[(meta_off + 2u32) as usize];
                                 if n_corr_total > 0u32 {
-                                    // Multi-component mixture (issue #111): the
+                                    // Multi-component mixture: the
                                     // neutron product carried several equally-
                                     // weighted correlated laws (F19 MT16 n,2n, two
                                     // at 0.5/0.5). Pick one uniformly per collision
@@ -4880,7 +4877,7 @@ pub(crate) fn multi_cell_transport_kernel(
                                             comp = n_comp - 1u32;
                                         }
                                     }
-                                    // Tight CSR (issue #104): the chosen component's
+                                    // Tight CSR: the chosen component's
                                     // ae-rows start at this global base; the shared
                                     // sampler reads each ae-row's (x, cdf, p) via
                                     // `corr_x_offset`, and the mu sub-table via
@@ -4948,7 +4945,7 @@ pub(crate) fn multi_cell_transport_kernel(
                                 //   mu sample.
                                 let n_kae = mt_slot_u32_meta[(meta_off + 4u32) as usize];
                                 if n_kae > 0u32 {
-                                    // Tight CSR (issue #104): the slot's ae-rows
+                                    // Tight CSR: the slot's ae-rows
                                     // start at this global base; the shared sampler
                                     // reads each row's (x, p, c, r, a) via
                                     // `km_x_offset`. No stride.
@@ -5003,7 +5000,7 @@ pub(crate) fn multi_cell_transport_kernel(
                                     // mirror that with ONE uniform when there are
                                     // >= 2 components, leaving single-component
                                     // slots bit-identical (no extra draw). θ is
-                                    // stored component-major (tight, issue #104):
+                                    // stored component-major (tight):
                                     // component `comp` occupies its own `n_tae`-point
                                     // row within this slot's `evap_theta_offset`
                                     // region. The shared incident-energy grid and
@@ -5018,7 +5015,7 @@ pub(crate) fn multi_cell_transport_kernel(
                                             comp = n_comp - 1u32;
                                         }
                                     }
-                                    // Tight CSR (issue #104): the slot's E_in rows
+                                    // Tight CSR: the slot's E_in rows
                                     // start at `evap_ae_offset[mat_slot]`; the
                                     // component-major theta starts at
                                     // `evap_theta_offset[mat_slot]`, with component
@@ -5140,7 +5137,7 @@ pub(crate) fn multi_cell_transport_kernel(
                                     // the slot's tabulated grid. Mirrors
                                     // the Evaporation interpolation
                                     // exactly -- same grid shape.
-                                    // Tight CSR (issue #104): the slot's E_in rows
+                                    // Tight CSR: the slot's E_in rows
                                     // start at `maxwell_ae_offset[mat_slot]`.
                                     let mg_off_e = maxwell_ae_offset[mat_slot as usize];
                                     let me_first = maxwell_energy_grid[mg_off_e as usize];
@@ -5215,7 +5212,7 @@ pub(crate) fn multi_cell_transport_kernel(
                                 // stays at the slice-B angular value.
                                 let n_wae = mt_slot_u32_meta[(meta_off + 8u32) as usize];
                                 if n_wae > 0u32 {
-                                    // Tight CSR (issue #104): the slot's E_in rows
+                                    // Tight CSR: the slot's E_in rows
                                     // start at `watt_ae_offset[mat_slot]`; `watt_ab`
                                     // interleaves a/b at stride 2 over that base.
                                     let wg_off = watt_ae_offset[mat_slot as usize];
@@ -5294,7 +5291,7 @@ pub(crate) fn multi_cell_transport_kernel(
                                 // catches it via elastic descriptor
                                 // aliasing). Flat full-range scan keeps
                                 // it within budget.
-                                // Tight CSR (issue #104): the slot's ae-rows start at
+                                // Tight CSR: the slot's ae-rows start at
                                 // this global base and run for `n_eout` rows; the
                                 // scan is bounded by `n_eout` (not a fixed
                                 // per-axis stride) so it never reads into a
@@ -5314,8 +5311,8 @@ pub(crate) fn multi_cell_transport_kernel(
                                 // `energy` is at/above the last incident-energy
                                 // point, which would sample the wrong (lowest-E)
                                 // row. The flat twin `sample_tabulated_equiprobable`
-                                // clamps to `n_e - 1` there, so mirror it (issue
-                                // #107). `n_eout > 0` per the branch guard.
+                                // clamps to `n_e - 1` there, so mirror it.
+                                // `n_eout > 0` per the branch guard.
                                 let e_last_t =
                                     eout_energy_grid[(eg_off_t + n_eout - 1u32) as usize];
                                 if e_in_inel >= e_last_t {
@@ -5435,11 +5432,11 @@ pub(crate) fn multi_cell_transport_kernel(
                                             / sin_phi_w_x;
                                     xdz = out_mu * dz - sin_th_x * sin_phi_w_x * cos_phi_x;
                                 }
-                                // The secondary's own collision stream, fixed
-                                // by its place in the emission tree (issue
-                                // #111). Derived identically whether the
-                                // secondary lands in the stack or the bank, so
-                                // spilling cannot change what it samples.
+                                // The secondary's own collision stream, fixed by
+                                // its place in the emission tree. Derived
+                                // identically whether the secondary lands in the
+                                // stack or the bank, so spilling cannot change what
+                                // it samples.
                                 let x_seed = crate::common::pcg32::secondary_seed(
                                     walk_seed,
                                     walk_secondaries,
@@ -5464,10 +5461,9 @@ pub(crate) fn multi_cell_transport_kernel(
                                     // host drains `PTYPE_NEUTRON` records in a
                                     // later pass, carrying `my_source_idx` so
                                     // the contributions still land in the
-                                    // ORIGINATING history's variance sample
-                                    // (issue #233 Stage 2). Costs no PCG draw,
-                                    // so the walk's stream is the same whether
-                                    // or not it spilled.
+                                    // ORIGINATING history's variance sample.
+                                    // Costs no PCG draw, so the walk's stream
+                                    // is the same whether or not it spilled.
                                     let xcap = (bank_f64.len() / 8) as u64;
                                     let xslot = bank_count[0].fetch_add(1u64);
                                     if xslot < xcap {
@@ -5511,7 +5507,7 @@ pub(crate) fn multi_cell_transport_kernel(
                         //   OFF (`0`): legacy variance-reduction terminator --
                         //     `weight *= nu_bar` then the `FISSION_WEIGHT_CAP`
                         //     kill. Byte-identical to the pre-bank kernel.
-                        //   ON  (`1`): true fission-chain branching (issue #78).
+                        //   ON  (`1`): true fission-chain branching.
                         //     Stochastically round nu_bar -> N, keep progeny 0 as
                         //     the current walk (weight UNCHANGED), and append the
                         //     other N-1 chi-sampled progeny to the device bank as
@@ -5525,9 +5521,9 @@ pub(crate) fn multi_cell_transport_kernel(
 
                         // Which of the struck nuclide's fission channels fired,
                         // hence which prompt chi row every progeny of this event
-                        // samples from (fusion-neutronics/core#34 entry 1). One
-                        // draw, taken only when the nuclide carries partial
-                        // channels, as CPU `sample_fission_reaction` does.
+                        // samples from. One draw, taken only when the nuclide
+                        // carries partial channels, as CPU
+                        // `sample_fission_reaction` does.
                         let rows_fis =
                             crate::common::sampling::fission_chi::select_fission_chi_rows(
                                 slab,
@@ -5657,10 +5653,10 @@ pub(crate) fn multi_cell_transport_kernel(
                     // (set by the per-branch block above).
 
                     // Lab azimuth: phi = TAU * xi (ONE PCG draw), matching the
-                    // production CPU / the shared.rs twin so the issue-#40
-                    // matched stream stays in lockstep past the first collision
-                    // (#136 / #111). cos/sin via the polyfills; the twin inlines
-                    // std libm cos/sin (agree within ulps, as ln/exp do).
+                    // production CPU / the shared.rs twin so the matched stream
+                    // stays in lockstep past the first collision. cos/sin via
+                    // the polyfills; the twin inlines std libm cos/sin (agree
+                    // within ulps, as ln/exp do).
                     let mphi = crate::common::sampling::marsaglia_phi::azimuth_cos_sin_phi(state);
                     let cos_phi = mphi.cos_phi;
                     let sin_phi = mphi.sin_phi;
@@ -5750,7 +5746,7 @@ pub(crate) fn multi_cell_transport_kernel(
         step += 1u32;
     }
 
-    // Batch-free per-history variance flush (issue #233). Emit this history's
+    // Batch-free per-history variance flush. Emit this history's
     // per-bin `sum` (into the first half of `tally_out`) and `sum_sq` (into the
     // second half) for every touched-list AND spill entry: one atomic add per
     // touched bin, the ONLY tally atomic traffic on this path (vs one per step
@@ -5791,14 +5787,13 @@ pub(crate) fn multi_cell_transport_kernel(
                 -((-sx + 0.5) as i64)
             };
             if per_source_var {
-                // Stage 2 (fissile): accumulate into this history's SOURCE row so
+                // Per-source (fissile): accumulate into this history's SOURCE row so
                 // fission descendants (later launches) fold into the same sample.
                 // sum_sq is deferred to the host finalize (once per source).
                 src_acc[src_base + idx as usize].fetch_add(u64::reinterpret(sbits));
             } else {
-                // Stage 1 (non-fissile): flush sum + sum_sq directly, and add
-                // this bin's total into the history's per-tally total
-                // (fusion-neutronics/core#29).
+                // Per-history (non-fissile): flush sum + sum_sq directly, and add
+                // this bin's total into the history's per-tally total.
                 let hrow = ABSOLUTE_POS * n_tallies as usize + t as usize;
                 hist_tally_total[hrow] = hist_tally_total[hrow] + x;
                 tally_out[idx as usize].fetch_add(u64::reinterpret(sbits));

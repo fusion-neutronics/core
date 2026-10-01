@@ -1,11 +1,10 @@
-//! GPU against CPU photon flux in the once-scattered band
-//! (fusion-neutronics/core#34 entry 3).
+//! GPU against CPU photon flux in the once-scattered band.
 //!
-//! The entry recorded a GPU excess of 0.8% and 1.4% in the 0.5 to 1 MeV and
-//! 1 to 1.5 MeV bands of a 2 MeV photon source in an iron sphere, with the
+//! An earlier measurement recorded a GPU excess of 0.8% and 1.4% in the 0.5
+//! to 1 MeV and 1 to 1.5 MeV bands of a 2 MeV photon source in an iron sphere, with the
 //! source band and the total agreeing to 0.2%, and named the Compton chain as
 //! the suspect. The Compton Doppler sampler has since been rewritten on both
-//! backends to OpenMC PR 4036 (fusion-neutronics/core#22), so this re-measures
+//! backends to match OpenMC's current one, so this re-measures
 //! the same three bands and holds them to the CPU in units of the combined
 //! statistical error. Measured on the stack that carries that rewrite: at 1M
 //! histories the bands are 0.9930 / 0.9995 / 1.0009 of the CPU (z -2.6, -0.1,

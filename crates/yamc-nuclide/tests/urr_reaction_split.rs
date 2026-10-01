@@ -1,4 +1,4 @@
-//! Issue #372: inside a URR band, the elastic/inelastic split of the scatter
+//! Inside a URR band, the elastic/inelastic split of the scatter
 //! bucket must come from the sampled probability-table band, not from the smooth
 //! elastic:scatter ratio.
 //!
@@ -26,7 +26,7 @@ fn cache(n: &str) -> String {
 
 /// The cache entry, or `None` when this machine has nothing full-scope for it.
 ///
-/// Presence is not enough. Since #389 a cache dir is routinely populated at
+/// Presence is not enough. A cache dir is routinely populated at
 /// activation scope, holding cross sections and none of the transport sections
 /// this test needs, and the directory exists either way. Read errors are
 /// therefore a skip like absence is: the alternative is a test that passes in
@@ -78,7 +78,7 @@ fn elastic_fraction_varies_with_the_sampled_band() {
         "elastic fraction of the scatter bucket spans only {lo:.4}..{hi:.4} across 40 \
          probability-table bands. It must follow the band (Fe58 at 1 MeV runs roughly \
          0.71..0.90); a near-constant span means the split is back on the smooth \
-         elastic:scatter ratio and the band is being discarded (#372)"
+         elastic:scatter ratio and the band is being discarded"
     );
 }
 
@@ -129,7 +129,7 @@ fn partials_sum_to_the_urr_total() {
                 assert!(
                     (sum - total).abs() <= 1e-9 * total.max(1.0),
                     "{name} at {e:.4e} eV band r={r}: partials sum to {sum:.10e} but the \
-                     URR total is {total:.10e} (#372)"
+                     URR total is {total:.10e}"
                 );
                 assert!(
                     p.sigma_e >= 0.0 && p.sigma_i >= 0.0,

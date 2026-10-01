@@ -1,5 +1,4 @@
-//! A correlated flux error reaches the inventory with its correlations
-//! (issue #140, item 6).
+//! A correlated flux error reaches the inventory with its correlations.
 //!
 //! Fe56(n,p)Mn56 under a spectrum of two fast groups, each carrying a 10%
 //! error. If the two groups move together, the rate moves by the full 10%. If

@@ -1,4 +1,4 @@
-"""X/Y torus surfaces (issue #367).
+"""X/Y torus surfaces.
 
 The X/Y tori share the ZTorus quartic with permuted axes (the exact
 permutation identity is pinned by the rust unit tests). Here the

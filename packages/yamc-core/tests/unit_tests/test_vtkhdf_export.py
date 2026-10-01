@@ -191,7 +191,7 @@ def test_tally_to_vtkhdf_forwards_to_mesh_writer(monkeypatch):
 def test_tally_to_vtkhdf_per_nuclide_rejected(tmp_path, mesh_2x3x4):
     """Per-nuclide (microscopic) tallies fail fast with a clear message."""
     # A reaction-rate score: a per-nuclide axis needs a score with a cross
-    # section (issue #305). What is under test is the export rejection.
+    # section. What is under test is the export rejection.
     tally = yamc.Tally(
         scores=["(n,gamma)"], mesh=mesh_2x3x4, nuclides=["Li6", "Li7"]
     )

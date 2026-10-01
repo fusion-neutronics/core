@@ -29,7 +29,7 @@
 //!   `ExpOp`/`LogOp` straight to GLSL.std.450 `Exp`/`Log` with no
 //!   operand-width check (`cubecl-spirv/src/ops/math.rs`), so the same
 //!   `fexp2`/`flog2` ACO errors fire and `exp(100)` reads back as
-//!   `2.3e-311`. cubecl#1316 stays open; the polyfills stay.
+//!   `2.3e-311`. Upstream has not fixed this, so the polyfills stay.
 //!
 //! sqrt and exp/ln are split into separate kernels so the passing
 //! sqrt test runs without triggering the AMD driver's compile-time

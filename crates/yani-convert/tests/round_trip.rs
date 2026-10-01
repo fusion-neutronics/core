@@ -1,10 +1,10 @@
 //! Convert real evaluations, then read the result back with yani's own reader.
 //!
-//! The point is to cross the language-free equivalent of the boundary that
-//! issue #379 went through: a writer and a reader that share assumptions can be
-//! wrong together and stay green. Here `yani_convert` writes the files and
-//! `yani::parse_chain_parts` takes them back, which is the reader a real
-//! transmutation run uses.
+//! The point is to cross the language-free equivalent of the writer/reader
+//! boundary where a vocabulary mismatch once went unnoticed: a writer and a
+//! reader that share assumptions can be wrong together and stay green. Here
+//! `yani_convert` writes the files and `yani::parse_chain_parts` takes them
+//! back, which is the reader a real transmutation run uses.
 //!
 //! Fixtures are pulled in with `include_bytes!`, so a fixture that goes missing
 //! is a compile error rather than a test that quietly checks nothing.
@@ -157,7 +157,7 @@ fn yani_reads_what_the_converter_writes() {
 
 /// The decay energy's split into its recoverable-heat components survives,
 /// with each component's own sigma, and the components sum to the total the
-/// chain has always carried (issue #140, item 2).
+/// chain has always carried.
 ///
 /// A component the evaluation does not give must come back absent rather than
 /// as zero, and a stated sigma must not come back as "none stated".
@@ -268,26 +268,30 @@ fn tapes() -> BTreeMap<String, endf::decay::Decay> {
         .collect()
 }
 
-/// Every decay mode's dBR in the written file is the tape's own number, the
-/// zeros included.
+/// Every decay mode's BR and dBR in the written file are the tape's own
+/// numbers, the zeros included.
 ///
 /// MT=457 writes 0.0 for an uncertainty it does not state. The file stores
 /// what the tape says and leaves "0.0 means not stated" to the readers, so this
-/// reads the column straight out of the file, not through yani, and compares
-/// it with the parsed tapes.
+/// reads the columns straight out of the file, not through yani, and compares
+/// them with the parsed tapes. `evaluated_branching_ratio` is the tape's BR
+/// before normalisation, beside the normalised `branching_ratio`.
 #[test]
-fn every_branching_sigma_is_written_as_the_tape_gives_it() {
+fn every_branching_ratio_and_sigma_is_written_as_the_tape_gives_it() {
     let c = convert("dbr");
     let tapes = tapes();
 
     let modes = c.dir.join("decay/decay_modes.arrow");
-    let (sigmas, last) = float_column(&modes, "branching_ratio_uncertainty");
+    let (sigmas, _) = float_column(&modes, "branching_ratio_uncertainty");
+    let (evaluated, last) = float_column(&modes, "evaluated_branching_ratio");
+    let (normalised, _) = float_column(&modes, "branching_ratio");
     assert_eq!(
-        last, "branching_ratio_uncertainty",
+        last, "evaluated_branching_ratio",
         "the new column must be appended last"
     );
     let parents = string_column(&modes, "nuclide");
     assert_eq!(parents.len(), sigmas.len());
+    assert_eq!(parents.len(), evaluated.len());
     let mut row = 0;
     for nuclide in &c.chain.nuclides {
         // Stable, or a half-life never evaluated (Xe136): no modes written.
@@ -302,6 +306,12 @@ fn every_branching_sigma_is_written_as_the_tape_gives_it() {
                 sigmas[row],
                 Some(mode.branching_ratio.1),
                 "{} row {row}: the dBR is not the tape's",
+                nuclide.name
+            );
+            assert_eq!(
+                evaluated[row],
+                Some(mode.branching_ratio.0),
+                "{} row {row}: the evaluated BR is not the tape's",
                 nuclide.name
             );
             row += 1;
@@ -331,6 +341,25 @@ fn every_branching_sigma_is_written_as_the_tape_gives_it() {
     assert_eq!(dbr("Cs137"), [Some(1.999988e-3), Some(1.999988e-3)]);
     assert_eq!(dbr("In116"), [Some(6.0e-5), Some(6.0e-5)]);
     assert_eq!(dbr("In116_m1"), [Some(0.0)]);
+    // Cs137's two modes sum to 1 - 1e-8 on the tape, so normalisation puts
+    // the residual on the larger one and only there do the two columns
+    // differ. yani reads both back as stored.
+    let moved: Vec<&String> = normalised
+        .iter()
+        .zip(&evaluated)
+        .zip(&parents)
+        .filter(|((n, e), _)| n != e)
+        .map(|(_, p)| p)
+        .collect();
+    assert_eq!(moved, ["Cs137"], "only Cs137's ratios miss unity");
+    let cs137: Vec<(f64, Option<f64>)> = back["Cs137"]
+        .decays
+        .iter()
+        .map(|d| (d.branching, d.evaluated_branching))
+        .collect();
+    assert_eq!(cs137[0], (0.05300549, Some(0.05300549)), "the smaller mode");
+    assert_eq!(cs137[1].1, Some(0.9469945), "the tape's BR");
+    assert!((cs137[1].0 - 0.94699451).abs() < 1e-15, "{cs137:?}");
     let _ = std::fs::remove_dir_all(&c.dir);
 }
 
@@ -501,7 +530,7 @@ fn convert_transmutation_writes_a_complete_directory() {
     .expect("yani reads it");
     assert_eq!(back.len(), chain.nuclides.len());
 
-    // data_version is what yamc compares a cached copy against (#366), so an
+    // data_version is what yamc compares a cached copy against, so an
     // unstamped directory is a cache that can never be invalidated.
     for subsection in ["decay", "reactions", "fission_yields"] {
         let text = std::fs::read_to_string(dir.join(subsection).join("provenance.json"))
@@ -536,9 +565,8 @@ fn convert_transmutation_writes_a_complete_directory() {
     // yani::export_chain_parts has the same property.
     //
     // Worth knowing beyond this test: it rules out content hashing as a way to
-    // detect that published data changed, which was one of the options weighed
-    // for issue #366. A hash over these files churns on every rebuild for no
-    // reason. The stamped data_version that was chosen instead does not.
+    // detect that published data changed. A hash over these files churns on
+    // every rebuild for no reason. The stamped data_version does not.
     let again = std::env::temp_dir().join(format!("yani-convert-again-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&again);
     yani_convert::convert_transmutation(
@@ -876,7 +904,7 @@ fn a_single_subsection_can_be_written_without_the_other_inputs() {
 /// [`yani_convert::convert_transmutation_files`] reads each neutron evaluation,
 /// takes its channels' Q values and drops it, so that a sublibrary far larger
 /// than memory can be converted: TENDL's 2848 files parse to about 39 GB held
-/// all at once, which was killed three times on a 45 GB machine (issue #53).
+/// all at once, which was killed three times on a 45 GB machine.
 /// That is only a safe trade if the result is unchanged, so this drives the
 /// same fixtures down both routes and compares the trees byte for byte.
 #[test]

@@ -1546,8 +1546,8 @@ fn as_continuous(dist: &AngleEnergy) -> Option<Continuous<'_>> {
 /// boundaries were written in the wrong half of the concatenated interpolation
 /// column, or its discrete-line count no longer matches the points it labels.
 /// Writing the interpolation before the breakpoints loads fine and inverts the
-/// histogram decision at `nuclide_arrow.rs:1288-1290`, which issue #499 already
-/// cost once, and a wrong `n_discrete` loads cleanly and samples a plausible
+/// histogram decision at `nuclide_arrow.rs:1288-1290`, and a wrong
+/// `n_discrete` loads cleanly and samples a plausible
 /// spectrum with the wrong shape, which is what `univariate_flat.rs:8-20` says.
 ///
 /// Li6 is the fixture for the values and the synthetic law 4 is the fixture for

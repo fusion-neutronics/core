@@ -9,7 +9,7 @@
 //! their numeric helpers) now lives in
 //! [`yamc_physics::gpu::flat::eout_extract`] and is re-exported below, so the
 //! CPU production transport and this GPU-side packing flatten each ENDF law
-//! through ONE implementation (issue #111). What stays here is genuinely
+//! through ONE implementation. What stays here is genuinely
 //! GPU-buffer-layout work: slot ordering, concatenation, and the counts the
 //! CSR base offsets are built from.
 
@@ -18,7 +18,7 @@ use yamc_nuclide::nuclide::Nuclide;
 use yamc_nuclide::reaction::Reaction;
 use yamc_nuclide::reaction_product::{AngleDistribution, ElasticAngleFlat, TabulatedInterp};
 
-/// Single-source-of-truth per-law flattening (issue #111). Re-exported at the
+/// Single-source-of-truth per-law flattening. Re-exported at the
 /// old paths so `super::extract`, `super::photon_production`, and the tests
 /// below are unchanged; the buffers they build are byte-for-byte what the
 /// in-crate copies produced.
@@ -27,13 +27,13 @@ pub use yamc_physics::gpu::flat::eout_extract::{
     MaxwellSlot, NbpsSlot, WattSlot,
 };
 /// The per-reaction elastic/inelastic angular flatten, likewise owned by
-/// yamc-physics (issue #111): the CPU transport's per-collision
+/// yamc-physics: the CPU transport's per-collision
 /// `InelasticFlat` bundle and the `build_per_mt_angle_buffers` loop below
 /// must produce the same table. Re-exported at its old path.
 pub use yamc_physics::gpu::flat::inelastic_flat::elastic_flat_from_reaction;
 
 /// Per-PHOTON-product angular distribution slice (slice S3). Tight,
-/// variable-length layout (issue #104): the per-(E_in row) arrays carry
+/// variable-length layout: the per-(E_in row) arrays carry
 /// exactly `n_energies` incident-energy rows and the `(mu, cdf, pdf)` arrays
 /// carry exactly `sum(n_mu)` mu points, back to back with no per-axis
 /// padding or stride
@@ -58,8 +58,8 @@ pub(super) struct PhotonAngleSlot {
 impl PhotonAngleSlot {
     /// Empty slot -- no rows, no points. With `n_energies == 0` the kernel
     /// falls back to isotropic `2 * draw_uniform - 1` (the CPU
-    /// `AngleDistribution::sample` empty-distribution path). Tight layout
-    /// (issue #104): every per-row / per-point `Vec` is empty.
+    /// `AngleDistribution::sample` empty-distribution path). Tight layout:
+    /// every per-row / per-point `Vec` is empty.
     pub(super) fn empty() -> Self {
         Self {
             n_energies: 0,
@@ -75,7 +75,7 @@ impl PhotonAngleSlot {
     /// Pack a photon product's `AngleDistribution`. Returns `empty()` for
     /// an empty angle (the kernel then samples isotropic mu). Mirrors the
     /// neutron angular flatten's per-(E_in slice) CDF-fallback and
-    /// renormalisation exactly. Tight, full-resolution layout (issue #104):
+    /// renormalisation exactly. Tight, full-resolution layout:
     /// keeps every incident energy and every mu point (no per-axis
     /// stride-subsampling).
     pub(super) fn from_angle(angle: &AngleDistribution) -> Self {
@@ -159,7 +159,7 @@ pub(super) fn build_per_mt_eout_buffers<'a, F>(
 where
     F: Fn(i32) -> Option<&'a Reaction>,
 {
-    // Tight variable-length layout (issue #104): per-slot scalars are
+    // Tight variable-length layout: per-slot scalars are
     // `[MT_INELASTIC_COUNT]`; the per-row / per-point arrays are concatenated
     // tight (no per-axis stride). The CSR base offsets are
     // built at concatenation time in `translate.rs` from the `n_energies` /
@@ -230,7 +230,7 @@ pub(super) fn build_per_mt_corr_buffers<'a, F>(
 where
     F: Fn(i32) -> Option<&'a Reaction>,
 {
-    // Tight, full-resolution per-MT correlated tables (issue #104): the data
+    // Tight, full-resolution per-MT correlated tables: the data
     // arrays grow only with the populated slots' rows / x-points / mu-points,
     // so we cannot pre-size to a fixed cap. The per-slot / per-row / per-x CSR
     // offsets are built later (translate.rs) from the n_x / n_mu counts.
@@ -310,7 +310,7 @@ where
 /// Build per-nuclide flat Evaporation buffers across every MT slot.
 /// Empty for slots whose reaction isn't `Evaporation`.
 ///
-/// Tight variable-length layout (issue #104): `n_energies` / `n_components` are
+/// Tight variable-length layout: `n_energies` / `n_components` are
 /// per-MT-slot scalars `[MT_INELASTIC_COUNT]`; `energy_grid` / `u` carry exactly
 /// `sum(n_energies)` rows and `theta` carries exactly `sum(n_components *
 /// n_energies)` rows, back to back with no per-axis padding. The
@@ -335,7 +335,7 @@ where
     let mut n_energies = Vec::with_capacity(MT_INELASTIC_COUNT);
     let mut n_components = Vec::with_capacity(MT_INELASTIC_COUNT);
     let mut energy_grid = Vec::new();
-    // Component-major theta, concatenated tight (issue #104).
+    // Component-major theta, concatenated tight.
     let mut theta = Vec::new();
     // Per incident-energy restriction energy, parallel to `energy_grid`.
     let mut u = Vec::new();
@@ -356,7 +356,7 @@ where
 /// Build per-nuclide flat Maxwell buffers across every MT slot.
 /// Empty for slots whose reaction isn't `Maxwell`.
 ///
-/// Tight variable-length layout (issue #104): `n_energies` / `u` are per-MT-slot
+/// Tight variable-length layout: `n_energies` / `u` are per-MT-slot
 /// scalars `[MT_INELASTIC_COUNT]`; `energy_grid` / `theta` carry exactly
 /// `sum(n_energies)` rows back to back with no per-axis padding. The
 /// per-(slab,MT) CSR base offset (`maxwell_ae_offset`) is built at concatenation
@@ -389,7 +389,7 @@ where
 /// Build per-nuclide flat Watt-inelastic buffers across every MT slot.
 /// Empty for slots whose reaction isn't `Watt`.
 ///
-/// Tight variable-length layout (issue #104): `n_energies` / `u` are per-MT-slot
+/// Tight variable-length layout: `n_energies` / `u` are per-MT-slot
 /// scalars `[MT_INELASTIC_COUNT]`; `energy_grid` / `a` / `b` carry exactly
 /// `sum(n_energies)` rows back to back with no per-axis padding. The
 /// per-(slab,MT) CSR base (`watt_ae_offset`) is built at concatenation time in
@@ -421,10 +421,10 @@ where
 }
 
 /// Extract per-(material, nuclide) URR (unresolved resonance region) data
-/// for a material (issue #210).
+/// for a material.
 ///
 /// URR is intrinsically per-nuclide: the CPU applies an independent
-/// probability-table band to EVERY in-range URR nuclide (issue #204). The
+/// probability-table band to EVERY in-range URR nuclide. The
 /// GPU mirrors that by emitting one slab row per nuclide, in the same
 /// `weighted` order the per-nuclide inelastic / elastic / total pools use,
 /// so the URR rows align 1:1 with the global slab index the kernel walks via
@@ -470,7 +470,7 @@ pub(super) fn build_urr_buffers(
             continue;
         };
 
-        // Tight CSR (issue #104): keep ALL energy points and ALL CDF bands.
+        // Tight CSR: keep ALL energy points and ALL CDF bands.
         let n_urr_e = urr.energy.len();
         // CDF-band count from the first energy point (URR records carry a
         // constant n_cdf across energies).
@@ -505,7 +505,7 @@ pub(super) fn build_urr_buffers(
         row[URR_META_INELASTIC_FLAG] = if urr.inelastic_flag > 0 { 1 } else { 0 };
         row[URR_META_ABSORPTION_FLAG] = urr.absorption_flag.max(0) as u32;
         row[URR_META_MULTIPLY_SMOOTH] = if urr.multiply_smooth { 1 } else { 0 };
-        // Per-nuclide stream key (issue #204): each isotope draws an
+        // Per-nuclide stream key: each isotope draws an
         // independent probability-table band from the shared per-collision
         // base seed via `urr_nuclide_random(base, ZA)`.
         row[URR_META_ZA] = nuc.urr_stream_key();
@@ -555,7 +555,7 @@ pub(super) fn build_per_mt_km_buffers<'a, F>(
 where
     F: Fn(i32) -> Option<&'a Reaction>,
 {
-    // Tight variable-length layout (issue #104): per-slot scalars are
+    // Tight variable-length layout: per-slot scalars are
     // `[MT_INELASTIC_COUNT]`; the per-row / per-point arrays are concatenated
     // tight (no per-axis stride). The CSR base offsets are
     // built at concatenation time in `translate.rs` from the `n_energies` /
@@ -635,7 +635,7 @@ where
     let mut angle_interp = Vec::new();
     let mut scatter_in_cm = Vec::with_capacity(MT_INELASTIC_COUNT);
 
-    // Tight, full-resolution per-MT angular tables (issue #104): no per-axis
+    // Tight, full-resolution per-MT angular tables: no per-axis
     // stride-subsampling. Built via the same `to_elastic_flat` the CPU
     // uses (`elastic_flat_from_reaction`); the CM/lab frame flag is a property
     // of the reaction, carried even when the slot has no angular data (so the
@@ -673,7 +673,7 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Correlated angle-energy multi-applicability parity (issue #111 Phase C)
+// Correlated angle-energy multi-applicability parity
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod corr_parity {
@@ -683,12 +683,11 @@ mod corr_parity {
     //! `ReactionProduct::sample` (which draws an applicability uniform and
     //! picks among the product's distributions when `n_dist > 1`).
     //!
-    //! Issue #111 localized a +9% (n,2n) outgoing-energy bias to the flat
-    //! extractor collapsing a multi-applicability product (F19 MT16 has TWO
-    //! equal-weight correlated distributions) down to `distribution[0]`. This
-    //! test reproduces that bias and guards the fix: at 14.06 MeV the flat
-    //! sampler's mean/std outgoing energy must match the legacy product
-    //! sampler for every correlated MT.
+    //! A flat extractor that collapses a multi-applicability product (F19 MT16
+    //! has TWO equal-weight correlated distributions) down to `distribution[0]`
+    //! gives a +9% (n,2n) outgoing-energy bias. This test guards against that:
+    //! at 14.06 MeV the flat sampler's mean/std outgoing energy must match the
+    //! legacy product sampler for every correlated MT.
     //!
     //!   cargo test -p yamc-gpu --release \
     //!       --lib neutron::xs::distributions::corr_parity -- --nocapture
@@ -951,13 +950,12 @@ mod evap_parity {
             eprintln!("skip ar38_mt91_u_grid_matches_windows -- Ar38 cache unreadable");
             return;
         };
-        // Loading is not the same as carrying what this reads. Since #389 a
-        // cache dir is routinely populated at activation scope, holding cross
-        // sections and none of the secondary distributions, and a `full`
-        // request over one of those is NARROWED rather than refused: the load
-        // succeeds, MT 91 is present, and it has no distribution to extract.
-        // Asserting on that reports absent data as a physics failure, which is
-        // the shape of issues #531 and #542.
+        // Loading is not the same as carrying what this reads. A cache dir is
+        // routinely populated at activation scope, holding cross sections and
+        // none of the secondary distributions, and a `full` request over one
+        // of those is NARROWED rather than refused: the load succeeds, MT 91
+        // is present, and it has no distribution to extract. Asserting on that
+        // would report absent data as a physics failure.
         if nuc.load_scope.sections != yamc_nuclide::load_scope::SectionScope::Full {
             eprintln!(
                 "skip ar38_mt91_u_grid_matches_windows -- Ar38 is cached at \

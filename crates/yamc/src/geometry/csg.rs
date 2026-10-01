@@ -28,7 +28,7 @@ pub struct Geometry {
     /// Flat material store. `Cell.material_idx` is a slot index into this Vec.
     /// Callers are responsible for deduplication (one Arc per unique Material).
     pub materials: Vec<Arc<Material>>,
-    /// Mesh bodies embedded in CSG cells (issue #232). Each fill's mesh
+    /// Mesh bodies embedded in CSG cells. Each fill's mesh
     /// volumes are flattened into `cells` as ordinary cells; the entries
     /// here carry the mesh, its placement transform and the host/embedded
     /// index mapping for the fill-aware geometry queries.
@@ -42,8 +42,8 @@ pub struct Geometry {
     /// host cell spatially and resolves the fill afterwards.
     pub bvh: Bvh,
     /// The geometry's vacuum-tagged surfaces (deduplicated), precomputed
-    /// at `Geometry::new` for the Woodcock flight exit check (issue
-    /// #360). Rebuilt on deserialization via `GeometrySerde`, never
+    /// at `Geometry::new` for the Woodcock flight exit check.
+    /// Rebuilt on deserialization via `GeometrySerde`, never
     /// serialized.
     pub(crate) vacuum_surfaces: Vec<Arc<crate::geo::Surface>>,
 }
@@ -106,7 +106,7 @@ impl TryFrom<GeometrySerde> for Geometry {
     }
 }
 
-/// True for a cell synthesized from a mesh-fill volume (issue #232);
+/// True for a cell synthesized from a mesh-fill volume;
 /// such cells are excluded from the point-location BVH because point
 /// location finds their host cell spatially and resolves the fill.
 fn is_embedded_fill_cell(cell: &Cell) -> bool {
@@ -159,8 +159,8 @@ impl Geometry {
         })
     }
 
-    /// Create a geometry in which some cells are filled by mesh bodies
-    /// (issue #232). Each fill's mesh volumes are appended to the cell
+    /// Create a geometry in which some cells are filled by mesh bodies.
+    /// Each fill's mesh volumes are appended to the cell
     /// list as ordinary cells (IDs auto-assigned after the user's cells,
     /// in fill order then volume order) and its materials join the flat
     /// material store; the host cell's own material becomes the
@@ -300,7 +300,7 @@ impl Geometry {
         let bvh = Bvh::build(&items);
 
         // Vacuum surfaces, from the deduplicated set above: the Woodcock
-        // flight exit check (issue #360) tests each flight only against
+        // flight exit check tests each flight only against
         // these few surfaces.
         let vacuum_surfaces: Vec<Arc<crate::geo::Surface>> = unique_surfaces
             .iter()
@@ -415,7 +415,7 @@ impl Geometry {
         csg_hit
     }
 
-    /// Spatial tracking verification (issue #254) for mesh fills: before
+    /// Spatial tracking verification for mesh fills: before
     /// accepting a crossing from a cell involved in a fill, check that no
     /// mesh surface foreign to the current volume lies strictly inside
     /// the accepted segment. Always false for ordinary CSG cells, whose

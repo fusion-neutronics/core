@@ -20,14 +20,14 @@ pub struct AngleDistribution {
 
 /// Flat (slice-of-`f64`) form of an [`AngleDistribution`], laid out for the
 /// shared GPU/CPU elastic-cosine sampler
-/// `yamc_physics::gpu::flat::elastic_mu_cm::sample_elastic_mu_cm` (issue #111).
+/// `yamc_physics::gpu::flat::elastic_mu_cm::sample_elastic_mu_cm`.
 ///
 /// The CPU transport and the GPU kernel both sample from the *same* tabulated
 /// data through that one function; building this flat form on the CPU (cached
 /// per nuclide, see [`ElasticFlatCache`]) lets the production elastic scatter
 /// call the identical sampler the GPU twin uses, so the two paths cannot drift.
 /// Full resolution -- no stride-subsampling (the CPU is the reference); the GPU
-/// host extraction applies its own fixed-cap subsampling (issue #104).
+/// host extraction applies its own fixed-cap subsampling.
 #[derive(Debug, Default, Clone)]
 pub struct ElasticAngleFlat {
     /// Incident-energy grid, length `n_ae`.
@@ -157,7 +157,7 @@ impl ElasticFlatCache {
 }
 
 /// Per-nuclide cache of flattened DISCRETE-inelastic-level angular tables,
-/// keyed by MT (issue #111 sub-step 3). Unlike the single elastic distribution,
+/// keyed by MT. Unlike the single elastic distribution,
 /// a nuclide has many discrete levels (MT 51-90), so this maps `mt -> flat`,
 /// each built lazily on the first collision of that level and shared read-only
 /// (`Arc`) across transport threads. The flat reuses [`ElasticAngleFlat`]

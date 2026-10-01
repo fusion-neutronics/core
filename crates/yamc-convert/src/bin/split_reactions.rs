@@ -2,7 +2,7 @@
 //! temperature), and reindex them.
 //!
 //! A library published one batch per MT makes a client that wants one
-//! temperature of one reaction download all six (fusion-neutronics/core#100).
+//! temperature of one reaction download all six.
 //! This rewrites each `{Name}.arrow/reactions.arrow` so every (MT, temperature)
 //! is its own batch, copying the cross sections rather than recomputing them,
 //! so NJOY does not run again and every value is what it was. `version.json`

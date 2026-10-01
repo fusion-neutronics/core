@@ -44,7 +44,7 @@ pub const INTERP_LINLIN: u32 = 1;
 ///   regardless of this flag, so callers don't need to special-case
 ///   it to keep RNG schedules aligned.
 /// * `x_table`, `p_table`, `c_table` -- flat tables packed
-///   variable-length (issue #104): row `i` occupies `x_offset[i] ..
+///   variable-length: row `i` occupies `x_offset[i] ..
 ///   x_offset[i] + n_x_per_i[i]`. Rows are stored back-to-back with no
 ///   padding.
 /// * `x_offset` -- start index of each incident-energy row in the flat
@@ -96,7 +96,7 @@ pub fn sample_tabulated_continuous_eout(
     let xi_x = next_xi(state);
 
     // Discrete-then-continuous CDF search, matching the CPU reference
-    // `sample_with_discrete_info` (issue #103). The discrete head (the first
+    // `sample_with_discrete_info`. The discrete head (the first
     // `n_disc` points) is searched with `xi < c[k]` and selects the exact
     // discrete line; the continuous tail is searched from `n_disc` with
     // `xi <= c[k+1]`, carrying `c_j` across iterations as the CPU does. The
@@ -312,7 +312,7 @@ mod tests {
     }
 
     /// Parity vs the CPU reference `TabulatedProbability::sample_with_discrete_info`
-    /// over a MULTI-line discrete head (issue #103). The pre-fix unified scan
+    /// over a MULTI-line discrete head. The pre-fix unified scan
     /// collapsed every discrete line onto index 0, so line 1+ were never
     /// selected and the first continuous bin's mass was misattributed to the
     /// delta at x[0]. With `histogram_outer = true` the flat sampler reduces to

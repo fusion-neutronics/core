@@ -171,7 +171,7 @@ impl EnergyFunctionFilter {
     /// the SAME polynomial the CPU does. The GPU kernel ships these straight
     /// through and evaluates `a + dx*(b + dx*(c + dx*d))` on linear energy,
     /// which is what makes GPU and CPU agree bit for bit rather than merely
-    /// closely (issue #271).
+    /// closely.
     pub fn spline_coeffs(&self) -> &[[f64; 4]] {
         &self.spline_coeffs
     }

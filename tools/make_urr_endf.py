@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MIT
 """Write a synthetic evaluation with unresolved resonance Cases A and B.
 
-These are the two shapes issue #15 made unreachable. Both readers dispatched on
-LRF where the format uses LRU, so a range with LRU=2 and LRF=1 matched neither
-branch: its records were left on the stream, and the *next* range was then read
+These are the two shapes a reader cannot reach if it dispatches on LRF where
+the format uses LRU. Both readers once did, so a range with LRU=2 and LRF=1
+matched neither branch: its records were left on the stream, and the *next* range was then read
 from the middle of it. Case C (LRU=2, LRF=2) worked only because the two flags
 happen to coincide there.
 

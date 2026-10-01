@@ -47,7 +47,7 @@ pub struct PhotonSource {
     /// photon kernel so `parent_nuclides` tally binning can attribute the
     /// photon (and every secondary it spawns) to its parent radionuclide.
     pub parent_nuclides: Vec<u32>,
-    /// Per-photon originating source-particle index (issue #233 Stage 3), one
+    /// Per-photon originating source-particle index, one
     /// u32 each, present only when the drain is given the bank's per-slot
     /// `bank_source_idx`. COMPACTED in lockstep with the `PTYPE_PHOTON` filter,
     /// so `source_indices[k]` is the source index of the `k`th drained photon
@@ -80,7 +80,7 @@ pub struct PhotonSource {
 /// which the caller must treat as a hard error before draining) never
 /// reads past the slots that were actually written.
 ///
-/// When `bank_source_idx` is `Some` (issue #233 Stage 3 per-source variance),
+/// When `bank_source_idx` is `Some` (per-source variance),
 /// the originating source-particle index of each KEPT (photon) slot is pushed
 /// into `PhotonSource::source_indices` in the same order, so it stays aligned
 /// with the compacted SoA even when the filter drops non-photon slots. It is
@@ -196,15 +196,15 @@ pub fn run_photon_transport_from_bank(
     pair_r_z: &[f64],
     pair_a: &[f64],
     pair_c: &[f64],
-    // Per-collision element-selection inputs (task #72), forwarded verbatim.
+    // Per-collision element-selection inputs, forwarded verbatim.
     elem_macro_total: &[f64],
     mat_elem_meta: &[u32],
     tallies: &TalliesPack,
     max_steps: u32,
-    // `Model::photon_cutoff_energy` in eV (issue #286), forwarded to the kernel
+    // `Model::photon_cutoff_energy` in eV, forwarded to the kernel
     // so drained secondaries obey the same cutoff as primaries.
     photon_cutoff_energy: f64,
-    // Tally variance mode (issue #233 Stage 3). For the coupled `PerSource` case
+    // Tally variance mode. For the coupled `PerSource` case
     // the caller builds `source_idx` from the neutron kernel's `bank_source_idx`
     // (the drained secondaries' originating source-neutron indices), one entry
     // PER RAW BANK SLOT of the drained range. The drain filters non-photon slots,
@@ -221,7 +221,7 @@ pub fn run_photon_transport_from_bank(
     };
     let src = drain_bank_to_photon_source(bank_f64, bank_u32, count, raw_source_idx);
     // Re-point `source_idx` at the drained-and-compacted indices. `PerSourceDirect`
-    // (issue #234 mesh) folds per originating source neutron exactly like
+    // (mesh tallies) folds per originating source neutron exactly like
     // `PerSource`; both remap in lockstep with the drained SoA.
     let variance = match variance {
         TallyVarianceMode::PerSource {

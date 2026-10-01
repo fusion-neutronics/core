@@ -3,9 +3,8 @@
 //! JEFF-4.0 Cf252 gives its gamma spectrum as three weak lines beside a
 //! linear-linear continuum, the spontaneous-fission photons, with FC = 0.249957
 //! photons per decay. That continuum is nearly all of the nuclide's photon
-//! emission, and before issue #163 both chain readers took its per-eV values
-//! for line intensities, which put it low by a factor of about its grid
-//! spacing in eV (roughly 2e5 here).
+//! emission, and reading its per-eV values as line intensities would put it
+//! low by a factor of about its grid spacing in eV (roughly 2e5 here).
 
 use endf::chain::Chain;
 use endf::{Decay, Material};

@@ -1,5 +1,5 @@
 //! The production CPU and the GPU kernel's CPU twin must transport a material at
-//! the temperature its label says (issue #478).
+//! the temperature its label says.
 //!
 //! `Material::temperature_k` was set once in `Material::new` and never updated by
 //! `set_temperature`, so the production CPU handed 294 K to
@@ -155,7 +155,7 @@ fn twin_and_cpu_agree_on_a_hot_material() {
     );
 
     // The bound only has to exclude a backend running the wrong temperature. With
-    // #478 present the CPU sampled targets at 294 K while the twin sampled at
+    // the bug present the CPU sampled targets at 294 K while the twin sampled at
     // 900 K, which is a 3.1x error in kT, far outside this.
     assert!(
         (0.96..=1.04).contains(&r_cold),
@@ -165,7 +165,7 @@ fn twin_and_cpu_agree_on_a_hot_material() {
         (0.96..=1.04).contains(&r_hot),
         "at {HOT} K twin/CPU flux is {r_hot:.4}, outside [0.96, 1.04]. The two \
          backends parse the material temperature separately; is the CPU still \
-         transporting this material at 294 K (#478)?"
+         transporting this material at 294 K?"
     );
 
     // Teeth for the assertions above: if the temperature reached neither

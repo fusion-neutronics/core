@@ -3,7 +3,7 @@
 Transport reads outward tet face normals off a fixed vertex ordering, which
 only points outward for a positively oriented tet. An inverted tet made the
 element walk pick an entry face as its exit and unstructured track-length
-tallies read about 33 percent low (issue #316). yamc used to re-wind such a
+tallies read about 33 percent low. yamc used to re-wind such a
 tet on read, which hid the producing writer's bug; it now raises instead.
 """
 
@@ -99,6 +99,5 @@ def test_negative_tet_raises_with_an_actionable_message():
     except ValueError as exc:
         message = str(exc)
     assert "negatively oriented" in message
-    assert "#316" in message
     assert "yamm" in message
     assert os.path.basename(path) in message

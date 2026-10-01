@@ -226,7 +226,7 @@ def dump_mf1(d: Dump, path: str, mt: int, section: dict) -> None:
 
     elif mt == 458:
         # ZA comes from a CONT rather than a HEAD record here, so it is a float
-        # in this section and an int everywhere else. See issue #14.
+        # in this section and an int everywhere else.
         d.float(f"{path}/ZA", section["ZA"])
         d.float(f"{path}/AWR", section["AWR"])
         d.int(f"{path}/LFC", section["LFC"])
@@ -279,7 +279,7 @@ def dump_mf2_parameters(d: Dump, rp: str, r: dict) -> None:
     """Whatever representation the range turned out to use.
 
     Driven by which keys are present rather than by LRU/LRF, so that a range
-    the dispatch skips (issue #15) emits nothing and the Rust side, which
+    the Python reader's dispatch skips emits nothing and the Rust side, which
     reproduces the same skip, emits nothing either.
     """
     if "APE" in r:
@@ -965,7 +965,7 @@ def dump_mf34(d: Dump, path: str, mt: int, section: dict) -> None:
     d.float(f"{path}/AWR", section["AWR"])
     d.int(f"{path}/LTT", section["LTT"])
     d.int(f"{path}/NMT1", section["NMT1"])
-    # 'subsections' is always empty upstream; see issue #18. Emitting nothing
+    # 'subsections' is always empty upstream. Emitting nothing
     # for it keeps the Rust side, which reproduces that, in agreement.
     for i, sub in enumerate(section["subsections"]):
         sp = f"{path}/subsections/{i}"
@@ -1136,7 +1136,7 @@ def dump_incident_neutron_ace(d: Dump, path: str, table) -> None:
 
     # The removal cross section is deliberately not dumped here. It folds the
     # elastic angular distribution into the total, and for ACE data the Python
-    # `forward_fraction` returns uninitialized memory (see issue #21) so
+    # `forward_fraction` returns uninitialized memory, so
     # there is nothing stable to compare against. It is dumped on the ENDF
     # path, where the answer is well defined.
 
@@ -1343,7 +1343,7 @@ def dump_decay_section(d: Dump, path: str, decay) -> None:
     if not n["stable"]:
         d.floats(f"{path}/half_life", [decay.half_life.n, decay.half_life.s])
         # A half-life of zero means it was not evaluated, and both readers now
-        # return nothing rather than dividing by it (issue #23). Dumped as an
+        # return nothing rather than dividing by it. Dumped as an
         # empty list rather than skipped, so the two are held to agreeing that
         # there is no decay constant, instead of the path simply being absent
         # on both sides.

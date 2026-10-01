@@ -1,14 +1,14 @@
-//! Issue #111: matched-stream LOCALIZATION harness.
+//! Matched-stream LOCALIZATION harness.
 //!
 //! Generalizes the Fe56-only `matched_stream_diff` to any endf-b8.1 cache
 //! nuclide, to pin down WHERE the production CPU (the OpenMC-validated path,
 //! still on the legacy `FastRng` tabulated sampler for continuum / correlated /
 //! Kalbach secondary energy) diverges from the GPU twin (the shared flat
 //! sampler). The twin is bit-identical to the cubecl kernel, so a production-CPU
-//! vs twin per-history diff localizes the un-unified `#111` secondary-production
-//! path without needing a physical GPU.
+//! vs twin per-history diff localizes any un-unified secondary-production path
+//! without needing a physical GPU.
 //!
-//! Unlike the earlier probe that produced the `#156` artifact, this records, at
+//! Rather than a collapsed classifier code, this records, at
 //! the FIRST per-history divergence, the REAL reaction MT, the CPU
 //! energy-distribution KIND (`TrackEvent::energy_dist` / `distribution`), and
 //! the `energy_out` on BOTH sides -- so the localization is grounded in the
@@ -57,8 +57,8 @@ fn cache_dir(nuclide: &str) -> String {
 
 /// Whether this machine can supply `nuclide` at the scope these tests need.
 ///
-/// Reading is the check, not `is_dir`, and what came back is the answer. Since
-/// #389 a cache directory is routinely populated at activation scope, holding
+/// Reading is the check, not `is_dir`, and what came back is the answer. A
+/// cache directory is routinely populated at activation scope, holding
 /// cross sections and none of the transport sections; the directory exists
 /// either way and the read succeeds either way, because the loader narrows a
 /// `Full` request to the sections on disk rather than refusing it. Only the
@@ -313,6 +313,7 @@ fn run_case_with(
         &inputs.energies,
         &inputs.positions,
         &inputs.directions,
+        &inputs.weights,
         &inputs.cell_aabbs,
         &inputs.cell_to_material,
         &inputs.surface_types,
@@ -460,7 +461,7 @@ fn run_case_with(
         // production CPU's `ParticleBank` stack, so the two backends emit a
         // history's collisions in the SAME sequence and the diff below stays a
         // measurement of the stream and the samplers rather than of the
-        // scheduling. Since #111 phase 1 every secondary carries its own
+        // scheduling. Since every secondary carries its own
         // identity-derived seed, so the order cannot change what a secondary
         // samples -- `secondary_stream_order.rs` proves that by running this
         // same twin FIFO and LIFO and demanding identical tallies. The kernel
@@ -678,7 +679,7 @@ fn localize_f19_14mev() {
     // collide in a substantial fraction of histories, and the already-unified
     // channels (elastic / capture / discrete-level inelastic) must keep a large
     // bit-identical majority -- a regression here means a previously-unified
-    // path desynced. The continuum/multi-body remainder is the open #111 work.
+    // path desynced. The continuum/multi-body remainder is not yet unified.
     assert!(
         rep.both > n / 4,
         "expected a substantial fraction of histories to collide ({} / {n})",
@@ -691,17 +692,16 @@ fn localize_f19_14mev() {
     );
 }
 
-/// U235 at 14 MeV: the fissile residual of issue #154 (GPU/CPU flux 0.9978).
+/// U235 at 14 MeV: the fissile GPU/CPU flux residual (ratio 0.9978).
 /// Fewer fissions than the Am240 cases (107 of 4000 histories at collision 0).
 ///
 /// The end-to-end claim is the tolerant one (every history within
 /// [`HISTORY_REL_TOLERANCE`], asserted at 100%); STRICT bit-identity is a floor,
 /// not an equality, because the two backends' arithmetic ASSOCIATION differs on
 /// some draws and whether that shows up in a given history depends on where the
-/// stream lands. This case read a full 4000 / 4000 strict until the delayed-neutron
-/// branch (issue #364) added one uniform per fission progeny; the same histories
-/// still agree within 1e-9, one of them now off in the trailing bits of an MT 53
-/// level draw. The floor is set well below the measured 3999 so an actual draw-order
+/// stream lands. The delayed-neutron branch draws one uniform per fission
+/// progeny, and with it one history lands off in the trailing bits of an MT 53
+/// level draw while still agreeing within 1e-9. The floor is set well below the measured 3999 so an actual draw-order
 /// break, which collapses strict agreement to a small fraction, still fails it.
 #[test]
 fn localize_u235_14mev() {
@@ -728,7 +728,7 @@ fn localize_u235_14mev() {
 /// where W184, Fe56 and F19 happen to round-trip cleanly. The CPU's elastic
 /// kinematics use `A` itself, so that one ulp put every non-free-gas elastic
 /// scatter a few ulp off the CPU's -- 14% of Am240 histories at 14 MeV and 27% at
-/// 180 keV, while W184 read 100% bit-identical (issue #111).
+/// 180 keV, while W184 read 100% bit-identical.
 #[test]
 fn twin_target_mass_is_the_nuclides_awr() {
     for (nuclide, density) in [("Am240", 5.0), ("W184", 19.3), ("Fe56", 7.87), ("F19", 1.7)] {
@@ -791,7 +791,7 @@ fn parity_ar38_collision0_spectrum() {
 
 /// Am240 at 14 MeV: the V&V sphere residual (reduced chi2 ~20, +/-8% flux
 /// oscillation across 100--300 keV). Fission is ~45% of the collisions here, so
-/// this is the fissile case for the #111 fission draw schedule.
+/// this is the fissile case for the shared fission draw schedule.
 ///
 /// The CPU used to round `nu_bar` into N BEFORE sampling the continuing
 /// progeny's chi and to draw a fresh isotropic cosine for it, while the kernel
@@ -828,8 +828,8 @@ fn parity_am240_collision0_spectrum() {
 /// At collision 0 the incident energy is the source energy on both sides, so a
 /// fission there draws its chi from the same stream position off the same seed:
 /// the two means are sums of the same values in the same order, hence bit-equal.
-/// Any nonzero gap means the chi landed at a different stream position (the
-/// pre-#111 order), or the two backends are reading different chi data.
+/// Any nonzero gap means the chi landed at a different stream position, or the
+/// two backends are reading different chi data.
 fn assert_fission_chi_bit_identical(rep: &CaseReport) {
     let (cpu_n, twin_n, gap) = rep
         .collision0_gaps
@@ -844,7 +844,7 @@ fn assert_fission_chi_bit_identical(rep: &CaseReport) {
         gap, 0.0,
         "MT18 collision-0 outgoing-energy mean gap {gap:+.3e}% (twin vs CPU): the fission chi \
          is not drawn at the same point of the shared stream, or the two backends disagree on \
-         the chi data (#111 fission)"
+         the chi data"
     );
 }
 
@@ -860,7 +860,7 @@ fn assert_identical_within_rounding(rep: &CaseReport) {
         rep.identical_within_rounding,
         rep.n,
         "{} / {} histories diverged beyond {HISTORY_REL_TOLERANCE:.0e} -- a fission draw \
-         schedule or sampler difference, not association noise (#111 fission)",
+         schedule or sampler difference, not association noise",
         rep.n - rep.identical_within_rounding,
         rep.n
     );
@@ -893,8 +893,7 @@ fn parity_am240_low_energy_spectrum() {
     }
 }
 
-/// Th232 at 14 MeV: the correlated prompt chi on the shared fission path
-/// (fusion-neutronics/core#34 entry 2).
+/// Th232 at 14 MeV: the correlated prompt chi on the shared fission path.
 ///
 /// Th232, Pa231 and Pa233 are the only three fissionable nuclides in endf-b8.1
 /// whose prompt-fission spectrum is `CorrelatedAngleEnergy` (the other 85 are 74
@@ -952,17 +951,12 @@ fn parity_f19_collision0_spectrum() {
 }
 
 /// W184 with the source inside its URR band (1e4 .. 1e5 eV), i.e. every
-/// collision samples the probability table (issue #111 gap 1).
-///
-/// URR used to be the last whole branch of the collision loop off the shared
-/// stream: `smooth_flight` bailed on `has_urr_in_range`, the band came from
-/// `FastRng`, and the analog split was gated off. Against the twin that read
-/// **1.23%** bit-identical, with 98.78% of histories diverging at collision 0
-/// -- while the aggregate spectra agreed to -0.00%, the signature of a pure
-/// stream desync rather than a physics gap.
+/// collision samples the probability table.
 ///
 /// With the band, the flight and the nuclide selection on the shared PCG
-/// stream in the kernel's order, it is bit-identical end to end. Asserted
+/// stream in the kernel's order, it is bit-identical end to end. A URR branch
+/// off the shared stream shows up as a pure stream desync (almost every history
+/// diverging at collision 0 while the aggregate spectra still agree). Asserted
 /// tightly precisely because that is what the unification buys: unlike the
 /// 14 MeV case, nothing here is left to arithmetic association.
 #[test]
@@ -981,21 +975,20 @@ fn localize_w184_urr_band() {
     assert_eq!(
         rep.identical, n,
         "URR histories must be bit-identical to the twin end to end: {} / {n}. \
-         Is a URR collision back on the legacy FastRng stream (#111 gap 1)?",
+         Is a URR collision back on the legacy FastRng stream?",
         rep.identical
     );
 }
 
-/// Survival biasing on BOTH backends (issue #111 gap 2).
+/// Survival biasing on BOTH backends.
 ///
-/// The CPU used to revert the flight, the nuclide selection and the reaction
-/// split to `FastRng` whenever survival biasing was on, so a survival-biased
-/// history ran a different draw schedule from the GPU entirely. All three are
-/// on the shared stream now, and so is the weight-cutoff roulette draw.
+/// Under survival biasing the flight, the nuclide selection, the reaction split
+/// and the weight-cutoff roulette draw all stay on the shared stream, so a
+/// survival-biased history runs the same draw schedule as the GPU.
 ///
 /// B10 at thermal is the right fixture: a strong absorber with no fission, so
 /// implicit capture fires at essentially every collision and the roulette
-/// fires often, while the fissile scheme difference (#352) -- the one thing
+/// fires often, while the fissile scheme difference -- the one thing
 /// still not unified under survival -- cannot intrude.
 #[test]
 fn localize_b10_survival_biasing() {
@@ -1014,27 +1007,25 @@ fn localize_b10_survival_biasing() {
         fully_identical, n,
         "survival-biased histories must be bit-identical to the twin: \
          {fully_identical} / {n}. Is the flight, the nuclide selection, the \
-         split or the roulette back on FastRng (#111 gap 2)?"
+         split or the roulette back on FastRng?"
     );
 }
 
 /// U235 inside its OWN unresolved-resonance band (2250 .. 24999 eV), which is
-/// where issue #154's fissile flux deficit comes from.
+/// where the fissile flux deficit comes from.
 ///
-/// `localize_w184_urr_band` reads 100% bit-identical, so URR looked closed after
-/// #351. It is not, and W184 structurally cannot show it: a nuclide's URR
+/// `localize_w184_urr_band` reads 100% bit-identical, but W184 structurally
+/// cannot cover this case: a nuclide's URR
 /// probability tables optionally carry extra partial columns, recorded as the
 /// `inelastic` / `absorption` indices in `urr.arrow`, and W184 has NEITHER
 /// (both -1) while U235 has BOTH (inelastic 4, absorption 0). 159 of the 351
 /// nuclides with URR tables in endf-b8.1 carry at least one, so the covered case
 /// is the minority one.
 ///
-/// It read ~49% bit-identical with `mean collisions / history` 13.36 against the
-/// twin's 11.32, because the CPU lost ALL in-band capture: `urr_adjusted_reaction_xs`
-/// subtracted fission from an absorption partial that already excluded it, which
-/// clamps to zero whenever in-band fission exceeds capture, i.e. for every fissile
-/// nuclide (#154). Fixing that takes this to ~82% strict / ~84% within 1e-9 and
-/// closes the integral deficit; `urr_fissile_capture` is the direct guard.
+/// It reads ~82% strict / ~84% within 1e-9. Subtracting fission from an
+/// absorption partial that already excludes it would clamp in-band capture to
+/// zero for every fissile nuclide; `urr_fissile_capture` is the direct guard
+/// for that.
 ///
 /// The residual ~16% is a smaller in-band difference that is still open, so this
 /// case stays report-only.
@@ -1053,7 +1044,7 @@ fn localize_u235_urr_band() {
     );
 }
 
-/// The issue-#154 model itself: a dense U235 sphere at 1 MeV, where the fission
+/// The fissile-deficit model itself: a dense U235 sphere at 1 MeV, where the fission
 /// chain actually runs (5.94 collisions per history against 0.08 for the thin
 /// `localize_u235_14mev` fixture, which is why that one reads 100% and this one
 /// does not).

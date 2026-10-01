@@ -381,7 +381,7 @@ def test_coupled_neutron_photon_weight_windows_one_call():
     to analog); the photon window is guarded against a neutron-only run (an inert
     photon window leaves the photon field bit-identical to neutron-only).
 
-    A single string ``particle`` still returns one bounds (PR1 behaviour), and a
+    A single string ``particle`` still returns one bounds, and a
     single-element list returns a one-element list -- both checked.
     """
     n_slices = 8
@@ -476,8 +476,8 @@ def test_coupled_neutron_photon_weight_windows_one_call():
     # the seed-to-seed spread of the rel_err estimate itself (a 6-way
     # generation-seed x transport-seed sweep at this budget gives deep
     # rel_err both {0.078..0.143} vs neutron-only {0.091..0.128}, a coin
-    # flip), so a strict inequality flips on realization luck (the 64-bit
-    # stream of issue #274 tipped it). Inertness is instead detected exactly
+    # flip), so a strict inequality flips on realization luck (an RNG
+    # stream change is enough to tip it). Inertness is instead detected exactly
     # the way the docstring frames it: with identical seeds an inert photon
     # window leaves the photon field bit-identical to the neutron-only run,
     # so (a) the generated photon window must carry real (finite, positive)
@@ -603,7 +603,7 @@ def test_decay_photon_weight_window_reduces_deep_variance():
         # seed x transport seed) improves the deep half in 5 of 6 cases, by
         # 1 to 6 percent, with the one regression at -7 percent: a strict
         # inequality on one hardcoded seed pair is a coin flip, and any RNG
-        # stream change (issue #111) reshuffles which side it lands on. The
+        # stream change reshuffles which side it lands on. The
         # same race was retired for the coupled neutron+photon one-call test
         # above, in the same way: assert non-inertness deterministically. An
         # inert window would leave the deep field bit-identical to analog.

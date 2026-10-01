@@ -754,7 +754,7 @@ fn partial_sum(
 /// The work is per-evaluation once the isomer table is built, so a caller
 /// reading a sublibrary off disk can add each file and drop it instead of
 /// holding the set. That matters for the same reason it did in
-/// `Chain::from_endf` (issue #53): the 552 parents this is usually scoped to
+/// `Chain::from_endf`: the 552 parents this is usually scoped to
 /// are about 7 GB parsed, and the scoping is a convention of the driver rather
 /// than anything this enforces, so an unscoped call is the 39 GB that used to
 /// be fatal. [`extract_branching`] is this driven over a slice.
@@ -864,7 +864,7 @@ impl BranchingExtractor {
         let mut emitted_any = false;
 
         for (mt, states) in &production {
-            // TODO(#140): MT=5 names no chain reaction, so its MF=10 partials
+            // TODO: MT=5 names no chain reaction, so its MF=10 partials
             // are passed over here, as are the MF=6 residual yields (with
             // their LIP isomer flag) that `radionuclide_production` does not
             // read. Until they are carried as an (n,X) reaction, the solve

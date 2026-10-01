@@ -1557,8 +1557,8 @@ fn constructed_out_of_order_subshell_rows_are_refused_by_write_compton() {
 }
 
 // ---------------------------------------------------------------------------
-// The gaps the pull request published, closed where a constructed input can
-// reach the writer at all.
+// Remaining coverage gaps, closed where a constructed input can reach the
+// writer at all.
 // ---------------------------------------------------------------------------
 
 /// [`constructed_element`] with every `element.arrow` column the writer can

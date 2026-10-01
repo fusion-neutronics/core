@@ -3,7 +3,7 @@
 //! cos φ / sin φ), produce the rotated unit direction. This is the formula
 //! the photon kernel inlines 4-5x (photon Compton, Compton electron,
 //! pair positron, Rayleigh, fluorescence) -- extracted as the single source
-//! of truth (issue #309) so it can be unit-tested against the CPU reference
+//! of truth so it can be unit-tested against the CPU reference
 //! `yamc_physics::neutron::interaction::rotate_direction_fast`.
 //!
 //! General case (direction not at the z-pole):

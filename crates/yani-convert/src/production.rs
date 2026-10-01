@@ -132,10 +132,10 @@ pub fn extract_production(material: &Material) -> Vec<ProductionChannel> {
 
 /// Read the radionuclide production of many evaluations, one at a time.
 ///
-/// Streamed rather than parsed into a held set, for the reason issue #53 gives:
-/// a whole neutron sublibrary does not fit in memory, and a survey is the case
-/// that wants every file rather than a scoped few. Channels come back in file
-/// order, so the answer does not depend on how the work was scheduled.
+/// Streamed rather than parsed into a held set, because a whole neutron
+/// sublibrary does not fit in memory, and a survey is the case that wants every
+/// file rather than a scoped few. Channels come back in file order, so the
+/// answer does not depend on how the work was scheduled.
 pub fn production_from_files<P: AsRef<Path>>(
     paths: &[P],
 ) -> Result<Vec<ProductionChannel>, Box<dyn Error>> {

@@ -457,7 +457,7 @@ impl WasmSimulation {
             Some(&presampled),
             // The wasm path rejects mesh-geometry models and cannot load a
             // filled model at all (fills do not round-trip from JSON), so there
-            // is never a fill to render here (issue #291).
+            // is never a fill to render here.
             false,
             Some(&surface_table),
         ))

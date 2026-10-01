@@ -1,4 +1,4 @@
-//! GPU `photon_cutoff_energy` (issue #286), on-hardware.
+//! GPU `photon_cutoff_energy`, on-hardware.
 //!
 //! The photon kernel used to hardcode the 1 keV default cutoff, so
 //! `Model::photon_cutoff_energy` was a no-op on `compute='gpu'`: the GPU

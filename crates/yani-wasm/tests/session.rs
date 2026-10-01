@@ -367,7 +367,7 @@ fn a_spliced_stream_transmutes_to_the_same_answer_as_the_whole_file() {
             .unwrap();
         let nuclide = std::fs::read(fe56.join("nuclide.arrow")).unwrap();
         session.add_nuclide_data("Fe56", "nuclide.arrow", nuclide);
-        // The union energy grids, their own section since #100. Fed whole even
+        // The union energy grids, their own section. Fed whole even
         // here, where the point is a spliced `reactions.arrow`: what this test
         // compares is the reaction bytes, so the grids must be identical on
         // both sides of the comparison.

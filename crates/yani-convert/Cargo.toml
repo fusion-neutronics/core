@@ -17,7 +17,7 @@ path = "src/lib.rs"
 # with default-features = false, the MT synthesis rules and no reader or
 # download (see yamc-convert/Cargo.toml), which is not the transport engine.
 # yani-python already links both converters, so the standalone yani wheel gains
-# no new code from it and issue #381 still holds.
+# no new code from it and still does not link the transport engine.
 [dependencies]
 endf = { path = "../endf" }
 nuclear-data-schema = { path = "../nuclear-data-schema" }

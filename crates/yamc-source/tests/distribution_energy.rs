@@ -501,10 +501,10 @@ mod tests {
 
     #[test]
     fn a_non_finite_histogram_edge_is_refused() {
-        // `w[1] <= w[0]` is false for a NaN, so the ascending check said
-        // nothing about one and a NaN edge reached the multigroup collapse,
-        // where it produced a NaN group average and an inventory of NaNs with
-        // no error anywhere along the way (issue #576).
+        // `w[1] <= w[0]` is false for a NaN, so the ascending check says
+        // nothing about one and a NaN edge would reach the multigroup collapse,
+        // where it produces a NaN group average and an inventory of NaNs with
+        // no error anywhere along the way.
         assert!(Histogram::new(vec![0.0, f64::NAN, 2e7], vec![0.5, 0.5]).is_err());
         assert!(Histogram::new(vec![0.0, 1e6, f64::INFINITY], vec![0.5, 0.5]).is_err());
         assert!(Histogram::new(vec![f64::NEG_INFINITY, 1e6, 2e7], vec![0.5, 0.5]).is_err());

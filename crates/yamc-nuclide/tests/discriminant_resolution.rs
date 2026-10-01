@@ -7,7 +7,7 @@
 //! the format where a mismatch is invisible to `test_schema_manifest.py`, to
 //! `check_declared`, and to every field-name check there is.
 //!
-//! It has bitten before. Issue #379: the transmutation writer spelled MT 18
+//! It has bitten before: the transmutation writer spelled MT 18
 //! "fission" while the Rust consumer's map held only "(n,fission)", so no
 //! fission product was ever produced and every Python-side test stayed green.
 //! The same shape sat unfired in the neutron reader, where `energy_dist_type`

@@ -1,4 +1,4 @@
-//! Issue #502: the transmutation matrix must be bit-reproducible.
+//! The transmutation matrix must be bit-reproducible.
 //!
 //! `Material.transmute()` called twice on identical inputs, in the same
 //! process, returned two different inventories. There is no Monte Carlo in that

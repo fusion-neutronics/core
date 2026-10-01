@@ -1,4 +1,4 @@
-//! Issue #476, task 1: the loader shares its large numeric buffers instead of
+//! The loader shares its large numeric buffers instead of
 //! copying them into a fresh `Vec` per consumer.
 //!
 //! Sharing is not observable through the data, which is the point: every field

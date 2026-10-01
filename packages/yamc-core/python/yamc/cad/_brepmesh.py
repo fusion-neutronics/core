@@ -28,7 +28,7 @@ def run_brepmesh(shape, tolerance, angular_tolerance):
     On nested thin shells the seam bands of adjacent surfaces cross each
     other even though every shell is watertight. Setting ``AngleInterior``
     (and ``DeflectionInterior``) explicitly enforces the tolerances on
-    interior nodes as well; see cad-to-dagmc-mesher issue #100.
+    interior nodes as well.
     ``InParallel`` stays False to keep the triangulation reproducible.
     """
     from OCP.IMeshTools import IMeshTools_Parameters

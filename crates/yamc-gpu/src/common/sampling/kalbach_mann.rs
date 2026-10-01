@@ -57,7 +57,7 @@ pub struct KalbachMannSample {
 
 /// Sample a Kalbach-Mann (File-6 Law-4) outgoing energy and scattering cosine.
 /// `eg_off_k` is the slot's base ae-row into the per-incident-energy buffers
-/// (`km_ae_offset[mat_slot]` with tight CSR storage, issue #104); `km_x_offset`
+/// (`km_ae_offset[mat_slot]` with tight CSR storage); `km_x_offset`
 /// gives the global start of each ae-row's `(x, p, c, r, a)` points in the flat
 /// `km_x` / `km_p` / `km_c` / `km_r` / `km_a` arrays (row `eg_off_k + bin`
 /// starts at `km_x_offset[eg_off_k + bin]`). The flat buffers
@@ -130,7 +130,7 @@ pub fn sample_kalbach_mann(
         let xi_kx = d_xkx.xi;
 
         // Discrete-then-continuous CDF inversion matching the CPU reference
-        // `sample_with_discrete_info` (issue #103): discrete head (first
+        // `sample_with_discrete_info`: discrete head (first
         // `n_disc` points) searched with `xi < c[k]` (exact line), continuous
         // tail from `n_disc` with `xi <= c[k+1]`, carrying `c_kj`. The previous
         // single scan collapsed every discrete line onto index 0. For
@@ -360,7 +360,7 @@ pub fn sample_kalbach_mann_cpu(
         let (xi_kx, st) = crate::common::pcg32::draw_uniform_cpu(state);
         state = st;
 
-        // Discrete-then-continuous CDF inversion (issue #103); bit-twin of the
+        // Discrete-then-continuous CDF inversion; bit-twin of the
         // `#[cube]` scan above. See its comment.
         let mut kj = 0u32;
         let mut c_kj = km_c[x_off_k as usize];
@@ -652,7 +652,7 @@ mod tests {
 
         let (energy_grid, n_x, interp, n_disc, x, p, c, r, a) = fixture();
         // CSR x-offsets for the padded fixture: row `r` (`slot*AE + ae`) starts
-        // at `r * MX` (issue #104 -- the sampler now takes per-row offsets
+        // at `r * MX` (the sampler takes per-row offsets
         // rather than a `max_km_x` stride).
         let x_offset: Vec<u32> = (0..n_x.len()).map(|row| (row * MX) as u32).collect();
 

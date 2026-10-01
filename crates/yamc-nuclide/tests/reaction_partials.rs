@@ -1,4 +1,4 @@
-//! Regression for the #111 reaction-type split: `Nuclide::reaction_partials`
+//! Regression for the reaction-type split: `Nuclide::reaction_partials`
 //! is the analog (survival-off, single-nuclide) replacement for
 //! `sample_reaction_type` + `sample_scattering_constituent`, splitting the
 //! collision into `(sigma_e, sigma_a, sigma_i, sigma_f)` so the transport loop
@@ -121,8 +121,8 @@ fn inelastic_constituent_selector_excludes_elastic() {
     }
 }
 
-/// The walk order is the CPU half of the CPU/GPU reaction-selection contract
-/// (issue #111): both backends accumulate the non-elastic partials in
+/// The walk order is the CPU half of the CPU/GPU reaction-selection contract:
+/// both backends accumulate the non-elastic partials in
 /// `INELASTIC_MT_SLOTS` order, so one shared `xi_mt` lands on one MT. Pinned on
 /// a synthetic column list so the invariants are visible without the fixture:
 /// elastic dropped, tabled MTs in TABLE order (not storage order), untabled MTs

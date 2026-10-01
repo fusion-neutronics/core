@@ -1,5 +1,5 @@
 //! An `(n,gamma)` tally must score MT 102 even where probability tables are in
-//! range (fusion-neutronics/core#106).
+//! range.
 //!
 //! `compute_urr_macro_xs` used one accumulator for both the capture score and
 //! the absorption score, filled from MT 101 (disappearance) for every nuclide
@@ -39,7 +39,7 @@ use yamc_materials::Material;
 const ENERGY: f64 = 2.0e6;
 
 /// Base randoms swept over (0, 1). `compute_urr_macro_xs` hashes this per
-/// nuclide (issue #204), so a uniform sweep gives each nuclide a uniform draw
+/// nuclide, so a uniform sweep gives each nuclide a uniform draw
 /// over its own bands. Deterministic, so the test cannot flake.
 const SAMPLES: usize = 20_000;
 

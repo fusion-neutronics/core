@@ -1,8 +1,8 @@
 //! Overlay (per-atom KERMA) vs standard (analog deposit) photon
-//! heating consistency (issue #358).
+//! heating consistency.
 //!
 //! Standard tallies deposit photon heating analogically at collision
-//! sites (electron energy local, minus banked TTB photons, #361).
+//! sites (electron energy local, minus banked TTB photons).
 //! Overlay tallies (`multiply_density = false`) instead score per-atom
 //! track-length KERMA: the tabulated heating XS when present, else the
 //! physics estimate (Klein-Nishina energy-transfer fraction for
@@ -10,7 +10,7 @@
 //! physical heating, so overlay-per-atom x atom density must match the
 //! analog volumetric result within a few percent.
 //!
-//! Guards two #358 bugs: the Compton energy-transfer closed form went
+//! Guards two bugs: the Compton energy-transfer closed form went
 //! NEGATIVE below ~400 keV (overlay heating ~10x low across
 //! 100-600 keV), and the analog eV deposit was also added into overlay
 //! tallies (unit mixing with the eV*barn KERMA contributions).
@@ -75,7 +75,7 @@ fn overlay_photon_heating_matches_analog_deposit() {
     let mut analog = Tally::new();
     analog.scores = vec![Score::Heating(HeatingScore)];
     // Collision estimator = the analog deposit reference (TrackLength
-    // heating scores KERMA along tracks since #356).
+    // heating scores KERMA along tracks).
     analog.estimator = yamc_tallies::Estimator::Collision;
     analog.name = Some("analog_heating".to_string());
 
@@ -126,8 +126,8 @@ fn overlay_photon_heating_matches_analog_deposit() {
     assert!(
         (0.95..1.06).contains(&ratio),
         "overlay KERMA x density = {overlay_ev:.4e} eV vs analog deposit \
-         {analog_ev:.4e} eV (ratio {ratio:.3}); measured 1.009 at the fix \
-         (issue #358) -- a collapse means the Compton transfer fraction \
+         {analog_ev:.4e} eV (ratio {ratio:.3}); expected ~1.009 \
+         -- a collapse means the Compton transfer fraction \
          regressed, ~2 means the analog deposit leaked back into overlay \
          tallies",
     );
@@ -162,7 +162,7 @@ fn build_natural_fe_material() -> Material {
     material
 }
 
-/// Issue #341: a material `response` must give the same macroscopic result as
+/// A material `response` must give the same macroscopic result as
 /// the manual workaround -- per-nuclide microscopic overlays (unit density)
 /// each weighted by that nuclide's atom density and summed. Running both in the
 /// SAME model (one seed -> identical tracks) makes the comparison exact, and the

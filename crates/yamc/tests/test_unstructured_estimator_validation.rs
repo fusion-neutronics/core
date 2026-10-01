@@ -1,10 +1,9 @@
-//! Unstructured-mesh tallies: estimator/mode support matrix (issues
-//! #354/#355).
+//! Unstructured-mesh tallies: estimator/mode support matrix.
 //!
 //! Both estimators are supported in every tracking mode. The collision
 //! path resolves the containing tetrahedron with yamt's element-BVH
-//! point query (#354); under woodcock/hybrid, flux-score track-length
-//! unstructured tallies take the true segment-scoring path (#355) and
+//! point query; under woodcock/hybrid, flux-score track-length
+//! unstructured tallies take the true segment-scoring path and
 //! everything else scores through the delta-collision estimator with
 //! per-tet attribution. Estimators and modes must all agree within
 //! statistics.
@@ -121,7 +120,7 @@ fn unstructured_collision_estimator_runs_in_every_mode() {
 fn unstructured_ineligible_runs_via_collision_density() {
     // A cell filter makes the tally ineligible for segment scoring (the
     // segment spans unidentified cells), so it falls back to the
-    // delta-collision path -- which now attributes per tet (#354).
+    // delta-collision path -- which now attributes per tet.
     for mode in [TrackingMode::Woodcock, TrackingMode::Hybrid] {
         let mut tally = make_unstructured_tally(yamc_tallies::Estimator::TrackLength);
         tally
@@ -147,11 +146,10 @@ fn unstructured_ineligible_runs_via_collision_density() {
     }
 }
 
-/// Histories for the estimator-comparison runs. 20 000 (the count this rig
-/// used when issue #316 was found) left the comparison at 2 to 5 sigma of
-/// power, so a +44% bias sat inside a 4 sigma bound on a lucky seed. 200 000
-/// puts the two estimators about 0.5 sigma apart and would show that bias at
-/// well over 20 sigma.
+/// Histories for the estimator-comparison runs. 20 000 histories left the
+/// comparison at 2 to 5 sigma of power, so a +44% bias sat inside a 4 sigma
+/// bound on a lucky seed. 200 000 puts the two estimators about 0.5 sigma
+/// apart and would show that bias at well over 20 sigma.
 const ESTIMATOR_HISTORIES: usize = 200_000;
 
 fn run_estimator_total(
@@ -178,7 +176,7 @@ fn run_estimator_total(
 }
 
 /// The collision estimator must read the same flux under every tracking mode:
-/// the per-tet attribution (#354) and the woodcock / hybrid segment path (#355)
+/// the per-tet attribution and the woodcock / hybrid segment path
 /// are the same physics seen through different tracking. This half of the
 /// original combined test holds: over 12 seeds the largest mode-to-mode gap
 /// measured was 1.8 sigma, well inside the 4 sigma bound.
@@ -206,13 +204,13 @@ fn unstructured_collision_agrees_across_tracking_modes() {
 }
 
 /// The two estimators must converge to the same flux: the collision
-/// estimator's per-tet attribution (#354) has to agree with the segment walk
+/// estimator's per-tet attribution has to agree with the segment walk
 /// in every tracking mode.
 ///
 /// This once read +44% (about 30 sigma at 1M histories) because the WALK was
 /// broken, not the collision estimator: it mis-stepped through negatively
 /// oriented tets, dropped every track that started outside the mesh, and
-/// leaked across volume boundaries (issue #316). It passed anyway at the
+/// leaked across volume boundaries. It passed anyway at the
 /// original 20 000 histories on the pinned seed 42, which sat at 3.4 of the
 /// 4 sigma bound while 17 of 36 (seed, mode) combinations were already over
 /// it. Hence 200 000 histories and three seeds here: at that count the old
@@ -220,9 +218,9 @@ fn unstructured_collision_agrees_across_tracking_modes() {
 #[test]
 fn unstructured_collision_matches_track_length() {
     // The two estimators converge to the same flux; the collision
-    // estimator's per-tet attribution (#354) must agree with the
-    // segment walk in every tracking mode. Issue #316: the segment walk
-    // was the broken side (it dropped every track that started outside
+    // estimator's per-tet attribution must agree with the
+    // segment walk in every tracking mode. The segment walk was once
+    // the broken side (it dropped every track that started outside
     // the mesh, and mis-walked negatively oriented tets), which read 33%
     // low and made the collision estimator look 44% high.
     //
@@ -253,14 +251,14 @@ fn unstructured_collision_matches_track_length() {
     }
 }
 
-/// Issue #316: independent reference for the tet-mesh path.
+/// Independent reference for the tet-mesh path.
 ///
 /// `cube.arrow` tiles the unit cube exactly, so a structured 1x1x1 rectangular
 /// mesh over `[0, 1]^3` integrates the flux over the identical region. Both
 /// tet-mesh estimators must land on it. This is what pinned down *which*
-/// estimator was wrong: before the fix the tet track-length total was 0.67 of
-/// this reference while the tet collision total was within its own statistics
-/// of it.
+/// estimator is wrong: a broken segment walk put the tet track-length total at
+/// 0.67 of this reference while the tet collision total stayed within its own
+/// statistics of it.
 #[test]
 fn unstructured_total_matches_the_structured_mesh_over_the_same_volume() {
     fn structured_tally(estimator: yamc_tallies::Estimator) -> Tally {
@@ -336,8 +334,8 @@ fn run_flux_total(mode: TrackingMode) -> (f64, f64) {
 #[test]
 fn unstructured_track_length_woodcock_matches_surface() {
     // Flux-score TL unstructured tallies score true track length along
-    // each delta flight segment (issue #355): same statistical-match
-    // property as the regular-mesh #351 tests.
+    // each delta flight segment: same statistical-match property as the
+    // regular-mesh tests.
     let (mean_s, std_s) = run_flux_total(TrackingMode::Surface);
     assert!(mean_s > 0.0, "surface unstructured flux zero: rig broken");
     for mode in [TrackingMode::Woodcock, TrackingMode::Hybrid] {
@@ -351,7 +349,7 @@ fn unstructured_track_length_woodcock_matches_surface() {
     }
 }
 
-/// Regression for issue #290: a model carrying a tet-mesh tally must be able to
+/// Regression: a model carrying a tet-mesh tally must be able to
 /// fingerprint. Every Python `simulate_transport` fingerprints the model for
 /// `combine_results` run provenance, and `UnstructuredMeshFilter::serialize`
 /// used to error, so the transport completed and then the results call threw,

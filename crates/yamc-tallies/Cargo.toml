@@ -34,8 +34,7 @@ arrow = [
     "yamc-materials/arrow",
 ]
 mesh = ["dep:yamt"]
-# All three variance-accumulation methods (per-batch sum/sum_sq, Stage 1
-# online Welford at batch boundaries, Stage 3 per-history Welford with
-# per-worker accumulator) are now compiled in unconditionally and
-# selected at runtime via `Tally::variance_method`. The previous
-# `welford` and `welford_stage3` cargo features have been removed.
+# All three variance-accumulation methods (per-batch sum/sum_sq, online
+# Welford at batch boundaries, per-history Welford with per-worker
+# accumulator) are compiled in unconditionally and selected at runtime
+# via `Tally::variance_method`.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convergence targets must stop at the same point under MPI as serially (#241).
+"""Convergence targets must stop at the same point under MPI as serially.
 
 Run under ``mpirun``; prints one ``RANKS=<n> histories=<n> mean=<x>`` line from
 rank 0 plus ``OK``. The wrapper test compares against a serial run.
@@ -11,7 +11,7 @@ entirely for ``mpi_size > 1`` and the run went to the particle cap instead.
 With ``--uncapped`` the particle cap is dropped and the convergence target is the
 only stop condition. That combination used to be rejected up front under MPI on
 the grounds that convergence was single-process only; now that the decision is
-collective it terminates, and this is what proves it (#303).
+collective it terminates, and this is what proves it.
 """
 import sys
 

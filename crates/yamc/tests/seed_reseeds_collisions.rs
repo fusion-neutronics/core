@@ -1,4 +1,4 @@
-//! Issue #315 regression: `TransportSettings::seed` must reseed the COLLISION
+//! Regression: `TransportSettings::seed` must reseed the COLLISION
 //! physics, not just the source sampling.
 //!
 //! The per-history collision PCG used to be seeded from the history index
@@ -207,7 +207,7 @@ fn same_seed_reproduces_the_run_exactly() {
     );
 }
 
-/// THE #315 REGRESSION: a different seed must give a different COLLISION
+/// THE REGRESSION: a different seed must give a different COLLISION
 /// realisation. The source is deterministic here, so against the pre-fix
 /// seeding the two traces were identical for 100.000% of the colliding
 /// histories and this failed.
@@ -256,7 +256,7 @@ fn different_seeds_change_the_collision_realisation() {
         frac < 0.01,
         "{identical} of {with_collisions} colliding histories kept an IDENTICAL collision \
          trace across seeds ({:.3}%) -- the base seed is not reaching the per-history \
-         collision PCG (issue #315)",
+         collision PCG",
         100.0 * frac
     );
 }
@@ -272,7 +272,7 @@ fn different_seeds_agree_within_statistics() {
     }
     // Single-threaded, so that "the two means differ" means the physics moved
     // rather than the parallel Welford merge order: with a deterministic source
-    // and the pre-#315 seeding these two runs produced a BIT-IDENTICAL mean.
+    // and the pre-fix seeding these two runs produced a BIT-IDENTICAL mean.
     let n = 20_000;
     let (mean_a, std_a) = capture_rate(7, n, Some(1));
     let (mean_b, std_b) = capture_rate(8, n, Some(1));

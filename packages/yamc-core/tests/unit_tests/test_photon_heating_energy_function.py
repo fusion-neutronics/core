@@ -1,4 +1,4 @@
-"""Issues #378 / #382: photon heating must apply an energy function as a weight.
+"""Photon heating must apply an energy function as a weight.
 
 The analog photon-heat arm of the collision estimator scores an already-deposited
 eV value. It used to be returned straight through, so an ``energy_function=``
@@ -76,10 +76,10 @@ def test_track_length_scales_the_same_way():
 
 
 def test_both_estimators_respond_to_the_energy_function_identically():
-    """The property that motivates the fix, and #382's acceptance criterion.
+    """The property that motivates the fix.
 
     Absolute collision and track-length photon heating need not agree (they carry
-    a known convention difference, see #356/#357), so this compares each
+    a known convention difference), so this compares each
     estimator's RESPONSE to the energy function -- the weighted/unweighted ratio.
     That isolates the energy-function handling from everything else, and it is
     exactly what disagreed before: one estimator's ratio was f, the other's was 1.

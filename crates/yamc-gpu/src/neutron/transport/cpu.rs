@@ -20,10 +20,10 @@ use crate::common::tallies::TalliesPack;
 ///
 /// `pend_drain` selects the in-thread (n,xn) queue's drain order. Production
 /// callers pass `PendDrain::Fifo`, the kernel's order; the alternative exists
-/// only so the issue-#111 order-independence test can prove that the per-
-/// secondary identity seeding makes the order unobservable.
+/// only so the order-independence test can prove that the per-secondary
+/// identity seeding makes the order unobservable.
 ///
-/// `capture_trace` drives the issue-#40 matched-stream diff harness: when
+/// `capture_trace` drives the matched-stream diff harness: when
 /// `true`, the returned `Vec<Vec<CollisionRecord>>` holds one per-particle
 /// collision trace (energy in/out + reaction class per collision) for
 /// diffing against the production CPU's track capture; when `false` it is an
@@ -35,6 +35,8 @@ pub fn run_multi_cell_transport_cpu(
     energies_in: &[f64],
     positions_in: &[f64],
     directions_in: &[f64],
+    // Per-particle starting weight (1.0 for a source neutron), one per seed.
+    weights_in: &[f64],
     cell_aabbs: &[f64],
     cell_to_material: &[u32],
     surface_types: &[u32],
@@ -43,19 +45,19 @@ pub fn run_multi_cell_transport_cpu(
     region_program: &[u32],
     log_energy_grid: &[f64],
     // Concatenated per-material coarse grids backing the per-MT inelastic
-    // buffers (issue #212); each material owns its coarse grid, described by
+    // buffers; each material owns its coarse grid, described by
     // `coarse_meta`. Mirrors the GPU launch so the CPU twin indexes the per-MT
     // buffers identically.
     coarse_log_energy_grid: &[f64],
     // Packed `[n_materials × COARSE_META_COLS]` per-material coarse-grid
-    // descriptor (issue #212). Mirrors the GPU launch's `coarse_meta` binding.
+    // descriptor. Mirrors the GPU launch's `coarse_meta` binding.
     coarse_meta: &[u32],
     // Concatenated per-material FINE grids backing the resonance-critical
-    // aggregate macro XS + nuc buffers (issue #212); each material owns its fine
+    // aggregate macro XS + nuc buffers; each material owns its fine
     // grid, described by `fine_meta`. Mirrors the GPU launch.
     fine_log_energy_grid: &[f64],
-    // Packed `[n_materials × FINE_META_COLS]` per-material fine-grid descriptor
-    // (issue #212). Mirrors the GPU launch's `fine_meta` binding.
+    // Packed `[n_materials × FINE_META_COLS]` per-material fine-grid descriptor.
+    // Mirrors the GPU launch's `fine_meta` binding.
     fine_meta: &[u32],
     xs_elastic_per_material: &[f64],
     xs_absorption_per_material: &[f64],
@@ -176,17 +178,21 @@ pub fn run_multi_cell_transport_cpu(
     max_steps: u32,
     // Free-gas resonance/thermal cutoff multiplier (model option, default
     // 400.0); the regime boundary is `free_gas_threshold * kT`. Mirrors the
-    // kernel's `free_gas_threshold` buffer so the twin stays bit-equivalent
-    // (issue #102).
+    // kernel's `free_gas_threshold` buffer so the twin stays bit-equivalent.
     free_gas_threshold: f64,
     capture_trace: bool,
     // Drain order of the in-thread (n,xn) queue. Production and the kernel are
-    // `PendDrain::Fifo`; `Lifo` is the issue-#111 verification instrument (see
+    // `PendDrain::Fifo`; `Lifo` is the verification instrument (see
     // `PendDrain`), which the order-independence test and the matched-stream
     // harness use.
     pend_drain: PendDrain,
 ) -> (MultiCellResult, Vec<Vec<CollisionRecord>>) {
     let n = seeds.len();
+    assert_eq!(
+        weights_in.len(),
+        n,
+        "weights_in must have one entry per seed"
+    );
     let n_cells = cell_aabbs.len() / 6;
     let n_surfaces = surface_types.len();
     let n_grid = log_energy_grid.len();
@@ -207,8 +213,8 @@ pub fn run_multi_cell_transport_cpu(
         xs_score_per_mt_slice.len() / (n_materials.max(1) * n_grid.max(1))
     };
 
-    // Per-MT inelastic pools are keyed per-(material, nuclide) slab (#74
-    // Stages 2a / 2b); single-nuclide materials give `n_slab == n_materials`.
+    // Per-MT inelastic pools are keyed per-(material, nuclide) slab;
+    // single-nuclide materials give `n_slab == n_materials`.
     let n_slab = nuclide_select.nuc_awr.len();
     validate_transport_inputs(
         tallies,
@@ -296,6 +302,7 @@ pub fn run_multi_cell_transport_cpu(
         energies_in,
         positions_in,
         directions_in,
+        weights_in,
         cell_aabbs,
         cell_to_material,
         surface_types,
@@ -307,11 +314,11 @@ pub fn run_multi_cell_transport_cpu(
         bvh_prims: &bvh_prims,
         bvh_unb: &bvh_unb,
         log_energy_grid,
-        // Per-material coarse grids (issue #212): the per-MT inelastic buffers
+        // Per-material coarse grids: the per-MT inelastic buffers
         // ride each material's own coarse grid, matching the GPU launch.
         coarse_log_energy_grid,
         coarse_meta,
-        // Per-material fine grids (issue #212): the aggregate macro XS + nuc
+        // Per-material fine grids: the aggregate macro XS + nuc
         // buffers ride each material's own fine grid, matching the GPU launch.
         fine_log_energy_grid,
         fine_meta,
@@ -455,7 +462,7 @@ pub fn run_multi_cell_transport_cpu(
     } else {
         Vec::new()
     };
-    // Lost-particle diagnostics (issue #289), mirroring the kernel's counter +
+    // Lost-particle diagnostics, mirroring the kernel's counter +
     // capped record list so the mirror reports the same losses.
     let mut lost = crate::common::lost_particles::LostParticleResult::default();
     let mut n_spilled_secondaries = 0u64;
@@ -499,8 +506,8 @@ pub fn run_multi_cell_transport_cpu(
             final_energies,
             tally_outputs,
             // The CPU mirror is the per-step (mean-only) reference; it emits no
-            // per-history sum-of-squares or per-source accumulator (issue #233
-            // batch-free variance is GPU-only).
+            // per-history sum-of-squares or per-source accumulator (batch-free
+            // variance is GPU-only).
             tally_sum_sq: Vec::new(),
             hist_tally_total: Vec::new(),
             src_acc: Vec::new(),

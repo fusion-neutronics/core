@@ -5,8 +5,7 @@
 //! those ranges lets a reader fetch just what it needs over HTTP range requests:
 //! an activation run reads the handful of channels its chain names at every
 //! temperature and none of the full-grid transport MTs, which are most of every
-//! file, and a plotter reads one channel at the one temperature it draws
-//! (fusion-neutronics/core#100).
+//! file, and a plotter reads one channel at the one temperature it draws.
 //!
 //! The index rides in `version.json`, which every consumer already fetches, so
 //! nothing extra is published and a reader that wants every MT still issues one

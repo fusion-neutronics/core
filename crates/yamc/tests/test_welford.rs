@@ -97,13 +97,13 @@ fn realization_unit_is_per_history() {
     let particles = 1000;
     let batches = 10;
     let tally = run_li6_sim(42, particles, batches);
-    // Under Stage 3, n_realizations is the count of source histories,
-    // not the count of batches.
+    // n_realizations is the count of source histories, not the count of
+    // batches.
     let expected = (particles * batches) as u32;
     assert_eq!(
         tally.get_n_realizations(),
         expected,
-        "Stage 3: n_realizations should equal particles × batches (={expected})"
+        "n_realizations should equal particles × batches (={expected})"
     );
 }
 
@@ -145,58 +145,19 @@ fn std_dev_is_positive_and_reasonable() {
 /// against a hard-coded reference taken from the default build of the
 /// same Li6 fixed-seed sim.
 ///
-/// Reference recomputed for the issue #111 free-flight migration: the neutron
-/// free-flight distance for a survival-off, single-nuclide, non-URR collision
-/// now draws its uniform from the shared per-particle PCG stream instead of the
-/// legacy FastRng stream (matching the GPU kernel's first per-step sample).
-/// That renumbers the FastRng stream this fixed-seed Li6 sim consumes, shifting
-/// the (n,t)-rate realization by ~0.49% (a draw-order change, not a physics
-/// change -- the flight is still `-ln(xi) / sigma_t`). The mean is independent
-/// of the variance estimator, so this is the default-build value. (The prior
-/// value 0.9978143913613567 was the endf-b8.1 fixture's pre-flight-migration
-/// result.)
-///
-/// Recomputed again for issue #274: the shared collision PCG widened from
-/// 32-bit to 64-bit state (PCG-XSH-RR 64/32, per-history seed expanded via
-/// splitmix64), which renumbers every fixed-seed stream. Same unbiased
-/// physics, different realization (the prior 32-bit-stream value was
-/// 1.0027406040118252).
-///
-/// Recomputed a third time for issue #315: the per-history collision seed is
-/// now `history_seed(base_seed, global_index)` instead of `global_index *
-/// golden`, i.e. the base seed finally reaches the collision stream, so every
-/// fixed-seed stream is renumbered again. Nothing about the sampling changed,
-/// only which stream each history draws from, and this 10 000-history mean is
-/// one realization of it (`std_dev` here is 7.8e-3, so a re-draw moves the
-/// value by ~1 sigma routinely).
-///
-/// Confirmed unbiased before recalibrating, on this exact model and tally:
-/// 8 runs x 2 000 000 histories give a pooled mean of 0.99970860 before the
-/// change and 1.00015215 after, a shift of +4.4e-4 against a standard error of
-/// 2.5e-4 on each, i.e. 1.3 combined sigma. (Deliberately NOT checked with a
-/// multi-seed spread, which is the estimator #315 fixed: before the fix those
-/// 8 seeds spread by only 2.8e-6, a 250x under-estimate of the true 7.1e-4
-/// per-run error, because they all shared one collision realization.)
-/// The prior value was 0.9857592350441496.
-///
-/// Recomputed a fourth time for issue #126: the Li6 fixture is now the
-/// PUBLISHED endf-b8.1 data (downloaded into `~/.cache/yamc`) instead of the
-/// April-2026 copy that used to be committed here. The two differ only in the
-/// last ulp of the energy grid (the published grid starts at exactly 1e-5 eV,
-/// the retired one at 9.999999999999999e-6), which moves this mean by 3.1e-10
-/// relative -- far below the 7.8e-3 statistical spread, but above the 1e-12
-/// this test asserts. The prior value was 1.0101426555071467.
-///
-/// Recomputed a fifth time for the August-2026 re-upload of endf-b8.1, which
-/// lands on exactly the pre-#126 value: 1.0101426555071467, bit for bit. The
-/// grid ulp #126 recalibrated for has gone back to what the retired committed
-/// copy had, so this is the same 3.1e-10 step in reverse rather than a new
-/// realization. Nothing else in the tally moves.
+/// The reference is one realization of the fixed-seed stream (`std_dev` here
+/// is 7.8e-3), so any change to draw order or stream seeding (the free-flight
+/// draw, the per-history collision PCG and its seeding) renumbers the streams
+/// and needs a recalibration, as does a change to the published Li6 data
+/// (even a last-ulp change to the energy grid moves the mean by ~3e-10, above
+/// the 1e-12 asserted here). Before recalibrating, confirm the shift is
+/// statistical with long independent runs (e.g. 8 x 2 000 000 histories on
+/// this model and tally), not a multi-seed spread of short runs.
 #[test]
 fn mean_matches_default_reference() {
     let tally = run_li6_sim(42, 1000, 10);
     let mean = tally.get_mean()[0];
-    // Default-build reference (published endf-b8.1 Li6 data, #315 per-history
+    // Default-build reference (published endf-b8.1 Li6 data, per-history
     // seeding).
     let reference = 1.0101426555071467;
     let diff = (mean - reference).abs();

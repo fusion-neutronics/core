@@ -37,7 +37,7 @@ REFERENCE_DIR = REGRESSION_DIR / "reference_data"
 # Resolved from this file, not from the CWD. `test_transmutation.py` and
 # `test_decay_photons.py` build a TransmutationChain at module scope, so a
 # CWD-relative path here fails at COLLECTION, before any fixture can run, and
-# `cd packages/yamc-core && pytest` dies at import (issue #539). The repo root
+# `cd packages/yamc-core && pytest` dies at import. The repo root
 # is four levels up: regression_tests -> tests -> yamc-core -> packages.
 REPO_ROOT = Path(__file__).resolve().parents[4]
 TESTS_DATA_DIR = REPO_ROOT / "tests"  # symlink to crates/yamc/tests
@@ -63,7 +63,7 @@ NEUTRON_SCALAR_SCORES = [
 # (data-convention difference, identical on the CPU and GPU backends and
 # confirmed against a pre-change build by the V&V suite); under the old
 # 32-bit RNG stream the Fe56 coupled realization sat just under the tight
-# band by luck, and the 64-bit stream (issue #274) tipped it to 3.4 sigma /
+# band by luck, and the 64-bit stream tipped it to 3.4 sigma /
 # 6.6 %.
 WIDE_TOLERANCE_SCORES = {"heating", "heating-local", "photoelectric"}
 
@@ -100,7 +100,7 @@ def load_reference(sim_type, nuclide):
     """Load reference data JSON. Returns None if not found.
 
     Fails loudly when the reference was generated from a different
-    nuclear-data library than the yamc fixture (issue #363): evaluations
+    nuclear-data library than the yamc fixture: evaluations
     shift between releases (Li6 photon production moves ~100x between
     ENDF/B-VIII.0 and VIII.1), so comparing across libraries produces
     failures that look like transport bugs.
@@ -140,8 +140,8 @@ def assert_scalar_agreement(ref_val, yamc_val, ref_std, yamc_std, name,
     # heating can be an exact 0 +/- 0 while yamc's own estimate carries ~30%
     # relative error. The comparison then reduces to "is yamc consistent with
     # zero", governed entirely by yamc's std, so a 3-sigma band is too tight to
-    # be stable across fixed-seed realizations (an RNG stream change like issue
-    # #111 reshuffles histories and tips a 3.0-sigma point to 3.1). Use a wider
+    # be stable across fixed-seed realizations (an RNG stream change reshuffles
+    # histories and tips a 3.0-sigma point to 3.1). Use a wider
     # 4-sigma statistical band for heating; a real KERMA bias on a
     # well-sampled nuclide is many sigma and is still caught.
     score_name = name.split("/")[-1] if "/" in name else name

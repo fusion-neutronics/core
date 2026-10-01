@@ -223,7 +223,7 @@ mod tests {
         }
 
         // Sanity: for the skewed array [0.1, 5.0, 0.3], the dominant
-        // nuclide (#1) must be picked most often over the seed sweep.
+        // nuclide must be picked most often over the seed sweep.
         let skew_ai = 2usize;
         let mut hist = vec![0u32; arrays[skew_ai].len()];
         for s in 0..n_seeds {

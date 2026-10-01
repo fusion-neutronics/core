@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Transmutation must give the same inventory under MPI as serially (#287).
+"""Transmutation must give the same inventory under MPI as serially.
 
 Run under ``mpirun``; prints one ``RANKS=<n> <nuclide>=<density>`` line from
 rank 0 plus ``OK``. The wrapper test compares the value against a serial run.

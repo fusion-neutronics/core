@@ -6,8 +6,8 @@ Both sides get the SAME wall-clock budget (default 20 min):
   - WW:      generate windows (time it, T_gen), then
              simulate_transport(max_runtime = BUDGET - T_gen)
 so the weight-window side pays for its own generation and the comparison is
-fair and generation-inclusive. Relies on the #193 fix (capped CPU chunk size)
-for max_runtime to actually bound the wall-clock.
+fair and generation-inclusive. The capped CPU chunk size is what lets
+max_runtime actually bound the wall-clock.
 
 Outputs (into the repo root):
   - bioshield_timed_heatmaps.png : 3 heatmaps (analog flux | WW flux | WW rel err)

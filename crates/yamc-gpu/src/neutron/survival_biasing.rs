@@ -20,10 +20,9 @@
 //!     continue at this weight with survival probability
 //!     `weight / weight_survive`).
 //!
-//! PR1 implemented implicit capture (reading only the enable flag); PR2
-//! adds the weight-cutoff Russian roulette that consumes `weight_cutoff`
-//! / `weight_survive` after each collision (delta-tracking aside, this is
-//! the standard analog VR roulette).
+//! Implicit capture reads only the enable flag; the weight-cutoff Russian
+//! roulette consumes `weight_cutoff` / `weight_survive` after each collision
+//! (delta-tracking aside, this is the standard analog VR roulette).
 
 /// Packed survival-biasing parameters, ready to upload as one `&[f64]`
 /// kernel buffer. A single buffer keeps the kernel's storage-descriptor

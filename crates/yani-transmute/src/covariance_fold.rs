@@ -479,7 +479,7 @@ impl Coverage {
     /// `partials_below_rate` the larger shortfall, the smaller ratio, and
     /// `derived_opposing_uncorrelated` and `lumped_covariance_not_assignable`
     /// union theirs. That is what lets the fold below run per nuclide in
-    /// parallel and merge afterwards (issue #576, finding 5c).
+    /// parallel and merge afterwards.
     pub fn absorb(&mut self, other: Coverage) {
         self.covered.extend(other.covered);
         self.without_data.extend(other.without_data);
@@ -581,7 +581,7 @@ impl FluxDensity<'_> {
     /// The boundaries ascend (`transmute_material_shielded` refuses a spectrum
     /// where they do not), so the ends bisect. Bit-identical: the groups this
     /// leaves out are exactly the ones the `lo >= hi` guard skipped, and the
-    /// ones it keeps are summed in the same order (issue #576, finding 8).
+    /// ones it keeps are summed in the same order.
     fn overlapping(&self, a: f64, b: f64) -> std::ops::Range<usize> {
         // Group `g` spans `[boundaries[g], boundaries[g + 1]]`, so it can
         // overlap when `boundaries[g + 1] > a` and `boundaries[g] < b`.
@@ -2371,7 +2371,7 @@ pub fn fold_rate_covariance(
     // and the shared flux, so the nuclides are independent. Each keeps its own
     // `Coverage` and the driver merges them in `names` order below; every field
     // of `Coverage` is order-free anyway, but merging in a fixed order costs
-    // nothing and leaves nothing to argue about (issue #576, finding 5c).
+    // nothing and leaves nothing to argue about.
     let one = |name: &&String| -> (Option<RateCovariance>, Coverage) {
         let mut coverage = Coverage::default();
         let Some(chain_nuclide) = chain.get(*name) else {
@@ -4986,6 +4986,7 @@ mod lumped_tests {
                 branching: 1.0,
                 q_value: Some(0.0),
                 branching_uncertainty: None,
+                evaluated_branching: None,
             }],
             decays: Vec::new(),
             fission_yields: None,

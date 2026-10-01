@@ -180,6 +180,16 @@ impl MpiContext {
         root_process.broadcast_into(data);
     }
 
+    /// Broadcast u64 array from root to all ranks
+    pub fn broadcast_u64(&self, data: &mut [u64], root_rank: i32) {
+        if self.size <= 1 {
+            return;
+        }
+        let world = self.world();
+        let root_process = world.process_at_rank(root_rank);
+        root_process.broadcast_into(data);
+    }
+
     /// Gather equal-length f64 slices from every rank to `root_rank`.
     /// Returns `Some(concatenated)` on the root (rank-major order:
     /// rank 0's slice first), `None` on other ranks.
@@ -229,7 +239,7 @@ impl MpiContext {
     /// in lockstep rather than acting on its rank-local view. For `size <= 1`
     /// it returns `local`. Used for the collective `max_runtime` early-stop so
     /// ranks break at the same chunk checkpoint and never desync the post-loop
-    /// gather collectives (#230).
+    /// gather collectives.
     pub fn any_rank_true(&self, local: bool) -> bool {
         let mut flag = [if local { 1.0 } else { 0.0 }];
         self.reduce_sum_f64(&mut flag, 0);
@@ -276,6 +286,10 @@ impl MpiContext {
     }
 
     pub fn broadcast_f64(&self, _data: &mut [f64], _root_rank: i32) {
+        // No-op: single process, data is already "broadcast"
+    }
+
+    pub fn broadcast_u64(&self, _data: &mut [u64], _root_rank: i32) {
         // No-op: single process, data is already "broadcast"
     }
 
