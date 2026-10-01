@@ -80,6 +80,11 @@ jobs:
         run: python scripts/fetch_test_fixtures.py
       - name: Build
         run: cargo build --workspace --verbose
+      - name: Build the converter on its own
+        # A workspace build unifies features across crates, so a crate that
+        # leaves out a feature it needs still builds there. The fixture fetch
+        # step runs these binaries alone, which is where that fails.
+        run: cargo build -p yamc-convert --bins
       - name: Test
         env:
           # The fetch step above ran, so the fixtures must now be readable at
