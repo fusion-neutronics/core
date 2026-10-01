@@ -127,12 +127,10 @@ impl TransmutationStepper for ForwardEulerStepper {
         // Where an exact answer exists, use it instead of the solver's. A
         // nuclide that nothing feeds over this step obeys `n(dt) = n0 *
         // exp(A_ii dt)` and nothing else, where `A_ii` is its own diagonal, so
-        // its row needs no linear solve at all; CRAM48's LU fill couples every
-        // row to the largest density in the solve, and what it returns for
-        // those rows is a residue around 1e-22 of that largest density rather
-        // than the answer.
+        // its row needs no linear solve at all, and the closed form is exact
+        // where the solver only approximates it.
         //
-        // That residue is invisible in an inventory and loud in the outputs
+        // A wrong density there is invisible in an inventory and loud in the outputs
         // that weight by a decay constant, which spans ten orders of magnitude
         // across the chain: cooled reactor graphite reported two thirds of its
         // decay heat from B12, a 20.2 ms emitter, on a density the solver had

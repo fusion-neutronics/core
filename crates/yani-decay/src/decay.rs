@@ -497,6 +497,52 @@ mod tests {
         assert_eq!(continua[0].emission_rate(), Err(UnreadableContinuum::NoLaw));
     }
 
+    /// Zr90m (0.808 s, 2.32 MeV) held in equilibrium by Y90m (3.19 h) in a
+    /// cooling zirconium foil, carried step by step through the cooling
+    /// schedule of the FNS 5 minute experiment. Its heat is `lambda * N * E`
+    /// of a population 1e-22 of the bulk, and at every step it has to be the
+    /// Bateman value, not a residue of the bulk that comes and goes with the
+    /// last bit of the step length.
+    #[test]
+    fn an_equilibrium_daughter_heats_from_its_population_at_every_step() {
+        let lambda_parent = std::f64::consts::LN_2 / 11_484.0;
+        let half_life_daughter = 0.8082;
+        let lambda_daughter = std::f64::consts::LN_2 / half_life_daughter;
+        let energy = 2.319_98e6;
+        let mut chain = HashMap::new();
+        chain.insert("Y90_m1".to_string(), nuclide("Y90_m1", Some(11_484.0), 0.0));
+        chain.insert(
+            "Zr90_m1".to_string(),
+            nuclide("Zr90_m1", Some(half_life_daughter), energy),
+        );
+        chain.insert("Zr90".to_string(), nuclide("Zr90", None, 0.0));
+        let names = ["Y90_m1", "Zr90_m1", "Zr90"];
+        let triplets = vec![
+            (0, 0, -lambda_parent),
+            (1, 0, lambda_parent),
+            (1, 1, -lambda_daughter),
+            (2, 1, lambda_daughter),
+        ];
+        let parent0 = 1.0e-15;
+        let mut n = vec![parent0, 0.0, 2.2e-2];
+        let mut elapsed = 0.0;
+        for dt in [35.0, 66.0, 97.0, 126.0, 126.0, 187.0, 247.0, 427.0, 607.0] {
+            n = yani::cram48_sparse(&triplets, 3, &n, dt).unwrap();
+            elapsed += dt;
+            let densities: HashMap<String, f64> =
+                names.iter().map(|s| s.to_string()).zip(n.clone()).collect();
+            let heat = decay_heat_by_nuclide(&densities, 1.0, &chain);
+            let exact_atoms = parent0 * lambda_parent / (lambda_daughter - lambda_parent)
+                * ((-lambda_parent * elapsed).exp() - (-lambda_daughter * elapsed).exp());
+            let exact = exact_atoms * BARN_PER_CM_SQ * lambda_daughter * energy * EV_TO_J;
+            let got = heat.get("Zr90_m1").copied().unwrap_or(0.0);
+            assert!(
+                ((got - exact) / exact).abs() < 1e-11,
+                "after {elapsed} s: Zr90m heat {got:e} W, Bateman {exact:e} W"
+            );
+        }
+    }
+
     /// Data without the split cannot give a component, and says which
     /// nuclides it could not split rather than reporting a partial heat.
     #[test]
