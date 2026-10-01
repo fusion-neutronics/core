@@ -289,6 +289,19 @@ pub struct Draw {
     nuclides: BTreeMap<String, NuclideDraw>,
 }
 
+impl Draw {
+    /// `m_k - 1` per relative cell of `nuclide`'s field, in the field's cell
+    /// order, or `None` for a nuclide this draw has no field for.
+    pub fn relative(&self, nuclide: &str) -> Option<&[f64]> {
+        self.nuclides.get(nuclide).map(|d| d.relative.as_slice())
+    }
+
+    /// The shift in barns per absolute cell of `nuclide`'s field.
+    pub fn absolute(&self, nuclide: &str) -> Option<&[f64]> {
+        self.nuclides.get(nuclide).map(|d| d.absolute.as_slice())
+    }
+}
+
 struct NuclideDraw {
     /// `m_k - 1` per relative cell.
     relative: Vec<f64>,
