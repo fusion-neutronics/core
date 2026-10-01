@@ -769,9 +769,11 @@ impl PyTransmutationResults {
     ///   ``sigma_at_least_one_outside_bound`` is the same for nuclides outside
     ///   the populated bound, whose wide channels a replica's draw can take
     ///   past it; the ten-or-more subset reads off its values.
-    /// - ``rates_sampled``: cross-section rate draws made. Each is a lognormal
-    ///   multiplier matched to the covariance's mean and variance, so none can
-    ///   go negative and none is floored.
+    /// - ``rates_sampled``: cross-section rate draws made, each read off one
+    ///   draw of the nuclide's cross sections. ``rates_floored`` counts those
+    ///   that came out negative and were floored at zero, which only a channel
+    ///   subtracting reactions or reading an additive (absolute or
+    ///   short-range) covariance can.
     /// - ``half_lives_perturbed`` / ``no_half_life_uncertainty``: with the
     ///   ``"half_life"`` source, which reachable unstable nuclides had their
     ///   half-life sampled and which state no sigma to sample from.

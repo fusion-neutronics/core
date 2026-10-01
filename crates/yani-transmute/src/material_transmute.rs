@@ -3,9 +3,7 @@ use crate::branching_rule::{
     BranchingState, Denominator, DroppedChannel, ListRates, ListRule, Lists,
     BRANCHING_RATE_TOLERANCE, INELASTIC, MT_ANYTHING, MT_INELASTIC,
 };
-use crate::covariance_fold::{
-    fold_cross_covariance, fold_rate_covariance, reachable_mts, FoldSpectrum,
-};
+use crate::covariance_fold::{cell_fields, fold_rate_covariance, reachable_mts, FoldSpectrum};
 use crate::covariance_sample::Sampler;
 use crate::multigroup::{collapse_with_lists, fold_list, scale_rates, Collapsed};
 use crate::results::TransmutationResults;
@@ -813,8 +811,9 @@ fn solve_case(
 struct ReplicaOutcome {
     /// This replica's inventory at each schedule step.
     densities: Vec<HashMap<String, f64>>,
-    /// Cross-section rate draws this replica made.
+    /// Cross-section rate draws this replica made, and those floored at zero.
     rates_sampled: usize,
+    rates_floored: usize,
     /// The two flux counters a replica actually produces. NOT the whole
     /// `FluxCoverage`: `Info::add_flux_coverage` assigns the spectrum counts,
     /// which are established before the loop, so folding a replica's zeros over
@@ -1460,7 +1459,6 @@ fn run_replicas(
     // The fold is relativized, so the per-step `scale_rates` leaves it correct:
     // a relative covariance does not move when the flux magnitude does.
     let mut coverage = crate::covariance_fold::Coverage::default();
-    let mut samplers = Vec::with_capacity(per_spectrum.len());
     let mut sigmas = crate::covariance_sample::SigmaReport::default();
     let densities = initial.get_atoms_per_barn_cm()?;
     // Each spectrum's fluence over the schedule, so the rate-weighted sigma
@@ -1507,33 +1505,30 @@ fn run_replicas(
         };
         folds.push(folded);
     }
-    // One evaluation is one uncertainty, so a nuclide's rates under two
-    // spectra are correlated through it. The cross blocks carry that, and the
-    // samplers factorize each nuclide once over all its spectra, so every
-    // spectrum's draw is its own rows of one factor applied to the same
-    // deviates. One spectrum needs no cross block and factorizes exactly as
-    // it would alone.
-    let mut cross = std::collections::BTreeMap::new();
-    if cross_sections {
-        let fold_spectrum = |idx: usize| FoldSpectrum {
-            chain: &per_spectrum[idx].2,
-            rates: &per_spectrum[idx].0,
-            multigroup_flux: &spectra[idx].masses,
-            group_boundaries: &spectra[idx].boundaries,
-        };
-        for a in 0..per_spectrum.len() {
-            for b in a + 1..per_spectrum.len() {
-                cross.insert(
-                    (a, b),
-                    fold_cross_covariance(initial, &fold_spectrum(a), &fold_spectrum(b), shielding),
-                );
-            }
-        }
-    }
-    for (idx, sampler) in Sampler::joint(&folds, &cross).into_iter().enumerate() {
-        let rates = &per_spectrum[idx].0;
+    // One evaluation is one uncertainty, so a replica draws each nuclide's
+    // cross sections once, as a field over its covariance cells, and every
+    // spectrum's rates are read off that one draw. The fold above stays the
+    // statement of what the evaluation says per spectrum, and the sampler's
+    // own rate covariance under each spectrum is checked against it in the
+    // sigma report.
+    let fields = if cross_sections {
+        let fold_spectra: Vec<FoldSpectrum> = per_spectrum
+            .iter()
+            .zip(spectra)
+            .map(|(p, s)| FoldSpectrum {
+                chain: &p.2,
+                rates: &p.0,
+                multigroup_flux: &s.masses,
+                group_boundaries: &s.boundaries,
+            })
+            .collect();
+        cell_fields(initial, chain, &fold_spectra, shielding)
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    let sampler = Sampler::new(&fields, &folds);
+    for (idx, (rates, _, _)) in per_spectrum.iter().enumerate() {
         sigmas.add(idx, &sampler, rates, fluence[idx], &densities, &populated);
-        samplers.push(sampler);
     }
 
     // The flux is the caller's own input, so it needs no nuclear data: only a
@@ -1755,7 +1750,7 @@ fn run_replicas(
     let no_decay_branchings = decay_branching
         .as_ref()
         .is_none_or(|b| b.two_modes.is_empty());
-    if samplers.iter().all(Sampler::is_empty)
+    if sampler.is_empty()
         && per_group.iter().all(Option::is_none)
         && no_half_lives
         && no_decay_branchings
@@ -1799,6 +1794,9 @@ fn run_replicas(
     let one_replica = |replica: u64| -> Result<ReplicaOutcome, String> {
         let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
         let mut rates_sampled = 0usize;
+        let mut rates_floored = 0usize;
+        // One draw of every nuclide's cross sections, read by every spectrum.
+        let xs_draw = sampler.draw(request.seed, replica);
         let mut decay_branchings_floored = 0usize;
         // A statistical draw of the whole tallied rate vector, the partials
         // re-folded into the branching the way the nominal was, so an
@@ -1875,8 +1873,9 @@ fn run_replicas(
                 }
                 None => rates.clone(),
             };
-            let (rates, n) = samplers[idx].perturb(&rates, request.seed, replica);
+            let (rates, n, floored) = sampler.perturb_with(&xs_draw, idx, &rates);
             rates_sampled += n;
+            rates_floored += floored;
             let folded_chain = match &chains {
                 // The pruned nominal chain, unless the statistical draw
                 // re-folded this replica's own chain, which then carries the
@@ -1902,6 +1901,7 @@ fn run_replicas(
         Ok(ReplicaOutcome {
             densities: densities_of(&materials),
             rates_sampled,
+            rates_floored,
             flux_bins_sampled: flux_coverage.bins_sampled,
             flux_bins_floored: flux_coverage.bins_floored,
             decay_branchings_sampled: edits.decay_branchings.len(),
@@ -1934,6 +1934,7 @@ fn run_replicas(
         for outcome in outcomes {
             let outcome = outcome?;
             info.rates_sampled += outcome.rates_sampled;
+            info.rates_floored += outcome.rates_floored;
             flux_coverage.bins_sampled += outcome.flux_bins_sampled;
             flux_coverage.bins_floored += outcome.flux_bins_floored;
             info.half_lives_sampled += outcome.half_lives.len();
@@ -2015,7 +2016,7 @@ fn run_replicas(
             stepper,
             applied
                 .contains(&crate::uncertainty::Source::CrossSections)
-                .then_some(samplers.as_slice()),
+                .then_some(&sampler),
             chains.as_ref(),
             half_life.as_ref(),
             decay_branching.as_ref(),
@@ -2065,7 +2066,7 @@ fn first_order_contributors(
     chain: &Arc<HashMap<String, ChainNuclide>>,
     parts: yani::ChainParts,
     stepper: &ForwardEulerStepper,
-    samplers: Option<&[Sampler]>,
+    sampler: Option<&Sampler>,
     chains: Option<&ReplicaChains>,
     half_life: Option<&HalfLifeSampling>,
     decay_branching: Option<&crate::decay_branching_uncertainty::Candidates>,
@@ -2097,15 +2098,18 @@ fn first_order_contributors(
     let mut out: Vec<Contributor> = Vec::new();
 
     // Cross sections: one solve per (spectrum, nuclide, channel).
-    if let Some(samplers) = samplers {
+    if let Some(sampler) = sampler {
         type Job = (usize, String, usize, String);
+        let factors: Vec<_> = (0..per_spectrum.len())
+            .map(|a| sampler.factors(a))
+            .collect();
         let mut jobs: Vec<Job> = Vec::new();
-        for (a, sampler) in samplers.iter().enumerate() {
-            for (name, kinds, _, _) in sampler.factors() {
+        for (a, spectrum_factors) in factors.iter().enumerate() {
+            for (name, kinds, _, _) in spectrum_factors {
                 for (i, kind) in kinds.iter().enumerate() {
-                    let rate = per_spectrum[a].0.get(name).and_then(|r| r.get(kind));
+                    let rate = per_spectrum[a].0.get(*name).and_then(|r| r.get(kind));
                     if rate.is_some_and(|r| *r > 0.0) {
-                        jobs.push((a, name.clone(), i, kind.clone()));
+                        jobs.push((a, (*name).clone(), i, kind.clone()));
                     }
                 }
             }
@@ -2129,16 +2133,18 @@ fn first_order_contributors(
             }
         };
         // w[nuclide or (nuclide, kind)][step][output] -> vector over the
-        // factor's columns, accumulated over spectra (they share the deviate).
+        // field's columns, accumulated over spectra (every spectrum reads the
+        // same field, so the columns are the same independent deviates).
         type PerStep = Vec<HashMap<String, Vec<f64>>>;
         let mut block: HashMap<String, PerStep> = HashMap::new();
         let mut channel: HashMap<(String, String), PerStep> = HashMap::new();
         for ((a, name, i, kind), sens) in jobs.iter().zip(results) {
             let sens = sens?;
-            let (_, _, l, n) = samplers[*a]
-                .factors()
+            let (_, _, l, n) = factors[*a]
+                .iter()
                 .find(|(n, _, _, _)| *n == name)
                 .expect("the job came from this factor");
+            let n = *n;
             let row = &l[i * n..(i + 1) * n];
             for target in [
                 block

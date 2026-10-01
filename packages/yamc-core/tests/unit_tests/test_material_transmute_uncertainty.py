@@ -221,16 +221,17 @@ def test_a_shielded_run_reports_its_shielding_held_at_nominal():
     assert "self-shielding correction" in info["not_perturbed"]
 
 
-def test_no_floor_counter_is_reported_for_a_draw_that_cannot_go_negative():
-    """The cross-section draw is lognormal, so there is nothing to floor."""
+def test_a_draw_on_relative_cells_alone_floors_nothing():
+    """Iron's channels read only lognormal cell multipliers with positive
+    coefficients, so no drawn rate can go negative and none is floored."""
     iron = _iron()
     results = iron.transmute(
         schedule=_schedule(),
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8),
     )
     info = results.get_data_uncertainty_info(iron.id or 0)
-    assert "rates_floored" not in info
-    assert "rates_sampled" in info
+    assert info["rates_floored"] == 0
+    assert info["rates_sampled"] > 0
 
 
 def test_coverage_is_a_share_and_a_dilute_run_has_no_partials_off_the_rate():

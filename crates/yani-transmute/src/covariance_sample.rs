@@ -1,31 +1,36 @@
-//! Sample perturbed reaction rates from the folded covariance.
+//! Sample nuclear cross sections from their covariance, and read every
+//! spectrum's reaction rates off each draw.
 //!
-//! One factorization per nuclide up front, then one cheap matrix-vector product
-//! per replica. The perturbation is multiplicative and relative:
+//! A replica draws each nuclide's cross sections once, as a field over its
+//! covariance cells (see [`CellField`](crate::covariance_fold::CellField)),
+//! and every spectrum, step and channel reads its rate off that one draw. So
+//! one evaluation is one uncertainty everywhere it is used: a nuclide under
+//! two spectra moves in both as one perturbed cross section moves it, and a
+//! spectrum added to a schedule does not change what the others draw.
 //!
 //! ```text
-//! L   = V √Λ        from the eigendecomposition of the relative covariance
-//! z   ~ N(0, I)
-//! δ   = L z
-//! σ_i = sqrt(Σ_j L_ij²)
-//! s_i = sqrt(ln(1 + σ_i²))
-//! R'  = R · exp(s_i δ_i / σ_i - s_i² / 2)
+//! relative cells   Σ_N = ln(1 + C),  y = L_N z,  m_k = exp(y_k - Σ_N,kk / 2)
+//! absolute cells   a = L_A z'                      (barns)
+//! short-range      ΔB_j ~ N(0, F_k ΔE_k w_j)       (independent pieces)
+//! rate             R'_i = R_i + Σ_k p_ik (m_k - 1) + Σ_k q_ik a_k + Σ_j w_ij ΔB_j
 //! ```
 //!
-//! Each channel's multiplier is lognormal with mean 1 and variance `σ_i²`, the
-//! evaluation's own two moments after any PSD repair, so a sampled rate is
-//! never negative and nothing is floored. [`lognormal_factor`] says what that
-//! keeps and what it does not.
+//! with `p`, `q` and `w` the spectrum's partial rates, partial fluxes and
+//! flux densities on the cells. A rate is linear in the cross section, so the
+//! last line is exact, not a linearization. The relative multipliers are a
+//! multivariate lognormal with mean one and the evaluation's own covariance
+//! (Žerovnik et al., NIM A 727 (2013) 33), so every perturbed cross section
+//! is positive, and so is every rate that only adds reactions.
 //!
-//! # Why Jacobi, and not a linear algebra dependency
+//! # The eigensolver
 //!
-//! The matrices are one per nuclide over that nuclide's activation channels, so
-//! they are single digits to low tens on a side. At that size the cyclic Jacobi
-//! rotation is fast, needs no dependency, is bit-reproducible across platforms
-//! because it is pure arithmetic in a fixed order, and gives the eigenvectors
-//! that the negative-eigenvalue clipping below needs anyway. A Cholesky would
-//! be the obvious choice if the matrices were positive definite, and the whole
-//! point is that they are not.
+//! Every factorization is an eigendecomposition, by Householder
+//! tridiagonalization and implicit QL ([`symmetric_eigen`]): bit-reproducible
+//! across platforms because it is pure arithmetic in a fixed order, O(n³)
+//! once on fields that run to hundreds of cells, and it gives the
+//! eigenvectors the negative-eigenvalue clipping below needs anyway. A
+//! Cholesky would be the obvious choice if the matrices were positive
+//! definite, and the whole point is that they are not.
 //!
 //! # Clipping is reported, not silent
 //!
@@ -67,7 +72,7 @@ use crate::covariance_fold::RateCovariance;
 /// stated at zero or below is judged without an eigenvalue at all: a negative
 /// variance is a repair, and so is a zero one with any covariance to another
 /// channel. What scaling buys is that round-off is on each channel's own
-/// scale. The Jacobi round-off on `C` is absolute, about `eps · λ_max`, and a
+/// scale. The eigensolver's round-off on `C` is absolute, about `eps · λ_max`, and a
 /// small channel can carry an O(1) share of a null-space eigenvector, so on
 /// `C` a rank-one matrix whose channels span a few orders in sigma already
 /// reads as needing clipping. On `R` every diagonal is one, so the trace is
@@ -133,9 +138,8 @@ pub struct Repair {
     ///
     /// Read off the same decomposition of `C` that is sampled, not off the
     /// correlation matrix the repair was decided on, so this and every other
-    /// value here describe what was drawn. Cyclic Jacobi keeps a small
-    /// eigenvalue beside a huge one to high relative accuracy in the cases
-    /// tested, but the guarantee on `C` is only about `eps · λ_max(C)`: next
+    /// value here describe what was drawn. The guarantee on `C` is only about
+    /// `eps · λ_max(C)`: next
     /// to a channel at a variance of 1e17 a flagged repair could in principle
     /// read here as a `lambda_min` near zero or above it.
     pub lambda_min: f64,
@@ -157,69 +161,176 @@ struct Eigen {
     clipped_fraction: f64,
 }
 
-/// One nuclide's factorized covariance, as one spectrum sees it.
-///
-/// A schedule's spectra share one factorization per nuclide (see
-/// [`Sampler::joint`]): this holds the rows of the joint `L` that drive this
-/// spectrum's channels, over all of its columns, so every spectrum applies its
-/// own rows to the same deviates. With one spectrum the rows are the whole,
-/// square factor.
-struct Factor {
+/// Keeps the absolute-cell streams clear of every other per-nuclide stream.
+const ABSOLUTE_STREAM: u32 = 0xAB50_1C0B;
+/// Keeps the short-range streams clear of every other per-nuclide stream.
+const SHORT_RANGE_STREAM: u32 = 0x5807_7A9E;
+
+/// One nuclide's covariance, factorized: everything that depends only on the
+/// evaluation, so one is shared by every material, spectrum and run that
+/// reads the same covariance (see [`factorized`]).
+struct Factorized {
+    /// Row-major `n × r` factor of the log-space covariance of the relative
+    /// cells, `Σ_N = ln(1 + C)` after any repair, with the directions whose
+    /// variance is below round-off dropped, so a draw costs `n r`.
+    log_factor: Vec<f64>,
+    log_rank: usize,
+    /// `Σ_N,kk / 2` per relative cell, after repair, so `exp(y - half)` has
+    /// mean one.
+    half_log_variance: Vec<f64>,
+    /// `exp(Σ_N) - 1`: the relative covariance the multipliers actually have.
+    relative_sampled: Vec<f64>,
+    /// Row-major factor of `relative_sampled`, the linear map first-order
+    /// attribution reads. Built on first use, since only attribution needs it.
+    relative_factor: std::sync::OnceLock<Vec<f64>>,
+    /// Row-major `m × r` factor of the absolute cells' covariance, in barns.
+    absolute_factor: Vec<f64>,
+    absolute_rank: usize,
+    /// The absolute cells' sampled covariance, in barn^2.
+    absolute_sampled: Vec<f64>,
+    repair: Option<Eigen>,
+    /// The inputs, so a cache hit is checked exactly rather than trusted to a
+    /// hash.
+    relative_input: Vec<f64>,
+    absolute_input: Vec<f64>,
+    /// Draws already made, keyed by `(nuclide ordinal, seed, replica)`: a draw
+    /// depends on nothing else, so every material reading this nuclide in a
+    /// run shares it rather than redoing the matrix-vector products.
+    draws: std::sync::Mutex<HashMap<(u32, u64, u64), GaussianDraw>>,
+}
+
+/// One replica's relative multipliers minus one and absolute shifts.
+type GaussianDraw = std::sync::Arc<(Vec<f64>, Vec<f64>)>;
+
+/// How many draws one factorization keeps before it starts over.
+const DRAW_CACHE: usize = 1 << 13;
+
+/// How many factorizations the process keeps before it starts over.
+const FACTORIZED_CACHE: usize = 256;
+
+/// One nuclide's field as one run reads it: its shared factorization, and the
+/// short-range pieces this run's spectra cut.
+struct Field {
+    core: std::sync::Arc<Factorized>,
+    short: Vec<crate::covariance_fold::ShortRange>,
+    /// Per short-range block and interval, the pieces drawn per replica: the
+    /// union of every spectrum's cuts there, so each spectrum's piece is a
+    /// whole number of them.
+    short_pieces: Vec<Vec<Vec<f64>>>,
+}
+
+impl Field {
+    fn n_relative(&self) -> usize {
+        self.core.half_log_variance.len()
+    }
+
+    fn n_absolute(&self) -> usize {
+        (self.core.absolute_sampled.len() as f64).sqrt() as usize
+    }
+
+    fn n_short_pieces(&self) -> usize {
+        self.short_pieces
+            .iter()
+            .flatten()
+            .map(|p| p.len().saturating_sub(1))
+            .sum()
+    }
+}
+
+/// One spectrum's reading of one nuclide's field.
+struct View {
     kinds: Vec<String>,
-    /// Row-major `kinds.len() × cols`, rows of `L = V √Λ`.
-    l: Vec<f64>,
-    /// Columns of `L`: the joint matrix's dimension, the number of standard
-    /// normals a replica draws for this nuclide.
-    cols: usize,
-    /// Per-channel relative standard deviation, `sqrt(sum_j L[i][j]^2)`.
-    ///
-    /// The marginal each row of `L` produces. Kept because the lognormal
-    /// transform needs the marginal, not the joint, and recomputing it per
-    /// replica would repeat the factorization's own work every draw.
-    sigma: Vec<f64>,
-    /// Per-channel `C_ii` as folded, before any repair, negative or not.
+    /// Full rate per channel.
+    rates: Vec<f64>,
+    /// Row-major `kinds × relative cells` partial rates.
+    relative: Vec<f64>,
+    /// Row-major `kinds × absolute cells` partial fluxes times 1e-24.
+    absolute: Vec<f64>,
+    /// Per channel, `(block, interval, weight per drawn piece)`: the term
+    /// weights carried onto the union pieces, summed over the channel's
+    /// terms, so a channel's short-range shift is one dot product per
+    /// interval.
+    short: Vec<Vec<(usize, usize, Vec<f64>)>>,
+    /// Per channel `C_ii` as folded, before any repair, or `None` for a
+    /// channel the fold did not give a variance.
     evaluated_variance: Vec<f64>,
-    /// Set when the joint matrix is not PSD past [`REPAIR_TOLERANCE`].
-    repair: Option<Eigen>,
+    /// Per channel, the relative variance of the sampled rate.
+    sampled_variance: Vec<f64>,
 }
 
-/// One spectrum's view of the per-nuclide factorizations, built once and
-/// reused for every replica.
+/// The cross-section uncertainty of one schedule: every nuclide's field,
+/// factorized once, and how each spectrum reads it.
+///
+/// A replica draws each nuclide's cross sections once, as a field over its
+/// covariance cells, and every spectrum's rates are read off that one draw.
+/// So a nuclide irradiated under two spectra moves in both exactly as one
+/// perturbed evaluation would move it, and a spectrum added to the schedule
+/// does not change what the others draw.
 pub struct Sampler {
-    factors: BTreeMap<String, Factor>,
+    fields: BTreeMap<String, Field>,
+    views: Vec<BTreeMap<String, View>>,
 }
 
-/// One nuclide's whole factorization, before it is split by spectrum.
-struct Joint {
-    l: Vec<f64>,
+/// One replica's draw of every nuclide's field.
+pub struct Draw {
+    nuclides: BTreeMap<String, NuclideDraw>,
+}
+
+struct NuclideDraw {
+    /// `m_k - 1` per relative cell.
+    relative: Vec<f64>,
+    /// `a_k` per absolute cell, in barns.
+    absolute: Vec<f64>,
+    /// Per short-range block and interval, the noise integrated over each
+    /// drawn piece, in barn-eV.
+    short: Vec<Vec<Vec<f64>>>,
+}
+
+/// The factor `L` of a symmetric matrix with its negative eigenvalues
+/// clipped, `L Lᵀ`, and whether the clipping did anything.
+///
+/// With `judge`, whether it did is [`needs_repair`]'s decision, summarized as
+/// a repair; without, it is any eigenvalue below `-1e-12` of the largest, and
+/// no repair is reported. Where nothing was clipped `L Lᵀ` is the matrix
+/// itself, exactly, and is not recomputed.
+fn clipped_factor(
+    matrix: &[f64],
     n: usize,
-    repair: Option<Eigen>,
-    evaluated_variance: Vec<f64>,
-}
-
-/// Factorize one relative covariance, `L = V √Λ` with negative eigenvalues
-/// clipped to zero.
-fn factorize(cov: &RateCovariance) -> Joint {
-    let n = cov.n();
-    let (values, vectors) = jacobi_eigen(&cov.relative, n);
-
-    let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
-    let repair = needs_repair(cov).then(|| {
-        let trace: f64 = (0..n).map(|i| cov.get(i, i)).sum();
-        let clipped: f64 = values.iter().filter(|v| **v < 0.0).map(|v| -v).sum();
-        Eigen {
-            lambda_min: min,
-            lambda_max: max,
-            clipped_fraction: if trace > 0.0 {
-                clipped / trace
-            } else {
-                f64::INFINITY
-            },
-        }
-    });
-
-    // Column j of V is eigenvector j, so L[i][j] = V[i][j] · √λ_j.
+    judge: bool,
+) -> (Vec<f64>, Option<Eigen>, Vec<f64>, bool) {
+    if n == 0 {
+        return (Vec::new(), None, Vec::new(), false);
+    }
+    let (values, vectors) = eigen(matrix, n);
+    let lambda_min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+    let lambda_max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let repair = judge
+        .then(|| {
+            let as_cov = RateCovariance {
+                kinds: vec![String::new(); n],
+                relative: matrix.to_vec(),
+            };
+            needs_repair(&as_cov).then(|| {
+                let trace: f64 = (0..n).map(|i| matrix[i * n + i]).sum();
+                let clipped: f64 = values.iter().filter(|v| **v < 0.0).map(|v| -v).sum();
+                Eigen {
+                    lambda_min,
+                    lambda_max,
+                    clipped_fraction: if trace > 0.0 {
+                        clipped / trace
+                    } else {
+                        f64::INFINITY
+                    },
+                }
+            })
+        })
+        .flatten();
+    let clipped = if judge {
+        repair.is_some()
+    } else {
+        lambda_min < -1.0e-12 * lambda_max.abs().max(lambda_min.abs())
+    };
+    // L = V √Λ: column j of V is eigenvector j, so L[i][j] = V[i][j] · √λ_j.
     let mut l = vec![0.0; n * n];
     for j in 0..n {
         let s = values[j].max(0.0).sqrt();
@@ -230,180 +341,588 @@ fn factorize(cov: &RateCovariance) -> Joint {
             l[i * n + j] = vectors[i * n + j] * s;
         }
     }
-    Joint {
-        l,
-        n,
-        repair,
-        evaluated_variance: (0..n).map(|i| cov.get(i, i)).collect(),
+    let product = if clipped {
+        let mut product = vec![0.0; n * n];
+        for i in 0..n {
+            for j in i..n {
+                let v: f64 = (0..n).map(|k| l[i * n + k] * l[j * n + k]).sum();
+                product[i * n + j] = v;
+                product[j * n + i] = v;
+            }
+        }
+        product
+    } else {
+        matrix.to_vec()
+    };
+    (l, repair, product, clipped)
+}
+
+/// The worse of two repair summaries, by how much variance each added.
+fn worse(a: Option<Eigen>, b: Option<Eigen>) -> Option<Eigen> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(if b.clipped_fraction > a.clipped_fraction {
+            b
+        } else {
+            a
+        }),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Drop the columns of a row-major `n × n` factor whose variance is below
+/// round-off of the total, returning the `n × r` factor and `r`.
+///
+/// Column `j` of `L = V √Λ` carries variance `λ_j`, so a column below
+/// `1e-15` of the trace moves no variance anything downstream can resolve,
+/// and dropping it makes every draw cost `n r` instead of `n²`. MF=33 cell
+/// covariances are far from full rank: ENDF/B-VIII.1 Fe56 keeps about 400 of
+/// 650 directions.
+fn truncated(l: Vec<f64>, n: usize) -> (Vec<f64>, usize) {
+    if n == 0 {
+        return (l, 0);
+    }
+    let weight: Vec<f64> = (0..n)
+        .map(|j| (0..n).map(|i| l[i * n + j] * l[i * n + j]).sum())
+        .collect();
+    let total: f64 = weight.iter().sum();
+    let kept: Vec<usize> = (0..n).filter(|&j| weight[j] > 1.0e-15 * total).collect();
+    let r = kept.len();
+    let mut out = vec![0.0; n * r];
+    for i in 0..n {
+        for (c, &j) in kept.iter().enumerate() {
+            out[i * r + c] = l[i * n + j];
+        }
+    }
+    (out, r)
+}
+
+impl Factorized {
+    /// Factorize one nuclide's cells.
+    ///
+    /// The relative cells are sampled as a multivariate lognormal matched to
+    /// the evaluation's covariance: `m = exp(y - diag(Σ_N)/2)` with
+    /// `y ~ N(0, Σ_N)` and `Σ_N = ln(1 + C)` elementwise, which gives every
+    /// multiplier mean one and `Cov(m_k, m_l) = C_kl` exactly wherever a
+    /// lognormal can carry it (Žerovnik et al., NIM A 727 (2013) 33). Every
+    /// multiplier is positive, so every perturbed cross section is.
+    ///
+    /// Not every covariance is a lognormal's: two fully correlated cells with
+    /// different sigmas cannot be, and an anticorrelation with
+    /// `1 + C_kl <= 0` cannot be at all. So `Σ_N` can come out slightly
+    /// indefinite from a perfectly good evaluation, and is clipped to the
+    /// nearest lognormal the factorization reaches. That is a property of
+    /// the distribution, not a defect of the data, so it is not reported as a
+    /// repair: its effect on every channel is in the sampled sigma beside the
+    /// evaluated one, and it shrinks as `σ⁴`, so it only shows on wide
+    /// channels, which the report names separately. A repair is the
+    /// evaluation's own matrix `C` not being PSD, decided and summarized on
+    /// `C` before the transform, as it always was.
+    fn new(relative: &[f64], absolute: &[f64]) -> Self {
+        let n = (relative.len() as f64).sqrt() as usize;
+        // The evaluation's own matrix is decomposed in full only when it needs
+        // a repair: deciding that takes its correlation matrix's eigenvalues
+        // alone, and sampling uses the log-space factor below.
+        let evaluated = RateCovariance {
+            kinds: vec![String::new(); n],
+            relative: relative.to_vec(),
+        };
+        let (relative_repair, repaired) = if n > 0 && needs_repair(&evaluated) {
+            let (_, repair, product, _) = clipped_factor(relative, n, true);
+            (repair, product)
+        } else {
+            (None, relative.to_vec())
+        };
+        let mut log = vec![0.0; n * n];
+        for k in 0..n {
+            let c = repaired[k * n + k];
+            log[k * n + k] = if c > -1.0 { c.ln_1p() } else { 0.0 };
+        }
+        for k in 0..n {
+            for l in 0..n {
+                if k != l {
+                    let c = repaired[k * n + l];
+                    log[k * n + l] = if c > -1.0 {
+                        c.ln_1p()
+                    } else {
+                        -(log[k * n + k].max(0.0) * log[l * n + l].max(0.0)).sqrt()
+                    };
+                }
+            }
+        }
+        let (log_factor, _, log_sampled, log_clipped) = clipped_factor(&log, n, false);
+        let half_log_variance = (0..n).map(|k| 0.5 * log_sampled[k * n + k]).collect();
+        let (log_factor, log_rank) = truncated(log_factor, n);
+        // Where the lognormal carries the covariance, what is sampled is the
+        // (repaired) evaluation itself, exactly, and is reported as that
+        // rather than through a round trip through `ln` and `exp` that costs an
+        // ulp. Only where it had to be clipped is the sampled one different.
+        let relative_sampled: Vec<f64> = if log_clipped {
+            log_sampled.iter().map(|v| v.exp_m1()).collect()
+        } else {
+            repaired
+        };
+
+        let m = (absolute.len() as f64).sqrt() as usize;
+        let (absolute_factor, absolute_repair, absolute_sampled, _) =
+            clipped_factor(absolute, m, true);
+        let (absolute_factor, absolute_rank) = truncated(absolute_factor, m);
+
+        Factorized {
+            log_factor,
+            log_rank,
+            half_log_variance,
+            relative_sampled,
+            relative_factor: std::sync::OnceLock::new(),
+            absolute_factor,
+            absolute_rank,
+            absolute_sampled,
+            repair: worse(relative_repair, absolute_repair),
+            relative_input: relative.to_vec(),
+            absolute_input: absolute.to_vec(),
+            draws: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The relative multipliers minus one and the absolute shifts of one
+    /// replica's draw for the nuclide with `ordinal`, made once and shared.
+    fn gaussian_draw(&self, ordinal: u32, base_seed: u64, replica: u64) -> GaussianDraw {
+        let key = (ordinal, base_seed, replica);
+        if let Some(d) = self.draws.lock().expect("draw cache").get(&key) {
+            return d.clone();
+        }
+        let replica_seed = yamc_rng::history_seed(base_seed, replica);
+        let n_relative = self.half_log_variance.len();
+        let n_absolute = (self.absolute_sampled.len() as f64).sqrt() as usize;
+        let gaussian = |stream: u32, factor: &[f64], rank: usize, n: usize| -> Vec<f64> {
+            if rank == 0 {
+                return vec![0.0; n];
+            }
+            let seed = yamc_rng::secondary_seed(replica_seed, ordinal ^ stream);
+            let mut state = yamc_rng::expand_seed(seed);
+            let z = standard_normals(&mut state, rank);
+            factor
+                .chunks_exact(rank)
+                .map(|row| row.iter().zip(&z).map(|(l, z)| l * z).sum())
+                .collect()
+        };
+        let relative = gaussian(0, &self.log_factor, self.log_rank, n_relative)
+            .into_iter()
+            .zip(&self.half_log_variance)
+            .map(|(y, half)| (y - half).exp_m1())
+            .collect();
+        let absolute = gaussian(
+            ABSOLUTE_STREAM,
+            &self.absolute_factor,
+            self.absolute_rank,
+            n_absolute,
+        );
+        let drawn = std::sync::Arc::new((relative, absolute));
+        let mut cache = self.draws.lock().expect("draw cache");
+        if cache.len() >= DRAW_CACHE {
+            cache.clear();
+        }
+        cache.insert(key, drawn.clone());
+        drawn
+    }
+}
+
+/// The factorization of `relative` and `absolute`, from the process-wide
+/// cache when the same covariance was factorized before.
+///
+/// The factorization depends on the covariance alone, so every material of a
+/// many-material run, every spectrum and every later run reading the same
+/// evaluation shares one. Keyed on a hash of the matrices and confirmed
+/// against them exactly.
+fn factorized(relative: &[f64], absolute: &[f64]) -> std::sync::Arc<Factorized> {
+    type Cache = HashMap<u64, Vec<std::sync::Arc<Factorized>>>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Cache>> = std::sync::OnceLock::new();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for v in relative.iter().chain([f64::NAN].iter()).chain(absolute) {
+        h ^= v.to_bits();
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let cache = CACHE.get_or_init(Default::default);
+    let same = |f: &std::sync::Arc<Factorized>| {
+        f.relative_input.len() == relative.len()
+            && f.absolute_input.len() == absolute.len()
+            && f.relative_input
+                .iter()
+                .zip(relative)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+            && f.absolute_input
+                .iter()
+                .zip(absolute)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+    };
+    if let Some(f) = cache
+        .lock()
+        .expect("factorization cache")
+        .get(&h)
+        .and_then(|bucket| bucket.iter().find(|f| same(f)).cloned())
+    {
+        return f;
+    }
+    // Factorized outside the lock, so nuclides factorize in parallel. Two
+    // threads racing on one covariance both compute it, and get the same
+    // answer either way.
+    let built = std::sync::Arc::new(Factorized::new(relative, absolute));
+    let mut map = cache.lock().expect("factorization cache");
+    if map.values().map(Vec::len).sum::<usize>() >= FACTORIZED_CACHE {
+        map.clear();
+    }
+    let bucket = map.entry(h).or_default();
+    if let Some(f) = bucket.iter().find(|f| same(f)) {
+        return f.clone();
+    }
+    bucket.push(built.clone());
+    built
+}
+
+impl Field {
+    fn new(cells: &crate::covariance_fold::CellField) -> Self {
+        let core = factorized(&cells.relative, &cells.absolute);
+        let short_pieces = cells
+            .short
+            .iter()
+            .enumerate()
+            .map(|(b, block)| {
+                (0..block.variance.len())
+                    .map(|k| {
+                        let mut edges: Vec<f64> = cells
+                            .projections
+                            .iter()
+                            .flatten()
+                            .flat_map(|p| p.short.iter().flatten())
+                            .filter(|t| t.block == b && t.interval == k)
+                            .flat_map(|t| t.cuts.iter().copied())
+                            .collect();
+                        edges.sort_by(f64::total_cmp);
+                        edges.dedup();
+                        edges
+                    })
+                    .collect()
+            })
+            .collect();
+
+        Field {
+            core,
+            short: cells.short.clone(),
+            short_pieces,
+        }
+    }
+
+    /// One replica's draw of this field.
+    fn draw(&self, name: &str, base_seed: u64, replica: u64) -> NuclideDraw {
+        let replica_seed = yamc_rng::history_seed(base_seed, replica);
+        // Keyed on the NAME, not on a position, so a nuclide's stream does not
+        // move when a different nuclide joins or leaves the material.
+        let ordinal = name_ordinal(name);
+        let gaussian = self.core.gaussian_draw(ordinal, base_seed, replica);
+        let (relative, absolute) = (gaussian.0.clone(), gaussian.1.clone());
+
+        // Short-range noise: independent increments over each drawn piece,
+        // `ΔB_j ~ N(0, F_k ΔE_k w_j)`, one stream per block and interval keyed
+        // on the block's identity in the evaluation.
+        let short_seed = yamc_rng::secondary_seed(replica_seed, ordinal ^ SHORT_RANGE_STREAM);
+        let short = self
+            .short
+            .iter()
+            .zip(&self.short_pieces)
+            .map(|(block, intervals)| {
+                intervals
+                    .iter()
+                    .enumerate()
+                    .map(|(k, edges)| {
+                        if edges.len() < 2 {
+                            return Vec::new();
+                        }
+                        let (mt, sub, idx) = block.key;
+                        let key = name_ordinal(&format!("{mt}/{sub}/{idx}/{k}"));
+                        let mut state =
+                            yamc_rng::expand_seed(yamc_rng::secondary_seed(short_seed, key));
+                        let z = standard_normals(&mut state, edges.len() - 1);
+                        let width = block.edges[k + 1] - block.edges[k];
+                        edges
+                            .windows(2)
+                            .zip(z)
+                            .map(|(w, z)| {
+                                z * (block.variance[k] * width * (w[1] - w[0])).max(0.0).sqrt()
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect();
+        NuclideDraw {
+            relative,
+            absolute,
+            short,
+        }
+    }
+}
+
+impl View {
+    fn new(
+        projection: &crate::covariance_fold::Projection,
+        field: &Field,
+        folded: Option<&RateCovariance>,
+    ) -> Self {
+        let n = projection.kinds.len();
+        let (nr, na) = (field.n_relative(), field.n_absolute());
+        // Each term's weight per spectrum piece, carried onto the drawn
+        // pieces it is made of and summed over the channel's terms.
+        let short: Vec<Vec<(usize, usize, Vec<f64>)>> = projection
+            .short
+            .iter()
+            .map(|terms| {
+                let mut out: Vec<(usize, usize, Vec<f64>)> = Vec::new();
+                for t in terms {
+                    let pieces = &field.short_pieces[t.block][t.interval];
+                    let slot = match out
+                        .iter()
+                        .position(|(b, k, _)| *b == t.block && *k == t.interval)
+                    {
+                        Some(i) => i,
+                        None => {
+                            out.push((
+                                t.block,
+                                t.interval,
+                                vec![0.0; pieces.len().saturating_sub(1)],
+                            ));
+                            out.len() - 1
+                        }
+                    };
+                    for (j, w) in pieces.windows(2).enumerate() {
+                        // The term's piece holding drawn piece `j`, if any.
+                        if let Some(p) =
+                            t.cuts.windows(2).position(|c| c[0] <= w[0] && w[1] <= c[1])
+                        {
+                            out[slot].2[j] += t.weight[p];
+                        }
+                    }
+                }
+                out
+            })
+            .collect();
+
+        let evaluated_variance = projection
+            .kinds
+            .iter()
+            .map(|kind| {
+                folded
+                    .and_then(|f| f.kinds.iter().position(|k| k == kind).map(|i| f.get(i, i)))
+                    .unwrap_or(0.0)
+            })
+            .collect();
+        let sampled_variance = (0..n)
+            .map(|i| {
+                let r = projection.rates[i];
+                if r == 0.0 {
+                    return 0.0;
+                }
+                let p = &projection.relative[i * nr..(i + 1) * nr];
+                let q = &projection.absolute[i * na..(i + 1) * na];
+                let quadratic = |x: &[f64], m: &[f64], n: usize| -> f64 {
+                    (0..n)
+                        .filter(|&a| x[a] != 0.0)
+                        .map(|a| x[a] * (0..n).map(|b| m[a * n + b] * x[b]).sum::<f64>())
+                        .sum()
+                };
+                let short_var: f64 = short[i]
+                    .iter()
+                    .map(|(b, k, w)| {
+                        let block = &field.short[*b];
+                        let width = block.edges[*k + 1] - block.edges[*k];
+                        let pieces = &field.short_pieces[*b][*k];
+                        w.iter()
+                            .zip(pieces.windows(2))
+                            .map(|(w, e)| block.variance[*k] * width * (e[1] - e[0]) * w * w)
+                            .sum::<f64>()
+                    })
+                    .sum();
+                (quadratic(p, &field.core.relative_sampled, nr)
+                    + quadratic(q, &field.core.absolute_sampled, na)
+                    + short_var)
+                    / (r * r)
+            })
+            .collect();
+        View {
+            kinds: projection.kinds.clone(),
+            rates: projection.rates.clone(),
+            relative: projection.relative.clone(),
+            absolute: projection.absolute.clone(),
+            short,
+            evaluated_variance,
+            sampled_variance,
+        }
+    }
+
+    /// Channel `i`'s rate relative to nominal under `draw`, before flooring.
+    fn ratio(&self, i: usize, draw: &NuclideDraw) -> f64 {
+        let r = self.rates[i];
+        if r == 0.0 {
+            return 1.0;
+        }
+        let (nr, na) = (draw.relative.len(), draw.absolute.len());
+        let mut shift: f64 = self.relative[i * nr..(i + 1) * nr]
+            .iter()
+            .zip(&draw.relative)
+            .map(|(p, d)| p * d)
+            .sum();
+        shift += self.absolute[i * na..(i + 1) * na]
+            .iter()
+            .zip(&draw.absolute)
+            .map(|(q, a)| q * a)
+            .sum::<f64>();
+        for (b, k, w) in &self.short[i] {
+            shift += w
+                .iter()
+                .zip(&draw.short[*b][*k])
+                .map(|(w, db)| w * db)
+                .sum::<f64>();
+        }
+        1.0 + shift / r
     }
 }
 
 impl Sampler {
-    /// Factorize every nuclide's relative covariance under one spectrum.
-    pub fn new(covariance: &BTreeMap<String, RateCovariance>) -> Self {
-        Self::joint(std::slice::from_ref(covariance), &BTreeMap::new())
-            .pop()
-            .expect("one spectrum in, one sampler out")
-    }
-
-    /// Factorize each nuclide once across every spectrum of a schedule, and
-    /// return one sampler per spectrum, in order.
+    /// Factorize every nuclide's field and build each spectrum's reading of
+    /// it.
     ///
-    /// `per_spectrum[a]` is spectrum `a`'s fold, and `cross[(a, b)]`, `a < b`,
-    /// the relative covariance between a nuclide's rates under `a` and under
-    /// `b` (row-major `n_a × n_b`, from
-    /// [`fold_cross_covariance`](crate::covariance_fold::fold_cross_covariance)).
-    /// A nuclide's channels under every spectrum that folded it are stacked
-    /// into one matrix and factorized once, and each spectrum's sampler keeps
-    /// its own rows of that factor.
-    ///
-    /// That is what makes one nuclide's draws under two spectra correlated as
-    /// the evaluation says: the deviates are drawn per nuclide, so the two
-    /// spectra's perturbations are `L_a z` and `L_b z` with `L_a L_bᵀ` the
-    /// folded cross block. Factorizing each spectrum on its own and sharing
-    /// `z` would give `L_a L_bᵀ` of two unrelated eigenbases instead, which can
-    /// be anything from -1 to 1 and is zero as easily as one. A missing cross
-    /// block reads as uncorrelated.
-    ///
-    /// With one spectrum the stacked matrix is that spectrum's own, so the
-    /// factor and every draw are bit-identical to factorizing it alone.
-    pub fn joint(
-        per_spectrum: &[BTreeMap<String, RateCovariance>],
-        cross: &BTreeMap<(usize, usize), BTreeMap<String, Vec<f64>>>,
-    ) -> Vec<Self> {
-        let names: BTreeSet<&String> = per_spectrum.iter().flat_map(|c| c.keys()).collect();
-        let names: Vec<&String> = names.into_iter().collect();
-
-        // One eigendecomposition per nuclide, each reading only its own
-        // matrices. The results land in `BTreeMap`s keyed by name, so nothing
-        // here can depend on the order they finish in.
-        let one = |name: &&String| -> Vec<(usize, Factor)> {
-            let present: Vec<(usize, &RateCovariance)> = per_spectrum
+    /// `fields` from [`cell_fields`](crate::covariance_fold::cell_fields), and
+    /// `folds[a]` spectrum `a`'s [`fold_rate_covariance`](crate::covariance_fold::fold_rate_covariance),
+    /// which supplies each channel's evaluated variance for the report.
+    pub fn new(
+        fields: &BTreeMap<String, crate::covariance_fold::CellField>,
+        folds: &[BTreeMap<String, RateCovariance>],
+    ) -> Self {
+        let entries: Vec<(&String, &crate::covariance_fold::CellField)> = fields.iter().collect();
+        let one = |&(name, cells): &(&String, &crate::covariance_fold::CellField)| -> (String, Field, Vec<Option<View>>) {
+            let field = Field::new(cells);
+            let views = cells
+                .projections
                 .iter()
                 .enumerate()
-                .filter_map(|(a, c)| c.get(*name).filter(|c| c.n() > 0).map(|c| (a, c)))
-                .collect();
-            let mut offsets = Vec::with_capacity(present.len());
-            let mut total = 0;
-            for (_, c) in &present {
-                offsets.push(total);
-                total += c.n();
-            }
-            if total == 0 {
-                return Vec::new();
-            }
-            let stacked = if present.len() == 1 {
-                present[0].1.clone()
-            } else {
-                let mut relative = vec![0.0; total * total];
-                for (p, &(a, ca)) in present.iter().enumerate() {
-                    let (oa, na) = (offsets[p], ca.n());
-                    for i in 0..na {
-                        for j in 0..na {
-                            relative[(oa + i) * total + oa + j] = ca.get(i, j);
-                        }
-                    }
-                    for (q, &(b, cb)) in present.iter().enumerate().skip(p + 1) {
-                        let (ob, nb) = (offsets[q], cb.n());
-                        let Some(block) = cross.get(&(a, b)).and_then(|m| m.get(*name)) else {
-                            continue;
-                        };
-                        assert_eq!(
-                            block.len(),
-                            na * nb,
-                            "the cross block of {name} between spectra {a} and {b} does not \
-                             match their channels"
-                        );
-                        for i in 0..na {
-                            for j in 0..nb {
-                                let v = block[i * nb + j];
-                                relative[(oa + i) * total + ob + j] = v;
-                                relative[(ob + j) * total + oa + i] = v;
-                            }
-                        }
-                    }
-                }
-                RateCovariance {
-                    kinds: present.iter().flat_map(|(_, c)| c.kinds.clone()).collect(),
-                    relative,
-                }
-            };
-            let joint = factorize(&stacked);
-            present
-                .iter()
-                .zip(&offsets)
-                .map(|(&(a, c), &offset)| {
-                    let rows = offset..offset + c.n();
-                    let l: Vec<f64> = joint.l[rows.start * joint.n..rows.end * joint.n].to_vec();
-                    // The marginal each row produces, which is what the
-                    // lognormal transform is matched against.
-                    let sigma = l
-                        .chunks_exact(joint.n)
-                        .map(|row| row.iter().map(|v| v * v).sum::<f64>().sqrt())
-                        .collect();
-                    (
-                        a,
-                        Factor {
-                            kinds: c.kinds.clone(),
-                            l,
-                            cols: joint.n,
-                            sigma,
-                            evaluated_variance: joint.evaluated_variance[rows].to_vec(),
-                            repair: joint.repair,
-                        },
-                    )
+                .map(|(a, p)| {
+                    p.as_ref()
+                        .map(|p| View::new(p, &field, folds.get(a).and_then(|f| f.get(name))))
                 })
-                .collect()
+                .collect();
+            (name.clone(), field, views)
         };
-
-        let factorized: Vec<(&String, Vec<(usize, Factor)>)> = {
+        let built: Vec<(String, Field, Vec<Option<View>>)> = {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 use rayon::prelude::*;
-                names.par_iter().map(|n| (*n, one(n))).collect()
+                entries.par_iter().map(one).collect()
             }
             #[cfg(target_arch = "wasm32")]
             {
-                names.iter().map(|n| (*n, one(n))).collect()
+                entries.iter().map(one).collect()
             }
         };
-        let mut out: Vec<Sampler> = (0..per_spectrum.len())
-            .map(|_| Sampler {
-                factors: BTreeMap::new(),
+        let n_spectra = folds.len().max(
+            fields
+                .values()
+                .map(|f| f.projections.len())
+                .max()
+                .unwrap_or(0),
+        );
+        let mut sampler = Sampler {
+            fields: BTreeMap::new(),
+            views: (0..n_spectra).map(|_| BTreeMap::new()).collect(),
+        };
+        for (name, field, views) in built {
+            for (a, view) in views.into_iter().enumerate() {
+                if let Some(view) = view {
+                    sampler.views[a].insert(name.clone(), view);
+                }
+            }
+            sampler.fields.insert(name, field);
+        }
+        sampler
+    }
+
+    /// A sampler over collapsed rates directly, for tests: each channel of
+    /// each nuclide one relative cell with a partial rate equal to its rate,
+    /// read the same way by each of `spectra` spectra. A rate is then exactly
+    /// its cell's multiplier, so this is the multivariate lognormal with
+    /// covariance `C`.
+    #[cfg(test)]
+    pub(crate) fn from_rate_covariance(
+        covariance: &BTreeMap<String, RateCovariance>,
+        spectra: usize,
+    ) -> Self {
+        use crate::covariance_fold::{Cell, CellField, Projection};
+        let fields = covariance
+            .iter()
+            .filter(|(_, c)| c.n() > 0)
+            .map(|(name, c)| {
+                let n = c.n();
+                let mut identity = vec![0.0; n * n];
+                for i in 0..n {
+                    identity[i * n + i] = 1.0;
+                }
+                (
+                    name.clone(),
+                    CellField {
+                        relative_cells: (0..n)
+                            .map(|i| Cell {
+                                mt: i as i32,
+                                lo: 0.0,
+                                hi: 1.0,
+                            })
+                            .collect(),
+                        relative: c.relative.clone(),
+                        absolute_cells: Vec::new(),
+                        absolute: Vec::new(),
+                        short: Vec::new(),
+                        projections: vec![
+                            Some(Projection {
+                                kinds: c.kinds.clone(),
+                                rates: vec![1.0; n],
+                                relative: identity,
+                                absolute: Vec::new(),
+                                short: vec![Vec::new(); n],
+                            });
+                            spectra
+                        ],
+                    },
+                )
             })
             .collect();
-        for (name, factors) in factorized {
-            for (a, factor) in factors {
-                out[a].factors.insert(name.clone(), factor);
-            }
-        }
-        out
+        Self::new(&fields, &vec![covariance.clone(); spectra])
     }
 
     /// Every matrix this sampler had to repair, tagged with `spectrum`.
     ///
-    /// A nuclide folded under several spectra is factorized once over all of
-    /// them, so a repair of that joint matrix is listed under each spectrum it
-    /// spans, with that spectrum's channels and the joint eigenvalues.
+    /// A nuclide's field is factorized once for every spectrum, so a repair
+    /// of it is listed under each spectrum that reads it, with that
+    /// spectrum's channels. The eigenvalues are of the evaluated covariance
+    /// that was clipped, over the relative cells or the absolute ones,
+    /// whichever the repair added more to.
     pub fn repairs(&self, spectrum: usize) -> Vec<Repair> {
-        self.factors
+        let Some(views) = self.views.get(spectrum) else {
+            return Vec::new();
+        };
+        views
             .iter()
-            .filter_map(|(name, f)| {
-                let r = f.repair?;
+            .filter_map(|(name, v)| {
+                let r = self.fields[name].core.repair?;
                 Some(Repair {
                     nuclide: name.clone(),
                     spectrum,
                     lambda_min: r.lambda_min,
                     lambda_max: r.lambda_max,
                     clipped_fraction: r.clipped_fraction,
-                    channels: f
+                    channels: v
                         .kinds
                         .iter()
-                        .zip(f.evaluated_variance.iter().zip(&f.sigma))
-                        .map(|(kind, (v, s))| ChannelSigma {
+                        .zip(v.evaluated_variance.iter().zip(&v.sampled_variance))
+                        .map(|(kind, (e, s))| ChannelSigma {
                             kind: kind.clone(),
-                            evaluated_variance: *v,
-                            sampled: *s,
+                            evaluated_variance: *e,
+                            sampled: s.max(0.0).sqrt(),
                         })
                         .collect(),
                 })
@@ -411,96 +930,181 @@ impl Sampler {
             .collect()
     }
 
-    /// Every channel with a factor, as `(nuclide, kind, evaluated, sampled)`
-    /// relative sigmas, the evaluated one zero where the stated variance is
-    /// negative (it states no spread a weighted mean could use).
+    /// Every channel `spectrum` reads, as `(nuclide, kind, evaluated,
+    /// sampled)` relative sigmas, the evaluated one zero where the stated
+    /// variance is negative (it states no spread a weighted mean could use).
     ///
-    /// The sampled sigma is the one the lognormal is matched to, on every
-    /// matrix: where no repair was needed it differs from the evaluated one
-    /// by the decomposition's round-off, and that is reported as it is rather
-    /// than replaced by the evaluated value.
-    pub(crate) fn channel_sigmas(&self) -> impl Iterator<Item = (&str, &str, f64, f64)> {
-        self.factors.iter().flat_map(|(name, f)| {
-            f.kinds.iter().enumerate().map(move |(i, kind)| {
-                let evaluated = f.evaluated_variance[i].max(0.0).sqrt();
-                (name.as_str(), kind.as_str(), evaluated, f.sigma[i])
+    /// The sampled sigma is the sampled rate's own, read off the factorized
+    /// field: where no repair was needed it differs from the evaluated one
+    /// by the decomposition's round-off, and that is reported as it is.
+    pub fn channel_sigmas(&self, spectrum: usize) -> impl Iterator<Item = (&str, &str, f64, f64)> {
+        self.views
+            .get(spectrum)
+            .into_iter()
+            .flat_map(|views| views.iter())
+            .flat_map(|(name, v)| {
+                v.kinds.iter().enumerate().map(move |(i, kind)| {
+                    (
+                        name.as_str(),
+                        kind.as_str(),
+                        v.evaluated_variance[i].max(0.0).sqrt(),
+                        v.sampled_variance[i].max(0.0).sqrt(),
+                    )
+                })
             })
-        })
     }
 
     /// Whether anything was factorized at all.
     pub fn is_empty(&self) -> bool {
-        self.factors.is_empty()
+        self.fields.is_empty()
     }
 
-    /// The nuclides carrying a factor, with each one's reaction kinds, its
-    /// row-major factor rows `L` (`L L^T` the relative covariance of those
-    /// kinds' rates) and their column count, for first-order attribution.
-    /// The columns are the nuclide's joint deviates, shared by every spectrum
-    /// of the schedule, so contributions over spectra add column by column.
-    pub(crate) fn factors(&self) -> impl Iterator<Item = (&String, &[String], &[f64], usize)> {
-        self.factors
-            .iter()
-            .map(|(name, f)| (name, f.kinds.as_slice(), f.l.as_slice(), f.cols))
-    }
-
-    /// The relative perturbations one replica applies, per nuclide and kind.
+    /// Under `spectrum`, the nuclides it reads, with each one's reaction
+    /// kinds, the row-major linear map `J` from the nuclide's independent
+    /// deviates to its channels' relative rate shifts (`J Jᵀ` the sampled
+    /// relative covariance of those rates), and its column count, for
+    /// first-order attribution.
     ///
-    /// Separated from [`Sampler::perturb`] so a test can look at the deviates
-    /// themselves rather than inferring them from perturbed rates.
-    pub fn deviates(&self, base_seed: u64, replica: u64) -> BTreeMap<String, Vec<f64>> {
-        let replica_seed = yamc_rng::history_seed(base_seed, replica);
-        let mut out = BTreeMap::new();
-        for (name, factor) in &self.factors {
-            // Keyed on the NAME, not on a position, so a nuclide's stream does
-            // not move when a different nuclide joins or leaves the material,
-            // and every spectrum's sampler draws the same deviates for it.
-            let seed = yamc_rng::secondary_seed(replica_seed, name_ordinal(name));
-            let mut state = yamc_rng::expand_seed(seed);
-            let z = standard_normals(&mut state, factor.cols);
-
-            // delta = L z, one row of the factor at a time.
-            let delta: Vec<f64> = factor
-                .l
-                .chunks_exact(factor.cols)
-                .map(|row| row.iter().zip(&z).map(|(l, z)| l * z).sum())
-                .collect();
-            out.insert(name.clone(), delta);
-        }
-        out
+    /// The columns are the nuclide's field, the same for every spectrum, so
+    /// contributions over spectra add column by column.
+    pub(crate) fn factors(&self, spectrum: usize) -> Vec<(&String, &[String], Vec<f64>, usize)> {
+        let Some(views) = self.views.get(spectrum) else {
+            return Vec::new();
+        };
+        views
+            .iter()
+            .map(|(name, v)| {
+                let f = &self.fields[name];
+                let (nr, na, ns) = (f.n_relative(), f.n_absolute(), f.n_short_pieces());
+                let cols = nr + na + ns;
+                let n = v.kinds.len();
+                let mut j = vec![0.0; n * cols];
+                // Where each block and interval's pieces start among the
+                // short-range columns.
+                let mut short_offset: Vec<Vec<usize>> = Vec::new();
+                let mut at = nr + na;
+                for intervals in &f.short_pieces {
+                    let mut row = Vec::new();
+                    for edges in intervals {
+                        row.push(at);
+                        at += edges.len().saturating_sub(1);
+                    }
+                    short_offset.push(row);
+                }
+                for i in 0..n {
+                    let r = v.rates[i];
+                    if r == 0.0 {
+                        continue;
+                    }
+                    let out = &mut j[i * cols..(i + 1) * cols];
+                    let p = &v.relative[i * nr..(i + 1) * nr];
+                    let relative_factor = f
+                        .core
+                        .relative_factor
+                        .get_or_init(|| clipped_factor(&f.core.relative_sampled, nr, false).0);
+                    for (c, o) in out[..nr].iter_mut().enumerate() {
+                        *o = (0..nr)
+                            .map(|k| p[k] * relative_factor[k * nr + c])
+                            .sum::<f64>()
+                            / r;
+                    }
+                    let q = &v.absolute[i * na..(i + 1) * na];
+                    for (c, o) in out[nr..nr + na].iter_mut().enumerate() {
+                        *o = (0..na)
+                            .map(|k| q[k] * f.core.absolute_factor[k * na + c])
+                            .sum::<f64>()
+                            / r;
+                    }
+                    for (b, k, w) in &v.short[i] {
+                        let block = &f.short[*b];
+                        let width = block.edges[*k + 1] - block.edges[*k];
+                        let pieces = &f.short_pieces[*b][*k];
+                        for (p, (w, e)) in w.iter().zip(pieces.windows(2)).enumerate() {
+                            out[short_offset[*b][*k] + p] += w
+                                * (block.variance[*k] * width * (e[1] - e[0])).max(0.0).sqrt()
+                                / r;
+                        }
+                    }
+                }
+                (name, v.kinds.as_slice(), j, cols)
+            })
+            .collect()
     }
 
-    /// Apply one replica's perturbation to a set of unit-flux rates, and count
-    /// the rates it drew.
+    /// One replica's draw of every nuclide's field.
+    pub fn draw(&self, base_seed: u64, replica: u64) -> Draw {
+        Draw {
+            nuclides: self
+                .fields
+                .iter()
+                .map(|(name, f)| (name.clone(), f.draw(name, base_seed, replica)))
+                .collect(),
+        }
+    }
+
+    /// The relative cell multipliers minus one that one replica draws, per
+    /// nuclide, for a test to look at the draw itself.
+    pub fn deviates(&self, base_seed: u64, replica: u64) -> BTreeMap<String, Vec<f64>> {
+        self.draw(base_seed, replica)
+            .nuclides
+            .into_iter()
+            .map(|(name, d)| (name, d.relative))
+            .collect()
+    }
+
+    /// Apply one replica's draw to `spectrum`'s unit-flux rates, and count the
+    /// rates it drew and the ones it floored at zero.
     ///
     /// Rates for nuclides or kinds with no covariance are passed through
-    /// unchanged. That is deliberate and is what the coverage report is for: an
-    /// unperturbed rate contributes no uncertainty, and the reason has to be
-    /// visible rather than inferred from a suspiciously small sigma.
-    pub fn perturb(
+    /// unchanged. That is deliberate and is what the coverage report is for:
+    /// an unperturbed rate contributes no uncertainty, and the reason has to
+    /// be visible rather than inferred from a suspiciously small sigma.
+    ///
+    /// A rate of a channel whose terms all have positive coefficients reads
+    /// only positive cross sections off relative cells and cannot go
+    /// negative. One that subtracts reactions (an NC derivation), or reads an
+    /// absolute or short-range shift, can, and is floored at zero and counted.
+    pub fn perturb_with(
         &self,
+        draw: &Draw,
+        spectrum: usize,
         rates: &ReactionRates,
-        base_seed: u64,
-        replica: u64,
-    ) -> (ReactionRates, usize) {
-        let deviates = self.deviates(base_seed, replica);
-        let mut sampled = 0;
+    ) -> (ReactionRates, usize, usize) {
         let mut out = rates.clone();
-
-        for (name, factor) in &self.factors {
-            let (Some(delta), Some(nuclide_rates)) = (deviates.get(name), out.get_mut(name)) else {
+        let (mut sampled, mut floored) = (0, 0);
+        let Some(views) = self.views.get(spectrum) else {
+            return (out, 0, 0);
+        };
+        for (name, view) in views {
+            let (Some(d), Some(nuclide_rates)) = (draw.nuclides.get(name), out.get_mut(name))
+            else {
                 continue;
             };
-            for (i, kind) in factor.kinds.iter().enumerate() {
+            for (i, kind) in view.kinds.iter().enumerate() {
                 let Some(rate) = nuclide_rates.get_mut(kind) else {
                     continue;
                 };
                 sampled += 1;
-                *rate *= lognormal_factor(delta[i], factor.sigma[i]);
+                let ratio = view.ratio(i, d);
+                if ratio < 0.0 {
+                    floored += 1;
+                }
+                *rate *= ratio.max(0.0);
             }
         }
+        (out, sampled, floored)
+    }
 
-        (out, sampled)
+    /// [`Sampler::perturb_with`] on a fresh draw, without the floor count.
+    pub fn perturb(
+        &self,
+        spectrum: usize,
+        rates: &ReactionRates,
+        base_seed: u64,
+        replica: u64,
+    ) -> (ReactionRates, usize) {
+        let (out, n, _) = self.perturb_with(&self.draw(base_seed, replica), spectrum, rates);
+        (out, n)
     }
 }
 
@@ -631,7 +1235,7 @@ impl SigmaReport {
             }
             self.repairs.push(repair);
         }
-        for (nuclide, kind, evaluated, sampled) in sampler.channel_sigmas() {
+        for (nuclide, kind, evaluated, sampled) in sampler.channel_sigmas(spectrum) {
             if !drawn(nuclide, kind) {
                 continue;
             }
@@ -721,7 +1325,7 @@ fn needs_repair(cov: &RateCovariance) -> bool {
             };
         }
     }
-    let (values, _) = jacobi_eigen(&r, m);
+    let values = eigenvalues(&r, m);
     let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
     min < -(m as f64) * REPAIR_TOLERANCE
 }
@@ -762,7 +1366,106 @@ pub(crate) fn standard_normals(state: &mut u64, n: usize) -> Vec<f64> {
     out
 }
 
-/// Eigen-decompose a symmetric matrix by cyclic Jacobi rotations.
+/// Eigen-decompose a symmetric matrix, block by block.
+///
+/// Cells no covariance couples are independent, so the matrix is split into
+/// its connected blocks and each is decomposed on its own: exact, and on a
+/// nuclide's field, where reactions are coupled only through the evaluation's
+/// cross blocks, a large saving. A block that is small, or whose positive
+/// variances span more than [`DYNAMIC_RANGE`], goes to [`jacobi_eigen`], which
+/// keeps a small eigenvalue beside a huge one to high relative accuracy
+/// (TENDL-2017 has channels at a variance near 3e17 beside ordinary ones);
+/// the rest to [`symmetric_eigen`].
+///
+/// Returns `(eigenvalues, eigenvectors)` with eigenvector `j` in COLUMN `j`
+/// of the row-major `n × n` result, blocks in order of their first index, so
+/// the result is a pure function of the input.
+fn eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+    blockwise(matrix, n, true)
+}
+
+/// [`eigen`]'s eigenvalues alone, which skips accumulating the
+/// transformations and so costs a fraction as much.
+fn eigenvalues(matrix: &[f64], n: usize) -> Vec<f64> {
+    blockwise(matrix, n, false).0
+}
+
+/// [`eigen`], with or without the eigenvectors (empty when not asked for).
+fn blockwise(matrix: &[f64], n: usize, want_vectors: bool) -> (Vec<f64>, Vec<f64>) {
+    // Union-find over the nonzero couplings.
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if matrix[i * n + j] != 0.0 || matrix[j * n + i] != 0.0 {
+                let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+                if a != b {
+                    parent[a.max(b)] = a.min(b);
+                }
+            }
+        }
+    }
+    let mut blocks: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for i in 0..n {
+        let r = root(&mut parent, i);
+        blocks.entry(r).or_default().push(i);
+    }
+    let mut values = Vec::with_capacity(n);
+    let mut vectors = if want_vectors {
+        vec![0.0; n * n]
+    } else {
+        Vec::new()
+    };
+    for members in blocks.values() {
+        let m = members.len();
+        let mut sub = vec![0.0; m * m];
+        for (a, &i) in members.iter().enumerate() {
+            for (b, &j) in members.iter().enumerate() {
+                sub[a * m + b] = matrix[i * n + j];
+            }
+        }
+        let positive = members
+            .iter()
+            .map(|&i| matrix[i * n + i])
+            .filter(|v| *v > 0.0);
+        let (lo, hi) = positive.fold((f64::INFINITY, 0.0_f64), |(lo, hi), v| {
+            (lo.min(v), hi.max(v))
+        });
+        let (sub_values, sub_vectors) = if m <= SMALL_BLOCK || (lo > 0.0 && hi / lo > DYNAMIC_RANGE)
+        {
+            jacobi_eigen(&sub, m)
+        } else {
+            tridiagonal_ql(&sub, m, want_vectors)
+        };
+        for c in 0..m {
+            let col = values.len();
+            values.push(sub_values[c]);
+            if want_vectors {
+                for (a, &i) in members.iter().enumerate() {
+                    vectors[i * n + col] = sub_vectors[a * m + c];
+                }
+            }
+        }
+    }
+    (values, vectors)
+}
+
+/// Blocks at most this size go to [`jacobi_eigen`]: there its cost is nothing
+/// and its accuracy is the best available.
+const SMALL_BLOCK: usize = 24;
+
+/// A block whose largest positive variance exceeds its smallest by more than
+/// this goes to [`jacobi_eigen`], since QL's error is relative to the largest
+/// eigenvalue.
+const DYNAMIC_RANGE: f64 = 1.0e8;
+
+/// Eigen-decompose a small symmetric matrix by cyclic Jacobi rotations.
 ///
 /// Returns `(eigenvalues, eigenvectors)` with eigenvector `j` in COLUMN `j` of
 /// the row-major `n × n` result.
@@ -770,8 +1473,10 @@ pub(crate) fn standard_normals(state: &mut u64, n: usize) -> Vec<f64> {
 /// The sweep order is fixed and the iteration count is bounded, so this is a
 /// pure function of its input: two runs on the same matrix give the same last
 /// bit, which is what the reproducibility contract needs. Convergence is
-/// quadratic and these matrices are tiny, so the bound is never the thing that
-/// stops it in practice.
+/// quadratic and the blocks [`eigen`] hands it are small or nearly diagonal,
+/// so the bound is never the thing that stops it in practice. Unlike QL it
+/// keeps a small eigenvalue beside a huge one to high relative accuracy,
+/// which is why [`eigen`] uses it on blocks whose variances span many orders.
 fn jacobi_eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     let mut a = matrix.to_vec();
     // Symmetrize on the way in. The fold fills both halves with the same value,
@@ -850,44 +1555,251 @@ fn jacobi_eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     (values, v)
 }
 
-/// A positive multiplier with mean 1 and variance `sigma^2`.
+/// Eigen-decompose a symmetric matrix: Householder reduction to tridiagonal
+/// form, then the implicit QL algorithm with shifts (EISPACK `tred2` and
+/// `tql2`, in the form JAMA gives them).
 ///
-/// `deviate` is one component of `L z`, so it is normal with standard
-/// deviation `sigma` and carries this channel's correlations with the others.
-/// Feeding it through the lognormal marginal
+/// Returns `(eigenvalues, eigenvectors)` with eigenvector `j` in COLUMN `j` of
+/// the row-major `n × n` result.
 ///
-/// ```text
-/// s^2 = ln(1 + sigma^2)
-/// f   = exp(s * (deviate / sigma) - s^2 / 2)
-/// ```
-///
-/// keeps those two moments exactly and cannot go negative, which
-/// `R * (1 + deviate)` could and did: on the FNS decay-heat benchmark that
-/// form floored 8.3% of all sampled rates at zero, 13% on iron, and every
-/// truncation biases the mean upward.
-///
-/// For a small `sigma` the two agree to second order -- `exp(s z - s^2/2)`
-/// is `1 + sigma z + O(sigma^2)` -- so a well known cross section samples as
-/// it did before, and only the channels that were being pushed past where a
-/// Gaussian describes them move.
-///
-/// What this does NOT preserve exactly is the linear correlation between
-/// channels. The deviates keep their Gaussian dependence and each is then
-/// transformed monotonically, which is a Gaussian copula: rank correlation is
-/// preserved exactly, Pearson correlation shifts by a factor that goes to one
-/// as sigma goes to zero. The alternative was a truncated normal, which
-/// preserves neither the mean nor positivity without an accept-reject loop
-/// whose cost depends on the data.
-fn lognormal_factor(deviate: f64, sigma: f64) -> f64 {
-    if !sigma.is_finite() || sigma <= 0.0 || !deviate.is_finite() {
-        return 1.0;
-    }
-    lognormal_multiplier(deviate / sigma, sigma)
+/// Pure arithmetic in a fixed order with no data-dependent parallelism, so it
+/// is a pure function of its input: two runs on the same matrix give the same
+/// last bit, on every platform, which is what the reproducibility contract
+/// needs. It is O(n³) once, where cyclic Jacobi is O(n³) per sweep, and that
+/// matters here: a nuclide's field has a cell per covariance interval of
+/// every reaction it reaches, hundreds on an evaluation like ENDF/B-VIII.1
+/// Fe56.
+// Index loops kept as EISPACK writes them, so the port can be checked line
+// by line against the reference.
+#[cfg(test)]
+fn symmetric_eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+    tridiagonal_ql(matrix, n, true)
 }
 
-/// [`lognormal_factor`] from a standard normal `z` rather than a deviate
-/// scaled by `sigma`: a positive multiplier with mean 1 and variance
-/// `sigma^2`, for a caller that draws one independent quantity at a time.
+/// [`symmetric_eigen`], optionally without the eigenvectors: the reduction
+/// still uses the matrix as its workspace, but the transformations are not
+/// accumulated and the QL rotations are not applied to them.
+#[allow(clippy::needless_range_loop)]
+fn tridiagonal_ql(matrix: &[f64], n: usize, want_vectors: bool) -> (Vec<f64>, Vec<f64>) {
+    if n == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    // Symmetrize on the way in. The fold fills both halves with the same
+    // value, so this is a no-op on real input; it costs nothing and means a
+    // caller cannot hand in something the reduction would silently misread.
+    let mut v = matrix.to_vec();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let m = 0.5 * (v[i * n + j] + v[j * n + i]);
+            v[i * n + j] = m;
+            v[j * n + i] = m;
+        }
+    }
+    // The reduction runs on the transpose (the input is symmetric, so that
+    // is the same matrix): its inner loops walk columns of `V`, which are
+    // then contiguous rows, and the accumulated `V` comes out transposed,
+    // which is the layout the QL rotations below want.
+    let at = |i: usize, j: usize| j * n + i;
+    let mut d = vec![0.0; n];
+    let mut e = vec![0.0; n];
+
+    // tred2: Householder reduction to tridiagonal form, accumulating the
+    // transformations in `v`.
+    for j in 0..n {
+        d[j] = v[at(n - 1, j)];
+    }
+    for i in (1..n).rev() {
+        let mut scale = 0.0;
+        let mut h = 0.0;
+        for k in 0..i {
+            scale += d[k].abs();
+        }
+        if scale == 0.0 {
+            e[i] = d[i - 1];
+            for j in 0..i {
+                d[j] = v[at(i - 1, j)];
+                v[at(i, j)] = 0.0;
+                v[at(j, i)] = 0.0;
+            }
+        } else {
+            for k in 0..i {
+                d[k] /= scale;
+                h += d[k] * d[k];
+            }
+            let mut f = d[i - 1];
+            let mut g = h.sqrt();
+            if f > 0.0 {
+                g = -g;
+            }
+            e[i] = scale * g;
+            h -= f * g;
+            d[i - 1] = f - g;
+            for x in e.iter_mut().take(i) {
+                *x = 0.0;
+            }
+            for j in 0..i {
+                f = d[j];
+                v[at(j, i)] = f;
+                g = e[j] + v[at(j, j)] * f;
+                for k in (j + 1)..i {
+                    g += v[at(k, j)] * d[k];
+                    e[k] += v[at(k, j)] * f;
+                }
+                e[j] = g;
+            }
+            f = 0.0;
+            for j in 0..i {
+                e[j] /= h;
+                f += e[j] * d[j];
+            }
+            let hh = f / (h + h);
+            for j in 0..i {
+                e[j] -= hh * d[j];
+            }
+            for j in 0..i {
+                f = d[j];
+                g = e[j];
+                for k in j..i {
+                    v[at(k, j)] -= f * e[k] + g * d[k];
+                }
+                d[j] = v[at(i - 1, j)];
+                v[at(i, j)] = 0.0;
+            }
+        }
+        d[i] = h;
+    }
+    if !want_vectors {
+        // The tridiagonal's diagonal is on the diagonal of the workspace.
+        for j in 0..n {
+            d[j] = v[at(j, j)];
+        }
+    }
+    for i in 0..(n - 1) {
+        if !want_vectors {
+            break;
+        }
+        v[at(n - 1, i)] = v[at(i, i)];
+        v[at(i, i)] = 1.0;
+        let h = d[i + 1];
+        if h != 0.0 {
+            for k in 0..=i {
+                d[k] = v[at(k, i + 1)] / h;
+            }
+            for j in 0..=i {
+                let mut g = 0.0;
+                for k in 0..=i {
+                    g += v[at(k, i + 1)] * v[at(k, j)];
+                }
+                for k in 0..=i {
+                    v[at(k, j)] -= g * d[k];
+                }
+            }
+        }
+        for k in 0..=i {
+            v[at(k, i + 1)] = 0.0;
+        }
+    }
+    if want_vectors {
+        for j in 0..n {
+            d[j] = v[at(n - 1, j)];
+            v[at(n - 1, j)] = 0.0;
+        }
+        v[at(n - 1, n - 1)] = 1.0;
+    }
+    e[0] = 0.0;
+
+    // tql2: the implicit QL algorithm on the tridiagonal matrix. The
+    // rotations combine two eigenvector COLUMNS, which in the transposed `V`
+    // are two contiguous rows; it is transposed back after.
+    for i in 1..n {
+        e[i - 1] = e[i];
+    }
+    e[n - 1] = 0.0;
+    let mut f = 0.0;
+    let mut tst1: f64 = 0.0;
+    let eps = f64::EPSILON;
+    for l in 0..n {
+        tst1 = tst1.max(d[l].abs() + e[l].abs());
+        let mut m = l;
+        while m < n {
+            if e[m].abs() <= eps * tst1 {
+                break;
+            }
+            m += 1;
+        }
+        // `e[n - 1]` is zero, so `m` stops at `n - 1` at the latest.
+        let m = m.min(n - 1);
+        if m > l {
+            // Convergence is cubic; the cap only keeps a pathological input
+            // from spinning.
+            for _ in 0..64 {
+                let mut g = d[l];
+                let mut p = (d[l + 1] - g) / (2.0 * e[l]);
+                let mut r = p.hypot(1.0);
+                if p < 0.0 {
+                    r = -r;
+                }
+                d[l] = e[l] / (p + r);
+                d[l + 1] = e[l] * (p + r);
+                let dl1 = d[l + 1];
+                let mut h = g - d[l];
+                for x in d.iter_mut().skip(l + 2) {
+                    *x -= h;
+                }
+                f += h;
+                p = d[m];
+                let mut c = 1.0;
+                let mut c2 = c;
+                let mut c3 = c;
+                let el1 = e[l + 1];
+                let mut s = 0.0;
+                let mut s2 = 0.0;
+                for i in (l..m).rev() {
+                    c3 = c2;
+                    c2 = c;
+                    s2 = s;
+                    g = c * e[i];
+                    h = c * p;
+                    r = p.hypot(e[i]);
+                    e[i + 1] = s * r;
+                    s = e[i] / r;
+                    c = p / r;
+                    p = c * d[i] - s * g;
+                    d[i + 1] = h + s * (c * g + s * d[i]);
+                    if want_vectors {
+                        let (lo, hi) = v.split_at_mut((i + 1) * n);
+                        let (col_i, col_next) = (&mut lo[i * n..], &mut hi[..n]);
+                        for (a, b) in col_i.iter_mut().zip(col_next.iter_mut()) {
+                            let h = *b;
+                            *b = s * *a + c * h;
+                            *a = c * *a - s * h;
+                        }
+                    }
+                }
+                p = -s * s2 * c3 * el1 * e[l] / dl1;
+                e[l] = s * p;
+                d[l] = c * p;
+                if e[l].abs() <= eps * tst1 {
+                    break;
+                }
+            }
+        }
+        d[l] += f;
+        e[l] = 0.0;
+    }
+    if !want_vectors {
+        return (d, Vec::new());
+    }
+    for i in 0..n {
+        for j in (i + 1)..n {
+            v.swap(at(i, j), at(j, i));
+        }
+    }
+    (d, v)
+}
+
+/// A positive multiplier with mean 1 and variance `sigma^2`, from a standard
+/// normal `z`, for a caller that draws one independent quantity at a time.
 ///
 /// The half-life and decay-energy sources are that caller. Their evaluations
 /// state an expected value and a standard deviation and nothing else (ENDF-102
@@ -913,6 +1825,11 @@ mod tests {
         ["X", "Y"].iter().map(|s| s.to_string()).collect()
     }
 
+    /// A rate-level sampler under one spectrum.
+    fn rate_sampler(covariance: &BTreeMap<String, RateCovariance>) -> Sampler {
+        Sampler::from_rate_covariance(covariance, 1)
+    }
+
     fn cov(kinds: &[&str], relative: Vec<f64>) -> RateCovariance {
         RateCovariance {
             kinds: kinds.iter().map(|s| s.to_string()).collect(),
@@ -921,26 +1838,77 @@ mod tests {
     }
 
     #[test]
-    fn jacobi_recovers_a_known_spectrum() {
+    fn the_eigensolver_recovers_a_known_spectrum() {
         // diag(4, 1) rotated by 45 degrees: [[2.5, 1.5], [1.5, 2.5]].
-        let (values, _) = jacobi_eigen(&[2.5, 1.5, 1.5, 2.5], 2);
+        let (values, _) = symmetric_eigen(&[2.5, 1.5, 1.5, 2.5], 2);
         let mut v = values;
         v.sort_by(f64::total_cmp);
         assert!((v[0] - 1.0).abs() < 1e-12, "{v:?}");
         assert!((v[1] - 4.0).abs() < 1e-12, "{v:?}");
     }
 
+    /// `V Λ Vᵀ` reproduces a dense indefinite matrix and `V` is orthonormal,
+    /// at a size where the tridiagonal path does real work.
+    #[test]
+    fn the_eigensolver_reconstructs_a_dense_matrix() {
+        let n = 60;
+        let mut state = yamc_rng::expand_seed(42);
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            for j in i..n {
+                let x = yamc_rng::next_xi(&mut state) - 0.5;
+                a[i * n + j] = x;
+                a[j * n + i] = x;
+            }
+        }
+        let (values, v) = symmetric_eigen(&a, n);
+        for i in 0..n {
+            for j in 0..n {
+                let rebuilt: f64 = (0..n)
+                    .map(|k| v[i * n + k] * values[k] * v[j * n + k])
+                    .sum();
+                assert!((rebuilt - a[i * n + j]).abs() < 1e-12, "({i},{j})");
+                let dot: f64 = (0..n).map(|k| v[k * n + i] * v[k * n + j]).sum();
+                let want = if i == j { 1.0 } else { 0.0 };
+                assert!((dot - want).abs() < 1e-12, "VᵀV ({i},{j}) = {dot}");
+            }
+        }
+    }
+
+    /// The eigenvalues-only path gives the same eigenvalues as the full one.
+    #[test]
+    fn eigenvalues_alone_match_the_full_decomposition() {
+        let n = 50;
+        let mut state = yamc_rng::expand_seed(7);
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            for j in i..n {
+                let x = yamc_rng::next_xi(&mut state) - 0.5;
+                a[i * n + j] = x;
+                a[j * n + i] = x;
+            }
+        }
+        let mut full = symmetric_eigen(&a, n).0;
+        let mut alone = tridiagonal_ql(&a, n, false).0;
+        full.sort_by(f64::total_cmp);
+        alone.sort_by(f64::total_cmp);
+        for (x, y) in full.iter().zip(&alone) {
+            assert!((x - y).abs() < 1e-12, "{x} vs {y}");
+        }
+    }
+
     /// `L Lᵀ` must reproduce the matrix it was factorized from.
     #[test]
     fn the_factor_reproduces_a_positive_definite_matrix() {
         let c = cov(&["(n,gamma)", "(n,p)"], vec![0.04, 0.012, 0.012, 0.09]);
-        let s = Sampler::new(&BTreeMap::from([("Fe56".to_string(), c.clone())]));
+        let s = rate_sampler(&BTreeMap::from([("Fe56".to_string(), c.clone())]));
         assert!(s.repairs(0).is_empty());
 
-        let f = &s.factors["Fe56"];
+        let factors = s.factors(0);
+        let (_, _, l, cols) = &factors[0];
         for i in 0..2 {
             for j in 0..2 {
-                let got: f64 = (0..2).map(|k| f.l[i * 2 + k] * f.l[j * 2 + k]).sum();
+                let got: f64 = (0..*cols).map(|k| l[i * cols + k] * l[j * cols + k]).sum();
                 assert!((got - c.get(i, j)).abs() < 1e-12, "({i},{j}) {got}");
             }
         }
@@ -954,7 +1922,7 @@ mod tests {
         // 0.06 along (1, 1)/sqrt(2), so each diagonal becomes 0.03 against
         // the 0.01 evaluated, and the variance added is 0.04 on a trace of 0.02.
         let c = cov(&["a", "b"], vec![0.01, 0.05, 0.05, 0.01]);
-        let s = Sampler::new(&BTreeMap::from([("X".to_string(), c)]));
+        let s = Sampler::from_rate_covariance(&BTreeMap::from([("X".to_string(), c)]), 4);
         let repairs = s.repairs(3);
         assert_eq!(repairs.len(), 1);
         let r = &repairs[0];
@@ -981,7 +1949,7 @@ mod tests {
     #[test]
     fn clipping_can_give_sigma_to_a_zero_diagonal() {
         let c = cov(&["a", "b"], vec![0.04, 0.01, 0.01, 0.0]);
-        let s = Sampler::new(&BTreeMap::from([("X".to_string(), c)]));
+        let s = rate_sampler(&BTreeMap::from([("X".to_string(), c)]));
         let r = &s.repairs(0)[0];
         assert_eq!(r.channels[1].evaluated_sigma(), Some(0.0));
         assert!(r.channels[1].sampled > 0.0, "{:?}", r.channels[1]);
@@ -1013,7 +1981,7 @@ mod tests {
     #[test]
     fn a_negative_diagonal_is_kept_as_stated() {
         let c = cov(&["a", "b"], vec![0.04, 0.01, 0.01, -0.001]);
-        let s = Sampler::new(&BTreeMap::from([("X".to_string(), c)]));
+        let s = rate_sampler(&BTreeMap::from([("X".to_string(), c)]));
         let ch = &s.repairs(0)[0].channels[1];
         assert_eq!(ch.evaluated_variance, -0.001);
         assert_eq!(ch.evaluated_sigma(), None);
@@ -1027,7 +1995,7 @@ mod tests {
     #[test]
     fn the_worst_inflation_counts_only_channels_a_draw_can_move() {
         let c = cov(&["a", "b"], vec![0.04, 0.01, 0.01, 0.0]);
-        let s = Sampler::new(&BTreeMap::from([("X".to_string(), c)]));
+        let s = rate_sampler(&BTreeMap::from([("X".to_string(), c)]));
 
         let mut no_rate = SigmaReport::default();
         no_rate.add(
@@ -1061,10 +2029,13 @@ mod tests {
     /// record per spectrum.
     #[test]
     fn a_repair_on_two_spectra_is_one_repaired_nuclide() {
-        let s = Sampler::new(&BTreeMap::from([(
-            "X".to_string(),
-            cov(&["a", "b"], vec![0.01, 0.05, 0.05, 0.01]),
-        )]));
+        let s = Sampler::from_rate_covariance(
+            &BTreeMap::from([(
+                "X".to_string(),
+                cov(&["a", "b"], vec![0.01, 0.05, 0.05, 0.01]),
+            )]),
+            2,
+        );
         let r = unit_rates("X", &[("a", 1.0), ("b", 1.0)]);
         let mut report = SigmaReport::default();
         report.add(0, &s, &r, 1.0, &Default::default(), &everyone());
@@ -1077,11 +2048,14 @@ mod tests {
     /// short, weak spectrum barely moves the headline.
     #[test]
     fn the_rate_weighted_inflation_weighs_spectra_by_fluence() {
-        let repaired = Sampler::new(&BTreeMap::from([(
-            "X".to_string(),
-            cov(&["a", "b"], vec![0.01, 0.05, 0.05, 0.01]),
-        )]));
-        let clean = Sampler::new(&BTreeMap::from([(
+        let repaired = Sampler::from_rate_covariance(
+            &BTreeMap::from([(
+                "X".to_string(),
+                cov(&["a", "b"], vec![0.01, 0.05, 0.05, 0.01]),
+            )]),
+            2,
+        );
+        let clean = rate_sampler(&BTreeMap::from([(
             "X".to_string(),
             cov(&["a", "b"], vec![0.01, 0.0, 0.0, 0.01]),
         )]));
@@ -1108,7 +2082,7 @@ mod tests {
         // own threshold within a factor of 1.5, so between them they pin both
         // the tolerance and the factor of n.
         let repaired = |c: RateCovariance| {
-            !Sampler::new(&BTreeMap::from([("X".to_string(), c)]))
+            !rate_sampler(&BTreeMap::from([("X".to_string(), c)]))
                 .repairs(0)
                 .is_empty()
         };
@@ -1140,7 +2114,7 @@ mod tests {
             let kinds: Vec<&str> = kinds.iter().map(String::as_str).collect();
             let rank_one = cov(&kinds, (0..n * n).map(|k| v[k / n] * v[k % n]).collect());
             assert!(
-                Sampler::new(&BTreeMap::from([("X".to_string(), rank_one)]))
+                rate_sampler(&BTreeMap::from([("X".to_string(), rank_one)]))
                     .repairs(0)
                     .is_empty(),
                 "{v:?}"
@@ -1161,7 +2135,7 @@ mod tests {
                 0.01, 0.0, 0.09,
             ],
         );
-        assert!(Sampler::new(&BTreeMap::from([("X".to_string(), c)]))
+        assert!(rate_sampler(&BTreeMap::from([("X".to_string(), c)]))
             .repairs(0)
             .is_empty());
     }
@@ -1180,7 +2154,7 @@ mod tests {
                 0.0, 0.05, 0.01,
             ],
         );
-        let s = Sampler::new(&BTreeMap::from([("X".to_string(), c)]));
+        let s = rate_sampler(&BTreeMap::from([("X".to_string(), c)]));
         let repairs = s.repairs(0);
         assert_eq!(repairs.len(), 1);
         let r = &repairs[0];
@@ -1224,7 +2198,7 @@ mod tests {
                 0.0, 0.05, 0.01,
             ],
         );
-        let s = Sampler::new(&BTreeMap::from([("X".to_string(), c)]));
+        let s = rate_sampler(&BTreeMap::from([("X".to_string(), c)]));
         let repairs = s.repairs(0);
         assert_eq!(repairs.len(), 1);
         let r = &repairs[0];
@@ -1242,7 +2216,7 @@ mod tests {
     /// move one of its channels.
     #[test]
     fn a_nuclide_the_material_cannot_populate_is_named_outside_the_bound() {
-        let s = Sampler::new(&BTreeMap::from([(
+        let s = rate_sampler(&BTreeMap::from([(
             "X".to_string(),
             cov(&["a", "b"], vec![4.0, 50.0, 50.0, 400.0]),
         )]));
@@ -1291,7 +2265,7 @@ mod tests {
     /// each channel's inflation, not on its sigma.
     #[test]
     fn a_wide_channel_does_not_mask_a_repair_on_the_dominant_ones() {
-        let s = Sampler::new(&BTreeMap::from([
+        let s = rate_sampler(&BTreeMap::from([
             (
                 "X".to_string(),
                 cov(&["a", "b"], vec![0.01, 0.05, 0.05, 0.01]),
@@ -1320,7 +2294,7 @@ mod tests {
     /// a spread makes the weighted headline infinite rather than ignored.
     #[test]
     fn a_spread_from_nothing_makes_the_weighted_inflation_infinite() {
-        let s = Sampler::new(&BTreeMap::from([(
+        let s = rate_sampler(&BTreeMap::from([(
             "X".to_string(),
             cov(&["a", "b"], vec![0.01, 0.05, 0.05, 0.0]),
         )]));
@@ -1336,7 +2310,7 @@ mod tests {
     /// parent's density, over every sampled channel.
     #[test]
     fn the_rate_weighted_inflation_counts_every_sampled_channel() {
-        let s = Sampler::new(&BTreeMap::from([
+        let s = rate_sampler(&BTreeMap::from([
             (
                 "X".to_string(),
                 cov(&["a", "b"], vec![0.01, 0.05, 0.05, 0.01]),
@@ -1364,7 +2338,7 @@ mod tests {
 
         // No repair anywhere reads as exactly zero, not as round-off.
         let mut clean = SigmaReport::default();
-        let y = Sampler::new(&BTreeMap::from([(
+        let y = rate_sampler(&BTreeMap::from([(
             "Y".to_string(),
             cov(&["a"], vec![0.04]),
         )]));
@@ -1378,7 +2352,7 @@ mod tests {
     /// not.
     #[test]
     fn wide_sigmas_are_named() {
-        let s = Sampler::new(&BTreeMap::from([(
+        let s = rate_sampler(&BTreeMap::from([(
             "X".to_string(),
             cov(
                 &["a", "b", "c", "d"],
@@ -1423,7 +2397,7 @@ mod tests {
         // Evaluated at 0.9 and sampled at sqrt(1.405) after the repair: the
         // list is of what the evaluation states, and the widening is in the
         // repair record instead.
-        let y = Sampler::new(&BTreeMap::from([(
+        let y = rate_sampler(&BTreeMap::from([(
             "Y".to_string(),
             cov(&["a", "b"], vec![0.81, 2.0, 2.0, 0.81]),
         )]));
@@ -1445,7 +2419,7 @@ mod tests {
     #[test]
     fn deviates_are_a_pure_function_of_seed_and_replica() {
         let c = cov(&["a", "b"], vec![0.04, 0.0, 0.0, 0.09]);
-        let s = Sampler::new(&BTreeMap::from([("Fe56".to_string(), c)]));
+        let s = rate_sampler(&BTreeMap::from([("Fe56".to_string(), c)]));
 
         assert_eq!(s.deviates(42, 7), s.deviates(42, 7));
         assert_ne!(s.deviates(42, 7), s.deviates(42, 8));
@@ -1461,8 +2435,8 @@ mod tests {
     fn one_nuclides_stream_does_not_depend_on_the_others() {
         let a = cov(&["a"], vec![0.04]);
         let b = cov(&["b"], vec![0.09]);
-        let alone = Sampler::new(&BTreeMap::from([("Fe56".to_string(), a.clone())]));
-        let together = Sampler::new(&BTreeMap::from([
+        let alone = rate_sampler(&BTreeMap::from([("Fe56".to_string(), a.clone())]));
+        let together = rate_sampler(&BTreeMap::from([
             ("Co59".to_string(), b),
             ("Fe56".to_string(), a),
         ]));
@@ -1478,7 +2452,7 @@ mod tests {
     fn the_sampled_spread_matches_the_stated_uncertainty() {
         // 20% and 30% relative, uncorrelated.
         let c = cov(&["a", "b"], vec![0.04, 0.0, 0.0, 0.09]);
-        let s = Sampler::new(&BTreeMap::from([("Fe56".to_string(), c)]));
+        let s = rate_sampler(&BTreeMap::from([("Fe56".to_string(), c)]));
 
         let n = 20_000;
         let mut sums = [0.0; 2];
@@ -1507,7 +2481,7 @@ mod tests {
     fn correlations_survive_the_factorization() {
         // 20% each, correlation +0.8.
         let c = cov(&["a", "b"], vec![0.04, 0.032, 0.032, 0.04]);
-        let s = Sampler::new(&BTreeMap::from([("Fe56".to_string(), c)]));
+        let s = rate_sampler(&BTreeMap::from([("Fe56".to_string(), c)]));
 
         let n = 20_000;
         let (mut sa, mut sb, mut saa, mut sbb, mut sab) = (0.0, 0.0, 0.0, 0.0, 0.0);
@@ -1533,7 +2507,7 @@ mod tests {
         // third of the time at that width; an exponential one never is, which
         // is why there is no floor left to count.
         let c = cov(&["(n,gamma)"], vec![9.0]);
-        let s = Sampler::new(&BTreeMap::from([("Fe56".to_string(), c)]));
+        let s = rate_sampler(&BTreeMap::from([("Fe56".to_string(), c)]));
         let rates: ReactionRates = HashMap::from([(
             "Fe56".to_string(),
             HashMap::from([("(n,gamma)".to_string(), 1.0e-8)]),
@@ -1541,7 +2515,7 @@ mod tests {
 
         let mut sampled = 0;
         for k in 0..2000 {
-            let (out, n) = s.perturb(&rates, 9, k);
+            let (out, n) = s.perturb(0, &rates, 9, k);
             sampled += n;
             assert!(out["Fe56"]["(n,gamma)"] > 0.0, "a rate must stay positive");
         }
@@ -1556,7 +2530,7 @@ mod tests {
         // A relative variance of 0.25, so a relative sigma of 0.5: `cov` takes
         // the covariance matrix, not the standard deviations.
         let c = cov(&["(n,gamma)"], vec![0.25]);
-        let s = Sampler::new(&BTreeMap::from([("Fe56".to_string(), c)]));
+        let s = rate_sampler(&BTreeMap::from([("Fe56".to_string(), c)]));
         let nominal = 1.0e-8;
         let rates: ReactionRates = HashMap::from([(
             "Fe56".to_string(),
@@ -1567,7 +2541,7 @@ mod tests {
         let mut sum = 0.0;
         let mut sum_sq = 0.0;
         for k in 0..n {
-            let v = s.perturb(&rates, 11, k).0["Fe56"]["(n,gamma)"];
+            let v = s.perturb(0, &rates, 11, k).0["Fe56"]["(n,gamma)"];
             sum += v;
             sum_sq += v * v;
         }
@@ -1593,9 +2567,8 @@ mod tests {
         // cross section must not move just because the distribution changed.
         for sigma in [0.001, 0.01, 0.05] {
             for z in [-2.0, -0.5, 0.5, 2.0] {
-                let deviate = sigma * z;
-                let lognormal = super::lognormal_factor(deviate, sigma);
-                let linear = 1.0 + deviate;
+                let lognormal = super::lognormal_multiplier(z, sigma);
+                let linear = 1.0 + sigma * z;
                 assert!(
                     (lognormal - linear).abs() < 2.0 * sigma * sigma * (1.0 + z * z),
                     "sigma {sigma} z {z}: {lognormal} vs {linear}"
@@ -1607,126 +2580,187 @@ mod tests {
     /// A nuclide with no covariance is passed through untouched.
     #[test]
     fn rates_without_covariance_are_unchanged() {
-        let s = Sampler::new(&BTreeMap::new());
+        let s = rate_sampler(&BTreeMap::new());
         assert!(s.is_empty());
         let rates: ReactionRates = HashMap::from([(
             "Fe56".to_string(),
             HashMap::from([("(n,gamma)".to_string(), 2.5)]),
         )]);
-        let (out, sampled) = s.perturb(&rates, 1, 0);
+        let (out, sampled) = s.perturb(0, &rates, 1, 0);
         assert_eq!(out, rates);
         assert_eq!(sampled, 0);
     }
 
-    /// Two spectra seeing one evaluation `C` through `D_a` and `D_b`, just
-    /// either side of the tie `C_11 = C_22` where a cyclic Jacobi rotation
-    /// changes sign: `(C_a, C_b, X)` with `X = D_a C D_b` the cross block.
-    fn either_side_of_the_tie() -> (RateCovariance, RateCovariance, Vec<f64>) {
-        let c = [0.01, 0.009, 0.009, 0.01];
-        let (da, db) = ([1.01_f64.sqrt(), 1.0], [0.99_f64.sqrt(), 1.0]);
-        let scaled = |l: [f64; 2], r: [f64; 2]| -> Vec<f64> {
-            (0..4).map(|k| l[k / 2] * c[k] * r[k % 2]).collect()
+    /// Small enough that a draw almost never takes a rate below zero, where
+    /// the floor would cut the sampled covariance short of the stated one.
+    const MIXED_SHORT_VARIANCE: f64 = 1.0e-4;
+
+    /// A field with every kind of cell, read by two spectra: two relative
+    /// cells, one absolute, and one short-range interval `[0, 4]` that the
+    /// two spectra cut differently. Unit rates, so a shift is a relative one.
+    fn mixed_field() -> crate::covariance_fold::CellField {
+        use crate::covariance_fold::{Cell, CellField, Projection, ShortRange, ShortTerm};
+        let projection = |p: [f64; 2], q: f64, cuts: Vec<f64>, weight: Vec<f64>| {
+            Some(Projection {
+                kinds: vec!["x".to_string()],
+                rates: vec![1.0],
+                relative: p.to_vec(),
+                absolute: vec![q],
+                short: vec![vec![ShortTerm {
+                    block: 0,
+                    interval: 0,
+                    cuts,
+                    weight,
+                }]],
+            })
         };
-        let kinds = ["(n,gamma)", "(n,p)"];
-        (
-            cov(&kinds, scaled(da, da)),
-            cov(&kinds, scaled(db, db)),
-            scaled(da, db),
-        )
-    }
-
-    fn rows_of(s: &Sampler, name: &str) -> (Vec<f64>, usize) {
-        let (_, _, l, cols) = s.factors().find(|(n, ..)| *n == name).expect("factor");
-        (l.to_vec(), cols)
-    }
-
-    /// `L_a L_bᵀ` over the shared columns is the folded cross block.
-    #[test]
-    fn the_joint_factor_reproduces_the_cross_block() {
-        let (ca, cb, x) = either_side_of_the_tie();
-        let joint = Sampler::joint(
-            &[
-                BTreeMap::from([("X".to_string(), ca)]),
-                BTreeMap::from([("X".to_string(), cb)]),
+        CellField {
+            relative_cells: vec![
+                Cell {
+                    mt: 1,
+                    lo: 0.0,
+                    hi: 1.0,
+                },
+                Cell {
+                    mt: 1,
+                    lo: 1.0,
+                    hi: 2.0,
+                },
             ],
-            &BTreeMap::from([((0, 1), BTreeMap::from([("X".to_string(), x.clone())]))]),
-        );
-        let (la, n) = rows_of(&joint[0], "X");
-        let (lb, m) = rows_of(&joint[1], "X");
-        assert_eq!((n, m), (4, 4), "one factor over both spectra' channels");
-        for i in 0..2 {
-            for j in 0..2 {
-                let v: f64 = (0..n).map(|k| la[i * n + k] * lb[j * n + k]).sum();
-                assert!(
-                    (v - x[i * 2 + j]).abs() < 1e-12,
-                    "({i},{j}): {v} vs {}",
-                    x[i * 2 + j]
-                );
-            }
+            relative: vec![0.04, 0.02, 0.02, 0.09],
+            absolute_cells: vec![Cell {
+                mt: 2,
+                lo: 0.0,
+                hi: 1.0,
+            }],
+            absolute: vec![0.25],
+            short: vec![ShortRange {
+                key: (1, 0, 0),
+                mt: 1,
+                edges: vec![0.0, 4.0],
+                variance: vec![MIXED_SHORT_VARIANCE],
+            }],
+            projections: vec![
+                projection([1.0, 0.5], 0.2, vec![0.0, 2.0, 4.0], vec![1.0, 3.0]),
+                projection([0.3, 1.0], 0.4, vec![0.0, 1.0, 4.0], vec![2.0, 1.0]),
+            ],
         }
     }
 
-    /// The bug the joint factor fixes: two separate factorizations sharing
-    /// the deviates give `L_a L_bᵀ` of two unrelated eigenbases, which here
-    /// is nowhere near the cross block, while the joint draws track it.
+    /// The analytic covariance of the two spectra's shifts: `pᵀ C p'` over
+    /// the relative cells, `qᵀ C q'` over the absolute one, and
+    /// `F ΔE ∫ ψ ψ' dE` over the short-range interval.
+    fn mixed_covariance(a: usize, b: usize) -> f64 {
+        let p = [[1.0, 0.5], [0.3, 1.0]];
+        let q = [0.2, 0.4];
+        let c = [[0.04, 0.02], [0.02, 0.09]];
+        let relative: f64 = (0..2)
+            .flat_map(|k| (0..2).map(move |l| (k, l)))
+            .map(|(k, l)| p[a][k] * c[k][l] * p[b][l])
+            .sum();
+        // Piecewise weights on the union [0, 1, 2, 4] of both cuts.
+        let psi = [[1.0, 1.0, 3.0], [2.0, 1.0, 1.0]];
+        let widths = [1.0, 1.0, 2.0];
+        let short: f64 = (0..3)
+            .map(|j| MIXED_SHORT_VARIANCE * 4.0 * widths[j] * psi[a][j] * psi[b][j])
+            .sum();
+        relative + q[a] * 0.25 * q[b] + short
+    }
+
+    /// Each spectrum's sampled variance is its analytic one.
     #[test]
-    fn separate_factors_miss_the_cross_correlation_and_the_joint_one_does_not() {
-        let (ca, cb, x) = either_side_of_the_tie();
-        let rho_true = x[0] / (ca.get(0, 0) * cb.get(0, 0)).sqrt();
-        let correlation = |a: &Sampler, b: &Sampler| -> f64 {
-            let n = 4000;
-            let (mut sab, mut saa, mut sbb) = (0.0, 0.0, 0.0);
-            for r in 0..n {
-                let da = a.deviates(7, r)["X"][0];
-                let db = b.deviates(7, r)["X"][0];
-                sab += da * db;
-                saa += da * da;
-                sbb += db * db;
-            }
-            sab / (saa * sbb).sqrt()
-        };
-
-        let alone_a = Sampler::new(&BTreeMap::from([("X".to_string(), ca.clone())]));
-        let alone_b = Sampler::new(&BTreeMap::from([("X".to_string(), cb.clone())]));
-        let separate = correlation(&alone_a, &alone_b);
-
-        let joint = Sampler::joint(
-            &[
-                BTreeMap::from([("X".to_string(), ca)]),
-                BTreeMap::from([("X".to_string(), cb)]),
-            ],
-            &BTreeMap::from([((0, 1), BTreeMap::from([("X".to_string(), x)]))]),
+    fn a_mixed_field_samples_its_stated_variance_under_each_spectrum() {
+        let field = mixed_field();
+        let s = Sampler::new(
+            &BTreeMap::from([("X".to_string(), field)]),
+            &[BTreeMap::new(), BTreeMap::new()],
         );
-        let together = correlation(&joint[0], &joint[1]);
+        for a in 0..2 {
+            let (_, _, _, sampled) = s.channel_sigmas(a).next().expect("one channel");
+            let want = mixed_covariance(a, a).sqrt();
+            assert!(
+                (sampled - want).abs() < 1e-12,
+                "spectrum {a}: {sampled} vs {want}"
+            );
+        }
+    }
 
-        assert!(
-            rho_true > 0.99,
-            "the setup is near-identical spectra: {rho_true}"
+    /// Two spectra reading one draw covary as the field says, including the
+    /// short-range term through the energies both weight, and the first-order
+    /// rows reproduce the same covariance over the shared columns.
+    #[test]
+    fn two_spectra_reading_one_field_covary_as_the_field_says() {
+        let s = Sampler::new(
+            &BTreeMap::from([("X".to_string(), mixed_field())]),
+            &[BTreeMap::new(), BTreeMap::new()],
         );
+        let rates: ReactionRates =
+            HashMap::from([("X".to_string(), HashMap::from([("x".to_string(), 1.0)]))]);
+        let n = 40_000;
+        let (mut sab, mut saa, mut sbb, mut ma, mut mb) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        for r in 0..n {
+            let draw = s.draw(13, r);
+            let a = s.perturb_with(&draw, 0, &rates).0["X"]["x"] - 1.0;
+            let b = s.perturb_with(&draw, 1, &rates).0["X"]["x"] - 1.0;
+            sab += a * b;
+            saa += a * a;
+            sbb += b * b;
+            ma += a;
+            mb += b;
+        }
+        let nf = n as f64;
+        let cov = sab / nf - (ma / nf) * (mb / nf);
+        let want = mixed_covariance(0, 1);
+        // The standard error of a sample covariance is about
+        // sqrt((var_a var_b + cov^2) / n).
+        let se = ((saa / nf) * (sbb / nf) + want * want).sqrt() / nf.sqrt();
         assert!(
-            (together - rho_true).abs() < 0.02,
-            "joint draws correlate at {together}, the fold says {rho_true}"
+            (cov - want).abs() < 4.0 * se,
+            "cross covariance {cov} vs {want} (se {se})"
         );
+
+        let fa = s.factors(0);
+        let fb = s.factors(1);
+        let (_, _, ja, cols) = &fa[0];
+        let (_, _, jb, cols_b) = &fb[0];
+        assert_eq!(cols, cols_b, "both spectra read the same columns");
+        let linear: f64 = (0..*cols).map(|k| ja[k] * jb[k]).sum();
         assert!(
-            (separate - rho_true).abs() > 0.5,
-            "separate factors correlate at {separate}; this case is meant to show \
-             them missing the fold's {rho_true}"
+            (linear - want).abs() < 1e-12,
+            "first-order {linear} vs {want}"
         );
     }
 
-    /// A nuclide only one spectrum folded is factorized exactly as it would
-    /// be alone, so its draws are bit-identical.
+    /// The relative cells are lognormal with the evaluation's covariance:
+    /// every multiplier positive, mean one, and the stated covariance.
     #[test]
-    fn a_nuclide_under_one_spectrum_draws_as_it_would_alone() {
-        let c = cov(&["(n,gamma)", "(n,p)"], vec![0.04, 0.012, 0.012, 0.09]);
-        let alone = Sampler::new(&BTreeMap::from([("X".to_string(), c.clone())]));
-        let joint = Sampler::joint(
-            &[BTreeMap::new(), BTreeMap::from([("X".to_string(), c)])],
-            &BTreeMap::new(),
-        );
-        assert!(joint[0].is_empty());
-        for r in 0..8 {
-            assert_eq!(alone.deviates(3, r), joint[1].deviates(3, r));
+    fn relative_cells_are_lognormal_with_the_stated_covariance() {
+        let c = cov(&["a", "b"], vec![0.25, 0.15, 0.15, 0.36]);
+        let s = rate_sampler(&BTreeMap::from([("X".to_string(), c.clone())]));
+        let n = 40_000;
+        let mut sum = [0.0; 2];
+        let mut cross = [[0.0; 2]; 2];
+        for r in 0..n {
+            let d = &s.deviates(3, r)["X"];
+            for k in 0..2 {
+                assert!(d[k] > -1.0, "multiplier {} not positive", 1.0 + d[k]);
+                sum[k] += d[k];
+                for l in 0..2 {
+                    cross[k][l] += d[k] * d[l];
+                }
+            }
+        }
+        let nf = n as f64;
+        for k in 0..2 {
+            assert!((sum[k] / nf).abs() < 0.01, "mean shift {}", sum[k] / nf);
+            for l in 0..2 {
+                let got = cross[k][l] / nf - (sum[k] / nf) * (sum[l] / nf);
+                assert!(
+                    (got - c.get(k, l)).abs() < 0.06 * c.get(k, k).max(c.get(l, l)),
+                    "({k},{l}): {got} vs {}",
+                    c.get(k, l)
+                );
+            }
         }
     }
 }
