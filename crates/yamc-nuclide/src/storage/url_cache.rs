@@ -1204,32 +1204,54 @@ enum Fetched {
 /// distinction matters: spliced after a schema message, a whole object's
 /// `ARROW1` magic is read as the start of a record batch, and the framing walks
 /// on into numbers that decode but are not the cross sections asked for.
+///
+/// A transport failure is retried like a 5xx: a request sent on a pooled
+/// connection the origin has already closed, or a body cut off mid-transfer,
+/// succeeds on a fresh attempt. A fresh cache issues hundreds of these in
+/// parallel, so without the retry a first run failed on whichever one hit it.
 #[cfg(feature = "download")]
 fn fetch(url: &str, span: Option<(u64, u64)>) -> Result<Fetched, Box<dyn std::error::Error>> {
     const RETRY_DELAYS_MS: &[u64] = &[200, 500, 1000];
-    let mut last_status: Option<reqwest::StatusCode> = None;
+    // A client that failed to build will not build on a retry either.
+    client()?;
+    let mut last_failure = String::new();
     for &delay_ms in std::iter::once(&0u64).chain(RETRY_DELAYS_MS.iter()) {
         if delay_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
         }
-        let r = blocking_get(url, span)?;
+        let r = match blocking_get(url, span) {
+            Ok(r) => r,
+            Err(e) => {
+                last_failure = e.to_string();
+                continue;
+            }
+        };
         let status = r.status();
         if status.is_success() {
-            return Ok(Fetched::Body {
-                partial: status == reqwest::StatusCode::PARTIAL_CONTENT,
-                bytes: r.bytes()?.to_vec(),
-            });
+            match r.bytes() {
+                Ok(bytes) => {
+                    return Ok(Fetched::Body {
+                        partial: status == reqwest::StatusCode::PARTIAL_CONTENT,
+                        bytes: bytes.to_vec(),
+                    })
+                }
+                Err(e) => {
+                    last_failure = format!("reading the response body: {e}");
+                    continue;
+                }
+            }
         }
         if status == reqwest::StatusCode::NOT_FOUND {
             // Definitively absent: R2 answers authoritatively, no retry.
             return Ok(Fetched::Absent);
         }
-        last_status = Some(status);
+        last_failure = status.to_string();
     }
     Err(format!(
-        "Failed to download {}: {}",
+        "Failed to download {} after {} attempts: {}",
         url,
-        last_status.unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR)
+        RETRY_DELAYS_MS.len() + 1,
+        last_failure
     )
     .into())
 }
@@ -2935,5 +2957,92 @@ mod cache_root_tests {
     fn this_machine_has_a_home_and_therefore_a_cache_root() {
         assert!(home_dir().is_some(), "no home directory resolved");
         assert!(cache_root().is_some());
+    }
+}
+
+#[cfg(all(test, feature = "download"))]
+mod fetch_retry_tests {
+    use super::{fetch, Fetched};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// How a connection the test origin accepts is answered.
+    #[derive(Clone, Copy)]
+    enum Fault {
+        /// Close without a response, as an origin does to an idle pooled
+        /// connection.
+        Drop,
+        /// Promise more bytes than are sent, then close.
+        Truncate,
+    }
+
+    /// A one-object HTTP origin whose first `faults` connections fail the
+    /// given way and every later one is answered in full. Returns the URL and
+    /// the count of connections accepted.
+    fn origin(faults: usize, fault: Fault, body: &'static [u8]) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/section.arrow", listener.local_addr().unwrap());
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&accepted);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream: TcpStream = stream.unwrap();
+                let n = seen.fetch_add(1, Ordering::SeqCst);
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                if n < faults {
+                    if let Fault::Truncate = fault {
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len() + 100
+                        );
+                        let _ = stream.write_all(head.as_bytes());
+                        let _ = stream.write_all(body);
+                    }
+                    continue;
+                }
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        });
+        (url, accepted)
+    }
+
+    fn body_of(fetched: Fetched) -> Vec<u8> {
+        match fetched {
+            Fetched::Body { bytes, .. } => bytes,
+            Fetched::Absent => panic!("expected a body"),
+        }
+    }
+
+    #[test]
+    fn a_dropped_connection_is_retried() {
+        let (url, accepted) = origin(2, Fault::Drop, b"sections");
+        assert_eq!(body_of(fetch(&url, None).unwrap()), b"sections");
+        assert_eq!(accepted.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn a_truncated_body_is_retried() {
+        let (url, accepted) = origin(1, Fault::Truncate, b"sections");
+        assert_eq!(body_of(fetch(&url, None).unwrap()), b"sections");
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_persistent_failure_gives_up_and_says_why() {
+        let (url, accepted) = origin(usize::MAX, Fault::Drop, b"sections");
+        let err = fetch(&url, None)
+            .err()
+            .expect("every attempt fails")
+            .to_string();
+        assert!(err.contains("after 4 attempts"), "{err}");
+        assert_eq!(accepted.load(Ordering::SeqCst), 4);
     }
 }
