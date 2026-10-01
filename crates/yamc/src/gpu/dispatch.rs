@@ -647,15 +647,12 @@ fn run_on_gpu_dispatch(
     device: Option<&str>,
     settings: &crate::model::TransportSettings,
 ) -> Result<GpuRunResult, GpuDispatchError> {
-    // GPU stop conditions: a finite particle cap (`total_particles`)
-    // and/or a wall-time budget (`max_runtime`), checked between launches.
-    // Convergence targets are not one of them: the launch loop cannot evaluate
-    // a precision target, and a run that carries targets alongside a cap
-    // would otherwise go silently to the cap, so it is refused first and in
-    // its own words. `Some(0)` is an
-    // error (0 is not "unlimited"); `None` + no `max_runtime` has no way to
-    // stop, so it is rejected here rather than looping forever. Covers every
-    // kernel path since they all route through this entry.
+    // GPU stop conditions: a finite particle cap (`total_particles`), a
+    // wall-time budget (`max_runtime`) and the convergence targets, all
+    // checked between launches. `Some(0)` is an error (0 is not "unlimited");
+    // `None` with neither `max_runtime` nor targets has no way to stop, so it
+    // is rejected here rather than looping forever. Covers every kernel path
+    // since they all route through this entry.
     let has_targets = !model.convergence_targets.is_empty();
     match (settings.total_particles, settings.max_runtime) {
         (Some(0), _) => {

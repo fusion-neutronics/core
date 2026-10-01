@@ -451,10 +451,12 @@ pub struct Model {
     /// once, and the single decision bit broadcast, so a borderline target
     /// cannot flip on summation order. Runtime config; not serialized.
     ///
-    /// CPU only. The GPU dispatch refuses a model carrying targets with
-    /// [`GpuDispatchError::ConvergenceTargetsUnsupported`](crate::gpu::GpuDispatchError)
-    /// rather than running to the particle cap while ignoring them; GPU
-    /// convergence stopping is not implemented yet.
+    /// Honoured on the GPU as well. The GPU dispatch folds the same aggregate
+    /// moments the CPU does, launch by launch, and evaluates the targets at
+    /// each launch boundary with the CPU predicate (`convergence_targets_met`)
+    /// on the rank-combined moments, so both backends stop on the same
+    /// criterion. The GPU checks at launch boundaries rather than CPU
+    /// checkpoints, so the particle count at the stop can differ.
     #[serde(skip)]
     pub convergence_targets: Vec<yamc_tallies::ConvergenceTarget>,
 }
