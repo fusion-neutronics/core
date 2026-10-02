@@ -427,9 +427,11 @@ jobs:
     if: needs.plan.outputs.build_yani == 'true'
     runs-on: ${{ matrix.runs-on }}
     strategy:
-      # `pip install yani` has no sdist to fall back on, so a platform without a
-      # wheel here is a platform where the install simply fails. The transport
-      # wheel covers the same three.
+      # `yani-core` has no sdist to fall back on, so a platform without a wheel
+      # here is a platform where `pip install yani` simply fails: the front
+      # door's own sdist resolves, then its `yani-core==` pin finds nothing
+      # installable. That made ARM Linux a hard failure rather than a slow
+      # install, which is why the last row exists.
       fail-fast: false
       matrix:
         include:
@@ -448,6 +450,18 @@ jobs:
             runs-on: macos-14
             target: aarch64-apple-darwin
             interpreter: ""
+            manylinux: auto
+          # ARM Linux, which is most of the cloud and every Apple silicon
+          # container. On GitHub's ARM runner, so the aarch64 manylinux
+          # container runs natively and the wheel is imported below like any
+          # other row. Cross-compiling this from x86_64 instead cannot work
+          # here: maturin runs the container's interpreter to read its
+          # metadata, and an aarch64 binary on an x86_64 host is an exec
+          # format error before any build starts.
+          - name: linux-aarch64
+            runs-on: ubuntu-24.04-arm
+            target: aarch64
+            interpreter: "-i /opt/python/cp310-cp310/bin/python"
             manylinux: auto
     steps:
       - uses: actions/checkout@v7
