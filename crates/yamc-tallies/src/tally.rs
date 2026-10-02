@@ -552,7 +552,7 @@ impl Tally {
     /// slow path call `score_fn(bin_idx, v)` rather than touching
     /// storage directly.
     #[allow(clippy::too_many_arguments)]
-    fn score_track_length_with(
+    pub fn score_track_length_with(
         &self,
         score_fn: &mut dyn FnMut(usize, f64),
         track_length: f64,
@@ -2157,6 +2157,17 @@ impl Tally {
     /// `get_std_dev` is derived from it.
     /// Raw per-history products of the bin scores, packed upper triangle,
     /// when the tally asked for its covariance and a run installed them.
+    /// The nuclear-data replica sums from the last run, when it carried
+    /// replica weights.
+    pub fn get_replica_sums(&self) -> Option<crate::welford::ReplicaSums> {
+        self.accumulator
+            .welford_finalized
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|stats| stats.replicas.clone())
+    }
+
     pub fn get_comoment(&self) -> Option<Vec<f64>> {
         self.accumulator
             .welford_finalized
@@ -2301,6 +2312,7 @@ impl Tally {
             agg: self.get_agg(),
             score_pdf: self.get_score_pdf(),
             comoment: self.get_comoment(),
+            replicas: self.get_replica_sums(),
             convergence_history: self.get_convergence_history(),
             shape,
             dim_labels,
@@ -2826,6 +2838,7 @@ mod tests {
             agg: crate::welford::AggMoments::ZERO,
             score_pdf: crate::welford::ScorePdf::default(),
             comoment: None,
+            replicas: None,
         };
         arc.install_finalized(stats);
         // Unwrap the Arc back -- tests want owned Tally to mutate filters etc.

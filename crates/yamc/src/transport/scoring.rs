@@ -22,6 +22,7 @@ pub(crate) fn score_track_length_segment(
     tallies: &[&Tally],
     transmutation_tallies: Option<&TransmutationTallies>,
     welford_worker: &mut yamc_tallies::welford::WelfordWorkerState,
+    replica: Option<&super::replica::ReplicaSegment>,
 ) -> [f64; 3] {
     let material_ref = cell_material.map(|m| m.as_ref());
     let end_position = [
@@ -33,6 +34,35 @@ pub(crate) fn score_track_length_segment(
         // Skip tallies that have opted into the collision estimator --
         // they get scored at collision sites, not at every cell crossing.
         if tally.estimator == yamc_tallies::Estimator::Collision {
+            continue;
+        }
+        if let Some(seg) = replica.filter(|_| welford_worker.has_replicas(tally_idx)) {
+            // Each score's replica factors for this segment: the ratio and
+            // the mean survival along it, times the score's own Σ'_x / Σ_x.
+            let factors: Vec<Vec<f64>> = tally
+                .scores
+                .iter()
+                .map(|score| seg.factors_for(score, particle.energy))
+                .collect();
+            tally.score_track_length_with(
+                &mut |bin_idx, v| {
+                    welford_worker.add_contribution(tally_idx, bin_idx, v);
+                    let score = tally.score_index_of_bin(bin_idx);
+                    welford_worker.add_replica_contribution(tally_idx, bin_idx, v, &factors[score]);
+                },
+                dist,
+                particle.weight,
+                cell.cell_id,
+                material_ref,
+                material_id,
+                particle.energy,
+                end_position,
+                particle.position,
+                particle.direction,
+                urr_macro_xs,
+                particle.particle_type,
+                particle.parent_nuclide,
+            );
             continue;
         }
         tally.score_track_length(

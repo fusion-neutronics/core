@@ -61,12 +61,14 @@ pub struct DataUncertaintyCoverage {
 
 /// The inputs no transport uncertainty run perturbs, whatever the evaluation
 /// carries.
-const NOT_PERTURBED: [&str; 6] = [
+const NOT_PERTURBED: [&str; 8] = [
     "angular and energy distributions of secondaries (MF=34, MF=35, MF=6)",
     "resonance-parameter covariance (MF=32)",
     "fission multiplicity and spectrum (MF=31, MF=35)",
     "unresolved-resonance probability tables beyond the cross-section covariance",
     "photon production and photon interaction data",
+    "heating, KERMA, damage-energy and gas-production responses, which move only through the flux",
+    "short-range (lb = 8) covariance, which averages away along a track",
     "the material composition and density",
 ];
 
@@ -152,5 +154,83 @@ impl Model {
         let covered: BTreeSet<String> = report.nuclides.keys().cloned().collect();
         report.without_data.retain(|n| !covered.contains(n));
         Ok(report)
+    }
+}
+
+impl Model {
+    /// Refuse a nuclear-data uncertainty run in any configuration the
+    /// replica weights do not yet carry exactly, naming what to change.
+    ///
+    /// Each refusal is a mode whose weight bookkeeping is not implemented:
+    /// rather than a sigma that silently leaves part of the physics nominal,
+    /// the run stops before it starts.
+    pub(crate) fn validate_data_uncertainty(
+        &self,
+        data: &crate::model::TransportDataUncertainty,
+        mpi_size: usize,
+        transmutation: bool,
+    ) -> Result<(), String> {
+        let refuse = |what: &str| {
+            Err(format!(
+                "data_uncertainty does not yet support {what}; the replica weights would \
+                 leave part of the physics nominal and report too small a sigma"
+            ))
+        };
+        if data.replicas < 2 {
+            return Err(format!(
+                "data_uncertainty needs at least 2 replicas to estimate a spread, got {}",
+                data.replicas
+            ));
+        }
+        if mpi_size > 1 {
+            return refuse("MPI runs");
+        }
+        if transmutation {
+            return refuse("simulate_transmutation");
+        }
+        if self.tracking_mode != crate::model::TrackingMode::Surface {
+            return refuse("tracking_mode other than 'surface' (delta tracking)");
+        }
+        if self.survival_biasing().is_some() {
+            return refuse("survival biasing (implicit capture)");
+        }
+        if !self.weight_windows().is_empty() {
+            return refuse("weight windows");
+        }
+        if self.has_photons() {
+            return refuse("photon transport (secondary, decay or source photons)");
+        }
+        for tally in &self.tallies {
+            let name = tally.name.as_deref().unwrap_or("<unnamed>");
+            if tally.estimator == yamc_tallies::Estimator::Collision {
+                return refuse(&format!("collision-estimator tallies (tally '{name}')"));
+            }
+            if !tally.multiply_density {
+                return refuse(&format!(
+                    "overlay tallies, which read their own nominal data (tally '{name}')"
+                ));
+            }
+            if !tally.nuclides.is_empty() {
+                return refuse(&format!("per-nuclide tally bins (tally '{name}')"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Load every material's nuclear data with covariance, before the run
+    /// prepares its tables, so the replica weights read the same data the run
+    /// transports.
+    pub(crate) fn load_covariance_for_replicas(&mut self) -> Result<(), String> {
+        for material_arc in self.geometry.materials_mut().iter_mut() {
+            let mut material = (**material_arc).clone();
+            material
+                .ensure_nuclides_loaded()
+                .map_err(|e| format!("loading nuclear data: {e}"))?;
+            material
+                .ensure_covariance_loaded()
+                .map_err(|e| format!("loading covariance: {e}"))?;
+            *material_arc = Arc::new(material);
+        }
+        Ok(())
     }
 }

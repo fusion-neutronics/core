@@ -125,6 +125,13 @@ pub struct Particle {
     /// Stored as an interned `NuclideId` (2 bytes with niche-packed Option) so the
     /// hot path carries no heap pointer; resolve names via `NuclideRegistry`.
     pub parent_nuclide: Option<NuclideId>,
+    /// One weight ratio per nuclear-data replica, when the run carries
+    /// correlated replica weights: replica `k`'s weight is `weight *
+    /// replica[k]`. `None` on every ordinary run, where it costs a null
+    /// pointer and nothing on the hot path. A secondary cloned from its parent
+    /// inherits the parent's ratios, which is what the likelihood ratio of its
+    /// history up to its birth is.
+    pub replica: Option<Box<[f64]>>,
     /// Collision history for debugging (only populated when debug_history feature is enabled)
     #[cfg(feature = "debug_history")]
     pub history: Vec<CollisionEvent>,
@@ -147,6 +154,7 @@ impl Particle {
             urr_energy: -1.0,             // Invalid energy to force initial sampling
             last_surface_id: NO_SURFACE,  // Set on surface crossings for lost particle diagnostics
             parent_nuclide: None,         // Set only for D1S decay photons
+            replica: None,
             #[cfg(feature = "debug_history")]
             history: Vec::new(),
         }

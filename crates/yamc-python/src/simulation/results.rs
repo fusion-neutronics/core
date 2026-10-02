@@ -58,6 +58,47 @@ impl PyTallyResult {
         self.inner.relative_error.clone()
     }
 
+    /// Nuclear-data standard deviation per bin, when the run was given
+    /// ``data_uncertainty``; ``None`` otherwise.
+    ///
+    /// The spread of the cross-section replicas, with the Monte Carlo noise
+    /// of the histories they share deconvolved. A bin where that noise is
+    /// larger than the spread reads zero and is flagged in
+    /// ``nuclear_data_variance_negative``: the replicas do not resolve it, and
+    /// more particles would. Compare with ``replica_standard_error``.
+    #[getter]
+    pub fn nuclear_data_standard_deviation(&self) -> Option<Vec<f64>> {
+        self.inner.nuclear_data_standard_deviation()
+    }
+
+    /// Per bin, whether the deconvolved nuclear-data variance came out
+    /// negative (the replicas' noise swamps their spread), when the run was
+    /// given ``data_uncertainty``; ``None`` otherwise.
+    #[getter]
+    pub fn nuclear_data_variance_negative(&self) -> Option<Vec<bool>> {
+        self.inner.nuclear_data_variance_negative()
+    }
+
+    /// Average of the cross-section replicas' means per bin, when the run was
+    /// given ``data_uncertainty``; ``None`` otherwise.
+    ///
+    /// ``mean`` stays the nominal result. The two differ where the score
+    /// responds nonlinearly to the cross sections, such as attenuation
+    /// through a thick shield.
+    #[getter]
+    pub fn replica_mean(&self) -> Option<Vec<f64>> {
+        self.inner.replica_mean()
+    }
+
+    /// Monte Carlo standard error of one replica's mean per bin, averaged over
+    /// replicas, when the run was given ``data_uncertainty``; ``None``
+    /// otherwise. Much larger than ``nuclear_data_standard_deviation`` means
+    /// the nuclear-data spread is not resolved.
+    #[getter]
+    pub fn replica_standard_error(&self) -> Option<Vec<f64>> {
+        self.inner.replica_standard_error()
+    }
+
     /// Variance of the mean per bin (``standard_deviation**2``), computed
     /// on the fly. This is the variance of the mean estimate -- the square
     /// of the reported uncertainty.

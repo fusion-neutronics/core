@@ -85,6 +85,13 @@ pub struct TallyResult {
     /// [`TallyResult::covariance`], carried like `m2` so combined results keep
     /// it. Not written by the Arrow result writer.
     pub comoment: Option<Vec<f64>>,
+    /// Nuclear-data replica sums, when the run carried correlated replica
+    /// weights: the merge state behind
+    /// [`TallyResult::nuclear_data_standard_deviation`] and
+    /// [`TallyResult::replica_mean`], carried like `comoment` so combined
+    /// results of the same draws keep it. Not written by the Arrow result
+    /// writer.
+    pub replicas: Option<crate::welford::ReplicaSums>,
     /// Snapshots of the tally's aggregate statistics versus number of
     /// histories, for convergence/trend inspection. Empty unless the run
     /// recorded them; not merged across `combine_results`.
@@ -113,6 +120,54 @@ pub struct TallyResult {
 }
 
 impl TallyResult {
+    /// Per-bin nuclear-data standard deviation of the score, when the run
+    /// carried replica weights: the spread of the replicas with the Monte
+    /// Carlo noise of the shared histories deconvolved (see
+    /// [`ReplicaSums::nuclear_data_variance`](crate::welford::ReplicaSums::nuclear_data_variance)).
+    /// A bin whose deconvolved variance came out negative, where the noise
+    /// swamped the spread, reads zero here and is flagged by
+    /// [`TallyResult::nuclear_data_variance_negative`].
+    pub fn nuclear_data_standard_deviation(&self) -> Option<Vec<f64>> {
+        let r = self.replicas.as_ref()?;
+        Some(
+            r.nuclear_data_variance(self.n_histories)
+                .iter()
+                .map(|(v, _)| v.max(0.0).sqrt())
+                .collect(),
+        )
+    }
+
+    /// Per-bin flag: the deconvolved nuclear-data variance came out negative,
+    /// so the replicas' own Monte Carlo noise is larger than their spread and
+    /// the nuclear-data standard deviation is not resolved.
+    pub fn nuclear_data_variance_negative(&self) -> Option<Vec<bool>> {
+        let r = self.replicas.as_ref()?;
+        Some(
+            r.nuclear_data_variance(self.n_histories)
+                .iter()
+                .map(|(v, _)| *v < 0.0)
+                .collect(),
+        )
+    }
+
+    /// Per-bin average of the replicas' means: the expected score over the
+    /// nuclear-data uncertainty, beside the nominal `mean`. The two differ
+    /// where the score responds nonlinearly to the cross sections.
+    pub fn replica_mean(&self) -> Option<Vec<f64>> {
+        Some(self.replicas.as_ref()?.replica_mean(self.n_histories))
+    }
+
+    /// Per-bin Monte Carlo standard error of one replica's mean, averaged over
+    /// replicas: compare with the nuclear-data standard deviation to see
+    /// whether the replicas resolve it.
+    pub fn replica_standard_error(&self) -> Option<Vec<f64>> {
+        Some(
+            self.replicas
+                .as_ref()?
+                .replica_standard_error(self.n_histories),
+        )
+    }
+
     /// Covariance of the bin means, `num_bins x num_bins` row-major, when the
     /// tally asked for it. Its diagonal is `standard_deviation` squared, and
     /// its off-diagonal terms are the correlations a per-bin standard
@@ -126,6 +181,7 @@ impl TallyResult {
             agg: self.agg,
             score_pdf: crate::welford::ScorePdf::default(),
             comoment: self.comoment.clone(),
+            replicas: None,
         };
         stats.covariance_of_mean()
     }
