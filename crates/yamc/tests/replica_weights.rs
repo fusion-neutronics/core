@@ -372,3 +372,47 @@ fn modes_the_weights_do_not_carry_yet_are_refused() {
         .expect_err("a mesh tally is refused");
     assert!(err.contains("mesh tallies"), "{err}");
 }
+
+/// A model whose data carries no covariance anywhere is refused rather than
+/// reported with a nuclear-data sigma of zero.
+#[test]
+fn a_model_with_no_covariance_is_refused_not_reported_exact() {
+    let fe57 = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/Fe57.arrow");
+    if !fe57.join("reactions.arrow").is_file() || fe57.join("covariance.arrow").is_file() {
+        eprintln!("skipping: needs an Fe57 fixture without covariance");
+        return;
+    }
+    let mut m = Material::new(
+        HashMap::from([("Fe57".to_string(), 1.0)]),
+        "atom",
+        "g/cm3",
+        Some(7.87),
+    )
+    .expect("material");
+    m.set_material_id(1);
+    m.set_temperature("294");
+    m.read_nuclear_data(
+        &HashMap::from([("Fe57".to_string(), fe57.to_string_lossy().into_owned())]),
+        None,
+    )
+    .expect("read Fe57");
+    let result = std::panic::catch_unwind(|| {
+        run(
+            m,
+            1.0,
+            1.0e6,
+            10,
+            1,
+            Some(TransportDataUncertainty {
+                seed: 1,
+                replicas: 4,
+            }),
+        )
+    });
+    let message = result
+        .expect_err("a model with no covariance is refused")
+        .downcast::<String>()
+        .map(|s| *s)
+        .unwrap_or_default();
+    assert!(message.contains("no nuclide"), "{message}");
+}

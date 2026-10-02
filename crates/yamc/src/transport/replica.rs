@@ -197,6 +197,18 @@ impl ReplicaContext {
         for material in materials {
             out.push(Self::material(material, &score_mts, replicas, seed)?);
         }
+        // With no covariance anywhere every replica is the nominal run and
+        // every sigma would read zero, which looks like an answer. It is not
+        // one: the data says nothing about the uncertainty.
+        if out.iter().all(Option::is_none) {
+            return Err(
+                "data_uncertainty: no nuclide in the model's materials carries covariance \
+                 data, so every nuclear-data sigma would read zero. Use a library whose \
+                 data includes covariance; model.data_uncertainty_coverage() lists what \
+                 each nuclide carries"
+                    .to_string(),
+            );
+        }
         Ok(ReplicaContext {
             replicas,
             materials: out,
