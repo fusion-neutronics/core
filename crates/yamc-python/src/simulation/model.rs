@@ -1036,8 +1036,8 @@ impl PyModel {
     ///         ``attribution`` is not supported. Not yet supported, and refused with the reason:
     ///         ``compute='gpu'``, MPI, ``tracking_mode`` other than
     ///         ``'surface'``, survival biasing, weight windows, photon
-    ///         transport, collision-estimator tallies, overlay tallies and
-    ///         per-nuclide tally bins. ``model.data_uncertainty_coverage()``
+    ///         transport, collision-estimator tallies, overlay tallies, mesh
+    ///         tallies and per-nuclide tally bins. ``model.data_uncertainty_coverage()``
     ///         lists what the evaluations cover. Default ``None``.
     ///
     /// Returns:
@@ -1121,7 +1121,7 @@ impl PyModel {
             threads,
             max_runtime: max_runtime_secs,
             data_uncertainty: data_uncertainty
-                .map(|d| transport_data_uncertainty(&d.inner))
+                .map(|d| transport_data_uncertainty(&d.inner, d.sources_given))
                 .transpose()?,
         };
         if compute == "cpu" {
@@ -1797,6 +1797,7 @@ impl PyModel {
 /// refused rather than ignored.
 fn transport_data_uncertainty(
     d: &yani_transmute::uncertainty::DataUncertainty,
+    sources_given: bool,
 ) -> PyResult<yamc::model::TransportDataUncertainty> {
     use yani_transmute::uncertainty::Source;
     if d.attribution {
@@ -1806,12 +1807,12 @@ fn transport_data_uncertainty(
     }
     // `sources=None` is every source the build implements, which for a
     // transport run is the one it can perturb. An explicit list naming
-    // anything else asks for something this run would not do.
-    let default = d.sources.as_slice() == Source::IMPLEMENTED;
+    // anything else, even every source, asks for something this run would
+    // not do.
     if let Some(other) = d
         .sources
         .iter()
-        .find(|s| !default && **s != Source::CrossSections)
+        .find(|s| sources_given && **s != Source::CrossSections)
     {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "data_uncertainty: simulate_transport perturbs cross sections only; remove \

@@ -222,15 +222,20 @@ impl ReplicaContext {
             .get_atoms_per_barn_cm()
             .map_err(|e| format!("atom densities: {e}"))?;
 
+        // Every nuclide with data, covered or not: one with no covariance
+        // perturbs nothing, but its cross section is still part of every
+        // reaction-rate score's nominal Σ_x, which the score's relative
+        // change is divided by.
+        let mut names: Vec<&String> = material.nuclides.keys().collect();
+        names.sort();
         let mut nuclides = Vec::new();
         let mut by_name = HashMap::new();
-        for (name, transport) in &fields {
-            let Some(field) = transport.field.as_ref() else {
-                continue;
-            };
+        let mut any_covered = false;
+        for name in names {
             let Some(nuclide) = material.nuclide_data.get(name) else {
                 continue;
             };
+            let transport = fields.get(name).filter(|t| t.field.is_some());
             let relative: Vec<&[f64]> = draws
                 .iter()
                 .map(|d| d.relative(name).unwrap_or(&[]))
@@ -243,7 +248,6 @@ impl ReplicaContext {
                 nuclide,
                 material.temperature(),
                 transport,
-                field,
                 &relative,
                 &absolute,
                 score_mts,
@@ -252,18 +256,18 @@ impl ReplicaContext {
             else {
                 continue;
             };
+            any_covered |= !tab.sources.is_empty();
             by_name.insert(name.clone(), nuclides.len());
             nuclides.push(tab);
         }
-        Ok((!nuclides.is_empty()).then_some(ReplicaMaterial { nuclides, by_name }))
+        Ok(any_covered.then_some(ReplicaMaterial { nuclides, by_name }))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn nuclide(
         nuclide: &Nuclide,
         temperature: &str,
-        transport: &TransportField,
-        field: &yani_transmute::covariance_fold::CellField,
+        transport: Option<&TransportField>,
         relative: &[&[f64]],
         absolute: &[&[f64]],
         score_mts: &BTreeSet<i32>,
@@ -295,7 +299,12 @@ impl ReplicaContext {
         let mut sources: Vec<Source> = Vec::new();
         let mut index: HashMap<i32, usize> = HashMap::new();
         let mut source_of: HashMap<i32, usize> = HashMap::new();
-        for (mt, read) in &transport.reads {
+        let no_reads = BTreeMap::new();
+        let reads = transport.map_or(&no_reads, |t| &t.reads);
+        for (mt, read) in reads {
+            let Some(field) = transport.and_then(|t| t.field.as_ref()) else {
+                break;
+            };
             let src = match read {
                 Read::Own => *mt,
                 Read::Parent(sum) => *sum,

@@ -70,7 +70,7 @@ Pick `yamc` when the neutron spectrum should come from a transport solve; pick
     supports CPU surface tracking of neutrons with track-length tallies, and
     refuses, with the reason, GPU, MPI, delta tracking, survival biasing,
     weight windows, photon transport, collision-estimator tallies, overlay
-    tallies and per-nuclide bins.
+    tallies, mesh tallies and per-nuclide bins.
   - `simulate_transmutation(method="independent", data_uncertainty=...)` gives
     a standard deviation on inventories, activity and decay heat. Its flux is
     transported once, so it does not respond to a perturbed cross section, and

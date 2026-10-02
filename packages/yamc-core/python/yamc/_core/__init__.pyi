@@ -2667,8 +2667,8 @@ class Model:
                 ``attribution`` is not supported. Not yet supported, and refused with the reason:
                 ``compute='gpu'``, MPI, ``tracking_mode`` other than
                 ``'surface'``, survival biasing, weight windows, photon
-                transport, collision-estimator tallies, overlay tallies and
-                per-nuclide tally bins. ``model.data_uncertainty_coverage()``
+                transport, collision-estimator tallies, overlay tallies, mesh
+                tallies and per-nuclide tally bins. ``model.data_uncertainty_coverage()``
                 lists what the evaluations cover. Default ``None``.
         
         Returns:

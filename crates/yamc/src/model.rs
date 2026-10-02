@@ -1819,6 +1819,22 @@ impl Model {
             .as_ref()
             .map(|p| p.current_num_threads())
             .unwrap_or_else(rayon::current_num_threads);
+        // Replica sums cost `(2R + 2)` doubles per bin per worker. Refuse a run
+        // that would not fit rather than let it fail allocating mid-setup.
+        if let Some(data) = &settings.data_uncertainty {
+            let bins: usize = welford_tally_num_bins.iter().sum();
+            let bytes = bins as f64 * (2 * data.replicas + 2) as f64 * 8.0 * n_rayon_threads as f64;
+            const LIMIT: f64 = 8.0 * 1024.0 * 1024.0 * 1024.0;
+            if bytes > LIMIT {
+                return Err(format!(
+                    "data_uncertainty would keep {:.1} GiB of replica sums ({bins} tally bins x \
+                     {} replicas x {n_rayon_threads} threads); reduce samples, threads or the \
+                     number of tally bins",
+                    bytes / 1024f64.powi(3),
+                    data.replicas
+                ));
+            }
+        }
         let welford_workers: Vec<parking_lot::Mutex<yamc_tallies::welford::WelfordWorkerState>> =
             (0..n_rayon_threads)
                 .map(|_| {

@@ -57,6 +57,34 @@ fn iron(dir: &std::path::Path) -> Material {
     m
 }
 
+/// Fe56 with an equal share of Fe57, whose fixture carries no covariance:
+/// Fe57 perturbs nothing but is still part of every reaction rate.
+fn mixed_iron(dir: &std::path::Path) -> Option<Material> {
+    let fe57 = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/Fe57.arrow");
+    if !fe57.join("reactions.arrow").is_file() || fe57.join("covariance.arrow").is_file() {
+        return None;
+    }
+    let mut m = Material::new(
+        HashMap::from([("Fe56".to_string(), 0.5), ("Fe57".to_string(), 0.5)]),
+        "atom",
+        "g/cm3",
+        Some(7.87),
+    )
+    .expect("material");
+    m.set_material_id(1);
+    m.set_temperature("294");
+    m.read_nuclear_data(
+        &HashMap::from([
+            ("Fe56".to_string(), dir.to_string_lossy().into_owned()),
+            ("Fe57".to_string(), fe57.to_string_lossy().into_owned()),
+        ]),
+        None,
+    )
+    .expect("read iron");
+    m.ensure_covariance_loaded().expect("read covariance");
+    Some(m)
+}
+
 fn tally(score: &str) -> Arc<Tally> {
     let mut t = Tally::new();
     t.filters.push(Filter::Cell(CellFilter::from_id(1)));
@@ -200,6 +228,41 @@ fn each_replica_matches_its_rerun_on_a_thin_target() {
     }
 }
 
+/// A nuclide with no covariance perturbs nothing, but its capture is part
+/// of the material's: each replica's capture rate on a mixed target must
+/// still match its rerun, the uncovered share diluting the change.
+#[test]
+fn a_nuclide_without_covariance_still_dilutes_the_rate_it_shares() {
+    let Some(dir) = fixture() else {
+        eprintln!("skipping: Fe56 fixture carries no covariance");
+        return;
+    };
+    let Some(m) = mixed_iron(&dir) else {
+        eprintln!("skipping: needs an Fe57 fixture without covariance");
+        return;
+    };
+    let replicas = 3;
+    let weighted = run(
+        m.clone(),
+        0.2,
+        0.0253,
+        20_000,
+        7,
+        Some(TransportDataUncertainty {
+            seed: SEED,
+            replicas,
+        }),
+    );
+    for k in 0..replicas {
+        let (x, _) = replica(&weighted[1], k);
+        let y = run(rerun_material(&m, k as u64), 0.2, 0.0253, 20_000, 7, None)[1].get_mean()[0];
+        assert!(
+            (x / y - 1.0).abs() < 2e-3,
+            "replica {k}: weighted capture {x:e}, rerun {y:e}"
+        );
+    }
+}
+
 /// On a thick sphere the flux responds to the cross sections through every
 /// flight and collision, and each replica's flux and capture rate must match
 /// an independent rerun within Monte Carlo error: this checks the flight and
@@ -287,4 +350,25 @@ fn modes_the_weights_do_not_carry_yet_are_refused() {
         })
         .expect_err("delta tracking is refused");
     assert!(err.contains("delta tracking"), "{err}");
+
+    model.tracking_mode = TrackingMode::Surface;
+    let mut mesh = Tally::new();
+    mesh.filters
+        .push(Filter::Mesh(yamc_tallies::filter::mesh::MeshFilter::new(
+            yamc_tallies::mesh::RegularRectangularMesh::new([-1.0; 3], [1.0; 3], [2, 2, 2]),
+        )));
+    mesh.scores = vec!["flux".parse::<Score>().unwrap()];
+    mesh.initialize_batches(1);
+    model.tallies = vec![Arc::new(mesh)];
+    let err = model
+        .simulate_transport(&TransportSettings {
+            total_particles: Some(10),
+            data_uncertainty: Some(TransportDataUncertainty {
+                seed: 1,
+                replicas: 4,
+            }),
+            ..Default::default()
+        })
+        .expect_err("a mesh tally is refused");
+    assert!(err.contains("mesh tallies"), "{err}");
 }

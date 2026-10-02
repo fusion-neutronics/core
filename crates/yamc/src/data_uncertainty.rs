@@ -213,6 +213,15 @@ impl Model {
             if !tally.nuclides.is_empty() {
                 return refuse(&format!("per-nuclide tally bins (tally '{name}')"));
             }
+            // A mesh splits one flight across voxels, and each voxel's replica
+            // factor is the likelihood ratio integrated over its own part of
+            // the flight, which the per-segment factor does not resolve.
+            if tally.filters.iter().any(|f| {
+                matches!(f, yamc_tallies::filter::Filter::Mesh(_))
+                    || f.type_name().to_lowercase().contains("mesh")
+            }) {
+                return refuse(&format!("mesh tallies (tally '{name}')"));
+            }
         }
         Ok(())
     }
