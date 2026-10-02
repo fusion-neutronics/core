@@ -786,6 +786,7 @@ impl WasmSimulation {
             // Single-threaded: rayon thread pools aren't available on wasm.
             threads: Some(1),
             max_runtime: None,
+            data_uncertainty: None,
         };
 
         // Captured before the &mut borrow of `geometry` below. Photon data
