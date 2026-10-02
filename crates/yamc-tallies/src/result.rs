@@ -12,7 +12,7 @@
 //!
 //! The shape/dim-labels logic appends dimensions in a canonical order:
 //!
-//!   score → nuclide → parent_nuclide → energy → mesh_z → mesh_y → mesh_x
+//!   score → cell → material → nuclide → parent_nuclide → energy → mesh_z → mesh_y → mesh_x
 //!
 //! A dimension only appears if it has more than one bin (or, for mesh, if a
 //! mesh filter is present). The flat arrays (mean, std-dev, etc.) are laid
@@ -570,7 +570,9 @@ fn is_roughly_constant(v: &[f64]) -> bool {
 /// is always included and mesh which is included whenever a mesh filter is
 /// present):
 ///
-///   score → nuclide → parent_nuclide → energy → mesh_z → mesh_y → mesh_x
+///   score → cell → material → nuclide → parent_nuclide → energy → mesh_z → mesh_y → mesh_x
+///
+/// This must match the flat bin layout of `Tally::get_bin_index_7d`.
 pub(crate) fn compute_shape_and_dims(tally: &Tally) -> (Vec<usize>, Vec<String>) {
     let mut shape = Vec::with_capacity(8);
     let mut dims: Vec<String> = Vec::with_capacity(8);
@@ -578,6 +580,20 @@ pub(crate) fn compute_shape_and_dims(tally: &Tally) -> (Vec<usize>, Vec<String>)
     // Score dimension is always present.
     shape.push(tally.scores.len());
     dims.push("score".to_string());
+
+    // Cell dimension only when the filter has >1 bins.
+    let n_cell = tally.num_cell_bins();
+    if n_cell > 1 {
+        shape.push(n_cell);
+        dims.push("cell".to_string());
+    }
+
+    // Material dimension only when the filter has >1 bins.
+    let n_material = tally.num_material_bins();
+    if n_material > 1 {
+        shape.push(n_material);
+        dims.push("material".to_string());
+    }
 
     // Nuclide dimension only when nuclides list is non-empty.
     if !tally.nuclides.is_empty() {
@@ -672,6 +688,34 @@ mod tests {
 
         // Config back-reference should point at the same Arc.
         assert!(Arc::ptr_eq(&result.tally, &tally));
+    }
+
+    /// Multi-bin cell and material filters each add a dimension, in the
+    /// same order as the flat bin layout, so `shape` covers every bin.
+    #[test]
+    fn shape_includes_cell_and_material_dims() {
+        use crate::filter::Filter;
+        use crate::{CellFilter, EnergyFilter, MaterialFilter};
+
+        let mut tally = Tally::new();
+        tally.scores = vec![Score::Flux(FluxScore)];
+        tally.filters = vec![
+            Filter::Cell(CellFilter::from_ids(vec![1, 2, 3])),
+            Filter::Material(MaterialFilter {
+                material_ids: vec![10, 20],
+            }),
+            Filter::Energy(EnergyFilter::new(vec![0.0, 1e6, 2e7])),
+        ];
+        tally.initialize_batches(1);
+        let tally = Arc::new(tally);
+        let result = tally.finalize();
+
+        assert_eq!(result.shape, vec![1, 3, 2, 2]);
+        assert_eq!(
+            result.dim_labels,
+            vec!["score", "cell", "material", "energy"]
+        );
+        assert_eq!(result.shape.iter().product::<usize>(), result.mean.len());
     }
 
     /// `with_fom(elapsed)` populates `figure_of_merit` per bin to
