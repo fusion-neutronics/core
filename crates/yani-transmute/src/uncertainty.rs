@@ -410,9 +410,14 @@ pub struct Info {
     /// Cross-section rate draws made, one per perturbed channel per spectrum
     /// per replica.
     ///
-    /// Each draw is a lognormal multiplier matched to the channel's mean and
-    /// variance, so none can go negative and there is no floor to count.
+    /// Each is read off one draw of the nuclide's cross sections, whose
+    /// relative cells are lognormal multipliers, so a channel reading only
+    /// those with positive coefficients cannot go negative.
     pub rates_sampled: usize,
+    /// Cross-section rate draws that came out negative and were floored at
+    /// zero: a channel that subtracts reactions (an NC derivation), or reads
+    /// an absolute or short-range shift, which is additive.
+    pub rates_floored: usize,
     /// Spectra that carried a per-bin flux sigma, and those that did not.
     ///
     /// A spectrum taken from a published reference set has no stated error, so

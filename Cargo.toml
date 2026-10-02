@@ -48,3 +48,13 @@ panic = "unwind"
 # numerical bug tends to sit in.
 [profile.dev]
 debug = "line-tables-only"
+
+# The nuclear-data uncertainty sampler factorizes each nuclide's covariance
+# field once per run, an O(n³) eigendecomposition on a few hundred to over a
+# thousand cells (ENDF/B-VIII.1 O16 has 1255). Unoptimized, one such
+# factorization takes about a minute, which turned two `yani-transmute` test
+# binaries from seconds into over a minute each under `cargo test`. Optimizing
+# this one crate keeps those tests near release speed and leaves every other
+# crate's debug build as it was.
+[profile.dev.package.yani-transmute]
+opt-level = 2
