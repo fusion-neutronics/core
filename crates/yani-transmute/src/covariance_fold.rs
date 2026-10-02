@@ -2484,6 +2484,498 @@ pub fn fold_rate_covariance(
     (out, coverage)
 }
 
+/// One spectrum of a schedule, as [`cell_fields`] reads it: the chain it was
+/// collapsed with (which fixes each nuclide's channels and their order), its
+/// unit-flux rates and its group fluxes.
+pub struct FoldSpectrum<'a> {
+    pub chain: &'a std::collections::HashMap<String, ChainNuclide>,
+    pub rates: &'a ReactionRates,
+    pub multigroup_flux: &'a [f64],
+    pub group_boundaries: &'a [f64],
+}
+
+/// One cell of a nuclide's cross-section field: reaction `mt` over
+/// `[lo, hi]` eV, an interval of the union of every covariance grid that
+/// reaction appears on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Cell {
+    pub mt: i32,
+    pub lo: f64,
+    pub hi: f64,
+}
+
+/// One short-range (`lb = 8`) self-covariance block: a variance `F_k` on
+/// each interval `[edges[k], edges[k + 1]]`, with nothing correlating two
+/// averages inside one interval (ENDF-102 section 33.2.2.2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShortRange {
+    /// The block's identity within the evaluation, `(mt, subsection,
+    /// block)`, which keys its noise so it does not move when other blocks
+    /// come or go.
+    pub key: (i32, i32, i32),
+    pub mt: i32,
+    pub edges: Vec<f64>,
+    /// `F_k`, in barn^2.
+    pub variance: Vec<f64>,
+}
+
+/// One channel's view of one short-range interval under one spectrum: the
+/// interval's part inside the term's range and the flux range, cut at the
+/// spectrum's group boundaries, and per piece the weight that turns the
+/// noise's integral over the piece into a rate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShortTerm {
+    /// Index into [`CellField::short`].
+    pub block: usize,
+    pub interval: usize,
+    /// Ascending piece edges, in eV.
+    pub cuts: Vec<f64>,
+    /// Per piece, `c · 1e-24 · ψ_j`: the term's coefficient times the flux
+    /// density flat over the piece, in cm^2 n/cm^2/s/eV per barn-eV.
+    pub weight: Vec<f64>,
+}
+
+/// How one spectrum's rates read a nuclide's cross-section field.
+///
+/// A perturbed cross section `σ'(E)` changes channel `i`'s rate by exactly
+///
+/// ```text
+/// R'_i - R_i = Σ_k p_ik (m_k - 1) + Σ_k q_ik a_k + Σ_terms Σ_j w_j ΔB_j
+/// ```
+///
+/// with `m_k` the multiplier on relative cell `k`, `a_k` the shift in barns
+/// on absolute cell `k`, and `ΔB_j` the short-range noise integrated over
+/// piece `j`. Nothing in that is linearized: a reaction rate is linear in the
+/// cross section, and every perturbation here is constant on its cell.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Projection {
+    /// The spectrum's channels for this nuclide, in the fold's order.
+    pub kinds: Vec<String>,
+    /// The full rate of each channel, the denominator the fold divides by.
+    pub rates: Vec<f64>,
+    /// Row-major `kinds × relative_cells`: `p_ik`, the term-weighted partial
+    /// rate of channel `i` over cell `k`, in 1/s.
+    pub relative: Vec<f64>,
+    /// Row-major `kinds × absolute_cells`: `q_ik`, the term-weighted partial
+    /// flux times 1e-24, in cm^2/barn n/cm^2/s.
+    pub absolute: Vec<f64>,
+    /// Per channel, its short-range terms.
+    pub short: Vec<Vec<ShortTerm>>,
+}
+
+/// One nuclide's cross-section uncertainty as a field over its covariance
+/// cells, independent of any spectrum, with how each spectrum reads it.
+///
+/// The fold contracts each block against one spectrum's partials. This keeps
+/// the blocks uncontracted instead, every block refined onto the union of its
+/// reactions' grids, which is exact because MF=33 covariance is constant on
+/// each interval of its own grid. A draw of the field is then one draw of the
+/// cross sections themselves, and every spectrum, step and material reads
+/// its rates off the same draw. Within a spectrum the rates' covariance is
+/// [`fold_rate_covariance`]'s, and between two spectra it is the same
+/// contraction with each side's own partials.
+///
+/// The cells are the union over every reaction the full chain's channels
+/// reach through this evaluation, not only those one spectrum's pruned chain
+/// reaches, so the field, and with it a replica's draw, is the same whichever
+/// spectra and materials read it. Blocks are consumed under exactly
+/// [`fold_nuclide`]'s rules.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CellField {
+    pub relative_cells: Vec<Cell>,
+    /// Row-major relative covariance over `relative_cells`.
+    pub relative: Vec<f64>,
+    pub absolute_cells: Vec<Cell>,
+    /// Row-major absolute covariance over `absolute_cells`, in barn^2.
+    pub absolute: Vec<f64>,
+    pub short: Vec<ShortRange>,
+    /// Per spectrum, in order, or `None` where that spectrum has no rates or
+    /// no channels for this nuclide.
+    pub projections: Vec<Option<Projection>>,
+}
+
+/// Every nuclide's [`CellField`], for the spectra of one schedule.
+///
+/// `chain` is the full chain, whose channels fix the cells; each spectrum's
+/// own (possibly pruned) chain fixes only which channels it reads. A nuclide
+/// with no covariance data, or none the channels reach, is left out, as the
+/// fold leaves it out.
+pub fn cell_fields(
+    material: &Material,
+    chain: &std::collections::HashMap<String, ChainNuclide>,
+    spectra: &[FoldSpectrum],
+    shielding: Option<&Shielding>,
+) -> BTreeMap<String, CellField> {
+    let shapes: Vec<Option<CollapseShapes>> = spectra
+        .iter()
+        .map(|s| {
+            let valid = !s.multigroup_flux.is_empty()
+                && s.group_boundaries.len() == s.multigroup_flux.len() + 1;
+            if valid {
+                CollapseShapes::new(material, s.multigroup_flux, s.group_boundaries, shielding)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let names: BTreeSet<&String> = spectra.iter().flat_map(|s| s.rates.keys()).collect();
+    let names: Vec<&String> = names.into_iter().collect();
+
+    let one = |name: &&String| -> Option<(String, CellField)> {
+        let full = chain.get(*name)?;
+        let nuclide_data = material.nuclide_data.get(*name)?;
+        let blocks = nuclide_data.covariance.as_ref()?;
+        let temperature = if material.temperature().is_empty() {
+            crate::default_temperature(nuclide_data)?
+        } else {
+            material.temperature().to_string()
+        };
+        let by_mt = nuclide_data.reactions_for_temp(&temperature)?;
+        let reactions: BTreeMap<i32, &Reaction> =
+            by_mt.iter().map(|(mt, r)| (*mt, r.as_ref())).collect();
+        let field = nuclide_field(name, full, blocks, &reactions, spectra, &shapes)?;
+        Some(((*name).clone(), field))
+    };
+
+    let fields: Vec<Option<(String, CellField)>> = {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use rayon::prelude::*;
+            names.par_iter().map(one).collect()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            names.iter().map(one).collect()
+        }
+    };
+    fields.into_iter().flatten().collect()
+}
+
+/// [`cell_fields`] for one nuclide.
+#[allow(clippy::too_many_arguments)]
+fn nuclide_field(
+    name: &str,
+    full: &ChainNuclide,
+    blocks: &[CovarianceBlock],
+    reactions: &BTreeMap<i32, &Reaction>,
+    spectra: &[FoldSpectrum],
+    shapes: &[Option<CollapseShapes>],
+) -> Option<CellField> {
+    let blocks = single_component_lumps(blocks);
+    let blocks = blocks.as_ref();
+    let sums = lump_cross_sections(blocks, reactions);
+    let mut reactions = reactions.clone();
+    reactions.extend(sums.iter().map(|r| (r.mt_number, r)));
+    let reactions = &reactions;
+
+    // The cells come from the full chain's channels, so they do not depend
+    // on which spectra read them.
+    let full_kinds = kinds_and_mts(full);
+    let reached: BTreeSet<i32> = channel_terms(blocks, reactions, &full_kinds)
+        .terms
+        .iter()
+        .map(|t| t.mt)
+        .collect();
+    if reached.is_empty() {
+        return None;
+    }
+    let mut skipped_copy: BTreeSet<(i32, i32)> = BTreeSet::new();
+    for (lo, hi) in mirrored_pairs(blocks, &reached) {
+        if orientation_expands(blocks, lo, hi) || !orientation_expands(blocks, hi, lo) {
+            skipped_copy.insert((hi, lo));
+        } else {
+            skipped_copy.insert((lo, hi));
+        }
+    }
+
+    // The blocks the fold consumes, by its rules.
+    let mut consumed: Vec<(&CovarianceBlock, ExpandedBlock)> = Vec::new();
+    for block in blocks {
+        if block.is_cross_material() || !block.names_cross_section() {
+            continue;
+        }
+        let CovarianceData::Ni(ni) = &block.data else {
+            continue;
+        };
+        let (row_mt, col_mt) = (block.mt, block.partner_mt());
+        if !reached.contains(&row_mt)
+            || !reached.contains(&col_mt)
+            || skipped_copy.contains(&(row_mt, col_mt))
+        {
+            continue;
+        }
+        let Ok(expanded) = expand_ni(ni) else {
+            continue;
+        };
+        if expanded.is_empty() || (expanded.scale == Scale::ShortRange && row_mt != col_mt) {
+            continue;
+        }
+        consumed.push((block, expanded));
+    }
+    if consumed.is_empty() {
+        return None;
+    }
+
+    // Per (reaction, scale), the union of every grid it appears on.
+    let mut edges: BTreeMap<(i32, bool), Vec<f64>> = BTreeMap::new();
+    let mut short: Vec<ShortRange> = Vec::new();
+    for (block, expanded) in &consumed {
+        let absolute = match expanded.scale {
+            Scale::Relative => false,
+            Scale::Absolute => true,
+            Scale::ShortRange => {
+                short.push(ShortRange {
+                    key: block_key(block),
+                    mt: block.mt,
+                    edges: expanded.row_energies.clone(),
+                    variance: (0..expanded.n_rows()).map(|k| expanded.get(k, k)).collect(),
+                });
+                continue;
+            }
+        };
+        let (row_mt, col_mt) = (block.mt, block.partner_mt());
+        edges
+            .entry((row_mt, absolute))
+            .or_default()
+            .extend_from_slice(&expanded.row_energies);
+        edges
+            .entry((col_mt, absolute))
+            .or_default()
+            .extend_from_slice(&expanded.col_energies);
+    }
+    let mut grids: BTreeMap<(i32, bool), Vec<f64>> = BTreeMap::new();
+    for (key, mut e) in edges {
+        e.sort_by(f64::total_cmp);
+        e.dedup();
+        if e.len() >= 2 {
+            grids.insert(key, e);
+        }
+    }
+
+    // Cells per scale, in (mt, energy) order, and each grid's offset.
+    let mut cells: [Vec<Cell>; 2] = [Vec::new(), Vec::new()];
+    let mut offset: BTreeMap<(i32, bool), usize> = BTreeMap::new();
+    for (&(mt, absolute), grid) in &grids {
+        let list = &mut cells[usize::from(absolute)];
+        offset.insert((mt, absolute), list.len());
+        list.extend(grid.windows(2).map(|w| Cell {
+            mt,
+            lo: w[0],
+            hi: w[1],
+        }));
+    }
+
+    // Each block refined onto the cells: a cell inside interval `i` of the
+    // block's row grid and one inside interval `j` of its column grid covary
+    // by the block's (i, j). A block between two reactions fills both
+    // orientations, as the fold's `rᵀ C r'` is both covariances.
+    let mut covariance: [Vec<f64>; 2] = [
+        vec![0.0; cells[0].len() * cells[0].len()],
+        vec![0.0; cells[1].len() * cells[1].len()],
+    ];
+    for (block, expanded) in &consumed {
+        let absolute = match expanded.scale {
+            Scale::Relative => false,
+            Scale::Absolute => true,
+            Scale::ShortRange => continue,
+        };
+        let s = usize::from(absolute);
+        let n = cells[s].len();
+        let (row_mt, col_mt) = (block.mt, block.partner_mt());
+        let (row_grid, col_grid) = (&grids[&(row_mt, absolute)], &grids[&(col_mt, absolute)]);
+        let (row_off, col_off) = (offset[&(row_mt, absolute)], offset[&(col_mt, absolute)]);
+        let row_of: Vec<Option<usize>> = row_grid
+            .windows(2)
+            .map(|w| interval_holding(&expanded.row_energies, w[0], w[1]))
+            .collect();
+        let col_of: Vec<Option<usize>> = col_grid
+            .windows(2)
+            .map(|w| interval_holding(&expanded.col_energies, w[0], w[1]))
+            .collect();
+        for (k, i) in row_of.iter().enumerate() {
+            let Some(i) = *i else { continue };
+            if i >= expanded.n_rows() {
+                continue;
+            }
+            for (l, j) in col_of.iter().enumerate() {
+                let Some(j) = *j else { continue };
+                if j >= expanded.n_cols() {
+                    continue;
+                }
+                let v = expanded.get(i, j);
+                if v == 0.0 {
+                    continue;
+                }
+                let (a, b) = (row_off + k, col_off + l);
+                covariance[s][a * n + b] += v;
+                if row_mt != col_mt {
+                    covariance[s][b * n + a] += v;
+                }
+            }
+        }
+    }
+
+    // A cell no block states anything on carries no uncertainty, and leaving
+    // it in would only widen the factorization. Two adjacent cells of one
+    // reaction whose rows are identical are one random variable (correlation
+    // one, equal variance): the union grid split them only because some
+    // other block has an edge there that no block of theirs distinguishes.
+    // They are merged, which is exact, since their partials then multiply the
+    // same draw; on an evaluation whose channels derive from many partials,
+    // such as ENDF/B-VIII.1 O16, it shrinks the factorization several-fold.
+    let mut groups: [Vec<Vec<usize>>; 2] = [Vec::new(), Vec::new()];
+    for s in 0..2 {
+        let n = cells[s].len();
+        let row = |a: usize| &covariance[s][a * n..(a + 1) * n];
+        for a in (0..n).filter(|&a| row(a).iter().any(|v| *v != 0.0)) {
+            let joins = groups[s].last().is_some_and(|g: &Vec<usize>| {
+                let prev = *g.last().expect("a group is never empty");
+                cells[s][prev].mt == cells[s][a].mt
+                    && cells[s][prev].hi == cells[s][a].lo
+                    && row(g[0]) == row(a)
+            });
+            if joins {
+                groups[s].last_mut().expect("checked").push(a);
+            } else {
+                groups[s].push(vec![a]);
+            }
+        }
+    }
+    let index: [BTreeMap<usize, usize>; 2] = [0, 1].map(|s| {
+        groups[s]
+            .iter()
+            .enumerate()
+            .flat_map(|(new, g)| g.iter().map(move |&old| (old, new)))
+            .collect()
+    });
+    let compact = |s: usize| -> (Vec<Cell>, Vec<f64>) {
+        let n = cells[s].len();
+        let m = groups[s].len();
+        let mut c = vec![0.0; m * m];
+        for (a, ga) in groups[s].iter().enumerate() {
+            for (b, gb) in groups[s].iter().enumerate() {
+                c[a * m + b] = covariance[s][ga[0] * n + gb[0]];
+            }
+        }
+        let merged = groups[s]
+            .iter()
+            .map(|g| Cell {
+                mt: cells[s][g[0]].mt,
+                lo: cells[s][g[0]].lo,
+                hi: cells[s][*g.last().expect("a group is never empty")].hi,
+            })
+            .collect();
+        (merged, c)
+    };
+    // A nuclide whose blocks state nothing but zeros keeps a field with no
+    // cells, as the fold keeps its zero matrix: it was covered, and every
+    // replica reads it at nominal, which is not the same as having no data.
+    let (relative_cells, relative) = compact(0);
+    let (absolute_cells, absolute) = compact(1);
+
+    let projections = spectra
+        .iter()
+        .zip(shapes)
+        .map(|(spectrum, shapes)| {
+            let kinds = kinds_and_mts(spectrum.chain.get(name)?);
+            let nuclide_rates = spectrum.rates.get(name)?;
+            if kinds.is_empty()
+                || spectrum.multigroup_flux.is_empty()
+                || spectrum.group_boundaries.len() != spectrum.multigroup_flux.len() + 1
+            {
+                return None;
+            }
+            let shape = shapes.as_ref().and_then(|s| s.shape_for(name));
+            let flux = FluxDensity {
+                boundaries: spectrum.group_boundaries,
+                flux: spectrum.multigroup_flux,
+                shape: shape.as_ref(),
+            };
+            let (flux_lo, flux_hi) = (
+                spectrum.group_boundaries[0],
+                spectrum.group_boundaries[spectrum.group_boundaries.len() - 1],
+            );
+            let n = kinds.len();
+            let (nr, na) = (relative_cells.len(), absolute_cells.len());
+            let mut projection = Projection {
+                kinds: kinds.iter().map(|(k, _)| k.clone()).collect(),
+                rates: kinds
+                    .iter()
+                    .map(|(k, _)| nuclide_rates.get(k).copied().unwrap_or(0.0))
+                    .collect(),
+                relative: vec![0.0; n * nr],
+                absolute: vec![0.0; n * na],
+                short: vec![Vec::new(); n],
+            };
+            for t in channel_terms(blocks, reactions, &kinds).terms {
+                let rx = reactions[&t.mt];
+                for (s, scale, out, width) in [
+                    (0usize, Scale::Relative, &mut projection.relative, nr),
+                    (1usize, Scale::Absolute, &mut projection.absolute, na),
+                ] {
+                    let absolute = s == 1;
+                    let Some(grid) = grids.get(&(t.mt, absolute)) else {
+                        continue;
+                    };
+                    let base = offset[&(t.mt, absolute)];
+                    let partials = partial_rates_within(&flux, rx, grid, scale, t.range);
+                    for (k, p) in partials.per_interval.iter().enumerate() {
+                        if let Some(&cell) = index[s].get(&(base + k)) {
+                            out[t.channel * width + cell] += t.coefficient * p;
+                        }
+                    }
+                }
+                for (b, block) in short.iter().enumerate() {
+                    if block.mt != t.mt {
+                        continue;
+                    }
+                    for (k, w) in block.edges.windows(2).enumerate() {
+                        if k >= block.variance.len() || block.variance[k] == 0.0 {
+                            continue;
+                        }
+                        let lo = w[0].max(t.range.0).max(flux_lo);
+                        let hi = w[1].min(t.range.1).min(flux_hi);
+                        if lo >= hi {
+                            continue;
+                        }
+                        let mut cuts = vec![lo];
+                        cuts.extend(
+                            spectrum
+                                .group_boundaries
+                                .iter()
+                                .copied()
+                                .filter(|&e| e > lo && e < hi),
+                        );
+                        cuts.push(hi);
+                        let weight = flux
+                            .flux_over(rx, &cuts)
+                            .iter()
+                            .zip(cuts.windows(2))
+                            .map(|(phi, c)| t.coefficient * BARN_TO_CM2 * phi / (c[1] - c[0]))
+                            .collect();
+                        projection.short[t.channel].push(ShortTerm {
+                            block: b,
+                            interval: k,
+                            cuts,
+                            weight,
+                        });
+                    }
+                }
+            }
+            Some(projection)
+        })
+        .collect();
+
+    Some(CellField {
+        relative_cells,
+        relative,
+        absolute_cells,
+        absolute,
+        short,
+        projections,
+    })
+}
+
 #[cfg(test)]
 mod coverage_total_tests {
     use super::*;
