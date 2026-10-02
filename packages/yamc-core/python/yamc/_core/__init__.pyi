@@ -2592,7 +2592,7 @@ class Model:
         Examples:
             >>> model = yamc.Model.load("blanket_v3.json")
         """
-    def simulate_transport(self, total_particles: typing.Optional[builtins.int] = None, seed: builtins.int = 1, threads: typing.Optional[builtins.int] = None, capture_tracks: typing.Optional[typing.Any] = None, compute: builtins.str = 'cpu', max_runtime: typing.Optional[typing.Any] = None) -> SimulationResults:
+    def simulate_transport(self, total_particles: typing.Optional[builtins.int] = None, seed: builtins.int = 1, threads: typing.Optional[builtins.int] = None, capture_tracks: typing.Optional[typing.Any] = None, compute: builtins.str = 'cpu', max_runtime: typing.Optional[typing.Any] = None, data_uncertainty: typing.Optional[DataUncertainty] = None) -> SimulationResults:
         r"""
         Run the Monte Carlo simulation.
         
@@ -2655,6 +2655,21 @@ class Model:
                 moments. A
                 time-bounded run is non-deterministic in history count, but the
                 results are statistically valid for the histories completed.
+            data_uncertainty: Nuclear-data uncertainty on every tally, as a
+                ``DataUncertainty``. Each history is transported once and
+                carries one weight per cross-section replica (``samples``, 32
+                when not set), drawn from the evaluations' covariance with
+                ``seed``, so no extra particles are run and ``mean`` stays the
+                nominal result, bit for bit. Each ``TallyResult`` then carries
+                ``nuclear_data_standard_deviation``, ``replica_mean`` and
+                ``replica_standard_error``. Cross sections only: leave
+                ``sources`` unset or pass ``["cross_sections"]``, and
+                ``attribution`` is not supported. Not yet supported, and refused with the reason:
+                ``compute='gpu'``, MPI, ``tracking_mode`` other than
+                ``'surface'``, survival biasing, weight windows, photon
+                transport, collision-estimator tallies, overlay tallies, mesh
+                tallies and per-nuclide tally bins. ``model.data_uncertainty_coverage()``
+                lists what the evaluations cover. Default ``None``.
         
         Returns:
             ``SimulationResults`` containing finalized ``TallyResult``s for
@@ -4646,6 +4661,43 @@ class TallyResult:
     def relative_error(self) -> builtins.list[builtins.float]:
         r"""
         Relative error (std_dev / mean) per bin.
+        """
+    @property
+    def nuclear_data_standard_deviation(self) -> typing.Optional[builtins.list[builtins.float]]:
+        r"""
+        Nuclear-data standard deviation per bin, when the run was given
+        ``data_uncertainty``; ``None`` otherwise.
+        
+        The spread of the cross-section replicas, with the Monte Carlo noise
+        of the histories they share deconvolved. A bin where that noise is
+        larger than the spread reads zero and is flagged in
+        ``nuclear_data_variance_negative``: the replicas do not resolve it, and
+        more particles would. Compare with ``replica_standard_error``.
+        """
+    @property
+    def nuclear_data_variance_negative(self) -> typing.Optional[builtins.list[builtins.bool]]:
+        r"""
+        Per bin, whether the deconvolved nuclear-data variance came out
+        negative (the replicas' noise swamps their spread), when the run was
+        given ``data_uncertainty``; ``None`` otherwise.
+        """
+    @property
+    def replica_mean(self) -> typing.Optional[builtins.list[builtins.float]]:
+        r"""
+        Average of the cross-section replicas' means per bin, when the run was
+        given ``data_uncertainty``; ``None`` otherwise.
+        
+        ``mean`` stays the nominal result. The two differ where the score
+        responds nonlinearly to the cross sections, such as attenuation
+        through a thick shield.
+        """
+    @property
+    def replica_standard_error(self) -> typing.Optional[builtins.list[builtins.float]]:
+        r"""
+        Monte Carlo standard error of one replica's mean per bin, averaged over
+        replicas, when the run was given ``data_uncertainty``; ``None``
+        otherwise. Much larger than ``nuclear_data_standard_deviation`` means
+        the nuclear-data spread is not resolved.
         """
     @property
     def variance(self) -> builtins.list[builtins.float]:

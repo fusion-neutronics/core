@@ -1720,6 +1720,8 @@ fn install_grouped_stats(
             // No per-history state on the GPU; a tally asking for its
             // covariance is refused before dispatch.
             comoment: None,
+            // Nor replica weights: a nuclear-data run is refused on the GPU.
+            replicas: None,
         });
         t += n_scores;
         group += 1;

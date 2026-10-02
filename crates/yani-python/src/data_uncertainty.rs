@@ -139,6 +139,11 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 #[derive(Clone)]
 pub struct PyDataUncertainty {
     pub inner: DataUncertainty,
+    /// Whether `sources` was given, rather than left to mean every source
+    /// the build implements. A caller that perturbs only some sources (a
+    /// transport run perturbs cross sections) refuses an explicit request for
+    /// the others but takes the default as everything it can do.
+    pub sources_given: bool,
 }
 
 #[gen_stub_pymethods]
@@ -158,6 +163,7 @@ impl PyDataUncertainty {
                  choose when the standard deviations have settled",
             ));
         }
+        let sources_given = sources.is_some();
         let sources = match sources {
             None => Source::IMPLEMENTED.to_vec(),
             Some(names) => {
@@ -180,6 +186,7 @@ impl PyDataUncertainty {
                 sources,
                 attribution,
             },
+            sources_given,
         })
     }
 

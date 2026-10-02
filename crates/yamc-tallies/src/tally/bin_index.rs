@@ -1,6 +1,15 @@
 use super::*;
 
 impl Tally {
+    /// The score a flat bin index belongs to. Score is the outermost
+    /// dimension of [`Tally::get_bin_index_7d`], so this is the bin over the
+    /// number of bins per score.
+    #[inline]
+    pub fn score_index_of_bin(&self, bin: usize) -> usize {
+        let per_score = (self.num_bins() / self.scores.len().max(1)).max(1);
+        bin / per_score
+    }
+
     /// Get the flat index for 7D indexing:
     /// `score → cell → material → nuclide → parent_nuclide → energy → mesh`
     ///

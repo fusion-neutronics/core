@@ -338,6 +338,24 @@ pub struct TransportSettings {
     /// moments to root, folds them and broadcasts one decision bit.
     /// Default: None.
     pub max_runtime: Option<f64>,
+    /// Nuclear-data uncertainty on every tally, by correlated replica weights
+    /// (see [`TransportDataUncertainty`]). `None` runs exactly as before.
+    /// Default: None.
+    pub data_uncertainty: Option<TransportDataUncertainty>,
+}
+
+/// Nuclear-data uncertainty for one transport run.
+///
+/// Each history carries `replicas` weight ratios, one per draw of the
+/// evaluations' cross-section covariance from the counter streams seeded by
+/// `seed`, and every tally keeps per-replica sums beside its nominal ones. The
+/// nominal tally is unchanged, bit for bit; the nuclear-data standard
+/// deviation and the replica mean come from the sums (see
+/// `yamc_tallies::TallyResult::nuclear_data_standard_deviation`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransportDataUncertainty {
+    pub seed: u64,
+    pub replicas: usize,
 }
 
 impl Default for TransportSettings {
@@ -347,6 +365,7 @@ impl Default for TransportSettings {
             seed: 1,
             threads: None,
             max_runtime: None,
+            data_uncertainty: None,
         }
     }
 }
@@ -1559,6 +1578,17 @@ impl Model {
             println!("Running with MPI: {mpi_size} ranks");
         }
 
+        // Nuclear-data replica weights: refuse what they do not carry yet, and
+        // load covariance before the tables are prepared from the same data.
+        if let Some(data) = &settings.data_uncertainty {
+            self.validate_data_uncertainty(
+                data,
+                mpi_size.max(1) as usize,
+                transmutation_tallies.is_some(),
+            )?;
+            self.load_covariance_for_replicas()?;
+        }
+
         // An uncapped run ends only on `max_runtime` or convergence. Under MPI
         // both now stop collectively: `max_runtime` through the OR-reduced stop
         // bit below, and convergence through the gather-fold-broadcast at the
@@ -1641,6 +1671,17 @@ impl Model {
             yamc_nuclide::set_load_logging(false);
         }
         let data_load_secs = prepared?;
+
+        // The draws, tabulated per material for the transport loop.
+        let replica_ctx = match &settings.data_uncertainty {
+            Some(data) => Some(crate::transport::replica::ReplicaContext::new(
+                self.geometry.materials(),
+                &self.tallies,
+                data.replicas,
+                data.seed,
+            )?),
+            None => None,
+        };
 
         // Ensure all tallies are initialized with the correct number
         // of batches. The runtime now derives this from the tally
@@ -1778,13 +1819,36 @@ impl Model {
             .as_ref()
             .map(|p| p.current_num_threads())
             .unwrap_or_else(rayon::current_num_threads);
+        // Replica sums cost `(2R + 2)` doubles per bin per worker. Refuse a run
+        // that would not fit rather than let it fail allocating mid-setup.
+        if let Some(data) = &settings.data_uncertainty {
+            let bins: usize = welford_tally_num_bins.iter().sum();
+            let bytes = bins as f64 * (2 * data.replicas + 2) as f64 * 8.0 * n_rayon_threads as f64;
+            const LIMIT: f64 = 8.0 * 1024.0 * 1024.0 * 1024.0;
+            if bytes > LIMIT {
+                return Err(format!(
+                    "data_uncertainty would keep {:.1} GiB of replica sums ({bins} tally bins x \
+                     {} replicas x {n_rayon_threads} threads); reduce samples, threads or the \
+                     number of tally bins",
+                    bytes / 1024f64.powi(3),
+                    data.replicas
+                ));
+            }
+        }
         let welford_workers: Vec<parking_lot::Mutex<yamc_tallies::welford::WelfordWorkerState>> =
             (0..n_rayon_threads)
                 .map(|_| {
-                    parking_lot::Mutex::new(
+                    let state =
                         yamc_tallies::welford::WelfordWorkerState::new(&welford_tally_num_bins)
-                            .with_covariance(&welford_covariance),
-                    )
+                            .with_covariance(&welford_covariance);
+                    parking_lot::Mutex::new(match &settings.data_uncertainty {
+                        Some(data) => state.with_replicas(
+                            &vec![true; welford_tally_num_bins.len()],
+                            data.replicas,
+                            data.seed,
+                        ),
+                        None => state,
+                    })
                 })
                 .collect();
 
@@ -2002,6 +2066,7 @@ impl Model {
                 max_lost,
                 debug,
                 inelastic_flat_cache: &inelastic_flat_cache,
+                replica: replica_ctx.as_ref(),
             };
             let transport_ctx = &transport_ctx;
 
@@ -2191,6 +2256,12 @@ impl Model {
                                 let mut particle =
                                     self.sample_source_with(&source_selector, rng);
                                 particle.alive = true;
+                                // Every replica starts at the source with
+                                // the nominal's weight.
+                                if let Some(r) = replica_ctx.as_ref() {
+                                    particle.replica =
+                                        Some(vec![1.0; r.replicas].into_boxed_slice());
+                                }
                                 particle_bank.add_source_particle(particle.clone(), source_seed);
 
                                 // Find initial cell for source birth tracking
@@ -2724,6 +2795,9 @@ impl Model {
                                     agg: yamc_tallies::welford::AggMoments::ZERO,
                                     score_pdf: yamc_tallies::welford::ScorePdf::default(),
                                     comoment: None,
+                                    // A run with replica weights is refused
+                                    // under MPI before it starts.
+                                    replicas: None,
                                 };
                                 match &mut folded {
                                     None => folded = Some(rank_stats),

@@ -354,6 +354,7 @@ fn entry_from_result(r: &Arc<TallyResult>, run_offset: usize) -> Result<Entry, S
             agg: r.agg,
             score_pdf: r.score_pdf.clone(),
             comoment: r.comoment.clone(),
+            replicas: r.replicas.clone(),
         },
         total_count: r.total_count.clone(),
         shape: r.shape.clone(),
@@ -436,6 +437,7 @@ fn finish_entry(
         agg: entry.stats.agg,
         score_pdf: entry.stats.score_pdf,
         comoment: entry.stats.comoment,
+        replicas: entry.stats.replicas,
         // Per-run series is not merged across combine_results.
         convergence_history: Vec::new(),
         shape: entry.shape,
@@ -496,6 +498,7 @@ mod tests {
             agg: crate::welford::AggMoments::ZERO,
             score_pdf: crate::welford::ScorePdf::default(),
             comoment: None,
+            replicas: None,
             convergence_history: Vec::new(),
             shape: vec![1],
             dim_labels: vec!["score".into()],

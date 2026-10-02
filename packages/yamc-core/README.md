@@ -62,12 +62,18 @@ Pick `yamc` when the neutron spectrum should come from a transport solve; pick
 - Fixed-source transport only. No criticality or eigenvalue calculations.
 - One transmutation stepper (`ForwardEulerStepper`, beginning-of-step rates).
   No predictor-corrector.
-- Nuclear-data uncertainty reaches transmutation results only.
-  `simulate_transmutation(method="independent", data_uncertainty=...)` gives a
-  standard deviation on inventories, activity and decay heat from the tallied
-  rates' statistics, MF=33 cross sections and the decay data. The flux is
-  transported once, so it does not respond to a perturbed cross section, and
-  the coupled method does not take `data_uncertainty`. Transport tallies carry
-  their Monte Carlo error only.
+- Nuclear-data uncertainty covers MF=33 cross sections, plus the decay data
+  for transmutation.
+  - `simulate_transport(data_uncertainty=...)` gives every tally a nuclear-data
+    standard deviation and a replica mean beside its unchanged nominal mean,
+    from one run whose histories carry a weight per cross-section replica. It
+    supports CPU surface tracking of neutrons with track-length tallies, and
+    refuses, with the reason, GPU, MPI, delta tracking, survival biasing,
+    weight windows, photon transport, collision-estimator tallies, overlay
+    tallies, mesh tallies and per-nuclide bins.
+  - `simulate_transmutation(method="independent", data_uncertainty=...)` gives
+    a standard deviation on inventories, activity and decay heat. Its flux is
+    transported once, so it does not respond to a perturbed cross section, and
+    the coupled method does not take `data_uncertainty`.
 - Pathways are reported per product (`get_production_routes`), but there is no
   automatic pathway search across the whole inventory.

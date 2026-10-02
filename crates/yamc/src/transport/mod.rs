@@ -59,6 +59,7 @@ use std::sync::atomic::Ordering;
 
 mod fission;
 mod photon;
+pub(crate) mod replica;
 mod scatter;
 mod scoring;
 mod woodcock;
@@ -153,6 +154,8 @@ pub(crate) struct TransportCtx<'a> {
     /// byte-identically to the GPU. Created per `Model::simulate` call, so it
     /// never outlives the nuclide data its keys are addresses of.
     pub(crate) inelastic_flat_cache: &'a InelasticFlatCache,
+    /// The nuclear-data replica draws, when the run carries replica weights.
+    pub(crate) replica: Option<&'a replica::ReplicaContext>,
 }
 
 /// Sample the distance the particle will travel before its next
@@ -627,6 +630,9 @@ pub(crate) fn transport_particle<T: Tracker>(
                 if verify_crossing(ctx, particle, cell_index, dist_surface) {
                     continue;
                 }
+                let segment = ctx.replica.and_then(|r| {
+                    replica::ReplicaSegment::new(r, particle, cell.material_idx, dist_surface)
+                });
                 let end_position = score_track_length_segment(
                     particle,
                     cell,
@@ -637,7 +643,11 @@ pub(crate) fn transport_particle<T: Tracker>(
                     ctx.tallies,
                     ctx.transmutation_tallies,
                     welford_worker,
+                    segment.as_ref(),
                 );
+                if let Some(segment) = &segment {
+                    segment.apply(particle);
+                }
                 handle_surface_crossing(
                     particle,
                     cell_index,
@@ -650,6 +660,9 @@ pub(crate) fn transport_particle<T: Tracker>(
                     current_generation,
                 );
             } else {
+                let segment = ctx.replica.and_then(|r| {
+                    replica::ReplicaSegment::new(r, particle, cell.material_idx, dist_collision)
+                });
                 let _end_position = score_track_length_segment(
                     particle,
                     cell,
@@ -660,7 +673,11 @@ pub(crate) fn transport_particle<T: Tracker>(
                     ctx.tallies,
                     ctx.transmutation_tallies,
                     welford_worker,
+                    segment.as_ref(),
                 );
+                if let Some(segment) = &segment {
+                    segment.apply(particle);
+                }
                 particle.move_by(dist_collision);
                 let material = cell_material.unwrap().as_ref();
 
@@ -1185,6 +1202,8 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                         ctx.tallies,
                         ctx.transmutation_tallies,
                         welford_worker,
+                        // Replica runs are refused under delta tracking.
+                        None,
                     );
                     handle_surface_crossing(
                         particle,
@@ -1212,6 +1231,8 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                         ctx.tallies,
                         ctx.transmutation_tallies,
                         welford_worker,
+                        // Replica runs are refused under delta tracking.
+                        None,
                     );
                     particle.move_by(dist_collision);
                     let material = cell_material
@@ -1993,6 +2014,13 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                             let elastic = nuclide
                                 .elastic_reaction(material.temperature())
                                 .expect("elastic reaction present when sigma_e > 0");
+                            replica::apply_collision(
+                                ctx.replica,
+                                particle,
+                                cell.material_idx,
+                                nuclide_name,
+                                2,
+                            );
                             // `scatter_elastic` always returns true (the free-gas
                             // sampler handles the degenerate CM-speed case
                             // internally), so there is no early-return to check.
@@ -2018,6 +2046,13 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                                     xi_mt,
                                 )
                                 .expect("non-elastic constituent present when sigma_i > 0");
+                            replica::apply_collision(
+                                ctx.replica,
+                                particle,
+                                cell.material_idx,
+                                nuclide_name,
+                                constituent.mt_number,
+                            );
                             let proceed = match constituent.mt_number {
                                 // Discrete levels: closed-form-Q on the shared PCG
                                 // stream, bit-identical to the GPU. `split.xi3` is
@@ -2116,6 +2151,13 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                             material.temperature(),
                             rng,
                         );
+                        replica::apply_collision(
+                            ctx.replica,
+                            particle,
+                            cell.material_idx,
+                            nuclide_name,
+                            constituent_reaction.mt_number,
+                        );
 
                         // Handle the sampled constituent reaction. Elastic and
                         // inelastic can terminate the history early (degenerate
@@ -2174,6 +2216,14 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                     // selection drew no seed, so draw one here (mirroring its
                     // elastic arm).
                     let mu_xi = fission_angle_xi.unwrap_or_else(|| next_xi(pcg));
+                    // Before the neutrons are banked, so they inherit it.
+                    replica::apply_collision(
+                        ctx.replica,
+                        particle,
+                        cell.material_idx,
+                        nuclide_name,
+                        18,
+                    );
                     let (fission_mt, fission_neutrons) = sample_fission_event(
                         nuclide,
                         material.temperature(),
@@ -2569,6 +2619,7 @@ mod tests {
             &tallies,
             None,
             &mut welford,
+            None,
         );
 
         // flux = weight * dist = 0.5 * 4.0 = 2.0
@@ -2603,6 +2654,7 @@ mod tests {
             &tallies,
             None,
             &mut welford,
+            None,
         );
         assert_eq!(bin0(&welford), 0.0);
     }

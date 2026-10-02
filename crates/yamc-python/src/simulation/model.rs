@@ -832,6 +832,7 @@ impl PyModel {
             seed,
             threads,
             max_runtime: max_runtime_secs,
+            data_uncertainty: None,
         };
         let result = py.detach(|| {
             self.inner
@@ -1023,6 +1024,21 @@ impl PyModel {
     ///         moments. A
     ///         time-bounded run is non-deterministic in history count, but the
     ///         results are statistically valid for the histories completed.
+    ///     data_uncertainty: Nuclear-data uncertainty on every tally, as a
+    ///         ``DataUncertainty``. Each history is transported once and
+    ///         carries one weight per cross-section replica (``samples``, 32
+    ///         when not set), drawn from the evaluations' covariance with
+    ///         ``seed``, so no extra particles are run and ``mean`` stays the
+    ///         nominal result, bit for bit. Each ``TallyResult`` then carries
+    ///         ``nuclear_data_standard_deviation``, ``replica_mean`` and
+    ///         ``replica_standard_error``. Cross sections only: leave
+    ///         ``sources`` unset or pass ``["cross_sections"]``, and
+    ///         ``attribution`` is not supported. Not yet supported, and refused with the reason:
+    ///         ``compute='gpu'``, MPI, ``tracking_mode`` other than
+    ///         ``'surface'``, survival biasing, weight windows, photon
+    ///         transport, collision-estimator tallies, overlay tallies, mesh
+    ///         tallies and per-nuclide tally bins. ``model.data_uncertainty_coverage()``
+    ///         lists what the evaluations cover. Default ``None``.
     ///
     /// Returns:
     ///     ``SimulationResults`` containing finalized ``TallyResult``s for
@@ -1053,7 +1069,8 @@ impl PyModel {
     ///     >>> results = model.simulate_transport(total_particles=1_000_000, compute=adapters[0])
     ///     >>> # no particle cap: run for about 5 minutes, take whatever converged:
     ///     >>> results = model.simulate_transport(max_runtime=(5, "min"))
-    #[pyo3(signature = (total_particles=None, seed=1, threads=None, capture_tracks=None, compute="cpu", max_runtime=None))]
+    #[pyo3(signature = (total_particles=None, seed=1, threads=None, capture_tracks=None, compute="cpu", max_runtime=None, data_uncertainty=None))]
+    #[allow(clippy::too_many_arguments)]
     pub fn simulate_transport(
         &mut self,
         total_particles: Option<usize>,
@@ -1062,6 +1079,7 @@ impl PyModel {
         capture_tracks: Option<pyo3::Py<pyo3::types::PyAny>>,
         compute: &str,
         max_runtime: Option<pyo3::Py<pyo3::types::PyAny>>,
+        data_uncertainty: Option<yani_python::data_uncertainty::PyDataUncertainty>,
         py: Python,
     ) -> PyResult<crate::simulation::PySimulationResults> {
         // `total_particles=0` is an error (0 is not "unlimited"; use `None`).
@@ -1102,6 +1120,9 @@ impl PyModel {
             seed,
             threads,
             max_runtime: max_runtime_secs,
+            data_uncertainty: data_uncertainty
+                .map(|d| transport_data_uncertainty(&d.inner, d.sources_given))
+                .transpose()?,
         };
         if compute == "cpu" {
             self.warn_if_max_steps_ignored(py, "simulate_transport(compute='cpu')")?;
@@ -1117,6 +1138,12 @@ impl PyModel {
         if parse_capture_tracks(py, capture_tracks)?.is_some() {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "capture_tracks is not supported with compute='gpu'",
+            ));
+        }
+        if settings.data_uncertainty.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "data_uncertainty is not yet supported with compute='gpu'; use \
+                 compute='cpu'",
             ));
         }
         if threads.is_some() {
@@ -1580,6 +1607,7 @@ impl PyModel {
             seed,
             threads,
             max_runtime: max_runtime_secs,
+            data_uncertainty: None,
         };
         // Unpack the PulseSchedule into the (timesteps, source_rates) the core
         // transmutation driver expects. Done while the GIL is held, before
@@ -1761,4 +1789,39 @@ impl PyModel {
              the feature list you passed",
         ))
     }
+}
+
+/// The transport run's nuclear-data uncertainty from a ``DataUncertainty``:
+/// its seed and replica count (32 when not set). Transport perturbs cross
+/// sections only and has no attribution, so a request for anything else is
+/// refused rather than ignored.
+fn transport_data_uncertainty(
+    d: &yani_transmute::uncertainty::DataUncertainty,
+    sources_given: bool,
+) -> PyResult<yamc::model::TransportDataUncertainty> {
+    use yani_transmute::uncertainty::Source;
+    if d.attribution {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "data_uncertainty: attribution is not supported by simulate_transport",
+        ));
+    }
+    // `sources=None` is every source the build implements, which for a
+    // transport run is the one it can perturb. An explicit list naming
+    // anything else, even every source, asks for something this run would
+    // not do.
+    if let Some(other) = d
+        .sources
+        .iter()
+        .find(|s| sources_given && **s != Source::CrossSections)
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "data_uncertainty: simulate_transport perturbs cross sections only; remove \
+             '{}' from sources",
+            other.name()
+        )));
+    }
+    Ok(yamc::model::TransportDataUncertainty {
+        seed: d.seed,
+        replicas: d.samples.unwrap_or(32),
+    })
 }

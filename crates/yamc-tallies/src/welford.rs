@@ -323,6 +323,149 @@ impl ScorePdf {
     }
 }
 
+/// Per-bin sums over histories of each nuclear-data replica's score, for a
+/// tally run with correlated replica weights.
+///
+/// Every history is transported once with the nominal cross sections and
+/// carries one weight ratio per replica; replica `r`'s score in a bin is the
+/// nominal score times that ratio. The sums kept per bin are, over histories
+/// `h`, `Σ x_hr` and `Σ x_hr²` for each replica, and `Σ x̄_h` and `Σ x̄_h²` for
+/// the replica-average score `x̄_h = mean_r x_hr`. Those are exactly what the
+/// shared-history variance deconvolution needs (see
+/// [`ReplicaSums::nuclear_data_variance`]), and they add across workers,
+/// ranks and runs of the same draws.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplicaSums {
+    /// Replicas per bin.
+    pub replicas: usize,
+    /// The seed the replicas' draws came from: sums of two different sets of
+    /// draws do not add.
+    pub seed: u64,
+    /// Row-major `bins × (2R + 2)`: `Σx_1..Σx_R, Σx_1²..Σx_R², Σx̄, Σx̄²`.
+    pub sums: Vec<f64>,
+}
+
+impl ReplicaSums {
+    pub fn new(replicas: usize, seed: u64, bins: usize) -> Self {
+        Self {
+            replicas,
+            seed,
+            sums: vec![0.0; bins * (2 * replicas + 2)],
+        }
+    }
+
+    fn width(&self) -> usize {
+        2 * self.replicas + 2
+    }
+
+    /// Bins covered.
+    pub fn bins(&self) -> usize {
+        self.sums.len() / self.width().max(1)
+    }
+
+    /// Fold one history's per-replica scores for one bin.
+    pub fn record(&mut self, bin: usize, scores: &[f64]) {
+        let (r, w) = (self.replicas, self.width());
+        let row = &mut self.sums[bin * w..(bin + 1) * w];
+        let mut mean = 0.0;
+        for (k, &x) in scores.iter().enumerate().take(r) {
+            row[k] += x;
+            row[r + k] += x * x;
+            mean += x;
+        }
+        mean /= r as f64;
+        row[2 * r] += mean;
+        row[2 * r + 1] += mean * mean;
+    }
+
+    /// Add another set of sums of the same draws.
+    pub fn add(&mut self, other: &ReplicaSums) -> Result<(), String> {
+        if self.replicas != other.replicas
+            || self.seed != other.seed
+            || self.sums.len() != other.sums.len()
+        {
+            return Err(format!(
+                "cannot combine nuclear-data replicas of different draws \
+                 ({} replicas, seed {} against {} replicas, seed {})",
+                self.replicas, self.seed, other.replicas, other.seed
+            ));
+        }
+        for (a, b) in self.sums.iter_mut().zip(&other.sums) {
+            *a += b;
+        }
+        Ok(())
+    }
+
+    /// Per bin, the average over replicas of each replica's mean score over
+    /// `histories`.
+    pub fn replica_mean(&self, histories: u64) -> Vec<f64> {
+        let (r, w, h) = (self.replicas, self.width(), histories.max(1) as f64);
+        (0..self.bins())
+            .map(|b| self.sums[b * w + 2 * r] / h)
+            .collect()
+    }
+
+    /// Per bin, the nuclear-data variance of the score with the Monte Carlo
+    /// noise of the shared histories deconvolved, and that noise term.
+    ///
+    /// The spread of the replica means over replicas, `S²`, has expectation
+    /// `Var_ND + noise`, the noise being the Monte Carlo variance of each
+    /// replica's deviation from the replica average. With every replica
+    /// scored on the same histories that is
+    ///
+    /// ```text
+    /// noise = (Σ_r s²(x_r) - R s²(x̄)) / (H (R - 1))
+    /// ```
+    ///
+    /// with `s²` the per-history sample variance, which the sums give
+    /// exactly. `S² - noise` is then unbiased for `Var_ND` (Clements, Geraci,
+    /// Olson, Palmer, JQSRT 319 (2024) 108958, adapted to shared histories).
+    /// It can come out negative where the replicas' noise swamps their
+    /// spread; it is returned as it is, for the caller to flag.
+    pub fn nuclear_data_variance(&self, histories: u64) -> Vec<(f64, f64)> {
+        let (r, w) = (self.replicas, self.width());
+        let h = histories as f64;
+        if r < 2 || histories < 2 {
+            return vec![(0.0, 0.0); self.bins()];
+        }
+        let rf = r as f64;
+        (0..self.bins())
+            .map(|b| {
+                let row = &self.sums[b * w..(b + 1) * w];
+                let means: Vec<f64> = (0..r).map(|k| row[k] / h).collect();
+                let grand = means.iter().sum::<f64>() / rf;
+                let spread = means.iter().map(|m| (m - grand).powi(2)).sum::<f64>() / (rf - 1.0);
+                let var = |s1: f64, s2: f64| ((s2 - s1 * s1 / h) / (h - 1.0)).max(0.0);
+                let replica_var: f64 = (0..r).map(|k| var(row[k], row[r + k])).sum();
+                let mean_var = var(row[2 * r], row[2 * r + 1]);
+                let noise = (replica_var - rf * mean_var) / (h * (rf - 1.0));
+                (spread - noise, noise)
+            })
+            .collect()
+    }
+
+    /// Per bin, the Monte Carlo standard error of one replica's mean, averaged
+    /// over replicas: how converged each replica is, for comparison with the
+    /// nuclear-data standard deviation.
+    pub fn replica_standard_error(&self, histories: u64) -> Vec<f64> {
+        let (r, w) = (self.replicas, self.width());
+        let h = histories as f64;
+        if histories < 2 {
+            return vec![0.0; self.bins()];
+        }
+        (0..self.bins())
+            .map(|b| {
+                let row = &self.sums[b * w..(b + 1) * w];
+                let v: f64 = (0..r)
+                    .map(|k| ((row[r + k] - row[k] * row[k] / h) / (h - 1.0)).max(0.0))
+                    .sum::<f64>()
+                    / r as f64;
+                (v / h).sqrt()
+            })
+            .collect()
+    }
+}
+
 /// Per-tally state for one rayon worker: Welford accumulator + per-
 /// history sparse scratch.
 ///
@@ -361,6 +504,9 @@ pub struct WelfordTallyWorker {
     /// Raw products change only where a history scored, add across workers,
     /// runs and ranks, and give the covariance once, at the end.
     pub comoment: Option<Vec<f64>>,
+    /// Nuclear-data replica sums, and the current history's per-replica
+    /// scratch, when the run carries correlated replica weights.
+    pub replicas: Option<(ReplicaSums, rustc_hash::FxHashMap<u32, Vec<f64>>)>,
 }
 
 /// Offset of row `r`'s diagonal in a packed upper triangle of size `n`.
@@ -380,6 +526,7 @@ impl WelfordTallyWorker {
             agg: AggMoments::ZERO,
             score_pdf: ScorePdf::new(),
             comoment: None,
+            replicas: None,
         }
     }
 }
@@ -422,6 +569,47 @@ impl WelfordWorkerState {
             }
         }
         self
+    }
+
+    /// Keep nuclear-data replica sums, `replicas` per bin from draws seeded
+    /// by `seed`, for the tallies flagged in `flags`. See [`ReplicaSums`].
+    pub fn with_replicas(mut self, flags: &[bool], replicas: usize, seed: u64) -> Self {
+        for (t, &on) in self.tallies.iter_mut().zip(flags) {
+            if on {
+                t.replicas = Some((
+                    ReplicaSums::new(replicas, seed, t.welford.len()),
+                    rustc_hash::FxHashMap::default(),
+                ));
+            }
+        }
+        self
+    }
+
+    /// Whether `tally_idx` keeps replica sums.
+    #[inline]
+    pub fn has_replicas(&self, tally_idx: usize) -> bool {
+        self.tallies[tally_idx].replicas.is_some()
+    }
+
+    /// Add a contribution to every replica of a bin in the current history:
+    /// replica `k` gets `value * factors[k]`. A tally without replica sums
+    /// ignores it.
+    #[inline]
+    pub fn add_replica_contribution(
+        &mut self,
+        tally_idx: usize,
+        bin_idx: usize,
+        value: f64,
+        factors: &[f64],
+    ) {
+        if let Some((sums, scratch)) = self.tallies[tally_idx].replicas.as_mut() {
+            let slot = scratch
+                .entry(bin_idx as u32)
+                .or_insert_with(|| vec![0.0; sums.replicas]);
+            for (s, f) in slot.iter_mut().zip(factors) {
+                *s += value * f;
+            }
+        }
     }
 
     /// Add a per-step contribution to a bin in the currently-in-progress
@@ -487,6 +675,12 @@ impl WelfordWorkerState {
             t.scratch_map.clear();
             t.agg.update(total);
             t.score_pdf.record(total);
+            if let Some((sums, scratch)) = t.replicas.as_mut() {
+                for (&bin, scores) in scratch.iter() {
+                    sums.record(bin as usize, scores);
+                }
+                scratch.clear();
+            }
         }
     }
 
@@ -526,6 +720,9 @@ impl WelfordWorkerState {
                     *x += y;
                 }
             }
+            if let (Some((ra, _)), Some((rb, _))) = (a.replicas.as_mut(), b.replicas.as_ref()) {
+                ra.add(rb).expect("workers of one run share their draws");
+            }
         }
         self.n_histories += other.n_histories;
         self
@@ -547,6 +744,7 @@ impl WelfordWorkerState {
                 let agg = t.agg;
                 let score_pdf = t.score_pdf;
                 let comoment = t.comoment;
+                let replicas = t.replicas.map(|(sums, _)| sums);
                 if n_hist == 0 {
                     return WelfordTallyStats {
                         mean,
@@ -555,6 +753,7 @@ impl WelfordWorkerState {
                         agg,
                         score_pdf,
                         comoment,
+                        replicas,
                     };
                 }
                 for i in 0..mean.len() {
@@ -580,6 +779,7 @@ impl WelfordWorkerState {
                     agg,
                     score_pdf,
                     comoment,
+                    replicas,
                 }
             })
             .collect();
@@ -615,6 +815,9 @@ pub struct WelfordTallyStats {
     /// Raw per-history products, packed upper triangle, when the tally asked
     /// for its covariance. They sum across runs and ranks.
     pub comoment: Option<Vec<f64>>,
+    /// Nuclear-data replica sums, when the run carried replica weights. They
+    /// sum across runs and ranks of the same draws.
+    pub replicas: Option<ReplicaSums>,
 }
 
 impl WelfordTallyStats {
@@ -645,7 +848,18 @@ impl WelfordTallyStats {
             self.agg = other.agg;
             self.score_pdf = other.score_pdf.clone();
             self.comoment.clone_from(&other.comoment);
+            self.replicas.clone_from(&other.replicas);
             return Ok(());
+        }
+        match (self.replicas.as_mut(), other.replicas.as_ref()) {
+            (Some(a), Some(b)) => a.add(b)?,
+            (None, None) => {}
+            _ => {
+                return Err(
+                    "cannot combine a tally carrying nuclear-data replicas with one that does not"
+                        .to_string(),
+                )
+            }
         }
         match (self.comoment.as_mut(), other.comoment.as_ref()) {
             (Some(a), Some(b)) => {
@@ -1035,5 +1249,93 @@ mod tests {
         w.add_contribution(0, 0, 1.0);
         w.finish_history();
         assert!(w.finalize().per_tally[0].covariance_of_mean().is_none());
+    }
+}
+
+#[cfg(test)]
+mod replica_sums_tests {
+    use super::*;
+
+    /// A tiny deterministic normal generator for synthetic scores.
+    struct Normals(u64);
+    impl Normals {
+        fn uniform(&mut self) -> f64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            ((self.0 >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        }
+        fn next(&mut self) -> f64 {
+            let (u1, u2) = (self.uniform(), self.uniform());
+            (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+        }
+    }
+
+    /// Noise shared by every replica in a history cancels from the
+    /// replicas' deviations, so the deconvolved variance is the spread of the
+    /// replica offsets exactly.
+    #[test]
+    fn noise_shared_by_every_replica_cancels_exactly() {
+        let offsets = [1.0, 1.1, 0.9, 1.05];
+        let mut sums = ReplicaSums::new(offsets.len(), 0, 1);
+        let mut g = Normals(7);
+        let h = 500u64;
+        for _ in 0..h {
+            let noise = g.next();
+            let scores: Vec<f64> = offsets.iter().map(|m| m + noise).collect();
+            sums.record(0, &scores);
+        }
+        let mean = offsets.iter().sum::<f64>() / 4.0;
+        let spread = offsets.iter().map(|m| (m - mean).powi(2)).sum::<f64>() / 3.0;
+        let (var, noise) = sums.nuclear_data_variance(h)[0];
+        assert!(noise.abs() < 1e-12, "shared noise left {noise}");
+        assert!((var - spread).abs() < 1e-12, "{var} against {spread}");
+    }
+
+    /// With noise independent per replica, the deconvolved variance is
+    /// unbiased: averaged over many trials it recovers the offsets' spread,
+    /// where the raw spread of the replica means does not.
+    #[test]
+    fn independent_noise_is_deconvolved_without_bias() {
+        let offsets = [1.0, 1.2, 0.8, 1.1, 0.9, 1.0, 1.15, 0.85];
+        let r = offsets.len();
+        let mean = offsets.iter().sum::<f64>() / r as f64;
+        let spread = offsets.iter().map(|m| (m - mean).powi(2)).sum::<f64>() / (r - 1) as f64;
+        let mut g = Normals(11);
+        let (h, trials) = (40u64, 4000);
+        let (mut deconvolved, mut raw) = (0.0, 0.0);
+        for _ in 0..trials {
+            let mut sums = ReplicaSums::new(r, 0, 1);
+            for _ in 0..h {
+                let scores: Vec<f64> = offsets.iter().map(|m| m + g.next()).collect();
+                sums.record(0, &scores);
+            }
+            let (var, noise) = sums.nuclear_data_variance(h)[0];
+            deconvolved += var;
+            raw += var + noise;
+        }
+        deconvolved /= trials as f64;
+        raw /= trials as f64;
+        assert!(
+            (deconvolved / spread - 1.0).abs() < 0.05,
+            "deconvolved {deconvolved} against {spread}"
+        );
+        assert!(
+            raw > 1.5 * spread,
+            "the raw spread {raw} should carry the noise"
+        );
+    }
+
+    /// Sums of one set of draws add; sums of another refuse to.
+    #[test]
+    fn sums_of_the_same_draws_add_and_of_others_do_not() {
+        let mut a = ReplicaSums::new(2, 5, 1);
+        a.record(0, &[1.0, 2.0]);
+        let mut b = ReplicaSums::new(2, 5, 1);
+        b.record(0, &[3.0, 4.0]);
+        a.add(&b).expect("same draws");
+        assert_eq!(a.sums[0], 4.0);
+        assert!(a.add(&ReplicaSums::new(2, 6, 1)).is_err());
+        assert!(a.add(&ReplicaSums::new(3, 5, 1)).is_err());
     }
 }
