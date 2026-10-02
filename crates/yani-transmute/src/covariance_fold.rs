@@ -2633,7 +2633,14 @@ pub fn cell_fields(
         let by_mt = nuclide_data.reactions_for_temp(&temperature)?;
         let reactions: BTreeMap<i32, &Reaction> =
             by_mt.iter().map(|(mt, r)| (*mt, r.as_ref())).collect();
-        let field = nuclide_field(name, full, blocks, &reactions, spectra, &shapes)?;
+        let field = nuclide_field(
+            name,
+            &kinds_and_mts(full),
+            blocks,
+            &reactions,
+            spectra,
+            &shapes,
+        )?;
         Some(((*name).clone(), field))
     };
 
@@ -2651,11 +2658,195 @@ pub fn cell_fields(
     fields.into_iter().flatten().collect()
 }
 
+/// Where one transport reaction's perturbation comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Read {
+    /// The evaluation states covariance for this reaction itself, directly or
+    /// through an NC derivation from other reactions.
+    Own,
+    /// The reaction has no covariance of its own, but the summed reaction it
+    /// is a component of does, and it takes that one's perturbation: MT 51 to
+    /// 91 from MT 4, 600 to 649 from MT 103, and so on. The components then
+    /// move together, fully correlated, which is how a covariance stated only
+    /// on the sum is applied to the reactions transport samples (SANDY does
+    /// the same). This adds no uncertainty the evaluation does not state: the
+    /// sum moves exactly as its covariance says.
+    Parent(i32),
+    /// No covariance reaches it; it is held at nominal.
+    Nominal,
+}
+
+/// One nuclide's cross-section field for transport, and how each reaction
+/// transport samples reads it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransportField {
+    /// Every non-redundant reaction the nuclide's transport data holds, the
+    /// partials that make up its total, and where each one's perturbation
+    /// comes from.
+    pub reads: BTreeMap<i32, Read>,
+    /// The field over the covariance cells those reactions reach, or `None`
+    /// when none does. It has no spectrum projections: transport reads it at
+    /// each event's energy rather than through a group spectrum.
+    pub field: Option<CellField>,
+}
+
+/// Every nuclide's [`TransportField`] for one material, and the nuclides with
+/// no covariance data at all.
+///
+/// Transport perturbs the partial reactions it samples, the non-redundant
+/// ones, and rebuilds every total from them, so the field is built over
+/// exactly those. A redundant reaction's own covariance (MT 1, MT 4, MT 103)
+/// is used only through [`Read::Parent`], for components that state none.
+/// The material's nuclides must be loaded with covariance (see
+/// `Material::ensure_covariance_loaded`); a nuclide whose data carries none
+/// is named in the returned set rather than reported as exact.
+pub fn transport_fields(
+    material: &Material,
+) -> (BTreeMap<String, TransportField>, BTreeSet<String>) {
+    let mut names: Vec<&String> = material.nuclides.keys().collect();
+    names.sort();
+    let mut without_data = BTreeSet::new();
+    let mut out = BTreeMap::new();
+    for name in names {
+        let Some(nuclide_data) = material.nuclide_data.get(name) else {
+            continue;
+        };
+        let temperature = if material.temperature().is_empty() {
+            match crate::default_temperature(nuclide_data) {
+                Some(t) => t,
+                None => continue,
+            }
+        } else {
+            material.temperature().to_string()
+        };
+        let Some(by_mt) = nuclide_data.reactions_for_temp(&temperature) else {
+            continue;
+        };
+        let partials: Vec<i32> = by_mt
+            .iter()
+            .filter(|(_, r)| !r.redundant)
+            .map(|(mt, _)| *mt)
+            .collect::<BTreeSet<i32>>()
+            .into_iter()
+            .collect();
+        let Some(blocks) = nuclide_data.covariance.as_ref() else {
+            without_data.insert(name.clone());
+            continue;
+        };
+        let reactions: BTreeMap<i32, &Reaction> =
+            by_mt.iter().map(|(mt, r)| (*mt, r.as_ref())).collect();
+        out.insert(
+            name.clone(),
+            transport_field(name, &partials, blocks, &reactions),
+        );
+    }
+    (out, without_data)
+}
+
+/// [`transport_fields`] for one nuclide.
+fn transport_field(
+    name: &str,
+    partials: &[i32],
+    blocks: &[CovarianceBlock],
+    reactions: &BTreeMap<i32, &Reaction>,
+) -> TransportField {
+    let lumped = single_component_lumps(blocks);
+    let blocks_ref = lumped.as_ref();
+    let sums = lump_cross_sections(blocks_ref, reactions);
+    let mut all = reactions.clone();
+    all.extend(sums.iter().map(|r| (r.mt_number, r)));
+
+    // The reactions some usable block states a covariance for.
+    let stated: BTreeSet<i32> = blocks_ref
+        .iter()
+        .filter(|b| !b.is_cross_material() && b.names_cross_section())
+        .filter(|b| match &b.data {
+            CovarianceData::Ni(ni) => expand_ni(ni).is_ok_and(|e| !e.is_empty()),
+            _ => false,
+        })
+        .flat_map(|b| [b.mt, b.partner_mt()])
+        .collect();
+    let reaches = |mt: i32| {
+        channel_terms(blocks_ref, &all, &[(String::new(), mt)])
+            .terms
+            .iter()
+            .any(|t| stated.contains(&t.mt))
+    };
+
+    let mut reads = BTreeMap::new();
+    let mut reach: Vec<(String, i32)> = Vec::new();
+    for &mt in partials {
+        let read = if reaches(mt) {
+            Read::Own
+        } else {
+            match level_sum(mt) {
+                Some(sum) if all.contains_key(&sum) && reaches(sum) => Read::Parent(sum),
+                _ => Read::Nominal,
+            }
+        };
+        match read {
+            Read::Own => reach.push((format!("MT{mt}"), mt)),
+            Read::Parent(sum) => reach.push((format!("MT{mt}"), sum)),
+            Read::Nominal => {}
+        }
+        reads.insert(mt, read);
+    }
+    let build = |reach: &mut Vec<(String, i32)>| {
+        // A parent read by several components is one set of cells.
+        reach.sort_by_key(|(_, mt)| *mt);
+        reach.dedup_by_key(|(_, mt)| *mt);
+        if reach.is_empty() {
+            None
+        } else {
+            nuclide_field(name, reach, blocks, reactions, &[], &[])
+        }
+    };
+    let mut field = build(&mut reach);
+
+    // A sum lends its perturbation only if it has cells of its own. One whose
+    // covariance is an NC derivation from its components (ENDF/B-VIII.1 Cr52
+    // MT 4 from its levels) states nothing beyond what those components
+    // state, so a component stating nothing takes nothing from it; nor does a
+    // sum whose only block is all zeros.
+    let has_cells = |f: &Option<CellField>, mt: i32| {
+        f.as_ref().is_some_and(|f| {
+            f.relative_cells.iter().any(|c| c.mt == mt)
+                || f.absolute_cells.iter().any(|c| c.mt == mt)
+                || f.short.iter().any(|b| b.mt == mt)
+        })
+    };
+    let demoted: Vec<i32> = reads
+        .iter()
+        .filter_map(|(mt, r)| match r {
+            Read::Parent(sum) if !has_cells(&field, *sum) => Some(*mt),
+            _ => None,
+        })
+        .collect();
+    if !demoted.is_empty() {
+        for mt in &demoted {
+            reads.insert(*mt, Read::Nominal);
+        }
+        let mut reach: Vec<(String, i32)> = reads
+            .iter()
+            .filter_map(|(mt, r)| match r {
+                Read::Own => Some((format!("MT{mt}"), *mt)),
+                Read::Parent(sum) => Some((format!("MT{mt}"), *sum)),
+                Read::Nominal => None,
+            })
+            .collect();
+        field = build(&mut reach);
+    }
+    TransportField { reads, field }
+}
+
 /// [`cell_fields`] for one nuclide.
 #[allow(clippy::too_many_arguments)]
+///
+/// `reach` names the channels whose reactions fix the cells, as `(kind, MT)`:
+/// the full chain's for activation, the transport reactions for transport.
 fn nuclide_field(
     name: &str,
-    full: &ChainNuclide,
+    reach: &[(String, i32)],
     blocks: &[CovarianceBlock],
     reactions: &BTreeMap<i32, &Reaction>,
     spectra: &[FoldSpectrum],
@@ -2668,10 +2859,9 @@ fn nuclide_field(
     reactions.extend(sums.iter().map(|r| (r.mt_number, r)));
     let reactions = &reactions;
 
-    // The cells come from the full chain's channels, so they do not depend
-    // on which spectra read them.
-    let full_kinds = kinds_and_mts(full);
-    let reached: BTreeSet<i32> = channel_terms(blocks, reactions, &full_kinds)
+    // The cells come from `reach`, not from any spectrum's channels, so they do
+    // not depend on which spectra read them.
+    let reached: BTreeSet<i32> = channel_terms(blocks, reactions, reach)
         .terms
         .iter()
         .map(|t| t.mt)
@@ -5517,5 +5707,95 @@ mod lumped_tests {
             .insert(key.clone(), ["MT41".to_string()].into());
         a.absorb(b);
         assert_eq!(a.lumped_covariance_not_assignable[&key].len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod transport_field_tests {
+    use super::*;
+
+    fn reaction(mt: i32, redundant: bool) -> Reaction {
+        Reaction {
+            cross_section: vec![1.0, 1.0].into(),
+            threshold_idx: 0,
+            energy: vec![1.0e-5, 2.0e7].into(),
+            mt_number: mt,
+            q_value: 0.0,
+            products: vec![],
+            scatter_in_cm: false,
+            redundant,
+        }
+    }
+
+    fn self_block(mt: i32, variance: f64) -> CovarianceBlock {
+        CovarianceBlock {
+            mt,
+            subsection_idx: 0,
+            block_idx: 0,
+            mat1: 0,
+            mt1: mt,
+            xmf1: 0.0,
+            xlfs1: 0.0,
+            mtl: 0,
+            mat: 0,
+            data: CovarianceData::Ni(NiSubsection {
+                lb: 1,
+                np: 3,
+                ek: vec![1.0e-5, 1.0e6, 2.0e7],
+                fk: vec![variance, variance, 0.0],
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn field(partials: &[i32], blocks: &[CovarianceBlock]) -> TransportField {
+        let owned: Vec<Reaction> = partials
+            .iter()
+            .map(|&mt| reaction(mt, false))
+            .chain([reaction(4, true)])
+            .collect();
+        let reactions: BTreeMap<i32, &Reaction> = owned.iter().map(|r| (r.mt_number, r)).collect();
+        transport_field("X", partials, blocks, &reactions)
+    }
+
+    /// Elastic states its own covariance, the levels take the total
+    /// inelastic's, and capture with none is held at nominal.
+    #[test]
+    fn partials_read_their_own_their_sums_or_nothing() {
+        let t = field(
+            &[2, 51, 52, 102],
+            &[self_block(2, 0.01), self_block(4, 0.04)],
+        );
+        assert_eq!(t.reads[&2], Read::Own);
+        assert_eq!(t.reads[&51], Read::Parent(4));
+        assert_eq!(t.reads[&52], Read::Parent(4));
+        assert_eq!(t.reads[&102], Read::Nominal);
+        assert!(
+            !t.reads.contains_key(&4),
+            "a redundant sum is not sampled itself"
+        );
+        // Elastic's two cells and the inelastic sum's two, the levels sharing
+        // the sum's.
+        let f = t.field.expect("covered reactions make a field");
+        let mts: BTreeSet<i32> = f.relative_cells.iter().map(|c| c.mt).collect();
+        assert_eq!(mts, BTreeSet::from([2, 4]));
+        assert_eq!(f.relative_cells.len(), 4);
+    }
+
+    /// A level that states its own covariance reads that, not the sum's.
+    #[test]
+    fn a_level_with_its_own_covariance_reads_it() {
+        let t = field(&[51, 52], &[self_block(51, 0.09), self_block(4, 0.04)]);
+        assert_eq!(t.reads[&51], Read::Own);
+        assert_eq!(t.reads[&52], Read::Parent(4));
+    }
+
+    /// With no covariance anywhere, every partial is held and there is no
+    /// field.
+    #[test]
+    fn no_covariance_holds_every_partial() {
+        let t = field(&[2, 102], &[]);
+        assert!(t.reads.values().all(|r| *r == Read::Nominal));
+        assert!(t.field.is_none());
     }
 }

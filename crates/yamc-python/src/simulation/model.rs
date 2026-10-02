@@ -432,6 +432,91 @@ impl PyModel {
         self.inner.required_elements()
     }
 
+    /// What nuclear-data uncertainty this model's transport could carry.
+    ///
+    /// Transport samples the partial reactions that make up each nuclide's
+    /// total, so for every nuclide in the model's materials this says which
+    /// of those partials the evaluation states a covariance for, which take
+    /// one from the summed reaction they belong to (a level of MT 51 to 91
+    /// from MT 4, say, the levels then moving together), and which are held at
+    /// nominal. Nothing is transported; tallies are unaffected.
+    ///
+    /// Loads each material's nuclear data, with covariance, as a run would,
+    /// and factorizes each nuclide's covariance, so a repair of a covariance
+    /// that is not positive semidefinite is reported here. A nuclide in
+    /// several materials is reported from the first one it appears in.
+    ///
+    /// Returns:
+    ///     dict: With keys
+    ///
+    ///     - ``nuclides``: per nuclide name, a dict with ``perturbed`` (per
+    ///       MT, a dict with ``via``, the MT whose covariance it takes, and
+    ///       ``max_relative_sigma``, the largest relative sigma stated on any
+    ///       covariance cell), ``held_at_nominal`` (sorted MTs no covariance
+    ///       reaches), ``cells`` and ``short_range_blocks`` (the size of the
+    ///       nuclide's covariance field) and ``repair`` (``None``, or a dict
+    ///       with ``lambda_min``, ``lambda_max`` and ``clipped_fraction``, the
+    ///       variance the repair added as a share of the stated variance).
+    ///     - ``without_data``: sorted names of nuclides whose data carries no
+    ///       covariance at all.
+    ///     - ``not_perturbed``: inputs no transport uncertainty run perturbs
+    ///       whatever the data, such as secondary angular and energy
+    ///       distributions.
+    ///
+    /// Raises:
+    ///     RuntimeError: If a material's nuclear data cannot be loaded.
+    ///
+    /// Examples:
+    ///     >>> coverage = model.data_uncertainty_coverage()
+    ///     >>> coverage["nuclides"]["Fe56"]["perturbed"][102]["max_relative_sigma"]
+    ///     >>> coverage["without_data"]
+    pub fn data_uncertainty_coverage<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let report = self
+            .inner
+            .data_uncertainty_coverage()
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        let nuclides = PyDict::new(py);
+        for (name, c) in &report.nuclides {
+            let perturbed = PyDict::new(py);
+            for (mt, r) in &c.perturbed {
+                let entry = PyDict::new(py);
+                entry.set_item("via", r.via)?;
+                entry.set_item("max_relative_sigma", r.max_relative_sigma)?;
+                perturbed.set_item(mt, entry)?;
+            }
+            let entry = PyDict::new(py);
+            entry.set_item("perturbed", perturbed)?;
+            entry.set_item(
+                "held_at_nominal",
+                c.held_at_nominal.iter().copied().collect::<Vec<_>>(),
+            )?;
+            entry.set_item("cells", c.cells)?;
+            entry.set_item("short_range_blocks", c.short_range_blocks)?;
+            match &c.repair {
+                Some(r) => {
+                    let repair = PyDict::new(py);
+                    repair.set_item("lambda_min", r.lambda_min)?;
+                    repair.set_item("lambda_max", r.lambda_max)?;
+                    repair.set_item("clipped_fraction", r.clipped_fraction)?;
+                    entry.set_item("repair", repair)?;
+                }
+                None => entry.set_item("repair", py.None())?,
+            }
+            nuclides.set_item(name, entry)?;
+        }
+        let d = PyDict::new(py);
+        d.set_item("nuclides", nuclides)?;
+        d.set_item(
+            "without_data",
+            report.without_data.iter().cloned().collect::<Vec<_>>(),
+        )?;
+        d.set_item("not_perturbed", report.not_perturbed.clone())?;
+        Ok(d)
+    }
+
     /// True when photons will be in flight during the run, either because a
     /// source emits them or because secondary-photon production is enabled.
     ///

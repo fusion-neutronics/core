@@ -153,6 +153,19 @@ pub struct Repair {
     pub channels: Vec<ChannelSigma>,
 }
 
+/// What the repair of one nuclide's evaluated cell covariance did, read off
+/// the matrix that was clipped (see [`Repair`] for the per-spectrum record).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FieldRepair {
+    /// The most negative eigenvalue of the evaluated covariance.
+    pub lambda_min: f64,
+    /// The largest eigenvalue of the evaluated covariance.
+    pub lambda_max: f64,
+    /// `sum |λ_neg| / trace(C)`: the variance the clipping added, as a share of
+    /// the variance the evaluation states.
+    pub clipped_fraction: f64,
+}
+
 /// The eigenvalue summary of a matrix whose repair counts as one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Eigen {
@@ -926,6 +939,25 @@ impl Sampler {
                         })
                         .collect(),
                 })
+            })
+            .collect()
+    }
+
+    /// Every nuclide whose evaluated covariance had to be repaired to be
+    /// sampled, with what the repair did, independent of any spectrum.
+    pub fn field_repairs(&self) -> BTreeMap<String, FieldRepair> {
+        self.fields
+            .iter()
+            .filter_map(|(name, f)| {
+                let r = f.core.repair?;
+                Some((
+                    name.clone(),
+                    FieldRepair {
+                        lambda_min: r.lambda_min,
+                        lambda_max: r.lambda_max,
+                        clipped_fraction: r.clipped_fraction,
+                    },
+                ))
             })
             .collect()
     }
