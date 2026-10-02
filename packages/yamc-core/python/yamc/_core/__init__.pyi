@@ -2441,6 +2441,47 @@ class Model:
         Returns:
             list[str]: Sorted, de-duplicated element symbols.
         """
+    def data_uncertainty_coverage(self) -> dict:
+        r"""
+        What nuclear-data uncertainty this model's transport could carry.
+        
+        Transport samples the partial reactions that make up each nuclide's
+        total, so for every nuclide in the model's materials this says which
+        of those partials the evaluation states a covariance for, which take
+        one from the summed reaction they belong to (a level of MT 51 to 91
+        from MT 4, say, the levels then moving together), and which are held at
+        nominal. Nothing is transported; tallies are unaffected.
+        
+        Loads each material's nuclear data, with covariance, as a run would,
+        and factorizes each nuclide's covariance, so a repair of a covariance
+        that is not positive semidefinite is reported here. A nuclide in
+        several materials is reported from the first one it appears in.
+        
+        Returns:
+            dict: With keys
+        
+            - ``nuclides``: per nuclide name, a dict with ``perturbed`` (per
+              MT, a dict with ``via``, the MT whose covariance it takes, and
+              ``max_relative_sigma``, the largest relative sigma stated on any
+              covariance cell), ``held_at_nominal`` (sorted MTs no covariance
+              reaches), ``cells`` and ``short_range_blocks`` (the size of the
+              nuclide's covariance field) and ``repair`` (``None``, or a dict
+              with ``lambda_min``, ``lambda_max`` and ``clipped_fraction``, the
+              variance the repair added as a share of the stated variance).
+            - ``without_data``: sorted names of nuclides whose data carries no
+              covariance at all.
+            - ``not_perturbed``: inputs no transport uncertainty run perturbs
+              whatever the data, such as secondary angular and energy
+              distributions.
+        
+        Raises:
+            RuntimeError: If a material's nuclear data cannot be loaded.
+        
+        Examples:
+            >>> coverage = model.data_uncertainty_coverage()
+            >>> coverage["nuclides"]["Fe56"]["perturbed"][102]["max_relative_sigma"]
+            >>> coverage["without_data"]
+        """
     def has_photons(self) -> builtins.bool:
         r"""
         True when photons will be in flight during the run, either because a

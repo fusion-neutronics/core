@@ -1,5 +1,6 @@
 //! Core Monte Carlo particle transport: geometry and cells, the transport
 //! kernel, materials/source wiring, and the `Model` simulation driver.
+pub mod data_uncertainty;
 pub mod geo;
 pub mod geometry;
 pub mod model;
@@ -10,6 +11,7 @@ pub mod track;
 mod transport;
 pub mod util;
 pub mod variance_reduction;
+pub mod xs_perturbation;
 
 // `Model::transmute`: the transport-coupled driver over `yani-transmute`.
 // Nothing but an inherent impl, so the module itself stays private.
