@@ -52,6 +52,9 @@ yamc-geo = { path = "../yamc-geo" }
 # WasmSimulation.plotHtml(). Native builds skip it entirely.
 yamc-plot = { path = "../yamc-plot", optional = true }
 yamc-nuclide = { path = "../yamc-nuclide", default-features = false }
+# The ENDF sum rules, for rebuilding the redundant rows of a perturbed nuclide
+# from its partials (`xs_perturbation`).
+endf = { path = "../endf" }
 yamc-element = { path = "../yamc-element", default-features = false }
 yamc-materials = { path = "../yamc-materials", default-features = false }
 yamc-particle = { path = "../yamc-particle" }

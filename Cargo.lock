@@ -6055,6 +6055,7 @@ version = "0.3.0"
 dependencies = [
  "console_error_panic_hook",
  "criterion",
+ "endf",
  "getrandom 0.3.4",
  "getrandom 0.4.2",
  "js-sys",

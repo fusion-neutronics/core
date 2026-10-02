@@ -11,6 +11,7 @@ pub mod track;
 mod transport;
 pub mod util;
 pub mod variance_reduction;
+pub mod xs_perturbation;
 
 // `Model::transmute`: the transport-coupled driver over `yani-transmute`.
 // Nothing but an inherent impl, so the module itself stays private.
