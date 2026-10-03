@@ -323,6 +323,35 @@ impl ScorePdf {
     }
 }
 
+/// The principal modes of the nuclear-data draws a run's control variate is
+/// built on: per mode, the variance of a draw's coordinate on it and the
+/// nuclide it belongs to, and per replica, that replica's coordinates.
+///
+/// Mode coordinates have mean zero and no correlation with each other, and
+/// their variances are exact (see `yani_transmute::covariance_sample::Modes`),
+/// so the linear predictor `Σ_k D_k ξ_k` of a score has variance
+/// `Σ_k λ_k D_k²` with no sampling error from the replicas.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplicaModes {
+    /// `λ_k` per mode.
+    pub variance: Vec<f64>,
+    /// The nuclide each mode belongs to.
+    pub nuclides: Vec<String>,
+    /// Row-major `replicas × modes`: replica `r`'s coordinate `ξ_rk`.
+    pub coordinates: Vec<f64>,
+}
+
+impl ReplicaModes {
+    /// Modes in all.
+    pub fn len(&self) -> usize {
+        self.variance.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.variance.is_empty()
+    }
+}
+
 /// Per-bin sums over histories of each nuclear-data replica's score, for a
 /// tally run with correlated replica weights.
 ///
@@ -334,6 +363,12 @@ impl ScorePdf {
 /// shared-history variance deconvolution needs (see
 /// [`ReplicaSums::nuclear_data_variance`]), and they add across workers,
 /// ranks and runs of the same draws.
+///
+/// With [`ReplicaModes`], each history also carries its score's derivative
+/// along every mode, `a_hk`, and the sums add `Σ a_hk` and `Σ a_hk²` per mode
+/// and the same four sums as the replicas' for the linear predictor of each
+/// replica, `ℓ_hr = y_h + Σ_k a_hk ξ_rk` (`y_h` the nominal score), the
+/// control variate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplicaSums {
     /// Replicas per bin.
@@ -341,21 +376,58 @@ pub struct ReplicaSums {
     /// The seed the replicas' draws came from: sums of two different sets of
     /// draws do not add.
     pub seed: u64,
-    /// Row-major `bins × (2R + 2)`: `Σx_1..Σx_R, Σx_1²..Σx_R², Σx̄, Σx̄²`.
+    /// The control variate's modes, when the run carried them.
+    pub modes: Option<std::sync::Arc<ReplicaModes>>,
+    /// Row-major `bins × width`: `Σx_1..Σx_R, Σx_1²..Σx_R², Σx̄, Σx̄²`, then
+    /// with modes `Σa_1..Σa_K, Σa_1²..Σa_K²` and
+    /// `Σℓ_1..Σℓ_R, Σℓ_1²..Σℓ_R², Σℓ̄, Σℓ̄²`.
     pub sums: Vec<f64>,
 }
 
+/// The deconvolved spread of `R` replica columns of one bin's sums, laid out
+/// `Σx_1..Σx_R, Σx_1²..Σx_R², Σx̄, Σx̄²`: `(S² - noise, noise)`.
+fn deconvolved_spread(row: &[f64], r: usize, h: f64) -> (f64, f64) {
+    let rf = r as f64;
+    let means: Vec<f64> = (0..r).map(|k| row[k] / h).collect();
+    let grand = means.iter().sum::<f64>() / rf;
+    let spread = means.iter().map(|m| (m - grand).powi(2)).sum::<f64>() / (rf - 1.0);
+    let var = |s1: f64, s2: f64| ((s2 - s1 * s1 / h) / (h - 1.0)).max(0.0);
+    let replica_var: f64 = (0..r).map(|k| var(row[k], row[r + k])).sum();
+    let mean_var = var(row[2 * r], row[2 * r + 1]);
+    let noise = (replica_var - rf * mean_var) / (h * (rf - 1.0));
+    (spread - noise, noise)
+}
+
 impl ReplicaSums {
-    pub fn new(replicas: usize, seed: u64, bins: usize) -> Self {
-        Self {
+    pub fn new(
+        replicas: usize,
+        seed: u64,
+        modes: Option<std::sync::Arc<ReplicaModes>>,
+        bins: usize,
+    ) -> Self {
+        let modes = modes.filter(|m| !m.is_empty());
+        let mut out = Self {
             replicas,
             seed,
-            sums: vec![0.0; bins * (2 * replicas + 2)],
-        }
+            modes,
+            sums: Vec::new(),
+        };
+        out.sums = vec![0.0; bins * out.width()];
+        out
+    }
+
+    /// Modes the control variate carries, zero without one.
+    pub fn n_modes(&self) -> usize {
+        self.modes.as_ref().map_or(0, |m| m.len())
     }
 
     fn width(&self) -> usize {
-        2 * self.replicas + 2
+        let (r, k) = (self.replicas, self.n_modes());
+        if k == 0 {
+            2 * r + 2
+        } else {
+            2 * r + 2 + 2 * k + 2 * r + 2
+        }
     }
 
     /// Bins covered.
@@ -363,31 +435,45 @@ impl ReplicaSums {
         self.sums.len() / self.width().max(1)
     }
 
-    /// Fold one history's per-replica scores for one bin.
-    pub fn record(&mut self, bin: usize, scores: &[f64]) {
-        let (r, w) = (self.replicas, self.width());
+    /// Fold one history's scores for one bin: the `R` replicas' scores, then
+    /// with modes the `K` derivatives along them, and the nominal score.
+    pub fn record(&mut self, bin: usize, scores: &[f64], nominal: f64) {
+        let (r, k, w) = (self.replicas, self.n_modes(), self.width());
         let row = &mut self.sums[bin * w..(bin + 1) * w];
-        let mut mean = 0.0;
-        for (k, &x) in scores.iter().enumerate().take(r) {
-            row[k] += x;
-            row[r + k] += x * x;
-            mean += x;
+        fold_replicas(&mut row[..2 * r + 2], &scores[..r]);
+        let Some(modes) = self.modes.as_ref() else {
+            return;
+        };
+        let a = &scores[r..r + k];
+        let (derivatives, linear) = row[2 * r + 2..].split_at_mut(2 * k);
+        for (i, &x) in a.iter().enumerate() {
+            derivatives[i] += x;
+            derivatives[k + i] += x * x;
         }
-        mean /= r as f64;
-        row[2 * r] += mean;
-        row[2 * r + 1] += mean * mean;
+        let predicted: Vec<f64> = modes
+            .coordinates
+            .chunks_exact(k)
+            .map(|xi| nominal + xi.iter().zip(a).map(|(x, d)| x * d).sum::<f64>())
+            .collect();
+        fold_replicas(linear, &predicted);
     }
 
     /// Add another set of sums of the same draws.
     pub fn add(&mut self, other: &ReplicaSums) -> Result<(), String> {
         if self.replicas != other.replicas
             || self.seed != other.seed
+            || self.modes != other.modes
             || self.sums.len() != other.sums.len()
         {
             return Err(format!(
                 "cannot combine nuclear-data replicas of different draws \
-                 ({} replicas, seed {} against {} replicas, seed {})",
-                self.replicas, self.seed, other.replicas, other.seed
+                 ({} replicas, {} modes, seed {} against {} replicas, {} modes, seed {})",
+                self.replicas,
+                self.n_modes(),
+                self.seed,
+                other.replicas,
+                other.n_modes(),
+                other.seed
             ));
         }
         for (a, b) in self.sums.iter_mut().zip(&other.sums) {
@@ -396,22 +482,65 @@ impl ReplicaSums {
         Ok(())
     }
 
+    fn row(&self, bin: usize) -> &[f64] {
+        let w = self.width();
+        &self.sums[bin * w..(bin + 1) * w]
+    }
+
+    /// Per mode of one bin, the derivative estimate `D̂_k` and its Monte Carlo
+    /// variance `s²(a_k) / H`.
+    fn derivatives(&self, bin: usize, h: f64) -> Vec<(f64, f64)> {
+        let (r, k) = (self.replicas, self.n_modes());
+        let d = &self.row(bin)[2 * r + 2..2 * r + 2 + 2 * k];
+        (0..k)
+            .map(|i| {
+                let (s1, s2) = (d[i], d[k + i]);
+                let var = ((s2 - s1 * s1 / h) / (h - 1.0)).max(0.0);
+                (s1 / h, var / h)
+            })
+            .collect()
+    }
+
     /// Per bin, the average over replicas of each replica's mean score over
-    /// `histories`.
+    /// `histories`: the expected score over the nuclear-data uncertainty.
+    ///
+    /// With modes, the replicas' linear predictors, whose expectation is the
+    /// nominal score exactly, are subtracted as a control variate, which
+    /// leaves only the nonlinear part to the replicas' sampling.
     pub fn replica_mean(&self, histories: u64) -> Vec<f64> {
-        let (r, w, h) = (self.replicas, self.width(), histories.max(1) as f64);
+        let (r, h) = (self.replicas, histories.max(1) as f64);
         (0..self.bins())
-            .map(|b| self.sums[b * w + 2 * r] / h)
+            .map(|b| {
+                let mean = self.row(b)[2 * r] / h;
+                match self.modes.as_ref() {
+                    None => mean,
+                    Some(modes) => {
+                        let k = modes.len();
+                        let shift: f64 = self
+                            .derivatives(b, h)
+                            .iter()
+                            .enumerate()
+                            .map(|(i, (d, _))| {
+                                let centre =
+                                    (0..r).map(|q| modes.coordinates[q * k + i]).sum::<f64>()
+                                        / r as f64;
+                                d * centre
+                            })
+                            .sum();
+                        mean - shift
+                    }
+                }
+            })
             .collect()
     }
 
     /// Per bin, the nuclear-data variance of the score with the Monte Carlo
-    /// noise of the shared histories deconvolved, and that noise term.
+    /// noise of the shared histories deconvolved, and the noise removed.
     ///
-    /// The spread of the replica means over replicas, `S²`, has expectation
-    /// `Var_ND + noise`, the noise being the Monte Carlo variance of each
-    /// replica's deviation from the replica average. With every replica
-    /// scored on the same histories that is
+    /// Without modes, the spread of the replica means over replicas, `S²`,
+    /// has expectation `Var_ND + noise`, the noise being the Monte Carlo
+    /// variance of each replica's deviation from the replica average. With
+    /// every replica scored on the same histories that is
     ///
     /// ```text
     /// noise = (Σ_r s²(x_r) - R s²(x̄)) / (H (R - 1))
@@ -420,42 +549,116 @@ impl ReplicaSums {
     /// with `s²` the per-history sample variance, which the sums give
     /// exactly. `S² - noise` is then unbiased for `Var_ND` (Clements, Geraci,
     /// Olson, Palmer, JQSRT 319 (2024) 108958, adapted to shared histories).
-    /// It can come out negative where the replicas' noise swamps their
-    /// spread; it is returned as it is, for the caller to flag.
+    ///
+    /// With modes, the replicas' linear predictors `ℓ_r` are a control
+    /// variate whose variance over draws is known exactly:
+    ///
+    /// ```text
+    /// Var_ND = Σ_k λ_k D_k² + [S²(x) - S²(ℓ)]
+    /// ```
+    ///
+    /// each term with its own noise deconvolved (`D̂_k²` by `s²(a_k) / H`).
+    /// The bracket has expectation `Var_ND - Σ_k λ_k D_k²` for any response,
+    /// so the estimate stays unbiased however nonlinear the response is,
+    /// while its sampling error over the draws shrinks to that of the
+    /// response's nonlinear part, and of whatever the kept modes miss.
+    ///
+    /// The estimate can come out negative where noise swamps it; it is
+    /// returned as it is, for the caller to flag.
     pub fn nuclear_data_variance(&self, histories: u64) -> Vec<(f64, f64)> {
-        let (r, w) = (self.replicas, self.width());
+        let r = self.replicas;
         let h = histories as f64;
         if r < 2 || histories < 2 {
             return vec![(0.0, 0.0); self.bins()];
         }
-        let rf = r as f64;
         (0..self.bins())
             .map(|b| {
-                let row = &self.sums[b * w..(b + 1) * w];
-                let means: Vec<f64> = (0..r).map(|k| row[k] / h).collect();
-                let grand = means.iter().sum::<f64>() / rf;
-                let spread = means.iter().map(|m| (m - grand).powi(2)).sum::<f64>() / (rf - 1.0);
-                let var = |s1: f64, s2: f64| ((s2 - s1 * s1 / h) / (h - 1.0)).max(0.0);
-                let replica_var: f64 = (0..r).map(|k| var(row[k], row[r + k])).sum();
-                let mean_var = var(row[2 * r], row[2 * r + 1]);
-                let noise = (replica_var - rf * mean_var) / (h * (rf - 1.0));
-                (spread - noise, noise)
+                let row = self.row(b);
+                let (replicas, noise) = deconvolved_spread(&row[..2 * r + 2], r, h);
+                let Some(modes) = self.modes.as_ref() else {
+                    return (replicas, noise);
+                };
+                let k = modes.len();
+                let (linear, linear_noise) = self.linear_terms(b, h);
+                let (predicted, predicted_noise) =
+                    deconvolved_spread(&row[2 * r + 2 + 2 * k..], r, h);
+                (
+                    linear + replicas - predicted,
+                    linear_noise + noise - predicted_noise,
+                )
             })
             .collect()
+    }
+
+    /// One bin's `Σ_k λ_k D̂_k²` with its noise deconvolved, and that noise.
+    fn linear_terms(&self, bin: usize, h: f64) -> (f64, f64) {
+        let Some(modes) = self.modes.as_ref() else {
+            return (0.0, 0.0);
+        };
+        self.derivatives(bin, h)
+            .iter()
+            .zip(&modes.variance)
+            .fold((0.0, 0.0), |(v, n), ((d, var), l)| {
+                (v + l * (d * d - var), n + l * var)
+            })
+    }
+
+    /// Per bin, the first-order nuclear-data variance `Σ_k λ_k D_k²` over the
+    /// kept modes, noise deconvolved, when the run carried modes.
+    pub fn linear_variance(&self, histories: u64) -> Option<Vec<f64>> {
+        self.modes.as_ref()?;
+        let h = histories as f64;
+        if histories < 2 {
+            return Some(vec![0.0; self.bins()]);
+        }
+        Some(
+            (0..self.bins())
+                .map(|b| self.linear_terms(b, h).0)
+                .collect(),
+        )
+    }
+
+    /// Per nuclide, per bin, its share of [`Self::linear_variance`]. Modes
+    /// belong to one nuclide each and are uncorrelated, so the shares add up
+    /// to the first-order variance exactly.
+    pub fn linear_variance_by_nuclide(
+        &self,
+        histories: u64,
+    ) -> Option<std::collections::BTreeMap<String, Vec<f64>>> {
+        let modes = self.modes.as_ref()?;
+        let h = histories as f64;
+        let mut out: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
+        for name in &modes.nuclides {
+            out.entry(name.clone())
+                .or_insert_with(|| vec![0.0; self.bins()]);
+        }
+        if histories < 2 {
+            return Some(out);
+        }
+        for b in 0..self.bins() {
+            for ((d, var), (l, name)) in self
+                .derivatives(b, h)
+                .iter()
+                .zip(modes.variance.iter().zip(&modes.nuclides))
+            {
+                out.get_mut(name).expect("every mode's nuclide")[b] += l * (d * d - var);
+            }
+        }
+        Some(out)
     }
 
     /// Per bin, the Monte Carlo standard error of one replica's mean, averaged
     /// over replicas: how converged each replica is, for comparison with the
     /// nuclear-data standard deviation.
     pub fn replica_standard_error(&self, histories: u64) -> Vec<f64> {
-        let (r, w) = (self.replicas, self.width());
+        let r = self.replicas;
         let h = histories as f64;
         if histories < 2 {
             return vec![0.0; self.bins()];
         }
         (0..self.bins())
             .map(|b| {
-                let row = &self.sums[b * w..(b + 1) * w];
+                let row = self.row(b);
                 let v: f64 = (0..r)
                     .map(|k| ((row[r + k] - row[k] * row[k] / h) / (h - 1.0)).max(0.0))
                     .sum::<f64>()
@@ -464,6 +667,21 @@ impl ReplicaSums {
             })
             .collect()
     }
+}
+
+/// Fold one history's `R` scores into sums laid out `Σx_1..Σx_R,
+/// Σx_1²..Σx_R², Σx̄, Σx̄²`.
+fn fold_replicas(row: &mut [f64], scores: &[f64]) {
+    let r = scores.len();
+    let mut mean = 0.0;
+    for (k, &x) in scores.iter().enumerate() {
+        row[k] += x;
+        row[r + k] += x * x;
+        mean += x;
+    }
+    mean /= r as f64;
+    row[2 * r] += mean;
+    row[2 * r + 1] += mean * mean;
 }
 
 /// Per-tally state for one rayon worker: Welford accumulator + per-
@@ -573,11 +791,17 @@ impl WelfordWorkerState {
 
     /// Keep nuclear-data replica sums, `replicas` per bin from draws seeded
     /// by `seed`, for the tallies flagged in `flags`. See [`ReplicaSums`].
-    pub fn with_replicas(mut self, flags: &[bool], replicas: usize, seed: u64) -> Self {
+    pub fn with_replicas(
+        mut self,
+        flags: &[bool],
+        replicas: usize,
+        seed: u64,
+        modes: Option<std::sync::Arc<ReplicaModes>>,
+    ) -> Self {
         for (t, &on) in self.tallies.iter_mut().zip(flags) {
             if on {
                 t.replicas = Some((
-                    ReplicaSums::new(replicas, seed, t.welford.len()),
+                    ReplicaSums::new(replicas, seed, modes.clone(), t.welford.len()),
                     rustc_hash::FxHashMap::default(),
                 ));
             }
@@ -592,8 +816,9 @@ impl WelfordWorkerState {
     }
 
     /// Add a contribution to every replica of a bin in the current history:
-    /// replica `k` gets `value * factors[k]`. A tally without replica sums
-    /// ignores it.
+    /// replica `k` gets `value * factors[k]`, and with modes, after the `R`
+    /// replicas, the derivative along mode `k` gets `value * factors[R + k]`.
+    /// A tally without replica sums ignores it.
     #[inline]
     pub fn add_replica_contribution(
         &mut self,
@@ -605,7 +830,7 @@ impl WelfordWorkerState {
         if let Some((sums, scratch)) = self.tallies[tally_idx].replicas.as_mut() {
             let slot = scratch
                 .entry(bin_idx as u32)
-                .or_insert_with(|| vec![0.0; sums.replicas]);
+                .or_insert_with(|| vec![0.0; sums.replicas + sums.n_modes()]);
             for (s, f) in slot.iter_mut().zip(factors) {
                 *s += value * f;
             }
@@ -661,6 +886,15 @@ impl WelfordWorkerState {
                     }
                 }
             }
+            // The replicas fold first: the control variate's linear predictor
+            // starts from the bin's nominal score, which the scratch holds.
+            if let Some((sums, scratch)) = t.replicas.as_mut() {
+                for (&bin, scores) in scratch.iter() {
+                    let nominal = t.scratch_map.get(&bin).copied().unwrap_or(0.0);
+                    sums.record(bin as usize, scores, nominal);
+                }
+                scratch.clear();
+            }
             let mut total = 0.0;
             for (&bin_u32, &x) in t.scratch_map.iter() {
                 let w = &mut t.welford[bin_u32 as usize];
@@ -675,12 +909,6 @@ impl WelfordWorkerState {
             t.scratch_map.clear();
             t.agg.update(total);
             t.score_pdf.record(total);
-            if let Some((sums, scratch)) = t.replicas.as_mut() {
-                for (&bin, scores) in scratch.iter() {
-                    sums.record(bin as usize, scores);
-                }
-                scratch.clear();
-            }
         }
     }
 
@@ -1277,13 +1505,13 @@ mod replica_sums_tests {
     #[test]
     fn noise_shared_by_every_replica_cancels_exactly() {
         let offsets = [1.0, 1.1, 0.9, 1.05];
-        let mut sums = ReplicaSums::new(offsets.len(), 0, 1);
+        let mut sums = ReplicaSums::new(offsets.len(), 0, None, 1);
         let mut g = Normals(7);
         let h = 500u64;
         for _ in 0..h {
             let noise = g.next();
             let scores: Vec<f64> = offsets.iter().map(|m| m + noise).collect();
-            sums.record(0, &scores);
+            sums.record(0, &scores, 0.0);
         }
         let mean = offsets.iter().sum::<f64>() / 4.0;
         let spread = offsets.iter().map(|m| (m - mean).powi(2)).sum::<f64>() / 3.0;
@@ -1305,10 +1533,10 @@ mod replica_sums_tests {
         let (h, trials) = (40u64, 4000);
         let (mut deconvolved, mut raw) = (0.0, 0.0);
         for _ in 0..trials {
-            let mut sums = ReplicaSums::new(r, 0, 1);
+            let mut sums = ReplicaSums::new(r, 0, None, 1);
             for _ in 0..h {
                 let scores: Vec<f64> = offsets.iter().map(|m| m + g.next()).collect();
-                sums.record(0, &scores);
+                sums.record(0, &scores, 0.0);
             }
             let (var, noise) = sums.nuclear_data_variance(h)[0];
             deconvolved += var;
@@ -1326,16 +1554,157 @@ mod replica_sums_tests {
         );
     }
 
+    /// Synthetic histories of a response `Y(ξ) = Q + Σ_k D_k ξ_k + c (ξ_0² -
+    /// λ_0)` on `R` replicas: each history scores the nominal `Q` plus noise,
+    /// its derivative along each mode is `D_k` plus noise, and its replica
+    /// scores are those of the response at the replica's coordinates plus
+    /// the same history noise. Returns the sums and the true variance.
+    fn synthetic(
+        g: &mut Normals,
+        lambda: &[f64],
+        d: &[f64],
+        c: f64,
+        replicas: usize,
+        histories: u64,
+    ) -> (ReplicaSums, f64) {
+        let k = lambda.len();
+        let coordinates: Vec<f64> = (0..replicas * k)
+            .map(|i| g.next() * lambda[i % k].sqrt())
+            .collect();
+        let modes = std::sync::Arc::new(ReplicaModes {
+            variance: lambda.to_vec(),
+            nuclides: (0..k).map(|i| format!("N{}", i % 2)).collect(),
+            coordinates: coordinates.clone(),
+        });
+        let mut sums = ReplicaSums::new(replicas, 0, Some(modes), 1);
+        for _ in 0..histories {
+            let nominal = 1.0 + 0.3 * g.next();
+            let a: Vec<f64> = d.iter().map(|d| d + 0.3 * g.next()).collect();
+            let mut scores: Vec<f64> = coordinates
+                .chunks_exact(k)
+                .map(|xi| {
+                    nominal
+                        + xi.iter().zip(&a).map(|(x, a)| x * a).sum::<f64>()
+                        + c * (xi[0] * xi[0] - lambda[0])
+                })
+                .collect();
+            scores.extend(&a);
+            sums.record(0, &scores, nominal);
+        }
+        let truth = lambda.iter().zip(d).map(|(l, d)| l * d * d).sum::<f64>()
+            + c * c * 2.0 * lambda[0] * lambda[0];
+        (sums, truth)
+    }
+
+    /// A linear response is its own control variate: the replicas' spread
+    /// and their predictors' cancel history by history, and what is left is
+    /// the first-order variance, whose only error is the derivatives' noise.
+    #[test]
+    fn a_linear_response_is_carried_by_its_modes_alone() {
+        let (lambda, d) = ([0.04, 0.01, 0.0025], [1.0, -2.0, 3.0]);
+        let mut g = Normals(3);
+        let (sums, truth) = synthetic(&mut g, &lambda, &d, 0.0, 8, 2000);
+        let (var, _) = sums.nuclear_data_variance(2000)[0];
+        let linear = sums.linear_variance(2000).unwrap()[0];
+        assert!(
+            (var - linear).abs() < 1e-12 * truth,
+            "{var} against {linear}"
+        );
+        assert!((var / truth - 1.0).abs() < 0.05, "{var} against {truth}");
+        let shares = sums.linear_variance_by_nuclide(2000).unwrap();
+        let total: f64 = shares.values().map(|v| v[0]).sum();
+        assert!((total - linear).abs() < 1e-12 * truth);
+    }
+
+    /// `trials` independent sets of draws and histories of a response with
+    /// nonlinear coefficient `c`: the control-variate estimates, the
+    /// replica-only estimates, and the true variance.
+    fn trials(c: f64, seed: u64) -> (Vec<f64>, Vec<f64>, f64) {
+        let (lambda, d) = ([0.04, 0.01, 0.0025], [1.0, -2.0, 3.0]);
+        let (replicas, histories) = (16, 400u64);
+        let mut g = Normals(seed);
+        let (mut cv, mut plain, mut truth) = (Vec::new(), Vec::new(), 0.0);
+        for _ in 0..1500 {
+            let (sums, t) = synthetic(&mut g, &lambda, &d, c, replicas, histories);
+            truth = t;
+            cv.push(sums.nuclear_data_variance(histories)[0].0);
+            let row = &sums.sums[..2 * replicas + 2];
+            plain.push(deconvolved_spread(row, replicas, histories as f64).0);
+        }
+        (cv, plain, truth)
+    }
+
+    fn mean(v: &[f64]) -> f64 {
+        v.iter().sum::<f64>() / v.len() as f64
+    }
+
+    fn sd(v: &[f64]) -> f64 {
+        let m = mean(v);
+        (v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (v.len() - 1) as f64).sqrt()
+    }
+
+    /// However nonlinear the response, here an eighth of its variance, the
+    /// estimate stays unbiased.
+    #[test]
+    fn the_control_variate_is_unbiased_for_a_nonlinear_response() {
+        let (cv, plain, truth) = trials(2.0, 5);
+        assert!(
+            (mean(&cv) / truth - 1.0).abs() < 0.03,
+            "{} against {truth}",
+            mean(&cv)
+        );
+        assert!(
+            (mean(&plain) / truth - 1.0).abs() < 0.05,
+            "{} against {truth}",
+            mean(&plain)
+        );
+    }
+
+    /// For a nearly linear response, as cross-section perturbations of a few
+    /// percent give, the estimate's spread over independent draws is a small
+    /// fraction of the replicas' alone.
+    #[test]
+    fn the_control_variate_is_far_tighter_for_a_nearly_linear_response() {
+        let (cv, plain, truth) = trials(0.3, 7);
+        assert!(
+            (mean(&cv) / truth - 1.0).abs() < 0.03,
+            "{} against {truth}",
+            mean(&cv)
+        );
+        assert!(
+            sd(&cv) < 0.3 * sd(&plain),
+            "control variate spread {} against the replicas' {}",
+            sd(&cv),
+            sd(&plain)
+        );
+    }
+
+    /// The replicas' mean with the predictors subtracted is unbiased for the
+    /// response's expectation, `Q`, here.
+    #[test]
+    fn the_replica_mean_keeps_its_expectation() {
+        let (lambda, d) = ([0.04, 0.01], [1.0, -2.0]);
+        let (replicas, histories, trials) = (8, 200u64, 2000);
+        let mut g = Normals(9);
+        let mut total = 0.0;
+        for _ in 0..trials {
+            let (sums, _) = synthetic(&mut g, &lambda, &d, 0.5, replicas, histories);
+            total += sums.replica_mean(histories)[0];
+        }
+        let mean = total / trials as f64;
+        assert!((mean - 1.0).abs() < 2e-3, "replica mean {mean}");
+    }
+
     /// Sums of one set of draws add; sums of another refuse to.
     #[test]
     fn sums_of_the_same_draws_add_and_of_others_do_not() {
-        let mut a = ReplicaSums::new(2, 5, 1);
-        a.record(0, &[1.0, 2.0]);
-        let mut b = ReplicaSums::new(2, 5, 1);
-        b.record(0, &[3.0, 4.0]);
+        let mut a = ReplicaSums::new(2, 5, None, 1);
+        a.record(0, &[1.0, 2.0], 0.0);
+        let mut b = ReplicaSums::new(2, 5, None, 1);
+        b.record(0, &[3.0, 4.0], 0.0);
         a.add(&b).expect("same draws");
         assert_eq!(a.sums[0], 4.0);
-        assert!(a.add(&ReplicaSums::new(2, 6, 1)).is_err());
-        assert!(a.add(&ReplicaSums::new(3, 5, 1)).is_err());
+        assert!(a.add(&ReplicaSums::new(2, 6, None, 1)).is_err());
+        assert!(a.add(&ReplicaSums::new(3, 5, None, 1)).is_err());
     }
 }

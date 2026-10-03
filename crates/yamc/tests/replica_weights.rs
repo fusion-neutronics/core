@@ -799,3 +799,196 @@ fn replicas_match_their_reruns_inside_absolute_probability_tables() {
     };
     urr_replicas_match_their_reruns(with_absolute_tables(&m));
 }
+
+/// The modes are an exact coordinate system for the draws: loading and
+/// projection are dual (`Lᵀ P = I`), and the projections diagonalize the
+/// covariance the draws have (`Pᵀ C P = diag(λ)`), so a draw's coordinates
+/// have the modes' variances and no correlation.
+#[test]
+fn modes_diagonalize_the_draws() {
+    let Some(m) = tungsten() else {
+        eprintln!("skipping: W184 fixture missing, or without covariance or tables");
+        return;
+    };
+    let (fields, _) = transport_fields(&m);
+    let cells = fields
+        .iter()
+        .filter_map(|(n, t)| t.field.clone().map(|f| (n.clone(), f)))
+        .collect();
+    let sampler = Sampler::new(&cells, &[]);
+    let (covariance, _) = sampler.sampled_covariance("W184").expect("a field");
+    let n = (covariance.len() as f64).sqrt() as usize;
+    let modes = sampler.modes("W184", 1.0).expect("modes");
+    let k = modes.n_relative();
+    assert!(k > 0);
+    let (p, l) = (&modes.relative_projection, &modes.relative_loading);
+    for a in 0..k {
+        for b in 0..k {
+            let dual: f64 = (0..n).map(|j| l[j * k + a] * p[j * k + b]).sum();
+            let quadratic: f64 = (0..n)
+                .map(|i| {
+                    p[i * k + a]
+                        * (0..n)
+                            .map(|j| covariance[i * n + j] * p[j * k + b])
+                            .sum::<f64>()
+                })
+                .sum();
+            let (want_dual, want_quadratic) = if a == b {
+                (1.0, modes.relative_variance[a])
+            } else {
+                (0.0, 0.0)
+            };
+            assert!((dual - want_dual).abs() < 1e-9, "Lᵀ P [{a}, {b}] = {dual}");
+            assert!(
+                (quadratic - want_quadratic).abs() < 1e-9 * modes.relative_variance[0],
+                "Pᵀ C P [{a}, {b}] = {quadratic}"
+            );
+        }
+    }
+}
+
+/// Replica `k`'s linear predictor's mean, `ℓ̂_k`, from a run's sums.
+fn predicted(t: &Arc<Tally>, k: usize) -> f64 {
+    let sums = t.get_replica_sums().expect("replica sums");
+    let (r, m) = (sums.replicas, sums.n_modes());
+    let h = t.finalize().n_histories as f64;
+    assert!(m > 0, "the run carried no modes");
+    sums.sums[2 * r + 2 + 2 * m + k] / h
+}
+
+/// On a thin target the score is close to linear in the cross sections, so
+/// each replica's linear predictor, built from the derivatives along the
+/// modes, must carry nearly all of the replica's departure from the nominal:
+/// a wrong derivative (a sign, a missing segment term) would not.
+#[test]
+fn the_linear_predictors_track_the_replicas_on_a_thin_target() {
+    let Some(dir) = fixture() else {
+        eprintln!("skipping: Fe56 fixture carries no covariance");
+        return;
+    };
+    let replicas = 6;
+    let weighted = run(
+        iron(&dir),
+        0.2,
+        0.0253,
+        20_000,
+        7,
+        Some(TransportDataUncertainty {
+            seed: SEED,
+            replicas,
+        }),
+    );
+    for (i, name) in ["flux", "capture"].iter().enumerate() {
+        let nominal = weighted[i].get_mean()[0];
+        let moves: Vec<(f64, f64)> = (0..replicas)
+            .map(|k| {
+                (
+                    replica(&weighted[i], k).0 - nominal,
+                    predicted(&weighted[i], k) - nominal,
+                )
+            })
+            .collect();
+        let largest = moves.iter().map(|(m, _)| m.abs()).fold(0.0, f64::max);
+        for (k, (moved, predicted)) in moves.iter().enumerate() {
+            assert!(
+                (moved - predicted).abs() <= 0.02 * largest,
+                "replica {k} {name}: moved {moved:e}, predicted {predicted:e} \
+                 (largest move {largest:e})"
+            );
+        }
+    }
+}
+
+/// The nuclear-data sigma with and without the control variate, over
+/// several sets of draws: their means agree, and the control variate's
+/// spread from one set of draws to the next is a fraction of the replicas'.
+#[test]
+fn the_control_variate_shrinks_the_spread_of_sigma_over_draws() {
+    let Some(dir) = fixture() else {
+        eprintln!("skipping: Fe56 fixture carries no covariance");
+        return;
+    };
+    let m = iron(&dir);
+    let replicas = 8;
+    let (mut cv, mut plain) = (Vec::new(), Vec::new());
+    for seed in 0..8u64 {
+        let tallies = run(
+            m.clone(),
+            8.0,
+            14.1e6,
+            4_000,
+            21,
+            Some(TransportDataUncertainty {
+                seed: 100 + seed,
+                replicas,
+            }),
+        );
+        let result = tallies[1].finalize();
+        cv.push(result.nuclear_data_standard_deviation().unwrap()[0]);
+        let sums = result.replicas.as_ref().unwrap();
+        let w = sums.sums.len();
+        let alone = yamc_tallies::welford::ReplicaSums {
+            replicas,
+            seed: sums.seed,
+            modes: None,
+            sums: sums.sums[..(2 * replicas + 2).min(w)].to_vec(),
+        };
+        plain.push(
+            alone.nuclear_data_variance(result.n_histories)[0]
+                .0
+                .max(0.0)
+                .sqrt(),
+        );
+    }
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let sd = |v: &[f64]| {
+        let m = mean(v);
+        (v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (v.len() - 1) as f64).sqrt()
+    };
+    eprintln!(
+        "capture sigma: control variate {:e} ± {:e}, replicas {:e} ± {:e}",
+        mean(&cv),
+        sd(&cv),
+        mean(&plain),
+        sd(&plain)
+    );
+    assert!(
+        (mean(&cv) - mean(&plain)).abs() < 3.0 * sd(&plain) / (plain.len() as f64).sqrt(),
+        "the two estimates disagree"
+    );
+    assert!(
+        sd(&cv) < 0.2 * sd(&plain),
+        "control variate spread {:e} against the replicas' {:e}",
+        sd(&cv),
+        sd(&plain)
+    );
+}
+
+/// The first-order variance splits by nuclide, and the shares add up to it.
+#[test]
+fn the_first_order_variance_splits_by_nuclide() {
+    let Some(m) = lithium() else {
+        eprintln!("skipping: lithium fixtures missing or without covariance");
+        return;
+    };
+    let tallies = run_scores(
+        m,
+        30.0,
+        14.1e6,
+        3_000,
+        21,
+        Some(TransportDataUncertainty {
+            seed: SEED,
+            replicas: 4,
+        }),
+        &["H3-production"],
+    );
+    let result = tallies[0].finalize();
+    let linear = result.nuclear_data_linear_variance().unwrap()[0];
+    let shares = result.nuclear_data_variance_by_nuclide().unwrap();
+    eprintln!("first-order variance {linear:e}, by nuclide {shares:?}");
+    assert!(shares.contains_key("Li6") && shares.contains_key("Li7"));
+    let total: f64 = shares.values().map(|v| v[0]).sum();
+    assert!((total - linear).abs() <= 1e-12 * linear.abs());
+    assert!(linear > 0.0);
+}

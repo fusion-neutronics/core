@@ -1864,11 +1864,20 @@ impl Model {
             .as_ref()
             .map(|p| p.current_num_threads())
             .unwrap_or_else(rayon::current_num_threads);
-        // Replica sums cost `(2R + 2)` doubles per bin per worker. Refuse a run
-        // that would not fit rather than let it fail allocating mid-setup.
+        // Replica sums cost `(2R + 2)` doubles per bin per worker, and with
+        // `K` modes `2K + 2R + 2` more. Refuse a run that would not fit rather
+        // than let it fail allocating mid-setup.
         if let Some(data) = &settings.data_uncertainty {
             let bins: usize = welford_tally_num_bins.iter().sum();
-            let bytes = bins as f64 * (2 * data.replicas + 2) as f64 * 8.0 * n_rayon_threads as f64;
+            let modes = replica_ctx.as_ref().map_or(0, |r| r.n_modes());
+            let width = 2 * data.replicas
+                + 2
+                + if modes > 0 {
+                    2 * modes + 2 * data.replicas + 2
+                } else {
+                    0
+                };
+            let bytes = bins as f64 * width as f64 * 8.0 * n_rayon_threads as f64;
             const LIMIT: f64 = 8.0 * 1024.0 * 1024.0 * 1024.0;
             if bytes > LIMIT {
                 return Err(format!(
@@ -1891,6 +1900,7 @@ impl Model {
                             &vec![true; welford_tally_num_bins.len()],
                             data.replicas,
                             data.seed,
+                            replica_ctx.as_ref().and_then(|r| r.modes.clone()),
                         ),
                         None => state,
                     })
@@ -2304,8 +2314,7 @@ impl Model {
                                 // Every replica starts at the source with
                                 // the nominal's weight.
                                 if let Some(r) = replica_ctx.as_ref() {
-                                    particle.replica =
-                                        Some(vec![1.0; r.replicas].into_boxed_slice());
+                                    particle.replica = Some(r.source_state());
                                 }
                                 particle_bank.add_source_particle(particle.clone(), source_seed);
 
