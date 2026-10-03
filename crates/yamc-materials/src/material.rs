@@ -534,7 +534,7 @@ impl Material {
                 // are incoherent with an absolute atom-density total.
                 if fraction_type == FractionType::Mass {
                     return Err(
-                        "units='atom/barn-cm' requires fraction='atom' (a total atom \
+                        "units='atom/barn-cm' requires fraction_type='atom' (a total atom \
                          density is incoherent with mass fractions)"
                             .into(),
                     );
