@@ -2,6 +2,7 @@
 name = "yamc-test-cache"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 description = "Locate the cached nuclear-data fixtures the test suites read"
 license = "MIT OR Apache-2.0"
 
