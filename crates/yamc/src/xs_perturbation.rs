@@ -23,9 +23,14 @@
 //! emitting the particle moved, each weighted by how many it emits. What is
 //! held at nominal: rows with no covariance (named in the coverage report),
 //! heating, KERMA and damage rows (absolute values with no per-reaction
-//! split), unresolved-resonance tables stored as
-//! absolute cross sections rather than factors on the smooth ones, and the
-//! short-range (`lb = 8`) noise, which averages away along a track.
+//! split), and the short-range (`lb = 8`) noise, which averages away along a
+//! track.
+//!
+//! In the unresolved range each probability-table band moves by its smooth
+//! channel's relative change. A table of factors on the smooth cross sections
+//! does that by construction; a table of absolute cross sections is given the
+//! nominal smooth cross sections ([`yamc_nuclide::urr::UrrData::nominal_smooth`])
+//! so its bands scale the same way.
 //!
 //! The multiplier is evaluated at each grid point, so between two points that
 //! straddle a covariance cell edge the interpolated cross section blends the
@@ -297,6 +302,12 @@ pub fn perturbed_nuclide(
             }
         }
         out.reactions[t] = new;
+        if let (Some(Some(urr)), Some(nominal)) = (out.urr_data.get_mut(t), nuclide.fast_xs.get(t))
+        {
+            if !urr.multiply_smooth {
+                urr.nominal_smooth = Some(Arc::new(nominal.clone()));
+            }
+        }
     }
     Ok((out, floored))
 }

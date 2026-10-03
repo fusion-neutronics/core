@@ -4,7 +4,11 @@
 //! as described in the ENDF-6 Formats Manual (BNL-90365-2009 Rev.2, Section 2.3).
 //! See also: Levitt, Nucl. Sci. Eng. 49, 450-457, 1972.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
+
+use crate::nuclide::FastXSGrid;
 
 /// Derive an independent per-nuclide URR probability-table random in `[0, 1)`
 /// from a per-collision base seed and the nuclide's `ZA` identifier
@@ -90,6 +94,54 @@ pub struct UrrData {
     /// Cross-section values corresponding to CDF points
     /// Shape: [n_energy, n_cdf]
     pub xs_values: Vec<Vec<UrrXsSet>>,
+
+    /// The smooth cross sections an absolute table (`multiply_smooth` false)
+    /// was evaluated against, set only on a copy whose smooth cross sections
+    /// have been perturbed. Each band channel then moves by its smooth
+    /// channel's relative change, `band' = band * smooth' / smooth`, which is
+    /// what a factor table does by construction, so the two kinds of table
+    /// respond to a perturbation alike. `None` reads the table as stored.
+    #[serde(skip)]
+    pub nominal_smooth: Option<Arc<FastXSGrid>>,
+}
+
+/// One nuclide's probability-table band at one energy, beside the smooth
+/// cross sections it was drawn against, all microscopic, in barns.
+///
+/// The band has four channels, each scaling one of the transport lookup's
+/// smooth partials: elastic (MT 2), the neutron-emitting non-elastic
+/// channels, disappearance (absorption less fission) and fission. The
+/// non-elastic channel is the smooth value itself when the table carries
+/// it, and absent from the band otherwise.
+#[derive(Debug, Clone, Copy)]
+pub struct UrrBand {
+    /// Smooth total, `elastic + inelastic + capture + fission`.
+    pub smooth_total: f64,
+    pub smooth_elastic: f64,
+    /// Smooth neutron-emitting non-elastic scattering.
+    pub smooth_inelastic: f64,
+    /// Smooth disappearance: absorption less fission.
+    pub smooth_capture: f64,
+    pub smooth_fission: f64,
+    /// Whether the band carries the non-elastic channel.
+    pub inelastic_in_table: bool,
+    /// The band's total, `elastic + inelastic + capture + fission`.
+    pub total: f64,
+    pub elastic: f64,
+    pub capture: f64,
+    pub fission: f64,
+}
+
+impl UrrBand {
+    /// The band's non-elastic scattering: the smooth value where the table
+    /// carries it, else none.
+    pub fn inelastic(&self) -> f64 {
+        if self.inelastic_in_table {
+            self.smooth_inelastic
+        } else {
+            0.0
+        }
+    }
 }
 
 impl UrrData {
@@ -103,7 +155,29 @@ impl UrrData {
             energy: Vec::new(),
             cdf_values: Vec::new(),
             xs_values: Vec::new(),
+            nominal_smooth: None,
         }
+    }
+
+    /// How far each smooth channel (elastic, disappearance, fission) at `e`
+    /// has moved from [`Self::nominal_smooth`], as `now / nominal`: all ones
+    /// without a nominal, and one for a channel that is nominally zero.
+    fn absolute_scale(&self, e: f64, elastic: f64, capture: f64, fission: f64) -> [f64; 3] {
+        let Some(nominal) = &self.nominal_smooth else {
+            return [1.0; 3];
+        };
+        let (_, nominal_capture, _, nominal_fission) = nominal.lookup(e);
+        let (i, f) = nominal.lookup_grid_index(e);
+        let nominal_elastic = nominal
+            .elastic_idx
+            .map(|k| nominal.scatter_xs_interp(i, f, k))
+            .unwrap_or(0.0);
+        let ratio = |now: f64, was: f64| if was > 0.0 { now / was } else { 1.0 };
+        [
+            ratio(elastic, nominal_elastic),
+            ratio(capture, nominal_capture),
+            ratio(fission, nominal_fission),
+        ]
     }
 
     /// Check if energy is within URR bounds
@@ -396,6 +470,17 @@ impl UrrData {
             // IMPORTANT: When absorption_flag=0, the URR table's capture column only contains
             // n_gamma. For the ratio calculation, smooth_total_for_ratio must also only include
             // n_gamma (not full absorption with other_abs), otherwise the ratio will be wrong.
+
+            // A perturbed copy moves each band by its smooth channel's change.
+            let [scale_elastic, scale_capture, scale_fission] = self.absolute_scale(
+                e,
+                smooth_elastic,
+                smooth_absorption - smooth_fission,
+                smooth_fission,
+            );
+            let elastic = elastic * scale_elastic;
+            let capture = capture * scale_capture;
+            let fission = fission * scale_fission;
 
             // Recompute total from partials (sum of partials instead of table-provided value)
             let total_computed = elastic + inelastic + capture + fission;

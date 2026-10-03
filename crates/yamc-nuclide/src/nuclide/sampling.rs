@@ -23,6 +23,82 @@ struct UrrReactionXs {
 }
 
 impl Nuclide {
+    /// This nuclide's probability-table band at `energy`, at temperature
+    /// index `temp_idx`, for the per-collision base seed `urr_random`, beside
+    /// the smooth cross sections it was drawn against. `None` when the
+    /// nuclide has no table covering `energy` there.
+    ///
+    /// The band is the one the material's free-flight total, its nuclide
+    /// selection and its tally cross sections read: each nuclide derives its
+    /// own independent band from the shared base seed.
+    pub fn urr_band(
+        &self,
+        temp_idx: usize,
+        energy: f64,
+        urr_random: f64,
+    ) -> Option<crate::urr::UrrBand> {
+        if !self.urr_present {
+            return None;
+        }
+        let urr = self.urr_data.get(temp_idx).and_then(|opt| opt.as_ref())?;
+        if !urr.energy_in_bounds(energy) {
+            return None;
+        }
+        let fast_grid = self.fast_xs.get(temp_idx)?;
+
+        let (xs_total, xs_absorption, xs_scattering, xs_fission) = fast_grid.lookup(energy);
+        let (i_grid, f) = fast_grid.lookup_grid_index(energy);
+        let xs_elastic = fast_grid
+            .elastic_idx
+            .map(|idx| fast_grid.scatter_xs_interp(i_grid, f, idx))
+            .unwrap_or(0.0);
+        let xs_inelastic = (xs_scattering - xs_elastic).max(0.0);
+        // `xs_absorption` is `FastXSGrid::lookup`'s disappearance PARTIAL, which
+        // already excludes fission (the four partials sum to the total). OpenMC
+        // writes `capture *= (micro.absorption - micro.fission)` because ITS
+        // absorption includes fission; importing that expression here would
+        // subtract fission a second time, clamping in-band capture to zero for
+        // every nuclide whose fission exceeds its capture. In-band that would
+        // make a capture tally read zero and an absorption tally (built as
+        // `macro_capture + macro_fission`) report just the fission rate.
+        let xs_capture = xs_absorption;
+        let xs_ngamma = if !urr.multiply_smooth && !fast_grid.xs_ngamma.is_empty() {
+            Some(fast_grid.lookup_ngamma(i_grid, f))
+        } else {
+            None
+        };
+
+        let smooth_absorption = xs_capture + xs_fission;
+        // `urr_random` is the per-collision base seed shared across the
+        // material's nuclides; derive this nuclide's independent probability
+        // table band from it. Isotopes' resonance structures are
+        // statistically independent, so each must draw its own band rather than
+        // all sharing one random (which over-transmits multi-isotope materials).
+        let r = crate::urr::urr_nuclide_random(urr_random, self.urr_stream_key());
+        let (total, elastic, capture, fission, _smooth) = urr.sample(
+            energy,
+            r,
+            xs_elastic,
+            smooth_absorption,
+            xs_fission,
+            xs_inelastic,
+            xs_ngamma,
+        );
+
+        Some(crate::urr::UrrBand {
+            smooth_total: xs_total,
+            smooth_elastic: xs_elastic,
+            smooth_inelastic: xs_inelastic,
+            smooth_capture: xs_capture,
+            smooth_fission: xs_fission,
+            inelastic_in_table: urr.inelastic_flag > 0,
+            total,
+            elastic,
+            capture,
+            fission,
+        })
+    }
+
     /// Sample URR-modified cross-sections at given energy.
     /// Returns (total, elastic, capture, fission) cross-sections after applying URR fluctuation factors.
     /// If energy is outside URR range or no URR data exists, returns the smooth cross-sections.

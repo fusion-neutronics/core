@@ -29,6 +29,16 @@
 //! of a sum taking the sum's. Rows with no covariance, heating and damage
 //! rows, and the short-range noise stay nominal; particle production
 //! (MT 203 to 207) moves with the reactions emitting the particle.
+//!
+//! In a nuclide's unresolved range the flight, the reaction and the tallies
+//! read a probability-table band instead of the smooth cross sections: each
+//! of the lookup's four channels (elastic, non-elastic scattering,
+//! disappearance, fission) is the smooth one times the band's factor. A
+//! replica moves each band by its smooth channel's relative change, as a
+//! factor table does and the reruns do for either kind of table, so a
+//! channel's change enters the flight and the band-valued scores times that
+//! factor. The collision factor needs no band: within a channel the band
+//! cancels from `σ'_mt / σ_mt`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -36,6 +46,8 @@ use std::sync::Arc;
 use yamc_materials::Material;
 use yamc_nuclide::nuclide::Nuclide;
 use yamc_nuclide::reaction::Reaction;
+use yamc_nuclide::synthesis::{channel_of, Channel};
+use yamc_nuclide::urr::UrrBand;
 use yamc_tallies::score::Score;
 use yamc_tallies::tally::Tally;
 use yani_transmute::covariance_fold::{transport_fields, Read, TransportField};
@@ -47,6 +59,10 @@ struct Source {
     /// `Σ σ_mt(E)` over the partials reading this source, in barns, on the
     /// nuclide's grid.
     sum: Vec<f64>,
+    /// `sum` split by the lookup channel each partial is in (see
+    /// [`Channel`]), for a probability-table band, which scales each channel
+    /// by its own factor.
+    channels: [Vec<f64>; 4],
     /// `σ_src(E)`, the source reaction's own cross section, on the grid: what
     /// an absolute shift on its cells is a shift of.
     own: Vec<f64>,
@@ -105,6 +121,42 @@ struct ReplicaNuclide {
     /// score's partials reading it, and the nominal score cross section, on
     /// the grid.
     scores: HashMap<i32, ScoreTable>,
+    /// The nuclide and its temperature index, where it has probability
+    /// tables to draw a band from.
+    urr: Option<(Arc<Nuclide>, usize)>,
+}
+
+/// The channels whose bands a tally's score of `mt` reads inside the
+/// unresolved range ([`yamc_materials::Material::macro_xs_by_mt`]), or `None`
+/// for a score read from the smooth cross sections there too.
+fn band_channels(mt: i32) -> Option<&'static [Channel]> {
+    match mt {
+        1 => Some(&Channel::ALL),
+        2 => Some(&[Channel::Elastic]),
+        18 => Some(&[Channel::Fission]),
+        27 => Some(&[Channel::Capture, Channel::Fission]),
+        102 => Some(&[Channel::Capture]),
+        _ => None,
+    }
+}
+
+/// Per channel, the band over the smooth cross section, `band_c / σ_c`: the
+/// factor a band puts on its channel, and so on any change to it. A channel
+/// the band leaves out (non-elastic, where the table does not carry it)
+/// moves nothing.
+fn band_factors(band: &UrrBand) -> [f64; 4] {
+    let factor = |b: f64, smooth: f64| if smooth > 0.0 { b / smooth } else { 0.0 };
+    [
+        factor(band.elastic, band.smooth_elastic),
+        if band.inelastic_in_table { 1.0 } else { 0.0 },
+        factor(band.capture, band.smooth_capture),
+        factor(band.fission, band.smooth_fission),
+    ]
+}
+
+/// The band's value of each channel, in [`Channel::ALL`] order.
+fn band_values(band: &UrrBand) -> [f64; 4] {
+    [band.elastic, band.inelastic(), band.capture, band.fission]
 }
 
 impl ReplicaNuclide {
@@ -128,6 +180,22 @@ impl ReplicaNuclide {
 
     fn at(table: &[f64], (i, f): (usize, f64)) -> f64 {
         table[i] + f * (table[i + 1] - table[i])
+    }
+
+    /// The probability-table band at `e` for the per-collision base seed
+    /// `urr_random`, the one the flight, the reaction and the tallies read.
+    fn band(&self, e: f64, urr_random: Option<f64>) -> Option<UrrBand> {
+        let (nuclide, t) = self.urr.as_ref()?;
+        nuclide.urr_band(*t, e, urr_random?)
+    }
+
+    /// `Σ_c g_c σ_c,s(E)` over `channels`: what a source's partials in
+    /// those channels add up to once each carries its band factor `g_c`.
+    fn banded(source: &Source, at: (usize, f64), g: &[f64; 4], channels: &[Channel]) -> f64 {
+        channels
+            .iter()
+            .map(|c| g[c.index()] * Self::at(&source.channels[c.index()], at))
+            .sum()
     }
 }
 
@@ -328,7 +396,7 @@ impl ReplicaContext {
                 .map(|d| d.absolute(name).unwrap_or(&[]))
                 .collect();
             let Some(tab) = Self::nuclide(
-                nuclide,
+                Arc::clone(nuclide),
                 material.temperature(),
                 transport,
                 &relative,
@@ -348,7 +416,7 @@ impl ReplicaContext {
 
     #[allow(clippy::too_many_arguments)]
     fn nuclide(
-        nuclide: &Nuclide,
+        nuclide: Arc<Nuclide>,
         temperature: &str,
         transport: Option<&TransportField>,
         relative: &[&[f64]],
@@ -422,6 +490,7 @@ impl ReplicaContext {
                     .map_or_else(|| vec![0.0; n], |r| on_grid(r, n));
                 sources.push(Source {
                     sum: vec![0.0; n],
+                    channels: std::array::from_fn(|_| vec![0.0; n]),
                     own,
                     relative: rel,
                     relative_dm: rel_dm,
@@ -430,7 +499,13 @@ impl ReplicaContext {
                 });
                 sources.len() - 1
             });
-            for (o, v) in sources[s].sum.iter_mut().zip(on_grid(reaction, n)) {
+            let xs = on_grid(reaction, n);
+            if let Some(c) = channel_of(*mt) {
+                for (o, v) in sources[s].channels[c.index()].iter_mut().zip(&xs) {
+                    *o += v;
+                }
+            }
+            for (o, v) in sources[s].sum.iter_mut().zip(xs) {
                 *o += v;
             }
             source_of.insert(*mt, s);
@@ -486,6 +561,13 @@ impl ReplicaContext {
             scores.insert(x, (by_source.into_iter().collect(), nominal));
         }
 
+        // The band index is the material's own temperature lookup, the one
+        // its flights and tallies draw bands with.
+        let urr = nuclide
+            .get_temp_idx(temperature)
+            .filter(|_| nuclide.urr_present)
+            .map(|t| (Arc::clone(&nuclide), t));
+
         Ok(Some(ReplicaNuclide {
             density,
             grid,
@@ -493,6 +575,7 @@ impl ReplicaContext {
             source_of,
             fission,
             scores,
+            urr,
         }))
     }
 
@@ -501,7 +584,19 @@ impl ReplicaContext {
     }
 
     /// `ΔΣ_k(E) = Σ'_t,k - Σ_t` in 1/cm for each replica, into `out`.
-    pub(crate) fn flight_delta(&self, slot: Option<u32>, e: f64, out: &mut [f64]) {
+    ///
+    /// Inside a nuclide's unresolved range the flight saw its band, each
+    /// channel the smooth one times the band's factor, and a replica moves
+    /// each band by its smooth channel's relative change, so the change in
+    /// the band total is each channel's change times that factor.
+    /// `urr_random` is the per-collision base seed the bands are drawn with.
+    pub(crate) fn flight_delta(
+        &self,
+        slot: Option<u32>,
+        e: f64,
+        urr_random: Option<f64>,
+        out: &mut [f64],
+    ) {
         out.fill(0.0);
         let Some(m) = self.material_at(slot) else {
             return;
@@ -510,8 +605,12 @@ impl ReplicaContext {
             let Some(at) = nuc.locate(e) else {
                 continue;
             };
+            let g = nuc.band(e, urr_random).map(|b| band_factors(&b));
             for s in &nuc.sources {
-                let sum = ReplicaNuclide::at(&s.sum, at);
+                let sum = match &g {
+                    Some(g) => ReplicaNuclide::banded(s, at, g, &Channel::ALL),
+                    None => ReplicaNuclide::at(&s.sum, at),
+                };
                 if sum == 0.0 {
                     continue;
                 }
@@ -573,7 +672,19 @@ impl ReplicaContext {
     /// `Σ'_x,k / Σ_x` for a reaction-rate or particle-production score at `e`
     /// in the material, into `out`; all ones for flux, for a score nothing
     /// perturbs, and for heating and damage scores, which stay nominal.
-    pub(crate) fn score_ratio(&self, slot: Option<u32>, score: &Score, e: f64, out: &mut [f64]) {
+    ///
+    /// Inside a nuclide's unresolved range a tally reads the total, elastic,
+    /// fission, absorption and capture from its band, so that nuclide's
+    /// share of those scores is the band's, and moves by the band's change.
+    /// `urr_random` is the per-collision base seed the bands are drawn with.
+    pub(crate) fn score_ratio(
+        &self,
+        slot: Option<u32>,
+        score: &Score,
+        e: f64,
+        urr_random: Option<f64>,
+        out: &mut [f64],
+    ) {
         out.fill(1.0);
         let x = match score {
             Score::ReactionRate(rr) => rr.mt.as_i32(),
@@ -583,10 +694,26 @@ impl ReplicaContext {
         let Some(m) = self.material_at(slot) else {
             return;
         };
+        let banded = band_channels(x);
         let mut denominator = 0.0;
         let mut change = vec![0.0; out.len()];
         for nuc in &m.nuclides {
-            let (Some((by_source, nominal)), Some(at)) = (nuc.scores.get(&x), nuc.locate(e)) else {
+            let Some(at) = nuc.locate(e) else {
+                continue;
+            };
+            if let (Some(channels), Some(band)) = (banded, nuc.band(e, urr_random)) {
+                let values = band_values(&band);
+                denominator +=
+                    nuc.density * channels.iter().map(|c| values[c.index()]).sum::<f64>();
+                let g = band_factors(&band);
+                for src in &nuc.sources {
+                    let own = ReplicaNuclide::at(&src.own, at);
+                    let sum = ReplicaNuclide::banded(src, at, &g, channels);
+                    src.add_relative_change(e, own, nuc.density * sum, &mut change);
+                }
+                continue;
+            }
+            let Some((by_source, nominal)) = nuc.scores.get(&x) else {
                 continue;
             };
             denominator += nuc.density * ReplicaNuclide::at(nominal, at);
@@ -623,6 +750,9 @@ pub(crate) fn mean_survival(x: f64) -> f64 {
 pub(crate) struct ReplicaSegment<'a> {
     ctx: &'a ReplicaContext,
     slot: Option<u32>,
+    /// The per-collision base seed the segment's probability-table bands are
+    /// drawn with.
+    urr_random: Option<f64>,
     /// `r_k φ(ΔΣ_k d)`: the ratio integrated along the segment, per unit
     /// length, which a track-length score is multiplied by.
     factors: Vec<f64>,
@@ -640,8 +770,9 @@ impl<'a> ReplicaSegment<'a> {
         dist: f64,
     ) -> Option<Self> {
         let ratios = particle.replica.as_ref()?;
+        let urr_random = yamc_particle::particle::urr_to_option(particle.urr_random);
         let mut delta = vec![0.0; ratios.len()];
-        ctx.flight_delta(slot, particle.energy, &mut delta);
+        ctx.flight_delta(slot, particle.energy, urr_random, &mut delta);
         let factors = ratios
             .iter()
             .zip(&delta)
@@ -651,6 +782,7 @@ impl<'a> ReplicaSegment<'a> {
         Some(Self {
             ctx,
             slot,
+            urr_random,
             factors,
             survival,
         })
@@ -659,7 +791,8 @@ impl<'a> ReplicaSegment<'a> {
     /// Replica factors for one score at energy `e`.
     pub(crate) fn factors_for(&self, score: &Score, e: f64) -> Vec<f64> {
         let mut ratio = vec![1.0; self.factors.len()];
-        self.ctx.score_ratio(self.slot, score, e, &mut ratio);
+        self.ctx
+            .score_ratio(self.slot, score, e, self.urr_random, &mut ratio);
         ratio
             .iter()
             .zip(&self.factors)

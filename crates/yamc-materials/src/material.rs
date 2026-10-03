@@ -1209,11 +1209,10 @@ impl Material {
         }
     }
 
-    /// Shared per-nuclide URR probability-table sampling.
+    /// Shared per-nuclide URR probability-table sampling, through
+    /// [`Nuclide::urr_band`] at the material's temperature.
     ///
-    /// Runs the guard chain (URR present, temperature index, in-range URR data,
-    /// per-temperature fast XS), then extracts the smooth microscopic partials from
-    /// `fast_xs` and samples the URR table with `urr_random`. Returns `None` when the
+    /// Returns `None` when the
     /// nuclide has no applicable URR contribution at this energy (the early-return
     /// semantics callers rely on); otherwise returns the smooth values the callers
     /// still need alongside the URR-sampled cross-sections.
@@ -1223,66 +1222,16 @@ impl Material {
         energy: f64,
         urr_random: f64,
     ) -> Option<UrrNuclideSample> {
-        if !nuclide.urr_present {
-            return None;
-        }
         let temp_idx = nuclide.get_temp_idx(&self.temperature)?;
-        let urr = nuclide
-            .urr_data
-            .get(temp_idx)
-            .and_then(|opt| opt.as_ref())?;
-        if !urr.energy_in_bounds(energy) {
-            return None;
-        }
-        let fast_grid = nuclide.fast_xs.get(temp_idx)?;
-
-        let (xs_total, xs_absorption, xs_scattering, xs_fission) = fast_grid.lookup(energy);
-        let (i_grid, f) = fast_grid.lookup_grid_index(energy);
-        let xs_elastic = fast_grid
-            .elastic_idx
-            .map(|idx| fast_grid.scatter_xs_interp(i_grid, f, idx))
-            .unwrap_or(0.0);
-        let xs_inelastic = (xs_scattering - xs_elastic).max(0.0);
-        // `xs_absorption` is `FastXSGrid::lookup`'s disappearance PARTIAL, which
-        // already excludes fission (the four partials sum to the total). OpenMC
-        // writes `capture *= (micro.absorption - micro.fission)` because ITS
-        // absorption includes fission; importing that expression here would
-        // subtract fission a second time, clamping in-band capture to zero for
-        // every nuclide whose fission exceeds its capture. In-band that would
-        // make a capture tally read zero and an absorption tally (built as
-        // `macro_capture + macro_fission`) report just the fission rate.
-        let xs_capture = xs_absorption;
-        let xs_ngamma = if !urr.multiply_smooth && !fast_grid.xs_ngamma.is_empty() {
-            Some(fast_grid.lookup_ngamma(i_grid, f))
-        } else {
-            None
-        };
-
-        let smooth_absorption = xs_capture + xs_fission;
-        // `urr_random` is the per-collision base seed shared across the
-        // material's nuclides; derive this nuclide's independent probability
-        // table band from it. Isotopes' resonance structures are
-        // statistically independent, so each must draw its own band rather than
-        // all sharing one random (which over-transmits multi-isotope materials).
-        let r = yamc_nuclide::urr::urr_nuclide_random(urr_random, nuclide.urr_stream_key());
-        let (urr_total, urr_elastic, urr_capture, urr_fission, _smooth) = urr.sample(
-            energy,
-            r,
-            xs_elastic,
-            smooth_absorption,
-            xs_fission,
-            xs_inelastic,
-            xs_ngamma,
-        );
-
+        let band = nuclide.urr_band(temp_idx, energy, urr_random)?;
         Some(UrrNuclideSample {
-            xs_total,
-            xs_inelastic,
-            inelastic_in_table: urr.inelastic_flag > 0,
-            urr_total,
-            urr_elastic,
-            urr_capture,
-            urr_fission,
+            xs_total: band.smooth_total,
+            xs_inelastic: band.smooth_inelastic,
+            inelastic_in_table: band.inelastic_in_table,
+            urr_total: band.total,
+            urr_elastic: band.elastic,
+            urr_capture: band.capture,
+            urr_fission: band.fission,
         })
     }
 

@@ -1662,6 +1662,7 @@ fn parse_urr(batch: &RecordBatch, row: usize) -> Result<UrrData, Box<dyn Error>>
         energy,
         cdf_values,
         xs_values,
+        nominal_smooth: None,
     })
 }
 

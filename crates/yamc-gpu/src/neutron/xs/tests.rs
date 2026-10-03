@@ -1321,6 +1321,7 @@ fn make_synthetic_urr_nuclide(z: u32, a: u32, n_e: usize, n_cdf: usize) -> Nucli
         energy,
         cdf_values: vec![cdf_row; n_e],
         xs_values: vec![xs_row; n_e],
+        nominal_smooth: None,
     };
     // `urr_data` is indexed by temperature index; the synthetic nuclide has a
     // single loaded temperature ("294") at index 0.
