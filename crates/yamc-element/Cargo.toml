@@ -2,6 +2,7 @@
 name = "yamc-element"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 description = "Evaluated photon nuclear data for yamc -- Element, photon interaction cross-sections, atomic transitions"
 license = "MIT OR Apache-2.0"
 

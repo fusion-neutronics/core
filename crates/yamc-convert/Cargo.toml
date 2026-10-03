@@ -2,6 +2,7 @@
 name = "yamc-convert"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 description = "Convert ENDF and ACE evaluations into the transport Arrow format yamc reads"
 license = "MIT OR Apache-2.0"
 

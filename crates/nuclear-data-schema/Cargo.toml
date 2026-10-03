@@ -2,6 +2,7 @@
 name = "nuclear-data-schema"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 description = "The Arrow schema of the simulation-ready nuclear data format, declared once"
 license = "MIT OR Apache-2.0"
 

@@ -447,10 +447,7 @@ struct Site {
 
 /// Split a LIST's values into fixed-width rows.
 fn rows<const N: usize>(values: &[f64]) -> Vec<[f64; N]> {
-    values
-        .chunks_exact(N)
-        .map(|c| c.try_into().expect("chunks_exact yields N values"))
-        .collect()
+    values.as_chunks::<N>().0.to_vec()
 }
 
 /// A LIST whose length the format fixes from its own counts.
@@ -636,7 +633,9 @@ fn parse_resolved(
             )?;
             let resonances = list
                 .values
-                .chunks_exact(12)
+                .as_chunks::<12>()
+                .0
+                .iter()
                 .map(|c| CompactResonance {
                     parameters: c[..6].try_into().expect("six values"),
                     uncertainties: c[6..].try_into().expect("six values"),
@@ -776,7 +775,7 @@ fn parse_r_matrix(
                     let len = list.values.len();
                     let stride = len / group.nrsa as usize;
                     len % group.nrsa as usize == 0
-                        && stride % 2 == 0
+                        && stride.is_multiple_of(2)
                         && stride / 2 > nch.max(0) as usize
                 } else {
                     list.values.is_empty()

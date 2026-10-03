@@ -1318,7 +1318,7 @@ impl Chain {
         let mut reachable: Vec<String> = Vec::new();
         let mut frontier: Vec<String> = initial.iter().map(|s| s.to_string()).collect();
         let mut depth = 0;
-        while !frontier.is_empty() && level.map_or(true, |l| depth <= l) {
+        while !frontier.is_empty() && level.is_none_or(|l| depth <= l) {
             let mut next = Vec::new();
             for name in frontier {
                 if reachable.contains(&name) || !self.contains(&name) {
