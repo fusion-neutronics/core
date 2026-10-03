@@ -2,6 +2,7 @@
 name = "yamc"
 version = "0.3.0"
 edition = "2021"
+rust-version.workspace = true
 description = "Yet Another Monte Carlo code for neutron transport simulations"
 license = "MIT OR Apache-2.0"
 exclude = [
