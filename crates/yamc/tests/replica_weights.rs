@@ -86,8 +86,12 @@ fn mixed_iron(dir: &std::path::Path) -> Option<Material> {
 }
 
 fn tally(score: &str) -> Arc<Tally> {
+    tally_in(1, score)
+}
+
+fn tally_in(cell: u32, score: &str) -> Arc<Tally> {
     let mut t = Tally::new();
-    t.filters.push(Filter::Cell(CellFilter::from_id(1)));
+    t.filters.push(Filter::Cell(CellFilter::from_id(cell)));
     t.scores = vec![score.parse::<Score>().expect("score")];
     t.estimator = Estimator::TrackLength;
     t.initialize_batches(1);
@@ -548,4 +552,250 @@ fn tritium_production_matches_its_rerun_through_a_thick_lithium_sphere() {
             "replica {k}: weighted {x:e} ± {sx:e}, rerun {y:e} ± {sy:e} (z = {z:.2})"
         );
     }
+}
+
+/// W184, from the fixtures: its probability tables cover 10 to 100 keV as
+/// factors on the smooth cross sections, with covariance on elastic and
+/// capture there.
+fn tungsten() -> Option<Material> {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/W184.arrow");
+    if !dir.join("covariance.arrow").is_file() || !dir.join("urr.arrow").is_file() {
+        return None;
+    }
+    let mut m = Material::new(
+        HashMap::from([("W184".to_string(), 1.0)]),
+        "atom",
+        "g/cm3",
+        Some(19.3),
+    )
+    .expect("material");
+    m.set_material_id(1);
+    m.set_temperature("294");
+    m.read_nuclear_data(
+        &HashMap::from([("W184".to_string(), dir.to_string_lossy().into_owned())]),
+        None,
+    )
+    .expect("read W184");
+    m.ensure_covariance_loaded().expect("covariance");
+    Some(m)
+}
+
+/// `m` with W184's factor tables rewritten as the absolute cross sections
+/// they stand for at each table energy, the other way an evaluation's
+/// processing can store them.
+fn with_absolute_tables(m: &Material) -> Material {
+    let mut out = m.clone();
+    let mut nuclide = (*out.nuclide_data["W184"]).clone();
+    for (t, urr) in nuclide.urr_data.iter_mut().enumerate() {
+        let Some(urr) = urr.as_mut() else { continue };
+        assert!(urr.multiply_smooth, "the fixture's tables are factors");
+        let grid = &m.nuclide_data["W184"].fast_xs[t];
+        for (e, row) in urr.energy.iter().zip(urr.xs_values.iter_mut()) {
+            let (_, capture, _, fission) = grid.lookup(*e);
+            let (i, f) = grid.lookup_grid_index(*e);
+            let elastic = grid
+                .elastic_idx
+                .map(|k| grid.scatter_xs_interp(i, f, k))
+                .unwrap_or(0.0);
+            for band in row.iter_mut() {
+                band.elastic *= elastic;
+                band.n_gamma *= capture;
+                band.fission *= fission;
+            }
+        }
+        urr.multiply_smooth = false;
+    }
+    out.nuclide_data
+        .insert("W184".to_string(), Arc::new(nuclide));
+    out.invalidate_xs_cache();
+    out
+}
+
+/// Every replica's tallies inside W184's unresolved range, where flights,
+/// collisions and the tally cross sections all read probability-table bands,
+/// against an independent rerun of that replica's draw.
+fn urr_replicas_match_their_reruns(m: Material) {
+    const SCORES: [&str; 4] = ["flux", "total", "elastic", "(n,gamma)"];
+    let replicas = 3;
+    let particles = 20_000;
+    let (radius, energy) = (3.0, 5.0e4);
+    let weighted = run_scores(
+        m.clone(),
+        radius,
+        energy,
+        particles,
+        21,
+        Some(TransportDataUncertainty {
+            seed: SEED,
+            replicas,
+        }),
+        &SCORES,
+    );
+    let mut failures = Vec::new();
+    for k in 0..replicas {
+        let rerun = run_scores(
+            rerun_material(&m, k as u64),
+            radius,
+            energy,
+            particles,
+            1000 + k as u64,
+            None,
+            &SCORES,
+        );
+        for (i, name) in SCORES.iter().enumerate() {
+            let (x, sx) = replica(&weighted[i], k);
+            let (y, sy) = (rerun[i].get_mean()[0], rerun[i].get_std_dev()[0]);
+            let nominal = weighted[i].get_mean()[0];
+            let z = (x - y) / (sx * sx + sy * sy).sqrt();
+            eprintln!(
+                "replica {k} {name}: weighted {x:e} ± {sx:e}, rerun {y:e} ± {sy:e}, \
+                 nominal {nominal:e} (z = {z:.2})"
+            );
+            if z.abs() >= 4.0 {
+                failures.push(format!("replica {k} {name}: z = {z:.2}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+/// The flux leaking out of a sphere of `material`, scored in a void shell
+/// around it.
+fn transmitted_flux(
+    material: Material,
+    radius: f64,
+    energy: f64,
+    particles: usize,
+    seed: u64,
+    data: Option<TransportDataUncertainty>,
+) -> Arc<Tally> {
+    let sphere = |id: usize, radius: f64, boundary: BoundaryType| {
+        Arc::new(Surface {
+            surface_id: Some(id),
+            kind: SurfaceKind::Sphere {
+                x0: 0.0,
+                y0: 0.0,
+                z0: 0.0,
+                radius,
+            },
+            boundary,
+            name: None,
+        })
+    };
+    let inner = sphere(1, radius, BoundaryType::Transmission);
+    let outer = sphere(2, radius + 1.0, BoundaryType::Vacuum);
+    let body = Cell::new(
+        Some(1),
+        Region::new_from_halfspace(HalfspaceType::Below(Arc::clone(&inner))),
+        Some("shield".into()),
+        Some(0),
+    );
+    let shell = Cell::new(
+        Some(2),
+        Region::new_from_halfspace(HalfspaceType::Above(inner))
+            .intersection(&Region::new_from_halfspace(HalfspaceType::Below(outer))),
+        Some("shell".into()),
+        None,
+    );
+    let geometry = Geometry::new(vec![body, shell], vec![Arc::new(material)]).expect("geometry");
+    let flux = tally_in(2, "flux");
+    let source = ParticleSource::Neutron(Source {
+        space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
+        angle: AngularDistribution::Isotropic,
+        energy: SourceEnergyDistribution::Discrete(Discrete::new(vec![energy], vec![1.0]).unwrap()),
+        strength: 1.0,
+    });
+    let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&flux)]);
+    model.verbose = Verbose::silent();
+    model.tracking_mode = TrackingMode::Surface;
+    model
+        .simulate_transport(&TransportSettings {
+            total_particles: Some(particles),
+            seed,
+            threads: Some(1),
+            data_uncertainty: data,
+            ..Default::default()
+        })
+        .expect("transport");
+    flux
+}
+
+/// Through a thick shield the neutrons that get out are mostly those that
+/// drew low probability-table bands, where the cross section, and with it
+/// the response to a perturbation of it, is far below the smooth value. Each
+/// replica's transmitted flux must match its rerun.
+fn urr_transmission_matches_its_rerun(m: Material) {
+    let replicas = 3;
+    let particles = 40_000;
+    let (radius, energy) = (8.0, 1.2e4);
+    let weighted = transmitted_flux(
+        m.clone(),
+        radius,
+        energy,
+        particles,
+        21,
+        Some(TransportDataUncertainty {
+            seed: SEED,
+            replicas,
+        }),
+    );
+    let nominal = weighted.get_mean()[0];
+    let mut failures = Vec::new();
+    for k in 0..replicas {
+        let rerun = transmitted_flux(
+            rerun_material(&m, k as u64),
+            radius,
+            energy,
+            particles,
+            1000 + k as u64,
+            None,
+        );
+        let (x, sx) = replica(&weighted, k);
+        let (y, sy) = (rerun.get_mean()[0], rerun.get_std_dev()[0]);
+        let z = (x - y) / (sx * sx + sy * sy).sqrt();
+        eprintln!(
+            "replica {k} transmitted flux: weighted {x:e} ± {sx:e}, rerun {y:e} ± {sy:e}, \
+             nominal {nominal:e} (z = {z:.2})"
+        );
+        if z.abs() >= 4.0 {
+            failures.push(format!("replica {k}: z = {z:.2}"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+fn transmission_matches_its_rerun_through_factor_probability_tables() {
+    let Some(m) = tungsten() else {
+        eprintln!("skipping: W184 fixture missing, or without covariance or tables");
+        return;
+    };
+    urr_transmission_matches_its_rerun(m);
+}
+
+#[test]
+fn transmission_matches_its_rerun_through_absolute_probability_tables() {
+    let Some(m) = tungsten() else {
+        eprintln!("skipping: W184 fixture missing, or without covariance or tables");
+        return;
+    };
+    urr_transmission_matches_its_rerun(with_absolute_tables(&m));
+}
+
+#[test]
+fn replicas_match_their_reruns_inside_factor_probability_tables() {
+    let Some(m) = tungsten() else {
+        eprintln!("skipping: W184 fixture missing, or without covariance or tables");
+        return;
+    };
+    urr_replicas_match_their_reruns(m);
+}
+
+#[test]
+fn replicas_match_their_reruns_inside_absolute_probability_tables() {
+    let Some(m) = tungsten() else {
+        eprintln!("skipping: W184 fixture missing, or without covariance or tables");
+        return;
+    };
+    urr_replicas_match_their_reruns(with_absolute_tables(&m));
 }

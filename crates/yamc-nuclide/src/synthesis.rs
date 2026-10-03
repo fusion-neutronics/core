@@ -67,6 +67,51 @@ fn fission() -> BTreeSet<i32> {
     set
 }
 
+/// The four partial channels of the transport lookup, which a total
+/// cross section is the sum of and a probability-table band scales one by
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Channel {
+    /// MT 2.
+    Elastic,
+    /// The neutron-emitting channels other than elastic and fission.
+    Inelastic,
+    /// Disappearance: capture and the charged-particle-out channels.
+    Capture,
+    /// The fission total or its chance partials.
+    Fission,
+}
+
+impl Channel {
+    pub const ALL: [Channel; 4] = [
+        Channel::Elastic,
+        Channel::Inelastic,
+        Channel::Capture,
+        Channel::Fission,
+    ];
+
+    /// Position in [`Self::ALL`].
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// The channel a partial belongs to, by the same rules the sums are built
+/// from, or `None` for an MT no sum holds.
+pub fn channel_of(mt: i32) -> Option<Channel> {
+    if mt == 2 {
+        Some(Channel::Elastic)
+    } else if fission().contains(&mt) {
+        Some(Channel::Fission)
+    } else if is_scattering(mt) {
+        Some(Channel::Inelastic)
+    } else if absorption().contains(&mt) {
+        Some(Channel::Capture)
+    } else {
+        None
+    }
+}
+
 /// Whether an MT emits a neutron, either as level inelastic or otherwise.
 pub fn is_scattering(mt: i32) -> bool {
     inelastic().contains(&mt) || scattering_non_inelastic().contains(&mt)
@@ -239,6 +284,22 @@ pub fn synthesize(partials: &BTreeMap<i32, Vec<f64>>, n_energy: usize) -> BTreeM
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every partial lands in the channel the transport lookup sums it into.
+    #[test]
+    fn partials_fall_in_their_lookup_channel() {
+        assert_eq!(channel_of(2), Some(Channel::Elastic));
+        for mt in [51, 91, 16, 17, 22, 875] {
+            assert_eq!(channel_of(mt), Some(Channel::Inelastic), "MT {mt}");
+        }
+        for mt in [102, 103, 105, 107] {
+            assert_eq!(channel_of(mt), Some(Channel::Capture), "MT {mt}");
+        }
+        for mt in [18, 19, 38] {
+            assert_eq!(channel_of(mt), Some(Channel::Fission), "MT {mt}");
+        }
+        assert_eq!(channel_of(1), None);
+    }
 
     /// The sets MT 3 is built from must not overlap.
     ///
