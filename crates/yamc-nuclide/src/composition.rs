@@ -262,6 +262,9 @@ pub fn expand_element_enriched(
 /// Enrichment parameters, if provided, are forwarded to the matching
 /// element only (the element whose symbol matches `enrichment_target`'s
 /// element prefix).
+///
+/// The returned fractions sum to 1.0 and are atom fractions when
+/// `fraction_type` is `"atom"`, mass fractions when it is `"mass"`.
 pub fn expand_formula(
     formula: &str,
     fraction_type: &str,
@@ -296,6 +299,10 @@ pub fn expand_formula(
             .collect::<String>()
     });
 
+    validate_fraction_type(fraction_type)?;
+
+    // The formula's counts are atom ratios, so expand every element in atom
+    // fractions and convert the whole formula to mass fractions at the end.
     let mut nuclides = HashMap::new();
 
     for (element, &count) in &counts {
@@ -305,16 +312,27 @@ pub fn expand_formula(
         let element_nuclides = if is_enrichment_target {
             if let (Some(enr), Some(target)) = (enrichment, enrichment_target) {
                 let et = enrichment_type.unwrap_or("atom");
-                expand_element_enriched(element, frac, enr, target, et, fraction_type)?
+                expand_element_enriched(element, frac, enr, target, et, "atom")?
             } else {
-                expand_element(element, frac, fraction_type)?
+                expand_element(element, frac, "atom")?
             }
         } else {
-            expand_element(element, frac, fraction_type)?
+            expand_element(element, frac, "atom")?
         };
 
         for (nuc, frac_val) in element_nuclides {
             *nuclides.entry(nuc).or_insert(0.0) += frac_val;
+        }
+    }
+
+    if fraction_type == "mass" {
+        let mut total_mass = 0.0;
+        for (nuc, frac) in nuclides.iter_mut() {
+            *frac *= atomic_mass(nuc)?;
+            total_mass += *frac;
+        }
+        for frac in nuclides.values_mut() {
+            *frac /= total_mass;
         }
     }
 
@@ -457,6 +475,41 @@ mod tests {
         let ag110 = atomic_mass("Ag110").expect("Ag110 should be in AME2020");
         let ag110_m1 = atomic_mass("Ag110_m1").expect("Ag110_m1 should fall back to Ag110's mass");
         assert_eq!(ag110, ag110_m1);
+    }
+
+    /// The formula's counts are atom ratios. With mass fractions each element
+    /// gets its share of the formula's mass, not its share of the atoms.
+    #[test]
+    fn expand_formula_mass_fractions_weight_by_mass() {
+        let sum_of = |m: &HashMap<String, f64>, el: &str| -> f64 {
+            m.iter()
+                .filter(|(k, _)| {
+                    k.strip_prefix(el)
+                        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+                })
+                .map(|(_, v)| v)
+                .sum()
+        };
+
+        let atom = expand_formula("H2O", "atom", None, None, None).unwrap();
+        assert!((sum_of(&atom, "H") - 2.0 / 3.0).abs() < 1e-12);
+
+        let mass = expand_formula("H2O", "mass", None, None, None).unwrap();
+        let h = sum_of(&mass, "H");
+        let o = sum_of(&mass, "O");
+        assert!((h + o - 1.0).abs() < 1e-12);
+        // 2 x 1.008 / 18.015 for natural H and O.
+        assert!((h - 0.1119).abs() < 1e-3, "H mass fraction {h}");
+
+        // Within the enriched element the isotopes still split by mass:
+        // 60 atom% Li6 in Li4SiO4 is 6.015 * 0.6 / (6.015 * 0.6 + 7.016 * 0.4)
+        // of the lithium mass.
+        let enr = expand_formula("Li4SiO4", "mass", Some(60.0), Some("Li6"), Some("atom")).unwrap();
+        let li6 = enr["Li6"];
+        let li7 = enr["Li7"];
+        let expected = 6.015 * 0.6 / (6.015 * 0.6 + 7.016 * 0.4);
+        assert!((li6 / (li6 + li7) - expected).abs() < 1e-3);
+        assert!((enr.values().sum::<f64>() - 1.0).abs() < 1e-12);
     }
 
     #[test]
