@@ -2819,6 +2819,7 @@ mod tests {
     use super::*;
     use crate::filter::mesh::MeshFilter;
     use crate::mesh::RegularRectangularMesh;
+    use crate::EnergyFilter;
 
     fn make_mesh_tally() -> Tally {
         // 3x4x5 mesh from (0,0,0) to (3,4,5). 60 bins total. Set each
@@ -2919,6 +2920,46 @@ mod tests {
                 expected_std
             );
         }
+    }
+
+    /// The slice reads through the full bin layout, so a tally with nuclide
+    /// and energy bins between score and mesh still gets the requested score.
+    #[test]
+    fn test_extract_mesh_slice_with_nuclide_bins() {
+        let mesh = RegularRectangularMesh::new([0.0, 0.0, 0.0], [2.0, 1.0, 1.0], [2, 1, 1]);
+        let mut tally = Tally::new();
+        tally.scores = vec![Score::Flux(FluxScore), Score::Flux(FluxScore)];
+        tally.nuclides = vec![NuclideBin::Specific("Fe56".to_string()), NuclideBin::Total];
+        tally.filters = vec![
+            Filter::Energy(EnergyFilter::new(vec![0.0, 1.0, 2.0])),
+            Filter::Mesh(MeshFilter::new(mesh)),
+        ];
+        // 2 scores x 2 nuclides x 2 energies x 2 mesh bins, each bin set to
+        // its flat index.
+        let n = tally.num_bins();
+        assert_eq!(n, 16);
+        let arc = std::sync::Arc::new(tally);
+        arc.install_finalized(crate::welford::WelfordTallyStats {
+            mean: (0..n).map(|i| i as f64).collect(),
+            m2: vec![0.0; n],
+            n_histories: 1,
+            agg: crate::welford::AggMoments::ZERO,
+            score_pdf: crate::welford::ScorePdf::default(),
+            comoment: None,
+            replicas: None,
+        });
+
+        // Score 1, nuclide 0, energy 1: flat index 8 + 2 + mesh bin.
+        let values = arc
+            .extract_mesh_slice("xy", Some(0.5), 1, Some(1), "mean")
+            .unwrap();
+        assert_eq!(values, vec![vec![10.0, 11.0]]);
+
+        // Summed over energy: (8 + mesh bin) + (10 + mesh bin).
+        let values = arc
+            .extract_mesh_slice("xy", Some(0.5), 1, None, "mean")
+            .unwrap();
+        assert_eq!(values, vec![vec![18.0, 20.0]]);
     }
 
     #[test]
