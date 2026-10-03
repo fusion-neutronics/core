@@ -762,6 +762,9 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
         available_temperatures: all_temps,
         loaded_temperatures: loaded_temps,
         data_path: Some(dir.to_string_lossy().to_string()),
+        // The caller that resolved a keyword or URL to this folder records
+        // what it was asked for; a folder read directly is its own source.
+        data_source: None,
         fission_nu,
         fast_xs: fast_xs_grids,
         urr_data,

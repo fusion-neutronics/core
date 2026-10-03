@@ -1075,6 +1075,13 @@ pub struct Nuclide {
     /// Optional path the Arrow data was read from (None for in‑memory sources / WASM).
     #[serde(skip, default)]
     pub data_path: Option<String>, // Path the Arrow data was loaded from (for potential future extension)
+    /// What the data was asked for by: a library keyword, URL or local path,
+    /// before resolution. A keyword resolves to a cache folder (`data_path`),
+    /// and a later load at a wider scope must go back to the keyword, not the
+    /// folder, or a section the first load did not fetch (`covariance.arrow`)
+    /// is never downloaded and reads as absent.
+    #[serde(skip, default)]
+    pub data_source: Option<String>,
     /// Fission nu-bar data (average neutrons per fission as function of energy)
     #[serde(skip, default)]
     pub fission_nu: Option<FissionNuData>,
@@ -1157,6 +1164,19 @@ pub struct Nuclide {
     /// transmutation-scoped load is never handed to transport.
     #[serde(skip, default)]
     pub load_scope: crate::load_scope::LoadScope,
+}
+
+impl Nuclide {
+    /// What to load this nuclide again from, at a wider scope: the keyword,
+    /// URL or path it was asked for by, else the folder it was read from.
+    ///
+    /// A library keyword resolves to a cache folder, and reloading from the
+    /// folder treats it as a plain local directory: a section the first load
+    /// did not fetch stays missing and reads as absent. Reloading from the
+    /// keyword lets the cache top the folder up.
+    pub fn reload_source(&self) -> Option<String> {
+        self.data_source.clone().or_else(|| self.data_path.clone())
+    }
 }
 
 impl Nuclide {
@@ -1711,6 +1731,7 @@ pub fn get_or_load_nuclide(
 
     let mut nuclide = crate::nuclide_loader::load_nuclide(&resolved_path, &load_at)?;
     nuclide.data_path = Some(resolved_path.clone());
+    nuclide.data_source = Some(path_or_keyword.to_string());
 
     // Build any temperature the CALLER asked for that the file only brackets.
     //

@@ -545,6 +545,7 @@ impl From<PyNuclide> for Nuclide {
             available_temperatures: py.available_temperatures,
             loaded_temperatures: py.loaded_temperatures,
             data_path: py.data_path,
+            data_source: None,
             fission_nu: py.fission_nu,
             fast_xs: Vec::new(),
             urr_data: Vec::new(),

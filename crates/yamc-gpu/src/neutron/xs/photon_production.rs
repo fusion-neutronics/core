@@ -1022,6 +1022,7 @@ mod tests {
             available_temperatures: vec![temp.clone()],
             loaded_temperatures: vec![temp],
             data_path: None,
+            data_source: None,
             fission_nu: None,
             fast_xs: vec![],
             urr_data: vec![],
