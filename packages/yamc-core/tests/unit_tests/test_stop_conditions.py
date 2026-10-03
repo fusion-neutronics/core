@@ -79,6 +79,21 @@ def test_uncapped_run_stops_on_convergence():
     assert r.aggregate_relative_error <= 0.12
 
 
+@pytest.mark.parametrize(
+    "selector, expected",
+    [({"tally": "tbrr"}, "tally='tbrr'"), ({"tally_id": 99}, "tally_id=99")],
+)
+def test_convergence_target_matching_no_tally_raises(selector, expected):
+    # A target that names no tally in the model is never evaluated, so the run
+    # used to treat it as met and stop at the first checkpoint. Fail fast.
+    model = _build_model()
+    model.convergence_targets = [
+        yamc.ConvergenceTarget("relative_error", 0.01, **selector)
+    ]
+    with pytest.raises(ValueError, match=f"{expected} matches no tally"):
+        model.simulate_transport(max_runtime=(1, "h"), seed=1)
+
+
 @pytest.mark.skipif(
     not yamc.parallel.gpu_available(),
     reason="no GPU with f64 compute available, or yamc was built without the `gpu` feature",

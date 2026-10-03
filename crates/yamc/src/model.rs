@@ -1368,6 +1368,50 @@ impl Model {
         Ok(data_load_secs)
     }
 
+    /// Validate the convergence targets before any expensive work: every target
+    /// must apply to at least one tally. A target that matches no tally is never
+    /// evaluated, so `convergence_targets_met` would count it as met and the run
+    /// would stop at its first checkpoint with unconverged results.
+    pub(crate) fn validate_convergence_targets(&self) -> Result<(), String> {
+        use yamc_tallies::TallySelector;
+        for target in &self.convergence_targets {
+            if self.tallies.iter().any(|t| target.targets(t)) {
+                continue;
+            }
+            if self.tallies.is_empty() {
+                return Err(
+                    "A convergence target is set but the model has no tallies, so it can \
+                     never be evaluated. Add a tally or remove the convergence target."
+                        .to_string(),
+                );
+            }
+            let selector = match &target.tally {
+                Some(TallySelector::Name(name)) => format!("tally='{name}'"),
+                Some(TallySelector::Id(id)) => format!("tally_id={id}"),
+                // A target with no selector applies to every tally, so it
+                // matches whenever the model has one.
+                None => continue,
+            };
+            let available: Vec<String> = self
+                .tallies
+                .iter()
+                .map(|t| {
+                    let name = t.name.as_deref().unwrap_or("<unnamed>");
+                    match t.tally_id {
+                        Some(id) => format!("'{name}' (id={id})"),
+                        None => format!("'{name}'"),
+                    }
+                })
+                .collect();
+            return Err(format!(
+                "Convergence target with {selector} matches no tally in the model. \
+                 Available tallies: {}.",
+                available.join(", ")
+            ));
+        }
+        Ok(())
+    }
+
     /// Validate the variance-reduction configuration before any expensive work:
     /// per-technique weight parameters, and at most one `SurvivalBiasing` entry
     /// (a second is meaningless).
@@ -1545,6 +1589,7 @@ impl Model {
 
         // Validate the variance-reduction configuration before any expensive work.
         self.validate_variance_reduction()?;
+        self.validate_convergence_targets()?;
 
         // Mesh-filled cells require surface tracking: Woodcock/hybrid
         // flights cross cells against a global majorant and never see the
@@ -3278,6 +3323,56 @@ mod tests {
     /// and the coupled path then panicked where that check exists to produce a
     /// clean error.
     ///
+    /// A convergence target that matches no tally would never be evaluated and
+    /// so would count as met at the first checkpoint. It is rejected up front.
+    ///
+    /// No nuclear data is read, so this runs anywhere.
+    #[test]
+    fn convergence_target_matching_no_tally_is_rejected() {
+        use yamc_tallies::{ConvergenceMetric, ConvergenceTarget};
+        let sphere = Arc::new(Surface::sphere(
+            0.0,
+            0.0,
+            0.0,
+            10.0,
+            Some(1),
+            Some(BoundaryType::Vacuum),
+        ));
+        let region = Region::new_from_halfspace(HalfspaceType::Below(sphere));
+        let cell = Cell::new(Some(1), region, None, None);
+        let geometry = Geometry::new(vec![cell], vec![]).unwrap();
+        let mut tally = Tally::new();
+        tally.name = Some("flux".to_string());
+        tally.tally_id = Some(7);
+        let mut model = Model::new(geometry, vec![], vec![Arc::new(tally)]);
+        let target = ConvergenceTarget::new(ConvergenceMetric::RelativeError, 0.01);
+
+        // Matching selectors, and a target on every tally, are accepted.
+        model.convergence_targets = vec![
+            target.clone().for_name("flux"),
+            target.clone().for_id(7),
+            target.clone(),
+        ];
+        assert!(model.validate_convergence_targets().is_ok());
+
+        // A misspelt name or an unknown id names the selector and the tallies.
+        model.convergence_targets = vec![target.clone().for_name("flx")];
+        let err = model.validate_convergence_targets().unwrap_err();
+        assert!(
+            err.contains("tally='flx'") && err.contains("'flux' (id=7)"),
+            "{err}"
+        );
+        model.convergence_targets = vec![target.clone().for_id(8)];
+        let err = model.validate_convergence_targets().unwrap_err();
+        assert!(err.contains("tally_id=8"), "{err}");
+
+        // With no tallies at all, even an unselected target has nothing to watch.
+        model.tallies.clear();
+        model.convergence_targets = vec![target];
+        let err = model.validate_convergence_targets().unwrap_err();
+        assert!(err.contains("no tallies"), "{err}");
+    }
+
     /// No nuclear data is read, so this runs anywhere.
     #[test]
     fn a_decay_photon_model_reports_photons() {
