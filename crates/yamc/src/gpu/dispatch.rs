@@ -157,6 +157,9 @@ pub enum GpuDispatchError {
     /// Rejected up front. The Python layer's own "at least one stop condition"
     /// guard fires first, so from Python this is unreachable.
     UncappedWithoutRuntime,
+    /// A convergence target matches no tally (see
+    /// `Model::validate_convergence_targets`). Carries the message.
+    ConvergenceTargetUnmatched(String),
     /// Histories in a launch were still transporting when they hit
     /// `Model::gpu_max_steps_per_particle`. Their remaining track length was never
     /// scored, so every tally they touched is under-counted, by an amount
@@ -267,6 +270,7 @@ impl std::fmt::Display for GpuDispatchError {
                 "compute='gpu' needs total_particles or max_runtime to stop. Set one or both, \
                  or run on the CPU."
             ),
+            Self::ConvergenceTargetUnmatched(msg) => write!(f, "{msg}"),
             Self::HistoriesTruncated {
                 truncated,
                 launched,
@@ -663,6 +667,9 @@ fn run_on_gpu_dispatch(
         (None, None) if !has_targets => return Err(GpuDispatchError::UncappedWithoutRuntime),
         _ => {}
     }
+    model
+        .validate_convergence_targets()
+        .map_err(GpuDispatchError::ConvergenceTargetUnmatched)?;
     // The neutron kernel supports survival biasing (implicit capture); any
     // other variance-reduction technique is rejected rather than silently
     // ignored. Iterate so an added variant (e.g. weight windows) fails fast
