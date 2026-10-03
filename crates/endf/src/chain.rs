@@ -690,7 +690,7 @@ pub fn emitted_particles(name: &str) -> Option<Vec<(&'static str, i64, i64)>> {
             _ => return None,
         };
         rest = &rest[1..];
-        out.extend(std::iter::repeat(particle).take(count));
+        out.extend(std::iter::repeat_n(particle, count));
     }
     Some(out)
 }
