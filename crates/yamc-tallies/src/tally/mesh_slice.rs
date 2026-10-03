@@ -94,6 +94,8 @@ impl Tally {
     ///
     /// Returns `Vec<(bin_index, flat_2d_row_major)>` where each slice is a flat
     /// `Vec<f64>` of length `h_size * v_size` in row-major order (v slow, h fast).
+    /// Values come from the first cell, material, nuclide and parent-nuclide
+    /// bin when the tally has more than one.
     pub fn extract_mesh_slices(
         &self,
         basis: &str,
@@ -133,7 +135,6 @@ impl Tally {
         };
 
         let num_energy_bins = self.num_energy_bins();
-        let num_mesh_bins = mesh_filter.num_bins();
 
         let mut result = Vec::with_capacity(slice_indices.len());
 
@@ -173,17 +174,17 @@ impl Tally {
                                 "energy_index {e_idx} out of range (tally has {num_energy_bins} energy bins)"
                             ));
                         }
-                        let bin_idx = score_index * (num_energy_bins * num_mesh_bins)
-                            + e_idx * num_mesh_bins
-                            + mesh_bin;
-                        data.get(bin_idx).copied().unwrap_or(0.0)
+                        let bin_idx = self
+                            .get_bin_index_7d(score_index, 0, 0, 0, 0, e_idx, mesh_bin)
+                            .ok_or("mesh slice bin index out of range")?;
+                        data[bin_idx]
                     } else {
                         let mut sum = 0.0;
                         for e in 0..num_energy_bins {
-                            let bin_idx = score_index * (num_energy_bins * num_mesh_bins)
-                                + e * num_mesh_bins
-                                + mesh_bin;
-                            sum += data.get(bin_idx).copied().unwrap_or(0.0);
+                            let bin_idx = self
+                                .get_bin_index_7d(score_index, 0, 0, 0, 0, e, mesh_bin)
+                                .ok_or("mesh slice bin index out of range")?;
+                            sum += data[bin_idx];
                         }
                         sum
                     };
