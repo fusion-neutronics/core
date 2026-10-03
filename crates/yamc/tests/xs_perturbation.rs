@@ -295,3 +295,64 @@ fn a_sampled_draw_perturbs_a_copy_and_keeps_the_totals_consistent() {
         );
     }
 }
+
+/// Raising Li6 (n,t) moves the stored tritium-production row (MT 205) by
+/// exactly the change in (n,t): it emits one triton.
+#[test]
+fn raising_lithium_6_n_t_moves_tritium_production_by_exactly_that() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/Li6.arrow");
+    if !dir.join("covariance.arrow").is_file() {
+        eprintln!("skipping: Li6 fixture carries no covariance");
+        return;
+    }
+    let mut m = Material::new(
+        HashMap::from([("Li6".to_string(), 1.0)]),
+        "atom",
+        "g/cm3",
+        Some(0.5),
+    )
+    .expect("material");
+    m.set_temperature("294");
+    m.read_nuclear_data(
+        &HashMap::from([("Li6".to_string(), dir.to_string_lossy().into_owned())]),
+        None,
+    )
+    .expect("read Li6");
+    m.ensure_covariance_loaded().expect("covariance");
+    let (fields, _) = transport_fields(&m);
+    let field = fields.get("Li6").cloned().expect("Li6 has covariance");
+    assert_eq!(
+        field.reads[&105],
+        Read::Own,
+        "Li6 (n,t) states its own covariance"
+    );
+    let (relative, absolute) = raise(&field, 105, 0.1);
+    let nominal = &m.nuclide_data["Li6"];
+    let (perturbed, _) = perturbed_nuclide(nominal, &field, &relative, &absolute).expect("perturb");
+    let t = nominal
+        .loaded_temperatures
+        .iter()
+        .position(|l| l == "294")
+        .expect("294 K");
+    let n = nominal.energy.as_ref().unwrap()["294"].len();
+    let row = |nuc: &yamc_nuclide::nuclide::Nuclide, mt: i32| -> Vec<f64> {
+        let r = &nuc.reactions[t][&mt];
+        let mut out = vec![0.0; n];
+        out[r.threshold_idx..r.threshold_idx + r.cross_section.len()]
+            .copy_from_slice(r.cross_section.as_slice());
+        out
+    };
+    let (t0, t1) = (row(nominal, 105), row(&perturbed, 105));
+    let (p0, p1) = (row(nominal, 205), row(&perturbed, 205));
+    let mut moved = 0;
+    for i in 0..n {
+        let d = t1[i] - t0[i];
+        assert!(
+            ((p1[i] - p0[i]) - d).abs() <= 1e-9 * p0[i].abs().max(1e-30),
+            "MT 205 moved by {} for an (n,t) change of {d}",
+            p1[i] - p0[i]
+        );
+        moved += usize::from(d != 0.0);
+    }
+    assert!(moved > 100, "the (n,t) cells cover the grid");
+}

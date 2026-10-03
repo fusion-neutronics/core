@@ -168,6 +168,46 @@ const REACTION_ALIASES: [(&str, i32); 5] = [
 ///
 /// `None` for an MT the format does not name, which includes every MT a
 /// particular evaluation may have invented.
+/// How many protons, deuterons, tritons, helions and alphas reaction `mt`
+/// emits, in that order, from its ENDF definition: the level families by MT
+/// range (600 to 649 emit one proton, 700 to 749 one triton, ...) and every
+/// other reaction from the particles its name lists. `None` for a reaction
+/// whose emitted particles its MT does not state (`MT 5`, totals, fission).
+///
+/// These are the counts NJOY's gas production (MT 203 to 207) sums, so a
+/// reaction's share of a production cross section is its count times its
+/// cross section.
+pub fn light_particles(mt: i32) -> Option<[u32; 5]> {
+    let one = |i: usize| {
+        let mut c = [0; 5];
+        c[i] = 1;
+        Some(c)
+    };
+    match mt {
+        600..=649 => return one(0),
+        650..=699 => return one(1),
+        700..=749 => return one(2),
+        750..=799 => return one(3),
+        800..=849 => return one(4),
+        51..=91 | 875..=891 => return Some([0; 5]),
+        _ => {}
+    }
+    let name = REACTION_NAME_BASE.iter().find(|&&(m, _)| m == mt)?.1;
+    let emitted = crate::chain::emitted_particles(name)?;
+    let mut counts = [0; 5];
+    for (nuclide, _, _) in emitted {
+        match nuclide {
+            "H1" => counts[0] += 1,
+            "H2" => counts[1] += 1,
+            "H3" => counts[2] += 1,
+            "He3" => counts[3] += 1,
+            "He4" => counts[4] += 1,
+            _ => {}
+        }
+    }
+    Some(counts)
+}
+
 pub fn reaction_name(mt: i32) -> Option<String> {
     for &(first, end, particle, offset) in &LEVEL_FAMILIES {
         if (first..end).contains(&mt) {
@@ -1333,5 +1373,29 @@ mod ace_tests {
         // NXS(6) counts the photon production reactions, and each belongs to
         // exactly one neutron reaction.
         assert_eq!(photons, t.nxs[6] as usize);
+    }
+}
+
+#[cfg(test)]
+mod light_particle_tests {
+    use super::light_particles;
+
+    #[test]
+    fn reactions_emit_the_particles_their_definitions_name() {
+        assert_eq!(light_particles(105), Some([0, 0, 1, 0, 0]), "(n,t)");
+        assert_eq!(light_particles(33), Some([0, 0, 1, 0, 0]), "(n,nt)");
+        assert_eq!(light_particles(113), Some([0, 0, 1, 0, 2]), "(n,t2a)");
+        assert_eq!(light_particles(116), Some([1, 0, 1, 0, 0]), "(n,pt)");
+        assert_eq!(light_particles(107), Some([0, 0, 0, 0, 1]), "(n,a)");
+        assert_eq!(light_particles(106), Some([0, 0, 0, 1, 0]), "(n,3He)");
+        assert_eq!(
+            light_particles(705),
+            Some([0, 0, 1, 0, 0]),
+            "a triton level"
+        );
+        assert_eq!(light_particles(16), Some([0; 5]), "(n,2n)");
+        assert_eq!(light_particles(102), Some([0; 5]), "(n,gamma)");
+        assert_eq!(light_particles(5), None, "(n,misc) states nothing");
+        assert_eq!(light_particles(1), None, "the total states nothing");
     }
 }

@@ -19,9 +19,11 @@
 //! 3. each temperature's [`FastXSGrid`] is rebuilt from the new reactions by
 //!    the loader's own builder.
 //!
-//! What is held at nominal: rows with no covariance (named in the coverage
-//! report), heating, KERMA, damage and gas-production rows (absolute values
-//! with no per-reaction split), unresolved-resonance tables stored as
+//! Particle-production rows (MT 203 to 207) move by what the reactions
+//! emitting the particle moved, each weighted by how many it emits. What is
+//! held at nominal: rows with no covariance (named in the coverage report),
+//! heating, KERMA and damage rows (absolute values with no per-reaction
+//! split), unresolved-resonance tables stored as
 //! absolute cross sections rather than factors on the smooth ones, and the
 //! short-range (`lb = 8`) noise, which averages away along a track.
 //!
@@ -226,6 +228,49 @@ pub fn perturbed_nuclide(
             }
             new.insert(sum, Arc::new(shifted(&stored, &change)));
         }
+        // Particle-production rows (MT 203 to 207) move by what the reactions
+        // emitting the particle moved, each weighted by how many it emits, and
+        // the part of the row no stated reaction explains moves with MT 5, its
+        // only candidate (see `transport::replica`, which reads the same rule).
+        for x in 203..=207 {
+            let Some(stored) = new.get(&x).cloned() else {
+                continue;
+            };
+            let particle = (x - 203) as usize;
+            let mut change = vec![0.0; n];
+            let mut explained = vec![0.0; n];
+            for (mt, before) in reactions {
+                if before.redundant {
+                    continue;
+                }
+                let Some(counts) = endf::reaction::light_particles(*mt) else {
+                    continue;
+                };
+                let c = counts[particle] as f64;
+                if c == 0.0 {
+                    continue;
+                }
+                let (b, a) = (on_full_grid(before, n), on_full_grid(&new[mt], n));
+                for i in 0..n {
+                    explained[i] += c * b[i];
+                    change[i] += c * (a[i] - b[i]);
+                }
+            }
+            if let (Some(b5), Some(a5)) = (reactions.get(&5), new.get(&5)) {
+                if !b5.redundant {
+                    let (b, a) = (on_full_grid(b5, n), on_full_grid(a5, n));
+                    let row = on_full_grid(&stored, n);
+                    for i in 0..n {
+                        if b[i] > 0.0 {
+                            let residual = (row[i] - explained[i]).max(0.0);
+                            change[i] += residual * (a[i] / b[i] - 1.0);
+                        }
+                    }
+                }
+            }
+            new.insert(x, Arc::new(shifted(&stored, &change)));
+        }
+
         let partials_of = |map: &HashMap<i32, Arc<Reaction>>| -> BTreeMap<i32, Vec<f64>> {
             map.iter()
                 .filter(|(mt, _)| !SYNTHETIC_MTS.contains(mt))

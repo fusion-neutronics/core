@@ -654,6 +654,47 @@ pub const DEFAULT_REACTIONS: [&str; 6] =
     ["(n,2n)", "(n,3n)", "(n,4n)", "(n,gamma)", "(n,p)", "(n,a)"];
 
 /// Look a reaction up by name.
+/// The particles a reaction name says leave, as `(nuclide, A, Z)`, one entry
+/// per particle: `"(n,2npa)"` gives n, n, H1, He4. `None` for a name that is
+/// not a list of emitted particles (`"(n,total)"`, `"(n,misc)"`) or that
+/// names a particle this grammar does not know. `"(n,gamma)"` emits nothing
+/// but the photon, which is not counted.
+pub fn emitted_particles(name: &str) -> Option<Vec<(&'static str, i64, i64)>> {
+    let body = name.strip_prefix("(n,")?.strip_suffix(')')?;
+    if body == "gamma" {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut rest = body;
+    while !rest.is_empty() {
+        // "3He" is a particle, not three of something, so it is matched
+        // before a leading digit is read as a count.
+        if let Some(r) = rest.strip_prefix("3He") {
+            out.push(("He3", 3, 2));
+            rest = r;
+            continue;
+        }
+        let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+        let count: usize = if digits == 0 {
+            1
+        } else {
+            rest[..digits].parse().ok()?
+        };
+        rest = &rest[digits..];
+        let particle = match rest.chars().next()? {
+            'n' => ("n", 1, 0),
+            'p' => ("H1", 1, 1),
+            'd' => ("H2", 2, 1),
+            't' => ("H3", 3, 1),
+            'a' => ("He4", 4, 2),
+            _ => return None,
+        };
+        rest = &rest[1..];
+        out.extend(std::iter::repeat(particle).take(count));
+    }
+    Some(out)
+}
+
 pub fn reaction_info(name: &str) -> Option<&'static ReactionInfo> {
     REACTIONS.iter().find(|r| r.name == name)
 }
@@ -1516,7 +1557,8 @@ mod tests {
         // emitted, so delta_a = 1 - sum(A) and delta_z = -sum(Z), and the
         // secondaries are the emitted particles other than neutrons.
         for rx in &REACTIONS {
-            let emitted = emitted_particles(rx.name);
+            let emitted = emitted_particles(rx.name)
+                .unwrap_or_else(|| panic!("{} is not of the form (n,...)", rx.name));
             let (a, z) = emitted.iter().fold((0, 0), |(a, z), p| (a + p.1, z + p.2));
             assert_eq!(
                 (rx.delta_a, rx.delta_z),
@@ -1531,47 +1573,6 @@ mod tests {
             secondaries.sort_unstable();
             assert_eq!(secondaries, charged, "{} secondaries", rx.name);
         }
-    }
-
-    /// The particles a reaction name says leave, as (nuclide, A, Z), one
-    /// entry per particle: `"(n,2npa)"` gives n, n, H1, He4.
-    fn emitted_particles(name: &str) -> Vec<(&'static str, i64, i64)> {
-        let body = name
-            .strip_prefix("(n,")
-            .and_then(|b| b.strip_suffix(')'))
-            .unwrap_or_else(|| panic!("{name} is not of the form (n,...)"));
-        if body == "gamma" {
-            return Vec::new();
-        }
-        let mut out = Vec::new();
-        let mut rest = body;
-        while !rest.is_empty() {
-            // "3He" is a particle, not three of something, so it is matched
-            // before a leading digit is read as a count.
-            if let Some(r) = rest.strip_prefix("3He") {
-                out.push(("He3", 3, 2));
-                rest = r;
-                continue;
-            }
-            let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
-            let count: usize = if digits == 0 {
-                1
-            } else {
-                rest[..digits].parse().unwrap()
-            };
-            rest = &rest[digits..];
-            let particle = match rest.chars().next() {
-                Some('n') => ("n", 1, 0),
-                Some('p') => ("H1", 1, 1),
-                Some('d') => ("H2", 2, 1),
-                Some('t') => ("H3", 3, 1),
-                Some('a') => ("He4", 4, 2),
-                other => panic!("unexpected particle {other:?} in {name}"),
-            };
-            rest = &rest[1..];
-            out.extend(std::iter::repeat_n(particle, count));
-        }
-        out
     }
 
     #[test]
