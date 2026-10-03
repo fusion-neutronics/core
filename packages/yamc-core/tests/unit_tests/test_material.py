@@ -128,6 +128,17 @@ def test_composition_with_formula():
     assert abs(o_total - 1.0 / 3.0) < 1e-3
 
 
+def test_composition_formula_mass_fraction():
+    """With fraction_type="mass" a formula splits into elements by mass."""
+    water = Material(composition={"H2O": 1.0}, density=1.0, fraction_type="mass")
+    nuclides = dict(water.nuclides)
+    h_total = sum(v for k, v in nuclides.items() if k.startswith("H"))
+    o_total = sum(v for k, v in nuclides.items() if k.startswith("O"))
+    # 2 x 1.008 / 18.015 of water's mass is hydrogen
+    assert abs(h_total - 0.1119) < 1e-3
+    assert abs(o_total - 0.8881) < 1e-3
+
+
 def test_composition_formula_scaling():
     """Formula fraction scales the stoichiometric amounts."""
     mat = Material(composition={"H2O": 0.5, "Fe": 0.5}, density=3.0)
