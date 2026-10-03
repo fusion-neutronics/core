@@ -284,6 +284,119 @@ pub struct Sampler {
     views: Vec<BTreeMap<String, View>>,
 }
 
+/// One nuclide's principal modes: a basis for the linear part of any
+/// response to its draws, largest share of variance first, relative cells
+/// and absolute cells apart (they are drawn independently).
+///
+/// With `p` a draw's relative multipliers minus one (or absolute shifts), `C`
+/// the covariance the draws actually have (after the lognormal transform and
+/// any repair, not the evaluation's before them) and `W = diag(1 / √C_jj)`,
+/// the modes are the eigenpairs `(λ_k, e_k)` of the correlation matrix
+/// `W C W`. A draw's coordinate on mode `k` is `ξ_k = e_kᵀ W p`, and the
+/// coordinates have mean zero, variance `λ_k` and no correlation, exactly. A
+/// response's derivative along mode `k` is `D_k = sᵀ W⁻¹ e_k`, `s` its
+/// gradient in `p`; over every mode `Σ_k D_k ξ_k = sᵀ p`. Keeping only the
+/// leading modes makes `Σ_k D_k ξ_k` a linear predictor whose variance,
+/// `Σ_k λ_k D_k²`, is known exactly; what the dropped modes would have
+/// carried only makes the predictor a poorer control variate, never a
+/// biased one.
+///
+/// Correlation rather than covariance, because the covariance's leading
+/// modes are its widest cells (a threshold channel at hundreds of percent),
+/// not the ones a response feels, and correlation needs no guess at what a
+/// response feels: every cell counts alike, and the modes a correlated block
+/// collapses to are kept whatever their width.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Modes {
+    /// `λ_k` per relative mode.
+    pub relative_variance: Vec<f64>,
+    /// Row-major `relative cells × relative modes`, `W e_k` in column `k`:
+    /// a draw's coordinate is this column dotted with its multipliers minus
+    /// one.
+    pub relative_projection: Vec<f64>,
+    /// Row-major `relative cells × relative modes`, `W⁻¹ e_k` in column `k`:
+    /// a derivative along the mode is this column dotted with the gradient.
+    pub relative_loading: Vec<f64>,
+    /// `λ_k` per absolute mode.
+    pub absolute_variance: Vec<f64>,
+    pub absolute_projection: Vec<f64>,
+    pub absolute_loading: Vec<f64>,
+}
+
+impl Modes {
+    pub fn n_relative(&self) -> usize {
+        self.relative_variance.len()
+    }
+
+    pub fn n_absolute(&self) -> usize {
+        self.absolute_variance.len()
+    }
+
+    /// Modes in all, relative first.
+    pub fn len(&self) -> usize {
+        self.n_relative() + self.n_absolute()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// The leading eigenpairs of the correlation matrix of the `n × n`
+/// covariance `matrix`, until they hold `kept` of its trace: `(variances,
+/// projection W e, loading W⁻¹ e)`, each row-major `n × k`, with
+/// `W = diag(1 / √C_jj)`. A cell of no variance is in no mode.
+fn principal(matrix: &[f64], n: usize, kept: f64) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    if n == 0 {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+    let w: Vec<f64> = (0..n)
+        .map(|i| {
+            let v = matrix[i * n + i];
+            if v > 0.0 {
+                1.0 / v.sqrt()
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let mut correlation = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            correlation[i * n + j] = w[i] * matrix[i * n + j] * w[j];
+        }
+    }
+    let (values, vectors) = leading_eigen(&correlation, n);
+    let mut order: Vec<usize> = (0..n).filter(|&j| values[j] > 0.0).collect();
+    order.sort_by(|&a, &b| values[b].total_cmp(&values[a]).then(a.cmp(&b)));
+    let total: f64 = order.iter().map(|&j| values[j]).sum();
+    let mut chosen = Vec::new();
+    let mut held = 0.0;
+    for &j in &order {
+        if held >= kept * total {
+            break;
+        }
+        held += values[j];
+        chosen.push(j);
+    }
+    let k = chosen.len();
+    let (mut projection, mut loading) = (vec![0.0; n * k], vec![0.0; n * k]);
+    for i in 0..n {
+        if w[i] == 0.0 {
+            continue;
+        }
+        for (c, &j) in chosen.iter().enumerate() {
+            projection[i * k + c] = w[i] * vectors[i * n + j];
+            loading[i * k + c] = vectors[i * n + j] / w[i];
+        }
+    }
+    (
+        chosen.iter().map(|&j| values[j]).collect(),
+        projection,
+        loading,
+    )
+}
+
 /// One replica's draw of every nuclide's field.
 pub struct Draw {
     nuclides: BTreeMap<String, NuclideDraw>,
@@ -1076,6 +1189,34 @@ impl Sampler {
             .collect()
     }
 
+    /// The covariance `nuclide`'s draws actually have, row-major: of its
+    /// relative cells' multipliers (`exp(Σ_N) - 1`, after the lognormal
+    /// transform and any repair) and of its absolute cells' shifts, in barn².
+    /// `None` for a nuclide without a field.
+    pub fn sampled_covariance(&self, nuclide: &str) -> Option<(&[f64], &[f64])> {
+        let f = self.fields.get(nuclide)?;
+        Some((&f.core.relative_sampled, &f.core.absolute_sampled))
+    }
+
+    /// `nuclide`'s principal modes holding `kept` (in `(0, 1]`) of the
+    /// correlation of its relative cells and of its absolute cells, or `None`
+    /// for a nuclide without a field. See [`Modes`].
+    pub fn modes(&self, nuclide: &str, kept: f64) -> Option<Modes> {
+        let f = self.fields.get(nuclide)?;
+        let (relative_variance, relative_projection, relative_loading) =
+            principal(&f.core.relative_sampled, f.n_relative(), kept);
+        let (absolute_variance, absolute_projection, absolute_loading) =
+            principal(&f.core.absolute_sampled, f.n_absolute(), kept);
+        Some(Modes {
+            relative_variance,
+            relative_projection,
+            relative_loading,
+            absolute_variance,
+            absolute_projection,
+            absolute_loading,
+        })
+    }
+
     /// One replica's draw of every nuclide's field.
     pub fn draw(&self, base_seed: u64, replica: u64) -> Draw {
         Draw {
@@ -1437,6 +1578,25 @@ fn eigenvalues(matrix: &[f64], n: usize) -> Vec<f64> {
 
 /// [`eigen`], with or without the eigenvectors (empty when not asked for).
 fn blockwise(matrix: &[f64], n: usize, want_vectors: bool) -> (Vec<f64>, Vec<f64>) {
+    blocks_eigen(matrix, n, want_vectors, true)
+}
+
+/// [`eigen`] for a caller that wants only the leading eigenpairs: every
+/// block past [`SMALL_BLOCK`] goes to QL whatever its dynamic range, since
+/// QL's error, relative to the largest eigenvalue, is what the leading ones
+/// need. Far faster on a large field (O16's 2839 cells) than Jacobi.
+fn leading_eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+    blocks_eigen(matrix, n, true, false)
+}
+
+/// The block decomposition behind [`eigen`] and [`leading_eigen`]; with
+/// `small_accurately`, a block of wide dynamic range goes to Jacobi.
+fn blocks_eigen(
+    matrix: &[f64],
+    n: usize,
+    want_vectors: bool,
+    small_accurately: bool,
+) -> (Vec<f64>, Vec<f64>) {
     // Union-find over the nonzero couplings.
     let mut parent: Vec<usize> = (0..n).collect();
     fn root(parent: &mut [usize], mut i: usize) -> usize {
@@ -1482,12 +1642,12 @@ fn blockwise(matrix: &[f64], n: usize, want_vectors: bool) -> (Vec<f64>, Vec<f64
         let (lo, hi) = positive.fold((f64::INFINITY, 0.0_f64), |(lo, hi), v| {
             (lo.min(v), hi.max(v))
         });
-        let (sub_values, sub_vectors) = if m <= SMALL_BLOCK || (lo > 0.0 && hi / lo > DYNAMIC_RANGE)
-        {
-            jacobi_eigen(&sub, m)
-        } else {
-            tridiagonal_ql(&sub, m, want_vectors)
-        };
+        let (sub_values, sub_vectors) =
+            if m <= SMALL_BLOCK || (small_accurately && lo > 0.0 && hi / lo > DYNAMIC_RANGE) {
+                jacobi_eigen(&sub, m)
+            } else {
+                tridiagonal_ql(&sub, m, want_vectors)
+            };
         for c in 0..m {
             let col = values.len();
             values.push(sub_values[c]);

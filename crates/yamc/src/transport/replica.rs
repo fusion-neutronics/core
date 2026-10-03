@@ -50,8 +50,16 @@ use yamc_nuclide::synthesis::{channel_of, Channel};
 use yamc_nuclide::urr::UrrBand;
 use yamc_tallies::score::Score;
 use yamc_tallies::tally::Tally;
+use yamc_tallies::welford::ReplicaModes;
 use yani_transmute::covariance_fold::{transport_fields, Read, TransportField};
-use yani_transmute::covariance_sample::Sampler;
+use yani_transmute::covariance_sample::{Modes, Sampler};
+
+/// The share of each nuclide's correlation its kept modes hold. Fewer modes
+/// cost less per event; what they miss leaves the estimate unbiased and only
+/// puts more of it on the replicas' sampling. On an 8 cm iron sphere at
+/// 14 MeV this keeps 123 of Fe56's 1361 modes and its sigma's spread over
+/// draws matches that with all of them.
+const KEPT_CORRELATION: f64 = 0.999;
 
 /// One covariance source of one nuclide: the reaction whose cells some of
 /// its partials read, with what those partials add up to.
@@ -73,6 +81,14 @@ struct Source {
     /// Absolute cells, and per cell each replica's shift in barns.
     absolute: Vec<(f64, f64)>,
     absolute_shift: Vec<f64>,
+    /// Per relative cell, its row of the nuclide's relative mode loadings,
+    /// row-major `cells × k`, with `(offset, k)` the nuclide's relative modes
+    /// in the run's mode vector.
+    relative_loading: Vec<f64>,
+    relative_modes: (usize, usize),
+    /// The same for the absolute cells.
+    absolute_loading: Vec<f64>,
+    absolute_modes: (usize, usize),
 }
 
 impl Source {
@@ -82,19 +98,39 @@ impl Source {
         (e < cells[i].1 || (i + 1 == cells.len() && e == cells[i].1)).then_some(i)
     }
 
-    /// Replica `k`'s relative change of a partial reading this source at
-    /// `e`, `σ'/σ - 1`, added into `out` times `scale`. `own` is `σ_src(e)`.
-    fn add_relative_change(&self, e: f64, own: f64, scale: f64, out: &mut [f64]) {
+    /// Each replica's relative change of a partial reading this source at
+    /// `e`, `σ'/σ - 1`, added into `out` times `scale`, and the change's
+    /// gradient along the run's modes into `modes` (left alone when empty).
+    /// `own` is `σ_src(e)`.
+    ///
+    /// The change is linear in the draw, `Σ_c g_c p_c` over the cells holding
+    /// `e`, so a replica's is the gradient dotted with its draw and the
+    /// gradient along mode `k` is `Σ_c g_c L_ck`, `L` the mode loadings.
+    fn add_change(&self, e: f64, own: f64, scale: f64, out: &mut [f64], modes: &mut [f64]) {
         let r = out.len();
         if let Some(c) = Self::cell(&self.relative, e) {
             for (o, dm) in out.iter_mut().zip(&self.relative_dm[c * r..(c + 1) * r]) {
                 *o += scale * dm;
+            }
+            let (offset, k) = self.relative_modes;
+            if k > 0 && !modes.is_empty() {
+                let loading = &self.relative_loading[c * k..(c + 1) * k];
+                for (o, l) in modes[offset..offset + k].iter_mut().zip(loading) {
+                    *o += scale * l;
+                }
             }
         }
         if own > 0.0 {
             if let Some(c) = Self::cell(&self.absolute, e) {
                 for (o, a) in out.iter_mut().zip(&self.absolute_shift[c * r..(c + 1) * r]) {
                     *o += scale * a / own;
+                }
+                let (offset, k) = self.absolute_modes;
+                if k > 0 && !modes.is_empty() {
+                    let loading = &self.absolute_loading[c * k..(c + 1) * k];
+                    for (o, l) in modes[offset..offset + k].iter_mut().zip(loading) {
+                        *o += scale * l / own;
+                    }
                 }
             }
         }
@@ -210,6 +246,99 @@ pub(crate) struct ReplicaContext {
     pub(crate) replicas: usize,
     /// By material slot (`Cell::material_idx`).
     materials: Vec<Option<ReplicaMaterial>>,
+    /// The principal modes the control variate is built on, `None` where no
+    /// nuclide has any.
+    pub(crate) modes: Option<Arc<ReplicaModes>>,
+}
+
+/// One nuclide's modes, where they sit in the run's mode vector.
+struct RegisteredModes {
+    modes: Modes,
+    relative_offset: usize,
+    absolute_offset: usize,
+}
+
+/// Every nuclide's modes across a run's materials, numbered once each, so a
+/// nuclide in two materials moves along the same modes in both.
+#[derive(Default)]
+struct ModeRegistry {
+    by_name: HashMap<String, RegisteredModes>,
+    variance: Vec<f64>,
+    nuclides: Vec<String>,
+    /// Per replica, its coordinate on each mode so far.
+    coordinates: Vec<Vec<f64>>,
+}
+
+impl ModeRegistry {
+    /// Number `name`'s `modes` after the ones already registered, with every
+    /// replica's coordinates on them from its draw.
+    fn register(&mut self, name: &str, modes: Modes, relative: &[&[f64]], absolute: &[&[f64]]) {
+        if self.coordinates.is_empty() {
+            self.coordinates = vec![Vec::new(); relative.len()];
+        }
+        let relative_offset = self.variance.len();
+        let absolute_offset = relative_offset + modes.n_relative();
+        let project = |projection: &[f64], k: usize, draw: &[f64]| -> Vec<f64> {
+            (0..k)
+                .map(|m| {
+                    draw.iter()
+                        .enumerate()
+                        .map(|(c, p)| p * projection[c * k + m])
+                        .sum()
+                })
+                .collect()
+        };
+        for (r, coordinates) in self.coordinates.iter_mut().enumerate() {
+            coordinates.extend(project(
+                &modes.relative_projection,
+                modes.n_relative(),
+                relative[r],
+            ));
+            coordinates.extend(project(
+                &modes.absolute_projection,
+                modes.n_absolute(),
+                absolute[r],
+            ));
+        }
+        self.variance.extend(&modes.relative_variance);
+        self.variance.extend(&modes.absolute_variance);
+        self.nuclides
+            .extend(std::iter::repeat_n(name.to_string(), modes.len()));
+        self.by_name.insert(
+            name.to_string(),
+            RegisteredModes {
+                modes,
+                relative_offset,
+                absolute_offset,
+            },
+        );
+    }
+
+    fn finish(self) -> Option<Arc<ReplicaModes>> {
+        if self.variance.is_empty() {
+            return None;
+        }
+        Some(Arc::new(ReplicaModes {
+            variance: self.variance,
+            nuclides: self.nuclides,
+            coordinates: self.coordinates.into_iter().flatten().collect(),
+        }))
+    }
+}
+
+/// The index of `temperature` among `nuclide`'s loaded ones, or its only one.
+fn temperature_index(nuclide: &Nuclide, temperature: &str) -> Result<usize, String> {
+    nuclide
+        .loaded_temperatures
+        .iter()
+        .position(|l| l == temperature)
+        .or_else(|| (nuclide.loaded_temperatures.len() == 1).then_some(0))
+        .ok_or_else(|| {
+            format!(
+                "{} is not loaded at {temperature} K for the replica weights",
+                nuclide.name.as_deref().unwrap_or("a nuclide")
+            )
+        })
 }
 
 /// A cross section on the full grid of `n` points, zero below threshold.
@@ -333,8 +462,15 @@ impl ReplicaContext {
             })
             .collect();
         let mut out = Vec::with_capacity(materials.len());
+        let mut registry = ModeRegistry::default();
         for material in materials {
-            out.push(Self::material(material, &score_mts, replicas, seed)?);
+            out.push(Self::material(
+                material,
+                &score_mts,
+                replicas,
+                seed,
+                &mut registry,
+            )?);
         }
         // With no covariance anywhere every replica is the nominal run and
         // every sigma would read zero, which looks like an answer. It is not
@@ -351,7 +487,21 @@ impl ReplicaContext {
         Ok(ReplicaContext {
             replicas,
             materials: out,
+            modes: registry.finish(),
         })
+    }
+
+    /// Modes the particles carry derivatives along.
+    pub(crate) fn n_modes(&self) -> usize {
+        self.modes.as_ref().map_or(0, |m| m.len())
+    }
+
+    /// A source particle's replica state: every ratio one, every derivative
+    /// zero.
+    pub(crate) fn source_state(&self) -> Box<[f64]> {
+        let mut state = vec![1.0; self.replicas];
+        state.resize(self.replicas + self.n_modes(), 0.0);
+        state.into_boxed_slice()
     }
 
     fn material(
@@ -359,6 +509,7 @@ impl ReplicaContext {
         score_mts: &BTreeSet<i32>,
         replicas: usize,
         seed: u64,
+        registry: &mut ModeRegistry,
     ) -> Result<Option<ReplicaMaterial>, String> {
         let (fields, _) = transport_fields(material);
         let cell_fields = fields
@@ -395,6 +546,11 @@ impl ReplicaContext {
                 .iter()
                 .map(|d| d.absolute(name).unwrap_or(&[]))
                 .collect();
+            if transport.is_some() && !registry.by_name.contains_key(name) {
+                if let Some(modes) = sampler.modes(name, KEPT_CORRELATION) {
+                    registry.register(name, modes, &relative, &absolute);
+                }
+            }
             let Some(tab) = Self::nuclide(
                 Arc::clone(nuclide),
                 material.temperature(),
@@ -403,6 +559,7 @@ impl ReplicaContext {
                 &absolute,
                 score_mts,
                 densities.get(name).copied().unwrap_or(0.0),
+                registry.by_name.get(name),
             )?
             else {
                 continue;
@@ -423,18 +580,9 @@ impl ReplicaContext {
         absolute: &[&[f64]],
         score_mts: &BTreeSet<i32>,
         density: f64,
+        modes: Option<&RegisteredModes>,
     ) -> Result<Option<ReplicaNuclide>, String> {
-        let t = nuclide
-            .loaded_temperatures
-            .iter()
-            .position(|l| l == temperature)
-            .or_else(|| (nuclide.loaded_temperatures.len() == 1).then_some(0));
-        let Some(t) = t else {
-            return Err(format!(
-                "{} is not loaded at {temperature} K for the replica weights",
-                nuclide.name.as_deref().unwrap_or("a nuclide")
-            ));
-        };
+        let t = temperature_index(&nuclide, temperature)?;
         let label = &nuclide.loaded_temperatures[t];
         let Some(grid) = nuclide.energy.as_ref().and_then(|m| m.get(label)) else {
             return Ok(None);
@@ -465,9 +613,13 @@ impl ReplicaContext {
                 continue;
             };
             let s = *index.entry(src).or_insert_with(|| {
+                // The source's cells, each replica's draw on each, and each
+                // cell's row of the nuclide's mode loadings (`k` per cell).
                 let cells = |list: &[yani_transmute::covariance_fold::Cell],
-                             values: &[&[f64]]|
-                 -> (Vec<(f64, f64)>, Vec<f64>) {
+                             values: &[&[f64]],
+                             loading: &[f64],
+                             k: usize|
+                 -> (Vec<(f64, f64)>, Vec<f64>, Vec<f64>) {
                     let picked: Vec<usize> = list
                         .iter()
                         .enumerate()
@@ -476,15 +628,29 @@ impl ReplicaContext {
                         .collect();
                     let bounds = picked.iter().map(|&k| (list[k].lo, list[k].hi)).collect();
                     let mut per = Vec::with_capacity(picked.len() * r);
-                    for &k in &picked {
+                    let mut rows = Vec::with_capacity(picked.len() * k);
+                    for &c in &picked {
                         for v in values {
-                            per.push(v.get(k).copied().unwrap_or(0.0));
+                            per.push(v.get(c).copied().unwrap_or(0.0));
                         }
+                        rows.extend_from_slice(&loading[c * k..(c + 1) * k]);
                     }
-                    (bounds, per)
+                    (bounds, per, rows)
                 };
-                let (rel, rel_dm) = cells(&field.relative_cells, relative);
-                let (abs, abs_shift) = cells(&field.absolute_cells, absolute);
+                let none = Modes::default();
+                let m = modes.map_or(&none, |m| &m.modes);
+                let (rel, rel_dm, rel_loading) = cells(
+                    &field.relative_cells,
+                    relative,
+                    &m.relative_loading,
+                    m.n_relative(),
+                );
+                let (abs, abs_shift, abs_loading) = cells(
+                    &field.absolute_cells,
+                    absolute,
+                    &m.absolute_loading,
+                    m.n_absolute(),
+                );
                 let own = held
                     .get(&src)
                     .map_or_else(|| vec![0.0; n], |r| on_grid(r, n));
@@ -496,6 +662,10 @@ impl ReplicaContext {
                     relative_dm: rel_dm,
                     absolute: abs,
                     absolute_shift: abs_shift,
+                    relative_loading: rel_loading,
+                    relative_modes: (modes.map_or(0, |m| m.relative_offset), m.n_relative()),
+                    absolute_loading: abs_loading,
+                    absolute_modes: (modes.map_or(0, |m| m.absolute_offset), m.n_absolute()),
                 });
                 sources.len() - 1
             });
@@ -590,14 +760,18 @@ impl ReplicaContext {
     /// each band by its smooth channel's relative change, so the change in
     /// the band total is each channel's change times that factor.
     /// `urr_random` is the per-collision base seed the bands are drawn with.
+    ///
+    /// `grad` gets `ΔΣ`'s gradient along the run's modes, in 1/cm.
     pub(crate) fn flight_delta(
         &self,
         slot: Option<u32>,
         e: f64,
         urr_random: Option<f64>,
         out: &mut [f64],
+        grad: &mut [f64],
     ) {
         out.fill(0.0);
+        grad.fill(0.0);
         let Some(m) = self.material_at(slot) else {
             return;
         };
@@ -615,14 +789,15 @@ impl ReplicaContext {
                     continue;
                 }
                 let own = ReplicaNuclide::at(&s.own, at);
-                s.add_relative_change(e, own, nuc.density * sum, out);
+                s.add_change(e, own, nuc.density * sum, out, grad);
             }
         }
     }
 
     /// The factor `σ'_mt,k / σ_mt` a collision ending in reaction `mt` on
     /// `nuclide` puts on each replica's ratio, into `out`; all ones where
-    /// nothing perturbs it.
+    /// nothing perturbs it. `grad` gets the factor's gradient along the
+    /// run's modes, which is its logarithm's at the nominal.
     pub(crate) fn collision_factor(
         &self,
         slot: Option<u32>,
@@ -630,8 +805,10 @@ impl ReplicaContext {
         mt: i32,
         e: f64,
         out: &mut [f64],
+        grad: &mut [f64],
     ) {
         out.fill(1.0);
+        grad.fill(0.0);
         let Some(m) = self.material_at(slot) else {
             return;
         };
@@ -657,7 +834,7 @@ impl ReplicaContext {
                     let src = &nuc.sources[*s];
                     let w = ReplicaNuclide::at(xs, at) / total;
                     let own = ReplicaNuclide::at(&src.own, at);
-                    src.add_relative_change(e, own, w, out);
+                    src.add_change(e, own, w, out, grad);
                 }
             }
             return;
@@ -665,7 +842,7 @@ impl ReplicaContext {
         if let Some(&s) = nuc.source_of.get(&mt) {
             let src = &nuc.sources[s];
             let own = ReplicaNuclide::at(&src.own, at);
-            src.add_relative_change(e, own, 1.0, out);
+            src.add_change(e, own, 1.0, out, grad);
         }
     }
 
@@ -684,8 +861,10 @@ impl ReplicaContext {
         e: f64,
         urr_random: Option<f64>,
         out: &mut [f64],
+        grad: &mut [f64],
     ) {
         out.fill(1.0);
+        grad.fill(0.0);
         let x = match score {
             Score::ReactionRate(rr) => rr.mt.as_i32(),
             Score::Production(p) => p.mt.as_i32(),
@@ -697,6 +876,7 @@ impl ReplicaContext {
         let banded = band_channels(x);
         let mut denominator = 0.0;
         let mut change = vec![0.0; out.len()];
+        let mut change_grad = vec![0.0; grad.len()];
         for nuc in &m.nuclides {
             let Some(at) = nuc.locate(e) else {
                 continue;
@@ -709,7 +889,7 @@ impl ReplicaContext {
                 for src in &nuc.sources {
                     let own = ReplicaNuclide::at(&src.own, at);
                     let sum = ReplicaNuclide::banded(src, at, &g, channels);
-                    src.add_relative_change(e, own, nuc.density * sum, &mut change);
+                    src.add_change(e, own, nuc.density * sum, &mut change, &mut change_grad);
                 }
                 continue;
             }
@@ -720,17 +900,21 @@ impl ReplicaContext {
             for (s, xs) in by_source {
                 let src = &nuc.sources[*s];
                 let own = ReplicaNuclide::at(&src.own, at);
-                src.add_relative_change(
+                src.add_change(
                     e,
                     own,
                     nuc.density * ReplicaNuclide::at(xs, at),
                     &mut change,
+                    &mut change_grad,
                 );
             }
         }
         if denominator > 0.0 {
             for (o, c) in out.iter_mut().zip(change) {
                 *o += c / denominator;
+            }
+            for (o, c) in grad.iter_mut().zip(change_grad) {
+                *o = c / denominator;
             }
         }
     }
@@ -746,7 +930,7 @@ pub(crate) fn mean_survival(x: f64) -> f64 {
 }
 
 /// One flight segment's replica state: what it scores with and what it does
-/// to the particle's ratios.
+/// to the particle's ratios and derivatives.
 pub(crate) struct ReplicaSegment<'a> {
     ctx: &'a ReplicaContext,
     slot: Option<u32>,
@@ -758,6 +942,13 @@ pub(crate) struct ReplicaSegment<'a> {
     factors: Vec<f64>,
     /// `exp(-ΔΣ_k d)`: the survival ratio to the segment's end.
     survival: Vec<f64>,
+    /// Per mode, the derivative of a track-length score's logarithm along
+    /// the segment before its own cross section: the particle's
+    /// `S_k = ∂ ln w / ∂ξ_k` less `d/2` times `ΔΣ`'s gradient, `φ'(0) = -1/2`.
+    slope: Vec<f64>,
+    /// `ΔΣ`'s gradient along the modes, in 1/cm, and the segment's length.
+    grad: Vec<f64>,
+    dist: f64,
 }
 
 impl<'a> ReplicaSegment<'a> {
@@ -769,51 +960,70 @@ impl<'a> ReplicaSegment<'a> {
         slot: Option<u32>,
         dist: f64,
     ) -> Option<Self> {
-        let ratios = particle.replica.as_ref()?;
+        let state = particle.replica.as_ref()?;
+        let (ratios, sensitivity) = state.split_at(ctx.replicas);
         let urr_random = yamc_particle::particle::urr_to_option(particle.urr_random);
         let mut delta = vec![0.0; ratios.len()];
-        ctx.flight_delta(slot, particle.energy, urr_random, &mut delta);
+        let mut grad = vec![0.0; sensitivity.len()];
+        ctx.flight_delta(slot, particle.energy, urr_random, &mut delta, &mut grad);
         let factors = ratios
             .iter()
             .zip(&delta)
             .map(|(r, d)| r * mean_survival(d * dist))
             .collect();
         let survival = delta.iter().map(|d| (-d * dist).exp()).collect();
+        let slope = sensitivity
+            .iter()
+            .zip(&grad)
+            .map(|(s, g)| s - 0.5 * dist * g)
+            .collect();
         Some(Self {
             ctx,
             slot,
             urr_random,
             factors,
             survival,
+            slope,
+            grad,
+            dist,
         })
     }
 
-    /// Replica factors for one score at energy `e`.
+    /// Replica factors for one score at energy `e`, then the score's
+    /// derivative factors along the modes: a contribution `v` adds `v` times
+    /// each to the replicas' and the derivatives' sums.
     pub(crate) fn factors_for(&self, score: &Score, e: f64) -> Vec<f64> {
         let mut ratio = vec![1.0; self.factors.len()];
+        let mut grad = vec![0.0; self.slope.len()];
         self.ctx
-            .score_ratio(self.slot, score, e, self.urr_random, &mut ratio);
+            .score_ratio(self.slot, score, e, self.urr_random, &mut ratio, &mut grad);
         ratio
             .iter()
             .zip(&self.factors)
             .map(|(a, b)| a * b)
+            .chain(self.slope.iter().zip(&grad).map(|(s, g)| s + g))
             .collect()
     }
 
-    /// Carry the particle's ratios to the segment's end.
+    /// Carry the particle's ratios and derivatives to the segment's end.
     pub(crate) fn apply(&self, particle: &mut yamc_particle::particle::Particle) {
-        if let Some(r) = particle.replica.as_mut() {
-            for (x, s) in r.iter_mut().zip(&self.survival) {
+        if let Some(state) = particle.replica.as_mut() {
+            let (ratios, sensitivity) = state.split_at_mut(self.ctx.replicas);
+            for (x, s) in ratios.iter_mut().zip(&self.survival) {
                 *x *= s;
+            }
+            for (x, g) in sensitivity.iter_mut().zip(&self.grad) {
+                *x -= self.dist * g;
             }
         }
     }
 }
 
 /// Multiply a particle's ratios by the factor of a collision ending in
-/// reaction `mt` on `nuclide`, at the particle's current (incident) energy.
-/// Call it after the reaction is chosen and before any secondary is banked,
-/// so secondaries inherit it.
+/// reaction `mt` on `nuclide`, at the particle's current (incident) energy,
+/// and add the factor's gradient to its derivatives. Call it after the
+/// reaction is chosen and before any secondary is banked, so secondaries
+/// inherit it.
 pub(crate) fn apply_collision(
     ctx: Option<&ReplicaContext>,
     particle: &mut yamc_particle::particle::Particle,
@@ -825,12 +1035,17 @@ pub(crate) fn apply_collision(
         return;
     };
     let energy = particle.energy;
-    let Some(r) = particle.replica.as_mut() else {
+    let Some(state) = particle.replica.as_mut() else {
         return;
     };
-    let mut factor = vec![1.0; r.len()];
-    ctx.collision_factor(slot, nuclide, mt, energy, &mut factor);
-    for (x, f) in r.iter_mut().zip(factor) {
+    let (ratios, sensitivity) = state.split_at_mut(ctx.replicas);
+    let mut factor = vec![1.0; ratios.len()];
+    let mut grad = vec![0.0; sensitivity.len()];
+    ctx.collision_factor(slot, nuclide, mt, energy, &mut factor, &mut grad);
+    for (x, f) in ratios.iter_mut().zip(factor) {
         *x *= f;
+    }
+    for (x, g) in sensitivity.iter_mut().zip(grad) {
+        *x += g;
     }
 }

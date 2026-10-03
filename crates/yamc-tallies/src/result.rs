@@ -121,8 +121,9 @@ pub struct TallyResult {
 
 impl TallyResult {
     /// Per-bin nuclear-data standard deviation of the score, when the run
-    /// carried replica weights: the spread of the replicas with the Monte
-    /// Carlo noise of the shared histories deconvolved (see
+    /// carried replica weights: the first-order variance along the principal
+    /// modes plus the nonlinear remainder the replicas estimate, with the
+    /// Monte Carlo noise of the shared histories deconvolved (see
     /// [`ReplicaSums::nuclear_data_variance`](crate::welford::ReplicaSums::nuclear_data_variance)).
     /// A bin whose deconvolved variance came out negative, where the noise
     /// swamped the spread, reads zero here and is flagged by
@@ -155,6 +156,27 @@ impl TallyResult {
     /// where the score responds nonlinearly to the cross sections.
     pub fn replica_mean(&self) -> Option<Vec<f64>> {
         Some(self.replicas.as_ref()?.replica_mean(self.n_histories))
+    }
+
+    /// Per-bin first-order nuclear-data variance: the variance of the score's
+    /// linear response to the cross sections along the run's principal modes,
+    /// with no sampling error from the replicas. The nuclear-data variance is
+    /// this plus the nonlinear remainder the replicas estimate. `None` when
+    /// the run carried no modes.
+    pub fn nuclear_data_linear_variance(&self) -> Option<Vec<f64>> {
+        self.replicas.as_ref()?.linear_variance(self.n_histories)
+    }
+
+    /// Per nuclide, per bin, its share of
+    /// [`TallyResult::nuclear_data_linear_variance`]: which nuclides' cross
+    /// sections the score's uncertainty comes from. The shares add up to the
+    /// first-order variance. `None` when the run carried no modes.
+    pub fn nuclear_data_variance_by_nuclide(
+        &self,
+    ) -> Option<std::collections::BTreeMap<String, Vec<f64>>> {
+        self.replicas
+            .as_ref()?
+            .linear_variance_by_nuclide(self.n_histories)
     }
 
     /// Per-bin Monte Carlo standard error of one replica's mean, averaged over

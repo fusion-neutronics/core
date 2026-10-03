@@ -61,11 +61,12 @@ impl PyTallyResult {
     /// Nuclear-data standard deviation per bin, when the run was given
     /// ``data_uncertainty``; ``None`` otherwise.
     ///
-    /// The spread of the cross-section replicas, with the Monte Carlo noise
-    /// of the histories they share deconvolved. A bin where that noise is
-    /// larger than the spread reads zero and is flagged in
-    /// ``nuclear_data_variance_negative``: the replicas do not resolve it, and
-    /// more particles would. Compare with ``replica_standard_error``.
+    /// The score's first-order variance along the cross sections' principal
+    /// modes, which carries no sampling error from the replicas, plus the
+    /// nonlinear remainder the replicas estimate, each with the Monte Carlo
+    /// noise of the shared histories deconvolved. A bin where that noise
+    /// swamps the estimate reads zero and is flagged in
+    /// ``nuclear_data_variance_negative``; more particles would resolve it.
     #[getter]
     pub fn nuclear_data_standard_deviation(&self) -> Option<Vec<f64>> {
         self.inner.nuclear_data_standard_deviation()
@@ -84,10 +85,36 @@ impl PyTallyResult {
     ///
     /// ``mean`` stays the nominal result. The two differ where the score
     /// responds nonlinearly to the cross sections, such as attenuation
-    /// through a thick shield.
+    /// through a thick shield. The replicas' linear part, whose average is
+    /// the nominal exactly, is subtracted from them first, so only the
+    /// nonlinear part is left to their sampling.
     #[getter]
     pub fn replica_mean(&self) -> Option<Vec<f64>> {
         self.inner.replica_mean()
+    }
+
+    /// First-order nuclear-data variance per bin, when the run was given
+    /// ``data_uncertainty``; ``None`` otherwise.
+    ///
+    /// The variance of the score's linear response to the cross sections
+    /// along their principal modes. ``nuclear_data_standard_deviation`` is the
+    /// square root of this plus the nonlinear remainder.
+    #[getter]
+    pub fn nuclear_data_linear_variance(&self) -> Option<Vec<f64>> {
+        self.inner.nuclear_data_linear_variance()
+    }
+
+    /// Each nuclide's share of ``nuclear_data_linear_variance`` per bin, as a
+    /// dict from nuclide name to a list over bins, when the run was given
+    /// ``data_uncertainty``; ``None`` otherwise.
+    ///
+    /// The shares add up to the first-order variance: they say which
+    /// nuclides' cross sections the score's uncertainty comes from.
+    #[getter]
+    pub fn nuclear_data_variance_by_nuclide(
+        &self,
+    ) -> Option<std::collections::BTreeMap<String, Vec<f64>>> {
+        self.inner.nuclear_data_variance_by_nuclide()
     }
 
     /// Monte Carlo standard error of one replica's mean per bin, averaged over
