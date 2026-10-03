@@ -163,6 +163,7 @@ fn two_temperature_nuclide_from(
         available_temperatures: vec!["294".to_string(), "600".to_string()],
         loaded_temperatures: vec!["294".to_string(), "600".to_string()],
         data_path: None,
+        data_source: None,
         fission_nu: None,
         fast_xs,
         urr_data: vec![Some(urr_marked(1.0)), Some(urr_marked(2.0))],

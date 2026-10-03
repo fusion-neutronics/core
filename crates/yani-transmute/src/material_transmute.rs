@@ -1089,7 +1089,7 @@ fn ensure_derivations_loaded(
         })
         .collect();
     for (name, scope) in short {
-        let source = material.nuclide_data[&name].data_path.clone().or_else(|| {
+        let source = material.nuclide_data[&name].reload_source().or_else(|| {
             let cfg = yamc_nuclide::config::CONFIG
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
@@ -3498,6 +3498,7 @@ mod tests {
             available_temperatures: vec![temperature.clone()],
             loaded_temperatures: vec![temperature.clone()],
             data_path: None,
+            data_source: None,
             fission_nu: None,
             fast_xs: vec![],
             urr_data: vec![],

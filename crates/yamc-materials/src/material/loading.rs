@@ -122,7 +122,7 @@ impl Material {
                 let nuclide = &self.nuclide_data[&name];
                 let temps: std::collections::HashSet<String> =
                     nuclide.loaded_temperatures.iter().cloned().collect();
-                (nuclide.data_path.clone(), temps, nuclide.load_scope.clone())
+                (nuclide.reload_source(), temps, nuclide.load_scope.clone())
             };
             // `data_path` is stamped by the Arrow loader whichever route loaded
             // the nuclide, so it survives the explicit-path case that CONFIG
@@ -201,7 +201,7 @@ impl Material {
         for name in narrow {
             let (path, scope) = {
                 let nuclide = &self.nuclide_data[&name];
-                (nuclide.data_path.clone(), nuclide.load_scope.clone())
+                (nuclide.reload_source(), nuclide.load_scope.clone())
             };
             let source = path.or_else(|| {
                 let cfg = yamc_nuclide::config::CONFIG
@@ -397,7 +397,7 @@ impl Material {
             let recorded = self
                 .nuclide_data
                 .get(&nuclide_name)
-                .and_then(|n| n.data_path.clone());
+                .and_then(|n| n.reload_source());
             if let Some(path) = recorded.or_else(|| config.get_cross_section(&nuclide_name)) {
                 source_map.insert(nuclide_name.clone(), path);
             }

@@ -869,3 +869,29 @@ fn breakup_mts_keep_their_position_in_the_walk() {
     sorted.sort_unstable();
     assert_eq!(breakup, sorted);
 }
+
+/// A nuclide asked for by a library keyword reloads from the keyword, not
+/// from the cache folder it resolved to: reloading from the folder treats it
+/// as a plain local directory, and a section the first load did not fetch,
+/// such as `covariance.arrow`, is never downloaded and reads as absent.
+#[test]
+fn a_nuclide_reloads_from_what_it_was_asked_for_by() {
+    let li6 = td("Li6.arrow");
+    if !li6.join("reactions.arrow").is_file() {
+        eprintln!("skipping: Li6 fixture missing");
+        return;
+    }
+    let mut n =
+        crate::nuclide_loader::load_nuclide(li6.to_str().unwrap(), &crate::LoadScope::full())
+            .expect("load Li6");
+    n.data_path = Some("/cache/jeff-4.0-Li6.arrow".to_string());
+    n.data_source = Some("jeff-4.0".to_string());
+    assert_eq!(n.reload_source().as_deref(), Some("jeff-4.0"));
+
+    // A folder read directly is its own source.
+    n.data_source = None;
+    assert_eq!(
+        n.reload_source().as_deref(),
+        Some("/cache/jeff-4.0-Li6.arrow")
+    );
+}
