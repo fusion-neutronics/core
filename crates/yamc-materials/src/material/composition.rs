@@ -58,7 +58,7 @@ impl Material {
         match self.density_units {
             DensityUnits::Sum => {
                 if self.fraction_type == FractionType::Mass {
-                    return Err("Cannot use fraction='weight' with density unit 'sum': \
+                    return Err("Cannot use fraction_type='mass' with density unit 'sum': \
                          'sum' mode requires absolute atom densities (atoms/barn-cm)"
                         .to_string());
                 }
@@ -278,7 +278,7 @@ impl Material {
             "atom" | "mass" => {
                 if (frac_sum - 1.0).abs() > 1e-8 {
                     return Err(format!(
-                        "Fractions must sum to 1.0 for fraction='{fraction_type}', got {frac_sum}"
+                        "Fractions must sum to 1.0 for fraction_type='{fraction_type}', got {frac_sum}"
                     ));
                 }
             }
@@ -435,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_atoms_per_barn_cm_weight_sum_errors() {
+    fn test_get_atoms_per_barn_cm_mass_sum_errors() {
         // fraction_type="mass" combined with density unit "sum" is invalid and
         // must return Err rather than panicking.
         let mat = Material {
@@ -453,7 +453,7 @@ mod tests {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| mat.get_atoms_per_barn_cm()))
                 .expect("get_atoms_per_barn_cm must not panic on invalid input");
 
-        assert!(result.is_err(), "weight + sum should return Err");
-        assert!(result.unwrap_err().contains("fraction='weight'"));
+        assert!(result.is_err(), "mass + sum should return Err");
+        assert!(result.unwrap_err().contains("fraction_type='mass'"));
     }
 }
