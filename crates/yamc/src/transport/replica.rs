@@ -26,8 +26,9 @@
 //! The perturbed cross sections are the same as [`crate::xs_perturbation`]
 //! builds for a rerun: each covered partial multiplied by its covariance
 //! cell's multiplier and shifted by its absolute cell's shift, a component
-//! of a sum taking the sum's. Rows with no covariance, heating and
-//! production rows, and the short-range noise stay nominal.
+//! of a sum taking the sum's. Rows with no covariance, heating and damage
+//! rows, and the short-range noise stay nominal; particle production
+//! (MT 203 to 207) moves with the reactions emitting the particle.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -174,6 +175,75 @@ fn is_fission(mt: i32) -> bool {
     matches!(mt, 18 | 19 | 20 | 21 | 38)
 }
 
+/// The score table of a particle-production score (MT 203 to 207: proton,
+/// deuteron, triton, helion and alpha production), or `None` for any other
+/// MT.
+///
+/// A production cross section is `Σ_mt c_mt σ_mt` over the reactions that
+/// emit the particle, `c_mt` the count of it each emits by the reaction's
+/// definition ([`endf::reaction::light_particles`]). Each covered reaction
+/// joins its source's table with that weight. The denominator is the
+/// nuclide's stored production row, the one the tally scores. Production the
+/// stated reactions do not account for, as an evaluation that carries its
+/// charged particles inside MT 5 has, is attributed to MT 5 where MT 5 is
+/// covered: the part of the row MT 5 is the only candidate for.
+fn production_table(
+    x: i32,
+    held: &BTreeMap<i32, Arc<Reaction>>,
+    source_of: &HashMap<i32, usize>,
+    n: usize,
+) -> Option<ScoreTable> {
+    if !(203..=207).contains(&x) {
+        return None;
+    }
+    let particle = (x - 203) as usize;
+    let nominal = match held.get(&x) {
+        Some(row) => on_grid(row, n),
+        None => return Some((Vec::new(), vec![0.0; n])),
+    };
+    let mut by_source: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+    let mut explained = vec![0.0; n];
+    for (mt, reaction) in held {
+        if reaction.redundant {
+            continue;
+        }
+        let Some(counts) = endf::reaction::light_particles(*mt) else {
+            continue;
+        };
+        let c = counts[particle] as f64;
+        if c == 0.0 {
+            continue;
+        }
+        let xs = on_grid(reaction, n);
+        for (e, v) in explained.iter_mut().zip(&xs) {
+            *e += c * v;
+        }
+        if let Some(&s) = source_of.get(mt) {
+            let entry = by_source.entry(s).or_insert_with(|| vec![0.0; n]);
+            for (o, v) in entry.iter_mut().zip(&xs) {
+                *o += c * v;
+            }
+        }
+    }
+    if let (Some(&s5), true) = (
+        source_of.get(&5),
+        held.get(&5).is_some_and(|r| !r.redundant),
+    ) {
+        let residual: Vec<f64> = nominal
+            .iter()
+            .zip(&explained)
+            .map(|(row, known)| (row - known).max(0.0))
+            .collect();
+        if residual.iter().any(|v| *v > 0.0) {
+            let entry = by_source.entry(s5).or_insert_with(|| vec![0.0; n]);
+            for (o, v) in entry.iter_mut().zip(residual) {
+                *o += v;
+            }
+        }
+    }
+    Some((by_source.into_iter().collect(), nominal))
+}
+
 impl ReplicaContext {
     /// Tabulate `replicas` draws, seeded by `seed`, for every material in
     /// `materials` (indexed by slot), for the reaction-rate scores of
@@ -190,6 +260,7 @@ impl ReplicaContext {
             .flat_map(|t| t.scores.iter())
             .filter_map(|s| match s {
                 Score::ReactionRate(r) => Some(r.mt.as_i32()),
+                Score::Production(p) => Some(p.mt.as_i32()),
                 _ => None,
             })
             .collect();
@@ -381,6 +452,10 @@ impl ReplicaContext {
 
         let mut scores = HashMap::new();
         for &x in score_mts {
+            if let Some(table) = production_table(x, &held, &source_of, n) {
+                scores.insert(x, table);
+                continue;
+            }
             let partials = partials_of(x, &held);
             if partials.is_empty() {
                 continue;
@@ -495,15 +570,16 @@ impl ReplicaContext {
         }
     }
 
-    /// `Σ'_x,k / Σ_x` for a reaction-rate score of `mt` at `e` in the
-    /// material, into `out`; all ones for flux, for a score nothing perturbs,
-    /// and for heating, production and damage scores, which stay nominal.
+    /// `Σ'_x,k / Σ_x` for a reaction-rate or particle-production score at `e`
+    /// in the material, into `out`; all ones for flux, for a score nothing
+    /// perturbs, and for heating and damage scores, which stay nominal.
     pub(crate) fn score_ratio(&self, slot: Option<u32>, score: &Score, e: f64, out: &mut [f64]) {
         out.fill(1.0);
-        let Score::ReactionRate(rr) = score else {
-            return;
+        let x = match score {
+            Score::ReactionRate(rr) => rr.mt.as_i32(),
+            Score::Production(p) => p.mt.as_i32(),
+            _ => return,
         };
-        let x = rr.mt.as_i32();
         let Some(m) = self.material_at(slot) else {
             return;
         };

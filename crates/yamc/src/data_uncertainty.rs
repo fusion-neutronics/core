@@ -67,7 +67,7 @@ const NOT_PERTURBED: [&str; 8] = [
     "fission multiplicity and spectrum (MF=31, MF=35)",
     "unresolved-resonance probability tables beyond the cross-section covariance",
     "photon production and photon interaction data",
-    "heating, KERMA, damage-energy and gas-production responses, which move only through the flux",
+    "heating, KERMA and damage-energy responses, which move only through the flux",
     "short-range (lb = 8) covariance, which averages away along a track",
     "the material composition and density",
 ];

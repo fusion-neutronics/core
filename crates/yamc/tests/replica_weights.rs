@@ -104,6 +104,27 @@ fn run(
     seed: u64,
     data: Option<TransportDataUncertainty>,
 ) -> Vec<Arc<Tally>> {
+    run_scores(
+        material,
+        radius,
+        energy,
+        particles,
+        seed,
+        data,
+        &["flux", "(n,gamma)"],
+    )
+}
+
+/// [`run`] with the tallies' scores given.
+fn run_scores(
+    material: Material,
+    radius: f64,
+    energy: f64,
+    particles: usize,
+    seed: u64,
+    data: Option<TransportDataUncertainty>,
+    scores: &[&str],
+) -> Vec<Arc<Tally>> {
     let sphere = Surface {
         surface_id: Some(1),
         kind: SurfaceKind::Sphere {
@@ -118,7 +139,7 @@ fn run(
     let region = Region::new_from_halfspace(HalfspaceType::Below(Arc::new(sphere)));
     let cell = Cell::new(Some(1), region, Some("c".into()), Some(0));
     let geometry = Geometry::new(vec![cell], vec![Arc::new(material)]).expect("geometry");
-    let tallies = vec![tally("flux"), tally("(n,gamma)")];
+    let tallies: Vec<Arc<Tally>> = scores.iter().map(|s| tally(s)).collect();
     let source = ParticleSource::Neutron(Source {
         space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
         angle: AngularDistribution::Isotropic,
@@ -415,4 +436,116 @@ fn a_model_with_no_covariance_is_refused_not_reported_exact() {
         .map(|s| *s)
         .unwrap_or_default();
     assert!(message.contains("no nuclide"), "{message}");
+}
+
+/// Natural lithium, from the fixtures.
+fn lithium() -> Option<Material> {
+    let tests = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let (li6, li7) = (tests.join("Li6.arrow"), tests.join("Li7.arrow"));
+    if !li6.join("covariance.arrow").is_file() || !li7.join("reactions.arrow").is_file() {
+        return None;
+    }
+    let mut m = Material::new(
+        HashMap::from([("Li6".to_string(), 0.0759), ("Li7".to_string(), 0.9241)]),
+        "atom",
+        "g/cm3",
+        Some(0.5),
+    )
+    .expect("material");
+    m.set_material_id(1);
+    m.set_temperature("294");
+    m.read_nuclear_data(
+        &HashMap::from([
+            ("Li6".to_string(), li6.to_string_lossy().into_owned()),
+            ("Li7".to_string(), li7.to_string_lossy().into_owned()),
+        ]),
+        None,
+    )
+    .expect("read lithium");
+    m.ensure_covariance_loaded().expect("covariance");
+    Some(m)
+}
+
+/// Tritium production on a thin lithium target matches each replica's rerun:
+/// the production score's own cross-section change is carried, through the
+/// reactions that emit tritons.
+#[test]
+fn tritium_production_matches_its_rerun_on_a_thin_lithium_target() {
+    let Some(m) = lithium() else {
+        eprintln!("skipping: lithium fixtures missing or without covariance");
+        return;
+    };
+    let replicas = 3;
+    let weighted = run_scores(
+        m.clone(),
+        0.2,
+        0.0253,
+        20_000,
+        7,
+        Some(TransportDataUncertainty {
+            seed: SEED,
+            replicas,
+        }),
+        &["H3-production"],
+    );
+    for k in 0..replicas {
+        let (x, _) = replica(&weighted[0], k);
+        let y = run_scores(
+            rerun_material(&m, k as u64),
+            0.2,
+            0.0253,
+            20_000,
+            7,
+            None,
+            &["H3-production"],
+        )[0]
+        .get_mean()[0];
+        assert!(
+            (x / y - 1.0).abs() < 2e-3,
+            "replica {k}: weighted tritium {x:e}, rerun {y:e}"
+        );
+    }
+}
+
+/// Through a thick lithium sphere at 14 MeV, where Li7's tritium and the
+/// flux response both enter, each replica's tritium production matches an
+/// independent rerun within Monte Carlo error.
+#[test]
+fn tritium_production_matches_its_rerun_through_a_thick_lithium_sphere() {
+    let Some(m) = lithium() else {
+        eprintln!("skipping: lithium fixtures missing or without covariance");
+        return;
+    };
+    let replicas = 3;
+    let particles = 6_000;
+    let weighted = run_scores(
+        m.clone(),
+        30.0,
+        14.1e6,
+        particles,
+        21,
+        Some(TransportDataUncertainty {
+            seed: SEED,
+            replicas,
+        }),
+        &["H3-production"],
+    );
+    for k in 0..replicas {
+        let rerun = run_scores(
+            rerun_material(&m, k as u64),
+            30.0,
+            14.1e6,
+            particles,
+            1000 + k as u64,
+            None,
+            &["H3-production"],
+        );
+        let (x, sx) = replica(&weighted[0], k);
+        let (y, sy) = (rerun[0].get_mean()[0], rerun[0].get_std_dev()[0]);
+        let z = (x - y) / (sx * sx + sy * sy).sqrt();
+        assert!(
+            z.abs() < 4.0,
+            "replica {k}: weighted {x:e} ± {sx:e}, rerun {y:e} ± {sy:e} (z = {z:.2})"
+        );
+    }
 }
