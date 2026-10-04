@@ -453,17 +453,24 @@ fn group_average(sigma: &endf::function::Tabulated1D, edges: &[f64]) -> Vec<f64>
         .windows(2)
         .map(|w| {
             let (lo, hi) = (w[0], w[1]);
-            let mut points: Vec<f64> = sigma
-                .x
-                .iter()
-                .copied()
-                .filter(|&e| e > lo && e < hi)
-                .collect();
-            points.insert(0, lo);
-            points.push(hi);
+            // Panel by panel of the table, each from its own end values: an
+            // evaluation doubles a point where MF=3 jumps (at the resolved
+            // range's upper limit, for one), and evaluating the function at
+            // that energy gives one side of the jump for both panels.
             let mut total = 0.0;
-            for p in points.windows(2) {
-                total += 0.5 * (p[1] / p[0]).ln() * (sigma.eval(p[0]) + sigma.eval(p[1]));
+            for i in 0..sigma.x.len().saturating_sub(1) {
+                let (x0, x1) = (sigma.x[i], sigma.x[i + 1]);
+                let (a, b) = (x0.max(lo), x1.min(hi));
+                if a >= b {
+                    continue;
+                }
+                let ya = if a == x0 { sigma.y[i] } else { sigma.eval(a) };
+                let yb = if b == x1 {
+                    sigma.y[i + 1]
+                } else {
+                    sigma.eval(b)
+                };
+                total += 0.5 * (b / a).ln() * (ya + yb);
             }
             total / (hi / lo).ln()
         })
@@ -484,6 +491,7 @@ fn push_resonance_blocks(
     let (Some(mf2), Some(mf32)) = (material.mf2(), material.mf32()) else {
         return Ok(());
     };
+    let lrp = material.mf1_mt451().map_or(1, |h| h.lrp);
     let mut next_block: BTreeMap<i32, usize> = BTreeMap::new();
     for cov in range_covariances(mf2, mf32)? {
         if cov.is_empty() {
@@ -491,7 +499,9 @@ fn push_resonance_blocks(
         }
         let range = &mf2.isotopes[cov.isotope].ranges[cov.mf2_range];
         // A formalism or feature endf does not reconstruct yet (charged
-        // particle channels, for one) leaves the range to MF=33 alone.
+        // particle channels, for one) leaves the range to MF=33 alone; any
+        // other failure is an error in the evaluation or the reader, and is
+        // not quietly dropped.
         let mut lssf = 0;
         let mut parameter_energies = Vec::new();
         let reconstruction: Box<dyn RangeReconstruction> = match (range.lru, range.lrf) {
@@ -501,11 +511,13 @@ fn push_resonance_blocks(
             },
             (1, 3) => match ReichMooreRange::new(range) {
                 Ok(r) => Box::new(r),
-                Err(_) => continue,
+                Err(endf::Error::Unsupported { .. }) => continue,
+                Err(e) => return Err(e.into()),
             },
             (1, 7) => match RMatrixRange::new(range) {
                 Ok(r) => Box::new(r),
-                Err(_) => continue,
+                Err(endf::Error::Unsupported { .. }) => continue,
+                Err(e) => return Err(e.into()),
             },
             (2, _) => match UnresolvedAverages::new(range) {
                 Ok(r) => {
@@ -513,15 +525,16 @@ fn push_resonance_blocks(
                     parameter_energies = r.parameter_energies();
                     Box::new(r)
                 }
-                Err(_) => continue,
+                Err(endf::Error::Unsupported { .. }) => continue,
+                Err(e) => return Err(e.into()),
             },
             _ => continue,
         };
         // In a resolved range one group per resonance; in an unresolved one
         // a group between each pair of the evaluator's parameter energies
         // (ten logarithmic ones where the parameters do not depend on
-        // energy). Within the covariance's own range, which can stop short of
-        // MF=2's.
+        // energy). Within both the covariance's range and MF=2's (either can
+        // stop short of the other).
         let (lo, hi) = (cov.el.max(range.el), cov.eh.min(range.eh));
         let inner = if range.lru == 2 {
             if parameter_energies.len() > 2 {
@@ -537,7 +550,12 @@ fn push_resonance_blocks(
         let mut edges: Vec<f64> = inner.into_iter().filter(|&e| e > lo && e < hi).collect();
         edges.insert(0, lo);
         edges.push(hi);
-        let resonance = group_covariance(&cov, reconstruction.as_ref(), &edges)?;
+        let mut resonance = group_covariance(&cov, reconstruction.as_ref(), &edges)?;
+        // An isotope of a natural element contributes its abundance's share.
+        let abundance = mf2.isotopes[cov.isotope].abn;
+        for xs in &mut resonance.cross_sections {
+            xs.iter_mut().for_each(|x| *x *= abundance);
+        }
         let totals: Vec<Vec<f64>> = resonance
             .reactions
             .iter()
@@ -546,8 +564,9 @@ fn push_resonance_blocks(
                 let background = material
                     .mf3(*mt)
                     .map_or_else(|| vec![0.0; xs.len()], |b| group_average(&b.sigma, &edges));
-                // With LSSF=1 MF=3 holds the unresolved averages already.
-                if lssf == 1 {
+                // With LRP=2 MF=3 holds the whole cross section already, and
+                // with LSSF=1 the unresolved averages.
+                if lrp == 2 || lssf == 1 {
                     background
                 } else {
                     xs.iter().zip(background).map(|(r, b)| r + b).collect()
@@ -587,7 +606,7 @@ fn push_resonance_blocks(
                         lb: 6,
                         ner: (n + 1) as i64,
                         nec: (n + 1) as i64,
-                        nt: 1 + 2 * (n + 1) as i64 + values.len() as i64,
+                        nt: 1 + ((n + 1) * (n + 1)) as i64,
                         er: g.edges.clone(),
                         ec: g.edges.clone(),
                         fkl: values,
@@ -607,6 +626,21 @@ fn push_resonance_blocks(
 mod tests {
     use super::*;
     use endf::mf::covariance::Mf33Subsection;
+
+    /// MF=3 doubles the point where it jumps, as at a resolved range's upper
+    /// limit (ENDF/B-VIII.1 Pb208 elastic goes from 1.8e-8 b to 5.5 b at
+    /// 1.5 MeV). Each group takes its own side of the jump: the group below
+    /// used to average in the value from above.
+    #[test]
+    fn a_group_average_takes_its_own_side_of_a_jump() {
+        let sigma =
+            endf::function::Tabulated1D::new(vec![1.0, 2.0, 2.0, 4.0], vec![0.0, 0.0, 5.0, 5.0]);
+        let g = group_average(&sigma, &[1.0, 2.0, 4.0]);
+        assert_eq!(g, [0.0, 5.0]);
+        // A group straddling the jump weights each side by its 1/E share.
+        let g = group_average(&sigma, &[1.0, 4.0]);
+        assert!((g[0] - 5.0 * 0.5).abs() < 1e-12, "{}", g[0]);
+    }
 
     /// A lumped reaction's component is its HEAD alone. One that also carries
     /// subsections is out of format and refused, not written as blocks whose
