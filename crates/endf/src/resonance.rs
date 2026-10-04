@@ -1855,8 +1855,14 @@ impl BreitWignerRange {
             for index in 0..s.er.len() {
                 let er = s.er[index];
                 let j = (s.aj[index].abs() - ajmin).round();
+                // A J this l and the target spin cannot make has no place in
+                // the formula; it is an error in the evaluation, refused
+                // rather than dropped (none of ENDF/B-VIII.1's 386 or
+                // JEFF-4.0's 492 multi-level ranges has one).
                 if j < 0.0 || j as usize >= nj {
-                    continue;
+                    return Err(Error::Mismatched {
+                        what: "a Breit-Wigner resonance's J and the spins its l allows",
+                    });
                 }
                 let rho = WAVE_NUMBER * ratio * er.abs().sqrt() * channel_radius;
                 let (per, ser) = penetration_shift(s.l, rho);

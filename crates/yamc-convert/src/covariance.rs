@@ -507,7 +507,8 @@ fn push_resonance_blocks(
         let reconstruction: Box<dyn RangeReconstruction> = match (range.lru, range.lrf) {
             (1, 2) => match BreitWignerRange::new(range) {
                 Ok(r) => Box::new(r),
-                Err(_) => continue,
+                Err(endf::Error::Unsupported { .. }) => continue,
+                Err(e) => return Err(e.into()),
             },
             (1, 3) => match ReichMooreRange::new(range) {
                 Ok(r) => Box::new(r),
