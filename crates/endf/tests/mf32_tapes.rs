@@ -439,7 +439,16 @@ fn every_resolved_mf32_range_reads_into_a_parameter_covariance() {
 /// reading: one parameter moving the p-wave radius by 0.0027 and the d- and
 /// f-wave radii by 0.027. ERRORR takes the radius step at a whole standard
 /// deviation, which above 300 keV is no longer small, so the two highest
-/// groups' elastic agree less closely.
+/// groups' elastic agree less closely; below, its 1% finite-difference
+/// sensitivities put it 1.4% under the analytic ones.
+///
+/// The reference is ERRORR run on the tape with Pb208's six 8 MeV
+/// resonances that share an energy and spin with another (in its L=1 to 3
+/// sections) moved to 8.001, 8.002 and 8.003 MeV, in MF=2 and MF=32 alike.
+/// On the tape as it is, ERRORR gives each of their MF=32 rows to the first
+/// MF=2 resonance of that energy and spin, puts the L=1 resonance's 33 MeV
+/// neutron width uncertainty on the L=0 one of 0.45 MeV, and reports a
+/// thermal elastic relative variance of 5.08e-4 where it is 3.0e-6.
 #[test]
 #[ignore = "reads a local tape; set ENDF_TAPES and run with --ignored"]
 fn pb208_group_covariance_matches_errorr() {
@@ -457,30 +466,30 @@ fn pb208_group_covariance_matches_errorr() {
     let g = group_covariance(cov, &rm, &edges).unwrap();
     // (relative variance, group cross section) as ERRORR prints them.
     let elastic = [
-        (5.080e-4, 1.1301e1),
-        (5.080e-4, 1.1300e1),
-        (5.075e-4, 1.1293e1),
-        (5.031e-4, 1.1230e1),
-        (4.773e-4, 1.0860e1),
-        (3.016e-4, 1.2204e1),
-        (2.892e-4, 8.8376e0),
-        (3.453e-4, 5.8307e0),
-        (2.503e-3, 5.0234e0),
+        (3.023e-6, 1.1301e1),
+        (3.023e-6, 1.1300e1),
+        (3.020e-6, 1.1293e1),
+        (2.998e-6, 1.1230e1),
+        (2.876e-6, 1.0860e1),
+        (1.699e-5, 1.2204e1),
+        (3.275e-6, 8.8376e0),
+        (1.500e-4, 5.8307e0),
+        (1.997e-3, 5.0234e0),
     ];
     let capture = [
-        (1.163e-3, 2.0455e-3),
-        (9.196e-4, 1.6761e-5),
-        (3.568e-5, 1.2941e-5),
-        (5.416e-7, 3.4620e-5),
-        (2.869e-8, 1.6769e-4),
-        (2.856e-4, 4.3271e-4),
+        (9.081e-4, 2.0455e-3),
+        (7.159e-4, 1.6761e-5),
+        (2.783e-5, 1.2941e-5),
+        (4.193e-7, 3.4620e-5),
+        (2.594e-8, 1.6769e-4),
+        (2.834e-4, 4.3271e-4),
         (1.546e-4, 9.2848e-4),
-        (2.719e-5, 1.5737e-3),
-        (2.288e-6, 3.8768e-4),
+        (2.715e-5, 1.5737e-3),
+        (2.254e-6, 3.8768e-4),
     ];
     for h in 0..9 {
         for (a, (rel, xs), tolerance) in [
-            (0, elastic[h], if h >= 7 { 0.1 } else { 0.01 }),
+            (0, elastic[h], if h >= 7 { 0.12 } else { 0.02 }),
             (1, capture[h], 0.05),
         ] {
             let ours = g.get(a, h, a, h) * g.cross_sections[a][h].powi(2);
