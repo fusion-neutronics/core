@@ -2415,7 +2415,7 @@ fn unported_files_keep_their_text() {
 /// MF=32, the only entry today, is here for a different reason: the Python
 /// reader does not parse it, so a fixture would have no golden to compare
 /// against. `mf32_tapes.rs` walks it on the full libraries instead.
-const UNCOVERED_BY_ANY_FIXTURE: [i32; 1] = [32];
+const UNCOVERED_BY_ANY_FIXTURE: [i32; 0] = [];
 
 /// The MF files that have a Rust parser at all.
 const PORTED: [i32; 22] = [
