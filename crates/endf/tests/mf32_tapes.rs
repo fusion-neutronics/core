@@ -438,10 +438,17 @@ fn every_mf32_range_reads_into_a_parameter_covariance() {
 /// NJOY 2016 ERRORR's resonance-parameter contribution on nine groups over
 /// the resolved range. The scattering radius uncertainty follows ERRORR's
 /// reading: one parameter moving the p-wave radius by 0.0027 and the d- and
-/// f-wave radii by 0.027. ERRORR takes the radius step at a whole standard
-/// deviation, which above 300 keV is no longer small, so the two highest
-/// groups' elastic agree less closely; below, its 1% finite-difference
-/// sensitivities put it 1.4% under the analytic ones.
+/// f-wave radii by 0.027. ERRORR takes the radius sensitivity as a one-sided
+/// difference over a whole standard deviation, (sigma(a + da) - sigma(a)) /
+/// da, where this takes the derivative; above 300 keV elastic is no longer
+/// linear in the radius over that step, and ERRORR's two highest elastic
+/// groups come out 10% higher. With the radius term taken ERRORR's way they
+/// agree to 2%, so those groups are compared that way. Below, ERRORR's 1%
+/// finite-difference sensitivities put it 1.4% under the derivatives.
+///
+/// The elastic-capture block agrees to 3% in the five groups below 50 keV.
+/// Beyond them its entries are below 0.01 in correlation in both codes,
+/// residues of large terms that cancel, and are not compared.
 ///
 /// The reference is ERRORR run on the tape with Pb208's six 8 MeV
 /// resonances that share an energy and spin with another (in its L=1 to 3
@@ -462,9 +469,30 @@ fn pb208_group_covariance_matches_errorr() {
     .unwrap();
     let cov = &range_covariances(m.mf2().unwrap(), m.mf32().unwrap()).unwrap()[0];
     assert_eq!(cov.radius_steps, vec![0.0, 0.0027, 0.027, 0.027]);
-    let rm = ReichMooreRange::new(&m.mf2().unwrap().isotopes[0].ranges[0]).unwrap();
+    let base = m.mf2().unwrap().isotopes[0].ranges[0].clone();
+    let rm = ReichMooreRange::new(&base).unwrap();
     let edges = [1e-5, 1.0, 1e2, 1e3, 1e4, 5e4, 1e5, 3e5, 1e6, 1.5e6];
     let g = group_covariance(cov, &rm, &edges).unwrap();
+    // The resonance group cross sections with every section's radius moved
+    // by z of its steps.
+    let moved = |z: f64| -> Vec<Vec<f64>> {
+        let mut range = base.clone();
+        if let endf::mf::mf2::ResonanceParameters::ReichMoore(p) = &mut range.parameters {
+            let ap = p.ap;
+            for (s, step) in p.sections.iter_mut().zip(&cov.radius_steps) {
+                let radius = if s.apl != 0.0 { s.apl } else { ap };
+                s.apl = radius + z * step;
+            }
+        }
+        let rm = ReichMooreRange::new(&range).unwrap();
+        group_covariance(cov, &rm, &edges).unwrap().cross_sections
+    };
+    let (up, down, at, whole) = (moved(1e-4), moved(-1e-4), moved(0.0), moved(1.0));
+    // ERRORR's elastic variance from the radius, less this one's.
+    let errorr_radius = |h: usize| {
+        let derivative = (up[0][h] - down[0][h]) / 2e-4;
+        (whole[0][h] - at[0][h]).powi(2) - derivative.powi(2)
+    };
     // (relative variance, group cross section) as ERRORR prints them.
     let elastic = [
         (3.023e-6, 1.1301e1),
@@ -489,15 +517,34 @@ fn pb208_group_covariance_matches_errorr() {
         (2.254e-6, 3.8768e-4),
     ];
     for h in 0..9 {
-        for (a, (rel, xs), tolerance) in [
-            (0, elastic[h], if h >= 7 { 0.12 } else { 0.02 }),
-            (1, capture[h], 0.05),
-        ] {
-            let ours = g.get(a, h, a, h) * g.cross_sections[a][h].powi(2);
+        for (a, (rel, xs), tolerance) in [(0, elastic[h], 0.02), (1, capture[h], 0.05)] {
+            let mut ours = g.get(a, h, a, h) * g.cross_sections[a][h].powi(2);
+            if a == 0 && h >= 7 {
+                ours += errorr_radius(h);
+            }
             let njoy = rel * xs * xs;
             assert!(
                 (ours / njoy - 1.0).abs() < tolerance,
                 "reaction {a} group {h}: {ours:e} against ERRORR's {njoy:e}"
+            );
+        }
+    }
+    // Elastic (rows) against capture (columns), relative, as ERRORR prints
+    // them, in the groups below 50 keV.
+    let cross = [
+        [-9.038e-6, -8.136e-6, -1.616e-6, -2.097e-7, -3.493e-8],
+        [-9.039e-6, -8.137e-6, -1.617e-6, -2.097e-7, -3.493e-8],
+        [-9.052e-6, -8.149e-6, -1.619e-6, -2.100e-7, -3.495e-8],
+        [-9.180e-6, -8.261e-6, -1.641e-6, -2.126e-7, -3.512e-8],
+        [-9.945e-6, -8.935e-6, -1.773e-6, -2.279e-7, -3.589e-8],
+    ];
+    for (h, row) in cross.iter().enumerate() {
+        for (k, &rel) in row.iter().enumerate() {
+            let ours = g.get(0, h, 1, k) * g.cross_sections[0][h] * g.cross_sections[1][k];
+            let njoy = rel * elastic[h].1 * capture[k].1;
+            assert!(
+                (ours / njoy - 1.0).abs() < 0.04,
+                "elastic group {h}, capture group {k}: {ours:e} against ERRORR's {njoy:e}"
             );
         }
     }
