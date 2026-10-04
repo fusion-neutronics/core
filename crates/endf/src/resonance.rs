@@ -53,7 +53,7 @@ use crate::mf::mf2::{ReichMoore, ResonanceParameters, ResonanceRange};
 /// `k = WAVE_NUMBER * A / (A + 1) * sqrt(E)`, `k` in 1/(1e-12 cm) for `E` in
 /// eV: `sqrt(2 m_n eV) 1e-12 cm / hbar` with the CODATA 2018 constants NJOY
 /// 2016 uses.
-pub const WAVE_NUMBER: f64 = 2.196_807_122_623e-3;
+pub const WAVE_NUMBER: f64 = 2.196_807_690_264e-3;
 
 /// The neutron mass in atomic mass units, as NJOY 2016 has it: the channel
 /// radius formula takes the target mass in amu, `AWRI` times this.
@@ -1366,8 +1366,10 @@ struct UrrSpin {
 }
 
 impl UrrSpin {
-    /// The parameters at `energy`, linearly interpolated (as NJOY does) and
-    /// held constant beyond the table.
+    /// The parameters at `energy`, linearly interpolated and held constant
+    /// beyond the table: how NJOY takes them at a node of the cross-section
+    /// grid, and within a panel too wide to interpolate cross sections across
+    /// (see [`UnresolvedAverages::cross_sections`]).
     fn at(&self, energy: f64) -> [f64; 5] {
         let n = self.energies.len();
         if n == 1 || energy <= self.energies[0] {
@@ -1393,8 +1395,13 @@ struct UrrOrbital {
 /// NJOY's RECONR computes them (`csunr1` and `csunr2`, ENDF-102 D.2): the
 /// single-level average over Porter-Thomas-like width distributions, with
 /// NJOY's ten-point fluctuation quadrature, for every `(l, J)` of the range,
-/// plus potential scattering. The parameters are interpolated linearly in
-/// energy at every point. Only `l <= 2` is supported, as in NJOY.
+/// plus potential scattering. Only `l <= 2` is supported, as in NJOY.
+///
+/// Where the parameters depend on energy the cross sections are computed at
+/// the evaluator's energies and interpolated between them, as ENDF-102 says
+/// INT is for and as NJOY does, rather than computed from interpolated
+/// parameters: the two differ by up to 3% in ENDF/B-VIII.1 Rh103 capture
+/// between its parameter energies (see [`Self::cross_sections`]).
 ///
 /// These averages are what the unresolved range's resonance-parameter
 /// covariance (MF=32, LRU=2) moves; where the evaluation sets LSSF=1 the
@@ -1410,6 +1417,33 @@ pub struct UnresolvedAverages {
     channel_radius: f64,
     scattering_radius: f64,
     orbitals: Vec<UrrOrbital>,
+    /// The energies the cross sections are computed at and interpolated
+    /// between; empty where the parameters do not depend on energy.
+    nodes: Vec<f64>,
+    /// The ENDF interpolation law between `nodes`.
+    law: i64,
+}
+
+/// A panel of the unresolved cross-section grid this many times wider than
+/// its lower energy or more is too coarse to interpolate cross sections
+/// across, and they are computed from interpolated parameters instead
+/// (NJOY's `wide`).
+const WIDE: f64 = 1.26;
+
+/// `y` at `x` between `(x1, y1)` and `(x2, y2)` under ENDF interpolation law
+/// `law`, as NJOY's `terp1` takes it. A logarithmic law across a zero or
+/// negative value falls back to linear, where `terp1` would give a NaN.
+fn interpolate(x1: f64, y1: f64, x2: f64, y2: f64, x: f64, law: i64) -> f64 {
+    if x2 == x1 || law == 1 || y2 == y1 || x == x1 {
+        return y1;
+    }
+    let linear = || y1 + (x - x1) * (y2 - y1) / (x2 - x1);
+    match law {
+        3 => y1 + (x / x1).ln() * (y2 - y1) / (x2 / x1).ln(),
+        4 if y1 > 0.0 && y2 > 0.0 => y1 * ((x - x1) * (y2 / y1).ln() / (x2 - x1)).exp(),
+        5 if y1 > 0.0 && y2 > 0.0 => y1 * ((x / x1).ln() * (y2 / y1).ln() / (x2 / x1).ln()).exp(),
+        _ => linear(),
+    }
 }
 
 /// What a multiplier on an unresolved parameter scales: column of
@@ -1446,6 +1480,10 @@ impl UnresolvedAverages {
             _ => u.ap,
         };
         let mut orbitals = Vec::with_capacity(u.ranges.len());
+        // NJOY interpolates on the first (l, J)'s energies, by the law of the
+        // last (case C), or linearly on ES (case B).
+        let mut grid: Vec<f64> = Vec::new();
+        let mut law = 2;
         for r in &u.ranges {
             if r.l > 2 {
                 return Err(Error::Unsupported {
@@ -1478,6 +1516,9 @@ impl UnresolvedAverages {
                         gf,
                     } => {
                         let energies: Vec<f64> = u.es.clone();
+                        if grid.is_empty() {
+                            grid = energies.clone();
+                        }
                         let rows = energies
                             .iter()
                             .enumerate()
@@ -1494,6 +1535,7 @@ impl UnresolvedAverages {
                     }
                     UnresolvedParameters::CaseC {
                         aj,
+                        interpolation,
                         amux,
                         amun,
                         amuf,
@@ -1505,6 +1547,10 @@ impl UnresolvedAverages {
                         gf,
                         ..
                     } => {
+                        if grid.is_empty() {
+                            grid = e.clone();
+                        }
+                        law = *interpolation;
                         spins.push(UrrSpin {
                             aj: *aj,
                             mux: amux.round() as usize,
@@ -1524,6 +1570,12 @@ impl UnresolvedAverages {
                 spins,
             });
         }
+        // NJOY's first panel starts at EL whatever the table's first energy.
+        let mut nodes = Vec::new();
+        if grid.len() >= 2 {
+            nodes.push(range.el);
+            nodes.extend(grid.into_iter().filter(|&e| e > range.el));
+        }
         Ok(UnresolvedAverages {
             el: range.el,
             eh: range.eh,
@@ -1532,6 +1584,8 @@ impl UnresolvedAverages {
             channel_radius,
             scattering_radius: u.ap,
             orbitals,
+            nodes,
+            law,
         })
     }
 
@@ -1550,8 +1604,31 @@ impl UnresolvedAverages {
         e
     }
 
-    /// The average cross sections at `energy` (eV).
+    /// The average cross sections at `energy` (eV): computed at the nodes of
+    /// the evaluator's energy grid and interpolated between them by its INT,
+    /// except in a panel [`WIDE`] or wider, and beyond the grid, where they
+    /// are computed from interpolated parameters.
     pub fn cross_sections(&self, energy: f64) -> CrossSections {
+        let n = &self.nodes;
+        if n.len() < 2 || energy <= n[0] || energy >= n[n.len() - 1] {
+            return self.with_parameters_at(energy);
+        }
+        let i = n.partition_point(|&e| e <= energy) - 1;
+        let (e1, e2) = (n[i], n[i + 1]);
+        if energy == e1 || e2 >= WIDE * e1 {
+            return self.with_parameters_at(energy);
+        }
+        let (a, b) = (self.with_parameters_at(e1), self.with_parameters_at(e2));
+        let at = |y1: f64, y2: f64| interpolate(e1, y1, e2, y2, energy, self.law);
+        CrossSections {
+            elastic: at(a.elastic, b.elastic),
+            capture: at(a.capture, b.capture),
+            fission: at(a.fission, b.fission),
+        }
+    }
+
+    /// The average cross sections at `energy` from the parameters there.
+    fn with_parameters_at(&self, energy: f64) -> CrossSections {
         let mut out = CrossSections::default();
         let pi = std::f64::consts::PI;
         for o in &self.orbitals {
@@ -1778,8 +1855,14 @@ impl BreitWignerRange {
             for index in 0..s.er.len() {
                 let er = s.er[index];
                 let j = (s.aj[index].abs() - ajmin).round();
+                // A J this l and the target spin cannot make has no place in
+                // the formula; it is an error in the evaluation, refused
+                // rather than dropped (none of ENDF/B-VIII.1's 386 or
+                // JEFF-4.0's 492 multi-level ranges has one).
                 if j < 0.0 || j as usize >= nj {
-                    continue;
+                    return Err(Error::Mismatched {
+                        what: "a Breit-Wigner resonance's J and the spins its l allows",
+                    });
                 }
                 let rho = WAVE_NUMBER * ratio * er.abs().sqrt() * channel_radius;
                 let (per, ser) = penetration_shift(s.l, rho);
@@ -2270,7 +2353,7 @@ mod tests {
                 ] {
                     // Seven digits of NJOY's total, less a background of up
                     // to a few barns, at an interference dip.
-                    let tolerance = 2e-6 * njoy.abs() + 1e-6;
+                    let tolerance = 6e-7 * njoy.abs() + 1e-6;
                     assert!(
                         (ours - njoy).abs() <= tolerance,
                         "{what} at {e} eV: {ours} against NJOY's {njoy}"
@@ -2537,8 +2620,8 @@ mod r_matrix_tests {
     ];
 
     /// The reconstruction agrees with NJOY to the seven digits it writes:
-    /// W186, Cu65 (shift factors, B = -1 on its p-wave channels) and V51 (whose
-    /// true and effective radii differ).
+    /// W186, Cu65 and V51 (whose true and effective radii differ). None of
+    /// the three uses shift factors (SHF=0 on every pair).
     #[test]
     fn r_matrix_matches_njoy() {
         for (fixture, reference) in [(W186, W186_NJOY), (CU65, CU65_NJOY), (V51, V51_NJOY)] {
@@ -2560,11 +2643,12 @@ mod r_matrix_tests {
 
     /// Every resonance's analytic derivatives (ER, the capture width and each
     /// neutron channel's width) match central differences of the
-    /// reconstruction, with and without shift factors.
+    /// reconstruction, negative-energy resonances included, and with V51's
+    /// distinct true and effective radii.
     #[test]
     fn r_matrix_derivatives_match_central_differences() {
         let mut checked = 0;
-        for fixture in [W186, CU65] {
+        for fixture in [W186, CU65, V51] {
             let base = material(fixture).mf2().unwrap().isotopes[0].ranges[0].clone();
             let rm = RMatrixRange::new(&base).unwrap();
             let ResonanceParameters::RMatrixLimited(params) = &base.parameters else {
@@ -2574,7 +2658,7 @@ mod r_matrix_tests {
                 let step = (sg.er.len() / 3).max(1);
                 for index in (0..sg.er.len()).step_by(step) {
                     let er = sg.er[index];
-                    if er <= base.el || er >= base.eh {
+                    if er >= base.eh {
                         continue;
                     }
                     let width: f64 = sg
@@ -2745,6 +2829,31 @@ mod unresolved_tests {
                 x.capture
             );
         }
+    }
+
+    /// Between the parameter energies the cross sections are interpolated,
+    /// by Rh103's INT, from their values at the panel's ends, not computed
+    /// from interpolated parameters; the two differ by percents in capture.
+    #[test]
+    fn unresolved_cross_sections_are_interpolated_between_parameter_energies() {
+        let (_, u) = unresolved();
+        let n = &u.nodes;
+        assert!(n.len() > 2 && n.windows(2).all(|w| w[1] < WIDE * w[0]));
+        let mut largest = 0.0f64;
+        for w in n.windows(2) {
+            let mid = 0.5 * (w[0] + w[1]);
+            let (a, b) = (u.cross_sections(w[0]), u.cross_sections(w[1]));
+            let x = u.cross_sections(mid);
+            let want = interpolate(w[0], a.capture, w[1], b.capture, mid, u.law);
+            assert!((x.capture / want - 1.0).abs() < 1e-14, "{mid}");
+            largest = largest.max((u.with_parameters_at(mid).capture / x.capture - 1.0).abs());
+        }
+        println!(
+            "INT {} over {} nodes: largest capture difference {largest}",
+            u.law,
+            n.len()
+        );
+        assert!(largest > 0.01, "{largest}");
     }
 
     /// NJOY 2016 ERRORR takes an unresolved range's sensitivities from
