@@ -757,6 +757,13 @@ pub fn group_covariance(
             what: "group edges, which must be positive and ascending",
         });
     }
+    // Outside the range the resonance formula is not the cross section.
+    let (el, eh) = range.bounds();
+    if edges[0] < el || edges[edges.len() - 1] > eh {
+        return Err(Error::Mismatched {
+            what: "group edges and the range, which must hold them",
+        });
+    }
     let groups = edges.len() - 1;
     let n_par = cov.len();
     let points = integration_points(range, edges, 400, 256);
