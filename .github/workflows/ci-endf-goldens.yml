@@ -53,15 +53,16 @@ jobs:
       # side already pins its git dependencies by revision in Cargo.lock, so
       # this is the same rule applied to the one Python dependency.
       #
-      # The pinned commit is the endf-python reader with its fix for the MF=33
-      # LB=0 to 4 table split, the reader the two MF33 fixtures' goldens were
+      # The pinned commit is the endf-python reader with its fixes for the
+      # MF=33 LB=0 to 4 table split and for the padding of LRF=7 resonances to
+      # six-value lines, the reader the MF33 and MF32 fixtures' goldens were
       # written with. That work is not on the fork's main development line
       # yet; repoint there once it is. Bumping it is a deliberate act: a fix to
       # the fork's reader does not reach these goldens until someone changes
       # this line, which is the trade a reproducible oracle asks for.
       - name: Install the endf reader the goldens are generated from
         run: |
-          pip install "endf @ git+https://github.com/shimwell/endf-python@6a12e6d0cdce74f47b1a3578addece194c266a86"
+          pip install "endf @ git+https://github.com/shimwell/endf-python@9ae252028d334c55adcd32a7015e019453c64f9d"
 
       # Regenerates every single-file golden from the fixtures and diffs them
       # against what is committed. The chain golden is built by a second tool
