@@ -488,15 +488,19 @@ fn push_resonance_blocks(
         }
         let range = &mf2.isotopes[cov.isotope].ranges[cov.mf2_range];
         // A formalism or feature endf does not reconstruct yet (charged
-        // particle channels, for one) leaves the range to MF=33 alone.
+        // particle channels, for one) leaves the range to MF=33 alone; any
+        // other failure is an error in the evaluation or the reader, and is
+        // not quietly dropped.
         let reconstruction: Box<dyn ResolvedRange> = match range.lrf {
             3 => match ReichMooreRange::new(range) {
                 Ok(r) => Box::new(r),
-                Err(_) => continue,
+                Err(endf::Error::Unsupported { .. }) => continue,
+                Err(e) => return Err(e.into()),
             },
             7 => match RMatrixRange::new(range) {
                 Ok(r) => Box::new(r),
-                Err(_) => continue,
+                Err(endf::Error::Unsupported { .. }) => continue,
+                Err(e) => return Err(e.into()),
             },
             _ => continue,
         };

@@ -1641,8 +1641,8 @@ mod r_matrix_tests {
     ];
 
     /// The reconstruction agrees with NJOY to the seven digits it writes:
-    /// W186, Cu65 (shift factors, B = -1 on its p-wave channels) and V51 (whose
-    /// true and effective radii differ).
+    /// W186, Cu65 and V51 (whose true and effective radii differ). None of
+    /// the three uses shift factors (SHF=0 on every pair).
     #[test]
     fn r_matrix_matches_njoy() {
         for (fixture, reference) in [(W186, W186_NJOY), (CU65, CU65_NJOY), (V51, V51_NJOY)] {
@@ -1664,11 +1664,12 @@ mod r_matrix_tests {
 
     /// Every resonance's analytic derivatives (ER, the capture width and each
     /// neutron channel's width) match central differences of the
-    /// reconstruction, with and without shift factors.
+    /// reconstruction, negative-energy resonances included, and with V51's
+    /// distinct true and effective radii.
     #[test]
     fn r_matrix_derivatives_match_central_differences() {
         let mut checked = 0;
-        for fixture in [W186, CU65] {
+        for fixture in [W186, CU65, V51] {
             let base = material(fixture).mf2().unwrap().isotopes[0].ranges[0].clone();
             let rm = RMatrixRange::new(&base).unwrap();
             let ResonanceParameters::RMatrixLimited(params) = &base.parameters else {
@@ -1678,7 +1679,7 @@ mod r_matrix_tests {
                 let step = (sg.er.len() / 3).max(1);
                 for index in (0..sg.er.len()).step_by(step) {
                     let er = sg.er[index];
-                    if er <= base.el || er >= base.eh {
+                    if er >= base.eh {
                         continue;
                     }
                     let width: f64 = sg
