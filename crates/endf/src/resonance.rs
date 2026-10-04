@@ -560,6 +560,13 @@ impl ReichMooreRange {
             }
             Ok(x)
         };
+        // No section of that l: nothing to move, where the division below
+        // would otherwise be skipped and the cross sections returned.
+        if let Some(l) = l {
+            if !self.source.sections.iter().any(|s| s.l == l) {
+                return Ok([0.0; 3]);
+            }
+        }
         const STEP: f64 = 1e-6;
         let (up, down) = (shifted(STEP)?, shifted(-STEP)?);
         // (sigma(+h) / h - sigma(-h) / (-h)) / 2 with h the same size each way.
@@ -942,5 +949,7 @@ mod derivative_tests {
         assert!((d[0] / want - 1.0).abs() < 1e-3, "{} against {want}", d[0]);
         let none = rm.radius_derivative(0.0253, None).unwrap();
         assert_eq!(none, [0.0, 0.0, 0.0]);
+        // Pb208 has no l=7 section.
+        assert_eq!(rm.radius_derivative(0.0253, Some(7)).unwrap(), [0.0; 3]);
     }
 }
