@@ -52,7 +52,7 @@ use crate::mf::mf2::{ReichMoore, ResonanceParameters, ResonanceRange};
 /// `k = WAVE_NUMBER * A / (A + 1) * sqrt(E)`, `k` in 1/(1e-12 cm) for `E` in
 /// eV: `sqrt(2 m_n eV) 1e-12 cm / hbar` with the CODATA 2018 constants NJOY
 /// 2016 uses.
-pub const WAVE_NUMBER: f64 = 2.196_807_122_623e-3;
+pub const WAVE_NUMBER: f64 = 2.196_807_690_264e-3;
 
 /// The neutron wave number in the centre-of-mass frame, in 1/(1e-12 cm).
 pub fn wave_number(awri: f64, energy: f64) -> f64 {
@@ -782,7 +782,7 @@ mod tests {
                 ] {
                     // Seven digits of NJOY's total, less a background of up
                     // to a few barns, at an interference dip.
-                    let tolerance = 2e-6 * njoy.abs() + 1e-6;
+                    let tolerance = 6e-7 * njoy.abs() + 1e-6;
                     assert!(
                         (ours - njoy).abs() <= tolerance,
                         "{what} at {e} eV: {ours} against NJOY's {njoy}"
