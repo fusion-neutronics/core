@@ -43,7 +43,8 @@
 //! have at all (JEFF-4.0 Sm151 at -0.08 eV) is left out of the matrix, which
 //! keeps the rest of it exact (a marginal of a covariance is its sub-block),
 //! and listed in [`RangeCovariance::unmatched`]. R-matrix spin groups are
-//! matched in order by spin, parity and channel count, so an MF=2 group MF=32
+//! matched in order by spin, channel count and resonance count, so an MF=2
+//! group MF=32
 //! leaves out (ENDF/B-VIII.1 W183's fifth) is skipped.
 //!
 //! # Scattering radius
@@ -71,7 +72,7 @@ use crate::mf::mf2::{Mf2, ResonanceParameters};
 use crate::mf::mf32::{Covariance, Mf32, PackedCovariance, Range, ScatteringRadiusUncertainty};
 
 /// Where a parameter sits in MF=2.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Location {
     /// Resonance `index` of the MF=2 section `section` (the section of one
     /// orbital angular momentum), for Breit-Wigner and Reich-Moore.
@@ -233,6 +234,8 @@ struct Builder {
     approximate: usize,
     unmatched: Vec<f64>,
     radius_steps: Vec<f64>,
+    /// The MF=2 resonances already given to an MF=32 one.
+    claimed: std::collections::HashSet<Location>,
 }
 
 impl Builder {
@@ -252,16 +255,19 @@ impl Builder {
     }
 
     /// The MF=2 location of a resonance from [`orbital`], counting an
-    /// approximate match and listing a missing one.
+    /// approximate match and listing a missing one. Each MF=2 resonance is
+    /// given to one MF=32 resonance at most: a second whose nearest match is
+    /// already taken is listed as missing rather than doubling the first's
+    /// parameters in the matrix.
     fn matched(&mut self, found: Option<(Location, bool)>, er: f64) -> Option<Location> {
         match found {
-            Some((location, exact)) => {
+            Some((location, exact)) if self.claimed.insert(location) => {
                 if !exact {
                     self.approximate += 1;
                 }
                 Some(location)
             }
-            None => {
+            _ => {
                 self.unmatched.push(er);
                 None
             }
@@ -330,20 +336,66 @@ impl Builder {
     }
 }
 
+/// How well an MF=2 candidate fits an MF=32 resonance, best first: nearest in
+/// energy; among equally near ones, one not yet claimed; then the closest
+/// neutron and capture widths. MF=2 can hold resonances of one spin at the
+/// same energy (in different orbital sections, or adjacent in one:
+/// ENDF/B-VIII.1 Pb208 has three such pairs at 8 MeV, Ne22 one at -1.47 MeV),
+/// and only the widths tell them apart.
+fn fit(distance: f64, claimed: bool, widths: (f64, f64), mf32: (f64, f64)) -> (f64, bool, f64) {
+    let off = |a: f64, b: f64| (a - b).abs() / a.abs().max(b.abs()).max(1e-30);
+    (
+        distance,
+        claimed,
+        off(widths.0, mf32.0) + off(widths.1, mf32.1),
+    )
+}
+
+/// Whether fit `a` is strictly better than `b` (see [`fit`]).
+fn better(a: (f64, bool, f64), b: (f64, bool, f64)) -> bool {
+    a.0.total_cmp(&b.0)
+        .then(a.1.cmp(&b.1))
+        .then(a.2.total_cmp(&b.2))
+        .is_lt()
+}
+
 /// The MF=2 section and index of the Breit-Wigner or Reich-Moore resonance
-/// nearest `er` with spin `aj`, within [`ENERGY_TOLERANCE`], and whether the
-/// energies agree to the digits ENDF writes. `None` where MF=2 has none.
-fn orbital(parameters: &ResonanceParameters, er: f64, aj: f64) -> Result<Option<(Location, bool)>> {
-    let sections: Vec<(&[f64], &[f64])> = match parameters {
+/// that best fits one MF=32 lists at `er` with spin `aj` and neutron and
+/// capture widths `mf32` (see [`fit`]), within [`ENERGY_TOLERANCE`], and
+/// whether the energies agree to the digits ENDF writes. `None` where MF=2 has
+/// none.
+fn orbital(
+    parameters: &ResonanceParameters,
+    er: f64,
+    aj: f64,
+    mf32: (f64, f64),
+    claimed: &std::collections::HashSet<Location>,
+) -> Result<Option<(Location, bool)>> {
+    type Columns<'a> = (&'a [f64], &'a [f64], &'a [f64], &'a [f64]);
+    let sections: Vec<Columns> = match parameters {
         ResonanceParameters::BreitWigner(bw) => bw
             .sections
             .iter()
-            .map(|s| (s.er.as_slice(), s.aj.as_slice()))
+            .map(|s| {
+                (
+                    s.er.as_slice(),
+                    s.aj.as_slice(),
+                    s.gn.as_slice(),
+                    s.gg.as_slice(),
+                )
+            })
             .collect(),
         ResonanceParameters::ReichMoore(rm) => rm
             .sections
             .iter()
-            .map(|s| (s.er.as_slice(), s.aj.as_slice()))
+            .map(|s| {
+                (
+                    s.er.as_slice(),
+                    s.aj.as_slice(),
+                    s.gn.as_slice(),
+                    s.gg.as_slice(),
+                )
+            })
             .collect(),
         _ => {
             return Err(Error::Mismatched {
@@ -351,21 +403,26 @@ fn orbital(parameters: &ResonanceParameters, er: f64, aj: f64) -> Result<Option<
             })
         }
     };
-    let mut best: Option<(f64, Location)> = None;
-    for (section, (energies, spins)) in sections.iter().enumerate() {
+    let mut best: Option<((f64, bool, f64), Location)> = None;
+    for (section, (energies, spins, gn, gg)) in sections.iter().enumerate() {
         for (index, (&e, &j)) in energies.iter().zip(spins.iter()).enumerate() {
             if !close(j.abs(), aj.abs()) {
                 continue;
             }
-            let d = (e - er).abs();
-            if best.is_none_or(|(b, _)| d < b) {
-                best = Some((d, Location::Orbital { section, index }));
+            let location = Location::Orbital { section, index };
+            let widths = (
+                gn.get(index).copied().unwrap_or(0.0),
+                gg.get(index).copied().unwrap_or(0.0),
+            );
+            let f = fit((e - er).abs(), claimed.contains(&location), widths, mf32);
+            if best.is_none_or(|(b, _)| better(f, b)) {
+                best = Some((f, location));
             }
         }
     }
     Ok(best
-        .filter(|(d, _)| *d <= ENERGY_TOLERANCE * er.abs().max(1e-30))
-        .map(|(d, l)| (l, d <= 1e-6 * er.abs().max(1e-30))))
+        .filter(|((d, _, _), _)| *d <= ENERGY_TOLERANCE * er.abs().max(1e-30))
+        .map(|((d, _, _), l)| (l, d <= 1e-6 * er.abs().max(1e-30))))
 }
 
 /// Each Breit-Wigner or Reich-Moore section's APL (zero where it has none:
@@ -433,7 +490,7 @@ fn read_range(range: &Range, parameters: &ResonanceParameters, b: &mut Builder) 
             // no resonance with another.
             for s in &c.sections {
                 for res in &s.resonances {
-                    let found = orbital(parameters, res[0], res[1])?;
+                    let found = orbital(parameters, res[0], res[1], (res[3], res[4]), &b.claimed)?;
                     let Some(location) = b.matched(found, res[0]) else {
                         continue;
                     };
@@ -461,7 +518,12 @@ fn read_range(range: &Range, parameters: &ResonanceParameters, b: &mut Builder) 
                 for res in &block.resonances {
                     // ER, AJ, then GT, GN, GG, GF for Breit-Wigner and GN, GG,
                     // GFA, GFB for Reich-Moore.
-                    let found = orbital(parameters, res[0], res[1])?;
+                    let gn_gg = if range.lrf == 3 {
+                        (res[2], res[3])
+                    } else {
+                        (res[3], res[4])
+                    };
+                    let found = orbital(parameters, res[0], res[1], gn_gg, &b.claimed)?;
                     let location = b.matched(found, res[0]);
                     let values = if range.lrf == 3 {
                         [res[2], res[3], res[4], res[5]]
@@ -499,7 +561,12 @@ fn read_range(range: &Range, parameters: &ResonanceParameters, b: &mut Builder) 
                 // Parameters ER, AJ, GN, GG, GFA, GFB (Reich-Moore) or ER, AJ,
                 // GT, GN, GG, GF (Breit-Wigner), uncertainties alongside.
                 let (p, d) = (&res.parameters, &res.uncertainties);
-                let found = orbital(parameters, p[0], p[1])?;
+                let gn_gg = if range.lrf == 3 {
+                    (p[2], p[3])
+                } else {
+                    (p[3], p[4])
+                };
+                let found = orbital(parameters, p[0], p[1], gn_gg, &b.claimed)?;
                 let location = b.matched(found, p[0]);
                 let order: [(f64, f64); 4] = if range.lrf == 3 {
                     [(p[2], d[2]), (p[3], d[3]), (p[4], d[4]), (p[5], d[5])]
@@ -532,7 +599,7 @@ fn read_range(range: &Range, parameters: &ResonanceParameters, b: &mut Builder) 
                 for sg in &block.spin_groups {
                     for k in 0..sg.nrb as usize {
                         let values = sg.resonance(k);
-                        let found = spin_group_resonance(rml, sg.nch, values[0]);
+                        let found = spin_group_resonance(rml, sg.nch, values[0], &b.claimed);
                         let location = b.matched(found, values[0]);
                         rows.push(b.row(location, Quantity::Energy, values[0]));
                         for c in 0..sg.nch as usize {
@@ -554,8 +621,8 @@ fn read_range(range: &Range, parameters: &ResonanceParameters, b: &mut Builder) 
             let mut rows = Vec::new();
             let mut u = Vec::new();
             // Each MF=32 spin group is the next MF=2 group of its spin,
-            // parity and channel count, so a group MF=32 leaves out is
-            // skipped.
+            // channel count and resonance count, so a group MF=32 leaves out
+            // is skipped.
             let mut next = 0;
             for sg in &c.spin_groups {
                 let group = (next..rml.spin_groups.len())
@@ -697,27 +764,30 @@ fn read_unresolved(
 }
 
 /// The spin group of `rml` with `nch` channels holding the resonance nearest
-/// `er`, within [`ENERGY_TOLERANCE`], its index there, and whether the
-/// energies agree to the digit.
+/// `er`, within [`ENERGY_TOLERANCE`], preferring among equally near ones one
+/// not yet claimed, its index there, and whether the energies agree to the
+/// digit.
 fn spin_group_resonance(
     rml: &crate::mf::mf2::RMatrixLimited,
     nch: i64,
     er: f64,
+    claimed: &std::collections::HashSet<Location>,
 ) -> Option<(Location, bool)> {
-    let mut best: Option<(f64, Location)> = None;
+    let mut best: Option<((f64, bool, f64), Location)> = None;
     for (group, sg) in rml.spin_groups.iter().enumerate() {
         if sg.nch != nch {
             continue;
         }
         for (index, &e) in sg.er.iter().enumerate() {
-            let d = (e - er).abs();
-            if best.is_none_or(|(b, _)| d < b) {
-                best = Some((d, Location::SpinGroup { group, index }));
+            let location = Location::SpinGroup { group, index };
+            let f = ((e - er).abs(), claimed.contains(&location), 0.0);
+            if best.is_none_or(|(b, _)| better(f, b)) {
+                best = Some((f, location));
             }
         }
     }
-    best.filter(|(d, _)| *d <= ENERGY_TOLERANCE * er.abs().max(1e-30))
-        .map(|(d, l)| (l, d <= 1e-6 * er.abs().max(1e-30)))
+    best.filter(|((d, _, _), _)| *d <= ENERGY_TOLERANCE * er.abs().max(1e-30))
+        .map(|((d, _, _), l)| (l, d <= 1e-6 * er.abs().max(1e-30)))
 }
 
 /// The channel radius parameters ISR=1 adds to an R-matrix limited range:
@@ -919,6 +989,13 @@ pub fn group_covariance(
             what: "group edges, which must be positive and ascending",
         });
     }
+    // Outside the range the resonance formula is not the cross section.
+    let (el, eh) = range.bounds();
+    if edges[0] < el || edges[edges.len() - 1] > eh {
+        return Err(Error::Mismatched {
+            what: "group edges and the range, which must hold them",
+        });
+    }
     let groups = edges.len() - 1;
     let n_par = cov.len();
     let points = integration_points(range, edges, 400, 256);
@@ -1086,6 +1163,69 @@ mod tests {
     const PU244: &[u8] = include_bytes!("../fixtures/n-094_Pu_244_mf2_mf32.endf.xz");
     const TH232: &[u8] = include_bytes!("../fixtures/n-090_Th_232_mf2_mf32.endf.xz");
     const CL35: &[u8] = include_bytes!("../fixtures/n-017_Cl_035_mf2_mf32.endf.xz");
+
+    /// MF=2 Reich-Moore sections each holding one 8 MeV J=1/2 resonance with
+    /// the given neutron widths, as ENDF/B-VIII.1 Pb208 does in its L=0 and
+    /// L=1 sections.
+    fn same_energy_and_spin(gn: &[f64]) -> ResonanceParameters {
+        ResonanceParameters::ReichMoore(crate::mf::mf2::ReichMoore {
+            sections: gn
+                .iter()
+                .enumerate()
+                .map(|(l, &gn)| crate::mf::mf2::ReichMooreSection {
+                    l: l as i64,
+                    er: vec![8.0e6],
+                    aj: vec![0.5],
+                    gn: vec![gn],
+                    gg: vec![1.0],
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn resonances_of_one_spin_at_one_energy_are_told_apart_by_their_widths() {
+        let mf2 = same_energy_and_spin(&[4.4577e5, 3.3064e7]);
+        let mut b = Builder::default();
+        // MF=32 lists the L=1 resonance first: its widths pick section 1,
+        // where the energy and spin alone took whichever came first.
+        for (gn, section) in [(3.3064e7, 1), (4.4577e5, 0)] {
+            let found = orbital(&mf2, 8.0e6, 0.5, (gn, 1.0), &b.claimed).unwrap();
+            let location = b.matched(found, 8.0e6);
+            assert_eq!(location, Some(Location::Orbital { section, index: 0 }));
+        }
+        assert!(b.unmatched.is_empty() && b.approximate == 0);
+    }
+
+    #[test]
+    fn an_mf2_resonance_is_given_to_one_mf32_resonance_at_most() {
+        // Identical rows (JEFF-4.0 Zn66 and I127 have them): the second MF=32
+        // resonance takes the second row, and a third finds none left.
+        let mf2 = same_energy_and_spin(&[2.0, 2.0]);
+        let mut b = Builder::default();
+        let mut got = Vec::new();
+        for _ in 0..3 {
+            let found = orbital(&mf2, 8.0e6, 0.5, (2.0, 1.0), &b.claimed).unwrap();
+            got.push(b.matched(found, 8.0e6));
+        }
+        assert_eq!(
+            got,
+            [
+                Some(Location::Orbital {
+                    section: 0,
+                    index: 0
+                }),
+                Some(Location::Orbital {
+                    section: 1,
+                    index: 0
+                }),
+                None,
+            ]
+        );
+        assert_eq!(b.unmatched, [8.0e6]);
+    }
 
     fn read(fixture: &[u8]) -> (Material, Vec<RangeCovariance>) {
         let m = Material::from_str(&crate::testdata::text(fixture)).expect("fixture parses");
