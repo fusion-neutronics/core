@@ -958,7 +958,13 @@ fn compton_and_bremsstrahlung_are_written_from_the_auxiliary_tabulations() {
     let expected_ee: Vec<f64> = (0..200)
         .map(|i| 10f64.powf(3.0 + 6.0 * i as f64 / 199.0))
         .collect();
-    assert_f64_slice_eq("electron_energy", &electron_energy, &expected_ee);
+    // To the last bit or two, not exactly: in an optimized build LLVM may
+    // rewrite `10f64.powf(x)` as `exp10(x)` (it does on macOS), which can
+    // round differently from the unoptimized `powf` evaluated here.
+    assert_eq!(electron_energy.len(), expected_ee.len());
+    for (i, (&got, &want)) in electron_energy.iter().zip(&expected_ee).enumerate() {
+        assert_close(&format!("electron_energy[{i}]"), got, want, 1e-15);
+    }
     assert_eq!(electron_energy.len(), 200);
     assert_close("electron_energy[0]", electron_energy[0], 1.0e3, 1e-12);
     assert_close("electron_energy[199]", electron_energy[199], 1.0e9, 1e-9);
