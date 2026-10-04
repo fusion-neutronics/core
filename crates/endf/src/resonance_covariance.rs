@@ -1,11 +1,17 @@
-//! The covariance of a resolved range's resonance parameters, as one matrix
-//! over named parameters.
+//! The covariance of a range's resonance parameters, as one matrix over named
+//! parameters.
+//!
+//! An unresolved range (LRU=2) gives the relative covariance of its average
+//! parameters per `(l, J)`; those become unit-mean multipliers on MF=2's
+//! parameter tables ([`Location::Unresolved`]), the parameters the range's
+//! average cross sections come from. NJOY's ERRORR perturbs MF=32's own
+//! energy-independent copies of them instead.
 //!
 //! MF=32 writes a resolved range's covariance in one of five layouts
 //! ([`crate::mf::mf32`]), each listing the parameters its own way: per
 //! resonance in fixed 4 by 4 blocks (LCOMP=0), in short-range blocks over a
 //! subset of resonances (LCOMP=1), or as uncertainties and an integer-coded
-//! correlation matrix (LCOMP=2). [`resolved_covariances`] reads every one into
+//! correlation matrix (LCOMP=2). [`range_covariances`] reads every one into
 //! the same form: a list of [`Parameter`]s, each tied to the MF=2 resonance and
 //! quantity it perturbs, and their covariance as a dense matrix in the
 //! parameters' own units (eV and eV², the scattering radius in 1e-12 cm). That
@@ -33,10 +39,10 @@
 //! repeats the MF=2 parameters, but not always to the digit (JEFF-4.0 Xe135
 //! writes 0.085107 eV for MF=2's 0.0851068) or even from the same parameter
 //! set (JEFF-4.0 U236 differs by up to 0.07%). Matches that are not exact are
-//! counted in [`ResolvedCovariance::approximate`]. A resonance MF=2 does not
+//! counted in [`RangeCovariance::approximate`]. A resonance MF=2 does not
 //! have at all (JEFF-4.0 Sm151 at -0.08 eV) is left out of the matrix, which
 //! keeps the rest of it exact (a marginal of a covariance is its sub-block),
-//! and listed in [`ResolvedCovariance::unmatched`]. R-matrix spin groups are
+//! and listed in [`RangeCovariance::unmatched`]. R-matrix spin groups are
 //! matched in order by spin, parity and channel count, so an MF=2 group MF=32
 //! leaves out (ENDF/B-VIII.1 W183's fifth) is skipped.
 //!
@@ -46,7 +52,7 @@
 //! parameter, uncorrelated with the resonance parameters (the format gives no
 //! such correlation), of unit variance: one standard deviation of it moves
 //! every section's radius at once, each by its own step
-//! ([`ResolvedCovariance::radius_steps`]). The steps follow NJOY's ERRORR, the
+//! ([`RangeCovariance::radius_steps`]). The steps follow NJOY's ERRORR, the
 //! reference reading of the format: the LIST's first value, DAP, is AP's;
 //! further values (MLS of them in all) are the first MLS-1 sections' own; a
 //! section the list does not reach takes DAP even where it carries an APL of
@@ -73,11 +79,14 @@ pub enum Location {
     /// Resonance `index` of spin group `group`, for R-matrix limited.
     SpinGroup { group: usize, index: usize },
     /// The range as a whole: its radius parameter, which moves every
-    /// section's radius by its step in [`ResolvedCovariance::radius_steps`].
+    /// section's radius by its step in [`RangeCovariance::radius_steps`].
     Range,
     /// The radius of channel `channel` of spin group `group`, for R-matrix
     /// limited.
     Channel { group: usize, channel: usize },
+    /// The `spin`-th J of the `orbital`-th section of an unresolved range:
+    /// its parameter is a unit-mean multiplier on the whole energy table.
+    Unresolved { orbital: usize, spin: usize },
 }
 
 /// What a parameter is.
@@ -90,8 +99,13 @@ pub enum Quantity {
     FissionWidth,
     /// GFB for Reich-Moore.
     SecondFissionWidth,
-    /// GX, the competitive width, for Breit-Wigner: GT less the others.
+    /// GX, the competitive width, for Breit-Wigner: GT less the others; for
+    /// an unresolved range, its average competitive width.
     CompetitiveWidth,
+    /// An unresolved range's average level spacing D.
+    LevelSpacing,
+    /// An unresolved range's average reduced neutron width GN0.
+    ReducedNeutronWidth,
     /// The width (or, with IFG=1, the reduced width amplitude) of channel
     /// `c` of an R-matrix limited spin group.
     ChannelWidth(usize),
@@ -108,7 +122,7 @@ pub struct Parameter {
 
 /// One resolved range's parameter covariance.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ResolvedCovariance {
+pub struct RangeCovariance {
     /// Index of the isotope in MF=2 and MF=32, of the range within MF=32's
     /// isotope, and of the MF=2 range it was matched to.
     pub isotope: usize,
@@ -116,8 +130,10 @@ pub struct ResolvedCovariance {
     pub mf2_range: usize,
     pub el: f64,
     pub eh: f64,
-    /// The MF=2 representation: 1 or 2 Breit-Wigner, 3 Reich-Moore, 7
-    /// R-matrix limited.
+    /// 1 resolved, 2 unresolved.
+    pub lru: i64,
+    /// The MF=2 representation: for a resolved range 1 or 2 Breit-Wigner, 3
+    /// Reich-Moore, 7 R-matrix limited.
     pub lrf: i64,
     pub parameters: Vec<Parameter>,
     /// Row-major `n × n`, `n` the number of parameters.
@@ -134,7 +150,7 @@ pub struct ResolvedCovariance {
     pub radius_steps: Vec<f64>,
 }
 
-impl ResolvedCovariance {
+impl RangeCovariance {
     /// Parameters in the matrix.
     pub fn len(&self) -> usize {
         self.parameters.len()
@@ -156,7 +172,7 @@ impl ResolvedCovariance {
 /// Errors where MF=32 does not match MF=2 (a resonance or spin group MF=2 does
 /// not have, or ranges that do not line up), or where a matrix's order is not
 /// what its parameters need.
-pub fn resolved_covariances(mf2: &Mf2, mf32: &Mf32) -> Result<Vec<ResolvedCovariance>> {
+pub fn range_covariances(mf2: &Mf2, mf32: &Mf32) -> Result<Vec<RangeCovariance>> {
     let mut out = Vec::new();
     for (i, isotope) in mf32.isotopes.iter().enumerate() {
         let Some(parameters) = mf2.isotopes.get(i) else {
@@ -165,7 +181,7 @@ pub fn resolved_covariances(mf2: &Mf2, mf32: &Mf32) -> Result<Vec<ResolvedCovari
             });
         };
         for (r, range) in isotope.ranges.iter().enumerate() {
-            if range.lru != 1 {
+            if range.lru != 1 && range.lru != 2 {
                 continue;
             }
             let overlap = |el: f64, eh: f64| (eh.min(range.eh) - el.max(range.el)).max(0.0);
@@ -173,20 +189,25 @@ pub fn resolved_covariances(mf2: &Mf2, mf32: &Mf32) -> Result<Vec<ResolvedCovari
                 .ranges
                 .iter()
                 .enumerate()
-                .filter(|(_, p)| p.lru == 1 && overlap(p.el, p.eh) > 0.0)
+                .filter(|(_, p)| p.lru == range.lru && overlap(p.el, p.eh) > 0.0)
                 .max_by(|a, b| overlap(a.1.el, a.1.eh).total_cmp(&overlap(b.1.el, b.1.eh)))
                 .ok_or(Error::Mismatched {
-                    what: "an MF=32 resolved range and the MF=2 ranges",
+                    what: "an MF=32 range and the MF=2 ranges",
                 })?;
             let mut builder = Builder::default();
-            read_range(range, &resonances.parameters, &mut builder)?;
+            if range.lru == 2 {
+                read_unresolved(range, &resonances.parameters, isotope.lfw, &mut builder)?;
+            } else {
+                read_range(range, &resonances.parameters, &mut builder)?;
+            }
             let covariance = builder.dense();
-            out.push(ResolvedCovariance {
+            out.push(RangeCovariance {
                 isotope: i,
                 range: r,
                 mf2_range,
                 el: range.el,
                 eh: range.eh,
+                lru: range.lru,
                 lrf: range.lrf,
                 parameters: builder.parameters,
                 covariance,
@@ -573,6 +594,90 @@ fn read_range(range: &Range, parameters: &ResonanceParameters, b: &mut Builder) 
     }
 }
 
+/// An unresolved range's parameter covariance: per `(l, J)`, in MF=32's
+/// listing order, unit-mean multipliers on its parameter tables (D, GN0, GG,
+/// GF, GX, the first MPAR of them; with LFW=0 and MPAR=4 the four are D,
+/// GN0, GG and GX), carrying MF=32's relative covariance. Sections are
+/// matched to MF=2's by `l`, spins by `J`.
+fn read_unresolved(
+    range: &Range,
+    parameters: &ResonanceParameters,
+    lfw: i64,
+    b: &mut Builder,
+) -> Result<()> {
+    let Covariance::Unresolved(u) = &range.covariance else {
+        return Err(Error::Mismatched {
+            what: "an MF=32 unresolved range without its covariance",
+        });
+    };
+    let ResonanceParameters::Unresolved(mf2) = parameters else {
+        return Err(Error::Mismatched {
+            what: "MF=32 unresolved parameters and the MF=2 range",
+        });
+    };
+    let mpar = u.mpar.max(0) as usize;
+    let names: [Quantity; 5] = if lfw == 0 && mpar == 4 {
+        [
+            Quantity::LevelSpacing,
+            Quantity::ReducedNeutronWidth,
+            Quantity::CaptureWidth,
+            Quantity::CompetitiveWidth,
+            Quantity::FissionWidth,
+        ]
+    } else {
+        [
+            Quantity::LevelSpacing,
+            Quantity::ReducedNeutronWidth,
+            Quantity::CaptureWidth,
+            Quantity::FissionWidth,
+            Quantity::CompetitiveWidth,
+        ]
+    };
+    let spin_of = |p: &crate::mf::mf2::UnresolvedParameters| match p {
+        crate::mf::mf2::UnresolvedParameters::CaseB { aj, .. } => *aj,
+        crate::mf::mf2::UnresolvedParameters::CaseC { aj, .. } => *aj,
+    };
+    let mut rows = Vec::new();
+    for lv in &u.l_values {
+        let orbital = mf2
+            .ranges
+            .iter()
+            .position(|r| r.l == lv.l)
+            .ok_or(Error::Mismatched {
+                what: "an MF=32 unresolved l that MF=2 does not have",
+            })?;
+        let section = &mf2.ranges[orbital];
+        let spins: Vec<f64> = if section.parameters.is_empty() {
+            section.aj.clone()
+        } else {
+            section.parameters.iter().map(spin_of).collect()
+        };
+        for (k, par) in lv.parameters.iter().enumerate() {
+            let aj = par[1];
+            // By J where it agrees; JEFF-4.0 writes many unresolved MF=32
+            // sections whose J column does not (Ni66: 5, 1, 2 for MF=2's
+            // 0.5, 1.5, 2.5), and there by position within the section, the
+            // order the format lists them in, where the counts agree.
+            let spin = match spins.iter().position(|&j| close(j, aj)) {
+                Some(spin) => Some(spin),
+                None if lv.parameters.len() == spins.len() => {
+                    b.approximate += 1;
+                    Some(k)
+                }
+                None => None,
+            };
+            let location = spin.map(|spin| Location::Unresolved { orbital, spin });
+            if location.is_none() {
+                b.unmatched.push(aj);
+            }
+            for name in names.iter().take(mpar) {
+                rows.push(b.row(location, *name, 1.0));
+            }
+        }
+    }
+    b.packed(&rows, &u.relative_covariance)
+}
+
 /// The spin group of `rml` with `nch` channels holding the resonance nearest
 /// `er`, within [`ENERGY_TOLERANCE`], its index there, and whether the
 /// energies agree to the digit.
@@ -697,7 +802,7 @@ impl GroupCovariance {
 /// thermal group below half the first resonance's energy. Groups are where a
 /// transport replica's cross-section multiplier is constant, so a group per
 /// resonance lets each resonance move on its own.
-pub fn resonance_edges(range: &dyn crate::resonance::ResolvedRange) -> Vec<f64> {
+pub fn resonance_edges(range: &dyn crate::resonance::RangeReconstruction) -> Vec<f64> {
     let (el, eh) = range.bounds();
     let mut energies: Vec<f64> = range
         .resonances()
@@ -737,7 +842,7 @@ pub fn resonance_edges(range: &dyn crate::resonance::ResolvedRange) -> Vec<f64> 
 /// apart and lopsided about an 11 eV resonance at 571 keV, does not (it made
 /// Pb208's capture variance there 1e4 times too large).
 fn integration_points(
-    range: &dyn crate::resonance::ResolvedRange,
+    range: &dyn crate::resonance::RangeReconstruction,
     edges: &[f64],
     per_decade: usize,
     per_resonance: usize,
@@ -787,8 +892,8 @@ fn integration_points(
 /// at infinite dilution and 0 K, as NJOY's ERRORR takes it. The integrals
 /// are trapezoids in `ln E` on points that trace every resonance.
 pub fn group_covariance(
-    cov: &ResolvedCovariance,
-    range: &dyn crate::resonance::ResolvedRange,
+    cov: &RangeCovariance,
+    range: &dyn crate::resonance::RangeReconstruction,
     edges: &[f64],
 ) -> Result<GroupCovariance> {
     if edges.len() < 2 || edges.windows(2).any(|w| w[1] <= w[0]) || edges[0] <= 0.0 {
@@ -897,15 +1002,15 @@ mod tests {
     const TH232: &[u8] = include_bytes!("../fixtures/n-090_Th_232_mf2_mf32.endf.xz");
     const CL35: &[u8] = include_bytes!("../fixtures/n-017_Cl_035_mf2_mf32.endf.xz");
 
-    fn read(fixture: &[u8]) -> (Material, Vec<ResolvedCovariance>) {
+    fn read(fixture: &[u8]) -> (Material, Vec<RangeCovariance>) {
         let m = Material::from_str(&crate::testdata::text(fixture)).expect("fixture parses");
-        let v = resolved_covariances(m.mf2().unwrap(), m.mf32().unwrap()).expect("covariance");
+        let v = range_covariances(m.mf2().unwrap(), m.mf32().unwrap()).expect("covariance");
         (m, v)
     }
 
     /// The trailing `k × k` block of a range's matrix, without the scattering
     /// radius parameters: `(trace, sum, C_01, C_12)`.
-    fn checksum(r: &ResolvedCovariance, k: usize) -> (f64, f64, f64, f64) {
+    fn checksum(r: &RangeCovariance, k: usize) -> (f64, f64, f64, f64) {
         let rows: Vec<usize> = (0..r.len())
             .filter(|&i| r.parameters[i].quantity != Quantity::ScatteringRadius)
             .collect();
@@ -1044,7 +1149,7 @@ mod tests {
     #[test]
     fn group_covariance_matches_errorr() {
         let m = Material::from_str(&crate::testdata::text(DY158)).expect("fixture parses");
-        let cov = &resolved_covariances(m.mf2().unwrap(), m.mf32().unwrap()).unwrap()[0];
+        let cov = &range_covariances(m.mf2().unwrap(), m.mf32().unwrap()).unwrap()[0];
         let rm = crate::resonance::ReichMooreRange::new(&m.mf2().unwrap().isotopes[0].ranges[0])
             .unwrap();
         let edges = [1e-5, 0.1, 1.0, 5.0, 10.0, 20.0, 30.0, 50.0, 86.2];
@@ -1081,7 +1186,7 @@ mod tests {
         let rm = crate::resonance::ReichMooreRange::new(&m.mf2().unwrap().isotopes[0].ranges[0])
             .unwrap();
         let edges = resonance_edges(&rm);
-        use crate::resonance::ResolvedRange;
+        use crate::resonance::RangeReconstruction;
         let inside: Vec<f64> = rm
             .resonances()
             .into_iter()

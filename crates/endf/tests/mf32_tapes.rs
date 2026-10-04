@@ -376,22 +376,25 @@ fn every_mf32_section_on_the_local_tapes_is_read_to_send() {
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
-/// Every resolved MF=32 range of ENDF/B-VIII.1 and JEFF-4.0 is matched to its
-/// MF=2 range and read into one parameter covariance. ENDF/B-VIII.1 matches
-/// every resonance exactly. JEFF-4.0 has 63 resonances whose MF=32 energy
-/// differs from MF=2's within the tolerance (Xe135 rounded, U236 from another
-/// parameter set) and 253 that MF=2 does not list at all.
+/// Every MF=32 range of ENDF/B-VIII.1 and JEFF-4.0, resolved and unresolved,
+/// is matched to its MF=2 range and read into one parameter covariance.
+/// ENDF/B-VIII.1 matches every resonance and every unresolved spin exactly.
+/// JEFF-4.0 has 63 resonances whose MF=32 energy differs from MF=2's within
+/// the tolerance (Xe135 rounded, U236 from another parameter set), 253 that
+/// MF=2 does not list at all, and 1618 unresolved spins whose MF=32 J column
+/// does not match MF=2's (Ni66 writes 5, 1, 2 for 0.5, 1.5, 2.5) and are
+/// matched by position.
 #[test]
 #[ignore = "reads GB of local tapes; set ENDF_TAPES and run with --ignored"]
-fn every_resolved_mf32_range_reads_into_a_parameter_covariance() {
-    use endf::resonance_covariance::resolved_covariances;
+fn every_mf32_range_reads_into_a_parameter_covariance() {
+    use endf::resonance_covariance::range_covariances;
     let root = PathBuf::from(
         std::env::var_os("ENDF_TAPES")
             .expect("set ENDF_TAPES to the directory holding the libraries"),
     );
     for (dir, files, ranges, approximate, unmatched) in [
-        ("endfb-viii.1-endf/neutrons-version.VIII.1", 130, 130, 0, 0),
-        ("jeff-4.0-endf/neutron", 510, 509, 63, 253),
+        ("endfb-viii.1-endf/neutrons-version.VIII.1", 130, 174, 0, 0),
+        ("jeff-4.0-endf/neutron", 510, 945, 1681, 253),
     ] {
         let (mut f, mut r, mut a, mut u) = (0, 0, 0, 0);
         for path in evaluations(&root.join(dir)) {
@@ -401,7 +404,7 @@ fn every_resolved_mf32_range_reads_into_a_parameter_covariance() {
             let (Some(mf2), Some(mf32)) = (m.mf2(), m.mf32()) else {
                 continue;
             };
-            let v = resolved_covariances(mf2, mf32)
+            let v = range_covariances(mf2, mf32)
                 .unwrap_or_else(|e| panic!("{}: {e:?}", path.display()));
             f += 1;
             r += v.len();
@@ -429,13 +432,13 @@ fn every_resolved_mf32_range_reads_into_a_parameter_covariance() {
 #[ignore = "reads a local tape; set ENDF_TAPES and run with --ignored"]
 fn pb208_group_covariance_matches_errorr() {
     use endf::resonance::ReichMooreRange;
-    use endf::resonance_covariance::{group_covariance, resolved_covariances};
+    use endf::resonance_covariance::{group_covariance, range_covariances};
     let root = PathBuf::from(std::env::var_os("ENDF_TAPES").expect("set ENDF_TAPES"));
     let m = endf::material::Material::from_file(
         root.join("endfb-viii.1-endf/neutrons-version.VIII.1/n-082_Pb_208.endf"),
     )
     .unwrap();
-    let cov = &resolved_covariances(m.mf2().unwrap(), m.mf32().unwrap()).unwrap()[0];
+    let cov = &range_covariances(m.mf2().unwrap(), m.mf32().unwrap()).unwrap()[0];
     assert_eq!(cov.radius_steps, vec![0.0, 0.0027, 0.027, 0.027]);
     let rm = ReichMooreRange::new(&m.mf2().unwrap().isotopes[0].ranges[0]).unwrap();
     let edges = [1e-5, 1.0, 1e2, 1e3, 1e4, 5e4, 1e5, 3e5, 1e6, 1.5e6];

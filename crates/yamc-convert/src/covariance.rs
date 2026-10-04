@@ -26,11 +26,12 @@
 //! range's cross-section covariance the MF=32 resonance-parameter part plus
 //! MF=33, and many evaluations put the whole resolved-range uncertainty in
 //! MF=32 (ENDF/B-VIII.1 W, Cu, Cr, Ni, Pb and Ti among them). So for each
-//! resolved MF=32 range whose formalism [`endf::resonance`] reconstructs
-//! (Reich-Moore, and R-matrix limited without charged-particle channels), the
-//! covariance of its elastic, capture and fission group cross sections
-//! ([`endf::resonance_covariance::group_covariance`], one group per resonance,
-//! 1/E weight, infinite dilution, 0 K) is written as NI blocks: LB=5 for a
+//! MF=32 range whose formalism [`endf::resonance`] reconstructs (resolved
+//! Reich-Moore, R-matrix limited without charged-particle channels, and
+//! unresolved averages), the covariance of its elastic, capture and fission
+//! group cross sections ([`endf::resonance_covariance::group_covariance`],
+//! one group per resonance or per pair of the unresolved parameters'
+//! energies, 1/E weight, infinite dilution, 0 K) is written as NI blocks: LB=5 for a
 //! reaction with itself, LB=6 for elastic with capture and the like. They are
 //! relative to the whole cross section, resonance part plus MF=3 background,
 //! since that is what a perturbation multiplies, as NJOY's ERRORR takes it.
@@ -476,38 +477,60 @@ fn push_resonance_blocks(
     rows: &mut CovarianceRows,
     material: &Material,
 ) -> Result<(), Box<dyn Error>> {
-    use endf::resonance::{RMatrixRange, ReichMooreRange, ResolvedRange};
-    use endf::resonance_covariance::{group_covariance, resolved_covariances, resonance_edges};
+    use endf::resonance::{RMatrixRange, RangeReconstruction, ReichMooreRange, UnresolvedAverages};
+    use endf::resonance_covariance::{group_covariance, range_covariances, resonance_edges};
     let (Some(mf2), Some(mf32)) = (material.mf2(), material.mf32()) else {
         return Ok(());
     };
     let mut next_block: BTreeMap<i32, usize> = BTreeMap::new();
-    for cov in resolved_covariances(mf2, mf32)? {
+    for cov in range_covariances(mf2, mf32)? {
         if cov.is_empty() {
             continue;
         }
         let range = &mf2.isotopes[cov.isotope].ranges[cov.mf2_range];
         // A formalism or feature endf does not reconstruct yet (charged
         // particle channels, for one) leaves the range to MF=33 alone.
-        let reconstruction: Box<dyn ResolvedRange> = match range.lrf {
-            3 => match ReichMooreRange::new(range) {
+        let mut lssf = 0;
+        let mut parameter_energies = Vec::new();
+        let reconstruction: Box<dyn RangeReconstruction> = match (range.lru, range.lrf) {
+            (1, 3) => match ReichMooreRange::new(range) {
                 Ok(r) => Box::new(r),
                 Err(_) => continue,
             },
-            7 => match RMatrixRange::new(range) {
+            (1, 7) => match RMatrixRange::new(range) {
                 Ok(r) => Box::new(r),
+                Err(_) => continue,
+            },
+            (2, _) => match UnresolvedAverages::new(range) {
+                Ok(r) => {
+                    lssf = r.lssf;
+                    parameter_energies = r.parameter_energies();
+                    Box::new(r)
+                }
                 Err(_) => continue,
             },
             _ => continue,
         };
-        // One group per resonance, within the covariance's own range (which
-        // can stop short of MF=2's).
-        let mut edges: Vec<f64> = resonance_edges(reconstruction.as_ref())
-            .into_iter()
-            .filter(|&e| e > cov.el && e < cov.eh)
-            .collect();
-        edges.insert(0, cov.el.max(range.el));
-        edges.push(cov.eh.min(range.eh));
+        // In a resolved range one group per resonance; in an unresolved one
+        // a group between each pair of the evaluator's parameter energies
+        // (ten logarithmic ones where the parameters do not depend on
+        // energy). Within the covariance's own range, which can stop short of
+        // MF=2's.
+        let (lo, hi) = (cov.el.max(range.el), cov.eh.min(range.eh));
+        let inner = if range.lru == 2 {
+            if parameter_energies.len() > 2 {
+                parameter_energies
+            } else {
+                (1..10)
+                    .map(|i| lo * (hi / lo).powf(i as f64 / 10.0))
+                    .collect()
+            }
+        } else {
+            resonance_edges(reconstruction.as_ref())
+        };
+        let mut edges: Vec<f64> = inner.into_iter().filter(|&e| e > lo && e < hi).collect();
+        edges.insert(0, lo);
+        edges.push(hi);
         let resonance = group_covariance(&cov, reconstruction.as_ref(), &edges)?;
         let totals: Vec<Vec<f64>> = resonance
             .reactions
@@ -517,7 +540,12 @@ fn push_resonance_blocks(
                 let background = material
                     .mf3(*mt)
                     .map_or_else(|| vec![0.0; xs.len()], |b| group_average(&b.sigma, &edges));
-                xs.iter().zip(background).map(|(r, b)| r + b).collect()
+                // With LSSF=1 MF=3 holds the unresolved averages already.
+                if lssf == 1 {
+                    background
+                } else {
+                    xs.iter().zip(background).map(|(r, b)| r + b).collect()
+                }
             })
             .collect();
         let g = resonance.relative_to(&totals);
