@@ -520,54 +520,131 @@ impl ReichMooreRange {
         out
     }
 
-    /// The derivative at `energy` with respect to a scattering radius: the
-    /// range's AP (`l` of `None`), which every section without an APL of
-    /// its own reads, or the APL of the sections of orbital angular momentum
-    /// `l`. With NAPS=1 the radius is the channel radius too. By central
-    /// difference, the radius entering the phase shift, the penetrability
-    /// and its ratio at every resonance together.
-    pub fn radius_derivative(&self, energy: f64, l: Option<i64>) -> Result<Gradient> {
-        let shifted = |delta: f64| -> Result<CrossSections> {
+    /// The derivative at `energy` with respect to the range's radius
+    /// parameter, which moves section `i`'s radius by `steps[i]` (1e-12 cm)
+    /// per unit: a section without an APL of its own through AP, one with an
+    /// APL through it. By central difference, the radius entering the phase
+    /// shift, the penetrability and every resonance's penetrability ratio
+    /// together.
+    pub fn radius_derivative(&self, energy: f64, steps: &[f64]) -> Result<Gradient> {
+        let shifted = |z: f64| -> Result<CrossSections> {
             let mut rm = self.source.clone();
-            let h = match l {
-                None => {
-                    let h = delta * rm.ap.abs().max(1e-3);
-                    rm.ap += h;
-                    h
-                }
-                Some(l) => {
-                    let mut h = 0.0;
-                    for s in rm.sections.iter_mut().filter(|s| s.l == l) {
-                        let base = if s.apl != 0.0 { s.apl } else { self.source.ap };
-                        h = delta * base.abs().max(1e-3);
-                        s.apl = base + h;
-                    }
-                    h
-                }
-            };
-            let range = ReichMooreRange {
+            let ap = rm.ap;
+            for (s, step) in rm.sections.iter_mut().zip(steps) {
+                let base = if s.apl != 0.0 { s.apl } else { ap };
+                s.apl = base + z * step;
+            }
+            let orbitals = orbitals(&rm, self.naps)?;
+            Ok(ReichMooreRange {
                 el: self.el,
                 eh: self.eh,
-                orbitals: orbitals(&rm, self.naps)?,
+                orbitals,
                 source: rm,
                 naps: self.naps,
-            };
-            let mut x = range.cross_sections(energy);
-            if h != 0.0 {
-                x.elastic /= h;
-                x.capture /= h;
-                x.fission /= h;
             }
-            Ok(x)
+            .cross_sections(energy))
         };
-        const STEP: f64 = 1e-6;
-        let (up, down) = (shifted(STEP)?, shifted(-STEP)?);
-        // (sigma(+h) / h - sigma(-h) / (-h)) / 2 with h the same size each way.
+        const Z: f64 = 1e-4;
+        let (up, down) = (shifted(Z)?, shifted(-Z)?);
         Ok([
-            0.5 * (up.elastic + down.elastic),
-            0.5 * (up.capture + down.capture),
-            0.5 * (up.fission + down.fission),
+            (up.elastic - down.elastic) / (2.0 * Z),
+            (up.capture - down.capture) / (2.0 * Z),
+            (up.fission - down.fission) / (2.0 * Z),
         ])
+    }
+}
+
+/// A resolved range that can give its cross sections and their derivatives
+/// with respect to MF=32's parameters: what the group covariance of
+/// [`crate::resonance_covariance::group_covariance`] needs from a formalism.
+pub trait ResolvedRange {
+    /// The range's energy bounds, eV.
+    fn bounds(&self) -> (f64, f64);
+
+    /// The cross sections at `energy`.
+    fn cross_sections(&self, energy: f64) -> CrossSections;
+
+    /// Each resonance's energy and total width, eV, for placing the points
+    /// an integral over the range needs.
+    fn resonances(&self) -> Vec<(f64, f64)>;
+
+    /// The derivatives at `energy` with respect to each of `cov`'s
+    /// parameters, in order. A parameter this range does not have reads zero.
+    fn parameter_gradients(
+        &self,
+        energy: f64,
+        cov: &crate::resonance_covariance::ResolvedCovariance,
+    ) -> Result<Vec<Gradient>>;
+}
+
+impl ResolvedRange for ReichMooreRange {
+    fn bounds(&self) -> (f64, f64) {
+        (self.el, self.eh)
+    }
+
+    fn cross_sections(&self, energy: f64) -> CrossSections {
+        ReichMooreRange::cross_sections(self, energy)
+    }
+
+    fn resonances(&self) -> Vec<(f64, f64)> {
+        self.orbitals
+            .iter()
+            .flat_map(|o| o.channels.iter())
+            .flat_map(|c| c.resonances.iter())
+            .map(|r| {
+                (
+                    r.energy,
+                    r.gn.abs() + r.gg.abs() + r.gfa.abs() + r.gfb.abs(),
+                )
+            })
+            .collect()
+    }
+
+    fn parameter_gradients(
+        &self,
+        energy: f64,
+        cov: &crate::resonance_covariance::ResolvedCovariance,
+    ) -> Result<Vec<Gradient>> {
+        let parameters = &cov.parameters;
+        use crate::resonance_covariance::{Location, Quantity};
+        let by_resonance: std::collections::HashMap<(usize, usize), [Gradient; 5]> = self
+            .derivatives(energy)
+            .into_iter()
+            .map(|g| ((g.section, g.index), g.d))
+            .collect();
+        let mut radius: Option<Gradient> = None;
+        let mut out = Vec::with_capacity(parameters.len());
+        for p in parameters {
+            let g = match (p.location, p.quantity) {
+                (Location::Orbital { section, index }, q) => {
+                    let row = match q {
+                        Quantity::Energy => 0,
+                        Quantity::NeutronWidth => 1,
+                        Quantity::CaptureWidth => 2,
+                        Quantity::FissionWidth => 3,
+                        Quantity::SecondFissionWidth => 4,
+                        _ => {
+                            out.push([0.0; 3]);
+                            continue;
+                        }
+                    };
+                    by_resonance
+                        .get(&(section, index))
+                        .map_or([0.0; 3], |d| d[row])
+                }
+                (Location::Range, Quantity::ScatteringRadius) => match radius {
+                    Some(g) => g,
+                    None => {
+                        let g = self.radius_derivative(energy, &cov.radius_steps)?;
+                        radius = Some(g);
+                        g
+                    }
+                },
+                _ => [0.0; 3],
+            };
+            out.push(g);
+        }
+        Ok(out)
     }
 }
 
@@ -930,17 +1007,17 @@ mod derivative_tests {
     /// At thermal energy Pb208's elastic is s-wave, `4 pi a_eff^2` with
     /// `a_eff` its section radius APL less the distant resonances' share,
     /// which (NAPS=1, `P_0` proportional to the radius) does not depend on
-    /// the radius. So the APL derivative is `8 pi a_eff`. Every Pb208 section
-    /// has its own APL, so the range-wide AP moves nothing.
+    /// the radius. So a unit step on the s-wave radius alone moves elastic by
+    /// `8 pi a_eff`, and no step moves nothing.
     #[test]
     fn radius_derivative_is_that_of_potential_scattering() {
         const PB208: &[u8] = include_bytes!("../fixtures/n-082_Pb_208_mf2.endf.xz");
         let rm = ReichMooreRange::new(&mf2_range(PB208)).unwrap();
-        let d = rm.radius_derivative(0.0253, Some(0)).unwrap();
+        let d = rm.radius_derivative(0.0253, &[1.0, 0.0, 0.0, 0.0]).unwrap();
         let elastic = rm.cross_sections(0.0253).elastic;
         let want = 8.0 * std::f64::consts::PI * (elastic / (4.0 * std::f64::consts::PI)).sqrt();
         assert!((d[0] / want - 1.0).abs() < 1e-3, "{} against {want}", d[0]);
-        let none = rm.radius_derivative(0.0253, None).unwrap();
+        let none = rm.radius_derivative(0.0253, &[0.0; 4]).unwrap();
         assert_eq!(none, [0.0, 0.0, 0.0]);
     }
 }

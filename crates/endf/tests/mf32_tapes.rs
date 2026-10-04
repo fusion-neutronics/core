@@ -415,3 +415,65 @@ fn every_resolved_mf32_range_reads_into_a_parameter_covariance() {
         );
     }
 }
+
+/// ENDF/B-VIII.1 Pb208's elastic and capture group variances, in barns
+/// squared (relative times the group cross section squared, since ERRORR
+/// relativizes by the cross section with its MF=3 background), against
+/// NJOY 2016 ERRORR's resonance-parameter contribution on nine groups over
+/// the resolved range. The scattering radius uncertainty follows ERRORR's
+/// reading: one parameter moving the p-wave radius by 0.0027 and the d- and
+/// f-wave radii by 0.027. ERRORR takes the radius step at a whole standard
+/// deviation, which above 300 keV is no longer small, so the two highest
+/// groups' elastic agree less closely.
+#[test]
+#[ignore = "reads a local tape; set ENDF_TAPES and run with --ignored"]
+fn pb208_group_covariance_matches_errorr() {
+    use endf::resonance::ReichMooreRange;
+    use endf::resonance_covariance::{group_covariance, resolved_covariances};
+    let root = PathBuf::from(std::env::var_os("ENDF_TAPES").expect("set ENDF_TAPES"));
+    let m = endf::material::Material::from_file(
+        root.join("endfb-viii.1-endf/neutrons-version.VIII.1/n-082_Pb_208.endf"),
+    )
+    .unwrap();
+    let cov = &resolved_covariances(m.mf2().unwrap(), m.mf32().unwrap()).unwrap()[0];
+    assert_eq!(cov.radius_steps, vec![0.0, 0.0027, 0.027, 0.027]);
+    let rm = ReichMooreRange::new(&m.mf2().unwrap().isotopes[0].ranges[0]).unwrap();
+    let edges = [1e-5, 1.0, 1e2, 1e3, 1e4, 5e4, 1e5, 3e5, 1e6, 1.5e6];
+    let g = group_covariance(cov, &rm, &edges).unwrap();
+    // (relative variance, group cross section) as ERRORR prints them.
+    let elastic = [
+        (5.080e-4, 1.1301e1),
+        (5.080e-4, 1.1300e1),
+        (5.075e-4, 1.1293e1),
+        (5.031e-4, 1.1230e1),
+        (4.773e-4, 1.0860e1),
+        (3.016e-4, 1.2204e1),
+        (2.892e-4, 8.8376e0),
+        (3.453e-4, 5.8307e0),
+        (2.503e-3, 5.0234e0),
+    ];
+    let capture = [
+        (1.163e-3, 2.0455e-3),
+        (9.196e-4, 1.6761e-5),
+        (3.568e-5, 1.2941e-5),
+        (5.416e-7, 3.4620e-5),
+        (2.869e-8, 1.6769e-4),
+        (2.856e-4, 4.3271e-4),
+        (1.546e-4, 9.2848e-4),
+        (2.719e-5, 1.5737e-3),
+        (2.288e-6, 3.8768e-4),
+    ];
+    for h in 0..9 {
+        for (a, (rel, xs), tolerance) in [
+            (0, elastic[h], if h >= 7 { 0.1 } else { 0.01 }),
+            (1, capture[h], 0.05),
+        ] {
+            let ours = g.get(a, h, a, h) * g.cross_sections[a][h].powi(2);
+            let njoy = rel * xs * xs;
+            assert!(
+                (ours / njoy - 1.0).abs() < tolerance,
+                "reaction {a} group {h}: {ours:e} against ERRORR's {njoy:e}"
+            );
+        }
+    }
+}
