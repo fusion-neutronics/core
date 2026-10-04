@@ -827,8 +827,10 @@ fn channel_radii(
 pub struct GroupCovariance {
     /// Group edges, eV, ascending: `G + 1` of them.
     pub edges: Vec<f64>,
-    /// The reactions, in block order: MT 2 and 102, and 18 where the range
-    /// has fission.
+    /// The reactions, in block order: MT 2 and 102, 18 where the range has
+    /// fission, and the MT of each other exit pair an R-matrix limited range
+    /// has (600 for a proton, 800 for an alpha, 51 for an inelastic
+    /// neutron).
     pub reactions: Vec<i32>,
     /// Per reaction, the 1/E-weighted group cross sections, barns.
     pub cross_sections: Vec<Vec<f64>>,
@@ -1001,8 +1003,9 @@ pub fn group_covariance(
     let points = integration_points(range, edges, 400, 256);
     // Per group: the integral of each cross section and of each parameter's
     // gradient, and of the weight.
-    let mut sigma = vec![[0.0; 3]; groups];
-    let mut sens = vec![[0.0; 3]; groups * n_par];
+    const R: usize = crate::resonance::REACTIONS;
+    let mut sigma = vec![[0.0; R]; groups];
+    let mut sens = vec![[0.0; R]; groups * n_par];
     let mut width = vec![0.0; groups];
     let mut previous: Option<(
         f64,
@@ -1019,28 +1022,31 @@ pub fn group_covariance(
             }
             let h = 0.5 * (e / e0).ln();
             width[g] += 2.0 * h;
-            let (a, b) = (
-                [x0.elastic, x0.capture, x0.fission],
-                [x.elastic, x.capture, x.fission],
-            );
-            for c in 0..3 {
+            let (a, b) = (x0.slots(), x.slots());
+            for c in 0..R {
                 sigma[g][c] += h * (a[c] + b[c]);
             }
             let row = &mut sens[g * n_par..(g + 1) * n_par];
             for (i, s) in row.iter_mut().enumerate() {
-                for c in 0..3 {
+                for c in 0..R {
                     s[c] += h * (grad0[i][c] + grad[i][c]);
                 }
             }
         }
         previous = Some((e, x, grad));
     }
-    let fission = sigma.iter().any(|s| s[2] != 0.0);
-    let reactions: Vec<(usize, i32)> = if fission {
-        vec![(0, 2), (1, 102), (2, 18)]
-    } else {
-        vec![(0, 2), (1, 102)]
-    };
+    // Elastic and capture always; fission, and an R-matrix range's other
+    // exit pairs, where the range has them.
+    let present = |c: usize| sigma.iter().any(|s| s[c] != 0.0);
+    let mut reactions: Vec<(usize, i32)> = vec![(0, 2), (1, 102)];
+    if present(2) {
+        reactions.push((2, 18));
+    }
+    for (k, mt) in range.other_reactions().into_iter().enumerate() {
+        if let Some(mt) = mt.filter(|_| present(3 + k)) {
+            reactions.push((3 + k, mt));
+        }
+    }
     let r = reactions.len();
     let rows = r * groups;
     // Relative sensitivities, row (a, g) by parameter.

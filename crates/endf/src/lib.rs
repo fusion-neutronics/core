@@ -22,6 +22,7 @@
 pub mod ace;
 pub mod angle_energy;
 pub mod chain;
+mod coulomb;
 pub mod data;
 pub mod decay;
 pub mod error;

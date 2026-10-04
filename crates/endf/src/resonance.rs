@@ -218,12 +218,44 @@ pub fn invert(a: &[Complex], n: usize) -> Vec<Complex> {
     out
 }
 
-/// Elastic, capture and fission cross sections in barns.
+/// Elastic, capture and fission cross sections in barns, and up to two
+/// more reactions: the exit pairs of an R-matrix limited range other than
+/// these (charged particles, inelastic neutrons), whose MTs
+/// [`RangeReconstruction::other_reactions`] gives.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct CrossSections {
     pub elastic: f64,
     pub capture: f64,
     pub fission: f64,
+    pub other: [f64; 2],
+}
+
+/// The reactions a reconstruction gives, in [`CrossSections::slots`] order:
+/// elastic, capture, fission and the two others.
+pub const REACTIONS: usize = 5;
+
+impl CrossSections {
+    /// Every reaction's cross section, in slot order.
+    pub fn slots(&self) -> Gradient {
+        [
+            self.elastic,
+            self.capture,
+            self.fission,
+            self.other[0],
+            self.other[1],
+        ]
+    }
+}
+
+/// `(up - down) / h`, reaction by reaction: a central difference.
+fn slope(up: &CrossSections, down: &CrossSections, h: f64) -> Gradient {
+    let (u, d) = (up.slots(), down.slots());
+    std::array::from_fn(|c| (u[c] - d[c]) / h)
+}
+
+/// A gradient of elastic, capture and fission alone.
+fn three(elastic: f64, capture: f64, fission: f64) -> Gradient {
+    [elastic, capture, fission, 0.0, 0.0]
 }
 
 /// One Reich-Moore resonance, as reconstruction reads it.
@@ -270,10 +302,11 @@ pub struct ReichMooreRange {
     naps: i64,
 }
 
-/// The derivatives of the elastic, capture and fission cross sections with
-/// respect to one parameter: barns per unit of the parameter (per eV for an
-/// energy or a width, per 1e-12 cm for a radius).
-pub type Gradient = [f64; 3];
+/// The derivatives of each reaction's cross section (in
+/// [`CrossSections::slots`] order) with respect to one parameter: barns per
+/// unit of the parameter (per eV for an energy or a width, per 1e-12 cm for
+/// a radius).
+pub type Gradient = [f64; REACTIONS];
 
 /// One resonance's parameter derivatives at one energy.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -483,7 +516,7 @@ impl ReichMooreRange {
                         (Complex::ZERO, [0.0, half_inv_sqrt(res.gfa), 0.0]),
                         (Complex::ZERO, [0.0, 0.0, half_inv_sqrt(res.gfb)]),
                     ];
-                    let mut d = [[0.0; 3]; 5];
+                    let mut d = [[0.0; REACTIONS]; 5];
                     for (q, (dd, da)) in params.iter().enumerate() {
                         if q >= 3 && n == 1 {
                             continue;
@@ -514,11 +547,11 @@ impl ReichMooreRange {
                         }
                         // Fission: 2 Re sum_f conj(W_nf) dW_nf.
                         let df = 2.0 * (1..n).map(|f| (conj(w(0, f)) * dw[f]).re).sum::<f64>();
-                        d[q] = [
+                        d[q] = three(
                             factor * ch.g * de,
                             factor * ch.g * 4.0 * dc,
                             factor * ch.g * 4.0 * df,
-                        ];
+                        );
                     }
                     out.push(ResonanceGradient {
                         section: res.section,
@@ -557,11 +590,7 @@ impl ReichMooreRange {
         };
         const Z: f64 = 1e-4;
         let (up, down) = (shifted(Z)?, shifted(-Z)?);
-        Ok([
-            (up.elastic - down.elastic) / (2.0 * Z),
-            (up.capture - down.capture) / (2.0 * Z),
-            (up.fission - down.fission) / (2.0 * Z),
-        ])
+        Ok(slope(&up, &down, 2.0 * Z))
     }
 }
 
@@ -578,6 +607,12 @@ pub trait RangeReconstruction {
     /// Each resonance's energy and total width, eV, for placing the points
     /// an integral over the range needs.
     fn resonances(&self) -> Vec<(f64, f64)>;
+
+    /// The MTs of [`CrossSections::other`]'s two slots, where the range
+    /// gives them.
+    fn other_reactions(&self) -> [Option<i32>; 2] {
+        [None, None]
+    }
 
     /// The derivatives at `energy` with respect to each of `cov`'s
     /// parameters, in order. A parameter this range does not have reads zero.
@@ -635,13 +670,13 @@ impl RangeReconstruction for ReichMooreRange {
                         Quantity::FissionWidth => 3,
                         Quantity::SecondFissionWidth => 4,
                         _ => {
-                            out.push([0.0; 3]);
+                            out.push([0.0; REACTIONS]);
                             continue;
                         }
                     };
                     by_resonance
                         .get(&(section, index))
-                        .map_or([0.0; 3], |d| d[row])
+                        .map_or([0.0; REACTIONS], |d| d[row])
                 }
                 (Location::Range, Quantity::ScatteringRadius) => match radius {
                     Some(g) => g,
@@ -651,7 +686,7 @@ impl RangeReconstruction for ReichMooreRange {
                         g
                     }
                 },
-                _ => [0.0; 3],
+                _ => [0.0; REACTIONS],
             };
             out.push(g);
         }
@@ -659,12 +694,24 @@ impl RangeReconstruction for ReichMooreRange {
     }
 }
 
-/// One explicit channel of an R-matrix limited spin group: a neutron channel
-/// (the photon channel is eliminated into the denominators).
+/// What an explicit channel of an R-matrix limited spin group leads to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ChannelKind {
+    /// The entrance channel's pair: elastic scattering.
+    Neutron,
+    Fission,
+    /// Another exit pair (a charged particle, an inelastic neutron), in
+    /// [`CrossSections::other`] slot `0` or `1`.
+    Other(usize),
+}
+
+/// One explicit channel of an R-matrix limited spin group (the photon
+/// channel is eliminated into the denominators).
 #[derive(Debug, Clone, PartialEq)]
 struct RmlChannel {
     /// Index among the spin group's channels in MF=2.
     index: usize,
+    kind: ChannelKind,
     l: i64,
     /// Radius for the penetrability and shift (APT), and for the phase shift
     /// (APE).
@@ -672,6 +719,85 @@ struct RmlChannel {
     phase_radius: f64,
     shift: bool,
     boundary: f64,
+    /// Whether the penetrability is computed (PNT > 0); 1 otherwise.
+    penetrable: bool,
+    /// The channel's threshold, lab eV: `-Q` over the entrance pair's mass
+    /// ratio. Zero for the neutron.
+    threshold: f64,
+    /// `sqrt(mu)`, the pair's reduced mass in neutron masses: `k = WAVE_NUMBER
+    /// sqrt(mu E_c)` with `E_c` the channel's centre-of-mass energy.
+    root_mu: f64,
+    /// `eta sqrt(E_c)`: `Z_a Z_b alpha sqrt(m_n c^2 mu / 2)`. Zero for a
+    /// neutral pair.
+    eta_scale: f64,
+}
+
+/// The fine-structure constant and the neutron's rest energy (eV), CODATA
+/// 2018, the values NJOY 2016 takes the Coulomb parameter from.
+const FINE_STRUCTURE: f64 = 7.297_352_569_3e-3;
+const NEUTRON_REST_ENERGY: f64 = 939.565_420_52e6;
+
+/// A penetrability at or below this is zero, as NJOY's SAMMY routines take
+/// it (`pgh`, `pghcou`). Evaluations are fitted with SAMMY, so where a
+/// resonance sits just above a charged-particle threshold its width is
+/// given against that convention: ENDF/B-VIII.1 Ca40's proton widths at
+/// 570, 577 and 594 keV, where the true penetrability is near 1e-50 and
+/// SAMMY's is zero, taken as 1.
+const PENETRABILITY_FLOOR: f64 = 1e-35;
+
+/// `(P, S)` with `P` floored as SAMMY floors it.
+fn floored((p, s): (f64, f64)) -> (f64, f64) {
+    (if p <= PENETRABILITY_FLOOR { 0.0 } else { p }, s)
+}
+
+impl RmlChannel {
+    /// `(P, S)` at lab energy `energy` for an entrance pair of mass ratio
+    /// `mass_ratio`. At a resonance's energy (`at_resonance`) the channel
+    /// energy is taken in magnitude, as for a neutron at `|E_r|`; otherwise
+    /// a channel below its threshold is closed, `P = 0`.
+    fn penetrability(&self, energy: f64, mass_ratio: f64, at_resonance: bool) -> (f64, f64) {
+        let mut ex = energy - self.threshold;
+        if at_resonance {
+            ex = ex.abs();
+        } else if ex <= 0.0 {
+            return (0.0, 0.0);
+        }
+        if !self.penetrable {
+            return (1.0, 0.0);
+        }
+        let ec = mass_ratio * ex;
+        let rho = WAVE_NUMBER * self.root_mu * ec.sqrt() * self.penetrability_radius;
+        if self.eta_scale == 0.0 && self.l <= 4 {
+            return floored(penetration_shift(self.l, rho));
+        }
+        let eta = if ec > 0.0 {
+            self.eta_scale / ec.sqrt()
+        } else {
+            f64::INFINITY
+        };
+        if !eta.is_finite() {
+            return (0.0, 0.0);
+        }
+        floored((
+            crate::coulomb::penetrability(self.l as usize, rho, eta),
+            0.0,
+        ))
+    }
+
+    /// `dP/dE` at a resonance energy, for the resonance-energy derivative:
+    /// analytic for a neutron channel, by central difference otherwise.
+    fn penetrability_slope_at(&self, energy: f64, mass_ratio: f64) -> f64 {
+        if self.kind == ChannelKind::Neutron {
+            let rho = WAVE_NUMBER * mass_ratio * energy.abs().sqrt() * self.penetrability_radius;
+            return penetrability_slope(self.l, rho) * rho / (2.0 * energy.abs()) * energy.signum();
+        }
+        let h = 1e-6 * (energy - self.threshold).abs().max(1e-3);
+        let (up, down) = (
+            self.penetrability(energy + h, mass_ratio, true).0,
+            self.penetrability(energy - h, mass_ratio, true).0,
+        );
+        (up - down) / (2.0 * h)
+    }
 }
 
 /// One R-matrix limited resonance, as reconstruction reads it.
@@ -681,9 +807,14 @@ struct RmlResonance {
     energy: f64,
     /// The eliminated photon channel's width.
     capture: f64,
-    /// Per explicit channel: its width, and its penetrability at `|E_r|`.
+    /// Per explicit channel: its width, its penetrability at the resonance
+    /// (1 where that is zero, as NJOY takes it), and that penetrability's
+    /// slope in the resonance energy (zero where it was taken as 1), for the
+    /// resonance-energy derivative: all independent of the energy the cross
+    /// sections are taken at, so computed once.
     widths: Vec<f64>,
     penetrability: Vec<f64>,
+    penetrability_slope: Vec<f64>,
 }
 
 /// One spin group: its statistical weight, mass ratio, channels and
@@ -691,6 +822,7 @@ struct RmlResonance {
 #[derive(Debug, Clone, PartialEq)]
 struct RmlGroup {
     g: f64,
+    /// The entrance (neutron) pair's `M_B / (M_A + M_B)`.
     mass_ratio: f64,
     /// The photon channel's index among the spin group's channels.
     photon: usize,
@@ -702,17 +834,18 @@ struct RmlGroup {
 ///
 /// ENDF-102 Appendix D.1.6 in the Reich-Moore approximation (KRM=3) with the
 /// widths themselves given (IFG=0): per spin group, over its explicit
-/// (neutron) channels,
+/// channels,
 ///
 /// ```text
 /// R~_cc'(E) = sum_r (1/2) sqrt(G_rc(E) G_rc'(E)) / (E_r - E - i G_rg / 2)
 /// M = I - R~ (Delta + i I),  Delta_c = (S_c(E) - B_c) / P_c(E) with a shift
 /// U = Omega (I + 2 i M^-1 R~) Omega
-/// elastic = pi/k^2 g sum_cc' |delta_cc' - U_cc'|^2
-/// capture = pi/k^2 g sum_c 4 [M^-1 Im(R~) M^-H]_cc
+/// elastic  = pi/k^2 g sum_cc' |delta_cc' - U_cc'|^2      (c, c' neutron)
+/// capture  = pi/k^2 g sum_c 4 [M^-1 Im(R~) M^-H]_cc      (c neutron)
+/// reaction = pi/k^2 g sum_cc' |U_cc'|^2                  (c neutron, c' the pair's)
 /// ```
 ///
-/// with `G_rc(E) = G_rc P_c(E) / P_c(|E_r|)`, `Omega = exp(-i phi_c)`, the
+/// with `G_rc(E) = G_rc P_c(E) / P_c(E_r)`, `Omega = exp(-i phi_c)`, the
 /// photon channel's width in the denominators, the penetrability and shift
 /// at the channel's true radius APT and the phase at its effective radius
 /// APE (ENDF-102 2.2.1.6; V51 is where the two differ). Capture is
@@ -721,14 +854,26 @@ struct RmlGroup {
 /// as for Reich-Moore. Only the channels a spin group lists scatter: the
 /// format gives no others.
 ///
-/// Particle pairs other than the photon and the neutron (fission, charged
-/// particles), background R-matrices, tabulated phase shifts and reduced
-/// width amplitudes (IFG=1) are refused by name.
+/// A channel of another pair is taken at its own centre-of-mass energy,
+/// `E_c = E M_B/(M_A + M_B) + Q`, and is closed below its threshold. A
+/// charged pair's penetrability is the Coulomb one, `rho / (F^2 + G^2)` (see
+/// [`crate::coulomb`]); a neutral one's is the hard-sphere one; a pair with
+/// PNT <= 0 (fission) takes 1. Its phase cancels in `|U_cc'|^2`. At a
+/// resonance a channel's penetrability is taken at `|E_r - threshold|`, and
+/// as 1 where it is zero, as NJOY's SAMMY routines take it. Fission adds to
+/// fission; up to two other pairs (MT 600 for a proton, 800 for an alpha, 51
+/// for an inelastic neutron) are [`CrossSections::other`].
+///
+/// Background R-matrices, tabulated phase shifts, reduced width amplitudes
+/// (IFG=1), a shift factor on a channel other than a neutron one, and more
+/// than two other pairs are refused by name.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RMatrixRange {
     pub el: f64,
     pub eh: f64,
     groups: Vec<RmlGroup>,
+    /// The MTs of [`CrossSections::other`]'s slots.
+    others: [Option<i32>; 2],
     source: crate::mf::mf2::RMatrixLimited,
 }
 
@@ -747,6 +892,7 @@ struct RmlState {
     d: Vec<Complex>,
     /// `P_c(E)` per channel.
     p: Vec<f64>,
+    kinds: Vec<ChannelKind>,
 }
 
 fn matmul(a: &[Complex], b: &[Complex], n: usize) -> Vec<Complex> {
@@ -763,6 +909,15 @@ fn matmul(a: &[Complex], b: &[Complex], n: usize) -> Vec<Complex> {
     out
 }
 
+/// The cross-section slot a channel's `|U|^2` from a neutron adds to.
+fn slot(kind: ChannelKind) -> Option<usize> {
+    match kind {
+        ChannelKind::Neutron => None,
+        ChannelKind::Fission => Some(2),
+        ChannelKind::Other(k) => Some(3 + k),
+    }
+}
+
 impl RmlState {
     fn new(group: &RmlGroup, energy: f64) -> Self {
         let n = group.channels.len();
@@ -771,7 +926,11 @@ impl RmlState {
         let mut k = vec![Complex::ZERO; n];
         let mut omega = vec![Complex::ONE; n];
         for (c, ch) in group.channels.iter().enumerate() {
-            let (pc, sc) = penetration_shift(ch.l, k_wave * ch.penetrability_radius);
+            let (pc, sc) = if ch.kind == ChannelKind::Neutron {
+                floored(penetration_shift(ch.l, k_wave * ch.penetrability_radius))
+            } else {
+                ch.penetrability(energy, group.mass_ratio, false)
+            };
             p[c] = pc;
             let delta = if ch.shift && pc > 0.0 {
                 (sc - ch.boundary) / pc
@@ -779,21 +938,18 @@ impl RmlState {
                 0.0
             };
             k[c] = Complex::new(delta, 1.0);
-            let phi = phase_shift(ch.l, k_wave * ch.phase_radius);
-            omega[c] = Complex::new(phi.cos(), -phi.sin());
+            // Only elastic needs the phase: it cancels in |U_cc'|^2.
+            if ch.kind == ChannelKind::Neutron {
+                let phi = phase_shift(ch.l, k_wave * ch.phase_radius);
+                omega[c] = Complex::new(phi.cos(), -phi.sin());
+            }
         }
         let mut r = vec![Complex::ZERO; n * n];
         let mut amplitudes = Vec::with_capacity(group.resonances.len());
         let mut d = Vec::with_capacity(group.resonances.len());
         for res in &group.resonances {
             let a: Vec<f64> = (0..n)
-                .map(|c| {
-                    if res.penetrability[c] > 0.0 {
-                        amplitude(res.widths[c] * p[c] / res.penetrability[c])
-                    } else {
-                        0.0
-                    }
-                })
+                .map(|c| amplitude(res.widths[c] * p[c] / res.penetrability[c]))
                 .collect();
             let dr = Complex::new(res.energy - energy, -0.5 * res.capture)
                 .inv()
@@ -830,7 +986,12 @@ impl RmlState {
             amplitudes,
             d,
             p,
+            kinds: group.channels.iter().map(|c| c.kind).collect(),
         }
+    }
+
+    fn neutron(&self, c: usize) -> bool {
+        self.kinds[c] == ChannelKind::Neutron
     }
 
     /// `U_cc'`.
@@ -840,26 +1001,32 @@ impl RmlState {
         self.omega[c] * (delta + Complex::new(0.0, 2.0) * self.x[c * n + cp]) * self.omega[cp]
     }
 
-    /// `sum_cc' |delta - U|^2` and `sum_c 4 [M^-1 Im(R~) M^-H]_cc`.
-    fn parts(&self) -> (f64, f64) {
+    /// Every reaction's `sum` before the `pi/k^2 g` factor, in slot order:
+    /// `sum_cc' |delta - U|^2` and `sum_c 4 [M^-1 Im(R~) M^-H]_cc` over
+    /// neutron channels, and `sum_cc' 4 |X_cc'|^2` from a neutron channel `c`
+    /// to the channels `c'` of each other reaction.
+    fn parts(&self) -> Gradient {
         let n = self.n;
-        let mut elastic = 0.0;
-        for c in 0..n {
+        let mut out = [0.0; REACTIONS];
+        for c in (0..n).filter(|&c| self.neutron(c)) {
             for cp in 0..n {
-                let delta = if c == cp { Complex::ONE } else { Complex::ZERO };
-                elastic += (delta - self.u(c, cp)).norm_sqr();
+                match slot(self.kinds[cp]) {
+                    None => {
+                        let delta = if c == cp { Complex::ONE } else { Complex::ZERO };
+                        out[0] += (delta - self.u(c, cp)).norm_sqr();
+                    }
+                    Some(s) => out[s] += 4.0 * self.x[c * n + cp].norm_sqr(),
+                }
             }
-        }
-        let mut capture = 0.0;
-        for c in 0..n {
             for i in 0..n {
                 for j in 0..n {
-                    capture +=
-                        self.r[i * n + j].im * (self.inv[c * n + i] * conj(self.inv[c * n + j])).re;
+                    out[1] += 4.0
+                        * self.r[i * n + j].im
+                        * (self.inv[c * n + i] * conj(self.inv[c * n + j])).re;
                 }
             }
         }
-        (elastic, 4.0 * capture)
+        out
     }
 }
 
@@ -871,26 +1038,33 @@ impl RMatrixRange {
                 what: "reconstruction of a resolved range other than R-matrix limited",
             });
         };
+        let (groups, others) = rml_groups(rml)?;
         Ok(RMatrixRange {
             el: range.el,
             eh: range.eh,
-            groups: rml_groups(rml)?,
+            groups,
+            others,
             source: (**rml).clone(),
         })
     }
 
     /// The cross sections at `energy` (eV).
     pub fn cross_sections(&self, energy: f64) -> CrossSections {
-        let mut out = CrossSections::default();
+        let mut sum = [0.0; REACTIONS];
         for g in &self.groups {
             let st = RmlState::new(g, energy);
             let k = WAVE_NUMBER * g.mass_ratio * energy.abs().sqrt();
             let factor = std::f64::consts::PI / (k * k) * g.g;
-            let (e, c) = st.parts();
-            out.elastic += factor * e;
-            out.capture += factor * c;
+            for (s, v) in sum.iter_mut().zip(st.parts()) {
+                *s += factor * v;
+            }
         }
-        out
+        CrossSections {
+            elastic: sum[0],
+            capture: sum[1],
+            fission: sum[2],
+            other: [sum[3], sum[4]],
+        }
     }
 
     /// Every resonance's derivatives at `energy` with respect to ER and each
@@ -925,28 +1099,22 @@ impl RMatrixRange {
                 let mut params: Vec<(usize, Complex, Vec<f64>)> = Vec::with_capacity(nch);
                 let mut da_er = vec![0.0; n];
                 if res.energy != 0.0 {
-                    let kr = WAVE_NUMBER * g.mass_ratio * res.energy.abs().sqrt();
-                    for (c, ch) in g.channels.iter().enumerate() {
-                        let rho = kr * ch.penetrability_radius;
-                        let dp_de = penetrability_slope(ch.l, rho) * rho / (2.0 * res.energy.abs())
-                            * res.energy.signum();
-                        if res.penetrability[c] > 0.0 {
-                            da_er[c] = -0.5 * a[c] * dp_de / res.penetrability[c];
-                        }
+                    for c in 0..n {
+                        da_er[c] = -0.5 * a[c] * res.penetrability_slope[c] / res.penetrability[c];
                     }
                 }
                 params.push((0, den2.scale(-0.5), da_er));
                 params.push((1 + g.photon, Complex::new(0.0, 0.25) * den2, vec![0.0; n]));
                 for (c, ch) in g.channels.iter().enumerate() {
                     let mut da = vec![0.0; n];
-                    if res.widths[c] != 0.0 && res.penetrability[c] > 0.0 {
+                    if res.widths[c] != 0.0 {
                         da[c] = (st.p[c] / res.penetrability[c]).sqrt()
                             / (2.0 * res.widths[c].abs().sqrt());
                     }
                     params.push((1 + ch.index, Complex::ZERO, da));
                 }
-                let mut d = vec![[0.0; 3]; nch];
-                for (slot, dd, da) in params {
+                let mut d = vec![[0.0; REACTIONS]; nch];
+                for (param_slot, dd, da) in params {
                     // dR~ = dD a a^T + D (da a^T + a da^T)
                     let mut d_r = vec![Complex::ZERO; n * n];
                     for i in 0..n {
@@ -965,29 +1133,37 @@ impl RMatrixRange {
                         }
                     }
                     let d_inv = matmul(&lk, &st.inv, n);
-                    let mut de = 0.0;
-                    for c in 0..n {
+                    let mut sum = [0.0; REACTIONS];
+                    for c in (0..n).filter(|&c| st.neutron(c)) {
                         for cp in 0..n {
-                            let delta = if c == cp { Complex::ONE } else { Complex::ZERO };
-                            let du = st.omega[c]
-                                * Complex::new(0.0, 2.0)
-                                * dx[c * n + cp]
-                                * st.omega[cp];
-                            de += -2.0 * (conj(delta - st.u(c, cp)) * du).re;
+                            match slot(st.kinds[cp]) {
+                                None => {
+                                    let delta = if c == cp { Complex::ONE } else { Complex::ZERO };
+                                    let du = st.omega[c]
+                                        * Complex::new(0.0, 2.0)
+                                        * dx[c * n + cp]
+                                        * st.omega[cp];
+                                    sum[0] += -2.0 * (conj(delta - st.u(c, cp)) * du).re;
+                                }
+                                // d 4|X|^2 = 8 Re(conj(X) dX)
+                                Some(s) => {
+                                    sum[s] += 8.0 * (conj(st.x[c * n + cp]) * dx[c * n + cp]).re
+                                }
+                            }
                         }
-                    }
-                    let mut dc = 0.0;
-                    for c in 0..n {
                         for i in 0..n {
                             for j in 0..n {
                                 let im_r = st.r[i * n + j].im;
                                 let im_dr = d_r[i * n + j].im;
-                                dc += 2.0 * im_r * (d_inv[c * n + i] * conj(st.inv[c * n + j])).re
-                                    + im_dr * (st.inv[c * n + i] * conj(st.inv[c * n + j])).re;
+                                sum[1] += 4.0
+                                    * (2.0
+                                        * im_r
+                                        * (d_inv[c * n + i] * conj(st.inv[c * n + j])).re
+                                        + im_dr * (st.inv[c * n + i] * conj(st.inv[c * n + j])).re);
                             }
                         }
                     }
-                    d[slot] = [factor * de, factor * 4.0 * dc, 0.0];
+                    d[param_slot] = sum.map(|v| factor * v);
                 }
                 out.push((gi, res.index, d));
             }
@@ -1009,28 +1185,26 @@ impl RMatrixRange {
                     *x += h;
                 }
             }
-            let groups = rml_groups(&rml)?;
+            let (groups, others) = rml_groups(&rml)?;
             Ok(RMatrixRange {
                 el: self.el,
                 eh: self.eh,
                 groups,
+                others,
                 source: rml,
             }
             .cross_sections(energy))
         };
         const H: f64 = 1e-5;
         let (up, down) = (shifted(H)?, shifted(-H)?);
-        Ok([
-            (up.elastic - down.elastic) / (2.0 * H),
-            (up.capture - down.capture) / (2.0 * H),
-            0.0,
-        ])
+        Ok(slope(&up, &down, 2.0 * H))
     }
 }
 
 /// The spin groups of an R-matrix limited range, with their explicit
-/// channels and resonances.
-fn rml_groups(rml: &crate::mf::mf2::RMatrixLimited) -> Result<Vec<RmlGroup>> {
+/// channels and resonances, and the MTs of the other exit pairs in slot
+/// order.
+fn rml_groups(rml: &crate::mf::mf2::RMatrixLimited) -> Result<(Vec<RmlGroup>, [Option<i32>; 2])> {
     if rml.krm != 3 {
         return Err(Error::Unsupported {
             what: "R-matrix limited reconstruction other than Reich-Moore (KRM=3)",
@@ -1042,6 +1216,15 @@ fn rml_groups(rml: &crate::mf::mf2::RMatrixLimited) -> Result<Vec<RmlGroup>> {
         });
     }
     let pp = &rml.particle_pairs;
+    // The entrance pair: the neutron's, MT=2.
+    let Some(entrance) = (0..pp.mt.len()).find(|&p| pp.mt[p] as i64 == 2) else {
+        return Err(Error::Unsupported {
+            what: "an R-matrix limited range without a neutron particle pair",
+        });
+    };
+    let mass_ratio = pp.mb[entrance] / (pp.ma[entrance] + pp.mb[entrance]);
+    let spins = (pp.ia[entrance].abs(), pp.ib[entrance].abs());
+    let mut others: [Option<i32>; 2] = [None, None];
     let mut out = Vec::with_capacity(rml.spin_groups.len());
     for sg in &rml.spin_groups {
         if sg.kbk != 0 || sg.kps != 0 {
@@ -1051,56 +1234,100 @@ fn rml_groups(rml: &crate::mf::mf2::RMatrixLimited) -> Result<Vec<RmlGroup>> {
         }
         let mut photon = None;
         let mut channels = Vec::new();
-        let mut mass_ratio = 0.0;
-        let mut spins = (0.5, 0.0);
         for c in 0..sg.nch as usize {
             let p = sg.channels.ppi[c] as usize - 1;
-            let mt = pp.mt[p] as i64;
+            let mt = pp.mt[p] as i32;
             if mt == 102 {
                 photon = Some(c);
-            } else if mt == 2 {
-                mass_ratio = pp.mb[p] / (pp.ma[p] + pp.mb[p]);
-                spins = (pp.ia[p].abs(), pp.ib[p].abs());
-                let ape = sg.channels.ape[c];
-                let apt = sg.channels.apt[c];
-                channels.push(RmlChannel {
-                    index: c,
-                    l: sg.channels.l[c] as i64,
-                    penetrability_radius: if apt != 0.0 { apt } else { ape },
-                    phase_radius: if ape != 0.0 { ape } else { apt },
-                    shift: pp.shf[p] == 1.0,
-                    boundary: sg.channels.bnd[c],
-                });
-            } else {
+                continue;
+            }
+            let kind = match mt {
+                2 => ChannelKind::Neutron,
+                18 => ChannelKind::Fission,
+                _ => {
+                    let k = match others.iter().position(|o| *o == Some(mt)) {
+                        Some(k) => k,
+                        None => {
+                            let Some(k) = others.iter().position(|o| o.is_none()) else {
+                                return Err(Error::Unsupported {
+                                    what: "an R-matrix limited range with more than two exit pairs besides elastic, capture and fission",
+                                });
+                            };
+                            others[k] = Some(mt);
+                            k
+                        }
+                    };
+                    ChannelKind::Other(k)
+                }
+            };
+            if kind != ChannelKind::Neutron && pp.shf[p] == 1.0 {
                 return Err(Error::Unsupported {
-                    what: "an R-matrix limited particle pair other than the photon and the neutron",
+                    what: "an R-matrix limited shift factor on a channel other than a neutron one",
                 });
             }
+            let (ma, mb) = (pp.ma[p], pp.mb[p]);
+            let mu = if ma + mb > 0.0 {
+                ma * mb / (ma + mb)
+            } else {
+                0.0
+            };
+            let ape = sg.channels.ape[c];
+            let apt = sg.channels.apt[c];
+            channels.push(RmlChannel {
+                index: c,
+                kind,
+                l: sg.channels.l[c] as i64,
+                penetrability_radius: if apt != 0.0 { apt } else { ape },
+                phase_radius: if ape != 0.0 { ape } else { apt },
+                shift: pp.shf[p] == 1.0,
+                boundary: sg.channels.bnd[c],
+                penetrable: kind == ChannelKind::Neutron || pp.pnt[p] > 0.0,
+                threshold: -pp.q[p] / mass_ratio,
+                root_mu: mu.sqrt(),
+                eta_scale: pp.za[p]
+                    * pp.zb[p]
+                    * FINE_STRUCTURE
+                    * (NEUTRON_REST_ENERGY * mu / 2.0).sqrt(),
+            });
         }
         let Some(photon) = photon else {
             return Err(Error::Unsupported {
                 what: "an R-matrix limited spin group without a photon channel",
             });
         };
-        if channels.iter().any(|c| c.l > 4) {
+        if channels
+            .iter()
+            .any(|c| c.kind == ChannelKind::Neutron && c.l > 4)
+        {
             return Err(Error::Unsupported {
-                what: "an R-matrix limited channel with l > 4",
+                what: "an R-matrix limited neutron channel with l > 4",
             });
         }
         let g = (2.0 * sg.aj.abs() + 1.0) / ((2.0 * spins.0 + 1.0) * (2.0 * spins.1 + 1.0));
         let resonances = (0..sg.er.len())
             .map(|index| {
                 let energy = sg.er[index];
-                let kr = WAVE_NUMBER * mass_ratio * energy.abs().sqrt();
+                // Where P(E_r) is zero it is taken as 1, with no slope.
+                let (penetrability, penetrability_slope) = channels
+                    .iter()
+                    .map(|c| {
+                        let p = c.penetrability(energy, mass_ratio, true).0;
+                        if p > 0.0 && energy != 0.0 {
+                            (p, c.penetrability_slope_at(energy, mass_ratio))
+                        } else if p > 0.0 {
+                            (p, 0.0)
+                        } else {
+                            (1.0, 0.0)
+                        }
+                    })
+                    .unzip();
                 RmlResonance {
                     index,
                     energy,
                     capture: sg.gam[photon][index],
                     widths: channels.iter().map(|c| sg.gam[c.index][index]).collect(),
-                    penetrability: channels
-                        .iter()
-                        .map(|c| penetration_shift(c.l, kr * c.penetrability_radius).0)
-                        .collect(),
+                    penetrability,
+                    penetrability_slope,
                 }
             })
             .collect();
@@ -1112,7 +1339,7 @@ fn rml_groups(rml: &crate::mf::mf2::RMatrixLimited) -> Result<Vec<RmlGroup>> {
             resonances,
         });
     }
-    Ok(out)
+    Ok((out, others))
 }
 
 impl RangeReconstruction for RMatrixRange {
@@ -1135,6 +1362,10 @@ impl RangeReconstruction for RMatrixRange {
                 )
             })
             .collect()
+    }
+
+    fn other_reactions(&self) -> [Option<i32>; 2] {
+        self.others
     }
 
     fn parameter_gradients(
@@ -1161,12 +1392,12 @@ impl RangeReconstruction for RMatrixRange {
                         .get(&(group, index))
                         .and_then(|d| d.get(slot))
                         .copied()
-                        .unwrap_or([0.0; 3])
+                        .unwrap_or([0.0; REACTIONS])
                 }
                 (Location::Channel { group, channel }, Quantity::ScatteringRadius) => {
                     self.radius_derivative(energy, group, channel)?
                 }
-                _ => [0.0; 3],
+                _ => [0.0; REACTIONS],
             };
             out.push(g);
         }
@@ -1634,6 +1865,7 @@ impl UnresolvedAverages {
             elastic: at(a.elastic, b.elastic),
             capture: at(a.capture, b.capture),
             fission: at(a.fission, b.fission),
+            other: [0.0; 2],
         }
     }
 
@@ -1730,13 +1962,9 @@ impl RangeReconstruction for UnresolvedAverages {
                     let down = self
                         .scaled(orbital, spin, column, 1.0 - H)
                         .cross_sections(energy);
-                    [
-                        (up.elastic - down.elastic) / (2.0 * H),
-                        (up.capture - down.capture) / (2.0 * H),
-                        (up.fission - down.fission) / (2.0 * H),
-                    ]
+                    slope(&up, &down, 2.0 * H)
                 }
-                _ => [0.0; 3],
+                _ => [0.0; REACTIONS],
             })
             .collect())
     }
@@ -2029,7 +2257,7 @@ impl BreitWignerRange {
             for r in &o.resonances {
                 let gj = o.gj[r.j];
                 let gtt = (r.p[1] * f.pe / r.per + r.p[2] + r.p[3]).abs().max(1e-12);
-                let mut d = [[0.0; 3]; 5];
+                let mut d = [[0.0; REACTIONS]; 5];
                 for (q, dq) in d.iter_mut().enumerate() {
                     let h = if q == 0 {
                         1e-6 * gtt
@@ -2054,7 +2282,7 @@ impl BreitWignerRange {
                     let dt: Vec<f64> = (0..4).map(|i| (tu[i] - td[i]) / (2.0 * h)).collect();
                     let s = sums[r.j];
                     let de = 2.0 * gj * ((f.s2p + s[1]) * dt[1] - (f.c2p - s[0]) * dt[0]);
-                    *dq = [f.pifac * de, f.pifac * dt[2], f.pifac * dt[3]];
+                    *dq = three(f.pifac * de, f.pifac * dt[2], f.pifac * dt[3]);
                 }
                 out.push((r.section, r.index, d));
             }
@@ -2073,11 +2301,7 @@ impl BreitWignerRange {
         };
         const Z: f64 = 1e-4;
         let (up, down) = (shifted(Z)?, shifted(-Z)?);
-        Ok([
-            (up.elastic - down.elastic) / (2.0 * Z),
-            (up.capture - down.capture) / (2.0 * Z),
-            (up.fission - down.fission) / (2.0 * Z),
-        ])
+        Ok(slope(&up, &down, 2.0 * Z))
     }
 }
 
@@ -2131,7 +2355,7 @@ impl RangeReconstruction for BreitWignerRange {
                         .get(&(section, index))
                         .and_then(|d| d.get(row))
                         .copied()
-                        .unwrap_or([0.0; 3])
+                        .unwrap_or([0.0; REACTIONS])
                 }
                 (Location::Range, Quantity::ScatteringRadius) => match radius {
                     Some(g) => g,
@@ -2144,7 +2368,7 @@ impl RangeReconstruction for BreitWignerRange {
                         g
                     }
                 },
-                _ => [0.0; 3],
+                _ => [0.0; REACTIONS],
             };
             out.push(g);
         }
@@ -2478,11 +2702,7 @@ mod derivative_tests {
                             let down = ReichMooreRange::new(&moved(&range, section, index, q, -h))
                                 .unwrap()
                                 .cross_sections(e);
-                            let numeric = [
-                                (up.elastic - down.elastic) / (2.0 * h),
-                                (up.capture - down.capture) / (2.0 * h),
-                                (up.fission - down.fission) / (2.0 * h),
-                            ];
+                            let numeric = slope(&up, &down, 2.0 * h);
                             let x = rm.cross_sections(e);
                             for c in 0..3 {
                                 let value = [x.elastic, x.capture, x.fission][c];
@@ -2522,7 +2742,7 @@ mod derivative_tests {
         let want = 8.0 * std::f64::consts::PI * (elastic / (4.0 * std::f64::consts::PI)).sqrt();
         assert!((d[0] / want - 1.0).abs() < 1e-3, "{} against {want}", d[0]);
         let none = rm.radius_derivative(0.0253, &[0.0; 4]).unwrap();
-        assert_eq!(none, [0.0, 0.0, 0.0]);
+        assert_eq!(none, [0.0; REACTIONS]);
     }
 }
 
@@ -2536,6 +2756,7 @@ mod r_matrix_tests {
     const CU65: &[u8] = include_bytes!("../fixtures/n-029_Cu_065_mf2_mf32.endf.xz");
     const V51: &[u8] = include_bytes!("../fixtures/n-023_V_051_mf2.endf.xz");
     const CU63: &[u8] = include_bytes!("../fixtures/n-029_Cu_063_mf2_mf32.endf.xz");
+    const CL35: &[u8] = include_bytes!("../fixtures/n-017_Cl_035_mf2_mf32.endf.xz");
 
     fn material(fixture: &[u8]) -> Material {
         Material::from_str(&crate::testdata::text(fixture)).expect("fixture parses")
@@ -2676,6 +2897,43 @@ mod r_matrix_tests {
         }
     }
 
+    /// ENDF/B-VIII.1 Cl35's proton channel (MT=600, Q = +615 keV, a Coulomb
+    /// barrier with eta about 3): NJOY 2016 RECONR at 0 K, less the MF=3
+    /// background, `(E, elastic, capture, (n,p))` at points of its grid. Ours
+    /// agrees at all 77,593 grid points in the range: elastic to 5e-7,
+    /// capture to 5e-6, (n,p) to 8e-5 (the worst where it is 4e-6 b).
+    const CL35_NJOY: &[(f64, f64, f64, f64)] = &[
+        (1.007813e-5, 2.068873e1, 2.177142e3, 2.401276e1),
+        (2.738299e4, 3.393684e0, 3.311553e-2, 1.020862e-2),
+        (5.732482e4, 1.754607e0, 1.821092e-3, 3.28925e-3),
+        (1.356961e5, 1.831491e0, 1.356554e-3, 1.736084e-4),
+        (2.149844e5, 8.415062e0, 4.553541e-3, 3.986409e-6),
+        (4.80878e5, 2.463045e0, 7.050354e-4, 5.457815e-5),
+        (8.273542e5, 4.38738e0, 2.929006e-3, 4.062967e-6),
+        (1.199436e6, 3.739409e0, 3.087964e-4, 8.53409e-6),
+    ];
+
+    /// A charged-particle exit channel: Cl35's (n,p) with its Coulomb
+    /// penetrability, beside elastic and capture, against NJOY.
+    #[test]
+    fn r_matrix_charged_particle_channel_matches_njoy() {
+        let rm = range(CL35);
+        assert_eq!(RangeReconstruction::other_reactions(&rm), [Some(600), None]);
+        for &(e, elastic, capture, np) in CL35_NJOY {
+            let x = rm.cross_sections(e);
+            for (ours, njoy, what) in [
+                (x.elastic, elastic, "elastic"),
+                (x.capture, capture, "capture"),
+                (x.other[0], np, "(n,p)"),
+            ] {
+                assert!(
+                    (ours - njoy).abs() <= 3e-6 * njoy.abs() + 1e-12,
+                    "{what} at {e} eV: {ours} against NJOY's {njoy}"
+                );
+            }
+        }
+    }
+
     /// Every resonance's analytic derivatives (ER, the capture width and each
     /// neutron channel's width) match central differences of the
     /// reconstruction, negative-energy resonances included, with V51's
@@ -2683,7 +2941,7 @@ mod r_matrix_tests {
     #[test]
     fn r_matrix_derivatives_match_central_differences() {
         let mut checked = 0;
-        for fixture in [W186, CU65, V51, CU63] {
+        for fixture in [W186, CU65, V51, CU63, CL35] {
             let base = material(fixture).mf2().unwrap().isotopes[0].ranges[0].clone();
             let rm = RMatrixRange::new(&base).unwrap();
             let ResonanceParameters::RMatrixLimited(params) = &base.parameters else {
@@ -2744,13 +3002,16 @@ mod r_matrix_tests {
                                 RMatrixRange::new(&r).unwrap().cross_sections(e)
                             };
                             let (up, down) = (moved(h), moved(-h));
-                            let numeric = [
-                                (up.elastic - down.elastic) / (2.0 * h),
-                                (up.capture - down.capture) / (2.0 * h),
-                            ];
-                            for c in 0..2 {
-                                let v = [x.elastic, x.capture][c];
-                                let tolerance = 1e-4 * numeric[c].abs() + 1e-13 * v.abs() / h;
+                            let numeric = slope(&up, &down, 2.0 * h);
+                            for c in 0..REACTIONS {
+                                let v = x.slots()[c];
+                                // Plus a floor of 1e-7 sigma / Gamma: a derivative that
+                                // small is an interference term (an (n,p) derivative with
+                                // respect to a resonance with no proton width) whose
+                                // difference is still dominated by truncation.
+                                let tolerance = 1e-4 * numeric[c].abs()
+                                    + 1e-13 * v.abs() / h
+                                    + 1e-7 * v.abs() / width;
                                 assert!(
                                     (grad[c] - numeric[c]).abs() <= tolerance,
                                     "slot {slot} of resonance {group}/{index} at {e} eV, reaction {c}: \

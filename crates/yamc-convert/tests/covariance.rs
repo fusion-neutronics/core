@@ -751,3 +751,25 @@ fn resonance_parameter_covariance_is_written_as_derived_ni_blocks() {
         }
     }
 }
+
+/// ENDF/B-VIII.1 Cl35's MF=1, MF=2 and MF=32: an R-matrix limited range with
+/// a proton channel (MT=600) and no MF=33 at all. Once skipped, it now gets
+/// its resonance covariance, with blocks for the (n,p) reaction beside
+/// elastic and capture.
+const CL35_MF32: &[u8] = include_bytes!("../../endf/fixtures/n-017_Cl_035_mf2_mf32.endf.xz");
+
+#[test]
+fn a_charged_particle_channel_gets_its_covariance() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let material = material(CL35_MF32, tmp.path(), "Cl35");
+    assert!(yamc_convert::covariance::write_covariance(&material, tmp.path()).expect("writes"));
+    let blocks = yamc_nuclide::arrow::covariance_arrow::read_covariance(tmp.path(), "Cl35")
+        .expect("the loader reads it")
+        .expect("the file is there");
+    let pairs: std::collections::BTreeSet<(i32, i32)> =
+        blocks.iter().map(|b| (b.mt, b.partner_mt())).collect();
+    for pair in [(2, 2), (102, 102), (600, 600), (2, 600), (102, 600)] {
+        assert!(pairs.contains(&pair), "no {pair:?} block in {pairs:?}");
+    }
+    assert!(blocks.iter().all(|b| b.subsection_idx == -1));
+}
