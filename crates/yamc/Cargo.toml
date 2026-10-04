@@ -69,6 +69,10 @@ yamc-gpu = { path = "../yamc-gpu", optional = true }
 # Resolves the nuclear-data fixture cache the same way the loader does,
 # rather than through `HOME` alone.
 yamc-test-cache = { path = "../yamc-test-cache" }
+# Reconverts a fixture's covariance from a local tape, for the tests that
+# need data newer than the published fixtures.
+yamc-convert = { path = "../yamc-convert" }
+tempfile = "3"
 wasm-bindgen-test = "0.3"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
