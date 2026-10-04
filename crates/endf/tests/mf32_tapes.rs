@@ -377,10 +377,13 @@ fn every_mf32_section_on_the_local_tapes_is_read_to_send() {
 }
 
 /// Every resolved MF=32 range of ENDF/B-VIII.1 and JEFF-4.0 is matched to its
-/// MF=2 range and read into one parameter covariance. ENDF/B-VIII.1 matches
-/// every resonance exactly. JEFF-4.0 has 63 resonances whose MF=32 energy
-/// differs from MF=2's within the tolerance (Xe135 rounded, U236 from another
-/// parameter set) and 253 that MF=2 does not list at all.
+/// MF=2 range and read into one parameter covariance, with no MF=2 parameter
+/// given to two MF=32 ones. ENDF/B-VIII.1 matches every resonance exactly,
+/// including the resonances of one spin MF=2 lists twice at one energy
+/// (Ne22, Ti49, Cr52, Pb208), which only their widths tell apart. JEFF-4.0
+/// has 63 resonances whose MF=32 energy differs from MF=2's within the
+/// tolerance (Xe135 rounded, U236 from another parameter set) and 253 that
+/// MF=2 does not list at all.
 #[test]
 #[ignore = "reads GB of local tapes; set ENDF_TAPES and run with --ignored"]
 fn every_resolved_mf32_range_reads_into_a_parameter_covariance() {
@@ -403,6 +406,18 @@ fn every_resolved_mf32_range_reads_into_a_parameter_covariance() {
             };
             let v = resolved_covariances(mf2, mf32)
                 .unwrap_or_else(|e| panic!("{}: {e:?}", path.display()));
+            for c in &v {
+                let mut seen = std::collections::HashSet::new();
+                for p in &c.parameters {
+                    assert!(
+                        seen.insert(format!("{:?} {:?}", p.location, p.quantity)),
+                        "{}: {:?} {:?} appears twice",
+                        path.display(),
+                        p.location,
+                        p.quantity
+                    );
+                }
+            }
             f += 1;
             r += v.len();
             a += v.iter().map(|c| c.approximate).sum::<usize>();
