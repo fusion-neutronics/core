@@ -652,20 +652,38 @@ fn read_unresolved(
         } else {
             section.parameters.iter().map(spin_of).collect()
         };
-        for (k, par) in lv.parameters.iter().enumerate() {
+        // By J where every J agrees; JEFF-4.0 writes many unresolved MF=32
+        // sections whose J column does not (Ni66: 5, 1, 2 for MF=2's 0.5,
+        // 1.5, 2.5), and there by position within the section, the order the
+        // format lists them in, where the counts agree. Decided for the whole
+        // section: a J that matches beside one that does not could otherwise
+        // send two MF=32 spins to one MF=2 spin. Where neither holds, each J
+        // that matches takes its MF=2 spin once and the rest are unmatched.
+        let by_j: Vec<Option<usize>> = lv
+            .parameters
+            .iter()
+            .map(|par| spins.iter().position(|&j| close(j, par[1])))
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        let unique = by_j.iter().all(|m| m.is_some_and(|s| seen.insert(s)));
+        let matched: Vec<Option<usize>> = if unique {
+            by_j
+        } else if lv.parameters.len() == spins.len() {
+            b.approximate += lv
+                .parameters
+                .iter()
+                .zip(&spins)
+                .filter(|(par, &j)| !close(j, par[1]))
+                .count();
+            (0..spins.len()).map(Some).collect()
+        } else {
+            let mut taken = std::collections::HashSet::new();
+            by_j.into_iter()
+                .map(|m| m.filter(|&s| taken.insert(s)))
+                .collect()
+        };
+        for (par, spin) in lv.parameters.iter().zip(matched) {
             let aj = par[1];
-            // By J where it agrees; JEFF-4.0 writes many unresolved MF=32
-            // sections whose J column does not (Ni66: 5, 1, 2 for MF=2's
-            // 0.5, 1.5, 2.5), and there by position within the section, the
-            // order the format lists them in, where the counts agree.
-            let spin = match spins.iter().position(|&j| close(j, aj)) {
-                Some(spin) => Some(spin),
-                None if lv.parameters.len() == spins.len() => {
-                    b.approximate += 1;
-                    Some(k)
-                }
-                None => None,
-            };
             let location = spin.map(|spin| Location::Unresolved { orbital, spin });
             if location.is_none() {
                 b.unmatched.push(aj);
@@ -995,6 +1013,73 @@ mod tests {
     use super::*;
     use crate::material::Material;
     use crate::mf::mf32::Covariance;
+
+    /// The MF=2 spin each MF=32 unresolved spin of one l=0 section lands on,
+    /// for MF=2 spins 1/2, 3/2 and 5/2, and the builder's counts.
+    fn unresolved_spins(mf32_j: &[f64]) -> (Vec<Option<usize>>, usize, Vec<f64>) {
+        let mf2 = ResonanceParameters::Unresolved(Box::new(crate::mf::mf2::Unresolved {
+            ranges: vec![crate::mf::mf2::UnresolvedRange {
+                l: 0,
+                aj: vec![0.5, 1.5, 2.5],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }));
+        let n = mf32_j.len();
+        let range = Range {
+            el: 1e3,
+            eh: 1e4,
+            lru: 2,
+            lrf: 1,
+            nro: 0,
+            naps: 0,
+            covariance: Covariance::Unresolved(Box::new(crate::mf::mf32::Unresolved {
+                l_values: vec![crate::mf::mf32::UnresolvedL {
+                    l: 0,
+                    njs: n as i64,
+                    parameters: mf32_j
+                        .iter()
+                        .map(|&j| [1.0, j, 1.0, 1.0, 0.0, 0.0])
+                        .collect(),
+                    ..Default::default()
+                }],
+                mpar: 1,
+                relative_covariance: PackedCovariance {
+                    order: n,
+                    values: vec![0.01; n * (n + 1) / 2],
+                },
+                ..Default::default()
+            })),
+        };
+        let mut b = Builder::default();
+        read_unresolved(&range, &mf2, 0, &mut b).unwrap();
+        let spins = b
+            .parameters
+            .iter()
+            .map(|p| match p.location {
+                Location::Unresolved { spin, .. } => Some(spin),
+                _ => None,
+            })
+            .collect();
+        (spins, b.approximate, b.unmatched)
+    }
+
+    #[test]
+    fn unresolved_spins_never_share_an_mf2_spin() {
+        // Every J matches: by J, in MF=32's order.
+        assert_eq!(
+            unresolved_spins(&[2.5, 0.5, 1.5]),
+            (vec![Some(2), Some(0), Some(1)], 0, vec![])
+        );
+        // One J does not: by position for the whole section, where matching
+        // each J alone would put 2 and 1.5 both on spin 1.
+        assert_eq!(
+            unresolved_spins(&[0.5, 2.0, 1.5]),
+            (vec![Some(0), Some(1), Some(2)], 2, vec![])
+        );
+        // A J twice and the counts differ: the second is unmatched.
+        assert_eq!(unresolved_spins(&[0.5, 0.5]), (vec![Some(0)], 0, vec![0.5]));
+    }
 
     const DY158: &[u8] = include_bytes!("../fixtures/n-066_Dy_158_mf2_mf32.endf.xz");
     const NA23: &[u8] = include_bytes!("../fixtures/n-011_Na_023_mf2_mf32.endf.xz");
