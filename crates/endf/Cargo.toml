@@ -28,6 +28,7 @@ categories = ["science", "parser-implementations"]
 # Tests only, and so not a dependency of anything that uses this crate. The
 # fixtures in `fixtures/` and the golden dumps in `tests/golden/` are stored
 # xz-compressed (an evaluation is highly repetitive and compresses about six to
-# one), and this reads them. Pure Rust, so there is no C toolchain to have.
+# one), and this reads them and writes the goldens. Pure Rust, so there is no C
+# toolchain to have, and unlike `lzma-rs` its encoder actually compresses.
 [dev-dependencies]
-lzma-rs = "0.3"
+lzma-rust2 = "0.21"

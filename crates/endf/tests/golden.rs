@@ -1,9 +1,13 @@
-//! Hold the Rust reader to what the Python reader produces.
+//! Hold the reader to what it returns for real evaluations.
 //!
-//! Every file in `tests/golden/` is a reference dump written by
-//! `tools/dump_golden.py`. This test finds each one, reads the ENDF file it
-//! names, builds the same `path -> value` map from its own parse, and compares
-//! the two maps whole.
+//! Every file in `tests/golden/` is a dump of what the reader returns for one
+//! fixture: every value, as a `path -> value` map. This test reads each
+//! fixture again, builds the same map, and compares the two whole. The goldens
+//! were first written by the Python endf reader this crate was ported from, and
+//! the port was held to that reader value for value; once it matched (70,260
+//! values across 58 goldens, all exact but two last-bit differences in computed
+//! values) the goldens were rewritten by this reader and the Python one was
+//! retired. From then on they are snapshots this crate owns.
 //!
 //! Comparing maps rather than walking records is what makes this scale to the
 //! whole package: a field that is renamed, dropped or added shows up as a path
@@ -11,10 +15,16 @@
 //! field was for.
 //!
 //! Values are compared exactly. The dump records the shortest round-tripping
-//! decimal and both readers parse decimals with correct rounding, so any
-//! difference is a real one. The single exception is `…/evaly`, the sampled
-//! interpolation, where the two languages evaluate the same expression through
-//! their own `ln` and `exp`.
+//! decimal and the parse is correctly rounded, so any difference is a real
+//! one. The exceptions are values computed through `ln`, `exp` and the like,
+//! listed in [`is_interpolated`] and [`is_log_law_cdf`]: those functions are
+//! not correctly rounded and differ in the last bit between platforms' maths
+//! libraries, so a golden written on Linux has to pass on Windows and macOS.
+//!
+//! After adding a fixture, or a deliberate change to what the reader returns,
+//! rewrite the goldens with
+//! `cargo test -p endf --test golden -- --ignored regenerate_goldens` and
+//! review the diff.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -24,6 +34,10 @@ use endf::mf::atomic::ElectroAtomicDistribution;
 use endf::mf::covariance::Mf33Subsection;
 use endf::mf::mf1::{FissionEnergyRelease, Nu, FISSION_ENERGY_COMPONENTS};
 use endf::mf::mf2::{ResonanceParameters, UnresolvedParameters};
+use endf::mf::mf32::{
+    CompactCorrelation, Covariance as Mf32Covariance, Mf32, PackedCovariance,
+    ScatteringRadiusUncertainty,
+};
 use endf::mf::mf4::{AngleAtEnergy, AngleDistribution};
 use endf::mf::mf5::EnergyDistribution;
 use endf::mf::mf6::Distribution as Mf6Distribution;
@@ -35,14 +49,17 @@ use endf::{materials_from_str, Material, Section, Tabulated1D, Tabulated2D};
 ///
 /// Both the fixtures and the golden dumps are stored xz-compressed: an
 /// evaluation is highly repetitive and compresses about six to one, and the
-/// dumps about seven. `lzma-rs` is a dev-dependency, so nothing that uses the
+/// dumps about seven. `lzma-rust2` is a dev-dependency, so nothing that uses the
 /// crate pays for it.
 fn read_text(path: &Path) -> String {
     let raw = std::fs::read(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
     if path.extension().is_some_and(|e| e == "xz") {
         let mut out = Vec::new();
-        lzma_rs::xz_decompress(&mut raw.as_slice(), &mut out)
-            .unwrap_or_else(|e| panic!("decompressing {}: {e}", path.display()));
+        std::io::Read::read_to_end(
+            &mut lzma_rust2::XzReader::new(raw.as_slice(), true),
+            &mut out,
+        )
+        .unwrap_or_else(|e| panic!("decompressing {}: {e}", path.display()));
         return String::from_utf8(out)
             .unwrap_or_else(|e| panic!("{} is not UTF-8: {e}", path.display()));
     }
@@ -58,7 +75,8 @@ fn has_kind(path: &Path, kind: &str) -> bool {
         .is_some_and(|e| e == kind)
 }
 
-/// Mirrors `MAX_SAMPLES` in `tools/dump_golden.py`.
+/// At most this many interpolation samples per TAB1, plus the bins either
+/// side of each breakpoint and the points just outside the table.
 const MAX_SAMPLES: usize = 24;
 
 /// Relative tolerance for sampled interpolation. Everything else is exact.
@@ -144,9 +162,9 @@ impl Dump {
     }
 }
 
-/// Mirrors `sample_points` in `tools/dump_golden.py`, index for index. The
-/// arithmetic is the same in both languages, so the abscissae come out
-/// bit-identical and only the ordinates need a tolerance.
+/// Where each TAB1 is sampled to hold its interpolation. The abscissae are
+/// plain arithmetic on the table and come out bit-identical everywhere; only
+/// the ordinates, which go through `ln` and `exp`, need a tolerance.
 fn sample_points(t: &Tabulated1D) -> Vec<f64> {
     let x = &t.x;
     if x.len() < 2 {
@@ -175,7 +193,7 @@ fn sample_points(t: &Tabulated1D) -> Vec<f64> {
 }
 
 // --------------------------------------------------------------------------
-// One dumper per ENDF file, mirroring tools/dump_golden.py.
+// One dumper per ENDF file.
 // --------------------------------------------------------------------------
 
 fn dump_nu(d: &mut Dump, path: &str, nu: &Nu) {
@@ -524,7 +542,193 @@ fn dump_mf33_subsection(d: &mut Dump, sp: &str, sub: &Mf33Subsection) {
     }
 }
 
-/// Mirrors `dump_angle_distribution` in `tools/dump_golden.py`.
+fn dump_dap(d: &mut Dump, path: &str, dap: &Option<ScatteringRadiusUncertainty>) {
+    match dap {
+        None => {}
+        Some(ScatteringRadiusUncertainty::Cont { dap }) => d.float(format!("{path}/DAP"), *dap),
+        Some(ScatteringRadiusUncertainty::List { values }) => {
+            d.floats(format!("{path}/DAP_list"), values.clone())
+        }
+    }
+}
+
+fn dump_packed(d: &mut Dump, path: &str, c: &PackedCovariance) {
+    d.int(format!("{path}/order"), c.order as i64);
+    d.floats(format!("{path}/values"), c.values.clone());
+}
+
+fn dump_compact_correlation(d: &mut Dump, path: &str, c: &CompactCorrelation) {
+    d.int(format!("{path}/NDIGIT"), c.ndigit);
+    d.int(format!("{path}/NNN"), c.nnn);
+    d.ints(format!("{path}/II"), c.rows.iter().map(|r| r.ii).collect());
+    d.ints(format!("{path}/JJ"), c.rows.iter().map(|r| r.jj).collect());
+    d.ints(
+        format!("{path}/KIJ"),
+        c.rows.iter().flat_map(|r| r.kij.iter().copied()).collect(),
+    );
+    d.ints(
+        format!("{path}/KIJ_len"),
+        c.rows.iter().map(|r| r.kij.len() as i64).collect(),
+    );
+}
+
+/// Rows of fixed width, flattened, with the row count alongside.
+fn dump_rows<const N: usize>(d: &mut Dump, path: &str, rows: &[[f64; N]]) {
+    d.int(format!("{path}/n"), rows.len() as i64);
+    d.floats(
+        format!("{path}/values"),
+        rows.iter().flat_map(|r| r.iter().copied()).collect(),
+    );
+}
+
+/// MF=32, which only this reader parses, so its golden is a snapshot of the
+/// parse rather than a cross-check: it catches a change in what the parser
+/// returns for a real evaluation, and the review of the regenerated golden is
+/// where such a change is judged.
+fn dump_mf32(d: &mut Dump, path: &str, s: &Mf32) {
+    d.int(format!("{path}/ZA"), s.za);
+    d.float(format!("{path}/AWR"), s.awr);
+    d.int(format!("{path}/NIS"), s.nis);
+    for (i, defect) in s.defects.iter().enumerate() {
+        d.text(format!("{path}/defects/{i}"), &format!("{defect:?}"));
+    }
+    for (i, iso) in s.isotopes.iter().enumerate() {
+        let ip = format!("{path}/isotopes/{i}");
+        d.float(format!("{ip}/ZAI"), iso.zai);
+        d.float(format!("{ip}/ABN"), iso.abn);
+        d.int(format!("{ip}/LFW"), iso.lfw);
+        d.int(format!("{ip}/NER"), iso.ner);
+        for (j, r) in iso.ranges.iter().enumerate() {
+            let rp = format!("{ip}/ranges/{j}");
+            d.float(format!("{rp}/EL"), r.el);
+            d.float(format!("{rp}/EH"), r.eh);
+            d.int(format!("{rp}/LRU"), r.lru);
+            d.int(format!("{rp}/LRF"), r.lrf);
+            d.int(format!("{rp}/NRO"), r.nro);
+            d.int(format!("{rp}/NAPS"), r.naps);
+            dump_mf32_covariance(d, &rp, &r.covariance);
+        }
+    }
+}
+
+fn dump_mf32_covariance(d: &mut Dump, rp: &str, covariance: &Mf32Covariance) {
+    match covariance {
+        Mf32Covariance::Compatible(c) => {
+            let cp = format!("{rp}/compatible");
+            d.float(format!("{cp}/SPI"), c.spi);
+            d.float(format!("{cp}/AP"), c.ap);
+            d.int(format!("{cp}/NLS"), c.nls);
+            for (k, sec) in c.sections.iter().enumerate() {
+                let sp = format!("{cp}/sections/{k}");
+                d.float(format!("{sp}/AWRI"), sec.awri);
+                d.int(format!("{sp}/L"), sec.l);
+                d.int(format!("{sp}/NRS"), sec.nrs);
+                dump_rows(d, &format!("{sp}/resonances"), &sec.resonances);
+            }
+        }
+        Mf32Covariance::General(c) => {
+            let cp = format!("{rp}/general");
+            d.float(format!("{cp}/SPI"), c.spi);
+            d.float(format!("{cp}/AP"), c.ap);
+            d.int(format!("{cp}/LAD"), c.lad);
+            d.int(format!("{cp}/NLS"), c.nls);
+            d.int(format!("{cp}/ISR"), c.isr);
+            dump_dap(d, &cp, &c.dap);
+            d.float(format!("{cp}/AWRI"), c.awri);
+            d.int(format!("{cp}/NSRS"), c.nsrs);
+            d.int(format!("{cp}/NLRS"), c.nlrs);
+            for (k, b) in c.blocks.iter().enumerate() {
+                let bp = format!("{cp}/blocks/{k}");
+                d.int(format!("{bp}/MPAR"), b.mpar);
+                d.int(format!("{bp}/NRB"), b.nrb);
+                dump_rows(d, &format!("{bp}/resonances"), &b.resonances);
+                dump_packed(d, &format!("{bp}/covariance"), &b.covariance);
+            }
+        }
+        Mf32Covariance::GeneralRMatrix(c) => {
+            let cp = format!("{rp}/general_rmatrix");
+            d.int(format!("{cp}/IFG"), c.ifg);
+            d.int(format!("{cp}/NJS"), c.njs);
+            d.int(format!("{cp}/ISR"), c.isr);
+            dump_dap(d, &cp, &c.dap);
+            d.float(format!("{cp}/AWRI"), c.awri);
+            d.int(format!("{cp}/NSRS"), c.nsrs);
+            d.int(format!("{cp}/NLRS"), c.nlrs);
+            for (k, b) in c.blocks.iter().enumerate() {
+                let bp = format!("{cp}/blocks/{k}");
+                d.int(format!("{bp}/NJSX"), b.njsx);
+                for (g, sg) in b.spin_groups.iter().enumerate() {
+                    let gp = format!("{bp}/spin_groups/{g}");
+                    d.int(format!("{gp}/NCH"), sg.nch);
+                    d.int(format!("{gp}/NRB"), sg.nrb);
+                    d.int(format!("{gp}/NX"), sg.nx);
+                    d.floats(format!("{gp}/values"), sg.values.clone());
+                }
+                dump_packed(d, &format!("{bp}/covariance"), &b.covariance);
+            }
+        }
+        Mf32Covariance::Compact(c) => {
+            let cp = format!("{rp}/compact");
+            d.float(format!("{cp}/SPI"), c.spi);
+            d.float(format!("{cp}/AP"), c.ap);
+            d.int(format!("{cp}/LAD"), c.lad);
+            d.int(format!("{cp}/ISR"), c.isr);
+            dump_dap(d, &cp, &c.dap);
+            d.float(format!("{cp}/AWRI"), c.awri);
+            d.float(format!("{cp}/APL"), c.apl);
+            d.int(format!("{cp}/LRX"), c.lrx);
+            d.int(format!("{cp}/NRSA"), c.nrsa);
+            let parameters: Vec<[f64; 6]> = c.resonances.iter().map(|r| r.parameters).collect();
+            let uncertainties: Vec<[f64; 6]> =
+                c.resonances.iter().map(|r| r.uncertainties).collect();
+            dump_rows(d, &format!("{cp}/parameters"), &parameters);
+            dump_rows(d, &format!("{cp}/uncertainties"), &uncertainties);
+            dump_compact_correlation(d, &format!("{cp}/correlation"), &c.correlation);
+        }
+        Mf32Covariance::CompactRMatrix(c) => {
+            let cp = format!("{rp}/compact_rmatrix");
+            d.int(format!("{cp}/IFG"), c.ifg);
+            d.int(format!("{cp}/NJS"), c.njs);
+            d.int(format!("{cp}/ISR"), c.isr);
+            dump_dap(d, &cp, &c.dap);
+            d.int(format!("{cp}/NPP"), c.npp);
+            d.int(format!("{cp}/NJSX"), c.njsx);
+            dump_rows(d, &format!("{cp}/particle_pairs"), &c.particle_pairs);
+            for (g, sg) in c.spin_groups.iter().enumerate() {
+                let gp = format!("{cp}/spin_groups/{g}");
+                d.float(format!("{gp}/AJ"), sg.aj);
+                d.float(format!("{gp}/PJ"), sg.pj);
+                d.int(format!("{gp}/NCH"), sg.nch);
+                dump_rows(d, &format!("{gp}/channels"), &sg.channels);
+                d.int(format!("{gp}/NRSA"), sg.nrsa);
+                d.int(format!("{gp}/NX"), sg.nx);
+                d.floats(format!("{gp}/values"), sg.values.clone());
+            }
+            dump_compact_correlation(d, &format!("{cp}/correlation"), &c.correlation);
+        }
+        Mf32Covariance::Unresolved(c) => {
+            let cp = format!("{rp}/unresolved");
+            d.float(format!("{cp}/SPI"), c.spi);
+            d.float(format!("{cp}/AP"), c.ap);
+            d.int(format!("{cp}/LSSF"), c.lssf);
+            d.int(format!("{cp}/NLS"), c.nls);
+            for (k, l) in c.l_values.iter().enumerate() {
+                let lp = format!("{cp}/l_values/{k}");
+                d.float(format!("{lp}/AWRI"), l.awri);
+                d.int(format!("{lp}/L"), l.l);
+                d.int(format!("{lp}/NJS"), l.njs);
+                dump_rows(d, &format!("{lp}/parameters"), &l.parameters);
+            }
+            d.int(format!("{cp}/MPAR"), c.mpar);
+            dump_packed(
+                d,
+                &format!("{cp}/relative_covariance"),
+                &c.relative_covariance,
+            );
+        }
+    }
+}
+
 fn dump_angle_distribution(d: &mut Dump, path: &str, dist: &AngleDistribution) {
     d.floats(format!("{path}/energy"), dist.energy.clone());
     d.int(format!("{path}/n_mu"), dist.mu.len() as i64);
@@ -549,7 +753,6 @@ fn dump_angle_distribution(d: &mut Dump, path: &str, dist: &AngleDistribution) {
     }
 }
 
-/// Mirrors `dump_reactions` in `tools/dump_golden.py`.
 fn dump_reactions(d: &mut Dump, path: &str, material: &Material) {
     let mts: Vec<i32> = material
         .section_data
@@ -567,7 +770,6 @@ fn dump_reactions(d: &mut Dump, path: &str, material: &Material) {
     }
 }
 
-/// Mirrors `dump_reaction` in `tools/dump_golden.py`.
 fn dump_reaction(d: &mut Dump, path: &str, rx: &endf::Reaction) {
     d.int(format!("{path}/MT"), rx.mt as i64);
     d.float(format!("{path}/q_reaction"), rx.q_reaction);
@@ -591,7 +793,6 @@ fn dump_reaction(d: &mut Dump, path: &str, rx: &endf::Reaction) {
     }
 }
 
-/// Mirrors `dump_product` in `tools/dump_golden.py`.
 fn dump_product(d: &mut Dump, path: &str, product: &endf::Product) {
     d.text(format!("{path}/name"), &product.name);
     d.text(
@@ -621,7 +822,6 @@ fn dump_product(d: &mut Dump, path: &str, product: &endf::Product) {
     }
 }
 
-/// Mirrors `dump_radionuclide_production` in `tools/dump_golden.py`.
 fn dump_radionuclide_production(d: &mut Dump, path: &str, material: &Material) {
     let production = endf::radionuclide_production(material);
     d.ints(
@@ -638,9 +838,8 @@ fn dump_radionuclide_production(d: &mut Dump, path: &str, material: &Material) {
             if let Some(elfs) = state.elfs {
                 d.float(format!("{sp}/ELFS"), elfs);
             }
-            // The Python reader takes ELFS as it stands where the Rust one
-            // passes over a non-positive ELFS on an excited state; every
-            // fixture's excited states have a positive ELFS, so the two agree.
+            // A non-positive ELFS on an excited state is passed over rather
+            // than taken as the excitation energy.
             if let Some(e) = state.excitation_energy() {
                 d.float(format!("{sp}/excitation_energy"), e);
             }
@@ -654,7 +853,6 @@ fn dump_radionuclide_production(d: &mut Dump, path: &str, material: &Material) {
     }
 }
 
-/// Mirrors `dump_univariate` in `tools/dump_golden.py`.
 fn dump_univariate(d: &mut Dump, p: &str, u: &Univariate) {
     let c = match u {
         Univariate::Discrete(t) => {
@@ -693,7 +891,6 @@ fn dump_univariate(d: &mut Dump, p: &str, u: &Univariate) {
     }
 }
 
-/// Mirrors `dump_energy_distribution` in `tools/dump_golden.py`.
 fn dump_energy_distribution(d: &mut Dump, p: &str, dist: &EnergyDistribution) {
     match dist {
         EnergyDistribution::ArbitraryTabulated { energy, g, .. } => {
@@ -772,7 +969,6 @@ fn dump_energy_distribution(d: &mut Dump, p: &str, dist: &EnergyDistribution) {
     }
 }
 
-/// Mirrors `dump_angle_energy` in `tools/dump_golden.py`.
 fn dump_angle_energy(d: &mut Dump, p: &str, ae: &AngleEnergy) {
     match ae {
         AngleEnergy::Uncorrelated(u) => {
@@ -835,7 +1031,6 @@ fn dump_angle_energy(d: &mut Dump, p: &str, ae: &AngleEnergy) {
     }
 }
 
-/// Mirrors `dump_incident_neutron_ace` in `tools/dump_golden.py`.
 fn dump_incident_neutron_ace(d: &mut Dump, path: &str, t: &ace::Table) {
     // ESZ (JXS(1)) is the energy grid and MTR (JXS(3)) the reaction list;
     // without them there is no nuclide to build.
@@ -891,12 +1086,10 @@ fn dump_incident_neutron_ace(d: &mut Dump, path: &str, t: &ace::Table) {
         );
     }
 
-    // The removal cross section is deliberately not dumped here. It folds the
-    // elastic angular distribution into the total, and for ACE data the Python
-    // `forward_fraction` returns uninitialized memory (`np.empty` for the
-    // shapes it does not fill), so there is nothing stable to compare
-    // against. It is dumped on the ENDF path, where the answer is well
-    // defined.
+    // The removal cross section is not dumped here. It folds the elastic
+    // angular distribution into the total, and the Python reader the goldens
+    // were first held to returned uninitialized memory for it from ACE data,
+    // so it was left out; it is dumped on the ENDF path.
 
     // Only the reactions this type synthesises are dumped in full; the ones
     // `Reaction::from_ace` builds are compared elsewhere.
@@ -907,7 +1100,6 @@ fn dump_incident_neutron_ace(d: &mut Dump, path: &str, t: &ace::Table) {
     }
 }
 
-/// Mirrors `dump_chain` in `tools/dump_chain_golden.py`.
 fn dump_chain(d: &mut Dump, path: &str, chain: &endf::Chain) {
     d.int(format!("{path}/n"), chain.nuclides.len() as i64);
     for (i, nuclide) in chain.nuclides.iter().enumerate() {
@@ -937,7 +1129,6 @@ fn dump_chain(d: &mut Dump, path: &str, chain: &endf::Chain) {
     }
 }
 
-/// Mirrors `dump_incident_photon` in `tools/dump_golden.py`.
 fn dump_incident_photon(d: &mut Dump, path: &str, material: &Material) {
     let has_photoatomic = material.section_data.keys().any(|&(mf, _)| mf == 23);
     if has_photoatomic {
@@ -987,7 +1178,6 @@ fn dump_incident_photon(d: &mut Dump, path: &str, material: &Material) {
     }
 }
 
-/// Mirrors `dump_atomic_relaxation` in `tools/dump_golden.py`.
 fn dump_atomic_relaxation(d: &mut Dump, path: &str, relaxation: &endf::AtomicRelaxation) {
     for (i, shell) in relaxation.subshells().iter().enumerate() {
         d.text(format!("{path}/subshells/{i}"), shell);
@@ -1011,7 +1201,6 @@ fn dump_atomic_relaxation(d: &mut Dump, path: &str, relaxation: &endf::AtomicRel
     }
 }
 
-/// Mirrors `dump_decay` in `tools/dump_golden.py`.
 fn dump_decay(d: &mut Dump, path: &str, material: &Material) {
     if material.mf8_mt457().is_some() {
         dump_decay_section(d, path, &endf::Decay::from_material(material).unwrap());
@@ -1024,7 +1213,7 @@ fn dump_decay(d: &mut Dump, path: &str, material: &Material) {
             ("cumulative", &fpy.cumulative),
         ] {
             for (i, yields) in sets.iter().enumerate() {
-                // Sorted by name, as the Python dumper walks a dict.
+                // Sorted by name, so the order does not depend on the reader's.
                 let mut yields = yields.clone();
                 yields.sort_by(|a, b| a.name.cmp(&b.name));
                 for (j, product) in yields.iter().enumerate() {
@@ -1040,7 +1229,6 @@ fn dump_decay(d: &mut Dump, path: &str, material: &Material) {
     }
 }
 
-/// Mirrors `dump_decay_section` in `tools/dump_golden.py`.
 fn dump_decay_section(d: &mut Dump, path: &str, decay: &endf::Decay) {
     let pair = |v: (f64, f64)| vec![v.0, v.1];
     let n = &decay.nuclide;
@@ -1136,7 +1324,6 @@ fn dump_decay_section(d: &mut Dump, path: &str, decay: &endf::Decay) {
     }
 }
 
-/// Mirrors `dump_incident_neutron_endf` in `tools/dump_golden.py`.
 fn dump_incident_neutron_endf(d: &mut Dump, path: &str, material: &Material) {
     if material.mf1_mt451().is_none() {
         return;
@@ -1176,7 +1363,6 @@ fn dump_incident_neutron_endf(d: &mut Dump, path: &str, material: &Material) {
     }
 }
 
-/// Mirrors `dump_ace_reactions` in `tools/dump_golden.py`.
 fn dump_ace_reactions(d: &mut Dump, path: &str, t: &ace::Table) {
     // MTR (JXS(3)) lists the reactions; without it there are none to read.
     if t.data_type().ok() != Some(ace::TableType::NeutronContinuous) || t.jxs[3] <= 0 {
@@ -1190,7 +1376,6 @@ fn dump_ace_reactions(d: &mut Dump, path: &str, t: &ace::Table) {
     }
 }
 
-/// Mirrors `dump_ace_dlw` in `tools/dump_golden.py`.
 fn dump_ace_dlw(d: &mut Dump, path: &str, t: &ace::Table) {
     if t.data_type().ok() != Some(ace::TableType::NeutronContinuous) {
         return;
@@ -1214,8 +1399,8 @@ fn dump_ace_dlw(d: &mut Dump, path: &str, t: &ace::Table) {
                 &format!("{rp}/{k}/applicability"),
                 &Tabulated1D::from_ace(&t.xss, (dlw + lnw + 2).max(0) as usize, true),
             );
-            // Law 66 wants the reaction's Q value; the Python dumper passes a
-            // fixed stand-in, so this passes the same one.
+            // Law 66 wants the reaction's Q value; a fixed stand-in is passed,
+            // since what is held here is the table, not the kinematics.
             let ae = AngleEnergy::from_ace(t, dlw, lnw, Some(0.0)).unwrap();
             dump_angle_energy(d, &format!("{rp}/{k}"), &ae);
             lnw = at(dlw + lnw - 1) as i64;
@@ -1224,7 +1409,6 @@ fn dump_ace_dlw(d: &mut Dump, path: &str, t: &ace::Table) {
     }
 }
 
-/// Mirrors `dump_ace_angle` in `tools/dump_golden.py`.
 fn dump_ace_angle(d: &mut Dump, path: &str, t: &ace::Table) {
     if t.data_type().ok() != Some(ace::TableType::NeutronContinuous) {
         return;
@@ -1247,10 +1431,10 @@ fn dump_ace_angle(d: &mut Dump, path: &str, t: &ace::Table) {
     }
 }
 
-/// Mirrors `ACE_XSS_SAMPLES` in `tools/dump_golden.py`.
 const ACE_XSS_SAMPLES: usize = 2000;
 
-/// Mirrors `ace_xss_indices` in `tools/dump_golden.py`, index for index.
+/// The XSS indices an ACE golden records: a spread across the array, both
+/// ends, and every JXS entry point.
 fn ace_xss_indices(n: usize, jxs: &[i64]) -> Vec<usize> {
     let mut idx: BTreeSet<usize> = (0..n).step_by((n / ACE_XSS_SAMPLES).max(1)).collect();
     idx.extend(0..50.min(n));
@@ -2019,10 +2203,7 @@ fn dump_section(d: &mut Dump, path: &str, section: &Section) {
             }
         }
 
-        // The Python reader ignores MF=32, so there is nothing to hold this
-        // to. It stays out of the golden comparison; the unit tests in
-        // `mf/mf32.rs` and the tape walk in `mf32_tapes.rs` cover it instead.
-        Section::Mf32(_) => {}
+        Section::Mf32(s) => dump_mf32(d, path, s),
 
         Section::Unparsed { .. } => {}
     }
@@ -2069,19 +2250,25 @@ struct Golden {
     chain_reactions: Vec<String>,
 }
 
+impl Golden {
+    fn empty() -> Self {
+        Golden {
+            kind: String::new(),
+            n_tables: 0,
+            decay: Vec::new(),
+            neutron: Vec::new(),
+            chain_reactions: Vec::new(),
+            source: String::new(),
+            n_materials: 0,
+            sections: BTreeMap::new(),
+            mats: BTreeMap::new(),
+            values: BTreeMap::new(),
+        }
+    }
+}
+
 fn parse_golden(text: &str, name: &str) -> Golden {
-    let mut g = Golden {
-        kind: String::new(),
-        n_tables: 0,
-        decay: Vec::new(),
-        neutron: Vec::new(),
-        chain_reactions: Vec::new(),
-        source: String::new(),
-        n_materials: 0,
-        sections: BTreeMap::new(),
-        mats: BTreeMap::new(),
-        values: BTreeMap::new(),
-    };
+    let mut g = Golden::empty();
 
     for (i, line) in text.lines().enumerate() {
         let at = format!("{name}:{}", i + 1);
@@ -2145,51 +2332,40 @@ fn parse_golden(text: &str, name: &str) -> Golden {
     g
 }
 
-/// Compare the two `path -> value` maps whole.
-///
-/// Shared by the ENDF and ACE paths: a field renamed, dropped or added shows up
-/// as a path on one side and not the other, whatever produced it.
 /// Whether a path holds values computed rather than read off the file.
 ///
-/// Two kinds qualify. `…/evaly` is the sampled interpolation the dump takes of
-/// every TAB1. The reaction yields are the other: a product given by MF=10 as
-/// a production cross section becomes a yield by dividing two interpolated
-/// cross sections on their union grid, and the Python reader does that with
-/// NumPy's array `log`, whose SIMD implementation differs from scalar `log` in
-/// the last bit. The tolerance is 1e-12 relative, so a real disagreement (a
-/// wrong value, a wrong index, a wrong law) still fails; only last-bit noise
-/// passes. It also covers the MF=9 yields, which are read verbatim and would
-/// otherwise be compared exactly.
+/// These go through `ln`, `exp` and similar functions, which are not
+/// correctly rounded and differ in the last bit between the maths libraries
+/// of the platforms CI runs on, so a golden written on one has to pass on the
+/// others. `…/evaly` is the sampled interpolation the dump takes of every
+/// TAB1. The reaction yields are the other main case: a product given by
+/// MF=10 as a production cross section becomes a yield by dividing two
+/// interpolated cross sections on their union grid. The tolerance is 1e-12
+/// relative, so a real disagreement (a wrong value, a wrong index, a wrong
+/// law) still fails; only last-bit noise passes. It also covers the MF=9
+/// yields, which are read verbatim and would otherwise be compared exactly.
 fn is_interpolated(path: &str) -> bool {
     path.ends_with("/evaly")
         || (path.contains("/reaction/") && path.contains("/yield/f/"))
-        // The propagated uncertainties. The Python package gets these from
-        // `uncertainties`, which accumulates a variance and takes its square
-        // root, where the port applies the derivative directly. The two agree
-        // to the last bit or two, and the nominal values (the first entry of
-        // each pair) are exact either way.
+        // The decay constant, ln 2 over the half-life, and the decay energy,
+        // with their propagated uncertainties.
         || path.ends_with("/decay_constant")
         || path.ends_with("/decay_energy")
         // The forward-scattered fraction, and the removal cross section that
-        // folds it into the total. Both integrate a Legendre series, and NumPy
-        // changed the association of the Clenshaw recurrence between 2.2 and
-        // 2.4, the results differ in the last bit or two depending on which
-        // NumPy wrote the golden, so no single implementation can match both
-        // exactly. The values are all within 1e-15 of each other.
+        // folds it into the total. Both integrate a Legendre series; the
+        // Python reader the goldens were first held to gave last-bit
+        // differences here between NumPy versions, and the tolerance is kept
+        // rather than tightened.
         || path.contains("/forward_fraction/")
         || path.contains("/removal_xs/")
 }
 
 /// Whether `path` is the CDF of a tabular distribution under a log law.
 ///
-/// Those CDFs integrate the density with `ln` and `exp_m1`, and neither the
-/// Rust nor the Python result is fixed by the arithmetic alone: each takes the
-/// platform's transcendental functions, which are not correctly rounded and
-/// differ in the last bit between glibc, the MSVC runtime and NumPy's SIMD
-/// kernels (NumPy picks its kernel by CPU, so the golden itself depends on the
-/// machine that wrote it). The operation order already matches the Python
-/// exactly; what is left is that last-bit noise, so these are compared to
-/// 1e-12 relative. Unlike the check in [`compare`] for the other computed
+/// Those CDFs integrate the density with `ln` and `exp_m1`, which take the
+/// platform's transcendental functions. Those are not correctly rounded and
+/// differ in the last bit between glibc and the MSVC and Apple runtimes, so
+/// these are compared to 1e-12 relative. Unlike the check in [`compare`] for the other computed
 /// paths there is no floor of 1 on the scale: a CDF of a spectrum in
 /// particles per eV can sit near 1e-20, where an absolute 1e-12 would pass
 /// anything. Histogram and linear-linear CDFs use no transcendental function
@@ -2204,6 +2380,10 @@ fn is_log_law_cdf(path: &str, theirs: &BTreeMap<String, Value>) -> bool {
     )
 }
 
+/// Compare the two `path -> value` maps whole.
+///
+/// Shared by the ENDF and ACE paths: a field renamed, dropped or added shows up
+/// as a path on one side and not the other, whatever produced it.
 fn compare(name: &str, ours: &BTreeMap<String, Value>, theirs: &BTreeMap<String, Value>) {
     let ours_keys: BTreeSet<&String> = ours.keys().collect();
     let theirs_keys: BTreeSet<&String> = theirs.keys().collect();
@@ -2211,12 +2391,12 @@ fn compare(name: &str, ours: &BTreeMap<String, Value>, theirs: &BTreeMap<String,
     let extra: Vec<&&String> = ours_keys.difference(&theirs_keys).take(10).collect();
     assert!(
         missing.is_empty(),
-        "{name}: the Rust reader did not produce {} paths, e.g. {missing:?}",
+        "{name}: the reader no longer produces {} paths the golden holds, e.g. {missing:?}",
         theirs_keys.difference(&ours_keys).count()
     );
     assert!(
         extra.is_empty(),
-        "{name}: the Rust reader produced {} paths the Python reader does not, e.g. {extra:?}",
+        "{name}: the reader produces {} paths the golden does not hold, e.g. {extra:?}",
         ours_keys.difference(&theirs_keys).count()
     );
 
@@ -2228,7 +2408,7 @@ fn compare(name: &str, ours: &BTreeMap<String, Value>, theirs: &BTreeMap<String,
                 for (i, (&got, &want)) in a.iter().zip(b).enumerate() {
                     assert!(
                         (got - want).abs() <= EVAL_TOL * want.abs(),
-                        "{name}: {path}[{i}]: rust {got} != python {want}"
+                        "{name}: {path}[{i}]: reader {got} != golden {want}"
                     );
                 }
                 continue;
@@ -2237,7 +2417,7 @@ fn compare(name: &str, ours: &BTreeMap<String, Value>, theirs: &BTreeMap<String,
         assert_eq!(
             got.kind(),
             want.kind(),
-            "{name}: {path} is {} in Rust and {} in Python",
+            "{name}: {path} is {} from the reader and {} in the golden",
             got.kind(),
             want.kind()
         );
@@ -2261,7 +2441,7 @@ fn compare(name: &str, ours: &BTreeMap<String, Value>, theirs: &BTreeMap<String,
                     } else {
                         (got - want).abs() <= EVAL_TOL * want.abs().max(1.0)
                     };
-                    assert!(agree, "{name}: {path}[{i}]: rust {got} != python {want}");
+                    assert!(agree, "{name}: {path}[{i}]: reader {got} != golden {want}");
                 }
             }
             _ => assert_eq!(got, want, "{name}: {path}"),
@@ -2269,17 +2449,74 @@ fn compare(name: &str, ours: &BTreeMap<String, Value>, theirs: &BTreeMap<String,
     }
 }
 
-/// Compare one golden file against the Rust reader. Returns paths compared.
-fn check(golden_path: &Path) -> usize {
-    let text = read_text(golden_path);
-    let name = golden_path
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
-    let g = parse_golden(&text, &name);
+/// The decay evaluations the chain golden is built from. Between them these
+/// close every path the chain follows, so no product needs a stand-in except
+/// Cs137's, which is deliberate: barium is absent, so the stand-in walk runs.
+const CHAIN_DECAY: [&str; 10] = [
+    "dec-048_Cd_116.endf.xz",
+    "dec-049_In_115.endf.xz",
+    "dec-049_In_116.endf.xz",
+    "dec-049_In_116m1.endf.xz",
+    "dec-049_In_116m2.endf.xz",
+    "dec-050_Sn_115.endf.xz",
+    "dec-050_Sn_116.endf.xz",
+    "dec-054_Xe_136.endf.xz",
+    "dec-054_Xe_137.endf.xz",
+    "dec-055_Cs_137.endf.xz",
+];
 
-    let source_path = repo_root().join(&g.source);
+/// The neutron evaluations, which supply the chain's transmutation Q values.
+const CHAIN_NEUTRON: [&str; 2] = [
+    "n-049_In-115_trimmed.endf.xz",
+    "n-054_Xe_136_trimmed.endf.xz",
+];
+
+/// Capture only. The fixtures do not close the (n,2n) and charged-particle
+/// paths, and an unclosed path exercises the stand-in walk rather than the
+/// chain, which is what the decay fixtures are already for.
+const CHAIN_REACTIONS: [&str; 1] = ["(n,gamma)"];
+
+/// The header of the chain golden, as [`build`] takes it.
+fn chain_header() -> Golden {
+    let rel = |name: &str| format!("crates/endf/fixtures/{name}");
+    Golden {
+        kind: "chain".to_string(),
+        decay: CHAIN_DECAY.iter().map(|n| rel(n)).collect(),
+        neutron: CHAIN_NEUTRON.iter().map(|n| rel(n)).collect(),
+        chain_reactions: CHAIN_REACTIONS.iter().map(|r| r.to_string()).collect(),
+        ..Golden::empty()
+    }
+}
+
+/// The header of the golden for one fixture, as [`build`] takes it.
+fn fixture_header(fixture: &Path) -> Golden {
+    let name = fixture.file_name().unwrap().to_string_lossy();
+    Golden {
+        kind: if has_kind(fixture, "ace") {
+            "ace"
+        } else {
+            "endf"
+        }
+        .to_string(),
+        source: format!("crates/endf/fixtures/{name}"),
+        ..Golden::empty()
+    }
+}
+
+/// Read what a golden's header names and build the whole golden from it.
+///
+/// Only the header fields of `header` are used (`kind`, `source`, and the
+/// chain's evaluations and reactions); everything else comes from the reader.
+fn build(header: &Golden) -> Golden {
+    let mut g = Golden {
+        kind: header.kind.clone(),
+        source: header.source.clone(),
+        decay: header.decay.clone(),
+        neutron: header.neutron.clone(),
+        chain_reactions: header.chain_reactions.clone(),
+        ..Golden::empty()
+    };
+    let mut d = Dump::default();
 
     if g.kind == "chain" {
         let read = |paths: &[String]| -> Vec<Material> {
@@ -2291,41 +2528,31 @@ fn check(golden_path: &Path) -> usize {
         let reactions: Vec<&str> = g.chain_reactions.iter().map(String::as_str).collect();
         let q_values = endf::chain::q_values(&read(&g.neutron));
         let chain = endf::Chain::from_endf(&read(&g.decay), &[], &q_values, &reactions).unwrap();
-        let mut d = Dump::default();
         dump_chain(&mut d, "chain", &chain);
-        compare(&name, &d.map, &g.values);
-        return g.values.len();
+        g.values = d.map;
+        return g;
     }
 
+    let text = read_text(&repo_root().join(&g.source));
+
     if g.kind == "ace" {
-        let tables = ace::tables_from_str(&read_text(&source_path), None)
-            .unwrap_or_else(|e| panic!("{name}: the Rust reader failed on {}: {e}", g.source));
-        assert_eq!(tables.len(), g.n_tables, "{name}: table count");
-        let mut d = Dump::default();
+        let tables = ace::tables_from_str(&text, None)
+            .unwrap_or_else(|e| panic!("the Rust reader failed on {}: {e}", g.source));
+        g.n_tables = tables.len();
         for (i, table) in tables.iter().enumerate() {
             dump_ace_table(&mut d, &i.to_string(), table);
         }
-        compare(&name, &d.map, &g.values);
-        return g.values.len();
+        g.values = d.map;
+        return g;
     }
 
-    let endf_text = read_text(&source_path);
-
-    let materials = materials_from_str(&endf_text)
-        .unwrap_or_else(|e| panic!("{name}: the Rust reader failed on {}: {e}", g.source));
-
-    assert_eq!(materials.len(), g.n_materials, "{name}: material count");
-
-    let mut d = Dump::default();
-    let mut sections: BTreeMap<(usize, i32, i32), usize> = BTreeMap::new();
+    let materials = materials_from_str(&text)
+        .unwrap_or_else(|e| panic!("the Rust reader failed on {}: {e}", g.source));
+    g.n_materials = materials.len();
     for (m, material) in materials.iter().enumerate() {
-        assert_eq!(
-            Some(&material.mat),
-            g.mats.get(&m),
-            "{name}: material {m} number"
-        );
+        g.mats.insert(m, material.mat);
         for (&(mf, mt), body) in &material.section_text {
-            sections.insert((m, mf, mt), body.lines().count());
+            g.sections.insert((m, mf, mt), body.lines().count());
         }
         for (&(mf, mt), section) in &material.section_data {
             dump_section(&mut d, &format!("{m}/{mf}/{mt}"), section);
@@ -2336,16 +2563,127 @@ fn check(golden_path: &Path) -> usize {
         dump_decay(&mut d, &format!("{m}/decay"), material);
         dump_incident_photon(&mut d, &format!("{m}/photon"), material);
     }
+    g.values = d.map;
+    g
+}
 
-    assert_eq!(sections, g.sections, "{name}: section splitting differs");
+/// Write a golden in the format [`parse_golden`] reads.
+///
+/// Floats are written with `{:?}`, the shortest decimal that round-trips to
+/// the same double, so reading the file back recovers every value bit for bit.
+/// Strings are hex because ENDF text fields are fixed-width and carry
+/// significant spaces, which the whitespace-separated format would eat.
+fn render(g: &Golden) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let what = match g.kind.as_str() {
+        "chain" => "a depletion chain".to_string(),
+        _ => g.source.clone(),
+    };
+    writeln!(
+        out,
+        "# golden reference for {what}, written by the Rust reader"
+    )
+    .unwrap();
+    writeln!(out, "# regenerate with: {REGENERATE}").unwrap();
+    match g.kind.as_str() {
+        "chain" => {
+            writeln!(out, "KIND chain").unwrap();
+            for p in &g.decay {
+                writeln!(out, "DECAY {p}").unwrap();
+            }
+            for p in &g.neutron {
+                writeln!(out, "NEUTRON {p}").unwrap();
+            }
+            for r in &g.chain_reactions {
+                writeln!(out, "REACTION {r}").unwrap();
+            }
+        }
+        "ace" => {
+            writeln!(out, "KIND ace").unwrap();
+            writeln!(out, "SOURCE {}", g.source).unwrap();
+            writeln!(out, "TABLES {}", g.n_tables).unwrap();
+        }
+        _ => {
+            writeln!(out, "SOURCE {}", g.source).unwrap();
+            writeln!(out, "MATERIALS {}", g.n_materials).unwrap();
+            for (m, mat) in &g.mats {
+                writeln!(out, "MAT {m} {mat}").unwrap();
+            }
+            for ((m, mf, mt), n) in &g.sections {
+                writeln!(out, "SECTION {m} {mf} {mt} {n}").unwrap();
+            }
+        }
+    }
+    for (path, value) in &g.values {
+        assert!(
+            !path.contains(char::is_whitespace),
+            "golden path {path:?} holds whitespace"
+        );
+        write!(out, "V {path} {}", value.kind()).unwrap();
+        match value {
+            Value::Floats(v) => v.iter().for_each(|x| write!(out, " {x:?}").unwrap()),
+            Value::Ints(v) => v.iter().for_each(|x| write!(out, " {x}").unwrap()),
+            Value::Text(t) if !t.is_empty() => {
+                out.push(' ');
+                t.bytes().for_each(|b| write!(out, "{b:02x}").unwrap());
+            }
+            Value::Text(_) => {}
+        }
+        out.push('\n');
+    }
+    out
+}
 
-    compare(&name, &d.map, &g.values);
+/// The command that rewrites the goldens, quoted in each one.
+const REGENERATE: &str = "cargo test -p endf --test golden -- --ignored regenerate_goldens";
 
-    g.values.len()
+/// Where a fixture's golden is stored: its name with the format suffix and
+/// any `.xz` taken off, as `.txt.xz`.
+fn golden_for(fixture: &Path) -> PathBuf {
+    let name = fixture.file_name().unwrap().to_string_lossy();
+    let name = name.strip_suffix(".xz").unwrap_or(&name);
+    let stem = Path::new(name).file_stem().unwrap().to_string_lossy();
+    golden_dir().join(format!("{stem}.txt.xz"))
+}
+
+/// Every ENDF and ACE fixture, sorted.
+fn fixtures() -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(fixture_dir())
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| ["endf", "dat", "ace"].iter().any(|k| has_kind(p, k)))
+        .collect();
+    found.sort();
+    found
+}
+
+/// Compare one golden file against the Rust reader. Returns paths compared.
+fn check(golden_path: &Path) -> usize {
+    let name = golden_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let stored = parse_golden(&read_text(golden_path), &name);
+    let fresh = build(&stored);
+
+    assert_eq!(fresh.n_tables, stored.n_tables, "{name}: table count");
+    assert_eq!(
+        fresh.n_materials, stored.n_materials,
+        "{name}: material count"
+    );
+    assert_eq!(fresh.mats, stored.mats, "{name}: material numbers");
+    assert_eq!(
+        fresh.sections, stored.sections,
+        "{name}: section splitting differs"
+    );
+    compare(&name, &fresh.values, &stored.values);
+    stored.values.len()
 }
 
 #[test]
-fn matches_the_python_reader() {
+fn matches_the_goldens() {
     let dir = golden_dir();
     let mut goldens: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
@@ -2363,17 +2701,80 @@ fn matches_the_python_reader() {
     println!("{} golden files, {total} paths compared", goldens.len());
 }
 
+/// A fixture with no golden is checked by nothing, so its absence fails here
+/// by name, as does a golden whose fixture has gone.
+#[test]
+fn every_fixture_has_a_golden() {
+    let mut expected: BTreeSet<PathBuf> = fixtures().iter().map(|f| golden_for(f)).collect();
+    expected.insert(golden_dir().join("chain.txt.xz"));
+    let present: BTreeSet<PathBuf> = std::fs::read_dir(golden_dir())
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| has_kind(p, "txt"))
+        .collect();
+    let missing: Vec<_> = expected.difference(&present).collect();
+    let orphaned: Vec<_> = present.difference(&expected).collect();
+    assert!(
+        missing.is_empty(),
+        "fixtures with no golden, write them with `{REGENERATE}`: {missing:?}"
+    );
+    assert!(orphaned.is_empty(), "goldens with no fixture: {orphaned:?}");
+}
+
+/// The chain golden is built from the evaluations named here, not from
+/// whatever its own header says, so editing the lists above is what changes it.
+#[test]
+fn the_chain_golden_names_the_chain_fixtures() {
+    let path = golden_dir().join("chain.txt.xz");
+    let stored = parse_golden(&read_text(&path), "chain.txt.xz");
+    let want = chain_header();
+    assert_eq!(stored.decay, want.decay);
+    assert_eq!(stored.neutron, want.neutron);
+    assert_eq!(stored.chain_reactions, want.chain_reactions);
+}
+
+/// Rewrite every golden from the Rust reader.
+///
+/// Ignored, so a plain `cargo test` only ever checks. Run it after adding a
+/// fixture, or after a deliberate change to what the reader produces, and
+/// review the diff it leaves: a golden that changes is a change in what the
+/// reader returns for a real evaluation. A file whose content is unchanged is
+/// left alone, so the compressed bytes do not churn.
+#[test]
+#[ignore = "writes the goldens; run on purpose"]
+fn regenerate_goldens() {
+    let mut headers: Vec<(PathBuf, Golden)> = fixtures()
+        .iter()
+        .map(|f| (golden_for(f), fixture_header(f)))
+        .collect();
+    headers.push((golden_dir().join("chain.txt.xz"), chain_header()));
+
+    for (target, header) in headers {
+        let text = render(&build(&header));
+        if target.exists() && read_text(&target) == text {
+            continue;
+        }
+        let file = std::fs::File::create(&target)
+            .unwrap_or_else(|e| panic!("creating {}: {e}", target.display()));
+        let mut xz =
+            lzma_rust2::XzWriter::new(file, lzma_rust2::XzOptions::with_preset(9)).unwrap();
+        std::io::Write::write_all(&mut xz, text.as_bytes()).unwrap();
+        xz.finish().unwrap();
+        println!("wrote {}", target.display());
+    }
+}
+
 #[test]
 fn unported_files_keep_their_text() {
-    // The port proceeds file by file, so a section with no Rust parser must
-    // still round-trip its text for the Python reader to fall back to.
+    // A section with no parser must still keep its text, so nothing in the
+    // evaluation is lost and a later parser has something to read.
     //
     // Built synthetically rather than taken from a fixture: every file in
     // every fixture on this branch is now ported, and a test that depends on
     // that not being true stops testing anything the moment it stops holding.
-    // MF=31 (covariances of the fission neutron multiplicity) is not parsed
-    // by the Python reader either (its dispatch warns and ignores) so it is a
-    // stable choice rather than one the next commit invalidates.
+    // MF=31 (covariances of the fission neutron multiplicity) has no parser
+    // and nothing here needs one, so it is a stable choice rather than one
+    // the next commit invalidates.
     const MF: i32 = 31;
     let line =
         |body: &str, mat: i32, mf: i32, mt: i32| format!("{body:<66}{mat:>4}{mf:>2}{mt:>3}\n");
@@ -2398,7 +2799,7 @@ fn unported_files_keep_their_text() {
         "MF={MF} should not have a parser"
     );
 
-    // The body is kept whole, SEND excluded, so the Python reader can take it.
+    // The body is kept whole, SEND excluded.
     let body = &m.section_text[&(MF, 452)];
     assert_eq!(body.lines().count(), 2);
     assert!(body.contains("1.001000+3"));
@@ -2407,14 +2808,10 @@ fn unported_files_keep_their_text() {
 /// The files that have a Rust parser but which no fixture exercises.
 ///
 /// These are written and structurally complete but have never been run against
-/// a real evaluation, so nothing here is checked against the Python reader.
-/// Kept as an explicit list rather than a remark in a commit message: the test
-/// below fails when a fixture starts covering one of them, which is the moment
-/// the entry should be deleted.
-///
-/// MF=32, the only entry today, is here for a different reason: the Python
-/// reader does not parse it, so a fixture would have no golden to compare
-/// against. `mf32_tapes.rs` walks it on the full libraries instead.
+/// a real evaluation, so no golden holds them. Kept as an explicit list rather
+/// than a remark in a commit message: the test below fails when a fixture
+/// starts covering one of them, which is the moment the entry should be
+/// deleted. Empty today.
 const UNCOVERED_BY_ANY_FIXTURE: [i32; 0] = [];
 
 /// The MF files that have a Rust parser at all.
@@ -2453,14 +2850,11 @@ fn the_uncovered_parser_list_is_accurate() {
 /// Every distribution shape the object dumpers can write.
 ///
 /// Three ENDF laws are missing on purpose. LF=1, LF=5 and LF=12 reach the
-/// golden files through the MF=5 section dump, which is driven by the Python
-/// reader's dictionaries and writes no `kind` line, so this scan cannot see
-/// them. Their fixture coverage is tracked in `golden/README.md` instead.
+/// golden files through the MF=5 section dump, which writes no `kind` line,
+/// so this scan cannot see them. Their fixture coverage is tracked in `golden/README.md` instead.
 ///
-/// ACE law 5 is missing for a different reason: the Python reader has no
-/// `from_ace` for the general evaporation spectrum and dies with an
-/// AttributeError, so there is nothing to compare against. The
-/// Rust reader refuses that law by name.
+/// ACE law 5 is missing for a different reason: the reader refuses the general
+/// evaporation spectrum from ACE by name, so there is nothing to dump.
 const DISTRIBUTION_SHAPES: [&str; 16] = [
     // Univariate shapes.
     "discrete",

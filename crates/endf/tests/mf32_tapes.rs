@@ -1,12 +1,11 @@
 //! Every MF=32 section of six evaluated libraries, read to its SEND record.
 //!
-//! No fixture is small enough to cover what the libraries actually write in
-//! MF=32, and the Python reader the goldens come from does not parse it at
-//! all, so this is the check that the parser matches the tapes: every section
-//! of ENDF/B-VIII.1, JEFF-4.0, JENDL-5.0, TENDL-2017, TENDL-2025 and
-//! FENDL-3.2d is parsed, must consume exactly the lines up to its SEND
-//! record, and the counts of what was read must match an independent survey
-//! of the same tapes.
+//! No set of fixtures small enough to keep covers what the libraries actually
+//! write in MF=32, so this is the check that the parser matches the tapes:
+//! every section of ENDF/B-VIII.1, JEFF-4.0, JENDL-5.0, TENDL-2017,
+//! TENDL-2025 and FENDL-3.2d is parsed, must consume exactly the lines up to
+//! its SEND record, and the counts of what was read must match an independent
+//! survey of the same tapes.
 //!
 //! The tapes are tens of gigabytes and live outside the repository, so this
 //! is ignored by default. Point `ENDF_TAPES` at a directory laid out as
