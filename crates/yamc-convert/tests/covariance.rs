@@ -741,7 +741,10 @@ fn resonance_parameter_covariance_is_written_as_derived_ni_blocks() {
     assert_eq!(ni(102, 102).lb, 5);
     let cross = ni(2, 102);
     assert_eq!(cross.lb, 6);
-    assert_eq!((cross.er.clone(), cross.ec.clone()), (edges.clone(), edges.clone()));
+    assert_eq!(
+        (cross.er.clone(), cross.ec.clone()),
+        (edges.clone(), edges.clone())
+    );
     for h in 0..n {
         for k in 0..n {
             assert_eq!(cross.fkl[h * n + k], g.get(0, h, 1, k));

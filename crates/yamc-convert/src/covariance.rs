@@ -26,7 +26,8 @@
 //! range's cross-section covariance the MF=32 resonance-parameter part plus
 //! MF=33, and many evaluations put the whole resolved-range uncertainty in
 //! MF=32 (ENDF/B-VIII.1 W, Cu, Cr, Ni, Pb and Ti among them). So for each
-//! resolved MF=32 range whose formalism [`endf::resonance`] reconstructs, the
+//! resolved MF=32 range whose formalism [`endf::resonance`] reconstructs
+//! (Reich-Moore, and R-matrix limited without charged-particle channels), the
 //! covariance of its elastic, capture and fission group cross sections
 //! ([`endf::resonance_covariance::group_covariance`], one group per resonance,
 //! 1/E weight, infinite dilution, 0 K) is written as NI blocks: LB=5 for a
@@ -475,7 +476,7 @@ fn push_resonance_blocks(
     rows: &mut CovarianceRows,
     material: &Material,
 ) -> Result<(), Box<dyn Error>> {
-    use endf::resonance::{ReichMooreRange, ResolvedRange};
+    use endf::resonance::{RMatrixRange, ReichMooreRange, ResolvedRange};
     use endf::resonance_covariance::{group_covariance, resolved_covariances, resonance_edges};
     let (Some(mf2), Some(mf32)) = (material.mf2(), material.mf32()) else {
         return Ok(());
@@ -486,8 +487,17 @@ fn push_resonance_blocks(
             continue;
         }
         let range = &mf2.isotopes[cov.isotope].ranges[cov.mf2_range];
+        // A formalism or feature endf does not reconstruct yet (charged
+        // particle channels, for one) leaves the range to MF=33 alone.
         let reconstruction: Box<dyn ResolvedRange> = match range.lrf {
-            3 => Box::new(ReichMooreRange::new(range)?),
+            3 => match ReichMooreRange::new(range) {
+                Ok(r) => Box::new(r),
+                Err(_) => continue,
+            },
+            7 => match RMatrixRange::new(range) {
+                Ok(r) => Box::new(r),
+                Err(_) => continue,
+            },
             _ => continue,
         };
         // One group per resonance, within the covariance's own range (which
