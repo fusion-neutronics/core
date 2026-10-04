@@ -2535,6 +2535,7 @@ mod r_matrix_tests {
     const W186: &[u8] = include_bytes!("../fixtures/n-074_W_186_mf2_mf32.endf.xz");
     const CU65: &[u8] = include_bytes!("../fixtures/n-029_Cu_065_mf2_mf32.endf.xz");
     const V51: &[u8] = include_bytes!("../fixtures/n-023_V_051_mf2.endf.xz");
+    const CU63: &[u8] = include_bytes!("../fixtures/n-029_Cu_063_mf2_mf32.endf.xz");
 
     fn material(fixture: &[u8]) -> Material {
         Material::from_str(&crate::testdata::text(fixture)).expect("fixture parses")
@@ -2629,12 +2630,36 @@ mod r_matrix_tests {
         (1.999991e5, 5.107940e0, 1.056029e-2),
     ];
 
+    /// ENDF/B-VIII.1 Cu63, whose neutron pair has shift factors (SHF=1, so
+    /// the level shift enters through (S - B) / P): NJOY 2016 RECONR at 0 K,
+    /// less the MF=3 background, at points of its grid. Ours agrees at all
+    /// 146,263 grid points in the range to 9e-6.
+    const CU63_NJOY: &[(f64, f64, f64)] = &[
+        (1.007813e-5, 5.219303e0, 2.245187e2),
+        (2.64666e3, 5.050529e2, 5.69318e1),
+        (5.897021e3, 8.156125e0, 5.240397e-2),
+        (1.062948e4, 3.123553e0, 1.95261e0),
+        (1.512945e4, 1.399074e1, 3.531374e0),
+        (2.0169835e4, 2.204113e0, 2.875944e-1),
+        (2.384106e4, 4.633378e0, 1.719402e-2),
+        (3.80580063e4, 9.011068e0, 2.572611e0),
+        (5.317189e4, 9.354675e0, 7.793233e-1),
+        (7.708003e4, 5.074166e0, 3.401554e-2),
+        (8.295071e4, 9.381562e0, 4.940859e-3),
+        (9.997417e4, 3.019871e0, 1.169127e-3),
+    ];
+
     /// The reconstruction agrees with NJOY to the seven digits it writes:
-    /// W186, Cu65 and V51 (whose true and effective radii differ). None of
-    /// the three uses shift factors (SHF=0 on every pair).
+    /// W186, Cu65, V51 (whose true and effective radii differ) and Cu63
+    /// (shift factors on its neutron pair).
     #[test]
     fn r_matrix_matches_njoy() {
-        for (fixture, reference) in [(W186, W186_NJOY), (CU65, CU65_NJOY), (V51, V51_NJOY)] {
+        for (fixture, reference) in [
+            (W186, W186_NJOY),
+            (CU65, CU65_NJOY),
+            (V51, V51_NJOY),
+            (CU63, CU63_NJOY),
+        ] {
             let rm = range(fixture);
             for &(e, elastic, capture) in reference {
                 let x = rm.cross_sections(e);
@@ -2653,12 +2678,12 @@ mod r_matrix_tests {
 
     /// Every resonance's analytic derivatives (ER, the capture width and each
     /// neutron channel's width) match central differences of the
-    /// reconstruction, negative-energy resonances included, and with V51's
-    /// distinct true and effective radii.
+    /// reconstruction, negative-energy resonances included, with V51's
+    /// distinct true and effective radii and Cu63's shift factors.
     #[test]
     fn r_matrix_derivatives_match_central_differences() {
         let mut checked = 0;
-        for fixture in [W186, CU65, V51] {
+        for fixture in [W186, CU65, V51, CU63] {
             let base = material(fixture).mf2().unwrap().isotopes[0].ranges[0].clone();
             let rm = RMatrixRange::new(&base).unwrap();
             let ResonanceParameters::RMatrixLimited(params) = &base.parameters else {
@@ -2749,6 +2774,47 @@ mod r_matrix_tests {
     /// (ERRORR's thermal capture is 14 times its 0.1 to 1 eV group's, both 1/v,
     /// and its 1 to 3 keV capture is 7e-13; ours is 2.45e-4 in each 1/v group,
     /// the 1.5% W186 capture uncertainty ERRORR gives elsewhere).
+    const W183: &[u8] = include_bytes!("../fixtures/n-074_W_183_mf2_mf32.endf.xz");
+
+    /// ENDF/B-VIII.1 W183 is the one evaluation that writes R-matrix limited
+    /// parameter covariance in full (LCOMP=1): every one of its 374
+    /// resonances matches MF=2 exactly, and the group covariance agrees with
+    /// NJOY 2016 ERRORR's on six 1/E groups over the resolved range,
+    /// relativized by ERRORR's group cross sections. Elastic is ERRORR's
+    /// MT=2 covariance as printed (which with MF=32 present holds no MF=33
+    /// part); capture is its MT=102 covariance less the evaluation's MF=33
+    /// part there, a uniform 2.5e-3.
+    #[test]
+    fn full_r_matrix_covariance_matches_errorr() {
+        let m = material(W183);
+        let covs = range_covariances(m.mf2().unwrap(), m.mf32().unwrap()).unwrap();
+        let cov = &covs[0];
+        assert_eq!((cov.lru, cov.lrf, cov.len()), (1, 7, 1132));
+        assert!(cov.unmatched.is_empty() && cov.approximate == 0);
+        let rm = RMatrixRange::new(&m.mf2().unwrap().isotopes[0].ranges[cov.mf2_range]).unwrap();
+        let edges = [1e-5, 1.0, 1e1, 1e2, 1e3, 2e3, 5e3];
+        let totals = vec![
+            vec![5.6675, 5.9782, 108.58, 36.381, 23.172, 19.890],
+            vec![85.782, 38.454, 93.079, 20.833, 4.9394, 2.6741],
+        ];
+        let g = group_covariance(cov, &rm, &edges)
+            .unwrap()
+            .relative_to(&totals);
+        let elastic = [3.974e-4, 2.174e-4, 9.285e-4, 4.622e-4, 2.464e-4, 2.067e-4];
+        let capture = [3.81e-4, 5.36e-4, 1.19e-4, 1.21e-4, 0.69e-4, 0.58e-4];
+        for h in 0..6 {
+            for (a, errorr, tolerance) in [(0, elastic[h], 0.01), (1, capture[h], 0.03)] {
+                let ours = g.get(a, h, a, h);
+                assert!(
+                    (ours / errorr - 1.0).abs() < tolerance,
+                    "reaction {a} group {h}: {ours:e} against ERRORR's {errorr:e}"
+                );
+            }
+        }
+        // The elastic groups anticorrelate across 10 eV, as ERRORR's do.
+        assert!((g.get(0, 0, 0, 2) / -5.833e-4 - 1.0).abs() < 0.01);
+    }
+
     #[test]
     fn r_matrix_group_covariance_matches_errorr() {
         let m = material(W186);

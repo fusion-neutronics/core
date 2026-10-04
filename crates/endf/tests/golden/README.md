@@ -94,10 +94,11 @@ useful coverage the day it is added.
 
 Every ENDF file with a parser is exercised by a fixture. MF 32 was the last:
 the Python reader never parsed it, so it could not have a golden until the
-goldens became this reader's own. Its fixtures cover LCOMP=0, LCOMP=1 general,
-LCOMP=2 compact (Reich-Moore and R-matrix limited) and the unresolved range;
-LCOMP=1 for R-matrix limited has none. `tests/mf32_tapes.rs` also walks every
-MF=32 section of six libraries.
+goldens became this reader's own. Its fixtures cover LCOMP=0, LCOMP=1 general
+(and for R-matrix limited in W183, the one ENDF/B-VIII.1 evaluation that writes
+it), LCOMP=2 compact (Reich-Moore and R-matrix limited) and the unresolved
+range.
+`tests/mf32_tapes.rs` also walks every MF=32 section of six libraries.
 
 It is pinned in `golden.rs` as `UNCOVERED_BY_ANY_FIXTURE` and checked, so the
 list cannot drift in either direction: the test fails both when a fixture
@@ -161,6 +162,8 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 | `n-066_Dy_158_mf2_mf32` | MF32 LCOMP=1 general covariance blocks |
 | `n-011_Na_023_mf2_mf32`, `n-090_Th_232_mf2_mf32` | MF32 LCOMP=2 compact Reich-Moore; Th232 also an unresolved range |
 | `n-017_Cl_035_mf2_mf32`, `n-029_Cu_065_mf2_mf32`, `n-074_W_186_mf2_mf32` | MF2 LRF=7 and MF32 LCOMP=2 compact R-matrix limited |
+| `n-029_Cu_063_mf2_mf32` | MF2 LRF=7 with shift factors (SHF=1) on the neutron pair, MF32 LCOMP=2 compact |
+| `n-074_W_183_mf2_mf32` | MF32 LCOMP=1 R-matrix limited, the only evaluation in ENDF/B-VIII.1 to write it |
 | `n-045_Rh_103_mf2_mf32` | MF32 compact R-matrix limited plus an unresolved range |
 | `n-082_Pb_208_mf2`, `n-092_U_235_mf2`, `n-023_V_051_mf2`, `n-083_Bi_209_mf2` | MF2 alone: Reich-Moore, LRF=7 with APE and APT both given, multi-level Breit-Wigner |
 
@@ -169,7 +172,6 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 - **Unresolved Cases A and B.** They cannot be reached at all through the
   current dispatch (it tests LRF where the format uses LRU) so a fixture alone
   will not cover them.
-- **MF32 LCOMP=1 for R-matrix limited**, the one MF32 layout no fixture has.
 - **Adler-Adler (LRF=4)**, which the reader rejects rather than parses. A
   fixture would only pin that rejection.
 - **ACE law 5**, which the reader refuses by name. Every other ACE law is

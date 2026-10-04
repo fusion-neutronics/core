@@ -68,3 +68,10 @@ opt-level = 2
 # Dev-only: nothing shipped depends on it.
 [profile.dev.package.lzma-rust2]
 opt-level = 3
+
+# The resonance covariance folds differentiate every resonance parameter at
+# every integration point; unoptimized, the W183 fold alone took two minutes
+# under `cargo test`. Optimizing this one crate keeps its tests near release
+# speed and leaves every other crate's debug build as it was.
+[profile.dev.package.endf]
+opt-level = 2
