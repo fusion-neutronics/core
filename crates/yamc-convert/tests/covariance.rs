@@ -290,9 +290,13 @@ fn round_trip(compressed: &[u8], name: &str, expect_mts: &[i32]) {
         }
     }
 
+    // The rows derived from MF=32 (subsection_idx -1) are not the tape's, and
+    // are checked by their own test.
+    let tape_rows = (0..batch.num_rows())
+        .filter(|&row| subsection_idx.value(row) >= 0)
+        .count();
     assert_eq!(
-        rows_checked,
-        batch.num_rows(),
+        rows_checked, tape_rows,
         "the file has rows the evaluation does not account for"
     );
     assert!(rows_checked > 0, "{name} produced no blocks to compare");
@@ -677,4 +681,73 @@ fn the_loader_reads_back_what_the_converter_writes() {
         expanded += 1;
     }
     assert!(expanded > 0, "no NI blocks were expanded");
+}
+
+/// ENDF/B-VIII.1 Dy158's MF=1 MT=451, MF=2 and MF=32: a Reich-Moore resolved
+/// range to 86.2 eV with an LCOMP=1 covariance and no MF=33.
+const DY158_MF32: &[u8] = include_bytes!("../../endf/fixtures/n-066_Dy_158_mf2_mf32.endf.xz");
+
+/// An evaluation with MF=32 and no MF=33 still gets a `covariance.arrow`: its
+/// resonance-parameter covariance as NI blocks, LB=5 for elastic and capture
+/// with themselves and LB=6 for elastic with capture, on one group per
+/// resonance, marked `subsection_idx = -1` and read back by the loader as the
+/// ordinary blocks they are, carrying `group_covariance`'s numbers.
+#[test]
+fn resonance_parameter_covariance_is_written_as_derived_ni_blocks() {
+    use endf::resonance::ReichMooreRange;
+    use endf::resonance_covariance::{group_covariance, resolved_covariances, resonance_edges};
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let material = material(DY158_MF32, tmp.path(), "Dy158");
+    let written = yamc_convert::covariance::write_covariance(&material, tmp.path())
+        .expect("covariance writes");
+    assert!(written, "MF=32 alone is covariance to write");
+
+    let blocks = yamc_nuclide::arrow::covariance_arrow::read_covariance(tmp.path(), "Dy158")
+        .expect("the loader reads it")
+        .expect("the file is there");
+    assert_eq!(blocks.len(), 3);
+    for b in &blocks {
+        assert_eq!(b.subsection_idx, -1);
+        assert!(b.is_same_evaluation());
+    }
+    let ni = |mt: i32, mt1: i32| -> &NiSubsection {
+        let b = blocks
+            .iter()
+            .find(|b| b.mt == mt && b.partner_mt() == mt1)
+            .unwrap_or_else(|| panic!("no ({mt}, {mt1}) block"));
+        match &b.data {
+            CovarianceData::Ni(ni) => ni,
+            other => panic!("({mt}, {mt1}) is {other:?}"),
+        }
+    };
+
+    // The reference: the same fold, straight from the parser.
+    let cov = &resolved_covariances(material.mf2().unwrap(), material.mf32().unwrap()).unwrap()[0];
+    let rm = ReichMooreRange::new(&material.mf2().unwrap().isotopes[0].ranges[0]).unwrap();
+    let edges = resonance_edges(&rm);
+    let g = group_covariance(cov, &rm, &edges).unwrap();
+    let n = g.groups();
+
+    let elastic = ni(2, 2);
+    assert_eq!((elastic.lb, elastic.ls), (5, 1));
+    assert_eq!(elastic.ek, edges);
+    let mut at = 0;
+    for h in 0..n {
+        for k in h..n {
+            assert_eq!(elastic.fkk[at], g.get(0, h, 0, k));
+            at += 1;
+        }
+    }
+    assert_eq!(ni(102, 102).lb, 5);
+    let cross = ni(2, 102);
+    assert_eq!(cross.lb, 6);
+    assert_eq!(
+        (cross.er.clone(), cross.ec.clone()),
+        (edges.clone(), edges.clone())
+    );
+    for h in 0..n {
+        for k in 0..n {
+            assert_eq!(cross.fkl[h * n + k], g.get(0, h, 1, k));
+        }
+    }
 }

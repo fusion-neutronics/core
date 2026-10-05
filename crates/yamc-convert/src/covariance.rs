@@ -18,7 +18,24 @@
 //! that is the reader's job.
 //!
 //! One row per covariance block, which is one NC or NI sub-subsection of one
-//! subsection. That granularity IS the sparse form: most (MT, MT1) pairs have
+//! subsection.
+//!
+//! # The resonance-parameter contribution
+//!
+//! The one set of rows not on the tape. ENDF-102 section 32 makes a resolved
+//! range's cross-section covariance the MF=32 resonance-parameter part plus
+//! MF=33, and many evaluations put the whole resolved-range uncertainty in
+//! MF=32 (ENDF/B-VIII.1 W, Cu, Cr, Ni, Pb and Ti among them). So for each
+//! resolved MF=32 range whose formalism [`endf::resonance`] reconstructs, the
+//! covariance of its elastic, capture and fission group cross sections
+//! ([`endf::resonance_covariance::group_covariance`], one group per resonance,
+//! 1/E weight, infinite dilution, 0 K) is written as NI blocks: LB=5 for a
+//! reaction with itself, LB=6 for elastic with capture and the like. They are
+//! relative to the whole cross section, resonance part plus MF=3 background,
+//! since that is what a perturbation multiplies, as NJOY's ERRORR takes it.
+//! These rows have `subsection_idx = -1`, which no tape subsection has, so
+//! they read as the ordinary NI blocks they are (a reader adds them to
+//! MF=33's, as the format says) and are still told apart from the tape's. That granularity IS the sparse form: most (MT, MT1) pairs have
 //! no cross terms and simply have no row, with nothing thresholded and no small
 //! value dropped.
 //!
@@ -28,6 +45,7 @@
 //! sums. Dropping it would lose that index, so it is written as a
 //! `kind = "lumped"` row.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::Path;
 
@@ -281,6 +299,15 @@ impl CovarianceRows {
         block_idx
     }
 
+    /// One NI block derived from MF=32 rather than read off the tape: the
+    /// covariance of `mt` with `mt1` in this evaluation, written with
+    /// `subsection_idx = -1` (see the module documentation).
+    fn push_derived(&mut self, mt: i32, block_idx: usize, mt1: i32, block: &NiSubsection) {
+        self.push_common(mt, 0, block_idx, "ni", 0, mt1 as i64, 0.0, 0.0, Some(0));
+        *self.subsection_idx.last_mut().expect("just pushed") = -1;
+        self.push_ni(block);
+    }
+
     pub fn is_empty(&self) -> bool {
         self.mt.is_empty()
     }
@@ -403,6 +430,7 @@ pub fn write_covariance(material: &Material, dir: &Path) -> Result<bool, Box<dyn
             push_section(&mut rows, material.mat, mt, mf33)?;
         }
     }
+    push_resonance_blocks(&mut rows, material)?;
 
     if rows.is_empty() {
         return Ok(false);
@@ -416,10 +444,159 @@ pub fn write_covariance(material: &Material, dir: &Path) -> Result<bool, Box<dyn
     Ok(true)
 }
 
+/// The 1/E average of `sigma` over each group of `edges`: trapezoids in
+/// `ln E` on the function's own points and the edges.
+fn group_average(sigma: &endf::function::Tabulated1D, edges: &[f64]) -> Vec<f64> {
+    edges
+        .windows(2)
+        .map(|w| {
+            let (lo, hi) = (w[0], w[1]);
+            // Panel by panel of the table, each from its own end values: an
+            // evaluation doubles a point where MF=3 jumps (at the resolved
+            // range's upper limit, for one), and evaluating the function at
+            // that energy gives one side of the jump for both panels.
+            let mut total = 0.0;
+            for i in 0..sigma.x.len().saturating_sub(1) {
+                let (x0, x1) = (sigma.x[i], sigma.x[i + 1]);
+                let (a, b) = (x0.max(lo), x1.min(hi));
+                if a >= b {
+                    continue;
+                }
+                let ya = if a == x0 { sigma.y[i] } else { sigma.eval(a) };
+                let yb = if b == x1 {
+                    sigma.y[i + 1]
+                } else {
+                    sigma.eval(b)
+                };
+                total += 0.5 * (b / a).ln() * (ya + yb);
+            }
+            total / (hi / lo).ln()
+        })
+        .collect()
+}
+
+/// The resonance-parameter contribution, as NI blocks (see the module
+/// documentation). A range whose formalism is not reconstructed yet is
+/// skipped, as is an evaluation with no MF=32.
+fn push_resonance_blocks(
+    rows: &mut CovarianceRows,
+    material: &Material,
+) -> Result<(), Box<dyn Error>> {
+    use endf::resonance::{ReichMooreRange, ResolvedRange};
+    use endf::resonance_covariance::{group_covariance, resolved_covariances, resonance_edges};
+    let (Some(mf2), Some(mf32)) = (material.mf2(), material.mf32()) else {
+        return Ok(());
+    };
+    let lrp = material.mf1_mt451().map_or(1, |h| h.lrp);
+    let mut next_block: BTreeMap<i32, usize> = BTreeMap::new();
+    for cov in resolved_covariances(mf2, mf32)? {
+        if cov.is_empty() {
+            continue;
+        }
+        let range = &mf2.isotopes[cov.isotope].ranges[cov.mf2_range];
+        let reconstruction: Box<dyn ResolvedRange> = match range.lrf {
+            3 => Box::new(ReichMooreRange::new(range)?),
+            _ => continue,
+        };
+        // One group per resonance, within both the covariance's range and
+        // MF=2's (either can stop short of the other).
+        let (lo, hi) = (cov.el.max(range.el), cov.eh.min(range.eh));
+        let mut edges: Vec<f64> = resonance_edges(reconstruction.as_ref())
+            .into_iter()
+            .filter(|&e| e > lo && e < hi)
+            .collect();
+        edges.insert(0, lo);
+        edges.push(hi);
+        let mut resonance = group_covariance(&cov, reconstruction.as_ref(), &edges)?;
+        // An isotope of a natural element contributes its abundance's share.
+        let abundance = mf2.isotopes[cov.isotope].abn;
+        for xs in &mut resonance.cross_sections {
+            xs.iter_mut().for_each(|x| *x *= abundance);
+        }
+        let totals: Vec<Vec<f64>> = resonance
+            .reactions
+            .iter()
+            .zip(&resonance.cross_sections)
+            .map(|(mt, xs)| {
+                let background = material
+                    .mf3(*mt)
+                    .map_or_else(|| vec![0.0; xs.len()], |b| group_average(&b.sigma, &edges));
+                // With LRP=2 MF=3 holds the whole cross section already.
+                if lrp == 2 {
+                    background
+                } else {
+                    xs.iter().zip(background).map(|(r, b)| r + b).collect()
+                }
+            })
+            .collect();
+        let g = resonance.relative_to(&totals);
+        let n = g.groups();
+        for (a, &mt) in g.reactions.iter().enumerate() {
+            for (b, &mt1) in g.reactions.iter().enumerate().skip(a) {
+                let values: Vec<f64> = if a == b {
+                    (0..n)
+                        .flat_map(|h| (h..n).map(move |k| (h, k)))
+                        .map(|(h, k)| g.get(a, h, a, k))
+                        .collect()
+                } else {
+                    (0..n)
+                        .flat_map(|h| (0..n).map(move |k| (h, k)))
+                        .map(|(h, k)| g.get(a, h, b, k))
+                        .collect()
+                };
+                if values.iter().all(|v| *v == 0.0) {
+                    continue;
+                }
+                let block = if a == b {
+                    NiSubsection {
+                        lb: 5,
+                        ls: 1,
+                        ne: (n + 1) as i64,
+                        nt: values.len() as i64 + (n + 1) as i64,
+                        ek: g.edges.clone(),
+                        fkk: values,
+                        ..Default::default()
+                    }
+                } else {
+                    NiSubsection {
+                        lb: 6,
+                        ner: (n + 1) as i64,
+                        nec: (n + 1) as i64,
+                        nt: 1 + ((n + 1) * (n + 1)) as i64,
+                        er: g.edges.clone(),
+                        ec: g.edges.clone(),
+                        fkl: values,
+                        ..Default::default()
+                    }
+                };
+                let idx = next_block.entry(mt).or_insert(0);
+                rows.push_derived(mt, *idx, mt1, &block);
+                *idx += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use endf::mf::covariance::Mf33Subsection;
+
+    /// MF=3 doubles the point where it jumps, as at a resolved range's upper
+    /// limit (ENDF/B-VIII.1 Pb208 elastic goes from 1.8e-8 b to 5.5 b at
+    /// 1.5 MeV). Each group takes its own side of the jump: the group below
+    /// used to average in the value from above.
+    #[test]
+    fn a_group_average_takes_its_own_side_of_a_jump() {
+        let sigma =
+            endf::function::Tabulated1D::new(vec![1.0, 2.0, 2.0, 4.0], vec![0.0, 0.0, 5.0, 5.0]);
+        let g = group_average(&sigma, &[1.0, 2.0, 4.0]);
+        assert_eq!(g, [0.0, 5.0]);
+        // A group straddling the jump weights each side by its 1/E share.
+        let g = group_average(&sigma, &[1.0, 4.0]);
+        assert!((g[0] - 5.0 * 0.5).abs() < 1e-12, "{}", g[0]);
+    }
 
     /// A lumped reaction's component is its HEAD alone. One that also carries
     /// subsections is out of format and refused, not written as blocks whose

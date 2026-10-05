@@ -110,9 +110,11 @@ pub struct Parameter {
 /// One resolved range's parameter covariance.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedCovariance {
-    /// Index of the isotope in MF=2 and MF=32, and of the range within it.
+    /// Index of the isotope in MF=2 and MF=32, of the range within MF=32's
+    /// isotope, and of the MF=2 range it was matched to.
     pub isotope: usize,
     pub range: usize,
+    pub mf2_range: usize,
     pub el: f64,
     pub eh: f64,
     /// The MF=2 representation: 1 or 2 Breit-Wigner, 3 Reich-Moore, 7
@@ -168,11 +170,12 @@ pub fn resolved_covariances(mf2: &Mf2, mf32: &Mf32) -> Result<Vec<ResolvedCovari
                 continue;
             }
             let overlap = |el: f64, eh: f64| (eh.min(range.eh) - el.max(range.el)).max(0.0);
-            let resonances = parameters
+            let (mf2_range, resonances) = parameters
                 .ranges
                 .iter()
-                .filter(|p| p.lru == 1 && overlap(p.el, p.eh) > 0.0)
-                .max_by(|a, b| overlap(a.el, a.eh).total_cmp(&overlap(b.el, b.eh)))
+                .enumerate()
+                .filter(|(_, p)| p.lru == 1 && overlap(p.el, p.eh) > 0.0)
+                .max_by(|a, b| overlap(a.1.el, a.1.eh).total_cmp(&overlap(b.1.el, b.1.eh)))
                 .ok_or(Error::Mismatched {
                     what: "an MF=32 resolved range and the MF=2 ranges",
                 })?;
@@ -182,6 +185,7 @@ pub fn resolved_covariances(mf2: &Mf2, mf32: &Mf32) -> Result<Vec<ResolvedCovari
             out.push(ResolvedCovariance {
                 isotope: i,
                 range: r,
+                mf2_range,
                 el: range.el,
                 eh: range.eh,
                 lrf: range.lrf,
@@ -720,6 +724,41 @@ impl GroupCovariance {
     pub fn get(&self, a: usize, g: usize, b: usize, h: usize) -> f64 {
         let n = self.reactions.len() * self.groups();
         self.relative[(a * self.groups() + g) * n + b * self.groups() + h]
+    }
+
+    /// The same covariance relative to `totals` (per reaction, per group)
+    /// instead of the resonance cross sections alone: what to use where the
+    /// cross section that gets multiplied is the resonance part plus a
+    /// background, as a transport replica's is. A group whose total is zero
+    /// reads zero.
+    pub fn relative_to(&self, totals: &[Vec<f64>]) -> GroupCovariance {
+        let (r, g) = (self.reactions.len(), self.groups());
+        let n = r * g;
+        let scale: Vec<f64> = (0..n)
+            .map(|k| {
+                let (a, h) = (k / g, k % g);
+                let total = totals.get(a).and_then(|t| t.get(h)).copied().unwrap_or(0.0);
+                if total != 0.0 {
+                    self.cross_sections[a][h] / total
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mut relative = self.relative.clone();
+        for i in 0..n {
+            for j in 0..n {
+                relative[i * n + j] *= scale[i] * scale[j];
+            }
+        }
+        GroupCovariance {
+            edges: self.edges.clone(),
+            reactions: self.reactions.clone(),
+            cross_sections: (0..r)
+                .map(|a| totals.get(a).cloned().unwrap_or_else(|| vec![0.0; g]))
+                .collect(),
+            relative,
+        }
     }
 }
 
