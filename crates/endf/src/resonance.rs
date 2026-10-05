@@ -43,8 +43,9 @@
 //!
 //! The channel radius `a` (in the penetrability) and the scattering radius
 //! (in the phase shift) follow NAPS: with NAPS=0 the channel radius is
-//! `0.123 A^(1/3) + 0.08` and the scattering radius AP (or the section's APL
-//! where non-zero); with NAPS=1 both are the scattering radius.
+//! `0.123 A^(1/3) + 0.08`, `A` the target mass in amu (`AWRI` times the
+//! neutron's, as NJOY takes it), and the scattering radius AP (or the
+//! section's APL where non-zero); with NAPS=1 both are the scattering radius.
 
 use crate::error::{Error, Result};
 use crate::mf::mf2::{ReichMoore, ResonanceParameters, ResonanceRange};
@@ -53,6 +54,16 @@ use crate::mf::mf2::{ReichMoore, ResonanceParameters, ResonanceRange};
 /// eV: `sqrt(2 m_n eV) 1e-12 cm / hbar` with the CODATA 2018 constants NJOY
 /// 2016 uses.
 pub const WAVE_NUMBER: f64 = 2.196_807_690_264e-3;
+
+/// The neutron mass in atomic mass units, as NJOY 2016 has it: the channel
+/// radius formula takes the target mass in amu, `AWRI` times this.
+pub const NEUTRON_MASS_AMU: f64 = 1.008_664_915_95;
+
+/// The channel radius ENDF-102 gives when NAPS=0, `0.123 A^(1/3) + 0.08`
+/// (1e-12 cm), `A` the target mass in amu.
+pub fn channel_radius_formula(awri: f64) -> f64 {
+    0.123 * (awri * NEUTRON_MASS_AMU).cbrt() + 0.08
+}
 
 /// The neutron wave number in the centre-of-mass frame, in 1/(1e-12 cm).
 pub fn wave_number(awri: f64, energy: f64) -> f64 {
@@ -557,7 +568,7 @@ impl ReichMooreRange {
 /// A resolved range that can give its cross sections and their derivatives
 /// with respect to MF=32's parameters: what the group covariance of
 /// [`crate::resonance_covariance::group_covariance`] needs from a formalism.
-pub trait ResolvedRange {
+pub trait RangeReconstruction {
     /// The range's energy bounds, eV.
     fn bounds(&self) -> (f64, f64);
 
@@ -573,11 +584,11 @@ pub trait ResolvedRange {
     fn parameter_gradients(
         &self,
         energy: f64,
-        cov: &crate::resonance_covariance::ResolvedCovariance,
+        cov: &crate::resonance_covariance::RangeCovariance,
     ) -> Result<Vec<Gradient>>;
 }
 
-impl ResolvedRange for ReichMooreRange {
+impl RangeReconstruction for ReichMooreRange {
     fn bounds(&self) -> (f64, f64) {
         (self.el, self.eh)
     }
@@ -603,7 +614,7 @@ impl ResolvedRange for ReichMooreRange {
     fn parameter_gradients(
         &self,
         energy: f64,
-        cov: &crate::resonance_covariance::ResolvedCovariance,
+        cov: &crate::resonance_covariance::RangeCovariance,
     ) -> Result<Vec<Gradient>> {
         let parameters = &cov.parameters;
         use crate::resonance_covariance::{Location, Quantity};
@@ -1104,7 +1115,7 @@ fn rml_groups(rml: &crate::mf::mf2::RMatrixLimited) -> Result<Vec<RmlGroup>> {
     Ok(out)
 }
 
-impl ResolvedRange for RMatrixRange {
+impl RangeReconstruction for RMatrixRange {
     fn bounds(&self) -> (f64, f64) {
         (self.el, self.eh)
     }
@@ -1129,7 +1140,7 @@ impl ResolvedRange for RMatrixRange {
     fn parameter_gradients(
         &self,
         energy: f64,
-        cov: &crate::resonance_covariance::ResolvedCovariance,
+        cov: &crate::resonance_covariance::RangeCovariance,
     ) -> Result<Vec<Gradient>> {
         use crate::resonance_covariance::{Location, Quantity};
         let by_resonance: std::collections::HashMap<(usize, usize), Vec<Gradient>> = self
@@ -1163,6 +1174,564 @@ impl ResolvedRange for RMatrixRange {
     }
 }
 
+/// NJOY 2016's fluctuation-integral quadrature (`reconr`'s `gnrl`): ten
+/// abscissae `QP` and weights `QW` for a chi-squared width distribution of one
+/// to four degrees of freedom, `[dof - 1][point]`.
+const URR_QW: [[f64; 10]; 4] = [
+    [
+        1.1120413e-1,
+        2.3546798e-1,
+        2.8440987e-1,
+        2.2419127e-1,
+        0.10967668,
+        0.030493789,
+        0.0042930874,
+        2.5827047e-4,
+        4.9031965e-6,
+        1.4079206e-8,
+    ],
+    [
+        0.033773418,
+        0.079932171,
+        0.12835937,
+        0.17652616,
+        0.21347043,
+        0.21154965,
+        0.13365186,
+        0.022630659,
+        1.6313638e-5,
+        2.745383e-31,
+    ],
+    [
+        3.3376214e-4,
+        0.018506108,
+        0.12309946,
+        0.29918923,
+        0.33431475,
+        0.17766657,
+        0.042695894,
+        4.0760575e-3,
+        1.1766115e-4,
+        5.0989546e-7,
+    ],
+    [
+        1.7623788e-3,
+        0.021517749,
+        0.080979849,
+        0.18797998,
+        0.30156335,
+        0.29616091,
+        0.10775649,
+        2.5171914e-3,
+        8.9630388e-10,
+        0.0,
+    ],
+];
+const URR_QP: [[f64; 10]; 4] = [
+    [
+        3.0013465e-3,
+        7.8592886e-2,
+        4.3282415e-1,
+        1.3345267,
+        3.0481846,
+        5.8263198,
+        9.9452656,
+        1.5782128e1,
+        23.996824,
+        36.216208,
+    ],
+    [
+        1.3219203e-2,
+        7.2349624e-2,
+        0.19089473,
+        0.39528842,
+        0.74083443,
+        1.3498293,
+        2.5297983,
+        5.2384894,
+        13.821772,
+        75.647525,
+    ],
+    [
+        1.0004488e-3,
+        0.026197629,
+        0.14427472,
+        0.44484223,
+        1.0160615,
+        1.9421066,
+        3.3150885,
+        5.2607092,
+        7.9989414,
+        12.072069,
+    ],
+    [
+        0.013219203,
+        0.072349624,
+        0.19089473,
+        0.39528842,
+        0.74083443,
+        1.3498293,
+        2.5297983,
+        5.2384894,
+        13.821772,
+        75.647525,
+    ],
+];
+
+/// One fluctuation integral (NJOY's `gnrl`): the average over the width
+/// distributions of `G_n^2 / G` (`id` 1, elastic), `G_n / G` (2, capture) or
+/// `G_n G_f / G` (3, fission), each in units of the average widths, for
+/// average neutron, fission, capture and competitive widths `alpha`, `beta`,
+/// `gamma` and `df` with `mu`, `nu` and `lambda` degrees of freedom.
+#[allow(clippy::too_many_arguments)]
+fn fluctuation(
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    mu: usize,
+    nu: usize,
+    lambda: usize,
+    df: f64,
+    id: u8,
+) -> f64 {
+    if alpha <= 0.0 || gamma <= 0.0 || beta < 0.0 || (beta > 0.0 && df < 0.0) {
+        return 0.0;
+    }
+    let dof = |m: usize| m.clamp(1, 4) - 1;
+    let (qwm, qpm) = (URR_QW[dof(mu)], URR_QP[dof(mu)]);
+    let (qwn, qpn) = (URR_QW[dof(nu)], URR_QP[dof(nu)]);
+    let (qwl, qpl) = (URR_QW[dof(lambda)], URR_QP[dof(lambda)]);
+    let num = |x: f64, y: f64| -> f64 {
+        match id {
+            1 => x * x,
+            2 => x,
+            _ => x * y,
+        }
+    };
+    let mut s = 0.0;
+    match (beta > 0.0, df > 0.0) {
+        (false, false) => {
+            if id == 3 {
+                return 0.0;
+            }
+            for j in 0..10 {
+                s += qwm[j] * num(qpm[j], 0.0) / (alpha * qpm[j] + gamma);
+            }
+        }
+        (false, true) => {
+            if id == 3 {
+                return 0.0;
+            }
+            for j in 0..10 {
+                for k in 0..10 {
+                    s +=
+                        qwm[j] * qwl[k] * num(qpm[j], 0.0) / (alpha * qpm[j] + gamma + df * qpl[k]);
+                }
+            }
+        }
+        (true, false) => {
+            for j in 0..10 {
+                for k in 0..10 {
+                    s += qwm[j] * qwn[k] * num(qpm[j], qpn[k])
+                        / (alpha * qpm[j] + beta * qpn[k] + gamma);
+                }
+            }
+        }
+        (true, true) => {
+            for j in 0..10 {
+                for k in 0..10 {
+                    for l in 0..10 {
+                        s += qwm[j] * qwn[k] * qwl[l] * num(qpm[j], qpn[k])
+                            / (alpha * qpm[j] + beta * qpn[k] + gamma + df * qpl[l]);
+                    }
+                }
+            }
+        }
+    }
+    s
+}
+
+/// The average parameters of one `(l, J)`, tabulated in energy: a table of
+/// one row is energy independent.
+#[derive(Debug, Clone, PartialEq)]
+struct UrrSpin {
+    aj: f64,
+    /// Degrees of freedom of the competitive, neutron and fission widths.
+    mux: usize,
+    mun: usize,
+    muf: usize,
+    energies: Vec<f64>,
+    /// D, GX, GN0, GG, GF per energy.
+    rows: Vec<[f64; 5]>,
+}
+
+impl UrrSpin {
+    /// The parameters at `energy`, linearly interpolated and held constant
+    /// beyond the table: how NJOY takes them at a node of the cross-section
+    /// grid, and within a panel too wide to interpolate cross sections across
+    /// (see [`UnresolvedAverages::cross_sections`]).
+    fn at(&self, energy: f64) -> [f64; 5] {
+        let n = self.energies.len();
+        if n == 1 || energy <= self.energies[0] {
+            return self.rows[0];
+        }
+        if energy >= self.energies[n - 1] {
+            return self.rows[n - 1];
+        }
+        let i = self.energies.partition_point(|&e| e <= energy) - 1;
+        let f = (energy - self.energies[i]) / (self.energies[i + 1] - self.energies[i]);
+        std::array::from_fn(|q| self.rows[i][q] + f * (self.rows[i + 1][q] - self.rows[i][q]))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct UrrOrbital {
+    l: i64,
+    awri: f64,
+    spins: Vec<UrrSpin>,
+}
+
+/// An unresolved range's infinitely dilute average cross sections at 0 K, as
+/// NJOY's RECONR computes them (`csunr1` and `csunr2`, ENDF-102 D.2): the
+/// single-level average over Porter-Thomas-like width distributions, with
+/// NJOY's ten-point fluctuation quadrature, for every `(l, J)` of the range,
+/// plus potential scattering. Only `l <= 2` is supported, as in NJOY.
+///
+/// Where the parameters depend on energy the cross sections are computed at
+/// the evaluator's energies and interpolated between them, as ENDF-102 says
+/// INT is for and as NJOY does, rather than computed from interpolated
+/// parameters: the two differ by up to 3% in ENDF/B-VIII.1 Rh103 capture
+/// between its parameter energies (see [`Self::cross_sections`]).
+///
+/// These averages are what the unresolved range's resonance-parameter
+/// covariance (MF=32, LRU=2) moves; where the evaluation sets LSSF=1 the
+/// average cross sections themselves are in MF=3 and the parameters only
+/// shape self-shielding, so a caller relativizes by MF=3.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnresolvedAverages {
+    pub el: f64,
+    pub eh: f64,
+    /// 1 where the averages are in MF=3 already.
+    pub lssf: i64,
+    spin: f64,
+    channel_radius: f64,
+    scattering_radius: f64,
+    orbitals: Vec<UrrOrbital>,
+    /// The energies the cross sections are computed at and interpolated
+    /// between; empty where the parameters do not depend on energy.
+    nodes: Vec<f64>,
+    /// The ENDF interpolation law between `nodes`.
+    law: i64,
+}
+
+/// A panel of the unresolved cross-section grid this many times wider than
+/// its lower energy or more is too coarse to interpolate cross sections
+/// across, and they are computed from interpolated parameters instead
+/// (NJOY's `wide`).
+const WIDE: f64 = 1.26;
+
+/// `y` at `x` between `(x1, y1)` and `(x2, y2)` under ENDF interpolation law
+/// `law`, as NJOY's `terp1` takes it. A logarithmic law across a zero or
+/// negative value falls back to linear, where `terp1` would give a NaN.
+fn interpolate(x1: f64, y1: f64, x2: f64, y2: f64, x: f64, law: i64) -> f64 {
+    if x2 == x1 || law == 1 || y2 == y1 || x == x1 {
+        return y1;
+    }
+    let linear = || y1 + (x - x1) * (y2 - y1) / (x2 - x1);
+    match law {
+        3 => y1 + (x / x1).ln() * (y2 - y1) / (x2 / x1).ln(),
+        4 if y1 > 0.0 && y2 > 0.0 => y1 * ((x - x1) * (y2 / y1).ln() / (x2 - x1)).exp(),
+        5 if y1 > 0.0 && y2 > 0.0 => y1 * ((x / x1).ln() * (y2 / y1).ln() / (x2 / x1).ln()).exp(),
+        _ => linear(),
+    }
+}
+
+/// What a multiplier on an unresolved parameter scales: column of
+/// [`UrrSpin::rows`].
+fn urr_column(q: crate::resonance_covariance::Quantity) -> Option<usize> {
+    use crate::resonance_covariance::Quantity;
+    match q {
+        Quantity::LevelSpacing => Some(0),
+        Quantity::CompetitiveWidth => Some(1),
+        Quantity::ReducedNeutronWidth => Some(2),
+        Quantity::CaptureWidth => Some(3),
+        Quantity::FissionWidth => Some(4),
+        _ => None,
+    }
+}
+
+impl UnresolvedAverages {
+    /// Prepare `range` (LRU=2) for reconstruction.
+    pub fn new(range: &ResonanceRange) -> Result<Self> {
+        use crate::mf::mf2::UnresolvedParameters;
+        let ResonanceParameters::Unresolved(u) = &range.parameters else {
+            return Err(Error::Unsupported {
+                what: "average cross sections of a range other than an unresolved one",
+            });
+        };
+        if range.nro != 0 {
+            return Err(Error::Unsupported {
+                what: "an energy-dependent scattering radius (NRO/=0)",
+            });
+        }
+        let awri = u.ranges.first().map_or(1.0, |r| r.awri);
+        let channel_radius = match range.naps {
+            0 => channel_radius_formula(awri),
+            _ => u.ap,
+        };
+        let mut orbitals = Vec::with_capacity(u.ranges.len());
+        // NJOY interpolates on the first (l, J)'s energies, by the law of the
+        // last (case C), or linearly on ES (case B).
+        let mut grid: Vec<f64> = Vec::new();
+        let mut law = 2;
+        for r in &u.ranges {
+            if r.l > 2 {
+                return Err(Error::Unsupported {
+                    what: "an unresolved section with l > 2",
+                });
+            }
+            let mut spins = Vec::new();
+            if r.parameters.is_empty() {
+                // Case A: energy independent, no fission or competition.
+                for j in 0..r.aj.len() {
+                    spins.push(UrrSpin {
+                        aj: r.aj[j],
+                        mux: 1,
+                        mun: r.amun[j].round() as usize,
+                        muf: 1,
+                        energies: vec![range.el],
+                        rows: vec![[r.d[j], 0.0, r.gno[j], r.gg[j], 0.0]],
+                    });
+                }
+            }
+            for p in &r.parameters {
+                match p {
+                    UnresolvedParameters::CaseB {
+                        muf,
+                        d,
+                        aj,
+                        amun,
+                        gn0,
+                        gg,
+                        gf,
+                    } => {
+                        let energies: Vec<f64> = u.es.clone();
+                        if grid.is_empty() {
+                            grid = energies.clone();
+                        }
+                        let rows = energies
+                            .iter()
+                            .enumerate()
+                            .map(|(i, _)| [*d, 0.0, *gn0, *gg, gf.get(i).copied().unwrap_or(0.0)])
+                            .collect();
+                        spins.push(UrrSpin {
+                            aj: *aj,
+                            mux: 1,
+                            mun: amun.round() as usize,
+                            muf: *muf as usize,
+                            energies,
+                            rows,
+                        });
+                    }
+                    UnresolvedParameters::CaseC {
+                        aj,
+                        interpolation,
+                        amux,
+                        amun,
+                        amuf,
+                        e,
+                        d,
+                        gx,
+                        gn0,
+                        gg,
+                        gf,
+                        ..
+                    } => {
+                        if grid.is_empty() {
+                            grid = e.clone();
+                        }
+                        law = *interpolation;
+                        spins.push(UrrSpin {
+                            aj: *aj,
+                            mux: amux.round() as usize,
+                            mun: amun.round() as usize,
+                            muf: amuf.round() as usize,
+                            energies: e.clone(),
+                            rows: (0..e.len())
+                                .map(|i| [d[i], gx[i], gn0[i], gg[i], gf[i]])
+                                .collect(),
+                        });
+                    }
+                }
+            }
+            orbitals.push(UrrOrbital {
+                l: r.l,
+                awri: r.awri,
+                spins,
+            });
+        }
+        // NJOY's first panel starts at EL whatever the table's first energy.
+        let mut nodes = Vec::new();
+        if grid.len() >= 2 {
+            nodes.push(range.el);
+            nodes.extend(grid.into_iter().filter(|&e| e > range.el));
+        }
+        Ok(UnresolvedAverages {
+            el: range.el,
+            eh: range.eh,
+            lssf: u.lssf,
+            spin: u.spi,
+            channel_radius,
+            scattering_radius: u.ap,
+            orbitals,
+            nodes,
+            law,
+        })
+    }
+
+    /// The energies the evaluation tabulates the parameters on, within the
+    /// range: where its cross sections are given.
+    pub fn parameter_energies(&self) -> Vec<f64> {
+        let mut e: Vec<f64> = self
+            .orbitals
+            .iter()
+            .flat_map(|o| o.spins.iter())
+            .flat_map(|s| s.energies.iter().copied())
+            .filter(|&x| x >= self.el && x <= self.eh)
+            .collect();
+        e.sort_by(f64::total_cmp);
+        e.dedup();
+        e
+    }
+
+    /// The average cross sections at `energy` (eV): computed at the nodes of
+    /// the evaluator's energy grid and interpolated between them by its INT,
+    /// except in a panel [`WIDE`] or wider, and beyond the grid, where they
+    /// are computed from interpolated parameters.
+    pub fn cross_sections(&self, energy: f64) -> CrossSections {
+        let n = &self.nodes;
+        if n.len() < 2 || energy <= n[0] || energy >= n[n.len() - 1] {
+            return self.with_parameters_at(energy);
+        }
+        let i = n.partition_point(|&e| e <= energy) - 1;
+        let (e1, e2) = (n[i], n[i + 1]);
+        if energy == e1 || e2 >= WIDE * e1 {
+            return self.with_parameters_at(energy);
+        }
+        let (a, b) = (self.with_parameters_at(e1), self.with_parameters_at(e2));
+        let at = |y1: f64, y2: f64| interpolate(e1, y1, e2, y2, energy, self.law);
+        CrossSections {
+            elastic: at(a.elastic, b.elastic),
+            capture: at(a.capture, b.capture),
+            fission: at(a.fission, b.fission),
+        }
+    }
+
+    /// The average cross sections at `energy` from the parameters there.
+    fn with_parameters_at(&self, energy: f64) -> CrossSections {
+        let mut out = CrossSections::default();
+        let pi = std::f64::consts::PI;
+        for o in &self.orbitals {
+            let ratio = o.awri / (o.awri + 1.0);
+            let k = WAVE_NUMBER * ratio * energy.sqrt();
+            let constant = 2.0 * pi * pi / (WAVE_NUMBER * ratio).powi(2);
+            let rho = k * self.channel_radius;
+            let rhoc = k * self.scattering_radius;
+            let r2 = rho * rho;
+            let (v, phase) = match o.l {
+                0 => (1.0, rhoc),
+                1 => (r2 / (1.0 + r2), rhoc - rhoc.atan()),
+                _ => (
+                    r2 * r2 / (9.0 + 3.0 * r2 + r2 * r2),
+                    rhoc - (3.0 * rhoc / (3.0 - rhoc * rhoc)).atan(),
+                ),
+            };
+            for sp in &o.spins {
+                let [d, gx, gn0, gg, gf] = sp.at(energy);
+                let gx = if gx < 1e-8 { 0.0 } else { gx };
+                let gf = if gf < 1e-8 { 0.0 } else { gf };
+                let gj = (2.0 * sp.aj + 1.0) / (4.0 * self.spin + 2.0);
+                let gn = gn0 * v * sp.mun as f64 * energy.sqrt();
+                let den = energy * d;
+                if den <= 0.0 {
+                    continue;
+                }
+                let temp = constant * gj * gn / den;
+                let gs = fluctuation(gn, gf, gg, sp.mun, sp.muf, sp.mux, gx, 1) * temp * gn;
+                let gc = fluctuation(gn, gf, gg, sp.mun, sp.muf, sp.mux, gx, 2) * temp * gg;
+                let gff = fluctuation(gn, gf, gg, sp.mun, sp.muf, sp.mux, gx, 3) * temp * gf;
+                let interference = constant * gj * 2.0 * gn * phase.sin().powi(2) / den;
+                out.elastic += gs - interference;
+                out.capture += gc;
+                out.fission += gff;
+            }
+            out.elastic += 4.0 * pi * (2 * o.l + 1) as f64 * (phase.sin() / k).powi(2);
+        }
+        out
+    }
+
+    /// `self` with column `column` of `(orbital, spin)`'s table scaled by
+    /// `factor` at every energy.
+    fn scaled(&self, orbital: usize, spin: usize, column: usize, factor: f64) -> Self {
+        let mut out = self.clone();
+        if let Some(s) = out
+            .orbitals
+            .get_mut(orbital)
+            .and_then(|o| o.spins.get_mut(spin))
+        {
+            for row in &mut s.rows {
+                row[column] *= factor;
+            }
+        }
+        out
+    }
+}
+
+impl RangeReconstruction for UnresolvedAverages {
+    fn bounds(&self) -> (f64, f64) {
+        (self.el, self.eh)
+    }
+
+    fn cross_sections(&self, energy: f64) -> CrossSections {
+        UnresolvedAverages::cross_sections(self, energy)
+    }
+
+    fn resonances(&self) -> Vec<(f64, f64)> {
+        Vec::new()
+    }
+
+    /// The derivative with respect to a unit-mean multiplier on one `(l, J)`
+    /// table, by central difference: the parameters are few.
+    fn parameter_gradients(
+        &self,
+        energy: f64,
+        cov: &crate::resonance_covariance::RangeCovariance,
+    ) -> Result<Vec<Gradient>> {
+        use crate::resonance_covariance::Location;
+        const H: f64 = 1e-4;
+        Ok(cov
+            .parameters
+            .iter()
+            .map(|p| match (p.location, urr_column(p.quantity)) {
+                (Location::Unresolved { orbital, spin }, Some(column)) => {
+                    let up = self
+                        .scaled(orbital, spin, column, 1.0 + H)
+                        .cross_sections(energy);
+                    let down = self
+                        .scaled(orbital, spin, column, 1.0 - H)
+                        .cross_sections(energy);
+                    [
+                        (up.elastic - down.elastic) / (2.0 * H),
+                        (up.capture - down.capture) / (2.0 * H),
+                        (up.fission - down.fission) / (2.0 * H),
+                    ]
+                }
+                _ => [0.0; 3],
+            })
+            .collect())
+    }
+}
+
 /// `dP_l / d rho` by central difference.
 fn penetrability_slope(l: i64, rho: f64) -> f64 {
     let h = 1e-6 * rho.abs().max(1e-6);
@@ -1191,7 +1760,7 @@ fn orbitals(rm: &ReichMoore, naps: i64) -> Result<Vec<RmOrbital>> {
         }
         let scattering_radius = if s.apl != 0.0 { s.apl } else { rm.ap };
         let channel_radius = match naps {
-            0 => 0.123 * s.awri.cbrt() + 0.08,
+            0 => channel_radius_formula(s.awri),
             _ => scattering_radius,
         };
         let l = s.l as f64;
@@ -1541,7 +2110,7 @@ mod derivative_tests {
 mod r_matrix_tests {
     use super::*;
     use crate::material::Material;
-    use crate::resonance_covariance::{group_covariance, resolved_covariances};
+    use crate::resonance_covariance::{group_covariance, range_covariances};
 
     const W186: &[u8] = include_bytes!("../fixtures/n-074_W_186_mf2_mf32.endf.xz");
     const CU65: &[u8] = include_bytes!("../fixtures/n-029_Cu_065_mf2_mf32.endf.xz");
@@ -1763,7 +2332,7 @@ mod r_matrix_tests {
     #[test]
     fn r_matrix_group_covariance_matches_errorr() {
         let m = material(W186);
-        let cov = &resolved_covariances(m.mf2().unwrap(), m.mf32().unwrap()).unwrap()[0];
+        let cov = &range_covariances(m.mf2().unwrap(), m.mf32().unwrap()).unwrap()[0];
         let rm = RMatrixRange::new(&m.mf2().unwrap().isotopes[0].ranges[0]).unwrap();
         let edges = [1e-5, 0.1, 1.0, 10.0, 100.0, 300.0, 1000.0, 3000.0, 1e4];
         let g = group_covariance(cov, &rm, &edges).unwrap();
@@ -1789,6 +2358,170 @@ mod r_matrix_tests {
                 (g.get(1, h, 1, h) / 2.45e-4 - 1.0).abs() < 0.05,
                 "1/v capture group {h}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod unresolved_tests {
+    use super::*;
+    use crate::material::Material;
+    use crate::mf::mf2::UnresolvedParameters;
+    use crate::mf::mf32::Covariance;
+    use crate::resonance_covariance::{group_covariance, range_covariances};
+
+    const RH103: &[u8] = include_bytes!("../fixtures/n-045_Rh_103_mf2_mf32.endf.xz");
+
+    fn material() -> Material {
+        Material::from_str(&crate::testdata::text(RH103)).expect("fixture parses")
+    }
+
+    /// ENDF/B-VIII.1 Rh103's unresolved averages (LSSF=0, so NJOY 2016 RECONR
+    /// puts them in MF=3), less the MF=3 background, at the evaluator's
+    /// parameter energies, where RECONR evaluates them rather than
+    /// interpolating: `(E, elastic, capture)`.
+    const RH103_NJOY: [(f64, f64, f64); 8] = [
+        (8.5e3, 6.597781, 1.405245),
+        (1.05e4, 7.016208, 1.436239),
+        (1.45e4, 7.094753, 1.333073),
+        (1.95e4, 6.800235, 1.049889),
+        (2.45e4, 6.842687, 0.9306573),
+        (2.95e4, 7.624931, 0.9414835),
+        (3.35e4, 7.541447, 0.8591245),
+        (3.65e4, 6.858164, 0.7361913),
+    ];
+
+    fn unresolved() -> (Material, UnresolvedAverages) {
+        let m = material();
+        let range = m.mf2().unwrap().isotopes[0]
+            .ranges
+            .iter()
+            .find(|r| r.lru == 2)
+            .unwrap()
+            .clone();
+        let u = UnresolvedAverages::new(&range).unwrap();
+        (m, u)
+    }
+
+    #[test]
+    fn unresolved_averages_match_njoy() {
+        let (_, u) = unresolved();
+        for (e, elastic, capture) in RH103_NJOY {
+            let x = u.cross_sections(e);
+            assert!(
+                (x.elastic / elastic - 1.0).abs() < 1e-6,
+                "elastic at {e}: {} against {elastic}",
+                x.elastic
+            );
+            assert!(
+                (x.capture / capture - 1.0).abs() < 1e-6,
+                "capture at {e}: {} against {capture}",
+                x.capture
+            );
+        }
+    }
+
+    /// Between the parameter energies the cross sections are interpolated,
+    /// by Rh103's INT, from their values at the panel's ends, not computed
+    /// from interpolated parameters; the two differ by percents in capture.
+    #[test]
+    fn unresolved_cross_sections_are_interpolated_between_parameter_energies() {
+        let (_, u) = unresolved();
+        let n = &u.nodes;
+        assert!(n.len() > 2 && n.windows(2).all(|w| w[1] < WIDE * w[0]));
+        let mut largest = 0.0f64;
+        for w in n.windows(2) {
+            let mid = 0.5 * (w[0] + w[1]);
+            let (a, b) = (u.cross_sections(w[0]), u.cross_sections(w[1]));
+            let x = u.cross_sections(mid);
+            let want = interpolate(w[0], a.capture, w[1], b.capture, mid, u.law);
+            assert!((x.capture / want - 1.0).abs() < 1e-14, "{mid}");
+            largest = largest.max((u.with_parameters_at(mid).capture / x.capture - 1.0).abs());
+        }
+        println!(
+            "INT {} over {} nodes: largest capture difference {largest}",
+            u.law,
+            n.len()
+        );
+        assert!(largest > 0.01, "{largest}");
+    }
+
+    /// NJOY 2016 ERRORR takes an unresolved range's sensitivities from
+    /// MF=32's own energy-independent average parameters, perturbed by 1%,
+    /// and relativizes them by the MF=2 cross section; here they are taken
+    /// from MF=2's tables, the parameters the evaluation's cross sections come
+    /// from. Given ERRORR's parameters the group covariance reproduces its
+    /// absolute variances: elastic to 0.3% and capture to 1.5%, its 1% finite
+    /// differences against a derivative.
+    #[test]
+    fn unresolved_group_covariance_reproduces_errorr_on_its_own_parameters() {
+        let (m, _) = unresolved();
+        let covs = range_covariances(m.mf2().unwrap(), m.mf32().unwrap()).unwrap();
+        let cov = covs
+            .iter()
+            .find(|c| c.lru == 2)
+            .expect("an unresolved covariance");
+        assert_eq!(cov.len(), 24);
+        assert!(cov.unmatched.is_empty());
+        let mut range = m.mf2().unwrap().isotopes[0].ranges[cov.mf2_range].clone();
+        let mf32 = m.mf32().unwrap().isotopes[0]
+            .ranges
+            .iter()
+            .find_map(|r| match &r.covariance {
+                Covariance::Unresolved(u) => Some(u.clone()),
+                _ => None,
+            })
+            .unwrap();
+        if let ResonanceParameters::Unresolved(u) = &mut range.parameters {
+            for (section, lv) in u.ranges.iter_mut().zip(&mf32.l_values) {
+                for (p, par) in section.parameters.iter_mut().zip(&lv.parameters) {
+                    if let UnresolvedParameters::CaseC {
+                        e,
+                        d,
+                        gx,
+                        gn0,
+                        gg,
+                        gf,
+                        ..
+                    } = p
+                    {
+                        let n = e.len();
+                        *d = vec![par[0]; n];
+                        *gn0 = vec![par[2]; n];
+                        *gg = vec![par[3]; n];
+                        *gf = vec![par[4]; n];
+                        *gx = vec![par[5]; n];
+                    }
+                }
+            }
+        }
+        let u = UnresolvedAverages::new(&range).unwrap();
+        let edges = [8e3, 1e4, 1.5e4, 2e4, 3e4, 4.0146e4];
+        let g = group_covariance(cov, &u, &edges).unwrap();
+        // ERRORR's relative variances and group cross sections.
+        let elastic = [
+            (3.278e-4, 6.5102),
+            (2.573e-4, 7.0800),
+            (2.841e-4, 7.0722),
+            (3.509e-4, 7.2484),
+            (4.928e-4, 7.2306),
+        ];
+        let capture = [
+            (1.961e-3, 1.3485),
+            (1.506e-3, 1.3648),
+            (1.645e-3, 1.1320),
+            (1.582e-3, 9.8357e-1),
+            (1.646e-3, 8.0582e-1),
+        ];
+        for h in 0..5 {
+            for (a, (rel, xs), tolerance) in [(0, elastic[h], 3e-3), (1, capture[h], 1.5e-2)] {
+                let ours = g.get(a, h, a, h) * g.cross_sections[a][h].powi(2);
+                let njoy = rel * xs * xs;
+                assert!(
+                    (ours / njoy - 1.0).abs() < tolerance,
+                    "reaction {a} group {h}: {ours:e} against {njoy:e}"
+                );
+            }
         }
     }
 }

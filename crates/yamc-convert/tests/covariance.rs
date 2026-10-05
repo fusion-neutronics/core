@@ -695,7 +695,7 @@ const DY158_MF32: &[u8] = include_bytes!("../../endf/fixtures/n-066_Dy_158_mf2_m
 #[test]
 fn resonance_parameter_covariance_is_written_as_derived_ni_blocks() {
     use endf::resonance::ReichMooreRange;
-    use endf::resonance_covariance::{group_covariance, resolved_covariances, resonance_edges};
+    use endf::resonance_covariance::{group_covariance, range_covariances, resonance_edges};
     let tmp = tempfile::tempdir().expect("temp dir");
     let material = material(DY158_MF32, tmp.path(), "Dy158");
     let written = yamc_convert::covariance::write_covariance(&material, tmp.path())
@@ -722,7 +722,7 @@ fn resonance_parameter_covariance_is_written_as_derived_ni_blocks() {
     };
 
     // The reference: the same fold, straight from the parser.
-    let cov = &resolved_covariances(material.mf2().unwrap(), material.mf32().unwrap()).unwrap()[0];
+    let cov = &range_covariances(material.mf2().unwrap(), material.mf32().unwrap()).unwrap()[0];
     let rm = ReichMooreRange::new(&material.mf2().unwrap().isotopes[0].ranges[0]).unwrap();
     let edges = resonance_edges(&rm);
     let g = group_covariance(cov, &rm, &edges).unwrap();
