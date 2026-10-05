@@ -506,15 +506,21 @@ const EXPECTED_DATA_VERSION: &[(&str, &str)] = &[
     // moved. All 8047 published markers carry this stamp and format_version 2,
     // checked over the built tree before upload.
     //
+    // The 2026-10-01 republish reconverts every nuclide and element with the
+    // yamc-core 0.14.0 / yani-core 0.19.0 converter, so values moved this time:
+    // covariance.arrow gains the evaluation's own MAT and the lumped-reaction
+    // component rows, and LB=0 to 4 blocks are split at 2*(NP - LT). All 8047
+    // markers in the built tree (7786 neutron, 261 photon) carry this stamp.
+    //
     // This pin MUST NOT ship until every library is live. A wheel pinning
-    // 2026-09-18 fails outright against any library still serving 2026-09-08,
+    // 2026-10-01 fails outright against any library still serving 2026-09-18,
     // and the six are uploaded one at a time.
-    ("tendl-2025", "2026-09-18"),
-    ("tendl-2017", "2026-09-18"),
-    ("fendl-3.2d", "2026-09-18"),
-    ("endf-b8.1", "2026-09-18"),
-    ("jeff-4.0", "2026-09-18"),
-    ("jendl-5.0", "2026-09-18"),
+    ("tendl-2025", "2026-10-01"),
+    ("tendl-2017", "2026-10-01"),
+    ("fendl-3.2d", "2026-10-01"),
+    ("endf-b8.1", "2026-10-01"),
+    ("jeff-4.0", "2026-10-01"),
+    ("jendl-5.0", "2026-10-01"),
 ];
 
 /// The `data_version` each library's transmutation subsections are expected to
@@ -554,14 +560,20 @@ const EXPECTED_TRANSMUTATION_DATA_VERSION: &[(&str, &str)] = &[
     // `<keyword>/transmutation/<subsection>.arrow/provenance.json` files read
     // "2026-09-18".
     //
+    // The 2026-10-01 republish rebuilt every chain with the yani-core 0.19.0
+    // converter, which writes the branching list facts that reader requires
+    // and refuses to guess without, plus branching_covariance.arrow and
+    // fission_yields/evaluated_yields.arrow where the library provides them.
+    // All 16 subsections in the built tree read "2026-10-01".
+    //
     // This pin MUST NOT ship until every library is live. A wheel pinning a new
     // stamp fails outright against any library whose chain still serves the
     // old one, and the five are uploaded one at a time.
-    ("tendl-2025", "2026-09-18"),
-    ("tendl-2017", "2026-09-18"),
-    ("endf-b8.1", "2026-09-18"),
-    ("jeff-4.0", "2026-09-18"),
-    ("jendl-5.0", "2026-09-18"),
+    ("tendl-2025", "2026-10-01"),
+    ("tendl-2017", "2026-10-01"),
+    ("endf-b8.1", "2026-10-01"),
+    ("jeff-4.0", "2026-10-01"),
+    ("jendl-5.0", "2026-10-01"),
 ];
 
 /// Which kind of published data a cached directory holds, and so which table
