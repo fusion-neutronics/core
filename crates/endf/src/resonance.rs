@@ -254,6 +254,100 @@ pub struct ReichMooreRange {
     pub el: f64,
     pub eh: f64,
     orbitals: Vec<RmOrbital>,
+    /// The parameters it was prepared from, for the radius derivatives.
+    source: ReichMoore,
+    naps: i64,
+}
+
+/// The derivatives of the elastic, capture and fission cross sections with
+/// respect to one parameter: barns per unit of the parameter (per eV for an
+/// energy or a width, per 1e-12 cm for a radius).
+pub type Gradient = [f64; 3];
+
+/// One resonance's parameter derivatives at one energy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResonanceGradient {
+    /// The resonance's MF=2 section and index.
+    pub section: usize,
+    pub index: usize,
+    /// With respect to ER, GN, GG, GFA and GFB, in that order. A fission
+    /// width of zero has no derivative (its amplitude is not differentiable
+    /// there) and reads zero.
+    pub d: [Gradient; 5],
+}
+
+/// One channel at one energy: what its cross sections and their
+/// derivatives are built from.
+struct ChannelState {
+    n: usize,
+    /// `W = (I - i R)^-1`, row-major `n × n`, symmetric.
+    w: Vec<Complex>,
+    /// `Im R`, row-major.
+    im_r: Vec<f64>,
+    /// Per resonance, its amplitudes `(sqrt G_n(E), sqrt G_fa, sqrt G_fb)`
+    /// (signed) and `D_r = (1/2) / (E_r - E - i G_g / 2)`.
+    amplitudes: Vec<[f64; 3]>,
+    d: Vec<Complex>,
+}
+
+impl ChannelState {
+    fn new(ch: &RmChannel, energy: f64, p: f64) -> Self {
+        let n = if ch.fission { 3 } else { 1 };
+        let mut r = vec![Complex::ZERO; n * n];
+        let mut amplitudes = Vec::with_capacity(ch.resonances.len());
+        let mut d = Vec::with_capacity(ch.resonances.len());
+        for res in &ch.resonances {
+            let gn = res.gn * p / res.penetrability;
+            let dr = Complex::new(res.energy - energy, -0.5 * res.gg)
+                .inv()
+                .scale(0.5);
+            let a = [amplitude(gn), amplitude(res.gfa), amplitude(res.gfb)];
+            for i in 0..n {
+                for j in 0..n {
+                    r[i * n + j] = r[i * n + j] + dr.scale(a[i] * a[j]);
+                }
+            }
+            amplitudes.push(a);
+            d.push(dr);
+        }
+        // I - i R
+        let mut m: Vec<Complex> = r.iter().map(|x| Complex::new(x.im, -x.re)).collect();
+        for i in 0..n {
+            m[i * n + i] = m[i * n + i] + Complex::ONE;
+        }
+        let w = if n == 1 {
+            vec![m[0].inv()]
+        } else {
+            invert(&m, n)
+        };
+        ChannelState {
+            n,
+            w,
+            im_r: r.iter().map(|x| x.im).collect(),
+            amplitudes,
+            d,
+        }
+    }
+
+    /// `|1 - U_nn|^2`, `[W Im(R) W^H]_nn` and `sum_f |W_nf|^2`, for a rotation
+    /// `exp(-2 i phi)`.
+    fn parts(&self, rotation: Complex) -> (f64, f64, f64) {
+        let n = self.n;
+        let w = &self.w[..n];
+        let u = rotation * (w[0].scale(2.0) - Complex::ONE);
+        let mut capture = 0.0;
+        for i in 0..n {
+            for j in 0..n {
+                capture += self.im_r[i * n + j] * (w[i] * conj(w[j])).re;
+            }
+        }
+        let fission = w[1..].iter().map(|x| x.norm_sqr()).sum();
+        ((Complex::ONE - u).norm_sqr(), capture, fission)
+    }
+}
+
+fn conj(x: Complex) -> Complex {
+    Complex::new(x.re, -x.im)
 }
 
 impl ReichMooreRange {
@@ -273,6 +367,8 @@ impl ReichMooreRange {
             el: range.el,
             eh: range.eh,
             orbitals: orbitals(rm, range.naps)?,
+            source: rm.clone(),
+            naps: range.naps,
         })
     }
 
@@ -287,22 +383,10 @@ impl ReichMooreRange {
             let phi = phase_shift(o.l, k * o.scattering_radius);
             let rotation = Complex::new((2.0 * phi).cos(), -(2.0 * phi).sin());
             for ch in &o.channels {
-                let (w, im_r) = channel_w(ch, energy, p);
-                let n = w.len();
-                let u = rotation * (w[0].scale(2.0) - Complex::ONE);
-                elastic += ch.g * (Complex::ONE - u).norm_sqr();
-                // [W Im(R) W^H]_nn, Im(R) real symmetric.
-                let mut c = 0.0;
-                for i in 0..n {
-                    for j in 0..n {
-                        let x = w[i] * Complex::new(w[j].re, -w[j].im);
-                        c += im_r[i * n + j] * x.re;
-                    }
-                }
+                let (e, c, f) = ChannelState::new(ch, energy, p).parts(rotation);
+                elastic += ch.g * e;
                 capture += ch.g * 4.0 * c;
-                for wf in &w[1..n] {
-                    fission += ch.g * 4.0 * wf.norm_sqr();
-                }
+                fission += ch.g * 4.0 * f;
             }
             out.elastic += factor * elastic;
             out.capture += factor * capture;
@@ -310,41 +394,199 @@ impl ReichMooreRange {
         }
         out
     }
+
+    /// Every resonance's parameter derivatives at `energy` (eV), from the
+    /// R-matrix algebra: `M = I - i R` gives `dW = i W dR W`, and with `W`
+    /// symmetric a parameter of resonance `r`, which moves
+    /// `R = sum_r D_r a_r a_r^T` through `D_r` and the amplitudes `a_r`,
+    /// moves `W_nj` by
+    ///
+    /// ```text
+    /// i [dD (W a)_n (W a)_j + D ((W da)_n (W a)_j + (W a)_n (W da)_j)]
+    /// ```
+    ///
+    /// which costs a few channel-sized products per parameter. The neutron
+    /// width enters through `a_n = sqrt(G_n P(E) / P(|E_r|))`, so ER moves it
+    /// through `P(|E_r|)` as well as through `D_r`.
+    pub fn derivatives(&self, energy: f64) -> Vec<ResonanceGradient> {
+        let mut out = Vec::new();
+        for o in &self.orbitals {
+            let k = wave_number(o.awri, energy);
+            let factor = std::f64::consts::PI / (k * k);
+            let (p, _) = penetration_shift(o.l, k * o.channel_radius);
+            let phi = phase_shift(o.l, k * o.scattering_radius);
+            let rotation = Complex::new((2.0 * phi).cos(), -(2.0 * phi).sin());
+            for ch in &o.channels {
+                let st = ChannelState::new(ch, energy, p);
+                let n = st.n;
+                let w = |i: usize, j: usize| st.w[i * n + j];
+                let u = rotation * (w(0, 0).scale(2.0) - Complex::ONE);
+                let one_minus_u = Complex::ONE - u;
+                // v_i = sum_j Im R_ij conj(W_nj); H_ij = Re(W_ni conj(W_nj)).
+                let v: Vec<Complex> = (0..n)
+                    .map(|i| {
+                        (0..n).fold(Complex::ZERO, |acc, j| {
+                            acc + conj(w(0, j)).scale(st.im_r[i * n + j])
+                        })
+                    })
+                    .collect();
+                let h = |i: usize, j: usize| (w(0, i) * conj(w(0, j))).re;
+                for (r, res) in ch.resonances.iter().enumerate() {
+                    let a = st.amplitudes[r];
+                    let dr = st.d[r];
+                    // W a, the column every derivative of this resonance uses.
+                    let wa: Vec<Complex> = (0..n)
+                        .map(|i| (0..n).fold(Complex::ZERO, |acc, j| acc + w(i, j).scale(a[j])))
+                        .collect();
+                    let den = Complex::new(res.energy - energy, -0.5 * res.gg);
+                    let den2 = (den * den).inv();
+                    // The neutron amplitude per unit G_n, and per unit ER
+                    // through P(|E_r|).
+                    let ratio = p / res.penetrability;
+                    let dan_dgn = if res.gn != 0.0 {
+                        ratio.sqrt() / (2.0 * res.gn.abs().sqrt())
+                    } else {
+                        0.0
+                    };
+                    let dan_der = if res.energy != 0.0 {
+                        let kr = wave_number(o.awri, res.energy);
+                        let rho = kr * o.channel_radius;
+                        let dp_drho = penetrability_slope(o.l, rho);
+                        let dp_de = dp_drho * rho / (2.0 * res.energy.abs()) * res.energy.signum();
+                        -0.5 * a[0] * dp_de / res.penetrability
+                    } else {
+                        0.0
+                    };
+                    let half_inv_sqrt = |g: f64| {
+                        if g != 0.0 {
+                            1.0 / (2.0 * g.abs().sqrt())
+                        } else {
+                            0.0
+                        }
+                    };
+                    // (dD, da) per parameter: ER, GN, GG, GFA, GFB.
+                    let params: [(Complex, [f64; 3]); 5] = [
+                        (den2.scale(-0.5), [dan_der, 0.0, 0.0]),
+                        (Complex::ZERO, [dan_dgn, 0.0, 0.0]),
+                        (Complex::new(0.0, 0.25) * den2, [0.0; 3]),
+                        (Complex::ZERO, [0.0, half_inv_sqrt(res.gfa), 0.0]),
+                        (Complex::ZERO, [0.0, 0.0, half_inv_sqrt(res.gfb)]),
+                    ];
+                    let mut d = [[0.0; 3]; 5];
+                    for (q, (dd, da)) in params.iter().enumerate() {
+                        if q >= 3 && n == 1 {
+                            continue;
+                        }
+                        let wda: Vec<Complex> = (0..n)
+                            .map(|i| {
+                                (0..n).fold(Complex::ZERO, |acc, j| acc + w(i, j).scale(da[j]))
+                            })
+                            .collect();
+                        let i_unit = Complex::new(0.0, 1.0);
+                        let dw: Vec<Complex> = (0..n)
+                            .map(|j| {
+                                i_unit
+                                    * (*dd * wa[0] * wa[j] + dr * (wda[0] * wa[j] + wa[0] * wda[j]))
+                            })
+                            .collect();
+                        // Elastic: d|1 - U|^2 = -2 Re(conj(1 - U) dU), dU = 2 rot dW_nn.
+                        let du = rotation * dw[0].scale(2.0);
+                        let de = -2.0 * (conj(one_minus_u) * du).re;
+                        // Capture: 2 Re sum_i dW_ni v_i + sum_ij W_ni Im(dR_ij) conj(W_nj).
+                        let mut dc = 2.0 * (0..n).map(|i| (dw[i] * v[i]).re).sum::<f64>();
+                        for i in 0..n {
+                            for j in 0..n {
+                                let im_dr =
+                                    dd.im * a[i] * a[j] + dr.im * (da[i] * a[j] + a[i] * da[j]);
+                                dc += im_dr * h(i, j);
+                            }
+                        }
+                        // Fission: 2 Re sum_f conj(W_nf) dW_nf.
+                        let df = 2.0 * (1..n).map(|f| (conj(w(0, f)) * dw[f]).re).sum::<f64>();
+                        d[q] = [
+                            factor * ch.g * de,
+                            factor * ch.g * 4.0 * dc,
+                            factor * ch.g * 4.0 * df,
+                        ];
+                    }
+                    out.push(ResonanceGradient {
+                        section: res.section,
+                        index: res.index,
+                        d,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// The derivative at `energy` with respect to a scattering radius: the
+    /// range's AP (`l` of `None`), which every section without an APL of
+    /// its own reads, or the APL of the sections of orbital angular momentum
+    /// `l`. With NAPS=1 the radius is the channel radius too. By central
+    /// difference, the radius entering the phase shift, the penetrability
+    /// and its ratio at every resonance together.
+    pub fn radius_derivative(&self, energy: f64, l: Option<i64>) -> Result<Gradient> {
+        let shifted = |delta: f64| -> Result<CrossSections> {
+            let mut rm = self.source.clone();
+            let h = match l {
+                None => {
+                    let h = delta * rm.ap.abs().max(1e-3);
+                    rm.ap += h;
+                    h
+                }
+                Some(l) => {
+                    let mut h = 0.0;
+                    for s in rm.sections.iter_mut().filter(|s| s.l == l) {
+                        let base = if s.apl != 0.0 { s.apl } else { self.source.ap };
+                        h = delta * base.abs().max(1e-3);
+                        s.apl = base + h;
+                    }
+                    h
+                }
+            };
+            let range = ReichMooreRange {
+                el: self.el,
+                eh: self.eh,
+                orbitals: orbitals(&rm, self.naps)?,
+                source: rm,
+                naps: self.naps,
+            };
+            let mut x = range.cross_sections(energy);
+            if h != 0.0 {
+                x.elastic /= h;
+                x.capture /= h;
+                x.fission /= h;
+            }
+            Ok(x)
+        };
+        // No section of that l: nothing to move, where the division below
+        // would otherwise be skipped and the cross sections returned.
+        if let Some(l) = l {
+            if !self.source.sections.iter().any(|s| s.l == l) {
+                return Ok([0.0; 3]);
+            }
+        }
+        const STEP: f64 = 1e-6;
+        let (up, down) = (shifted(STEP)?, shifted(-STEP)?);
+        // (sigma(+h) / h - sigma(-h) / (-h)) / 2 with h the same size each way.
+        Ok([
+            0.5 * (up.elastic + down.elastic),
+            0.5 * (up.capture + down.capture),
+            0.5 * (up.fission + down.fission),
+        ])
+    }
+}
+
+/// `dP_l / d rho` by central difference.
+fn penetrability_slope(l: i64, rho: f64) -> f64 {
+    let h = 1e-6 * rho.abs().max(1e-6);
+    (penetration_shift(l, rho + h).0 - penetration_shift(l, rho - h).0) / (2.0 * h)
 }
 
 /// `sqrt(|x|)` with the sign of `x`: a width's amplitude.
 fn amplitude(x: f64) -> f64 {
     x.signum() * x.abs().sqrt()
-}
-
-/// The first row of `W = (I - i R)^-1` for one channel at `energy`, with
-/// `p = P_l(E)` (`W_nn` then `W_nf` per fission channel), and `Im(R)`,
-/// row-major.
-fn channel_w(ch: &RmChannel, energy: f64, p: f64) -> (Vec<Complex>, Vec<f64>) {
-    let n = if ch.fission { 3 } else { 1 };
-    let mut r = vec![Complex::ZERO; n * n];
-    for res in &ch.resonances {
-        let gn = res.gn * p / res.penetrability;
-        let d = Complex::new(res.energy - energy, -0.5 * res.gg)
-            .inv()
-            .scale(0.5);
-        let a = [amplitude(gn), amplitude(res.gfa), amplitude(res.gfb)];
-        for i in 0..n {
-            for j in 0..n {
-                r[i * n + j] = r[i * n + j] + d.scale(a[i] * a[j]);
-            }
-        }
-    }
-    // I - i R
-    let mut m: Vec<Complex> = r.iter().map(|x| Complex::new(x.im, -x.re)).collect();
-    for i in 0..n {
-        m[i * n + i] = m[i * n + i] + Complex::ONE;
-    }
-    let im_r = r.iter().map(|x| x.im).collect();
-    if n == 1 {
-        return (vec![m[0].inv()], im_r);
-    }
-    (invert(&m, n)[..n].to_vec(), im_r)
 }
 
 /// Every `(l, s, J)` channel of a Reich-Moore range, with its resonances.
@@ -574,5 +816,140 @@ mod tests {
                 at(e)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod derivative_tests {
+    use super::*;
+    use crate::material::Material;
+
+    const DY158: &[u8] = include_bytes!("../fixtures/n-066_Dy_158_mf2_mf32.endf.xz");
+    const TH232: &[u8] = include_bytes!("../fixtures/n-090_Th_232_mf2_mf32.endf.xz");
+    const U235: &[u8] = include_bytes!("../fixtures/n-092_U_235_mf2.endf.xz");
+
+    fn mf2_range(fixture: &[u8]) -> ResonanceRange {
+        let m = Material::from_str(&crate::testdata::text(fixture)).expect("fixture parses");
+        m.mf2().unwrap().isotopes[0].ranges[0].clone()
+    }
+
+    /// `range` with parameter `q` (ER, GN, GG, GFA, GFB) of resonance
+    /// `(section, index)` moved by `delta`.
+    fn moved(
+        range: &ResonanceRange,
+        section: usize,
+        index: usize,
+        q: usize,
+        delta: f64,
+    ) -> ResonanceRange {
+        let mut r = range.clone();
+        let ResonanceParameters::ReichMoore(rm) = &mut r.parameters else {
+            unreachable!()
+        };
+        let s = &mut rm.sections[section];
+        let field = match q {
+            0 => &mut s.er,
+            1 => &mut s.gn,
+            2 => &mut s.gg,
+            3 => &mut s.gfa,
+            _ => &mut s.gfb,
+        };
+        field[index] += delta;
+        r
+    }
+
+    /// Every resonance parameter's analytic derivative matches a central
+    /// difference of the reconstruction, at energies on, between and far
+    /// from the resonances, for elastic, capture and fission.
+    #[test]
+    fn parameter_derivatives_match_central_differences() {
+        let mut checked = 0;
+        for fixture in [DY158, TH232, U235] {
+            let range = mf2_range(fixture);
+            let rm = ReichMooreRange::new(&range).unwrap();
+            let ResonanceParameters::ReichMoore(params) = &range.parameters else {
+                unreachable!()
+            };
+            // A spread of resonances, and energies on them and beside them.
+            for (section, s) in params.sections.iter().enumerate() {
+                let step = (s.er.len() / 4).max(1);
+                for index in (0..s.er.len()).step_by(step) {
+                    let er = s.er[index];
+                    if er <= range.el || er >= range.eh {
+                        continue;
+                    }
+                    let width = (s.gn[index].abs() + s.gg[index].abs()).max(1e-3);
+                    for e in [er, er + 0.7 * width, er * 1.3, 0.0253] {
+                        if e <= range.el || e >= range.eh {
+                            continue;
+                        }
+                        let analytic = rm
+                            .derivatives(e)
+                            .into_iter()
+                            .find(|g| g.section == section && g.index == index)
+                            .expect("every resonance has a gradient");
+                        let values = [er, s.gn[index], s.gg[index], s.gfa[index], s.gfb[index]];
+                        for (q, &value_q) in values.iter().enumerate() {
+                            if q >= 3 && value_q == 0.0 {
+                                continue;
+                            }
+                            let h = if q == 0 {
+                                1e-4 * width
+                            } else {
+                                1e-5 * value_q.abs().max(1e-6)
+                            };
+                            let up = ReichMooreRange::new(&moved(&range, section, index, q, h))
+                                .unwrap()
+                                .cross_sections(e);
+                            let down = ReichMooreRange::new(&moved(&range, section, index, q, -h))
+                                .unwrap()
+                                .cross_sections(e);
+                            let numeric = [
+                                (up.elastic - down.elastic) / (2.0 * h),
+                                (up.capture - down.capture) / (2.0 * h),
+                                (up.fission - down.fission) / (2.0 * h),
+                            ];
+                            let x = rm.cross_sections(e);
+                            for c in 0..3 {
+                                let value = [x.elastic, x.capture, x.fission][c];
+                                // Relative to the derivative, plus the rounding
+                                // noise of the difference itself: a sum of
+                                // hundreds of terms carries about 1e-14 of it.
+                                let noise = 1e-14 * value.abs() / h;
+                                let tolerance = 1e-4 * numeric[c].abs() + noise;
+                                assert!(
+                                    (analytic.d[q][c] - numeric[c]).abs() <= tolerance,
+                                    "parameter {q} of resonance {section}/{index} at {e} eV, \
+                                     reaction {c}: analytic {} against numeric {}",
+                                    analytic.d[q][c],
+                                    numeric[c]
+                                );
+                                checked += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 500, "{checked}");
+    }
+
+    /// At thermal energy Pb208's elastic is s-wave, `4 pi a_eff^2` with
+    /// `a_eff` its section radius APL less the distant resonances' share,
+    /// which (NAPS=1, `P_0` proportional to the radius) does not depend on
+    /// the radius. So the APL derivative is `8 pi a_eff`. Every Pb208 section
+    /// has its own APL, so the range-wide AP moves nothing.
+    #[test]
+    fn radius_derivative_is_that_of_potential_scattering() {
+        const PB208: &[u8] = include_bytes!("../fixtures/n-082_Pb_208_mf2.endf.xz");
+        let rm = ReichMooreRange::new(&mf2_range(PB208)).unwrap();
+        let d = rm.radius_derivative(0.0253, Some(0)).unwrap();
+        let elastic = rm.cross_sections(0.0253).elastic;
+        let want = 8.0 * std::f64::consts::PI * (elastic / (4.0 * std::f64::consts::PI)).sqrt();
+        assert!((d[0] / want - 1.0).abs() < 1e-3, "{} against {want}", d[0]);
+        let none = rm.radius_derivative(0.0253, None).unwrap();
+        assert_eq!(none, [0.0, 0.0, 0.0]);
+        // Pb208 has no l=7 section.
+        assert_eq!(rm.radius_derivative(0.0253, Some(7)).unwrap(), [0.0; 3]);
     }
 }
