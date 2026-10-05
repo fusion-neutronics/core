@@ -37,6 +37,8 @@ pub mod product;
 pub mod radionuclide_production;
 pub mod reaction;
 pub mod records;
+pub mod resonance;
+pub mod resonance_covariance;
 pub mod spline;
 
 #[cfg(test)]
