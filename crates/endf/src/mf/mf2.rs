@@ -381,13 +381,17 @@ fn parse_r_matrix_limited(reader: &mut Reader) -> Result<RMatrixLimited> {
         };
 
         // Resonance energies and widths: each resonance is one energy followed
-        // by `nch` widths.
+        // by `nch` widths, padded to a whole number of six-value lines
+        // (ENDF-102 section 2.2.1.6: NX lines in all, `NX / NRS` per
+        // resonance). Stepping `nch + 1` values instead reads the padding of a
+        // two-channel spin group as a second resonance.
         let list = reader.list_record()?;
         let v = &list.values;
         group.nrs = list.cont.l2;
         group.nx = list.cont.n2;
-        let width = nch.max(0) as usize + 1;
+        let width = (nch.max(0) as usize + 1).div_ceil(6) * 6;
         group.er = column(v, 0, width);
+        group.er.truncate(group.nrs.max(0) as usize);
         // Stored resonance-major; transposed to channel-major here, matching
         // what the Python reader returns.
         let nrs = group.nrs.max(0) as usize;
