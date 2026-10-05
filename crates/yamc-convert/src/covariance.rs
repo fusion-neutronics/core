@@ -27,8 +27,8 @@
 //! MF=33, and many evaluations put the whole resolved-range uncertainty in
 //! MF=32 (ENDF/B-VIII.1 W, Cu, Cr, Ni, Pb and Ti among them). So for each
 //! MF=32 range whose formalism [`endf::resonance`] reconstructs (resolved
-//! Reich-Moore, R-matrix limited without charged-particle channels, and
-//! unresolved averages), the covariance of its elastic, capture and fission
+//! multi-level Breit-Wigner, Reich-Moore and R-matrix limited without
+//! charged-particle channels, and unresolved averages), the covariance of its elastic, capture and fission
 //! group cross sections ([`endf::resonance_covariance::group_covariance`],
 //! one group per resonance or per pair of the unresolved parameters'
 //! energies, 1/E weight, infinite dilution, 0 K) is written as NI blocks: LB=5 for a
@@ -484,7 +484,9 @@ fn push_resonance_blocks(
     rows: &mut CovarianceRows,
     material: &Material,
 ) -> Result<(), Box<dyn Error>> {
-    use endf::resonance::{RMatrixRange, RangeReconstruction, ReichMooreRange, UnresolvedAverages};
+    use endf::resonance::{
+        BreitWignerRange, RMatrixRange, RangeReconstruction, ReichMooreRange, UnresolvedAverages,
+    };
     use endf::resonance_covariance::{group_covariance, range_covariances, resonance_edges};
     let (Some(mf2), Some(mf32)) = (material.mf2(), material.mf32()) else {
         return Ok(());
@@ -503,6 +505,11 @@ fn push_resonance_blocks(
         let mut lssf = 0;
         let mut parameter_energies = Vec::new();
         let reconstruction: Box<dyn RangeReconstruction> = match (range.lru, range.lrf) {
+            (1, 2) => match BreitWignerRange::new(range) {
+                Ok(r) => Box::new(r),
+                Err(endf::Error::Unsupported { .. }) => continue,
+                Err(e) => return Err(e.into()),
+            },
             (1, 3) => match ReichMooreRange::new(range) {
                 Ok(r) => Box::new(r),
                 Err(endf::Error::Unsupported { .. }) => continue,
