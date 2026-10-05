@@ -1,11 +1,26 @@
 # Golden files
 
-Each `.txt.xz` here is a reference dump of what the **Python** reader produces
-for one ENDF evaluation. `tests/golden.rs` reads every one of them, runs the Rust
-reader over the evaluation the `SOURCE` line names, and compares.
+Each `.txt.xz` here is a dump of what the reader returns for one fixture,
+every value as a `path -> value` line. `tests/golden.rs` reads every one of
+them, runs the reader over the evaluation the `SOURCE` line names, and
+compares.
 
-This is what makes the port safe: the Rust crate is not being written against
-the ENDF-102 manual alone, it is being held to a reader that already works.
+The goldens were first written by the Python endf reader this crate was ported
+from, and the port was held to it value for value. When the Python reader was
+retired the port matched it on all 70,260 values across 58 goldens, exactly
+except for two last-bit differences in computed values (a decay constant and
+an MF=10 yield, 1.8e-16 relative). The goldens were then rewritten by this
+reader, and are now snapshots it owns: they catch any change in what the
+reader returns for a real evaluation, and reviewing a regenerated golden's
+diff is where such a change is judged. Correctness of the physics built on top
+is checked against NJOY, not here.
+
+Regenerate every golden (unchanged ones are left alone):
+
+    cargo test -p endf --test golden -- --ignored regenerate_goldens
+
+`every_fixture_has_a_golden` fails, naming the file, when a fixture has no
+golden or a golden has no fixture.
 
 ## ACE fixtures
 
@@ -26,21 +41,19 @@ numbers.
 
 Fixtures and dumps are both stored xz-compressed. An evaluation is highly
 repetitive: the fixtures go 4.1 MB to 655 KB and the dumps 5.3 MB to 748 KB,
-about six and seven to one. The Python side reads them through
-`endf.fileutils.open_text`, which handles `.xz` and leaves anything else alone;
-the Rust side reads them with `lzma-rs`, a pure-Rust **dev-dependency**, so the
-`endf` crate stays dependency-free for anything that uses it.
-
-Nothing else changes: `python tools/dump_golden.py` writes `.txt.xz` and the
-dumps are still byte-reproducible.
+about six and seven to one. The tests read and write them with `lzma-rust2`, a
+pure-Rust **dev-dependency**, so the `endf` crate stays dependency-free for
+anything that uses it. The comparison is on the decompressed text, never the
+compressed bytes, and regenerating leaves a golden whose text is unchanged
+untouched, so the bytes do not churn.
 
 ## The chain golden
 
 `chain.txt.xz` is the odd one out: a depletion chain is the join of three
 sub-libraries, so its golden names all of them with `DECAY`, `NEUTRON` and
-`REACTION` lines instead of a single `SOURCE`. It is written by
-`tools/dump_chain_golden.py` rather than by the main dumper, and the Rust
-harness recognises it by `KIND chain`.
+`REACTION` lines instead of a single `SOURCE`. The evaluations and reactions
+are the `CHAIN_*` lists in `golden.rs`, and the harness recognises the golden
+by `KIND chain`.
 
 The ten decay evaluations behind it were chosen to close every path the chain
 follows, except Cs137's, whose barium daughters are deliberately absent so
@@ -48,13 +61,12 @@ that the stand-in walk of `replace_missing` is exercised.
 
 ## Adding an evaluation
 
-1. Compress the file and drop it in `tests/`:
-   `python -c "import lzma,sys,pathlib; p=pathlib.Path(sys.argv[1]); pathlib.Path(str(p)+'.xz').write_bytes(lzma.compress(p.read_bytes(), preset=9))" file.endf`
-2. `python tools/dump_golden.py` (or pass the one path to regenerate just it).
-3. `cargo test -p endf`.
+1. Compress the file and drop it in `crates/endf/fixtures/`:
+   `xz -9 -k file.endf`
+2. `cargo test -p endf --test golden -- --ignored regenerate_goldens`
+3. Review the new golden, then `cargo test -p endf`.
 
-Nothing in the Rust test needs changing, it discovers golden files and follows
-`SOURCE`.
+Nothing in the Rust test needs changing, it discovers fixtures and goldens.
 
 ## What is compared
 
@@ -66,47 +78,36 @@ Nothing in the Rust test needs changing, it discovers golden files and follows
 | `MF3 …`, `BP`, `INT`, `X`, `Y` | Parsed values, compared **exactly** |
 | `EVALX` / `EVALY` | Interpolation, compared to 1e-12 relative |
 
-Values are written as the shortest round-tripping decimal and both readers parse
-decimals with correct rounding, so parsed values are compared bit-for-bit. Only
-computed values use a tolerance, and `is_interpolated` in `golden.rs` lists
-exactly which: the interpolation samples, because logs and exps need not round
-identically in the two languages; the MF=10 yields, which divide two
-interpolated cross sections; the propagated uncertainties, where `uncertainties`
-accumulates a variance and takes its square root; and the forward-scattered
-fraction with the removal cross section that folds it in, because NumPy
-re-associated the Clenshaw recurrence between 2.2 and 2.4 and the two give
-different last bits. Nothing that comes off the file is compared loosely.
-
-`python tools/dump_golden.py --check` compares the stored dumps against freshly
-generated ones under the same rules, which is what CI runs. It compares the dump
-*text* rather than the compressed bytes, two xz encoders can write the same
-content differently, and that says nothing about the reader.
+Values are written as the shortest round-tripping decimal and parsed with
+correct rounding, so parsed values are compared bit-for-bit. Only computed
+values use a tolerance, and `is_interpolated` and `is_log_law_cdf` in
+`golden.rs` list exactly which: those that go through `ln`, `exp` and similar
+functions, which are not correctly rounded and differ in the last bit between
+the maths libraries of the platforms CI runs on. Nothing that comes off the
+file is compared loosely.
 
 The `SECTION` lines matter more than they look: they hold the section splitter
-to the Python reader across files that have no Rust parser yet, so a new
-evaluation is useful coverage the day it is added, long before every MF is
-ported.
+across every file, including any MF that has no parser, so a new evaluation is
+useful coverage the day it is added.
 
 ## Coverage still wanted
 
-Every ENDF file the Python package parses now has a Rust parser, and every one
-is exercised by a fixture. MF 40 was the last, and the TENDL-2017 Nb93 trim now
-covers it.
-
-MF 32 (resonance parameter covariances) has a Rust parser the Python package
-does not, so it is kept out of the golden comparison entirely: there is no
-reader to generate a golden from, and a hand-written one would only restate
-the parser. It is covered by the unit tests in `src/mf/mf32.rs` and by
-`tests/mf32_tapes.rs`, which walks every MF=32 section of six libraries.
+Every ENDF file with a parser is exercised by a fixture. MF 32 was the last:
+the Python reader never parsed it, so it could not have a golden until the
+goldens became this reader's own. Its fixtures cover LCOMP=0, LCOMP=1 general,
+LCOMP=2 compact (Reich-Moore and R-matrix limited) and the unresolved range;
+LCOMP=1 for R-matrix limited has none. `tests/mf32_tapes.rs` also walks every
+MF=32 section of six libraries.
 
 It is pinned in `golden.rs` as `UNCOVERED_BY_ANY_FIXTURE` and checked, so the
 list cannot drift in either direction: the test fails both when a fixture
 starts covering one, and when a new parser arrives without coverage.
 
-`MF2` is worth a line of its own. It has real Reich-Moore parameters from Fe56
-and U235, a Case C unresolved region from U235, and a synthetic multi-level
-Breit-Wigner section, but Adler-Adler, R-matrix limited (LRF=7) and unresolved
-Cases A and B are still untested. Cases A and B are additionally unreachable
+`MF2` is worth a line of its own. It has real Reich-Moore parameters from Fe56,
+U235 and Pb208, R-matrix limited (LRF=7) from Cl35, Cu65, W186 and V51, a Case
+C unresolved region from U235, and multi-level Breit-Wigner from Bi209 and a
+synthetic section, but Adler-Adler and unresolved Cases A and B are still
+untested. Cases A and B are additionally unreachable
 through the current dispatch, which tests LRF where the format uses LRU.
 
 The distribution shapes are tracked the same way, in `DISTRIBUTION_SHAPES`:
@@ -117,7 +118,7 @@ real file small enough to keep as a fixture holds a shape, one is built.
 `tools/make_denormal_ace.py` write ACE tables; `tools/make_nfy_endf.py` and
 `tools/make_shapes_endf.py` write ENDF evaluations on top of the record writer
 in `tools/endf_writer.py`. The values are invented; the layout is the format's,
-which is the part both readers are being held to.
+which is the part the reader is being held to.
 
 Trimming a fixture down to the sections that matter is what `tools/trim_endf.py`
 is for. A full evaluation runs to tens of megabytes, most of it covariance
@@ -156,18 +157,23 @@ data, U235 is 36 MB whole and 451 KB with ten sections kept.
 | `synthetic-denormal.ace` | The float form NJOY writes for a denormal, `6.10562372605-318` |
 | `synthetic-nfy.endf` | MF8 MT=454 and MT=459, the fission product yields |
 | `synthetic-shapes.endf` | MF2 LRF=2 Breit-Wigner, MF5 LF=12 Madland-Nix, MF6 LANG=2 and LAW=6, MF13 |
+| `n-094_Pu_244_mf2_mf32` | MF32 LCOMP=0 (compatible) |
+| `n-066_Dy_158_mf2_mf32` | MF32 LCOMP=1 general covariance blocks |
+| `n-011_Na_023_mf2_mf32`, `n-090_Th_232_mf2_mf32` | MF32 LCOMP=2 compact Reich-Moore; Th232 also an unresolved range |
+| `n-017_Cl_035_mf2_mf32`, `n-029_Cu_065_mf2_mf32`, `n-074_W_186_mf2_mf32` | MF2 LRF=7 and MF32 LCOMP=2 compact R-matrix limited |
+| `n-045_Rh_103_mf2_mf32` | MF32 compact R-matrix limited plus an unresolved range |
+| `n-082_Pb_208_mf2`, `n-092_U_235_mf2`, `n-023_V_051_mf2`, `n-083_Bi_209_mf2` | MF2 alone: Reich-Moore, LRF=7 with APE and APT both given, multi-level Breit-Wigner |
 
 ### Fixtures still wanted
 
-- **MF2 formalisms beyond Reich-Moore and Breit-Wigner**: R-matrix limited
-  (LRF=7), and unresolved Cases A and B. Note that Cases A and B cannot be
-  reached at all through the current dispatch (it tests LRF where the format
-  uses LRU) so a fixture alone will not cover them.
-- **Adler-Adler (LRF=4)**, which both readers reject rather than parse. A
+- **Unresolved Cases A and B.** They cannot be reached at all through the
+  current dispatch (it tests LRF where the format uses LRU) so a fixture alone
+  will not cover them.
+- **MF32 LCOMP=1 for R-matrix limited**, the one MF32 layout no fixture has.
+- **Adler-Adler (LRF=4)**, which the reader rejects rather than parses. A
   fixture would only pin that rejection.
-- **ACE law 5**, which the Python reader cannot read at all (it has no ACE
-  reader for the general evaporation spectrum), so there is nothing to compare
-  against. Every other ACE law is covered.
+- **ACE law 5**, which the reader refuses by name. Every other ACE law is
+  covered.
 - **A second ACE table of the same nuclide at another temperature**, which is
   what `add_temperature_from_ace` exists for. Only the "already present" path
   is exercised.

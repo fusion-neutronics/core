@@ -29,8 +29,11 @@ fn read_text(name: &str) -> String {
     let path = fixture(name);
     let raw = std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
     let mut out = Vec::new();
-    lzma_rs::xz_decompress(&mut raw.as_slice(), &mut out)
-        .unwrap_or_else(|e| panic!("decompressing {}: {e}", path.display()));
+    std::io::Read::read_to_end(
+        &mut lzma_rust2::XzReader::new(raw.as_slice(), true),
+        &mut out,
+    )
+    .unwrap_or_else(|e| panic!("decompressing {}: {e}", path.display()));
     String::from_utf8(out).expect("a fixture is not UTF-8")
 }
 
