@@ -2954,14 +2954,16 @@ mod r_matrix_tests {
     /// where they do not.
     ///
     /// Elastic and capture agree below 0.82 MeV to NJOY's digits, and so
-    /// does the (n,p) cross section, to 2% (NJOY's large-eta form, `bigeta`,
-    /// is 6% off mpmath at its resonances). At 822.77 keV the proton
-    /// channel's eta crosses ten times its rho, where NJOY's `coulx` leaves
-    /// `bigeta` for its eta >= 5 form, and NJOY's (n,p) jumps 2.6e5-fold
-    /// within 15 eV (6.19e-10 b to 1.59e-4 b with one proton width alone),
-    /// an error in that form that every NJOY (n,p) above it inherits (3.1e-3
-    /// b at 925 keV, where the evaluation's widths give 6e-7 b). Ours is
-    /// continuous across it.
+    /// does the (n,p) cross section, to 2%. NJOY 2016's large-eta Coulomb
+    /// form (`bigeta`, taken where eta > 10 rho and eta > 5) builds its K_0
+    /// and K_1 series with integer division in the harmonic numbers, so its
+    /// penetrability is far too small: 1.31e-18 for l=2 where it is 3.35e-13
+    /// at rho = 0.567, eta = 5.67. Ca40's proton channel leaves that branch
+    /// at 822.77 keV, where NJOY's (n,p) jumps 2.6e5-fold within 15 eV, and
+    /// every resonance whose penetrability `bigeta` gave is mis-normalized
+    /// above it (3.1e-3 b at 925 keV, where the widths give 5.6e-7 b). With
+    /// real division NJOY agrees with this reconstruction to 3 to 5% there
+    /// (shimwell/NJOY2016#5). Ours is continuous across 822.77 keV.
     #[test]
     fn r_matrix_charged_channels_hold_where_njoy_switches_coulomb_forms() {
         let rm = range(CA40);
