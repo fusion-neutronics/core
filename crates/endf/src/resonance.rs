@@ -2757,6 +2757,7 @@ mod r_matrix_tests {
     const V51: &[u8] = include_bytes!("../fixtures/n-023_V_051_mf2.endf.xz");
     const CU63: &[u8] = include_bytes!("../fixtures/n-029_Cu_063_mf2_mf32.endf.xz");
     const CL35: &[u8] = include_bytes!("../fixtures/n-017_Cl_035_mf2_mf32.endf.xz");
+    const CA40: &[u8] = include_bytes!("../fixtures/n-020_Ca_040_mf2.endf.xz");
 
     fn material(fixture: &[u8]) -> Material {
         Material::from_str(&crate::testdata::text(fixture)).expect("fixture parses")
@@ -2932,6 +2933,71 @@ mod r_matrix_tests {
                 );
             }
         }
+    }
+
+    /// ENDF/B-VIII.1 Ca40: an alpha channel (MT=800, Q = +1.75 MeV) and a
+    /// proton channel (MT=600) closed below 542 keV. NJOY 2016 RECONR at 0 K,
+    /// less the MF=3 background, `(E, elastic, capture)` below 0.82 MeV.
+    const CA40_NJOY: &[(f64, f64, f64)] = &[
+        (1e-5, 2.629753e0, 2.062027e1),
+        (3.449957e4, 1.010069e0, 2.021545e-3),
+        (1.10002e5, 1.787824e-1, 1.821381e-4),
+        (2.799985e5, 1.315065e0, 2.450266e-4),
+        (4.749992e5, 7.805748e-1, 4.574448e-4),
+        (6.199994e5, 3.52773e0, 2.535537e-3),
+        (7.00035e5, 1.388453e0, 2.556458e-5),
+        (7.640008e5, 2.127604e-1, 1.056679e-3),
+        (8.000002e5, 2.900387e0, 2.738641e-2),
+    ];
+
+    /// Ca40 against NJOY where NJOY's Coulomb functions hold, and continuous
+    /// where they do not.
+    ///
+    /// Elastic and capture agree below 0.82 MeV to NJOY's digits, and so
+    /// does the (n,p) cross section, to 2% (NJOY's large-eta form, `bigeta`,
+    /// is 6% off mpmath at its resonances). At 822.77 keV the proton
+    /// channel's eta crosses ten times its rho, where NJOY's `coulx` leaves
+    /// `bigeta` for its eta >= 5 form, and NJOY's (n,p) jumps 2.6e5-fold
+    /// within 15 eV (6.19e-10 b to 1.59e-4 b with one proton width alone),
+    /// an error in that form that every NJOY (n,p) above it inherits (3.1e-3
+    /// b at 925 keV, where the evaluation's widths give 6e-7 b). Ours is
+    /// continuous across it.
+    #[test]
+    fn r_matrix_charged_channels_hold_where_njoy_switches_coulomb_forms() {
+        let rm = range(CA40);
+        assert_eq!(
+            RangeReconstruction::other_reactions(&rm),
+            [Some(800), Some(600)]
+        );
+        for &(e, elastic, capture) in CA40_NJOY {
+            let x = rm.cross_sections(e);
+            for (ours, njoy, what) in [
+                (x.elastic, elastic, "elastic"),
+                (x.capture, capture, "capture"),
+            ] {
+                assert!(
+                    (ours - njoy).abs() <= 2e-6 * njoy.abs() + 1e-6,
+                    "{what} at {e} eV: {ours} against NJOY's {njoy}"
+                );
+            }
+        }
+        for (e, njoy) in [(7.640008e5, 1.290136e-8), (8.000002e5, 4.417897e-6)] {
+            let ours = rm.cross_sections(e).other[1];
+            assert!(
+                (ours / njoy - 1.0).abs() < 0.02,
+                "(n,p) at {e} eV: {ours} against NJOY's {njoy}"
+            );
+        }
+        let (below, above) = (
+            rm.cross_sections(822_760.0).other[1],
+            rm.cross_sections(822_776.0).other[1],
+        );
+        // The 825.7 keV resonance's tail rises 1.7% over these 16 eV; NJOY's
+        // jumps by 2.6e5.
+        assert!(
+            (above / below - 1.0).abs() < 0.05,
+            "(n,p) {below} then {above}"
+        );
     }
 
     /// Every resonance's analytic derivatives (ER, the capture width and each
