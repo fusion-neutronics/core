@@ -43,10 +43,19 @@
 //!
 //! # Scattering radius
 //!
-//! Where ISR=1 the radius uncertainty is a parameter of its own, uncorrelated
-//! with the resonance parameters (the format gives no such correlation): the
-//! range's AP and, for Reich-Moore, each L's APL; for R-matrix limited, the
-//! radius of each channel of each spin group.
+//! Where ISR=1 a Breit-Wigner or Reich-Moore range's radius uncertainty is one
+//! parameter, uncorrelated with the resonance parameters (the format gives no
+//! such correlation), of unit variance: one standard deviation of it moves
+//! every section's radius at once, each by its own step
+//! ([`ResolvedCovariance::radius_steps`]). The steps follow NJOY's ERRORR, the
+//! reference reading of the format: the LIST's first value, DAP, is AP's;
+//! further values (MLS of them in all) are the first MLS-1 sections' own; a
+//! section the list does not reach takes DAP even where it carries an APL of
+//! its own, and a section without an APL moves with AP, by DAP. ENDF/B-VIII.1
+//! Pb208 lists `[0.027, 0, 0.0027]` over four sections: its s-wave radius is
+//! certain, its p-wave radius moves by 0.0027 and its d- and f-wave radii,
+//! which repeat AP, by 0.027. For R-matrix limited ranges each channel of each
+//! spin group has a radius parameter of its own.
 
 use crate::error::{Error, Result};
 
@@ -64,11 +73,9 @@ pub enum Location {
     Orbital { section: usize, index: usize },
     /// Resonance `index` of spin group `group`, for R-matrix limited.
     SpinGroup { group: usize, index: usize },
-    /// The range as a whole: its scattering radius AP.
+    /// The range as a whole: its radius parameter, which moves every
+    /// section's radius by its step in [`ResolvedCovariance::radius_steps`].
     Range,
-    /// The scattering radius APL of the section of orbital angular momentum
-    /// `l`, for Reich-Moore.
-    Orbit { l: i64 },
     /// The radius of channel `channel` of spin group `group`, for R-matrix
     /// limited.
     Channel { group: usize, channel: usize },
@@ -120,6 +127,10 @@ pub struct ResolvedCovariance {
     /// Energies of MF=32 resonances MF=2 does not list, left out of the
     /// matrix.
     pub unmatched: Vec<f64>,
+    /// Per MF=2 section, how far one standard deviation of the range's radius
+    /// parameter moves the section's radius (1e-12 cm). Empty where the
+    /// range has no radius uncertainty.
+    pub radius_steps: Vec<f64>,
 }
 
 impl ResolvedCovariance {
@@ -178,6 +189,7 @@ pub fn resolved_covariances(mf2: &Mf2, mf32: &Mf32) -> Result<Vec<ResolvedCovari
                 covariance,
                 approximate: builder.approximate,
                 unmatched: builder.unmatched,
+                radius_steps: builder.radius_steps,
             });
         }
     }
@@ -196,6 +208,7 @@ struct Builder {
     entries: Vec<(usize, usize, f64)>,
     approximate: usize,
     unmatched: Vec<f64>,
+    radius_steps: Vec<f64>,
     /// The MF=2 resonances already given to an MF=32 one.
     claimed: std::collections::HashSet<Location>,
 }
@@ -387,43 +400,45 @@ fn orbital(
         .map(|((d, _, _), l)| (l, d <= 1e-6 * er.abs().max(1e-30))))
 }
 
-/// The MF=2 orbital angular momentum of each Reich-Moore section, for the
-/// L-dependent radii.
-fn orbital_l_values(parameters: &ResonanceParameters) -> Vec<i64> {
+/// Each Breit-Wigner or Reich-Moore section's APL (zero where it has none:
+/// Breit-Wigner sections never do).
+fn section_radii(parameters: &ResonanceParameters) -> Vec<f64> {
     match parameters {
-        ResonanceParameters::ReichMoore(rm) => rm.sections.iter().map(|s| s.l).collect(),
-        ResonanceParameters::BreitWigner(bw) => bw.sections.iter().map(|s| s.l).collect(),
+        ResonanceParameters::ReichMoore(rm) => rm.sections.iter().map(|s| s.apl).collect(),
+        ResonanceParameters::BreitWigner(bw) => vec![0.0; bw.sections.len()],
         _ => Vec::new(),
     }
 }
 
-/// The radius parameters ISR=1 adds: one for AP, and for Reich-Moore one per
-/// L-dependent APL after it, in the order the LIST gives them.
-fn radius(
-    builder: &mut Builder,
-    dap: &Option<ScatteringRadiusUncertainty>,
-    ap: f64,
-    l_values: &[i64],
-) {
+/// The radius parameter ISR=1 adds, and each section's step under it (see
+/// the module documentation).
+fn radius(builder: &mut Builder, dap: &Option<ScatteringRadiusUncertainty>, apl: &[f64]) {
     let values: Vec<f64> = match dap {
         None => return,
         Some(ScatteringRadiusUncertainty::Cont { dap }) => vec![*dap],
         Some(ScatteringRadiusUncertainty::List { values }) => values.clone(),
     };
-    for (k, d) in values.iter().enumerate() {
-        if *d == 0.0 {
-            continue;
+    let Some(&global) = values.first() else {
+        return;
+    };
+    let nls = apl.len();
+    let mls = values.len();
+    let own = |i: usize| -> f64 {
+        if mls > 1 && i + 1 < mls {
+            values[i + 1]
+        } else {
+            global
         }
-        let location = match k {
-            0 => Location::Range,
-            _ => match l_values.get(k - 1) {
-                Some(&l) => Location::Orbit { l },
-                None => continue,
-            },
-        };
-        let p = builder.push(location, Quantity::ScatteringRadius, ap);
-        builder.set(p, p, d * d);
+    };
+    let steps: Vec<f64> = (0..nls)
+        .map(|i| if apl[i] == 0.0 { global } else { own(i) })
+        .collect();
+    if steps.iter().all(|s| *s == 0.0) {
+        return;
     }
+    let p = builder.push(Location::Range, Quantity::ScatteringRadius, 0.0);
+    builder.set(p, p, 1.0);
+    builder.radius_steps = steps;
 }
 
 /// The width quantities of a Breit-Wigner or Reich-Moore resonance, in the
@@ -470,7 +485,7 @@ fn read_range(range: &Range, parameters: &ResonanceParameters, b: &mut Builder) 
             Ok(())
         }
         Covariance::General(c) => {
-            radius(b, &c.dap, c.ap, &orbital_l_values(parameters));
+            radius(b, &c.dap, &section_radii(parameters));
             let names = widths(range.lrf);
             for block in &c.blocks {
                 let mpar = block.mpar as usize;
@@ -500,7 +515,7 @@ fn read_range(range: &Range, parameters: &ResonanceParameters, b: &mut Builder) 
             Ok(())
         }
         Covariance::Compact(c) => {
-            radius(b, &c.dap, c.ap, &orbital_l_values(parameters));
+            radius(b, &c.dap, &section_radii(parameters));
             let nrsa = c.resonances.len();
             let nnn = c.correlation.nnn as usize;
             if nrsa == 0 || !nnn.is_multiple_of(nrsa) {
@@ -677,6 +692,235 @@ fn channel_radii(
             b.set(p, p, d * d);
         }
     }
+}
+
+/// The relative covariance of a resolved range's group cross sections that
+/// its resonance-parameter covariance implies.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupCovariance {
+    /// Group edges, eV, ascending: `G + 1` of them.
+    pub edges: Vec<f64>,
+    /// The reactions, in block order: MT 2 and 102, and 18 where the range
+    /// has fission.
+    pub reactions: Vec<i32>,
+    /// Per reaction, the 1/E-weighted group cross sections, barns.
+    pub cross_sections: Vec<Vec<f64>>,
+    /// Row-major `(R G) × (R G)`, reaction-major: element
+    /// `(a G + g, b G + h)` is the relative covariance of reaction `a` in
+    /// group `g` with reaction `b` in group `h`.
+    pub relative: Vec<f64>,
+}
+
+impl GroupCovariance {
+    pub fn groups(&self) -> usize {
+        self.edges.len().saturating_sub(1)
+    }
+
+    /// The relative covariance of `(reaction a, group g)` with `(b, h)`.
+    pub fn get(&self, a: usize, g: usize, b: usize, h: usize) -> f64 {
+        let n = self.reactions.len() * self.groups();
+        self.relative[(a * self.groups() + g) * n + b * self.groups() + h]
+    }
+}
+
+/// Group edges for a resolved range: one group per resonance, the edges at
+/// the geometric midpoints of neighbouring resonance energies, with a
+/// thermal group below half the first resonance's energy. Groups are where a
+/// transport replica's cross-section multiplier is constant, so a group per
+/// resonance lets each resonance move on its own.
+pub fn resonance_edges(range: &dyn crate::resonance::ResolvedRange) -> Vec<f64> {
+    let (el, eh) = range.bounds();
+    let mut energies: Vec<f64> = range
+        .resonances()
+        .into_iter()
+        .map(|(e, _)| e)
+        .filter(|&e| e > el && e < eh)
+        .collect();
+    energies.sort_by(f64::total_cmp);
+    energies.dedup();
+    let mut edges = vec![el];
+    if let Some(&first) = energies.first() {
+        if 0.5 * first > el {
+            edges.push(0.5 * first);
+        }
+    }
+    for w in energies.windows(2) {
+        edges.push((w[0] * w[1]).sqrt());
+    }
+    edges.push(eh);
+    edges.dedup_by(|a, b| close(*a, *b));
+    edges
+}
+
+/// The points an integral over a resolved range is taken on: a logarithmic
+/// grid at `per_decade` points a decade, each resonance traced at
+/// `per_resonance` points spaced as `E_r + (G/2) tan(theta)` (uniform in the
+/// Lorentzian's cumulative) and then outwards at `E_r +- (G/2) 1.1^k` to the
+/// range's edges, and every group edge. At 400 a decade and 256 a resonance
+/// Pb208's group variances are within 1% of their value at twice to four
+/// times the density.
+///
+/// The outward points matter for the derivative with respect to a resonance's
+/// energy: it is odd about the resonance and falls as a power of the
+/// distance, so its integral over a group is a near-cancellation that
+/// trapezoids on points symmetric about the resonance and geometric in the
+/// distance get right, and the logarithmic grid alone, kilo-electronvolts
+/// apart and lopsided about an 11 eV resonance at 571 keV, does not (it made
+/// Pb208's capture variance there 1e4 times too large).
+fn integration_points(
+    range: &dyn crate::resonance::ResolvedRange,
+    edges: &[f64],
+    per_decade: usize,
+    per_resonance: usize,
+) -> Vec<f64> {
+    let (el, eh) = (edges[0], edges[edges.len() - 1]);
+    let mut points = edges.to_vec();
+    let decades = (eh / el).log10();
+    let n = (decades * per_decade as f64).ceil().max(1.0) as usize;
+    for i in 1..n {
+        points.push(el * (eh / el).powf(i as f64 / n as f64));
+    }
+    for (er, width) in range.resonances() {
+        if er <= el || er >= eh || width <= 0.0 {
+            continue;
+        }
+        for j in 0..per_resonance {
+            let theta = std::f64::consts::PI * ((j as f64 + 0.5) / per_resonance as f64 - 0.5);
+            let e = er + 0.5 * width * theta.tan();
+            if e > el && e < eh {
+                points.push(e);
+            }
+        }
+        let mut offset =
+            0.5 * width * (std::f64::consts::FRAC_PI_2 * (1.0 - 1.0 / per_resonance as f64)).tan();
+        while er - offset > el || er + offset < eh {
+            for e in [er - offset, er + offset] {
+                if e > el && e < eh {
+                    points.push(e);
+                }
+            }
+            offset *= 1.1;
+        }
+    }
+    points.sort_by(f64::total_cmp);
+    points.dedup();
+    points
+}
+
+/// The relative covariance of `range`'s 1/E-weighted group cross sections on
+/// `edges` that the parameter covariance `cov` implies, to first order:
+///
+/// ```text
+/// C_(ag, bh) = sum_ij S_ag,i C_ij S_bh,j / (sigma_ag sigma_bh)
+/// S_ag,i     = int_g (d sigma_a / d p_i) dE / E  /  int_g dE / E
+/// ```
+///
+/// at infinite dilution and 0 K, as NJOY's ERRORR takes it. The integrals
+/// are trapezoids in `ln E` on points that trace every resonance.
+pub fn group_covariance(
+    cov: &ResolvedCovariance,
+    range: &dyn crate::resonance::ResolvedRange,
+    edges: &[f64],
+) -> Result<GroupCovariance> {
+    if edges.len() < 2 || edges.windows(2).any(|w| w[1] <= w[0]) || edges[0] <= 0.0 {
+        return Err(Error::Mismatched {
+            what: "group edges, which must be positive and ascending",
+        });
+    }
+    // Outside the range the resonance formula is not the cross section.
+    let (el, eh) = range.bounds();
+    if edges[0] < el || edges[edges.len() - 1] > eh {
+        return Err(Error::Mismatched {
+            what: "group edges and the range, which must hold them",
+        });
+    }
+    let groups = edges.len() - 1;
+    let n_par = cov.len();
+    let points = integration_points(range, edges, 400, 256);
+    // Per group: the integral of each cross section and of each parameter's
+    // gradient, and of the weight.
+    let mut sigma = vec![[0.0; 3]; groups];
+    let mut sens = vec![[0.0; 3]; groups * n_par];
+    let mut width = vec![0.0; groups];
+    let mut previous: Option<(
+        f64,
+        crate::resonance::CrossSections,
+        Vec<crate::resonance::Gradient>,
+    )> = None;
+    let mut g = 0;
+    for &e in &points {
+        let x = range.cross_sections(e);
+        let grad = range.parameter_gradients(e, cov)?;
+        if let Some((e0, x0, grad0)) = &previous {
+            while g + 1 < groups && *e0 >= edges[g + 1] {
+                g += 1;
+            }
+            let h = 0.5 * (e / e0).ln();
+            width[g] += 2.0 * h;
+            let (a, b) = (
+                [x0.elastic, x0.capture, x0.fission],
+                [x.elastic, x.capture, x.fission],
+            );
+            for c in 0..3 {
+                sigma[g][c] += h * (a[c] + b[c]);
+            }
+            let row = &mut sens[g * n_par..(g + 1) * n_par];
+            for (i, s) in row.iter_mut().enumerate() {
+                for c in 0..3 {
+                    s[c] += h * (grad0[i][c] + grad[i][c]);
+                }
+            }
+        }
+        previous = Some((e, x, grad));
+    }
+    let fission = sigma.iter().any(|s| s[2] != 0.0);
+    let reactions: Vec<(usize, i32)> = if fission {
+        vec![(0, 2), (1, 102), (2, 18)]
+    } else {
+        vec![(0, 2), (1, 102)]
+    };
+    let r = reactions.len();
+    let rows = r * groups;
+    // Relative sensitivities, row (a, g) by parameter.
+    let mut s_rel = vec![0.0; rows * n_par];
+    let mut cross_sections = vec![vec![0.0; groups]; r];
+    for (ai, &(c, _)) in reactions.iter().enumerate() {
+        for gi in 0..groups {
+            let w = width[gi].max(f64::MIN_POSITIVE);
+            let mean = sigma[gi][c] / w;
+            cross_sections[ai][gi] = mean;
+            if mean == 0.0 {
+                continue;
+            }
+            for i in 0..n_par {
+                s_rel[(ai * groups + gi) * n_par + i] = sens[gi * n_par + i][c] / w / mean;
+            }
+        }
+    }
+    // T = C S^T (n_par × rows), then S T.
+    let mut t = vec![0.0; n_par * rows];
+    for i in 0..n_par {
+        let crow = &cov.covariance[i * n_par..(i + 1) * n_par];
+        for k in 0..rows {
+            let srow = &s_rel[k * n_par..(k + 1) * n_par];
+            t[i * rows + k] = crow.iter().zip(srow).map(|(c, s)| c * s).sum();
+        }
+    }
+    let mut relative = vec![0.0; rows * rows];
+    for a in 0..rows {
+        let srow = &s_rel[a * n_par..(a + 1) * n_par];
+        for b in a..rows {
+            let v: f64 = (0..n_par).map(|i| srow[i] * t[i * rows + b]).sum();
+            relative[a * rows + b] = v;
+            relative[b * rows + a] = v;
+        }
+    }
+    Ok(GroupCovariance {
+        edges: edges.to_vec(),
+        reactions: reactions.iter().map(|&(_, mt)| mt).collect(),
+        cross_sections,
+        relative,
+    })
 }
 
 #[cfg(test)]
@@ -891,6 +1135,65 @@ mod tests {
             assert!(sg.gam.iter().all(|row| row.len() == sg.nrs as usize));
             assert!(sg.er.windows(2).all(|w| w[0] <= w[1]), "energies ascend");
         }
+    }
+
+    /// Dy158's group covariance matches NJOY 2016 ERRORR's resonance-parameter
+    /// contribution (ENDF/B-VIII.1, 1/E weight, the "contribution from
+    /// resonance parameters (mf=32)" it prints) to its four printed digits and
+    /// the 1% finite differences it takes them from, elastic and capture, over
+    /// the resolved range.
+    #[test]
+    fn group_covariance_matches_errorr() {
+        let m = Material::from_str(&crate::testdata::text(DY158)).expect("fixture parses");
+        let cov = &resolved_covariances(m.mf2().unwrap(), m.mf32().unwrap()).unwrap()[0];
+        let rm = crate::resonance::ReichMooreRange::new(&m.mf2().unwrap().isotopes[0].ranges[0])
+            .unwrap();
+        let edges = [1e-5, 0.1, 1.0, 5.0, 10.0, 20.0, 30.0, 50.0, 86.2];
+        let g = group_covariance(cov, &rm, &edges).unwrap();
+        assert_eq!(g.reactions, vec![2, 102]);
+        let elastic = [
+            3.635e-4, 3.106e-4, 2.243e-4, 2.366e-4, 3.692e-4, 1.065e-3, 2.343e-2, 3.569e-2,
+        ];
+        let capture = [
+            4.477e-2, 4.326e-2, 3.303e-2, 1.469e-2, 1.634e-2, 2.292e-2, 4.058e-3, 1.930e-2,
+        ];
+        for h in 0..8 {
+            for (a, want) in [(0, elastic[h]), (1, capture[h])] {
+                let got = g.get(a, h, a, h);
+                assert!(
+                    (got / want - 1.0).abs() < 2e-3,
+                    "reaction {a} group {h}: {got:e} against ERRORR's {want:e}"
+                );
+            }
+        }
+        // The cross block is the transpose of its mirror.
+        for h in 0..8 {
+            for k in 0..8 {
+                assert_eq!(g.get(0, h, 1, k), g.get(1, k, 0, h));
+            }
+        }
+    }
+
+    /// One group per resonance: an edge between every pair of neighbours and
+    /// a thermal group below the first.
+    #[test]
+    fn resonance_edges_put_one_resonance_in_each_group() {
+        let m = Material::from_str(&crate::testdata::text(DY158)).expect("fixture parses");
+        let rm = crate::resonance::ReichMooreRange::new(&m.mf2().unwrap().isotopes[0].ranges[0])
+            .unwrap();
+        let edges = resonance_edges(&rm);
+        use crate::resonance::ResolvedRange;
+        let inside: Vec<f64> = rm
+            .resonances()
+            .into_iter()
+            .map(|(e, _)| e)
+            .filter(|&e| e > edges[0] && e < edges[edges.len() - 1])
+            .collect();
+        for w in edges.windows(2) {
+            let n = inside.iter().filter(|&&e| e >= w[0] && e < w[1]).count();
+            assert!(n <= 1, "group {w:?} holds {n} resonances");
+        }
+        assert!(edges.windows(2).all(|w| w[1] > w[0]));
     }
 
     /// The matrix is symmetric wherever it comes from.
