@@ -11,9 +11,14 @@ contract a Python caller actually meets:
   saying so, rather than a confident zero. That distinction is the whole point
   of the feature, and it is the one that is easy to lose at a binding.
 
-The committed test fixtures carry no ``covariance.arrow`` -- nothing published
-does yet -- which is exactly what makes them the right data for the second case.
+The fixtures are fetched without ``covariance.arrow``, which is what makes them
+the right data for the second case. They are links into (on Windows, copies of)
+the download cache, though, which other tests fill with covariance now that the
+published data carries it, so this module moves any ``covariance.arrow`` there
+aside while it runs.
 """
+
+import pathlib
 
 import pytest
 import yamc
@@ -24,6 +29,23 @@ DAY = 86400.0
 ENERGY_GROUPS = [1e-5, 0.625, 1e5, 2e7]
 MULTIGROUP_FLUX = [1e12, 5e12, 1e14]
 RATE = sum(MULTIGROUP_FLUX)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _fixtures_without_covariance():
+    """Hide every fixture's ``covariance.arrow`` for this module, restoring it
+    afterwards: the tests here are about data that carries none."""
+    root = pathlib.Path(__file__).resolve().parents[4] / "tests"
+    hidden = []
+    for cov in root.glob("*.arrow/covariance.arrow"):
+        aside = cov.with_name("covariance.arrow.hidden-by-test")
+        cov.rename(aside)
+        hidden.append((aside, cov))
+    try:
+        yield
+    finally:
+        for aside, cov in hidden:
+            aside.rename(cov)
 
 
 @pytest.fixture(autouse=True)
@@ -109,8 +131,8 @@ def test_asking_on_data_without_covariance_reports_it_rather_than_a_zero():
     info = results.get_data_uncertainty_info(iron.id or 0)
     assert info is not None, "asking for uncertainty must produce a report"
 
-    # The committed fixtures carry no covariance.arrow, so nothing can be
-    # perturbed. The report has to say that.
+    # The fixtures carry no covariance.arrow here (see the module fixture),
+    # so nothing can be perturbed. The report has to say that.
     assert info["perturbed"] == []
     assert info["has_gaps"] is True
     assert "Fe56" in info["no_covariance_data"]
