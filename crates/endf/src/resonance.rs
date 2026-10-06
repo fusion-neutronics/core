@@ -1475,10 +1475,18 @@ impl UnresolvedAverages {
             });
         }
         let awri = u.ranges.first().map_or(1.0, |r| r.awri);
-        let channel_radius = match range.naps {
-            0 => channel_radius_formula(awri),
-            _ => u.ap,
-        };
+        // NAPS=2 takes the channel radius from an energy-dependent radius,
+        // which NRO=0 does not give (refused above when it does), so here it
+        // is illegal, as NJOY's csunr2 says.
+        let channel_radius =
+            match range.naps {
+                0 => channel_radius_formula(awri),
+                1 => u.ap,
+                _ => return Err(Error::Mismatched {
+                    what:
+                        "an unresolved range's NAPS and its scattering radius (NAPS=2 needs NRO=1)",
+                }),
+            };
         let mut orbitals = Vec::with_capacity(u.ranges.len());
         // NJOY interpolates on the first (l, J)'s energies, by the law of the
         // last (case C), or linearly on ES (case B).
@@ -1497,7 +1505,9 @@ impl UnresolvedAverages {
                     spins.push(UrrSpin {
                         aj: r.aj[j],
                         mux: 1,
-                        mun: r.amun[j].round() as usize,
+                        // Truncated, as NJOY's csunr1 takes cases A and B;
+                        // csunr2 rounds case C's.
+                        mun: r.amun[j] as usize,
                         muf: 1,
                         energies: vec![range.el],
                         rows: vec![[r.d[j], 0.0, r.gno[j], r.gg[j], 0.0]],
@@ -1527,7 +1537,7 @@ impl UnresolvedAverages {
                         spins.push(UrrSpin {
                             aj: *aj,
                             mux: 1,
-                            mun: amun.round() as usize,
+                            mun: *amun as usize,
                             muf: *muf as usize,
                             energies,
                             rows,
@@ -2811,6 +2821,25 @@ mod unresolved_tests {
             .clone();
         let u = UnresolvedAverages::new(&range).unwrap();
         (m, u)
+    }
+
+    /// NAPS=2 takes the channel radius from an energy-dependent radius that
+    /// NRO=0 does not give: refused, as NJOY refuses it, rather than read as
+    /// NAPS=1.
+    #[test]
+    fn unresolved_naps_2_without_an_energy_dependent_radius_is_refused() {
+        let m = material();
+        let mut range = m.mf2().unwrap().isotopes[0]
+            .ranges
+            .iter()
+            .find(|r| r.lru == 2)
+            .unwrap()
+            .clone();
+        range.naps = 2;
+        assert!(matches!(
+            UnresolvedAverages::new(&range),
+            Err(Error::Mismatched { .. })
+        ));
     }
 
     #[test]
