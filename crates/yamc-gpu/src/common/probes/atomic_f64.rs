@@ -19,7 +19,7 @@
 //! u64-bit-reinterpret-CAS-loop, atomic u32 with split high/low halves,
 //! or per-thread tally buffers reduced after the kernel.
 
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::ir::features::AtomicUsage;
 use cubecl::ir::{ElemType, FloatKind, Type};
 use cubecl::prelude::*;
@@ -62,7 +62,7 @@ pub fn run_atomic_f64_add_probe(ctx: &GpuContext, n_threads: u32, initial: f64) 
     let groups = n_threads / WORKGROUP_SIZE;
 
     unsafe {
-        atomic_f64_add_kernel::launch_unchecked::<WgpuRuntime>(
+        atomic_f64_add_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

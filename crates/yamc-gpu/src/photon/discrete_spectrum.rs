@@ -29,7 +29,7 @@
 //! particle bank (P4 / D1S P5).
 
 use crate::common::pcg32::{expand_seed, pcg_out};
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// CPU twin of the GPU discrete-spectrum walk. `energies`/`intensities` are
@@ -143,7 +143,7 @@ pub fn run_discrete_spectrum(
     const WG: u32 = 64;
     let groups = (n as u32).div_ceil(WG);
     unsafe {
-        discrete_spectrum_kernel::launch_unchecked::<WgpuRuntime>(
+        discrete_spectrum_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WG),

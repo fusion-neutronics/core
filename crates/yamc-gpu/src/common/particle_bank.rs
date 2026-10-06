@@ -45,7 +45,7 @@
 //! and treat `bank_overflow > 0` as a hard error -- never a silent drop
 //! (this is strictly safer than the CPU bank's silent cap).
 
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// f64 fields per banked particle: `[energy, px, py, pz, dx, dy, dz, weight]`.
@@ -188,7 +188,7 @@ pub fn run_bank_append(
     const WG: u32 = 64;
     let groups = (n as u32).div_ceil(WG);
     unsafe {
-        bank_append_kernel::launch_unchecked::<WgpuRuntime>(
+        bank_append_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WG),

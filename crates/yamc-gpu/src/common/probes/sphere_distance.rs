@@ -38,7 +38,7 @@
 //! detect misses. f64 has plenty of headroom above `1e30` so this
 //! doesn't collide with any realistic transport distance.
 
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Sentinel value for "ray misses sphere" or "sphere is behind ray".
@@ -141,7 +141,7 @@ pub fn run_sphere_distance(
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        sphere_distance_kernel::launch_unchecked::<WgpuRuntime>(
+        sphere_distance_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

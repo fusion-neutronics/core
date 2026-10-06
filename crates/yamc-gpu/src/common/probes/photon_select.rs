@@ -7,7 +7,7 @@
 //!
 //! Pure (the caller draws `cutoff = xi * sigma_total`), so byte-identical.
 
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Select the photon reaction type. `cutoff = xi * sigma_total`; returns
@@ -71,7 +71,7 @@ pub fn run_photon_select(
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        photon_select_kernel::launch_unchecked::<WgpuRuntime>(
+        photon_select_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

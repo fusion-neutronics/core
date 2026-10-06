@@ -437,7 +437,7 @@ fn eout_ct_test_kernel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GpuContext, GpuInitError, WgpuRuntime};
+    use crate::{GpuContext, GpuInitError};
 
     // Fixed test layout (kept tiny; the kernel hardcodes max_eout_x = 8).
     const AE: usize = 4; // max_eout_ae for the test
@@ -617,7 +617,7 @@ mod tests {
         const WG: u32 = 64;
         let groups = (n as u32).div_ceil(WG);
         unsafe {
-            eout_ct_test_kernel::launch_unchecked::<WgpuRuntime>(
+            eout_ct_test_kernel::launch_unchecked(
                 &client,
                 CubeCount::Static(groups, 1, 1),
                 CubeDim::new_1d(WG),

@@ -22,7 +22,7 @@
 
 use crate::common::pcg32::{expand_seed, pcg_out};
 use crate::common::rng::{PCG_INCR, PCG_MULT};
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Result of ONE free-electron Klein-Nishina (Kahn) proposal -- a single
@@ -151,7 +151,7 @@ pub fn run_compton_kahn(ctx: &GpuContext, seeds: &[u32], alphas: &[f64]) -> (Vec
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        compton_kahn_kernel::launch_unchecked::<WgpuRuntime>(
+        compton_kahn_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

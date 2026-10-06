@@ -25,7 +25,7 @@
 //! `#[cube]` helper and the CPU twin assume `count >= 1` and always draw; the
 //! caller is responsible for the skip.
 
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Selection result: the chosen LOCAL element index in `[0, count)` and the
@@ -182,7 +182,7 @@ pub fn run_photon_element_select(
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        photon_element_select_kernel::launch_unchecked::<WgpuRuntime>(
+        photon_element_select_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

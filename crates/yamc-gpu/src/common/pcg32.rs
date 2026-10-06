@@ -12,7 +12,7 @@
 use crate::common::rng::{
     PCG_INCR, PCG_MULT, SECONDARY_SEED_GOLDEN, SECONDARY_SEED_MIX_A, SECONDARY_SEED_MIX_B,
 };
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Expand a 32-bit per-history seed into a 64-bit PCG state via splitmix64
@@ -158,7 +158,7 @@ pub fn run_draw_uniform(ctx: &GpuContext, seeds: &[u32]) -> (Vec<f64>, Vec<u64>)
     const WG: u32 = 64;
     let groups = (n as u32).div_ceil(WG);
     unsafe {
-        draw_uniform_kernel::launch_unchecked::<WgpuRuntime>(
+        draw_uniform_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WG),
@@ -197,7 +197,7 @@ pub fn run_secondary_seed(ctx: &GpuContext, parents: &[u32], ordinals: &[u32]) -
     const WG: u32 = 64;
     let groups = (n as u32).div_ceil(WG);
     unsafe {
-        secondary_seed_kernel::launch_unchecked::<WgpuRuntime>(
+        secondary_seed_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WG),
@@ -257,7 +257,7 @@ pub fn run_pcg32_validation(ctx: &GpuContext, seeds: &[u32], samples_per_thread:
     let groups = n_threads.div_ceil(WORKGROUP_SIZE as usize) as u32;
 
     unsafe {
-        pcg32_kernel::launch_unchecked::<WgpuRuntime>(
+        pcg32_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

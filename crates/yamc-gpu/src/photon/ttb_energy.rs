@@ -14,7 +14,7 @@
 //! `powf`), but they agree to well within Monte-Carlo noise.
 
 use crate::common::polyfills::{exp_f64, ln_f64};
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Inverse-CDF TTB photon energy (linear eV). `w_l_log`/`w_r_log` are the
@@ -65,7 +65,7 @@ pub fn run_ttb_photon_energy(ctx: &GpuContext, inputs: &[f64]) -> Vec<f64> {
     const WG: u32 = 64;
     let groups = (n as u32).div_ceil(WG);
     unsafe {
-        ttb_energy_kernel::launch_unchecked::<WgpuRuntime>(
+        ttb_energy_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WG),

@@ -10,7 +10,7 @@
 //! Pure lookup (no RNG), so the extraction is byte-identical and the test is
 //! deterministic.
 
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Evaluate S at momentum-transfer `x` by lin-lin interpolation of the
@@ -83,7 +83,7 @@ pub fn run_incoherent_s(
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        incoherent_s_kernel::launch_unchecked::<WgpuRuntime>(
+        incoherent_s_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

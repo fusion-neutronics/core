@@ -31,7 +31,7 @@
 //! here means f64 codegen has a real bug (much more than 1 ulp off, or
 //! producing NaN/inf where CPU doesn't), not just FMA contraction.
 
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 #[cfg(test)]
@@ -73,7 +73,7 @@ pub fn run_f64_arith(ctx: &GpuContext, input: &[f64]) -> Vec<f64> {
     let groups = n.div_ceil(WORKGROUP_SIZE as usize) as u32;
 
     unsafe {
-        f64_arith_kernel::launch_unchecked::<WgpuRuntime>(
+        f64_arith_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

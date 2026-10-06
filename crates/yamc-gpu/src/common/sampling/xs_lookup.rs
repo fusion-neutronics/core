@@ -33,7 +33,7 @@
 //!   nuclides weighted by atomic densities. That comes after this works.
 
 use crate::common::polyfills::ln_f64;
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Per-thread XS lookup. Each `energies[tid]` is one query; the result
@@ -114,7 +114,7 @@ pub fn run_xs_lookup(
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        xs_lookup_kernel::launch_unchecked::<WgpuRuntime>(
+        xs_lookup_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

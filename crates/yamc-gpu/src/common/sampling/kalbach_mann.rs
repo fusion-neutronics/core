@@ -550,7 +550,7 @@ fn km_test_kernel(
 mod tests {
     use super::*;
     use crate::neutron::xs::constants::ANGLE_INTERP_LINLIN;
-    use crate::{GpuContext, GpuInitError, WgpuRuntime};
+    use crate::{GpuContext, GpuInitError};
 
     // Fixed test layout (kept tiny; the kernel hardcodes max_km_x = 8).
     const AE: usize = 4; // max_km_ae for the test
@@ -736,7 +736,7 @@ mod tests {
         const WG: u32 = 64;
         let groups = (n as u32).div_ceil(WG);
         unsafe {
-            km_test_kernel::launch_unchecked::<WgpuRuntime>(
+            km_test_kernel::launch_unchecked(
                 &client,
                 CubeCount::Static(groups, 1, 1),
                 CubeDim::new_1d(WG),

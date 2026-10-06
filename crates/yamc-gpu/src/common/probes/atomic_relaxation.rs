@@ -15,7 +15,7 @@
 
 use crate::common::pcg32::{expand_seed, pcg_out};
 use crate::common::rng::{PCG_INCR, PCG_MULT};
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// One sampled atomic-relaxation transition.
@@ -135,7 +135,7 @@ pub fn run_relax_transition(
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        relax_transition_kernel::launch_unchecked::<WgpuRuntime>(
+        relax_transition_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

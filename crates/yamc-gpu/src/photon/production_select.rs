@@ -38,7 +38,7 @@
 //! linear-E factor `frac`, and both samplers are wired into the production
 //! neutron kernel so emitted photons append to the device particle bank (P4).
 
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 // `draw_uniform` / `pcg_next` live in `crate::common::pcg32`; pull the cube
@@ -291,7 +291,7 @@ pub fn run_photon_product_select(
     const WG: u32 = 64;
     let groups = (n as u32).div_ceil(WG);
     unsafe {
-        photon_product_select_kernel::launch_unchecked::<WgpuRuntime>(
+        photon_product_select_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WG),
@@ -386,7 +386,7 @@ pub fn run_photon_count(
     const WG: u32 = 64;
     let groups = (n as u32).div_ceil(WG);
     unsafe {
-        photon_count_kernel::launch_unchecked::<WgpuRuntime>(
+        photon_count_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WG),

@@ -23,7 +23,7 @@
 //! If yes, fixed-point tally accumulation is viable. If no, Phase D
 //! falls back to per-thread tally buffers + a reduction kernel.
 
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::ir::features::AtomicUsage;
 use cubecl::ir::{ElemType, Type, UIntKind};
 use cubecl::prelude::*;
@@ -63,7 +63,7 @@ pub fn run_atomic_u64_add_probe(ctx: &GpuContext, n_threads: u32, initial: u64) 
     let groups = n_threads / WORKGROUP_SIZE;
 
     unsafe {
-        atomic_u64_add_kernel::launch_unchecked::<WgpuRuntime>(
+        atomic_u64_add_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

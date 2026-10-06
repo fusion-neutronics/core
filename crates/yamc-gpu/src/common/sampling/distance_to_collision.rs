@@ -24,7 +24,7 @@
 use crate::common::pcg32::{expand_seed, pcg_out};
 use crate::common::polyfills::ln_f64;
 use crate::common::rng::{PCG_INCR, PCG_MULT};
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Each thread reads its seed from `seeds[tid]`, samples one free
@@ -106,7 +106,7 @@ pub fn run_distance_to_collision(ctx: &GpuContext, seeds: &[u32], sigma_total: f
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        distance_to_collision_kernel::launch_unchecked::<WgpuRuntime>(
+        distance_to_collision_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

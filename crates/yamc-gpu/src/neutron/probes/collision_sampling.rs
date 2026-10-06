@@ -32,7 +32,7 @@
 
 use crate::common::pcg32::{expand_seed, pcg_out};
 use crate::common::rng::{PCG_INCR, PCG_MULT};
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Per-particle: PCG-32 → uniform `ξ` → compare to elastic fraction.
@@ -90,7 +90,7 @@ pub fn run_collision_sampling(
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        collision_sampling_kernel::launch_unchecked::<WgpuRuntime>(
+        collision_sampling_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

@@ -18,7 +18,7 @@
 //! exact, not within a tolerance).
 
 #[cfg(test)]
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Weight-cutoff Russian-roulette decision. Given a still-alive particle's
@@ -84,7 +84,7 @@ fn run_weight_cutoff_roulette(
     const WG: u32 = 64;
     let groups = (n as u32).div_ceil(WG);
     unsafe {
-        weight_cutoff_roulette_kernel::launch_unchecked::<WgpuRuntime>(
+        weight_cutoff_roulette_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WG),

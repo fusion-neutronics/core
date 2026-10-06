@@ -413,7 +413,7 @@ fn watt_fission_test_kernel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GpuContext, GpuInitError, WgpuRuntime};
+    use crate::{GpuContext, GpuInitError};
 
     // Rel tolerance for the energy: the candidate flows through the ln/exp/cos
     // polyfills (~16 ULP for ln/exp, ~1e-13 abs for cos per `polyfills.rs`), so
@@ -490,7 +490,7 @@ mod tests {
         const WG: u32 = 64;
         let groups = (n as u32).div_ceil(WG);
         unsafe {
-            evap_test_kernel::launch_unchecked::<WgpuRuntime>(
+            evap_test_kernel::launch_unchecked(
                 &client,
                 CubeCount::Static(groups, 1, 1),
                 CubeDim::new_1d(WG),
@@ -571,7 +571,7 @@ mod tests {
         const WG: u32 = 64;
         let groups = (n as u32).div_ceil(WG);
         unsafe {
-            maxwell_test_kernel::launch_unchecked::<WgpuRuntime>(
+            maxwell_test_kernel::launch_unchecked(
                 &client,
                 CubeCount::Static(groups, 1, 1),
                 CubeDim::new_1d(WG),
@@ -648,7 +648,7 @@ mod tests {
         const WG: u32 = 64;
         let groups = (n as u32).div_ceil(WG);
         unsafe {
-            watt_test_kernel::launch_unchecked::<WgpuRuntime>(
+            watt_test_kernel::launch_unchecked(
                 &client,
                 CubeCount::Static(groups, 1, 1),
                 CubeDim::new_1d(WG),
@@ -710,7 +710,7 @@ mod tests {
         const WG: u32 = 64;
         let groups = (n as u32).div_ceil(WG);
         unsafe {
-            watt_fission_test_kernel::launch_unchecked::<WgpuRuntime>(
+            watt_fission_test_kernel::launch_unchecked(
                 &client,
                 CubeCount::Static(groups, 1, 1),
                 CubeDim::new_1d(WG),

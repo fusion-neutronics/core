@@ -48,7 +48,7 @@
 
 use crate::common::tallies::TalliesPack;
 use crate::neutron::xs::{MT_INELASTIC_COUNT, URR_META_COLS, URR_XS_COLS};
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 
 mod cpu;
 mod cpu_rayon;

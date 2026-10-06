@@ -36,7 +36,7 @@
 //! error below `1e-7` (well above the precision floor at `S = 2^30`,
 //! and well below MC tally noise).
 
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Scale factor `2^30`. f64 round-trip accuracy at this scale is well
@@ -87,7 +87,7 @@ pub fn run_fixed_point_tally(ctx: &GpuContext, contributions: &[f64]) -> f64 {
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        fixed_point_tally_kernel::launch_unchecked::<WgpuRuntime>(
+        fixed_point_tally_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),
