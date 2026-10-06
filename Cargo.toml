@@ -61,3 +61,10 @@ debug = "line-tables-only"
 # crate's debug build as it was.
 [profile.dev.package.yani-transmute]
 opt-level = 2
+
+# The endf goldens and fixtures are xz-compressed and the tests decompress
+# over 20 MB of text, some of it more than once. Unoptimized, the pure-Rust
+# decoder spent most of the golden test's time on it (20 s against 4 s).
+# Dev-only: nothing shipped depends on it.
+[profile.dev.package.lzma-rust2]
+opt-level = 3

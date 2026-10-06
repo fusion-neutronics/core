@@ -50,7 +50,6 @@ crate-by-crate workspace layout.
 | [`ci-rust.yml`](.github/workflows/ci-rust.yml) | the Rust workspace across the supported targets |
 | [`ci-python.yml`](.github/workflows/ci-python.yml) | the wheels, the Python test suites and the published stubs |
 | [`ci-wasm.yml`](.github/workflows/ci-wasm.yml) | the wasm32 builds |
-| [`ci-endf-goldens.yml`](.github/workflows/ci-endf-goldens.yml) | the ENDF and ACE converters against pinned goldens |
 | [`licenses.yml`](.github/workflows/licenses.yml) | the third-party license bundle shipped in each wheel |
 | [`docs-mkdocs.yml`](.github/workflows/docs-mkdocs.yml) | this repository's internal site |
 | [`commit-authors.yml`](.github/workflows/commit-authors.yml) | commit authorship on every pull request |

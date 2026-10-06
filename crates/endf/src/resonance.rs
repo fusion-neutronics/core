@@ -1475,10 +1475,18 @@ impl UnresolvedAverages {
             });
         }
         let awri = u.ranges.first().map_or(1.0, |r| r.awri);
-        let channel_radius = match range.naps {
-            0 => channel_radius_formula(awri),
-            _ => u.ap,
-        };
+        // NAPS=2 takes the channel radius from an energy-dependent radius,
+        // which NRO=0 does not give (refused above when it does), so here it
+        // is illegal, as NJOY's csunr2 says.
+        let channel_radius =
+            match range.naps {
+                0 => channel_radius_formula(awri),
+                1 => u.ap,
+                _ => return Err(Error::Mismatched {
+                    what:
+                        "an unresolved range's NAPS and its scattering radius (NAPS=2 needs NRO=1)",
+                }),
+            };
         let mut orbitals = Vec::with_capacity(u.ranges.len());
         // NJOY interpolates on the first (l, J)'s energies, by the law of the
         // last (case C), or linearly on ES (case B).
@@ -1497,7 +1505,9 @@ impl UnresolvedAverages {
                     spins.push(UrrSpin {
                         aj: r.aj[j],
                         mux: 1,
-                        mun: r.amun[j].round() as usize,
+                        // Truncated, as NJOY's csunr1 takes cases A and B;
+                        // csunr2 rounds case C's.
+                        mun: r.amun[j] as usize,
                         muf: 1,
                         energies: vec![range.el],
                         rows: vec![[r.d[j], 0.0, r.gno[j], r.gg[j], 0.0]],
@@ -1527,7 +1537,7 @@ impl UnresolvedAverages {
                         spins.push(UrrSpin {
                             aj: *aj,
                             mux: 1,
-                            mun: amun.round() as usize,
+                            mun: *amun as usize,
                             muf: *muf as usize,
                             energies,
                             rows,
@@ -1729,6 +1739,416 @@ impl RangeReconstruction for UnresolvedAverages {
                 _ => [0.0; 3],
             })
             .collect())
+    }
+}
+
+/// One multi-level Breit-Wigner resonance, as reconstruction reads it: its
+/// MF=2 parameters, the competitive width at its energy and the factors at
+/// `|E_r|`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BwResonance {
+    section: usize,
+    index: usize,
+    /// ER, GN, GG, GF, GC (the competitive width, GT less the others).
+    p: [f64; 5],
+    j: usize,
+    /// Shift and penetrability at `|E_r|`, and the competitive channel's
+    /// penetrability there.
+    ser: f64,
+    per: f64,
+    pex: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct BwOrbital {
+    l: i64,
+    awri: f64,
+    qx: f64,
+    competitive: bool,
+    /// `g_J` per J index, and `2l + 1 - sum g_J`, the J values with no
+    /// resonance.
+    gj: Vec<f64>,
+    missing: f64,
+    resonances: Vec<BwResonance>,
+}
+
+/// A multi-level Breit-Wigner range (LRF=2), prepared for reconstruction at
+/// 0 K as NJOY's RECONR computes it (`csmlbw`, ENDF-102 D.1.2). Per `l`, with
+/// `x_r = 2 (E - E'_r) / G_r`, `a_r = 2 G_nr(E) / G_r / (1 + x_r^2)` and the
+/// level shift `E'_r = E_r + G_n (S(|E_r|) - S(E)) / (2 P(|E_r|))`,
+///
+/// ```text
+/// elastic = pi/k^2 sum_J g_J [(1 - cos 2phi - sum_r a_r)^2 + (sin 2phi + sum_r a_r x_r)^2]
+///         + pi/k^2 2 (2l + 1 - sum_J g_J)(1 - cos 2phi)
+/// capture = 2 pi/k^2 sum_r g_J G_nr(E) G_gr / G_r^2 / (1 + x_r^2), fission alike
+/// ```
+///
+/// with the competitive width at the penetrability of the competing channel
+/// (`l` 0 and 2 swapped, as NJOY has it) at `E + QX / ratio`. An
+/// energy-dependent scattering radius (NRO/=0) is refused.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BreitWignerRange {
+    pub el: f64,
+    pub eh: f64,
+    spin: f64,
+    channel_radius: f64,
+    scattering_radius: f64,
+    orbitals: Vec<BwOrbital>,
+    source: crate::mf::mf2::BreitWigner,
+    naps: i64,
+}
+
+/// Per-energy factors of one section: wave number, `S` and `P` at the
+/// channel radius, `1 - cos 2phi`, `sin 2phi` and the competitive
+/// penetrability.
+struct BwFactors {
+    pifac: f64,
+    se: f64,
+    pe: f64,
+    c2p: f64,
+    s2p: f64,
+    pec: f64,
+}
+
+impl BreitWignerRange {
+    /// Prepare `range` (LRF=2) for reconstruction.
+    pub fn new(range: &ResonanceRange) -> Result<Self> {
+        let ResonanceParameters::BreitWigner(bw) = &range.parameters else {
+            return Err(Error::Unsupported {
+                what: "reconstruction of a resolved range other than Breit-Wigner",
+            });
+        };
+        if range.lrf != 2 {
+            return Err(Error::Unsupported {
+                what: "single-level Breit-Wigner reconstruction (LRF=1)",
+            });
+        }
+        if range.nro != 0 {
+            return Err(Error::Unsupported {
+                what: "an energy-dependent scattering radius (NRO/=0)",
+            });
+        }
+        Self::prepare(range.el, range.eh, bw, range.naps)
+    }
+
+    fn prepare(el: f64, eh: f64, bw: &crate::mf::mf2::BreitWigner, naps: i64) -> Result<Self> {
+        let awri0 = bw.sections.first().map_or(1.0, |s| s.awri);
+        let channel_radius = if naps == 1 {
+            bw.ap
+        } else {
+            channel_radius_formula(awri0)
+        };
+        let spin = bw.spi;
+        let mut orbitals = Vec::with_capacity(bw.sections.len());
+        for (section, s) in bw.sections.iter().enumerate() {
+            if s.l > 4 {
+                return Err(Error::Unsupported {
+                    what: "a Breit-Wigner section with l > 4",
+                });
+            }
+            let l = s.l as f64;
+            let ajmin = ((spin - l).abs() - 0.5).abs();
+            let ajmax = spin + l + 0.5;
+            let nj = (ajmax - ajmin + 1.0).round().max(1.0) as usize;
+            let gj: Vec<f64> = (0..nj)
+                .map(|i| (2.0 * (ajmin + i as f64) + 1.0) / (4.0 * spin + 2.0))
+                .collect();
+            let missing = 2.0 * l + 1.0 - gj.iter().sum::<f64>();
+            let ratio = s.awri / (s.awri + 1.0);
+            let competitive = s.lrx != 0;
+            let lp = match s.l {
+                0 => 2,
+                2 => 0,
+                other => other,
+            };
+            let mut resonances = Vec::with_capacity(s.er.len());
+            for index in 0..s.er.len() {
+                let er = s.er[index];
+                let j = (s.aj[index].abs() - ajmin).round();
+                // A J this l and the target spin cannot make has no place in
+                // the formula; it is an error in the evaluation, refused
+                // rather than dropped (none of ENDF/B-VIII.1's 386 or
+                // JEFF-4.0's 492 multi-level ranges has one).
+                if j < 0.0 || j as usize >= nj {
+                    return Err(Error::Mismatched {
+                        what: "a Breit-Wigner resonance's J and the spins its l allows",
+                    });
+                }
+                let rho = WAVE_NUMBER * ratio * er.abs().sqrt() * channel_radius;
+                let (per, ser) = penetration_shift(s.l, rho);
+                let mut gc = 0.0;
+                let mut pex = 0.0;
+                if competitive {
+                    let rhoc =
+                        WAVE_NUMBER * ratio * (er + s.qx / ratio).abs().sqrt() * channel_radius;
+                    pex = penetration_shift(lp, rhoc).0;
+                    gc = s.gt[index] - s.gn[index] - s.gg[index] - s.gf[index];
+                    if gc < 1e-5 * s.gt[index] || er < -s.qx / ratio {
+                        gc = 0.0;
+                    }
+                }
+                resonances.push(BwResonance {
+                    section,
+                    index,
+                    p: [er, s.gn[index], s.gg[index], s.gf[index], gc],
+                    j: j as usize,
+                    ser,
+                    per,
+                    pex,
+                });
+            }
+            orbitals.push(BwOrbital {
+                l: s.l,
+                awri: s.awri,
+                qx: s.qx,
+                competitive,
+                gj,
+                missing,
+                resonances,
+            });
+        }
+        Ok(BreitWignerRange {
+            el,
+            eh,
+            spin,
+            channel_radius,
+            scattering_radius: bw.ap,
+            orbitals,
+            source: bw.clone(),
+            naps,
+        })
+    }
+
+    /// `r` with its factors at `|E_r|` taken at resonance energy `er`.
+    fn at_energy(&self, o: &BwOrbital, r: &BwResonance, er: f64) -> BwResonance {
+        let ratio = o.awri / (o.awri + 1.0);
+        let (per, ser) = penetration_shift(
+            o.l,
+            WAVE_NUMBER * ratio * er.abs().sqrt() * self.channel_radius,
+        );
+        let mut out = BwResonance { ser, per, ..*r };
+        if o.competitive {
+            let lp = match o.l {
+                0 => 2,
+                2 => 0,
+                other => other,
+            };
+            let rhoc = WAVE_NUMBER * ratio * (er + o.qx / ratio).abs().sqrt() * self.channel_radius;
+            out.pex = penetration_shift(lp, rhoc).0;
+        }
+        out
+    }
+
+    fn factors(&self, o: &BwOrbital, energy: f64) -> BwFactors {
+        let ratio = o.awri / (o.awri + 1.0);
+        let k = WAVE_NUMBER * ratio * energy.abs().sqrt();
+        let (pe, se) = penetration_shift(o.l, k * self.channel_radius);
+        let phi = phase_shift(o.l, k * self.scattering_radius);
+        let mut pec = 0.0;
+        if o.competitive && energy + o.qx / ratio >= 0.0 {
+            let lp = match o.l {
+                0 => 2,
+                2 => 0,
+                other => other,
+            };
+            let rhop =
+                WAVE_NUMBER * ratio * (energy + o.qx / ratio).abs().sqrt() * self.channel_radius;
+            pec = penetration_shift(lp, rhop).0;
+        }
+        BwFactors {
+            pifac: std::f64::consts::PI / (k * k),
+            se,
+            pe,
+            c2p: 1.0 - (2.0 * phi).cos(),
+            s2p: (2.0 * phi).sin(),
+            pec,
+        }
+    }
+
+    /// One resonance's terms at `energy` for parameters `p`: `a_r`,
+    /// `a_r x_r`, and its capture and fission without `pi/k^2`.
+    fn terms(r: &BwResonance, p: &[f64; 5], f: &BwFactors, gj: f64, energy: f64) -> [f64; 4] {
+        let [er, gn, gg, gf, gc] = *p;
+        let rper = 1.0 / r.per;
+        let erp = er + gn * (r.ser - f.se) * rper / 2.0;
+        let gne = gn * f.pe * rper;
+        let mut gtt = gne + gg + gf;
+        if gc != 0.0 && r.pex > 0.0 {
+            gtt += gc * f.pec / r.pex;
+        }
+        if gtt == 0.0 {
+            return [0.0; 4];
+        }
+        let x = 2.0 * (energy - erp) / gtt;
+        let a = 2.0 * gne / gtt / (1.0 + x * x);
+        let common = a * gj / gtt;
+        [a, a * x, 2.0 * common * gg, 2.0 * common * gf]
+    }
+
+    /// The cross sections at `energy` (eV).
+    pub fn cross_sections(&self, energy: f64) -> CrossSections {
+        let mut out = CrossSections::default();
+        for o in &self.orbitals {
+            let f = self.factors(o, energy);
+            let mut sums = vec![[0.0; 2]; o.gj.len()];
+            let (mut capture, mut fission) = (0.0, 0.0);
+            for r in &o.resonances {
+                let t = Self::terms(r, &r.p, &f, o.gj[r.j], energy);
+                sums[r.j][0] += t[0];
+                sums[r.j][1] += t[1];
+                capture += t[2];
+                fission += t[3];
+            }
+            let mut elastic = 2.0 * o.missing * f.c2p;
+            for (j, s) in sums.iter().enumerate() {
+                elastic += o.gj[j] * ((f.c2p - s[0]).powi(2) + (f.s2p + s[1]).powi(2));
+            }
+            out.elastic += f.pifac * elastic;
+            out.capture += f.pifac * capture;
+            out.fission += f.pifac * fission;
+        }
+        out
+    }
+
+    /// Every resonance's derivatives at `energy` with respect to ER, GN, GG,
+    /// GF and the competitive width, as `(section, index, d)`. A resonance's
+    /// terms depend on its own parameters alone, so each is differenced
+    /// locally (exactly enough: they are smooth in their parameters) and
+    /// carried through the elastic's squared sums analytically:
+    /// `d/dp g_J [(c - A)^2 + (s + B)^2] = 2 g_J [(s + B) dB - (c - A) dA]`.
+    pub fn derivatives(&self, energy: f64) -> Vec<(usize, usize, [Gradient; 5])> {
+        let mut out = Vec::new();
+        for o in &self.orbitals {
+            let f = self.factors(o, energy);
+            let mut sums = vec![[0.0; 2]; o.gj.len()];
+            for r in &o.resonances {
+                let t = Self::terms(r, &r.p, &f, o.gj[r.j], energy);
+                sums[r.j][0] += t[0];
+                sums[r.j][1] += t[1];
+            }
+            for r in &o.resonances {
+                let gj = o.gj[r.j];
+                let gtt = (r.p[1] * f.pe / r.per + r.p[2] + r.p[3]).abs().max(1e-12);
+                let mut d = [[0.0; 3]; 5];
+                for (q, dq) in d.iter_mut().enumerate() {
+                    let h = if q == 0 {
+                        1e-6 * gtt
+                    } else {
+                        1e-6 * r.p[q].abs().max(1e-12)
+                    };
+                    if q > 0 && r.p[q] == 0.0 {
+                        continue;
+                    }
+                    let (mut up, mut down) = (r.p, r.p);
+                    up[q] += h;
+                    down[q] -= h;
+                    // Moving ER moves the shift and penetrabilities at |E_r|
+                    // with it.
+                    let (ru, rd) = if q == 0 {
+                        (self.at_energy(o, r, up[0]), self.at_energy(o, r, down[0]))
+                    } else {
+                        (*r, *r)
+                    };
+                    let tu = Self::terms(&ru, &up, &f, gj, energy);
+                    let td = Self::terms(&rd, &down, &f, gj, energy);
+                    let dt: Vec<f64> = (0..4).map(|i| (tu[i] - td[i]) / (2.0 * h)).collect();
+                    let s = sums[r.j];
+                    let de = 2.0 * gj * ((f.s2p + s[1]) * dt[1] - (f.c2p - s[0]) * dt[0]);
+                    *dq = [f.pifac * de, f.pifac * dt[2], f.pifac * dt[3]];
+                }
+                out.push((r.section, r.index, d));
+            }
+        }
+        out
+    }
+
+    /// The derivative at `energy` with respect to the range's radius
+    /// parameter, which moves AP by `step` per unit (and the channel radius
+    /// with it where NAPS=1), by central difference.
+    pub fn radius_derivative(&self, energy: f64, step: f64) -> Result<Gradient> {
+        let shifted = |z: f64| -> Result<CrossSections> {
+            let mut bw = self.source.clone();
+            bw.ap += z * step;
+            Ok(Self::prepare(self.el, self.eh, &bw, self.naps)?.cross_sections(energy))
+        };
+        const Z: f64 = 1e-4;
+        let (up, down) = (shifted(Z)?, shifted(-Z)?);
+        Ok([
+            (up.elastic - down.elastic) / (2.0 * Z),
+            (up.capture - down.capture) / (2.0 * Z),
+            (up.fission - down.fission) / (2.0 * Z),
+        ])
+    }
+}
+
+impl RangeReconstruction for BreitWignerRange {
+    fn bounds(&self) -> (f64, f64) {
+        (self.el, self.eh)
+    }
+
+    fn cross_sections(&self, energy: f64) -> CrossSections {
+        BreitWignerRange::cross_sections(self, energy)
+    }
+
+    fn resonances(&self) -> Vec<(f64, f64)> {
+        self.orbitals
+            .iter()
+            .flat_map(|o| o.resonances.iter())
+            .map(|r| {
+                (
+                    r.p[0],
+                    r.p[1].abs() + r.p[2].abs() + r.p[3].abs() + r.p[4].abs(),
+                )
+            })
+            .collect()
+    }
+
+    fn parameter_gradients(
+        &self,
+        energy: f64,
+        cov: &crate::resonance_covariance::RangeCovariance,
+    ) -> Result<Vec<Gradient>> {
+        use crate::resonance_covariance::{Location, Quantity};
+        let by_resonance: std::collections::HashMap<(usize, usize), [Gradient; 5]> = self
+            .derivatives(energy)
+            .into_iter()
+            .map(|(s, i, d)| ((s, i), d))
+            .collect();
+        let mut radius: Option<Gradient> = None;
+        let mut out = Vec::with_capacity(cov.parameters.len());
+        for p in &cov.parameters {
+            let g = match (p.location, p.quantity) {
+                (Location::Orbital { section, index }, q) => {
+                    let row = match q {
+                        Quantity::Energy => 0,
+                        Quantity::NeutronWidth => 1,
+                        Quantity::CaptureWidth => 2,
+                        Quantity::FissionWidth => 3,
+                        Quantity::CompetitiveWidth => 4,
+                        _ => usize::MAX,
+                    };
+                    by_resonance
+                        .get(&(section, index))
+                        .and_then(|d| d.get(row))
+                        .copied()
+                        .unwrap_or([0.0; 3])
+                }
+                (Location::Range, Quantity::ScatteringRadius) => match radius {
+                    Some(g) => g,
+                    None => {
+                        // Breit-Wigner sections have no APL: every one moves
+                        // with AP, by the same step.
+                        let step = cov.radius_steps.first().copied().unwrap_or(0.0);
+                        let g = self.radius_derivative(energy, step)?;
+                        radius = Some(g);
+                        g
+                    }
+                },
+                _ => [0.0; 3],
+            };
+            out.push(g);
+        }
+        Ok(out)
     }
 }
 
@@ -2403,6 +2823,25 @@ mod unresolved_tests {
         (m, u)
     }
 
+    /// NAPS=2 takes the channel radius from an energy-dependent radius that
+    /// NRO=0 does not give: refused, as NJOY refuses it, rather than read as
+    /// NAPS=1.
+    #[test]
+    fn unresolved_naps_2_without_an_energy_dependent_radius_is_refused() {
+        let m = material();
+        let mut range = m.mf2().unwrap().isotopes[0]
+            .ranges
+            .iter()
+            .find(|r| r.lru == 2)
+            .unwrap()
+            .clone();
+        range.naps = 2;
+        assert!(matches!(
+            UnresolvedAverages::new(&range),
+            Err(Error::Mismatched { .. })
+        ));
+    }
+
     #[test]
     fn unresolved_averages_match_njoy() {
         let (_, u) = unresolved();
@@ -2522,6 +2961,202 @@ mod unresolved_tests {
                     "reaction {a} group {h}: {ours:e} against {njoy:e}"
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod breit_wigner_tests {
+    use super::*;
+    use crate::material::Material;
+    use crate::resonance_covariance::{group_covariance, range_covariances};
+
+    const NA23: &[u8] = include_bytes!("../fixtures/n-011_Na_023_mf2_mf32.endf.xz");
+    const BI209: &[u8] = include_bytes!("../fixtures/n-083_Bi_209_mf2.endf.xz");
+
+    fn material(fixture: &[u8]) -> Material {
+        Material::from_str(&crate::testdata::text(fixture)).expect("fixture parses")
+    }
+
+    fn base(fixture: &[u8]) -> ResonanceRange {
+        material(fixture).mf2().unwrap().isotopes[0].ranges[0].clone()
+    }
+
+    // NJOY 2016 RECONR at 0 K (err 1e-5) on ENDF/B-VIII.1, less the MF=3
+    // background: `(E, elastic, capture)` at its own grid points.
+    const NA23_NJOY: &[(f64, f64, f64)] = &[
+        (6.000001e2, 2.590251e0, 5.592553e-3),
+        (2.895279e3, 3.225436e2, 2.829048e-1),
+        (6.223924e3, 6.882148e0, 7.317377e-4),
+        (7.623351e3, 5.652118e0, 5.351622e-3),
+        (3.490035e4, 3.660606e0, 1.205420e-4),
+        (3.54521e4, 3.661267e0, 5.950752e-3),
+        (5.110473e4, 5.308628e0, 1.382841e-3),
+        (5.559582e4, 5.282489e0, 1.139946e-3),
+        (1.153683e5, 3.339513e0, 7.227864e-5),
+        (1.184273e5, 3.330467e0, 2.714267e-4),
+        (1.431801e5, 3.311581e0, 2.740680e-2),
+        (1.899359e5, 3.414973e0, 5.219651e-3),
+        (1.98785e5, 5.935074e0, 1.721568e-3),
+        (2.332003e5, 4.115097e0, 3.894598e-4),
+        (2.409338e5, 8.343700e0, 1.282068e-3),
+        (2.575781e5, 3.432568e0, 7.108686e-5),
+        (2.992149e5, 7.363565e0, 8.670610e-3),
+        (3.052538e5, 4.292893e0, 4.350785e-2),
+        (3.8255e5, 4.232516e0, 6.961596e-4),
+        (4.404813e5, 3.416106e0, 3.677313e-4),
+        (4.9829e5, 2.305676e0, 1.528993e-4),
+    ];
+    const BI209_NJOY: &[(f64, f64, f64)] = &[
+        (1e-5, 9.300213e0, 1.700211e0),
+        (7.770962e2, 7.106646e0, 1.553622e-1),
+        (2.329238e3, 1.340722e2, 2.326100e-1),
+        (4.469778e3, 1.004740e1, 1.984945e-3),
+        (6.287976e3, 1.025582e1, 5.519906e-2),
+        (9.157961e3, 9.101037e0, 1.400923e-2),
+        (1.363894e4, 1.320070e1, 3.674760e-4),
+        (1.782918e4, 1.351520e1, 5.580281e-3),
+        (2.387102e4, 1.069757e1, 4.590635e-5),
+        (2.747975e4, 1.113815e1, 1.321673e-4),
+        (3.213329e4, 8.214320e0, 1.890789e-4),
+        (3.719825e4, 1.190088e1, 1.493159e-3),
+        (4.56763e4, 2.415648e1, 2.876805e-3),
+        (4.982325e4, 7.705359e0, 3.451343e-3),
+        (5.417642e4, 1.268552e1, 7.550482e-3),
+        (6.057277e4, 9.789206e0, 1.357146e-2),
+        (6.718046e4, 1.047189e1, 6.134909e-3),
+        (7.259876e4, 7.512234e0, 1.414209e-2),
+        (8.429125e4, 1.085037e1, 1.114537e-2),
+        (9.197943e4, 9.453433e0, 2.001718e-5),
+        (9.994963e4, 8.955507e0, 2.819803e-5),
+    ];
+
+    /// Multi-level Breit-Wigner agrees with NJOY to the seven digits it
+    /// writes.
+    #[test]
+    fn breit_wigner_matches_njoy() {
+        for (fixture, reference) in [(NA23, NA23_NJOY), (BI209, BI209_NJOY)] {
+            let bw = BreitWignerRange::new(&base(fixture)).unwrap();
+            for &(e, elastic, capture) in reference {
+                let x = bw.cross_sections(e);
+                for (ours, njoy, what) in [
+                    (x.elastic, elastic, "elastic"),
+                    (x.capture, capture, "capture"),
+                ] {
+                    assert!(
+                        (ours - njoy).abs() <= 2e-6 * njoy.abs() + 1e-6,
+                        "{what} at {e} eV: {ours} against NJOY's {njoy}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The per-resonance derivatives, differenced locally and carried through
+    /// the elastic's squared sums, match central differences of the whole
+    /// reconstruction.
+    #[test]
+    fn breit_wigner_derivatives_match_central_differences() {
+        let base = base(NA23);
+        let bw = BreitWignerRange::new(&base).unwrap();
+        let ResonanceParameters::BreitWigner(params) = &base.parameters else {
+            unreachable!()
+        };
+        let mut checked = 0;
+        for (section, s) in params.sections.iter().enumerate() {
+            for index in 0..s.er.len() {
+                let er = s.er[index];
+                let width = s.gt[index].abs().max(1e-3);
+                for e in [er, er + 0.7 * width, er * 1.3] {
+                    if e <= base.el || e >= base.eh {
+                        continue;
+                    }
+                    let analytic = bw
+                        .derivatives(e)
+                        .into_iter()
+                        .find(|(sec, i, _)| *sec == section && *i == index)
+                        .expect("a gradient")
+                        .2;
+                    let x = bw.cross_sections(e);
+                    for q in 0..3 {
+                        let value = [er, s.gn[index], s.gg[index]][q];
+                        let h = if q == 0 {
+                            1e-4 * width
+                        } else {
+                            1e-3 * value.abs()
+                        };
+                        if h == 0.0 {
+                            continue;
+                        }
+                        let moved = |delta: f64| {
+                            let mut r = base.clone();
+                            let ResonanceParameters::BreitWigner(p) = &mut r.parameters else {
+                                unreachable!()
+                            };
+                            let sec = &mut p.sections[section];
+                            match q {
+                                0 => sec.er[index] += delta,
+                                1 => {
+                                    sec.gn[index] += delta;
+                                    sec.gt[index] += delta;
+                                }
+                                _ => {
+                                    sec.gg[index] += delta;
+                                    sec.gt[index] += delta;
+                                }
+                            }
+                            BreitWignerRange::new(&r).unwrap().cross_sections(e)
+                        };
+                        let (up, down) = (moved(h), moved(-h));
+                        let numeric = [
+                            (up.elastic - down.elastic) / (2.0 * h),
+                            (up.capture - down.capture) / (2.0 * h),
+                        ];
+                        for c in 0..2 {
+                            let v = [x.elastic, x.capture][c];
+                            let tolerance = 1e-4 * numeric[c].abs() + 1e-12 * v.abs() / h;
+                            assert!(
+                                (analytic[q][c] - numeric[c]).abs() <= tolerance,
+                                "parameter {q} of resonance {section}/{index} at {e} eV, reaction {c}: \
+                                 {} against {}",
+                                analytic[q][c],
+                                numeric[c]
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 50, "{checked}");
+    }
+
+    /// Na23's elastic group covariance against NJOY 2016 ERRORR (absolute,
+    /// ERRORR relativizing with the MF=3 background): within 2%, its 1%
+    /// finite differences against a derivative.
+    #[test]
+    fn breit_wigner_group_covariance_matches_errorr() {
+        let m = material(NA23);
+        let cov = &range_covariances(m.mf2().unwrap(), m.mf32().unwrap()).unwrap()[0];
+        let bw = BreitWignerRange::new(&m.mf2().unwrap().isotopes[0].ranges[0]).unwrap();
+        let edges = [6e2, 2e3, 5e3, 1e4, 3e4, 1e5, 3e5, 5e5];
+        let g = group_covariance(cov, &bw, &edges).unwrap();
+        let elastic = [
+            (1.560e-3, 4.8537),
+            (2.610e-4, 81.200),
+            (1.217e-3, 6.6217),
+            (1.160e-3, 4.4326),
+            (8.611e-4, 4.6608),
+            (1.689e-3, 3.7888),
+            (5.960e-3, 3.6200),
+        ];
+        for (h, (rel, xs)) in elastic.iter().enumerate() {
+            let ours = g.get(0, h, 0, h) * g.cross_sections[0][h].powi(2);
+            let njoy = rel * xs * xs;
+            assert!(
+                (ours / njoy - 1.0).abs() < 0.02,
+                "group {h}: {ours:e} against {njoy:e}"
+            );
         }
     }
 }

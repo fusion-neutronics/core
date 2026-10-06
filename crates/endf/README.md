@@ -48,20 +48,22 @@ evaluations happen to use.
 ## Correctness
 
 This is a port of [`endf-python`](https://github.com/paulromano/endf-python),
-and it is held to it rather than to the ENDF-102 manual alone. The Python
-reader dumps every value it produces for each fixture; the Rust reader parses
-the same file, builds the same `path -> value` map, and the two are compared
-whole, 38,000 values across 28 evaluations and ACE tables, bit for bit, with a
-tolerance only where the value is computed rather than parsed.
+and it was held to it rather than to the ENDF-102 manual alone: the Python
+reader dumped every value it produced for each fixture, the Rust reader built
+the same `path -> value` map, and the two were compared whole. When the Python
+reader was retired they agreed on all 70,260 values across 58 evaluations, ACE
+tables and a depletion chain, exactly except for two last-bit differences in
+computed values. The goldens are now written by this reader and kept as
+snapshots, MF=32 included, so any change in what it returns for a real
+evaluation shows up as a diff to review.
 
 See `tests/golden/README.md` for what is covered and what is not.
 
-MF=32 is the exception: the Python reader does not parse it, so there is no
-golden to compare against. It is held to the tapes instead.
-`tests/mf32_tapes.rs` reads every MF=32 section of ENDF/B-VIII.1, JEFF-4.0,
-JENDL-5.0, TENDL-2017, TENDL-2025 and FENDL-3.2d to its SEND record and checks
-the counts of what it read against an independent survey of the same files.
-It needs the libraries locally, so it is `#[ignore]`d by default.
+MF=32 is also held to the tapes: `tests/mf32_tapes.rs` reads every MF=32
+section of ENDF/B-VIII.1, JEFF-4.0, JENDL-5.0, TENDL-2017, TENDL-2025 and
+FENDL-3.2d to its SEND record and checks the counts of what it read against an
+independent survey of the same files. It needs the libraries locally, so it is
+`#[ignore]`d by default.
 
 ## Minimum supported Rust version
 

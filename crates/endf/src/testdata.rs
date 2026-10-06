@@ -11,7 +11,8 @@
 /// Decompress an embedded fixture to the text the readers take.
 pub fn text(compressed: &[u8]) -> String {
     let mut out = Vec::new();
-    lzma_rs::xz_decompress(&mut { compressed }, &mut out).expect("fixture is valid xz");
+    std::io::Read::read_to_end(&mut lzma_rust2::XzReader::new(compressed, true), &mut out)
+        .expect("fixture is valid xz");
     String::from_utf8(out).expect("fixture is valid UTF-8")
 }
 
