@@ -498,38 +498,39 @@ fn push_resonance_blocks(
             continue;
         }
         let range = &mf2.isotopes[cov.isotope].ranges[cov.mf2_range];
-        // A formalism or feature endf does not reconstruct yet (charged
-        // particle channels, for one) leaves the range to MF=33 alone; any
-        // other failure is an error in the evaluation or the reader, and is
-        // not quietly dropped.
+        // A formalism or feature endf does not reconstruct yet leaves the
+        // range to MF=33 alone, and says so: the evaluation's resonance
+        // covariance is not in the file, and for an evaluation with no MF=33
+        // over the range that is all of it. Any other failure is an error in
+        // the evaluation or the reader, and is returned.
         let mut lssf = 0;
         let mut parameter_energies = Vec::new();
-        let reconstruction: Box<dyn RangeReconstruction> = match (range.lru, range.lrf) {
-            (1, 2) => match BreitWignerRange::new(range) {
-                Ok(r) => Box::new(r),
-                Err(endf::Error::Unsupported { .. }) => continue,
-                Err(e) => return Err(e.into()),
-            },
-            (1, 3) => match ReichMooreRange::new(range) {
-                Ok(r) => Box::new(r),
-                Err(endf::Error::Unsupported { .. }) => continue,
-                Err(e) => return Err(e.into()),
-            },
-            (1, 7) => match RMatrixRange::new(range) {
-                Ok(r) => Box::new(r),
-                Err(endf::Error::Unsupported { .. }) => continue,
-                Err(e) => return Err(e.into()),
-            },
-            (2, _) => match UnresolvedAverages::new(range) {
-                Ok(r) => {
-                    lssf = r.lssf;
-                    parameter_energies = r.parameter_energies();
-                    Box::new(r)
-                }
-                Err(endf::Error::Unsupported { .. }) => continue,
-                Err(e) => return Err(e.into()),
-            },
-            _ => continue,
+        let built: Result<Box<dyn RangeReconstruction>, endf::Error> = match (range.lru, range.lrf)
+        {
+            (1, 2) => BreitWignerRange::new(range).map(|r| Box::new(r) as _),
+            (1, 3) => ReichMooreRange::new(range).map(|r| Box::new(r) as _),
+            (1, 7) => RMatrixRange::new(range).map(|r| Box::new(r) as _),
+            (2, _) => UnresolvedAverages::new(range).map(|r| {
+                lssf = r.lssf;
+                parameter_energies = r.parameter_energies();
+                Box::new(r) as _
+            }),
+            _ => Err(endf::Error::Unsupported {
+                what: "the cross sections of this formalism",
+            }),
+        };
+        let reconstruction = match built {
+            Ok(r) => r,
+            Err(endf::Error::Unsupported { what }) => {
+                eprintln!(
+                    "warning: MAT {} resonance range {:.6e} to {:.6e} eV (LRU={}, LRF={}) \
+                     has MF=32 covariance that is absent from covariance.arrow: \
+                     endf does not implement {what}",
+                    material.mat, range.el, range.eh, range.lru, range.lrf
+                );
+                continue;
+            }
+            Err(e) => return Err(e.into()),
         };
         // In a resolved range one group per resonance; in an unresolved one
         // a group between each pair of the evaluator's parameter energies
