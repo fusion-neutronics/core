@@ -1162,6 +1162,13 @@ jobs:
       # pin the origin does not serve fails every download, fresh installs
       # included. So the release waits until the origin carries every pinned
       # stamp: upload the data first, then tag.
+      #
+      # The runner's preinstalled rustc trails stable, and the workspace's
+      # rust-version can be newer than it: on the 0.15.0 / 0.20.0 tag cargo
+      # refused to build with 1.98.1 against rust-version 1.99. Same set-up
+      # as the data-pins job in ci-rust.yml, which runs this test on PRs.
+      - name: Set up Rust
+        run: rustup update stable && rustup default stable
       - name: The origin serves every pinned data stamp
         run: >-
           cargo test -p yamc-nuclide --features download-tls --lib --
