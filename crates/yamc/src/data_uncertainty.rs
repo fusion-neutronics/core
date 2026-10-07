@@ -44,6 +44,12 @@ pub struct NuclideCoverage {
     /// What repairing the evaluated covariance did, when it was not positive
     /// semidefinite.
     pub repair: Option<FieldRepair>,
+    /// The library the covariance came from, as its data folder records it,
+    /// or `None` when it records none.
+    pub library: Option<String>,
+    /// What the library's own documentation says is wrong with this
+    /// covariance (see `yani_transmute::covariance_provenance`).
+    pub warnings: Vec<String>,
 }
 
 /// What nuclear-data uncertainty a model's transport could carry.
@@ -117,6 +123,21 @@ impl Model {
                     coverage.short_range_blocks = field.short.len();
                 }
                 coverage.repair = repairs.get(&name).copied();
+                if let Some(nd) = material.nuclide_data.get(&name) {
+                    coverage.library = nd
+                        .data_source
+                        .as_deref()
+                        .filter(|s| yamc_nuclide::storage::url_cache::is_keyword(s))
+                        .map(str::to_string)
+                        .or_else(|| nd.library.clone())
+                        .map(|l| {
+                            yani_transmute::covariance_provenance::library_keyword(&l).to_string()
+                        });
+                }
+                if let Some(library) = &coverage.library {
+                    coverage.warnings =
+                        yani_transmute::covariance_provenance::known_problems(library, &name);
+                }
                 for (mt, read) in &transport.reads {
                     let via = match read {
                         Read::Own => *mt,

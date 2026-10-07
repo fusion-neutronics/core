@@ -2466,9 +2466,14 @@ class Model:
               ``max_relative_sigma``, the largest relative sigma stated on any
               covariance cell), ``held_at_nominal`` (sorted MTs no covariance
               reaches), ``cells`` and ``short_range_blocks`` (the size of the
-              nuclide's covariance field) and ``repair`` (``None``, or a dict
+              nuclide's covariance field), ``repair`` (``None``, or a dict
               with ``lambda_min``, ``lambda_max`` and ``clipped_fraction``, the
-              variance the repair added as a share of the stated variance).
+              variance the repair added as a share of the stated variance),
+              ``library`` (the library the covariance came from, or ``None``
+              when its data folder records none) and ``warnings`` (what that
+              library's own documentation says is wrong with this covariance,
+              with the source; every FENDL-3.2 covariance, and the ENDF/B-VIII.1
+              evaluations its release paper names).
             - ``without_data``: sorted names of nuclides whose data carries no
               covariance at all.
             - ``not_perturbed``: inputs no transport uncertainty run perturbs
@@ -5576,6 +5581,17 @@ class TransmutationResults:
           their declared sizes, an LB=0 to 2 block carrying a second energy
           table, an LB=3 or 4 block without one or whose tables share no
           energy range, or an LB=8 variance stated between two reactions.
+        - ``covariance_source``: where each perturbed nuclide's covariance came
+          from, ``"<library>, MAT <n>"``, the library being the one its data
+          folder records (``"unknown"`` when none is recorded).
+        - ``covariance_warnings``: perturbed nuclides whose library documents
+          a problem with this covariance, each with what it says and where:
+          every FENDL-3.2 covariance, which its own paper says should not be
+          used, and the ENDF/B-VIII.1 evaluations its release paper names (Fe,
+          Cr covariances reused from VIII.0; Cu with no fast-range covariance;
+          Ta, W, Pb resolved-resonance covariance flagged as too low; the Ta181
+          unresolved covariance overwritten). The evaluation is still sampled as
+          it is; any warning makes ``has_gaps`` true.
         - ``covariance_repaired``: nuclides the material can populate (bounded
           at or above the solver's density floor over the schedule at nominal
           rates; a replica's rates can sit above them) whose folded covariance

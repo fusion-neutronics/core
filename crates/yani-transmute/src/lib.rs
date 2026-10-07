@@ -14,6 +14,7 @@
 
 pub mod branching_rule;
 pub mod covariance_fold;
+pub mod covariance_provenance;
 pub mod covariance_sample;
 pub mod d1s_uncertainty;
 mod decay_branching_uncertainty;

@@ -454,9 +454,14 @@ impl PyModel {
     ///       ``max_relative_sigma``, the largest relative sigma stated on any
     ///       covariance cell), ``held_at_nominal`` (sorted MTs no covariance
     ///       reaches), ``cells`` and ``short_range_blocks`` (the size of the
-    ///       nuclide's covariance field) and ``repair`` (``None``, or a dict
+    ///       nuclide's covariance field), ``repair`` (``None``, or a dict
     ///       with ``lambda_min``, ``lambda_max`` and ``clipped_fraction``, the
-    ///       variance the repair added as a share of the stated variance).
+    ///       variance the repair added as a share of the stated variance),
+    ///       ``library`` (the library the covariance came from, or ``None``
+    ///       when its data folder records none) and ``warnings`` (what that
+    ///       library's own documentation says is wrong with this covariance,
+    ///       with the source; every FENDL-3.2 covariance, and the ENDF/B-VIII.1
+    ///       evaluations its release paper names).
     ///     - ``without_data``: sorted names of nuclides whose data carries no
     ///       covariance at all.
     ///     - ``not_perturbed``: inputs no transport uncertainty run perturbs
@@ -495,6 +500,8 @@ impl PyModel {
             )?;
             entry.set_item("cells", c.cells)?;
             entry.set_item("short_range_blocks", c.short_range_blocks)?;
+            entry.set_item("library", &c.library)?;
+            entry.set_item("warnings", &c.warnings)?;
             match &c.repair {
                 Some(r) => {
                     let repair = PyDict::new(py);

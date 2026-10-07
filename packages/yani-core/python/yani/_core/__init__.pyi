@@ -2769,6 +2769,17 @@ class TransmutationResults:
           their declared sizes, an LB=0 to 2 block carrying a second energy
           table, an LB=3 or 4 block without one or whose tables share no
           energy range, or an LB=8 variance stated between two reactions.
+        - ``covariance_source``: where each perturbed nuclide's covariance came
+          from, ``"<library>, MAT <n>"``, the library being the one its data
+          folder records (``"unknown"`` when none is recorded).
+        - ``covariance_warnings``: perturbed nuclides whose library documents
+          a problem with this covariance, each with what it says and where:
+          every FENDL-3.2 covariance, which its own paper says should not be
+          used, and the ENDF/B-VIII.1 evaluations its release paper names (Fe,
+          Cr covariances reused from VIII.0; Cu with no fast-range covariance;
+          Ta, W, Pb resolved-resonance covariance flagged as too low; the Ta181
+          unresolved covariance overwritten). The evaluation is still sampled as
+          it is; any warning makes ``has_gaps`` true.
         - ``covariance_repaired``: nuclides the material can populate (bounded
           at or above the solver's density floor over the schedule at nominal
           rates; a replica's rates can sit above them) whose folded covariance
