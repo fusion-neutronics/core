@@ -624,7 +624,16 @@ class DataUncertainty:
       (FD for lines, FC for a continuum), one draw per spectrum common to all
       its lines, and each line's own intensity (dRI) and energy (dER), from
       the decay data's MT=457 sigmas. It moves the decay photon spectrum and
-      the contact dose only: no photon enters the solve.
+      the contact dose only: no photon enters the solve;
+    - ``"fission_yield"``: each fissioning parent's independent yields (MT=454),
+      from the DY the evaluation states on each, drawn on the tape's own
+      products and summed onto the chain's the way the converter summed the
+      nominal yields. No evaluation states a correlation between yields, so
+      each is drawn independently and the yields of a draw are not
+      renormalised. An actinide that borrows another's yields shares its draw.
+      Needs a chain that carries the evaluated yields
+      (``fission_yields/evaluated_yields.arrow``); without one every parent is
+      listed under ``no_fission_yield_uncertainty``.
     
     Each cross-section draw is a lognormal multiplier with the covariance's
     own mean and variance, so a sampled rate is never negative and nothing is
@@ -644,7 +653,7 @@ class DataUncertainty:
       or more modes, unequal sigmas, too wide to sample untruncated, or no
       sigma), and the per-decay photon lines and decay energy of a drawn
       parent, which follow its nominal branching;
-    - fission yields and the isomeric-branching overlay from MF=9/MF=10;
+    - the isomeric-branching overlay from MF=9/MF=10;
     - covariance correlating two evaluations (MAT1 naming another material),
       covariance with a quantity that is not a cross section (XMF1 not 0 or
       3), covariance derived from other sections by an NC block that cannot
@@ -2810,7 +2819,9 @@ class Model:
                   which move decay heat only;
                 - ``"decay_photon_lines"``: the decay data's photon spectrum
                   normalisation, line intensity and line energy sigmas, which
-                  move the decay photon spectrum and contact dose only.
+                  move the decay photon spectrum and contact dose only;
+                - ``"fission_yield"``: the independent fission yields, from the
+                  DY the evaluation states on each.
         
                 ``"flux_spectrum"`` does not apply: there is no supplied spectrum,
                 and the flux's error is the statistical one. The transport runs
@@ -5691,6 +5702,15 @@ class TransmutationResults:
           ``decay_photon_line_uncertainty_not_carried`` names those with a
           sigma stated on a zero value, or not finite, which no draw can carry;
           that value is held at nominal and counted as a gap.
+        - ``fission_yields_perturbed`` / ``no_fission_yield_uncertainty``: the
+          same for the ``"fission_yield"`` source, over the reachable
+          fissioning parents. ``fission_yield_uncertainty_not_carried`` names
+          those with a DY on a zero yield, or not finite, which is held while
+          the parent's other yields are drawn.
+          ``fission_yields_mapping_mismatch`` names those whose tape yields,
+          named and summed by the converter's rule, do not give back the yields
+          the solver reads; they are held rather than drawn through a mapping
+          their yields were not built with. Each is counted as a gap.
         - ``decay_branchings_perturbed``: with the ``"decay_branching"``
           source, the reachable two-mode parents whose split was sampled. The
           multi-mode parents held at their evaluated ratios, each a gap:
