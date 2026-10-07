@@ -43,6 +43,10 @@ pub struct Estimate {
     pub mean: Option<f64>,
     /// The ensemble's sample standard deviation, or `None` below two replicas.
     pub std_dev: Option<f64>,
+    /// The standard error of `std_dev`, how far another ensemble of the same
+    /// size could put it, or `None` below four replicas. It allows for a heavy
+    /// tail (see [`crate::uncertainty::std_dev_standard_error`]).
+    pub std_dev_standard_error: Option<f64>,
     /// How many replicas the ensemble held.
     pub replicas: usize,
 }
@@ -104,6 +108,7 @@ fn estimate(nominal: f64, values: &[f64]) -> Estimate {
         nominal,
         mean,
         std_dev,
+        std_dev_standard_error: crate::uncertainty::std_dev_standard_error(values),
         replicas: values.len(),
     }
 }

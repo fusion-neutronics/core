@@ -927,6 +927,16 @@ class Estimate:
         ``std_dev`` as a fraction of ``nominal``, or None if either is absent.
         """
     @property
+    def std_dev_standard_error(self) -> typing.Optional[builtins.float]:
+        r"""
+        The standard error of ``std_dev``: how far another ensemble of the
+        same size could put it, or None below four replicas.
+        
+        It allows for a heavy tail, ``Var(s^2) = s^4 (2/(n-1) + kappa/n)`` with
+        ``kappa`` the sample excess kurtosis, so a lognormal-tailed quantity
+        reads as less settled than a Gaussian one at the same replica count.
+        """
+    @property
     def replicas(self) -> builtins.int:
         r"""
         How many replicas the ensemble held.
@@ -1239,6 +1249,12 @@ class LineEstimate:
     def relative_std_dev(self) -> typing.Optional[builtins.float]:
         r"""
         ``std_dev`` as a fraction of ``nominal``, or None if either is absent.
+        """
+    @property
+    def std_dev_standard_error(self) -> typing.Optional[builtins.float]:
+        r"""
+        The standard error of ``std_dev``, or None below four replicas (see
+        ``Estimate.std_dev_standard_error``).
         """
     @property
     def replicas(self) -> builtins.int:
@@ -5297,6 +5313,25 @@ class TransmutationResults:
             ``get_data_uncertainty_info(material_id)["no_covariance_data"]``,
             which lists exactly
             those nuclides.
+        """
+    def get_nuclide_uncertainty_standard_error(self, material_id: builtins.int, nuclide: builtins.str, step: builtins.int) -> typing.Optional[builtins.float]:
+        r"""
+        Get the standard error of ``get_nuclide_uncertainty``: how far another
+        ensemble of the same size could put that sigma.
+        
+        It allows for a heavy tail, through the replicas' sample kurtosis, so a
+        lognormal-tailed density reads as less settled than a Gaussian one at
+        the same replica count.
+        
+        Args:
+            material_id: Material ID number.
+            nuclide: Nuclide name.
+            step: As in ``get_nuclide_uncertainty``.
+        
+        Returns:
+            The standard error [atoms/barn-cm], or None if the transmutation was
+            run without ``data_uncertainty`` or with fewer than four replicas.
+            Step 0 reports 0.0.
         """
     def get_nuclide_uncertainty_evolution(self, material_id: builtins.int, nuclide: builtins.str) -> typing.Optional[builtins.list[builtins.float]]:
         r"""

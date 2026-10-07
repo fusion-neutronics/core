@@ -55,6 +55,17 @@ impl PyEstimate {
         self.inner.relative_std_dev()
     }
 
+    /// The standard error of ``std_dev``: how far another ensemble of the
+    /// same size could put it, or None below four replicas.
+    ///
+    /// It allows for a heavy tail, ``Var(s^2) = s^4 (2/(n-1) + kappa/n)`` with
+    /// ``kappa`` the sample excess kurtosis, so a lognormal-tailed quantity
+    /// reads as less settled than a Gaussian one at the same replica count.
+    #[getter]
+    fn std_dev_standard_error(&self) -> Option<f64> {
+        self.inner.std_dev_standard_error
+    }
+
     /// How many replicas the ensemble held.
     #[getter]
     fn replicas(&self) -> usize {
@@ -62,12 +73,16 @@ impl PyEstimate {
     }
 
     fn __repr__(&self) -> String {
-        match self.inner.std_dev {
-            Some(sigma) => format!(
+        match (self.inner.std_dev, self.inner.std_dev_standard_error) {
+            (Some(sigma), Some(se)) => format!(
+                "Estimate(nominal={:.4e}, std_dev={:.4e} +/- {:.2e}, replicas={})",
+                self.inner.nominal, sigma, se, self.inner.replicas
+            ),
+            (Some(sigma), None) => format!(
                 "Estimate(nominal={:.4e}, std_dev={:.4e}, replicas={})",
                 self.inner.nominal, sigma, self.inner.replicas
             ),
-            None => format!(
+            (None, _) => format!(
                 "Estimate(nominal={:.4e}, std_dev=None, replicas={})",
                 self.inner.nominal, self.inner.replicas
             ),
@@ -127,6 +142,13 @@ impl PyLineEstimate {
     #[getter]
     fn relative_std_dev(&self) -> Option<f64> {
         self.inner.estimate.relative_std_dev()
+    }
+
+    /// The standard error of ``std_dev``, or None below four replicas (see
+    /// ``Estimate.std_dev_standard_error``).
+    #[getter]
+    fn std_dev_standard_error(&self) -> Option<f64> {
+        self.inner.estimate.std_dev_standard_error
     }
 
     /// How many replicas the ensemble held.
@@ -382,6 +404,32 @@ impl PyTransmutationResults {
     fn get_nuclide_uncertainty(&self, material_id: u32, nuclide: &str, step: usize) -> Option<f64> {
         self.inner
             .get_nuclide_uncertainty(material_id, nuclide, step)
+    }
+
+    /// Get the standard error of ``get_nuclide_uncertainty``: how far another
+    /// ensemble of the same size could put that sigma.
+    ///
+    /// It allows for a heavy tail, through the replicas' sample kurtosis, so a
+    /// lognormal-tailed density reads as less settled than a Gaussian one at
+    /// the same replica count.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     nuclide: Nuclide name.
+    ///     step: As in ``get_nuclide_uncertainty``.
+    ///
+    /// Returns:
+    ///     The standard error [atoms/barn-cm], or None if the transmutation was
+    ///     run without ``data_uncertainty`` or with fewer than four replicas.
+    ///     Step 0 reports 0.0.
+    fn get_nuclide_uncertainty_standard_error(
+        &self,
+        material_id: u32,
+        nuclide: &str,
+        step: usize,
+    ) -> Option<f64> {
+        self.inner
+            .get_nuclide_uncertainty_standard_error(material_id, nuclide, step)
     }
 
     /// Get the standard deviation of a nuclide's density at every timestep.
