@@ -74,17 +74,33 @@ pub const MESH_RECT_PARAMS: usize = 15;
 pub const MESH_CYL_HEADER: usize = 7;
 
 /// Number of `f64` words an energy-function table occupies in
-/// [`TalliesPack::efunc_params`] for `n_points` tabulated points: one header
-/// word (`n_points`), the `n_points` energies, then the natural-cubic-spline
-/// coefficients, four (`a`, `b`, `c`, `d`) per interval.
+/// [`TalliesPack::efunc_params`] for `n_points` tabulated points: two header
+/// words (`n_points`, then the mode word), the `n_points` energies, then four
+/// words per interval.
 ///
-/// `EnergyFunctionFilter::new` requires `n_points >= 4`, so a packed table is
+/// The mode word says how the four words are read. [`EFUNC_MODE_POLYNOMIAL`]
+/// (cubic and linear interpolation) makes them `[a, b, c, d]` of
+/// `a + dx*(b + dx*(c + dx*d))` on linear `dx`. [`EFUNC_MODE_INTERVAL_KIND`]
+/// (log-log) makes them `[w0, w1, w2, kind]`, read by the interval's kind. The
+/// values match the constants of the same names in `yamc-tallies`, which
+/// `yamc`'s dispatch tests check.
+///
+/// `EnergyFunctionFilter::new` requires `n_points >= 2`, so a packed table is
 /// never degenerate; an absent filter is encoded as an EMPTY range rather than
 /// a zero-point table.
 #[inline]
 pub const fn efunc_table_len(n_points: usize) -> usize {
-    1 + n_points + 4 * (n_points - 1)
+    2 + n_points + 4 * (n_points - 1)
 }
+
+/// Energy-function table mode: each interval is a polynomial in linear energy.
+pub const EFUNC_MODE_POLYNOMIAL: f64 = 0.0;
+/// Energy-function table mode: each interval carries its own kind.
+pub const EFUNC_MODE_INTERVAL_KIND: f64 = 1.0;
+/// Interval kind: `exp(w0 + w1*(ln(energy) - w2))`.
+pub const EFUNC_KIND_LOG_LOG: f64 = 0.0;
+/// Interval kind: `w0 + w1*(energy - w2)`.
+pub const EFUNC_KIND_LINEAR: f64 = 1.0;
 
 /// Default per-step contribution scale for the fixed-point
 /// atomic accumulator. Per-step contributions are
@@ -504,9 +520,9 @@ pub struct TalliesPack {
     /// Concatenated per-tally energy-function tables (`EnergyFunctionFilter`,
     /// i.e. `energy_function=` / `dose_coefficients=`). Tally `t` occupies
     /// `efunc_params[efunc_offsets[t]..efunc_offsets[t+1]]`, laid out
-    /// `[n_points, energy[n], coeffs[4*(n-1)]]` -- the point count is a
-    /// leading header word, matching the cylindrical mesh descriptor's
-    /// header-then-grids convention above.
+    /// `[n_points, mode, energy[n], words[4*(n-1)]]` (see [`efunc_table_len`]).
+    /// The point count and mode lead as header words, matching the
+    /// cylindrical mesh descriptor's header-then-grids convention above.
     ///
     /// Unlike every other per-tally payload here this is NOT a bin dimension:
     /// the filter contributes `num_bins() == 1`, so it never widens the output
@@ -515,9 +531,8 @@ pub struct TalliesPack {
     /// NOTHING into that tally, matching the CPU's `return` on
     /// `get_weight() == None`.
     ///
-    /// The coefficients are the natural cubic spline the CPU solved at filter
-    /// construction; the kernel only evaluates the polynomial, so both
-    /// backends interpolate identically.
+    /// The words are the ones the CPU filter computed at construction; the
+    /// kernel only evaluates them, so both backends apply the same rule.
     pub efunc_params: Vec<f64>,
 }
 
@@ -1137,7 +1152,8 @@ impl<'a> CylMeshView<'a> {
 /// interval evaluated at its right end on both.
 pub fn energy_function_weight(params: &[f64], off: usize, energy: f64) -> Option<f64> {
     let n = params[off] as usize;
-    let e0 = off + 1;
+    let mode = params[off + 1];
+    let e0 = off + 2;
     let c0 = e0 + n;
     if energy < params[e0] || energy > params[e0 + n - 1] {
         return None;
@@ -1158,12 +1174,23 @@ pub fn energy_function_weight(params: &[f64], off: usize, energy: f64) -> Option
         }
     }
     let idx = (lo - 1).min(n - 2);
-    let dx = energy - params[e0 + idx];
-    let a = params[c0 + 4 * idx];
-    let b = params[c0 + 4 * idx + 1];
-    let c = params[c0 + 4 * idx + 2];
-    let d = params[c0 + 4 * idx + 3];
-    Some(a + dx * (b + dx * (c + dx * d)))
+    let w0 = params[c0 + 4 * idx];
+    let w1 = params[c0 + 4 * idx + 1];
+    let w2 = params[c0 + 4 * idx + 2];
+    let w3 = params[c0 + 4 * idx + 3];
+    if mode == EFUNC_MODE_POLYNOMIAL {
+        let dx = energy - params[e0 + idx];
+        return Some(w0 + dx * (w1 + dx * (w2 + dx * w3)));
+    }
+    Some(if w3 == EFUNC_KIND_LOG_LOG {
+        (w0 + w1 * (energy.ln() - w2)).exp()
+    } else if w3 == EFUNC_KIND_LINEAR {
+        w0 + w1 * (energy - w2)
+    } else if energy <= w2 {
+        w0
+    } else {
+        w1
+    })
 }
 
 /// Voxel bin for a point in a cylindrical mesh, or `None` if outside. Plain-Rust

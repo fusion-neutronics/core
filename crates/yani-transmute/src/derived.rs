@@ -461,6 +461,12 @@ impl TransmutationResults {
     /// Needs no volume, unlike the other three. The estimate takes the material
     /// for a half-space, which leaves no distance and no volume in the answer.
     ///
+    /// The band is the spread of the replicas' inventories alone. The photon
+    /// attenuation (NIST XCOM), the air energy absorption (NIST SRD 126), the
+    /// ICRP dose coefficients and the build-up factor are held at their
+    /// nominal values in every replica, since none of those sources publishes
+    /// a per-value uncertainty, and so is each decay photon line's intensity.
+    ///
     /// See [`Self::activity_uncertainty`] for the return convention.
     pub fn contact_dose_uncertainty(
         &self,
@@ -480,9 +486,9 @@ impl TransmutationResults {
 
     /// Contact dose at `step` broken down by nuclide, each with its spread.
     ///
-    /// See [`Self::contact_dose_uncertainty`], and
-    /// [`Self::activity_uncertainty_by_nuclide`] on why these do not add up to
-    /// the total in quadrature.
+    /// See [`Self::contact_dose_uncertainty`], including what the band holds
+    /// at nominal, and [`Self::activity_uncertainty_by_nuclide`] on why these
+    /// do not add up to the total in quadrature.
     pub fn contact_dose_uncertainty_by_nuclide(
         &self,
         material_id: u32,

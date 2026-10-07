@@ -3272,6 +3272,7 @@ mod tests {
         let ef = EnergyFunctionFilter::with_units(
             vec![1.0, 10.0, 100.0, 1000.0],
             vec![1.0, 2.0, 3.0, 4.0],
+            crate::Interpolation::Cubic,
             "pSv·cm²",
         );
         let mut tally = Tally::new();
@@ -3284,8 +3285,11 @@ mod tests {
     #[test]
     fn test_derive_units_energy_function_filter_without_units() {
         use crate::EnergyFunctionFilter;
-        let ef =
-            EnergyFunctionFilter::new(vec![1.0, 10.0, 100.0, 1000.0], vec![1.0, 2.0, 3.0, 4.0]);
+        let ef = EnergyFunctionFilter::new(
+            vec![1.0, 10.0, 100.0, 1000.0],
+            vec![1.0, 2.0, 3.0, 4.0],
+            crate::Interpolation::Cubic,
+        );
         let mut tally = Tally::new();
         tally.scores = vec![Score::Flux(FluxScore)];
         tally.filters = vec![Filter::EnergyFunction(ef)];

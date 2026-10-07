@@ -1005,8 +1005,8 @@ fn multi_cell_photon_transport_kernel(
                         let mut ef_in_range = true;
                         if ef_hi > ef_lo {
                             let n_ef = tally_efunc_params[ef_lo as usize] as u32;
-                            let e_first = tally_efunc_params[(ef_lo + 1u32) as usize];
-                            let e_last = tally_efunc_params[(ef_lo + n_ef) as usize];
+                            let e_first = tally_efunc_params[(ef_lo + 2u32) as usize];
+                            let e_last = tally_efunc_params[(ef_lo + n_ef + 1u32) as usize];
                             if energy < e_first || energy > e_last {
                                 ef_in_range = false;
                             } else {
@@ -1234,8 +1234,9 @@ fn multi_cell_photon_transport_kernel(
                             let mut ef_in_range_c = true;
                             if ef_hi_c > ef_lo_c {
                                 let n_ef_c = tally_efunc_params[ef_lo_c as usize] as u32;
-                                let e_first_c = tally_efunc_params[(ef_lo_c + 1u32) as usize];
-                                let e_last_c = tally_efunc_params[(ef_lo_c + n_ef_c) as usize];
+                                let e_first_c = tally_efunc_params[(ef_lo_c + 2u32) as usize];
+                                let e_last_c =
+                                    tally_efunc_params[(ef_lo_c + n_ef_c + 1u32) as usize];
                                 if energy < e_first_c || energy > e_last_c {
                                     ef_in_range_c = false;
                                 } else {
@@ -3357,8 +3358,9 @@ fn multi_cell_photon_transport_kernel(
                                 let mut ef_weight_h = 1.0f64;
                                 if ef_hi_h > ef_lo_h {
                                     let n_ef_h = tally_efunc_params[ef_lo_h as usize] as u32;
-                                    let e_first_h = tally_efunc_params[(ef_lo_h + 1u32) as usize];
-                                    let e_last_h = tally_efunc_params[(ef_lo_h + n_ef_h) as usize];
+                                    let e_first_h = tally_efunc_params[(ef_lo_h + 2u32) as usize];
+                                    let e_last_h =
+                                        tally_efunc_params[(ef_lo_h + n_ef_h + 1u32) as usize];
                                     if heat_e_in < e_first_h || heat_e_in > e_last_h {
                                         ef_in_range_h = false;
                                     } else {

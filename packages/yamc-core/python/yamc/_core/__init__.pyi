@@ -755,10 +755,11 @@ class DoseCoefficients:
         r"""
         Units of the coefficients (``"pSv cm2"``).
         """
-    def as_energy_function(self) -> tuple[builtins.list[builtins.float], builtins.list[builtins.float], builtins.str]:
+    def as_energy_function(self) -> tuple[builtins.list[builtins.float], builtins.list[builtins.float], builtins.str, builtins.str]:
         r"""
-        Repackage as the ``(energy, coefficients, units)`` tuple accepted by
-        ``Tally(energy_function=...)``.
+        Repackage as the ``(energy, coefficients, units, interpolation)`` tuple
+        accepted by ``Tally(energy_function=...)``. The interpolation is
+        ``"log-log"``, how the tabulation is read everywhere else.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -3292,10 +3293,13 @@ class PhotonCoefficients:
         Energies outside the tabulated range return the nearest end value rather
         than extrapolating: the tabulation stops where the data does.
         """
-    def as_energy_function(self) -> tuple[builtins.list[builtins.float], builtins.list[builtins.float], builtins.str]:
+    def as_energy_function(self) -> tuple[builtins.list[builtins.float], builtins.list[builtins.float], builtins.str, builtins.str]:
         r"""
-        Repackage as the ``(energy, coefficients, units)`` tuple accepted by
-        ``Tally(energy_function=...)``.
+        Repackage as the ``(energy, coefficients, units, interpolation)`` tuple
+        accepted by ``Tally(energy_function=...)``. The interpolation is
+        ``"log-log"``, matching :meth:`interpolate`, so a tally weights by the
+        same values; its absorption edges are steps rather than the ringing a
+        cubic spline gives across them.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -4442,9 +4446,11 @@ class Tally:
         Energy bin boundaries in eV, or None.
         """
     @property
-    def energy_function(self) -> typing.Optional[tuple[builtins.list[builtins.float], builtins.list[builtins.float], typing.Optional[builtins.str]]]:
+    def energy_function(self) -> typing.Optional[tuple[builtins.list[builtins.float], builtins.list[builtins.float], typing.Optional[builtins.str], builtins.str]]:
         r"""
-        Energy function filter data as (energy, y, units) tuple, or None.
+        Energy function filter data as an ``(energy, y, units, interpolation)``
+        tuple, or None. Passing it back as ``energy_function=`` rebuilds the
+        same filter.
         """
     @property
     def cells(self) -> typing.Optional[builtins.list[builtins.int]]:
@@ -4536,7 +4542,7 @@ class Tally:
         Returns:
             list[float]: Relative error per bin.
         """
-    def __new__(cls, scores: typing.Sequence[builtins.str | builtins.int] | None = None, name: typing.Optional[builtins.str] = None, id: typing.Optional[builtins.int] = None, nuclides: typing.Optional[typing.Sequence[builtins.str]] = None, response: str | typing.Sequence[str] | Material | None = None, cells: Cell | typing.Sequence[Cell] | None = None, materials: Material | typing.Sequence[Material] | None = None, mesh: RegularRectangularMesh | RegularCylindricalMesh | None = None, unstructured_mesh: tuple[MeshGeometry, builtins.float] | None = None, energy_bins: typing.Optional[typing.Sequence[builtins.float]] = None, energy_group_structure: typing.Optional[builtins.str] = None, energy_function: tuple[typing.Sequence[builtins.float], typing.Sequence[builtins.float], builtins.str] | None = None, dose_coefficients: tuple[builtins.str, builtins.str] | tuple[builtins.str, builtins.str, builtins.str] | None = None, particle: typing.Optional[builtins.str] = None, parent_nuclides: typing.Optional[typing.Sequence[builtins.str]] = None, estimator: typing.Optional[builtins.str] = None, covariance: builtins.bool = False) -> Tally:
+    def __new__(cls, scores: typing.Sequence[builtins.str | builtins.int] | None = None, name: typing.Optional[builtins.str] = None, id: typing.Optional[builtins.int] = None, nuclides: typing.Optional[typing.Sequence[builtins.str]] = None, response: str | typing.Sequence[str] | Material | None = None, cells: Cell | typing.Sequence[Cell] | None = None, materials: Material | typing.Sequence[Material] | None = None, mesh: RegularRectangularMesh | RegularCylindricalMesh | None = None, unstructured_mesh: tuple[MeshGeometry, builtins.float] | None = None, energy_bins: typing.Optional[typing.Sequence[builtins.float]] = None, energy_group_structure: typing.Optional[builtins.str] = None, energy_function: tuple[typing.Sequence[builtins.float], typing.Sequence[builtins.float]] | tuple[typing.Sequence[builtins.float], typing.Sequence[builtins.float], builtins.str] | tuple[typing.Sequence[builtins.float], typing.Sequence[builtins.float], builtins.str, builtins.str] | None = None, interpolation: typing.Optional[builtins.str] = None, dose_coefficients: tuple[builtins.str, builtins.str] | tuple[builtins.str, builtins.str, builtins.str] | None = None, particle: typing.Optional[builtins.str] = None, parent_nuclides: typing.Optional[typing.Sequence[builtins.str]] = None, estimator: typing.Optional[builtins.str] = None, covariance: builtins.bool = False) -> Tally:
         r"""
         Create a new Tally.
         
@@ -4565,8 +4571,19 @@ class Tally:
             unstructured_mesh (tuple, optional): (MeshGeometry, volume) for tet mesh scoring
             energy_bins (list[float], optional): Energy bin boundaries in eV
             energy_group_structure (str, optional): Named group structure (e.g. "VITAMIN-J-175")
-            energy_function (tuple, optional): (energy, y, units) for energy-dependent weighting
-            dose_coefficients (tuple, optional): (particle, geometry[, data_source]) for dose
+            energy_function (tuple, optional): ``(energy, y[, units[, interpolation]])``
+                for energy-dependent weighting. The optional fourth item names the
+                interpolation, as ``as_energy_function()`` returns it.
+            interpolation (str, optional): How ``energy_function`` interpolates
+                between its points: ``"cubic"`` (natural cubic spline in linear
+                energy, the default, needs 4 points), ``"linear"``, or
+                ``"log-log"`` (linear in log energy and log value, the convention
+                for tabulated coefficients and how contact dose reads them; an
+                interval with a zero value falls back to linear). Only valid with
+                ``energy_function``.
+            dose_coefficients (tuple, optional): (particle, geometry[, data_source]) for dose.
+                The coefficients are interpolated log-log, as contact dose reads
+                the same tables.
             particle (str, optional): "neutron" or "photon"
             parent_nuclides (list[str], optional): Nuclides for D1S parent binning
             covariance (bool): Also accumulate the covariance of the bin means,

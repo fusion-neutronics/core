@@ -125,7 +125,11 @@ fn test_ap_vs_pa_different_coefficients() {
 fn test_energy_function_filter_creation() {
     let energy = vec![1.0, 10.0, 100.0, 1000.0];
     let y = vec![1.0, 2.0, 3.0, 4.0];
-    let filter = EnergyFunctionFilter::new(energy.clone(), y.clone());
+    let filter = EnergyFunctionFilter::new(
+        energy.clone(),
+        y.clone(),
+        yamc_tallies::Interpolation::Cubic,
+    );
 
     assert_eq!(filter.num_bins(), 1);
     assert_eq!(filter.energy().len(), 4);
@@ -141,7 +145,11 @@ fn test_energy_function_filter_from_dose_coefficients() {
     );
 
     // Should be able to create filter from dose coefficients
-    let filter = EnergyFunctionFilter::new(energy.clone(), coeffs.clone());
+    let filter = EnergyFunctionFilter::new(
+        energy.clone(),
+        coeffs.clone(),
+        yamc_tallies::Interpolation::Cubic,
+    );
 
     assert_eq!(filter.num_bins(), 1);
     assert_eq!(filter.energy().len(), energy.len());
@@ -152,7 +160,11 @@ fn test_energy_function_filter_from_dose_coefficients() {
 fn test_cubic_spline_at_data_points() {
     let energy = vec![1.0, 10.0, 100.0, 1000.0];
     let y = vec![1.0, 2.0, 3.0, 4.0];
-    let filter = EnergyFunctionFilter::new(energy.clone(), y.clone());
+    let filter = EnergyFunctionFilter::new(
+        energy.clone(),
+        y.clone(),
+        yamc_tallies::Interpolation::Cubic,
+    );
 
     // At data points, cubic spline should return exact values
     for (i, &e) in energy.iter().enumerate() {
@@ -172,7 +184,7 @@ fn test_cubic_spline_interpolation_smooth() {
     // Create data from a smooth function (y = x^0.5)
     let energy = vec![1.0, 4.0, 9.0, 16.0, 25.0];
     let y = vec![1.0, 2.0, 3.0, 4.0, 5.0]; // sqrt values
-    let filter = EnergyFunctionFilter::new(energy, y);
+    let filter = EnergyFunctionFilter::new(energy, y, yamc_tallies::Interpolation::Cubic);
 
     // Test at midpoint - cubic spline should give smooth result
     let weight = filter.get_weight(6.25).unwrap(); // sqrt(6.25) = 2.5
@@ -188,7 +200,7 @@ fn test_cubic_spline_interpolation_smooth() {
 fn test_outside_energy_range() {
     let energy = vec![10.0, 100.0, 1000.0, 10000.0];
     let y = vec![1.0, 2.0, 3.0, 4.0];
-    let filter = EnergyFunctionFilter::new(energy, y);
+    let filter = EnergyFunctionFilter::new(energy, y, yamc_tallies::Interpolation::Cubic);
 
     // Below range
     assert_eq!(filter.get_weight(5.0), None);
@@ -203,7 +215,7 @@ fn test_outside_energy_range() {
 fn test_at_range_boundaries() {
     let energy = vec![10.0, 100.0, 1000.0, 10000.0];
     let y = vec![1.0, 2.0, 3.0, 4.0];
-    let filter = EnergyFunctionFilter::new(energy, y);
+    let filter = EnergyFunctionFilter::new(energy, y, yamc_tallies::Interpolation::Cubic);
 
     // At exact boundaries
     assert!(filter.get_weight(10.0).is_some());
@@ -215,7 +227,7 @@ fn test_at_range_boundaries() {
 fn test_non_monotonic_energy_panics() {
     let energy = vec![10.0, 5.0, 100.0, 1000.0]; // Not monotonic
     let y = vec![1.0, 2.0, 3.0, 4.0];
-    EnergyFunctionFilter::new(energy, y);
+    EnergyFunctionFilter::new(energy, y, yamc_tallies::Interpolation::Cubic);
 }
 
 #[test]
@@ -223,7 +235,7 @@ fn test_non_monotonic_energy_panics() {
 fn test_mismatched_lengths_panics() {
     let energy = vec![10.0, 100.0, 1000.0, 10000.0];
     let y = vec![1.0, 2.0, 3.0]; // One less
-    EnergyFunctionFilter::new(energy, y);
+    EnergyFunctionFilter::new(energy, y, yamc_tallies::Interpolation::Cubic);
 }
 
 #[test]
@@ -231,7 +243,7 @@ fn test_mismatched_lengths_panics() {
 fn test_too_few_points_panics() {
     let energy = vec![10.0, 100.0, 1000.0]; // Only 3 points
     let y = vec![1.0, 2.0, 3.0];
-    EnergyFunctionFilter::new(energy, y);
+    EnergyFunctionFilter::new(energy, y, yamc_tallies::Interpolation::Cubic);
 }
 
 #[test]
@@ -242,7 +254,11 @@ fn test_with_realistic_dose_data() {
         DoseGeometry::AP,
         DoseDataSource::ICRP116,
     );
-    let filter = EnergyFunctionFilter::new(energy.clone(), coeffs.clone());
+    let filter = EnergyFunctionFilter::new(
+        energy.clone(),
+        coeffs.clone(),
+        yamc_tallies::Interpolation::Cubic,
+    );
 
     // Test at a few known energies
     // 14 MeV = 14e6 eV - typical fusion neutron energy

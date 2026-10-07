@@ -32,6 +32,7 @@ fn sloped_table() -> Filter {
     Filter::EnergyFunction(EnergyFunctionFilter::new(
         vec![1.0e3, 1.0e4, 1.0e5, 1.0e6],
         vec![1.0, 10.0, 100.0, 1000.0],
+        yamc_tallies::Interpolation::Cubic,
     ))
 }
 
@@ -41,6 +42,7 @@ fn flat_table(value: f64) -> Filter {
     Filter::EnergyFunction(EnergyFunctionFilter::new(
         vec![1.0e3, 1.0e4, 1.0e5, 1.0e6],
         vec![value; 4],
+        yamc_tallies::Interpolation::Cubic,
     ))
 }
 

@@ -1,10 +1,10 @@
 //! Gate test for the packed energy-function descriptor.
 //!
-//! `energy_function=` / `dose_coefficients=` interpolate a natural cubic spline
-//! in LINEAR energy. The GPU cannot solve a spline, so the dispatch ships the
-//! coefficients `EnergyFunctionFilter::new` already solved on the host and the
-//! kernel only evaluates the polynomial. That is what makes the two backends
-//! agree bit for bit rather than merely closely, and this test is what pins it:
+//! `energy_function=` / `dose_coefficients=` interpolate cubic, linear or
+//! log-log. The GPU does not fit anything, so the dispatch ships the four words
+//! per interval `EnergyFunctionFilter::new` already computed on the host and the
+//! kernel only evaluates them. That is what makes the two backends agree bit for
+//! bit rather than merely closely, and this test is what pins it:
 //! `common::tallies::energy_function_weight` reading the PACKED descriptor must
 //! return exactly what `EnergyFunctionFilter::get_weight` returns, including
 //! the `None` that means "drop the whole scoring event".
@@ -22,14 +22,15 @@ use yamc_gpu::common::tallies::{efunc_table_len, energy_function_weight};
 use yamc_tallies::EnergyFunctionFilter;
 
 /// Pack one filter the way `build_tallies_pack` does:
-/// `[n_points, energy[n], coeffs[4*(n-1)]]`. Duplicated here on purpose --
+/// `[n_points, mode, energy[n], words[4*(n-1)]]`. Duplicated here on purpose:
 /// a test that called the packer could not catch the packer drifting.
 fn pack(filter: &EnergyFunctionFilter) -> Vec<f64> {
     let energies = filter.energy();
     let mut out = Vec::with_capacity(efunc_table_len(energies.len()));
     out.push(energies.len() as f64);
+    out.push(filter.interpolation().mode_word());
     out.extend_from_slice(energies);
-    for c in filter.spline_coeffs() {
+    for c in filter.interval_coeffs() {
         out.extend_from_slice(c);
     }
     out
@@ -92,6 +93,7 @@ fn packed_table_matches_the_filter_on_a_synthetic_curve() {
     let filter = EnergyFunctionFilter::new(
         vec![1.0, 10.0, 100.0, 1000.0, 1e4, 1e5],
         vec![0.5, 3.0, 1.25, 8.0, 2.0, 6.5],
+        yamc_tallies::Interpolation::Cubic,
     );
     assert_twin_matches(&filter, "synthetic");
 }
@@ -102,7 +104,10 @@ fn packed_table_matches_the_filter_on_a_uniform_grid() {
     // the decade-spaced grids above.
     let energy: Vec<f64> = (0..12).map(|i| 1.0 + i as f64).collect();
     let y: Vec<f64> = (0..12).map(|i| ((i as f64) * 0.7).sin() + 2.0).collect();
-    assert_twin_matches(&EnergyFunctionFilter::new(energy, y), "uniform");
+    assert_twin_matches(
+        &EnergyFunctionFilter::new(energy, y, yamc_tallies::Interpolation::Cubic),
+        "uniform",
+    );
 }
 
 #[test]
@@ -116,7 +121,32 @@ fn packed_table_matches_the_filter_on_the_icrp116_dose_curve() {
         yamc_nuclide::data::effective_dose::DoseDataSource::ICRP116,
     );
     assert!(energy.len() >= 60, "unexpected ICRP-116 table size");
-    assert_twin_matches(&EnergyFunctionFilter::new(energy, coeffs), "icrp116-ap");
+    assert_twin_matches(
+        &EnergyFunctionFilter::new(energy, coeffs, yamc_tallies::Interpolation::Cubic),
+        "icrp116-ap",
+    );
+}
+
+#[test]
+fn packed_table_matches_the_filter_log_log_on_the_icrp116_dose_curve() {
+    // What `dose_coefficients=` now packs: the same ICRP-116 table, log-log.
+    let (energy, coeffs) = yamc_nuclide::data::effective_dose::dose_coefficients(
+        yamc_nuclide::data::effective_dose::DoseParticle::Neutron,
+        yamc_nuclide::data::effective_dose::DoseGeometry::AP,
+        yamc_nuclide::data::effective_dose::DoseDataSource::ICRP116,
+    );
+    let filter = EnergyFunctionFilter::new(energy, coeffs, yamc_tallies::Interpolation::LogLog);
+    assert_twin_matches(&filter, "icrp116-ap-log-log");
+}
+
+#[test]
+fn packed_table_matches_the_filter_linear_on_a_synthetic_curve() {
+    let filter = EnergyFunctionFilter::new(
+        vec![1.0, 10.0, 100.0, 1000.0, 1e4, 1e5],
+        vec![0.5, 3.0, 1.25, 8.0, 2.0, 6.5],
+        yamc_tallies::Interpolation::Linear,
+    );
+    assert_twin_matches(&filter, "synthetic-linear");
 }
 
 #[test]
@@ -126,7 +156,11 @@ fn constant_curve_evaluates_to_exactly_the_constant() {
     // tally by exactly c" invariance test in the transport suites exact rather
     // than approximate. Pin the property here so a failure there points at the
     // transport wiring rather than at the spline.
-    let filter = EnergyFunctionFilter::new(vec![1.0, 10.0, 100.0, 1000.0], vec![3.5; 4]);
+    let filter = EnergyFunctionFilter::new(
+        vec![1.0, 10.0, 100.0, 1000.0],
+        vec![3.5; 4],
+        yamc_tallies::Interpolation::Cubic,
+    );
     let params = pack(&filter);
     for e in probe_energies(filter.energy()) {
         if let Some(w) = filter.get_weight(e) {
@@ -145,8 +179,11 @@ fn out_of_range_is_none_not_zero() {
     // The distinction matters: `None` means the CPU dropped the whole scoring
     // event, so the kernel must skip the atomic add rather than add zero. They
     // differ once several tallies or a mesh fan-out are involved.
-    let filter =
-        EnergyFunctionFilter::new(vec![10.0, 100.0, 1000.0, 1e4], vec![1.0, 2.0, 3.0, 4.0]);
+    let filter = EnergyFunctionFilter::new(
+        vec![10.0, 100.0, 1000.0, 1e4],
+        vec![1.0, 2.0, 3.0, 4.0],
+        yamc_tallies::Interpolation::Cubic,
+    );
     let params = pack(&filter);
     for e in [1.0, 9.999, 1.00001e4, 1e6] {
         assert_eq!(filter.get_weight(e), None, "CPU should gate {e:e}");
@@ -167,8 +204,16 @@ fn tables_are_read_at_their_own_offset() {
     // Two tallies share one buffer, so the second must be read at its offset
     // and not from the front. An off-by-one in the CSR arithmetic would
     // silently give every tally the first tally's dose curve.
-    let a = EnergyFunctionFilter::new(vec![1.0, 10.0, 100.0, 1000.0], vec![1.0, 2.0, 3.0, 4.0]);
-    let b = EnergyFunctionFilter::new(vec![2.0, 20.0, 200.0, 2000.0], vec![9.0, 7.0, 5.0, 3.0]);
+    let a = EnergyFunctionFilter::new(
+        vec![1.0, 10.0, 100.0, 1000.0],
+        vec![1.0, 2.0, 3.0, 4.0],
+        yamc_tallies::Interpolation::Cubic,
+    );
+    let b = EnergyFunctionFilter::new(
+        vec![2.0, 20.0, 200.0, 2000.0],
+        vec![9.0, 7.0, 5.0, 3.0],
+        yamc_tallies::Interpolation::Cubic,
+    );
     let mut params = pack(&a);
     let off_b = params.len();
     params.extend(pack(&b));
