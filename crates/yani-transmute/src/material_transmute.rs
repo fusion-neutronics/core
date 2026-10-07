@@ -2696,7 +2696,7 @@ fn linearity_of(
                 .filter_map(|(o, name)| {
                     let s = &sums[step][o];
                     let variance = s.aa - s.a * s.a / n;
-                    if !(variance > 0.0) {
+                    if variance <= 0.0 || variance.is_nan() {
                         return None;
                     }
                     let residual_share = ((s.rr - s.r * s.r / n) / variance).max(0.0);
