@@ -290,11 +290,15 @@ class DataUncertainty:
       be derived (LTY 1-4, or an LTY=0 block counted in ``skipped_nc``), the
       covariance of a lumped reaction (MT=851-870) with several components
       that no derivation names, listed in ``lumped_covariance_not_assignable``,
-      and the resonance-parameter covariance (MF=32). What is sampled is each
-      reaction's explicit MF=33 blocks, the blocks of a lumped reaction whose
-      one component it is, and for a reaction an LTY=0 NC block states as a
-      sum of others (ENDF/B-VIII.1 O16 (n,p) as MT 600 to 603, U235 MT 4 as
-      MT 51 plus the lumped MT 851), the covariance derived from the named
+      and the resonance-parameter covariance (MF=32) wherever it is not in
+      ``covariance.arrow``: a library converted before the converter derived
+      it, or a resonance range whose formalism the converter does not
+      reconstruct. What is sampled is each reaction's explicit MF=33 blocks,
+      the resonance-range blocks the converter derives from MF=32 and writes
+      beside them where a library has them, the blocks of a lumped reaction
+      whose one component it is, and for a reaction an LTY=0 NC block states
+      as a sum of others (ENDF/B-VIII.1 O16 (n,p) as MT 600 to 603, U235 MT 4
+      as MT 51 plus the lumped MT 851), the covariance derived from the named
       reactions' own blocks and the cross blocks between them;
     - the self-shielding correction, when ``self_shielding_chord`` or
       ``self_shielding_shape`` is given: the shielded flux is built once from
@@ -2860,9 +2864,10 @@ class TransmutationResults:
           covariance; ``statistical_floored`` / ``statistical_sampled`` count
           draws that came out negative and were floored.
         - ``not_perturbed``: every input this run held at its nominal value,
-          such as the MF=32 resonance-parameter covariance, the photon and dose
-          data, the material composition, any source switched off, and, where
-          they applied, the self-shielding correction, the flux's response to a
+          such as any MF=32 resonance-parameter covariance the library's
+          ``covariance.arrow`` does not carry, the photon and dose data, the
+          material composition, any source switched off, and, where they
+          applied, the self-shielding correction, the flux's response to a
           perturbed cross section on a transport run, and the per-branch decay
           emission of a parent whose branching was drawn.
         - ``samples`` / ``converged``: how many replicas ran, and whether the

@@ -815,9 +815,10 @@ impl PyTransmutationResults {
     ///   covariance; ``statistical_floored`` / ``statistical_sampled`` count
     ///   draws that came out negative and were floored.
     /// - ``not_perturbed``: every input this run held at its nominal value,
-    ///   such as the MF=32 resonance-parameter covariance, the photon and dose
-    ///   data, the material composition, any source switched off, and, where
-    ///   they applied, the self-shielding correction, the flux's response to a
+    ///   such as any MF=32 resonance-parameter covariance the library's
+    ///   ``covariance.arrow`` does not carry, the photon and dose data, the
+    ///   material composition, any source switched off, and, where they
+    ///   applied, the self-shielding correction, the flux's response to a
     ///   perturbed cross section on a transport run, and the per-branch decay
     ///   emission of a parent whose branching was drawn.
     /// - ``samples`` / ``converged``: how many replicas ran, and whether the
