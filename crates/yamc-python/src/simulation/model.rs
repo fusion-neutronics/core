@@ -1526,7 +1526,10 @@ impl PyModel {
     ///           two-mode parents whose sum rule fixes how the stated sigma is
     ///           shared, as ``DataUncertainty`` describes;
     ///         - ``"decay_energy"``: the decay data's mean decay energy sigmas,
-    ///           which move decay heat only.
+    ///           which move decay heat only;
+    ///         - ``"decay_photon_lines"``: the decay data's photon spectrum
+    ///           normalisation, line intensity and line energy sigmas, which
+    ///           move the decay photon spectrum and contact dose only.
     ///
     ///         ``"flux_spectrum"`` does not apply: there is no supplied spectrum,
     ///         and the flux's error is the statistical one. The transport runs

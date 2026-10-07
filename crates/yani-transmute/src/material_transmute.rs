@@ -1640,6 +1640,43 @@ fn run_replicas(
             Default::default()
         };
 
+    // Decay photons: like the decay energies, drawn where the spectrum and
+    // contact dose are evaluated, never in a solve. Here only who has a sigma.
+    let want_decay_photons = request.wants(crate::uncertainty::Source::DecayPhotonLines);
+    let (decay_photons_perturbed, no_decay_photon_sigma, decay_photon_not_carried) =
+        if want_decay_photons {
+            let seeds: Vec<&str> = initial
+                .nuclides
+                .keys()
+                .chain(initial.nuclide_data.keys())
+                .map(|s| s.as_str())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            let mut with = std::collections::BTreeSet::new();
+            let mut without = std::collections::BTreeSet::new();
+            let mut not_carried = std::collections::BTreeSet::new();
+            for name in yani::reachable_nuclides(chain, &seeds) {
+                let Some(cn) = chain.get(&name) else { continue };
+                if cn.half_life.is_none_or(|t| t <= 0.0)
+                    || !crate::uncertainty::has_decay_photons(cn)
+                {
+                    continue;
+                }
+                if crate::uncertainty::has_decay_photon_sigma_not_carried(cn) {
+                    not_carried.insert(name.clone());
+                }
+                if crate::uncertainty::has_decay_photon_sigma(cn) {
+                    with.insert(name);
+                } else if !not_carried.contains(&name) {
+                    without.insert(name);
+                }
+            }
+            (with, without, not_carried)
+        } else {
+            Default::default()
+        };
+
     // The shares are exact where the fold's partials are the collapse's own
     // split of each rate: on a dilute or self-shielded collapse, not a tallied
     // rate, and under the flat within-group weight, since under 1/E a nuclide
@@ -1678,6 +1715,12 @@ fn run_replicas(
     }
     if !want_decay_energy {
         info.not_perturbed.insert(0, "decay energy".to_string());
+    }
+    if !want_decay_photons {
+        info.not_perturbed.insert(
+            0,
+            "decay photon line energy and intensity, and continuum normalisation".to_string(),
+        );
     }
     if !cross_sections {
         info.not_perturbed
@@ -1722,6 +1765,9 @@ fn run_replicas(
     info.decay_energies_perturbed = decay_energy_perturbed.clone();
     info.no_decay_energy_uncertainty = no_decay_energy_sigma;
     info.decay_energy_uncertainty_not_carried = decay_energy_not_carried;
+    info.decay_photon_lines_perturbed = decay_photons_perturbed.clone();
+    info.no_decay_photon_line_uncertainty = no_decay_photon_sigma;
+    info.decay_photon_line_uncertainty_not_carried = decay_photon_not_carried;
     if let Some(h) = &half_life {
         info.half_lives_perturbed = h.candidates.iter().map(|(n, _, _)| n.clone()).collect();
         info.no_half_life_uncertainty = h.without.clone();
@@ -1744,6 +1790,9 @@ fn run_replicas(
     if !decay_energy_perturbed.is_empty() {
         ensemble.decay_energy_seed = Some(request.seed);
     }
+    if !decay_photons_perturbed.is_empty() {
+        ensemble.decay_photon_seed = Some(request.seed);
+    }
 
     // Nothing to perturb means nothing to sample. The ensemble stays empty and
     // every sigma reads zero, with `info` saying why: no covariance data, not a
@@ -1760,10 +1809,11 @@ fn run_replicas(
     {
         info.converged = true;
         info.add_flux_coverage(&flux_coverage);
-        // Decay energies alone leave every inventory at nominal, but the
-        // decay heat of each still moves, so the replicas are the nominal
-        // inventory repeated: no solve beyond the one.
-        if !decay_energy_perturbed.is_empty() {
+        // Decay energies and photons alone leave every inventory at nominal,
+        // but the decay heat, photon spectrum and dose of each still move, so
+        // the replicas are the nominal inventory repeated: no solve beyond
+        // the one.
+        if !decay_energy_perturbed.is_empty() || !decay_photons_perturbed.is_empty() {
             let nominal = densities_of(
                 &replica_steps(initial, steps, per_spectrum, chain, parts, stepper)
                     .map_err(|e| e.to_string())?,

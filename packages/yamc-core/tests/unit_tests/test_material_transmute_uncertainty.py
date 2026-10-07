@@ -211,7 +211,7 @@ def test_the_report_names_what_is_never_perturbed():
         "isomeric branching (MF=9/MF=10)",
         "covariance with another evaluation (MAT1 naming another material)",
         "resonance-parameter covariance not written into covariance.arrow (MF=32)",
-        "decay photon line energy and intensity (MF=8 MT=457)",
+        "decay photon spectrum covariance and continuum shape (MF=8 MT=457 LCOV, which no library states)",
         "photon attenuation coefficient (XCOM)",
         "air energy-absorption coefficient (NIST SRD 126)",
         "fluence-to-dose coefficient (ICRP-116)",
@@ -837,6 +837,43 @@ def test_a_component_is_named_or_refused():
     iron = _iron()
     with pytest.raises(ValueError, match="component must be one of"):
         iron.decay_heat(component="neutrino")
+
+
+# --- decay photon lines -------------------------------------------------------
+#
+# The draws and their sigmas are pinned in Rust
+# (yani-transmute/tests/decay_photon_line_uncertainty.rs). Here: the source is
+# offered, the report names its nuclides, and the spectrum keeps the material's
+# own lines with an energy spread on each.
+
+def test_decay_photon_lines_is_an_available_source():
+    assert "decay_photon_lines" in yamc.DataUncertainty.available_sources()
+
+
+def test_drawn_photon_lines_keep_the_nominal_spectrum_and_report_an_energy_spread():
+    iron = _iron()
+    results = iron.transmute(
+        schedule=_schedule(),
+        data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["decay_photon_lines"]),
+    )
+    mid = iron.id or 0
+    info = results.get_data_uncertainty_info(mid)
+    for key in (
+        "decay_photon_lines_perturbed",
+        "no_decay_photon_line_uncertainty",
+        "decay_photon_line_uncertainty_not_carried",
+    ):
+        assert isinstance(info[key], list)
+    assert not any(s.startswith("decay photon line energy") for s in info["not_perturbed"])
+
+    lines = results.get_decay_photon_spectrum_uncertainty(mid, 1)
+    energies, rates = results.get_material(mid, 1).decay_photon_spectrum()
+    assert [line.energy for line in lines] == energies
+    assert [line.nominal for line in lines] == rates
+    for line in lines:
+        assert line.energy_std_dev is None or line.energy_std_dev >= 0.0
+        if line.energy_std_dev == 0.0:
+            assert line.energy_mean == line.energy
 
 
 def test_with_no_rate_drawn_the_repair_report_is_empty():

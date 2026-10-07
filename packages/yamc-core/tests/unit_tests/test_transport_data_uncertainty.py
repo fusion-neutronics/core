@@ -66,7 +66,7 @@ def test_unsupported_requests_are_refused_with_the_reason():
         model.simulate_transport(
             total_particles=10, data_uncertainty=yamc.DataUncertainty(attribution=True)
         )
-    every = ["cross_sections", "flux_spectrum", "half_life", "decay_branching", "statistical", "decay_energy"]
+    every = ["cross_sections", "flux_spectrum", "half_life", "decay_branching", "statistical", "decay_energy", "decay_photon_lines"]
     with pytest.raises(ValueError, match="cross sections only"):
         model.simulate_transport(
             total_particles=10, data_uncertainty=yamc.DataUncertainty(sources=every)

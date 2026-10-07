@@ -88,6 +88,21 @@ pub enum Source {
     /// untouched: it moves the decay heat evaluated from each replica, and
     /// nothing else.
     DecayEnergy,
+    /// Decay photon lines and continua, from the MT=457 sigmas on each
+    /// spectrum: the normalisation's (FD for lines, FC for a continuum),
+    /// common to the whole spectrum, and each line's own intensity (dRI) and
+    /// energy (dER). Every one is drawn as a lognormal with the stated mean
+    /// and sigma, the normalisation once per spectrum and so fully correlated
+    /// across its lines, each line's intensity and energy independently.
+    ///
+    /// The tape's dRI is relative to FD and excludes its sigma, so the two
+    /// multiply without counting either twice. A continuum's shape stays at
+    /// nominal: no library states the covariance it would be drawn from.
+    ///
+    /// Like a decay energy it never enters the solve. It moves the decay
+    /// photon spectrum and the contact dose evaluated from each replica, and
+    /// nothing else.
+    DecayPhotonLines,
 }
 
 impl Source {
@@ -100,6 +115,7 @@ impl Source {
         Source::DecayBranching,
         Source::Statistical,
         Source::DecayEnergy,
+        Source::DecayPhotonLines,
     ];
 
     /// The name used in the API and in the coverage report.
@@ -111,6 +127,7 @@ impl Source {
             Source::DecayBranching => "decay_branching",
             Source::Statistical => "statistical",
             Source::DecayEnergy => "decay_energy",
+            Source::DecayPhotonLines => "decay_photon_lines",
         }
     }
 
@@ -486,6 +503,17 @@ pub struct Info {
     /// or not finite. That energy was held at nominal; any other component of
     /// the same nuclide with a usable sigma was still drawn.
     pub decay_energy_uncertainty_not_carried: BTreeSet<String>,
+    /// Reachable unstable nuclides with decay photon data whose normalisation,
+    /// line intensities or line energies were perturbed.
+    pub decay_photon_lines_perturbed: BTreeSet<String>,
+    /// Reachable unstable nuclides with decay photon data but no stated sigma
+    /// on any of it, held at nominal. Not a claim that it is exact.
+    pub no_decay_photon_line_uncertainty: BTreeSet<String>,
+    /// Reachable unstable nuclides with a decay photon sigma that no draw can
+    /// carry: stated on a normalisation, intensity or energy of zero, or not
+    /// finite. That value was held at nominal; every other value of the same
+    /// nuclide with a usable sigma was still drawn.
+    pub decay_photon_line_uncertainty_not_carried: BTreeSet<String>,
     /// Tallied rates sampled statistically, the totals and partials together;
     /// zero off the transport path or with the source off.
     pub statistical_rates: usize,
@@ -562,8 +590,7 @@ impl Info {
                 "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, or LTY=0 in skipped_nc)",
                 "lumped-reaction covariance of several components no derivation names (MF=33 MT=851-870, in lumped_covariance_not_assignable)",
                 "resonance-parameter covariance not written into covariance.arrow (MF=32)",
-                "decay photon line energy and intensity (MF=8 MT=457)",
-                "decay photon continuum normalisation and shape (MF=8 MT=457 continuum and its covariance)",
+                "decay photon spectrum covariance and continuum shape (MF=8 MT=457 LCOV, which no library states)",
                 "photon attenuation coefficient (XCOM)",
                 "air energy-absorption coefficient (NIST SRD 126)",
                 "fluence-to-dose coefficient (ICRP-116)",
@@ -612,6 +639,8 @@ impl Info {
             || !self.no_decay_energy_uncertainty.is_empty()
             || !self.half_life_uncertainty_not_carried.is_empty()
             || !self.decay_energy_uncertainty_not_carried.is_empty()
+            || !self.no_decay_photon_line_uncertainty.is_empty()
+            || !self.decay_photon_line_uncertainty_not_carried.is_empty()
     }
 }
 
@@ -670,6 +699,11 @@ pub struct Ensemble {
     /// they were perturbed. They do not change the inventory, so they are
     /// drawn where decay heat is evaluated rather than stored.
     pub decay_energy_seed: Option<u64>,
+    /// The seed decay photon lines and continua are drawn from, per replica
+    /// and nuclide, when they were perturbed. Like the decay energies they do
+    /// not change the inventory, so they are drawn where the photon spectrum
+    /// and contact dose are evaluated.
+    pub decay_photon_seed: Option<u64>,
 }
 
 /// Where an inventory's uncertainty comes from.
@@ -717,6 +751,7 @@ impl Ensemble {
             half_lives: Vec::new(),
             attribution: None,
             decay_energy_seed: None,
+            decay_photon_seed: None,
         }
     }
 
@@ -1054,6 +1089,156 @@ pub(crate) fn has_decay_energy_sigma_not_carried(cn: &yani::ChainNuclide) -> boo
     }
 }
 
+/// Keeps the decay-photon streams clear of every other per-nuclide stream.
+pub(crate) const DECAY_PHOTON_STREAM: u32 = 0x9A44_A11E;
+
+/// Every `(value, sigma)` pair a nuclide's photon sources state: each
+/// spectrum's normalisation, and each line's intensity and energy.
+///
+/// The normalisation is checked against its own value, not against the
+/// intensities it scaled: its sigma is relative to FD (or FC), and a draw
+/// multiplies the spectrum by `m(sigma / FD)`.
+fn photon_sigmas(cn: &yani::ChainNuclide) -> impl Iterator<Item = (f64, Option<f64>)> + '_ {
+    cn.sources
+        .iter()
+        .filter(|source| source.particle == "photon")
+        .filter_map(|source| Some((source, source.uncertainty.as_deref()?)))
+        .flat_map(|(source, u)| {
+            let normalization = u.normalization.map(|fd| (fd, u.normalization_uncertainty));
+            let lines: Vec<(f64, Option<f64>)> = match &source.distribution {
+                yani::DecaySourceDistribution::Discrete {
+                    energies,
+                    intensities,
+                } => {
+                    let intensity = intensities.iter().enumerate().map(|(i, value)| {
+                        let sigma = u
+                            .intensity_uncertainties
+                            .as_ref()
+                            .and_then(|s| s.get(i).copied());
+                        (*value, sigma)
+                    });
+                    let energy = energies.iter().enumerate().map(|(i, value)| {
+                        let sigma = u
+                            .energy_uncertainties
+                            .as_ref()
+                            .and_then(|s| s.get(i).copied());
+                        (*value, sigma)
+                    });
+                    intensity.chain(energy).collect()
+                }
+                yani::DecaySourceDistribution::Tabular { .. } => Vec::new(),
+            };
+            normalization.into_iter().chain(lines)
+        })
+}
+
+/// Whether a nuclide has any photon source at all, which is what puts it in
+/// the report either way.
+pub(crate) fn has_decay_photons(cn: &yani::ChainNuclide) -> bool {
+    cn.sources.iter().any(|source| source.particle == "photon")
+}
+
+/// Whether any of a nuclide's photon normalisations, line intensities or line
+/// energies carries a sigma a draw can sample from.
+pub(crate) fn has_decay_photon_sigma(cn: &yani::ChainNuclide) -> bool {
+    photon_sigmas(cn).any(|(value, sigma)| carried(value, sigma).is_some())
+}
+
+/// Whether a nuclide states a photon sigma no draw can carry: one on a value
+/// of zero, or one not finite. JENDL-5.0 writes 0.0 on a reference line and
+/// puts its sigma in the normalisation, which is a 0.0 sigma, not stated, and
+/// so not this.
+pub(crate) fn has_decay_photon_sigma_not_carried(cn: &yani::ChainNuclide) -> bool {
+    photon_sigmas(cn).any(|(value, sigma)| stated(sigma) && carried(value, sigma).is_none())
+}
+
+/// Draw one replica's decay photon data for one nuclide in place, from a
+/// stream keyed on `(seed, replica, nuclide)`.
+///
+/// Per photon source, one lognormal multiplier from the normalisation's
+/// relative sigma scales every line or continuum point of that source, so the
+/// lines of one spectrum move together, as the evaluation states. Each line
+/// then takes its own intensity multiplier from dRI / RI, and its energy its
+/// own from dER / ER. A sigma that is not stated, or that no draw can carry,
+/// leaves its value at nominal.
+///
+/// The deviates are taken in a fixed layout, one per source and two per line
+/// whether a sigma is stated or not, so a value draws the same number in
+/// every replica regardless of which of its neighbours carry a sigma.
+///
+/// Applied after a replica's half-life, whose rescale moves each intensity
+/// and its sigma together and leaves their ratio, which is all a draw reads.
+pub(crate) fn sample_decay_photons(cn: &mut yani::ChainNuclide, base_seed: u64, replica: u64) {
+    let replica_seed = yamc_rng::history_seed(base_seed, replica);
+    let seed = yamc_rng::secondary_seed(
+        replica_seed,
+        crate::covariance_sample::name_ordinal(&cn.name) ^ DECAY_PHOTON_STREAM,
+    );
+    let count: usize = cn
+        .sources
+        .iter()
+        .filter(|source| source.particle == "photon")
+        .map(|source| match &source.distribution {
+            yani::DecaySourceDistribution::Discrete { energies, .. } => 1 + 2 * energies.len(),
+            yani::DecaySourceDistribution::Tabular { .. } => 1,
+        })
+        .sum();
+    if count == 0 {
+        return;
+    }
+    let z = crate::covariance_sample::standard_normals(&mut yamc_rng::expand_seed(seed), count);
+    let mut z = z.into_iter();
+    let multiplier = |value: f64, sigma: Option<f64>, z: f64| match carried(value, sigma) {
+        Some(sigma) => lognormal_multiplier(z, sigma / value),
+        None => 1.0,
+    };
+    for source in cn
+        .sources
+        .iter_mut()
+        .filter(|source| source.particle == "photon")
+    {
+        let z_norm = z.next().expect("one deviate per source");
+        let Some(u) = source.uncertainty.clone() else {
+            // Nothing stated, nothing drawn, but the layout's deviates are
+            // still spent so the sources after it read the same ones.
+            if let yani::DecaySourceDistribution::Discrete { energies, .. } = &source.distribution {
+                for _ in 0..2 * energies.len() {
+                    z.next();
+                }
+            }
+            continue;
+        };
+        let common = u.normalization.map_or(1.0, |fd| {
+            multiplier(fd, u.normalization_uncertainty, z_norm)
+        });
+        match &mut source.distribution {
+            yani::DecaySourceDistribution::Discrete {
+                energies,
+                intensities,
+            } => {
+                for i in 0..energies.len() {
+                    let z_intensity = z.next().expect("two deviates per line");
+                    let z_energy = z.next().expect("two deviates per line");
+                    let sigma = |s: &Option<Vec<f64>>| s.as_ref().and_then(|s| s.get(i).copied());
+                    let own = multiplier(
+                        intensities[i],
+                        sigma(&u.intensity_uncertainties),
+                        z_intensity,
+                    );
+                    let shift = multiplier(energies[i], sigma(&u.energy_uncertainties), z_energy);
+                    intensities[i] *= common * own;
+                    energies[i] *= shift;
+                }
+            }
+            yani::DecaySourceDistribution::Tabular { intensities, .. } => {
+                for value in intensities.iter_mut() {
+                    *value *= common;
+                }
+            }
+        }
+    }
+}
+
 /// `chain` with the half-lives of `sampled` substituted.
 pub(crate) fn with_half_lives(
     chain: &HashMap<String, yani::ChainNuclide>,
@@ -1097,22 +1282,19 @@ pub(crate) fn set_half_life(cn: &mut yani::ChainNuclide, half_life: f64) {
 mod tests {
     use super::*;
 
-    /// Every run states the decay photon sources it holds at nominal, lines
-    /// and continua both, so a reader does not take their silence for zero.
+    /// Every run states the decay photon data it holds at nominal whatever
+    /// the sources, so a reader does not take its silence for zero.
     #[test]
     fn the_report_names_the_photon_sources_held_at_nominal() {
         let info = Info::from_fold(&Coverage::default(), &SigmaReport::default(), true)
             .expect("no shares to check");
-        for source in [
-            "decay photon line energy and intensity (MF=8 MT=457)",
-            "decay photon continuum normalisation and shape (MF=8 MT=457 continuum and its covariance)",
-        ] {
-            assert!(
-                info.not_perturbed.iter().any(|s| s == source),
-                "{source:?} missing from {:?}",
-                info.not_perturbed
-            );
-        }
+        let source = "decay photon spectrum covariance and continuum shape \
+                      (MF=8 MT=457 LCOV, which no library states)";
+        assert!(
+            info.not_perturbed.iter().any(|s| s == source),
+            "{source:?} missing from {:?}",
+            info.not_perturbed
+        );
     }
 
     /// A new half-life rescales a continuum's density exactly as it rescales a
@@ -1363,7 +1545,7 @@ mod tests {
             "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, or LTY=0 in skipped_nc)",
             "lumped-reaction covariance of several components no derivation names (MF=33 MT=851-870, in lumped_covariance_not_assignable)",
             "resonance-parameter covariance not written into covariance.arrow (MF=32)",
-            "decay photon line energy and intensity (MF=8 MT=457)",
+            "decay photon spectrum covariance and continuum shape (MF=8 MT=457 LCOV, which no library states)",
             "photon attenuation coefficient (XCOM)",
             "air energy-absorption coefficient (NIST SRD 126)",
             "fluence-to-dose coefficient (ICRP-116)",
@@ -1391,6 +1573,7 @@ mod tests {
             "half-life",
             "decay branching ratio",
             "decay energy",
+            "decay photon line energy and intensity, and continuum normalisation",
         ] {
             assert!(!info.not_perturbed.iter().any(|s| s == conditional));
         }
@@ -1706,5 +1889,221 @@ mod tests {
         let (_, parts) = sample_decay_energy(&cn, 5, 0).unwrap();
         assert_eq!(parts[0].unwrap().energy, 0.0);
         assert_ne!(parts[1].unwrap().energy, 1.0e6);
+    }
+
+    /// A nuclide with one gamma spectrum of two lines and one continuum: FD
+    /// sigma 2%, the first line dRI 3% and dER 50 eV, the second line only
+    /// `second_line_sigma` (relative), and the continuum FC sigma 10%.
+    fn photon_emitter(second_line_sigma: f64) -> yani::ChainNuclide {
+        let lambda = std::f64::consts::LN_2 / 1000.0;
+        let intensities = vec![0.5 * lambda, 0.25 * lambda];
+        let mut cn = stated_as_zero();
+        cn.name = "X100".to_string();
+        cn.half_life = Some(1000.0);
+        cn.sources = vec![
+            yani::DecaySource {
+                particle: "photon".to_string(),
+                radiation: Some("gamma".to_string()),
+                distribution: yani::DecaySourceDistribution::Discrete {
+                    energies: vec![5.0e5, 1.2e6],
+                    intensities: intensities.clone(),
+                },
+                uncertainty: Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
+                    normalization: Some(0.8),
+                    normalization_uncertainty: Some(0.016),
+                    intensity_uncertainties: Some(vec![
+                        0.03 * intensities[0],
+                        second_line_sigma * intensities[1],
+                    ]),
+                    energy_uncertainties: Some(vec![50.0, 0.0]),
+                    covariance: None,
+                })),
+            },
+            yani::DecaySource {
+                particle: "photon".to_string(),
+                radiation: Some("gamma".to_string()),
+                distribution: yani::DecaySourceDistribution::Tabular {
+                    energies: vec![1.0e4, 1.0e6],
+                    intensities: vec![1.0e-9, 1.0e-9],
+                    interpolation: None,
+                },
+                uncertainty: Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
+                    normalization: Some(0.5),
+                    normalization_uncertainty: Some(0.05),
+                    ..Default::default()
+                })),
+            },
+        ];
+        cn
+    }
+
+    /// `(line intensities, line energies, continuum value)` of one draw.
+    fn photon_draw(cn: &yani::ChainNuclide, seed: u64, replica: u64) -> (Vec<f64>, Vec<f64>, f64) {
+        let mut cn = cn.clone();
+        sample_decay_photons(&mut cn, seed, replica);
+        let yani::DecaySourceDistribution::Discrete {
+            energies,
+            intensities,
+        } = &cn.sources[0].distribution
+        else {
+            unreachable!()
+        };
+        let yani::DecaySourceDistribution::Tabular {
+            intensities: continuum,
+            ..
+        } = &cn.sources[1].distribution
+        else {
+            unreachable!()
+        };
+        (intensities.clone(), energies.clone(), continuum[0])
+    }
+
+    /// The draws carry the stated sigmas: a line's relative sigma is FD's and
+    /// its own dRI in quadrature, the lines of one spectrum are correlated
+    /// through FD alone, a line's energy moves by its dER, and a continuum by
+    /// its FC sigma, every one centred on the nominal value.
+    #[test]
+    fn photon_draws_carry_the_stated_sigmas_and_the_common_normalisation() {
+        let cn = photon_emitter(0.0);
+        let (i0, e0, c0) = photon_draw(&cn, 0, 0);
+        let nominal = {
+            let yani::DecaySourceDistribution::Discrete { intensities, .. } =
+                &cn.sources[0].distribution
+            else {
+                unreachable!()
+            };
+            intensities.clone()
+        };
+        assert_ne!(i0, nominal, "the draw moved the lines");
+        assert_ne!(e0[0], 5.0e5, "the draw moved the first line's energy");
+        assert_eq!(e0[1], 1.2e6, "a 0.0 dER is not stated, so not drawn");
+        assert_ne!(c0, 1.0e-9);
+
+        let n = 40_000;
+        let (mut a, mut b, mut e, mut c) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for replica in 0..n {
+            let (i, energies, continuum) = photon_draw(&cn, 9, replica);
+            a.push(i[0] / nominal[0]);
+            b.push(i[1] / nominal[1]);
+            e.push(energies[0]);
+            c.push(continuum / 1.0e-9);
+        }
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+        let sd = |v: &[f64]| {
+            let m = mean(v);
+            (v.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / (v.len() - 1) as f64).sqrt()
+        };
+        let close = |got: f64, want: f64, tol: f64, what: &str| {
+            assert!(
+                (got - want).abs() <= tol * want,
+                "{what}: {got} against {want}"
+            );
+        };
+        let fd = 0.016 / 0.8;
+        close(mean(&a), 1.0, 0.002, "first line mean");
+        close(mean(&b), 1.0, 0.002, "second line mean");
+        close(
+            sd(&a),
+            (fd * fd + 0.03 * 0.03_f64).sqrt(),
+            0.03,
+            "first line sigma",
+        );
+        close(sd(&b), fd, 0.03, "second line sigma");
+        close(mean(&e), 5.0e5, 1e-5, "first line energy mean");
+        close(sd(&e), 50.0, 0.03, "first line energy sigma");
+        close(mean(&c), 1.0, 0.003, "continuum mean");
+        close(sd(&c), 0.1, 0.03, "continuum sigma");
+
+        let (ma, mb) = (mean(&a), mean(&b));
+        let cov = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| (x - ma) * (y - mb))
+            .sum::<f64>()
+            / (n - 1) as f64;
+        let rho = cov / (sd(&a) * sd(&b));
+        let want = fd / (fd * fd + 0.03 * 0.03_f64).sqrt();
+        assert!(
+            (rho - want).abs() < 0.03,
+            "correlation {rho} against {want}"
+        );
+    }
+
+    /// The deviates are laid out by position, not by which values state a
+    /// sigma, so giving one line a sigma moves that line and nothing else.
+    #[test]
+    fn a_line_draws_the_same_deviate_whatever_its_neighbours_state() {
+        let without = photon_emitter(0.0);
+        let with = photon_emitter(0.04);
+        for replica in 0..32 {
+            let (i_without, e_without, c_without) = photon_draw(&without, 3, replica);
+            let (i_with, e_with, c_with) = photon_draw(&with, 3, replica);
+            assert_eq!(i_without[0], i_with[0]);
+            assert_ne!(i_without[1], i_with[1]);
+            assert_eq!(e_without, e_with);
+            assert_eq!(c_without, c_with);
+        }
+        // A source with no uncertainty at all still spends its deviates.
+        let mut bare = photon_emitter(0.0);
+        bare.sources[0].uncertainty = None;
+        let mut zeros = photon_emitter(0.0);
+        zeros.sources[0].uncertainty = Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
+            intensity_uncertainties: Some(vec![0.0, 0.0]),
+            energy_uncertainties: Some(vec![0.0, 0.0]),
+            ..Default::default()
+        }));
+        for replica in 0..32 {
+            assert_eq!(
+                photon_draw(&bare, 3, replica),
+                photon_draw(&zeros, 3, replica)
+            );
+        }
+    }
+
+    /// A nuclide whose only photon sigmas are 0.0 states none, and one with a
+    /// sigma on a zero intensity states one no draw can carry.
+    #[test]
+    fn photon_sigmas_are_classified_as_stated_carried_or_not() {
+        let emitter = photon_emitter(0.0);
+        assert!(has_decay_photons(&emitter));
+        assert!(has_decay_photon_sigma(&emitter));
+        assert!(!has_decay_photon_sigma_not_carried(&emitter));
+
+        let mut silent = photon_emitter(0.0);
+        silent.sources[0].uncertainty = Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
+            normalization: Some(1.0),
+            normalization_uncertainty: Some(0.0),
+            intensity_uncertainties: Some(vec![0.0, 0.0]),
+            energy_uncertainties: Some(vec![0.0, 0.0]),
+            covariance: None,
+        }));
+        silent.sources[1].uncertainty = None;
+        assert!(has_decay_photons(&silent));
+        assert!(!has_decay_photon_sigma(&silent));
+        assert!(!has_decay_photon_sigma_not_carried(&silent));
+        let before = photon_draw(&silent, 1, 0);
+        assert_eq!(before.0, {
+            let yani::DecaySourceDistribution::Discrete { intensities, .. } =
+                &silent.sources[0].distribution
+            else {
+                unreachable!()
+            };
+            intensities.clone()
+        });
+
+        let mut lost = silent.clone();
+        if let yani::DecaySourceDistribution::Discrete { intensities, .. } =
+            &mut lost.sources[0].distribution
+        {
+            intensities[1] = 0.0;
+        }
+        lost.sources[0].uncertainty = Some(std::sync::Arc::new(yani::DecaySourceUncertainty {
+            intensity_uncertainties: Some(vec![0.0, 1.0e-6]),
+            ..Default::default()
+        }));
+        assert!(!has_decay_photon_sigma(&lost));
+        assert!(has_decay_photon_sigma_not_carried(&lost));
+
+        assert!(!has_decay_photons(&stated_as_zero()));
     }
 }
