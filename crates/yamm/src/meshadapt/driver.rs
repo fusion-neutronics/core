@@ -454,6 +454,14 @@ pub fn mesh_face_meshadapt(
     config: Option<MeshAdaptConfig>,
 ) -> (Vec<[f64; 2]>, Vec<[usize; 3]>) {
     let config = config.unwrap_or_default();
+    mesh_face_meshadapt_with_config(boundary_uv, sf, &config)
+}
+
+fn mesh_face_meshadapt_with_config(
+    boundary_uv: &[[f64; 2]],
+    sf: &SizeField,
+    config: &MeshAdaptConfig,
+) -> (Vec<[f64; 2]>, Vec<[usize; 3]>) {
     let n = boundary_uv.len();
 
     if n < 3 {
@@ -482,7 +490,7 @@ pub fn mesh_face_meshadapt(
     }
 
     // 4. Run meshadapt loop
-    meshadapt(&mut mesh, sf, &config);
+    meshadapt(&mut mesh, sf, config);
 
     // 5. Export BDS to flat arrays
     mesh.to_triangles()
@@ -504,7 +512,7 @@ pub fn mesh_faces_meshadapt_parallel(
     let config = config.unwrap_or_default();
     inputs
         .par_iter()
-        .map(|(boundary, sf)| mesh_face_meshadapt(boundary, sf, Some(config.clone())))
+        .map(|(boundary, sf)| mesh_face_meshadapt_with_config(boundary, sf, &config))
         .collect()
 }
 

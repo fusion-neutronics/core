@@ -12,6 +12,7 @@ mod delaunay3d;
 pub(crate) mod dethash;
 mod mesh_improve;
 pub mod optimize;
+mod point_storage;
 #[allow(dead_code)]
 mod refine3d;
 
@@ -20,7 +21,7 @@ use rayon::prelude::*;
 mod predicates3d;
 mod types;
 
-pub use types::{BoundaryRecoveryStats, VolumeInput, VolumeOutput};
+pub use types::{BoundaryRecoveryStats, VolumeInput, VolumeInputRef, VolumeOutput};
 
 use crate::error::{MesherError, Result};
 use delaunay3d::Delaunay3D;
@@ -66,6 +67,16 @@ use delaunay3d::Delaunay3D;
 /// solid can only end up as good as it was before.
 const CONFORMING_TRIGGER_DEFAULT: f64 = 1e-8;
 
+/// Reuse a combined `boundary ++ interior` allocation for the returned
+/// interior-only vertex list, releasing boundary-sized spare capacity.
+fn into_interior_vertices(mut vertices: Vec<[f64; 3]>, n_boundary: usize) -> Vec<[f64; 3]> {
+    let n_interior = vertices.len() - n_boundary;
+    vertices.copy_within(n_boundary.., 0);
+    vertices.truncate(n_interior);
+    point_storage::trim_spare_capacity(&mut vertices);
+    vertices
+}
+
 /// Mesh a volume with tetrahedra.
 ///
 /// Takes a closed surface mesh (boundary) and fills it with tetrahedra
@@ -95,6 +106,11 @@ const CONFORMING_TRIGGER_DEFAULT: f64 = 1e-8;
 /// Returns `MesherError::MeshingFailed` if the meshed result violates the
 /// positive-orientation guarantee above (a mesher bug, not bad input).
 pub fn mesh_volume(input: &VolumeInput) -> Result<VolumeOutput> {
+    mesh_volume_ref(input.into())
+}
+
+/// Mesh a volume while borrowing its boundary arrays.
+pub fn mesh_volume_ref(input: VolumeInputRef<'_>) -> Result<VolumeOutput> {
     // --- Input validation ---
     if input.boundary_vertices.len() < 4 {
         return Err(MesherError::InvalidInput(format!(
@@ -137,8 +153,7 @@ pub fn mesh_volume(input: &VolumeInput) -> Result<VolumeOutput> {
     // mesh) is overridable via YAMM_MAX_INTERIOR_PTS for users who mean it.
     {
         let h = input.target_edge_length * 2.0 / 3.0_f64.sqrt();
-        let enclosed =
-            boundary_enclosed_volume(&input.boundary_vertices, &input.boundary_triangles);
+        let enclosed = boundary_enclosed_volume(input.boundary_vertices, input.boundary_triangles);
         let est_pts = 2.0 * enclosed / (h * h * h);
         let cap: f64 = std::env::var("YAMM_MAX_INTERIOR_PTS")
             .ok()
@@ -163,7 +178,7 @@ pub fn mesh_volume(input: &VolumeInput) -> Result<VolumeOutput> {
     }
 
     // Delaunay pipeline with quality refinement
-    let output = mesh_volume_delaunay(input)?;
+    let output = mesh_volume_delaunay(&input)?;
 
     // --- Emission-boundary invariant: positive orientation ---
     // One O(#tets), allocation-free sign pass at the single point every
@@ -172,7 +187,7 @@ pub fn mesh_volume(input: &VolumeInput) -> Result<VolumeOutput> {
     // mesh (0.11% of the 10.2 s mesh_volume). Three orders of magnitude below
     // the meshing itself, so it stays always-on rather than debug-only: a
     // silently inverted mesh is not something to discover in a transport run.
-    if let Some((idx, signed)) = output.first_non_positive_tet(&input.boundary_vertices) {
+    if let Some((idx, signed)) = output.first_non_positive_tet(input.boundary_vertices) {
         return Err(MesherError::MeshingFailed(format!(
             "tet {idx} of {} is not positively oriented (signed volume {signed:e}). \
              Every tet yamm emits must have positive signed volume: transport reads \
@@ -384,7 +399,7 @@ fn carve_interior(dt: &Delaunay3D, boundary_faces: &[[usize; 3]]) -> Vec<[usize;
 /// the legacy path handled, and exactly fixes both over- and under-shoot where
 /// it succeeds.
 fn mesh_volume_conforming(
-    input: &VolumeInput,
+    input: &VolumeInputRef<'_>,
     all_points: &[[f64; 3]],
     n_boundary: usize,
 ) -> Option<VolumeOutput> {
@@ -448,7 +463,7 @@ fn mesh_volume_conforming(
     // track that refined set here and hand IT to carve_interior so the flood is
     // blocked by the faces actually present in the mesh. The volume gate below
     // still references the ORIGINAL input triangles (the true target volume).
-    let mut cur_faces: Vec<[usize; 3]> = input.boundary_triangles.clone();
+    let mut cur_faces: Vec<[usize; 3]> = input.boundary_triangles.to_vec();
 
     // ── Separation audit (YAMM_SEP_AUDIT) ──
     // The carve's flood partition is only valid if the surface SEPARATES, which
@@ -569,7 +584,9 @@ fn mesh_volume_conforming(
     // Steiner refinement appends new vertices to `dt.vertices` (all lying on
     // the original surface), so the tet indices reference the FULL dt vertex
     // list - use it (not `all_points`) as the coordinate table.
-    let mut pts = dt.vertices.clone();
+    let mut pts = std::mem::take(&mut dt.vertices);
+    drop(dt);
+    drop(cur_faces);
     for t in &mut tets {
         let vol = predicates3d::tet_volume(pts[t[0]], pts[t[1]], pts[t[2]], pts[t[3]]);
         if vol < 0.0 {
@@ -585,7 +602,7 @@ fn mesh_volume_conforming(
         .iter()
         .map(|t| predicates3d::tet_volume(pts[t[0]], pts[t[1]], pts[t[2]], pts[t[3]]).abs())
         .sum();
-    let bvol = boundary_enclosed_volume(&input.boundary_vertices, &input.boundary_triangles);
+    let bvol = boundary_enclosed_volume(input.boundary_vertices, input.boundary_triangles);
     // A topological flood-fill carve over a FULLY-recovered boundary is a valid
     // partition of the enclosed region by construction, so its volume equals the
     // boundary-enclosed volume EXACTLY in exact arithmetic. The residual here is
@@ -616,15 +633,15 @@ fn mesh_volume_conforming(
         &mut pts,
         &mut tets,
         n_boundary,
-        &input.boundary_vertices,
-        &input.boundary_triangles,
+        input.boundary_vertices,
+        input.boundary_triangles,
         input.target_edge_length,
         10,
         None,
     );
     drop_degenerate_tets(&pts, &mut tets, "conforming");
 
-    let interior_vertices = pts[n_boundary..].to_vec();
+    let interior_vertices = into_interior_vertices(pts, n_boundary);
     Some(VolumeOutput {
         interior_vertices,
         tetrahedra: tets,
@@ -789,21 +806,24 @@ fn count_tets_cut_by_boundary(
 }
 
 /// Delaunay-based pipeline with iterative quality refinement.
-fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
+fn mesh_volume_delaunay(input: &VolumeInputRef<'_>) -> Result<VolumeOutput> {
     let n_boundary = input.boundary_vertices.len();
 
     use std::time::Instant;
     // Step 1: Generate BCC lattice interior points
     let t_start = Instant::now();
     let interior_pts = bcc::generate_bcc_interior_points(
-        &input.boundary_vertices,
-        &input.boundary_triangles,
+        input.boundary_vertices,
+        input.boundary_triangles,
         input.target_edge_length,
     );
+    let has_interior_points = !interior_pts.is_empty();
 
     // Step 2: Combine boundary + interior points
-    let mut all_points: Vec<[f64; 3]> = input.boundary_vertices.clone();
-    all_points.extend_from_slice(&interior_pts);
+    let mut all_points: Vec<[f64; 3]> =
+        Vec::with_capacity(input.boundary_vertices.len() + interior_pts.len());
+    all_points.extend_from_slice(input.boundary_vertices);
+    all_points.extend(interior_pts);
 
     // FORCED conforming path (YAMM_CONFORMING): attempt the conforming carve
     // unconditionally, before the legacy pipeline. The DEFAULT flow instead
@@ -819,7 +839,7 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
         }
     }
 
-    if interior_pts.is_empty() {
+    if !has_interior_points {
         let out = mesh_boundary_only(input);
         // Undershoot-trigger parity: without it this early return would skip
         // the Step-6b conforming backstop entirely, so boundary-only
@@ -833,15 +853,14 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
             && std::env::var("YAMM_NO_CONFORMING").is_err()
             && std::env::var("YAMM_CONFORMING").is_err()
         {
-            let mut pts: Vec<[f64; 3]> = input.boundary_vertices.clone();
+            let mut pts: Vec<[f64; 3]> = input.boundary_vertices.to_vec();
             pts.extend_from_slice(&out.interior_vertices);
             let bo_vol: f64 = out
                 .tetrahedra
                 .iter()
                 .map(|t| predicates3d::tet_volume(pts[t[0]], pts[t[1]], pts[t[2]], pts[t[3]]).abs())
                 .sum();
-            let bvol =
-                boundary_enclosed_volume(&input.boundary_vertices, &input.boundary_triangles);
+            let bvol = boundary_enclosed_volume(input.boundary_vertices, input.boundary_triangles);
             let trig: f64 = std::env::var("YAMM_CONFORMING_TRIGGER")
                 .ok()
                 .and_then(|s| s.parse::<f64>().ok())
@@ -883,7 +902,7 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
     }
     let t_step = Instant::now();
     let (faces_recovered, faces_failed, failed_faces) =
-        boundary_recovery::recover_faces(&mut dt, &input.boundary_triangles);
+        boundary_recovery::recover_faces(&mut dt, input.boundary_triangles);
 
     let mut recovery_stats = BoundaryRecoveryStats {
         edges_recovered: 0,
@@ -912,6 +931,7 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
     let bvh = aabb_bvh::TriangleBvh::new(&tri_data);
 
     let all_extracted = dt.extract_tets();
+    drop(dt);
     eprintln!(
         "    [vol] extracted {} raw tets, building BVH over {} boundary tris",
         all_extracted.len(),
@@ -1297,7 +1317,7 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
                 }
             );
         }
-        let bvol = boundary_enclosed_volume(&input.boundary_vertices, &input.boundary_triangles);
+        let bvol = boundary_enclosed_volume(input.boundary_vertices, input.boundary_triangles);
         let kept: f64 = tets.iter().map(tet_vol).sum();
         let lo = v_in;
         let hi = v_in + v_straddle;
@@ -1538,7 +1558,7 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
                 .abs()
             })
             .sum();
-        let bvol = boundary_enclosed_volume(&input.boundary_vertices, &input.boundary_triangles);
+        let bvol = boundary_enclosed_volume(input.boundary_vertices, input.boundary_triangles);
         let trig: f64 = std::env::var("YAMM_CONFORMING_TRIGGER")
             .ok()
             .and_then(|s| s.parse::<f64>().ok())
@@ -1684,7 +1704,8 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
         // keeps the mesh conformal across cells instead of cracked. A cracked
         // mesh would also make mesh_improve treat every clipped face as a
         // boundary face.
-        let mut index_of: HashMap<[u64; 3], usize> = HashMap::default();
+        let mut index_of: HashMap<[u64; 3], usize> =
+            HashMap::with_capacity_and_hasher(all_points.len(), Default::default());
         for (i, p) in all_points.iter().enumerate() {
             index_of
                 .entry([p[0].to_bits(), p[1].to_bits(), p[2].to_bits()])
@@ -1739,7 +1760,7 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
                 .abs()
             })
             .sum();
-        let bv_now = boundary_enclosed_volume(&input.boundary_vertices, &input.boundary_triangles);
+        let bv_now = boundary_enclosed_volume(input.boundary_vertices, input.boundary_triangles);
         eprintln!(
             "    [vol] clip filter: post-clip tet-sum {v_now:.6} vs boundary {bv_now:.6} (err {:+.3e})",
             if bv_now > 0.0 { v_now / bv_now - 1.0 } else { 0.0 }
@@ -1756,6 +1777,11 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
         tets = new_tets;
     }
 
+    // Clipping is the final consumer of both the raw tet list and the boundary
+    // BVH. Release them before mesh improvement builds its large adjacencies.
+    drop(all_extracted);
+    drop(bvh);
+
     let t_step = Instant::now();
     // Step 7: Local mesh improvement
     zv_count(&all_points, &tets, "pre-improve");
@@ -1763,8 +1789,8 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
         &mut all_points,
         &mut tets,
         n_boundary,
-        &input.boundary_vertices,
-        &input.boundary_triangles,
+        input.boundary_vertices,
+        input.boundary_triangles,
         input.target_edge_length,
         10,
         clip_pinned.as_deref(),
@@ -1777,9 +1803,6 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
               t1.as_secs_f64(), t2.as_secs_f64(), t3.as_secs_f64(),
               t4.as_secs_f64(), t5.as_secs_f64(), t6.as_secs_f64(),
               t_start.elapsed().as_secs_f64(), tets.len());
-    // Extract interior vertices
-    let interior_vertices = all_points[n_boundary..].to_vec();
-
     // EXACTNESS SIGNAL. Count the FINAL tets the boundary passes
     // through. This is exact and cheap (measured 0.0s on every zoo model,
     // including BlanketModule's 25743 tets), and it is what the caller should
@@ -1788,14 +1811,15 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
     // wholesale. It replaces `faces_failed` as the watertightness signal, which
     // fires on healthy meshes.
     let t_cut = Instant::now();
-    let mut all_v = input.boundary_vertices.clone();
-    all_v.extend_from_slice(&interior_vertices);
-    recovery_stats.tets_cut_by_boundary = count_tets_cut_by_boundary(&all_v, &tets, &tri_data);
+    recovery_stats.tets_cut_by_boundary = count_tets_cut_by_boundary(&all_points, &tets, &tri_data);
     eprintln!(
         "    [vol] exactness: {} tet(s) cut by the boundary in {:.1}s",
         recovery_stats.tets_cut_by_boundary,
         t_cut.elapsed().as_secs_f64()
     );
+
+    // Extract interior vertices without allocating a second point vector.
+    let interior_vertices = into_interior_vertices(all_points, n_boundary);
 
     Ok(VolumeOutput {
         interior_vertices,
@@ -1805,7 +1829,7 @@ fn mesh_volume_delaunay(input: &VolumeInput) -> Result<VolumeOutput> {
 }
 
 /// Mesh a very small volume with just boundary vertices (no interior points).
-fn mesh_boundary_only(input: &VolumeInput) -> VolumeOutput {
+fn mesh_boundary_only(input: &VolumeInputRef<'_>) -> VolumeOutput {
     if input.boundary_vertices.len() < 4 {
         return VolumeOutput {
             interior_vertices: vec![],
@@ -1814,14 +1838,15 @@ fn mesh_boundary_only(input: &VolumeInput) -> VolumeOutput {
         };
     }
 
-    let dt = Delaunay3D::new(&input.boundary_vertices);
+    let dt = Delaunay3D::new(input.boundary_vertices);
     let mut tets = dt.extract_tets();
+    drop(dt);
 
     tets = filter_tets_inside_boundary(
-        &input.boundary_vertices,
+        input.boundary_vertices,
         &tets,
-        &input.boundary_vertices,
-        &input.boundary_triangles,
+        input.boundary_vertices,
+        input.boundary_triangles,
     );
 
     // Fix orientation
@@ -1845,13 +1870,13 @@ fn mesh_boundary_only(input: &VolumeInput) -> VolumeOutput {
     // zoo). Run the same boundary-/volume-preserving improvement the main
     // path runs (it demonstrably heals slivers via swaps)...
     let n_boundary = input.boundary_vertices.len();
-    let mut pts: Vec<[f64; 3]> = input.boundary_vertices.clone();
+    let mut pts: Vec<[f64; 3]> = input.boundary_vertices.to_vec();
     mesh_improve::improve_mesh(
         &mut pts,
         &mut tets,
         n_boundary,
-        &input.boundary_vertices,
-        &input.boundary_triangles,
+        input.boundary_vertices,
+        input.boundary_triangles,
         input.target_edge_length,
         10,
         None,
@@ -1859,7 +1884,7 @@ fn mesh_boundary_only(input: &VolumeInput) -> VolumeOutput {
     // ...then drop any tet still below the degeneracy threshold.
     drop_degenerate_tets(&pts, &mut tets, "boundary-only");
 
-    let interior_vertices = pts[n_boundary..].to_vec();
+    let interior_vertices = into_interior_vertices(pts, n_boundary);
     VolumeOutput {
         interior_vertices,
         tetrahedra: tets,
@@ -1955,6 +1980,7 @@ fn flood_fill_classify(
 
     // Build adjacency: map sorted face → [tet_indices sharing that face]
     let mut face_to_tets: HashMap<[usize; 3], Vec<usize>> = HashMap::default();
+    face_to_tets.reserve(tets.len() * 2);
     for (ti, t) in tets.iter().enumerate() {
         for combo in &[[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]] {
             let mut f = [t[combo[0]], t[combo[1]], t[combo[2]]];
@@ -2245,6 +2271,48 @@ fn ray_tri_intersect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interior_extraction_preserves_suffix_and_bounds_capacity() {
+        for n in 0..=32 {
+            let points: Vec<_> = (0..n).map(|i| [i as f64, 1.0, 2.0]).collect();
+            for boundary in 0..=n {
+                let extracted = into_interior_vertices(points.clone(), boundary);
+                assert_eq!(extracted, points[boundary..]);
+                assert!(extracted.capacity() <= extracted.len().saturating_mul(2));
+            }
+        }
+        let empty = into_interior_vertices(vec![[0.0; 3]; 100_000], 100_000);
+        assert_eq!(empty.capacity(), 0);
+        let sparse = into_interior_vertices(vec![[1.0; 3]; 100_000], 99_999);
+        assert_eq!(sparse, vec![[1.0; 3]]);
+        assert_eq!(sparse.capacity(), 1);
+        let dense = vec![[2.0; 3]; 100];
+        let pointer = dense.as_ptr();
+        let dense = into_interior_vertices(dense, 10);
+        assert_eq!(dense.as_ptr(), pointer);
+        assert_eq!(dense.len(), 90);
+    }
+
+    #[test]
+    fn boundary_only_output_does_not_own_unused_vertex_storage() {
+        let input = VolumeInput {
+            boundary_vertices: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            boundary_triangles: vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+            target_edge_length: 10.0,
+        };
+        let output = mesh_volume(&input).unwrap();
+        assert_eq!(output.interior_vertices.capacity(), 0);
+        assert_eq!(output.tetrahedra.len(), 1);
+        assert!(output
+            .first_non_positive_tet(&input.boundary_vertices)
+            .is_none());
+    }
 
     /// Unit cube boundary: 8 vertices, 12 triangles.
     fn unit_cube() -> (Vec<[f64; 3]>, Vec<[usize; 3]>) {

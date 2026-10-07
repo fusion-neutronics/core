@@ -10,6 +10,7 @@
 use super::dethash::{HashMap, HashSet};
 use super::optimize;
 use super::predicates3d::{self, dist_sq_3d, orient_3d};
+use smallvec::SmallVec;
 
 // ── Adjacency data structure ─────────────────────────────────────────────
 
@@ -28,15 +29,23 @@ pub struct TetMesh {
     /// vertex → list of tet indices containing that vertex
     vert_tets: Vec<Vec<usize>>,
     /// sorted face → tet indices sharing that face (max 2)
-    face_tets: HashMap<[usize; 3], Vec<usize>>,
+    face_tets: HashMap<[usize; 3], SmallVec<[usize; 2]>>,
     /// Bitmap of dead (tombstone) tets - avoids retain+reindex.
     is_dead: Vec<bool>,
 }
 
-fn sorted_face(a: usize, b: usize, c: usize) -> [usize; 3] {
-    let mut f = [a, b, c];
-    f.sort();
-    f
+#[inline]
+fn sorted_face(mut a: usize, mut b: usize, mut c: usize) -> [usize; 3] {
+    if a > b {
+        std::mem::swap(&mut a, &mut b);
+    }
+    if b > c {
+        std::mem::swap(&mut b, &mut c);
+    }
+    if a > b {
+        std::mem::swap(&mut a, &mut b);
+    }
+    [a, b, c]
 }
 
 fn tet_faces(t: &[usize; 4]) -> [[usize; 3]; 4] {
@@ -50,6 +59,10 @@ fn tet_faces(t: &[usize; 4]) -> [[usize; 3]; 4] {
 
 fn sorted_edge(a: usize, b: usize) -> (usize, usize) {
     (a.min(b), a.max(b))
+}
+
+fn tet_vertices_are_unique(t: &[usize; 4]) -> bool {
+    t[0] != t[1] && t[0] != t[2] && t[0] != t[3] && t[1] != t[2] && t[1] != t[3] && t[2] != t[3]
 }
 
 impl TetMesh {
@@ -88,6 +101,7 @@ impl TetMesh {
             if self.is_dead.get(ti).copied().unwrap_or(false) {
                 continue;
             }
+            debug_assert!(tet_vertices_are_unique(t));
             for &v in t {
                 if v < self.vert_tets.len() {
                     self.vert_tets[v].push(ti);
@@ -119,10 +133,7 @@ impl TetMesh {
         let mut result = Vec::new();
         if a < self.vert_tets.len() {
             for &ti in &self.vert_tets[a] {
-                if !self.is_dead.get(ti).copied().unwrap_or(true)
-                    && self.tets[ti].contains(&b)
-                    && !result.contains(&ti)
-                {
+                if !self.is_dead.get(ti).copied().unwrap_or(true) && self.tets[ti].contains(&b) {
                     result.push(ti);
                 }
             }
@@ -157,6 +168,7 @@ impl TetMesh {
     /// (58% of the Cuboid@1.25 output!) plus partial-ring T-junction
     /// structure throughout the improved mesh.
     fn push_tet(&mut self, t: [usize; 4]) -> usize {
+        debug_assert!(tet_vertices_are_unique(&t));
         let ti = self.tets.len();
         self.tets.push(t);
         self.is_dead.push(false);
@@ -269,8 +281,8 @@ fn split_long_edges(mesh: &mut TetMesh, max_len: f64) -> usize {
 
         // Each tet [va, vb, c, d] in the ring splits into two:
         // [va, mid, c, d] and [mid, vb, c, d]
-        let mut new_tets: Vec<[usize; 4]> = Vec::new();
-        let mut old_tet_indices: Vec<usize> = Vec::new();
+        let mut new_tets: Vec<[usize; 4]> = Vec::with_capacity(ring.len() * 2);
+        let mut old_tet_indices: Vec<usize> = Vec::with_capacity(ring.len());
 
         let mut valid = true;
         for &ti in &ring {
@@ -486,7 +498,12 @@ pub fn improve_mesh(
     // surface triangulation (the authoritative DAGMC surface) is never moved.
     let _ = (boundary_vertices, boundary_triangles);
 
-    let mut mesh = TetMesh::new_pinned(vertices.clone(), tets.clone(), n_boundary, pinned);
+    let mut mesh = TetMesh::new_pinned(
+        std::mem::take(vertices),
+        std::mem::take(tets),
+        n_boundary,
+        pinned,
+    );
 
     for pass in 0..max_passes {
         let splits = split_long_edges(&mut mesh, split_threshold);
@@ -556,6 +573,45 @@ pub fn improve_mesh(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn three_element_face_sort_matches_slice_sort() {
+        for a in 0..4 {
+            for b in 0..4 {
+                for c in 0..4 {
+                    let mut expected = [a, b, c];
+                    expected.sort();
+                    assert_eq!(sorted_face(a, b, c), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vertex_tet_adjacency_has_unique_indices() {
+        let vertices = vec![[0.0; 3]; 6];
+        let tets = vec![[0, 1, 2, 3], [0, 1, 3, 4], [0, 2, 4, 5]];
+        let mut mesh = TetMesh::new_pinned(vertices, tets, 0, None);
+
+        for adjacent in &mesh.vert_tets {
+            assert!(adjacent.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+
+        let new_tet = mesh.push_tet([0, 1, 4, 5]);
+        for adjacent in &mesh.vert_tets {
+            assert!(adjacent.iter().filter(|&&ti| ti == new_tet).count() <= 1);
+        }
+        for &v in &mesh.tets[new_tet] {
+            assert_eq!(
+                mesh.vert_tets[v]
+                    .iter()
+                    .filter(|&&ti| ti == new_tet)
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(mesh.tets_around_edge(0, 1), vec![0, 1, new_tet]);
+    }
 
     #[test]
     fn test_split_reduces_max_edge() {

@@ -57,13 +57,15 @@ type PreEdge = (u64, bool, Vec<[f64; 2]>);
 /// `mode` is `"coarse"` or `"fine:<edge_length>"`.
 type PreFace = (u64, Vec<PreEdge>, Vec<Vec<PreEdge>>, bool, String);
 
-fn pre_edge(e: &PreEdge) -> SceneFaceEdge {
+/// Takes the edge by value, so its UV points move into the mesher's input
+/// rather than being copied.
+fn pre_edge(e: PreEdge) -> SceneFaceEdge {
     SceneFaceEdge {
         edge: None,
         edge_id: e.0,
         reversed: e.1,
         pcurve: None,
-        uv_points: e.2.clone(),
+        uv_points: e.2,
     }
 }
 
@@ -94,17 +96,17 @@ pub fn mesh_faces_scene_resolved(
     angular_tolerance: f64,
 ) -> PyResult<Vec<SceneFaceOutput>> {
     let scene_faces: Vec<SceneFace> = faces
-        .iter()
+        .into_iter()
         .map(|(face_id, boundary, holes, is_planar, mode)| {
             Ok(SceneFace {
-                face_id: *face_id,
-                boundary: boundary.iter().map(pre_edge).collect(),
+                face_id,
+                boundary: boundary.into_iter().map(pre_edge).collect(),
                 holes: holes
-                    .iter()
-                    .map(|h| h.iter().map(pre_edge).collect())
+                    .into_iter()
+                    .map(|h| h.into_iter().map(pre_edge).collect())
                     .collect(),
-                is_planar: *is_planar,
-                mode: parse_mode(mode)?,
+                is_planar,
+                mode: parse_mode(&mode)?,
                 boundary_snaps: vec![],
                 hole_snaps: vec![],
             })
