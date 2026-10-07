@@ -171,7 +171,7 @@ fn run(threads: usize, uncertainty: bool) -> Answer {
                 format!(
                     "{} {} {} {}",
                     i.rates_sampled,
-                    i.flux_bins_floored,
+                    i.flux_lognormal_not_carried.len(),
                     i.flux_bins_sampled,
                     i.spectra_with_flux_sigma,
                 )

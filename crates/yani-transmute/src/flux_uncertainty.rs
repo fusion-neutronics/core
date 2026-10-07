@@ -65,9 +65,13 @@ pub struct FluxCoverage {
     pub spectra_with_sigma: usize,
     /// Spectra that did not, so contributed no flux uncertainty.
     pub spectra_without_sigma: usize,
-    /// Bins whose sampled flux went negative and was floored at zero.
-    pub bins_floored: usize,
     pub bins_sampled: usize,
+    /// Spectra, by index, whose stated covariance is not a lognormal's, with
+    /// how far the sampled one is from it (see
+    /// [`crate::covariance_sample::LognormalLimit`]). A per-bin standard
+    /// deviation always is one.
+    pub lognormal_not_carried:
+        std::collections::BTreeMap<usize, crate::covariance_sample::LognormalLimit>,
 }
 
 impl FluxCoverage {
@@ -107,8 +111,8 @@ pub fn relative_std_dev(flux: &[f64], std_dev: &[f64]) -> Option<Vec<f64>> {
 pub enum FluxError {
     /// Per-bin relative standard deviation, bins independent.
     RelativeStdDev(Vec<f64>),
-    /// Full relative covariance, `C_ij / (phi_i phi_j)`, carried as its
-    /// lower-triangular factor.
+    /// Full relative covariance, `C_ij / (phi_i phi_j)`, carried as the
+    /// lognormal that matches it.
     RelativeCovariance(RelativeFluxCovariance),
 }
 
@@ -128,23 +132,65 @@ impl FluxError {
 
     /// An exact identity for keying a shared collapse.
     pub(crate) fn key_bits(&self) -> Vec<u64> {
-        let (tag, values) = match self {
-            FluxError::RelativeStdDev(v) => (0u64, v),
-            FluxError::RelativeCovariance(c) => (1u64, &c.factor),
-        };
-        std::iter::once(tag)
-            .chain(values.iter().map(|x| x.to_bits()))
-            .collect()
+        match self {
+            FluxError::RelativeStdDev(v) => std::iter::once(0u64)
+                .chain(v.iter().map(|x| x.to_bits()))
+                .collect(),
+            FluxError::RelativeCovariance(c) => std::iter::once(1u64)
+                .chain(c.log_factor.iter().map(|x| x.to_bits()))
+                .chain(c.half_log_variance.iter().map(|x| x.to_bits()))
+                .collect(),
+        }
     }
 }
 
-/// A spectrum's relative covariance, factorized.
+/// A spectrum's relative covariance, as the lognormal that carries it.
+///
+/// Each bin's flux is drawn as a factor `exp(y_i - Σ_N,ii / 2)` with
+/// `y ~ N(0, Σ_N)` and `Σ_N = ln(1 + C)` elementwise, the transform the cross
+/// sections use: every factor has mean one, `Cov(m_i, m_j) = C_ij` wherever a
+/// lognormal can carry it, and no sampled flux can go negative.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RelativeFluxCovariance {
     n: usize,
-    /// Lower-triangular factor, row-major `n x n`, with `L L^T` the relative
-    /// covariance.
-    factor: Vec<f64>,
+    /// Factor of `Σ_N`, row-major `n x n`, with `L L^T = Σ_N`. Lower
+    /// triangular where `Σ_N` is positive semi-definite.
+    log_factor: Vec<f64>,
+    /// `Σ_N,ii / 2` of the matrix sampled.
+    half_log_variance: Vec<f64>,
+    /// How far the sampled covariance is from the stated one, where the
+    /// stated one is not a lognormal's.
+    lognormal_limit: Option<crate::covariance_sample::LognormalLimit>,
+}
+
+/// Cholesky factor of a symmetric `n x n` matrix, row-major, skipping a zero
+/// pivot so a singular matrix factors, or the bin whose remaining variance is
+/// negative past round-off.
+fn cholesky(matrix: &[f64], n: usize) -> Result<Vec<f64>, usize> {
+    let scale = (0..n).map(|i| matrix[i * n + i]).fold(0.0_f64, f64::max);
+    let mut l = vec![0.0; n * n];
+    for j in 0..n {
+        let mut d = matrix[j * n + j];
+        for k in 0..j {
+            d -= l[j * n + k] * l[j * n + k];
+        }
+        if d < -1.0e-9 * scale {
+            return Err(j);
+        }
+        if d <= 1.0e-12 * scale {
+            continue;
+        }
+        let pivot = d.sqrt();
+        l[j * n + j] = pivot;
+        for i in (j + 1)..n {
+            let mut v = matrix[i * n + j];
+            for k in 0..j {
+                v -= l[i * n + k] * l[j * n + k];
+            }
+            l[i * n + j] = v / pivot;
+        }
+    }
+    Ok(l)
 }
 
 impl RelativeFluxCovariance {
@@ -192,33 +238,42 @@ impl RelativeFluxCovariance {
                 0.0
             }
         };
-        let rel_scale = (0..n).map(|i| rel(i, i)).fold(0.0_f64, f64::max);
-        let mut l = vec![0.0; n * n];
-        for j in 0..n {
-            let mut d = rel(j, j);
-            for k in 0..j {
-                d -= l[j * n + k] * l[j * n + k];
-            }
-            if d < -1.0e-9 * rel_scale {
-                return Err(format!(
-                    "the flux covariance is not positive semi-definite: bin {j} has a \
-                     negative remaining variance ({d:.3e} relative)"
-                ));
-            }
-            if d <= 1.0e-12 * rel_scale {
-                continue;
-            }
-            let pivot = d.sqrt();
-            l[j * n + j] = pivot;
-            for i in (j + 1)..n {
-                let mut v = rel(i, j);
-                for k in 0..j {
-                    v -= l[i * n + k] * l[j * n + k];
-                }
-                l[i * n + j] = v / pivot;
-            }
+        let relative: Vec<f64> = (0..n * n).map(|ij| rel(ij / n, ij % n)).collect();
+        if let Err(j) = cholesky(&relative, n) {
+            return Err(format!(
+                "the flux covariance is not positive semi-definite: bin {j} has a \
+                 negative remaining variance"
+            ));
         }
-        Ok(RelativeFluxCovariance { n, factor: l })
+        // The lognormal carrying it. Where `Σ_N` factors as it stands, the
+        // stated covariance is carried exactly and the factor is triangular,
+        // so a diagonal covariance draws bin for bin as the per-bin standard
+        // deviation does. Where it does not, or an entry has no logarithm,
+        // the nearest lognormal is sampled and how far it is recorded.
+        let (log, substituted) = crate::covariance_sample::log_covariance(&relative, n);
+        let (log_factor, sampled_log) = match (substituted, cholesky(&log, n)) {
+            (false, Ok(l)) => (l, None),
+            _ => {
+                let (l, _, sampled, _) = crate::covariance_sample::clipped_factor(&log, n, false);
+                (l, Some(sampled))
+            }
+        };
+        let (half_log_variance, lognormal_limit) = match sampled_log {
+            None => ((0..n).map(|i| 0.5 * log[i * n + i]).collect(), None),
+            Some(s) => {
+                let sampled: Vec<f64> = s.iter().map(|v| v.exp_m1()).collect();
+                (
+                    (0..n).map(|i| 0.5 * s[i * n + i]).collect(),
+                    crate::covariance_sample::lognormal_limit(&relative, &sampled, n),
+                )
+            }
+        };
+        Ok(RelativeFluxCovariance {
+            n,
+            log_factor,
+            half_log_variance,
+            lognormal_limit,
+        })
     }
 }
 
@@ -227,9 +282,10 @@ impl RelativeFluxCovariance {
 /// Drawn from the spectrum's own relative error, once per replica and shared
 /// across every nuclide: independently per bin for a standard deviation, and
 /// through the factor for a covariance, so correlated bins move together.
-/// Floored at `-1` so a sampled flux cannot go negative: a negative flux is
-/// not a physical state, and a bin whose relative error exceeds 100% -- normal
-/// in the tail of a tally -- would otherwise produce one.
+/// Each bin's flux is scaled by a lognormal factor with mean one, so
+/// `delta_g` is that factor minus one: never below `-1`, so a sampled flux
+/// cannot go negative even where a bin's relative error exceeds 100%, normal
+/// in the tail of a tally, and with no floor to bias its mean.
 pub fn flux_deviates(
     error: &FluxError,
     base_seed: u64,
@@ -246,34 +302,35 @@ pub fn flux_deviates(
 
     let n = error.len();
     let z = crate::covariance_sample::standard_normals(&mut state, n);
-    let delta: Vec<f64> = match error {
+    coverage.bins_sampled += n;
+    match error {
         FluxError::RelativeStdDev(relative) => relative
             .iter()
             .zip(&z)
-            .map(|(sigma, z)| sigma * z)
-            .collect(),
-        FluxError::RelativeCovariance(c) => (0..n)
-            .map(|i| {
-                c.factor[i * n..i * n + i + 1]
-                    .iter()
-                    .zip(&z)
-                    .map(|(l, z)| l * z)
-                    .sum()
+            .map(|(sigma, z)| {
+                if *sigma > 0.0 {
+                    crate::covariance_sample::lognormal_multiplier(*z, *sigma) - 1.0
+                } else {
+                    0.0
+                }
             })
             .collect(),
-    };
-    delta
-        .into_iter()
-        .map(|d| {
-            coverage.bins_sampled += 1;
-            if d < -1.0 {
-                coverage.bins_floored += 1;
-                -1.0
-            } else {
-                d
+        FluxError::RelativeCovariance(c) => {
+            if let Some(limit) = c.lognormal_limit {
+                coverage.lognormal_not_carried.insert(spectrum_index, limit);
             }
-        })
-        .collect()
+            (0..n)
+                .map(|i| {
+                    let y: f64 = c.log_factor[i * n..(i + 1) * n]
+                        .iter()
+                        .zip(&z)
+                        .map(|(l, z)| l * z)
+                        .sum();
+                    (y - c.half_log_variance[i]).exp_m1()
+                })
+                .collect()
+        }
+    }
 }
 
 /// Keeps the flux stream clear of the per-nuclide cross-section streams, which
@@ -435,19 +492,51 @@ mod tests {
         assert_eq!(d[0], 0.0);
     }
 
-    /// A relative error above 100% would otherwise sample a negative flux.
+    /// A relative error above 100%, normal in the tail of a tally, still
+    /// never samples a negative flux, and with no floor the factor keeps its
+    /// mean of one.
     #[test]
-    fn a_negative_flux_is_floored_and_counted() {
+    fn a_wide_flux_error_never_goes_negative_and_keeps_its_mean() {
         let mut c = FluxCoverage::default();
-        let mut floored_any = false;
-        for k in 0..400 {
-            // 300% relative: a large share of draws fall below -1.
+        let draws = 20_000;
+        let mut sum = 0.0;
+        for k in 0..draws {
+            // 300% relative.
             let d = flux_deviates(&FluxError::RelativeStdDev(vec![3.0]), 9, k, 0, &mut c);
-            assert!(d[0] >= -1.0, "a flux bin cannot go negative");
-            floored_any |= d[0] == -1.0;
+            assert!(d[0] > -1.0, "a flux bin cannot go negative");
+            sum += 1.0 + d[0];
         }
-        assert!(floored_any, "some draws must have been floored");
-        assert!(c.bins_floored > 0 && c.bins_sampled == 400);
+        let mean = sum / draws as f64;
+        // The factor's sigma is 3, so the mean's standard error is ~0.02.
+        assert!((mean - 1.0).abs() < 0.15, "mean factor {mean}");
+        assert_eq!(c.bins_sampled, draws as usize);
+        assert!(c.lognormal_not_carried.is_empty());
+    }
+
+    /// Two fully correlated bins with different sigmas are not a lognormal's:
+    /// the nearest one is sampled, and how far it is gets recorded.
+    #[test]
+    fn a_covariance_no_lognormal_carries_is_recorded() {
+        let flux = [1.0, 1.0];
+        let (a, b) = (0.5, 2.0);
+        let cov = vec![vec![a * a, a * b], vec![a * b, b * b]];
+        let rel = RelativeFluxCovariance::from_absolute(&flux, &cov).unwrap();
+        let limit = rel.lognormal_limit.expect("not a lognormal's");
+        assert!(limit.cells > 0);
+        assert!(limit.largest_correlation_change > 0.0 || limit.largest_sigma_change > 0.0);
+        let mut c = FluxCoverage::default();
+        let d = flux_deviates(&FluxError::RelativeCovariance(rel), 1, 0, 3, &mut c);
+        assert!(d.iter().all(|d| *d > -1.0));
+        assert_eq!(c.lognormal_not_carried.get(&3), Some(&limit));
+    }
+
+    /// An ordinary covariance is carried exactly, so nothing is recorded.
+    #[test]
+    fn an_ordinary_covariance_records_nothing() {
+        let flux = [1.0, 2.0];
+        let cov = vec![vec![0.01, 0.005], vec![0.005, 0.04]];
+        let rel = RelativeFluxCovariance::from_absolute(&flux, &cov).unwrap();
+        assert_eq!(rel.lognormal_limit, None);
     }
 
     /// Over many replicas the spread matches the sigma it was built from.
