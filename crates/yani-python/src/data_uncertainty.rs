@@ -401,7 +401,24 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
         "spectra_without_flux_sigma",
         info.spectra_without_flux_sigma,
     )?;
-    d.set_item("flux_bins_floored", info.flux_bins_floored)?;
+    let limit_dict =
+        |l: &yani_transmute::covariance_sample::LognormalLimit| -> PyResult<Bound<'py, PyDict>> {
+            let e = PyDict::new(py);
+            e.set_item("cells", l.cells)?;
+            e.set_item("largest_sigma_change", l.largest_sigma_change)?;
+            e.set_item("largest_correlation_change", l.largest_correlation_change)?;
+            Ok(e)
+        };
+    let flux_limits = PyDict::new(py);
+    for (spectrum, l) in &info.flux_lognormal_not_carried {
+        flux_limits.set_item(*spectrum, limit_dict(l)?)?;
+    }
+    d.set_item("flux_lognormal_not_carried", flux_limits)?;
+    let limits = PyDict::new(py);
+    for (nuclide, l) in &info.lognormal_not_carried {
+        limits.set_item(nuclide, limit_dict(l)?)?;
+    }
+    d.set_item("lognormal_not_carried", limits)?;
     d.set_item("flux_bins_sampled", info.flux_bins_sampled)?;
     d.set_item(
         "half_lives_perturbed",

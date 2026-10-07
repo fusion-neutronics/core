@@ -814,12 +814,13 @@ struct ReplicaOutcome {
     /// Cross-section rate draws this replica made, and those floored at zero.
     rates_sampled: usize,
     rates_floored: usize,
-    /// The two flux counters a replica actually produces. NOT the whole
+    /// The flux records a replica actually produces. NOT the whole
     /// `FluxCoverage`: `Info::add_flux_coverage` assigns the spectrum counts,
     /// which are established before the loop, so folding a replica's zeros over
     /// them would erase them.
     flux_bins_sampled: usize,
-    flux_bins_floored: usize,
+    flux_lognormal_not_carried:
+        std::collections::BTreeMap<usize, crate::covariance_sample::LognormalLimit>,
     /// The half-lives this replica was solved with, for the nuclides whose
     /// half-life was perturbed; empty when none were.
     half_lives: HashMap<String, f64>,
@@ -1647,6 +1648,7 @@ fn run_replicas(
     let collapsed_flat = !transport
         && crate::multigroup::within_group_weight() == crate::multigroup::Weighting::FlatInEnergy;
     let mut info = Info::from_fold(&coverage, &sigmas, collapsed_flat)?;
+    info.lognormal_not_carried = sampler.lognormal_limits();
     if half_life.is_none() {
         info.not_perturbed.insert(0, "half-life".to_string());
     }
@@ -1903,7 +1905,7 @@ fn run_replicas(
             rates_sampled,
             rates_floored,
             flux_bins_sampled: flux_coverage.bins_sampled,
-            flux_bins_floored: flux_coverage.bins_floored,
+            flux_lognormal_not_carried: flux_coverage.lognormal_not_carried,
             decay_branchings_sampled: edits.decay_branchings.len(),
             decay_branchings_floored,
             half_lives: edits.half_lives,
@@ -1936,7 +1938,9 @@ fn run_replicas(
             info.rates_sampled += outcome.rates_sampled;
             info.rates_floored += outcome.rates_floored;
             flux_coverage.bins_sampled += outcome.flux_bins_sampled;
-            flux_coverage.bins_floored += outcome.flux_bins_floored;
+            flux_coverage
+                .lognormal_not_carried
+                .extend(outcome.flux_lognormal_not_carried);
             info.half_lives_sampled += outcome.half_lives.len();
             info.decay_branchings_sampled += outcome.decay_branchings_sampled;
             info.decay_branchings_floored += outcome.decay_branchings_floored;

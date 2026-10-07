@@ -425,9 +425,20 @@ pub struct Info {
     /// flux known exactly.
     pub spectra_with_flux_sigma: usize,
     pub spectra_without_flux_sigma: usize,
-    /// Sampled flux bins that went negative and were floored at zero.
-    pub flux_bins_floored: usize,
+    /// Flux bins drawn, one per bin per spectrum with a stated error per
+    /// replica. Each is a lognormal factor with mean one, so none can go
+    /// negative and none is floored.
     pub flux_bins_sampled: usize,
+    /// Spectra, by index, whose stated flux covariance is not a lognormal's,
+    /// with how far the sampled covariance is from it. Not a gap: see
+    /// [`crate::covariance_sample::LognormalLimit`].
+    pub flux_lognormal_not_carried: BTreeMap<usize, crate::covariance_sample::LognormalLimit>,
+    /// Nuclides whose evaluated relative covariance is not a lognormal's,
+    /// with how far the sampled covariance is from it. Not a gap: it is a
+    /// property of the distribution that carries the evaluation's two
+    /// moments, not a defect of the data, and the effect on each channel is
+    /// also in its sampled sigma beside the evaluated one.
+    pub lognormal_not_carried: BTreeMap<String, crate::covariance_sample::LognormalLimit>,
     /// Unstable nuclides the material can reach whose half-life was perturbed.
     pub half_lives_perturbed: BTreeSet<String>,
     /// Unstable nuclides the material can reach whose evaluation states no
@@ -572,8 +583,8 @@ impl Info {
     pub(crate) fn add_flux_coverage(&mut self, c: &crate::flux_uncertainty::FluxCoverage) {
         self.spectra_with_flux_sigma = c.spectra_with_sigma;
         self.spectra_without_flux_sigma = c.spectra_without_sigma;
-        self.flux_bins_floored = c.bins_floored;
         self.flux_bins_sampled = c.bins_sampled;
+        self.flux_lognormal_not_carried = c.lognormal_not_carried.clone();
     }
 
     /// Whether anything was left out, or is inconsistent, that a reader should

@@ -5604,6 +5604,16 @@ class TransmutationResults:
           ``sigma_at_least_one_outside_bound`` is the same for nuclides outside
           the populated bound, whose wide channels a replica's draw can take
           past it; the ten-or-more subset reads off its values.
+        - ``lognormal_not_carried``: nuclides whose evaluated relative
+          covariance is not a lognormal's, keyed by nuclide, each with
+          ``cells`` (cells whose sampled sigma or correlation differs from the
+          evaluated one), ``largest_sigma_change`` (the largest
+          ``|sampled / evaluated sigma - 1|``) and ``largest_correlation_change``.
+          Two fully correlated cells with different sigmas, or an
+          anticorrelation with ``1 + C <= 0``, are not, and the nearest
+          lognormal is sampled. A property of the distribution rather than a
+          defect of the data, so not a gap. ``flux_lognormal_not_carried`` is
+          the same for a stated flux covariance, keyed by spectrum index.
         - ``rates_sampled``: cross-section rate draws made, each read off one
           draw of the nuclide's cross sections. ``rates_floored`` counts those
           that came out negative and were floored at zero, which only a channel

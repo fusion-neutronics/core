@@ -153,6 +153,101 @@ pub struct Repair {
     pub channels: Vec<ChannelSigma>,
 }
 
+/// Where a relative covariance is not a lognormal's, and how far the sampled
+/// one is from it.
+///
+/// The multipliers are drawn as `exp(y - diag(Σ_N)/2)` with `Σ_N = ln(1 + C)`
+/// elementwise, which carries `C` exactly only where `Σ_N` is positive
+/// semi-definite and every `1 + C_kl` is positive. Two fully correlated cells
+/// with different sigmas, or an anticorrelation with `1 + C_kl <= 0`, are not
+/// a lognormal's, and the nearest one is sampled instead. That is a property
+/// of the distribution rather than a defect of the data, so it is reported
+/// here and not as a repair, and it does not count as a gap.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LognormalLimit {
+    /// Cells (or flux bins) whose sampled sigma, or whose correlation with
+    /// another cell, differs from the stated one by more than
+    /// [`LOGNORMAL_LIMIT_TOLERANCE`].
+    pub cells: usize,
+    /// The largest `|sampled sigma / stated sigma - 1|` over the cells.
+    pub largest_sigma_change: f64,
+    /// The largest change in a correlation coefficient,
+    /// `|C'_kl - C_kl| / sqrt(C_kk C_ll)`, over the pairs of cells.
+    pub largest_correlation_change: f64,
+}
+
+/// The relative change below which a sampled sigma or correlation counts as
+/// the stated one: well above the round-off of the transform, well below
+/// anything that moves an answer.
+pub const LOGNORMAL_LIMIT_TOLERANCE: f64 = 1.0e-9;
+
+/// Compare the relative covariance a lognormal draw carries, `sampled`, with
+/// the one it was matched to, `stated`, both row-major `n x n`. `None` when
+/// they agree to [`LOGNORMAL_LIMIT_TOLERANCE`] everywhere.
+pub(crate) fn lognormal_limit(stated: &[f64], sampled: &[f64], n: usize) -> Option<LognormalLimit> {
+    let mut affected = vec![false; n];
+    let mut largest_sigma_change = 0.0_f64;
+    let mut largest_correlation_change = 0.0_f64;
+    for k in 0..n {
+        let s = stated[k * n + k];
+        if s > 0.0 {
+            let change = (sampled[k * n + k].max(0.0) / s).sqrt() - 1.0;
+            if change.abs() > LOGNORMAL_LIMIT_TOLERANCE {
+                affected[k] = true;
+            }
+            largest_sigma_change = largest_sigma_change.max(change.abs());
+        }
+    }
+    for k in 0..n {
+        for l in (k + 1)..n {
+            let norm = (stated[k * n + k] * stated[l * n + l]).sqrt();
+            if !(norm > 0.0) {
+                continue;
+            }
+            let change = (sampled[k * n + l] - stated[k * n + l]).abs() / norm;
+            if change > LOGNORMAL_LIMIT_TOLERANCE {
+                affected[k] = true;
+                affected[l] = true;
+            }
+            largest_correlation_change = largest_correlation_change.max(change);
+        }
+    }
+    let cells = affected.iter().filter(|a| **a).count();
+    (cells > 0).then_some(LognormalLimit {
+        cells,
+        largest_sigma_change,
+        largest_correlation_change,
+    })
+}
+
+/// `Σ_N = ln(1 + C)` elementwise for a relative covariance `C`, row-major
+/// `n x n`, and whether an entry had no logarithm. A diagonal at or below
+/// `-1` is not a variance and maps to zero; an off-diagonal with
+/// `1 + C_kl <= 0`, which no lognormal can carry, maps to the most negative
+/// covariance its two diagonals allow.
+pub(crate) fn log_covariance(relative: &[f64], n: usize) -> (Vec<f64>, bool) {
+    let mut log = vec![0.0; n * n];
+    let mut substituted = false;
+    for k in 0..n {
+        let c = relative[k * n + k];
+        log[k * n + k] = if c > -1.0 { c.ln_1p() } else { 0.0 };
+    }
+    for k in 0..n {
+        for l in 0..n {
+            if k != l {
+                let c = relative[k * n + l];
+                log[k * n + l] = if c > -1.0 {
+                    c.ln_1p()
+                } else {
+                    substituted = true;
+                    -(log[k * n + k].max(0.0) * log[l * n + l].max(0.0)).sqrt()
+                };
+            }
+        }
+    }
+    (log, substituted)
+}
+
 /// What the repair of one nuclide's evaluated cell covariance did, read off
 /// the matrix that was clipped (see [`Repair`] for the per-spectrum record).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -168,7 +263,7 @@ pub struct FieldRepair {
 
 /// The eigenvalue summary of a matrix whose repair counts as one.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Eigen {
+pub(crate) struct Eigen {
     lambda_min: f64,
     lambda_max: f64,
     clipped_fraction: f64,
@@ -202,6 +297,8 @@ struct Factorized {
     /// The absolute cells' sampled covariance, in barn^2.
     absolute_sampled: Vec<f64>,
     repair: Option<Eigen>,
+    /// Where the relative cells are not a lognormal's (see [`LognormalLimit`]).
+    lognormal_limit: Option<LognormalLimit>,
     /// The inputs, so a cache hit is checked exactly rather than trusted to a
     /// hash.
     relative_input: Vec<f64>,
@@ -432,7 +529,7 @@ struct NuclideDraw {
 /// a repair; without, it is any eigenvalue below `-1e-12` of the largest, and
 /// no repair is reported. Where nothing was clipped `L Lᵀ` is the matrix
 /// itself, exactly, and is not recomputed.
-fn clipped_factor(
+pub(crate) fn clipped_factor(
     matrix: &[f64],
     n: usize,
     judge: bool,
@@ -571,35 +668,23 @@ impl Factorized {
         } else {
             (None, relative.to_vec())
         };
-        let mut log = vec![0.0; n * n];
-        for k in 0..n {
-            let c = repaired[k * n + k];
-            log[k * n + k] = if c > -1.0 { c.ln_1p() } else { 0.0 };
-        }
-        for k in 0..n {
-            for l in 0..n {
-                if k != l {
-                    let c = repaired[k * n + l];
-                    log[k * n + l] = if c > -1.0 {
-                        c.ln_1p()
-                    } else {
-                        -(log[k * n + k].max(0.0) * log[l * n + l].max(0.0)).sqrt()
-                    };
-                }
-            }
-        }
+        let (log, substituted) = log_covariance(&repaired, n);
         let (log_factor, _, log_sampled, log_clipped) = clipped_factor(&log, n, false);
         let half_log_variance = (0..n).map(|k| 0.5 * log_sampled[k * n + k]).collect();
         let (log_factor, log_rank) = truncated(log_factor, n);
         // Where the lognormal carries the covariance, what is sampled is the
         // (repaired) evaluation itself, exactly, and is reported as that
         // rather than through a round trip through `ln` and `exp` that costs an
-        // ulp. Only where it had to be clipped is the sampled one different.
-        let relative_sampled: Vec<f64> = if log_clipped {
-            log_sampled.iter().map(|v| v.exp_m1()).collect()
-        } else {
-            repaired
-        };
+        // ulp. Only where it had to be clipped, or an entry had no logarithm,
+        // is the sampled one different, and then it is recorded how much.
+        let (relative_sampled, lognormal_limit): (Vec<f64>, Option<LognormalLimit>) =
+            if log_clipped || substituted {
+                let sampled: Vec<f64> = log_sampled.iter().map(|v| v.exp_m1()).collect();
+                let limit = lognormal_limit(&repaired, &sampled, n);
+                (sampled, limit)
+            } else {
+                (repaired, None)
+            };
 
         let m = (absolute.len() as f64).sqrt() as usize;
         let (absolute_factor, absolute_repair, absolute_sampled, _) =
@@ -616,6 +701,7 @@ impl Factorized {
             absolute_rank,
             absolute_sampled,
             repair: worse(relative_repair, absolute_repair),
+            lognormal_limit,
             relative_input: relative.to_vec(),
             absolute_input: absolute.to_vec(),
             draws: std::sync::Mutex::new(HashMap::new()),
@@ -1085,6 +1171,16 @@ impl Sampler {
                     },
                 ))
             })
+            .collect()
+    }
+
+    /// Every nuclide whose relative cells are not a lognormal's, with how far
+    /// the sampled covariance is from the stated one, independent of any
+    /// spectrum.
+    pub fn lognormal_limits(&self) -> BTreeMap<String, LognormalLimit> {
+        self.fields
+            .iter()
+            .filter_map(|(name, f)| Some((name.clone(), f.core.lognormal_limit?)))
             .collect()
     }
 
@@ -2024,6 +2120,34 @@ pub(crate) fn lognormal_multiplier(z: f64, sigma: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lognormal_limit_is_none_where_the_covariance_is_carried() {
+        let c = [0.01, 0.002, 0.002, 0.04];
+        assert_eq!(lognormal_limit(&c, &c, 2), None);
+    }
+
+    #[test]
+    fn a_lognormal_limit_counts_the_cells_and_the_largest_changes() {
+        let stated = [0.04, 0.02, 0.02, 0.09];
+        // Second sigma 0.3 -> 0.33, correlation 0.02/(0.2*0.3) -> 0.01/(0.06).
+        let sampled = [0.04, 0.01, 0.01, 0.1089];
+        let l = lognormal_limit(&stated, &sampled, 2).unwrap();
+        assert_eq!(l.cells, 2);
+        assert!((l.largest_sigma_change - 0.1).abs() < 1e-12);
+        assert!((l.largest_correlation_change - 0.01 / 0.06).abs() < 1e-12);
+    }
+
+    #[test]
+    fn an_anticorrelation_past_minus_one_is_a_lognormal_limit() {
+        // 1 + C_01 <= 0: no lognormal carries it, even though C is PSD.
+        let n = 2;
+        let c = [4.0, -1.5, -1.5, 4.0];
+        let (_, substituted) = log_covariance(&c, n);
+        assert!(substituted);
+        let f = Factorized::new(&c, &[]);
+        assert!(f.lognormal_limit.is_some());
+    }
 
     /// A populated set wide enough for every nuclide these tests name.
     fn everyone() -> HashSet<String> {
