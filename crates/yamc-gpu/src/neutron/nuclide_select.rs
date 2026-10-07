@@ -27,7 +27,7 @@
 //! P4 RNG-stream-alignment concern; here both backends always draw.
 
 use crate::common::pcg32::{expand_seed, pcg_out};
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// CPU twin of the GPU nuclide-selection walk. `xs` is the material's
@@ -133,7 +133,7 @@ pub fn run_nuclide_select(
     const WG: u32 = 64;
     let groups = (n as u32).div_ceil(WG);
     unsafe {
-        nuclide_select_kernel::launch_unchecked::<WgpuRuntime>(
+        nuclide_select_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WG),

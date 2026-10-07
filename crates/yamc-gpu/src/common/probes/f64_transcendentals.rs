@@ -52,7 +52,7 @@
 //!    vs native, but works everywhere.
 //! 3. Wait for / contribute to a Mesa NIR or cubecl-spirv fix.
 
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 #[cube(launch_unchecked)]
@@ -84,7 +84,7 @@ pub fn run_f64_sqrt(ctx: &GpuContext, input: &[f64]) -> Vec<f64> {
     let groups = n.div_ceil(WORKGROUP_SIZE as usize) as u32;
 
     unsafe {
-        f64_sqrt_kernel::launch_unchecked::<WgpuRuntime>(
+        f64_sqrt_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),
@@ -110,7 +110,7 @@ pub fn run_f64_exp_ln(ctx: &GpuContext, input: &[f64]) -> (Vec<f64>, Vec<f64>) {
     let groups = n.div_ceil(WORKGROUP_SIZE as usize) as u32;
 
     unsafe {
-        f64_exp_ln_kernel::launch_unchecked::<WgpuRuntime>(
+        f64_exp_ln_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

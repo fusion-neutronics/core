@@ -17,7 +17,7 @@
 
 use crate::common::pcg32::{expand_seed, pcg_next};
 use crate::common::polyfills::{cos_f64, sin_f64};
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Result of [`marsaglia_cos_sin_phi`]: the sampled azimuthal `(cos, sin)`
@@ -145,7 +145,7 @@ pub fn run_marsaglia_phi(ctx: &GpuContext, seeds: &[u32]) -> (Vec<f64>, Vec<f64>
     const WG: u32 = 64;
     let groups = (n as u32).div_ceil(WG);
     unsafe {
-        marsaglia_phi_kernel::launch_unchecked::<WgpuRuntime>(
+        marsaglia_phi_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WG),

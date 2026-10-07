@@ -14,7 +14,7 @@ use crate::common::pcg32::{expand_seed, pcg_out};
 use crate::common::polyfills::exp_f64;
 use crate::common::rng::{PCG_INCR, PCG_MULT};
 use crate::photon::transport::AR_MAX_SHELLS;
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Result of one photoelectric subshell sample.
@@ -151,7 +151,7 @@ pub fn run_pe_subshell(
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        pe_subshell_kernel::launch_unchecked::<WgpuRuntime>(
+        pe_subshell_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

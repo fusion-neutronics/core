@@ -346,7 +346,7 @@ fn quartic_solve_kernel(coeffs: &[f64], roots: &mut [f64]) {
     roots[ABSOLUTE_POS] = quartic_smallest_positive(b, c, d, e);
 }
 
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 
 /// Run `quartic_smallest_positive` on the GPU for test/validation
 /// purposes. `coeffs` is stride-4: `[b₀, c₀, d₀, e₀, b₁, c₁, …]`.
@@ -359,7 +359,7 @@ pub fn run_quartic_solve(ctx: &GpuContext, coeffs: &[f64]) -> Vec<f64> {
     const WG: u32 = 64;
     let groups = (n as u32).div_ceil(WG);
     unsafe {
-        quartic_solve_kernel::launch_unchecked::<WgpuRuntime>(
+        quartic_solve_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WG),

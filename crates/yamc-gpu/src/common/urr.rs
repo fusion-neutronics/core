@@ -12,7 +12,7 @@
 //! lowering against the CPU twin on real hardware.
 
 use crate::common::polyfills::{exp_f64, ln_f64};
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// SplitMix64 golden-ratio increment used to mix `ZA` into the base entropy.
@@ -84,7 +84,7 @@ pub fn run_urr_nuclide_random(ctx: &GpuContext, base_seeds: &[f64], zas: &[u32])
     const WG: u32 = 64;
     let groups = (n as u32).div_ceil(WG);
     unsafe {
-        urr_nuclide_random_kernel::launch_unchecked::<WgpuRuntime>(
+        urr_nuclide_random_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WG),

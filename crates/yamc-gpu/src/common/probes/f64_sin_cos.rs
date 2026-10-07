@@ -28,7 +28,7 @@
 //! --include-ignored`) once an upstream fix lands or on a different
 //! driver/runtime.
 
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 #[cube(launch_unchecked)]
@@ -56,7 +56,7 @@ pub fn run_f64_sin_cos(ctx: &GpuContext, input: &[f64]) -> (Vec<f64>, Vec<f64>) 
     let groups = n.div_ceil(WORKGROUP_SIZE as usize) as u32;
 
     unsafe {
-        f64_sin_cos_kernel::launch_unchecked::<WgpuRuntime>(
+        f64_sin_cos_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

@@ -16,7 +16,7 @@
 //! The result is renormalized to guard against drift (the inline kernel
 //! copies did the same).
 
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Rotated unit direction.
@@ -114,7 +114,7 @@ pub fn run_rotate_mu_phi(ctx: &GpuContext, dirs: &[f64], mus: &[f64], phis: &[f6
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        rotate_mu_phi_kernel::launch_unchecked::<WgpuRuntime>(
+        rotate_mu_phi_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

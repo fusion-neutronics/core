@@ -33,7 +33,7 @@
 //! the cell index, or `CELL_NOT_FOUND = u32::MAX` if no cell contains
 //! the point.
 
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Sentinel returned when no cell AABB contains the particle's position.
@@ -97,7 +97,7 @@ pub fn run_cell_finding(ctx: &GpuContext, positions: &[f64], cell_aabbs: &[f64])
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        cell_finding_kernel::launch_unchecked::<WgpuRuntime>(
+        cell_finding_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

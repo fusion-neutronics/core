@@ -232,7 +232,7 @@ fn angle_cdf_test_kernel(
 mod tests {
     use super::*;
     use crate::neutron::xs::constants::ANGLE_INTERP_HISTOGRAM;
-    use crate::{GpuContext, GpuInitError, WgpuRuntime};
+    use crate::{GpuContext, GpuInitError};
 
     const MX: usize = 8; // points-per-slice stride for the test fixture
 
@@ -365,7 +365,7 @@ mod tests {
         const WG: u32 = 64;
         let groups = (n as u32).div_ceil(WG);
         unsafe {
-            angle_cdf_test_kernel::launch_unchecked::<WgpuRuntime>(
+            angle_cdf_test_kernel::launch_unchecked(
                 &client,
                 CubeCount::Static(groups, 1, 1),
                 CubeDim::new_1d(WG),

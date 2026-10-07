@@ -63,7 +63,7 @@ use crate::common::geometry::surface_distance::{
     cone_smallest_positive, cone_smallest_positive_cpu, quadric_smallest_positive,
     quadric_smallest_positive_cpu, torus_smallest_positive, torus_smallest_positive_cpu,
 };
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Distance returned when no surface in the set is hit forward.
@@ -257,7 +257,7 @@ pub fn run_boundary_distance(
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        boundary_distance_kernel::launch_unchecked::<WgpuRuntime>(
+        boundary_distance_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

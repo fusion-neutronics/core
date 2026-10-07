@@ -60,7 +60,7 @@ use crate::common::sampling::eout_continuous_tabular::{
 use crate::neutron::xs::photon_production::{
     PHOTON_EOUT_KIND_CONTINUOUS_TABULAR, PHOTON_EOUT_KIND_DISCRETE,
 };
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Result of [`sample_photon_kinematics`]: the sampled outgoing photon energy
@@ -551,7 +551,7 @@ pub fn run_photon_kinematics(
     const WG: u32 = 64;
     let groups = (n as u32).div_ceil(WG);
     unsafe {
-        photon_kinematics_kernel::launch_unchecked::<WgpuRuntime>(
+        photon_kinematics_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WG),

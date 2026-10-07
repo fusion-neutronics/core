@@ -91,7 +91,7 @@ fn bracket_test_kernel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GpuContext, GpuInitError, WgpuRuntime};
+    use crate::{GpuContext, GpuInitError};
 
     /// GPU bracket pick must match the CPU twin bit-for-bit: the PCG state
     /// advances by exact u64 integer math and the chosen bin is a pure
@@ -159,7 +159,7 @@ mod tests {
         const WG: u32 = 64;
         let groups = (cnt as u32).div_ceil(WG);
         unsafe {
-            bracket_test_kernel::launch_unchecked::<WgpuRuntime>(
+            bracket_test_kernel::launch_unchecked(
                 &client,
                 CubeCount::Static(groups, 1, 1),
                 CubeDim::new_1d(WG),

@@ -40,7 +40,7 @@
 
 use crate::common::pcg32::{expand_seed, pcg_out};
 use crate::common::rng::{PCG_INCR, PCG_MULT};
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 #[cube(launch_unchecked)]
@@ -143,7 +143,7 @@ pub fn run_direction_rotation(
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        direction_rotation_kernel::launch_unchecked::<WgpuRuntime>(
+        direction_rotation_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

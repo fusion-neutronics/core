@@ -414,7 +414,7 @@ fn i64_cast_probe(input: &[f64], output: &mut [f64]) {
     output[ABSOLUTE_POS] = k as f64;
 }
 
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 
 /// Run the i64-cast probe on the GPU. Returns rounded values
 /// `(input[i] + 0.5f64) as i64 as f64`.
@@ -426,7 +426,7 @@ pub fn run_i64_cast_probe(ctx: &GpuContext, input: &[f64]) -> Vec<f64> {
     const WORKGROUP_SIZE: u32 = 64;
     let groups = n.div_ceil(WORKGROUP_SIZE as usize) as u32;
     unsafe {
-        i64_cast_probe::launch_unchecked::<WgpuRuntime>(
+        i64_cast_probe::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),
@@ -448,7 +448,7 @@ pub fn run_ln_polyfill(ctx: &GpuContext, input: &[f64]) -> Vec<f64> {
     let groups = n.div_ceil(WORKGROUP_SIZE as usize) as u32;
 
     unsafe {
-        ln_polyfill_kernel::launch_unchecked::<WgpuRuntime>(
+        ln_polyfill_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),
@@ -470,7 +470,7 @@ pub fn run_exp_polyfill(ctx: &GpuContext, input: &[f64]) -> Vec<f64> {
     let groups = n.div_ceil(WORKGROUP_SIZE as usize) as u32;
 
     unsafe {
-        exp_polyfill_kernel::launch_unchecked::<WgpuRuntime>(
+        exp_polyfill_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),
@@ -490,7 +490,7 @@ pub fn run_cos_polyfill(ctx: &GpuContext, input: &[f64]) -> Vec<f64> {
     const WORKGROUP_SIZE: u32 = 64;
     let groups = n.div_ceil(WORKGROUP_SIZE as usize) as u32;
     unsafe {
-        cos_polyfill_kernel::launch_unchecked::<WgpuRuntime>(
+        cos_polyfill_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),
@@ -510,7 +510,7 @@ pub fn run_sin_polyfill(ctx: &GpuContext, input: &[f64]) -> Vec<f64> {
     const WORKGROUP_SIZE: u32 = 64;
     let groups = n.div_ceil(WORKGROUP_SIZE as usize) as u32;
     unsafe {
-        sin_polyfill_kernel::launch_unchecked::<WgpuRuntime>(
+        sin_polyfill_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),
@@ -532,7 +532,7 @@ pub fn run_atan2_polyfill(ctx: &GpuContext, y_in: &[f64], x_in: &[f64]) -> Vec<f
     const WORKGROUP_SIZE: u32 = 64;
     let groups = n.div_ceil(WORKGROUP_SIZE as usize) as u32;
     unsafe {
-        atan2_polyfill_kernel::launch_unchecked::<WgpuRuntime>(
+        atan2_polyfill_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

@@ -30,7 +30,7 @@ use crate::common::pcg32::{expand_seed, pcg_out};
 use crate::common::polyfills::{exp_f64, ln_f64};
 use crate::common::rng::{PCG_INCR, PCG_MULT};
 use crate::photon::transport::{DOP_MAX_PZ, DOP_MAX_SHELLS, FINE_STRUCTURE, MASS_ELECTRON_EV};
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// `f64::EPSILON`, spelled out because the associated constant is not
@@ -768,7 +768,7 @@ pub fn run_compton_doppler(
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        compton_doppler_kernel::launch_unchecked::<WgpuRuntime>(
+        compton_doppler_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

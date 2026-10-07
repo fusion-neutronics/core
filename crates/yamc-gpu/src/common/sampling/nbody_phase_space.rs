@@ -310,7 +310,7 @@ fn nbody_test_kernel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GpuContext, GpuInitError, WgpuRuntime};
+    use crate::{GpuContext, GpuInitError};
 
     // Rel tolerance for the energy: x_m / y_m flow through the ln/cos
     // polyfills (~16 ULP for ln, ~1e-13 abs for cos per `polyfills.rs`), so
@@ -414,7 +414,7 @@ mod tests {
         const WG: u32 = 64;
         let groups = (n as u32).div_ceil(WG);
         unsafe {
-            nbody_test_kernel::launch_unchecked::<WgpuRuntime>(
+            nbody_test_kernel::launch_unchecked(
                 &client,
                 CubeCount::Static(groups, 1, 1),
                 CubeDim::new_1d(WG),

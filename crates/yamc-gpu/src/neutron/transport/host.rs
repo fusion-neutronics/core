@@ -845,7 +845,7 @@ pub fn run_multi_cell_transport(
     // launches (test suite, or repeated model.simulate_transport('gpu'))
     // otherwise accumulate state that intermittently corrupts results.
     let _ = pollster::block_on(client.sync());
-    client.memory_cleanup();
+    let _ = client.memory_cleanup();
     let seeds_h = client.create_from_slice(bytemuck::cast_slice(seeds));
     let energies_h = client.create_from_slice(bytemuck::cast_slice(energies_in));
     let positions_h = client.create_from_slice(bytemuck::cast_slice(positions_in));
@@ -1417,7 +1417,7 @@ pub fn run_multi_cell_transport(
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        multi_cell_transport_kernel::launch_unchecked::<WgpuRuntime>(
+        multi_cell_transport_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

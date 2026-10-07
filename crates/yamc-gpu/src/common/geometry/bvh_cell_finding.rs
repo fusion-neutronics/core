@@ -66,7 +66,7 @@
 
 use crate::common::geometry::cell_finding::CELL_NOT_FOUND;
 use crate::common::geometry::region_eval::region_contains_cpu;
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 use yamc_geo::Bvh;
 
@@ -275,7 +275,7 @@ pub fn run_bvh_cell_finding(
     let groups = (n as u32).div_ceil(WG);
 
     unsafe {
-        bvh_cell_finding_kernel::launch_unchecked::<WgpuRuntime>(
+        bvh_cell_finding_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WG),

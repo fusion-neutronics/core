@@ -17,7 +17,7 @@
 
 use crate::common::pcg32::{draw_uniform, expand_seed};
 use crate::common::polyfills::{cos_f64, sin_f64};
-use crate::{GpuContext, WgpuRuntime};
+use crate::GpuContext;
 use cubecl::prelude::*;
 
 /// Electron rest mass in eV. Mirrors `yamc_element::photon::MASS_ELECTRON_EV`.
@@ -104,7 +104,7 @@ pub fn run_sauter_direction(ctx: &GpuContext, seeds: &[u32], electron_ke: f64) -
     let groups = (n as u32).div_ceil(WORKGROUP_SIZE);
 
     unsafe {
-        sauter_direction_kernel::launch_unchecked::<WgpuRuntime>(
+        sauter_direction_kernel::launch_unchecked(
             &client,
             CubeCount::Static(groups, 1, 1),
             CubeDim::new_1d(WORKGROUP_SIZE),

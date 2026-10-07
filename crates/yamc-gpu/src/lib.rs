@@ -49,9 +49,11 @@ pub use photon::xs::pair_production_xs::{extract_pair_production_for_gpu, GpuPai
 pub use photon::xs::photon_xs::{extract_photon_material_xs, GpuPhotonXs, MAX_RAYLEIGH_FF};
 
 #[cfg(not(target_os = "macos"))]
-use cubecl::{client::ComputeClient, Runtime};
+use cubecl::client::Client;
 #[cfg(not(target_os = "macos"))]
-use cubecl_wgpu::{init_setup, RuntimeOptions, Vulkan, WgpuDevice};
+use cubecl_runtime::runtime::Runtime;
+#[cfg(not(target_os = "macos"))]
+use cubecl_wgpu::{init_setup, RuntimeOptions, Vulkan, WgpuDevice, WgpuDeviceKind};
 use std::fmt;
 #[cfg(not(target_os = "macos"))]
 use std::{
@@ -205,13 +207,13 @@ impl GpuContext {
         &self.device
     }
 
-    /// Hand back a cubecl `ComputeClient` for this context's device.
+    /// Hand back a cubecl `Client` for this context's device.
     /// This is the entry point for submitting `#[cube]` kernels -- it's
     /// the type cubecl's launch helpers want as `&self`. The client is
     /// `Arc`-backed internally, so this is a cheap lookup-and-clone.
     #[cfg(not(target_os = "macos"))]
-    pub fn client(&self) -> ComputeClient<WgpuRuntime> {
-        WgpuRuntime::client(&self.device)
+    pub fn client(&self) -> Client {
+        <WgpuRuntime>::client(&self.device)
     }
 }
 
@@ -309,11 +311,11 @@ fn resolve_named_device(
         .iter()
         .filter(|(_, ty, _)| ty == device_type)
         .count();
-    let device = match device_type.as_str() {
-        "DiscreteGpu" => WgpuDevice::DiscreteGpu(type_index),
-        "IntegratedGpu" => WgpuDevice::IntegratedGpu(type_index),
-        "VirtualGpu" => WgpuDevice::VirtualGpu(type_index),
-        "Cpu" => WgpuDevice::Cpu,
+    let kind = match device_type.as_str() {
+        "DiscreteGpu" => WgpuDeviceKind::DiscreteGpu(type_index),
+        "IntegratedGpu" => WgpuDeviceKind::IntegratedGpu(type_index),
+        "VirtualGpu" => WgpuDeviceKind::VirtualGpu(type_index),
+        "Cpu" => WgpuDeviceKind::Cpu,
         other => {
             return Err(GpuSelectError::AdapterNotFound(format!(
                 "adapter {sel:?} has unsupported device type {other:?}; \
@@ -321,7 +323,7 @@ fn resolve_named_device(
             )));
         }
     };
-    Ok(device)
+    Ok(WgpuDevice::new(kind))
 }
 
 /// Stable cache key for a resolved device. We only ever construct the
@@ -329,11 +331,11 @@ fn resolve_named_device(
 /// slot.
 #[cfg(not(target_os = "macos"))]
 fn device_key(device: &WgpuDevice) -> (u8, usize) {
-    match device {
-        WgpuDevice::DiscreteGpu(i) => (0, *i),
-        WgpuDevice::IntegratedGpu(i) => (1, *i),
-        WgpuDevice::VirtualGpu(i) => (2, *i),
-        WgpuDevice::Cpu => (3, 0),
+    match device.kind {
+        WgpuDeviceKind::DiscreteGpu(i) => (0, i),
+        WgpuDeviceKind::IntegratedGpu(i) => (1, i),
+        WgpuDeviceKind::VirtualGpu(i) => (2, i),
+        WgpuDeviceKind::Cpu => (3, 0),
         _ => (4, 0),
     }
 }
@@ -493,7 +495,7 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     mod resolve {
         use crate::{resolve_named_device, GpuSelectError};
-        use cubecl_wgpu::WgpuDevice;
+        use cubecl_wgpu::WgpuDeviceKind;
 
         fn laptop() -> Vec<(String, String, bool)> {
             vec![
@@ -513,13 +515,13 @@ mod tests {
         #[test]
         fn exact_name_matches_discrete() {
             let d = resolve_named_device("NVIDIA RTX A500 Laptop GPU", &laptop()).unwrap();
-            assert!(matches!(d, WgpuDevice::DiscreteGpu(0)));
+            assert!(matches!(d.kind, WgpuDeviceKind::DiscreteGpu(0)));
         }
 
         #[test]
         fn match_is_case_insensitive_and_trimmed() {
             let d = resolve_named_device("  nvidia rtx a500 laptop gpu  ", &laptop()).unwrap();
-            assert!(matches!(d, WgpuDevice::DiscreteGpu(0)));
+            assert!(matches!(d.kind, WgpuDeviceKind::DiscreteGpu(0)));
         }
 
         #[test]
@@ -543,7 +545,7 @@ mod tests {
         #[test]
         fn cpu_adapter_resolves_to_cpu() {
             let d = resolve_named_device("llvmpipe (LLVM 20.1.2, 256 bits)", &laptop()).unwrap();
-            assert!(matches!(d, WgpuDevice::Cpu));
+            assert!(matches!(d.kind, WgpuDeviceKind::Cpu));
         }
 
         #[test]
@@ -556,7 +558,7 @@ mod tests {
                 ("New Discrete".into(), "DiscreteGpu".into(), true),
             ];
             let d = resolve_named_device("New Discrete", &adapters).unwrap();
-            assert!(matches!(d, WgpuDevice::DiscreteGpu(1)));
+            assert!(matches!(d.kind, WgpuDeviceKind::DiscreteGpu(1)));
         }
 
         #[test]
@@ -566,7 +568,7 @@ mod tests {
                 ("Intel iGPU".into(), "IntegratedGpu".into(), true),
             ];
             let d = resolve_named_device("Intel iGPU", &adapters).unwrap();
-            assert!(matches!(d, WgpuDevice::IntegratedGpu(0)));
+            assert!(matches!(d.kind, WgpuDeviceKind::IntegratedGpu(0)));
         }
 
         #[test]
@@ -576,7 +578,7 @@ mod tests {
                 ("Twin GPU".into(), "DiscreteGpu".into(), true),
             ];
             let d = resolve_named_device("Twin GPU", &adapters).unwrap();
-            assert!(matches!(d, WgpuDevice::DiscreteGpu(0)));
+            assert!(matches!(d.kind, WgpuDeviceKind::DiscreteGpu(0)));
         }
     }
 }
