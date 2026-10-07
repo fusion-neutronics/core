@@ -151,7 +151,7 @@ def test_runs_provenance_exposed():
     assert info["compute"] == "cpu"
     assert info["mpi_rank"] == 0
     assert len(info["fingerprint"]) == 64  # sha-256 hex
-    assert info["data_libraries"]["n:Li6"] == "tests/Li6.arrow"
+    assert info["data_libraries"]["n:Li6"] == "endf-b8.1"
 
 
 def test_arrow_roundtrip_lossless_and_combinable(tmp_path):

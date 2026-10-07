@@ -269,6 +269,16 @@ pub fn is_keyword(input: &str) -> bool {
     KEYWORDS.contains(&input)
 }
 
+/// The library keyword for a library name as a data folder records it. The
+/// converter stamps ENDF/B-VIII.1 as `endfb-8.1` in `version.json`, where the
+/// keyword is `endf-b8.1`; every other library is stamped as its keyword.
+pub fn library_keyword(library: &str) -> &str {
+    match library {
+        "endfb-8.1" => "endf-b8.1",
+        other => other,
+    }
+}
+
 /// Expand a keyword to a full URL for a specific nuclide / element. The
 /// particle `kind` selects the per-particle subdirectory under `url_stem`
 /// (empty for libraries with a flat layout; all current libraries use a subdir).

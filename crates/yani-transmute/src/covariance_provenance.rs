@@ -55,15 +55,7 @@ const KNOWN_PROBLEMS: &[KnownProblem] = &[
     },
 ];
 
-/// The library keyword for a library name, which a data folder may spell
-/// differently: the converter stamps ENDF/B-VIII.1 as `endfb-8.1` in
-/// `version.json`, where the keyword is `endf-b8.1`.
-pub fn library_keyword(library: &str) -> &str {
-    match library {
-        "endfb-8.1" => "endf-b8.1",
-        other => other,
-    }
-}
+pub use yamc_nuclide::storage::url_cache::library_keyword;
 
 /// The documented problems with `nuclide`'s covariance in `library`, each
 /// with its source.

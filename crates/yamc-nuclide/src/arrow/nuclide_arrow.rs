@@ -316,7 +316,7 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
             .get("library")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .map(str::to_string);
+            .map(|s| crate::storage::url_cache::library_keyword(s).to_string());
         let fmt_version = version
             .get("format_version")
             .and_then(|v| v.as_i64())
