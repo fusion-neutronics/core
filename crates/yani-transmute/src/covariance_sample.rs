@@ -201,7 +201,7 @@ pub(crate) fn lognormal_limit(stated: &[f64], sampled: &[f64], n: usize) -> Opti
     for k in 0..n {
         for l in (k + 1)..n {
             let norm = (stated[k * n + k] * stated[l * n + l]).sqrt();
-            if !(norm > 0.0) {
+            if norm <= 0.0 || norm.is_nan() {
                 continue;
             }
             let change = (sampled[k * n + l] - stated[k * n + l]).abs() / norm;
