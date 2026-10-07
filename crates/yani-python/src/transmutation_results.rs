@@ -236,6 +236,20 @@ impl PyTransmutationResults {
     ///   contributor is a two-mode parent's one degree of freedom, with
     ///   ``reaction`` of ``None``. It says which evaluation to look at; the
     ///   total is the resampled one.
+    /// - ``linearity``: how well that first order explains the replicas, per
+    ///   source and as ``"all"`` for every source together. Each replica's
+    ///   first-order prediction is the nominal plus every sensitivity times
+    ///   that replica's own change in its input, so no extra solve is made.
+    ///   Per entry: ``r2`` (squared correlation between replicas and
+    ///   predictions), ``residual_share`` (the share of the variance first
+    ///   order does not account for), ``by_contributor`` (``{source:
+    ///   {nuclide: r2}}``, each contributor's term alone), ``ranking_agrees``
+    ///   (whether the first-order top contributor is also the best
+    ///   correlated), and ``flagged`` (``residual_share`` above 0.1, or the
+    ///   ranking disagrees: read the contributors with care). ``None`` for a
+    ///   source first order has no terms for (``flux_spectrum``,
+    ///   ``statistical``, ``decay_energy``), and for ``"all"`` when any
+    ///   applied source is one of those; absent for a nuclide with no spread.
     ///
     /// Args:
     ///     material_id: Material ID number.
@@ -261,6 +275,29 @@ impl PyTransmutationResults {
         d.set_item("by_source", by)?;
         d.set_item("unattributed", b.unattributed)?;
         d.set_item("contributors", b.contributors)?;
+        let linearity = PyDict::new(py);
+        for (source, l) in &b.linearity {
+            match l {
+                None => linearity.set_item(source, py.None())?,
+                Some(l) => {
+                    let e = PyDict::new(py);
+                    e.set_item("r2", l.r2)?;
+                    e.set_item("residual_share", l.residual_share)?;
+                    let mut by: std::collections::BTreeMap<
+                        &str,
+                        std::collections::BTreeMap<&str, f64>,
+                    > = std::collections::BTreeMap::new();
+                    for ((s, n), r2) in &l.by_contributor {
+                        by.entry(s.as_str()).or_default().insert(n.as_str(), *r2);
+                    }
+                    e.set_item("by_contributor", by)?;
+                    e.set_item("ranking_agrees", l.ranking_agrees)?;
+                    e.set_item("flagged", l.flagged)?;
+                    linearity.set_item(source, e)?;
+                }
+            }
+        }
+        d.set_item("linearity", linearity)?;
         Ok(Some(d))
     }
 

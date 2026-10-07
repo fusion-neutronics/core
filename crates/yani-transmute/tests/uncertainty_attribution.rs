@@ -23,12 +23,12 @@ use yani_transmute::{transmute_material, MultigroupSpectrum, TransmuteStep};
 
 const HOUR: f64 = 3600.0;
 
-fn chain() -> Arc<HashMap<String, yani::ChainNuclide>> {
+fn chain(relative_sigma: f64) -> Arc<HashMap<String, yani::ChainNuclide>> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../yani/tests/transmutation-endf-b8.1-sfr.arrow");
     let mut chain = yani::parse_chain_arrow(&path).expect("parse chain");
     let mn56 = chain.get_mut("Mn56").expect("Mn56");
-    mn56.half_life_uncertainty = Some(mn56.half_life.unwrap() * 0.05);
+    mn56.half_life_uncertainty = Some(mn56.half_life.unwrap() * relative_sigma);
     Arc::new(chain)
 }
 
@@ -50,6 +50,18 @@ fn iron() -> Option<Material> {
 }
 
 fn run(attribution: bool) -> Option<yani_transmute::TransmutationResults> {
+    run_with(
+        attribution,
+        0.05,
+        vec![Source::HalfLife, Source::FluxSpectrum],
+    )
+}
+
+fn run_with(
+    attribution: bool,
+    relative_sigma: f64,
+    sources: Vec<Source>,
+) -> Option<yani_transmute::TransmutationResults> {
     let mut material = iron()?;
     let spectrum = MultigroupSpectrum {
         boundaries: vec![5.0e6, 1.0e7, 2.0e7],
@@ -69,7 +81,7 @@ fn run(attribution: bool) -> Option<yani_transmute::TransmutationResults> {
     let request = DataUncertainty {
         seed: 4,
         samples: Some(1024),
-        sources: vec![Source::HalfLife, Source::FluxSpectrum],
+        sources,
         attribution,
     };
     Some(
@@ -77,7 +89,7 @@ fn run(attribution: bool) -> Option<yani_transmute::TransmutationResults> {
             &mut material,
             &[spectrum],
             &steps,
-            chain(),
+            chain(relative_sigma),
             &Default::default(),
             Default::default(),
             Some(&request),
@@ -117,6 +129,19 @@ fn the_breakdown_accounts_for_the_total() {
         (own / half_life - 1.0).abs() < 0.12,
         "first order {own:.3e} against exact {half_life:.3e}"
     );
+    // A 5% half-life is close to linear in the inventory, so first order
+    // explains its replicas. The flux has no first-order terms, so its
+    // linearity, and that of both sources together, is not applicable rather
+    // than read as nonlinear.
+    let own = b.linearity["half_life"]
+        .as_ref()
+        .expect("half-life has terms");
+    assert!(own.r2 > 0.99, "r2 {}", own.r2);
+    assert!(own.residual_share < 0.02, "residual {}", own.residual_share);
+    assert!(!own.flagged);
+    assert!(own.by_contributor[&("half_life".to_string(), "Mn56".to_string())] > 0.99);
+    assert!(b.linearity["flux_spectrum"].is_none());
+    assert!(b.linearity["all"].is_none());
     // The initial composition carries nothing.
     assert_eq!(
         results
@@ -138,4 +163,27 @@ fn attribution_is_off_unless_asked_and_changes_no_total() {
     let a = with.uncertainty[&0].std_dev_at(1)["Mn56"];
     let b = without.uncertainty[&0].std_dev_at(1)["Mn56"];
     assert_eq!(a.to_bits(), b.to_bits());
+}
+
+/// A wide half-life moves the inventory nonlinearly, and the check sees it:
+/// first order explains less of an 80% half-life's replicas than of a 5% one's.
+#[test]
+fn a_wide_input_reads_as_less_linear() {
+    let (Some(narrow), Some(wide)) = (
+        run_with(true, 0.05, vec![Source::HalfLife]),
+        run_with(true, 0.80, vec![Source::HalfLife]),
+    ) else {
+        eprintln!("skipping -- Fe56 fixture absent");
+        return;
+    };
+    let linearity = |r: &yani_transmute::TransmutationResults| {
+        r.uncertainty_breakdown(0, "Mn56", 2)
+            .expect("asked for")
+            .linearity["all"]
+            .clone()
+            .expect("half-life alone is covered")
+    };
+    let (n, w) = (linearity(&narrow), linearity(&wide));
+    assert!(w.residual_share > n.residual_share, "{w:?} against {n:?}");
+    assert!(w.r2 < n.r2, "{w:?} against {n:?}");
 }

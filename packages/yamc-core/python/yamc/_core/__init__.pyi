@@ -5203,6 +5203,20 @@ class TransmutationResults:
           contributor is a two-mode parent's one degree of freedom, with
           ``reaction`` of ``None``. It says which evaluation to look at; the
           total is the resampled one.
+        - ``linearity``: how well that first order explains the replicas, per
+          source and as ``"all"`` for every source together. Each replica's
+          first-order prediction is the nominal plus every sensitivity times
+          that replica's own change in its input, so no extra solve is made.
+          Per entry: ``r2`` (squared correlation between replicas and
+          predictions), ``residual_share`` (the share of the variance first
+          order does not account for), ``by_contributor`` (``{source:
+          {nuclide: r2}}``, each contributor's term alone), ``ranking_agrees``
+          (whether the first-order top contributor is also the best
+          correlated), and ``flagged`` (``residual_share`` above 0.1, or the
+          ranking disagrees: read the contributors with care). ``None`` for a
+          source first order has no terms for (``flux_spectrum``,
+          ``statistical``, ``decay_energy``), and for ``"all"`` when any
+          applied source is one of those; absent for a nuclide with no spread.
         
         Args:
             material_id: Material ID number.

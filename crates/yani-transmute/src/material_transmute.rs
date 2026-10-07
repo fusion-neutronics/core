@@ -1973,16 +1973,58 @@ fn run_replicas(
     }
 
     if request.attribution {
-        let applied: Vec<crate::uncertainty::Source> = info
+        use crate::uncertainty::Source;
+        let applied: Vec<Source> = info
             .sources
             .iter()
-            .filter_map(|n| crate::uncertainty::Source::parse(n).ok())
+            .filter_map(|n| Source::parse(n).ok())
             .collect();
+        let first_order = first_order_contributors(
+            initial,
+            steps,
+            per_spectrum,
+            chain,
+            parts,
+            stepper,
+            applied.contains(&Source::CrossSections).then_some(&sampler),
+            chains.as_ref(),
+            half_life.as_ref(),
+            decay_branching.as_ref(),
+        )?;
+        let draws = ReplicaDraws {
+            seed: request.seed,
+            per_spectrum,
+            sampler: Some(&sampler),
+            half_life: half_life.as_ref(),
+            decay_branching: decay_branching.as_ref(),
+        };
+        // The sources first order has terms for. The flux, the tallies'
+        // statistics and the decay energies enter linearly or not through a
+        // rate sensitivity, and have none.
+        let covered = |s: &Source| {
+            matches!(
+                s,
+                Source::CrossSections | Source::HalfLife | Source::DecayBranching
+            )
+        };
+        let terms_of = |source: Option<&str>| -> Vec<&Sensitivity> {
+            first_order
+                .sensitivities
+                .iter()
+                .filter(|s| source.is_none_or(|name| s.source == name))
+                .collect()
+        };
         let mut by_source = std::collections::BTreeMap::new();
+        let mut linearity = std::collections::BTreeMap::new();
         if applied.len() == 1 {
             by_source.insert(
                 info.sources[0].clone(),
                 variances_of(&ensemble, steps.len()),
+            );
+            linearity.insert(
+                info.sources[0].clone(),
+                covered(&applied[0])
+                    .then(|| linearity_of(&ensemble, &first_order, &terms_of(None), &draws)),
             );
         } else {
             for &source in &applied {
@@ -2005,25 +2047,27 @@ fn run_replicas(
                     statistical_in,
                 )?;
                 by_source.insert(source.name().to_string(), variances_of(&sub, steps.len()));
+                // Judged on the source's own replicas, which the other
+                // sources' draws do not move.
+                linearity.insert(
+                    source.name().to_string(),
+                    covered(&source).then(|| {
+                        linearity_of(&sub, &first_order, &terms_of(Some(source.name())), &draws)
+                    }),
+                );
             }
         }
-        let contributors = first_order_contributors(
-            initial,
-            steps,
-            per_spectrum,
-            chain,
-            parts,
-            stepper,
+        linearity.insert(
+            "all".to_string(),
             applied
-                .contains(&crate::uncertainty::Source::CrossSections)
-                .then_some(&sampler),
-            chains.as_ref(),
-            half_life.as_ref(),
-            decay_branching.as_ref(),
-        )?;
+                .iter()
+                .all(covered)
+                .then(|| linearity_of(&ensemble, &first_order, &terms_of(None), &draws)),
+        );
         ensemble.attribution = Some(crate::uncertainty::Attribution {
             by_source,
-            contributors,
+            contributors: first_order.contributors.clone(),
+            linearity,
         });
     }
     Ok((ensemble, info))
@@ -2070,7 +2114,7 @@ fn first_order_contributors(
     chains: Option<&ReplicaChains>,
     half_life: Option<&HalfLifeSampling>,
     decay_branching: Option<&crate::decay_branching_uncertainty::Candidates>,
-) -> Result<Vec<crate::uncertainty::Contributor>, Box<dyn std::error::Error>> {
+) -> Result<FirstOrder, Box<dyn std::error::Error>> {
     use crate::uncertainty::Contributor;
     let solve = |ps: &[PerSpectrum], base: &Arc<HashMap<String, ChainNuclide>>| {
         replica_steps(initial, steps, ps, base, parts, stepper)
@@ -2096,6 +2140,7 @@ fn first_order_contributors(
     };
 
     let mut out: Vec<Contributor> = Vec::new();
+    let mut sensitivities: Vec<Sensitivity> = Vec::new();
 
     // Cross sections: one solve per (spectrum, nuclide, channel).
     if let Some(sampler) = sampler {
@@ -2140,6 +2185,15 @@ fn first_order_contributors(
         let mut channel: HashMap<(String, String), PerStep> = HashMap::new();
         for ((a, name, i, kind), sens) in jobs.iter().zip(results) {
             let sens = sens?;
+            sensitivities.push(Sensitivity {
+                source: "cross_sections",
+                nuclide: name.clone(),
+                input: Input::Rate {
+                    spectrum: *a,
+                    kind: kind.clone(),
+                },
+                s: sens.clone(),
+            });
             let (_, _, l, n) = factors[*a]
                 .iter()
                 .find(|(n, _, _, _)| *n == name)
@@ -2245,7 +2299,14 @@ fn first_order_contributors(
         };
         for ((name, t, sigma), sens) in jobs.into_iter().zip(results) {
             let rel = sigma / t;
-            let variance = sens?
+            let sens = sens?;
+            sensitivities.push(Sensitivity {
+                source: "half_life",
+                nuclide: name.clone(),
+                input: Input::HalfLife { nominal: *t },
+                s: sens.clone(),
+            });
+            let variance = sens
                 .into_iter()
                 .map(|per| {
                     per.into_iter()
@@ -2299,7 +2360,18 @@ fn first_order_contributors(
             // `sensitivity` divides by the relative step, so `s` is dN per
             // unit relative change of the smaller ratio.
             let rel = t.sigma / t.smaller();
-            let variance = sens?
+            let sens = sens?;
+            sensitivities.push(Sensitivity {
+                source: "decay_branching",
+                nuclide: t.parent.clone(),
+                input: Input::Branching {
+                    row: t.drawn,
+                    nominal: t.ratio,
+                    smaller: t.smaller(),
+                },
+                s: sens.clone(),
+            });
+            let variance = sens
                 .into_iter()
                 .map(|per| {
                     per.into_iter()
@@ -2328,7 +2400,339 @@ fn first_order_contributors(
                 (&a.source, &a.nuclide, &a.reaction).cmp(&(&b.source, &b.nuclide, &b.reaction))
             })
     });
-    Ok(out)
+    Ok(FirstOrder {
+        contributors: out,
+        sensitivities,
+        nominal,
+    })
+}
+
+/// What [`first_order_contributors`] found: the contributions, the raw
+/// sensitivities they were collapsed from, and the nominal inventory they are
+/// sensitivities of.
+struct FirstOrder {
+    contributors: Vec<crate::uncertainty::Contributor>,
+    sensitivities: Vec<Sensitivity>,
+    nominal: Vec<HashMap<String, f64>>,
+}
+
+/// One input's first-order sensitivity: `[step][nuclide]` change in the
+/// inventory per unit relative change of the input.
+struct Sensitivity {
+    source: &'static str,
+    /// The nuclide whose data the input is.
+    nuclide: String,
+    input: Input,
+    s: Vec<HashMap<String, f64>>,
+}
+
+/// Which input a sensitivity is to, and what its relative change is measured
+/// against.
+enum Input {
+    /// One channel's rate on one spectrum, relative to its nominal rate.
+    Rate { spectrum: usize, kind: String },
+    /// A half-life, relative to its nominal.
+    HalfLife { nominal: f64 },
+    /// A two-mode parent's drawn ratio, relative to the smaller nominal ratio,
+    /// which is what the sensitivity was taken along.
+    Branching {
+        row: usize,
+        nominal: f64,
+        smaller: f64,
+    },
+}
+
+/// Everything needed to regenerate one replica's inputs exactly as the replica
+/// drew them, without solving it again.
+struct ReplicaDraws<'a> {
+    seed: u64,
+    per_spectrum: &'a [PerSpectrum],
+    sampler: Option<&'a Sampler>,
+    half_life: Option<&'a HalfLifeSampling>,
+    decay_branching: Option<&'a crate::decay_branching_uncertainty::Candidates>,
+}
+
+impl ReplicaDraws<'_> {
+    /// Each sensitivity's input's relative change in `replica`, in order.
+    fn relative_changes(&self, sensitivities: &[&Sensitivity], replica: u64) -> Vec<f64> {
+        let needs = |f: fn(&Input) -> bool| sensitivities.iter().any(|s| f(&s.input));
+        let rates: Vec<ReactionRates> = match self.sampler {
+            Some(sampler) if needs(|i| matches!(i, Input::Rate { .. })) => {
+                let draw = sampler.draw(self.seed, replica);
+                (0..self.per_spectrum.len())
+                    .map(|a| sampler.perturb_with(&draw, a, &self.per_spectrum[a].0).0)
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        let half_lives = match self.half_life {
+            Some(h) if needs(|i| matches!(i, Input::HalfLife { .. })) => {
+                crate::uncertainty::sample_half_lives(&h.candidates, self.seed, replica)
+            }
+            _ => HashMap::new(),
+        };
+        let branchings = match self.decay_branching {
+            Some(b) if needs(|i| matches!(i, Input::Branching { .. })) => {
+                crate::decay_branching_uncertainty::sample(
+                    &b.two_modes,
+                    self.seed,
+                    replica,
+                    &mut 0usize,
+                )
+            }
+            _ => HashMap::new(),
+        };
+        sensitivities
+            .iter()
+            .map(|s| match &s.input {
+                Input::Rate { spectrum, kind } => {
+                    let nominal = self.per_spectrum[*spectrum]
+                        .0
+                        .get(&s.nuclide)
+                        .and_then(|r| r.get(kind))
+                        .copied()
+                        .unwrap_or(0.0);
+                    let drawn = rates
+                        .get(*spectrum)
+                        .and_then(|r| r.get(&s.nuclide))
+                        .and_then(|r| r.get(kind))
+                        .copied()
+                        .unwrap_or(nominal);
+                    if nominal > 0.0 {
+                        drawn / nominal - 1.0
+                    } else {
+                        0.0
+                    }
+                }
+                Input::HalfLife { nominal } => half_lives
+                    .get(&s.nuclide)
+                    .map_or(0.0, |t| t / nominal - 1.0),
+                Input::Branching {
+                    row,
+                    nominal,
+                    smaller,
+                } => branchings
+                    .get(&s.nuclide)
+                    .map_or(0.0, |r| (r[*row] - nominal) / smaller),
+            })
+            .collect()
+    }
+}
+
+/// How well `sensitivities` explain `ensemble`, `[step][nuclide]`, over every
+/// nuclide with a spread at that step. A trace activation product is usually
+/// what a reader asks about, so no density cut is applied.
+///
+/// Each replica's prediction is the nominal plus every sensitivity times its
+/// input's relative change in that replica, regenerated by `draws` from the
+/// replica's own seed, so it is the first-order image of exactly the draw the
+/// replica was solved with.
+fn linearity_of(
+    ensemble: &Ensemble,
+    first_order: &FirstOrder,
+    sensitivities: &[&Sensitivity],
+    draws: &ReplicaDraws<'_>,
+) -> Vec<HashMap<String, crate::uncertainty::Linearity>> {
+    use crate::uncertainty::{Linearity, LINEARITY_FLAG};
+    let n_steps = first_order.nominal.len();
+    let replicas = ensemble.replicas();
+    // Contributors, keyed (source, nuclide), and which one each sensitivity
+    // belongs to.
+    let mut keys: Vec<(String, String)> = sensitivities
+        .iter()
+        .map(|s| (s.source.to_string(), s.nuclide.clone()))
+        .collect();
+    keys.sort();
+    keys.dedup();
+    let key_of: Vec<usize> = sensitivities
+        .iter()
+        .map(|s| {
+            keys.binary_search(&(s.source.to_string(), s.nuclide.clone()))
+                .expect("every sensitivity's key is listed")
+        })
+        .collect();
+
+    // Outputs per step, and each one's replica values.
+    let outputs: Vec<Vec<String>> = (0..n_steps)
+        .map(|step| {
+            let mut v: Vec<String> = ensemble
+                .std_dev_at(step)
+                .into_iter()
+                .filter(|(_, s)| *s > 0.0)
+                .map(|(n, _)| n)
+                .collect();
+            v.sort();
+            v
+        })
+        .collect();
+    let index: Vec<HashMap<&str, usize>> = outputs
+        .iter()
+        .map(|o| o.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect())
+        .collect();
+    let actual: Vec<Vec<Vec<f64>>> = outputs
+        .iter()
+        .enumerate()
+        .map(|(step, o)| o.iter().map(|n| ensemble.samples_at(step, n)).collect())
+        .collect();
+    // Each sensitivity as sparse (step, output, value) over the tracked outputs.
+    let sparse: Vec<Vec<(usize, usize, f64)>> = sensitivities
+        .iter()
+        .map(|s| {
+            s.s.iter()
+                .enumerate()
+                .flat_map(|(step, per)| {
+                    let index = &index[step];
+                    per.iter()
+                        .filter_map(move |(n, v)| index.get(n.as_str()).map(|&o| (step, o, *v)))
+                })
+                .collect()
+        })
+        .collect();
+
+    #[derive(Clone, Default)]
+    struct Sums {
+        a: f64,
+        aa: f64,
+        p: f64,
+        pp: f64,
+        ap: f64,
+        r: f64,
+        rr: f64,
+    }
+    #[derive(Clone, Default)]
+    struct Term {
+        c: f64,
+        cc: f64,
+        ac: f64,
+    }
+    let mut sums: Vec<Vec<Sums>> = outputs
+        .iter()
+        .map(|o| vec![Sums::default(); o.len()])
+        .collect();
+    let mut terms: Vec<Vec<HashMap<usize, Term>>> = outputs
+        .iter()
+        .map(|o| vec![HashMap::new(); o.len()])
+        .collect();
+
+    for replica in 0..replicas {
+        let delta = draws.relative_changes(sensitivities, replica as u64);
+        let mut predicted: Vec<Vec<f64>> = outputs
+            .iter()
+            .enumerate()
+            .map(|(step, o)| {
+                o.iter()
+                    .map(|n| first_order.nominal[step].get(n).copied().unwrap_or(0.0))
+                    .collect()
+            })
+            .collect();
+        let mut by_key: Vec<Vec<HashMap<usize, f64>>> = outputs
+            .iter()
+            .map(|o| vec![HashMap::new(); o.len()])
+            .collect();
+        for (k, entries) in sparse.iter().enumerate() {
+            if delta[k] == 0.0 {
+                continue;
+            }
+            for &(step, o, s) in entries {
+                let term = s * delta[k];
+                predicted[step][o] += term;
+                *by_key[step][o].entry(key_of[k]).or_insert(0.0) += term;
+            }
+        }
+        for step in 0..n_steps {
+            for o in 0..outputs[step].len() {
+                let a = actual[step][o][replica];
+                let p = predicted[step][o];
+                let s = &mut sums[step][o];
+                s.a += a;
+                s.aa += a * a;
+                s.p += p;
+                s.pp += p * p;
+                s.ap += a * p;
+                s.r += a - p;
+                s.rr += (a - p) * (a - p);
+                for (&key, &c) in &by_key[step][o] {
+                    let t = terms[step][o].entry(key).or_default();
+                    t.c += c;
+                    t.cc += c * c;
+                    t.ac += a * c;
+                }
+            }
+        }
+    }
+
+    let n = replicas as f64;
+    let correlation_squared = |sa: f64, saa: f64, sb: f64, sbb: f64, sab: f64| -> f64 {
+        let va = saa - sa * sa / n;
+        let vb = sbb - sb * sb / n;
+        let cab = sab - sa * sb / n;
+        if va > 0.0 && vb > 0.0 {
+            (cab * cab / (va * vb)).min(1.0)
+        } else {
+            0.0
+        }
+    };
+    // The contributor ranked first by first-order variance at each output.
+    let first_ranked = |step: usize, nuclide: &str| -> Option<(String, String)> {
+        first_order
+            .contributors
+            .iter()
+            .filter(|c| c.reaction.is_none())
+            .filter_map(|c| {
+                let v = *c.variance.get(step)?.get(nuclide)?;
+                Some(((c.source.clone(), c.nuclide.clone()), v))
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(k, _)| k)
+    };
+    if replicas < 3 {
+        return vec![HashMap::new(); n_steps];
+    }
+    (0..n_steps)
+        .map(|step| {
+            outputs[step]
+                .iter()
+                .enumerate()
+                .filter_map(|(o, name)| {
+                    let s = &sums[step][o];
+                    let variance = s.aa - s.a * s.a / n;
+                    if !(variance > 0.0) {
+                        return None;
+                    }
+                    let residual_share = ((s.rr - s.r * s.r / n) / variance).max(0.0);
+                    let r2 = correlation_squared(s.a, s.aa, s.p, s.pp, s.ap);
+                    let by_contributor: std::collections::BTreeMap<(String, String), f64> = terms
+                        [step][o]
+                        .iter()
+                        .map(|(&key, t)| {
+                            (
+                                keys[key].clone(),
+                                correlation_squared(s.a, s.aa, t.c, t.cc, t.ac),
+                            )
+                        })
+                        .collect();
+                    let best = by_contributor
+                        .iter()
+                        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                        .map(|(k, _)| k.clone());
+                    let ranking_agrees = match (first_ranked(step, name), best) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => true,
+                    };
+                    Some((
+                        name.clone(),
+                        Linearity {
+                            r2,
+                            residual_share,
+                            by_contributor,
+                            ranking_agrees,
+                            flagged: residual_share > LINEARITY_FLAG || !ranking_agrees,
+                        },
+                    ))
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Merge one spectrum's coverage into the run's.
