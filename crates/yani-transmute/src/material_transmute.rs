@@ -2639,10 +2639,9 @@ fn linearity_of(
                 *by_key[step][o].entry(key_of[k]).or_insert(0.0) += term;
             }
         }
-        for step in 0..n_steps {
-            for o in 0..outputs[step].len() {
-                let a = actual[step][o][replica];
-                let p = predicted[step][o];
+        for (step, (actual_step, predicted_step)) in actual.iter().zip(&predicted).enumerate() {
+            for (o, (samples, &p)) in actual_step.iter().zip(predicted_step).enumerate() {
+                let a = samples[replica];
                 let s = &mut sums[step][o];
                 s.a += a;
                 s.aa += a * a;
