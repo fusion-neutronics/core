@@ -106,6 +106,7 @@ fn fe_sphere(energy_function: Option<&[f64]>) -> (Model, Arc<Tally>, TransportSe
             .push(Filter::EnergyFunction(EnergyFunctionFilter::new(
                 GRID.to_vec(),
                 values.to_vec(),
+                yamc_tallies::Interpolation::Cubic,
             )));
     }
     t.scores = vec![Score::Heating(HeatingScore)];

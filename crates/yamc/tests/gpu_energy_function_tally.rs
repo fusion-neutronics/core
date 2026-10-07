@@ -133,6 +133,7 @@ fn constant_curve() -> Filter {
     Filter::EnergyFunction(EnergyFunctionFilter::new(
         vec![1e-5, 1e2, 1e5, 1e8],
         vec![CONST_Y; 4],
+        yamc_tallies::Interpolation::Cubic,
     ))
 }
 
@@ -206,6 +207,7 @@ fn gpu_energy_function_gate_drops_exactly_the_out_of_range_flux() {
             Filter::EnergyFunction(EnergyFunctionFilter::new(
                 vec![SPLIT, 5e6, 1e7, TOP],
                 vec![1.0; 4],
+                yamc_tallies::Interpolation::Cubic,
             )),
         ],
     );
@@ -294,8 +296,13 @@ fn gpu_icrp116_dose_matches_cpu() {
         yamc_nuclide::data::effective_dose::DoseGeometry::AP,
         yamc_nuclide::data::effective_dose::DoseDataSource::ICRP116,
     );
-    let dose_filter =
-        || Filter::EnergyFunction(EnergyFunctionFilter::new(e.clone(), coeffs.clone()));
+    let dose_filter = || {
+        Filter::EnergyFunction(EnergyFunctionFilter::new(
+            e.clone(),
+            coeffs.clone(),
+            yamc_tallies::Interpolation::Cubic,
+        ))
+    };
 
     let cpu_t = flux_tally("cpu_dose", vec![cell_filter(), dose_filter()]);
     let (mut cpu_m, cpu_s) = model(vec![Arc::clone(&cpu_t)], "Fe56", 7.874);

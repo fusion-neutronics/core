@@ -984,6 +984,7 @@ fn cpu_only_table() {
             Filter::EnergyFunction(yamc_tallies::EnergyFunctionFilter::new(
                 energy.clone(),
                 coeffs.clone(),
+                yamc_tallies::Interpolation::Cubic,
             ))
         };
 

@@ -62,18 +62,22 @@ pub const PERHIST_K: u32 = 32;
 /// event when the energy falls outside the table, which is a different
 /// outcome from a zero weight, and a cubecl fn cannot return the `Option`
 /// that would carry that. The test is two comparisons against
-/// `params[off + 1]` and `params[off + n]`, so it costs nothing at the call
-/// site and keeps this fn a pure evaluator.
+/// `params[off + 2]` and `params[off + n + 1]` (after the point-count and
+/// mode header words), so it costs nothing at the call site and keeps this fn
+/// a pure evaluator.
 ///
-/// Two things it deliberately does not do. It does not solve the spline --
-/// the natural-cubic coefficients arrive precomputed from
-/// `EnergyFunctionFilter::new`, which is what lets both backends interpolate
-/// identically instead of merely closely. And it works in LINEAR energy, not
-/// the log energy every surrounding cross-section lookup uses.
+/// It does not fit anything: the four words per interval arrive precomputed
+/// from `EnergyFunctionFilter::new`, and this applies the same rule
+/// (`yamc_tallies::filter::energy_function::evaluate_interval`). Polynomial
+/// tables (cubic, linear) are evaluated in LINEAR energy and agree with the
+/// CPU bit for bit. Log-log intervals use the `ln_f64` / `exp_f64` polyfills,
+/// since native f64 log and exp do not lower on every backend, so they agree
+/// with the CPU to about an ulp rather than exactly.
 #[cube]
 pub(crate) fn energy_function_weight_kernel(params: &[f64], off: u32, energy: f64) -> f64 {
     let n = params[off as usize] as u32;
-    let e0 = off + 1u32;
+    let mode = params[(off + 1u32) as usize];
+    let e0 = off + 2u32;
     let c0 = e0 + n;
     // First index with `e[idx] > energy`; the bracket is the one below it.
     // Phrased as a lower bound rather than an upper one so the midpoint stays a
@@ -100,12 +104,27 @@ pub(crate) fn energy_function_weight_kernel(params: &[f64], off: u32, energy: f6
     if idx > n - 2u32 {
         idx = n - 2u32;
     }
-    let dx = energy - params[(e0 + idx) as usize];
-    let a = params[(c0 + 4u32 * idx) as usize];
-    let b = params[(c0 + 4u32 * idx + 1u32) as usize];
-    let c = params[(c0 + 4u32 * idx + 2u32) as usize];
-    let d = params[(c0 + 4u32 * idx + 3u32) as usize];
-    a + dx * (b + dx * (c + dx * d))
+    let w0 = params[(c0 + 4u32 * idx) as usize];
+    let w1 = params[(c0 + 4u32 * idx + 1u32) as usize];
+    let w2 = params[(c0 + 4u32 * idx + 2u32) as usize];
+    let w3 = params[(c0 + 4u32 * idx + 3u32) as usize];
+    // EFUNC_KIND_STEP above the edge, unless a branch below says otherwise.
+    let mut weight = w1;
+    if mode == 0.0f64 {
+        // EFUNC_MODE_POLYNOMIAL: [a, b, c, d] on linear dx.
+        let dx = energy - params[(e0 + idx) as usize];
+        weight = w0 + dx * (w1 + dx * (w2 + dx * w3));
+    } else if w3 == 0.0f64 {
+        // EFUNC_KIND_LOG_LOG
+        weight = exp_f64(w0 + w1 * (ln_f64(energy) - w2));
+    } else if w3 == 1.0f64 {
+        // EFUNC_KIND_LINEAR
+        weight = w0 + w1 * (energy - w2);
+    } else if energy <= w2 {
+        // EFUNC_KIND_STEP, below or at the edge
+        weight = w0;
+    }
+    weight
 }
 
 /// `#[cube]` twin of `crate::common::tallies::rect_mesh_crossings` + the mesh
@@ -3102,8 +3121,8 @@ pub(crate) fn multi_cell_transport_kernel(
                     let mut ef_in_range = true;
                     if ef_hi > ef_lo {
                         let n_ef = tally_efunc_params[ef_lo as usize] as u32;
-                        let e_first = tally_efunc_params[(ef_lo + 1u32) as usize];
-                        let e_last = tally_efunc_params[(ef_lo + n_ef) as usize];
+                        let e_first = tally_efunc_params[(ef_lo + 2u32) as usize];
+                        let e_last = tally_efunc_params[(ef_lo + n_ef + 1u32) as usize];
                         if energy < e_first || energy > e_last {
                             ef_in_range = false;
                         } else {
@@ -3323,8 +3342,8 @@ pub(crate) fn multi_cell_transport_kernel(
                         let mut ef_in_range_c = true;
                         if ef_hi_c > ef_lo_c {
                             let n_ef_c = tally_efunc_params[ef_lo_c as usize] as u32;
-                            let e_first_c = tally_efunc_params[(ef_lo_c + 1u32) as usize];
-                            let e_last_c = tally_efunc_params[(ef_lo_c + n_ef_c) as usize];
+                            let e_first_c = tally_efunc_params[(ef_lo_c + 2u32) as usize];
+                            let e_last_c = tally_efunc_params[(ef_lo_c + n_ef_c + 1u32) as usize];
                             if energy < e_first_c || energy > e_last_c {
                                 ef_in_range_c = false;
                             } else {

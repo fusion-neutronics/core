@@ -401,10 +401,11 @@ class DoseCoefficients:
         r"""
         Units of the coefficients (``"pSv cm2"``).
         """
-    def as_energy_function(self) -> tuple[builtins.list[builtins.float], builtins.list[builtins.float], builtins.str]:
+    def as_energy_function(self) -> tuple[builtins.list[builtins.float], builtins.list[builtins.float], builtins.str, builtins.str]:
         r"""
-        Repackage as the ``(energy, coefficients, units)`` tuple accepted by
-        ``Tally(energy_function=...)``.
+        Repackage as the ``(energy, coefficients, units, interpolation)`` tuple
+        accepted by ``Tally(energy_function=...)``. The interpolation is
+        ``"log-log"``, how the tabulation is read everywhere else.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -1767,10 +1768,13 @@ class PhotonCoefficients:
         Energies outside the tabulated range return the nearest end value rather
         than extrapolating: the tabulation stops where the data does.
         """
-    def as_energy_function(self) -> tuple[builtins.list[builtins.float], builtins.list[builtins.float], builtins.str]:
+    def as_energy_function(self) -> tuple[builtins.list[builtins.float], builtins.list[builtins.float], builtins.str, builtins.str]:
         r"""
-        Repackage as the ``(energy, coefficients, units)`` tuple accepted by
-        ``Tally(energy_function=...)``.
+        Repackage as the ``(energy, coefficients, units, interpolation)`` tuple
+        accepted by ``Tally(energy_function=...)``. The interpolation is
+        ``"log-log"``, matching :meth:`interpolate`, so a tally weights by the
+        same values; its absorption edges are steps rather than the ringing a
+        cubic spline gives across them.
         """
     def __repr__(self) -> builtins.str: ...
 

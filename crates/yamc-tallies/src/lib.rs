@@ -21,7 +21,7 @@ pub use convergence_target::{ConvergenceMetric, ConvergenceTarget, TallySelector
 pub use estimator::Estimator;
 pub use filter::cell::CellFilter;
 pub use filter::energy::EnergyFilter;
-pub use filter::energy_function::EnergyFunctionFilter;
+pub use filter::energy_function::{EnergyFunctionFilter, Interpolation};
 pub use filter::material::MaterialFilter;
 pub use filter::mesh::{MeshFilter, MeshKind};
 pub use filter::parent_nuclide::ParentNuclideFilter;

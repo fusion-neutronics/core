@@ -321,12 +321,77 @@ class TestPhotonCoefficients:
 
     def test_as_energy_function_round_trips_into_a_tally(self):
         air = yamc.data.mass_energy_absorption_coefficient("air")
-        energy, coefficients, units = air.as_energy_function()
+        energy, coefficients, units, interpolation = air.as_energy_function()
 
         assert len(energy) == len(coefficients)
         assert units == "cm2/g"
-        tally = yamc.Tally(scores=["flux"], energy_function=(energy, coefficients, units))
-        assert tally is not None
+        assert interpolation == "log-log"
+        tally = yamc.Tally(scores=["flux"], energy_function=air.as_energy_function())
+        assert tally.energy_function[3] == "log-log"
+
+
+class TestEnergyFunctionInterpolation:
+    """The `interpolation=` argument and how dose tallies interpolate."""
+
+    def test_energy_function_defaults_to_cubic(self):
+        tally = yamc.Tally(
+            scores=["flux"], energy_function=([1.0, 10.0, 100.0, 1000.0], [1.0, 2.0, 3.0, 4.0])
+        )
+        assert tally.energy_function[3] == "cubic"
+
+    @pytest.mark.parametrize("interpolation", ["cubic", "linear", "log-log"])
+    def test_interpolation_is_recorded(self, interpolation):
+        tally = yamc.Tally(
+            scores=["flux"],
+            energy_function=([1.0, 10.0, 100.0, 1000.0], [1.0, 2.0, 3.0, 4.0]),
+            interpolation=interpolation,
+        )
+        assert tally.energy_function[3] == interpolation
+
+    def test_log_log_and_linear_need_only_two_points(self):
+        for interpolation in ["linear", "log-log"]:
+            tally = yamc.Tally(
+                scores=["flux"],
+                energy_function=([1.0, 10.0], [1.0, 2.0]),
+                interpolation=interpolation,
+            )
+            assert tally.energy_function is not None
+
+    def test_cubic_still_needs_four_points(self):
+        with pytest.raises(ValueError, match="at least 4"):
+            yamc.Tally(scores=["flux"], energy_function=([1.0, 10.0], [1.0, 2.0]))
+
+    def test_an_unknown_interpolation_is_refused(self):
+        with pytest.raises(ValueError, match="'cubic', 'linear' or 'log-log'"):
+            yamc.Tally(
+                scores=["flux"],
+                energy_function=([1.0, 10.0], [1.0, 2.0]),
+                interpolation="spline",
+            )
+
+    def test_a_tuple_and_argument_that_disagree_are_refused(self):
+        with pytest.raises(ValueError, match="names interpolation"):
+            yamc.Tally(
+                scores=["flux"],
+                energy_function=([1.0, 10.0], [1.0, 2.0], "", "log-log"),
+                interpolation="linear",
+            )
+
+    def test_interpolation_without_an_energy_function_is_refused(self):
+        with pytest.raises(ValueError, match="energy_function only"):
+            yamc.Tally(scores=["flux"], dose_coefficients=("neutron", "AP"), interpolation="cubic")
+
+    def test_log_log_refuses_a_zero_energy(self):
+        with pytest.raises(ValueError, match="positive energies"):
+            yamc.Tally(
+                scores=["flux"],
+                energy_function=([0.0, 10.0], [1.0, 2.0]),
+                interpolation="log-log",
+            )
+
+    def test_dose_coefficients_interpolate_log_log(self):
+        tally = yamc.Tally(scores=["flux"], dose_coefficients=("neutron", "AP"))
+        assert tally.energy_function[3] == "log-log"
 
     def test_interpolating_outside_the_grid_clamps(self):
         air = yamc.data.mass_energy_absorption_coefficient("air")

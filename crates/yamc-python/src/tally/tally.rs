@@ -102,8 +102,19 @@ impl PyTally {
     ///     unstructured_mesh (tuple, optional): (MeshGeometry, volume) for tet mesh scoring
     ///     energy_bins (list[float], optional): Energy bin boundaries in eV
     ///     energy_group_structure (str, optional): Named group structure (e.g. "VITAMIN-J-175")
-    ///     energy_function (tuple, optional): (energy, y, units) for energy-dependent weighting
-    ///     dose_coefficients (tuple, optional): (particle, geometry[, data_source]) for dose
+    ///     energy_function (tuple, optional): ``(energy, y[, units[, interpolation]])``
+    ///         for energy-dependent weighting. The optional fourth item names the
+    ///         interpolation, as ``as_energy_function()`` returns it.
+    ///     interpolation (str, optional): How ``energy_function`` interpolates
+    ///         between its points: ``"cubic"`` (natural cubic spline in linear
+    ///         energy, the default, needs 4 points), ``"linear"``, or
+    ///         ``"log-log"`` (linear in log energy and log value, the convention
+    ///         for tabulated coefficients and how contact dose reads them; an
+    ///         interval with a zero value falls back to linear). Only valid with
+    ///         ``energy_function``.
+    ///     dose_coefficients (tuple, optional): (particle, geometry[, data_source]) for dose.
+    ///         The coefficients are interpolated log-log, as contact dose reads
+    ///         the same tables.
     ///     particle (str, optional): "neutron" or "photon"
     ///     parent_nuclides (list[str], optional): Nuclides for D1S parent binning
     ///     covariance (bool): Also accumulate the covariance of the bin means,
@@ -130,7 +141,7 @@ impl PyTally {
         cells=None, materials=None,
         mesh=None, unstructured_mesh=None,
         energy_bins=None, energy_group_structure=None, energy_function=None,
-        dose_coefficients=None, particle=None, parent_nuclides=None,
+        interpolation=None, dose_coefficients=None, particle=None, parent_nuclides=None,
         estimator=None, covariance=false,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -158,9 +169,10 @@ impl PyTally {
         energy_bins: Option<Vec<f64>>,
         energy_group_structure: Option<String>,
         #[gen_stub(override_type(
-            type_repr = "tuple[typing.Sequence[builtins.float], typing.Sequence[builtins.float], builtins.str] | None"
+            type_repr = "tuple[typing.Sequence[builtins.float], typing.Sequence[builtins.float]] | tuple[typing.Sequence[builtins.float], typing.Sequence[builtins.float], builtins.str] | tuple[typing.Sequence[builtins.float], typing.Sequence[builtins.float], builtins.str, builtins.str] | None"
         ))]
         energy_function: Option<&Bound<'_, PyAny>>,
+        interpolation: Option<String>,
         #[gen_stub(override_type(
             type_repr = "tuple[builtins.str, builtins.str] | tuple[builtins.str, builtins.str, builtins.str] | None"
         ))]
@@ -390,33 +402,60 @@ impl PyTally {
             filters.push(Filter::Energy(ef));
         }
 
+        if interpolation.is_some() && energy_function.is_none() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "interpolation applies to energy_function only; dose_coefficients are always log-log",
+            ));
+        }
         if let Some(ef) = energy_function {
             let items: Vec<Bound<'_, PyAny>> = ef.extract().map_err(|_| {
                 pyo3::exceptions::PyTypeError::new_err(
-                    "energy_function must be a tuple (energy, y[, units])",
+                    "energy_function must be a tuple (energy, y[, units[, interpolation]])",
                 )
             })?;
-            if items.len() < 2 || items.len() > 3 {
+            if items.len() < 2 || items.len() > 4 {
                 return Err(pyo3::exceptions::PyValueError::new_err(
-                    "energy_function must be a 2- or 3-tuple (energy, y[, units])",
+                    "energy_function must be a 2- to 4-tuple (energy, y[, units[, interpolation]])",
                 ));
             }
             let energy: Vec<f64> = items[0].extract()?;
             let y: Vec<f64> = items[1].extract()?;
-            let units: Option<String> = if items.len() == 3 {
+            let units: Option<String> = if items.len() >= 3 {
                 items[2].extract().ok()
             } else {
                 None
             };
+            let tuple_interpolation: Option<String> = if items.len() == 4 {
+                Some(items[3].extract()?)
+            } else {
+                None
+            };
+            let name = match (tuple_interpolation, interpolation.clone()) {
+                (Some(a), Some(b)) if a != b => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "energy_function names interpolation '{a}' but interpolation='{b}' was passed"
+                    )));
+                }
+                (Some(a), _) => a,
+                (None, Some(b)) => b,
+                (None, None) => "cubic".to_string(),
+            };
+            let interp = yamc_tallies::Interpolation::from_name(&name).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "interpolation must be 'cubic', 'linear' or 'log-log', got '{name}'"
+                ))
+            })?;
             if energy.len() != y.len() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "energy and y arrays must have the same length",
                 ));
             }
-            if energy.len() < 4 {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "energy_function requires at least 4 data points for cubic interpolation",
-                ));
+            if energy.len() < interp.min_points() {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "energy_function requires at least {} data points for {} interpolation",
+                    interp.min_points(),
+                    interp.name()
+                )));
             }
             for i in 1..energy.len() {
                 if energy[i] <= energy[i - 1] {
@@ -425,7 +464,12 @@ impl PyTally {
                     ));
                 }
             }
-            let mut filter = EnergyFunctionFilter::new(energy, y);
+            if interp == yamc_tallies::Interpolation::LogLog && energy[0] <= 0.0 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "log-log interpolation needs positive energies",
+                ));
+            }
+            let mut filter = EnergyFunctionFilter::new(energy, y, interp);
             filter.units = units;
             filters.push(Filter::EnergyFunction(filter));
         }
@@ -489,7 +533,8 @@ impl PyTally {
                 }
             };
             let (energy, coeffs) = rust_dose_coefficients(dc_particle_kind, geom, source);
-            let mut filter = EnergyFunctionFilter::new(energy, coeffs);
+            let mut filter =
+                EnergyFunctionFilter::new(energy, coeffs, yamc_tallies::Interpolation::LogLog);
             filter.units = Some("pSv·cm²".to_string());
             filters.push(Filter::EnergyFunction(filter));
         }
@@ -793,12 +838,19 @@ impl PyTally {
         })
     }
 
-    /// Energy function filter data as (energy, y, units) tuple, or None.
+    /// Energy function filter data as an ``(energy, y, units, interpolation)``
+    /// tuple, or None. Passing it back as ``energy_function=`` rebuilds the
+    /// same filter.
     #[getter]
-    pub fn energy_function(&self) -> Option<(Vec<f64>, Vec<f64>, Option<String>)> {
+    pub fn energy_function(&self) -> Option<(Vec<f64>, Vec<f64>, Option<String>, String)> {
         self.inner.filters.iter().find_map(|f| {
             if let Filter::EnergyFunction(ef) = f {
-                Some((ef.energy().to_vec(), ef.y().to_vec(), ef.units.clone()))
+                Some((
+                    ef.energy().to_vec(),
+                    ef.y().to_vec(),
+                    ef.units.clone(),
+                    ef.interpolation().name().to_string(),
+                ))
             } else {
                 None
             }

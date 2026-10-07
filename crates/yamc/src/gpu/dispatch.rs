@@ -1359,15 +1359,16 @@ fn build_tallies_pack(
         // than widening the output block. A tally without one leaves an empty
         // range, which is how the kernel detects its absence.
         //
-        // The spline coefficients are the ones `EnergyFunctionFilter::new`
-        // already solved on the host, so the kernel evaluates the same
-        // polynomial rather than re-deriving (or approximating) the fit.
+        // The interval words are the ones `EnergyFunctionFilter::new` already
+        // computed on the host, so the kernel applies the same rule rather
+        // than re-deriving (or approximating) the fit.
         if let Some(ef) = v.tally.get_energy_function_filter() {
             let energies = ef.energy();
-            let coeffs = ef.spline_coeffs();
+            let coeffs = ef.interval_coeffs();
             debug_assert_eq!(coeffs.len(), energies.len() - 1);
             efunc_params.reserve(efunc_table_len(energies.len()));
             efunc_params.push(energies.len() as f64);
+            efunc_params.push(ef.interpolation().mode_word());
             efunc_params.extend_from_slice(energies);
             for c in coeffs {
                 efunc_params.extend_from_slice(c);
@@ -5968,10 +5969,22 @@ mod tests {
     // output layout. These tests pin both halves of that.
 
     fn efunc_tally(energy: Vec<f64>, y: Vec<f64>) -> Arc<Tally> {
+        efunc_tally_with(energy, y, yamc_tallies::Interpolation::Cubic)
+    }
+
+    fn efunc_tally_with(
+        energy: Vec<f64>,
+        y: Vec<f64>,
+        interpolation: yamc_tallies::Interpolation,
+    ) -> Arc<Tally> {
         let mut t = Tally::new();
         t.filters = vec![
             Filter::Cell(CellFilter { cell_ids: vec![1] }),
-            Filter::EnergyFunction(yamc_tallies::EnergyFunctionFilter::new(energy, y)),
+            Filter::EnergyFunction(yamc_tallies::EnergyFunctionFilter::new(
+                energy,
+                y,
+                interpolation,
+            )),
         ];
         t.scores = vec![Score::Flux(yamc_tallies::score::FluxScore)];
         Arc::new(t)
@@ -6061,6 +6074,7 @@ mod tests {
             yamc_tallies::EnergyFunctionFilter::new(
                 vec![1.0, 10.0, 100.0, 1000.0],
                 vec![1.0, 2.0, 3.0, 4.0],
+                yamc_tallies::Interpolation::Cubic,
             ),
         )];
         t.scores = vec![Score::Flux(yamc_tallies::score::FluxScore)];
@@ -6073,24 +6087,65 @@ mod tests {
     }
 
     #[test]
-    fn energy_function_table_packs_energies_then_spline_coeffs() {
+    fn energy_function_table_packs_mode_energies_then_words() {
         let energy = vec![1.0, 10.0, 100.0, 1000.0];
         let y = vec![1.0, 2.0, 3.0, 4.0];
         let t = efunc_tally(energy.clone(), y.clone());
         let validated = validate_tallies(std::slice::from_ref(&t), ParticleType::Neutron).unwrap();
         let pack = build_tallies_pack(&validated, &one_cell_geometry(), 1, &[], &[]).unwrap();
 
-        // `[n_points, energy[n], coeffs[4*(n-1)]]`.
+        // `[n_points, mode, energy[n], words[4*(n-1)]]`.
         assert_eq!(pack.efunc_offsets, vec![0, efunc_table_len(4) as u32]);
         assert_eq!(pack.efunc_params[0], 4.0, "leading point-count word");
-        assert_eq!(&pack.efunc_params[1..5], &energy[..]);
+        assert_eq!(
+            pack.efunc_params[1],
+            yamc_gpu::common::tallies::EFUNC_MODE_POLYNOMIAL,
+            "cubic packs as a polynomial table"
+        );
+        assert_eq!(&pack.efunc_params[2..6], &energy[..]);
         let filter = t.get_energy_function_filter().unwrap();
-        let flat: Vec<f64> = filter.spline_coeffs().iter().flatten().copied().collect();
-        assert_eq!(&pack.efunc_params[5..], &flat[..]);
+        let flat: Vec<f64> = filter.interval_coeffs().iter().flatten().copied().collect();
+        assert_eq!(&pack.efunc_params[6..], &flat[..]);
 
         // No bin dimension: one cell bin, one energy bin, nothing else.
         assert_eq!(pack.out_offsets, vec![0, 1]);
         assert_eq!(t.num_bins(), 1);
+    }
+
+    /// The table constants are defined twice, in `yamc-tallies` (which builds
+    /// the words) and `yamc-gpu` (which reads them), since neither crate
+    /// depends on the other. They must agree.
+    #[test]
+    fn energy_function_table_constants_agree_across_crates() {
+        use yamc_gpu::common::tallies as gpu;
+        use yamc_tallies::filter::energy_function as cpu;
+        assert_eq!(cpu::EFUNC_MODE_POLYNOMIAL, gpu::EFUNC_MODE_POLYNOMIAL);
+        assert_eq!(cpu::EFUNC_MODE_INTERVAL_KIND, gpu::EFUNC_MODE_INTERVAL_KIND);
+        assert_eq!(cpu::EFUNC_KIND_LOG_LOG, gpu::EFUNC_KIND_LOG_LOG);
+        assert_eq!(cpu::EFUNC_KIND_LINEAR, gpu::EFUNC_KIND_LINEAR);
+    }
+
+    #[test]
+    fn a_log_log_table_packs_as_interval_kinds_and_evaluates_like_the_cpu() {
+        // A zero value (linear fallback) and an absorption edge one ulp wide
+        // (a step) beside ordinary log-log intervals, so every kind is packed.
+        let edge: f64 = 8.979e3;
+        let below = f64::from_bits(edge.to_bits() - 1);
+        let energy = vec![1.0, 10.0, 1e3, below, edge, 1e5];
+        let y = vec![0.0, 2.0, 100.0, 10.0, 80.0, 1.0];
+        let t = efunc_tally_with(energy, y, yamc_tallies::Interpolation::LogLog);
+        let validated = validate_tallies(std::slice::from_ref(&t), ParticleType::Neutron).unwrap();
+        let pack = build_tallies_pack(&validated, &one_cell_geometry(), 1, &[], &[]).unwrap();
+        let filter = t.get_energy_function_filter().unwrap();
+        assert_eq!(
+            pack.efunc_params[1],
+            yamc_gpu::common::tallies::EFUNC_MODE_INTERVAL_KIND
+        );
+        for &e in &[0.5, 1.0, 5.0, 10.0, 300.0, below, edge, 3e4, 1e5, 2e5] {
+            let want = filter.get_weight(e);
+            let got = yamc_gpu::common::tallies::energy_function_weight(&pack.efunc_params, 0, e);
+            assert_eq!(got, want, "energy {e}");
+        }
     }
 
     #[test]

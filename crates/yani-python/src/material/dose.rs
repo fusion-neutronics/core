@@ -51,13 +51,15 @@ impl PyDoseCoefficients {
         self.units.clone()
     }
 
-    /// Repackage as the ``(energy, coefficients, units)`` tuple accepted by
-    /// ``Tally(energy_function=...)``.
-    fn as_energy_function(&self) -> (Vec<f64>, Vec<f64>, String) {
+    /// Repackage as the ``(energy, coefficients, units, interpolation)`` tuple
+    /// accepted by ``Tally(energy_function=...)``. The interpolation is
+    /// ``"log-log"``, how the tabulation is read everywhere else.
+    fn as_energy_function(&self) -> (Vec<f64>, Vec<f64>, String, String) {
         (
             self.energy.clone(),
             self.coefficients.clone(),
             self.units.clone(),
+            "log-log".to_string(),
         )
     }
 
@@ -273,10 +275,18 @@ impl PyPhotonCoefficients {
         self.table.interpolate(energy)
     }
 
-    /// Repackage as the ``(energy, coefficients, units)`` tuple accepted by
-    /// ``Tally(energy_function=...)``.
-    fn as_energy_function(&self) -> (Vec<f64>, Vec<f64>, String) {
-        (self.energy(), self.coefficients(), self.units.clone())
+    /// Repackage as the ``(energy, coefficients, units, interpolation)`` tuple
+    /// accepted by ``Tally(energy_function=...)``. The interpolation is
+    /// ``"log-log"``, matching :meth:`interpolate`, so a tally weights by the
+    /// same values; its absorption edges are steps rather than the ringing a
+    /// cubic spline gives across them.
+    fn as_energy_function(&self) -> (Vec<f64>, Vec<f64>, String, String) {
+        (
+            self.energy(),
+            self.coefficients(),
+            self.units.clone(),
+            "log-log".to_string(),
+        )
     }
 
     fn __repr__(&self) -> String {
