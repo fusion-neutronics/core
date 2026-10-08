@@ -1420,6 +1420,34 @@ fn energy_key(energy: f64) -> String {
 /// cannot be judged, the Python reader indexes past the end and raises
 /// `KeyError: -1` there.
 pub fn replace_missing(product: &str, decay_data: &BTreeMap<String, Decay>) -> Option<String> {
+    replace_missing_in(
+        product,
+        |name| decay_data.contains_key(name),
+        decay_data.iter().map(|(name, data)| {
+            (
+                name.as_str(),
+                data.nuclide.stable,
+                data.half_life.map_or(0.0, |(t, _)| t),
+            )
+        }),
+    )
+}
+
+/// [`replace_missing`] over any decay library, not only the converter's own.
+///
+/// `contains` says whether the library has a nuclide, and `library` gives
+/// every nuclide as `(name, stable, half-life [s])` in ascending name order,
+/// the order a `BTreeMap` walks: the longest-lived isotope is searched in that
+/// order and the first stable one ends the search, so another order can pick
+/// another direction. A half-life of 0.0 is one the library does not state.
+///
+/// Exposed so a reader of a converted chain can recover which stand-in a
+/// product of the tape was summed onto, with the converter's own rule.
+pub fn replace_missing_in<'a>(
+    product: &str,
+    contains: impl Fn(&str) -> bool,
+    library: impl IntoIterator<Item = (&'a str, bool, f64)>,
+) -> Option<String> {
     let (z, a, state) = zam(product).ok()?;
     let mut a = a as i64;
     let mut z = z as i64;
@@ -1440,15 +1468,14 @@ pub fn replace_missing(product: &str, decay_data: &BTreeMap<String, Decay>) -> O
     // The longest-lived isotope of this element says which way stability lies.
     let mut half_life = 0.0;
     let mut mass_longest_lived = a;
-    for (nuclide, data) in decay_data {
+    for (nuclide, stable, t) in library {
         let Some((mass, _)) = same_element(nuclide, symbol) else {
             continue;
         };
-        if data.nuclide.stable {
+        if stable {
             mass_longest_lived = mass;
             break;
         }
-        let t = data.half_life.map_or(0.0, |(t, _)| t);
         if t > half_life {
             mass_longest_lived = mass;
             half_life = t;
@@ -1456,7 +1483,7 @@ pub fn replace_missing(product: &str, decay_data: &BTreeMap<String, Decay>) -> O
     }
     let beta_minus = mass_longest_lived < a;
 
-    while !decay_data.contains_key(&product) {
+    while !contains(&product) {
         if z > 98 {
             z -= 2;
             a -= 4;

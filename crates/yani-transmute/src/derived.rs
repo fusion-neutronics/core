@@ -71,12 +71,22 @@ impl Estimate {
 /// replicas of 128 has a mean that is 97% zeros and a sigma that says more
 /// about whether the line is there at all than about how bright it is. Without
 /// the count the two cases are indistinguishable in the numbers.
+///
+/// With the `decay_photon_lines` source on, a replica draws each line's energy
+/// as well as its intensity, so a line is identified across replicas by its
+/// nominal energy, and `energy_estimate` carries the spread of the energy it
+/// was drawn at.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LineEstimate {
-    /// Line energy [eV].
+    /// Nominal line energy [eV], the one the evaluation states.
     pub energy: f64,
     /// Emission rate [photons/s], with the ensemble's spread.
     pub estimate: Estimate,
+    /// The energy each replica emitted the line at [eV], with the spread,
+    /// over the emitting replicas only: a replica that does not emit a line
+    /// gives it no energy. Where coincident lines are summed it is their
+    /// rate-weighted mean. `nominal` is `energy`.
+    pub energy_estimate: Estimate,
     /// Replicas that emitted this line at a positive rate.
     pub emitting: usize,
 }
@@ -148,38 +158,156 @@ fn estimate_by_nuclide(
 
 /// One [`LineEstimate`] per line, over the union of the lines that appear.
 ///
-/// Keyed on the energy's bits, exactly as `decay_photon_lines` keys its own
-/// merge, so coincident lines land together and a `BTreeSet` walk comes out
-/// ascending in energy (line energies are positive, where bit order and
-/// numeric order agree).
-fn estimate_lines(nominal: &[(f64, f64)], per_replica: &[Vec<(f64, f64)>]) -> Vec<LineEstimate> {
-    let mut energies: BTreeSet<u64> = nominal.iter().map(|(e, _)| e.to_bits()).collect();
+/// Keyed on the nominal energy's bits, exactly as `decay_photon_lines` keys
+/// its own merge, so coincident lines land together and a `BTreeSet` walk
+/// comes out ascending in energy (line energies are positive, where bit order
+/// and numeric order agree).
+fn estimate_lines(nominal: &[TracedLine], per_replica: &[Vec<TracedLine>]) -> Vec<LineEstimate> {
+    let mut energies: BTreeSet<u64> = nominal.iter().map(|l| l.energy.to_bits()).collect();
     for lines in per_replica {
-        energies.extend(lines.iter().map(|(e, _)| e.to_bits()));
+        energies.extend(lines.iter().map(|l| l.energy.to_bits()));
     }
-    let replicas: Vec<HashMap<u64, f64>> = per_replica
+    let replicas: Vec<HashMap<u64, &TracedLine>> = per_replica
         .iter()
-        .map(|lines| lines.iter().map(|(e, r)| (e.to_bits(), *r)).collect())
+        .map(|lines| lines.iter().map(|l| (l.energy.to_bits(), l)).collect())
         .collect();
-    let nominal: HashMap<u64, f64> = nominal.iter().map(|(e, r)| (e.to_bits(), *r)).collect();
+    let nominal: HashMap<u64, f64> = nominal
+        .iter()
+        .map(|l| (l.energy.to_bits(), l.rate))
+        .collect();
 
-    let mut values = Vec::with_capacity(replicas.len());
+    let mut rates = Vec::with_capacity(replicas.len());
+    let mut drawn = Vec::with_capacity(replicas.len());
     energies
         .into_iter()
         .map(|bits| {
-            values.clear();
-            values.extend(
-                replicas
-                    .iter()
-                    .map(|r| r.get(&bits).copied().unwrap_or(0.0)),
-            );
+            rates.clear();
+            drawn.clear();
+            for replica in &replicas {
+                match replica.get(&bits) {
+                    Some(line) => {
+                        rates.push(line.rate);
+                        if line.rate > 0.0 {
+                            drawn.push(line.drawn_energy);
+                        }
+                    }
+                    None => rates.push(0.0),
+                }
+            }
+            let energy = f64::from_bits(bits);
             LineEstimate {
-                energy: f64::from_bits(bits),
-                emitting: values.iter().filter(|rate| **rate > 0.0).count(),
-                estimate: estimate(nominal.get(&bits).copied().unwrap_or(0.0), &values),
+                energy,
+                emitting: drawn.len(),
+                estimate: estimate(nominal.get(&bits).copied().unwrap_or(0.0), &rates),
+                energy_estimate: estimate(energy, &drawn),
             }
         })
         .collect()
+}
+
+/// Atoms per barn-cm times cm^3 is 1e24 atoms per cm^3 times cm^3.
+const BARN_PER_CM_SQ: f64 = 1.0e24;
+
+/// One line of an inventory's spectrum, identified by its nominal energy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TracedLine {
+    /// The nominal energy [eV], the key a line is matched on across replicas.
+    energy: f64,
+    /// Photons per second.
+    rate: f64,
+    /// The rate-weighted energy the line was emitted at in this replica [eV];
+    /// `energy` itself when nothing moved it.
+    drawn_energy: f64,
+}
+
+/// An inventory's decay photon lines, as `yani_decay::decay_photon_lines`
+/// gives them, with each line keyed on its energy in `nominal` and carrying
+/// the energy `drawn` emits it at.
+///
+/// `drawn` is a replica's chain, the same sources as `nominal` with values
+/// drawn, so the two are walked side by side. With `drawn` equal to `nominal`
+/// the rates are those of `decay_photon_lines` to the last bit: the lines of
+/// one nuclide are merged in the order `ChainNuclide::photon_lines` merges
+/// them, then scaled by its atom count, in nuclide-name order.
+fn traced_photon_lines(
+    densities: &HashMap<String, f64>,
+    volume: f64,
+    nominal: &HashMap<String, ChainNuclide>,
+    drawn: &HashMap<String, ChainNuclide>,
+) -> Vec<TracedLine> {
+    let mut names: Vec<&String> = densities.keys().collect();
+    names.sort();
+    // (rate, rate times the drawn energy's offset from the nominal one), keyed
+    // on the nominal energy's bits. The offset rather than the energy, so a
+    // line nothing moved comes back at its nominal energy exactly, not a
+    // rounding off it.
+    let mut lines: std::collections::BTreeMap<u64, (f64, f64)> = Default::default();
+    for name in names {
+        let atoms = densities[name] * BARN_PER_CM_SQ * volume;
+        if atoms <= 0.0 {
+            continue;
+        }
+        let (Some(n), Some(d)) = (nominal.get(name), drawn.get(name)) else {
+            continue;
+        };
+        for (energy, intensity, weighted) in traced_nuclide_lines(n, d) {
+            if intensity > 0.0 {
+                let entry = lines.entry(energy.to_bits()).or_insert((0.0, 0.0));
+                entry.0 += atoms * intensity;
+                entry.1 += atoms * weighted;
+            }
+        }
+    }
+    lines
+        .into_iter()
+        .map(|(bits, (rate, weighted))| {
+            let energy = f64::from_bits(bits);
+            TracedLine {
+                energy,
+                rate,
+                drawn_energy: energy + weighted / rate,
+            }
+        })
+        .collect()
+}
+
+/// One nuclide's lines as `(nominal energy, drawn intensity, drawn intensity
+/// times the drawn energy's offset from the nominal one)`, ascending in
+/// nominal energy, coincident ones summed in source order, which is the order
+/// `ChainNuclide::photon_lines` sums in.
+fn traced_nuclide_lines(nominal: &ChainNuclide, drawn: &ChainNuclide) -> Vec<(f64, f64, f64)> {
+    fn photons(cn: &ChainNuclide) -> impl Iterator<Item = &yani::DecaySource> {
+        cn.sources
+            .iter()
+            .filter(|source| source.particle == "photon")
+    }
+    let mut lines: Vec<(f64, f64, f64)> =
+        photons(nominal)
+            .zip(photons(drawn))
+            .filter_map(|(n, d)| match (&n.distribution, &d.distribution) {
+                (
+                    yani::DecaySourceDistribution::Discrete { energies: keys, .. },
+                    yani::DecaySourceDistribution::Discrete {
+                        energies,
+                        intensities,
+                    },
+                ) => Some(keys.iter().zip(intensities).zip(energies).map(
+                    |((key, intensity), energy)| (*key, *intensity, intensity * (energy - key)),
+                )),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+    lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+    lines.dedup_by(|later, kept| {
+        let same = later.0 == kept.0;
+        if same {
+            kept.1 += later.1;
+            kept.2 += later.2;
+        }
+        same
+    });
+    lines
 }
 
 /// The volume a quantity expressed per unit of material needs.
@@ -301,13 +429,14 @@ impl TransmutationResults {
         };
         let half_lives = ensemble.half_lives();
         let decay_energy_seed = ensemble.decay_energy_seed;
+        let decay_photon_seed = ensemble.decay_photon_seed;
         let no_half_lives = HashMap::new();
         let per_replica = inventories
             .into_iter()
             .enumerate()
             .map(|(k, inventory)| {
                 let sampled = half_lives.get(k).filter(|h| !h.is_empty());
-                if sampled.is_none() && decay_energy_seed.is_none() {
+                if sampled.is_none() && decay_energy_seed.is_none() && decay_photon_seed.is_none() {
                     // Every replica evaluates to exactly what the nominal
                     // chain gives, which at step 0 is the nominal value
                     // itself: a measured zero spread, not the unmeasured one
@@ -318,13 +447,15 @@ impl TransmutationResults {
                 // them too: its activity is lambda_k N_k, never lambda N_k, or
                 // the cancellation that makes a saturated activity insensitive
                 // to its own half-life is lost. So even step 0 has a spread
-                // then, the initial radionuclides' own. Its decay energies are
-                // drawn for it here, since they never entered the solve.
+                // then, the initial radionuclides' own. Its decay energies and
+                // photons are drawn for it here, since they never entered the
+                // solve.
                 let chain_k = replica_chain(
                     chain,
                     inventory,
                     sampled.unwrap_or(&no_half_lives),
                     decay_energy_seed.map(|seed| (seed, k as u64)),
+                    decay_photon_seed.map(|seed| (seed, k as u64)),
                 );
                 evaluate(inventory, volume, &chain_k)
             })
@@ -424,7 +555,8 @@ impl TransmutationResults {
     }
 
     /// The decay-photon spectrum at `step`, each line with the ensemble's
-    /// spread on its emission rate.
+    /// spread on its emission rate, and on its energy when the
+    /// `decay_photon_lines` source draws it.
     ///
     /// Ascending in energy, coincident lines summed, exactly as
     /// `Material.decay_photon_spectrum` returns them -- and over the union of
@@ -443,9 +575,9 @@ impl TransmutationResults {
         chain: &HashMap<String, ChainNuclide>,
     ) -> Result<Option<Vec<LineEstimate>>, String> {
         Ok(self
-            .fold_replicas(material_id, step, chain, |densities, volume, chain| {
+            .fold_replicas(material_id, step, chain, |densities, volume, drawn| {
                 let volume = require_volume(volume, "decay_photon_spectrum")?;
-                Ok(yani_decay::decay_photon_lines(densities, volume, chain))
+                Ok(traced_photon_lines(densities, volume, chain, drawn))
             })?
             .map(|(nominal, per_replica)| estimate_lines(&nominal, &per_replica)))
     }
@@ -461,11 +593,12 @@ impl TransmutationResults {
     /// Needs no volume, unlike the other three. The estimate takes the material
     /// for a half-space, which leaves no distance and no volume in the answer.
     ///
-    /// The band is the spread of the replicas' inventories alone. The photon
-    /// attenuation (NIST XCOM), the air energy absorption (NIST SRD 126), the
-    /// ICRP dose coefficients and the build-up factor are held at their
-    /// nominal values in every replica, since none of those sources publishes
-    /// a per-value uncertainty, and so is each decay photon line's intensity.
+    /// The band is the spread of the replicas' inventories, and of their
+    /// decay photon lines and continua when the `decay_photon_lines` source
+    /// is on. The photon attenuation (NIST XCOM), the air energy absorption
+    /// (NIST SRD 126), the ICRP dose coefficients and the build-up factor are
+    /// held at their nominal values in every replica, since none of those
+    /// sources publishes a per-value uncertainty.
     ///
     /// See [`Self::activity_uncertainty`] for the return convention.
     pub fn contact_dose_uncertainty(
@@ -509,7 +642,7 @@ impl TransmutationResults {
 }
 
 /// The chain entries an inventory's derived quantities read, with one
-/// replica's half-lives substituted.
+/// replica's half-lives substituted and its decay energies and photons drawn.
 ///
 /// Only the nuclides in the inventory: activity, decay heat, decay photons and
 /// contact dose all evaluate each nuclide from its own entry, so the rest of a
@@ -519,6 +652,7 @@ fn replica_chain(
     inventory: &HashMap<String, f64>,
     half_lives: &HashMap<String, f64>,
     decay_energy: Option<(u64, u64)>,
+    decay_photons: Option<(u64, u64)>,
 ) -> HashMap<String, ChainNuclide> {
     inventory
         .keys()
@@ -534,6 +668,11 @@ fn replica_chain(
                     cn.decay_energy = total;
                     cn.decay_energy_components = parts;
                 }
+            }
+            // After the half-life, whose rescale keeps each line's sigma in
+            // proportion to its intensity.
+            if let Some((seed, replica)) = decay_photons {
+                crate::uncertainty::sample_decay_photons(&mut cn, seed, replica);
             }
             Some((name.clone(), cn))
         })

@@ -207,11 +207,10 @@ def test_the_report_names_what_is_never_perturbed():
     not_perturbed = results.get_data_uncertainty_info(iron.id or 0)["not_perturbed"]
     joined = " ".join(not_perturbed)
     for source in (
-        "fission yield",
         "isomeric branching (MF=9/MF=10)",
         "covariance with another evaluation (MAT1 naming another material)",
         "resonance-parameter covariance not written into covariance.arrow (MF=32)",
-        "decay photon line energy and intensity (MF=8 MT=457)",
+        "decay photon spectrum covariance and continuum shape (MF=8 MT=457 LCOV, which no library states)",
         "photon attenuation coefficient (XCOM)",
         "air energy-absorption coefficient (NIST SRD 126)",
         "fluence-to-dose coefficient (ICRP-116)",
@@ -229,6 +228,7 @@ def test_the_report_names_what_is_never_perturbed():
     # Every default source is on, so none is listed as switched off.
     assert "activation cross section (MF=33)" not in not_perturbed
     assert "decay branching ratio" not in not_perturbed
+    assert "fission yield" not in not_perturbed
 
 
 def test_a_shielded_run_reports_its_shielding_held_at_nominal():
@@ -356,12 +356,12 @@ def test_naming_a_source_that_does_not_exist_yet_raises():
 
     Adding sources one at a time and watching the inventory sigma grow only
     means something if asking for a source that has not landed is an error. A
-    silently ignored ``fission_yield`` would look exactly like a
-    ``fission_yield`` that contributed nothing, which is the one confusion this
-    whole feature exists to prevent.
+    silently ignored ``reaction_branching`` would look exactly like a
+    ``reaction_branching`` that contributed nothing, which is the one confusion
+    this whole feature exists to prevent.
     """
-    with pytest.raises(ValueError, match="fission_yield"):
-        yamc.DataUncertainty(sources=["fission_yield"])
+    with pytest.raises(ValueError, match="reaction_branching"):
+        yamc.DataUncertainty(sources=["reaction_branching"])
 
     with pytest.raises(ValueError, match="cross_sections"):
         # The message must name what IS available, not just what is not.
@@ -837,6 +837,72 @@ def test_a_component_is_named_or_refused():
     iron = _iron()
     with pytest.raises(ValueError, match="component must be one of"):
         iron.decay_heat(component="neutrino")
+
+
+# --- decay photon lines -------------------------------------------------------
+#
+# The draws and their sigmas are pinned in Rust
+# (yani-transmute/tests/decay_photon_line_uncertainty.rs). Here: the source is
+# offered, the report names its nuclides, and the spectrum keeps the material's
+# own lines with an energy spread on each.
+
+def test_decay_photon_lines_is_an_available_source():
+    assert "decay_photon_lines" in yamc.DataUncertainty.available_sources()
+
+
+def test_drawn_photon_lines_keep_the_nominal_spectrum_and_report_an_energy_spread():
+    iron = _iron()
+    results = iron.transmute(
+        schedule=_schedule(),
+        data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["decay_photon_lines"]),
+    )
+    mid = iron.id or 0
+    info = results.get_data_uncertainty_info(mid)
+    for key in (
+        "decay_photon_lines_perturbed",
+        "no_decay_photon_line_uncertainty",
+        "decay_photon_line_uncertainty_not_carried",
+    ):
+        assert isinstance(info[key], list)
+    assert not any(s.startswith("decay photon line energy") for s in info["not_perturbed"])
+
+    lines = results.get_decay_photon_spectrum_uncertainty(mid, 1)
+    energies, rates = results.get_material(mid, 1).decay_photon_spectrum()
+    assert [line.energy for line in lines] == energies
+    assert [line.nominal for line in lines] == rates
+    for line in lines:
+        assert line.energy_std_dev is None or line.energy_std_dev >= 0.0
+        if line.energy_std_dev == 0.0:
+            assert line.energy_mean == line.energy
+
+
+# --- fission yields -----------------------------------------------------------
+#
+# The draw, the mapping check and the aliases are pinned in Rust
+# (yani-transmute/src/fission_yield_uncertainty.rs and
+# yani-transmute/tests/fission_yield_uncertainty.rs). Here: the source is
+# offered and the report carries its keys.
+
+def test_fission_yield_is_an_available_source():
+    assert "fission_yield" in yamc.DataUncertainty.available_sources()
+
+
+def test_the_report_names_the_fission_yields_drawn_and_held():
+    iron = _iron()
+    results = iron.transmute(
+        schedule=_schedule(),
+        data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["fission_yield"]),
+    )
+    info = results.get_data_uncertainty_info(iron.id or 0)
+    for key in (
+        "fission_yields_perturbed",
+        "no_fission_yield_uncertainty",
+        "fission_yield_uncertainty_not_carried",
+        "fission_yields_mapping_mismatch",
+    ):
+        assert isinstance(info[key], list)
+    assert "fission yield" not in info["not_perturbed"]
+    assert info["sources"] == ["fission_yield"]
 
 
 def test_with_no_rate_drawn_the_repair_report_is_empty():

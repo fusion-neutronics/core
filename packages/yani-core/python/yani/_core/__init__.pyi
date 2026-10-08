@@ -265,7 +265,21 @@ class DataUncertainty:
       decay data gives each recoverable-heat component (beta, gamma, alpha),
       or the total's where it gives no split. It moves decay heat only: a decay
       energy never enters the solve, so the inventory and activity are
-      untouched.
+      untouched;
+    - ``"decay_photon_lines"``: each decay photon spectrum's normalisation
+      (FD for lines, FC for a continuum), one draw per spectrum common to all
+      its lines, and each line's own intensity (dRI) and energy (dER), from
+      the decay data's MT=457 sigmas. It moves the decay photon spectrum and
+      the contact dose only: no photon enters the solve;
+    - ``"fission_yield"``: each fissioning parent's independent yields (MT=454),
+      from the DY the evaluation states on each, drawn on the tape's own
+      products and summed onto the chain's the way the converter summed the
+      nominal yields. No evaluation states a correlation between yields, so
+      each is drawn independently and the yields of a draw are not
+      renormalised. An actinide that borrows another's yields shares its draw.
+      Needs a chain that carries the evaluated yields
+      (``fission_yields/evaluated_yields.arrow``); without one every parent is
+      listed under ``no_fission_yield_uncertainty``.
     
     Each cross-section draw is a lognormal multiplier with the covariance's
     own mean and variance, so a sampled rate is never negative and nothing is
@@ -274,7 +288,9 @@ class DataUncertainty:
     come out weaker than evaluated as the sigmas grow. Half-lives and decay
     energies are drawn the same way, one nuclide at a time: the decay data
     states a mean and a sigma for each and no correlation, so the draws carry
-    exactly what the evaluation states and are never negative.
+    exactly what the evaluation states and are never negative. So are the decay
+    photon normalisations, intensities and energies, with the one correlation
+    the data does state: a spectrum's normalisation is common to its lines.
     
     Held at their nominal values, with uncertainties of their own that this
     does not propagate:
@@ -283,7 +299,7 @@ class DataUncertainty:
       or more modes, unequal sigmas, too wide to sample untruncated, or no
       sigma), and the per-decay photon lines and decay energy of a drawn
       parent, which follow its nominal branching;
-    - fission yields and the isomeric-branching overlay from MF=9/MF=10;
+    - the isomeric-branching overlay from MF=9/MF=10;
     - covariance correlating two evaluations (MAT1 naming another material),
       covariance with a quantity that is not a cross section (XMF1 not 0 or
       3), covariance derived from other sections by an NC block that cannot
@@ -306,11 +322,10 @@ class DataUncertainty:
     - on a transport run, the flux's response to a perturbed cross section:
       there is one transport, not one per replica. The tallied values
       themselves are still drawn by the ``"statistical"`` source;
-    - decay photon line energies and intensities (MF=8 MT=457), the decay
-      photon continuum normalisation and shape (MF=8 MT=457 continuum and its
-      covariance), photon attenuation (XCOM), air energy absorption (NIST
-      SRD 126), the ICRP-116 fluence-to-dose coefficients and the contact-dose
-      build-up factor;
+    - the decay photon spectrum covariance and continuum shape (MF=8 MT=457
+      LCOV, which no library states), photon attenuation (XCOM), air energy
+      absorption (NIST SRD 126), the ICRP-116 fluence-to-dose coefficients and
+      the contact-dose build-up factor;
     - the material's composition, density, natural isotopic abundances and the
       AME2020 atomic masses used to convert mass fractions;
     - any source switched off with ``sources``, or with nothing to act on (a
@@ -586,7 +601,8 @@ class Estimate:
 @typing.final
 class LineEstimate:
     r"""
-    One decay-photon line, with the ensemble's spread on its emission rate.
+    One decay-photon line, with the ensemble's spread on its emission rate and
+    on the energy it is emitted at.
     
     The set of lines is not the same in every replica: a nuclide that falls
     below the density floor in one draw takes its lines out of that draw. The
@@ -598,7 +614,22 @@ class LineEstimate:
     @property
     def energy(self) -> builtins.float:
         r"""
-        Line energy [eV].
+        Nominal line energy [eV], the one the evaluation states. Lines are
+        matched across replicas on it.
+        """
+    @property
+    def energy_mean(self) -> typing.Optional[builtins.float]:
+        r"""
+        The mean energy the emitting replicas drew for this line [eV], or None
+        below two of them. Equal to ``energy`` unless the
+        ``"decay_photon_lines"`` source drew line energies.
+        """
+    @property
+    def energy_std_dev(self) -> typing.Optional[builtins.float]:
+        r"""
+        The sample standard deviation of the drawn energy over the emitting
+        replicas [eV], or None below two of them. Zero unless the
+        ``"decay_photon_lines"`` source drew line energies.
         """
     @property
     def nominal(self) -> builtins.float:
@@ -2597,11 +2628,13 @@ class TransmutationResults:
         Needs no ``volume``, unlike the other three, because the estimate takes
         the material for a half-space.
         
-        The band is the spread of the replicas' inventories alone (each with
-        its own half-lives when the ``"half_life"`` source is on). The decay
-        photon line intensities, photon attenuation (XCOM), air energy
-        absorption (NIST SRD 126), ICRP-116 dose coefficients and the build-up
-        factor are held at their nominal values and contribute nothing to it.
+        The band is the spread of the replicas' inventories (each with its own
+        half-lives when the ``"half_life"`` source is on), and of their decay
+        photon line intensities and energies and continuum normalisations when
+        the ``"decay_photon_lines"`` source is on. The photon attenuation
+        (XCOM), air energy absorption (NIST SRD 126), ICRP-116 dose
+        coefficients and the build-up factor are held at their nominal values
+        and contribute nothing to it.
         
         Args:
             material_id: Material ID number.
@@ -2631,10 +2664,12 @@ class TransmutationResults:
         only, as there: a photon continuum is not a line and is not reported
         here.
         
-        The band is the spread of the replicas' inventories alone (each with
-        its own half-lives when the ``"half_life"`` source is on). The line
-        intensities per decay are held at their nominal values and contribute
-        nothing to it.
+        The band is the spread of the replicas' inventories (each with its own
+        half-lives when the ``"half_life"`` source is on), and of each line's
+        intensity per decay when the ``"decay_photon_lines"`` source is on.
+        That source draws each line's energy too, so lines are matched across
+        replicas on their nominal energy, and ``LineEstimate.energy_std_dev``
+        gives the spread of the energy drawn.
         
             >>> lines = results.get_decay_photon_spectrum_uncertainty(mid, step)
             >>> [(l.energy, l.nominal, l.std_dev) for l in lines[:2]]
@@ -2848,6 +2883,22 @@ class TransmutationResults:
           data splits it. ``decay_energy_uncertainty_not_carried`` names those
           with a sigma stated on a zero energy, or not finite, which no draw
           can carry; that energy is held at nominal and counted as a gap.
+        - ``decay_photon_lines_perturbed`` /
+          ``no_decay_photon_line_uncertainty``: the same for the
+          ``"decay_photon_lines"`` source, over the reachable unstable
+          nuclides with decay photon data.
+          ``decay_photon_line_uncertainty_not_carried`` names those with a
+          sigma stated on a zero value, or not finite, which no draw can carry;
+          that value is held at nominal and counted as a gap.
+        - ``fission_yields_perturbed`` / ``no_fission_yield_uncertainty``: the
+          same for the ``"fission_yield"`` source, over the reachable
+          fissioning parents. ``fission_yield_uncertainty_not_carried`` names
+          those with a DY on a zero yield, or not finite, which is held while
+          the parent's other yields are drawn.
+          ``fission_yields_mapping_mismatch`` names those whose tape yields,
+          named and summed by the converter's rule, do not give back the yields
+          the solver reads; they are held rather than drawn through a mapping
+          their yields were not built with. Each is counted as a gap.
         - ``decay_branchings_perturbed``: with the ``"decay_branching"``
           source, the reachable two-mode parents whose split was sampled. The
           multi-mode parents held at their evaluated ratios, each a gap:

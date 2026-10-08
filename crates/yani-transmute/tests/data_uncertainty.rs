@@ -282,11 +282,7 @@ fn nuclides_without_covariance_are_named_in_the_report() {
             .is_none(),
         "a nuclide cannot be both perturbed and lacking data"
     );
-    for source in [
-        "fission yield",
-        "isomeric branching",
-        "covariance with another evaluation",
-    ] {
+    for source in ["isomeric branching", "covariance with another evaluation"] {
         assert!(
             info.not_perturbed.iter().any(|s| s.contains(source)),
             "{source} must be stated as not propagated: {:?}",

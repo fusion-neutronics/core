@@ -81,7 +81,8 @@ impl From<Estimate> for PyEstimate {
     }
 }
 
-/// One decay-photon line, with the ensemble's spread on its emission rate.
+/// One decay-photon line, with the ensemble's spread on its emission rate and
+/// on the energy it is emitted at.
 ///
 /// The set of lines is not the same in every replica: a nuclide that falls
 /// below the density floor in one draw takes its lines out of that draw. The
@@ -99,10 +100,27 @@ pub struct PyLineEstimate {
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyLineEstimate {
-    /// Line energy [eV].
+    /// Nominal line energy [eV], the one the evaluation states. Lines are
+    /// matched across replicas on it.
     #[getter]
     fn energy(&self) -> f64 {
         self.inner.energy
+    }
+
+    /// The mean energy the emitting replicas drew for this line [eV], or None
+    /// below two of them. Equal to ``energy`` unless the
+    /// ``"decay_photon_lines"`` source drew line energies.
+    #[getter]
+    fn energy_mean(&self) -> Option<f64> {
+        self.inner.energy_estimate.mean
+    }
+
+    /// The sample standard deviation of the drawn energy over the emitting
+    /// replicas [eV], or None below two of them. Zero unless the
+    /// ``"decay_photon_lines"`` source drew line energies.
+    #[getter]
+    fn energy_std_dev(&self) -> Option<f64> {
+        self.inner.energy_estimate.std_dev
     }
 
     /// Emission rate from the unperturbed inventory [photons/s].
@@ -513,11 +531,13 @@ impl PyTransmutationResults {
     /// Needs no ``volume``, unlike the other three, because the estimate takes
     /// the material for a half-space.
     ///
-    /// The band is the spread of the replicas' inventories alone (each with
-    /// its own half-lives when the ``"half_life"`` source is on). The decay
-    /// photon line intensities, photon attenuation (XCOM), air energy
-    /// absorption (NIST SRD 126), ICRP-116 dose coefficients and the build-up
-    /// factor are held at their nominal values and contribute nothing to it.
+    /// The band is the spread of the replicas' inventories (each with its own
+    /// half-lives when the ``"half_life"`` source is on), and of their decay
+    /// photon line intensities and energies and continuum normalisations when
+    /// the ``"decay_photon_lines"`` source is on. The photon attenuation
+    /// (XCOM), air energy absorption (NIST SRD 126), ICRP-116 dose
+    /// coefficients and the build-up factor are held at their nominal values
+    /// and contribute nothing to it.
     ///
     /// Args:
     ///     material_id: Material ID number.
@@ -572,10 +592,12 @@ impl PyTransmutationResults {
     /// only, as there: a photon continuum is not a line and is not reported
     /// here.
     ///
-    /// The band is the spread of the replicas' inventories alone (each with
-    /// its own half-lives when the ``"half_life"`` source is on). The line
-    /// intensities per decay are held at their nominal values and contribute
-    /// nothing to it.
+    /// The band is the spread of the replicas' inventories (each with its own
+    /// half-lives when the ``"half_life"`` source is on), and of each line's
+    /// intensity per decay when the ``"decay_photon_lines"`` source is on.
+    /// That source draws each line's energy too, so lines are matched across
+    /// replicas on their nominal energy, and ``LineEstimate.energy_std_dev``
+    /// gives the spread of the energy drawn.
     ///
     ///     >>> lines = results.get_decay_photon_spectrum_uncertainty(mid, step)
     ///     >>> [(l.energy, l.nominal, l.std_dev) for l in lines[:2]]
@@ -799,6 +821,22 @@ impl PyTransmutationResults {
     ///   data splits it. ``decay_energy_uncertainty_not_carried`` names those
     ///   with a sigma stated on a zero energy, or not finite, which no draw
     ///   can carry; that energy is held at nominal and counted as a gap.
+    /// - ``decay_photon_lines_perturbed`` /
+    ///   ``no_decay_photon_line_uncertainty``: the same for the
+    ///   ``"decay_photon_lines"`` source, over the reachable unstable
+    ///   nuclides with decay photon data.
+    ///   ``decay_photon_line_uncertainty_not_carried`` names those with a
+    ///   sigma stated on a zero value, or not finite, which no draw can carry;
+    ///   that value is held at nominal and counted as a gap.
+    /// - ``fission_yields_perturbed`` / ``no_fission_yield_uncertainty``: the
+    ///   same for the ``"fission_yield"`` source, over the reachable
+    ///   fissioning parents. ``fission_yield_uncertainty_not_carried`` names
+    ///   those with a DY on a zero yield, or not finite, which is held while
+    ///   the parent's other yields are drawn.
+    ///   ``fission_yields_mapping_mismatch`` names those whose tape yields,
+    ///   named and summed by the converter's rule, do not give back the yields
+    ///   the solver reads; they are held rather than drawn through a mapping
+    ///   their yields were not built with. Each is counted as a gap.
     /// - ``decay_branchings_perturbed``: with the ``"decay_branching"``
     ///   source, the reachable two-mode parents whose split was sampled. The
     ///   multi-mode parents held at their evaluated ratios, each a gap:

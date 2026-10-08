@@ -43,7 +43,21 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///   decay data gives each recoverable-heat component (beta, gamma, alpha),
 ///   or the total's where it gives no split. It moves decay heat only: a decay
 ///   energy never enters the solve, so the inventory and activity are
-///   untouched.
+///   untouched;
+/// - ``"decay_photon_lines"``: each decay photon spectrum's normalisation
+///   (FD for lines, FC for a continuum), one draw per spectrum common to all
+///   its lines, and each line's own intensity (dRI) and energy (dER), from
+///   the decay data's MT=457 sigmas. It moves the decay photon spectrum and
+///   the contact dose only: no photon enters the solve;
+/// - ``"fission_yield"``: each fissioning parent's independent yields (MT=454),
+///   from the DY the evaluation states on each, drawn on the tape's own
+///   products and summed onto the chain's the way the converter summed the
+///   nominal yields. No evaluation states a correlation between yields, so
+///   each is drawn independently and the yields of a draw are not
+///   renormalised. An actinide that borrows another's yields shares its draw.
+///   Needs a chain that carries the evaluated yields
+///   (``fission_yields/evaluated_yields.arrow``); without one every parent is
+///   listed under ``no_fission_yield_uncertainty``.
 ///
 /// Each cross-section draw is a lognormal multiplier with the covariance's
 /// own mean and variance, so a sampled rate is never negative and nothing is
@@ -52,7 +66,9 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 /// come out weaker than evaluated as the sigmas grow. Half-lives and decay
 /// energies are drawn the same way, one nuclide at a time: the decay data
 /// states a mean and a sigma for each and no correlation, so the draws carry
-/// exactly what the evaluation states and are never negative.
+/// exactly what the evaluation states and are never negative. So are the decay
+/// photon normalisations, intensities and energies, with the one correlation
+/// the data does state: a spectrum's normalisation is common to its lines.
 ///
 /// Held at their nominal values, with uncertainties of their own that this
 /// does not propagate:
@@ -61,7 +77,7 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///   or more modes, unequal sigmas, too wide to sample untruncated, or no
 ///   sigma), and the per-decay photon lines and decay energy of a drawn
 ///   parent, which follow its nominal branching;
-/// - fission yields and the isomeric-branching overlay from MF=9/MF=10;
+/// - the isomeric-branching overlay from MF=9/MF=10;
 /// - covariance correlating two evaluations (MAT1 naming another material),
 ///   covariance with a quantity that is not a cross section (XMF1 not 0 or
 ///   3), covariance derived from other sections by an NC block that cannot
@@ -84,11 +100,10 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 /// - on a transport run, the flux's response to a perturbed cross section:
 ///   there is one transport, not one per replica. The tallied values
 ///   themselves are still drawn by the ``"statistical"`` source;
-/// - decay photon line energies and intensities (MF=8 MT=457), the decay
-///   photon continuum normalisation and shape (MF=8 MT=457 continuum and its
-///   covariance), photon attenuation (XCOM), air energy absorption (NIST
-///   SRD 126), the ICRP-116 fluence-to-dose coefficients and the contact-dose
-///   build-up factor;
+/// - the decay photon spectrum covariance and continuum shape (MF=8 MT=457
+///   LCOV, which no library states), photon attenuation (XCOM), air energy
+///   absorption (NIST SRD 126), the ICRP-116 fluence-to-dose coefficients and
+///   the contact-dose build-up factor;
 /// - the material's composition, density, natural isotopic abundances and the
 ///   AME2020 atomic masses used to convert mass fractions;
 /// - any source switched off with ``sources``, or with nothing to act on (a
@@ -490,6 +505,39 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
             .cloned()
             .collect::<Vec<_>>(),
     )?;
+    for (key, set) in [
+        (
+            "decay_photon_lines_perturbed",
+            &info.decay_photon_lines_perturbed,
+        ),
+        (
+            "no_decay_photon_line_uncertainty",
+            &info.no_decay_photon_line_uncertainty,
+        ),
+        (
+            "decay_photon_line_uncertainty_not_carried",
+            &info.decay_photon_line_uncertainty_not_carried,
+        ),
+    ] {
+        d.set_item(key, set.iter().cloned().collect::<Vec<_>>())?;
+    }
+    for (key, set) in [
+        ("fission_yields_perturbed", &info.fission_yields_perturbed),
+        (
+            "no_fission_yield_uncertainty",
+            &info.no_fission_yield_uncertainty,
+        ),
+        (
+            "fission_yield_uncertainty_not_carried",
+            &info.fission_yield_uncertainty_not_carried,
+        ),
+        (
+            "fission_yields_mapping_mismatch",
+            &info.fission_yields_mapping_mismatch,
+        ),
+    ] {
+        d.set_item(key, set.iter().cloned().collect::<Vec<_>>())?;
+    }
     d.set_item("statistical_rates", info.statistical_rates)?;
     d.set_item("statistical_floored", info.statistical_floored)?;
     d.set_item("statistical_sampled", info.statistical_sampled)?;
