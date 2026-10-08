@@ -1093,8 +1093,64 @@ pub(crate) fn set_half_life(cn: &mut yani::ChainNuclide, half_life: f64) {
     cn.half_life = Some(half_life);
 }
 
+/// The standard error of the sample standard deviation of `values`, or
+/// `None` below four values, where the kurtosis it needs is not estimated.
+///
+/// `Var(s^2) = s^4 (2/(n-1) + kappa/n)` with `kappa` the sample excess
+/// kurtosis, so a heavy-tailed output (a lognormal one, say) reads as less
+/// settled than a Gaussian one at the same count, as it is. Then
+/// `SE(s) = sqrt(Var(s^2)) / (2 s)` to first order. Identical values give
+/// exactly zero.
+pub fn std_dev_standard_error(values: &[f64]) -> Option<f64> {
+    let n = values.len();
+    if n < 4 {
+        return None;
+    }
+    let nf = n as f64;
+    let mean = values.iter().sum::<f64>() / nf;
+    let m2 = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / nf;
+    if m2 <= 0.0 {
+        return Some(0.0);
+    }
+    let m4 = values.iter().map(|v| (v - mean).powi(4)).sum::<f64>() / nf;
+    let kurtosis = m4 / (m2 * m2) - 3.0;
+    let s2 = m2 * nf / (nf - 1.0);
+    let var_s2 = (s2 * s2 * (2.0 / (nf - 1.0) + kurtosis / nf)).max(0.0);
+    Some(var_s2.sqrt() / (2.0 * s2.sqrt()))
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_standard_error_needs_four_values_and_is_zero_without_spread() {
+        assert_eq!(std_dev_standard_error(&[1.0, 2.0, 3.0]), None);
+        assert_eq!(std_dev_standard_error(&[2.0; 8]), Some(0.0));
+    }
+
+    #[test]
+    fn a_gaussian_standard_error_is_sigma_over_sqrt_2n() {
+        // Box-Muller on a fixed stream: kurtosis near zero, so SE(s) is about
+        // s / sqrt(2(n-1)).
+        let mut state = yamc_rng::expand_seed(7);
+        let z = crate::covariance_sample::standard_normals(&mut state, 20_000);
+        let se = std_dev_standard_error(&z).unwrap();
+        let want = 1.0 / (2.0 * 19_999.0_f64).sqrt();
+        assert!((se / want - 1.0).abs() < 0.05, "{se} against {want}");
+    }
+
+    #[test]
+    fn a_heavy_tail_reads_as_less_settled() {
+        let mut state = yamc_rng::expand_seed(7);
+        let z = crate::covariance_sample::standard_normals(&mut state, 4_000);
+        let lognormal: Vec<f64> = z.iter().map(|z| (0.8 * z).exp()).collect();
+        let s = |v: &[f64]| {
+            let m = v.iter().sum::<f64>() / v.len() as f64;
+            (v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (v.len() - 1) as f64).sqrt()
+        };
+        let relative = |v: &[f64]| std_dev_standard_error(v).unwrap() / s(v);
+        assert!(relative(&lognormal) > 1.5 * relative(&z));
+    }
     use super::*;
 
     /// Every run states the decay photon sources it holds at nominal, lines

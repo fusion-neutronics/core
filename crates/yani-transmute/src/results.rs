@@ -796,6 +796,23 @@ impl TransmutationResults {
         )
     }
 
+    /// The standard error of [`Self::get_nuclide_uncertainty`]: how far
+    /// another ensemble of the same size could put that sigma. `None` when
+    /// uncertainty was not asked for or the ensemble holds fewer than four
+    /// replicas; zero at step 0, which carries no spread.
+    pub fn get_nuclide_uncertainty_standard_error(
+        &self,
+        material_id: u32,
+        nuclide: &str,
+        step: usize,
+    ) -> Option<f64> {
+        let ensemble = self.uncertainty.get(&material_id)?;
+        if step == 0 {
+            return Some(0.0);
+        }
+        crate::uncertainty::std_dev_standard_error(&ensemble.samples_at(step - 1, nuclide))
+    }
+
     /// The standard deviation of a nuclide's density at every step.
     ///
     /// Parallel to [`Self::get_nuclide_evolution`], leading zero included, so

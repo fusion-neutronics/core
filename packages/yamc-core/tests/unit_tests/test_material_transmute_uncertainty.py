@@ -543,10 +543,13 @@ def test_no_covariance_gives_an_absent_spread_rather_than_a_confident_zero():
     assert estimate.std_dev is None
     assert estimate.mean is None
     assert estimate.relative_std_dev is None
+    assert estimate.std_dev_standard_error is None
     assert estimate.nominal > 0.0, "the unperturbed run still has an answer"
 
     # The neighbouring accessor's answer to the same question, for contrast.
     assert results.get_nuclide_uncertainty(mid, "Mn56", 1) == 0.0
+    # Its standard error needs four replicas, and there are none.
+    assert results.get_nuclide_uncertainty_standard_error(mid, "Mn56", 1) is None
 
 
 def test_by_nuclide_agrees_with_the_material_breakdown_it_mirrors():
