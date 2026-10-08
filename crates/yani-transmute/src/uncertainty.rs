@@ -702,6 +702,43 @@ pub struct Attribution {
     pub by_source: BTreeMap<String, Vec<HashMap<String, f64>>>,
     /// First-order contributions, the largest-reaching first.
     pub contributors: Vec<Contributor>,
+    /// How well first order explains the replicas, per source and as
+    /// `"all"` for every source together: `[step][nuclide]`. `None` for a
+    /// source with no first-order terms (`flux_spectrum`, `statistical`,
+    /// `decay_energy`), whose variance first order does not try to explain,
+    /// and for `"all"` when any applied source is one of those.
+    pub linearity: BTreeMap<String, Option<Vec<HashMap<String, Linearity>>>>,
+}
+
+/// The residual share above which first order is flagged as missing a real
+/// part of an output's variance: past a tenth, a first-order ranking can
+/// misorder the inputs that matter.
+pub const LINEARITY_FLAG: f64 = 0.1;
+
+/// How well the first-order contributions explain one output's replicas.
+///
+/// Each replica's first-order prediction is the nominal output plus every
+/// sensitivity times that replica's own relative change in its input (the
+/// perturbed rate over the nominal, the drawn half-life over the nominal, the
+/// drawn branching over the nominal), so no extra solve is made. Compared
+/// with what the replica actually produced, this measures what first order
+/// leaves out: nonlinearity, and interactions between inputs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Linearity {
+    /// Squared correlation between the replicas and their first-order
+    /// predictions.
+    pub r2: f64,
+    /// `Var(actual - predicted) / Var(actual)`: the share of the output's
+    /// variance first order does not account for.
+    pub residual_share: f64,
+    /// Per (source, nuclide) contributor, the squared correlation between the
+    /// replicas and that contributor's first-order term alone.
+    pub by_contributor: BTreeMap<(String, String), f64>,
+    /// Whether the contributor ranked first by first-order variance is also
+    /// the one whose term correlates most with the replicas.
+    pub ranking_agrees: bool,
+    /// `residual_share` above [`LINEARITY_FLAG`], or the ranking disagrees.
+    pub flagged: bool,
 }
 
 /// One first-order contribution to the inventory variance.

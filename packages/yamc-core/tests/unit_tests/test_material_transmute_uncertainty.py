@@ -822,6 +822,9 @@ def test_the_breakdown_says_which_source_carries_the_variance():
     assert b["by_source"] == {"flux_spectrum": b["variance"]}
     assert b["unattributed"] == 0.0
     assert isinstance(b["contributors"], list)
+    # The flux has no first-order terms: its linearity is not applicable, not
+    # read as nonlinear.
+    assert b["linearity"] == {"flux_spectrum": None, "all": None}
     assert results.get_uncertainty_breakdown(mid, "Mn56", 0)["variance"] == 0.0
 
 

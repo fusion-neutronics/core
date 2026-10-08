@@ -159,6 +159,10 @@ pub struct UncertaintyBreakdown {
     pub by_source: std::collections::BTreeMap<String, f64>,
     pub unattributed: f64,
     pub contributors: Vec<(String, String, Option<String>, f64)>,
+    /// How well first order explains this nuclide's replicas, per source and
+    /// `"all"`; `None` for a source first order has no terms for, and absent
+    /// where the nuclide had no spread.
+    pub linearity: std::collections::BTreeMap<String, Option<crate::uncertainty::Linearity>>,
 }
 
 /// One channel's reaction rate, resolved onto the spectrum's own groups.
@@ -361,11 +365,23 @@ impl TransmutationResults {
                 Some((c.source.clone(), c.nuclide.clone(), c.reaction.clone(), v))
             })
             .collect();
+        let linearity = attribution
+            .linearity
+            .iter()
+            .filter_map(|(source, per_step)| match per_step {
+                None => Some((source.clone(), None)),
+                Some(per_step) => per_step
+                    .get(i)
+                    .and_then(|m| m.get(nuclide))
+                    .map(|l| (source.clone(), Some(l.clone()))),
+            })
+            .collect();
         Some(UncertaintyBreakdown {
             variance,
             by_source,
             unattributed,
             contributors,
+            linearity,
         })
     }
 
