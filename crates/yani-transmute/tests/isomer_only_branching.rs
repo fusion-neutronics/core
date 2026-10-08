@@ -34,7 +34,7 @@ fn reaction(mt: i32, threshold_idx: usize, energy: Vec<f64>, cross_section: Vec<
         energy: energy.into(),
         mt_number: mt,
         q_value: 0.0,
-        products: vec![],
+        products: vec![].into(),
         scatter_in_cm: false,
         redundant: false,
     }

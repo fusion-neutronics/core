@@ -138,7 +138,7 @@ fn each_mu_table_takes_its_own_interpolation_code() {
     let mut rows = 0usize;
     for temp_map in &nd.reactions {
         for rxn in temp_map.values() {
-            for prod in &rxn.products {
+            for prod in rxn.products.iter() {
                 for ae in &prod.distribution {
                     let AngleEnergyDistribution::CorrelatedAngleEnergy { correlated } = ae else {
                         continue;

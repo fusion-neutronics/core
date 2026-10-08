@@ -32,7 +32,7 @@ fn correlated_mu_subtables_bounded_and_monotonic() {
     let mut max_pts = 0usize;
     for temp_map in &nd.reactions {
         for rxn in temp_map.values() {
-            for prod in &rxn.products {
+            for prod in rxn.products.iter() {
                 for ae in &prod.distribution {
                     if let AngleEnergyDistribution::CorrelatedAngleEnergy { correlated } = ae {
                         for ct in &correlated.distributions {

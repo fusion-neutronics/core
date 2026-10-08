@@ -40,7 +40,7 @@ fn main() {
             let Some(rxn) = rxns.get(&mt) else {
                 continue;
             };
-            for p in &rxn.products {
+            for p in rxn.products.iter() {
                 if !p.is_particle_type(&yamc_nuclide::particle_type::ParticleType::Neutron) {
                     continue;
                 }

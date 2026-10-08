@@ -332,7 +332,7 @@ impl FastXSGrid {
                 } else {
                     1.0
                 };
-                for product in &reaction.products {
+                for product in reaction.products.iter() {
                     if product.is_particle_type(&ParticleType::Photon) {
                         let y = product
                             .product_yield
@@ -399,7 +399,7 @@ mod tests {
             energy,
             mt_number: mt,
             q_value: 0.0,
-            products,
+            products: products.into(),
             scatter_in_cm: false,
             redundant,
         })

@@ -2792,7 +2792,7 @@ mod tests {
             energy: energy.into(),
             mt_number: 16,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         };

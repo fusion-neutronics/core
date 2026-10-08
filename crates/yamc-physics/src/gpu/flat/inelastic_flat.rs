@@ -507,7 +507,8 @@ mod tests {
                 applicability: Vec::new(),
                 distribution: dist,
                 product_yield: None,
-            }],
+            }]
+            .into(),
             scatter_in_cm: true,
             redundant: false,
         }
@@ -520,7 +521,7 @@ mod tests {
     fn unrecognised_law_reports_no_outgoing_energy_law() {
         // No products at all.
         let mut bare = reaction_with(Vec::new());
-        bare.products.clear();
+        bare.products = Vec::new().into();
         assert!(!InelasticFlat::from_reaction(&bare).has_outgoing_energy_law());
         // A neutron product with no distribution.
         assert!(!InelasticFlat::from_reaction(&reaction_with(Vec::new())).has_outgoing_energy_law());

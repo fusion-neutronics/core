@@ -71,7 +71,7 @@ fn scaled_reaction_at(
         energy: grid.tail(threshold_idx),
         mt_number: mt,
         q_value: -1.5e6,
-        products,
+        products: products.into(),
         scatter_in_cm: true,
         redundant: false,
     })

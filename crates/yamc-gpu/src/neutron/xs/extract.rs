@@ -372,7 +372,7 @@ pub fn extract_xs_from_nuclide(
             q_inelastic_per_mt[slot] = rxn.q_value;
             // First neutron product carries the yield. Mirrors
             // `sample_from_products_with_awr` in yamc::inelastic.
-            for product in &rxn.products {
+            for product in rxn.products.iter() {
                 if !product.is_particle_type(&yamc_nuclide::particle_type::ParticleType::Neutron) {
                     continue;
                 }
@@ -1835,7 +1835,7 @@ fn extract_watt_params(nuclides: &[(&Nuclide, f64)], temperature: &str) -> Optio
             let Some(rxn) = reactions.get(fmt) else {
                 continue;
             };
-            for product in &rxn.products {
+            for product in rxn.products.iter() {
                 if !product.is_particle_type(&yamc_nuclide::particle_type::ParticleType::Neutron) {
                     continue;
                 }

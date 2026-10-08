@@ -43,7 +43,7 @@ fn main() {
         };
 
         let mut found_any = false;
-        for p in &rxn.products {
+        for p in rxn.products.iter() {
             if !p.is_particle_type(&ParticleType::Neutron) {
                 continue;
             }

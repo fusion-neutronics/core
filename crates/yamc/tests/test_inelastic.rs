@@ -19,7 +19,7 @@ fn test_inelastic_scatter_panics_without_products() {
         energy: vec![1e5].into(),
         mt_number: 16,   // (n,2n) reaction
         q_value: -6.0e6, // Endothermic, 6 MeV threshold
-        products: vec![],
+        products: vec![].into(),
         scatter_in_cm: false,
         redundant: false,
     };
@@ -44,7 +44,7 @@ fn test_single_neutron_reaction_panics_without_products() {
         energy: vec![1e5].into(),
         mt_number: 51,   // Discrete inelastic level
         q_value: -1.0e6, // 1 MeV excitation energy
-        products: vec![],
+        products: vec![].into(),
         scatter_in_cm: false,
         redundant: false,
     };

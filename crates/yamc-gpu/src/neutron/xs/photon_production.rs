@@ -543,7 +543,7 @@ pub fn extract_photon_production_xs(
 
             // One packed product per photon product of this reaction, in
             // product order (matches the CPU `photon_product_idx` ordering).
-            for product in &rxn.products {
+            for product in rxn.products.iter() {
                 if !product.is_particle_type(&ParticleType::Photon) {
                     continue;
                 }
@@ -772,7 +772,7 @@ mod tests {
             } else {
                 1.0
             };
-            for product in &reaction.products {
+            for product in reaction.products.iter() {
                 if product.is_particle_type(&ParticleType::Photon) {
                     let y = product
                         .product_yield
@@ -837,7 +837,7 @@ mod tests {
         let cpu_n_products: usize = {
             let mut n = 0;
             for j in 0..grid.photon_rxn_mt_numbers.len() {
-                for product in &grid.photon_rxn_reactions[j].products {
+                for product in grid.photon_rxn_reactions[j].products.iter() {
                     if product.is_particle_type(&ParticleType::Photon) {
                         n += 1;
                     }
@@ -923,7 +923,7 @@ mod tests {
         let mut n_continuous = 0usize;
         let mut max_slot: i64 = -1;
         for &j in &order {
-            for product in &grid.photon_rxn_reactions[j].products {
+            for product in grid.photon_rxn_reactions[j].products.iter() {
                 if !product.is_particle_type(&ParticleType::Photon) {
                     continue;
                 }
@@ -998,7 +998,7 @@ mod tests {
             energy: energy_grid.clone().into(),
             mt_number: 2,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         };

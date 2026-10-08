@@ -1866,7 +1866,7 @@ mod tests {
             energy: e.into(),
             mt_number: 102,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         }
@@ -1913,7 +1913,7 @@ mod tests {
             energy: e.into(),
             mt_number: 102,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         };
@@ -1950,7 +1950,7 @@ mod tests {
             energy: e.clone().into(),
             mt_number: 102,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         };
@@ -1991,7 +1991,7 @@ mod tests {
             energy: e.into(),
             mt_number: 102,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         };
@@ -2017,7 +2017,7 @@ mod tests {
             energy: vec![energy_range.0, energy_range.1].into(),
             mt_number: mt,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         }
@@ -2031,7 +2031,7 @@ mod tests {
             energy: vec![e0, e1].into(),
             mt_number: mt,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         }
@@ -2110,7 +2110,7 @@ mod tests {
             energy: vec![1e5, 1e6].into(),
             mt_number: 16,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         };
@@ -2153,7 +2153,7 @@ mod tests {
             energy: energy.into(),
             mt_number: 102,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         }

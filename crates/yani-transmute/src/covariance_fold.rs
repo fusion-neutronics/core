@@ -1750,7 +1750,7 @@ fn summed(mt: i32, parts: &[&Reaction]) -> Option<Reaction> {
         energy: grid.to_vec().into(),
         mt_number: mt,
         q_value: 0.0,
-        products: vec![],
+        products: vec![].into(),
         scatter_in_cm: false,
         redundant: true,
     })
@@ -3242,7 +3242,7 @@ mod stated_variance_tests {
             energy: vec![1.0e-5, 1.0e4, 2.0e7].into(),
             mt_number: mt,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         }
@@ -3607,7 +3607,7 @@ mod integration_range_tests {
             energy: vec![e0, e1].into(),
             mt_number: 102,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         }
@@ -3822,7 +3822,7 @@ mod shielded_split_tests {
             energy: vec![1.0e-5, 1.0, 50.0, 500.0, 5.0e3, 5.0e4, 2.0e7].into(),
             mt_number: 102,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         }
@@ -4043,7 +4043,7 @@ mod same_evaluation_tests {
             energy: vec![1.0e-5, 1.0e4, 2.0e7].into(),
             mt_number: mt,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         }
@@ -4543,7 +4543,7 @@ mod nc_derived_tests {
             energy: vec![1.0e-5, 1.0e5, 2.0e7].into(),
             mt_number: mt,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         }
@@ -5218,7 +5218,7 @@ mod lumped_tests {
             energy: vec![1.0e-5, 1.0e5, 2.0e7].into(),
             mt_number: mt,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         }
@@ -5721,7 +5721,7 @@ mod transport_field_tests {
             energy: vec![1.0e-5, 2.0e7].into(),
             mt_number: mt,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant,
         }
