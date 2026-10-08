@@ -1184,6 +1184,35 @@ impl Nuclide {
     pub fn reload_source(&self) -> Option<String> {
         self.data_source.clone().or_else(|| self.data_path.clone())
     }
+
+    /// Forget the loaded `temperatures`: their reactions, lookups, URR tables
+    /// and energy grids. `available_temperatures` is untouched, so a later
+    /// request for one resolves against the file and reloads it.
+    ///
+    /// The per-temperature vectors are parallel to `loaded_temperatures`, except
+    /// that `fast_xs` and `urr_data` are empty on a load that carries no
+    /// transport sections, and are left so.
+    pub fn drop_temperatures(&mut self, temperatures: &[String]) {
+        let n = self.loaded_temperatures.len();
+        let fast_xs_parallel = self.fast_xs.len() == n;
+        let urr_parallel = self.urr_data.len() == n;
+        for idx in (0..n).rev() {
+            if !temperatures.contains(&self.loaded_temperatures[idx]) {
+                continue;
+            }
+            let label = self.loaded_temperatures.remove(idx);
+            self.reactions.remove(idx);
+            if fast_xs_parallel {
+                self.fast_xs.remove(idx);
+            }
+            if urr_parallel {
+                self.urr_data.remove(idx);
+            }
+            if let Some(map) = self.energy.as_mut() {
+                map.remove(&label);
+            }
+        }
+    }
 }
 
 impl Nuclide {

@@ -480,6 +480,29 @@ fn a_channel_present_at_one_temperature_and_absent_at_the_other_is_refused() {
 /// parallel structures the nuclide indexes by temperature position would be out
 /// of step with the others, and `get_temp_idx` would return an index that is
 /// right for one and wrong for the rest.
+/// Dropping the neighbours of a blend must take the same position out of every
+/// structure indexed by temperature, and leave the blend reachable by label.
+#[test]
+fn dropping_the_neighbours_keeps_every_indexed_structure_in_step() {
+    let mut n = two_temperature_nuclide();
+    yamc_nuclide::blend::synthesise_temperature(&mut n, "450").expect("450 is bracketed");
+    let blended_grid = n.fast_xs[1].energy.as_slice().to_vec();
+
+    n.drop_temperatures(&["294".to_string(), "600".to_string()]);
+
+    assert_eq!(n.loaded_temperatures, vec!["450"]);
+    assert_eq!(n.reactions.len(), 1);
+    assert_eq!(n.fast_xs.len(), 1);
+    assert_eq!(n.urr_data.len(), 1);
+    assert_eq!(n.get_temp_idx("450"), Some(0));
+    assert_eq!(n.fast_xs[0].energy.as_slice(), blended_grid.as_slice());
+    let energy = n.energy.as_ref().expect("energy map");
+    assert!(energy.contains_key("450"));
+    assert!(!energy.contains_key("294") && !energy.contains_key("600"));
+    // What the file offers is unchanged, so either neighbour can be reloaded.
+    assert_eq!(n.available_temperatures, vec!["294", "600"]);
+}
+
 #[test]
 fn synthesising_a_temperature_keeps_every_indexed_structure_in_step() {
     let mut n = two_temperature_nuclide();

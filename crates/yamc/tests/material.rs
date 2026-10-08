@@ -820,12 +820,10 @@ mod tests {
             .expect("300 K is bracketed by 294 K and 600 K");
         let be9 = mat.nuclide_data.get("Be9").expect("Be9 not loaded");
 
-        // The two rungs it was built from, and the rung itself, in numeric
-        // order. Nothing else: a 300 K material has no use for 900 K.
-        assert_eq!(
-            be9.loaded_temperatures,
-            vec!["294".to_string(), "300".to_string(), "600".to_string()]
-        );
+        // The blend alone. Its 294 K and 600 K neighbours are read to build it
+        // and then dropped: a 300 K material reads neither, and has no use for
+        // 900 K either.
+        assert_eq!(be9.loaded_temperatures, vec!["300".to_string()]);
         assert!(be9.get_temp_idx("300").is_some());
 
         // The file's own ladder is unchanged. Adding "300" to it would make a
