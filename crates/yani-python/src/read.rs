@@ -42,8 +42,8 @@ use yamc_nuclide::load_scope::{LoadScope, SectionScope};
 /// dict
 ///     ``name``, ``atomic_number``, ``mass_number``, ``atomic_weight_ratio``,
 ///     ``fissionable``, ``urr_present``, ``available_temperatures``,
-///     ``loaded_temperatures``, ``mts``, ``energy_points`` and
-///     ``scope_loaded``.
+///     ``loaded_temperatures``, ``mts``, ``energy_points``,
+///     ``angular_covariance`` and ``scope_loaded``.
 ///
 ///     ``energy_points`` is a dict of temperature to grid length, over the
 ///     loaded temperatures. Not one number: the reader also keeps the 0 K union
@@ -54,6 +54,12 @@ use yamc_nuclide::load_scope::{LoadScope, SectionScope};
 ///     There is no ``library`` key. The Arrow loader does not populate that
 ///     field, so it would report ``None`` for every directory, correct or not.
 ///     Read ``version.json`` for it.
+///
+///     ``angular_covariance`` is the folder's MF=34 (``angular_covariance.arrow``),
+///     summarised as ``{mt: [(l, l1), ...]}``: per reaction, the sorted (L, L1)
+///     pairs of Legendre orders a covariance block correlates. ``None`` when
+///     the folder has none. It is read whatever ``scope`` says, since it is a
+///     separate optional section.
 ///
 ///     ``scope_loaded`` is the one to assert on, and it is not always the
 ///     ``scope`` asked for: a directory holding no transport sections narrows a
@@ -74,12 +80,13 @@ use yamc_nuclide::load_scope::{LoadScope, SectionScope};
 #[pyo3(signature = (path, scope = "full"))]
 pub fn read_nuclide_from_arrow(py: Python, path: &str, scope: &str) -> PyResult<Py<PyAny>> {
     let requested = match scope {
-        "full" => LoadScope::full(),
+        "full" => LoadScope::full().with_angular_covariance(true),
         "xs" => LoadScope {
             sections: SectionScope::XsOnly,
             mts: None,
             temperatures: None,
             covariance: false,
+            angular_covariance: true,
         },
         other => {
             return Err(PyValueError::new_err(format!(
@@ -130,6 +137,19 @@ pub fn read_nuclide_from_arrow(py: Python, path: &str, scope: &str) -> PyResult<
         }
     }
     dict.set_item("energy_points", energy_points)?;
+    let angular = nuclide.angular_covariance.as_ref().map(|blocks| {
+        let mut by_mt: std::collections::BTreeMap<i32, Vec<(i32, i32)>> =
+            std::collections::BTreeMap::new();
+        for b in blocks.iter() {
+            by_mt.entry(b.mt).or_default().push((b.l, b.l1));
+        }
+        for pairs in by_mt.values_mut() {
+            pairs.sort_unstable();
+            pairs.dedup();
+        }
+        by_mt
+    });
+    dict.set_item("angular_covariance", angular)?;
     dict.set_item(
         "scope_loaded",
         match nuclide.load_scope.sections {

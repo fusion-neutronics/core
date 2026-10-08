@@ -2530,6 +2530,10 @@ class Model:
             - ``not_perturbed``: inputs no transport uncertainty run perturbs
               whatever the data, such as secondary angular and energy
               distributions.
+            - ``angular_covariance``: per nuclide whose evaluation carries MF=34
+              (the covariance of angular distributions), ``{mt: [(l, l1), ...]}``:
+              the sorted pairs of Legendre orders a covariance block correlates.
+              Reported so the data is visible; it is not sampled yet.
         
         Raises:
             RuntimeError: If a material's nuclear data cannot be loaded.
@@ -7027,8 +7031,8 @@ def read_nuclide_from_arrow(path: builtins.str, scope: builtins.str = 'full') ->
     dict
         ``name``, ``atomic_number``, ``mass_number``, ``atomic_weight_ratio``,
         ``fissionable``, ``urr_present``, ``available_temperatures``,
-        ``loaded_temperatures``, ``mts``, ``energy_points`` and
-        ``scope_loaded``.
+        ``loaded_temperatures``, ``mts``, ``energy_points``,
+        ``angular_covariance`` and ``scope_loaded``.
     
         ``energy_points`` is a dict of temperature to grid length, over the
         loaded temperatures. Not one number: the reader also keeps the 0 K union
@@ -7039,6 +7043,12 @@ def read_nuclide_from_arrow(path: builtins.str, scope: builtins.str = 'full') ->
         There is no ``library`` key. The Arrow loader does not populate that
         field, so it would report ``None`` for every directory, correct or not.
         Read ``version.json`` for it.
+    
+        ``angular_covariance`` is the folder's MF=34 (``angular_covariance.arrow``),
+        summarised as ``{mt: [(l, l1), ...]}``: per reaction, the sorted (L, L1)
+        pairs of Legendre orders a covariance block correlates. ``None`` when
+        the folder has none. It is read whatever ``scope`` says, since it is a
+        separate optional section.
     
         ``scope_loaded`` is the one to assert on, and it is not always the
         ``scope`` asked for: a directory holding no transport sections narrows a

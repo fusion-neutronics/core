@@ -63,6 +63,11 @@ pub struct DataUncertaintyCoverage {
     /// Inputs a run holds at nominal whatever the data, so a small sigma is
     /// not read as one these were included in.
     pub not_perturbed: Vec<String>,
+    /// Every nuclide whose evaluation carries MF=34, the covariance of
+    /// angular distributions: per reaction, the sorted (L, L1) pairs of
+    /// Legendre orders a covariance block correlates. Reported so the data is
+    /// visible; no run samples it yet, which `not_perturbed` says.
+    pub angular_covariance: BTreeMap<String, BTreeMap<i32, Vec<(i32, i32)>>>,
 }
 
 /// The inputs no transport uncertainty run perturbs, whatever the evaluation
@@ -101,6 +106,22 @@ impl Model {
             material
                 .ensure_covariance_loaded()
                 .map_err(|e| format!("loading covariance: {e}"))?;
+            material
+                .ensure_angular_covariance_loaded()
+                .map_err(|e| format!("loading angular covariance: {e}"))?;
+            for (name, nuclide) in &material.nuclide_data {
+                let Some(blocks) = &nuclide.angular_covariance else {
+                    continue;
+                };
+                let by_mt = report.angular_covariance.entry(name.clone()).or_default();
+                for b in blocks.iter() {
+                    by_mt.entry(b.mt).or_default().push((b.l, b.l1));
+                }
+                for pairs in by_mt.values_mut() {
+                    pairs.sort_unstable();
+                    pairs.dedup();
+                }
+            }
             let material = Arc::new(material);
             *material_arc = Arc::clone(&material);
 

@@ -13,6 +13,7 @@
 //! implementation: the sums it builds must reproduce the evaluation's own
 //! total.
 
+pub mod angular_covariance;
 pub mod covariance;
 pub mod distributions;
 pub mod energy_ranges;

@@ -467,6 +467,10 @@ impl PyModel {
     ///     - ``not_perturbed``: inputs no transport uncertainty run perturbs
     ///       whatever the data, such as secondary angular and energy
     ///       distributions.
+    ///     - ``angular_covariance``: per nuclide whose evaluation carries MF=34
+    ///       (the covariance of angular distributions), ``{mt: [(l, l1), ...]}``:
+    ///       the sorted pairs of Legendre orders a covariance block correlates.
+    ///       Reported so the data is visible; it is not sampled yet.
     ///
     /// Raises:
     ///     RuntimeError: If a material's nuclear data cannot be loaded.
@@ -521,6 +525,7 @@ impl PyModel {
             report.without_data.iter().cloned().collect::<Vec<_>>(),
         )?;
         d.set_item("not_perturbed", report.not_perturbed.clone())?;
+        d.set_item("angular_covariance", &report.angular_covariance)?;
         Ok(d)
     }
 

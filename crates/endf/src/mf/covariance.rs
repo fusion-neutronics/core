@@ -227,6 +227,9 @@ pub fn parse_mf33(reader: &mut Reader) -> Result<Mf33> {
 /// The covariance blocks of one (L, L1) pair.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Mf34SubSubsection {
+    /// LCT of this (L, L1) pair: the frame its Legendre coefficients are in
+    /// (1 laboratory, 2 centre of mass, 0 the same as MF=4's).
+    pub lct: i64,
     /// The symmetry flag of each covariance block.
     pub ls: Vec<f64>,
     /// The covariance matrix type of each block, read from its own field
@@ -243,8 +246,10 @@ pub struct Mf34Subsection {
     pub mat1: i64,
     pub mt1: i64,
     pub nl: i64,
+    /// NL1, the number of Legendre orders of reaction MT1. Equal to NL for a
+    /// reaction's covariance with itself.
+    pub nl1: i64,
     pub nss: i64,
-    pub lct: i64,
     /// Legendre order of each sub-subsection. Floats, as upstream stores them.
     pub l: Vec<f64>,
     pub l1: Vec<f64>,
@@ -290,21 +295,22 @@ pub fn parse_mf34(reader: &mut Reader, mt: i64) -> Result<Mf34> {
             mat1,
             mt1,
             nl,
+            nl1,
             nss,
             ..Default::default()
         };
 
-        for n in 0..nss.max(0) {
+        for _ in 0..nss.max(0) {
             let c = reader.cont_record()?;
             let ni = c.n2;
             sub.l.push(c.l1 as f64);
             sub.l1.push(c.l2 as f64);
             sub.ni.push(ni as f64);
-            if n == 0 {
-                sub.lct = c.n1;
-            }
 
-            let mut subsub = Mf34SubSubsection::default();
+            let mut subsub = Mf34SubSubsection {
+                lct: c.n1,
+                ..Default::default()
+            };
             for _ in 0..ni.max(0) {
                 let list = reader.list_record()?;
                 subsub.ls.push(list.cont.l1 as f64);
@@ -320,6 +326,63 @@ pub fn parse_mf34(reader: &mut Reader, mt: i64) -> Result<Mf34> {
     }
 
     Ok(data)
+}
+
+/// Split one MF=34 covariance block, a LIST record's header fields and
+/// values, into the [`NiSubsection`] shape MF=33 blocks take (ENDF-102
+/// section 34.2).
+///
+/// - LB 0 to 2: `NE` pairs of (E, F), all in the first table (`ek`, `fk`).
+///   MF=34 states no second table for them, so `lt` is zero.
+/// - LB=5: `NE` energies, then the matrix in the format's packed order
+///   (`fkk`); `ls` says whether it is symmetric.
+/// - LB=6: `NER` row energies (the header's `N2`), `NEC = (NT - 1) / NER`
+///   column energies, then the matrix (`fkl`).
+///
+/// Any other LB is refused: ENDF-102 allows only these in MF=34.
+pub fn split_mf34_block(
+    ls: i64,
+    lb: i64,
+    nt: i64,
+    ne: i64,
+    values: &[f64],
+) -> Result<NiSubsection> {
+    let v = values;
+    let mut block = NiSubsection {
+        ls,
+        lb,
+        nt,
+        ..Default::default()
+    };
+    match lb {
+        0..=2 => {
+            block.ne = ne;
+            let split = (2 * ne).clamp(0, v.len() as i64) as usize;
+            block.ek = column(&v[..split], 0, 2);
+            block.fk = column(&v[..split], 1, 2);
+        }
+        5 => {
+            block.ne = ne;
+            let ne = ne.clamp(0, v.len() as i64) as usize;
+            block.ek = v[..ne].to_vec();
+            block.fkk = v[ne..].to_vec();
+        }
+        6 => {
+            block.ner = ne;
+            let ner = ne.max(0) as usize;
+            block.nec = if ner > 0 { (nt - 1) / ne } else { 0 };
+            let nec = block.nec.max(0) as usize;
+            block.er = v[..ner.min(v.len())].to_vec();
+            block.ec = v[ner.min(v.len())..(ner + nec).min(v.len())].to_vec();
+            block.fkl = v[(ner + nec).min(v.len())..].to_vec();
+        }
+        _ => {
+            return Err(Error::Unsupported {
+                what: "an MF=34 LB value other than 0, 1, 2, 5 or 6",
+            })
+        }
+    }
+    Ok(block)
 }
 
 // -------------------------------------------------------------------------
@@ -380,6 +443,42 @@ pub fn parse_mf40(reader: &mut Reader) -> Result<Mf40> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_mf34_lb1_block_is_one_table_of_pairs() {
+        let b = split_mf34_block(0, 1, 6, 3, &[1.0, 0.1, 2.0, 0.2, 3.0, 0.3]).unwrap();
+        assert_eq!(b.ek, vec![1.0, 2.0, 3.0]);
+        assert_eq!(b.fk, vec![0.1, 0.2, 0.3]);
+        assert!(b.el.is_empty() && b.fl.is_empty());
+        assert_eq!((b.lb, b.ne, b.lt), (1, 3, 0));
+    }
+
+    #[test]
+    fn an_mf34_lb5_block_is_energies_then_the_packed_matrix() {
+        // Symmetric (LS=1), NE=3 energies, so two intervals and three packed
+        // values.
+        let b = split_mf34_block(1, 5, 6, 3, &[1.0, 2.0, 3.0, 0.1, 0.2, 0.3]).unwrap();
+        assert_eq!(b.ek, vec![1.0, 2.0, 3.0]);
+        assert_eq!(b.fkk, vec![0.1, 0.2, 0.3]);
+        assert_eq!((b.ls, b.lb, b.ne), (1, 5, 3));
+    }
+
+    #[test]
+    fn an_mf34_lb6_block_splits_rows_columns_and_matrix() {
+        // NER=2 rows, NEC=(NT-1)/NER=3 columns: 2 + 3 + 2 values, NT=7.
+        let v = [1.0, 2.0, 10.0, 20.0, 30.0, 0.5, 0.6];
+        let b = split_mf34_block(0, 6, 7, 2, &v).unwrap();
+        assert_eq!(b.er, vec![1.0, 2.0]);
+        assert_eq!(b.ec, vec![10.0, 20.0, 30.0]);
+        assert_eq!(b.fkl, vec![0.5, 0.6]);
+        assert_eq!((b.ner, b.nec), (2, 3));
+    }
+
+    #[test]
+    fn an_mf34_block_with_an_unknown_lb_is_refused() {
+        assert!(split_mf34_block(0, 8, 2, 1, &[1.0, 2.0]).is_err());
+    }
+
     use super::*;
 
     fn f(v: f64) -> String {

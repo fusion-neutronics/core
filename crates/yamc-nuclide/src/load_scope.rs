@@ -55,6 +55,11 @@ pub struct LoadScope {
     /// without it. Off by default, so nothing on the ordinary path reads or
     /// allocates it.
     pub covariance: bool,
+    /// Whether to read `angular_covariance.arrow`, the MF=34 covariance of
+    /// angular distributions. Separate from `covariance` because nothing that
+    /// samples cross sections needs it, so an uncertainty run does not fetch
+    /// it. Off by default.
+    pub angular_covariance: bool,
 }
 
 impl LoadScope {
@@ -70,12 +75,19 @@ impl LoadScope {
             mts: Some(mts),
             temperatures: None,
             covariance: false,
+            angular_covariance: false,
         }
     }
 
     /// Also read `covariance.arrow`.
     pub fn with_covariance(mut self, covariance: bool) -> Self {
         self.covariance = covariance;
+        self
+    }
+
+    /// Also read `angular_covariance.arrow`.
+    pub fn with_angular_covariance(mut self, angular_covariance: bool) -> Self {
+        self.angular_covariance = angular_covariance;
         self
     }
 
@@ -121,6 +133,7 @@ impl LoadScope {
         // a request that does not either.
         sections_ok
             && (self.covariance || !other.covariance)
+            && (self.angular_covariance || !other.angular_covariance)
             && covers_set(self.mts.as_ref(), other.mts.as_ref())
             && covers_set(self.temperatures.as_ref(), other.temperatures.as_ref())
     }
@@ -142,6 +155,7 @@ impl LoadScope {
             mts: union_set(self.mts.as_ref(), other.mts.as_ref()),
             temperatures: union_set(self.temperatures.as_ref(), other.temperatures.as_ref()),
             covariance: self.covariance || other.covariance,
+            angular_covariance: self.angular_covariance || other.angular_covariance,
         }
     }
 }

@@ -191,10 +191,30 @@ impl Material {
     /// alternative, failing the whole transmutation because one trace daughter
     /// cannot be located, would be worse than a reported gap.
     pub fn ensure_covariance_loaded(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.widen_scope(|s| s.covariance, |s| s.with_covariance(true))
+    }
+
+    /// [`Self::ensure_covariance_loaded`] for MF=34, `angular_covariance.arrow`:
+    /// re-read every nuclide loaded without it, widening that axis alone.
+    /// Absent data is not an error, for the same reasons.
+    pub fn ensure_angular_covariance_loaded(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.widen_scope(
+            |s| s.angular_covariance,
+            |s| s.with_angular_covariance(true),
+        )
+    }
+
+    /// Re-read every nuclide whose scope lacks what `has` asks for, at the
+    /// scope `widen` makes of its current one.
+    fn widen_scope(
+        &mut self,
+        has: impl Fn(&yamc_nuclide::LoadScope) -> bool,
+        widen: impl Fn(yamc_nuclide::LoadScope) -> yamc_nuclide::LoadScope,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let narrow: Vec<String> = self
             .nuclide_data
             .iter()
-            .filter(|(_, n)| !n.load_scope.covariance)
+            .filter(|(_, n)| !has(&n.load_scope))
             .map(|(name, _)| name.clone())
             .collect();
 
@@ -213,11 +233,11 @@ impl Material {
                 continue;
             };
 
-            // Widen the covariance axis and nothing else. `LoadScope::full()`
+            // Widen the one axis and nothing else. `LoadScope::full()`
             // would union to Full with every MT and re-read the transport
             // sections an activation load deliberately skipped.
             let path_map = HashMap::from([(name.clone(), source)]);
-            let widened = get_or_load_nuclide(&name, &path_map, &scope.with_covariance(true))?;
+            let widened = get_or_load_nuclide(&name, &path_map, &widen(scope))?;
             self.nuclide_data.insert(name, widened);
         }
         Ok(())

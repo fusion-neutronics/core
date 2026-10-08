@@ -824,6 +824,7 @@ pub fn download_and_cache(
     let cache_name = generate_cache_name(source, nuclide_name);
     let local_path = cache_dir.join(&cache_name);
     let sections = sections_for(kind, scope);
+    let sections = sections.as_slice();
     // Which MTs, if this load reads only some of them. Decides whether
     // reactions.arrow is fetched whole or as the byte ranges those MTs occupy.
     let subset = subset_mts(kind, scope);
@@ -1040,13 +1041,13 @@ const NEUTRON_XS_ONLY_SECTIONS_WITH_COVARIANCE: &[(&str, bool)] = &[
 
 /// Which section objects a scope needs.
 ///
-/// Photon data has no transmutation path, so it is always fetched whole.
+/// Photon data has no transmutation path, so it is always fetched whole. MF=34
+/// (`angular_covariance.arrow`) is added only when the scope asks for it, and
+/// optional like `covariance.arrow`: most evaluations have none, and a 404 is
+/// recorded rather than retried.
 #[cfg(feature = "download")]
-fn sections_for(
-    kind: DataKind,
-    scope: &crate::load_scope::LoadScope,
-) -> &'static [(&'static str, bool)] {
-    match kind {
+fn sections_for(kind: DataKind, scope: &crate::load_scope::LoadScope) -> Vec<(&'static str, bool)> {
+    let base: &'static [(&'static str, bool)] = match kind {
         DataKind::Neutron if !scope.wants_transport_sections() => {
             if scope.covariance {
                 NEUTRON_XS_ONLY_SECTIONS_WITH_COVARIANCE
@@ -1057,7 +1058,12 @@ fn sections_for(
         DataKind::Neutron if scope.covariance => NEUTRON_SECTIONS_WITH_COVARIANCE,
         DataKind::Neutron => NEUTRON_SECTIONS,
         DataKind::Photon => PHOTON_SECTIONS,
+    };
+    let mut sections = base.to_vec();
+    if kind == DataKind::Neutron && scope.angular_covariance {
+        sections.push(("angular_covariance.arrow", false));
     }
+    sections
 }
 
 /// The section whose MTs can be fetched a few byte ranges at a time.
@@ -2247,10 +2253,10 @@ mod tests {
         }
         let full = sections_for(DataKind::Neutron, &crate::LoadScope::full());
         assert!(
-            !have_all_sections(&dir.0, full, None),
+            !have_all_sections(&dir.0, &full, None),
             "transport must not be satisfied by a subset"
         );
-        let todo: Vec<&str> = sections_to_fetch(&dir.0, full, None)
+        let todo: Vec<&str> = sections_to_fetch(&dir.0, &full, None)
             .iter()
             .map(|(n, _)| *n)
             .collect();
@@ -2276,8 +2282,8 @@ mod tests {
             DataKind::Neutron,
             &crate::LoadScope::activation(wanted.clone()),
         );
-        assert!(have_all_sections(&dir.0, xs_only, Some(&wanted)));
-        assert!(sections_to_fetch(&dir.0, xs_only, Some(&wanted)).is_empty());
+        assert!(have_all_sections(&dir.0, &xs_only, Some(&wanted)));
+        assert!(sections_to_fetch(&dir.0, &xs_only, Some(&wanted)).is_empty());
     }
 
     /// Only a neutron load that named its MTs may range. Photon data has no
@@ -2300,6 +2306,7 @@ mod tests {
             mts: None,
             temperatures: None,
             covariance: false,
+            angular_covariance: false,
         };
         assert!(subset_mts(DataKind::Neutron, &all_mts).is_none());
     }
@@ -2390,6 +2397,31 @@ mod tests {
         assert_eq!(cov, Some(("covariance.arrow", false)));
     }
 
+    /// MF=34 is fetched only when asked for, on its own axis: an uncertainty
+    /// run that wants MF=33 does not pull it, and it is optional.
+    #[test]
+    fn angular_covariance_is_fetched_only_when_the_scope_asks_for_it() {
+        let names = |scope: &crate::LoadScope| -> Vec<&str> {
+            sections_for(DataKind::Neutron, scope)
+                .iter()
+                .map(|(n, _)| *n)
+                .collect()
+        };
+        let angular = "angular_covariance.arrow";
+        assert!(!names(&crate::LoadScope::full()).contains(&angular));
+        let mf33 = crate::LoadScope::activation([102].into()).with_covariance(true);
+        assert!(!names(&mf33).contains(&angular));
+        let asked = crate::LoadScope::full().with_angular_covariance(true);
+        assert!(names(&asked).contains(&angular));
+        assert!(sections_for(DataKind::Neutron, &asked).contains(&(angular, false)));
+        assert!(
+            !sections_for(DataKind::Photon, &asked)
+                .iter()
+                .any(|(n, _)| *n == angular),
+            "photon data has no MF=34"
+        );
+    }
+
     /// Every other layer ships the fission photon release (the
     /// converter writes it, the schema declares it, the Arrow reader parses
     /// it), but a download-path user only ever sees a section named in this
@@ -2421,27 +2453,27 @@ mod tests {
         // Nothing cached yet: both scopes want all of their own sections.
         let empty = dir.0.join("missing.arrow");
         assert_eq!(
-            sections_to_fetch(&empty, xs_only, None).len(),
+            sections_to_fetch(&empty, &xs_only, None).len(),
             xs_only.len()
         );
-        assert!(!have_all_sections(&empty, xs_only, None));
+        assert!(!have_all_sections(&empty, &xs_only, None));
 
         // Simulate the transmutation load having run.
-        for (name, _) in xs_only {
+        for (name, _) in &xs_only {
             dir.touch(name);
         }
         assert!(
-            have_all_sections(&dir.0, xs_only, None),
+            have_all_sections(&dir.0, &xs_only, None),
             "the activation scope is satisfied"
         );
         assert!(
-            !have_all_sections(&dir.0, full, None),
+            !have_all_sections(&dir.0, &full, None),
             "but transport still needs the rest"
         );
 
         // The follow-up transport fetch asks only for what is missing, which is
         // the whole point: the earlier three are not refetched.
-        let todo: Vec<&str> = sections_to_fetch(&dir.0, full, None)
+        let todo: Vec<&str> = sections_to_fetch(&dir.0, &full, None)
             .iter()
             .map(|(n, _)| *n)
             .collect();
@@ -2461,7 +2493,7 @@ mod tests {
     fn an_absent_marker_settles_an_optional_section() {
         let dir = TempDir::new("absent");
         let full = sections_for(DataKind::Neutron, &crate::LoadScope::full());
-        for (name, required) in full {
+        for (name, required) in &full {
             // Fe56 has no URR, nu or fission-photon tables upstream: those 404
             // and get a marker.
             if *required {
@@ -2469,7 +2501,7 @@ mod tests {
             }
         }
         assert!(
-            !have_all_sections(&dir.0, full, None),
+            !have_all_sections(&dir.0, &full, None),
             "an unmarked optional section still looks unfetched"
         );
 
@@ -2477,10 +2509,10 @@ mod tests {
         dir.touch(&format!("total_nu.arrow{ABSENT_SUFFIX}"));
         dir.touch(&format!("fission_photon.arrow{ABSENT_SUFFIX}"));
         assert!(
-            have_all_sections(&dir.0, full, None),
+            have_all_sections(&dir.0, &full, None),
             "a marker means the origin answered 404, so stop asking"
         );
-        assert!(sections_to_fetch(&dir.0, full, None).is_empty());
+        assert!(sections_to_fetch(&dir.0, &full, None).is_empty());
     }
 
     /// End-to-end network test for the additive path: fetch one nuclide at an

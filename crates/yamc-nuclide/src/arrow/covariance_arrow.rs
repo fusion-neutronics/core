@@ -22,7 +22,9 @@ use endf::mf::covariance::{NcSubsection, NiSubsection};
 use crate::arrow::arrow_helpers::{
     get_str, read_arrow_file, try_get_f64, try_get_f64_list, try_get_i32, try_get_str,
 };
-use crate::covariance::{BranchingCovarianceBlock, CovarianceBlock, CovarianceData};
+use crate::covariance::{
+    AngularCovarianceBlock, BranchingCovarianceBlock, CovarianceBlock, CovarianceData,
+};
 
 /// A nullable `int32` column read as the parser's `i64`, with null as zero.
 ///
@@ -104,6 +106,42 @@ pub fn read_covariance(
         )?);
     }
 
+    Ok(Some(blocks))
+}
+
+/// Read `angular_covariance.arrow` (MF=34) from a `{Nuclide}.arrow/`
+/// directory.
+///
+/// `Ok(None)` when the file is not there, which is every evaluation without
+/// MF=34 and every folder written before the section existed. A file that is
+/// there and cannot be read is an error, as for `covariance.arrow`.
+pub fn read_angular_covariance(
+    dir: &Path,
+) -> Result<Option<Vec<AngularCovarianceBlock>>, Box<dyn Error>> {
+    let path = dir.join("angular_covariance.arrow");
+    if !crate::storage::exists(&path) {
+        return Ok(None);
+    }
+    let batch = read_arrow_file(&path)?;
+    let int = |col: &str, row: usize| int_or_zero(&batch, col, row) as i32;
+    let blocks = (0..batch.num_rows())
+        .map(|row| AngularCovarianceBlock {
+            mt: int("mt", row),
+            subsection_idx: int("subsection_idx", row),
+            pair_idx: int("pair_idx", row),
+            block_idx: int("block_idx", row),
+            mat1: int("mat1", row),
+            mt1: int("mt1", row),
+            ltt: int("ltt", row),
+            nl: int("nl", row),
+            nl1: int("nl1", row),
+            l: int("l", row),
+            l1: int("l1", row),
+            lct: int("lct", row),
+            mat: int("mat", row),
+            block: ni_from_row(&batch, row),
+        })
+        .collect();
     Ok(Some(blocks))
 }
 

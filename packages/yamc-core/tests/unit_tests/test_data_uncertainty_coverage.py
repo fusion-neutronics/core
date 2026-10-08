@@ -60,6 +60,12 @@ def test_iron_reports_what_it_covers_and_how():
     assert "repair" in fe56
     assert coverage["without_data"] == []
     assert any("MF=34" in item for item in coverage["not_perturbed"])
+    # MF=34 is reported where the data has it: a dict per nuclide of
+    # {mt: [(l, l1), ...]}, and every pair is a Legendre order pair.
+    assert isinstance(coverage["angular_covariance"], dict)
+    for by_mt in coverage["angular_covariance"].values():
+        for pairs in by_mt.values():
+            assert pairs == sorted(pairs) and all(len(p) == 2 for p in pairs)
 
 
 def test_a_nuclide_without_covariance_is_named_not_reported_exact():

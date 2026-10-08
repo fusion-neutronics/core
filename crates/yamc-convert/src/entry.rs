@@ -321,6 +321,7 @@ fn write_covariance_if_asked(
         );
     };
     crate::covariance::write_covariance(material, dir)?;
+    crate::angular_covariance::write_angular_covariance(material, dir)?;
     Ok(())
 }
 
