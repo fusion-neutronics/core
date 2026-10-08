@@ -326,6 +326,7 @@ mod tests {
             0,
             crate::uncertainty::HALF_LIFE_STREAM,
             crate::uncertainty::DECAY_ENERGY_STREAM,
+            crate::uncertainty::DECAY_PHOTON_STREAM,
             DECAY_BRANCHING_STREAM,
         ];
         let mut keys = std::collections::HashSet::new();

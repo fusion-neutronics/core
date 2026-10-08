@@ -19,6 +19,7 @@ pub mod covariance_sample;
 pub mod d1s_uncertainty;
 mod decay_branching_uncertainty;
 pub mod derived;
+mod fission_yield_uncertainty;
 pub mod flux_uncertainty;
 mod history_statistics;
 mod material_transmute;
