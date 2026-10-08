@@ -41,28 +41,14 @@ impl Material {
         let source_map: &HashMap<String, String> = &merged;
 
         // Load nuclides using the centralized function in the nuclide module
-        use std::collections::HashSet;
-
-        // Only filter by temperature if explicitly set, otherwise load all temperatures
-        let temp_filter = if !self.temperature.is_empty() {
-            let mut temp_set: HashSet<String> = HashSet::new();
-            temp_set.insert(self.temperature.clone());
-            Some(temp_set)
-        } else {
-            None
-        };
-
+        let scope = self.transport_scope();
         let photon_only = photon_data_paths.is_some() && source_map.is_empty();
         for nuclide_name in nuclide_names {
             if photon_only && !source_map.contains_key(&nuclide_name) {
                 // Photon-only mode: skip nuclides without neutron data
                 continue;
             }
-            let nuclide = get_or_load_nuclide(
-                &nuclide_name,
-                source_map,
-                &LoadScope::full().with_temperatures(temp_filter.clone()),
-            )?;
+            let nuclide = get_or_load_nuclide(&nuclide_name, source_map, &scope)?;
             self.nuclide_data.insert(nuclide_name, nuclide);
         }
 
@@ -427,10 +413,7 @@ impl Material {
                 continue;
             }
 
-            // Load nuclide with all available temperatures (no filter)
-            // Temperature validation is deferred to resolve_temperature() which uses
-            // fallback logic to find a valid temperature
-            match get_or_load_nuclide(&nuclide_name, &source_map, &LoadScope::full()) {
+            match get_or_load_nuclide(&nuclide_name, &source_map, &self.transport_scope()) {
                 Ok(nuclide) => {
                     self.nuclide_data.insert(nuclide_name.clone(), nuclide);
                 }
@@ -488,12 +471,31 @@ impl Material {
             source_map.insert(nuclide_name.to_string(), path);
         }
 
-        match get_or_load_nuclide(nuclide_name, &source_map, &LoadScope::full()) {
+        match get_or_load_nuclide(nuclide_name, &source_map, &self.transport_scope()) {
             Ok(nuclide) => {
                 self.nuclide_data.insert(nuclide_name.to_string(), nuclide);
                 Ok(true)
             }
             Err(e) => Err(format!("Failed to load nuclide '{nuclide_name}': {e}").into()),
         }
+    }
+
+    /// Every section and every MT, at this material's own temperature.
+    ///
+    /// The temperature is the material's label as given, which need not be one
+    /// the data carries: the loader serves a temperature that falls between two
+    /// of the file's by loading both neighbours and blending them once. An
+    /// unlabelled material loads every temperature, so `resolve_temperature`
+    /// can still adopt a single-temperature library's one temperature.
+    ///
+    /// Loading every temperature for a labelled material built a transport
+    /// lookup per temperature the file carries (seven in the published
+    /// libraries) when transport only ever reads one. A query at another
+    /// temperature later still works: `ensure_temperature_loaded` widens on
+    /// the miss.
+    fn transport_scope(&self) -> LoadScope {
+        let temperatures = (!self.temperature.is_empty())
+            .then(|| std::collections::HashSet::from([self.temperature.clone()]));
+        LoadScope::full().with_temperatures(temperatures)
     }
 }
