@@ -354,6 +354,16 @@ pub struct Info {
     /// wider than its evaluation states. How much is in `covariance_repairs`,
     /// which also keeps the repairs of populated nuclides no draw can move.
     pub covariance_repaired: BTreeSet<String>,
+    /// Where each perturbed nuclide's covariance came from, as
+    /// `"<library>, MAT <n>"`: the library its data folder records, and the
+    /// evaluation's own MAT. `"unknown"` for a folder that recorded no library.
+    pub covariance_source: BTreeMap<String, String>,
+    /// Perturbed nuclides whose library documents a problem with this
+    /// covariance, with what it says and where: every FENDL-3.2 covariance,
+    /// and the ENDF/B-VIII.1 evaluations its release paper names. A gap: the
+    /// evaluation is sampled as it is, and its own authors say not to rely on
+    /// it as it is.
+    pub covariance_warnings: BTreeMap<String, Vec<String>>,
     /// One record per repaired (populated nuclide, spectrum): the eigenvalues,
     /// the share of the stated variance the clipping added, and every
     /// channel's evaluated sigma beside the sigma it was sampled at. A repair
@@ -602,6 +612,7 @@ impl Info {
             || !self.derived_opposing_uncorrelated.is_empty()
             || !self.lumped_covariance_not_assignable.is_empty()
             || !self.covariance_repaired.is_empty()
+            || !self.covariance_warnings.is_empty()
             || !self.covariance_repaired_outside_bound.is_empty()
             || self.spectra_without_flux_sigma > 0
             || !self.no_half_life_uncertainty.is_empty()

@@ -345,6 +345,8 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
         "covariance_repaired",
         info.covariance_repaired.iter().cloned().collect::<Vec<_>>(),
     )?;
+    d.set_item("covariance_source", &info.covariance_source)?;
+    d.set_item("covariance_warnings", &info.covariance_warnings)?;
     let repairs = PyList::empty(py);
     for r in &info.covariance_repairs {
         let entry = PyDict::new(py);

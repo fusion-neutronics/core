@@ -141,6 +141,20 @@ fn mn56_gets_a_nuclear_data_uncertainty() {
         "Fe56 carries the covariance, so it must be the perturbed nuclide"
     );
     assert_eq!(info.samples, 96);
+    // The folder's version.json names ENDF/B-VIII.1, whose release paper says
+    // its Fe56 covariance is the VIII.0 one reused, so that is reported, and
+    // counts as a gap.
+    assert!(
+        info.covariance_source["Fe56"].starts_with("endf-b8.1"),
+        "{:?}",
+        info.covariance_source
+    );
+    assert!(
+        info.covariance_warnings["Fe56"][0].contains("VIII.0"),
+        "{:?}",
+        info.covariance_warnings
+    );
+    assert!(info.has_gaps());
 }
 
 /// Asking for uncertainty must not move the answer.

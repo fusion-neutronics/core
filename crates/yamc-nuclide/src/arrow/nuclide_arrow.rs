@@ -305,11 +305,18 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
     // scope recorded on the nuclide, speaks for what is really on disk.
     let scope = &narrow_to_present_sections(dir, scope)?;
 
-    // Check version.json
+    // Check version.json, and read which library the converter stamped, so a
+    // nuclide read from a folder still knows where its data came from.
     let version_path = dir.join("version.json");
+    let mut library: Option<String> = None;
     if crate::storage::exists(&version_path) {
         let version_str = crate::storage::read_to_string(&version_path)?;
         let version: serde_json::Value = serde_json::from_str(&version_str)?;
+        library = version
+            .get("library")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| crate::storage::url_cache::library_keyword(s).to_string());
         let fmt_version = version
             .get("format_version")
             .and_then(|v| v.as_i64())
@@ -755,7 +762,7 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
         neutron_number: Some(a.saturating_sub(z)),
         mass_number: Some(a),
         atomic_weight_ratio: Some(awr),
-        library: None,
+        library,
         energy: Some(energy_map),
         reactions: reactions_per_temp,
         fissionable,

@@ -221,12 +221,10 @@ fn fingerprint_separates_physics_from_observation() {
     let (m2, _) = build_model(2.0, 9_999, 42, false);
     assert_eq!(m1.fingerprint().unwrap(), m2.fingerprint().unwrap());
 
-    // The data-library map names the Li6 fixture.
+    // The data-library map names the library the Li6 fixture's folder
+    // records, as its keyword.
     let libs = m1.data_libraries();
-    assert_eq!(
-        libs.get("n:Li6").map(String::as_str),
-        Some("tests/Li6.arrow")
-    );
+    assert_eq!(libs.get("n:Li6").map(String::as_str), Some("endf-b8.1"));
 }
 
 #[test]

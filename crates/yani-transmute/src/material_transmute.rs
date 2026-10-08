@@ -1649,6 +1649,25 @@ fn run_replicas(
         && crate::multigroup::within_group_weight() == crate::multigroup::Weighting::FlatInEnergy;
     let mut info = Info::from_fold(&coverage, &sigmas, collapsed_flat)?;
     info.lognormal_not_carried = sampler.lognormal_limits();
+    (info.covariance_source, info.covariance_warnings) =
+        crate::covariance_provenance::provenance(&info.perturbed, |name| {
+            let Some(nd) = initial.nuclide_data.get(name) else {
+                return (None, None);
+            };
+            // A keyword names the library outright; a folder says in its
+            // version.json what the converter stamped.
+            let library = nd
+                .data_source
+                .as_deref()
+                .filter(|s| yamc_nuclide::storage::url_cache::is_keyword(s))
+                .map(str::to_string)
+                .or_else(|| nd.library.clone());
+            let mat = nd
+                .covariance
+                .as_ref()
+                .and_then(|blocks| blocks.iter().map(|b| b.mat).find(|m| *m > 0));
+            (library, mat)
+        });
     if half_life.is_none() {
         info.not_perturbed.insert(0, "half-life".to_string());
     }
