@@ -111,6 +111,30 @@ fn list_gpu_adapters() -> Vec<String> {
     }
 }
 
+/// Install the function every nuclear-data download goes through.
+///
+/// Emscripten (Pyodide) builds only: they have no sockets, so the host
+/// supplies the HTTP GET. `fetcher(url, offset, length)` must answer
+/// `(status, body)`; `offset` and `length` are both `None` for a whole
+/// object, otherwise the byte range to request. In a browser this is a
+/// synchronous XMLHttpRequest made from a Web Worker.
+#[cfg(target_os = "emscripten")]
+#[pyfunction]
+fn _set_data_fetcher(fetcher: Py<PyAny>) {
+    yamc_nuclide::url_cache::set_host_fetcher(Box::new(move |url, span| {
+        Python::attach(|py| -> PyResult<(u16, Vec<u8>)> {
+            let (offset, length) = match span {
+                Some((offset, length)) => (Some(offset), Some(length)),
+                None => (None, None),
+            };
+            let reply = fetcher.call1(py, (url, offset, length))?;
+            let (status, body): (u16, Bound<'_, pyo3::types::PyBytes>) = reply.extract(py)?;
+            Ok((status, body.as_bytes().to_vec()))
+        })
+        .map_err(|e| format!("data fetcher failed for {url}: {e}"))
+    }));
+}
+
 #[pymodule]
 fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Materials, nuclides, chains, elements, sources, schedules and
@@ -154,6 +178,8 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(yani_python::convert::convert_photon, m)?)?;
     m.add_function(wrap_pyfunction!(simulation::combine_results, m)?)?;
+    #[cfg(target_os = "emscripten")]
+    m.add_function(wrap_pyfunction!(_set_data_fetcher, m)?)?;
     m.add_function(wrap_pyfunction!(tally_reduce::reduce_mesh_tally_block, m)?)?;
     m.add_class::<variance_reduction::PySurvivalBiasing>()?;
     m.add_class::<variance_reduction::PyWeightWindowBounds>()?;
