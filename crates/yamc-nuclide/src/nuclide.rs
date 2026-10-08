@@ -230,14 +230,13 @@ pub struct FastXSGrid {
     /// grid, never a copy.
     pub energy: F64Buffer,
     /// MT numbers of scattering reactions, parallel to `scatter_mt_reactions`.
-    /// Length = `n_scatter_mts`. `scatter_mt_xs` is indexed by energy-major
-    /// then MT, same as the on-disk Arrow layout.
+    /// Length = `n_scatter_mts`, and the channel order of `scatter_mt_xs`.
     pub scatter_mt_numbers: Vec<i32>,
-    /// Row-major `[n_energies, n_scatter_mts]` XS matrix. Access XS at
-    /// (energy index i, MT index j) via `scatter_mt_xs[i * n_scatter_mts + j]`.
-    /// One contiguous buffer, matching the on-disk layout; uploadable to
-    /// device memory as-is.
-    pub scatter_mt_xs: F64Buffer,
+    /// Each scattering channel's cross section on the grid, channel order
+    /// `scatter_mt_numbers`. Read through [`FastXSGrid::scatter_xs_at`] and
+    /// [`FastXSGrid::scatter_xs_interp`]; it stores no zeros below thresholds
+    /// (see [`crate::threshold_table`]).
+    pub scatter_mt_xs: crate::threshold_table::ThresholdTable,
     /// Reaction pointers for each scattering MT (parallel to
     /// `scatter_mt_numbers`). Only dereffed at sampling time; separated
     /// from the XS buffer so the latter stays pure data.
@@ -343,30 +342,30 @@ impl FastXSGrid {
     /// XS at (i_energy, mt_idx) for `scatter_mt_xs`; 0.0 if out of bounds.
     #[inline]
     pub fn scatter_xs_at(&self, i_energy: usize, mt_idx: usize) -> f64 {
-        let n = self.scatter_mt_numbers.len();
-        if n == 0 {
-            return 0.0;
+        let table = &self.scatter_mt_xs;
+        if i_energy < table.n_rows() && mt_idx < table.n_channels() {
+            table.get(i_energy, mt_idx)
+        } else {
+            0.0
         }
-        let idx = i_energy * n + mt_idx;
-        self.scatter_mt_xs.get(idx).copied().unwrap_or(0.0)
     }
 
     /// Interpolated XS at (i_grid + f) for `scatter_mt_xs` MT slot `mt_idx`.
     #[inline]
     pub fn scatter_xs_interp(&self, i_grid: usize, f: f64, mt_idx: usize) -> f64 {
-        let n = self.scatter_mt_numbers.len();
-        if n == 0 {
+        let table = &self.scatter_mt_xs;
+        if mt_idx >= table.n_channels() {
             return 0.0;
         }
-        let n_e = self.scatter_mt_xs.len() / n;
+        let n_e = table.n_rows();
         if i_grid + 1 < n_e {
-            let x0 = self.scatter_mt_xs[i_grid * n + mt_idx];
-            let x1 = self.scatter_mt_xs[(i_grid + 1) * n + mt_idx];
+            let x0 = table.get(i_grid, mt_idx);
+            let x1 = table.get(i_grid + 1, mt_idx);
             x0 + f * (x1 - x0)
         } else if i_grid < n_e {
-            self.scatter_mt_xs[i_grid * n + mt_idx]
+            table.get(i_grid, mt_idx)
         } else if n_e > 0 {
-            self.scatter_mt_xs[(n_e - 1) * n + mt_idx]
+            table.get(n_e - 1, mt_idx)
         } else {
             0.0
         }

@@ -240,7 +240,9 @@ impl FastXSGrid {
         }
 
         let (log_e_min, inv_log_delta, log_grid_index) = build_log_grid_index(grid);
-        let scatter_mt_xs: F64Buffer = flatten_row_major(&scatter_cols, n_energy).into();
+        let scatter_mt_xs =
+            crate::threshold_table::ThresholdTable::from_columns(&scatter_cols, n_energy)
+                .map_err(|e| format!("{label}: {e}"))?;
         let fission_mt_xs: F64Buffer = flatten_row_major(&fission_cols, n_energy).into();
         // True when the evaluation gives the chance-by-chance partials rather
         // than only the MT 18 total; the sampler then draws which one.
@@ -445,7 +447,8 @@ mod tests {
         // Energy point 0 (1 eV): only elastic and capture.
         assert_eq!(built.xs[0], [14.0, 4.0, 10.0, 0.0]);
         // Row-major [n_energy, n_mts]: point 3 holds MT 2, MT 16, MT 51.
-        assert_eq!(&built.scatter_mt_xs.as_slice()[9..12], &[10.0, 2.0, 1.0]);
+        let point_3: Vec<f64> = (0..3).map(|j| built.scatter_xs_at(3, j)).collect();
+        assert_eq!(point_3, vec![10.0, 2.0, 1.0]);
         assert_eq!(built.xs_ngamma.as_slice(), &[4.0; 4]);
         assert_eq!(built.log_grid_index.len(), 8001);
         assert!(

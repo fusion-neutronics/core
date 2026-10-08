@@ -200,7 +200,13 @@ fn assert_same_lookup(got: &FastXSGrid, want: &FastXSGrid) {
     );
     assert_eq!(got.xs, want.xs, "summed columns");
     assert_eq!(got.scatter_mt_numbers, want.scatter_mt_numbers);
-    assert_eq!(got.scatter_mt_xs.as_slice(), want.scatter_mt_xs.as_slice());
+    for j in 0..got.scatter_mt_numbers.len() {
+        assert_eq!(
+            got.scatter_mt_xs.column(j).as_slice(),
+            want.scatter_mt_xs.column(j).as_slice(),
+            "scattering channel {j}"
+        );
+    }
     assert!(same_arcs(
         &got.scatter_mt_reactions,
         &want.scatter_mt_reactions
@@ -361,7 +367,7 @@ fn a_cross_section_linear_in_energy_and_temperature_blends_exactly() {
         assert_eq!(row[3], 0.0, "fission at E={e}");
 
         // Every scattering column, so a swap between them shows.
-        let m = &blended.scatter_mt_xs.as_slice()[i * cols..(i + 1) * cols];
+        let m: Vec<f64> = (0..cols).map(|j| blended.scatter_xs_at(i, j)).collect();
         assert!(close(m[0], elastic), "MT 2 at E={e}");
         assert!(
             close(m[1], n2n) || n2n == 0.0 && m[1] == 0.0,

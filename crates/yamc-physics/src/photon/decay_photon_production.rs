@@ -418,11 +418,7 @@ fn get_reaction_xs_vector(fast_grid: &FastXSGrid, mt: i32) -> Option<F64Buffer> 
     }
     // Search scatter_mt_xs
     if let Some(i) = fast_grid.scatter_mt_numbers.iter().position(|&m| m == mt) {
-        return Some(extract_col(
-            &fast_grid.scatter_mt_xs,
-            fast_grid.scatter_mt_numbers.len(),
-            i,
-        ));
+        return Some(fast_grid.scatter_mt_xs.column(i));
     }
     // Search fission_mt_xs
     if let Some(i) = fast_grid.fission_mt_numbers.iter().position(|&m| m == mt) {

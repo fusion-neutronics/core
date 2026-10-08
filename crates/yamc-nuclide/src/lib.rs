@@ -25,6 +25,7 @@ pub mod reaction;
 pub mod reaction_product;
 pub mod synthesis;
 pub mod temperature;
+pub mod threshold_table;
 pub mod urr;
 
 // Grouped subsystems. Each subfolder's child modules are re-exported at the
