@@ -103,6 +103,16 @@ pub enum Source {
     /// photon spectrum and the contact dose evaluated from each replica, and
     /// nothing else.
     DecayPhotonLines,
+    /// Independent fission yields, from the DY the evaluation states on each
+    /// (MT=454), each drawn as a lognormal with the stated mean and sigma and
+    /// summed onto the solver's products the way the converter summed the
+    /// nominal yields. No evaluation publishes a correlation between yields,
+    /// so each is drawn independently and nothing is renormalised.
+    ///
+    /// An alias, an actinide that borrows another's yields, shares that
+    /// evaluation's draw. Cumulative yields are not solved with and are not
+    /// drawn.
+    FissionYield,
 }
 
 impl Source {
@@ -116,6 +126,7 @@ impl Source {
         Source::Statistical,
         Source::DecayEnergy,
         Source::DecayPhotonLines,
+        Source::FissionYield,
     ];
 
     /// The name used in the API and in the coverage report.
@@ -128,6 +139,7 @@ impl Source {
             Source::Statistical => "statistical",
             Source::DecayEnergy => "decay_energy",
             Source::DecayPhotonLines => "decay_photon_lines",
+            Source::FissionYield => "fission_yield",
         }
     }
 
@@ -141,8 +153,7 @@ impl Source {
                 let have: Vec<&str> = Source::IMPLEMENTED.iter().map(|s| s.name()).collect();
                 format!(
                     "unknown uncertainty source {name:?}; this build can perturb {have:?}. \
-                     Fission yields carry published uncertainties that are not read yet, \
-                     and reaction branching has none in ENDF-6 to read."
+                     Reaction branching has none in ENDF-6 to read."
                 )
             })
     }
@@ -514,6 +525,21 @@ pub struct Info {
     /// finite. That value was held at nominal; every other value of the same
     /// nuclide with a usable sigma was still drawn.
     pub decay_photon_line_uncertainty_not_carried: BTreeSet<String>,
+    /// Reachable fissioning parents whose independent yields were perturbed.
+    pub fission_yields_perturbed: BTreeSet<String>,
+    /// Reachable fissioning parents whose yields state no DY, or whose chain
+    /// carries no evaluated yields to read one from, held at nominal. Not a
+    /// claim that they are exact.
+    pub no_fission_yield_uncertainty: BTreeSet<String>,
+    /// Reachable fissioning parents with a DY no draw can carry (on a zero
+    /// yield, or not finite). That yield was held; every other yield of the
+    /// parent with a usable DY was still drawn.
+    pub fission_yield_uncertainty_not_carried: BTreeSet<String>,
+    /// Reachable fissioning parents whose tape yields, named and summed by the
+    /// converter's rule, do not give back the yields the solver reads, held
+    /// at nominal rather than drawn through a mapping their yields were not
+    /// built with.
+    pub fission_yields_mapping_mismatch: BTreeSet<String>,
     /// Tallied rates sampled statistically, the totals and partials together;
     /// zero off the transport path or with the source off.
     pub statistical_rates: usize,
@@ -583,7 +609,6 @@ impl Info {
             sigma_at_least_ten: sigmas.sigma_at_least_ten.clone(),
             sigma_at_least_one_outside_bound: sigmas.sigma_at_least_one_outside_bound.clone(),
             not_perturbed: [
-                "fission yield",
                 "isomeric branching (MF=9/MF=10)",
                 "covariance with another evaluation (MAT1 naming another material)",
                 "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
@@ -641,6 +666,9 @@ impl Info {
             || !self.decay_energy_uncertainty_not_carried.is_empty()
             || !self.no_decay_photon_line_uncertainty.is_empty()
             || !self.decay_photon_line_uncertainty_not_carried.is_empty()
+            || !self.no_fission_yield_uncertainty.is_empty()
+            || !self.fission_yield_uncertainty_not_carried.is_empty()
+            || !self.fission_yields_mapping_mismatch.is_empty()
     }
 }
 
@@ -927,7 +955,7 @@ pub(crate) const HALF_LIFE_STREAM: u32 = 0x4A1F_11FE;
 
 /// Whether an evaluation states `sigma`: a stored 0.0 is "not stated", the
 /// same as a null, never an exact value.
-fn stated(sigma: Option<f64>) -> bool {
+pub(crate) fn stated(sigma: Option<f64>) -> bool {
     sigma.is_some_and(|s| s > 0.0)
 }
 
@@ -941,7 +969,7 @@ fn stated(sigma: Option<f64>) -> bool {
 /// checked, not just the ratio, because the lognormal is built from
 /// `ln(1 + relative^2)` and a ratio above about 1e154 overflows there into
 /// the same NaN.
-fn carried(value: f64, sigma: Option<f64>) -> Option<f64> {
+pub(crate) fn carried(value: f64, sigma: Option<f64>) -> Option<f64> {
     let sigma = sigma.filter(|s| *s > 0.0 && s.is_finite())?;
     let relative = sigma / value;
     (value > 0.0 && relative > 0.0 && (relative * relative).is_finite()).then_some(sigma)
@@ -1538,7 +1566,6 @@ mod tests {
         let info = Info::from_fold(&Coverage::default(), &SigmaReport::default(), true)
             .expect("no shares to check");
         for held in [
-            "fission yield",
             "isomeric branching (MF=9/MF=10)",
             "covariance with another evaluation (MAT1 naming another material)",
             "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
@@ -1574,6 +1601,7 @@ mod tests {
             "decay branching ratio",
             "decay energy",
             "decay photon line energy and intensity, and continuum normalisation",
+            "fission yield",
         ] {
             assert!(!info.not_perturbed.iter().any(|s| s == conditional));
         }

@@ -1529,7 +1529,9 @@ impl PyModel {
     ///           which move decay heat only;
     ///         - ``"decay_photon_lines"``: the decay data's photon spectrum
     ///           normalisation, line intensity and line energy sigmas, which
-    ///           move the decay photon spectrum and contact dose only.
+    ///           move the decay photon spectrum and contact dose only;
+    ///         - ``"fission_yield"``: the independent fission yields, from the
+    ///           DY the evaluation states on each.
     ///
     ///         ``"flux_spectrum"`` does not apply: there is no supplied spectrum,
     ///         and the flux's error is the statistical one. The transport runs

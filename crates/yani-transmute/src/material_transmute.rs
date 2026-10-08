@@ -1327,11 +1327,16 @@ struct ChainEdits {
     half_lives: HashMap<String, f64>,
     /// Perturbed decay branching ratios, one per row of the parent's `decays`.
     decay_branchings: HashMap<String, Vec<f64>>,
+    /// Perturbed fission yields, a new set per parent drawn, shared between
+    /// the parents of one evaluation and never written into the nominal one.
+    fission_yields: HashMap<String, Arc<yani::FissionYieldSet>>,
 }
 
 impl ChainEdits {
     fn is_empty(&self) -> bool {
-        self.half_lives.is_empty() && self.decay_branchings.is_empty()
+        self.half_lives.is_empty()
+            && self.decay_branchings.is_empty()
+            && self.fission_yields.is_empty()
     }
 
     /// `chain` with every edit made.
@@ -1345,6 +1350,11 @@ impl ChainEdits {
         for (name, ratios) in &self.decay_branchings {
             if let Some(cn) = out.get_mut(name) {
                 crate::decay_branching_uncertainty::set_decay_branchings(cn, ratios);
+            }
+        }
+        for (name, set) in &self.fission_yields {
+            if let Some(cn) = out.get_mut(name) {
+                cn.fission_yields = Some(Arc::clone(set));
             }
         }
         out
@@ -1573,7 +1583,8 @@ fn run_replicas(
     // the part of the chain its solve walks.
     let want_half_life = request.wants(crate::uncertainty::Source::HalfLife);
     let want_decay_branching = request.wants(crate::uncertainty::Source::DecayBranching);
-    let edits_chain = want_half_life || want_decay_branching;
+    let want_fission_yield = request.wants(crate::uncertainty::Source::FissionYield);
+    let edits_chain = want_half_life || want_decay_branching || want_fission_yield;
     let chains = edits_chain.then(|| replica_chains(initial, chain, per_spectrum));
 
     // Half-lives: sampled per replica from the evaluation's stated sigma, and
@@ -1598,6 +1609,15 @@ fn run_replicas(
     // never decays, so a parent's rows are the same in every chain.
     let decay_branching = match (&chains, want_decay_branching) {
         (Some(c), true) => Some(crate::decay_branching_uncertainty::candidates(&c.base)),
+        _ => None,
+    };
+
+    // Fission yields: the reachable fissioning parents, their tape products
+    // named by the converter's rule over the whole chain. Folding rewrites
+    // reactions and never yields, so a parent's set is the same in every
+    // chain and one draw serves them all.
+    let fission_yield = match (&chains, want_fission_yield) {
+        (Some(c), true) => Some(crate::fission_yield_uncertainty::candidates(&c.base, chain)),
         _ => None,
     };
 
@@ -1716,6 +1736,15 @@ fn run_replicas(
     if !want_decay_energy {
         info.not_perturbed.insert(0, "decay energy".to_string());
     }
+    match &fission_yield {
+        None => info.not_perturbed.insert(0, "fission yield".to_string()),
+        Some(f) => {
+            info.fission_yields_perturbed = f.perturbed.clone();
+            info.no_fission_yield_uncertainty = f.without.clone();
+            info.fission_yield_uncertainty_not_carried = f.not_carried.clone();
+            info.fission_yields_mapping_mismatch = f.mapping_mismatch.clone();
+        }
+    }
     if !want_decay_photons {
         info.not_perturbed.insert(
             0,
@@ -1801,10 +1830,12 @@ fn run_replicas(
     let no_decay_branchings = decay_branching
         .as_ref()
         .is_none_or(|b| b.two_modes.is_empty());
+    let no_fission_yields = fission_yield.as_ref().is_none_or(|f| f.is_empty());
     if sampler.is_empty()
         && per_group.iter().all(Option::is_none)
         && no_half_lives
         && no_decay_branchings
+        && no_fission_yields
         && statistical.is_none()
     {
         info.converged = true;
@@ -1890,6 +1921,12 @@ fn run_replicas(
                     replica,
                     &mut decay_branchings_floored,
                 ),
+                _ => HashMap::new(),
+            },
+            fission_yields: match &fission_yield {
+                Some(f) if !f.is_empty() => {
+                    crate::fission_yield_uncertainty::sample(f, request.seed, replica)
+                }
                 _ => HashMap::new(),
             },
         };
@@ -4461,7 +4498,7 @@ mod tests {
         ]);
         let edits = ChainEdits {
             half_lives: sampled.clone(),
-            decay_branchings: HashMap::new(),
+            ..Default::default()
         };
         let got = edits.apply(&chain);
         let want = crate::uncertainty::with_half_lives(&chain, &sampled);

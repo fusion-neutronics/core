@@ -828,6 +828,15 @@ impl PyTransmutationResults {
     ///   ``decay_photon_line_uncertainty_not_carried`` names those with a
     ///   sigma stated on a zero value, or not finite, which no draw can carry;
     ///   that value is held at nominal and counted as a gap.
+    /// - ``fission_yields_perturbed`` / ``no_fission_yield_uncertainty``: the
+    ///   same for the ``"fission_yield"`` source, over the reachable
+    ///   fissioning parents. ``fission_yield_uncertainty_not_carried`` names
+    ///   those with a DY on a zero yield, or not finite, which is held while
+    ///   the parent's other yields are drawn.
+    ///   ``fission_yields_mapping_mismatch`` names those whose tape yields,
+    ///   named and summed by the converter's rule, do not give back the yields
+    ///   the solver reads; they are held rather than drawn through a mapping
+    ///   their yields were not built with. Each is counted as a gap.
     /// - ``decay_branchings_perturbed``: with the ``"decay_branching"``
     ///   source, the reachable two-mode parents whose split was sampled. The
     ///   multi-mode parents held at their evaluated ratios, each a gap:
