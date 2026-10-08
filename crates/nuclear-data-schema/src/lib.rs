@@ -41,6 +41,7 @@ pub fn all_sections() -> Vec<(&'static str, Schema)> {
             "branching/branching_covariance.arrow",
             branching_branching_covariance(),
         ),
+        ("angular_covariance.arrow", angular_covariance()),
         ("bremsstrahlung.arrow", bremsstrahlung()),
         ("compton.arrow", compton()),
         ("covariance.arrow", covariance()),
@@ -528,6 +529,56 @@ pub fn covariance() -> Schema {
     ])
 }
 
+/// `angular_covariance.arrow`: MF=34, the covariance of the Legendre
+/// coefficients of angular distributions, one row per covariance block.
+///
+/// A section of its own rather than rows in `covariance.arrow`: a block there
+/// is read as a cross-section covariance, and an MF=34 MT=2 block would be
+/// folded as the elastic cross section's.
+pub fn angular_covariance() -> Schema {
+    Schema::new(vec![
+        // Which block this is. Rows are written in tape order: the section's
+        // MT, the subsection (one per MAT1, MT1), the (L, L1) pair within it,
+        // and the block within the pair.
+        i32("mt", false),
+        i32("subsection_idx", false),
+        i32("pair_idx", false),
+        i32("block_idx", false),
+        // The subsection's partner reaction and Legendre order counts, and
+        // the section's LTT (the representation MF=4 uses), repeated on every
+        // row of the subsection.
+        i32("mat1", true),
+        i32("mt1", true),
+        i32("ltt", true),
+        i32("nl", true),
+        i32("nl1", true),
+        // The Legendre orders this block correlates, L of MT with L1 of MT1,
+        // and the frame of their coefficients (LCT: 1 laboratory, 2 centre of
+        // mass, 0 the same as MF=4's).
+        i32("l", true),
+        i32("l1", true),
+        i32("lct", true),
+        // The block, split by `lb` as covariance.arrow's NI blocks are: 0-2
+        // use `ne` and the (E, F) table `ek`/`fk`; 5 uses `ls`, `ne`, `ek`
+        // and `fkk`; 6 uses `ner`, `nec`, `er`, `ec` and `fkl`.
+        i32("lb", true),
+        i32("ls", true),
+        i32("nt", true),
+        i32("ne", true),
+        i32("ner", true),
+        i32("nec", true),
+        f64s("ek", true),
+        f64s("fk", true),
+        f64s("fkk", true),
+        f64s("er", true),
+        f64s("ec", true),
+        f64s("fkl", true),
+        // The evaluation's own MAT, so a `mat1` naming this material reads as
+        // this evaluation, as in covariance.arrow.
+        i32("mat", true),
+    ])
+}
+
 /// `decay/decay_modes.arrow`
 pub fn decay_decay_modes() -> Schema {
     Schema::new(vec![
@@ -921,7 +972,7 @@ mod tests {
         let sections = all_sections();
         assert_eq!(
             sections.len(),
-            22,
+            23,
             "section count changed; update the manifest"
         );
         let mut paths: Vec<&str> = sections.iter().map(|(p, _)| *p).collect();

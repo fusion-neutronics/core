@@ -39,6 +39,43 @@ pub enum CovarianceData {
     Lumped,
 }
 
+/// One MF=34 covariance block: the covariance of Legendre coefficient `l` of
+/// reaction `mt`'s angular distribution with coefficient `l1` of `mt1`'s.
+///
+/// Read from `angular_covariance.arrow`, which keeps these apart from
+/// `covariance.arrow`'s cross-section blocks. Nothing samples them yet; they
+/// are carried so the data is read faithfully and reported.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AngularCovarianceBlock {
+    /// The reaction this block's section belongs to.
+    pub mt: i32,
+    /// Which subsection of that section, in tape order (one per MAT1, MT1).
+    pub subsection_idx: i32,
+    /// Which (L, L1) pair within that subsection, in tape order.
+    pub pair_idx: i32,
+    /// Which block within that pair, in tape order.
+    pub block_idx: i32,
+    /// The material `mt1` belongs to. `0`, or `mat`, means this evaluation.
+    pub mat1: i32,
+    /// The reaction this one is correlated with.
+    pub mt1: i32,
+    /// LTT of the section: the representation MF=4 uses.
+    pub ltt: i32,
+    /// Legendre orders of `mt` and `mt1` the subsection covers.
+    pub nl: i32,
+    pub nl1: i32,
+    /// The Legendre orders this block correlates.
+    pub l: i32,
+    pub l1: i32,
+    /// The frame of the coefficients: 1 laboratory, 2 centre of mass, 0 the
+    /// same as MF=4's.
+    pub lct: i32,
+    /// The evaluation's own MAT, `0` when the file does not state it.
+    pub mat: i32,
+    /// The block itself, in MF=33's NI shape (`lb` 0-2, 5 or 6).
+    pub block: NiSubsection,
+}
+
 /// One covariance block: the covariance of `mt` with `mt1`, on one grid.
 ///
 /// # Which blocks are this evaluation's own

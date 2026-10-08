@@ -90,3 +90,21 @@ fn a_load_without_covariance_does_not_cover_one_with_it() {
         "the union carries covariance, so a reload serves both callers"
     );
 }
+
+/// MF=34 the same way: a directory without `angular_covariance.arrow` loads
+/// with none when asked, and a load without it does not cover one with it.
+#[test]
+fn a_directory_without_angular_covariance_still_loads() {
+    let Some(dir) = fe56() else {
+        return skip("a_directory_without_angular_covariance_still_loads");
+    };
+    assert!(!dir.join("angular_covariance.arrow").exists());
+    let scope = LoadScope::activation(HashSet::from([102])).with_angular_covariance(true);
+    let nuclide = read_nuclide_from_arrow(&dir, &scope).expect("Fe56 loads");
+    assert!(nuclide.angular_covariance.is_none());
+    assert!(nuclide.load_scope.angular_covariance);
+    assert!(
+        !LoadScope::activation(HashSet::from([102])).covers(&scope),
+        "a load without MF=34 must not stand in for one that asked for it"
+    );
+}

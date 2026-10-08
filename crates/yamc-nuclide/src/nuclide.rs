@@ -1123,6 +1123,13 @@ pub struct Nuclide {
     /// 145-point grid is 10440 doubles -- and `Nuclide` is `Clone`.
     #[serde(skip, default)]
     pub covariance: Option<std::sync::Arc<Vec<crate::covariance::CovarianceBlock>>>,
+    /// MF=34, the covariance of angular distributions' Legendre
+    /// coefficients, when [`LoadScope::angular_covariance`] asked for it and
+    /// the evaluation has some. Read and carried, not sampled.
+    ///
+    /// [`LoadScope::angular_covariance`]: crate::LoadScope::angular_covariance
+    #[serde(skip, default)]
+    pub angular_covariance: Option<std::sync::Arc<Vec<crate::covariance::AngularCovarianceBlock>>>,
     /// Lazily-built flat elastic angular table. Routes the
     /// production CPU elastic scatter through the same
     /// `yamc_physics::gpu::flat::elastic_mu_cm` sampler the GPU kernel/twin

@@ -1033,6 +1033,7 @@ mod tests {
             delayed_neutron_cache: Default::default(),
             inelastic_angle_flat_cache: Default::default(),
             covariance: None,
+            angular_covariance: None,
             load_scope: Default::default(),
         };
 

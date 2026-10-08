@@ -2152,16 +2152,14 @@ fn dump_section(d: &mut Dump, path: &str, section: &Section) {
             d.float(format!("{path}/AWR"), s.awr);
             d.int(format!("{path}/LTT"), s.ltt);
             d.int(format!("{path}/NMT1"), s.nmt1);
-            // Always empty, matching upstream, whose reader builds these and
-            // then drops them.
             for (i, sub) in s.subsections.iter().enumerate() {
                 let sp = format!("{path}/subsections/{i}");
                 for (key, value) in [
                     ("MAT1", sub.mat1),
                     ("MT1", sub.mt1),
                     ("NL", sub.nl),
+                    ("NL1", sub.nl1),
                     ("NSS", sub.nss),
-                    ("LCT", sub.lct),
                 ] {
                     d.int(format!("{sp}/{key}"), value);
                 }
@@ -2170,6 +2168,7 @@ fn dump_section(d: &mut Dump, path: &str, section: &Section) {
                 }
                 for (j, ss) in sub.subsubsections.iter().enumerate() {
                     let ssp = format!("{sp}/subsubsections/{j}");
+                    d.int(format!("{ssp}/LCT"), ss.lct);
                     for (key, values) in [
                         ("LS", &ss.ls),
                         ("LB", &ss.lb),
