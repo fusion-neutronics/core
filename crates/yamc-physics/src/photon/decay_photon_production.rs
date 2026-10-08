@@ -411,7 +411,7 @@ fn get_reaction_xs_vector(fast_grid: &FastXSGrid, mt: i32) -> Option<F64Buffer> 
         .position(|&m| m == mt)
     {
         return Some(extract_col(
-            &fast_grid.photon_rxn_xs,
+            &fast_grid.photon_rxn_xs(),
             fast_grid.photon_rxn_mt_numbers.len(),
             i,
         ));
@@ -439,7 +439,7 @@ fn get_reaction_xs_vector(fast_grid: &FastXSGrid, mt: i32) -> Option<F64Buffer> 
         .position(|&m| m == mt)
     {
         return Some(extract_col(
-            &fast_grid.absorption_mt_xs,
+            &fast_grid.absorption_mt_xs(),
             fast_grid.absorption_mt_numbers.len(),
             i,
         ));

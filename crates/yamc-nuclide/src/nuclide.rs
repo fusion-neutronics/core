@@ -277,16 +277,24 @@ pub struct FastXSGrid {
     pub photon_rxn_mt_numbers: Vec<i32>,
     /// Row-major `[n_energies, n_photon_rxn_mts]` XS matrix for photon-producing
     /// reactions. Used by sample_photon_product for grid-consistent XS lookup.
-    pub photon_rxn_xs: F64Buffer,
+    ///
+    /// Built on first use through [`FastXSGrid::photon_rxn_xs`]: a run without
+    /// secondary or decay photons never reads it, and on a heavy nuclide it is
+    /// the largest table the lookup holds.
+    pub(crate) photon_rxn_xs: std::sync::OnceLock<F64Buffer>,
     /// Reaction pointers for each photon-producing MT.
     pub photon_rxn_reactions: Vec<Arc<Reaction>>,
     /// MT numbers for absorption-only (D1S decay-photon-lookup) channels,
     /// parallel to `absorption_mt_xs`. Contains non-redundant absorption
     /// reactions (MT 103-117 etc.) not already in photon_rxn_xs.
     pub absorption_mt_numbers: Vec<i32>,
+    /// Reaction pointers for each absorption-only MT, parallel to
+    /// `absorption_mt_numbers`, from which its table is built on first use.
+    pub absorption_mt_reactions: Vec<Arc<Reaction>>,
     /// Row-major `[n_energies, n_absorption_mts]` XS matrix for absorption-only
-    /// channels used by D1S decay photon lookup.
-    pub absorption_mt_xs: F64Buffer,
+    /// channels used by D1S decay photon lookup. Built on first use through
+    /// [`FastXSGrid::absorption_mt_xs`], since only a D1S run reads it.
+    pub(crate) absorption_mt_xs: std::sync::OnceLock<F64Buffer>,
     /// Pre-computed delayed photon scaling factor at each energy point.
     /// For fission reactions, photon production yield is multiplied by this factor
     /// to account for delayed photons: f = (prompt_energy + delayed_energy) / prompt_energy.
@@ -404,6 +412,29 @@ impl FastXSGrid {
         }
     }
 
+    /// The photon-producing channels' cross sections on this grid, row-major
+    /// `[n_energies, n_photon_rxn_mts]`, built the first time it is asked for.
+    pub fn photon_rxn_xs(&self) -> &[f64] {
+        self.photon_rxn_xs
+            .get_or_init(|| {
+                crate::fast_xs::columns_on_grid(self.energy.as_slice(), &self.photon_rxn_reactions)
+            })
+            .as_slice()
+    }
+
+    /// The absorption-only channels' cross sections on this grid, row-major
+    /// `[n_energies, n_absorption_mts]`, built the first time it is asked for.
+    pub fn absorption_mt_xs(&self) -> &[f64] {
+        self.absorption_mt_xs
+            .get_or_init(|| {
+                crate::fast_xs::columns_on_grid(
+                    self.energy.as_slice(),
+                    &self.absorption_mt_reactions,
+                )
+            })
+            .as_slice()
+    }
+
     /// XS at (i_energy, mt_idx) for `photon_rxn_xs`; 0.0 if out of bounds.
     #[inline]
     pub fn photon_rxn_xs_at(&self, i_energy: usize, mt_idx: usize) -> f64 {
@@ -412,7 +443,7 @@ impl FastXSGrid {
             return 0.0;
         }
         let idx = i_energy * n + mt_idx;
-        self.photon_rxn_xs.get(idx).copied().unwrap_or(0.0)
+        self.photon_rxn_xs().get(idx).copied().unwrap_or(0.0)
     }
 
     /// Interpolated XS at (i_grid + f) for `photon_rxn_xs` MT slot `mt_idx`.
@@ -422,15 +453,16 @@ impl FastXSGrid {
         if n == 0 {
             return 0.0;
         }
-        let n_e = self.photon_rxn_xs.len() / n;
+        let table = self.photon_rxn_xs();
+        let n_e = table.len() / n;
         if i_grid + 1 < n_e {
-            let x0 = self.photon_rxn_xs[i_grid * n + mt_idx];
-            let x1 = self.photon_rxn_xs[(i_grid + 1) * n + mt_idx];
+            let x0 = table[i_grid * n + mt_idx];
+            let x1 = table[(i_grid + 1) * n + mt_idx];
             x0 + f * (x1 - x0)
         } else if i_grid < n_e {
-            self.photon_rxn_xs[i_grid * n + mt_idx]
+            table[i_grid * n + mt_idx]
         } else if n_e > 0 {
-            self.photon_rxn_xs[(n_e - 1) * n + mt_idx]
+            table[(n_e - 1) * n + mt_idx]
         } else {
             0.0
         }

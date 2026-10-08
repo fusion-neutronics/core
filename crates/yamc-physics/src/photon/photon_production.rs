@@ -436,14 +436,14 @@ mod tests {
         let fast_grid = &nuclide.fast_xs[0];
 
         assert!(
-            !fast_grid.photon_rxn_xs.is_empty(),
+            !fast_grid.photon_rxn_xs().is_empty(),
             "Fe56 should have photon-producing reactions in photon_rxn_xs"
         );
 
         // Check that photon_rxn_xs entries have the right structure
         let n_mts = fast_grid.photon_rxn_mt_numbers.len();
         assert_eq!(
-            fast_grid.photon_rxn_xs.len(),
+            fast_grid.photon_rxn_xs().len(),
             fast_grid.energy.len() * n_mts,
             "flat photon_rxn_xs should be [n_energies * n_mts]"
         );

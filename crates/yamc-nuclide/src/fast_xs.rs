@@ -280,7 +280,7 @@ impl FastXSGrid {
         // is left once scattering, fission, photon production, capture and the
         // summed MTs are set aside.
         let mut absorption_mt_numbers: Vec<i32> = Vec::new();
-        let mut absorption_mt_xs_per_mt: Vec<Vec<f64>> = Vec::new();
+        let mut absorption_mt_reactions: Vec<Arc<Reaction>> = Vec::new();
         {
             let mut covered: HashSet<i32> = HashSet::new();
             covered.extend(&scatter_mts);
@@ -302,7 +302,7 @@ impl FastXSGrid {
                     .collect();
                 if xs_vec.iter().any(|&x| x > 0.0) {
                     absorption_mt_numbers.push(mt);
-                    absorption_mt_xs_per_mt.push(xs_vec);
+                    absorption_mt_reactions.push(Arc::clone(reaction));
                 }
             }
         }
@@ -364,13 +364,36 @@ impl FastXSGrid {
             xs_ngamma,
             photon_prod: photon_prod.into(),
             photon_rxn_mt_numbers,
-            photon_rxn_xs: flatten_row_major(&photon_rxn_xs_per_mt, n_energy).into(),
+            // Both tables are built on first use from the reactions kept here,
+            // by `columns_on_grid`, which evaluates exactly as the columns
+            // above were: a neutron-only run never asks.
+            photon_rxn_xs: std::sync::OnceLock::new(),
             photon_rxn_reactions,
             absorption_mt_numbers,
-            absorption_mt_xs: flatten_row_major(&absorption_mt_xs_per_mt, n_energy).into(),
+            absorption_mt_reactions,
+            absorption_mt_xs: std::sync::OnceLock::new(),
             delayed_photon_scaling,
         })
     }
+}
+
+/// Each reaction's cross section at every point of `grid`, flattened row-major
+/// `[grid.len(), reactions.len()]`: the layout of the lazily built
+/// photon-producing and absorption-only tables.
+///
+/// Evaluated with [`Reaction::cross_section_at`], as [`FastXSGrid::build`]
+/// evaluates the same columns to choose the channels, so a table built late
+/// holds exactly what one built at load time would have.
+pub(crate) fn columns_on_grid(grid: &[f64], reactions: &[Arc<Reaction>]) -> F64Buffer {
+    let columns: Vec<Vec<f64>> = reactions
+        .iter()
+        .map(|reaction| {
+            grid.iter()
+                .map(|&e| reaction.cross_section_at(e).unwrap_or(0.0))
+                .collect()
+        })
+        .collect();
+    flatten_row_major(&columns, grid.len()).into()
 }
 
 #[cfg(test)]
@@ -418,6 +441,43 @@ mod tests {
 
     fn grid() -> F64Buffer {
         vec![1.0, 10.0, 100.0, 1000.0].into()
+    }
+
+    fn photon_out() -> Vec<ReactionProduct> {
+        vec![ReactionProduct {
+            particle: ParticleType::Photon,
+            emission_mode: "prompt".to_string(),
+            decay_rate: 0.0,
+            applicability: Vec::new(),
+            distribution: Vec::new(),
+            product_yield: None,
+        }]
+    }
+
+    /// The photon-producing and absorption-only tables are not built with the
+    /// lookup, and hold what the load-time build would have when asked for.
+    #[test]
+    fn the_photon_and_absorption_tables_are_built_on_first_use() {
+        let g = grid();
+        let n = g.len();
+        let mut reactions: HashMap<i32, Arc<Reaction>> = HashMap::new();
+        reactions.insert(2, reaction(2, vec![10.0; n], 0, &g, false, neutron_out()));
+        reactions.insert(102, reaction(102, vec![4.0; n], 0, &g, false, photon_out()));
+        // (n,alpha) above the second point: no neutron out, no photon.
+        reactions.insert(107, reaction(107, vec![3.0, 5.0], 2, &g, false, Vec::new()));
+
+        let built = FastXSGrid::build(&g, &reactions, None, "test").unwrap();
+        assert_eq!(built.photon_rxn_mt_numbers, vec![102]);
+        assert_eq!(built.absorption_mt_numbers, vec![107]);
+        assert!(built.photon_rxn_xs.get().is_none(), "built eagerly");
+        assert!(built.absorption_mt_xs.get().is_none(), "built eagerly");
+        // Photon production is still summed at load: transport reads it to
+        // decide whether a collision emits photons at all.
+        assert_eq!(built.photon_prod.as_slice(), &[4.0; 4]);
+
+        assert_eq!(built.photon_rxn_xs(), &[4.0; 4]);
+        assert_eq!(built.absorption_mt_xs(), &[0.0, 0.0, 3.0, 5.0]);
+        assert_eq!(built.photon_rxn_xs_interp(1, 0.5, 0), 4.0);
     }
 
     /// Elastic, one level-inelastic channel, one (n,2n) and capture: the four
