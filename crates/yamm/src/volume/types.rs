@@ -10,6 +10,30 @@ pub struct VolumeInput {
     pub target_edge_length: f64,
 }
 
+/// Borrowed input for volume meshing.
+///
+/// This is useful for callers that already own boundary arrays and do not need
+/// to transfer them into a separate [`VolumeInput`] allocation.
+#[derive(Clone, Copy, Debug)]
+pub struct VolumeInputRef<'a> {
+    /// Boundary vertices in 3D (the surface mesh vertices).
+    pub boundary_vertices: &'a [[f64; 3]],
+    /// Boundary triangles as indices into `boundary_vertices`.
+    pub boundary_triangles: &'a [[usize; 3]],
+    /// Target edge length for interior tetrahedra.
+    pub target_edge_length: f64,
+}
+
+impl<'a> From<&'a VolumeInput> for VolumeInputRef<'a> {
+    fn from(input: &'a VolumeInput) -> Self {
+        Self {
+            boundary_vertices: &input.boundary_vertices,
+            boundary_triangles: &input.boundary_triangles,
+            target_edge_length: input.target_edge_length,
+        }
+    }
+}
+
 /// Statistics from the boundary recovery phase of volume meshing.
 #[derive(Clone, Debug, Default)]
 pub struct BoundaryRecoveryStats {

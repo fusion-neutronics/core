@@ -146,6 +146,7 @@ pub fn mesh_faces_scene(
     }
 
     // Edge parameter slots, filled exactly once by edge tasks.
+    // Scoped tasks borrow these slots; no reference-counted allocation is needed.
     let params: Vec<OnceLock<Vec<f64>>> = (0..n_edges).map(|_| OnceLock::new()).collect();
 
     // edge index -> dependent face indices (deduplicated per face).
@@ -181,11 +182,19 @@ pub fn mesh_faces_scene(
     let results: Vec<Mutex<Option<Result<FaceOutput>>>> =
         (0..n_faces).map(|_| Mutex::new(None)).collect();
 
-    // Resolve immediate (Params) edges before entering the scope so
-    // their dependent faces start as ready.
-    for (ei, e) in edges.iter().enumerate() {
-        if let SceneEdgeSource::Params(p) = &e.source {
-            let _ = params[ei].set(p.clone());
+    // Move immediate Params vectors into shared slots before entering the
+    // scope. Keeping Curve work separately lets this consume `edges` instead
+    // of cloning every precomputed parameter vector.
+    let mut curve_edges = Vec::with_capacity(n_edges);
+    for (ei, e) in edges.into_iter().enumerate() {
+        match e.source {
+            SceneEdgeSource::Params(p) => {
+                let _ = params[ei].set(p);
+                curve_edges.push(None);
+            }
+            SceneEdgeSource::Curve { curve, t0, t1 } => {
+                curve_edges.push(Some((curve, t0, t1)));
+            }
         }
     }
 
@@ -246,8 +255,8 @@ pub fn mesh_faces_scene(
 
         // Spawn an edge task per Curve edge; each completion decrements
         // its dependent faces' counters and spawns those that hit zero.
-        for (ei, e) in edges.iter().enumerate() {
-            if let SceneEdgeSource::Curve { curve, t0, t1 } = &e.source {
+        for (ei, e) in curve_edges.iter().enumerate() {
+            if let Some((curve, t0, t1)) = e {
                 s.spawn(move |s| {
                     let p = discretize_curve3(curve, *t0, *t1, tolerance, angular_tolerance);
                     let _ = params[ei].set(p);
@@ -408,6 +417,65 @@ mod tests {
         for (i, o) in outputs.iter().enumerate() {
             assert_eq!(o.face_id, i as u64);
             assert_eq!(o.triangles.len(), 2);
+        }
+    }
+
+    #[test]
+    fn mixed_params_and_curves_with_shared_holes_match_across_threads() {
+        let run = || {
+            let mut edges = square_edges();
+            for i in [1, 3] {
+                edges[i].source = SceneEdgeSource::Params(vec![0.0, 1.0]);
+            }
+            edges.extend((0..4).map(|_| SceneEdge {
+                source: SceneEdgeSource::Params(vec![0.0, 1.0]),
+            }));
+            let faces = (0..12)
+                .map(|i| {
+                    let mut face = unit_square_face(i, 0, true);
+                    let mut hole = unit_square_face(0, 4, true).boundary;
+                    for edge in &mut hole {
+                        if let Some(Curve2::Line { origin, dir }) = &mut edge.pcurve {
+                            for j in 0..2 {
+                                origin[j] = 0.3 + origin[j] * 0.4;
+                                dir[j] *= 0.4;
+                            }
+                        }
+                    }
+                    face.holes.push(hole);
+                    face
+                })
+                .collect();
+            mesh_faces_scene(edges, faces, 0.01, 0.3).unwrap()
+        };
+        let one = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(run);
+        let two = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap()
+            .install(run);
+        assert_eq!(one.len(), 12);
+        for (i, (a, b)) in one.iter().zip(&two).enumerate() {
+            assert_eq!(a.face_id, i as u64);
+            assert_eq!(a.face_id, b.face_id);
+            assert_eq!(a.boundary_uv_vertices, b.boundary_uv_vertices);
+            assert_eq!(a.interior_uv_vertices, b.interior_uv_vertices);
+            assert_eq!(a.triangles, b.triangles);
+            let mut points = a.boundary_uv_vertices.clone();
+            points.extend_from_slice(&a.interior_uv_vertices);
+            let area: f64 = a
+                .triangles
+                .iter()
+                .map(|t| {
+                    let [p, q, r] = t.map(|j| points[j]);
+                    ((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])).abs() * 0.5
+                })
+                .sum();
+            assert!((area - 0.84).abs() < 1e-12);
         }
     }
 }

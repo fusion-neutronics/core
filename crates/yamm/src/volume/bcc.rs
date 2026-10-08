@@ -34,6 +34,7 @@ pub fn generate_bcc_interior_points(
         })
         .collect();
     let bvh = TriangleBvh::new(&tri_data);
+    drop(tri_data);
     if tdbg {
         eprintln!("    [bcc] bvh build={:.2}s", tp.elapsed().as_secs_f64());
         tp = std::time::Instant::now();
@@ -159,44 +160,24 @@ pub fn generate_bcc_interior_points(
     // Filter candidates: must be inside boundary and far enough from surface.
     // Use BVH nearest_point_on_surface (O(log n)) instead of O(n) vertex scan.
     // Parallelize with rayon for large candidate sets.
-    use rayon::prelude::*;
     eprintln!(
         "    [bcc] {} candidates, {} boundary tris, filtering...",
         candidates.len(),
         boundary_triangles.len()
     );
     let t_filter = std::time::Instant::now();
-    let mut points: Vec<[f64; 3]> = if candidates.len() > 1_000 {
-        candidates
-            .par_iter()
-            .filter(|p| {
-                if !bvh.is_point_inside(p) {
-                    return false;
-                }
-                let nearest = bvh.nearest_point_on_surface(p);
-                let dx = p[0] - nearest[0];
-                let dy = p[1] - nearest[1];
-                let dz = p[2] - nearest[2];
-                dx * dx + dy * dy + dz * dz > margin_sq
-            })
-            .copied()
-            .collect()
-    } else {
-        candidates
-            .iter()
-            .filter(|p| {
-                if !bvh.is_point_inside(p) {
-                    return false;
-                }
-                let nearest = bvh.nearest_point_on_surface(p);
-                let dx = p[0] - nearest[0];
-                let dy = p[1] - nearest[1];
-                let dz = p[2] - nearest[2];
-                dx * dx + dy * dy + dz * dz > margin_sq
-            })
-            .copied()
-            .collect()
+    let is_interior = |p: &[f64; 3]| {
+        if !bvh.is_point_inside(p) {
+            return false;
+        }
+        let nearest = bvh.nearest_point_on_surface(p);
+        let dx = p[0] - nearest[0];
+        let dy = p[1] - nearest[1];
+        let dz = p[2] - nearest[2];
+        dx * dx + dy * dy + dz * dz > margin_sq
     };
+    retain_candidates(&mut candidates, is_interior);
+    let mut points = candidates;
 
     eprintln!(
         "    [bcc] filtered to {} interior points in {:.1}s",
@@ -204,11 +185,42 @@ pub fn generate_bcc_interior_points(
         t_filter.elapsed().as_secs_f64()
     );
 
+    // Filtering is complete. Release its large scratch allocations before
+    // Hilbert sorting allocates one keyed entry per retained point.
+    drop(bvh);
+    drop(occupied);
+    // Thin/skewed solids can reject almost every candidate. Do not keep
+    // candidate-sized storage through sorting and the caller's point merge.
+    super::point_storage::trim_spare_capacity(&mut points);
+
     // Sort points along a Hilbert-like space-filling curve for better
     // spatial locality during Delaunay insertion (reduces cavity search time).
     hilbert_sort_3d(&mut points, &min_bb, &max_bb);
 
     points
+}
+
+fn retain_candidates(
+    candidates: &mut Vec<[f64; 3]>,
+    is_interior: impl Fn(&[f64; 3]) -> bool + Sync,
+) {
+    use rayon::prelude::*;
+
+    if candidates.len() > 1_000 {
+        // Rust bools occupy one byte each. The indexed parallel iterator
+        // preserves predicate order, so the following compaction is stable.
+        let keep: Vec<bool> = candidates.par_iter().map(&is_interior).collect();
+        let mut write = 0;
+        for (read, retain) in keep.into_iter().enumerate() {
+            if retain {
+                candidates[write] = candidates[read];
+                write += 1;
+            }
+        }
+        candidates.truncate(write);
+    } else {
+        candidates.retain(is_interior);
+    }
 }
 
 /// Sort 3D points along a Hilbert-like space-filling curve.
@@ -316,6 +328,47 @@ fn bounding_box(vertices: &[[f64; 3]]) -> ([f64; 3], [f64; 3]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compaction_preserves_order_on_both_sides_of_parallel_threshold() {
+        for n in [0, 1, 999, 1000, 1001, 2051] {
+            let original: Vec<_> = (0..n).map(|i| [i as f64, 0.0, 0.0]).collect();
+            for stride in [0, 1, 7] {
+                let predicate =
+                    |p: &[f64; 3]| stride != 0 && (p[0] as usize).is_multiple_of(stride);
+                let expected: Vec<_> = original.iter().copied().filter(predicate).collect();
+                let mut actual = original.clone();
+                retain_candidates(&mut actual, predicate);
+                super::super::point_storage::trim_spare_capacity(&mut actual);
+                assert_eq!(actual, expected);
+                assert!(actual.capacity() <= actual.len().saturating_mul(2));
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_prism_does_not_return_candidate_sized_storage() {
+        let (mut vertices, triangles) = unit_cube();
+        for point in &mut vertices {
+            let [u, v, w] = *point;
+            *point = [10.0 * u, 10.0 * u + 0.4 * v, w];
+        }
+        let run = || generate_bcc_interior_points(&vertices, &triangles, 0.1);
+        let one = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(run);
+        let four = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap()
+            .install(run);
+        assert!(!one.is_empty());
+        assert_eq!(one, four);
+        assert_eq!(one.capacity(), one.len());
+        assert_eq!(four.capacity(), four.len());
+    }
 
     /// Unit cube boundary: 8 vertices, 12 triangles.
     fn unit_cube() -> (Vec<[f64; 3]>, Vec<[usize; 3]>) {

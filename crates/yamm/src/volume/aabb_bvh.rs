@@ -2,7 +2,22 @@
 ///
 /// Used by `filter_tets_inside_boundary` and BCC point generation to
 /// accelerate inside/outside testing from O(n) to O(log n) per query.
+use smallvec::SmallVec;
+
 const LEAF_SIZE: usize = 8;
+
+/// Number of nodes produced by recursive midpoint splits.
+fn node_count(n: usize) -> usize {
+    let mut width = 1;
+    while n / width > LEAF_SIZE {
+        width *= 2;
+    }
+    // At this depth, each interval has floor(n / width) or one more
+    // triangles. Only the larger intervals can still need a split.
+    let extra_leaves = if n / width == LEAF_SIZE { n % width } else { 0 };
+    // A full binary tree has one fewer internal node than leaves.
+    2 * (width + extra_leaves) - 1
+}
 
 /// Axis-aligned bounding box.
 #[derive(Clone, Copy)]
@@ -83,19 +98,9 @@ impl TriangleBvh {
     /// Build a BVH from triangle vertex data.
     pub fn new(triangles: &[([f64; 3], [f64; 3], [f64; 3])]) -> Self {
         let mut tris: Vec<[[f64; 3]; 3]> = triangles.iter().map(|(a, b, c)| [*a, *b, *c]).collect();
-        let mut centroids: Vec<[f64; 3]> = tris
-            .iter()
-            .map(|t| {
-                [
-                    (t[0][0] + t[1][0] + t[2][0]) / 3.0,
-                    (t[0][1] + t[1][1] + t[2][1]) / 3.0,
-                    (t[0][2] + t[1][2] + t[2][2]) / 3.0,
-                ]
-            })
-            .collect();
-        let mut nodes = Vec::new();
         let n = tris.len();
-        build_recursive(&mut nodes, &mut tris, &mut centroids, 0, n);
+        let mut nodes = Vec::with_capacity(node_count(n));
+        build_recursive(&mut nodes, &mut tris, 0, n);
         TriangleBvh { nodes, tris }
     }
 
@@ -103,7 +108,8 @@ impl TriangleBvh {
     pub fn ray_intersection_count(&self, origin: &[f64; 3], dir: &[f64; 3]) -> usize {
         let inv_dir = [1.0 / dir[0], 1.0 / dir[1], 1.0 / dir[2]];
         let mut count = 0;
-        let mut stack = vec![0usize];
+        let mut stack = SmallVec::<[usize; 64]>::new();
+        stack.push(0);
         while let Some(ni) = stack.pop() {
             match &self.nodes[ni] {
                 BvhNode::Leaf {
@@ -236,7 +242,8 @@ impl TriangleBvh {
     fn segment_intersection_count(&self, a: &[f64; 3], dir: &[f64; 3], len_sq: f64) -> usize {
         let inv_dir = [1.0 / dir[0], 1.0 / dir[1], 1.0 / dir[2]];
         let mut count = 0;
-        let mut stack = vec![0usize];
+        let mut stack = SmallVec::<[usize; 64]>::new();
+        stack.push(0);
         while let Some(ni) = stack.pop() {
             match &self.nodes[ni] {
                 BvhNode::Leaf {
@@ -299,7 +306,6 @@ impl TriangleBvh {
 fn build_recursive(
     nodes: &mut Vec<BvhNode>,
     tris: &mut Vec<[[f64; 3]; 3]>,
-    centroids: &mut Vec<[f64; 3]>,
     start: usize,
     count: usize,
 ) -> usize {
@@ -319,17 +325,10 @@ fn build_recursive(
     let mid = start + count / 2;
 
     // Partial sort to find median along axis
-    let (_left_tris, _, _) =
-        tris[start..start + count].select_nth_unstable_by(count / 2, |a, b| {
-            let ca = (a[0][axis] + a[1][axis] + a[2][axis]) / 3.0;
-            let cb = (b[0][axis] + b[1][axis] + b[2][axis]) / 3.0;
-            ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
-        });
-    // Also reorder centroids to match (not strictly needed since we don't use them after split)
-    centroids[start..start + count].select_nth_unstable_by(count / 2, |a, b| {
-        a[axis]
-            .partial_cmp(&b[axis])
-            .unwrap_or(std::cmp::Ordering::Equal)
+    tris[start..start + count].select_nth_unstable_by(count / 2, |a, b| {
+        let ca = (a[0][axis] + a[1][axis] + a[2][axis]) / 3.0;
+        let cb = (b[0][axis] + b[1][axis] + b[2][axis]) / 3.0;
+        ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
     });
 
     let idx = nodes.len();
@@ -340,8 +339,8 @@ fn build_recursive(
         aabb,
     });
 
-    let left = build_recursive(nodes, tris, centroids, start, count / 2);
-    let right = build_recursive(nodes, tris, centroids, mid, count - count / 2);
+    let left = build_recursive(nodes, tris, start, count / 2);
+    let right = build_recursive(nodes, tris, mid, count - count / 2);
 
     nodes[idx] = BvhNode::Internal { left, right, aabb };
     idx
@@ -574,6 +573,31 @@ fn ray_triangle_intersect(origin: &[f64; 3], dir: &[f64; 3], tri: &[[f64; 3]; 3]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_reservation_matches_midpoint_tree() {
+        fn reference(n: usize) -> usize {
+            if n <= LEAF_SIZE {
+                1
+            } else {
+                1 + reference(n / 2) + reference(n - n / 2)
+            }
+        }
+        for n in 0..=4096 {
+            assert_eq!(node_count(n), reference(n), "triangle count {n}");
+        }
+        for n in [0, 1, 8, 9, 16, 17, 18, 20, 33, 64, 257, 1000] {
+            let triangles: Vec<_> = (0..n)
+                .map(|i| {
+                    let x = i as f64;
+                    ([x, 0.0, 0.0], [x, 1.0, 0.0], [x, 0.0, 1.0])
+                })
+                .collect();
+            let bvh = TriangleBvh::new(&triangles);
+            assert_eq!(bvh.nodes.len(), node_count(n));
+            assert_eq!(bvh.nodes.capacity(), bvh.nodes.len());
+        }
+    }
 
     fn cube_triangles() -> Vec<([f64; 3], [f64; 3], [f64; 3])> {
         let v = [

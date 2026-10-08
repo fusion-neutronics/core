@@ -20,7 +20,13 @@ import math
 
 from OCP.TopAbs import TopAbs_REVERSED, TopAbs_EDGE, TopAbs_WIRE
 from OCP.TopExp import TopExp, TopExp_Explorer
-from OCP.TopTools import TopTools_IndexedMapOfShape
+try:
+    from OCP.TopTools import TopTools_IndexedMapOfShape
+except ImportError:
+    # OCP 8 moved the indexed shape map into OCP.collections.
+    from OCP.collections import (
+        IndexedMap_TopoDS_Shape_TopTools_ShapeMapHasher as TopTools_IndexedMapOfShape,
+    )
 from OCP.BRepTools import BRepTools, BRepTools_WireExplorer
 from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Curve2d, BRepAdaptor_Surface
 from OCP.GCPnts import GCPnts_TangentialDeflection, GCPnts_AbscissaPoint
