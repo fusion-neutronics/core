@@ -1,8 +1,7 @@
 use crate::branching_rule::{
     build_lists, measure_unmodelled_mt5, refuse_clipped_or_held, refuse_unmodelled_mt5,
     removal_rate, Bound, BranchingChannel, BranchingReport, BranchingState, Denominator,
-    DroppedChannel, ListRates, ListRule, Lists, ANYTHING, BRANCHING_RATE_TOLERANCE, INELASTIC,
-    MT_ANYTHING, MT_INELASTIC,
+    DroppedChannel, ListRates, ListRule, Lists, ANYTHING, INELASTIC, MT_ANYTHING, MT_INELASTIC,
 };
 use crate::covariance_fold::{cell_fields, fold_rate_covariance, reachable_mts, FoldSpectrum};
 use crate::covariance_sample::Sampler;
@@ -3002,7 +3001,7 @@ type LoadOutcome = Result<Option<(String, std::sync::Arc<yamc_nuclide::Nuclide>)
 /// the partials alone.
 ///
 /// Refuses the spectrum where the rule would rest more than
-/// [`BRANCHING_RATE_TOLERANCE`] of a parent's removal rate on a clipped or
+/// [`BRANCHING_RATE_TOLERANCE`](crate::branching_rule::BRANCHING_RATE_TOLERANCE) of a parent's removal rate on a clipped or
 /// held value, reports MT=5's share of each parent's removal where the chain
 /// does not model its residuals (see [`measure_unmodelled_mt5`]), and refuses
 /// where that is more than the tolerance of the material's own removal (see
