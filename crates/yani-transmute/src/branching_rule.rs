@@ -48,7 +48,7 @@
 //! "multiplicities" up to 1e9 where MT=5 vanishes. Because every MT=5
 //! evaluation sits in the network of every irradiation, what MT=5 clips or
 //! holds is refused by its share of the material's removal rather than of
-//! one parent's ([`refuse_anything_clipped`]). Where the chain does not
+//! one parent's ([`refuse_clipped_or_held`]), as every list's is. Where the chain does not
 //! model MT=5's residuals at all, the rate is reported, and refused above the
 //! tolerance the same way by [`refuse_unmodelled_mt5`].
 
@@ -58,16 +58,21 @@ use std::collections::HashMap;
 use yamc_nuclide::reaction::Reaction;
 use yani::{BranchCurve, BranchQuantity};
 
-/// The largest share of a parent's neutron removal rate that may rest on a
-/// value the rule cannot represent, before a solve refuses to run.
+/// The largest share of the material's neutron removal rate that may rest on
+/// a value the rule cannot represent, before a solve refuses to run.
 ///
-/// Two things are measured against it, each as a rate over the parent's
-/// removal rate in the run's own spectrum: the production clipped because it
-/// was impossible (absolute partials above the transport total, isomer yields
-/// above one, negative partials), and the production resting on a held
-/// fraction outside a list's tabulated range. MT=5 whose residuals the chain
-/// does not model is measured against it too, as a share of the material's
-/// removal (see [`refuse_unmodelled_mt5`]).
+/// Three things are measured against it, each as a rate over the removal rate
+/// of the material's composition in the run's own spectrum, every parent
+/// weighted by its density: the production clipped because it was impossible
+/// (absolute partials above the transport total, isomer yields above one,
+/// negative partials, multiplicities above the nucleon bound), the production
+/// resting on a held fraction outside a list's tabulated range (see
+/// [`refuse_clipped_or_held`]), and MT=5 whose residuals the chain does not
+/// model (see [`refuse_unmodelled_mt5`]). The report gives each channel's
+/// share of its own parent's removal beside it. Weighting by the material
+/// keeps a bad list on a product present at a trace from refusing every
+/// irradiation whose network reaches it, while a material made of the parent
+/// is held to the same 0.1% as before.
 ///
 /// It is the solver's tolerance for a rate it has no data for, the same
 /// 0.1% as [`crate::multigroup::ABOVE_EVALUATION_TOLERANCE`], which refuses a
@@ -1060,20 +1065,23 @@ pub(crate) fn refuse_unmodelled_mt5(
 }
 
 /// Refuse a run where too much of the material's neutron removal rests on
-/// `(n,X)` production the rule clipped as impossible or held beyond the
+/// production a branching list clipped as impossible or held beyond the
 /// evaluation's range.
 ///
-/// The same measure as [`refuse_unmodelled_mt5`], for the same reason: a
-/// parent's clipped and held MT=5 production, as the report gives it (shares
-/// of that parent's removal), weighted by its density in the material, over
-/// the removal of the whole composition. ENDF/B-VIII.1's Cr50 to Cr54 give
-/// residual "multiplicities" in the hundreds where their MT=5 is small, so
-/// Cr50's clipped share is 0.2% to 0.4% of its own removal under the FNS
-/// spectra; a per-parent test refuses every irradiation whose network reaches
-/// Cr50 at all, and this one refuses a material made of chromium if, and only
-/// if, that much of its removal is affected. With no densities it refuses
-/// nothing.
-pub(crate) fn refuse_anything_clipped(
+/// Weighed by the material, as [`refuse_unmodelled_mt5`] is and for the same
+/// reason: each channel's clipped and held production, as the report gives it
+/// (shares of its parent's removal), times the parent's density, over the
+/// removal of the whole composition, refused above
+/// [`BRANCHING_RATE_TOLERANCE`] for either. A parent of the network can be a
+/// product the material holds at a trace, and a test of each parent's own
+/// share refuses every irradiation whose network reaches one bad list: with
+/// MT=5 carried, ENDF/B-VIII.1's Cr50 `(n,X)` (residual "multiplicities" in the
+/// hundreds) and Ir194_m1 `(n,n')` reach every one of the 132 FNS foils, at
+/// 0.2% to 1% of their own removal and nothing of the foils'. A material made
+/// of such a parent is refused as before, since there the two measures agree.
+/// With no densities (a statistical replica, re-drawn from a nominal already
+/// guarded, or a caller that gave none) it refuses nothing.
+pub(crate) fn refuse_clipped_or_held(
     channels: &[BranchingChannel],
     rates: &yani::ReactionRates,
     densities: &HashMap<String, f64>,
@@ -1088,49 +1096,82 @@ pub(crate) fn refuse_anything_clipped(
     if whole <= 0.0 {
         return Ok(());
     }
-    let mut lost: Vec<(f64, &BranchingChannel)> = channels
+    let weight = |c: &BranchingChannel, share: f64| -> f64 {
+        let n = densities.get(&c.parent).copied().unwrap_or(0.0);
+        n * share * removal_rate(rates, &c.parent) / whole
+    };
+    let clipped: f64 = channels.iter().map(|c| weight(c, c.clipped_share)).sum();
+    let held: f64 = channels
         .iter()
-        .filter(|c| c.reaction == ANYTHING)
-        .filter_map(|c| {
-            let n = densities.get(&c.parent).copied().unwrap_or(0.0);
-            let rate = (c.clipped_share + c.extrapolated_share) * removal_rate(rates, &c.parent);
-            (n * rate > 0.0).then(|| (n * rate / whole, c))
-        })
-        .collect();
-    let total: f64 = lost.iter().map(|(share, _)| share).sum();
-    if total <= BRANCHING_RATE_TOLERANCE {
+        .map(|c| weight(c, c.extrapolated_share))
+        .sum();
+    if clipped <= BRANCHING_RATE_TOLERANCE && held <= BRANCHING_RATE_TOLERANCE {
         return Ok(());
     }
-    lost.sort_by(|a, b| {
-        b.0.total_cmp(&a.0)
-            .then_with(|| a.1.parent.cmp(&b.1.parent))
-    });
-    let named: Vec<String> = lost
-        .iter()
-        .map(|(share, c)| {
-            let from = library(&c.parent)
-                .map(|l| format!(" ({l})"))
-                .unwrap_or_default();
-            format!(
-                "{} {}{from}: {:.3}% of the material's removal, {:.3}% of its own clipped \
-                 as impossible (a multiplicity above what the nucleons allow, or negative) \
-                 and {:.3}% held beyond the evaluation's range",
-                c.parent,
-                c.reaction,
-                100.0 * share,
-                100.0 * c.clipped_share,
-                100.0 * c.extrapolated_share
-            )
-        })
-        .collect();
+    let mut named: Vec<(f64, String)> = Vec::new();
+    for c in channels {
+        let from = library(&c.parent)
+            .map(|l| format!(" ({l})"))
+            .unwrap_or_default();
+        let (wc, wh) = (weight(c, c.clipped_share), weight(c, c.extrapolated_share));
+        if clipped > BRANCHING_RATE_TOLERANCE && wc > 0.0 {
+            let excess = match c.own_total_excess {
+                Some((e, ratio)) if ratio.is_finite() => format!(
+                    " (the listed values reach {ratio:.4} times the evaluation's own total, at \
+                     {e:.4e} eV)"
+                ),
+                Some((e, _)) => format!(
+                    " (the listed values are non-zero where the evaluation's own total is \
+                     zero, at {e:.4e} eV)"
+                ),
+                None => String::new(),
+            };
+            named.push((
+                wc,
+                format!(
+                    "{} {}{from}: {:.3}% of the material's removal, {:.3}% of {}'s, is \
+                     production the evaluation gives above the reaction's transport total, as a \
+                     negative value, or as more of a product than the target's nucleons \
+                     allow{excess}",
+                    c.parent,
+                    c.reaction,
+                    100.0 * wc,
+                    100.0 * c.clipped_share,
+                    c.parent
+                ),
+            ));
+        }
+        if held > BRANCHING_RATE_TOLERANCE && wh > 0.0 {
+            named.push((
+                wh,
+                format!(
+                    "{} {}{from}: {:.3}% of the material's removal, {:.3}% of {}'s, lies where \
+                     the evaluation tabulates no split, and would rest on a fraction held from \
+                     the edge of its range",
+                    c.parent,
+                    c.reaction,
+                    100.0 * wh,
+                    100.0 * c.extrapolated_share,
+                    c.parent
+                ),
+            ));
+        }
+    }
+    named.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     Err(format!(
-        "{:.3}% of this material's neutron removal rate rests on MT=5 (n,X) production the \
-         evaluation does not give, above the {:.1}% the solver carries: {}. Nothing is clipped \
-         or extrapolated silently: use a reaction library whose MF=6 MT=5 conserves the \
-         target's nucleons over this spectrum.",
-        100.0 * total,
+        "the branching cannot be applied to this spectrum without resting more than {:.1}% of \
+         the material's neutron removal rate on values the evaluation does not give \
+         ({:.3}% clipped, {:.3}% held): {}. Nothing is clipped or extrapolated silently: use an \
+         evaluation that covers this spectrum consistently with the cross-section library, or \
+         leave the branching overlay out for these nuclides.",
         100.0 * BRANCHING_RATE_TOLERANCE,
-        named.join("; ")
+        100.0 * clipped,
+        100.0 * held,
+        named
+            .iter()
+            .map(|(_, s)| s.as_str())
+            .collect::<Vec<_>>()
+            .join("; ")
     ))
 }
 

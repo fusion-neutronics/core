@@ -1337,9 +1337,10 @@ impl PyTransmutationResults {
     /// (``representation`` ``"multiplicity"``, each state's ``share`` the
     /// multiplicity folded over the spectrum, which can exceed one).
     ///
-    /// A run refuses when a channel's clipped or held production is more than
-    /// 0.1% of that parent's neutron removal rate, so what comes back here is
-    /// below that. A multiplicity above what the target's nucleons allow is
+    /// A run refuses when the clipped or held production of its channels,
+    /// each parent weighted by its density, is more than 0.1% of the
+    /// material's neutron removal rate; each channel's ``clipped_share`` and
+    /// ``extrapolated_share`` are of its own parent's removal. A multiplicity above what the target's nucleons allow is
     /// clipped like any other impossible value. ``unmodelled_mt5`` lists the
     /// parents whose MT=5 residuals the chain does not model, with the reason;
     /// on a reactions subsection that carries MT=5, a run refuses when those

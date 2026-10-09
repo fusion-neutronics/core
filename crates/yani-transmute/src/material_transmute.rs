@@ -1,5 +1,5 @@
 use crate::branching_rule::{
-    build_lists, measure_unmodelled_mt5, refuse_anything_clipped, refuse_unmodelled_mt5,
+    build_lists, measure_unmodelled_mt5, refuse_clipped_or_held, refuse_unmodelled_mt5,
     removal_rate, Bound, BranchingChannel, BranchingReport, BranchingState, Denominator,
     DroppedChannel, ListRates, ListRule, Lists, ANYTHING, BRANCHING_RATE_TOLERANCE, INELASTIC,
     MT_ANYTHING, MT_INELASTIC,
@@ -3064,7 +3064,7 @@ pub(crate) fn collapse_and_fold(
     let (folded_chain, mut report) = fold_branching_into_chain(chain, lists, &folded, &mut rates)?;
     report.unmodelled_mt5 = measure_unmodelled_mt5(chain, &rates, &mt5);
     let densities = material.get_atoms_per_barn_cm().unwrap_or_default();
-    refuse_anything_clipped(&report.channels, &rates, &densities, &|n| {
+    refuse_clipped_or_held(&report.channels, &rates, &densities, &|n| {
         library_of(material, n)
     })?;
     refuse_unmodelled_mt5(&report.unmodelled_mt5, &rates, &mt5, &densities, &|n| {
@@ -3100,9 +3100,9 @@ fn library_of(material: &Material, nuclide: &str) -> Option<String> {
 ///   transport total folded in the same walk, and the chain's other targets
 ///   for the reaction (the ground state) take the rest.
 ///
-/// Then the guards: a list whose clipped or held production is more than
-/// [`BRANCHING_RATE_TOLERANCE`] of its parent's removal rate refuses the run.
-/// Below that it is reported, with everything else the report carries.
+/// Each channel's clipped and held production is reported as a share of its
+/// parent's removal; whether the run may go on is the caller's to decide
+/// against the material (see [`refuse_clipped_or_held`]).
 pub(crate) fn fold_branching_into_chain(
     chain: &Arc<HashMap<String, ChainNuclide>>,
     lists: &Lists<'_>,
@@ -3138,7 +3138,6 @@ pub(crate) fn fold_branching_into_chain(
 
     // Measured against removal rates that include the `(n,n')` rates the
     // lists injected, so every list is judged against the same whole.
-    let mut refusals: Vec<String> = Vec::new();
     let mut report = BranchingReport::default();
     for resolved in channels {
         let mut channel = resolved.channel;
@@ -3147,59 +3146,7 @@ pub(crate) fn fold_branching_into_chain(
         channel.removal_share = share_of(resolved.rate);
         channel.clipped_share = share_of(resolved.clipped);
         channel.extrapolated_share = share_of(resolved.extrapolated);
-        // MT=5's lists are judged by the material instead (see
-        // `refuse_anything_clipped`): every MT=5 evaluation is in the network
-        // of every irradiation, ENDF/B-VIII.1's Cr50 at a trace in each of the
-        // 132 FNS foils, so a per-parent test would refuse all of them for a
-        // nuclide none of them is made of.
-        if channel.reaction == ANYTHING {
-            report.channels.push(channel);
-            continue;
-        }
-        if channel.clipped_share > BRANCHING_RATE_TOLERANCE {
-            let excess = match channel.own_total_excess {
-                Some((e, ratio)) if ratio.is_finite() => format!(
-                    " (the listed values reach {ratio:.4} times the evaluation's own total, at \
-                     {e:.4e} eV)"
-                ),
-                Some((e, _)) => {
-                    format!(" (the listed values are non-zero where the evaluation's own total is zero, at {e:.4e} eV)")
-                }
-                None => String::new(),
-            };
-            refusals.push(format!(
-                "{} {}: {:.3}% of {}'s neutron removal rate is production the evaluation gives \
-                 above the reaction's transport total, as a negative value, or as more of a \
-                 product than the target's nucleons allow{excess}",
-                channel.parent,
-                channel.reaction,
-                100.0 * channel.clipped_share,
-                channel.parent
-            ));
-        }
-        if channel.extrapolated_share > BRANCHING_RATE_TOLERANCE {
-            refusals.push(format!(
-                "{} {}: {:.3}% of {}'s neutron removal rate lies where the branching \
-                 evaluation tabulates no split, and would rest on a fraction held from the \
-                 edge of its range",
-                channel.parent,
-                channel.reaction,
-                100.0 * channel.extrapolated_share,
-                channel.parent
-            ));
-        }
         report.channels.push(channel);
-    }
-    if !refusals.is_empty() {
-        return Err(format!(
-            "the isomeric branching cannot be applied to this spectrum without moving more \
-             than {:.1}% of a parent's removal rate onto values the evaluation does not give. \
-             {}. Nothing is clipped or extrapolated silently: use a branching evaluation that \
-             covers this spectrum consistently with the cross-section library, or leave the \
-             branching overlay out for these nuclides.",
-            100.0 * BRANCHING_RATE_TOLERANCE,
-            refusals.join("; ")
-        ));
     }
     for (mut d, rate) in dropped {
         let removal = removal_rate(rates, &d.parent);
@@ -3721,7 +3668,7 @@ pub fn apply_coupled_branching(
     let (folded_chain, mut report) = fold_branching_into_chain(chain, &lists, &folded, rates)?;
     if let Some(d) = diagnostics {
         report.unmodelled_mt5 = measure_unmodelled_mt5(chain, rates, &d.mt5);
-        refuse_anything_clipped(&report.channels, rates, &d.densities, &|n| {
+        refuse_clipped_or_held(&report.channels, rates, &d.densities, &|n| {
             d.libraries.get(n).cloned()
         })?;
         refuse_unmodelled_mt5(&report.unmodelled_mt5, rates, &d.mt5, &d.densities, &|n| {
