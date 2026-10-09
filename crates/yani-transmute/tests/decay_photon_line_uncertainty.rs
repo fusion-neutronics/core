@@ -90,6 +90,7 @@ fn run(
         samples: Some(samples),
         sources,
         attribution: false,
+        ..Default::default()
     };
     transmute_material(
         &mut material,

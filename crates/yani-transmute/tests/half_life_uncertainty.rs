@@ -81,6 +81,7 @@ fn run(sources: Vec<Source>) -> Option<(yani_transmute::TransmutationResults, f6
         samples: Some(512),
         sources,
         attribution: false,
+        ..Default::default()
     };
     let results = transmute_material(
         &mut material,

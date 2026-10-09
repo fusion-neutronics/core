@@ -56,6 +56,14 @@ stack; pick `yamc` when the spectrum should come from a transport solve.
   intensities, the material composition) are held at nominal, and
   `get_data_uncertainty_info` lists every one it held. There are no
   first-order sensitivity coefficients.
+- Replicas are added 64 at a time until every tracked sigma (each nuclide
+  density within 1e-6 of the largest, and the total activity, decay heat and
+  decay photon line rate, at every step) has a standard error under 5% of
+  itself, set with `DataUncertainty(convergence=...)`. The standard error
+  carries the sample kurtosis, so a heavy-tailed output needs more replicas
+  than a Gaussian one (about 201 at 5%). At least 128 and at most 1024 run;
+  a run that stops on the cap says so (`hit_cap`) and lists the outputs that
+  missed (`unconverged`).
 - Pathways are reported per product (`get_production_routes`), but there is no
   automatic pathway search across the whole inventory.
 - No ingestion or inhalation dose.

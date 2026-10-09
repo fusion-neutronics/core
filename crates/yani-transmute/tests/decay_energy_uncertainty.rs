@@ -69,6 +69,7 @@ fn decay_energy_moves_the_heat_and_nothing_else() {
         samples: Some(4096),
         sources: vec![Source::DecayEnergy],
         attribution: false,
+        ..Default::default()
     };
     let results = transmute_material(
         &mut material,
@@ -131,6 +132,7 @@ fn a_sigma_no_draw_can_carry_is_reported_as_a_gap() {
         samples: Some(8),
         sources: vec![Source::HalfLife, Source::DecayEnergy],
         attribution: false,
+        ..Default::default()
     };
     let results = transmute_material(
         &mut material,

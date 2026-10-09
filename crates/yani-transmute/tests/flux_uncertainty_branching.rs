@@ -210,6 +210,7 @@ fn flux_only(samples: usize) -> DataUncertainty {
         samples: Some(samples),
         sources: vec![Source::FluxSpectrum],
         attribution: false,
+        ..Default::default()
     }
 }
 

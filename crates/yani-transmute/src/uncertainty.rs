@@ -160,18 +160,18 @@ impl Source {
 }
 
 /// Ask for nuclear-data uncertainty on a transmutation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DataUncertainty {
     /// Base seed. The perturbation of a given nuclide in a given replica is a
     /// pure function of `(seed, replica, nuclide)`, so a rerun with the same
     /// seed gives the same answer whatever else changed about the run.
     pub seed: u64,
-    /// Fixed replica count, or `None` to run until the sigma estimate settles.
+    /// Fixed replica count, or `None` to run until every tracked sigma is
+    /// known to [`Self::convergence`].
     ///
-    /// `None` is the recommended setting and the one with no accuracy knob in
-    /// it: the driver adds replicas until the reported sigmas stop moving by
-    /// more than an internal tolerance. A number here is for reproducing a
-    /// specific run or for bounding cost, not for trading accuracy.
+    /// `None` is the recommended setting. A number here is for reproducing a
+    /// specific run or for bounding cost: exactly that many replicas run, and
+    /// [`Info::unconverged`] still says which sigmas did not reach the target.
     pub samples: Option<usize>,
     /// Which inputs to perturb. Empty means every implemented source.
     ///
@@ -186,6 +186,18 @@ pub struct DataUncertainty {
     /// source, and one deterministic solve per contributor. It changes no
     /// number the run otherwise reports.
     pub attribution: bool,
+    /// The target for the standard error of each tracked sigma, relative to
+    /// that sigma: replicas are added until `SE(sigma) / sigma` is below it
+    /// for every tracked output at every step. [`DEFAULT_CONVERGENCE`] (5%)
+    /// unless set; in (0, 1), see [`check_convergence`].
+    ///
+    /// For a Gaussian output `SE(sigma) / sigma` is about `1 / sqrt(2(n-1))`,
+    /// so a target `t` needs about `1 / (2 t^2) + 1` replicas: 201 at 5%, 51
+    /// at 10%. A heavy-tailed output needs more (see
+    /// [`std_dev_standard_error`]), and [`MAX_SAMPLES`] bounds the run, so a
+    /// target much below 2.2% (the Gaussian figure at the cap) cannot be met.
+    /// What is tracked is listed on [`Ensemble::unconverged`].
+    pub convergence: f64,
 }
 
 impl Default for DataUncertainty {
@@ -195,6 +207,7 @@ impl Default for DataUncertainty {
             samples: None,
             sources: Source::IMPLEMENTED.to_vec(),
             attribution: false,
+            convergence: DEFAULT_CONVERGENCE,
         }
     }
 }
@@ -209,17 +222,133 @@ impl DataUncertainty {
     }
 }
 
+/// The default [`DataUncertainty::convergence`]: each tracked sigma known to
+/// 5% of itself, one standard error.
+pub const DEFAULT_CONVERGENCE: f64 = 0.05;
+
+/// Refuse a convergence target outside (0, 1).
+///
+/// Zero or below can never be met and would always run the cap, and a
+/// standard error as large as the sigma it qualifies says nothing about it.
+pub fn check_convergence(convergence: f64) -> Result<(), String> {
+    if convergence.is_finite() && convergence > 0.0 && convergence < 1.0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "convergence must be between 0 and 1 (exclusive), the target for each \
+             sigma's standard error relative to that sigma, e.g. 0.05 for 5%; got \
+             {convergence}"
+        ))
+    }
+}
+
 /// Replicas are added in blocks, and convergence is judged between blocks.
 pub(crate) const BLOCK: usize = 64;
-/// Below this the sigma estimate is too noisy to judge, whatever it says.
+/// Below this the run does not stop whatever the target says. The standard
+/// error rests on a sample kurtosis, which is itself noisy on a few dozen
+/// replicas and reads low on a heavy tail that has not shown yet, so a loose
+/// target could otherwise stop a run on the first block.
 pub(crate) const MIN_SAMPLES: usize = 128;
 /// A ceiling, so a pathological problem cannot run forever.
 pub(crate) const MAX_SAMPLES: usize = 1024;
-/// Relative movement in a nuclide's sigma between blocks that counts as settled.
-pub(crate) const TOLERANCE: f64 = 0.02;
-/// Nuclides below this share of the largest final density are not tracked for
-/// convergence: their sigma is noise on a number nobody reads.
+/// Nuclides below this share of the largest density at a step are not tracked
+/// at that step: their sigma is noise on a number nobody reads.
 pub(crate) const SIGNIFICANCE: f64 = 1.0e-6;
+/// A sigma below this share of its mean is not tracked. It changes no figure
+/// a reader uses, and its shape is often far from Gaussian: a saturated
+/// activity's spread is `exp(-lambda t)` of the half-life draw, a heavy tail
+/// whose sigma no cap could pin down to a few percent, and at the bottom of
+/// the range it is rounding in the solve.
+pub(crate) const NEGLIGIBLE: f64 = 1.0e-4;
+
+/// One output whose sigma the stopping rule judges.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Output {
+    /// A nuclide's density.
+    Density(String),
+    /// The total activity.
+    Activity,
+    /// The total decay heat.
+    DecayHeat,
+    /// The total emission rate of the decay photon lines, the photon spectrum
+    /// summed over its lines.
+    DecayPhotonRate,
+    /// A D1S time-correction factor: one emitter in one campaign.
+    TimeCorrectionFactor {
+        /// The campaign, in schedule order.
+        campaign: usize,
+        /// The emitting radionuclide.
+        emitter: String,
+    },
+}
+
+impl Output {
+    /// The name the output goes by in a report.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Output::Density(_) => "density",
+            Output::Activity => "activity",
+            Output::DecayHeat => "decay_heat",
+            Output::DecayPhotonRate => "decay_photon_rate",
+            Output::TimeCorrectionFactor { .. } => "time_correction_factor",
+        }
+    }
+
+    /// The nuclide it belongs to, for a density or a time-correction factor.
+    pub fn nuclide(&self) -> Option<&str> {
+        match self {
+            Output::Density(n) => Some(n),
+            Output::TimeCorrectionFactor { emitter, .. } => Some(emitter),
+            _ => None,
+        }
+    }
+}
+
+/// One tracked sigma that did not reach the convergence target.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Unconverged {
+    /// What it is the sigma of.
+    pub output: Output,
+    /// The step, indexed like `TransmutationResults::get_material` (1 is the
+    /// end of the first schedule step); a schedule index for a time-correction
+    /// factor.
+    pub step: usize,
+    /// `SE(sigma) / sigma` reached, or `None` below four replicas, where no
+    /// standard error is estimated.
+    pub relative_standard_error: Option<f64>,
+}
+
+/// The tracked sigmas of `values` that miss `convergence`, as `Some(SE /
+/// sigma)`, `Some(None)` below four values, or `None` when the output meets
+/// it or has no spread worth judging (none at all, or under [`NEGLIGIBLE`] of
+/// its mean).
+pub(crate) fn misses(values: &[f64], convergence: f64) -> Option<Option<f64>> {
+    let n = values.len() as f64;
+    if n < 2.0 {
+        return None;
+    }
+    let mean = values.iter().sum::<f64>() / n;
+    let sigma = (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
+    if sigma <= NEGLIGIBLE * mean.abs() || sigma == 0.0 {
+        return None;
+    }
+    match std_dev_standard_error(values) {
+        None => Some(None),
+        Some(se) if se / sigma >= convergence => Some(Some(se / sigma)),
+        Some(_) => None,
+    }
+}
+
+/// Sort the misses worst first, an unestimated one ahead of every number.
+pub(crate) fn worst_first(unconverged: &mut [Unconverged]) {
+    unconverged.sort_by(|a, b| {
+        let key = |u: &Unconverged| u.relative_standard_error.unwrap_or(f64::INFINITY);
+        key(b)
+            .total_cmp(&key(a))
+            .then_with(|| a.step.cmp(&b.step))
+            .then_with(|| a.output.cmp(&b.output))
+    });
+}
 
 /// What was perturbed, and what could not be.
 ///
@@ -231,8 +360,18 @@ pub(crate) const SIGNIFICANCE: f64 = 1.0e-6;
 pub struct Info {
     /// Replicas actually run.
     pub samples: usize,
-    /// Whether the run stopped because the sigmas settled rather than on the cap.
+    /// Whether every tracked sigma reached the convergence target, so
+    /// `unconverged` is empty. With a fixed sample count, whether it did at
+    /// that count.
     pub converged: bool,
+    /// The convergence target the run judged against, `SE(sigma) / sigma`.
+    pub convergence: f64,
+    /// Whether the run stopped on [`MAX_SAMPLES`] with some tracked sigma
+    /// still short of the target. Never set on a fixed sample count.
+    pub hit_cap: bool,
+    /// Every tracked sigma, by output and step, that did not reach the
+    /// target, with the `SE(sigma) / sigma` it did reach, worst first.
+    pub unconverged: Vec<Unconverged>,
     /// Nuclides whose cross sections were perturbed.
     pub perturbed: BTreeSet<String>,
     /// Nuclides with rates but no usable covariance, so no stated uncertainty.
@@ -648,6 +787,22 @@ impl Info {
         })
     }
 
+    /// Record how a replica run ended: the count, the target, every tracked
+    /// sigma still short of it, and whether the cap stopped it.
+    pub(crate) fn conclude(
+        &mut self,
+        ensemble: &mut Ensemble,
+        chain: &HashMap<String, yani::ChainNuclide>,
+        request: &DataUncertainty,
+    ) {
+        ensemble.track_derived(chain);
+        self.samples = ensemble.replicas();
+        self.convergence = request.convergence;
+        self.unconverged = ensemble.unconverged(request.convergence);
+        self.converged = self.unconverged.is_empty();
+        self.hit_cap = request.samples.is_none() && !self.converged;
+    }
+
     pub(crate) fn add_flux_coverage(&mut self, c: &crate::flux_uncertainty::FluxCoverage) {
         self.spectra_with_flux_sigma = c.spectra_with_sigma;
         self.spectra_without_flux_sigma = c.spectra_without_sigma;
@@ -740,6 +895,9 @@ pub struct Ensemble {
     /// nuclides whose half-life was perturbed. Empty maps when half-lives were
     /// not perturbed.
     half_lives: Vec<HashMap<String, f64>>,
+    /// `[replica][step]`: the activity, decay heat and decay photon line rate
+    /// per cm^3 the stopping rule tracks, for the replicas evaluated so far.
+    tracked: Vec<Vec<[f64; 3]>>,
     /// Where the uncertainty comes from, when it was asked for.
     pub attribution: Option<Attribution>,
     /// The seed decay energies are drawn from, per replica and nuclide, when
@@ -838,6 +996,7 @@ impl Ensemble {
             moments: vec![HashMap::new(); n_steps],
             samples: Vec::new(),
             half_lives: Vec::new(),
+            tracked: Vec::new(),
             attribution: None,
             decay_energy_seed: None,
             decay_photon_seed: None,
@@ -941,68 +1100,135 @@ impl Ensemble {
         self.samples.iter().filter_map(|r| r.get(step)).collect()
     }
 
-    /// The nuclides worth judging convergence on at the final step.
+    /// Evaluate the derived totals the stopping rule tracks on every replica
+    /// not yet evaluated, each with its own half-lives, decay energies and
+    /// decay photon data.
     ///
-    /// Everything within [`SIGNIFICANCE`] of the largest density. A trace many
-    /// decades down carries no significant figures anyway, and letting its
-    /// sigma decide when to stop would run the cap every time.
-    fn significant(&self) -> Vec<String> {
-        let Some(last) = self.moments.last() else {
-            return Vec::new();
+    /// Once per replica, so a run that judges after every block pays for each
+    /// replica's totals once.
+    pub(crate) fn track_derived(&mut self, chain: &HashMap<String, yani::ChainNuclide>) {
+        let from = self.tracked.len();
+        let evaluate = |k: usize| -> Vec<[f64; 3]> {
+            let half_lives = &self.half_lives[k];
+            self.samples[k]
+                .iter()
+                .map(|inventory| {
+                    crate::derived::tracked_totals(
+                        inventory,
+                        chain,
+                        half_lives,
+                        self.decay_energy_seed.map(|seed| (seed, k as u64)),
+                        self.decay_photon_seed.map(|seed| (seed, k as u64)),
+                    )
+                })
+                .collect()
         };
-        let max = last.values().map(|m| m.mean.abs()).fold(0.0_f64, f64::max);
-        if max <= 0.0 {
-            return Vec::new();
+        let fresh: Vec<Vec<[f64; 3]>> = {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use rayon::prelude::*;
+                (from..self.samples.len())
+                    .into_par_iter()
+                    .map(evaluate)
+                    .collect()
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                (from..self.samples.len()).map(evaluate).collect()
+            }
+        };
+        self.tracked.extend(fresh);
+    }
+
+    /// Whether an adaptive run may stop: at least [`MIN_SAMPLES`] replicas,
+    /// and every tracked sigma's `SE(sigma) / sigma` below `convergence` (see
+    /// [`Self::unconverged`]).
+    pub(crate) fn may_stop(
+        &mut self,
+        chain: &HashMap<String, yani::ChainNuclide>,
+        convergence: f64,
+    ) -> bool {
+        if self.replicas() < MIN_SAMPLES {
+            return false;
         }
-        let mut out: Vec<String> = last
-            .iter()
-            .filter(|(_, m)| m.mean.abs() >= max * SIGNIFICANCE)
-            .map(|(k, _)| k.clone())
-            .collect();
-        out.sort();
+        self.track_derived(chain);
+        self.unconverged(convergence).is_empty()
+    }
+
+    /// Every tracked sigma that misses `convergence`, worst first.
+    ///
+    /// Tracked, at every schedule step: the density of each nuclide within
+    /// [`SIGNIFICANCE`] of that step's largest, and the total activity, decay
+    /// heat and decay photon line rate evaluated so far by
+    /// [`Self::track_derived`]. Every step, not only the last, since a cooling
+    /// step is often the one read, and an output noisy at one step only keeps
+    /// the run going. The judgement is `SE(sigma) / sigma` from
+    /// [`std_dev_standard_error`], so a heavy-tailed output needs more
+    /// replicas than a Gaussian one. An output with no spread, or a sigma
+    /// under [`NEGLIGIBLE`] of its mean, has nothing worth converging and is
+    /// not tracked.
+    ///
+    /// Not tracked: the photon spectrum line by line and the contact dose,
+    /// whose dose quantity and build-up factor are chosen when it is read and
+    /// whose attenuation data a run does not load. Their emitters' densities
+    /// and the summed line rate are tracked, and every estimate reports its
+    /// own standard error.
+    pub fn unconverged(&self, convergence: f64) -> Vec<Unconverged> {
+        let mut out = Vec::new();
+        let mut values = Vec::with_capacity(self.samples.len());
+        for (step, slot) in self.moments.iter().enumerate() {
+            // The running mean is over the replicas a nuclide appeared in;
+            // scaled to all of them, an absence reads as the zero it is.
+            let replicas = self.samples.len().max(1) as f64;
+            let means: Vec<(&String, f64)> = slot
+                .iter()
+                .map(|(name, m)| (name, m.mean * m.n as f64 / replicas))
+                .collect();
+            let max = means.iter().map(|(_, m)| m.abs()).fold(0.0_f64, f64::max);
+            for (name, mean) in means {
+                if max <= 0.0 || mean.abs() < max * SIGNIFICANCE {
+                    continue;
+                }
+                values.clear();
+                values.extend(self.samples.iter().map(|r| {
+                    r.get(step)
+                        .and_then(|s| s.get(name))
+                        .copied()
+                        .unwrap_or(0.0)
+                }));
+                if let Some(reached) = misses(&values, convergence) {
+                    out.push(Unconverged {
+                        output: Output::Density(name.clone()),
+                        step: step + 1,
+                        relative_standard_error: reached,
+                    });
+                }
+            }
+            if self.tracked.is_empty() {
+                continue;
+            }
+            for (q, output) in [Output::Activity, Output::DecayHeat, Output::DecayPhotonRate]
+                .into_iter()
+                .enumerate()
+            {
+                values.clear();
+                values.extend(
+                    self.tracked
+                        .iter()
+                        .filter_map(|r| r.get(step).map(|t| t[q])),
+                );
+                if let Some(reached) = misses(&values, convergence) {
+                    out.push(Unconverged {
+                        output,
+                        step: step + 1,
+                        relative_standard_error: reached,
+                    });
+                }
+            }
+        }
+        worst_first(&mut out);
         out
     }
-
-    /// The final-step sigmas of the significant nuclides, for comparison
-    /// against the previous block.
-    pub(crate) fn convergence_probe(&self) -> BTreeMap<String, f64> {
-        let Some(last) = self.moments.last() else {
-            return BTreeMap::new();
-        };
-        self.significant()
-            .into_iter()
-            .filter_map(|k| last.get(&k).map(|m| (k, m.std_dev())))
-            .collect()
-    }
-}
-
-/// Whether the sigmas have stopped moving between two blocks.
-///
-/// Compared on relative movement per nuclide, and judged on the WORST of them
-/// rather than an average: an average lets a single unconverged nuclide hide
-/// behind a hundred settled ones. Nuclides whose sigma is zero in both probes
-/// are skipped, since a relative change is undefined there and a genuinely
-/// deterministic nuclide (a stable one, or one no perturbed channel feeds) is
-/// converged the moment it is seen.
-pub(crate) fn settled(previous: &BTreeMap<String, f64>, current: &BTreeMap<String, f64>) -> bool {
-    if previous.is_empty() || current.is_empty() {
-        return false;
-    }
-    let mut compared = 0;
-    for (name, &now) in current {
-        let Some(&before) = previous.get(name) else {
-            return false;
-        };
-        let scale = now.abs().max(before.abs());
-        if scale == 0.0 {
-            continue;
-        }
-        compared += 1;
-        if (now - before).abs() / scale > TOLERANCE {
-            return false;
-        }
-    }
-    compared > 0
 }
 
 /// The per-step nuclide densities of one replica.
@@ -1382,15 +1608,69 @@ pub fn std_dev_standard_error(values: &[f64]) -> Option<f64> {
     }
     let nf = n as f64;
     let mean = values.iter().sum::<f64>() / nf;
-    let m2 = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / nf;
+    let m2 = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
+    let m4 = values.iter().map(|v| (v - mean).powi(4)).sum::<f64>();
+    Some(standard_error_from_sums(nf, m2, m4))
+}
+
+/// [`std_dev_standard_error`] from the count and the sums of the squared and
+/// fourth-power deviations from the mean.
+fn standard_error_from_sums(n: f64, m2: f64, m4: f64) -> f64 {
     if m2 <= 0.0 {
-        return Some(0.0);
+        return 0.0;
     }
-    let m4 = values.iter().map(|v| (v - mean).powi(4)).sum::<f64>() / nf;
+    let (m2, m4) = (m2 / n, m4 / n);
     let kurtosis = m4 / (m2 * m2) - 3.0;
-    let s2 = m2 * nf / (nf - 1.0);
-    let var_s2 = (s2 * s2 * (2.0 / (nf - 1.0) + kurtosis / nf)).max(0.0);
-    Some(var_s2.sqrt() / (2.0 * s2.sqrt()))
+    let s2 = m2 * n / (n - 1.0);
+    let var_s2 = (s2 * s2 * (2.0 / (n - 1.0) + kurtosis / n)).max(0.0);
+    var_s2.sqrt() / (2.0 * s2.sqrt())
+}
+
+/// A sample's standard deviation and its standard error, accumulated one
+/// value at a time, for a spread over more values than are worth keeping
+/// (a D1S dose per mesh bin, say).
+///
+/// The running central moments to the fourth, updated as Pebay (Sandia
+/// SAND2008-6212, 2008) gives them, so the answer is
+/// [`std_dev_standard_error`]'s on the same values to rounding.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SpreadAccumulator {
+    n: u64,
+    mean: f64,
+    m2: f64,
+    m3: f64,
+    m4: f64,
+}
+
+impl SpreadAccumulator {
+    /// Add one value.
+    pub fn update(&mut self, x: f64) {
+        let n1 = self.n as f64;
+        self.n += 1;
+        let n = self.n as f64;
+        let delta = x - self.mean;
+        let delta_n = delta / n;
+        let delta_n2 = delta_n * delta_n;
+        let term = delta * delta_n * n1;
+        self.mean += delta_n;
+        self.m4 += term * delta_n2 * (n * n - 3.0 * n + 3.0) + 6.0 * delta_n2 * self.m2
+            - 4.0 * delta_n * self.m3;
+        self.m3 += term * delta_n * (n - 2.0) - 3.0 * delta_n * self.m2;
+        self.m2 += term;
+    }
+
+    /// The sample standard deviation, or zero below two values.
+    pub fn std_dev(&self) -> f64 {
+        if self.n < 2 {
+            return 0.0;
+        }
+        (self.m2 / (self.n - 1) as f64).max(0.0).sqrt()
+    }
+
+    /// The standard error of [`Self::std_dev`], or `None` below four values.
+    pub fn std_dev_standard_error(&self) -> Option<f64> {
+        (self.n >= 4).then(|| standard_error_from_sums(self.n as f64, self.m2, self.m4.max(0.0)))
+    }
 }
 
 #[cfg(test)]
@@ -1759,23 +2039,141 @@ mod tests {
         assert_eq!(e.samples_at(0, "Mn56"), vec![2.0, 0.0, 4.0]);
     }
 
-    #[test]
-    fn settling_is_judged_on_the_worst_nuclide_not_the_average() {
-        let before = BTreeMap::from([("a".into(), 1.0), ("b".into(), 1.0)]);
-        // "a" is unchanged, "b" moved 50%. The average movement is 25%, under
-        // any sane tolerance; the worst is not.
-        let after = BTreeMap::from([("a".into(), 1.0), ("b".into(), 1.5)]);
-        assert!(!settled(&before, &after));
+    /// `n` replicas, each a one-nuclide inventory per step drawn by `draw`
+    /// from that replica's standard normal deviate.
+    fn synthetic(steps: usize, z: &[f64], draw: impl Fn(usize, f64) -> f64) -> Ensemble {
+        let mut e = Ensemble::new(steps);
+        for &z in z {
+            e.push(
+                (0..steps)
+                    .map(|step| HashMap::from([("X".to_string(), draw(step, z))]))
+                    .collect(),
+            );
+        }
+        e
+    }
 
-        let close = BTreeMap::from([("a".into(), 1.0), ("b".into(), 1.005)]);
-        assert!(settled(&before, &close));
+    /// The driver's loop on a synthetic ensemble: blocks of [`BLOCK`] until
+    /// [`Ensemble::may_stop`] or [`MAX_SAMPLES`], and the count it stopped at.
+    fn stops_at(
+        steps: usize,
+        convergence: f64,
+        draw: impl Fn(usize, f64) -> f64 + Copy,
+    ) -> (usize, Info) {
+        let mut state = yamc_rng::expand_seed(3);
+        let z = crate::covariance_sample::standard_normals(&mut state, MAX_SAMPLES);
+        let chain = HashMap::new();
+        let mut n = 0;
+        let mut e = Ensemble::new(steps);
+        while n < MAX_SAMPLES {
+            n += BLOCK;
+            e = synthetic(steps, &z[..n], draw);
+            if e.may_stop(&chain, convergence) {
+                break;
+            }
+        }
+        let mut info = Info::default();
+        let request = DataUncertainty {
+            convergence,
+            ..Default::default()
+        };
+        info.conclude(&mut e, &chain, &request);
+        (n, info)
     }
 
     #[test]
-    fn a_nuclide_that_appears_late_is_not_treated_as_settled() {
-        let before = BTreeMap::from([("a".into(), 1.0)]);
-        let after = BTreeMap::from([("a".into(), 1.0), ("b".into(), 0.5)]);
-        assert!(!settled(&before, &after), "a new nuclide has not settled");
+    fn a_gaussian_output_stops_near_one_over_two_t_squared() {
+        // 1 / (2 t^2) + 1 is 201 at 5%, so the block after it, 256, give or
+        // take a block for the noise in the estimated kurtosis.
+        let gaussian = |_: usize, z: f64| 1.0 + 0.1 * z;
+        let (at_5, info) = stops_at(1, 0.05, gaussian);
+        assert!((192..=320).contains(&at_5), "{at_5}");
+        assert!(info.converged && !info.hit_cap && info.unconverged.is_empty());
+        assert_eq!(info.convergence, 0.05);
+        // 557 at 3%.
+        let (at_3, _) = stops_at(1, 0.03, gaussian);
+        assert!((512..=704).contains(&at_3), "{at_3}");
+    }
+
+    #[test]
+    fn a_heavy_tail_needs_more_replicas_than_a_gaussian() {
+        let gaussian = |_: usize, z: f64| 1.0 + 0.1 * z;
+        let lognormal = |_: usize, z: f64| (0.8 * z).exp();
+        let (g, _) = stops_at(1, 0.05, gaussian);
+        let (l, _) = stops_at(1, 0.05, lognormal);
+        assert!(l > g, "lognormal {l} against Gaussian {g}");
+    }
+
+    #[test]
+    fn an_output_noisy_only_at_a_cooling_step_keeps_the_run_going() {
+        // Three steps; the middle one alone has a tail (excess kurtosis about
+        // 1.6, so about 364 replicas at 5% against 201).
+        let draw = |step: usize, z: f64| {
+            if step == 1 {
+                (0.3 * z).exp()
+            } else {
+                1.0 + 0.1 * z
+            }
+        };
+        let (with, info) = stops_at(3, 0.05, draw);
+        let (without, _) = stops_at(3, 0.05, |_, z| 1.0 + 0.1 * z);
+        assert!(with > without, "{with} against {without}");
+        assert!(info.converged, "{info:?}");
+    }
+
+    #[test]
+    fn the_cap_is_reported_with_the_outputs_that_missed() {
+        let draw = |step: usize, z: f64| if step == 1 { (1.2 * z).exp() } else { 1.0 };
+        let (n, info) = stops_at(2, 0.01, draw);
+        assert_eq!(n, MAX_SAMPLES);
+        assert!(info.hit_cap && !info.converged);
+        assert_eq!(info.samples, MAX_SAMPLES);
+        assert_eq!(info.unconverged.len(), 1, "{:?}", info.unconverged);
+        let miss = &info.unconverged[0];
+        assert_eq!(miss.output, Output::Density("X".to_string()));
+        assert_eq!(miss.step, 2, "steps count from 1, the end of the first");
+        assert!(miss.relative_standard_error.unwrap() > 0.01);
+    }
+
+    #[test]
+    fn a_fixed_count_reports_without_claiming_the_cap() {
+        let mut state = yamc_rng::expand_seed(3);
+        let z = crate::covariance_sample::standard_normals(&mut state, 64);
+        let mut e = synthetic(1, &z, |_, z| 1.0 + 0.1 * z);
+        let mut info = Info::default();
+        let request = DataUncertainty {
+            samples: Some(64),
+            ..Default::default()
+        };
+        info.conclude(&mut e, &HashMap::new(), &request);
+        // 64 Gaussian replicas give about 9%, short of 5%.
+        assert!(!info.converged && !info.hit_cap);
+        assert_eq!(info.unconverged.len(), 1);
+    }
+
+    #[test]
+    fn the_target_defaults_to_five_percent_and_is_checked() {
+        assert_eq!(DataUncertainty::default().convergence, 0.05);
+        assert!(check_convergence(0.05).is_ok());
+        for bad in [0.0, 1.0, -0.1, 2.0, f64::NAN, f64::INFINITY] {
+            let err = check_convergence(bad).unwrap_err();
+            assert!(err.contains("convergence"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_streamed_standard_error_matches_the_slice_one() {
+        let mut state = yamc_rng::expand_seed(5);
+        let z = crate::covariance_sample::standard_normals(&mut state, 500);
+        let values: Vec<f64> = z.iter().map(|z| 3.0 + (0.6 * z).exp()).collect();
+        let mut acc = SpreadAccumulator::default();
+        for &v in &values {
+            acc.update(v);
+        }
+        let want = std_dev_standard_error(&values).unwrap();
+        let got = acc.std_dev_standard_error().unwrap();
+        assert!((got / want - 1.0).abs() < 1e-9, "{got} against {want}");
+        assert_eq!(SpreadAccumulator::default().std_dev_standard_error(), None);
     }
 
     /// A nuclide whose every sigma is the 0.0 MT=457 writes for "not stated",
@@ -1828,16 +2226,14 @@ mod tests {
     #[test]
     fn only_significant_nuclides_drive_convergence() {
         let mut e = Ensemble::new(1);
-        for v in [1.0, 1.1, 0.9] {
+        for v in [1.0, 1.1, 0.9, 1.05, 0.95] {
             e.push(vec![HashMap::from([
-                ("big".to_string(), v),
+                ("big".to_string(), 1.0),
                 ("trace".to_string(), v * 1e-12),
             ])]);
         }
-        let probe = e.convergence_probe();
-        assert!(probe.contains_key("big"));
         assert!(
-            !probe.contains_key("trace"),
+            e.unconverged(0.05).is_empty(),
             "a trace 12 decades down must not decide when to stop"
         );
     }

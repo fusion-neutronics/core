@@ -9,7 +9,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
+use yani_transmute::uncertainty::{
+    check_convergence, DataUncertainty, Info, Source, Unconverged, DEFAULT_CONVERGENCE,
+};
 
 /// Request nuclear-data uncertainty on a transmutation.
 ///
@@ -126,9 +128,11 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///         reproduces the same answer regardless of replica count, iteration
 ///         order, or what else is in the material.
 ///     samples (int, optional): Fixed replica count. Leave as ``None`` (the
-///         default) to let the solver add replicas until the reported standard
-///         deviations stop moving. A number here bounds cost or reproduces a
-///         specific run; it is not an accuracy dial.
+///         default) to let the solver add replicas, 64 at a time, until every
+///         tracked standard deviation is known to ``convergence``. A number
+///         here bounds cost or reproduces a specific run: exactly that many
+///         replicas run, and the info still lists any standard deviation that
+///         did not reach ``convergence``.
 ///     sources (list[str], optional): Which inputs to perturb. ``None`` (the
 ///         default) means every source this build implements. Restricting it is
 ///         how a run isolates one contribution, so that adding a source and
@@ -144,6 +148,23 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///         default because it costs further solves: one ensemble per source,
 ///         each source alone, and one deterministic solve per contributor. It
 ///         changes none of the numbers the run otherwise reports.
+///     convergence (float, optional): How well each standard deviation must
+///         be known before the run stops: the standard error of the sample
+///         standard deviation, relative to it, ``SE(sigma) / sigma``. ``None``
+///         (the default) means 0.05.
+///         The standard error allows for a heavy tail (it carries the sample
+///         kurtosis), so a skewed output needs more replicas than a Gaussian
+///         one, for which a target ``t`` needs about ``1 / (2 t^2) + 1``: 201
+///         at 0.05. It is judged at every step, not only the last, on every
+///         nuclide density within 1e-6 of the largest at that step and on the
+///         total activity, decay heat and decay photon line rate, leaving out
+///         any whose standard deviation is under 0.01% of its value. The
+///         photon spectrum line by line and the contact dose are not judged,
+///         as their dose quantity and build-up are chosen when they are read.
+///         At least 128 replicas run whatever the target, since the kurtosis
+///         is too noisy to trust on fewer, and at most 1024: a run that stops
+///         there sets ``hit_cap`` in the info and lists every output, nuclide
+///         and step that missed under ``unconverged``. Must be between 0 and 1.
 ///
 /// Examples:
 ///     >>> results = iron.transmute(
@@ -166,25 +187,32 @@ pub struct PyDataUncertainty {
     /// transport run perturbs cross sections) refuses an explicit request for
     /// the others but takes the default as everything it can do.
     pub sources_given: bool,
+    /// Whether `convergence` was given, so a caller that runs a fixed replica
+    /// count (a transport run) can refuse it rather than ignore it.
+    pub convergence_given: bool,
 }
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyDataUncertainty {
     #[new]
-    #[pyo3(signature = (seed = 1, samples = None, sources = None, attribution = false))]
+    #[pyo3(signature = (seed = 1, samples = None, sources = None, attribution = false, convergence = None))]
     fn new(
         seed: u64,
         samples: Option<usize>,
         sources: Option<Vec<String>>,
         attribution: bool,
+        convergence: Option<f64>,
     ) -> PyResult<Self> {
         if samples == Some(0) {
             return Err(PyValueError::new_err(
                 "samples must be at least 1; pass samples=None to let the solver \
-                 choose when the standard deviations have settled",
+                 choose when the standard deviations are known to `convergence`",
             ));
         }
+        let convergence_given = convergence.is_some();
+        let convergence = convergence.unwrap_or(DEFAULT_CONVERGENCE);
+        check_convergence(convergence).map_err(PyValueError::new_err)?;
         let sources_given = sources.is_some();
         let sources = match sources {
             None => Source::IMPLEMENTED.to_vec(),
@@ -207,8 +235,10 @@ impl PyDataUncertainty {
                 samples,
                 sources,
                 attribution,
+                convergence,
             },
             sources_given,
+            convergence_given,
         })
     }
 
@@ -240,6 +270,13 @@ impl PyDataUncertainty {
         self.inner.attribution
     }
 
+    /// The target for each standard deviation's standard error, relative to
+    /// it, that an adaptive run stops on.
+    #[getter]
+    fn convergence(&self) -> f64 {
+        self.inner.convergence
+    }
+
     #[getter]
     fn sources(&self) -> Vec<String> {
         self.inner
@@ -255,11 +292,39 @@ impl PyDataUncertainty {
             None => "None".to_string(),
         };
         format!(
-            "DataUncertainty(seed={}, samples={samples}, sources={:?})",
+            "DataUncertainty(seed={}, samples={samples}, sources={:?}, convergence={})",
             self.inner.seed,
             self.sources(),
+            self.inner.convergence,
         )
     }
+}
+
+/// Render the sigmas that missed the convergence target as a list of dicts,
+/// worst first: ``output`` (``"density"``, ``"activity"``, ``"decay_heat"``,
+/// ``"decay_photon_rate"`` or ``"time_correction_factor"``), ``nuclide`` (the
+/// nuclide or emitter, ``None`` for a total), ``campaign`` (for a
+/// time-correction factor), ``step`` and ``relative_standard_error`` (the
+/// ``SE(sigma) / sigma`` reached, ``None`` below four replicas).
+pub fn unconverged_to_list<'py>(
+    py: Python<'py>,
+    unconverged: &[Unconverged],
+) -> PyResult<Bound<'py, PyList>> {
+    let list = PyList::empty(py);
+    for u in unconverged {
+        let d = PyDict::new(py);
+        d.set_item("output", u.output.name())?;
+        d.set_item("nuclide", u.output.nuclide())?;
+        if let yani_transmute::uncertainty::Output::TimeCorrectionFactor { campaign, .. } =
+            &u.output
+        {
+            d.set_item("campaign", campaign)?;
+        }
+        d.set_item("step", u.step)?;
+        d.set_item("relative_standard_error", u.relative_standard_error)?;
+        list.append(d)?;
+    }
+    Ok(list)
 }
 
 /// Render an [`Info`] as a plain dict.
@@ -273,6 +338,9 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     let d = PyDict::new(py);
     d.set_item("samples", info.samples)?;
     d.set_item("converged", info.converged)?;
+    d.set_item("convergence", info.convergence)?;
+    d.set_item("hit_cap", info.hit_cap)?;
+    d.set_item("unconverged", unconverged_to_list(py, &info.unconverged)?)?;
     d.set_item(
         "perturbed",
         info.perturbed.iter().cloned().collect::<Vec<_>>(),

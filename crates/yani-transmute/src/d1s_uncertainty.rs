@@ -20,8 +20,8 @@ use std::sync::Arc;
 use yani::ChainNuclide;
 
 use crate::uncertainty::{
-    half_life_candidates, sample_half_lives, with_half_lives, DataUncertainty, Source, BLOCK,
-    MAX_SAMPLES, MIN_SAMPLES, TOLERANCE,
+    check_convergence, half_life_candidates, misses, sample_half_lives, with_half_lives,
+    worst_first, DataUncertainty, Output, Source, Unconverged, BLOCK, MAX_SAMPLES, MIN_SAMPLES,
 };
 
 /// One replica's TCFs: per campaign, emitter -> TCF per schedule index.
@@ -42,8 +42,19 @@ pub struct TcfEnsemble {
     /// (not finite, or not finite relative to the half-life), so held at
     /// nominal.
     pub half_life_uncertainty_not_carried: BTreeSet<String>,
-    /// Whether the TCF spreads settled rather than hitting the cap.
+    /// Whether every TCF's sigma reached the convergence target, so
+    /// `unconverged` is empty. With a fixed sample count, whether it did at
+    /// that count.
     pub converged: bool,
+    /// The convergence target judged against, `SE(sigma) / sigma`.
+    pub convergence: f64,
+    /// Whether the run stopped on the replica cap with some TCF's sigma still
+    /// short of the target. Never set on a fixed sample count.
+    pub hit_cap: bool,
+    /// Every (campaign, emitter, schedule index) TCF whose sigma did not
+    /// reach the target, with the `SE(sigma) / sigma` it did reach, worst
+    /// first.
+    pub unconverged: Vec<Unconverged>,
     /// The sources that applied, by name. Only `half_life` acts on a TCF.
     pub sources: Vec<String>,
     /// What feeds a TCF and is held at nominal here, for the record.
@@ -81,9 +92,10 @@ fn feeding(chain: &HashMap<String, ChainNuclide>, emitters: &[String]) -> HashSe
 /// Resample the half-lives behind a schedule's TCFs.
 ///
 /// `source_rates` holds one rate history per campaign of the schedule, as
-/// `time_correct_tally` splits it. Replicas are added in blocks until every
-/// emitter's final-step TCF spread settles, as the transmutation driver does,
-/// or `request.samples` fixes the count.
+/// `time_correct_tally` splits it. Replicas are added in blocks, as the
+/// transmutation driver adds them, until the sigma of every emitter's TCF in
+/// every campaign at every schedule index has `SE(sigma) / sigma` below
+/// `request.convergence`, or `request.samples` fixes the count.
 pub fn time_correction_factor_ensemble(
     emitters: &[String],
     timesteps: &[f64],
@@ -91,8 +103,10 @@ pub fn time_correction_factor_ensemble(
     chain: &Arc<HashMap<String, ChainNuclide>>,
     request: &DataUncertainty,
 ) -> Result<TcfEnsemble, String> {
+    check_convergence(request.convergence)?;
     let mut out = TcfEnsemble {
         not_perturbed: vec!["decay branching ratio".to_string()],
+        convergence: request.convergence,
         ..Default::default()
     };
     if !request.wants(Source::HalfLife) {
@@ -131,32 +145,43 @@ pub fn time_correction_factor_ensemble(
             .collect()
     };
 
-    // The final TCF of every (campaign, emitter), the quantity judged settled.
-    let spread = |replicas: &[ReplicaTcfs]| -> HashMap<(usize, String), f64> {
-        let mut out = HashMap::new();
-        let n = replicas.len() as f64;
-        if n < 2.0 {
+    // Every (campaign, emitter, schedule index) TCF whose sigma misses the
+    // target. A TCF with no spread (the pre-irradiation zero) or a negligible
+    // one (a saturated emitter's) has nothing worth converging.
+    let unconverged = |replicas: &[ReplicaTcfs]| -> Vec<Unconverged> {
+        let mut out = Vec::new();
+        let Some(first) = replicas.first() else {
             return out;
-        }
-        for (c, campaign) in replicas[0].iter().enumerate() {
-            for name in campaign.keys() {
-                let values: Vec<f64> = replicas
-                    .iter()
-                    .filter_map(|r| r[c].get(name).and_then(|v| v.last()).copied())
-                    .collect();
-                let mean = values.iter().sum::<f64>() / n;
-                if mean == 0.0 {
-                    continue;
+        };
+        let mut values = Vec::with_capacity(replicas.len());
+        for (c, campaign) in first.iter().enumerate() {
+            for (name, tcf) in campaign {
+                for step in 0..tcf.len() {
+                    values.clear();
+                    values.extend(replicas.iter().map(|r| {
+                        r[c].get(name)
+                            .and_then(|v| v.get(step))
+                            .copied()
+                            .unwrap_or(0.0)
+                    }));
+                    if let Some(reached) = misses(&values, request.convergence) {
+                        out.push(Unconverged {
+                            output: Output::TimeCorrectionFactor {
+                                campaign: c,
+                                emitter: name.clone(),
+                            },
+                            step,
+                            relative_standard_error: reached,
+                        });
+                    }
                 }
-                let var = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0);
-                out.insert((c, name.clone()), var.sqrt() / mean.abs());
             }
         }
+        worst_first(&mut out);
         out
     };
 
     let cap = request.samples.unwrap_or(MAX_SAMPLES);
-    let mut previous: HashMap<(usize, String), f64> = HashMap::new();
     let mut replica = 0usize;
     while replica < cap {
         let end = (replica + BLOCK).min(cap);
@@ -179,21 +204,12 @@ pub fn time_correction_factor_ensemble(
         if request.samples.is_some() {
             continue;
         }
-        let now = spread(&out.replicas);
-        if replica >= MIN_SAMPLES
-            && now.iter().all(|(k, s)| {
-                previous
-                    .get(k)
-                    .is_some_and(|p| *s == 0.0 || ((s - p) / s).abs() <= TOLERANCE)
-            })
-        {
-            out.converged = true;
+        if replica >= MIN_SAMPLES && unconverged(&out.replicas).is_empty() {
             break;
         }
-        previous = now;
     }
-    if request.samples.is_some() {
-        out.converged = true;
-    }
+    out.unconverged = unconverged(&out.replicas);
+    out.converged = out.unconverged.is_empty();
+    out.hit_cap = request.samples.is_none() && !out.converged;
     Ok(out)
 }

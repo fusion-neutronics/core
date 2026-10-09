@@ -327,6 +327,7 @@ fn the_covered_share_is_of_the_shielded_rate() {
             samples: Some(2),
             sources: vec![Source::CrossSections],
             attribution: false,
+            ..Default::default()
         }),
         Some(&shielding),
     )
@@ -488,6 +489,7 @@ fn a_zero_covariance_gives_zero_spread_under_shielding() {
             samples: Some(4),
             sources: vec![Source::CrossSections],
             attribution: false,
+            ..Default::default()
         }),
         Some(&shielding),
     )
