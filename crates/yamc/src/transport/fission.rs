@@ -287,7 +287,7 @@ mod chi_product_resolution_tests {
             energy: vec![1.0].into(),
             mt_number: mt,
             q_value: 0.0,
-            products,
+            products: products.into(),
             scatter_in_cm: false,
             redundant: false,
         })

@@ -10,7 +10,7 @@ mod tests {
             energy: vec![0.5, 1.0, 2.0, 5.0].into(),
             mt_number: 102,
             q_value: 0.0,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         };

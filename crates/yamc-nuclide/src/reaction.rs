@@ -1,6 +1,7 @@
 use crate::buffer::F64Buffer;
 use crate::reaction_product::ReactionProduct;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Represents a single reaction channel (identified by ENDF/MT number) for a
 /// specific nuclide at a given temperature.
@@ -29,9 +30,13 @@ pub struct Reaction {
     /// Q-value of the reaction in eV (energy released/absorbed in the reaction)
     #[serde(default)]
     pub q_value: f64,
-    /// Products emitted by this reaction (e.g., neutrons, photons, fragments)
+    /// Products emitted by this reaction (e.g., neutrons, photons, fragments).
+    ///
+    /// Shared rather than owned: a product's distributions do not depend on
+    /// temperature, so every temperature of a nuclide, and every blend built
+    /// from them, points at one copy. Owned, they were cloned per temperature.
     #[serde(default)]
-    pub products: Vec<ReactionProduct>,
+    pub products: Arc<[ReactionProduct]>,
     /// Whether scattering is in center-of-mass frame (requires CM to LAB conversion)
     #[serde(default)]
     pub scatter_in_cm: bool,
@@ -123,7 +128,7 @@ mod tests {
             energy: F64Buffer::from(energy),
             mt_number: 16,
             q_value: 0.0,
-            products: Vec::new(),
+            products: Vec::new().into(),
             scatter_in_cm: false,
             redundant: false,
         }

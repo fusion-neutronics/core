@@ -1164,7 +1164,7 @@ mod tests {
         let mut n_ct = 0usize;
         for &mt in &mts {
             let rxn = reactions.get(&mt).unwrap();
-            for product in &rxn.products {
+            for product in rxn.products.iter() {
                 if !product.is_particle_type(&ParticleType::Photon) {
                     continue;
                 }

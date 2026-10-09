@@ -68,7 +68,7 @@ pub fn sample_secondary_photons<R: rand::Rng>(
         // Get the photon product at the sampled index
         let mut photon_product_idx = 0;
         let mut product = None;
-        for p in &reaction.products {
+        for p in reaction.products.iter() {
             if p.is_particle_type(&ParticleType::Photon) {
                 if photon_product_idx == product_idx {
                     product = Some(p);
@@ -180,7 +180,7 @@ fn sample_photon_product<'a, R: rand::Rng>(
             continue;
         }
         let f = scaling_factor(mt);
-        for product in &reaction.products {
+        for product in reaction.products.iter() {
             if product.is_particle_type(&ParticleType::Photon) {
                 let y = product
                     .product_yield
@@ -210,7 +210,7 @@ fn sample_photon_product<'a, R: rand::Rng>(
 
         let f = scaling_factor(mt);
         let mut photon_product_idx = 0;
-        for product in &reaction.products {
+        for product in reaction.products.iter() {
             if product.is_particle_type(&ParticleType::Photon) {
                 let y = product
                     .product_yield
@@ -460,7 +460,7 @@ mod tests {
                 "Reaction MT {mt} in photon_rxn_xs should have photon products"
             );
             // Photon products should have distributions
-            for product in &reaction.products {
+            for product in reaction.products.iter() {
                 if product.is_particle_type(&ParticleType::Photon) {
                     assert!(
                         !product.distribution.is_empty(),

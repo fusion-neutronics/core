@@ -54,7 +54,7 @@ fn make_synthetic_nuclide_with_grid(
         energy: energy_grid.clone().into(),
         mt_number: MT_ELASTIC,
         q_value: 0.0,
-        products: vec![],
+        products: vec![].into(),
         scatter_in_cm: false,
         redundant: false,
     };
@@ -64,7 +64,7 @@ fn make_synthetic_nuclide_with_grid(
         energy: energy_grid.clone().into(),
         mt_number: MT_CAPTURE,
         q_value: 0.0,
-        products: vec![],
+        products: vec![].into(),
         scatter_in_cm: false,
         redundant: false,
     };
@@ -199,7 +199,7 @@ fn make_synthetic_nuclide_with_inelastic_angle() -> Nuclide {
         energy: energy_grid.clone(),
         mt_number: 51,
         q_value: -1e3,
-        products: vec![neutron_product],
+        products: vec![neutron_product].into(),
         scatter_in_cm: true,
         redundant: false,
     };
@@ -305,7 +305,7 @@ fn make_synthetic_nuclide_with_continuum_eout() -> Nuclide {
         energy: energy_grid.clone(),
         mt_number: 91,
         q_value: -1e3,
-        products: vec![neutron_product],
+        products: vec![neutron_product].into(),
         scatter_in_cm: false,
         redundant: false,
     };
@@ -687,7 +687,7 @@ fn make_synthetic_nuclide_with_correlated() -> Nuclide {
         energy: energy_grid.clone(),
         mt_number: 91,
         q_value: -1e3,
-        products: vec![neutron_product],
+        products: vec![neutron_product].into(),
         scatter_in_cm: false,
         redundant: false,
     };
@@ -802,7 +802,7 @@ fn extracts_mt_16_into_slot_41() {
         energy: energy_grid.clone(),
         mt_number: 16,
         q_value: -11_197_000.0, // typical Fe56 (n,2n) Q
-        products: vec![],
+        products: vec![].into(),
         scatter_in_cm: false,
         redundant: false,
     };
@@ -874,7 +874,7 @@ fn extracts_slice_f_charged_particle_mts_into_slots_43_to_47() {
             energy: energy_grid.clone(),
             mt_number: mt,
             q_value: expected_q,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         };
@@ -930,7 +930,7 @@ fn slice_f_mt_xs_subtracted_from_absorption_derivation() {
         energy: energy_grid.clone(),
         mt_number: 22,
         q_value: -7_614_000.0,
-        products: vec![],
+        products: vec![].into(),
         scatter_in_cm: false,
         redundant: false,
     };
@@ -992,7 +992,7 @@ fn extracts_breakup_mts_into_slots_56_to_61() {
             energy: energy_grid.clone(),
             mt_number: mt,
             q_value: expected_q,
-            products: vec![],
+            products: vec![].into(),
             scatter_in_cm: false,
             redundant: false,
         };
@@ -1031,7 +1031,7 @@ fn breakup_mt_xs_subtracted_from_absorption_derivation() {
         energy: energy_grid.clone(),
         mt_number: 11,
         q_value: -20_000_000.0,
-        products: vec![],
+        products: vec![].into(),
         scatter_in_cm: false,
         redundant: false,
     };
@@ -1253,7 +1253,7 @@ fn evap_multi_distribution_u_is_energy_dependent() {
         energy: vec![1.0e6, 5.0e6, 10.0e6, 15.0e6].into(),
         mt_number: 91,
         q_value: -5.84e6,
-        products: vec![neutron_product],
+        products: vec![neutron_product].into(),
         scatter_in_cm: false,
         redundant: false,
     };
@@ -1408,7 +1408,7 @@ fn refuses_unslotted_scatter_mt_above_tolerance() {
         energy: energy_grid.clone(),
         mt_number: 160,
         q_value: -30_000_000.0,
-        products: vec![],
+        products: vec![].into(),
         scatter_in_cm: false,
         redundant: false,
     };
@@ -1451,7 +1451,7 @@ fn tolerates_negligible_unslotted_scatter_mt() {
         energy: energy_grid.clone(),
         mt_number: 160,
         q_value: -30_000_000.0,
-        products: vec![],
+        products: vec![].into(),
         scatter_in_cm: false,
         redundant: false,
     };

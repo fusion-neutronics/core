@@ -26,7 +26,7 @@ impl WasmReaction {
                 cross_section: F64Buffer::default(),
                 energy: F64Buffer::default(),
                 mt_number: 0,
-                products: Vec::new(),
+                products: Vec::new().into(),
                 q_value: 0.0,
                 redundant: false,
                 scatter_in_cm: false,

@@ -512,7 +512,7 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
         let reactions_batch = read_arrow_file(&reactions_path(dir, scope))?;
 
         // Build products lookup, keyed by MT, empty when the scope excludes them.
-        let mut products_map: HashMap<i32, Vec<ReactionProduct>> = HashMap::new();
+        let mut products_map: HashMap<i32, Arc<[ReactionProduct]>> = HashMap::new();
         if scope.wants_transport_sections() {
             let products_batch = read_arrow_file(&dir.join("products.arrow"))?;
             let distributions_batch = read_arrow_file(&dir.join("distributions.arrow"))?;
@@ -621,7 +621,10 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
                     .into());
                 }
 
-                let products = products_map.get(&mt).cloned().unwrap_or_default();
+                let products = products_map
+                    .get(&mt)
+                    .cloned()
+                    .unwrap_or_else(|| Arc::from([]));
 
                 if crate::nuclide::is_fission_mt(mt) && !redundant {
                     has_fission = true;
@@ -829,15 +832,23 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
 fn build_products_map(
     products_batch: &RecordBatch,
     distributions_map: &HashMap<(i32, i32, i32), ParsedDistribution>,
-    products_map: &mut HashMap<i32, Vec<ReactionProduct>>,
+    products_map: &mut HashMap<i32, Arc<[ReactionProduct]>>,
 ) -> Result<(), Box<dyn Error>> {
+    // Gathered per MT first, then frozen: each MT's list is shared by every
+    // temperature the load builds a reaction for.
+    let mut by_mt: HashMap<i32, Vec<ReactionProduct>> = HashMap::new();
     for row in 0..products_batch.num_rows() {
         let mt = get_i32(products_batch, "reaction_mt", row)?;
         let prod_idx = get_i32(products_batch, "product_idx", row)?;
         let n_dist = get_i32(products_batch, "n_distribution", row)?;
         let product = parse_product(products_batch, row, mt, prod_idx, n_dist, distributions_map)?;
-        products_map.entry(mt).or_default().push(product);
+        by_mt.entry(mt).or_default().push(product);
     }
+    products_map.extend(
+        by_mt
+            .into_iter()
+            .map(|(mt, products)| (mt, products.into())),
+    );
     Ok(())
 }
 
