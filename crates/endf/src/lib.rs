@@ -15,7 +15,9 @@
 //! Everything here describes the file format and nothing more. A
 //! simulation-ready projection of this data (reconstructed resonances,
 //! summed reactions, unionised grids) belongs in a consumer built on top,
-//! not in this crate.
+//! not in this crate. The exceptions are the processing steps a consumer
+//! needs to reproduce NJOY's: [`njoy`] drives NJOY itself, and [`doppler`] is
+//! BROADR's free-gas kernel and its adjoint.
 
 #![forbid(unsafe_code)]
 
@@ -25,6 +27,7 @@ pub mod chain;
 mod coulomb;
 pub mod data;
 pub mod decay;
+pub mod doppler;
 pub mod error;
 pub mod fission_energy;
 pub mod function;
