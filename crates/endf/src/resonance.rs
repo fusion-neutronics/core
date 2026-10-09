@@ -594,6 +594,32 @@ impl ReichMooreRange {
     }
 }
 
+/// The reconstruction of `range` in its own formalism: multi-level
+/// Breit-Wigner (LRF=2), Reich-Moore (LRF=3) or R-matrix limited (LRF=7) for
+/// a resolved range, the average cross sections of an unresolved one. Any
+/// other formalism is refused as [`Error::Unsupported`], as is whatever the
+/// formalism's own constructor refuses.
+pub fn reconstruction(
+    range: &ResonanceRange,
+) -> Result<Box<dyn RangeReconstruction + Send + Sync>> {
+    Ok(match (range.lru, range.lrf) {
+        (1, 2) => Box::new(BreitWignerRange::new(range)?),
+        (1, 3) => Box::new(ReichMooreRange::new(range)?),
+        (1, 7) => Box::new(RMatrixRange::new(range)?),
+        (2, _) => Box::new(UnresolvedAverages::new(range)?),
+        _ => {
+            return Err(Error::Unsupported {
+                what: "the cross sections of this resonance formalism",
+            })
+        }
+    })
+}
+
+/// `range`'s cross sections at each energy of `grid` (eV), in order.
+pub fn cross_sections_on(range: &dyn RangeReconstruction, grid: &[f64]) -> Vec<CrossSections> {
+    grid.iter().map(|&e| range.cross_sections(e)).collect()
+}
+
 /// A resolved range that can give its cross sections and their derivatives
 /// with respect to MF=32's parameters: what the group covariance of
 /// [`crate::resonance_covariance::group_covariance`] needs from a formalism.
@@ -1172,18 +1198,13 @@ impl RMatrixRange {
     }
 
     /// The derivative at `energy` with respect to the radius of channel
-    /// `channel` of spin group `group` (its APE and APT together), by
-    /// central difference.
+    /// `channel` of spin group `group` (its APE and APT together, see
+    /// `shift_channel_radius`), by central difference.
     pub fn radius_derivative(&self, energy: f64, group: usize, channel: usize) -> Result<Gradient> {
         let shifted = |h: f64| -> Result<CrossSections> {
             let mut rml = self.source.clone();
             if let Some(sg) = rml.spin_groups.get_mut(group) {
-                if let Some(x) = sg.channels.ape.get_mut(channel) {
-                    *x += h;
-                }
-                if let Some(x) = sg.channels.apt.get_mut(channel) {
-                    *x += h;
-                }
+                shift_channel_radius(&mut sg.channels, channel, h);
             }
             let (groups, others) = rml_groups(&rml)?;
             Ok(RMatrixRange {
@@ -1199,6 +1220,33 @@ impl RMatrixRange {
         let (up, down) = (shifted(H)?, shifted(-H)?);
         Ok(slope(&up, &down, 2.0 * H))
     }
+}
+
+/// Move channel `channel`'s radii by `delta` (1e-12 cm): the radius its
+/// penetrability is taken at and the one its phase is, which are APT and APE
+/// where each is given and the other where it is not (see [`RMatrixRange`]).
+/// A radius that is zero stands for the other and stays zero; where both are,
+/// both take `delta`. Returns whether the channel exists.
+pub(crate) fn shift_channel_radius(
+    channels: &mut crate::mf::mf2::Channels,
+    channel: usize,
+    delta: f64,
+) -> bool {
+    let (Some(&ape), Some(&apt)) = (channels.ape.get(channel), channels.apt.get(channel)) else {
+        return false;
+    };
+    if ape == 0.0 && apt == 0.0 {
+        channels.ape[channel] = delta;
+        channels.apt[channel] = delta;
+    } else {
+        if ape != 0.0 {
+            channels.ape[channel] = ape + delta;
+        }
+        if apt != 0.0 {
+            channels.apt[channel] = apt + delta;
+        }
+    }
+    true
 }
 
 /// The spin groups of an R-matrix limited range, with their explicit
