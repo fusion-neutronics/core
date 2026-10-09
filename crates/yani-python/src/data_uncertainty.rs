@@ -606,6 +606,9 @@ fn resonance_parameters_dict<'py>(
     for (nuclide, method) in methods {
         let entry = PyDict::new(py);
         entry.set_item("method", method.name())?;
+        let (largest, frobenius) = method.correlation_change();
+        entry.set_item("largest_correlation_change", largest)?;
+        entry.set_item("correlation_frobenius_change", frobenius)?;
         let ranges = PyList::empty(py);
         match method {
             ResonanceMethod::Sampled { ranges: reports } => {
@@ -634,6 +637,11 @@ fn resonance_parameters_dict<'py>(
                     range.set_item("stated_repair", repair(&r.stated_repair)?)?;
                     range.set_item("unattainable_pairs", r.unattainable_pairs)?;
                     range.set_item("transformed_repair", repair(&r.transformed_repair)?)?;
+                    range.set_item("largest_correlation_change", r.correlation_change)?;
+                    range.set_item(
+                        "correlation_frobenius_change",
+                        r.correlation_frobenius_change,
+                    )?;
                     ranges.append(range)?;
                 }
             }
@@ -831,6 +839,8 @@ mod tests {
             }),
             unattainable_pairs: 0,
             transformed_repair: None,
+            correlation_change: 1e-3,
+            correlation_frobenius_change: 2e-3,
         };
         let info = Info {
             resonance_parameters: [
@@ -879,6 +889,20 @@ mod tests {
                 4
             );
             assert!(range.get_item("transformed_repair").unwrap().is_none());
+            assert_eq!(
+                w.get_item("largest_correlation_change")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                1e-3
+            );
+            assert_eq!(
+                w.get_item("correlation_frobenius_change")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                2e-3
+            );
             let la = methods.get_item("La138").unwrap();
             assert_eq!(
                 la.get_item("method").unwrap().extract::<String>().unwrap(),

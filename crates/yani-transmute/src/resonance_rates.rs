@@ -123,6 +123,26 @@ pub enum ResonanceMethod {
 }
 
 impl ResonanceMethod {
+    /// How far the correlations the draws have are from the evaluated ones,
+    /// over every range: the largest single change and the root-sum-square
+    /// of the ranges' Frobenius changes (see
+    /// [`SamplerReport::correlation_change`]). `(0, 0)` for the first-order
+    /// rows. Widths stay lognormal whatever this says: a pair of widths no
+    /// lognormal carries is where it is largest.
+    pub fn correlation_change(&self) -> (f64, f64) {
+        let ResonanceMethod::Sampled { ranges } = self else {
+            return (0.0, 0.0);
+        };
+        ranges
+            .iter()
+            .fold((0.0_f64, 0.0_f64), |(largest, frobenius), r| {
+                (
+                    largest.max(r.correlation_change),
+                    frobenius.hypot(r.correlation_frobenius_change),
+                )
+            })
+    }
+
     /// `"parameters sampled"` or `"first-order rows"`.
     pub fn name(&self) -> &'static str {
         match self {
