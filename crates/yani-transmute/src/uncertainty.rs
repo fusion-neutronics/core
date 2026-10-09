@@ -773,10 +773,15 @@ pub struct Attribution {
     /// First-order contributions, the largest-reaching first.
     pub contributors: Vec<Contributor>,
     /// How well first order explains the replicas, per source and as
-    /// `"all"` for every source together: `[step][nuclide]`. `None` for a
-    /// source with no first-order terms (`flux_spectrum`, `statistical`,
-    /// `decay_energy`), whose variance first order does not try to explain,
-    /// and for `"all"` when any applied source is one of those.
+    /// `"all"` for every source together: `[step][nuclide]`. First order has
+    /// terms only for `cross_sections`, `half_life` and `decay_branching`.
+    /// `None` for every other source (`flux_spectrum`, `statistical`,
+    /// `decay_energy`, `decay_photon_lines`, `fission_yield`), whose variance
+    /// first order does not try to explain, and for `"all"` when any applied
+    /// source is one of those. The default source set applies several of them
+    /// (`flux_spectrum` or `statistical`, `decay_energy`, `decay_photon_lines`
+    /// and `fission_yield`), so with the defaults `"all"` is `None`: restrict
+    /// the sources to the three above for an `"all"` entry.
     pub linearity: BTreeMap<String, Option<Vec<HashMap<String, Linearity>>>>,
 }
 
