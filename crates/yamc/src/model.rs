@@ -1339,6 +1339,8 @@ impl Model {
             if has_nuclide_tallies {
                 material.populate_per_nuclide_xs();
             }
+            // Both consumers of the per-nuclide microscopic tables have run.
+            material.release_microscopic_xs();
             if transport_secondary_photons {
                 // The presence check is performed upfront before any locks
                 // are taken; init_photon_data will surface per-element issues.

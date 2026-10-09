@@ -518,6 +518,20 @@ impl Material {
         (energy_grid, macro_xs)
     }
 
+    /// Drop the per-nuclide microscopic cross sections cached on the unified grid.
+    ///
+    /// They are the inputs to the macroscopic sums and to
+    /// [`Self::populate_per_nuclide_xs`], and nothing in transport reads them
+    /// once those are built, yet on a material with many nuclides they are the
+    /// largest thing it holds: every nuclide's every MT on the union of all
+    /// their grids. A later [`Self::calculate_macroscopic_xs`] recomputes them,
+    /// which is correct and only costs time; the transmutation loop's
+    /// density-only update is the one caller that would rather reuse them, and
+    /// it pays that once per material on its first step.
+    pub fn release_microscopic_xs(&mut self) {
+        self.cached_microscopic_xs = None;
+    }
+
     /// Populate per-nuclide macroscopic cross sections for all MTs in the current cache.
     ///
     /// After `calculate_macroscopic_xs` has been called, this method builds
