@@ -68,7 +68,7 @@ use crate::error::{Error, Result};
 /// How far, relative to the energy, an MF=32 resonance may sit from the MF=2
 /// resonance it is matched to.
 pub const ENERGY_TOLERANCE: f64 = 1e-3;
-use crate::mf::mf2::{Mf2, ResonanceParameters};
+use crate::mf::mf2::{Mf2, ResonanceParameters, ResonanceRange};
 use crate::mf::mf32::{Covariance, Mf32, PackedCovariance, Range, ScatteringRadiusUncertainty};
 
 /// Where a parameter sits in MF=2.
@@ -821,6 +821,203 @@ fn channel_radii(
     }
 }
 
+/// `range`, the MF=2 range `cov` was matched to, with `cov`'s parameters at
+/// `values` (one per parameter, in order) instead of their nominal values:
+/// what a sampled parameter vector is rebuilt into cross sections from
+/// ([`reconstruction_at`]).
+///
+/// Each value is read against its parameter's [`Parameter::value`], so the
+/// nominal vector gives back `range` exactly, field for field, wherever MF=32
+/// repeats MF=2 to fewer digits or matched a resonance only approximately:
+///
+/// - a resonance energy or width, or an R-matrix channel radius, moves its
+///   MF=2 value by `values[i] - value` (eV, or 1e-12 cm). A Breit-Wigner
+///   width moves GT with it, so the competitive width (GT less the others)
+///   stays put, and the competitive width itself moves GT alone. A channel
+///   radius moves the radii its penetrability and phase are taken at
+///   together, as [`crate::resonance::RMatrixRange::radius_derivative`]
+///   differentiates it.
+/// - the radius parameter of a Breit-Wigner or Reich-Moore range (nominally
+///   0, unit variance) moves each section's radius by `values[i]` times its
+///   step in [`RangeCovariance::radius_steps`]: a Reich-Moore section with an
+///   APL of its own through it, one without from AP, and a Breit-Wigner
+///   range's AP by its one step, as the reconstructions' `radius_derivative`
+///   take it.
+/// - an unresolved `(l, J)` multiplier (nominally 1) scales its whole
+///   parameter table (every energy's value) by `values[i] / value`. A width
+///   the table does not have (the fission width of case A, the competitive
+///   width of cases A and B) is zero in the average cross sections, and stays
+///   zero.
+///
+/// Errors where `values` is not as long as `cov`'s parameters, a value is not
+/// finite, or a parameter has no place in `range`: a location the range does
+/// not have, or a quantity its formalism has no field for (a second fission
+/// width in Breit-Wigner, a competitive width in Reich-Moore, a channel width
+/// outside R-matrix limited). [`range_covariances`] emits neither of the last
+/// two, so a refusal means the covariance is not `range`'s.
+pub fn with_parameters(
+    range: &ResonanceRange,
+    cov: &RangeCovariance,
+    values: &[f64],
+) -> Result<ResonanceRange> {
+    if values.len() != cov.len() {
+        return Err(Error::Mismatched {
+            what: "a parameter vector's length and its covariance's parameter count",
+        });
+    }
+    if values.iter().any(|v| !v.is_finite()) {
+        return Err(Error::Mismatched {
+            what: "a parameter vector, whose values must be finite,",
+        });
+    }
+    let misplaced = || Error::Mismatched {
+        what: "a covariance parameter and the MF=2 range it is placed in",
+    };
+    let mut out = range.clone();
+    for (p, &v) in cov.parameters.iter().zip(values) {
+        if v == p.value {
+            continue;
+        }
+        let shift = v - p.value;
+        match (&mut out.parameters, p.location) {
+            (ResonanceParameters::ReichMoore(rm), Location::Orbital { section, index }) => {
+                let s = rm.sections.get_mut(section).ok_or_else(misplaced)?;
+                let column = match p.quantity {
+                    Quantity::Energy => &mut s.er,
+                    Quantity::NeutronWidth => &mut s.gn,
+                    Quantity::CaptureWidth => &mut s.gg,
+                    Quantity::FissionWidth => &mut s.gfa,
+                    Quantity::SecondFissionWidth => &mut s.gfb,
+                    _ => return Err(misplaced()),
+                };
+                *column.get_mut(index).ok_or_else(misplaced)? += shift;
+            }
+            (ResonanceParameters::BreitWigner(bw), Location::Orbital { section, index }) => {
+                let s = bw.sections.get_mut(section).ok_or_else(misplaced)?;
+                let (column, total) = match p.quantity {
+                    Quantity::Energy => (Some(&mut s.er), false),
+                    Quantity::NeutronWidth => (Some(&mut s.gn), true),
+                    Quantity::CaptureWidth => (Some(&mut s.gg), true),
+                    Quantity::FissionWidth => (Some(&mut s.gf), true),
+                    Quantity::CompetitiveWidth => (None, true),
+                    _ => return Err(misplaced()),
+                };
+                if let Some(column) = column {
+                    *column.get_mut(index).ok_or_else(misplaced)? += shift;
+                }
+                if total {
+                    *s.gt.get_mut(index).ok_or_else(misplaced)? += shift;
+                }
+            }
+            (ResonanceParameters::ReichMoore(rm), Location::Range)
+                if p.quantity == Quantity::ScatteringRadius =>
+            {
+                let ap = rm.ap;
+                for (s, step) in rm.sections.iter_mut().zip(&cov.radius_steps) {
+                    let base = if s.apl != 0.0 { s.apl } else { ap };
+                    s.apl = base + shift * step;
+                }
+            }
+            (ResonanceParameters::BreitWigner(bw), Location::Range)
+                if p.quantity == Quantity::ScatteringRadius =>
+            {
+                bw.ap += shift * cov.radius_steps.first().copied().unwrap_or(0.0);
+            }
+            (ResonanceParameters::RMatrixLimited(rml), Location::SpinGroup { group, index }) => {
+                let sg = rml.spin_groups.get_mut(group).ok_or_else(misplaced)?;
+                let column = match p.quantity {
+                    Quantity::Energy => &mut sg.er,
+                    Quantity::ChannelWidth(c) => sg.gam.get_mut(c).ok_or_else(misplaced)?,
+                    _ => return Err(misplaced()),
+                };
+                *column.get_mut(index).ok_or_else(misplaced)? += shift;
+            }
+            (ResonanceParameters::RMatrixLimited(rml), Location::Channel { group, channel })
+                if p.quantity == Quantity::ScatteringRadius =>
+            {
+                let sg = rml.spin_groups.get_mut(group).ok_or_else(misplaced)?;
+                if !crate::resonance::shift_channel_radius(&mut sg.channels, channel, shift) {
+                    return Err(misplaced());
+                }
+            }
+            (ResonanceParameters::Unresolved(u), Location::Unresolved { orbital, spin }) => {
+                if p.value == 0.0 {
+                    return Err(misplaced());
+                }
+                let factor = v / p.value;
+                let section = u.ranges.get_mut(orbital).ok_or_else(misplaced)?;
+                scale_unresolved(section, spin, p.quantity, factor).ok_or_else(misplaced)?;
+            }
+            _ => return Err(misplaced()),
+        }
+    }
+    Ok(out)
+}
+
+/// Scale the `quantity` column of spin `spin` of an unresolved section by
+/// `factor`, at every energy: `None` where the section has no such spin or
+/// the quantity is not an unresolved parameter. A width the case does not
+/// tabulate is zero and is left so.
+fn scale_unresolved(
+    section: &mut crate::mf::mf2::UnresolvedRange,
+    spin: usize,
+    quantity: Quantity,
+    factor: f64,
+) -> Option<()> {
+    use crate::mf::mf2::UnresolvedParameters;
+    let scale = |x: &mut f64| *x *= factor;
+    if section.parameters.is_empty() {
+        // Case A: D, GN0 and GG per J, no fission or competition.
+        let column = match quantity {
+            Quantity::LevelSpacing => &mut section.d,
+            Quantity::ReducedNeutronWidth => &mut section.gno,
+            Quantity::CaptureWidth => &mut section.gg,
+            Quantity::FissionWidth | Quantity::CompetitiveWidth => {
+                return (spin < section.aj.len()).then_some(())
+            }
+            _ => return None,
+        };
+        scale(column.get_mut(spin)?);
+        return Some(());
+    }
+    match section.parameters.get_mut(spin)? {
+        UnresolvedParameters::CaseB { d, gn0, gg, gf, .. } => match quantity {
+            Quantity::LevelSpacing => scale(d),
+            Quantity::ReducedNeutronWidth => scale(gn0),
+            Quantity::CaptureWidth => scale(gg),
+            Quantity::FissionWidth => gf.iter_mut().for_each(scale),
+            Quantity::CompetitiveWidth => {}
+            _ => return None,
+        },
+        UnresolvedParameters::CaseC {
+            d, gx, gn0, gg, gf, ..
+        } => {
+            let column = match quantity {
+                Quantity::LevelSpacing => d,
+                Quantity::ReducedNeutronWidth => gn0,
+                Quantity::CaptureWidth => gg,
+                Quantity::FissionWidth => gf,
+                Quantity::CompetitiveWidth => gx,
+                _ => return None,
+            };
+            column.iter_mut().for_each(scale);
+        }
+    }
+    Some(())
+}
+
+/// The reconstruction of `range` with `cov`'s parameters at `values`: the
+/// cross sections of a sampled parameter vector, exact in the parameters
+/// rather than first order. [`with_parameters`] then
+/// [`crate::resonance::reconstruction`], with their errors.
+pub fn reconstruction_at(
+    range: &ResonanceRange,
+    cov: &RangeCovariance,
+    values: &[f64],
+) -> Result<Box<dyn crate::resonance::RangeReconstruction + Send + Sync>> {
+    crate::resonance::reconstruction(&with_parameters(range, cov, values)?)
+}
+
 /// The relative covariance of a resolved range's group cross sections that
 /// its resonance-parameter covariance implies.
 #[derive(Debug, Clone, PartialEq)]
@@ -916,6 +1113,76 @@ pub fn resonance_edges(range: &dyn crate::resonance::RangeReconstruction) -> Vec
     edges
 }
 
+/// Points a decade and points a resonance of [`integration_points`].
+const PER_DECADE: usize = 400;
+const PER_RESONANCE: usize = 256;
+
+/// Errors unless `edges` are positive, ascending and within `range`, outside
+/// which the resonance formula is not the cross section.
+fn check_edges(range: &dyn crate::resonance::RangeReconstruction, edges: &[f64]) -> Result<()> {
+    if edges.len() < 2 || edges.windows(2).any(|w| w[1] <= w[0]) || edges[0] <= 0.0 {
+        return Err(Error::Mismatched {
+            what: "group edges, which must be positive and ascending",
+        });
+    }
+    let (el, eh) = range.bounds();
+    if edges[0] < el || edges[edges.len() - 1] > eh {
+        return Err(Error::Mismatched {
+            what: "group edges and the range, which must hold them",
+        });
+    }
+    Ok(())
+}
+
+/// The 0 K grid on which [`group_covariance`] takes its integrals, for
+/// evaluating several reconstructions of one range on the same points:
+/// typically the nominal one and one rebuilt from a sampled parameter vector
+/// ([`reconstruction_at`]), whose difference a caller integrates against a
+/// weight.
+///
+/// It holds every one of `edges` (group edges, or just the range's bounds)
+/// and spans them: 400 logarithmic points a decade and, for every resonance
+/// of every one of `reconstructions`, 256 points at `E_r + (G/2) tan(theta)`
+/// (uniform in the Lorentzian's cumulative), then outwards at
+/// `E_r +- (G/2) 1.1^k` to the edges, `G` the resonance's total width. The
+/// outward points are what make a trapezoid of the difference of two
+/// reconstructions accurate where it is a near-cancellation (the odd tail of
+/// a moved resonance energy). A resonance two reconstructions share exactly
+/// is traced once. An unresolved range has no resonances: its grid is the
+/// logarithmic one. Pass the perturbed
+/// reconstructions along with the nominal one: a sampled resonance energy
+/// moves the peak, and a peak the grid traces only at its nominal place is
+/// integrated well only while the shift is small against its width, so the
+/// grid built from the union of the nominal and perturbed resonances is the
+/// one on which each reconstruction's integral is as accurate as the nominal
+/// one's.
+///
+/// Errors without a reconstruction, and unless `edges` are positive,
+/// ascending and inside every reconstruction's bounds.
+pub fn reconstruction_grid(
+    reconstructions: &[&dyn crate::resonance::RangeReconstruction],
+    edges: &[f64],
+) -> Result<Vec<f64>> {
+    if reconstructions.is_empty() {
+        return Err(Error::Mismatched {
+            what: "a reconstruction grid and the reconstructions it is for, of which there must be one",
+        });
+    }
+    let mut resonances = Vec::new();
+    for r in reconstructions {
+        check_edges(*r, edges)?;
+        resonances.extend(r.resonances());
+    }
+    resonances.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    resonances.dedup();
+    Ok(integration_points(
+        &resonances,
+        edges,
+        PER_DECADE,
+        PER_RESONANCE,
+    ))
+}
+
 /// The points an integral over a resolved range is taken on: a logarithmic
 /// grid at `per_decade` points a decade, each resonance traced at
 /// `per_resonance` points spaced as `E_r + (G/2) tan(theta)` (uniform in the
@@ -932,7 +1199,7 @@ pub fn resonance_edges(range: &dyn crate::resonance::RangeReconstruction) -> Vec
 /// apart and lopsided about an 11 eV resonance at 571 keV, does not (it made
 /// Pb208's capture variance there 1e4 times too large).
 fn integration_points(
-    range: &dyn crate::resonance::RangeReconstruction,
+    resonances: &[(f64, f64)],
     edges: &[f64],
     per_decade: usize,
     per_resonance: usize,
@@ -944,7 +1211,7 @@ fn integration_points(
     for i in 1..n {
         points.push(el * (eh / el).powf(i as f64 / n as f64));
     }
-    for (er, width) in range.resonances() {
+    for &(er, width) in resonances {
         if er <= el || er >= eh || width <= 0.0 {
             continue;
         }
@@ -986,21 +1253,10 @@ pub fn group_covariance(
     range: &dyn crate::resonance::RangeReconstruction,
     edges: &[f64],
 ) -> Result<GroupCovariance> {
-    if edges.len() < 2 || edges.windows(2).any(|w| w[1] <= w[0]) || edges[0] <= 0.0 {
-        return Err(Error::Mismatched {
-            what: "group edges, which must be positive and ascending",
-        });
-    }
-    // Outside the range the resonance formula is not the cross section.
-    let (el, eh) = range.bounds();
-    if edges[0] < el || edges[edges.len() - 1] > eh {
-        return Err(Error::Mismatched {
-            what: "group edges and the range, which must hold them",
-        });
-    }
+    check_edges(range, edges)?;
     let groups = edges.len() - 1;
     let n_par = cov.len();
-    let points = integration_points(range, edges, 400, 256);
+    let points = integration_points(&range.resonances(), edges, PER_DECADE, PER_RESONANCE);
     // Per group: the integral of each cross section and of each parameter's
     // gradient, and of the weight.
     const R: usize = crate::resonance::REACTIONS;
@@ -1445,5 +1701,686 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod rebuild_tests {
+    use super::*;
+    use crate::material::Material;
+    use crate::mf::mf2::{Unresolved, UnresolvedParameters, UnresolvedRange};
+    use crate::resonance::{cross_sections_on, reconstruction, REACTIONS};
+
+    /// Every MF=2 and MF=32 fixture: multi-level Breit-Wigner (Na23, Pu244),
+    /// Reich-Moore (Dy158, Th232), R-matrix limited (Cl35, Cu63, Cu65, W183,
+    /// W186, Rh103) and unresolved (Th232, Rh103).
+    const FIXTURES: [&[u8]; 10] = [
+        include_bytes!("../fixtures/n-011_Na_023_mf2_mf32.endf.xz"),
+        include_bytes!("../fixtures/n-094_Pu_244_mf2_mf32.endf.xz"),
+        include_bytes!("../fixtures/n-066_Dy_158_mf2_mf32.endf.xz"),
+        include_bytes!("../fixtures/n-090_Th_232_mf2_mf32.endf.xz"),
+        include_bytes!("../fixtures/n-017_Cl_035_mf2_mf32.endf.xz"),
+        include_bytes!("../fixtures/n-029_Cu_063_mf2_mf32.endf.xz"),
+        include_bytes!("../fixtures/n-029_Cu_065_mf2_mf32.endf.xz"),
+        include_bytes!("../fixtures/n-074_W_183_mf2_mf32.endf.xz"),
+        include_bytes!("../fixtures/n-074_W_186_mf2_mf32.endf.xz"),
+        include_bytes!("../fixtures/n-045_Rh_103_mf2_mf32.endf.xz"),
+    ];
+    const NA23: &[u8] = FIXTURES[0];
+    const DY158: &[u8] = FIXTURES[2];
+    const W186: &[u8] = FIXTURES[8];
+    const RH103: &[u8] = FIXTURES[9];
+    const PU244: &[u8] = FIXTURES[1];
+    const U235: &[u8] = include_bytes!("../fixtures/n-092_U_235_mf2.endf.xz");
+    const V51: &[u8] = include_bytes!("../fixtures/n-023_V_051_mf2.endf.xz");
+
+    fn material(fixture: &[u8]) -> Material {
+        Material::from_str(&crate::testdata::text(fixture)).expect("fixture parses")
+    }
+
+    /// Each of a fixture's covariances with the MF=2 range it was matched to.
+    fn covariances(fixture: &[u8]) -> Vec<(ResonanceRange, RangeCovariance)> {
+        let m = material(fixture);
+        let mf2 = m.mf2().unwrap();
+        range_covariances(mf2, m.mf32().unwrap())
+            .unwrap()
+            .into_iter()
+            .map(|c| (mf2.isotopes[c.isotope].ranges[c.mf2_range].clone(), c))
+            .collect()
+    }
+
+    fn nominal(cov: &RangeCovariance) -> Vec<f64> {
+        cov.parameters.iter().map(|p| p.value).collect()
+    }
+
+    /// A covariance over `parameters` of `range` (unit matrix: only the
+    /// parameters are read here).
+    fn synthetic(
+        range: &ResonanceRange,
+        parameters: Vec<Parameter>,
+        radius_steps: Vec<f64>,
+    ) -> RangeCovariance {
+        let n = parameters.len();
+        let mut covariance = vec![0.0; n * n];
+        for i in 0..n {
+            covariance[i * n + i] = 1.0;
+        }
+        RangeCovariance {
+            isotope: 0,
+            range: 0,
+            mf2_range: 0,
+            el: range.el,
+            eh: range.eh,
+            lru: range.lru,
+            lrf: range.lrf,
+            parameters,
+            covariance,
+            approximate: 0,
+            unmatched: Vec::new(),
+            radius_steps,
+        }
+    }
+
+    fn parameter(location: Location, quantity: Quantity, value: f64) -> Parameter {
+        Parameter {
+            location,
+            quantity,
+            value,
+        }
+    }
+
+    /// The nominal vector gives back the MF=2 range field for field, and its
+    /// reconstruction the nominal cross sections to the bit, on (a spread of)
+    /// the grid an integral over the range is taken on.
+    fn assert_nominal_is_exact(range: &ResonanceRange, cov: &RangeCovariance) {
+        let values = nominal(cov);
+        assert_eq!(&with_parameters(range, cov, &values).unwrap(), range);
+        let a = reconstruction(range).unwrap();
+        let b = reconstruction_at(range, cov, &values).unwrap();
+        let (el, eh) = a.bounds();
+        let grid = reconstruction_grid(&[a.as_ref(), b.as_ref()], &[el, eh]).unwrap();
+        let points: Vec<f64> = grid
+            .iter()
+            .step_by((grid.len() / 300).max(1))
+            .copied()
+            .collect();
+        for ((x, y), e) in cross_sections_on(a.as_ref(), &points)
+            .iter()
+            .zip(cross_sections_on(b.as_ref(), &points))
+            .zip(&points)
+        {
+            for c in 0..REACTIONS {
+                assert_eq!(
+                    x.slots()[c].to_bits(),
+                    y.slots()[c].to_bits(),
+                    "reaction {c} at {e} eV"
+                );
+            }
+        }
+    }
+
+    /// The step a central difference takes in parameter `i`, the energies it
+    /// is taken at, and the width the derivative's size goes with.
+    fn probe(cov: &RangeCovariance, i: usize, bounds: (f64, f64)) -> (f64, Vec<f64>, f64) {
+        let p = cov.parameters[i];
+        let (el, eh) = bounds;
+        let spread = vec![
+            el * (eh / el).powf(0.25),
+            (el * eh).sqrt(),
+            el * (eh / el).powf(0.8),
+        ];
+        match p.location {
+            Location::Orbital { .. } | Location::SpinGroup { .. } => {
+                let at = |q: &Parameter| q.location == p.location;
+                let er = cov
+                    .parameters
+                    .iter()
+                    .find(|q| at(q) && q.quantity == Quantity::Energy)
+                    .map_or(p.value, |q| q.value);
+                let width = cov
+                    .parameters
+                    .iter()
+                    .filter(|q| at(q) && q.quantity != Quantity::Energy)
+                    .map(|q| q.value.abs())
+                    .sum::<f64>()
+                    .max(1e-3);
+                let h = match p.quantity {
+                    Quantity::Energy => 1e-4 * width,
+                    _ if cov.lrf == 3 => 1e-5 * p.value.abs(),
+                    _ => 1e-3 * p.value.abs(),
+                };
+                let energies = [er, er + 0.7 * width, er * 1.3]
+                    .into_iter()
+                    .filter(|&e| e > el && e < eh)
+                    .collect();
+                (h, energies, width)
+            }
+            Location::Range => (1e-4, spread, eh - el),
+            Location::Channel { .. } => (1e-5, spread, eh - el),
+            Location::Unresolved { .. } => (1e-4, spread, eh - el),
+        }
+    }
+
+    /// Moving parameter `i` by a small step moves the rebuilt cross sections
+    /// by the range's analytic gradient times the step: a central difference
+    /// of [`reconstruction_at`] against
+    /// [`RangeReconstruction::parameter_gradients`]. Returns the number of
+    /// comparisons.
+    fn assert_first_order(range: &ResonanceRange, cov: &RangeCovariance, picks: &[usize]) -> usize {
+        let base = reconstruction(range).unwrap();
+        let mut checked = 0;
+        for &i in picks {
+            let p = cov.parameters[i];
+            let (h, energies, width) = probe(cov, i, base.bounds());
+            // A zero width has no derivative (its amplitude is not
+            // differentiable there), and reads zero.
+            if h == 0.0 {
+                continue;
+            }
+            let moved = |delta: f64| {
+                let mut values = nominal(cov);
+                values[i] += delta;
+                reconstruction_at(range, cov, &values).unwrap()
+            };
+            let (up, down) = (moved(h), moved(-h));
+            for e in energies {
+                let analytic = base.parameter_gradients(e, cov).unwrap()[i];
+                let (u, d, x) = (
+                    up.cross_sections(e).slots(),
+                    down.cross_sections(e).slots(),
+                    base.cross_sections(e).slots(),
+                );
+                for c in 0..REACTIONS {
+                    let numeric = (u[c] - d[c]) / (2.0 * h);
+                    // As the formalisms' own derivative tests: relative to
+                    // the derivative, plus the difference's rounding noise,
+                    // plus a floor for interference terms whose difference is
+                    // still truncation.
+                    let tolerance =
+                        1e-4 * numeric.abs() + 1e-12 * x[c].abs() / h + 1e-7 * x[c].abs() / width;
+                    assert!(
+                        (analytic[c] - numeric).abs() <= tolerance,
+                        "{:?} {:?} at {e} eV, reaction {c}: analytic {} against {numeric}",
+                        p.location,
+                        p.quantity,
+                        analytic[c]
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        checked
+    }
+
+    /// About `n` parameters spread across the covariance, and the first of
+    /// every quantity, so each quantity a range has is tried.
+    fn picks(cov: &RangeCovariance, n: usize) -> Vec<usize> {
+        let mut out: Vec<usize> = (0..cov.len()).step_by((cov.len() / n).max(1)).collect();
+        let mut seen = Vec::new();
+        for (i, p) in cov.parameters.iter().enumerate() {
+            let kind = std::mem::discriminant(&p.quantity);
+            if !seen.contains(&kind) {
+                seen.push(kind);
+                out.push(i);
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    #[test]
+    fn the_nominal_vector_rebuilds_every_fixture_bit_for_bit() {
+        let mut formalisms = std::collections::BTreeSet::new();
+        for fixture in FIXTURES {
+            for (range, cov) in covariances(fixture) {
+                assert_nominal_is_exact(&range, &cov);
+                formalisms.insert((range.lru, range.lrf));
+            }
+        }
+        assert_eq!(
+            formalisms.into_iter().collect::<Vec<_>>(),
+            [(1, 2), (1, 3), (1, 7), (2, 2)]
+        );
+    }
+
+    #[test]
+    fn a_small_step_moves_every_fixture_by_its_gradient() {
+        for fixture in FIXTURES {
+            for (range, cov) in covariances(fixture) {
+                let checked = assert_first_order(&range, &cov, &picks(&cov, 6));
+                assert!(checked >= 15, "{checked} comparisons");
+            }
+        }
+    }
+
+    /// A Reich-Moore range with fission: every quantity a resonance has (GFB
+    /// included), and the radius parameter moving its one section's APL.
+    #[test]
+    fn reich_moore_places_every_quantity() {
+        let range = material(U235).mf2().unwrap().isotopes[0].ranges[0].clone();
+        let ResonanceParameters::ReichMoore(rm) = &range.parameters else {
+            unreachable!()
+        };
+        let s = &rm.sections[0];
+        let mut parameters = vec![parameter(Location::Range, Quantity::ScatteringRadius, 0.0)];
+        for index in (0..s.er.len())
+            .filter(|&i| s.gfb[i] != 0.0 && s.er[i] > range.el && s.er[i] < range.eh)
+            .step_by(40)
+        {
+            let location = Location::Orbital { section: 0, index };
+            for (q, v) in [
+                (Quantity::Energy, s.er[index]),
+                (Quantity::NeutronWidth, s.gn[index]),
+                (Quantity::CaptureWidth, s.gg[index]),
+                (Quantity::FissionWidth, s.gfa[index]),
+                (Quantity::SecondFissionWidth, s.gfb[index]),
+            ] {
+                parameters.push(parameter(location, q, v));
+            }
+        }
+        let cov = synthetic(&range, parameters, vec![0.02]);
+        assert!(cov.len() > 20);
+        assert_nominal_is_exact(&range, &cov);
+        let all: Vec<usize> = (0..cov.len()).collect();
+        assert!(assert_first_order(&range, &cov, &all) > 300);
+        // Two standard deviations of the radius: AP plus twice the step,
+        // written to the section's APL.
+        let mut values = nominal(&cov);
+        values[0] = 2.0;
+        let moved = with_parameters(&range, &cov, &values).unwrap();
+        let ResonanceParameters::ReichMoore(m) = &moved.parameters else {
+            unreachable!()
+        };
+        let base = if s.apl != 0.0 { s.apl } else { rm.ap };
+        assert_eq!(m.sections[0].apl, base + 2.0 * 0.02);
+    }
+
+    /// A multi-level Breit-Wigner range with a competitive width (Na23 given
+    /// one): each width moves GT with it, the competitive width GT alone, and
+    /// the radius parameter AP.
+    #[test]
+    fn breit_wigner_places_every_quantity() {
+        let mut range = material(NA23).mf2().unwrap().isotopes[0].ranges[0].clone();
+        let ResonanceParameters::BreitWigner(bw) = &mut range.parameters else {
+            unreachable!()
+        };
+        let s = &mut bw.sections[0];
+        s.lrx = 1;
+        s.qx = -100.0;
+        for i in 0..s.er.len() {
+            s.gt[i] += 0.2 * s.gn[i];
+        }
+        let s = s.clone();
+        let mut parameters = vec![parameter(Location::Range, Quantity::ScatteringRadius, 0.0)];
+        for index in (0..s.er.len()).filter(|&i| s.er[i] > range.el && s.er[i] < range.eh) {
+            let location = Location::Orbital { section: 0, index };
+            for (q, v) in [
+                (Quantity::Energy, s.er[index]),
+                (Quantity::NeutronWidth, s.gn[index]),
+                (Quantity::CaptureWidth, s.gg[index]),
+                (Quantity::FissionWidth, s.gf[index]),
+                (
+                    Quantity::CompetitiveWidth,
+                    s.gt[index] - s.gn[index] - s.gg[index] - s.gf[index],
+                ),
+            ] {
+                parameters.push(parameter(location, q, v));
+            }
+        }
+        let cov = synthetic(&range, parameters, vec![0.01; 3]);
+        assert_nominal_is_exact(&range, &cov);
+        let all: Vec<usize> = (0..cov.len()).collect();
+        assert!(assert_first_order(&range, &cov, &all) > 100);
+        // GN moves GT; GC moves GT alone.
+        let at = |q: Quantity| {
+            cov.parameters
+                .iter()
+                .position(|p| p.quantity == q && p.location != Location::Range)
+                .unwrap()
+        };
+        let mut values = nominal(&cov);
+        values[at(Quantity::NeutronWidth)] += 0.5;
+        values[at(Quantity::CompetitiveWidth)] += 0.25;
+        values[0] = -1.0;
+        let moved = with_parameters(&range, &cov, &values).unwrap();
+        let ResonanceParameters::BreitWigner(m) = &moved.parameters else {
+            unreachable!()
+        };
+        let Location::Orbital { index, .. } = cov.parameters[at(Quantity::NeutronWidth)].location
+        else {
+            unreachable!()
+        };
+        assert_eq!(m.sections[0].gn[index], s.gn[index] + 0.5);
+        assert_eq!(m.sections[0].gt[index], s.gt[index] + 0.5 + 0.25);
+        assert_eq!(m.sections[0].gg[index], s.gg[index]);
+        let ResonanceParameters::BreitWigner(b) = &range.parameters else {
+            unreachable!()
+        };
+        assert_eq!(m.ap, b.ap - 0.01);
+    }
+
+    /// R-matrix limited channel radii: V51's group with distinct APE and APT
+    /// moves both, a zero radius (the one standing for the other) stays zero,
+    /// and the rebuilt cross sections follow the radius derivative.
+    #[test]
+    fn r_matrix_places_channel_radii() {
+        for fixture in [V51, W186] {
+            let range = material(fixture).mf2().unwrap().isotopes[0].ranges[0].clone();
+            let ResonanceParameters::RMatrixLimited(rml) = &range.parameters else {
+                unreachable!()
+            };
+            let mut parameters = Vec::new();
+            for (group, sg) in rml.spin_groups.iter().enumerate().take(3) {
+                for channel in 0..sg.nch as usize {
+                    parameters.push(parameter(
+                        Location::Channel { group, channel },
+                        Quantity::ScatteringRadius,
+                        sg.channels.apt[channel],
+                    ));
+                }
+                for index in (0..sg.er.len()).step_by(5) {
+                    let location = Location::SpinGroup { group, index };
+                    parameters.push(parameter(location, Quantity::Energy, sg.er[index]));
+                    for (c, row) in sg.gam.iter().enumerate() {
+                        parameters.push(parameter(location, Quantity::ChannelWidth(c), row[index]));
+                    }
+                }
+            }
+            let cov = synthetic(&range, parameters, Vec::new());
+            assert_nominal_is_exact(&range, &cov);
+            let radii: Vec<usize> = (0..cov.len())
+                .filter(|&i| cov.parameters[i].location != Location::Range)
+                .collect();
+            assert!(assert_first_order(&range, &cov, &radii) > 50);
+            let mut values = nominal(&cov);
+            for (v, p) in values.iter_mut().zip(&cov.parameters) {
+                if p.quantity == Quantity::ScatteringRadius {
+                    *v += 0.01;
+                }
+            }
+            let moved = with_parameters(&range, &cov, &values).unwrap();
+            let ResonanceParameters::RMatrixLimited(m) = &moved.parameters else {
+                unreachable!()
+            };
+            for (group, sg) in rml.spin_groups.iter().enumerate().take(3) {
+                let ch = &m.spin_groups[group].channels;
+                for c in 0..sg.nch as usize {
+                    let (ape, apt) = (sg.channels.ape[c], sg.channels.apt[c]);
+                    let want = |x: f64, other: f64| {
+                        if x != 0.0 || other == 0.0 {
+                            x + 0.01
+                        } else {
+                            0.0
+                        }
+                    };
+                    assert_eq!(ch.ape[c], want(ape, apt));
+                    assert_eq!(ch.apt[c], want(apt, ape));
+                }
+            }
+        }
+    }
+
+    /// Every unresolved quantity in each table case: A (D, GN0 and GG per J),
+    /// B (energy-dependent GF) and C (all of them per energy), C with a
+    /// competitive width (Rh103 given one) and a fission width (Pu244).
+    #[test]
+    fn unresolved_places_every_quantity_in_every_case() {
+        let case_a = UnresolvedRange {
+            awri: 100.0,
+            l: 0,
+            njs: 2,
+            d: vec![20.0, 15.0],
+            aj: vec![0.0, 1.0],
+            amun: vec![1.0, 1.0],
+            gno: vec![2e-3, 1e-3],
+            gg: vec![0.05, 0.06],
+            ..Default::default()
+        };
+        let case_b = UnresolvedRange {
+            awri: 100.0,
+            l: 0,
+            njs: 1,
+            parameters: vec![UnresolvedParameters::CaseB {
+                muf: 2,
+                d: 20.0,
+                aj: 0.5,
+                amun: 1.0,
+                gn0: 2e-3,
+                gg: 0.05,
+                gf: vec![0.1, 0.12, 0.15],
+            }],
+            ..Default::default()
+        };
+        let synthetic_range = |section: UnresolvedRange, spi: f64, lrf: i64| ResonanceRange {
+            el: 1e3,
+            eh: 3e4,
+            lru: 2,
+            lrf,
+            nro: 0,
+            naps: 0,
+            parameters: ResonanceParameters::Unresolved(Box::new(Unresolved {
+                spi,
+                ap: 0.6,
+                nls: 1,
+                es: vec![1e3, 1e4, 3e4],
+                ranges: vec![section],
+                ..Default::default()
+            })),
+        };
+        let mut ranges = vec![
+            synthetic_range(case_a, 0.5, 1),
+            synthetic_range(case_b, 0.0, 1),
+        ];
+        for fixture in [RH103, PU244] {
+            let m = material(fixture);
+            let mut range = m.mf2().unwrap().isotopes[0]
+                .ranges
+                .iter()
+                .find(|r| r.lru == 2)
+                .unwrap()
+                .clone();
+            if let ResonanceParameters::Unresolved(u) = &mut range.parameters {
+                for p in u.ranges.iter_mut().flat_map(|s| s.parameters.iter_mut()) {
+                    if let UnresolvedParameters::CaseC { amux, gx, gg, .. } = p {
+                        if gx.iter().all(|x| *x == 0.0) {
+                            *gx = gg.iter().map(|g| 0.3 * g).collect();
+                            *amux = amux.max(1.0);
+                        }
+                    }
+                }
+            }
+            ranges.push(range);
+        }
+        let quantities = [
+            Quantity::LevelSpacing,
+            Quantity::ReducedNeutronWidth,
+            Quantity::CaptureWidth,
+            Quantity::FissionWidth,
+            Quantity::CompetitiveWidth,
+        ];
+        for range in ranges {
+            let ResonanceParameters::Unresolved(u) = &range.parameters else {
+                unreachable!()
+            };
+            let mut parameters = Vec::new();
+            for (orbital, s) in u.ranges.iter().enumerate() {
+                let spins = s.parameters.len().max(s.aj.len());
+                for spin in 0..spins {
+                    for q in quantities {
+                        parameters.push(parameter(Location::Unresolved { orbital, spin }, q, 1.0));
+                    }
+                }
+            }
+            let cov = synthetic(&range, parameters, Vec::new());
+            assert_nominal_is_exact(&range, &cov);
+            let all: Vec<usize> = (0..cov.len()).collect();
+            assert!(assert_first_order(&range, &cov, &all) > 50);
+            // Twice the level spacing of the first (l, J), at every energy.
+            let mut values = nominal(&cov);
+            values[0] = 2.0;
+            let moved = with_parameters(&range, &cov, &values).unwrap();
+            let ResonanceParameters::Unresolved(m) = &moved.parameters else {
+                unreachable!()
+            };
+            let (was, now) = (&u.ranges[0], &m.ranges[0]);
+            match (was.parameters.first(), now.parameters.first()) {
+                (None, None) => assert_eq!(now.d[0], 2.0 * was.d[0]),
+                (
+                    Some(UnresolvedParameters::CaseB { d: a, .. }),
+                    Some(UnresolvedParameters::CaseB { d: b, .. }),
+                ) => assert_eq!(*b, 2.0 * a),
+                (
+                    Some(UnresolvedParameters::CaseC { d: a, .. }),
+                    Some(UnresolvedParameters::CaseC { d: b, .. }),
+                ) => {
+                    assert!(a.iter().zip(b).all(|(a, b)| *b == 2.0 * a));
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn a_vector_of_the_wrong_length_is_refused() {
+        let (range, cov) = covariances(DY158).remove(0);
+        let mut values = nominal(&cov);
+        values.push(0.0);
+        assert!(matches!(
+            with_parameters(&range, &cov, &values),
+            Err(Error::Mismatched { .. })
+        ));
+        values.truncate(cov.len() - 1);
+        assert!(matches!(
+            with_parameters(&range, &cov, &values),
+            Err(Error::Mismatched { .. })
+        ));
+        assert!(reconstruction_at(&range, &cov, &[]).is_err());
+        let mut values = nominal(&cov);
+        values[3] = f64::NAN;
+        assert!(with_parameters(&range, &cov, &values).is_err());
+    }
+
+    /// A quantity the formalism has no field for, or a location the range
+    /// does not have, is refused rather than dropped. The nominal value is
+    /// written nowhere, so only a moved one is refused.
+    #[test]
+    fn a_parameter_with_no_place_in_the_range_is_refused() {
+        let reich_moore = material(DY158).mf2().unwrap().isotopes[0].ranges[0].clone();
+        let breit_wigner = material(NA23).mf2().unwrap().isotopes[0].ranges[0].clone();
+        let r_matrix = material(W186).mf2().unwrap().isotopes[0].ranges[0].clone();
+        let orbital = Location::Orbital {
+            section: 0,
+            index: 0,
+        };
+        for (range, p) in [
+            (
+                &breit_wigner,
+                parameter(orbital, Quantity::SecondFissionWidth, 0.0),
+            ),
+            (
+                &reich_moore,
+                parameter(orbital, Quantity::CompetitiveWidth, 0.0),
+            ),
+            (
+                &reich_moore,
+                parameter(orbital, Quantity::ChannelWidth(0), 0.0),
+            ),
+            (
+                &reich_moore,
+                parameter(orbital, Quantity::LevelSpacing, 1.0),
+            ),
+            (&r_matrix, parameter(orbital, Quantity::Energy, 1.0)),
+            (
+                &r_matrix,
+                parameter(Location::Range, Quantity::ScatteringRadius, 0.0),
+            ),
+            (
+                &r_matrix,
+                parameter(
+                    Location::SpinGroup {
+                        group: 0,
+                        index: 10_000,
+                    },
+                    Quantity::Energy,
+                    1.0,
+                ),
+            ),
+            (
+                &reich_moore,
+                parameter(
+                    Location::Orbital {
+                        section: 9,
+                        index: 0,
+                    },
+                    Quantity::Energy,
+                    1.0,
+                ),
+            ),
+            (
+                &reich_moore,
+                parameter(
+                    Location::Unresolved {
+                        orbital: 0,
+                        spin: 0,
+                    },
+                    Quantity::LevelSpacing,
+                    1.0,
+                ),
+            ),
+        ] {
+            let cov = synthetic(range, vec![p], vec![0.01]);
+            assert!(with_parameters(range, &cov, &[p.value]).is_ok());
+            assert!(
+                matches!(
+                    with_parameters(range, &cov, &[p.value + 0.5]),
+                    Err(Error::Mismatched { .. })
+                ),
+                "{p:?}"
+            );
+        }
+        // Single-level Breit-Wigner is placed but not reconstructed.
+        let mut single = breit_wigner.clone();
+        single.lrf = 1;
+        assert!(matches!(
+            reconstruction(&single),
+            Err(Error::Unsupported { .. })
+        ));
+    }
+
+    /// The grid traces a perturbed resonance where it moved to, and holds
+    /// every point of the nominal grid.
+    #[test]
+    fn the_grid_traces_nominal_and_perturbed_resonances() {
+        let (range, cov) = covariances(DY158).remove(0);
+        let i = cov
+            .parameters
+            .iter()
+            .position(|p| p.quantity == Quantity::Energy && p.value > 1.0)
+            .unwrap();
+        let width: f64 = cov.parameters[i + 1].value + cov.parameters[i + 2].value;
+        let shifted = cov.parameters[i].value + 7.3 * width;
+        let mut values = nominal(&cov);
+        values[i] = shifted;
+        let a = reconstruction(&range).unwrap();
+        let b = reconstruction_at(&range, &cov, &values).unwrap();
+        let (el, eh) = a.bounds();
+        let alone = reconstruction_grid(&[a.as_ref()], &[el, eh]).unwrap();
+        let both = reconstruction_grid(&[a.as_ref(), b.as_ref()], &[el, eh]).unwrap();
+        assert!(both.windows(2).all(|w| w[1] > w[0]));
+        assert!(alone
+            .iter()
+            .all(|e| both.binary_search_by(|x| x.total_cmp(e)).is_ok()));
+        // Half the points across a Lorentzian lie within half a width of it.
+        let near = |grid: &[f64]| {
+            grid.iter()
+                .filter(|&&e| (e - shifted).abs() <= 0.5 * width)
+                .count()
+        };
+        assert!(near(&both) >= PER_RESONANCE / 2, "{}", near(&both));
+        assert!(near(&alone) < PER_RESONANCE / 8, "{}", near(&alone));
+        // Nothing to build a grid for, or edges outside the range.
+        assert!(reconstruction_grid(&[], &[el, eh]).is_err());
+        assert!(reconstruction_grid(&[a.as_ref()], &[el, 2.0 * eh]).is_err());
     }
 }
