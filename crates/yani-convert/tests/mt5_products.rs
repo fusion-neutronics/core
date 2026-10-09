@@ -213,7 +213,6 @@ fn the_rows_reach_yanis_reader() {
             .iter()
             .map(|n| endf::chain::Nuclide::new(n))
             .collect(),
-        ..Default::default()
     };
     let dir = std::env::temp_dir().join(format!("yani-convert-mt5-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

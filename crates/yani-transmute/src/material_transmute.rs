@@ -4550,7 +4550,7 @@ mod tests {
     /// (MF=6 yields of a complete list), particles as multiplicities.
     fn anything_branch(ag111: f64) -> BranchTable {
         let e = [1.0e7, 2.0e7];
-        let mut residual = |t: &str, v: f64| {
+        let residual = |t: &str, v: f64| {
             let mut c = curve(t, BranchQuantity::Yield, &e, &[v, v], true);
             c.states = facts(5, 0, true);
             c
@@ -4708,30 +4708,52 @@ mod tests {
         assert!((anything_of(&folded, "H1") - 1.0).abs() < 1e-12);
     }
 
-    /// MT=5 on a chain that carries no `(n,X)` reaction for the parent is
-    /// measured against its removal: at 30 MeV it is half of In115's here,
-    /// all of the material, so the run is refused and says why; a D-T
-    /// spectrum below its 20 MeV threshold reports nothing and runs.
+    /// MT=5 whose residuals the chain does not model is measured against the
+    /// removal: at 30 MeV it is half of In115's here, all of the material. On
+    /// a reactions subsection written before MT=5 was carried that is
+    /// reported, as it was; on one that carries MT=5 and says In115's
+    /// residual is not given the run is refused and says why. A D-T spectrum
+    /// below the 20 MeV threshold reports nothing and runs.
     #[test]
     fn unmodelled_mt5_refuses_a_material_made_of_it() {
         let material = indium(vec![
             reaction(16, vec![1.0e7, 4.0e7], vec![1.0, 1.0]),
             reaction(5, vec![2.0e7, 4.0e7], vec![0.0, 2.0]),
         ]);
-        let err = fold(
+        // A reactions subsection that predates MT=5: reported, as before.
+        let (_, _, report) = fold(
             &material,
             &indium_chain(),
             &BranchTable::new(),
             &one_group(2.9e7, 3.1e7),
         )
+        .unwrap();
+        let mt5 = &report.unmodelled_mt5[0];
+        assert_eq!(mt5.nuclide, "In115");
+        assert!((mt5.share - 0.5).abs() < 1e-3, "{mt5:?}");
+        assert!(!mt5.guarded);
+
+        // One that carries MT=5 and says In115's residual is not given.
+        let mut nuc = indium_chain()["In115"].clone();
+        nuc.reactions.push(ChainReaction {
+            target: None,
+            ..edge(ANYTHING, "", 0.0)
+        });
+        let chain = Arc::new(HashMap::from([("In115".to_string(), nuc)]));
+        let err = fold(
+            &material,
+            &chain,
+            &BranchTable::new(),
+            &one_group(2.9e7, 3.1e7),
+        )
         .unwrap_err();
         assert!(err.contains("In115"), "{err}");
-        assert!(err.contains("no (n,X) reaction"), "{err}");
+        assert!(err.contains("not its residuals"), "{err}");
         assert!(err.contains("50.00% of its own"), "{err}");
 
         let (_, _, report) = fold(
             &material,
-            &indium_chain(),
+            &chain,
             &BranchTable::new(),
             &one_group(1.35e7, 1.45e7),
         )

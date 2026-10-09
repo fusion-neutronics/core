@@ -847,6 +847,13 @@ pub struct UnmodelledRate {
     /// library has no MT=5 products for), or it carries one whose evaluation
     /// gives light particles and no residual.
     pub reason: String,
+    /// Whether [`refuse_unmodelled_mt5`] holds the run to it. False only on a
+    /// reactions subsection that carries no `(n,X)` at all, one written
+    /// before MT=5 was carried, which is reported as it always was until the
+    /// library is re-converted: refusing there would stop every published
+    /// ENDF/B-VIII.1, JEFF-4.0 and FENDL-3.2d iron run for want of a
+    /// conversion rather than of data.
+    pub guarded: bool,
 }
 
 /// What the isomeric-branching rule did over one step's spectrum, and what it
@@ -878,12 +885,21 @@ pub(crate) fn removal_rate(rates: &yani::ReactionRates, parent: &str) -> f64 {
 /// Why a parent's MT=5 residuals are not modelled, or `None` when they are:
 /// the chain carries `(n,X)` for it, and none of its rows is the one with no
 /// target that says the evaluation gives no residual.
-fn unmodelled_reason(nuclide: Option<&yani::ChainNuclide>) -> Option<&'static str> {
+fn unmodelled_reason(
+    nuclide: Option<&yani::ChainNuclide>,
+    carries_anything: bool,
+) -> Option<&'static str> {
     let rows: Vec<&yani::ChainReaction> = nuclide
         .map(|n| n.reactions.iter().filter(|r| r.kind == ANYTHING).collect())
         .unwrap_or_default();
     if rows.is_empty() {
-        return Some("the chain carries no (n,X) reaction for it");
+        return Some(if carries_anything {
+            "the chain carries no (n,X) reaction for it: the reaction library has no MT=5 \
+             for it where the cross-section library does"
+        } else {
+            "the reactions subsection was written before MT=5's products were carried; \
+             re-convert it, or fetch a republished one"
+        });
     }
     rows.iter().any(|r| r.target.is_none()).then_some(
         "its evaluation gives MT=5's light particles but not its residuals, so the \
@@ -915,15 +931,19 @@ pub(crate) fn measure_unmodelled_mt5(
     rates: &yani::ReactionRates,
     mt5: &HashMap<String, f64>,
 ) -> Vec<UnmodelledRate> {
+    let carries_anything = chain
+        .values()
+        .any(|n| n.reactions.iter().any(|r| r.kind == ANYTHING));
     let mut out: Vec<UnmodelledRate> = mt5
         .iter()
         .filter(|(_, r)| **r > 0.0)
         .filter_map(|(nuclide, &r5)| {
-            let reason = unmodelled_reason(chain.get(nuclide))?;
+            let reason = unmodelled_reason(chain.get(nuclide), carries_anything)?;
             Some(UnmodelledRate {
                 nuclide: nuclide.clone(),
                 share: r5 / (removal_without_anything(rates, nuclide) + r5),
                 reason: reason.to_string(),
+                guarded: carries_anything,
             })
         })
         .collect();
@@ -970,7 +990,8 @@ fn removal_without_anything(rates: &yani::ReactionRates, parent: &str) -> f64 {
 /// the atoms. Every parent's share is still reported.
 ///
 /// With no densities (a statistical replica, or a caller that gave none) it
-/// refuses nothing. `library` names where a nuclide's cross sections came
+/// refuses nothing, and it passes over what [`UnmodelledRate::guarded`] says
+/// predates the reactions subsection carrying MT=5. `library` names where a nuclide's cross sections came
 /// from, for the message.
 pub(crate) fn refuse_unmodelled_mt5(
     unmodelled: &[UnmodelledRate],
@@ -993,6 +1014,7 @@ pub(crate) fn refuse_unmodelled_mt5(
     }
     let mut lost: Vec<(f64, &UnmodelledRate)> = unmodelled
         .iter()
+        .filter(|u| u.guarded)
         .filter_map(|u| {
             let n = densities.get(&u.nuclide).copied().unwrap_or(0.0);
             let r5 = mt5.get(&u.nuclide).copied().unwrap_or(0.0);
@@ -1288,7 +1310,8 @@ mod tests {
             ),
         ]);
         let mt5 = HashMap::from([("Fe58".to_string(), 1.0)]);
-        let report = measure_unmodelled_mt5(&HashMap::new(), &rates, &mt5);
+        let chain = parent_with(vec![(ANYTHING, Some("H1")), (ANYTHING, None)]);
+        let report = measure_unmodelled_mt5(&chain, &rates, &mt5);
         let library = |_: &str| Some("endf-b8.1".to_string());
         let pure = HashMap::from([("Fe58".to_string(), 1.0)]);
         let err = refuse_unmodelled_mt5(&report, &rates, &mt5, &pure, &library).unwrap_err();
@@ -1296,6 +1319,11 @@ mod tests {
         let natural = HashMap::from([("Fe58".to_string(), 3.0e-4), ("Fe56".to_string(), 1.0)]);
         assert!(refuse_unmodelled_mt5(&report, &rates, &mt5, &natural, &library).is_ok());
         assert!(refuse_unmodelled_mt5(&report, &rates, &mt5, &HashMap::new(), &library).is_ok());
+        // A reactions subsection with no (n,X) anywhere predates MT=5, and is
+        // reported, not refused.
+        let old = measure_unmodelled_mt5(&HashMap::new(), &rates, &mt5);
+        assert!(!old[0].guarded && old[0].reason.contains("re-convert"));
+        assert!(refuse_unmodelled_mt5(&old, &rates, &mt5, &pure, &library).is_ok());
     }
 
     #[test]

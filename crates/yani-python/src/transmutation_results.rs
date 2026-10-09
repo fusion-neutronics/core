@@ -1342,8 +1342,9 @@ impl PyTransmutationResults {
     /// below that. A multiplicity above what the target's nucleons allow is
     /// clipped like any other impossible value. ``unmodelled_mt5`` lists the
     /// parents whose MT=5 residuals the chain does not model, with the reason;
-    /// a run refuses when those of the material's own nuclides carry more
-    /// than 0.1% of the material's removal rate.
+    /// on a reactions subsection that carries MT=5, a run refuses when those
+    /// of the material's own nuclides carry more than 0.1% of the material's
+    /// removal rate (one written before MT=5 was carried is reported only).
     ///
     /// Args:
     ///     material_id: Material ID number.
