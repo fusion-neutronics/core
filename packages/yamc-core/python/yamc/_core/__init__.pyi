@@ -73,6 +73,7 @@ __all__ = [
     "VoxelData",
     "WeightWindowBounds",
     "WeightWindowGeneratorDeGVR",
+    "cache_dir",
     "cad_mesh_labels",
     "cad_mesh_to_arrow",
     "combine_results",
@@ -4107,9 +4108,16 @@ class SimulationResults:
         r"""
         Provenance of the run(s) behind these results: a list of dicts
         with ``seed``, ``n_histories``, ``elapsed_secs``, ``fingerprint``,
-        ``data_libraries``, ``compute``, ``yamc_version``, ``mpi_size``
-        and ``mpi_rank``. One entry per ``simulate_transport`` run;
-        concatenated by ``combine_results``.
+        ``data_libraries``, ``data_releases``, ``compute``, ``yamc_version``,
+        ``mpi_size`` and ``mpi_rank``. One entry per ``simulate_transport``
+        run; concatenated by ``combine_results``.
+        
+        ``data_releases`` maps each library keyword the run downloaded data
+        from to a dict with ``release`` (the published release identifier),
+        ``manifest_sha256`` (the hash of that release's manifest, which pins
+        every file in it), ``format_version`` and ``offline`` (True when the
+        data origin was unreachable and the newest complete cached release was
+        used). Empty when all data came from local directories.
         """
     def __len__(self) -> builtins.int:
         r"""
@@ -5250,6 +5258,17 @@ class TransmutationResults:
         the same spectrum, composition, temperature and shielding collapse to
         the same rates and share one, so ``performed`` below ``requested`` is
         the saving ``transmute`` made over solving them one at a time.
+        """
+    @property
+    def data_releases(self) -> dict:
+        r"""
+        The published nuclear-data release each library keyword came from, as
+        a dict keyed by keyword. Each value is a dict with ``release`` (the
+        release identifier), ``manifest_sha256`` (the hash of that release's
+        manifest, which pins every file in it), ``format_version`` and
+        ``offline`` (True when the data origin was unreachable and the newest
+        complete cached release was used). Empty when every data source was a
+        local directory.
         """
     @property
     def num_steps(self) -> builtins.int:
@@ -6432,6 +6451,26 @@ def Torus(axis: typing.Any, x0: builtins.float = 0.0, y0: builtins.float = 0.0, 
     
     Returns:
         A Surface object representing the torus
+    """
+
+def cache_dir() -> builtins.str:
+    r"""
+    The directory downloaded nuclear data is cached in.
+    
+    A folder in the platform's per-user cache directory (under ``~/.cache`` on
+    Linux, or ``$XDG_CACHE_HOME`` when that is set; ``~/Library/Caches`` on
+    macOS; ``%LOCALAPPDATA%`` on Windows), shared by both wheels. Inside it
+    each library keeps one folder per published release,
+    ``<keyword>/<release>/``, holding that release's ``manifest.json`` and the
+    files downloaded from it, each verified against the manifest. Read only:
+    to use data from somewhere else, point the data source at a local
+    directory instead.
+    
+    Returns:
+        The cache directory as a string, whether or not it exists yet.
+    
+    Raises:
+        RuntimeError: If the platform resolves no home directory.
     """
 
 def cad_mesh_labels(triangle_face_ids: typing.Sequence[builtins.int], solid_faces: typing.Sequence[tuple[builtins.int, typing.Sequence[builtins.int]]], tet_blocks: typing.Sequence[tuple[builtins.int, builtins.int, typing.Sequence[typing.Sequence[builtins.int]]]] = []) -> tuple[builtins.list[builtins.int], builtins.list[builtins.int], builtins.list[builtins.list[builtins.int]], builtins.list[builtins.int]]:
