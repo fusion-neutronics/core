@@ -189,7 +189,7 @@ impl Spectrum {
     }
 
     fn first_wall() -> Spectrum {
-        let text = include_str!("fixtures/dt_first_wall_175.txt");
+        let text = include_str!("fixtures/dt_first_wall_175.dat");
         let mut boundaries = Vec::new();
         let mut flux = Vec::new();
         for line in text.lines().filter(|l| !l.starts_with('#')) {
