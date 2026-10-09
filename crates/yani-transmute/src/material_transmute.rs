@@ -375,6 +375,7 @@ pub fn transmute_materials(
                 .collect(),
             request,
             shielding: cases[c].shielding.as_ref(),
+            lists: &lists,
         });
         solve_case(
             &initial[c],
@@ -728,6 +729,14 @@ struct CaseOutcome {
     uncertainty: Option<(Ensemble, Info)>,
 }
 
+/// One spectrum's stated flux error and the per-group terms it perturbs: the
+/// transport channels' group averages and the branching lists' folds.
+struct FluxTerms {
+    error: crate::flux_uncertainty::FluxError,
+    rates: crate::flux_uncertainty::PerGroupRates,
+    lists: crate::flux_uncertainty::PerGroupLists,
+}
+
 /// One material's inputs to the uncertainty replicas, in its own indexing.
 struct Replicas<'a> {
     spectra: &'a [MultigroupSpectrum],
@@ -735,6 +744,9 @@ struct Replicas<'a> {
     per_spectrum: Vec<PerSpectrum>,
     request: &'a DataUncertainty,
     shielding: Option<&'a Shielding>,
+    /// The branching lists the nominal fold applied, which a flux replica
+    /// re-folds under its own perturbation.
+    lists: &'a Lists<'a>,
 }
 
 /// One material's timeline, stepped from `initial` with steps whose spectrum
@@ -792,6 +804,7 @@ fn solve_case(
             &stepper,
             r.request,
             r.shielding,
+            r.lists,
             None,
         )?),
         None => None,
@@ -1258,6 +1271,8 @@ pub fn transport_replicas(
         &ForwardEulerStepper,
         request,
         None,
+        // No supplied flux, so nothing for a flux replica to re-fold.
+        &HashMap::new(),
         // Always the transport path, even with no statistics to sample: that
         // is what keeps `flux_spectrum` out of it.
         Some(statistics.as_ref().unwrap_or(&no_statistics)),
@@ -1448,6 +1463,7 @@ fn run_replicas(
     stepper: &ForwardEulerStepper,
     request: &DataUncertainty,
     shielding: Option<&Shielding>,
+    lists: &Lists<'_>,
     statistical: Option<&TransportStatistics>,
 ) -> Result<(Ensemble, Info), Box<dyn std::error::Error>> {
     // The two paths each have one source the other lacks. A transport run has
@@ -1548,26 +1564,42 @@ fn run_replicas(
     // the report says so.
     let want_flux = !transport && request.wants(crate::uncertainty::Source::FluxSpectrum);
     let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
-    let mut per_group: Vec<
-        Option<(
-            crate::flux_uncertainty::FluxError,
-            crate::flux_uncertainty::PerGroupRates,
-        )>,
-    > = Vec::with_capacity(per_spectrum.len());
+    let mut per_group: Vec<Option<FluxTerms>> = Vec::with_capacity(per_spectrum.len());
     for (idx, spectrum) in spectra.iter().enumerate() {
         match spectrum.flux_error.as_ref().filter(|_| want_flux) {
             Some(relative) => {
                 flux_coverage.spectra_with_sigma += 1;
-                per_group.push(Some((
-                    relative.clone(),
-                    crate::multigroup::per_group_reaction_rates(
-                        initial,
-                        &per_spectrum[idx].2,
-                        &spectrum.masses,
-                        &spectrum.boundaries,
-                        shielding,
+                let rates = crate::multigroup::per_group_reaction_rates(
+                    initial,
+                    &per_spectrum[idx].2,
+                    &spectrum.masses,
+                    &spectrum.boundaries,
+                    shielding,
+                );
+                // The overlay's rates and splits are folds of the branching
+                // lists, not group averages, so they get terms of their own
+                // and each replica re-folds them.
+                let lists_terms = crate::multigroup::per_group_list_rates(
+                    initial,
+                    chain,
+                    lists,
+                    &spectrum.masses,
+                    &spectrum.boundaries,
+                    shielding,
+                );
+                flux_coverage.rates_without_terms.extend(
+                    crate::flux_uncertainty::rates_without_terms(
+                        &per_spectrum[idx].0,
+                        &rates,
+                        lists,
+                        &lists_terms,
                     ),
-                )));
+                );
+                per_group.push(Some(FluxTerms {
+                    error: relative.clone(),
+                    rates,
+                    lists: lists_terms,
+                }));
             }
             None => {
                 if want_flux {
@@ -1585,7 +1617,13 @@ fn run_replicas(
     let want_decay_branching = request.wants(crate::uncertainty::Source::DecayBranching);
     let want_fission_yield = request.wants(crate::uncertainty::Source::FissionYield);
     let edits_chain = want_half_life || want_decay_branching || want_fission_yield;
-    let chains = edits_chain.then(|| replica_chains(initial, chain, per_spectrum));
+    // A flux replica re-folds the branching into the base chain, so it wants
+    // the pruned base too.
+    let refolds = per_group
+        .iter()
+        .flatten()
+        .any(|terms| !terms.lists.is_empty());
+    let chains = (edits_chain || refolds).then(|| replica_chains(initial, chain, per_spectrum));
 
     // Half-lives: sampled per replica from the evaluation's stated sigma, and
     // substituted into every chain the replica is solved with, the base one
@@ -1968,27 +2006,50 @@ fn run_replicas(
                 (Some((totals, chain_k)), 0) => (totals, chain_k),
                 _ => (rates, folded_chain),
             };
-            let rates = match &per_group[idx] {
-                Some((relative, terms)) => {
+            let (rates, refolded) = match &per_group[idx] {
+                Some(terms) => {
                     let delta = crate::flux_uncertainty::flux_deviates(
-                        relative,
+                        &terms.error,
                         request.seed,
                         replica,
                         idx,
                         &mut flux_coverage,
                     );
-                    crate::flux_uncertainty::perturb_rates(rates, terms, &delta)
+                    let mut rates =
+                        crate::flux_uncertainty::perturb_rates(rates, &terms.rates, &delta);
+                    // The branching re-folded from this replica's productions,
+                    // into the unfolded chain the nominal was folded into:
+                    // the `(n,n')` isomer rates are re-made and every split
+                    // moves with the bins its states are produced in. Pruned,
+                    // which leaves every parent the material reaches as it is.
+                    let refolded = match &chains {
+                        Some(c) if !terms.lists.is_empty() => Some(
+                            fold_branching_into_chain(
+                                &c.base,
+                                lists,
+                                &crate::flux_uncertainty::perturb_lists(&terms.lists, &delta),
+                                &mut rates,
+                            )?
+                            .0,
+                        ),
+                        _ => None,
+                    };
+                    (rates, refolded)
                 }
-                None => rates.clone(),
+                None => (rates.clone(), None),
             };
             let (rates, n, floored) = sampler.perturb_with(&xs_draw, idx, &rates);
             rates_sampled += n;
             rates_floored += floored;
-            let folded_chain = match &chains {
+            let folded_chain = match (&chains, refolded) {
+                // A chain the flux perturbation re-folded carries the edits
+                // itself.
+                (_, Some(k)) if !edits.is_empty() => Arc::new(edits.apply(&k)),
+                (_, Some(k)) => k,
                 // The pruned nominal chain, unless the statistical draw
                 // re-folded this replica's own chain, which then carries the
                 // edits instead.
-                Some(c) if !edits.is_empty() => Arc::new(if drawn.is_some() {
+                (Some(c), None) if !edits.is_empty() => Arc::new(if drawn.is_some() {
                     edits.apply(folded_chain)
                 } else {
                     edits.apply(&c.folded[idx])
@@ -2154,6 +2215,7 @@ fn run_replicas(
                     stepper,
                     &alone,
                     shielding,
+                    lists,
                     statistical_in,
                 )?;
                 by_source.insert(source.name().to_string(), variances_of(&sub, steps.len()));

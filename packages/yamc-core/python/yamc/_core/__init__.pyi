@@ -685,7 +685,9 @@ class DataUncertainty:
     - any source switched off with ``sources``, or with nothing to act on (a
       spectrum given without ``flux_std_dev``). When only some of a material's
       spectra have one, the entry is ``"flux spectrum (spectra without a sigma
-      only)"`` and ``spectra_without_flux_sigma`` gives the count.
+      only)"`` and ``spectra_without_flux_sigma`` gives the count. A rate
+      under a spectrum with a sigma that the flux draw cannot move is named
+      in ``flux_rates_without_terms``.
     
     ``TransmutationResults.get_data_uncertainty_info`` lists every one of these
     that applied to a material under ``not_perturbed``, along with any nuclide

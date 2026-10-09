@@ -619,6 +619,29 @@ pub(crate) fn fold_list(
     shape: Option<&FluxShape>,
     source_rate: f64,
 ) -> ListRates {
+    fold_list_by_group(
+        bound,
+        multigroup_flux,
+        group_boundaries,
+        groups,
+        shape,
+        source_rate,
+        |_, _, _| {},
+    )
+}
+
+/// [`fold_list`], handing each group's averages and flux to `on_group` as
+/// they are summed, so a caller can keep the per-group terms of exactly the
+/// fold the nominal run took.
+fn fold_list_by_group(
+    bound: &Bound<'_, '_>,
+    multigroup_flux: &[f64],
+    group_boundaries: &[f64],
+    groups: impl Iterator<Item = usize>,
+    shape: Option<&FluxShape>,
+    source_rate: f64,
+    mut on_group: impl FnMut(usize, &ListGroup, f64),
+) -> ListRates {
     let n = bound.rule.curves.len();
     let mut out = ListRates {
         production: vec![0.0; n],
@@ -637,6 +660,7 @@ pub(crate) fn fold_list(
             weighting,
             &mut scratch,
         );
+        on_group(g, &group, phi);
         for k in 0..n {
             out.production[k] += group.production[k] * phi;
         }
@@ -1828,6 +1852,127 @@ pub fn per_group_reaction_rates(
         }
     }
     out
+}
+
+/// The per-group terms of every branching list, for flux uncertainty.
+///
+/// The overlay's rates are not group averages of a transport channel: an
+/// `(n,n')` isomer rate IS the folded MF=10 production, and every other
+/// list's split is a ratio of folded productions to the folded total. So
+/// [`per_group_reaction_rates`] has no terms for them, and a flux
+/// perturbation would leave them at nominal. These are the terms of the same
+/// folds [`crate::material_transmute::collapse_and_fold`] takes, list for
+/// list: each walked parent's lists in its collapse walk (the same active
+/// groups and flux shape), and the `(n,n')` lists of a parent with no
+/// transport data from its partials alone over the groups with flux. The
+/// folded sums are kept beside the terms, so a replica re-folds the branching
+/// from a perturbation of exactly what the nominal run folded.
+pub(crate) fn per_group_list_rates(
+    material: &Material,
+    chain: &HashMap<String, ChainNuclide>,
+    lists: &Lists<'_>,
+    multigroup_flux: &[f64],
+    group_boundaries: &[f64],
+    shielding: Option<&Shielding>,
+) -> crate::flux_uncertainty::PerGroupLists {
+    let n_groups = multigroup_flux.len();
+    let setup = CollapseSetup::new(material, multigroup_flux, shielding);
+    let context = setup
+        .as_ref()
+        .map(|s| s.context(material, multigroup_flux, group_boundaries, 1.0, shielding));
+    let with_flux: Vec<usize> = (0..n_groups)
+        .filter(|&g| multigroup_flux[g] != 0.0)
+        .collect();
+
+    let fold = |bound: &Bound<'_, '_>,
+                groups: &mut dyn Iterator<Item = usize>,
+                shape: Option<&FluxShape>| {
+        let curves = bound.rule.curves.len();
+        let mut production = vec![vec![0.0; n_groups]; curves];
+        let mut total = vec![0.0; n_groups];
+        let folded = fold_list_by_group(
+            bound,
+            multigroup_flux,
+            group_boundaries,
+            groups,
+            shape,
+            1.0,
+            |g, group, phi| {
+                for (k, p) in group.production.iter().enumerate() {
+                    production[k][g] = p * phi;
+                }
+                total[g] = group.total * phi;
+            },
+        );
+        crate::flux_uncertainty::ListTerms {
+            folded,
+            production,
+            total,
+        }
+    };
+
+    let entries: Vec<(&String, &Vec<crate::branching_rule::ListRule<'_>>)> = lists.iter().collect();
+    let one = |&(parent, rules): &(&String, &Vec<crate::branching_rule::ListRule<'_>>)| {
+        // Walked exactly when the collapse walks the parent: it is in the
+        // chain with a reaction to drive, and has transport data.
+        let walked = context.as_ref().and_then(|context| {
+            let nuc = chain.get(parent.as_str())?;
+            if nuc.reactions.is_empty() {
+                return None;
+            }
+            let reactions = context.reactions_for(parent)?;
+            Some((context, reactions))
+        });
+        let per: Vec<Option<crate::flux_uncertainty::ListTerms>> = match walked {
+            Some((context, reactions)) => {
+                let (shape, _, _) = context.shape_for(parent, reactions);
+                rules
+                    .iter()
+                    .map(|rule| {
+                        let total = rule
+                            .mt
+                            .and_then(|mt| reactions.get(&mt))
+                            .map(|r| r.as_ref());
+                        let tails = rule.tails(total);
+                        let bound = Bound {
+                            rule,
+                            total,
+                            tail: &tails,
+                        };
+                        Some(fold(
+                            &bound,
+                            &mut context.active.iter().copied(),
+                            shape.as_ref(),
+                        ))
+                    })
+                    .collect()
+            }
+            None => rules
+                .iter()
+                .map(|rule| {
+                    (rule.kind == crate::branching_rule::INELASTIC).then(|| {
+                        let bound = Bound {
+                            rule,
+                            total: None,
+                            tail: &[],
+                        };
+                        fold(&bound, &mut with_flux.iter().copied(), None)
+                    })
+                })
+                .collect(),
+        };
+        (parent.to_string(), per)
+    };
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use rayon::prelude::*;
+        entries.par_iter().map(one).collect()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        entries.iter().map(one).collect()
+    }
 }
 
 /// Scale all reaction rates by a multiplier.
