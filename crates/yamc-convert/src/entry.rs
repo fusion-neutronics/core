@@ -324,6 +324,7 @@ fn write_covariance_if_asked(
     crate::angular_covariance::write_angular_covariance(material, dir)?;
     crate::nubar_covariance::write_nubar_covariance(material, dir)?;
     crate::spectrum_covariance::write_spectrum_covariance(material, dir)?;
+    crate::resonance_parameters::write_resonance_parameters(material, dir)?;
     Ok(())
 }
 

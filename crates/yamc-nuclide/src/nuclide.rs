@@ -1174,6 +1174,15 @@ pub struct Nuclide {
     #[serde(skip, default)]
     pub spectrum_covariance:
         Option<std::sync::Arc<Vec<crate::covariance::SpectrumCovarianceBlock>>>,
+    /// MF=2 MT=151 and MF=32 MT=151 as ENDF-6 text, when
+    /// [`LoadScope::resonance_parameters`] asked for them and the evaluation
+    /// has MF=32. Parsed only on demand, through
+    /// [`ResonanceParameters`](crate::resonance_parameters::ResonanceParameters).
+    ///
+    /// [`LoadScope::resonance_parameters`]: crate::LoadScope::resonance_parameters
+    #[serde(skip, default)]
+    pub resonance_parameters:
+        Option<std::sync::Arc<crate::resonance_parameters::ResonanceParameters>>,
     /// Lazily-built flat elastic angular table. Routes the
     /// production CPU elastic scatter through the same
     /// `yamc_physics::gpu::flat::elastic_mu_cm` sampler the GPU kernel/twin

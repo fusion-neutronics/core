@@ -27,6 +27,7 @@ pub mod photon;
 pub mod products;
 pub mod reaction_ranges;
 pub mod reactions;
+pub mod resonance_parameters;
 pub mod sections;
 pub mod spectrum_covariance;
 pub mod univariate_flat;

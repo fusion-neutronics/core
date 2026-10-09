@@ -1036,6 +1036,7 @@ mod tests {
             angular_covariance: None,
             nubar_covariance: None,
             spectrum_covariance: None,
+            resonance_parameters: None,
             load_scope: Default::default(),
         };
 

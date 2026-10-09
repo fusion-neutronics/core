@@ -1042,10 +1042,11 @@ const NEUTRON_XS_ONLY_SECTIONS_WITH_COVARIANCE: &[(&str, bool)] = &[
 /// Which section objects a scope needs.
 ///
 /// Photon data has no transmutation path, so it is always fetched whole. MF=34
-/// (`angular_covariance.arrow`), and MF=31 and MF=35 (`nubar_covariance.arrow`,
-/// `spectrum_covariance.arrow`), are added only when the scope asks for them,
-/// and optional like `covariance.arrow`: most evaluations have none, and a 404
-/// is recorded rather than retried.
+/// (`angular_covariance.arrow`), MF=31 and MF=35 (`nubar_covariance.arrow`,
+/// `spectrum_covariance.arrow`), and MF=2 with MF=32
+/// (`resonance_parameters.arrow`) are added only when the scope asks for
+/// them, and optional like `covariance.arrow`: most evaluations have none,
+/// and a 404 is recorded rather than retried.
 #[cfg(feature = "download")]
 fn sections_for(kind: DataKind, scope: &crate::load_scope::LoadScope) -> Vec<(&'static str, bool)> {
     let base: &'static [(&'static str, bool)] = match kind {
@@ -1067,6 +1068,9 @@ fn sections_for(kind: DataKind, scope: &crate::load_scope::LoadScope) -> Vec<(&'
     if kind == DataKind::Neutron && scope.fission_covariance {
         sections.push(("nubar_covariance.arrow", false));
         sections.push(("spectrum_covariance.arrow", false));
+    }
+    if kind == DataKind::Neutron && scope.resonance_parameters {
+        sections.push(("resonance_parameters.arrow", false));
     }
     sections
 }
@@ -2313,6 +2317,7 @@ mod tests {
             covariance: false,
             angular_covariance: false,
             fission_covariance: false,
+            resonance_parameters: false,
         };
         assert!(subset_mts(DataKind::Neutron, &all_mts).is_none());
     }
@@ -2457,6 +2462,33 @@ mod tests {
                 "photon data has no {file}"
             );
         }
+    }
+
+    /// MF=2 and MF=32 are fetched only when asked for, on their own axis: no
+    /// other scope pulls them, however wide, and the file is optional.
+    #[test]
+    fn resonance_parameters_are_fetched_only_when_the_scope_asks_for_them() {
+        let file = "resonance_parameters.arrow";
+        let every_other_axis = crate::LoadScope::full()
+            .with_covariance(true)
+            .with_angular_covariance(true)
+            .with_fission_covariance(true);
+        for scope in [crate::LoadScope::full(), every_other_axis] {
+            assert!(
+                !sections_for(DataKind::Neutron, &scope)
+                    .iter()
+                    .any(|(n, _)| *n == file),
+                "{scope:?} fetched {file}"
+            );
+        }
+        let asked = crate::LoadScope::activation([102].into()).with_resonance_parameters(true);
+        assert!(sections_for(DataKind::Neutron, &asked).contains(&(file, false)));
+        assert!(
+            !sections_for(DataKind::Photon, &asked)
+                .iter()
+                .any(|(n, _)| *n == file),
+            "photon data has no {file}"
+        );
     }
 
     /// Every other layer ships the fission photon release (the

@@ -129,3 +129,22 @@ fn a_directory_without_fission_covariance_still_loads() {
         "a load without MF=31 and MF=35 must not stand in for one that asked for them"
     );
 }
+
+/// MF=2 and MF=32 the same way: a directory without
+/// `resonance_parameters.arrow` loads with none when asked, and a load
+/// without them does not cover one with them.
+#[test]
+fn a_directory_without_resonance_parameters_still_loads() {
+    let Some(dir) = fe56() else {
+        return skip("a_directory_without_resonance_parameters_still_loads");
+    };
+    assert!(!dir.join("resonance_parameters.arrow").exists());
+    let scope = LoadScope::activation(HashSet::from([102])).with_resonance_parameters(true);
+    let nuclide = read_nuclide_from_arrow(&dir, &scope).expect("Fe56 loads");
+    assert!(nuclide.resonance_parameters.is_none());
+    assert!(nuclide.load_scope.resonance_parameters);
+    assert!(
+        !LoadScope::activation(HashSet::from([102])).covers(&scope),
+        "a load without MF=2 and MF=32 must not stand in for one that asked for them"
+    );
+}

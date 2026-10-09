@@ -43,8 +43,8 @@ use yamc_nuclide::load_scope::{LoadScope, SectionScope};
 ///     ``name``, ``atomic_number``, ``mass_number``, ``atomic_weight_ratio``,
 ///     ``fissionable``, ``urr_present``, ``available_temperatures``,
 ///     ``loaded_temperatures``, ``mts``, ``energy_points``,
-///     ``angular_covariance``, ``nubar_covariance``, ``spectrum_covariance``
-///     and ``scope_loaded``.
+///     ``angular_covariance``, ``nubar_covariance``, ``spectrum_covariance``,
+///     ``resonance_parameters`` and ``scope_loaded``.
 ///
 ///     ``energy_points`` is a dict of temperature to grid length, over the
 ///     loaded temperatures. Not one number: the reader also keeps the 0 K union
@@ -70,6 +70,12 @@ use yamc_nuclide::load_scope::{LoadScope, SectionScope};
 ///     order. Each is ``None`` when the folder has none, and both are read
 ///     whatever ``scope`` says, as ``angular_covariance`` is.
 ///
+///     ``resonance_parameters`` is the folder's MF=2 and MF=32
+///     (``resonance_parameters.arrow``), both parsed, summarised as the
+///     ``(lru, lrf)`` of each MF=2 energy range, isotope by isotope in tape
+///     order: LRU 1 resolved or 2 unresolved, LRF the formalism. ``None`` when
+///     the folder has none, and read whatever ``scope`` says.
+///
 ///     ``scope_loaded`` is the one to assert on, and it is not always the
 ///     ``scope`` asked for: a directory holding no transport sections narrows a
 ///     ``"full"`` request to ``"xs"`` rather than failing it, on the theory
@@ -83,7 +89,8 @@ use yamc_nuclide::load_scope::{LoadScope, SectionScope};
 ///     ``scope`` is neither ``"full"`` nor ``"xs"``.
 /// RuntimeError
 ///     The directory is absent, is not the Arrow format version this build
-///     reads, or any section fails to parse.
+///     reads, or any section fails to parse, the stored MF=2 and MF=32 text
+///     included.
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (path, scope = "full"))]
@@ -91,7 +98,8 @@ pub fn read_nuclide_from_arrow(py: Python, path: &str, scope: &str) -> PyResult<
     let requested = match scope {
         "full" => LoadScope::full()
             .with_angular_covariance(true)
-            .with_fission_covariance(true),
+            .with_fission_covariance(true)
+            .with_resonance_parameters(true),
         "xs" => LoadScope {
             sections: SectionScope::XsOnly,
             mts: None,
@@ -99,6 +107,7 @@ pub fn read_nuclide_from_arrow(py: Python, path: &str, scope: &str) -> PyResult<
             covariance: false,
             angular_covariance: true,
             fission_covariance: true,
+            resonance_parameters: true,
         },
         other => {
             return Err(PyValueError::new_err(format!(
@@ -180,6 +189,21 @@ pub fn read_nuclide_from_arrow(py: Python, path: &str, scope: &str) -> PyResult<
         by_mt
     });
     dict.set_item("spectrum_covariance", spectrum)?;
+    let resonance = match nuclide.resonance_parameters.as_ref() {
+        Some(stored) => {
+            let (mf2, _mf32) = stored.parse().map_err(|e| {
+                PyRuntimeError::new_err(format!("{path}: resonance_parameters.arrow: {e}"))
+            })?;
+            let ranges: Vec<(i64, i64)> = mf2
+                .isotopes
+                .iter()
+                .flat_map(|isotope| isotope.ranges.iter().map(|r| (r.lru, r.lrf)))
+                .collect();
+            Some(ranges)
+        }
+        None => None,
+    };
+    dict.set_item("resonance_parameters", resonance)?;
     dict.set_item(
         "scope_loaded",
         match nuclide.load_scope.sections {

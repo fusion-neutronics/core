@@ -201,6 +201,17 @@ impl Material {
         )
     }
 
+    /// [`Self::ensure_covariance_loaded`] for MF=2 and MF=32,
+    /// `resonance_parameters.arrow`: re-read every nuclide loaded without
+    /// them, widening that axis alone. Absent data is not an error, for the
+    /// same reasons.
+    pub fn ensure_resonance_parameters_loaded(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.widen_scope(
+            |s| s.resonance_parameters,
+            |s| s.with_resonance_parameters(true),
+        )
+    }
+
     /// Re-read every nuclide whose scope lacks what `has` asks for, at the
     /// scope `widen` makes of its current one.
     fn widen_scope(
