@@ -116,6 +116,7 @@ pub fn register_classes(py: Python<'_>, m: &Bound<'_, PyModule>, package: &str) 
     // both wheels convert.
     m.add_function(wrap_pyfunction!(read::read_nuclide_from_arrow, m)?)?;
     m.add_function(wrap_pyfunction!(read::read_element_from_arrow, m)?)?;
+    m.add_function(wrap_pyfunction!(config::cache_dir, m)?)?;
     m.add_function(wrap_pyfunction!(config::get_cross_section_data, m)?)?;
     m.add_function(wrap_pyfunction!(config::set_cross_section_data, m)?)?;
     m.add_function(wrap_pyfunction!(config::lookup_cross_section_data, m)?)?;

@@ -3,8 +3,13 @@
 
 The fixtures under ``crates/yamc/tests/*.arrow`` used to be committed binaries
 (~530 MB, re-committed on every library migration). They are published data, not
-source, so this script downloads them into the same on-disk cache production
-uses (``~/.cache/yamc``, or ``$YAMC_CACHE_DIR``) and symlinks them into place.
+source, so this script downloads them into the same cache directory production
+uses (the platform cache directory: ``~/.cache/yamc`` on Linux,
+``~/Library/Caches/yamc`` on macOS, ``%LOCALAPPDATA%\\yamc`` on Windows) and
+symlinks them into place. The fixtures keep their own flat layout there
+(``endf-b8.1-<Name>.arrow``), apart from the per-release folders the runtime
+downloader writes (``endf-b8.1/<release>/...``), and are fetched from the
+unversioned layout until the libraries are republished in the release layout.
 
 Usage::
 
@@ -15,12 +20,8 @@ Usage::
 Already-cached sections are left alone, so re-running is cheap.
 
 A cached fixture whose ``data_version`` no longer matches the origin's is
-fetched again from scratch. The runtime rejects data stamped with a release
-other than the one it pins and re-downloads it lazily, and when the fixture is
-a symlink into that same cache the files disappear from under a test that is
-reading them: after the 2026-09-02 republish every Python test job restored a
-cache stamped 2026-08-21, fetched nothing, and failed on
-``tests/Fe54.arrow/reactions.arrow: No such file``.
+fetched again from scratch, so a republish reaches the fixtures rather than
+leaving a mix of two releases behind a symlink a test is reading.
 """
 
 from __future__ import annotations
@@ -153,10 +154,19 @@ CHAIN_FIXTURE = "transmutation-endf-b8.1-sfr"
 
 
 def cache_root() -> pathlib.Path:
-    env = os.environ.get("YAMC_CACHE_DIR")
-    if env:
-        return pathlib.Path(env)
-    return pathlib.Path.home() / ".cache" / "yamc"
+    """The platform cache directory with ``yamc`` appended, the rule
+    ``cache_root`` in crates/yamc-nuclide/src/storage/url_cache.rs applies
+    (through ``etcetera``'s native strategy). Kept in step by hand because this
+    script runs before yamc is built."""
+    if sys.platform == "darwin":
+        return pathlib.Path.home() / "Library" / "Caches" / "yamc"
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA")
+        base = pathlib.Path(local) if local else pathlib.Path.home() / "AppData" / "Local"
+        return base / "yamc"
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    base = pathlib.Path(xdg) if xdg and os.path.isabs(xdg) else pathlib.Path.home() / ".cache"
+    return base / "yamc"
 
 
 # How many times a section download is attempted before the script gives up,

@@ -675,7 +675,10 @@ mod tests {
             vec![with_release(2, "2026-11-15")],
         );
         let err = combine_results(&[&a, &b]).unwrap_err();
-        assert!(err.contains("different releases of endf-b8.1"), "got: {err}");
+        assert!(
+            err.contains("different releases of endf-b8.1"),
+            "got: {err}"
+        );
         let c = sim(
             vec![result_from_samples(tally("flux"), &[3.0, 4.0], 1.0)],
             vec![with_release(3, "2026-10-01")],

@@ -1,17 +1,20 @@
 """Verify that library keywords for the transmutation subsections autoresolve
-to the published Cloudflare R2 tarballs and assemble into a usable chain.
+to the published release on Cloudflare R2 and assemble into a usable chain.
 
 The four ``yamc.transmutation_*`` settings each take a library keyword or a
-path. A keyword downloads ``{keyword}/transmutation/{subsection}.arrow.tar`` on
-first use and caches it under ``$YAMC_CACHE_DIR`` (``~/.cache/yamc/`` when that
-is unset or empty). Unset decay/reactions/fission_yields fall back to the
-default ``endf-b8.1`` library.
+path. A keyword resolves the library's current release through
+``{keyword}/latest.json`` and downloads
+``{keyword}/{release}/transmutation/{subsection}.arrow/`` on first use, verified
+against the release manifest, into ``yamc.cache_dir()``. Unset
+decay/reactions/fission_yields fall back to the default ``endf-b8.1`` library.
 
 These are end-to-end network tests against the R2 data; they skip when the
-data is unreachable (offline).
+data is unavailable (offline with an empty cache, or the library not yet
+published in the release layout).
 """
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -19,10 +22,12 @@ import yamc
 
 
 def _cache(sub, keyword="endf-b8.1"):
-    # The root the downloader writes to (cache_root in url_cache.rs), so a run
-    # pointed at another cache checks the directory it actually filled.
-    root = os.environ.get("YAMC_CACHE_DIR") or os.path.expanduser("~/.cache/yamc")
-    return os.path.join(root, f"{keyword}-transmutation-{sub}.arrow")
+    # The folder the downloader writes to: the newest cached release of the
+    # library, which is the one this process resolved.
+    library = Path(yamc.cache_dir()) / keyword
+    releases = sorted(d for d in library.glob("*") if (d / "manifest.json").is_file())
+    release = releases[-1] if releases else library
+    return os.path.join(release, "transmutation", f"{sub}.arrow")
 
 
 def _reset():
@@ -56,10 +61,10 @@ def _try_endf_b81():
     try:
         _radionuclides(["Fe54"])
     except Exception as e:  # pragma: no cover - offline + empty cache
-        # A data_version error means the origin answered and its stamp is not
-        # the one this build pins: a publishing or pinning mistake to fail on,
-        # not the missing network the skip below is for.
-        if "data_version" in str(e):
+        # A verification or format error means the origin answered with data
+        # this build refuses: a publishing mistake to fail on, not the missing
+        # network or unpublished release the skip below is for.
+        if "mismatch" in str(e) or "format_version" in str(e):
             raise
         return False, str(e)
     return True, ""
@@ -67,7 +72,7 @@ def _try_endf_b81():
 
 def test_endf_b81_subsection_keywords_resolve():
     """The endf-b8.1 keyword downloads the decay/reactions/fission_yields
-    subsection tarballs from R2 and assembles a usable chain."""
+    subsections from R2 and assembles a usable chain."""
     ok, err = _try_endf_b81()
     if not ok:
         pytest.skip(f"endf-b8.1 subsections unavailable (offline?): {err}")

@@ -106,7 +106,10 @@ impl Origin {
             "manifest_sha256": sha256_hex(manifest),
             "manifest_bytes": manifest.len(),
         });
-        self.put(&format!("{keyword}/latest.json"), latest.to_string().as_bytes());
+        self.put(
+            &format!("{keyword}/latest.json"),
+            latest.to_string().as_bytes(),
+        );
     }
 }
 
@@ -144,12 +147,14 @@ fn answer(
     }
     let body = files.lock().unwrap().get(&path).cloned();
     let Some(body) = body else {
-        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let _ = stream
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         return;
     };
     let cut = cut_once.lock().unwrap().remove(&path);
     let promised = if cut { body.len() + 100 } else { body.len() };
-    let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {promised}\r\nConnection: close\r\n\r\n");
+    let head =
+        format!("HTTP/1.1 200 OK\r\nContent-Length: {promised}\r\nConnection: close\r\n\r\n");
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(&body);
 }
@@ -223,12 +228,21 @@ fn publish(origin: &Origin, release: &str, nuclides: &[&str], extra: &[(&str, &[
         .flat_map(|n| nuclide_files(n, release))
         .collect();
     owned.extend(extra.iter().map(|(p, b)| (p.to_string(), b.to_vec())));
-    let files: Vec<(&str, &[u8])> = owned.iter().map(|(p, b)| (p.as_str(), b.as_slice())).collect();
+    let files: Vec<(&str, &[u8])> = owned
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
     origin.publish("endf-b8.1", release, &files);
 }
 
 fn fetch(reg: &Registry, name: &str) -> Result<PathBuf, String> {
-    fetch_particle(reg, "endf-b8.1", name, DataKind::Neutron, &LoadScope::full())
+    fetch_particle(
+        reg,
+        "endf-b8.1",
+        name,
+        DataKind::Neutron,
+        &LoadScope::full(),
+    )
 }
 
 #[test]
@@ -278,7 +292,10 @@ fn a_corrupted_byte_is_refused_and_never_cached() {
     publish(&origin, "2026-10-01", &["Fe56"], &[]);
     let mut bad = b"Fe56 reactions.arrow of 2026-10-01".to_vec();
     bad[3] ^= 1;
-    origin.put("endf-b8.1/2026-10-01/neutron/Fe56.arrow/reactions.arrow", &bad);
+    origin.put(
+        "endf-b8.1/2026-10-01/neutron/Fe56.arrow/reactions.arrow",
+        &bad,
+    );
     let root = Scratch::new("corrupt");
     let err = fetch(&registry(&origin.url, &root), "Fe56").unwrap_err();
     assert!(err.contains("sha256 mismatch"), "{err}");
@@ -379,7 +396,10 @@ fn a_nuclide_the_release_lacks_is_refused_listing_what_it_has() {
     publish(&origin, "2026-10-01", &["Fe56", "Li6"], &[]);
     let root = Scratch::new("absent-nuclide");
     let err = fetch(&registry(&origin.url, &root), "Ag104").unwrap_err();
-    assert!(err.contains("Ag104") && err.contains("not available"), "{err}");
+    assert!(
+        err.contains("Ag104") && err.contains("not available"),
+        "{err}"
+    );
     assert!(err.contains("Fe56, Li6"), "{err}");
     assert!(
         !origin.hits().iter().any(|h| h.contains("Ag104")),
@@ -442,7 +462,11 @@ fn a_new_release_replaces_the_old_for_every_file_and_never_mixes() {
     let new = registry(&origin.url, &root);
     for name in ["Fe56", "Li6"] {
         let dir = fetch(&new, name).unwrap();
-        assert_eq!(dir, root.0.join(format!("endf-b8.1/2026-11-15/neutron/{name}.arrow")));
+        assert_eq!(
+            dir,
+            root.0
+                .join(format!("endf-b8.1/2026-11-15/neutron/{name}.arrow"))
+        );
         assert_eq!(
             fs::read(dir.join("reactions.arrow")).unwrap(),
             format!("{name} reactions.arrow of 2026-11-15").into_bytes(),
@@ -452,7 +476,11 @@ fn a_new_release_replaces_the_old_for_every_file_and_never_mixes() {
     assert_eq!(new.data_releases()["endf-b8.1"].release, "2026-11-15");
     // The old release stays on disk for offline use, untouched.
     assert_eq!(
-        fs::read(root.0.join("endf-b8.1/2026-10-01/neutron/Li6.arrow/reactions.arrow")).unwrap(),
+        fs::read(
+            root.0
+                .join("endf-b8.1/2026-10-01/neutron/Li6.arrow/reactions.arrow")
+        )
+        .unwrap(),
         b"Li6 reactions.arrow of 2026-10-01"
     );
 }
@@ -481,7 +509,10 @@ fn offline_uses_the_newest_complete_cached_release_and_sticks_to_it() {
         "no mixing: Fe56 comes from the release Li6 did, not the newer one"
     );
     let record = &reg.data_releases()["endf-b8.1"];
-    assert_eq!((record.release.as_str(), record.offline), ("2026-10-01", true));
+    assert_eq!(
+        (record.release.as_str(), record.offline),
+        ("2026-10-01", true)
+    );
 
     // Asked for Fe56 first, the newest release holding it wins, and a later
     // Li6 is the clear error rather than a silent switch.
@@ -529,7 +560,10 @@ fn the_default_timeouts_bound_the_first_contact() {
     assert!(t.pointer <= Duration::from_secs(5));
     assert!((1..=2).contains(&t.pointer_attempts));
     assert!(t.pointer.max(t.connect) * t.pointer_attempts as u32 <= Duration::from_secs(10));
-    assert!(t.read >= Duration::from_secs(10), "a slow link must not fail a large file");
+    assert!(
+        t.read >= Duration::from_secs(10),
+        "a slow link must not fail a large file"
+    );
 }
 
 /// The live origin serves, for every keyword, a `latest.json` whose

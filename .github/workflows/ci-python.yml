@@ -763,7 +763,12 @@ jobs:
       - name: Cache nuclear-data test fixtures
         uses: actions/cache@v6
         with:
-          path: ~/.cache/yamc
+          # The platform cache directory yamc resolves (url_cache::cache_root):
+          # one of these exists on any runner, the others are ignored.
+          path: |
+            ~/.cache/yamc
+            ~/Library/Caches/yamc
+            ~/AppData/Local/yamc
           key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
 
       - name: Fetch nuclear-data test fixtures
@@ -847,7 +852,12 @@ jobs:
       - name: Cache nuclear-data test fixtures
         uses: actions/cache@v6
         with:
-          path: ~/.cache/yamc
+          # The platform cache directory yamc resolves (url_cache::cache_root):
+          # one of these exists on any runner, the others are ignored.
+          path: |
+            ~/.cache/yamc
+            ~/Library/Caches/yamc
+            ~/AppData/Local/yamc
           key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
 
       - name: Fetch nuclear-data test fixtures
@@ -927,7 +937,12 @@ jobs:
       - name: Cache nuclear-data test fixtures
         uses: actions/cache@v6
         with:
-          path: ~/.cache/yamc
+          # The platform cache directory yamc resolves (url_cache::cache_root):
+          # one of these exists on any runner, the others are ignored.
+          path: |
+            ~/.cache/yamc
+            ~/Library/Caches/yamc
+            ~/AppData/Local/yamc
           key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
 
       # Runs on a cache hit too. The cache holds ~/.cache/yamc, and it is this
@@ -1157,22 +1172,22 @@ jobs:
           check yamc-core "$PUBLISH_YAMC" "${TAGGED_YAMC:-}" "${YAMC_OVERRIDE:-}" crates/yamc-python/Cargo.toml
           check yani-core "$PUBLISH_YANI" "${TAGGED_YANI:-}" "${YANI_OVERRIDE:-}" crates/yani-python/Cargo.toml
           exit $fail
-      # Both wheels compile in the data pins (yamc-nuclide's
-      # EXPECTED_DATA_VERSION and EXPECTED_TRANSMUTATION_DATA_VERSION), and a
-      # pin the origin does not serve fails every download, fresh installs
-      # included. So the release waits until the origin carries every pinned
-      # stamp: upload the data first, then tag.
+      # Both wheels read any published release whose format_version they
+      # support (yamc-nuclide's SUPPORTED_FORMAT_VERSIONS), so the release
+      # waits until the origin serves, for every keyword, a latest.json with
+      # such a format and a manifest matching its hash. A keyword not yet
+      # published in the release layout is skipped with a notice.
       #
       # The runner's preinstalled rustc trails stable, and the workspace's
       # rust-version can be newer than it: on the 0.15.0 / 0.20.0 tag cargo
       # refused to build with 1.98.1 against rust-version 1.99. Same set-up
-      # as the data-pins job in ci-rust.yml, which runs this test on PRs.
+      # as the data-release job in ci-rust.yml, which runs this test on PRs.
       - name: Set up Rust
         run: rustup update stable && rustup default stable
-      - name: The origin serves every pinned data stamp
+      - name: The origin serves a readable, verified release for every keyword
         run: >-
           cargo test -p yamc-nuclide --features download-tls --lib --
-          --ignored origin_serves_every_pinned_data_version --nocapture
+          --ignored origin_serves_a_readable_release_for_every_keyword --nocapture
 
   # Sort the built wheels into one directory per PyPI project, so each publish
   # job below uploads exactly one project's files.

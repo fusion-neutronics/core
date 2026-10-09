@@ -144,7 +144,10 @@ impl Release {
     /// Whether any file is published under the folder `dir`.
     pub fn has_dir(&self, dir: &str) -> bool {
         let prefix = format!("{}/", dir.trim_end_matches('/'));
-        self.manifest.files.iter().any(|f| f.path.starts_with(&prefix))
+        self.manifest
+            .files
+            .iter()
+            .any(|f| f.path.starts_with(&prefix))
     }
 }
 
@@ -213,7 +216,11 @@ fn safe_relative_path(p: &str) -> bool {
 }
 
 /// Refuse a release whose format this build cannot read, saying what to do.
-pub fn check_format_version(keyword: &str, release: &str, format_version: u32) -> Result<(), String> {
+pub fn check_format_version(
+    keyword: &str,
+    release: &str,
+    format_version: u32,
+) -> Result<(), String> {
     if SUPPORTED_FORMAT_VERSIONS.contains(&format_version) {
         return Ok(());
     }
@@ -372,8 +379,12 @@ mod tests {
     #[test]
     fn a_manifest_matching_its_pointer_parses_and_indexes() {
         let bytes = manifest_json("endf-b8.1", "2026-10-01", 2);
-        let release =
-            parse_manifest("endf-b8.1", &bytes, Some(&pointer_for("2026-10-01", &bytes))).unwrap();
+        let release = parse_manifest(
+            "endf-b8.1",
+            &bytes,
+            Some(&pointer_for("2026-10-01", &bytes)),
+        )
+        .unwrap();
         assert_eq!(release.manifest_sha256, sha256_hex(&bytes));
         assert!(release.file("neutron/Fe56.arrow/version.json").is_some());
         assert!(release.file("neutron/Fe57.arrow/version.json").is_none());
@@ -397,8 +408,12 @@ mod tests {
     #[test]
     fn a_manifest_for_another_release_is_refused() {
         let bytes = manifest_json("endf-b8.1", "2026-09-18", 2);
-        let err = parse_manifest("endf-b8.1", &bytes, Some(&pointer_for("2026-10-01", &bytes)))
-            .unwrap_err();
+        let err = parse_manifest(
+            "endf-b8.1",
+            &bytes,
+            Some(&pointer_for("2026-10-01", &bytes)),
+        )
+        .unwrap_err();
         assert!(err.contains("2026-09-18"), "{err}");
     }
 
@@ -438,7 +453,11 @@ mod tests {
         };
         assert!(verify("p", &expected, 3, &sha256_hex(b"abc")).is_ok());
         let short = verify("neutron/Fe56.arrow/reactions.arrow", &expected, 2, "x").unwrap_err();
-        assert!(short.contains("reactions.arrow") && short.contains("3 bytes") && short.contains("2 were"));
+        assert!(
+            short.contains("reactions.arrow")
+                && short.contains("3 bytes")
+                && short.contains("2 were")
+        );
         let bad = verify("p", &expected, 3, &sha256_hex(b"abd")).unwrap_err();
         assert!(bad.contains(&expected.sha256) && bad.contains(&sha256_hex(b"abd")));
     }

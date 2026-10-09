@@ -55,12 +55,10 @@ use std::time::Duration;
 use once_cell::sync::{Lazy, OnceCell};
 
 use super::release::{
-    parse_latest, parse_manifest, verify, DataRelease, LatestPointer, ManifestFile, Release, StreamHash, LATEST,
-    MANIFEST,
+    parse_latest, parse_manifest, verify, DataRelease, LatestPointer, ManifestFile, Release,
+    StreamHash, LATEST, MANIFEST,
 };
-use super::url_cache::{
-    cache_root, get_path_lock, sections_for, transmutation_sections, DataKind,
-};
+use super::url_cache::{cache_root, get_path_lock, sections_for, transmutation_sections, DataKind};
 
 /// How long each phase of a request may take.
 ///
@@ -134,7 +132,7 @@ impl CachedRelease {
 enum Library {
     /// The origin answered: files come from this release, downloaded as needed.
     Online {
-        release: CachedRelease,
+        release: Box<CachedRelease>,
         /// `<origin>/<keyword>/<release>/`.
         base_url: String,
     },
@@ -148,6 +146,9 @@ enum Library {
     },
 }
 
+/// One library's resolution, made once: `None` until the first request.
+type ResolutionSlot = Mutex<Option<Result<Arc<Library>, String>>>;
+
 /// The per-process state: which release each library resolved to.
 pub(crate) struct Registry {
     /// Scheme and host, with a trailing `/`.
@@ -157,7 +158,7 @@ pub(crate) struct Registry {
     timeouts: Timeouts,
     client: OnceCell<reqwest::Result<reqwest::blocking::Client>>,
     /// Keyword -> its resolution, success or failure, made once.
-    libraries: Mutex<HashMap<String, Arc<Mutex<Option<Result<Arc<Library>, String>>>>>>,
+    libraries: Mutex<HashMap<String, Arc<ResolutionSlot>>>,
     /// Keyword -> the release the run used, for provenance.
     used: Mutex<BTreeMap<String, DataRelease>>,
 }
@@ -262,10 +263,10 @@ impl Registry {
         }
         Ok(Library::Online {
             base_url: format!("{}{keyword}/{}/", self.origin, pointer.release),
-            release: CachedRelease {
+            release: Box::new(CachedRelease {
                 release,
                 dir: release_dir,
-            },
+            }),
         })
     }
 
@@ -295,7 +296,8 @@ impl Registry {
             }
             Err(Unreachable(reason)) => return Err(ManifestError::Unreachable(reason)),
         };
-        let release = parse_manifest(keyword, &bytes, Some(pointer)).map_err(ManifestError::Invalid)?;
+        let release =
+            parse_manifest(keyword, &bytes, Some(pointer)).map_err(ManifestError::Invalid)?;
         write_atomically(&cached, &bytes).map_err(|e| {
             ManifestError::Invalid(format!("could not cache {}: {e}", cached.display()))
         })?;
@@ -407,7 +409,15 @@ impl Registry {
                             .is_ok_and(|files| files.iter().all(|f| c.dir.join(&f.path).is_file()))
                     });
                     let Some(pick) = pick else {
-                        return Err(offline_missing_error(keyword, reason, candidates.first().map(|c| &**c), dir, sections, what, &self.root()?));
+                        return Err(offline_missing_error(
+                            keyword,
+                            reason,
+                            candidates.first().map(|c| &**c),
+                            dir,
+                            sections,
+                            what,
+                            &self.root()?,
+                        ));
                     };
                     println!(
                         "yamc: could not reach the nuclear-data origin for {keyword} ({reason}); \
@@ -422,7 +432,15 @@ impl Registry {
                 let release = chosen.as_ref().expect("chosen above");
                 let needed = needed_files(keyword, release, dir, sections, what)?;
                 if needed.iter().any(|f| !release.dir.join(&f.path).is_file()) {
-                    return Err(offline_missing_error(keyword, reason, Some(release), dir, sections, what, &self.root()?));
+                    return Err(offline_missing_error(
+                        keyword,
+                        reason,
+                        Some(release),
+                        dir,
+                        sections,
+                        what,
+                        &self.root()?,
+                    ));
                 }
                 let local = release.dir.join(dir);
                 log_from_cache(keyword, release.id(), what, &local);
@@ -517,7 +535,9 @@ fn needed_files<'a>(
         let path = format!("{dir}/{name}");
         match release.release.file(&path) {
             Some(file) => needed.push(file),
-            None if *required => return Err(not_in_release_error(keyword, release, dir, what, &path)),
+            None if *required => {
+                return Err(not_in_release_error(keyword, release, dir, what, &path))
+            }
             None => {}
         }
     }
@@ -698,10 +718,15 @@ fn fetch_verified(
         }
         match stream_to_file(&mut response, dest) {
             Ok((bytes, sha256)) => {
-                return verify(&format!("{url} ({})", expected.path), expected, bytes, &sha256)
-                    .inspect_err(|_| {
-                        fs::remove_file(dest).ok();
-                    })
+                return verify(
+                    &format!("{url} ({})", expected.path),
+                    expected,
+                    bytes,
+                    &sha256,
+                )
+                .inspect_err(|_| {
+                    fs::remove_file(dest).ok();
+                })
             }
             Err(e) => last = format!("reading the response body: {e}"),
         }
@@ -750,7 +775,12 @@ pub(crate) fn fetch_particle(
         DataKind::Neutron => format!("Nuclide '{name}'"),
         DataKind::Photon => format!("Photon data for '{name}'"),
     };
-    registry.fetch_dir(keyword, &particle_dir(kind, name), &sections_for(kind, scope), &what)
+    registry.fetch_dir(
+        keyword,
+        &particle_dir(kind, name),
+        &sections_for(kind, scope),
+        &what,
+    )
 }
 
 /// Resolve one transmutation subsection of `keyword` to a local folder.

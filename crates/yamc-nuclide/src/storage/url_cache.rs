@@ -130,7 +130,6 @@ fn blocking_get(
     Ok(request.send()?)
 }
 
-
 /// Every recognized library keyword. Each is published on the data origin as
 /// immutable release folders under `<keyword>/<release>/` plus a
 /// `<keyword>/latest.json` pointer (see [`super::release`]); what a release
@@ -415,7 +414,10 @@ const NEUTRON_XS_ONLY_SECTIONS_WITH_COVARIANCE: &[(&str, bool)] = &[
 /// them, and optional like `covariance.arrow`: most evaluations have none,
 /// and a 404 is recorded rather than retried.
 #[cfg(feature = "download")]
-pub(crate) fn sections_for(kind: DataKind, scope: &crate::load_scope::LoadScope) -> Vec<(&'static str, bool)> {
+pub(crate) fn sections_for(
+    kind: DataKind,
+    scope: &crate::load_scope::LoadScope,
+) -> Vec<(&'static str, bool)> {
     let base: &'static [(&'static str, bool)] = match kind {
         DataKind::Neutron if !scope.wants_transport_sections() => {
             if scope.covariance {
@@ -890,7 +892,6 @@ fn download_sections(
     }
 }
 
-
 /// The directory yamc caches downloaded nuclear data in, without creating it.
 ///
 /// The platform's per-user cache directory with `yamc` appended, as
@@ -924,7 +925,12 @@ pub fn cache_root() -> Option<PathBuf> {
 /// The platform cache directory with `yamc` appended (see [`cache_root`]).
 fn default_cache_root() -> Option<PathBuf> {
     use etcetera::base_strategy::BaseStrategy;
-    Some(etcetera::base_strategy::choose_native_strategy().ok()?.cache_dir().join("yamc"))
+    Some(
+        etcetera::base_strategy::choose_native_strategy()
+            .ok()?
+            .cache_dir()
+            .join("yamc"),
+    )
 }
 
 /// A cache root that replaces the platform one for the whole process, so a
@@ -977,9 +983,8 @@ pub fn data_releases() -> std::collections::BTreeMap<String, super::release::Dat
 /// Get the cache directory for yamc, creating it if it does not exist.
 #[cfg(feature = "download")]
 pub fn get_cache_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let cache_dir = cache_root().ok_or(
-        "Could not find a cache directory: the platform resolved no home directory",
-    )?;
+    let cache_dir = cache_root()
+        .ok_or("Could not find a cache directory: the platform resolved no home directory")?;
 
     // Create the cache directory if it doesn't exist
     if !cache_dir.exists() {
@@ -1149,7 +1154,6 @@ pub fn resolve_path_or_url(
         Ok(PathBuf::from(path_url_or_keyword))
     }
 }
-
 
 #[cfg(all(test, feature = "download"))]
 mod tests {
@@ -1678,7 +1682,10 @@ mod cache_root_tests {
         if cfg!(target_os = "macos") {
             assert_eq!(root, home.join("Library").join("Caches").join("yamc"));
         } else if cfg!(windows) {
-            assert!(root.ends_with("AppData/Local/yamc") || root.ends_with("AppData\\Local\\yamc"), "{root:?}");
+            assert!(
+                root.ends_with("AppData/Local/yamc") || root.ends_with("AppData\\Local\\yamc"),
+                "{root:?}"
+            );
         } else if std::env::var_os("XDG_CACHE_HOME").is_none() {
             assert_eq!(root, home.join(".cache").join("yamc"));
         }

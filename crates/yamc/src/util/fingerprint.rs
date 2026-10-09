@@ -71,9 +71,7 @@ impl Model {
     /// keyword as its data source. One release per library per process (see
     /// `yamc_nuclide::url_cache::data_releases`), so this is exact for a run.
     /// Empty for data loaded from local directories.
-    pub fn data_releases(
-        &self,
-    ) -> BTreeMap<String, yamc_nuclide::storage::release::DataRelease> {
+    pub fn data_releases(&self) -> BTreeMap<String, yamc_nuclide::storage::release::DataRelease> {
         let in_use = yamc_nuclide::url_cache::data_releases();
         if in_use.is_empty() {
             return BTreeMap::new();
@@ -100,7 +98,9 @@ impl Model {
                 let loaded = paths.iter().any(|p| {
                     p.ancestors().any(|a| {
                         a.file_name().and_then(|n| n.to_str()) == Some(release.release.as_str())
-                            && a.parent().and_then(|q| q.file_name()).and_then(|n| n.to_str())
+                            && a.parent()
+                                .and_then(|q| q.file_name())
+                                .and_then(|n| n.to_str())
                                 == Some(keyword.as_str())
                     })
                 });

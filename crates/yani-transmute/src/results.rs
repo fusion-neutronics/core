@@ -104,6 +104,16 @@ pub struct TransmutationResults {
     /// parent's removal. Indexed as `timesteps`; a decay-only step holds an
     /// empty report. Steps sharing a spectrum share its report.
     pub branching_report: HashMap<u32, Vec<std::sync::Arc<crate::branching_rule::BranchingReport>>>,
+
+    /// Per library keyword, the published release the solve's nuclear data
+    /// came from: release identifier, manifest sha256 (which pins every file
+    /// of the release), format version, and whether the origin was unreachable
+    /// so the newest complete cached release was used. A process reads one
+    /// release per library, so this is every library the process downloaded
+    /// from by the end of the solve. Empty when every source was a local
+    /// directory, and on results built by hand.
+    pub data_releases:
+        std::collections::BTreeMap<String, yamc_nuclide::storage::release::DataRelease>,
 }
 
 /// How much of a spectrum solve's collapse work was shared.
@@ -269,6 +279,7 @@ impl TransmutationResults {
             collapse_reuse: None,
             rate_covariance: HashMap::new(),
             branching_report: HashMap::new(),
+            data_releases: Default::default(),
         }
     }
 

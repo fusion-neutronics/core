@@ -22,10 +22,10 @@ import yamc
 
 
 def _make_fake_nuclide(cache_dir: Path, name: str, payload: bytes = b"<arrow-data>") -> None:
-    """Create a fake `endf-b8.1-<name>.arrow/` directory in ``cache_dir`` with
-    the standard yamc file set. Contents are arbitrary bytes -- the export path
-    doesn't parse them, only base64-encodes."""
-    nuc_dir = cache_dir / f"endf-b8.1-{name}.arrow"
+    """Create a fake `neutron/<name>.arrow/` directory in the release folder
+    ``cache_dir`` with the standard yamc file set. Contents are arbitrary
+    bytes -- the export path doesn't parse them, only base64-encodes."""
+    nuc_dir = cache_dir / "neutron" / f"{name}.arrow"
     nuc_dir.mkdir(parents=True, exist_ok=True)
     for fname in (
         "nuclide.arrow",
@@ -112,10 +112,10 @@ def test_export_embed_element_expands_to_all_isotopes(tmp_path: Path) -> None:
     _make_fake_nuclide(cache, "Li7")
     # Decoy: same-prefix nuclide that ISN'T an isotope of Li -- must not match.
     _make_fake_nuclide(cache, "Be9")
-    # Decoy: bare-element file `endf-b8.1-Li.arrow` -- must not match (we
+    # Decoy: bare-element folder `neutron/Li.arrow` -- must not match (we
     # only match `Li<digits>`, not the natural-element entry).
-    (cache / "endf-b8.1-Li.arrow").mkdir()
-    (cache / "endf-b8.1-Li.arrow" / "nuclide.arrow").write_bytes(b"natural")
+    (cache / "neutron" / "Li.arrow").mkdir()
+    (cache / "neutron" / "Li.arrow" / "nuclide.arrow").write_bytes(b"natural")
 
     out = _li6_model().to_html(
         tmp_path / "out.html",
@@ -154,7 +154,7 @@ def test_export_missing_nuclide_raises_with_helpful_message(tmp_path: Path) -> N
         )
     msg = str(excinfo.value)
     assert "Cm245" in msg
-    assert "endf-b8.1-Cm245.arrow" in msg
+    assert "Cm245.arrow" in msg
 
 
 def test_export_unknown_element_raises_with_helpful_message(tmp_path: Path) -> None:
