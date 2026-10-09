@@ -983,9 +983,13 @@ pub fn preload_activation_data(
         // full-grid kind the comment above is about, so they are read only when
         // a chord was actually given and the correction is going to be applied.
         let wanted = collapse_mts(chain, branch, shielding);
+        // MF=2 and MF=32 ride along with the covariance: a replica samples
+        // the resonance parameters where a folder carries them
+        // (`resonance_rates`), and a folder without them reads as before.
         let scope = LoadScope::activation(wanted)
             .with_temperatures(temp_filter)
-            .with_covariance(want_covariance);
+            .with_covariance(want_covariance)
+            .with_resonance_parameters(want_covariance);
 
         // One Arrow decode per nuclide, and they are independent: `to_load`'s
         // names are distinct, so no two tasks want the same file, and the
@@ -1085,9 +1089,42 @@ pub fn preload_activation_data(
     // covariance, which reads exactly like an evaluation that has none.
     if want_covariance {
         material.ensure_covariance_loaded()?;
+        ensure_resonance_parameters_loaded(material)?;
         ensure_derivations_loaded(material, chain)?;
     }
 
+    Ok(())
+}
+
+/// Read the resonance parameters of each loaded nuclide whose folder has
+/// `resonance_parameters.arrow` and that was loaded without it.
+///
+/// Only those, rather than every nuclide loaded without the axis as
+/// `Material::ensure_resonance_parameters_loaded` would: re-reading a nuclide
+/// replaces everything it holds, and a folder without the file has nothing to
+/// add, so a material whose nuclides were loaded (or edited) in memory reads
+/// exactly as it did before the section existed.
+fn ensure_resonance_parameters_loaded(
+    material: &mut Material,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let lacking: Vec<(String, String, LoadScope)> = material
+        .nuclide_data
+        .iter()
+        .filter(|(_, nd)| !nd.load_scope.resonance_parameters)
+        .filter(|(_, nd)| {
+            nd.data_path.as_deref().is_some_and(|dir| {
+                yamc_nuclide::storage::exists(
+                    &std::path::Path::new(dir).join("resonance_parameters.arrow"),
+                )
+            })
+        })
+        .filter_map(|(name, nd)| Some((name.clone(), nd.reload_source()?, nd.load_scope.clone())))
+        .collect();
+    for (name, source, scope) in lacking {
+        let sources = HashMap::from([(name.clone(), source)]);
+        let widened = get_or_load_nuclide(&name, &sources, &scope.with_resonance_parameters(true))?;
+        material.nuclide_data.insert(name, widened);
+    }
     Ok(())
 }
 
@@ -1568,18 +1605,24 @@ fn run_replicas(
     // statement of what the evaluation says per spectrum, and the sampler's
     // own rate covariance under each spectrum is checked against it in the
     // sigma report.
+    let fold_spectra: Vec<FoldSpectrum> = per_spectrum
+        .iter()
+        .zip(spectra)
+        .map(|(p, s)| FoldSpectrum {
+            chain: &p.2,
+            rates: &p.0,
+            multigroup_flux: &s.masses,
+            group_boundaries: &s.boundaries,
+        })
+        .collect();
     let fields = if cross_sections {
-        let fold_spectra: Vec<FoldSpectrum> = per_spectrum
-            .iter()
-            .zip(spectra)
-            .map(|(p, s)| FoldSpectrum {
-                chain: &p.2,
-                rates: &p.0,
-                multigroup_flux: &s.masses,
-                group_boundaries: &s.boundaries,
-            })
-            .collect();
-        cell_fields(initial, chain, &fold_spectra, shielding)
+        cell_fields(
+            initial,
+            chain,
+            &fold_spectra,
+            shielding,
+            &std::collections::BTreeSet::new(),
+        )
     } else {
         std::collections::BTreeMap::new()
     };
@@ -1587,6 +1630,67 @@ fn run_replicas(
     for (idx, (rates, _, _)) in per_spectrum.iter().enumerate() {
         sigmas.add(idx, &sampler, rates, fluence[idx], &densities, &populated);
     }
+
+    // Resonance parameters, where a nuclide's folder carries them: drawn per
+    // replica and its cross sections rebuilt, exact in the parameters. Not on
+    // a transport run, which keeps the first-order MF=32 rows (its flux is
+    // one transport's, so a replica has no spectrum to weight a rebuilt
+    // cross section with but the tally's).
+    let resonance = (cross_sections && !transport).then(|| {
+        let weight_spectra: Vec<crate::resonance_rates::WeightSpectrum> = per_spectrum
+            .iter()
+            .zip(spectra)
+            .map(|(p, s)| crate::resonance_rates::WeightSpectrum {
+                rates: &p.0,
+                masses: &s.masses,
+                boundaries: &s.boundaries,
+            })
+            .collect();
+        crate::resonance_rates::ResonanceRun::new(initial, &weight_spectra, shielding, request.seed)
+    });
+    // What a replica draws MF=33 from: the same fields, less the first-order
+    // MF=32 rows of every nuclide whose parameters are sampled, so the
+    // resonance range is counted once. Everything that reads the
+    // evaluation's statement (the sigma report above, first-order
+    // attribution) keeps `sampler`, rows and all, as the first-order image
+    // of the same source. Only the sampled nuclides are fielded again; every
+    // other nuclide's field, and so its draw, is the one in `sampler`.
+    let sampled = resonance.as_ref().map(|r| r.sampled()).unwrap_or_default();
+    let mf33_sampler = (!sampled.is_empty()).then(|| {
+        let restricted: Vec<ReactionRates> = per_spectrum
+            .iter()
+            .map(|p| {
+                p.0.iter()
+                    .filter(|(name, _)| sampled.contains(*name))
+                    .map(|(name, kinds)| (name.clone(), kinds.clone()))
+                    .collect()
+            })
+            .collect();
+        let restricted_spectra: Vec<FoldSpectrum> = fold_spectra
+            .iter()
+            .zip(&restricted)
+            .map(|(f, rates)| FoldSpectrum {
+                chain: f.chain,
+                rates,
+                multigroup_flux: f.multigroup_flux,
+                group_boundaries: f.group_boundaries,
+            })
+            .collect();
+        let mut draw_fields: std::collections::BTreeMap<_, _> = fields
+            .iter()
+            .filter(|(name, _)| !sampled.contains(*name))
+            .map(|(name, field)| (name.clone(), field.clone()))
+            .collect();
+        draw_fields.extend(cell_fields(
+            initial,
+            chain,
+            &restricted_spectra,
+            shielding,
+            &sampled,
+        ));
+        Sampler::new(&draw_fields, &folds)
+    });
+    let draw_sampler = mf33_sampler.as_ref().unwrap_or(&sampler);
 
     // The flux is the caller's own input, so it needs no nuclear data: only a
     // per-bin sigma, which a spectrum lifted from a published reference set
@@ -1842,6 +1946,9 @@ fn run_replicas(
         info.not_perturbed
             .insert(0, "activation cross section (MF=33)".to_string());
     }
+    if let Some(r) = &resonance {
+        info.resonance_parameters = r.methods().clone();
+    }
     // On the spectrum path a spectrum without a per-bin sigma, or any spectrum
     // with the source off, is used as given. When only some are, the entry
     // says so, so it never reads as held for a flux that was partly sampled.
@@ -1919,6 +2026,7 @@ fn run_replicas(
         .is_none_or(|b| b.two_modes.is_empty());
     let no_fission_yields = fission_yield.as_ref().is_none_or(|f| f.is_empty());
     if sampler.is_empty()
+        && resonance.as_ref().is_none_or(|r| r.is_empty())
         && per_group.iter().all(Option::is_none)
         && no_half_lives
         && no_decay_branchings
@@ -1965,8 +2073,14 @@ fn run_replicas(
         let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
         let mut rates_sampled = 0usize;
         let mut rates_floored = 0usize;
-        // One draw of every nuclide's cross sections, read by every spectrum.
-        let xs_draw = sampler.draw(request.seed, replica);
+        // One draw of every nuclide's cross sections, read by every spectrum,
+        // and of every sampled nuclide's resonance parameters, rebuilt into
+        // a shift of each rate they move.
+        let xs_draw = draw_sampler.draw(request.seed, replica);
+        let resonance_shifts = match &resonance {
+            Some(r) if !r.is_empty() => Some(r.shifts(replica)?),
+            _ => None,
+        };
         let mut decay_branchings_floored = 0usize;
         // A statistical draw of the whole tallied rate vector, the partials
         // re-folded into the branching the way the nominal was, so an
@@ -2069,7 +2183,12 @@ fn run_replicas(
                 }
                 None => (rates.clone(), None),
             };
-            let (rates, n, floored) = sampler.perturb_with(&xs_draw, idx, &rates);
+            let (rates, n, floored) = draw_sampler.perturb_with(
+                &xs_draw,
+                idx,
+                &rates,
+                resonance_shifts.as_ref().map(|s| &s[idx]),
+            );
             rates_sampled += n;
             rates_floored += floored;
             let folded_chain = match (&chains, refolded) {
@@ -2193,10 +2312,13 @@ fn run_replicas(
             half_life.as_ref(),
             decay_branching.as_ref(),
         )?;
+        // The draws each replica was solved with: MF=33 less the rows of the
+        // sampled nuclides, and their parameters' shifts.
         let draws = ReplicaDraws {
             seed: request.seed,
             per_spectrum,
-            sampler: Some(&sampler),
+            sampler: Some(draw_sampler),
+            resonance: resonance.as_ref().filter(|r| !r.is_empty()),
             half_life: half_life.as_ref(),
             decay_branching: decay_branching.as_ref(),
         };
@@ -2652,6 +2774,7 @@ struct ReplicaDraws<'a> {
     seed: u64,
     per_spectrum: &'a [PerSpectrum],
     sampler: Option<&'a Sampler>,
+    resonance: Option<&'a crate::resonance_rates::ResonanceRun>,
     half_life: Option<&'a HalfLifeSampling>,
     decay_branching: Option<&'a crate::decay_branching_uncertainty::Candidates>,
 }
@@ -2663,8 +2786,24 @@ impl ReplicaDraws<'_> {
         let rates: Vec<ReactionRates> = match self.sampler {
             Some(sampler) if needs(|i| matches!(i, Input::Rate { .. })) => {
                 let draw = sampler.draw(self.seed, replica);
+                // The replica that solved this draw computed its shifts
+                // already, here or in an attribution sub-run on the same
+                // seed, and they are a pure function of the replica.
+                let shifts = self.resonance.map(|r| {
+                    r.shifts(replica)
+                        .expect("a replica's resonance shifts were computed when it was solved")
+                });
                 (0..self.per_spectrum.len())
-                    .map(|a| sampler.perturb_with(&draw, a, &self.per_spectrum[a].0).0)
+                    .map(|a| {
+                        sampler
+                            .perturb_with(
+                                &draw,
+                                a,
+                                &self.per_spectrum[a].0,
+                                shifts.as_ref().map(|s| &s[a]),
+                            )
+                            .0
+                    })
                     .collect()
             }
             _ => Vec::new(),
@@ -5116,6 +5255,7 @@ mod tests {
             seed,
             per_spectrum: &[],
             sampler: None,
+            resonance: None,
             half_life: Some(&h),
             decay_branching: None,
         };
@@ -5149,6 +5289,7 @@ mod tests {
                 seed,
                 per_spectrum: &[],
                 sampler: None,
+                resonance: None,
                 half_life: Some(&h),
                 decay_branching: None,
             };

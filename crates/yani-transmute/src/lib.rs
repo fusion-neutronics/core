@@ -24,6 +24,7 @@ pub mod flux_uncertainty;
 mod history_statistics;
 mod material_transmute;
 pub mod multigroup;
+pub mod resonance_rates;
 pub mod resonance_sampling;
 mod results;
 mod schedule;

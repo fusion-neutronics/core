@@ -1776,7 +1776,7 @@ fn summed(mt: i32, parts: &[&Reaction]) -> Option<Reaction> {
 /// Appendix B.1: MT 4 holds 51 to 91, MT 103 to 107 the levels of each emitted
 /// particle, MT 16 its levels 875 to 891, and MT 18 the fission chances 19,
 /// 20, 21 and 38 (`endf::data`'s sum rule for 18).
-fn level_sum(mt: i32) -> Option<i32> {
+pub(crate) fn level_sum(mt: i32) -> Option<i32> {
     match mt {
         19 | 20 | 21 | 38 => Some(18),
         51..=91 => Some(4),
@@ -2620,11 +2620,19 @@ pub struct CellField {
 /// own (possibly pruned) chain fixes only which channels it reads. A nuclide
 /// with no covariance data, or none the channels reach, is left out, as the
 /// fold leaves it out.
+///
+/// The nuclides in `without_mf32_rows` are fielded from their tape blocks
+/// alone, without the blocks the converter derived from MF=32: a replica
+/// samples their resonance parameters instead
+/// ([`crate::resonance_rates`]), and drawing both would count the
+/// resonance range's uncertainty twice. One whose only blocks are those is
+/// left out.
 pub fn cell_fields(
     material: &Material,
     chain: &std::collections::HashMap<String, ChainNuclide>,
     spectra: &[FoldSpectrum],
     shielding: Option<&Shielding>,
+    without_mf32_rows: &BTreeSet<String>,
 ) -> BTreeMap<String, CellField> {
     let shapes: Vec<Option<CollapseShapes>> = spectra
         .iter()
@@ -2645,6 +2653,16 @@ pub fn cell_fields(
         let full = chain.get(*name)?;
         let nuclide_data = material.nuclide_data.get(*name)?;
         let blocks = nuclide_data.covariance.as_ref()?;
+        let tape_only: Vec<CovarianceBlock>;
+        let blocks: &[CovarianceBlock] = if without_mf32_rows.contains(*name) {
+            tape_only = blocks.iter().filter(|b| on_tape(b)).cloned().collect();
+            if tape_only.is_empty() {
+                return None;
+            }
+            &tape_only
+        } else {
+            &blocks[..]
+        };
         let temperature = if material.temperature().is_empty() {
             crate::default_temperature(nuclide_data)?
         } else {
