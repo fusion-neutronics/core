@@ -2109,8 +2109,9 @@ fn run_replicas(
             decay_branching: decay_branching.as_ref(),
         };
         // The sources first order has terms for. The flux, the tallies'
-        // statistics and the decay energies enter linearly or not through a
-        // rate sensitivity, and have none.
+        // statistics, the decay energies, the decay photon lines and the
+        // fission yields have none, so their linearity (and the "all" one
+        // whenever any of them is applied, as in the default set) is None.
         let covered = |s: &Source| {
             matches!(
                 s,
