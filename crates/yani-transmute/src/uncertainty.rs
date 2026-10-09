@@ -463,6 +463,12 @@ pub struct Info {
     /// flux known exactly.
     pub spectra_with_flux_sigma: usize,
     pub spectra_without_flux_sigma: usize,
+    /// `(nuclide, reaction)` rates under a spectrum with a stated flux error
+    /// that have no per-group terms, so the flux perturbation could not move
+    /// them and they were held at nominal. Empty unless a rate reaches the
+    /// solve by a route that is neither a collapsed channel nor a branching
+    /// list's fold.
+    pub flux_rates_without_terms: BTreeSet<(String, String)>,
     /// Flux bins drawn, one per bin per spectrum with a stated error per
     /// replica. Each is a lognormal factor with mean one, so none can go
     /// negative and none is floored.
@@ -645,6 +651,7 @@ impl Info {
     pub(crate) fn add_flux_coverage(&mut self, c: &crate::flux_uncertainty::FluxCoverage) {
         self.spectra_with_flux_sigma = c.spectra_with_sigma;
         self.spectra_without_flux_sigma = c.spectra_without_sigma;
+        self.flux_rates_without_terms = c.rates_without_terms.clone();
         self.flux_bins_sampled = c.bins_sampled;
         self.flux_lognormal_not_carried = c.lognormal_not_carried.clone();
     }
@@ -667,6 +674,7 @@ impl Info {
             || !self.covariance_warnings.is_empty()
             || !self.covariance_repaired_outside_bound.is_empty()
             || self.spectra_without_flux_sigma > 0
+            || !self.flux_rates_without_terms.is_empty()
             || !self.no_half_life_uncertainty.is_empty()
             || !self.no_decay_branching_uncertainty.is_empty()
             || !self.decay_branchings_three_or_more_modes.is_empty()
