@@ -3357,9 +3357,10 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         energy within a tenth, by level index, as the only isomer, or not at
         all) and ``flagged_levels`` (one line per level that was unresolved,
         taken as ground because the decay data has no isomer for its product,
-        matched only by the looser energy pass, or matched by energy while its
-        level index pointed at another isomer; every excited level that ends
-        up at ground is listed), ``partial_sum_mismatches``
+        matched only by the looser energy pass, matched by energy while its
+        level index pointed at another isomer, or taken as its product's only
+        isomer while further from it than either energy pass accepts; every
+        excited level that ends up at ground is listed), ``partial_sum_mismatches``
         (one line per reaction whose MF=10 partial cross sections do not sum to
         its MF=3 total, or whose MF=9 yields do not sum to one, within two
         percent below 20 MeV), and ``skipped_states`` (one line per production

@@ -310,6 +310,26 @@ def test_branching_subsection(tmp_path):
     assert not (out / "branching" / "branching_covariance.arrow").exists()
 
 
+def test_a_level_far_from_the_only_isomer_is_flagged(tmp_path):
+    """With In116_m2 the only In116 isomer in the decay data, In115's capture
+    level at 127.3 keV is booked to it, 162.4 keV away, and the stats say so."""
+    inputs = tmp_path / "endf"
+    inputs.mkdir()
+    stats = yamc.convert_branching(
+        neutron_files=_plain(["n-049_In-115_trimmed.endf.xz"], inputs),
+        decay_files=_plain(["dec-049_In_116m2.endf.xz"], inputs),
+        output_path=str(tmp_path / "transmutation_endf-b8.1.arrow"),
+        library="endf-b8.1",
+        data_version="2026-10-09.1",
+        created_utc="2026-10-09T00:00:00+00:00",
+    )
+    assert stats["level_routes"]["single_isomer"] == 1
+    assert (
+        "In115 MT102 -> In116_m2: level 1 at 127.3 keV, taken as the only isomer, "
+        "-162.4 keV from it"
+    ) in stats["flagged_levels"], stats["flagged_levels"]
+
+
 def test_branching_covariance_is_written_beside_the_curves(tmp_path):
     """MF=40, from Python: TENDL-2017 Nb93 states the covariance of the ground
     and isomer partials of (n,n') and (n,2n), one LB=5 block each, and every
