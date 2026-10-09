@@ -12,7 +12,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use yani_transmute::covariance_fold::{transport_fields, Read};
+use yamc_nuclide::nuclide::Nuclide;
+use yani_transmute::covariance_fold::{transport_fields, DerivedTerm, Read, TransportField};
 use yani_transmute::covariance_sample::{FieldRepair, Sampler};
 
 use crate::model::Model;
@@ -26,7 +27,11 @@ pub struct ReactionCoverage {
     pub via: i32,
     /// The largest relative standard deviation the evaluation states for it
     /// on any covariance cell, after any repair. Zero when it is covered only
-    /// by an absolute or short-range block.
+    /// by an absolute block. For a reaction whose covariance an NC block derives from others
+    /// (ENDF/B-VIII.1 Pb208 elastic above 1.5 MeV), the largest relative
+    /// standard deviation of its cross section at any point of its energy
+    /// grid, its own cells and the named reactions' together, absolute
+    /// blocks included: the sigma a run applies to it.
     pub max_relative_sigma: f64,
 }
 
@@ -35,7 +40,8 @@ pub struct ReactionCoverage {
 pub struct NuclideCoverage {
     /// The partial reactions a run would perturb, by MT.
     pub perturbed: BTreeMap<i32, ReactionCoverage>,
-    /// The partial reactions no covariance reaches, held at nominal.
+    /// The partial reactions no covariance a run applies reaches, held at
+    /// nominal.
     pub held_at_nominal: BTreeSet<i32>,
     /// Covariance cells in the nuclide's field, relative and absolute.
     pub cells: usize,
@@ -89,6 +95,83 @@ const NOT_PERTURBED: [&str; 8] = [
     "short-range (lb = 8) covariance, which averages away along a track",
     "the material composition and density",
 ];
+
+/// The largest relative standard deviation the field gives partial `mt` of
+/// `nuclide` at any point of its energy grid, its own cells and the `terms`
+/// an NC derivation adds together, or `None` where the nuclide has no such
+/// partial or grid at `temperature`.
+///
+/// At each point the partial's change is linear in the draw: `1` on its own
+/// relative cell and `w_t / σ` on each named reaction's, `1 / σ` on its own
+/// absolute cell and `w_t / (σ_t σ)` on each named one's, as the runs apply
+/// it ([`crate::xs_perturbation::grid_terms`]). Its variance is that
+/// gradient sandwiched with the field's covariance.
+fn derived_relative_sigma(
+    nuclide: &Nuclide,
+    temperature: &str,
+    transport: &TransportField,
+    mt: i32,
+    terms: &[DerivedTerm],
+) -> Option<f64> {
+    use crate::xs_perturbation::{cell_at, cells_by_mt, grid_terms, on_full_grid};
+    let field = transport.field.as_ref()?;
+    let t = nuclide
+        .loaded_temperatures
+        .iter()
+        .position(|l| l == temperature)
+        .or_else(|| (nuclide.loaded_temperatures.len() == 1).then_some(0))?;
+    let energies = nuclide
+        .energy
+        .as_ref()?
+        .get(&nuclide.loaded_temperatures[t])?
+        .as_slice();
+    let reactions = nuclide.reactions.get(t)?;
+    let partial = reactions.get(&mt)?;
+    let xs = on_full_grid(partial, energies.len());
+    let derived = grid_terms(terms, partial, reactions, energies);
+    let relative_cells = cells_by_mt(&field.relative_cells);
+    let absolute_cells = cells_by_mt(&field.absolute_cells);
+    let sandwich = |gradient: &[(usize, f64)], covariance: &[f64], n: usize| -> f64 {
+        gradient
+            .iter()
+            .flat_map(|(a, ga)| {
+                gradient
+                    .iter()
+                    .map(move |(b, gb)| ga * gb * covariance[a * n + b])
+            })
+            .sum()
+    };
+    let mut worst: f64 = 0.0;
+    let (mut g, mut h) = (Vec::new(), Vec::new());
+    for (i, &e) in energies.iter().enumerate().skip(partial.threshold_idx) {
+        if xs[i] <= 0.0 {
+            continue;
+        }
+        g.clear();
+        h.clear();
+        let cell = |cells: &BTreeMap<i32, crate::xs_perturbation::Cells>, of: i32| {
+            cells.get(&of).and_then(|c| cell_at(c, e))
+        };
+        if let Some(k) = cell(&relative_cells, mt) {
+            g.push((k, 1.0));
+        }
+        if let Some(k) = cell(&absolute_cells, mt) {
+            h.push((k, 1.0 / xs[i]));
+        }
+        for term in derived.iter().filter(|d| d.weight[i] != 0.0) {
+            if let Some(k) = cell(&relative_cells, term.mt) {
+                g.push((k, term.weight[i] / xs[i]));
+            }
+            if let (Some(k), true) = (cell(&absolute_cells, term.mt), term.xs[i] > 0.0) {
+                h.push((k, term.weight[i] / (term.xs[i] * xs[i])));
+            }
+        }
+        let variance = sandwich(&g, &field.relative, field.relative_cells.len())
+            + sandwich(&h, &field.absolute, field.absolute_cells.len());
+        worst = worst.max(variance.max(0.0).sqrt());
+    }
+    Some(worst)
+}
 
 impl Model {
     /// Which partial reactions of every nuclide in the model's materials the
@@ -186,10 +269,17 @@ impl Model {
                             continue;
                         }
                     };
-                    let max_relative_sigma = transport
-                        .field
-                        .as_ref()
-                        .map(|f| {
+                    let derived = transport.derived.get(mt).and_then(|terms| {
+                        derived_relative_sigma(
+                            material.nuclide_data.get(&name)?,
+                            material.temperature(),
+                            &transport,
+                            *mt,
+                            terms,
+                        )
+                    });
+                    let max_relative_sigma = derived.unwrap_or_else(|| {
+                        transport.field.as_ref().map_or(0.0, |f| {
                             let n = f.relative_cells.len();
                             f.relative_cells
                                 .iter()
@@ -198,7 +288,7 @@ impl Model {
                                 .map(|(k, _)| f.relative[k * n + k].max(0.0).sqrt())
                                 .fold(0.0, f64::max)
                         })
-                        .unwrap_or(0.0);
+                    });
                     coverage.perturbed.insert(
                         *mt,
                         ReactionCoverage {

@@ -26,9 +26,11 @@
 //! The perturbed cross sections are the same as [`crate::xs_perturbation`]
 //! builds for a rerun: each covered partial multiplied by its covariance
 //! cell's multiplier and shifted by its absolute cell's shift, a component
-//! of a sum taking the sum's. Rows with no covariance, heating and damage
-//! rows, and the short-range noise stay nominal; particle production
-//! (MT 203 to 207) moves with the reactions emitting the particle.
+//! of a sum taking the sum's, and a partial whose covariance an NC block
+//! derives moved by the named reactions' changes too
+//! ([`crate::xs_perturbation::grid_terms`]). Rows with no covariance,
+//! heating and damage rows, and the short-range noise stay nominal; particle
+//! production (MT 203 to 207) moves with the reactions emitting the particle.
 //!
 //! In a nuclide's unresolved range the flight, the reaction and the tallies
 //! read a probability-table band instead of the smooth cross sections: each
@@ -54,6 +56,8 @@ use yamc_tallies::welford::ReplicaModes;
 use yani_transmute::covariance_fold::{transport_fields, Read, TransportField};
 use yani_transmute::covariance_sample::{Modes, Sampler};
 
+use crate::xs_perturbation::grid_terms;
+
 /// The share of each nuclide's correlation its kept modes hold. Fewer modes
 /// cost less per event; what they miss leaves the estimate unbiased and only
 /// puts more of it on the replicas' sampling. On an 8 cm iron sphere at
@@ -64,8 +68,10 @@ const KEPT_CORRELATION: f64 = 0.999;
 /// One covariance source of one nuclide: the reaction whose cells some of
 /// its partials read, with what those partials add up to.
 struct Source {
-    /// `Σ σ_mt(E)` over the partials reading this source, in barns, on the
-    /// nuclide's grid.
+    /// `Σ w_mt(E)` over the partials reading this source, in barns, on the
+    /// nuclide's grid: `σ_mt` for a partial reading the source's cells as its
+    /// own or its sum's, and `c σ_src` for one an NC derivation names the
+    /// source in, with the derivation's coefficient `c`.
     sum: Vec<f64>,
     /// `sum` split by the lookup channel each partial is in (see
     /// [`Channel`]), for a probability-table band, which scales each channel
@@ -142,17 +148,53 @@ impl Source {
 /// cross section, on the nuclide's grid.
 type ScoreTable = (Vec<(usize, Vec<f64>)>, Vec<f64>);
 
+/// What one covered partial reads: per source, `None` where the partial moves
+/// by the source's relative change itself (its own cells, or its sum's), or
+/// the weight `c σ_src` on the grid of a term an NC derivation adds, which
+/// moves the partial by that weight times the source's relative change.
+type PartialTerms = Vec<(usize, Option<Vec<f64>>)>;
+
+/// The weight of one of a partial's terms at `at`, the partial's own cross
+/// section `xs` where the term reads the source itself.
+fn term_weight(weight: &Option<Vec<f64>>, xs: f64, at: (usize, f64)) -> f64 {
+    match weight {
+        None => xs,
+        Some(w) => ReplicaNuclide::at(w, at),
+    }
+}
+
+/// `table` with each term of a partial added in: the partial's cross section
+/// `xs` times `scale` for a term reading the source itself, its weight times
+/// `scale` for a derived one, into `out` by source.
+fn add_terms(
+    out: &mut BTreeMap<usize, Vec<f64>>,
+    terms: &PartialTerms,
+    xs: &[f64],
+    scale: impl Fn(usize) -> f64,
+) {
+    for (s, weight) in terms {
+        let table = weight.as_deref().unwrap_or(xs);
+        let entry = out.entry(*s).or_insert_with(|| vec![0.0; xs.len()]);
+        for (i, (o, v)) in entry.iter_mut().zip(table).enumerate() {
+            *o += scale(i) * v;
+        }
+    }
+}
+
 /// One nuclide of one material, as the replicas read it.
 struct ReplicaNuclide {
     /// Atoms per barn-cm.
     density: f64,
     grid: Vec<f64>,
     sources: Vec<Source>,
-    /// Each covered partial's source.
-    source_of: HashMap<i32, usize>,
-    /// The fission partials, each with its source (if covered) and its cross
-    /// section on the grid, for the factor a fission's neutrons inherit.
-    fission: Vec<(Option<usize>, Vec<f64>)>,
+    /// Each covered partial's terms.
+    terms_of: HashMap<i32, PartialTerms>,
+    /// The cross section on the grid of each partial with derived terms, which
+    /// a collision's factor divides their weights by.
+    xs_of: HashMap<i32, Vec<f64>>,
+    /// The fission partials, each with its MT and its cross section on the
+    /// grid, for the factor a fission's neutrons inherit.
+    fission: Vec<(i32, Vec<f64>)>,
     /// Per tally score MT: per source, the summed cross section of the
     /// score's partials reading it, and the nominal score cross section, on
     /// the grid.
@@ -387,7 +429,7 @@ fn is_fission(mt: i32) -> bool {
 fn production_table(
     x: i32,
     held: &BTreeMap<i32, Arc<Reaction>>,
-    source_of: &HashMap<i32, usize>,
+    terms_of: &HashMap<i32, PartialTerms>,
     n: usize,
 ) -> Option<ScoreTable> {
     if !(203..=207).contains(&x) {
@@ -415,27 +457,26 @@ fn production_table(
         for (e, v) in explained.iter_mut().zip(&xs) {
             *e += c * v;
         }
-        if let Some(&s) = source_of.get(mt) {
-            let entry = by_source.entry(s).or_insert_with(|| vec![0.0; n]);
-            for (o, v) in entry.iter_mut().zip(&xs) {
-                *o += c * v;
-            }
+        if let Some(terms) = terms_of.get(mt) {
+            add_terms(&mut by_source, terms, &xs, |_| c);
         }
     }
-    if let (Some(&s5), true) = (
-        source_of.get(&5),
-        held.get(&5).is_some_and(|r| !r.redundant),
-    ) {
+    if let (Some(terms5), Some(r5)) = (terms_of.get(&5), held.get(&5).filter(|r| !r.redundant)) {
         let residual: Vec<f64> = nominal
             .iter()
             .zip(&explained)
             .map(|(row, known)| (row - known).max(0.0))
             .collect();
         if residual.iter().any(|v| *v > 0.0) {
-            let entry = by_source.entry(s5).or_insert_with(|| vec![0.0; n]);
-            for (o, v) in entry.iter_mut().zip(residual) {
-                *o += v;
-            }
+            // The residual moves by MT 5's relative change, so each of its
+            // terms carries the residual's share of MT 5 at each point.
+            let xs5 = on_grid(r5, n);
+            let share: Vec<f64> = residual
+                .iter()
+                .zip(&xs5)
+                .map(|(r, x)| if *x > 0.0 { r / x } else { 0.0 })
+                .collect();
+            add_terms(&mut by_source, terms5, &xs5, |i| share[i]);
         }
     }
     Some((by_source.into_iter().collect(), nominal))
@@ -597,13 +638,86 @@ impl ReplicaContext {
 
         let mut sources: Vec<Source> = Vec::new();
         let mut index: HashMap<i32, usize> = HashMap::new();
-        let mut source_of: HashMap<i32, usize> = HashMap::new();
+        let mut terms_of: HashMap<i32, PartialTerms> = HashMap::new();
+        let mut xs_of: HashMap<i32, Vec<f64>> = HashMap::new();
+        // Per source, what the partials reading it as their own or their
+        // sum's add up to: the row an absolute shift is shared over when the
+        // source has none of its own.
+        let mut direct: Vec<Vec<f64>> = Vec::new();
+        let none = Modes::default();
+        let m = modes.map_or(&none, |m| &m.modes);
+        // The source reading `src`'s cells, made the first time it is asked
+        // for, with `own` as its cross section where it holds none.
+        let mut source = |src: i32,
+                          own: Option<&[f64]>,
+                          sources: &mut Vec<Source>,
+                          direct: &mut Vec<Vec<f64>>|
+         -> Option<usize> {
+            let field = transport.and_then(|t| t.field.as_ref())?;
+            if let Some(&s) = index.get(&src) {
+                return Some(s);
+            }
+            // The source's cells, each replica's draw on each, and each
+            // cell's row of the nuclide's mode loadings (`k` per cell).
+            let cells = |list: &[yani_transmute::covariance_fold::Cell],
+                         values: &[&[f64]],
+                         loading: &[f64],
+                         k: usize|
+             -> (Vec<(f64, f64)>, Vec<f64>, Vec<f64>) {
+                let picked: Vec<usize> = list
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| c.mt == src)
+                    .map(|(k, _)| k)
+                    .collect();
+                let bounds = picked.iter().map(|&k| (list[k].lo, list[k].hi)).collect();
+                let mut per = Vec::with_capacity(picked.len() * r);
+                let mut rows = Vec::with_capacity(picked.len() * k);
+                for &c in &picked {
+                    for v in values {
+                        per.push(v.get(c).copied().unwrap_or(0.0));
+                    }
+                    rows.extend_from_slice(&loading[c * k..(c + 1) * k]);
+                }
+                (bounds, per, rows)
+            };
+            let (rel, rel_dm, rel_loading) = cells(
+                &field.relative_cells,
+                relative,
+                &m.relative_loading,
+                m.n_relative(),
+            );
+            let (abs, abs_shift, abs_loading) = cells(
+                &field.absolute_cells,
+                absolute,
+                &m.absolute_loading,
+                m.n_absolute(),
+            );
+            let own = match (held.get(&src), own) {
+                (Some(r), _) => on_grid(r, n),
+                (None, Some(own)) => own.to_vec(),
+                (None, None) => vec![0.0; n],
+            };
+            sources.push(Source {
+                sum: vec![0.0; n],
+                channels: std::array::from_fn(|_| vec![0.0; n]),
+                own,
+                relative: rel,
+                relative_dm: rel_dm,
+                absolute: abs,
+                absolute_shift: abs_shift,
+                relative_loading: rel_loading,
+                relative_modes: (modes.map_or(0, |m| m.relative_offset), m.n_relative()),
+                absolute_loading: abs_loading,
+                absolute_modes: (modes.map_or(0, |m| m.absolute_offset), m.n_absolute()),
+            });
+            direct.push(vec![0.0; n]);
+            index.insert(src, sources.len() - 1);
+            Some(sources.len() - 1)
+        };
         let no_reads = BTreeMap::new();
         let reads = transport.map_or(&no_reads, |t| &t.reads);
         for (mt, read) in reads {
-            let Some(field) = transport.and_then(|t| t.field.as_ref()) else {
-                break;
-            };
             let src = match read {
                 Read::Own => *mt,
                 Read::Parent(sum) => *sum,
@@ -612,92 +726,64 @@ impl ReplicaContext {
             let Some(reaction) = held.get(mt) else {
                 continue;
             };
-            let s = *index.entry(src).or_insert_with(|| {
-                // The source's cells, each replica's draw on each, and each
-                // cell's row of the nuclide's mode loadings (`k` per cell).
-                let cells = |list: &[yani_transmute::covariance_fold::Cell],
-                             values: &[&[f64]],
-                             loading: &[f64],
-                             k: usize|
-                 -> (Vec<(f64, f64)>, Vec<f64>, Vec<f64>) {
-                    let picked: Vec<usize> = list
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, c)| c.mt == src)
-                        .map(|(k, _)| k)
-                        .collect();
-                    let bounds = picked.iter().map(|&k| (list[k].lo, list[k].hi)).collect();
-                    let mut per = Vec::with_capacity(picked.len() * r);
-                    let mut rows = Vec::with_capacity(picked.len() * k);
-                    for &c in &picked {
-                        for v in values {
-                            per.push(v.get(c).copied().unwrap_or(0.0));
-                        }
-                        rows.extend_from_slice(&loading[c * k..(c + 1) * k]);
-                    }
-                    (bounds, per, rows)
-                };
-                let none = Modes::default();
-                let m = modes.map_or(&none, |m| &m.modes);
-                let (rel, rel_dm, rel_loading) = cells(
-                    &field.relative_cells,
-                    relative,
-                    &m.relative_loading,
-                    m.n_relative(),
-                );
-                let (abs, abs_shift, abs_loading) = cells(
-                    &field.absolute_cells,
-                    absolute,
-                    &m.absolute_loading,
-                    m.n_absolute(),
-                );
-                let own = held
-                    .get(&src)
-                    .map_or_else(|| vec![0.0; n], |r| on_grid(r, n));
-                sources.push(Source {
-                    sum: vec![0.0; n],
-                    channels: std::array::from_fn(|_| vec![0.0; n]),
-                    own,
-                    relative: rel,
-                    relative_dm: rel_dm,
-                    absolute: abs,
-                    absolute_shift: abs_shift,
-                    relative_loading: rel_loading,
-                    relative_modes: (modes.map_or(0, |m| m.relative_offset), m.n_relative()),
-                    absolute_loading: abs_loading,
-                    absolute_modes: (modes.map_or(0, |m| m.absolute_offset), m.n_absolute()),
-                });
-                sources.len() - 1
-            });
+            let Some(s) = source(src, None, &mut sources, &mut direct) else {
+                break;
+            };
             let xs = on_grid(reaction, n);
-            if let Some(c) = channel_of(*mt) {
-                for (o, v) in sources[s].channels[c.index()].iter_mut().zip(&xs) {
+            let channel = channel_of(*mt).map(|c| c.index());
+            let add = |source: &mut Source, values: &[f64]| {
+                if let Some(c) = channel {
+                    for (o, v) in source.channels[c].iter_mut().zip(values) {
+                        *o += v;
+                    }
+                }
+                for (o, v) in source.sum.iter_mut().zip(values) {
                     *o += v;
                 }
-            }
-            for (o, v) in sources[s].sum.iter_mut().zip(xs) {
+            };
+            add(&mut sources[s], &xs);
+            for (o, v) in direct[s].iter_mut().zip(&xs) {
                 *o += v;
             }
-            source_of.insert(*mt, s);
+            let mut terms: PartialTerms = vec![(s, None)];
+            // The terms an NC derivation adds, each read through the named
+            // reaction's cells with its weight `c σ_t`.
+            let derived = match (read, transport.and_then(|t| t.derived.get(mt))) {
+                (Read::Own, Some(derived)) => {
+                    grid_terms(derived, reaction, &nuclide.reactions[t], &grid)
+                }
+                _ => Vec::new(),
+            };
+            for g in derived {
+                let Some(s) = source(g.mt, Some(&g.xs), &mut sources, &mut direct) else {
+                    continue;
+                };
+                add(&mut sources[s], &g.weight);
+                terms.push((s, Some(g.weight)));
+            }
+            if terms.len() > 1 {
+                xs_of.insert(*mt, xs);
+            }
+            terms_of.insert(*mt, terms);
         }
         // A sum read only by its components has no row of its own to read an
         // absolute shift against when it is absent: the components' sum is
         // that row.
-        for s in &mut sources {
+        for (s, d) in sources.iter_mut().zip(direct) {
             if s.own.iter().all(|v| *v == 0.0) {
-                s.own.clone_from(&s.sum);
+                s.own = d;
             }
         }
 
         let fission = held
             .iter()
             .filter(|(mt, r)| is_fission(**mt) && !r.redundant)
-            .map(|(mt, r)| (source_of.get(mt).copied(), on_grid(r, n)))
+            .map(|(mt, r)| (*mt, on_grid(r, n)))
             .collect();
 
         let mut scores = HashMap::new();
         for &x in score_mts {
-            if let Some(table) = production_table(x, &held, &source_of, n) {
+            if let Some(table) = production_table(x, &held, &terms_of, n) {
                 scores.insert(x, table);
                 continue;
             }
@@ -707,11 +793,8 @@ impl ReplicaContext {
             }
             let mut by_source: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
             for p in &partials {
-                if let (Some(&s), Some(reaction)) = (source_of.get(p), held.get(p)) {
-                    let e = by_source.entry(s).or_insert_with(|| vec![0.0; n]);
-                    for (o, v) in e.iter_mut().zip(on_grid(reaction, n)) {
-                        *o += v;
-                    }
+                if let (Some(terms), Some(reaction)) = (terms_of.get(p), held.get(p)) {
+                    add_terms(&mut by_source, terms, &on_grid(reaction, n), |_| 1.0);
                 }
             }
             // The nominal score cross section the tally multiplies by: the
@@ -742,7 +825,8 @@ impl ReplicaContext {
             density,
             grid,
             sources,
-            source_of,
+            terms_of,
+            xs_of,
             fission,
             scores,
             urr,
@@ -829,20 +913,38 @@ impl ReplicaContext {
             if total <= 0.0 {
                 return;
             }
-            for (s, xs) in &nuc.fission {
-                if let Some(s) = s {
+            for (fmt, xs) in &nuc.fission {
+                let Some(terms) = nuc.terms_of.get(fmt) else {
+                    continue;
+                };
+                let x = ReplicaNuclide::at(xs, at);
+                for (s, weight) in terms {
                     let src = &nuc.sources[*s];
-                    let w = ReplicaNuclide::at(xs, at) / total;
+                    let w = term_weight(weight, x, at) / total;
                     let own = ReplicaNuclide::at(&src.own, at);
                     src.add_change(e, own, w, out, grad);
                 }
             }
             return;
         }
-        if let Some(&s) = nuc.source_of.get(&mt) {
-            let src = &nuc.sources[s];
-            let own = ReplicaNuclide::at(&src.own, at);
-            src.add_change(e, own, 1.0, out, grad);
+        if let Some(terms) = nuc.terms_of.get(&mt) {
+            // A derived term moves the partial by its weight over the
+            // partial's own cross section times the source's relative change.
+            let xs = if terms.len() > 1 {
+                nuc.xs_of.get(&mt).map(|xs| ReplicaNuclide::at(xs, at))
+            } else {
+                None
+            };
+            for (s, weight) in terms {
+                let scale = match (weight, xs) {
+                    (None, _) => 1.0,
+                    (Some(w), Some(x)) if x > 0.0 => ReplicaNuclide::at(w, at) / x,
+                    _ => continue,
+                };
+                let src = &nuc.sources[*s];
+                let own = ReplicaNuclide::at(&src.own, at);
+                src.add_change(e, own, scale, out, grad);
+            }
         }
     }
 
@@ -1047,5 +1149,202 @@ pub(crate) fn apply_collision(
     }
     for (x, g) in sensitivity.iter_mut().zip(grad) {
         *x += g;
+    }
+}
+
+#[cfg(test)]
+mod nc_derived_tests {
+    //! The replica weights of a partial whose covariance an NC block derives
+    //! (ENDF/B-VIII.1 Pb208 elastic above 1.5 MeV, `σ_1 - σ_4 - σ_16 -
+    //! σ_102`), against the rerun of the same draw and against the sigma the
+    //! derivation gives it. The covariance is converted from a committed
+    //! MF=33 tape onto the fetched fixture.
+    use super::*;
+    use crate::xs_perturbation::perturbed_nuclide;
+    use yani_transmute::covariance_sample::Sampler;
+
+    const PB208: &[u8] = include_bytes!("../../../endf/fixtures/n-082_Pb_208_endfb81_mf33.endf.xz");
+    const SEED: u64 = 7;
+
+    /// Pb208 with its ENDF/B-VIII.1 covariance, or `None` when the fixture is
+    /// not fetched.
+    fn pb208(tmp: &std::path::Path) -> Option<Material> {
+        let cached = std::path::PathBuf::from(yamc_test_cache::nuclide("Pb208")?);
+        let dir = tmp.join("Pb208.arrow");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        for entry in std::fs::read_dir(&cached).expect("read cached fixture") {
+            let entry = entry.expect("dir entry");
+            if entry.path().is_file() && entry.file_name() != "covariance.arrow" {
+                std::fs::copy(entry.path(), dir.join(entry.file_name())).expect("copy section");
+            }
+        }
+        let mut raw = Vec::new();
+        lzma_rs::xz_decompress(&mut &PB208[..], &mut raw).expect("tape decompresses");
+        let text = String::from_utf8(raw).expect("ENDF is text");
+        let evaluation = endf::Material::from_str(&text).expect("tape parses");
+        assert!(yamc_convert::covariance::write_covariance(&evaluation, &dir).expect("writes"));
+        let mut m = Material::new(
+            HashMap::from([("Pb208".to_string(), 1.0)]),
+            "atom",
+            "g/cm3",
+            Some(11.3),
+        )
+        .expect("material");
+        m.set_temperature("294");
+        m.read_nuclear_data(
+            &HashMap::from([("Pb208".to_string(), dir.to_string_lossy().into_owned())]),
+            None,
+        )
+        .expect("read Pb208");
+        m.ensure_covariance_loaded().expect("read covariance");
+        Some(m)
+    }
+
+    /// Grid indices inside the derivation's range, each at a point the grid
+    /// does not repeat, so the replicas' lookup lands on it exactly.
+    fn sample_points(energies: &[f64]) -> Vec<usize> {
+        (1..energies.len() - 1)
+            .filter(|&i| (1.5e6..2.0e7).contains(&energies[i]))
+            .filter(|&i| energies[i - 1] < energies[i] && energies[i] < energies[i + 1])
+            .step_by(97)
+            .collect()
+    }
+
+    /// Replica by replica, a collision ending in Pb208 elastic carries the
+    /// rerun's `σ'_2 / σ_2`, and a flight sees the rerun's change in the
+    /// total, which is the sum of what every partial moved.
+    #[test]
+    fn replicas_and_reruns_move_pb208_elastic_and_its_total_alike() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let Some(m) = pb208(tmp.path()) else {
+            eprintln!("skipping: Pb208 fixture not fetched");
+            return;
+        };
+        let replicas = 8;
+        let ctx = ReplicaContext::new(&[Arc::new(m.clone())], &[], replicas, SEED)
+            .expect("replica context");
+        let (fields, _) = transport_fields(&m);
+        let cells = fields
+            .iter()
+            .filter_map(|(n, t)| t.field.clone().map(|f| (n.clone(), f)))
+            .collect();
+        let sampler = Sampler::new(&cells, &[]);
+        let data = &m.nuclide_data["Pb208"];
+        let density = m.get_atoms_per_barn_cm().expect("densities")["Pb208"];
+        let energies = data.energy.as_ref().expect("grid")["294"].as_slice();
+        let n = energies.len();
+        let points = sample_points(energies);
+        assert!(points.len() > 10);
+
+        let (mut factor, mut flight) = (vec![0.0; replicas], vec![0.0; replicas]);
+        let mut grad = vec![0.0; ctx.n_modes()];
+        let mut moved = 0.0_f64;
+        for k in 0..replicas {
+            let draw = sampler.draw(SEED, k as u64);
+            let (p, floored) = perturbed_nuclide(
+                data,
+                &fields["Pb208"],
+                draw.relative("Pb208").expect("relative"),
+                draw.absolute("Pb208").expect("absolute"),
+            )
+            .expect("perturb");
+            assert_eq!(floored, 0);
+            let xs = |map: &HashMap<i32, Arc<Reaction>>, mt: i32| on_grid(&map[&mt], n);
+            let (b2, a2) = (xs(&data.reactions[0], 2), xs(&p.reactions[0], 2));
+            let (b1, a1) = (xs(&data.reactions[0], 1), xs(&p.reactions[0], 1));
+            for &i in &points {
+                let e = energies[i];
+                ctx.collision_factor(Some(0), "Pb208", 2, e, &mut factor, &mut grad);
+                let rerun = a2[i] / b2[i];
+                assert!(
+                    (factor[k] - rerun).abs() <= 1e-9,
+                    "replica {k} at {e} eV: elastic factor {} against the rerun's {rerun}",
+                    factor[k]
+                );
+                moved = moved.max((rerun - 1.0).abs());
+                ctx.flight_delta(Some(0), e, None, &mut flight, &mut grad);
+                let rerun = density * (a1[i] - b1[i]);
+                assert!(
+                    (flight[k] - rerun).abs() <= 1e-9 * density * b1[i],
+                    "replica {k} at {e} eV: ΔΣ_t {} against the rerun's {rerun}",
+                    flight[k]
+                );
+            }
+        }
+        assert!(moved > 1e-3, "Pb208 elastic moves, by up to {moved}");
+    }
+
+    /// Over many replicas, Pb208 elastic's spread is the derivation's sigma
+    /// at each energy, `√(gᵀ C g)` with `g_t = c_t σ_t / σ_2` on the named
+    /// reactions' cells, and the total's spread is what MT 1's own cells
+    /// state for it.
+    #[test]
+    fn pb208_elastic_spreads_by_its_derivations_sigma() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let Some(m) = pb208(tmp.path()) else {
+            eprintln!("skipping: Pb208 fixture not fetched");
+            return;
+        };
+        let replicas = 4096;
+        let ctx = ReplicaContext::new(&[Arc::new(m.clone())], &[], replicas, SEED)
+            .expect("replica context");
+        let (fields, _) = transport_fields(&m);
+        let t = &fields["Pb208"];
+        let field = t.field.as_ref().expect("a field");
+        let data = &m.nuclide_data["Pb208"];
+        let density = m.get_atoms_per_barn_cm().expect("densities")["Pb208"];
+        let energies = data.energy.as_ref().expect("grid")["294"].as_slice();
+        let n = energies.len();
+        let held = &data.reactions[0];
+        let nr = field.relative_cells.len();
+        let cell = |mt: i32, e: f64| {
+            field
+                .relative_cells
+                .iter()
+                .position(|c| c.mt == mt && c.lo <= e && e < c.hi)
+        };
+        let sd = |v: &[f64]| {
+            let mean = v.iter().sum::<f64>() / v.len() as f64;
+            (v.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / (v.len() as f64 - 1.0)).sqrt()
+        };
+        let mut out = vec![0.0; replicas];
+        let mut grad = vec![0.0; ctx.n_modes()];
+        for target in [2.1e6, 14.1e6] {
+            let i = energies.partition_point(|&x| x < target);
+            let e = energies[i];
+            let xs = |mt: i32| on_grid(&held[&mt], n)[i];
+            let mut g = vec![0.0; nr];
+            for term in &t.derived[&2] {
+                // A named reaction with no cell here moves nothing here.
+                if let Some(k) = cell(term.mt, e) {
+                    g[k] += term.coefficient * xs(term.mt) / xs(2);
+                }
+            }
+            let variance: f64 = (0..nr)
+                .flat_map(|a| (0..nr).map(move |b| (a, b)))
+                .map(|(a, b)| g[a] * g[b] * field.relative[a * nr + b])
+                .sum();
+            let analytic = variance.sqrt();
+            ctx.collision_factor(Some(0), "Pb208", 2, e, &mut out, &mut grad);
+            let sampled = sd(&out);
+            eprintln!("Pb208 elastic at {e:.4e} eV: sd {sampled:.5}, derivation {analytic:.5}");
+            assert!(
+                (sampled / analytic - 1.0).abs() < 0.06,
+                "Pb208 elastic at {e} eV: sd {sampled} against {analytic}"
+            );
+
+            let k1 = cell(1, e).expect("MT 1 has a cell here");
+            let total = density * xs(1) * field.relative[k1 * nr + k1].sqrt();
+            ctx.flight_delta(Some(0), e, None, &mut out, &mut grad);
+            let sampled = sd(&out);
+            eprintln!(
+                "Pb208 ΔΣ_t at {e:.4e} eV: sd {sampled:.4e} /cm ({:.3}%), MT 1 states {total:.4e} /cm",
+                100.0 * sampled / (density * xs(1))
+            );
+            assert!(
+                (sampled / total - 1.0).abs() < 0.06,
+                "Pb208 total at {e} eV: sd {sampled} against {total}"
+            );
+        }
     }
 }

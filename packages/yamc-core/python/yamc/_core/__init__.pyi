@@ -2518,7 +2518,9 @@ class Model:
             - ``nuclides``: per nuclide name, a dict with ``perturbed`` (per
               MT, a dict with ``via``, the MT whose covariance it takes, and
               ``max_relative_sigma``, the largest relative sigma stated on any
-              covariance cell), ``held_at_nominal`` (sorted MTs no covariance
+              covariance cell, or for a reaction an NC block derives from
+              others the largest its derived cross section has at any
+              energy), ``held_at_nominal`` (sorted MTs no applied covariance
               reaches), ``cells`` and ``short_range_blocks`` (the size of the
               nuclide's covariance field), ``repair`` (``None``, or a dict
               with ``lambda_min``, ``lambda_max`` and ``clipped_fraction``, the

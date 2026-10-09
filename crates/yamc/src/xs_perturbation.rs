@@ -6,7 +6,11 @@
 //!
 //! 1. every non-redundant reaction the field covers is multiplied by its
 //!    cell's multiplier, and shifted by its absolute cell's shift, at each
-//!    point of its energy grid;
+//!    point of its energy grid. One whose covariance an NC block derives
+//!    (ENDF/B-VIII.1 Pb208 elastic above 1.5 MeV is `σ_1 - σ_4 - σ_16 -
+//!    σ_102`) also moves by `Σ c_t δσ_t` over the derivation's range, each
+//!    `δσ_t` what the draw moves the named reaction's cross section by
+//!    ([`TransportField::derived`]), as the activation fold derives it;
 //! 2. the redundant rows that other code reads are moved by exactly what their
 //!    parts moved: MT 16, 18 and 103 to 107 by the change in the sum of their
 //!    components where those are present, then MT 1, 3, 4, 27 and 101 by the
@@ -44,7 +48,7 @@ use yamc_materials::Material;
 use yamc_nuclide::nuclide::{FastXSGrid, Nuclide};
 use yamc_nuclide::reaction::Reaction;
 use yamc_nuclide::synthesis::{synthesize, SYNTHETIC_MTS};
-use yani_transmute::covariance_fold::{Cell, Read, TransportField};
+use yani_transmute::covariance_fold::{Cell, DerivedTerm, Read, TransportField};
 use yani_transmute::covariance_sample::Draw;
 
 /// The redundant rows rebuilt from their components before the totals are
@@ -53,9 +57,9 @@ const COMPONENT_SUMS: [i32; 7] = [16, 18, 103, 104, 105, 106, 107];
 
 /// One reaction's cells, sorted by energy, with each cell's index in the
 /// field.
-type Cells = Vec<(f64, f64, usize)>;
+pub(crate) type Cells = Vec<(f64, f64, usize)>;
 
-fn cells_by_mt(cells: &[Cell]) -> BTreeMap<i32, Cells> {
+pub(crate) fn cells_by_mt(cells: &[Cell]) -> BTreeMap<i32, Cells> {
     let mut out: BTreeMap<i32, Cells> = BTreeMap::new();
     for (k, c) in cells.iter().enumerate() {
         out.entry(c.mt).or_default().push((c.lo, c.hi, k));
@@ -68,7 +72,7 @@ fn cells_by_mt(cells: &[Cell]) -> BTreeMap<i32, Cells> {
 
 /// The field index of the cell of `cells` holding `energy`, if one does. A
 /// cell is `[lo, hi)`, except that the last one also holds its top edge.
-fn cell_at(cells: &Cells, energy: f64) -> Option<usize> {
+pub(crate) fn cell_at(cells: &Cells, energy: f64) -> Option<usize> {
     let i = cells.partition_point(|c| c.0 <= energy).checked_sub(1)?;
     let (_, hi, k) = cells[i];
     (energy < hi || (i + 1 == cells.len() && energy == hi)).then_some(k)
@@ -76,13 +80,75 @@ fn cell_at(cells: &Cells, energy: f64) -> Option<usize> {
 
 /// A reaction's cross section on the full grid of `n` points, zero below its
 /// threshold.
-fn on_full_grid(reaction: &Reaction, n: usize) -> Vec<f64> {
+pub(crate) fn on_full_grid(reaction: &Reaction, n: usize) -> Vec<f64> {
     let mut out = vec![0.0; n];
     let xs = reaction.cross_section.as_slice();
     let start = reaction.threshold_idx.min(n);
     let len = xs.len().min(n - start);
     out[start..start + len].copy_from_slice(&xs[..len]);
     out
+}
+
+/// One [`DerivedTerm`] of a partial, on the nuclide's energy grid.
+pub(crate) struct GridTerm {
+    /// The reaction whose cells the term reads.
+    pub(crate) mt: i32,
+    /// `c σ_t(E_i)`, in barns, at the points inside the term's range from the
+    /// partial's threshold, and zero elsewhere: what a relative change of the
+    /// named reaction moves the partial by.
+    pub(crate) weight: Vec<f64>,
+    /// `σ_t(E_i)`, the named reaction's own cross section, which an absolute
+    /// shift on its cells is a shift of.
+    pub(crate) xs: Vec<f64>,
+}
+
+/// Whether grid energy `e` is inside `range`: `[lo, hi)`, closed at the top
+/// of the grid `top` so the last point of a derivation that runs to the end
+/// of the grid is inside it, as the last covariance cell holds its top edge.
+fn in_range(range: (f64, f64), e: f64, top: f64) -> bool {
+    range.0 <= e && (e < range.1 || (e == range.1 && e == top))
+}
+
+/// `partial`'s derived terms on the grid `energies`, its cross sections read
+/// from `reactions`.
+///
+/// The replica weights and the reruns both read a partial's NC derivation
+/// through this, so the two apply it the same way. A term is zero below the
+/// partial's threshold, where the partial has no cross section to move.
+pub(crate) fn grid_terms(
+    terms: &[DerivedTerm],
+    partial: &Reaction,
+    reactions: &HashMap<i32, Arc<Reaction>>,
+    energies: &[f64],
+) -> Vec<GridTerm> {
+    let n = energies.len();
+    let top = energies.last().copied().unwrap_or(f64::NAN);
+    terms
+        .iter()
+        .map(|t| {
+            let mut xs = vec![0.0; n];
+            for r in t.cross_sections.iter().filter_map(|mt| reactions.get(mt)) {
+                for (o, v) in xs.iter_mut().zip(on_full_grid(r, n)) {
+                    *o += v;
+                }
+            }
+            let weight = (0..n)
+                .map(|i| {
+                    let inside = i >= partial.threshold_idx && in_range(t.range, energies[i], top);
+                    if inside {
+                        t.coefficient * xs[i]
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            GridTerm {
+                mt: t.mt,
+                weight,
+                xs,
+            }
+        })
+        .collect()
 }
 
 /// `reaction` with `values` (on its own grid, from its threshold) in place of
@@ -163,6 +229,31 @@ pub fn perturbed_nuclide(
                     _ => 1.0,
                 }
             };
+            // What an NC derivation adds: each named reaction's change at the
+            // point, times its coefficient, an absolute shift as a share of
+            // the named reaction's own cross section, as the replicas read it.
+            let derived = match (read, transport.derived.get(mt)) {
+                (Read::Own, Some(terms)) => grid_terms(terms, reaction, reactions, energies),
+                _ => Vec::new(),
+            };
+            let derived_change = |i: usize, e: f64| -> f64 {
+                derived
+                    .iter()
+                    .filter(|t| t.weight.get(i).is_some_and(|w| *w != 0.0))
+                    .map(|t| {
+                        let dm = relative_cells
+                            .get(&t.mt)
+                            .and_then(|c| cell_at(c, e))
+                            .map_or(0.0, |k| relative[k]);
+                        let a = absolute_cells
+                            .get(&t.mt)
+                            .and_then(|c| cell_at(c, e))
+                            .filter(|_| t.xs[i] > 0.0)
+                            .map_or(0.0, |k| absolute[k] / t.xs[i]);
+                        t.weight[i] * (dm + a)
+                    })
+                    .sum()
+            };
             let start = reaction.threshold_idx;
             let values: Vec<f64> = reaction
                 .cross_section
@@ -180,7 +271,7 @@ pub fn perturbed_nuclide(
                         .get(&source)
                         .and_then(|c| cell_at(c, e))
                         .map_or(0.0, |k| absolute[k] * share(i, xs));
-                    let v = xs * m + a;
+                    let v = xs * m + a + derived_change(i, e);
                     if v < 0.0 {
                         floored += 1;
                         0.0
