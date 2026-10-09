@@ -44,6 +44,10 @@ pub enum Error {
     Unsupported {
         what: &'static str,
     },
+    /// An argument outside what a computation accepts.
+    InvalidArgument {
+        what: String,
+    },
     Io(std::io::Error),
 }
 
@@ -79,6 +83,7 @@ impl fmt::Display for Error {
             Error::Unsupported { what } => {
                 write!(f, "this reader does not implement {what}")
             }
+            Error::InvalidArgument { what } => write!(f, "{what}"),
             Error::Io(e) => write!(f, "{e}"),
         }
     }
