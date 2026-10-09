@@ -222,16 +222,13 @@ fn assert_same_lookup(got: &FastXSGrid, want: &FastXSGrid) {
     assert_eq!(got.xs_ngamma.as_slice(), want.xs_ngamma.as_slice());
     assert_eq!(got.photon_prod.as_slice(), want.photon_prod.as_slice());
     assert_eq!(got.photon_rxn_mt_numbers, want.photon_rxn_mt_numbers);
-    assert_eq!(got.photon_rxn_xs.as_slice(), want.photon_rxn_xs.as_slice());
+    assert_eq!(got.photon_rxn_xs(), want.photon_rxn_xs());
     assert!(same_arcs(
         &got.photon_rxn_reactions,
         &want.photon_rxn_reactions
     ));
     assert_eq!(got.absorption_mt_numbers, want.absorption_mt_numbers);
-    assert_eq!(
-        got.absorption_mt_xs.as_slice(),
-        want.absorption_mt_xs.as_slice()
-    );
+    assert_eq!(got.absorption_mt_xs(), want.absorption_mt_xs());
     assert_eq!(
         got.delayed_photon_scaling.as_slice(),
         want.delayed_photon_scaling.as_slice()

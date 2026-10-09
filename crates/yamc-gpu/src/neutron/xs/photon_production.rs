@@ -808,7 +808,7 @@ mod tests {
             .expect("Fe56 must have 294 K loaded");
         let grid = &nuclide.fast_xs[temp_idx];
         assert!(
-            !grid.photon_rxn_xs.is_empty(),
+            !grid.photon_rxn_xs().is_empty(),
             "Fe56 must carry photon-producing reactions for this test"
         );
 
