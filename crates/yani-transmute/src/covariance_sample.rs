@@ -2459,9 +2459,23 @@ mod tests {
 
     /// A covariance that needs no repair is sampled exactly as before the
     /// nearest-correlation repair existed: these are the bits the clipping
-    /// sampler drew for the same seeds, relative and absolute.
+    /// sampler drew for the same seeds, relative and absolute. The bits were
+    /// taken on x86-64 Linux; other targets may round the last place
+    /// differently in `ln`, `exp` and fused arithmetic, so each value is held
+    /// to within a few units in the last place rather than bit for bit.
     #[test]
     fn a_valid_matrix_draws_as_it_always_did() {
+        // Within `ulps` units in the last place, for finite values of one sign.
+        fn assert_ulps(got: &[u64], want: &[u64], ulps: u64, what: &str) {
+            assert_eq!(got.len(), want.len(), "{what}");
+            for (g, w) in got.iter().zip(want) {
+                let (gv, wv) = (f64::from_bits(*g), f64::from_bits(*w));
+                assert!(
+                    gv.signum() == wv.signum() && g.abs_diff(*w) <= ulps,
+                    "{what}: got {gv:e} ({g}), want {wv:e} ({w})"
+                );
+            }
+        }
         let c = cov(
             &["a", "b", "c"],
             vec![
@@ -2494,7 +2508,7 @@ mod tests {
                 .iter()
                 .map(|v| v.to_bits())
                 .collect();
-            assert_eq!(got, want, "replica {r}");
+            assert_ulps(&got, want, 4, &format!("replica {r}"));
         }
         let sampled: Vec<u64> = s
             .sampled_covariance("X")
@@ -2503,9 +2517,9 @@ mod tests {
             .iter()
             .map(|v| v.to_bits())
             .collect();
-        assert_eq!(
-            sampled,
-            [
+        assert_ulps(
+            &sampled,
+            &[
                 4585925428558828667,
                 4578071150808694522,
                 13794633745026886140,
@@ -2514,16 +2528,28 @@ mod tests {
                 4573567551181324026,
                 13794633745026886140,
                 4573567551181324026,
-                4567911030049346683
-            ]
+                4567911030049346683,
+            ],
+            4,
+            "sampled covariance",
         );
 
         let f = Factorized::new(&[0.01, 0.002, 0.002, 0.04], &[4.0, -1.0, -1.0, 9.0]);
         assert_eq!(f.repair, None);
         let g = f.gaussian_draw(7, 11, 2);
         let bits = |v: &[f64]| v.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
-        assert_eq!(bits(&g.0), [4580321971225683108, 13814906861411971440]);
-        assert_eq!(bits(&g.1), [4613374713056438380, 4607834391228464327]);
+        assert_ulps(
+            &bits(&g.0),
+            &[4580321971225683108, 13814906861411971440],
+            4,
+            "gaussian draw",
+        );
+        assert_ulps(
+            &bits(&g.1),
+            &[4613374713056438380, 4607834391228464327],
+            4,
+            "gaussian draw multipliers",
+        );
     }
 
     /// Absolute cells are repaired as the relative ones are, on their own
