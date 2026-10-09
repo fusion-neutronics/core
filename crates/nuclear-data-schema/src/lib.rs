@@ -453,9 +453,11 @@ pub fn compton() -> Schema {
 /// resolved-resonance-range covariance a range's MF=32 resonance-parameter
 /// covariance implies (ENDF-102 section 32 adds it to MF=33's), written by the
 /// converter as ordinary `"ni"` blocks, LB=5 for a reaction with itself and
-/// LB=6 across reactions, on one group per resonance, relative to the whole
-/// cross section. A reader folds them with the tape's blocks unchanged; the
-/// index only says where they came from.
+/// LB=6 across reactions (in the lower MT's section), on one group per
+/// resonance, relative to the whole cross section. A reader folds them with
+/// the tape's blocks unchanged, adding each to the tape's block of the same
+/// pair: the index says where they came from, so one is never taken for the
+/// other orientation of a pair the tape stores both ways.
 ///
 /// `"lumped"` is the one row that is not a block. ENDF-102 33.2.3 writes a
 /// component of a lumped reaction as a section with only its HEAD record,
