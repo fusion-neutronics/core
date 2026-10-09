@@ -1662,13 +1662,13 @@ pub(crate) fn standard_normals(state: &mut u64, n: usize) -> Vec<f64> {
 /// Returns `(eigenvalues, eigenvectors)` with eigenvector `j` in COLUMN `j`
 /// of the row-major `n × n` result, blocks in order of their first index, so
 /// the result is a pure function of the input.
-fn eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+pub(crate) fn eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     blockwise(matrix, n, true)
 }
 
 /// [`eigen`]'s eigenvalues alone, which skips accumulating the
 /// transformations and so costs a fraction as much.
-fn eigenvalues(matrix: &[f64], n: usize) -> Vec<f64> {
+pub(crate) fn eigenvalues(matrix: &[f64], n: usize) -> Vec<f64> {
     blockwise(matrix, n, false).0
 }
 
