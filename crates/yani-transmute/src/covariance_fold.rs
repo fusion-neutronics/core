@@ -1203,10 +1203,15 @@ const MIRROR_ROUNDING: f64 = 1.0e-5;
 /// nothing forbids the transpose in the other section as well, and JEFF-4.0
 /// Be9 has 130 such pairs. The fold fills both halves from one block, so
 /// keeping both copies would count the pair twice.
+///
+/// Only the tape's blocks are copies of one another ([`on_tape`]). A block the
+/// converter derived from MF=32 is a contribution of its own, which ENDF-102
+/// section 32 adds to MF=33's, so it is never one side of a pair whichever
+/// orientation it is written in, and is always folded.
 fn mirrored_pairs(blocks: &[CovarianceBlock], reached: &BTreeSet<i32>) -> BTreeSet<(i32, i32)> {
     let oriented: BTreeSet<(i32, i32)> = blocks
         .iter()
-        .filter(|b| b.is_same_evaluation() && matches!(b.data, CovarianceData::Ni(_)))
+        .filter(|b| on_tape(b) && b.is_same_evaluation() && matches!(b.data, CovarianceData::Ni(_)))
         .map(|b| (b.mt, b.partner_mt()))
         .filter(|(a, b)| a != b && reached.contains(a) && reached.contains(b))
         .collect();
@@ -1217,7 +1222,15 @@ fn mirrored_pairs(blocks: &[CovarianceBlock], reached: &BTreeSet<i32>) -> BTreeS
         .collect()
 }
 
-/// This evaluation's explicit (`row`, `col`) blocks.
+/// Whether `block` was read off the tape, rather than derived by the
+/// converter from MF=32 (`subsection_idx = -1`, which no tape subsection has).
+fn on_tape(block: &CovarianceBlock) -> bool {
+    block.subsection_idx >= 0
+}
+
+/// This evaluation's explicit (`row`, `col`) blocks on the tape: one copy of a
+/// pair [`mirrored_pairs`] lists. The MF=32-derived blocks are not part of
+/// either copy.
 fn orientation(
     blocks: &[CovarianceBlock],
     row: i32,
@@ -1225,7 +1238,10 @@ fn orientation(
 ) -> impl Iterator<Item = &NiSubsection> {
     blocks.iter().filter_map(move |blk| match &blk.data {
         CovarianceData::Ni(ni)
-            if blk.is_same_evaluation() && blk.mt == row && blk.partner_mt() == col =>
+            if on_tape(blk)
+                && blk.is_same_evaluation()
+                && blk.mt == row
+                && blk.partner_mt() == col =>
         {
             Some(ni)
         }
@@ -1995,7 +2011,8 @@ fn fold_nuclide(
         _ => false,
     };
 
-    // A pair stored in both orientations is folded from one copy only: the
+    // A pair the tape stores in both orientations is folded from one copy
+    // only, and the MF=32-derived blocks of it are added: the copy is the
     // lower MT's section, unless a block of it does not expand and the other
     // copy's all do. Only two copies that both expand have numbers to
     // compare. A copy left unused that does not expand is a layout gap
@@ -2071,7 +2088,7 @@ fn fold_nuclide(
         };
         // Every reached MT has a cross section: `channel_terms` checks.
         let (row_rx, col_rx) = (reactions[&row_mt], reactions[&col_mt]);
-        if skipped_copy.contains(&(row_mt, col_mt)) {
+        if on_tape(block) && skipped_copy.contains(&(row_mt, col_mt)) {
             continue;
         }
 
@@ -2159,7 +2176,8 @@ fn fold_nuclide(
                         // block with MT1 below MT (ENDF/B-VIII.1 Np237 has 22)
                         // fills the same two cells as one written the other way
                         // round. A pair the tape also stores the other way is
-                        // folded from one copy only (`mirrored_pairs`). A
+                        // folded from one copy only (`mirrored_pairs`), and an
+                        // MF=32-derived block of it is added to that copy. A
                         // self-covariance block needs no mirror, since every
                         // ordered pair of terms visits it. Two terms of one
                         // channel correlated by a cross block land on the same
@@ -2892,7 +2910,7 @@ fn nuclide_field(
         let (row_mt, col_mt) = (block.mt, block.partner_mt());
         if !reached.contains(&row_mt)
             || !reached.contains(&col_mt)
-            || skipped_copy.contains(&(row_mt, col_mt))
+            || (on_tape(block) && skipped_copy.contains(&(row_mt, col_mt)))
         {
             continue;
         }
@@ -4274,6 +4292,94 @@ mod same_evaluation_tests {
         let mismatch = coverage.mirrored_disagree[&key];
         assert!((mismatch - 0.1).abs() < 1.0e-12, "{mismatch}");
         assert!(coverage.has_gaps());
+    }
+
+    /// A block of `mt` with `mt1` as the converter derives it from MF=32
+    /// (`subsection_idx = -1`), with numbers of its own on `GRID`.
+    fn derived(mt: i32, mt1: i32) -> CovarianceBlock {
+        let mut b = block(mt, 0, mt1, lb6(&GRID, &GRID, &[0.003, 0.0, 0.0, 0.002]));
+        b.subsection_idx = -1;
+        b
+    }
+
+    /// ENDF-102 section 32 adds the MF=32 resonance-parameter contribution to
+    /// MF=33's. A derived cross block next to the tape's block of the same
+    /// pair is a second contribution, not a copy of it, whichever way round
+    /// either is written: the reaction order the converter used to write in,
+    /// elastic, capture, fission, put (102, 18) against the tape's (18, 102)
+    /// for 13 JEFF-4.0 and TENDL-2017 actinides, and the fold kept only the
+    /// tape's and reported a false disagreement.
+    #[test]
+    fn an_mf32_derived_cross_block_adds_to_the_tape_block() {
+        for (tape, extra) in [
+            (cross(16, 0, 102), derived(102, 16)),
+            (cross(16, 0, 102), derived(16, 102)),
+            (transposed(102, 0, 16), derived(16, 102)),
+        ] {
+            let a = relative(&[own(16), own(102), tape.clone()]);
+            let b = relative(&[own(16), own(102), extra.clone()]);
+            let (c, coverage) = fold(&[own(16), own(102), tape, extra]);
+            let c = c.expect("usable").relative;
+            let expected = a[N2N_CAPTURE] + b[N2N_CAPTURE];
+            assert!(
+                (c[N2N_CAPTURE] - expected).abs() <= 1.0e-12 * expected.abs(),
+                "{} against {expected}",
+                c[N2N_CAPTURE]
+            );
+            assert!(
+                coverage.mirrored_disagree.is_empty(),
+                "{:?}",
+                coverage.mirrored_disagree
+            );
+        }
+    }
+
+    /// A pair the tape stores both ways is still folded once beside a derived
+    /// block of it, which is added, and copies that disagree are still
+    /// reported by how far the tape's two are apart.
+    #[test]
+    fn a_tape_pair_stored_both_ways_is_folded_once_beside_a_derived_block() {
+        let once = relative(&[own(16), own(102), cross(16, MAT, 102)]);
+        let extra = relative(&[own(16), own(102), derived(102, 16)]);
+        let expected = once[N2N_CAPTURE] + extra[N2N_CAPTURE];
+        let (both, coverage) = fold(&[
+            own(16),
+            own(102),
+            cross(16, MAT, 102),
+            transposed(102, MAT, 16),
+            derived(102, 16),
+        ]);
+        let both = both.expect("usable").relative;
+        assert!(
+            (both[N2N_CAPTURE] - expected).abs() <= 1.0e-12 * expected.abs(),
+            "{} against {expected}",
+            both[N2N_CAPTURE]
+        );
+        assert!(
+            coverage.mirrored_disagree.is_empty(),
+            "{:?}",
+            coverage.mirrored_disagree
+        );
+
+        let mut upper = transposed(102, MAT, 16);
+        let CovarianceData::Ni(ni) = &mut upper.data else {
+            unreachable!()
+        };
+        ni.fkl[0] += 0.0006;
+        let (_, coverage) = fold(&[
+            own(16),
+            own(102),
+            cross(16, MAT, 102),
+            upper,
+            derived(102, 16),
+        ]);
+        let key = (
+            "Pt194".to_string(),
+            "(n,2n)".to_string(),
+            "(n,gamma)".to_string(),
+        );
+        let mismatch = coverage.mirrored_disagree[&key];
+        assert!((mismatch - 0.1).abs() < 1.0e-12, "{mismatch}");
     }
 
     /// A pair the nuclide has no rate for on one side is not folded, so two
@@ -5790,6 +5896,52 @@ mod transport_field_tests {
         let t = field(&[51, 52], &[self_block(51, 0.09), self_block(4, 0.04)]);
         assert_eq!(t.reads[&51], Read::Own);
         assert_eq!(t.reads[&52], Read::Parent(4));
+    }
+
+    /// A cross block of `mt` with `mt1` on the self blocks' grid, from
+    /// `subsection_idx`: `-1` for one derived from MF=32.
+    fn cross_block(mt: i32, mt1: i32, subsection_idx: i32, fkl: [f64; 4]) -> CovarianceBlock {
+        CovarianceBlock {
+            subsection_idx,
+            mt1,
+            data: CovarianceData::Ni(NiSubsection {
+                lb: 6,
+                ner: 3,
+                nec: 3,
+                er: vec![1.0e-5, 1.0e6, 2.0e7],
+                ec: vec![1.0e-5, 1.0e6, 2.0e7],
+                fkl: fkl.to_vec(),
+                ..Default::default()
+            }),
+            ..self_block(mt, 0.0)
+        }
+    }
+
+    /// The transport field adds an MF=32-derived cross block to the tape's
+    /// block of the same pair, as the fold does, rather than keeping one as
+    /// a copy of the other.
+    #[test]
+    fn a_derived_cross_block_adds_to_the_tape_block() {
+        let own = [self_block(2, 0.01), self_block(102, 0.04)];
+        let tape = cross_block(2, 102, 0, [0.002, 0.001, -0.001, 0.003]);
+        let derived = cross_block(102, 2, -1, [0.004, 0.0, 0.0, 0.001]);
+        let relative = |extra: &[CovarianceBlock]| {
+            let blocks: Vec<CovarianceBlock> = own.iter().chain(extra).cloned().collect();
+            let f = field(&[2, 102], &blocks).field.expect("a field");
+            assert_eq!(f.relative_cells.len(), 4);
+            f.relative
+        };
+        let (a, b) = (
+            relative(std::slice::from_ref(&tape)),
+            relative(std::slice::from_ref(&derived)),
+        );
+        let both = relative(&[tape, derived]);
+        // Rows 0 and 1 are elastic's cells, columns 2 and 3 capture's.
+        for (i, j) in [(0, 2), (0, 3), (1, 2), (1, 3)] {
+            let (k, t) = (i * 4 + j, j * 4 + i);
+            assert!((both[k] - (a[k] + b[k])).abs() < 1.0e-15, "cell ({i}, {j})");
+            assert_eq!(both[k], both[t]);
+        }
     }
 
     /// Fission given by chance, as ENDF/B-VIII.1 Pu240 is: MT 18 is the

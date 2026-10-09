@@ -32,7 +32,8 @@
 //! group cross sections ([`endf::resonance_covariance::group_covariance`],
 //! one group per resonance or per pair of the unresolved parameters'
 //! energies, 1/E weight, infinite dilution, 0 K) is written as NI blocks: LB=5 for a
-//! reaction with itself, LB=6 for elastic with capture and the like. They are
+//! reaction with itself, LB=6 for elastic with capture and the like, in the
+//! lower MT's section as MF=33's are. They are
 //! relative to the whole cross section, resonance part plus MF=3 background,
 //! since that is what a perturbation multiplies, as NJOY's ERRORR takes it.
 //! These rows have `subsection_idx = -1`, which no tape subsection has, so
@@ -576,58 +577,85 @@ fn push_resonance_blocks(
             })
             .collect();
         let g = resonance.relative_to(&totals);
-        let n = g.groups();
-        for (a, &mt) in g.reactions.iter().enumerate() {
-            for (b, &mt1) in g.reactions.iter().enumerate().skip(a) {
-                let values: Vec<f64> = if a == b {
-                    (0..n)
-                        .flat_map(|h| (h..n).map(move |k| (h, k)))
-                        .map(|(h, k)| g.get(a, h, a, k))
-                        .collect()
-                } else {
-                    (0..n)
-                        .flat_map(|h| (0..n).map(move |k| (h, k)))
-                        .map(|(h, k)| g.get(a, h, b, k))
-                        .collect()
-                };
-                if values.iter().all(|v| *v == 0.0) {
-                    continue;
-                }
-                let block = if a == b {
-                    NiSubsection {
-                        lb: 5,
-                        ls: 1,
-                        ne: (n + 1) as i64,
-                        nt: values.len() as i64 + (n + 1) as i64,
-                        ek: g.edges.clone(),
-                        fkk: values,
-                        ..Default::default()
-                    }
-                } else {
-                    NiSubsection {
-                        lb: 6,
-                        ner: (n + 1) as i64,
-                        nec: (n + 1) as i64,
-                        nt: 1 + ((n + 1) * (n + 1)) as i64,
-                        er: g.edges.clone(),
-                        ec: g.edges.clone(),
-                        fkl: values,
-                        ..Default::default()
-                    }
-                };
-                let idx = next_block.entry(mt).or_insert(0);
-                rows.push_derived(mt, *idx, mt1, &block);
-                *idx += 1;
-            }
-        }
+        push_group_blocks(rows, &g, &mut next_block);
     }
     Ok(())
+}
+
+/// The NI blocks of one range's group covariance `g`: LB=5 for a reaction
+/// with itself and LB=6 for a pair, each pair once, a block of all zeros
+/// left out. `next_block` is the running `block_idx` per section, shared by
+/// every range of the evaluation.
+///
+/// A pair is written in the section of its lower MT, with MT1 the higher, as
+/// ENDF-102 places MF=33's, whatever order `g` lists the reactions in (capture
+/// before fission, 102 before an R-matrix range's 51). Such a block adds to
+/// the tape's block of the same pair rather than copying it, so a reader
+/// tells the two apart by `subsection_idx`, not by orientation: writing the
+/// lower MT's orientation only keeps the file to the convention.
+fn push_group_blocks(
+    rows: &mut CovarianceRows,
+    g: &endf::resonance_covariance::GroupCovariance,
+    next_block: &mut BTreeMap<i32, usize>,
+) {
+    let n = g.groups();
+    for a in 0..g.reactions.len() {
+        for b in a..g.reactions.len() {
+            // Rows are the lower MT's groups.
+            let (row, col) = if g.reactions[a] <= g.reactions[b] {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            let (mt, mt1) = (g.reactions[row], g.reactions[col]);
+            let values: Vec<f64> = if row == col {
+                (0..n)
+                    .flat_map(|h| (h..n).map(move |k| (h, k)))
+                    .map(|(h, k)| g.get(row, h, row, k))
+                    .collect()
+            } else {
+                (0..n)
+                    .flat_map(|h| (0..n).map(move |k| (h, k)))
+                    .map(|(h, k)| g.get(row, h, col, k))
+                    .collect()
+            };
+            if values.iter().all(|v| *v == 0.0) {
+                continue;
+            }
+            let block = if row == col {
+                NiSubsection {
+                    lb: 5,
+                    ls: 1,
+                    ne: (n + 1) as i64,
+                    nt: values.len() as i64 + (n + 1) as i64,
+                    ek: g.edges.clone(),
+                    fkk: values,
+                    ..Default::default()
+                }
+            } else {
+                NiSubsection {
+                    lb: 6,
+                    ner: (n + 1) as i64,
+                    nec: (n + 1) as i64,
+                    nt: 1 + ((n + 1) * (n + 1)) as i64,
+                    er: g.edges.clone(),
+                    ec: g.edges.clone(),
+                    fkl: values,
+                    ..Default::default()
+                }
+            };
+            let idx = next_block.entry(mt).or_insert(0);
+            rows.push_derived(mt, *idx, mt1, &block);
+            *idx += 1;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use endf::mf::covariance::Mf33Subsection;
+    use std::collections::BTreeSet;
 
     /// MF=3 doubles the point where it jumps, as at a resolved range's upper
     /// limit (ENDF/B-VIII.1 Pb208 elastic goes from 1.8e-8 b to 5.5 b at
@@ -642,6 +670,55 @@ mod tests {
         // A group straddling the jump weights each side by its 1/E share.
         let g = group_average(&sigma, &[1.0, 4.0]);
         assert!((g[0] - 5.0 * 0.5).abs() < 1e-12, "{}", g[0]);
+    }
+
+    /// A pair is written from its lower MT's section, the rows that MT's
+    /// groups, whatever order the group covariance lists the reactions in:
+    /// capture before fission, and capture before an R-matrix range's 51.
+    #[test]
+    fn a_derived_pair_is_written_from_the_lower_mt() {
+        let reactions = vec![2, 102, 18, 51];
+        let (r, groups) = (reactions.len(), 2);
+        let n = r * groups;
+        // Every element distinct, and the matrix symmetric, as a covariance.
+        let relative: Vec<f64> = (0..n * n)
+            .map(|k| {
+                let (i, j) = (k / n, k % n);
+                let (lo, hi) = (i.min(j), i.max(j));
+                1.0e-4 * (1 + lo * n + hi) as f64
+            })
+            .collect();
+        let g = endf::resonance_covariance::GroupCovariance {
+            edges: vec![1.0e-5, 1.0, 1.0e3],
+            reactions,
+            cross_sections: vec![vec![1.0; groups]; r],
+            relative,
+        };
+        let mut rows = CovarianceRows::default();
+        push_group_blocks(&mut rows, &g, &mut BTreeMap::new());
+        assert_eq!(rows.len(), r * (r + 1) / 2);
+        assert!(rows.subsection_idx.iter().all(|&i| i == -1));
+        let index = |mt: i32| g.reactions.iter().position(|&m| m == mt).unwrap();
+        for k in 0..rows.len() {
+            let (mt, mt1) = (rows.mt[k], rows.mt1[k].expect("written"));
+            assert!(mt <= mt1, "({mt}, {mt1}) is written from the higher MT");
+            if mt == mt1 {
+                continue;
+            }
+            assert_eq!(rows.lb[k], Some(6));
+            let (a, b) = (index(mt), index(mt1));
+            let expected: Vec<f64> = (0..groups)
+                .flat_map(|h| (0..groups).map(move |l| (h, l)))
+                .map(|(h, l)| g.get(a, h, b, l))
+                .collect();
+            assert_eq!(rows.fkl[k], expected, "({mt}, {mt1})");
+        }
+        let pairs: BTreeSet<(i32, i32)> = (0..rows.len())
+            .map(|k| (rows.mt[k], rows.mt1[k].unwrap()))
+            .collect();
+        for pair in [(18, 102), (51, 102), (2, 51), (18, 51)] {
+            assert!(pairs.contains(&pair), "{pair:?}");
+        }
     }
 
     /// A lumped reaction's component is its HEAD alone. One that also carries
