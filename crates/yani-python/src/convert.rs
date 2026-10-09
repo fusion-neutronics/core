@@ -186,9 +186,10 @@ pub fn convert_transmutation(
 ///     energy within a tenth, by level index, as the only isomer, or not at
 ///     all) and ``flagged_levels`` (one line per level that was unresolved,
 ///     taken as ground because the decay data has no isomer for its product,
-///     matched only by the looser energy pass, or matched by energy while its
-///     level index pointed at another isomer; every excited level that ends
-///     up at ground is listed), ``partial_sum_mismatches``
+///     matched only by the looser energy pass, matched by energy while its
+///     level index pointed at another isomer, or taken as its product's only
+///     isomer while further from it than either energy pass accepts; every
+///     excited level that ends up at ground is listed), ``partial_sum_mismatches``
 ///     (one line per reaction whose MF=10 partial cross sections do not sum to
 ///     its MF=3 total, or whose MF=9 yields do not sum to one, within two
 ///     percent below 20 MeV), and ``skipped_states`` (one line per production
@@ -352,8 +353,10 @@ pub fn convert_branching(
 ///     Recorded in ``version.json``. ``data_version`` identifies the published
 ///     release and is what a consumer compares a cached copy against.
 /// covariance : bool
-///     Also write ``covariance.arrow``, the MF=33 cross-section covariance.
-///     Off by default: the matrices are large and only an uncertainty
+///     Also write ``covariance.arrow``, the MF=33 cross-section covariance,
+///     and the evaluation's other covariance sections where it has them:
+///     ``angular_covariance.arrow`` (MF=34), ``nubar_covariance.arrow``
+///     (MF=31) and ``spectrum_covariance.arrow`` (MF=35). Off by default: the matrices are large and only an uncertainty
 ///     calculation reads them. Requires ``source_format="endf"`` -- MF=33 is
 ///     not carried through ACER, so asking for it from an ACE table raises.
 ///
@@ -443,8 +446,10 @@ pub fn convert_neutron_xs(
 /// library, data_version, created_utc
 ///     Recorded in ``version.json``.
 /// covariance : bool
-///     Also write ``covariance.arrow``, the MF=33 cross-section covariance.
-///     Off by default: the matrices are large and only an uncertainty
+///     Also write ``covariance.arrow``, the MF=33 cross-section covariance,
+///     and the evaluation's other covariance sections where it has them:
+///     ``angular_covariance.arrow`` (MF=34), ``nubar_covariance.arrow``
+///     (MF=31) and ``spectrum_covariance.arrow`` (MF=35). Off by default: the matrices are large and only an uncertainty
 ///     calculation reads them.
 ///
 /// Returns

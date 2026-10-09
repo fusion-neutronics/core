@@ -426,6 +426,14 @@ def test_a_negative_flux_error_is_rejected():
         _pulse([1e11, -5e11, 1e13])
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_flux_error_is_rejected(bad):
+    """A NaN fails every comparison, so it once passed the non-negative check
+    and was then taken as an exact bin, understating the spread silently."""
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        _pulse([1e11, bad, 1e13])
+
+
 def test_a_flux_error_of_the_wrong_length_is_refused():
     """A sigma that does not line up with the flux is not a sigma for it."""
     iron = _iron()

@@ -81,6 +81,8 @@ fn indium() -> Material {
         fission_photon_release: None,
         covariance: None,
         angular_covariance: None,
+        nubar_covariance: None,
+        spectrum_covariance: None,
         elastic_flat_cache: Default::default(),
         fission_chi_flat_cache: Default::default(),
         delayed_neutron_cache: Default::default(),

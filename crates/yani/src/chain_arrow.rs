@@ -30,7 +30,7 @@ fn section_schema(path: &str) -> Schema {
 use crate::chain::{
     BranchCurve, BranchQuantity, BranchState, BranchTable, ChainNuclide, ChainParts, ChainReaction,
     DecaySource, DecaySourceDistribution, DecaySourceUncertainty, EvaluatedYields, FissionYield,
-    FissionYieldSet, SourceCovariance,
+    FissionYieldSet, SourceCovariance, YieldInterpolation,
 };
 use crate::continuum::Interpolation;
 
@@ -755,18 +755,22 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
             let energies = col::<Float64Array>(&batch, "energy")?;
             let products_col = col::<ListArray>(&batch, "products")?;
             let yields_col = col::<ListArray>(&batch, "yields")?;
+            let laws = optional_col::<Int32Array>(&batch, "interpolation")?;
             for i in 0..batch.num_rows() {
                 let products = list_str(products_col, i)?;
                 let yields = list_f64(yields_col, i)?;
                 let pairs: Vec<(String, f64)> = products.into_iter().zip(yields).collect();
+                let (nuclide, energy) = (nuclides.value(i), energies.value(i));
+                let code = laws.filter(|c| !c.is_null(i)).map(|c| c.value(i));
                 by_nuclide
-                    .entry(nuclides.value(i).to_string())
+                    .entry(nuclide.to_string())
                     .or_default()
                     .push(FissionYield {
-                        energy: energies.value(i),
+                        energy,
                         products: pairs,
                         independent: None,
                         cumulative: None,
+                        interpolation: yield_law("fission_yields.arrow", nuclide, energy, code)?,
                     });
             }
         }
@@ -790,7 +794,74 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
         }
     }
 
+    report_unstated_yield_laws(&chain);
     Ok(chain)
+}
+
+/// A fission-yield law read from a file, `None` where it states none.
+///
+/// Only histogram and linear-linear are read. Another law is refused rather
+/// than read as one of them, which would change the yields between energies
+/// without saying so.
+fn yield_law(
+    origin: &str,
+    nuclide: &str,
+    energy: f64,
+    code: Option<i32>,
+) -> Result<Option<YieldInterpolation>, Box<dyn Error>> {
+    let Some(code) = code else {
+        return Ok(None);
+    };
+    YieldInterpolation::from_endf_code(code)
+        .map(Some)
+        .ok_or_else(|| {
+            let name = Interpolation::from_endf_code(code).map_or("not an ENDF law", |l| l.name());
+            format!(
+                "{origin}: the fission yields of {nuclide} at {energy} eV are reached from the \
+                 energy below by interpolation law {code} ({name}), which this build does not \
+                 read. Fission yields are read histogram (1) or linear-linear (2), the laws \
+                 ENDF/B-VIII.1, JEFF-4.0 and JENDL-5.0 use"
+            )
+            .into()
+        })
+}
+
+/// The nuclides whose yields have an interval with no stated law, sorted.
+///
+/// Those intervals are read linear-linear, which is right for ENDF/B-VIII.1
+/// and wrong for JEFF-4.0, whose yields are histograms. A chain has them when
+/// its `fission_yields.arrow` was written before the `interpolation` column
+/// and no `evaluated_yields.arrow` came with it to take the laws from.
+pub fn unstated_yield_laws(chain: &HashMap<String, ChainNuclide>) -> Vec<String> {
+    let mut names: Vec<String> = chain
+        .iter()
+        .filter(|(_, n)| {
+            n.fission_yields
+                .as_ref()
+                .is_some_and(|s| s.has_unstated_law())
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Say on stderr which nuclides [`unstated_yield_laws`] finds, since reading
+/// their yields linear-linear is a guess the data did not make.
+fn report_unstated_yield_laws(chain: &HashMap<String, ChainNuclide>) {
+    let names = unstated_yield_laws(chain);
+    if !names.is_empty() {
+        eprintln!(
+            "yani: the fission yields of {} nuclide(s) state no interpolation law between \
+             their incident energies, so they are read linear-linear: {}. The chain's \
+             fission_yields.arrow was written before the interpolation column and no \
+             evaluated_yields.arrow came with it. Where the evaluation states a histogram \
+             (JEFF-4.0, and some JENDL-5.0 yields) that changes the yields between energies; \
+             regenerate the chain with a current converter",
+            names.len(),
+            names.join(", ")
+        );
+    }
 }
 
 /// Get-or-create a bare nuclide entry in the chain map.
@@ -1149,6 +1220,9 @@ pub fn parse_chain_parts_from_bytes(
     // fission_yields/fission_yields.arrow -- optional.
     if let Some(bytes) = parts.fission_yields.get("fission_yields.arrow") {
         let mut by_nuclide: HashMap<String, Vec<FissionYield>> = HashMap::new();
+        // Whether the file has an `interpolation` column at all, which one
+        // written before it does not.
+        let mut stated_laws = false;
         for batch in read_section_bytes(
             bytes,
             "fission_yields/fission_yields.arrow",
@@ -1158,23 +1232,50 @@ pub fn parse_chain_parts_from_bytes(
             let energies = col::<Float64Array>(&batch, "energy")?;
             let products_col = col::<ListArray>(&batch, "products")?;
             let yields_col = col::<ListArray>(&batch, "yields")?;
+            let laws = optional_col::<Int32Array>(&batch, "interpolation")?;
+            stated_laws |= laws.is_some();
             for i in 0..batch.num_rows() {
                 let products = list_str(products_col, i)?;
                 let yields = list_f64(yields_col, i)?;
                 let pairs: Vec<(String, f64)> = products.into_iter().zip(yields).collect();
+                let (nuclide, energy) = (nuclides.value(i), energies.value(i));
+                let code = laws.filter(|c| !c.is_null(i)).map(|c| c.value(i));
                 by_nuclide
-                    .entry(nuclides.value(i).to_string())
+                    .entry(nuclide.to_string())
                     .or_default()
                     .push(FissionYield {
-                        energy: energies.value(i),
+                        energy,
                         products: pairs,
                         independent: None,
                         cumulative: None,
+                        interpolation: yield_law(
+                            "fission_yields/fission_yields.arrow",
+                            nuclide,
+                            energy,
+                            code,
+                        )?,
                     });
             }
         }
         if let Some(bytes) = parts.fission_yields.get("evaluated_yields.arrow") {
             attach_evaluated_yields(&mut by_nuclide, bytes)?;
+            // A file written before the column states no law, and the
+            // evaluated yields beside it hold the tape's own. Taken from the
+            // independent yields (MT=454), which the nominal ones are built
+            // from.
+            if !stated_laws {
+                for (nuclide, yields) in &mut by_nuclide {
+                    for y in yields.iter_mut() {
+                        let code = y.independent.as_ref().and_then(|i| i.interpolation);
+                        y.interpolation = yield_law(
+                            "fission_yields/evaluated_yields.arrow",
+                            nuclide,
+                            y.energy,
+                            code,
+                        )?;
+                    }
+                }
+            }
         }
         for (name, yields) in by_nuclide {
             // `FissionYieldSet::new` sorts: the rows accumulate in Arrow row
@@ -1215,6 +1316,8 @@ pub fn parse_chain_parts_from_bytes(
             }
         }
     }
+
+    report_unstated_yield_laws(&chain);
 
     // branching/branching.arrow -- optional isomeric-branching overlay.
     //
@@ -1673,6 +1776,7 @@ pub fn export_chain_parts<P: AsRef<Path>>(
         let mut energy_b = Float64Builder::new();
         let mut products_b = ListBuilder::new(StringBuilder::new());
         let mut yields_b = ListBuilder::new(Float64Builder::new());
+        let mut law_b = Int32Builder::new();
         for name in &names {
             let nuc = &chain[*name];
             if let Some(fy) = &nuc.fission_yields {
@@ -1685,6 +1789,7 @@ pub fn export_chain_parts<P: AsRef<Path>>(
                     }
                     products_b.append(true);
                     yields_b.append(true);
+                    law_b.append_option(entry.interpolation.map(YieldInterpolation::endf_code));
                 }
             }
         }
@@ -1696,6 +1801,7 @@ pub fn export_chain_parts<P: AsRef<Path>>(
                 Arc::new(energy_b.finish()),
                 Arc::new(products_b.finish()),
                 Arc::new(yields_b.finish()),
+                Arc::new(law_b.finish()),
             ],
         )?;
         write_arrow_file(&fy_dir.join("fission_yields.arrow"), schema, batch)?;
@@ -1957,6 +2063,7 @@ pub fn export_chain_arrow<P: AsRef<Path>>(
         let mut energy_b = Float64Builder::new();
         let mut products_b = ListBuilder::new(StringBuilder::new());
         let mut yields_b = ListBuilder::new(Float64Builder::new());
+        let mut law_b = Int32Builder::new();
         for name in &names {
             let nuc = &chain[*name];
             if let Some(fy) = &nuc.fission_yields {
@@ -1969,6 +2076,7 @@ pub fn export_chain_arrow<P: AsRef<Path>>(
                     }
                     products_b.append(true);
                     yields_b.append(true);
+                    law_b.append_option(entry.interpolation.map(YieldInterpolation::endf_code));
                 }
             }
         }
@@ -1985,6 +2093,7 @@ pub fn export_chain_arrow<P: AsRef<Path>>(
                 DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
                 false,
             ),
+            Field::new("interpolation", DataType::Int32, true),
         ]));
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -1993,6 +2102,7 @@ pub fn export_chain_arrow<P: AsRef<Path>>(
                 Arc::new(energy_b.finish()),
                 Arc::new(products_b.finish()),
                 Arc::new(yields_b.finish()),
+                Arc::new(law_b.finish()),
             ],
         )?;
         write_arrow_file(&dir.join("fission_yields.arrow"), schema, batch)?;
@@ -3052,6 +3162,7 @@ mod tests {
                     uncertainties: vec![Some(3.1e-4)],
                     interpolation: Some(2),
                 }),
+                interpolation: (i > 0).then_some(crate::chain::YieldInterpolation::Histogram),
             })
             .collect();
         crate::chain::ChainNuclide {
@@ -3108,6 +3219,7 @@ mod tests {
             for (w, r) in written.iter().zip(read) {
                 assert_eq!(w.energy, r.energy);
                 assert_eq!(w.products, r.products, "{name}: the nominal yields moved");
+                assert_eq!(w.interpolation, r.interpolation, "{name}: the law moved");
                 assert_eq!(w.independent, r.independent, "{name} at {} eV", w.energy);
                 assert_eq!(w.cumulative, r.cumulative, "{name} at {} eV", w.energy);
             }
@@ -3124,6 +3236,110 @@ mod tests {
         assert_eq!(
             u235[0].products,
             back["U235"].fission_yields.as_ref().unwrap().yields[0].products
+        );
+        // The law is the nominal file's own, so it does not leave with them.
+        assert_eq!(
+            u235[1].interpolation,
+            Some(crate::chain::YieldInterpolation::Histogram)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Export a two-energy U235 whose upper energy carries evaluated yields
+    /// stating `evaluated_law`, then rewrite its `fission_yields.arrow` the
+    /// way a converter before the `interpolation` column wrote it.
+    fn chain_without_the_law_column(
+        dir: &std::path::Path,
+        evaluated_law: Option<i32>,
+    ) -> std::path::PathBuf {
+        use crate::chain::{EvaluatedYields, FissionYieldSet};
+        let _ = std::fs::remove_dir_all(dir);
+        let mut u235 = fissioning("U235", &[0.0253, 4.0e5], true);
+        let mut yields = u235.fission_yields.as_ref().unwrap().yields.clone();
+        yields[1].independent = evaluated_law.map(|law| EvaluatedYields {
+            products: vec!["I135".into(), "Cs137".into()],
+            yields: vec![0.07, 0.06],
+            uncertainties: vec![None, None],
+            interpolation: Some(law),
+        });
+        u235.fission_yields = Some(Arc::new(FissionYieldSet::new(yields)));
+        let chain = std::collections::HashMap::from([("U235".to_string(), u235)]);
+        super::export_chain_parts(&chain, dir, None).unwrap();
+
+        let path = dir.join("fission_yields/fission_yields.arrow");
+        let batch = super::read_arrow_file(&path).unwrap().remove(0);
+        let law = batch.schema().index_of("interpolation").unwrap();
+        let columns: Vec<usize> = (0..batch.num_columns()).filter(|&c| c != law).collect();
+        let older = batch.project(&columns).unwrap();
+        super::write_arrow_file(&path, older.schema(), older).unwrap();
+        dir.join("fission_yields")
+    }
+
+    /// A `fission_yields.arrow` written before the column states no law, and
+    /// the evaluated yields beside it supply the tape's. Without them the law
+    /// is unstated, read linear-linear and named by `unstated_yield_laws`.
+    #[test]
+    fn a_file_without_the_law_column_takes_it_from_the_evaluated_yields() {
+        use crate::chain::YieldInterpolation;
+        let dir = std::env::temp_dir().join(format!("yani-law-fallback-{}", std::process::id()));
+        let read = |fy: &std::path::Path| {
+            parse_chain_parts(&dir.join("decay"), None, Some(fy), None)
+                .map(|(chain, _)| chain)
+                .unwrap()
+        };
+
+        let fy = chain_without_the_law_column(&dir, Some(1));
+        let chain = read(&fy);
+        let set = chain["U235"].fission_yields.as_ref().unwrap();
+        assert_eq!(set.laws(), [None, Some(YieldInterpolation::Histogram)]);
+        assert!(super::unstated_yield_laws(&chain).is_empty());
+
+        std::fs::remove_file(fy.join("evaluated_yields.arrow")).unwrap();
+        let chain = read(&fy);
+        let set = chain["U235"].fission_yields.as_ref().unwrap();
+        assert_eq!(set.laws(), [None, None]);
+        assert_eq!(super::unstated_yield_laws(&chain), ["U235"]);
+        // Read linear-linear, as every build before the column did.
+        assert_eq!(set.interp_weights(1.0e5).unwrap()[1].0, 1);
+        assert!(set.interp_weights(1.0e5).unwrap()[1].1 > 0.0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A law other than histogram or linear-linear is refused, from either
+    /// file, rather than read as linear.
+    #[test]
+    fn an_unknown_yield_law_is_refused() {
+        let dir = std::env::temp_dir().join(format!("yani-law-refused-{}", std::process::id()));
+
+        // In the evaluated yields a file without the column falls back to.
+        let fy = chain_without_the_law_column(&dir, Some(5));
+        let err = parse_chain_parts(&dir.join("decay"), None, Some(&fy), None)
+            .map(|_| ())
+            .expect_err("a log-log yield law must be refused")
+            .to_string();
+        assert!(
+            err.contains("U235") && err.contains("law 5 (log-log)"),
+            "got: {err}"
+        );
+
+        // In the nominal file's own column.
+        let path = fy.join("fission_yields.arrow");
+        let batch = super::read_arrow_file(&path).unwrap().remove(0);
+        let mut columns = batch.columns().to_vec();
+        columns.push(Arc::new(arrow_array::Int32Array::from(vec![None, Some(7)])));
+        let schema = Arc::new(super::section_schema("fission_yields/fission_yields.arrow"));
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        super::write_arrow_file(&path, schema, batch).unwrap();
+        let err = parse_chain_parts(&dir.join("decay"), None, Some(&fy), None)
+            .map(|_| ())
+            .expect_err("an unknown yield law must be refused")
+            .to_string();
+        assert!(
+            err.starts_with("fission_yields/fission_yields.arrow")
+                && err.contains("law 7 (not an ENDF law)"),
+            "got: {err}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

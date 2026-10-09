@@ -461,7 +461,12 @@ impl PyModel {
     ///       when its data folder records none) and ``warnings`` (what that
     ///       library's own documentation says is wrong with this covariance,
     ///       with the source; every FENDL-3.2 covariance, and the ENDF/B-VIII.1
-    ///       evaluations its release paper names).
+    ///       evaluations its release paper names), ``nubar_covariance`` (the
+    ///       sorted fission multiplicity MTs, of 452, 455 and 456, the
+    ///       evaluation carries MF=31 covariance for) and
+    ///       ``spectrum_covariance`` (whether it carries MF=35, the covariance
+    ///       of the fission spectrum). Both are reported so the data is
+    ///       visible; neither is sampled yet.
     ///     - ``without_data``: sorted names of nuclides whose data carries no
     ///       covariance at all.
     ///     - ``not_perturbed``: inputs no transport uncertainty run perturbs
@@ -506,6 +511,8 @@ impl PyModel {
             entry.set_item("short_range_blocks", c.short_range_blocks)?;
             entry.set_item("library", &c.library)?;
             entry.set_item("warnings", &c.warnings)?;
+            entry.set_item("nubar_covariance", &c.nubar_covariance)?;
+            entry.set_item("spectrum_covariance", c.spectrum_covariance)?;
             match &c.repair {
                 Some(r) => {
                     let repair = PyDict::new(py);
@@ -1530,7 +1537,10 @@ impl PyModel {
     ///           reaction rates, from their per-history covariance, so the
     ///           correlations between rates scored by the same histories are
     ///           kept. Each rate's own sigma is read with
-    ///           ``get_reaction_rate_uncertainty``;
+    ///           ``get_reaction_rate_uncertainty``. Different materials'
+    ///           tallies are separate estimates and are drawn independently,
+    ///           while the nuclear-data sources below are drawn once per
+    ///           replica and shared by every material;
     ///         - ``"cross_sections"``: the ENDF MF=33 covariance, folded against
     ///           the spectrum the tally actually saw;
     ///         - ``"half_life"``: the decay data's half-life sigmas;

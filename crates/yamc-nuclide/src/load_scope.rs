@@ -60,6 +60,12 @@ pub struct LoadScope {
     /// samples cross sections needs it, so an uncertainty run does not fetch
     /// it. Off by default.
     pub angular_covariance: bool,
+    /// Whether to read `nubar_covariance.arrow` and `spectrum_covariance.arrow`,
+    /// the MF=31 covariance of fission multiplicities and the MF=35
+    /// covariance of the fission spectrum. One axis for both, since only
+    /// fissionable evaluations carry either, and separate from `covariance`
+    /// for the same reason as `angular_covariance`. Off by default.
+    pub fission_covariance: bool,
 }
 
 impl LoadScope {
@@ -76,6 +82,7 @@ impl LoadScope {
             temperatures: None,
             covariance: false,
             angular_covariance: false,
+            fission_covariance: false,
         }
     }
 
@@ -88,6 +95,12 @@ impl LoadScope {
     /// Also read `angular_covariance.arrow`.
     pub fn with_angular_covariance(mut self, angular_covariance: bool) -> Self {
         self.angular_covariance = angular_covariance;
+        self
+    }
+
+    /// Also read `nubar_covariance.arrow` and `spectrum_covariance.arrow`.
+    pub fn with_fission_covariance(mut self, fission_covariance: bool) -> Self {
+        self.fission_covariance = fission_covariance;
         self
     }
 
@@ -134,6 +147,7 @@ impl LoadScope {
         sections_ok
             && (self.covariance || !other.covariance)
             && (self.angular_covariance || !other.angular_covariance)
+            && (self.fission_covariance || !other.fission_covariance)
             && covers_set(self.mts.as_ref(), other.mts.as_ref())
             && covers_set(self.temperatures.as_ref(), other.temperatures.as_ref())
     }
@@ -156,6 +170,7 @@ impl LoadScope {
             temperatures: union_set(self.temperatures.as_ref(), other.temperatures.as_ref()),
             covariance: self.covariance || other.covariance,
             angular_covariance: self.angular_covariance || other.angular_covariance,
+            fission_covariance: self.fission_covariance || other.fission_covariance,
         }
     }
 }

@@ -508,7 +508,11 @@ impl TransmutationResults {
     /// condition `Material::activity` rejects.
     ///
     /// `step` is indexed like [`Self::get_material`]: 0 is the initial
-    /// composition, whose spread is zero because it is an input.
+    /// composition. That composition is an input, so every replica starts from
+    /// the same inventory, but each replica evaluates it with its own sampled
+    /// half-lives, decay energies and decay photon data. Step 0 therefore has
+    /// a spread whenever any of those sources is sampled, and is zero only
+    /// when none of them is.
     pub fn activity_uncertainty(
         &self,
         material_id: u32,
@@ -948,9 +952,12 @@ mod tests {
         }
     }
 
-    /// The initial composition is an input, so every replica starts from it and
-    /// its spread is zero rather than unmeasured. This is the same answer
-    /// `get_nuclide_uncertainty` gives at step 0.
+    /// The initial composition is an input, so every replica starts from it.
+    /// With no decay data sampled (this fixture samples none) every replica
+    /// evaluates to the nominal value, so the spread is zero rather than
+    /// unmeasured, the same answer `get_nuclide_uncertainty` gives at step 0.
+    /// Sampled half-lives, decay energies or photon data would give step 0 a
+    /// spread.
     #[test]
     fn the_initial_composition_has_a_zero_spread_rather_than_no_spread() {
         let results = trading();

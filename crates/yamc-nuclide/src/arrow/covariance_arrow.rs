@@ -24,6 +24,7 @@ use crate::arrow::arrow_helpers::{
 };
 use crate::covariance::{
     AngularCovarianceBlock, BranchingCovarianceBlock, CovarianceBlock, CovarianceData,
+    SpectrumCovarianceBlock,
 };
 
 /// A nullable `int32` column read as the parser's `i64`, with null as zero.
@@ -145,10 +146,66 @@ pub fn read_angular_covariance(
     Ok(Some(blocks))
 }
 
-/// One row's block, in the columns `covariance.arrow` and
-/// `branching_covariance.arrow` share. `what` names the file in errors.
-/// `lumped` is whether a lumped reaction's component row (`kind = "lumped"`)
-/// may appear, which only MF=33 has: MF=40 has no MTL.
+/// Read `nubar_covariance.arrow` (MF=31) from a `{Nuclide}.arrow/`
+/// directory.
+///
+/// The blocks are [`CovarianceBlock`]s because MF=31 is MF=33's format, but
+/// `mt` and `mt1` name fission multiplicities (452, 455, 456), not cross
+/// sections, which is why they are kept apart from `covariance.arrow`'s.
+/// `Ok(None)` when the file is not there, which is every evaluation without
+/// MF=31 and every folder written before the section existed. A file that is
+/// there and cannot be read is an error, as for `covariance.arrow`.
+pub fn read_nubar_covariance(
+    dir: &Path,
+    nuclide: &str,
+) -> Result<Option<Vec<CovarianceBlock>>, Box<dyn Error>> {
+    let path = dir.join("nubar_covariance.arrow");
+    if !crate::storage::exists(&path) {
+        return Ok(None);
+    }
+    let batch = read_arrow_file(&path)?;
+    let what = format!("{nuclide} nubar_covariance.arrow");
+    let blocks = (0..batch.num_rows())
+        .map(|row| block_from_row(&batch, row, &what, false))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(blocks))
+}
+
+/// Read `spectrum_covariance.arrow` (MF=35) from a `{Nuclide}.arrow/`
+/// directory.
+///
+/// `Ok(None)` when the file is not there, as for the other covariance
+/// sections, and an error when it is there and cannot be read.
+pub fn read_spectrum_covariance(
+    dir: &Path,
+) -> Result<Option<Vec<SpectrumCovarianceBlock>>, Box<dyn Error>> {
+    let path = dir.join("spectrum_covariance.arrow");
+    if !crate::storage::exists(&path) {
+        return Ok(None);
+    }
+    let batch = read_arrow_file(&path)?;
+    let int = |col: &str, row: usize| int_or_zero(&batch, col, row) as i32;
+    let blocks = (0..batch.num_rows())
+        .map(|row| SpectrumCovarianceBlock {
+            mt: int("mt", row),
+            block_idx: int("block_idx", row),
+            e1: float_or_zero(&batch, "e1", row),
+            e2: float_or_zero(&batch, "e2", row),
+            ls: int("ls", row),
+            lb: int("lb", row),
+            ne: int("ne", row),
+            ek: try_get_f64_list(&batch, "ek", row),
+            fkk: try_get_f64_list(&batch, "fkk", row),
+        })
+        .collect();
+    Ok(Some(blocks))
+}
+
+/// One row's block, in the columns `covariance.arrow`,
+/// `nubar_covariance.arrow` and `branching_covariance.arrow` share. `what`
+/// names the file in errors. `lumped` is whether a lumped reaction's
+/// component row (`kind = "lumped"`) may appear, which only MF=33 has: MF=40
+/// has no MTL, and the converter writes no MF=31 lumped row.
 fn block_from_row(
     batch: &arrow_array::RecordBatch,
     row: usize,

@@ -420,6 +420,7 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
     let mut energy = Vec::new();
     let mut products: Vec<Vec<String>> = Vec::new();
     let mut yields: Vec<Vec<f64>> = Vec::new();
+    let mut laws: Vec<Option<i32>> = Vec::new();
     let mut alias_nuc = Vec::new();
     let mut alias_parent = Vec::new();
 
@@ -439,8 +440,10 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
         let union: std::collections::BTreeSet<&String> =
             n.yield_data.values().flat_map(|m| m.keys()).collect();
         for (e, by_product) in &n.yield_data {
+            let e = e.parse::<f64>().unwrap_or(0.0);
             nuc.push(n.name.clone());
-            energy.push(e.parse::<f64>().unwrap_or(0.0));
+            energy.push(e);
+            laws.push(nominal_yield_law(n, e)?);
             products.push(union.iter().map(|p| (*p).clone()).collect());
             yields.push(
                 union
@@ -464,6 +467,7 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
             floats(&energy),
             string_lists(&products),
             list_of(&yields),
+            opt_ints(&laws),
         ],
     )?;
     // Both optional files are written only when there is something to say,
@@ -488,6 +492,32 @@ pub fn write_fission_yields(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Err
         )?;
     }
     Ok(())
+}
+
+/// The law the nominal yields at `energy` are reached with from the energy
+/// below: the I of that energy's MT=454 LIST, which the nominal yields are
+/// built from. `None` at the lowest energy, which states LE there instead,
+/// and for yields with no evaluation behind them.
+///
+/// Written as the tape states it. Which laws a reader accepts is the
+/// reader's to decide, as it is for the evaluated yields' copy of the same
+/// code.
+fn nominal_yield_law(n: &endf::chain::Nuclide, energy: f64) -> Result<Option<i32>, Box<dyn Error>> {
+    let Some(evaluation) = &n.yield_evaluation else {
+        return Ok(None);
+    };
+    let law = evaluation
+        .energies
+        .iter()
+        .position(|e| *e == energy)
+        .and_then(|i| {
+            evaluation
+                .independent_interpolation
+                .get(i)
+                .copied()
+                .flatten()
+        });
+    Ok(law.map(i32::try_from).transpose()?)
 }
 
 /// Remove an optional file this run has nothing to write into, if an earlier

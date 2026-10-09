@@ -76,6 +76,33 @@ pub struct AngularCovarianceBlock {
     pub block: NiSubsection,
 }
 
+/// One MF=35 covariance block: the covariance of reaction `mt`'s normalised
+/// secondary energy spectrum for incident energies from `e1` to `e2`.
+///
+/// Read from `spectrum_covariance.arrow`. On the tapes `mt` is 18, the prompt
+/// fission neutron spectrum. Nothing samples these yet; they are carried so
+/// the data is read faithfully and reported.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpectrumCovarianceBlock {
+    /// The reaction whose spectrum this is.
+    pub mt: i32,
+    /// Which block within that section, in tape order.
+    pub block_idx: i32,
+    /// The incident energy range this block applies to.
+    pub e1: f64,
+    pub e2: f64,
+    /// The symmetry flag (always 1) and matrix type (always 7).
+    pub ls: i32,
+    pub lb: i32,
+    /// The number of outgoing energy bin boundaries, `ek.len()`.
+    pub ne: i32,
+    /// The outgoing energy bin boundaries.
+    pub ek: Vec<f64>,
+    /// The `ne - 1` by `ne - 1` symmetric matrix's upper triangle, row by
+    /// row, in the format's packed order.
+    pub fkk: Vec<f64>,
+}
+
 /// One covariance block: the covariance of `mt` with `mt1`, on one grid.
 ///
 /// # Which blocks are this evaluation's own

@@ -286,10 +286,16 @@ impl PyTransmutationResults {
     ///   {nuclide: r2}}``, each contributor's term alone), ``ranking_agrees``
     ///   (whether the first-order top contributor is also the best
     ///   correlated), and ``flagged`` (``residual_share`` above 0.1, or the
-    ///   ranking disagrees: read the contributors with care). ``None`` for a
-    ///   source first order has no terms for (``flux_spectrum``,
-    ///   ``statistical``, ``decay_energy``), and for ``"all"`` when any
-    ///   applied source is one of those; absent for a nuclide with no spread.
+    ///   ranking disagrees: read the contributors with care). First order has
+    ///   terms only for ``cross_sections``, ``half_life`` and
+    ///   ``decay_branching``. ``None`` for every other source
+    ///   (``flux_spectrum``, ``statistical``, ``decay_energy``,
+    ///   ``decay_photon_lines``, ``fission_yield``), and for ``"all"`` when
+    ///   any applied source is one of those; absent for a nuclide with no
+    ///   spread. The default source set applies several of them, so with the
+    ///   defaults ``"all"`` is ``None``: restrict ``DataUncertainty(sources=...)``
+    ///   to ``cross_sections``, ``half_life`` and ``decay_branching`` (or a
+    ///   subset) for an ``"all"`` entry.
     ///
     /// Args:
     ///     material_id: Material ID number.
@@ -549,8 +555,10 @@ impl PyTransmutationResults {
     ///
     /// Args:
     ///     material_id: Material ID number.
-    ///     step: Timestep index (0 = initial composition, whose spread is zero
-    ///         because it is an input rather than a result).
+    ///     step: Timestep index (0 = initial composition). The composition at
+    ///         step 0 is an input, but each replica evaluates it with its own
+    ///         sampled half-lives, so the activity at step 0 has a spread
+    ///         whenever the ``"half_life"`` source is sampled.
     ///     by_nuclide (bool): Return a ``dict[str, Estimate]`` instead of one
     ///         ``Estimate`` for the total. These do not add up to the total in
     ///         quadrature, and are not meant to.
@@ -582,7 +590,9 @@ impl PyTransmutationResults {
     ///
     /// Args:
     ///     material_id: Material ID number.
-    ///     step: Timestep index (0 = initial composition).
+    ///     step: Timestep index (0 = initial composition). As in
+    ///         ``get_activity_uncertainty``, step 0 has a spread whenever the
+    ///         ``"half_life"`` or ``"decay_energy"`` source is sampled.
     ///     by_nuclide (bool): Return a ``dict[str, Estimate]`` of W by nuclide
     ///         instead of one ``Estimate`` for the total.
     ///
@@ -626,7 +636,9 @@ impl PyTransmutationResults {
     ///
     /// Args:
     ///     material_id: Material ID number.
-    ///     step: Timestep index (0 = initial composition).
+    ///     step: Timestep index (0 = initial composition). As in
+    ///         ``get_activity_uncertainty``, step 0 has a spread whenever the
+    ///         ``"half_life"`` or ``"decay_photon_lines"`` source is sampled.
     ///     dose_quantity (str): ``'absorbed-air'`` (Gy/h, the default) or
     ///         ``'effective'`` (Sv/h), as ``Material.contact_dose`` takes them.
     ///     build_up (float): Build-up factor, a plain multiplier on the answer.
@@ -689,7 +701,9 @@ impl PyTransmutationResults {
     ///
     /// Args:
     ///     material_id: Material ID number.
-    ///     step: Timestep index (0 = initial composition).
+    ///     step: Timestep index (0 = initial composition). As in
+    ///         ``get_activity_uncertainty``, step 0 has a spread whenever the
+    ///         ``"half_life"`` or ``"decay_photon_lines"`` source is sampled.
     ///
     /// Returns:
     ///     list[LineEstimate] | None: None if the transmutation was run without
