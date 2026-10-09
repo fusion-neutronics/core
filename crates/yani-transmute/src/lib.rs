@@ -17,6 +17,7 @@ pub mod covariance_fold;
 pub mod covariance_provenance;
 pub mod covariance_sample;
 pub mod d1s_uncertainty;
+pub mod damage;
 mod decay_branching_uncertainty;
 pub mod derived;
 mod fission_yield_uncertainty;
@@ -132,6 +133,7 @@ pub fn load_configured_chain() -> Result<yani::LoadedChain, Box<dyn std::error::
         branch_dir.as_ref().map(|p| p.to_string_lossy()).as_deref(),
     )
 }
+pub use damage::{DamageRequest, DisplacementDamage};
 pub use derived::{Estimate, LineEstimate};
 pub use history_statistics::{HistoryCovariance, RateCovariance, RateLabel, YieldChannelLabel};
 pub use multigroup::{

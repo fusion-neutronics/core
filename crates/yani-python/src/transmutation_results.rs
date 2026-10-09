@@ -1115,6 +1115,178 @@ impl PyTransmutationResults {
         })
     }
 
+    /// Cumulative NRT displacements per atom (dpa) over the schedule.
+    ///
+    /// Present when the transmute call was given
+    /// ``displacement_damage=True``, and ``None`` otherwise. One value per
+    /// state, aligned with ``times``: entry 0 is the initial composition and
+    /// is zero, and entry ``i`` is the total after schedule step ``i - 1``.
+    /// Cooldowns add nothing.
+    ///
+    /// For an element ``X`` it is the damage energy deposited per atom of
+    /// ``X``, from ``X``'s own nuclides, converted with ``X``'s displacement
+    /// threshold energy as ``0.8 * E_damage / (2 * E_d)`` (the NRT model,
+    /// ASTM E521). The material total, with ``element`` omitted, is the
+    /// atom-fraction-weighted sum over elements: each element's recoils are
+    /// treated as slowing down among atoms of their own kind, which reduces to
+    /// the elemental value for a pure element and leaves out energy transfer
+    /// between elements in a cascade. MT=444 is already integrated over the
+    /// recoil spectrum, so the per-recoil threshold steps of the NRT model
+    /// (no displacement below ``E_d``, one up to ``2 * E_d / 0.8``) are not
+    /// applied, which is the standard practice for a damage-energy cross
+    /// section. The ``E_d`` used and its source are in
+    /// ``get_displacement_damage_info``.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     element: Element symbol, e.g. ``"W"``, for that element's dpa;
+    ///         omit it for the material total.
+    ///
+    /// Returns:
+    ///     List of cumulative dpa, one per state, or None if damage was not
+    ///     asked for or the material is not in the results.
+    ///
+    /// Raises:
+    ///     ValueError: If ``element`` has no dpa: it is not in the material
+    ///         on an irradiated step, or it is a transmutation product with no
+    ///         displacement threshold energy.
+    #[pyo3(signature = (material_id, element = None))]
+    fn get_dpa(&self, material_id: u32, element: Option<&str>) -> PyResult<Option<Vec<f64>>> {
+        let Some(damage) = self.inner.get_displacement_damage(material_id) else {
+            return Ok(None);
+        };
+        match element {
+            None => Ok(Some(damage.dpa.clone())),
+            Some(el) => damage
+                .element_dpa
+                .get(el)
+                .cloned()
+                .map(Some)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "no dpa for element {el:?}; elements with dpa: {}",
+                        damage
+                            .element_dpa
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                }),
+        }
+    }
+
+    /// Cumulative damage energy deposited per atom [eV] over the schedule.
+    ///
+    /// The quantity dpa is computed from, kept separate so the displacement
+    /// model can be changed without the data: each nuclide's MT=444
+    /// damage-energy cross section [eV barn] folded against the pulse
+    /// spectrum by the same collapse as the reaction rates, times the flux
+    /// magnitude and the step duration, at each step's composition. Indexed
+    /// as ``get_dpa``. For an element it is per atom of that element; the
+    /// material total weights the elements by atom fraction, so it is per atom
+    /// of the material.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     element: Element symbol for that element's damage energy; omit it
+    ///         for the material total.
+    ///
+    /// Returns:
+    ///     List of cumulative damage energy [eV per atom], one per state, or
+    ///     None if damage was not asked for or the material is not in the
+    ///     results.
+    ///
+    /// Raises:
+    ///     ValueError: If ``element`` is not in the material on an irradiated
+    ///         step.
+    #[pyo3(signature = (material_id, element = None))]
+    fn get_damage_energy(
+        &self,
+        material_id: u32,
+        element: Option<&str>,
+    ) -> PyResult<Option<Vec<f64>>> {
+        let Some(damage) = self.inner.get_displacement_damage(material_id) else {
+            return Ok(None);
+        };
+        match element {
+            None => Ok(Some(damage.damage_energy.clone())),
+            Some(el) => damage
+                .element_damage_energy
+                .get(el)
+                .cloned()
+                .map(Some)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "no damage energy for element {el:?}; elements present: {}",
+                        damage
+                            .element_damage_energy
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                }),
+        }
+    }
+
+    /// What the displacement damage was computed with, and what it could not
+    /// count.
+    ///
+    /// ``None`` unless the transmute call was given
+    /// ``displacement_damage=True``. A dict:
+    ///
+    /// - ``model``: ``"NRT"``, and ``efficiency``: ``0.8``.
+    /// - ``displacement_energies``: per element with dpa,
+    ///   ``{"energy": E_d in eV, "source": ...}``, where ``source`` is
+    ///   ``"ASTM E521"``, ``"OECD-NEA 2015"`` (Table 2.4 of NEA/NSC/DOC(2015)9,
+    ///   for an element ASTM E521 does not cover) or ``"user"``.
+    /// - ``without_damage_energy``: nuclides present on an irradiated step
+    ///   whose data has no MT=444, each with the largest atom fraction it
+    ///   reached there. Their damage energy is not counted, so a large entry
+    ///   here means the totals are low by about that share. Only
+    ///   transmutation products can appear: a nuclide of the starting
+    ///   composition without MT=444 is refused.
+    /// - ``without_displacement_energy``: transmutation-product elements with
+    ///   no displacement threshold energy (hydrogen and helium, typically),
+    ///   each with the largest atom fraction reached. Their damage energy is
+    ///   counted in ``get_damage_energy``; they add nothing to ``get_dpa``.
+    ///   Pass ``displacement_energies`` to include them.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    fn get_displacement_damage_info<'py>(
+        &self,
+        py: Python<'py>,
+        material_id: u32,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(damage) = self.inner.get_displacement_damage(material_id) else {
+            return Ok(None);
+        };
+        let d = PyDict::new(py);
+        d.set_item("model", "NRT")?;
+        d.set_item("efficiency", yamc_element::displacement::NRT_EFFICIENCY)?;
+        let energies = PyDict::new(py);
+        for (el, ed) in &damage.displacement_energies {
+            let entry = PyDict::new(py);
+            entry.set_item("energy", ed.energy_ev)?;
+            entry.set_item("source", ed.source.label())?;
+            energies.set_item(el, entry)?;
+        }
+        d.set_item("displacement_energies", energies)?;
+        let without = PyDict::new(py);
+        for (name, fraction) in &damage.without_damage_energy {
+            without.set_item(name, fraction)?;
+        }
+        d.set_item("without_damage_energy", without)?;
+        let without = PyDict::new(py);
+        for (el, fraction) in &damage.without_displacement_energy {
+            without.set_item(el, fraction)?;
+        }
+        d.set_item("without_displacement_energy", without)?;
+        Ok(Some(d))
+    }
+
     /// Per-edge reaction rates the solve drove one step with.
     ///
     /// The rate of each individual production edge, which the solve computes to

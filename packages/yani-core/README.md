@@ -31,6 +31,25 @@ print(final.contact_dose(), "Gy/h")
 print(final.clearance_index("UK_EPR16_out_of_scope").index)
 ```
 
+Displacement damage comes from the same call: pass `displacement_damage=True`
+for the damage energy per atom and NRT dpa over the schedule, per element and
+for the material.
+
+```python
+tungsten = yani.Material({"W": 1.0}, density=19.3)
+results = tungsten.transmute(schedule=schedule, displacement_damage=True)
+results.get_dpa(0)  # cumulative, one value per state
+results.get_dpa(0, element="W")
+results.get_damage_energy(0)  # eV per atom, the model-free input
+results.get_displacement_damage_info(0)["displacement_energies"]
+```
+
+The displacement threshold energies default to ASTM E521, and to the OECD-NEA
+2015 report "Primary Radiation Damage in Materials" (NEA/NSC/DOC(2015)9) for
+elements E521 does not cover; override any of them with
+`displacement_energies={"Fe": 40.0}`. An element in neither source must be
+given, and is never guessed.
+
 ## Relationship to yamc
 
 `yamc` is a superset: it ships
@@ -56,6 +75,8 @@ stack; pick `yamc` when the spectrum should come from a transport solve.
   intensities, the material composition) are held at nominal, and
   `get_data_uncertainty_info` lists every one it held. There are no
   first-order sensitivity coefficients.
+- Damage energy and dpa carry no uncertainty yet: MT=444 has no covariance,
+  and the flux and composition replicas are not folded into it.
 - Pathways are reported per product (`get_production_routes`), but there is no
   automatic pathway search across the whole inventory.
 - No ingestion or inhalation dose.

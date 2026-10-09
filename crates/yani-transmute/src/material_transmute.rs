@@ -5,6 +5,7 @@ use crate::branching_rule::{
 };
 use crate::covariance_fold::{cell_fields, fold_rate_covariance, reachable_mts, FoldSpectrum};
 use crate::covariance_sample::Sampler;
+use crate::damage::DamageRequest;
 use crate::multigroup::{collapse_with_lists, fold_list, scale_rates, Collapsed};
 use crate::results::TransmutationResults;
 use crate::self_shielding::{Shielding, ShieldingInfo};
@@ -196,6 +197,7 @@ pub fn transmute_material_shielded(
         branch,
         parts,
         uncertainty,
+        None,
     )
 }
 
@@ -233,12 +235,19 @@ pub struct TransmuteCase<'a> {
 /// Errors if two materials share an id, since the result could not tell them
 /// apart, or if the timelines differ. A single material with no id answers to
 /// 0, as [`transmute_material`] always has.
+///
+/// `damage` asks for each material's displacement damage, damage energy per
+/// atom and NRT dpa (see [`crate::damage`]), in
+/// [`TransmutationResults::displacement_damage`]. It is computed after the
+/// solve from the states it produced, and MT=444 is loaded only then, so
+/// `None` leaves the solve and the data it loads exactly as they were.
 pub fn transmute_materials(
     mut cases: Vec<TransmuteCase<'_>>,
     chain: Arc<HashMap<String, yani::ChainNuclide>>,
     branch: &BranchTable,
     parts: yani::ChainParts,
     uncertainty: Option<&DataUncertainty>,
+    damage: Option<&DamageRequest>,
 ) -> Result<TransmutationResults, Box<dyn std::error::Error>> {
     if cases.is_empty() {
         return Err("no materials to transmute".into());
@@ -272,6 +281,13 @@ pub fn transmute_materials(
 
     for (c, case) in cases.iter().enumerate() {
         validate_case(&case.spectra, &case.steps).map_err(|e| named(c, ids[c], e))?;
+        // Before anything is loaded or solved: an element with no displacement
+        // threshold energy is refused, not discovered after the solve.
+        if let Some(request) = damage {
+            request
+                .check_composition(case.material)
+                .map_err(|e| named(c, ids[c], e.into()))?;
+        }
     }
     for (c, case) in cases.iter().enumerate().skip(1) {
         check_same_timeline(&cases[0].steps, &case.steps)
@@ -462,6 +478,29 @@ pub fn transmute_materials(
                 shielding: case.shielding,
             },
         );
+    }
+    // Displacement damage, from the states the solve produced. MT=444 is
+    // loaded into each material only here, so a solve that did not ask for it
+    // neither fetches it nor changes.
+    if let Some(request) = damage {
+        for (c, case) in cases.iter_mut().enumerate() {
+            let states = &results.materials[&ids[c]];
+            crate::damage::ensure_damage_data_loaded(case.material, states)
+                .map_err(|e| named(c, ids[c], e))?;
+            // The composition the collapse read, with the widened data.
+            let mut folded = initial[c].clone();
+            folded.nuclide_data = case.material.nuclide_data.clone();
+            let damage = crate::damage::displacement_damage(
+                &folded,
+                states,
+                &case.spectra,
+                &case.steps,
+                case.shielding.as_ref(),
+                request,
+            )
+            .map_err(|e| named(c, ids[c], e))?;
+            results.displacement_damage.insert(ids[c], damage);
+        }
     }
     results.collapse_reuse = Some(crate::results::CollapseReuse {
         performed: per_spectrum.len(),

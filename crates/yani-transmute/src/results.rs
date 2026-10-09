@@ -104,6 +104,13 @@ pub struct TransmutationResults {
     /// parent's removal. Indexed as `timesteps`; a decay-only step holds an
     /// empty report. Steps sharing a spectrum share its report.
     pub branching_report: HashMap<u32, Vec<std::sync::Arc<crate::branching_rule::BranchingReport>>>,
+
+    /// Material ID -> its displacement damage over the schedule, when a
+    /// spectrum solve was asked for it with a [`crate::damage::DamageRequest`].
+    ///
+    /// Empty otherwise, and always for a transport-coupled solve, whose
+    /// damage-energy tally is not converted here.
+    pub displacement_damage: HashMap<u32, crate::damage::DisplacementDamage>,
 }
 
 /// How much of a spectrum solve's collapse work was shared.
@@ -269,6 +276,7 @@ impl TransmutationResults {
             collapse_reuse: None,
             rate_covariance: HashMap::new(),
             branching_report: HashMap::new(),
+            displacement_damage: HashMap::new(),
         }
     }
 
@@ -290,6 +298,14 @@ impl TransmutationResults {
     /// The rate each step drove `material_id` at, indexed as `timesteps`.
     pub fn get_source_rates(&self, material_id: u32) -> Option<&[f64]> {
         self.source_rates.get(&material_id).map(|r| r.as_slice())
+    }
+
+    /// `material_id`'s displacement damage, when it was asked for.
+    pub fn get_displacement_damage(
+        &self,
+        material_id: u32,
+    ) -> Option<&crate::damage::DisplacementDamage> {
+        self.displacement_damage.get(&material_id)
     }
 
     /// Add material state after a timestep.

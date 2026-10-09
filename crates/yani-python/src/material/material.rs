@@ -1336,6 +1336,27 @@ impl PyMaterial {
     ///         size. It is an upper bound rather than a safe default, which is
     ///         why there is no default here at all.
     ///
+    ///     displacement_damage (bool): Also compute displacement damage over the
+    ///         schedule: the damage energy deposited per atom (eV) and NRT
+    ///         displacements per atom, per element and for the material, read
+    ///         with ``get_dpa``, ``get_damage_energy`` and
+    ///         ``get_displacement_damage_info``. Each nuclide's MT=444
+    ///         damage-energy cross section is folded against the pulse spectrum
+    ///         by the same collapse as the reaction rates (self-shielding
+    ///         included), using each step's composition and flux; cooldowns
+    ///         add nothing. dpa is ``0.8 * E_damage / (2 * E_d)`` per element,
+    ///         and the material total weights the elements by atom fraction.
+    ///         Off by default, and then MT=444 is not fetched and nothing about
+    ///         the solve changes. No uncertainty is given for it yet.
+    ///
+    ///     displacement_energies (dict[str, float], optional): Displacement
+    ///         threshold energies ``E_d`` in eV by element symbol, e.g.
+    ///         ``{"Fe": 40.0}``, replacing the defaults (ASTM E521, and the
+    ///         OECD-NEA 2015 report "Primary Radiation Damage in Materials"
+    ///         for elements it does not cover). An element of the material in
+    ///         neither source must be given here; it is never guessed. Needs
+    ///         ``displacement_damage=True``.
+    ///
     /// Raises:
     ///     ValueError: If an irradiation pulse lacks a NeutronSource, its energy
     ///         is not a Histogram, or on other invalid inputs.
@@ -1352,7 +1373,8 @@ impl PyMaterial {
     ///     >>> # reaction: the sum is sigma * phi * N and the ratio is f_m
     ///     >>> results.get_reaction_rates(iron.id or 0, 0)["W186"]["(n,2n)"]
     ///     [('W185', 1.1e-08), ('W185_m1', 4.6e-07)]
-    #[pyo3(signature = (schedule, data_uncertainty = None, self_shielding_chord = None, self_shielding_shape = None))]
+    #[pyo3(signature = (schedule, data_uncertainty = None, self_shielding_chord = None, self_shielding_shape = None, displacement_damage = false, displacement_energies = None))]
+    #[allow(clippy::too_many_arguments)]
     fn transmute(
         &mut self,
         py: Python<'_>,
@@ -1360,7 +1382,10 @@ impl PyMaterial {
         data_uncertainty: Option<crate::data_uncertainty::PyDataUncertainty>,
         self_shielding_chord: Option<f64>,
         self_shielding_shape: Option<Bound<'_, PyAny>>,
+        displacement_damage: bool,
+        displacement_energies: Option<HashMap<String, f64>>,
     ) -> PyResult<crate::transmutation_results::PyTransmutationResults> {
+        let damage = damage_request(displacement_damage, displacement_energies)?;
         let sched = schedule
             .cast::<crate::distribution::PyPulseSchedule>()
             .map_err(|_| {
@@ -1390,15 +1415,18 @@ impl PyMaterial {
         let uncertainty = data_uncertainty.map(|u| u.inner);
         let material = &mut self.internal;
         let results = py.detach(move || {
-            yani_transmute::transmute_material_shielded(
-                material,
-                &spectra,
-                &steps,
+            yani_transmute::transmute_materials(
+                vec![yani_transmute::TransmuteCase {
+                    material,
+                    spectra,
+                    steps,
+                    shielding,
+                }],
                 loaded.chain,
                 &loaded.branch,
                 loaded.parts,
                 uncertainty.as_ref(),
-                shielding.as_ref(),
+                damage.as_ref(),
             )
             // `Box<dyn Error>` is not `Send`, so it cannot come back out
             // through `detach`; the message is what the caller sees anyway.
@@ -1475,6 +1503,27 @@ impl PyMaterial {
         let result = Material::mix_materials(&mat_refs, &fractions, &fraction_type, name, id)
             .map_err(PyValueError::new_err)?;
         Ok(PyMaterial { internal: result })
+    }
+}
+
+/// The displacement damage request, validated at the boundary.
+///
+/// Threshold energies without the switch are refused rather than taken to turn
+/// it on: a run that silently computed nothing with them would read as one
+/// that had used them.
+pub(crate) fn damage_request(
+    displacement_damage: bool,
+    displacement_energies: Option<HashMap<String, f64>>,
+) -> PyResult<Option<yani_transmute::DamageRequest>> {
+    match (displacement_damage, displacement_energies) {
+        (false, None) => Ok(None),
+        (false, Some(_)) => Err(PyValueError::new_err(
+            "displacement_energies was given without displacement_damage=True; set it to \
+             compute displacement damage with them",
+        )),
+        (true, energies) => yani_transmute::DamageRequest::new(energies.unwrap_or_default())
+            .map(Some)
+            .map_err(PyValueError::new_err),
     }
 }
 
