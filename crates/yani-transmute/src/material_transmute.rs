@@ -3156,7 +3156,8 @@ pub(crate) fn fold_branching_into_chain(
             };
             refusals.push(format!(
                 "{} {}: {:.3}% of {}'s neutron removal rate is production the evaluation gives \
-                 above the reaction's transport total, or as a negative value{excess}",
+                 above the reaction's transport total, as a negative value, or as more of a \
+                 product than the target's nucleons allow{excess}",
                 channel.parent,
                 channel.reaction,
                 100.0 * channel.clipped_share,
@@ -4523,6 +4524,190 @@ mod tests {
         );
     }
 
+    /// In115 with an `(n,X)` reaction as the reactions subsection carries
+    /// one: two residuals and two light particles, each row NaN until folded.
+    fn anything_chain() -> Arc<HashMap<String, ChainNuclide>> {
+        let row = |t: &str| ChainReaction {
+            branching: f64::NAN,
+            ..edge(ANYTHING, t, 0.0)
+        };
+        Arc::new(HashMap::from([(
+            "In115".to_string(),
+            nuclide_entry(
+                "In115",
+                vec![
+                    edge("(n,2n)", "In114", 1.0),
+                    row("Ag112"),
+                    row("Ag111"),
+                    row("He4"),
+                    row("H1"),
+                ],
+            ),
+        )]))
+    }
+
+    /// The `(n,X)` curves as the reader builds them: residuals as shares
+    /// (MF=6 yields of a complete list), particles as multiplicities.
+    fn anything_branch(ag111: f64) -> BranchTable {
+        let e = [1.0e7, 2.0e7];
+        let mut residual = |t: &str, v: f64| {
+            let mut c = curve(t, BranchQuantity::Yield, &e, &[v, v], true);
+            c.states = facts(5, 0, true);
+            c
+        };
+        let particle = |t: &str, v: &[f64]| {
+            let mut c = curve(t, BranchQuantity::Multiplicity, &e, v, true);
+            c.states = facts(5, 0, true);
+            c
+        };
+        indium_branch(
+            ANYTHING,
+            vec![
+                residual("Ag112", 0.75),
+                residual("Ag111", ag111),
+                particle("He4", &[0.5, 1.5]),
+                particle("H1", &[1.0, 1.0]),
+            ],
+        )
+    }
+
+    fn anything_of(chain: &HashMap<String, ChainNuclide>, target: &str) -> f64 {
+        branching_of(chain, ANYTHING, target)
+    }
+
+    /// MT=5 rising from 1 to 3 b over one group: the residuals split it as
+    /// their shares, 0.75 and 0.25, and each light particle takes its
+    /// multiplicity folded against MT=5, `int m sigma / int sigma`: He4's
+    /// rises from 0.5 to 1.5 with MT=5 and folds to 13/12, H1's is a flat 1.
+    /// The parent is removed once, at the MT=5 rate, and nothing is left
+    /// unmodelled.
+    #[test]
+    fn an_anything_reaction_folds_residuals_as_shares_and_particles_as_multiplicities() {
+        let material = indium(vec![
+            reaction(16, vec![1.0e7, 2.0e7], vec![1.0, 1.0]),
+            reaction(5, vec![1.0e7, 2.0e7], vec![1.0, 3.0]),
+        ]);
+        let (rates, folded, report) = fold(
+            &material,
+            &anything_chain(),
+            &anything_branch(0.25),
+            &one_group(1.0e7, 2.0e7),
+        )
+        .unwrap();
+        assert!((anything_of(&folded, "Ag112") - 0.75).abs() < 1e-12);
+        assert!((anything_of(&folded, "Ag111") - 0.25).abs() < 1e-12);
+        assert!((anything_of(&folded, "He4") - 13.0 / 12.0).abs() < 1e-12);
+        assert!((anything_of(&folded, "H1") - 1.0).abs() < 1e-12);
+        assert!((rates["In115"][ANYTHING] - 2.0e-24).abs() < 1e-36);
+        assert!(report.unmodelled_mt5.is_empty(), "{report:?}");
+        let channels: Vec<(&str, i32, &str)> = report
+            .channels
+            .iter()
+            .filter(|c| c.reaction == ANYTHING)
+            .map(|c| (c.representation.as_str(), c.file, c.denominator.as_str()))
+            .collect();
+        assert_eq!(
+            channels,
+            [
+                ("share", 6, "sum of the listed yields"),
+                ("multiplicity", 6, "transport total")
+            ]
+        );
+
+        // Through the matrix: the gains are the shares and multiplicities of
+        // one removal.
+        let names: Vec<String> = ["Ag111", "Ag112", "H1", "He4", "In114", "In115"]
+            .map(String::from)
+            .to_vec();
+        let (triplets, _) = yani::build_matrix_triplets(
+            &folded,
+            &names,
+            &rates,
+            &Default::default(),
+            Default::default(),
+        )
+        .unwrap();
+        let at = |row: &str| -> f64 {
+            let r = names.iter().position(|n| n == row).unwrap();
+            triplets
+                .iter()
+                .filter(|t| t.0 == r && t.1 == 5)
+                .map(|t| t.2)
+                .sum()
+        };
+        assert!((at("In115") + 3.0e-24).abs() < 1e-36);
+        assert!((at("Ag112") - 1.5e-24).abs() < 1e-36);
+        assert!((at("He4") - 2.0e-24 * 13.0 / 12.0).abs() < 1e-36);
+    }
+
+    /// A residual multiplicity above what the target's nucleons allow (one
+    /// Ag111 per reaction on In115) is impossible, as ENDF/B-VIII.1's Cr
+    /// isotopes' V and Ti "multiplicities" of 400 are: clipped to the bound
+    /// and reported, and refused when MT=5 carries the parent's removal.
+    #[test]
+    fn an_impossible_multiplicity_is_clipped_and_refused_by_size() {
+        let branch = anything_branch(400.0);
+        let only = indium(vec![reaction(5, vec![1.0e7, 2.0e7], vec![1.0, 3.0])]);
+        let err = fold(&only, &anything_chain(), &branch, &one_group(1.0e7, 2.0e7)).unwrap_err();
+        assert!(err.contains("In115 (n,X)"), "{err}");
+        assert!(err.contains("nucleons allow"), "{err}");
+
+        let beside = indium(vec![
+            reaction(16, vec![1.0e7, 2.0e7], vec![1.0e5, 1.0e5]),
+            reaction(5, vec![1.0e7, 2.0e7], vec![1.0, 3.0]),
+        ]);
+        let (_, folded, report) = fold(
+            &beside,
+            &anything_chain(),
+            &branch,
+            &one_group(1.0e7, 2.0e7),
+        )
+        .unwrap();
+        // Capped at one, the split is 1 : 0.75.
+        assert!((anything_of(&folded, "Ag111") - 1.0 / 1.75).abs() < 1e-12);
+        let channel = report
+            .channels
+            .iter()
+            .find(|c| c.reaction == ANYTHING && c.representation == "share")
+            .unwrap();
+        // 399 of 400.75 moved at every energy, over a 2 b mean MT=5.
+        let want = 399.0 / 400.75 * 2.0 / (1.0e5 + 2.0);
+        assert!(
+            (channel.clipped_share - want).abs() < 1e-9 * want,
+            "{}",
+            channel.clipped_share
+        );
+    }
+
+    /// The coupled path takes the tallied productions and makes the same
+    /// split the fold does, the particles' kept apart from the residuals'.
+    #[test]
+    fn coupled_anything_partials_set_shares_and_multiplicities() {
+        let mut partials: PartialRates = HashMap::new();
+        partials.entry("In115".to_string()).or_default().insert(
+            ANYTHING.to_string(),
+            vec![
+                ("Ag112".to_string(), 1.5),
+                ("Ag111".to_string(), 0.5),
+                ("He4".to_string(), 13.0 / 6.0),
+                ("H1".to_string(), 2.0),
+            ],
+        );
+        let mut rates: ReactionRates = HashMap::from([(
+            "In115".to_string(),
+            HashMap::from([(ANYTHING.to_string(), 2.0)]),
+        )]);
+        let folded = coupled(
+            &anything_chain(),
+            &anything_branch(0.25),
+            &partials,
+            &mut rates,
+        );
+        assert!((anything_of(&folded, "Ag112") - 0.75).abs() < 1e-12);
+        assert!((anything_of(&folded, "He4") - 13.0 / 12.0).abs() < 1e-12);
+        assert!((anything_of(&folded, "H1") - 1.0).abs() < 1e-12);
+    }
+
     /// MT=5 on a chain that carries no `(n,X)` reaction for the parent is
     /// measured against its removal: at 30 MeV it is half of In115's here,
     /// all of the material, so the run is refused and says why; a D-T
@@ -4542,7 +4727,7 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("In115"), "{err}");
         assert!(err.contains("no (n,X) reaction"), "{err}");
-        assert!(err.contains("50.000% of its own"), "{err}");
+        assert!(err.contains("50.00% of its own"), "{err}");
 
         let (_, _, report) = fold(
             &material,

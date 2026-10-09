@@ -30,8 +30,8 @@
 //!
 //! * `not_conserving`: where the products, neutrons included and weighted by
 //!   multiplicity, do not give back the charge and mass number of the target
-//!   plus the neutron, by more than [`CONSERVATION_TOLERANCE`] at some energy
-//!   where MT=5 is open. ENDF/B-VIII.1's Cr50 to Cr54 are the large ones: their
+//!   plus the neutron, by more than [`CONSERVATION_TOLERANCE`] averaged over
+//!   MT=5. ENDF/B-VIII.1's Cr50 to Cr54 are the large ones: their
 //!   V51 (Cr52) and similar "multiplicities" run to 1e9, a cross section in
 //!   barns divided by a vanishing MT=5. Every parent's worst imbalance is
 //!   under `conservation`, defects or not, so the check is whole.
@@ -77,12 +77,12 @@ use crate::branching::{linearize, merge_duplicates, BranchingRow, DEFAULT_LINEAR
 pub const ANYTHING: &str = "(n,X)";
 
 /// How far the products of MT=5 may sit from conserving the target's charge
-/// and mass number, at some energy where MT=5 is open, before the evaluation
-/// is listed as not conserving: as a fraction of the target's Z, and of its
-/// A plus one. The published evaluations that conserve at all do so to a few
-/// parts in a thousand (ENDF/B-VIII.1 Fe54 3.8e-3, Fe56 4.5e-3, each at an
-/// energy where MT=5 is a few percent of its peak), so this lists the ones
-/// that do not without burying them under rounding.
+/// and mass number, averaged over MT=5, before the evaluation is listed as
+/// not conserving: as a fraction of the target's Z, and of its A plus one.
+/// The published evaluations that conserve at all do so to a few parts in a
+/// thousand (ENDF/B-VIII.1 Fe54 3.8e-3 and Fe56 4.5e-3 at their worst where
+/// MT=5 is a percent of its peak or more), so this lists the ones that do not
+/// without burying them under rounding.
 pub const CONSERVATION_TOLERANCE: f64 = 1.0e-2;
 
 /// Below this share of the target's charge, carried by the products of a list
@@ -318,15 +318,17 @@ fn charge_share(evaluation: &Evaluation, products: &[Product], emitted: &[&Produ
     }) / evaluation.z as f64
 }
 
-/// The worst imbalance of charge and mass number over the energies where
-/// MT=5 is open, both relative, with where each is worst, and the residuals'
-/// summed multiplicity there.
+/// The imbalance of charge and mass number, both relative: the worst at any
+/// energy where MT=5 is open, with where it is and the residuals' summed
+/// multiplicity there, and the MT=5-weighted average of each over the whole
+/// range, which is what [`CONSERVATION_TOLERANCE`] is held against. The worst
+/// alone would list nearly every evaluation for a point at threshold where
+/// MT=5 is a vanishing 1e-7 b and the yields are still zero (ENDF/B-VIII.1
+/// Fe54 at 5.5 MeV); the average weighs each energy by what MT=5 carries
+/// there.
 fn conservation(evaluation: &Evaluation, products: &[Product]) -> serde_json::Value {
     let (z_t, a_t) = (evaluation.z as f64, (evaluation.a + 1) as f64);
-    let mut worst_z = (0.0f64, f64::NAN, f64::NAN);
-    let mut worst_a = (0.0f64, f64::NAN);
-    let mut worst_below_20 = 0.0f64;
-    for e in open_grid(evaluation, products) {
+    let imbalance = |e: f64| -> (f64, f64, f64) {
         let (mut z, mut a, mut residuals) = (0.0, 0.0, 0.0);
         for p in products {
             let m = curve_at(&p.energy, &p.multiplicity, e);
@@ -336,16 +338,17 @@ fn conservation(evaluation: &Evaluation, products: &[Product]) -> serde_json::Va
                 residuals += m;
             }
         }
-        let dz = (z_t - z) / z_t;
-        let da = (a_t - a) / a_t;
+        ((z_t - z) / z_t, (a_t - a) / a_t, residuals)
+    };
+    let mut worst_z = (0.0f64, f64::NAN, f64::NAN);
+    let mut worst_a = (0.0f64, f64::NAN);
+    for e in open_grid(evaluation, products) {
+        let (dz, da, residuals) = imbalance(e);
         if dz.abs() > worst_z.0.abs() || worst_z.1.is_nan() {
             worst_z = (dz, e, residuals);
         }
         if da.abs() > worst_a.0.abs() || worst_a.1.is_nan() {
             worst_a = (da, e);
-        }
-        if e <= 2.0e7 {
-            worst_below_20 = worst_below_20.max(dz.abs()).max(da.abs());
         }
     }
     serde_json::json!({
@@ -354,7 +357,8 @@ fn conservation(evaluation: &Evaluation, products: &[Product]) -> serde_json::Va
         "residual_multiplicity_there": worst_z.2,
         "mass_number": worst_a.0,
         "mass_number_at_eV": worst_a.1,
-        "worst_at_or_below_20_MeV": worst_below_20,
+        "charge_weighted": mt5_average(evaluation, products, |e| imbalance(e).0.abs()),
+        "mass_number_weighted": mt5_average(evaluation, products, |e| imbalance(e).1.abs()),
     })
 }
 
@@ -395,6 +399,23 @@ pub struct DecayIndex {
 }
 
 impl DecayIndex {
+    /// A decay library given by its nuclides, `(name, stable, half-life [s])`,
+    /// for a caller that holds the library some other way than as
+    /// evaluations (a test, or a chain already read).
+    pub fn from_library(entries: impl IntoIterator<Item = (String, bool, f64)>) -> DecayIndex {
+        let by_name: BTreeMap<String, (bool, f64)> = entries
+            .into_iter()
+            .map(|(name, stable, t)| (name, (stable, t)))
+            .collect();
+        DecayIndex {
+            names: by_name.keys().cloned().collect(),
+            library: by_name
+                .into_iter()
+                .map(|(name, (stable, t))| (name, stable, t))
+                .collect(),
+        }
+    }
+
     /// Index the decay evaluations a chain is built from, skipping the
     /// neutron's own as `Chain::from_endf` does.
     pub fn new(decay: &[Material]) -> DecayIndex {
@@ -478,7 +499,8 @@ pub fn name_all(
 
         let balance = conservation(evaluation, products);
         let worst = |key: &str| balance[key].as_f64().unwrap_or(0.0).abs();
-        if worst("charge") > CONSERVATION_TOLERANCE || worst("mass_number") > CONSERVATION_TOLERANCE
+        if worst("charge_weighted") > CONSERVATION_TOLERANCE
+            || worst("mass_number_weighted") > CONSERVATION_TOLERANCE
         {
             let mut entry = balance.clone();
             entry["nuclide"] = serde_json::json!(parent);

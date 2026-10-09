@@ -1223,6 +1223,81 @@ mod tests {
 
     /// MT=5 is reported as its share of the parent's removal, the MT=5 rate
     /// counted in that removal.
+    fn parent_with(rows: Vec<(&str, Option<&str>)>) -> HashMap<String, yani::ChainNuclide> {
+        let reactions = rows
+            .into_iter()
+            .map(|(kind, target)| yani::ChainReaction {
+                kind: kind.to_string(),
+                target: target.map(str::to_string),
+                branching: 0.0,
+                q_value: None,
+                branching_uncertainty: None,
+                evaluated_branching: None,
+                multiplicity: None,
+            })
+            .collect();
+        HashMap::from([(
+            "Fe58".to_string(),
+            yani::ChainNuclide {
+                name: "Fe58".to_string(),
+                half_life: None,
+                half_life_uncertainty: None,
+                decay_energy: 0.0,
+                decay_energy_uncertainty: None,
+                decay_energy_components: Default::default(),
+                reactions,
+                decays: Vec::new(),
+                fission_yields: None,
+                sources: Vec::new(),
+            },
+        )])
+    }
+
+    /// A parent whose `(n,X)` gives its residuals is not listed; one whose
+    /// `(n,X)` says no residual is given is, with that reason, its MT=5 rate
+    /// counted once in its removal.
+    #[test]
+    fn only_mt5_without_residuals_is_listed() {
+        let rates: yani::ReactionRates = HashMap::from([(
+            "Fe58".to_string(),
+            HashMap::from([("(n,p)".to_string(), 3.0), (ANYTHING.to_string(), 1.0)]),
+        )]);
+        let mt5 = HashMap::from([("Fe58".to_string(), 1.0)]);
+        let modelled = parent_with(vec![(ANYTHING, Some("Mn57")), (ANYTHING, Some("H1"))]);
+        assert!(measure_unmodelled_mt5(&modelled, &rates, &mt5).is_empty());
+        let missing = parent_with(vec![(ANYTHING, Some("H1")), (ANYTHING, None)]);
+        let report = measure_unmodelled_mt5(&missing, &rates, &mt5);
+        assert_eq!(report[0].nuclide, "Fe58");
+        assert!((report[0].share - 0.25).abs() < 1e-15);
+        assert!(report[0].reason.contains("not its residuals"), "{report:?}");
+    }
+
+    /// The guard weighs by the material: a parent losing a quarter of its own
+    /// removal refuses a material made of it, and passes one in which it is a
+    /// trace, as natural iron's Fe58 is on ENDF/B-VIII.1.
+    #[test]
+    fn unmodelled_mt5_is_refused_by_its_share_of_the_material() {
+        let rates: yani::ReactionRates = HashMap::from([
+            (
+                "Fe58".to_string(),
+                HashMap::from([("(n,p)".to_string(), 3.0)]),
+            ),
+            (
+                "Fe56".to_string(),
+                HashMap::from([("(n,p)".to_string(), 4.0)]),
+            ),
+        ]);
+        let mt5 = HashMap::from([("Fe58".to_string(), 1.0)]);
+        let report = measure_unmodelled_mt5(&HashMap::new(), &rates, &mt5);
+        let library = |_: &str| Some("endf-b8.1".to_string());
+        let pure = HashMap::from([("Fe58".to_string(), 1.0)]);
+        let err = refuse_unmodelled_mt5(&report, &rates, &mt5, &pure, &library).unwrap_err();
+        assert!(err.contains("Fe58 (endf-b8.1): 25.000%"), "{err}");
+        let natural = HashMap::from([("Fe58".to_string(), 3.0e-4), ("Fe56".to_string(), 1.0)]);
+        assert!(refuse_unmodelled_mt5(&report, &rates, &mt5, &natural, &library).is_ok());
+        assert!(refuse_unmodelled_mt5(&report, &rates, &mt5, &HashMap::new(), &library).is_ok());
+    }
+
     #[test]
     fn mt5_is_reported_as_a_share_of_the_removal() {
         let rates: yani::ReactionRates = HashMap::from([(
