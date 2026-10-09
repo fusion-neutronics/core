@@ -66,6 +66,7 @@ pub fn all_sections() -> Vec<(&'static str, Schema)> {
         ("products.arrow", products()),
         ("reactions.arrow", reactions()),
         ("reactions/reactions.arrow", reactions_reactions()),
+        ("resonance_parameters.arrow", resonance_parameters()),
         ("spectrum_covariance.arrow", spectrum_covariance()),
         ("subshells.arrow", subshells()),
         ("total_nu.arrow", total_nu()),
@@ -621,6 +622,28 @@ pub fn spectrum_covariance() -> Schema {
     ])
 }
 
+/// `resonance_parameters.arrow`: MF=2 MT=151, the resolved and unresolved
+/// resonance parameters, and MF=32 MT=151, their covariance, one row per
+/// ENDF section.
+///
+/// Each row holds its section's ENDF-6 text verbatim, every record as it is on
+/// the tape with its control columns, up to but not including the SEND record.
+/// Text rather than columns because the consumer reconstructs cross sections
+/// from the parameters, which needs every formalism (SLBW, MLBW, Reich-Moore,
+/// R-matrix limited, unresolved) and every MF=32 covariance form exactly as
+/// the evaluator wrote them, and the `endf` crate's parsers already read that
+/// text. Written only for an evaluation with MF=32 MT=151, so a file always
+/// has both rows.
+pub fn resonance_parameters() -> Schema {
+    Schema::new(vec![
+        // Which section the row is: (2, 151) or (32, 151).
+        i32("mf", false),
+        i32("mt", false),
+        // The section's records, one line each, newline terminated.
+        utf8("text", false),
+    ])
+}
+
 /// `decay/decay_modes.arrow`
 pub fn decay_decay_modes() -> Schema {
     Schema::new(vec![
@@ -1022,7 +1045,7 @@ mod tests {
         let sections = all_sections();
         assert_eq!(
             sections.len(),
-            25,
+            26,
             "section count changed; update the manifest"
         );
         let mut paths: Vec<&str> = sections.iter().map(|(p, _)| *p).collect();

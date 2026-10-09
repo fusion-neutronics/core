@@ -3457,7 +3457,10 @@ def convert_neutron_transport(input_path: builtins.str, output_dir: builtins.str
         Also write ``covariance.arrow``, the MF=33 cross-section covariance,
         and the evaluation's other covariance sections where it has them:
         ``angular_covariance.arrow`` (MF=34), ``nubar_covariance.arrow``
-        (MF=31) and ``spectrum_covariance.arrow`` (MF=35). Off by default: the matrices are large and only an uncertainty
+        (MF=31), ``spectrum_covariance.arrow`` (MF=35) and
+        ``resonance_parameters.arrow`` (the MF=2 resonance parameters with
+        their MF=32 covariance). Off by default: the matrices are large and
+        only an uncertainty
         calculation reads them.
     
     Returns
@@ -3504,7 +3507,10 @@ def convert_neutron_xs(input_path: builtins.str, output_dir: builtins.str, sourc
         Also write ``covariance.arrow``, the MF=33 cross-section covariance,
         and the evaluation's other covariance sections where it has them:
         ``angular_covariance.arrow`` (MF=34), ``nubar_covariance.arrow``
-        (MF=31) and ``spectrum_covariance.arrow`` (MF=35). Off by default: the matrices are large and only an uncertainty
+        (MF=31), ``spectrum_covariance.arrow`` (MF=35) and
+        ``resonance_parameters.arrow`` (the MF=2 resonance parameters with
+        their MF=32 covariance). Off by default: the matrices are large and
+        only an uncertainty
         calculation reads them. Requires ``source_format="endf"`` -- MF=33 is
         not carried through ACER, so asking for it from an ACE table raises.
     
@@ -3854,8 +3860,8 @@ def read_nuclide_from_arrow(path: builtins.str, scope: builtins.str = 'full') ->
         ``name``, ``atomic_number``, ``mass_number``, ``atomic_weight_ratio``,
         ``fissionable``, ``urr_present``, ``available_temperatures``,
         ``loaded_temperatures``, ``mts``, ``energy_points``,
-        ``angular_covariance``, ``nubar_covariance``, ``spectrum_covariance``
-        and ``scope_loaded``.
+        ``angular_covariance``, ``nubar_covariance``, ``spectrum_covariance``,
+        ``resonance_parameters`` and ``scope_loaded``.
     
         ``energy_points`` is a dict of temperature to grid length, over the
         loaded temperatures. Not one number: the reader also keeps the 0 K union
@@ -3881,6 +3887,12 @@ def read_nuclide_from_arrow(path: builtins.str, scope: builtins.str = 'full') ->
         order. Each is ``None`` when the folder has none, and both are read
         whatever ``scope`` says, as ``angular_covariance`` is.
     
+        ``resonance_parameters`` is the folder's MF=2 and MF=32
+        (``resonance_parameters.arrow``), both parsed, summarised as the
+        ``(lru, lrf)`` of each MF=2 energy range, isotope by isotope in tape
+        order: LRU 1 resolved or 2 unresolved, LRF the formalism. ``None`` when
+        the folder has none, and read whatever ``scope`` says.
+    
         ``scope_loaded`` is the one to assert on, and it is not always the
         ``scope`` asked for: a directory holding no transport sections narrows a
         ``"full"`` request to ``"xs"`` rather than failing it, on the theory
@@ -3894,7 +3906,8 @@ def read_nuclide_from_arrow(path: builtins.str, scope: builtins.str = 'full') ->
         ``scope`` is neither ``"full"`` nor ``"xs"``.
     RuntimeError
         The directory is absent, is not the Arrow format version this build
-        reads, or any section fails to parse.
+        reads, or any section fails to parse, the stored MF=2 and MF=32 text
+        included.
     """
 
 def sample_scatter_cosine() -> builtins.float:

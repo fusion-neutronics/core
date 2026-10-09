@@ -270,6 +270,7 @@ fn narrow_to_present_sections(dir: &Path, scope: &LoadScope) -> Result<LoadScope
         covariance: scope.covariance,
         angular_covariance: scope.angular_covariance,
         fission_covariance: scope.fission_covariance,
+        resonance_parameters: scope.resonance_parameters,
     })
 }
 
@@ -735,6 +736,14 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
     } else {
         (None, None)
     };
+    // MF=2 and MF=32 as ENDF-6 text, behind their own axis: only sampling the
+    // resonance parameters reads them, and they are parsed only then.
+    let resonance_parameters = if scope.resonance_parameters {
+        crate::arrow::covariance_arrow::read_resonance_parameters(dir, &name)?
+            .map(std::sync::Arc::new)
+    } else {
+        None
+    };
 
     let mut fission_nu: Option<FissionNuData> = None;
     let total_nu_path = dir.join("total_nu.arrow");
@@ -818,6 +827,7 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
         angular_covariance,
         nubar_covariance,
         spectrum_covariance,
+        resonance_parameters,
         elastic_flat_cache: Default::default(),
         fission_chi_flat_cache: Default::default(),
         delayed_neutron_cache: Default::default(),

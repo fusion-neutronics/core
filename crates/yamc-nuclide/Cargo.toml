@@ -17,8 +17,10 @@ serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 nuclear-data-schema = { path = "../nuclear-data-schema" }
 # For the reaction name tables, which would otherwise be a second copy of
-# what the parser already declares. The parser itself is dead code here and
-# the linker strips it: +9.8 KB (+0.24%) in the wasm build.
+# what the parser already declares, and the MF=2 and MF=32 parsers behind
+# `ResonanceParameters`. The rest of the parser is dead code here and the
+# linker strips it, as it does those two in a build that never calls them:
+# +9.8 KB (+0.24%) in the wasm build.
 endf = { path = "../endf" }
 # Not optional, unlike the rest of the Arrow stack: `F64Buffer` is the type of
 # every large numeric field on Nuclide/Reaction/FastXSGrid, so it has to exist in

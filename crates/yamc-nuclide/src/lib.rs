@@ -23,6 +23,7 @@ pub mod nuclide_registry;
 pub mod particle_type;
 pub mod reaction;
 pub mod reaction_product;
+pub mod resonance_parameters;
 pub mod synthesis;
 pub mod temperature;
 pub mod threshold_table;

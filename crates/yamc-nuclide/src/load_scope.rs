@@ -66,6 +66,11 @@ pub struct LoadScope {
     /// fissionable evaluations carry either, and separate from `covariance`
     /// for the same reason as `angular_covariance`. Off by default.
     pub fission_covariance: bool,
+    /// Whether to read `resonance_parameters.arrow`, the MF=2 resonance
+    /// parameters and their MF=32 covariance as ENDF-6 text. Its own axis
+    /// because only sampling the resonance parameters needs it, and MF=2 runs
+    /// to megabytes for the heavy evaluations. Off by default.
+    pub resonance_parameters: bool,
 }
 
 impl LoadScope {
@@ -83,6 +88,7 @@ impl LoadScope {
             covariance: false,
             angular_covariance: false,
             fission_covariance: false,
+            resonance_parameters: false,
         }
     }
 
@@ -101,6 +107,12 @@ impl LoadScope {
     /// Also read `nubar_covariance.arrow` and `spectrum_covariance.arrow`.
     pub fn with_fission_covariance(mut self, fission_covariance: bool) -> Self {
         self.fission_covariance = fission_covariance;
+        self
+    }
+
+    /// Also read `resonance_parameters.arrow`.
+    pub fn with_resonance_parameters(mut self, resonance_parameters: bool) -> Self {
+        self.resonance_parameters = resonance_parameters;
         self
     }
 
@@ -148,6 +160,7 @@ impl LoadScope {
             && (self.covariance || !other.covariance)
             && (self.angular_covariance || !other.angular_covariance)
             && (self.fission_covariance || !other.fission_covariance)
+            && (self.resonance_parameters || !other.resonance_parameters)
             && covers_set(self.mts.as_ref(), other.mts.as_ref())
             && covers_set(self.temperatures.as_ref(), other.temperatures.as_ref())
     }
@@ -171,6 +184,7 @@ impl LoadScope {
             covariance: self.covariance || other.covariance,
             angular_covariance: self.angular_covariance || other.angular_covariance,
             fission_covariance: self.fission_covariance || other.fission_covariance,
+            resonance_parameters: self.resonance_parameters || other.resonance_parameters,
         }
     }
 }
