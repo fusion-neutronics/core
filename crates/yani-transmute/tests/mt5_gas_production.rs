@@ -325,15 +325,6 @@ fn irradiate(
                     );
                     exact_reference += w * (exact - pointwise);
                 }
-                if std::env::var_os("YANI_MT5_DEBUG").is_some() {
-                    let (mut e_sum, mut p_sum) = (0.0, 0.0);
-                    for (g, w) in spectrum.shape.iter().enumerate() {
-                        let (exact, pointwise) = mt5_part(curve, mt5, table, spectrum.boundaries[g], spectrum.boundaries[g + 1]);
-                        e_sum += w * exact;
-                        p_sum += w * pointwise;
-                    }
-                    eprintln!("DEBUG {nuclide} {gas}: MT=5 exact {e_sum:.6e} pointwise-on-table-grid {p_sum:.6e} table {reference:.6e}");
-                }
             }
             (gas, made, reference, exact_reference)
         })
@@ -735,54 +726,55 @@ fn tendl_under_dt_is_unchanged() {
         println!("{name:13} worst nuclide difference {worst:.3e}");
         assert!(worst <= 1.0e-9, "{name}: {worst}");
     }
+    // The process-wide sources set above would otherwise reach the next test.
+    yamc_nuclide::config::Config::global()
+        .cross_sections
+        .clear();
 }
 
-/// Test 10: the `(n,X)` rate is a cross section like any other to the
-/// resample-and-re-solve uncertainty. ENDF/B-VIII.1 Fe54 states MF=33
-/// covariance for MT=5, so its `(n,X)` rate is drawn and the gas it makes
-/// carries a spread; Fe57 has no covariance at all, and is named as such.
-/// The multiplicities, which no library gives a covariance for, are named as
-/// held.
+/// Test 10: the resample-and-re-solve uncertainty covers `(n,X)` where the
+/// evaluation's MF=33 has MT=5 covariance (ENDF/B-VIII.1 Fe54) and not where
+/// it has none (Fe57), and says which: the channel's covered rate fraction,
+/// and the MT=5 multiplicities among what is held.
 #[test]
 #[ignore = "reads whole local libraries; set YANI_MT5_DATA and YANI_MT5_REACTIONS"]
-fn the_anything_rate_is_drawn_where_mf33_covers_mt5() {
+fn mt5_is_perturbed_where_its_covariance_is_given() {
     let Some((data, reactions_root)) = roots() else {
         eprintln!("YANI_MT5_DATA or YANI_MT5_REACTIONS unset; nothing to check");
         return;
     };
     let library = "endf-b8.1";
     let loaded = chain(&data, &reactions_root, library);
-    let neutron = data.join(format!("{library}-arrow")).join("neutron");
+    let path = |n: &str| {
+        data.join(format!("{library}-arrow"))
+            .join("neutron")
+            .join(format!("{n}.arrow"))
+            .to_string_lossy()
+            .to_string()
+    };
     let atoms = HashMap::from([("Fe54".to_string(), 5.0e-3), ("Fe57".to_string(), 5.0e-3)]);
-    let mut material = Material::new(atoms.clone(), "atom", "sum", None).expect("material");
+    let mut material = Material::new(atoms.clone(), "atom", "sum", None).unwrap();
     material.nuclides = atoms;
     material.volume = Some(1.0);
     material
         .read_nuclear_data(
-            &["Fe54", "Fe57"]
-                .iter()
-                .map(|n| {
-                    (
-                        n.to_string(),
-                        neutron
-                            .join(format!("{n}.arrow"))
-                            .to_string_lossy()
-                            .to_string(),
-                    )
-                })
-                .collect(),
+            &HashMap::from([
+                ("Fe54".to_string(), path("Fe54")),
+                ("Fe57".to_string(), path("Fe57")),
+            ]),
             None,
         )
         .expect("cross sections load");
+    let spectrum = Spectrum::flat("14 MeV", 1.3e7, 1.5e7);
     let results = transmute_material(
         &mut material,
         &[MultigroupSpectrum {
-            boundaries: vec![1.3e7, 1.5e7],
-            masses: vec![1.0],
+            boundaries: spectrum.boundaries.clone(),
+            masses: spectrum.shape.clone(),
             flux_error: None,
         }],
         &[TransmuteStep {
-            dt: 3.15576e7,
+            dt: 3600.0,
             irradiation: Some((0, 1.0e14)),
         }],
         std::sync::Arc::clone(&loaded.chain),
@@ -801,34 +793,31 @@ fn the_anything_rate_is_drawn_where_mf33_covers_mt5() {
             .get(&(n.to_string(), yani::reactions::ANYTHING.to_string()))
             .copied()
     };
+    let he4 = results.get_nuclide_density(0, "He4", 1).unwrap();
+    let he4_sigma = results.get_nuclide_uncertainty(0, "He4", 1).unwrap();
+    let mn53 = results.get_nuclide_density(0, "Mn53", 1).unwrap();
+    let mn53_sigma = results.get_nuclide_uncertainty(0, "Mn53", 1).unwrap();
     println!(
-        "Fe54 (n,X) covered {:?}, Fe57 (n,X) covered {:?}",
+        "Fe54 (n,X) covered {:?}, Fe57 (n,X) covered {:?}; He4 {he4:.4e} +- {:.2}%, Mn53 {mn53:.4e} +- {:.2}%",
         covered("Fe54"),
-        covered("Fe57")
+        covered("Fe57"),
+        100.0 * he4_sigma / he4,
+        100.0 * mn53_sigma / mn53
     );
-    println!("perturbed {:?}", info.perturbed);
-    println!("no covariance data {:?}", info.no_covariance_data);
-    for n in ["H1", "He4", "Mn53", "Cr51"] {
-        let mean = results.get_nuclide_density(0, n, 1).unwrap_or(0.0);
-        let sigma = results.get_nuclide_uncertainty(0, n, 1).unwrap_or(0.0);
-        println!(
-            "{n:4} {mean:.4e} +- {sigma:.3e} ({:.2}%)",
-            100.0 * sigma / mean
-        );
-    }
+    println!("not perturbed: {:?}", info.not_perturbed);
     assert!(
         covered("Fe54").is_some_and(|f| f > 0.99),
         "{:?}",
         covered("Fe54")
     );
-    assert!(info.no_covariance_data.contains("Fe57"));
+    assert!(
+        covered("Fe57").is_none_or(|f| f == 0.0),
+        "{:?}",
+        covered("Fe57")
+    );
+    assert!(mn53_sigma > 0.0, "MT=5's residual moves with its rate");
     assert!(info
         .not_perturbed
         .iter()
         .any(|s| s.starts_with("MT=5 product multiplicities")));
-    let mn53 = results.get_nuclide_uncertainty(0, "Mn53", 1).unwrap_or(0.0);
-    assert!(
-        mn53 > 0.0,
-        "Mn53 is MT=5's residual, so its spread is MT=5's"
-    );
 }
