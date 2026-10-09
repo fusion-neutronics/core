@@ -429,6 +429,9 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
     // filter is applied, which is why the expansion belongs here rather than
     // at the call sites that build the filter.
     let mut to_synthesise: Vec<String> = Vec::new();
+    // The rungs the caller asked for by name. Any other rung a filtered load
+    // reads is there only to be blended, and is dropped once it has been.
+    let mut requested_rungs: std::collections::HashSet<String> = std::collections::HashSet::new();
     let loaded_temps: Vec<String> = if let Some(filter) = temps_filter {
         let mut wanted: Vec<String> = Vec::new();
         for label in filter {
@@ -436,7 +439,8 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
                 .map_err(|e| format!("{name}: {e}"))?
             {
                 crate::temperature::TemperatureSource::Exact { idx } => {
-                    wanted.push(all_temps[idx].clone())
+                    wanted.push(all_temps[idx].clone());
+                    requested_rungs.insert(all_temps[idx].clone());
                 }
                 crate::temperature::TemperatureSource::Blend { lo_idx, hi_idx, .. } => {
                     wanted.push(all_temps[lo_idx].clone());
@@ -453,8 +457,14 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
             .cloned()
             .collect()
     } else {
+        requested_rungs.extend(all_temps.iter().cloned());
         all_temps.clone()
     };
+    let bracket_only: Vec<String> = loaded_temps
+        .iter()
+        .filter(|t| !requested_rungs.contains(*t))
+        .cloned()
+        .collect();
 
     if loaded_temps.is_empty() {
         return Err(
@@ -744,17 +754,21 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
         .take_while(|c| c.is_alphabetic())
         .collect::<String>();
 
-    // What this load can ANSWER, which is the union of the labels asked for and
-    // the bracket rungs actually read. Recording only the request would miss a
-    // later query at one of the brackets; recording only the served set would
-    // miss a repeat of the intermediate request and rebuild the blend on every
-    // call. `LoadScope::covers` is a subset test, so the union is the only
-    // choice that is right in both directions.
+    // What this load can ANSWER: the labels asked for, the rungs read for them,
+    // and the blends built from rungs nobody asked for. Not those rungs
+    // themselves, which are dropped below once blended, so a later query at
+    // one of them misses and reloads it rather than finding it gone.
+    // `LoadScope::covers` is a subset test, so recording only the request
+    // would also be wrong: a repeat of the intermediate request would rebuild
+    // the blend on every call.
     let scope = if to_synthesise.is_empty() {
         scope.clone()
     } else {
-        let mut answerable: std::collections::HashSet<String> =
-            loaded_temps.iter().cloned().collect();
+        let mut answerable: std::collections::HashSet<String> = loaded_temps
+            .iter()
+            .filter(|t| !bracket_only.contains(*t))
+            .cloned()
+            .collect();
         answerable.extend(to_synthesise.iter().cloned());
         if let Some(requested) = scope.temperatures.as_ref() {
             answerable.extend(requested.iter().cloned());
@@ -801,6 +815,11 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
         crate::blend::synthesise_temperature(&mut nuclide, label)
             .map_err(|e| format!("{}: {e}", dir.display()))?;
     }
+
+    // The neighbours of a blend are read only to build it. Transport reads the
+    // blend, so holding them would keep two full temperatures of reactions and
+    // lookups alive for every interpolated nuclide.
+    nuclide.drop_temperatures(&bracket_only);
 
     Ok(nuclide)
 }

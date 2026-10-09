@@ -143,8 +143,9 @@ fn a_temperature_between_two_blends_exactly_as_a_full_load_does() {
     let (scoped_flux, scoped) = run(material(nuclide, Some("450")));
     assert_eq!(
         loaded(&scoped, nuclide),
-        BTreeSet::from(["294".to_string(), "450".to_string(), "600".to_string()]),
-        "a 450 K material should load its two neighbours and the blend of them"
+        BTreeSet::from(["450".to_string()]),
+        "a 450 K material should keep only the blend: its 294 K and 600 K \
+         neighbours are read to build it and then dropped"
     );
 
     // The reference: every temperature loaded first, as transport used to,
@@ -169,8 +170,35 @@ fn a_temperature_between_two_blends_exactly_as_a_full_load_does() {
 }
 
 #[test]
-fn a_temperature_outside_the_data_is_reported() {
+fn a_dropped_neighbour_reloads_when_asked_for() {
     let nuclide = "Li6";
+    if configure(nuclide).is_none() {
+        eprintln!("skip: no {nuclide} fixture");
+        return;
+    }
+
+    // Build a 450 K blend, which reads 294 K and 600 K and then drops them.
+    let (_, blended) = run(material(nuclide, Some("450")));
+    assert_eq!(
+        loaded(&blended, nuclide),
+        BTreeSet::from(["450".to_string()])
+    );
+
+    // Asking the same material for 294 K must reload it, not find it missing,
+    // and must give what a material loaded at 294 K from the start gives.
+    let mut widened = (*blended).clone();
+    let (widened_xs, widened_grid) = widened.macroscopic_cross_section(1, Some("294"));
+    let (fresh_flux, fresh) = run(material(nuclide, Some("294")));
+    assert!(fresh_flux[0] > 0.0, "no flux scored");
+    let (fresh_xs, fresh_grid) = (*fresh).clone().macroscopic_cross_section(1, Some("294"));
+    assert!(!widened_xs.is_empty(), "no 294 K total after widening");
+    assert_eq!(widened_grid, fresh_grid, "the 294 K grids differ");
+    assert_eq!(widened_xs, fresh_xs, "the 294 K totals differ");
+}
+
+#[test]
+fn a_temperature_outside_the_data_is_reported() {
+    let nuclide = "Be9";
     if configure(nuclide).is_none() {
         eprintln!("skip: no {nuclide} fixture");
         return;
