@@ -513,6 +513,23 @@ fn validate_case(
         if s.masses.iter().any(|&m| !m.is_finite() || m < 0.0) {
             return Err(format!("spectrum {i}: masses must be finite and non-negative").into());
         }
+        // A flux error that does not line up with the bins would be truncated
+        // to the shorter of the two where the deviates meet the per-group
+        // rates, silently leaving bins exact or dropping entries.
+        if let Some(error) = &s.flux_error {
+            if error.len() != s.masses.len() {
+                return Err(format!(
+                    "spectrum {i}: the flux error describes {} bins but the spectrum has {}",
+                    error.len(),
+                    s.masses.len()
+                )
+                .into());
+            }
+            if let crate::flux_uncertainty::FluxError::RelativeStdDev(sigma) = error {
+                crate::flux_uncertainty::check_std_dev(sigma)
+                    .map_err(|e| format!("spectrum {i}: {e}"))?;
+            }
+        }
     }
     for (i, st) in steps.iter().enumerate() {
         if st.dt < 0.0 {

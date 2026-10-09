@@ -85,19 +85,41 @@ impl FluxCoverage {
 ///
 /// A bin with zero flux has no relative error to state, and one with a zero
 /// sigma is a bin the caller says is exact; both come out as zero, which
-/// perturbs nothing. Returns `None` when the lengths disagree, which is a
+/// perturbs nothing.
+///
+/// Refuses a sigma vector whose length disagrees with the flux, which is a
 /// caller error rather than something to paper over: a sigma vector that does
-/// not line up with the flux is not a sigma for that flux.
-pub fn relative_std_dev(flux: &[f64], std_dev: &[f64]) -> Option<Vec<f64>> {
+/// not line up with the flux is not a sigma for that flux. Refuses a negative
+/// or non-finite entry too. A NaN in particular would otherwise read as an
+/// exact bin, since every comparison against it is false, and the replicas
+/// would understate the spread with nothing to say so.
+pub fn relative_std_dev(flux: &[f64], std_dev: &[f64]) -> Result<Vec<f64>, String> {
     if flux.len() != std_dev.len() {
-        return None;
+        return Err(format!(
+            "flux_std_dev has {} entries but the spectrum has {} bins; they must line up, \
+             since each entry is the error on the bin beside it",
+            std_dev.len(),
+            flux.len()
+        ));
     }
-    Some(
-        flux.iter()
-            .zip(std_dev)
-            .map(|(f, s)| if *f > 0.0 { (s / f).abs() } else { 0.0 })
-            .collect(),
-    )
+    check_std_dev(std_dev)?;
+    Ok(flux
+        .iter()
+        .zip(std_dev)
+        .map(|(f, s)| if *f > 0.0 { s / f } else { 0.0 })
+        .collect())
+}
+
+/// Refuse a standard deviation entry that is negative or not finite.
+pub(crate) fn check_std_dev(std_dev: &[f64]) -> Result<(), String> {
+    match std_dev.iter().position(|s| !s.is_finite() || *s < 0.0) {
+        Some(bad) => Err(format!(
+            "flux standard deviation entry {bad} is {}; a standard deviation is finite and \
+             non-negative",
+            std_dev[bad]
+        )),
+        None => Ok(()),
+    }
 }
 
 /// A spectrum's stated error, relative to its own values.
@@ -396,21 +418,42 @@ mod tests {
 
     #[test]
     fn a_relative_sigma_is_the_absolute_one_over_the_flux() {
-        let r = relative_std_dev(&[100.0, 50.0], &[5.0, 10.0]).expect("same length");
+        let r = relative_std_dev(&[100.0, 50.0], &[5.0, 10.0]).expect("valid sigma");
         assert_eq!(r, vec![0.05, 0.2]);
     }
 
     /// A bin with no flux has no relative error to state.
     #[test]
     fn a_zero_flux_bin_gets_no_relative_error() {
-        let r = relative_std_dev(&[0.0, 50.0], &[5.0, 10.0]).expect("same length");
+        let r = relative_std_dev(&[0.0, 50.0], &[5.0, 10.0]).expect("valid sigma");
         assert_eq!(r, vec![0.0, 0.2]);
     }
 
     /// A sigma that does not line up with the flux is not a sigma for it.
     #[test]
     fn a_length_mismatch_is_refused_rather_than_truncated() {
-        assert_eq!(relative_std_dev(&[1.0, 2.0], &[0.1]), None);
+        let err = relative_std_dev(&[1.0, 2.0], &[0.1]).expect_err("length mismatch");
+        assert!(err.contains("must line up"), "got {err:?}");
+    }
+
+    /// A NaN sigma fails every comparison, so unchecked it read as an exact
+    /// bin: no deviate drawn and no gap reported.
+    #[test]
+    fn a_nan_sigma_is_refused_rather_than_taken_as_exact() {
+        let err = relative_std_dev(&[1.0, 1.0], &[f64::NAN, 0.1]).expect_err("NaN sigma");
+        assert!(err.contains("entry 0 is NaN"), "got {err:?}");
+    }
+
+    #[test]
+    fn an_infinite_sigma_is_refused() {
+        let err = relative_std_dev(&[1.0, 1.0], &[0.1, f64::INFINITY]).expect_err("inf sigma");
+        assert!(err.contains("entry 1 is inf"), "got {err:?}");
+    }
+
+    #[test]
+    fn a_negative_sigma_is_refused() {
+        let err = relative_std_dev(&[1.0, 1.0], &[0.1, -0.1]).expect_err("negative sigma");
+        assert!(err.contains("finite and non-negative"), "got {err:?}");
     }
 
     /// Zero perturbation reproduces the nominal rate exactly.

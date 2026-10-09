@@ -148,10 +148,13 @@ impl PyPulse {
             ));
         }
         if let Some(sigma) = &flux_std_dev {
-            if sigma.iter().any(|s| *s < 0.0) {
-                return Err(PyValueError::new_err(
-                    "flux_std_dev entries must be non-negative",
-                ));
+            // A NaN fails every comparison, so `s < 0.0` let it through, and
+            // downstream it read as an exact bin.
+            if let Some(bad) = sigma.iter().position(|s| !s.is_finite() || *s < 0.0) {
+                return Err(PyValueError::new_err(format!(
+                    "flux_std_dev entry {bad} is {}; entries must be finite and non-negative",
+                    sigma[bad]
+                )));
             }
         }
         let flux_error = match (flux_std_dev, flux_covariance) {
@@ -970,15 +973,7 @@ fn histogram_spectrum(
                 Some(FluxErrorInput::StdDev(sigma)) => {
                     Some(yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(
                         yani_transmute::flux_uncertainty::relative_std_dev(probs, sigma)
-                            .ok_or_else(|| {
-                                PyValueError::new_err(format!(
-                                    "flux_std_dev has {} entries but the pulse source's \
-                                     Histogram has {} bins; they must line up, since each \
-                                     entry is the error on the bin beside it",
-                                    sigma.len(),
-                                    probs.len(),
-                                ))
-                            })?,
+                            .map_err(PyValueError::new_err)?,
                     ))
                 }
                 Some(FluxErrorInput::Covariance(cov)) => Some(
