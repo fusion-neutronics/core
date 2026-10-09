@@ -103,6 +103,8 @@ fn make_synthetic_nuclide_with_grid(
         inelastic_angle_flat_cache: Default::default(),
         covariance: None,
         angular_covariance: None,
+        nubar_covariance: None,
+        spectrum_covariance: None,
         load_scope: Default::default(),
     }
 }

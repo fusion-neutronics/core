@@ -43,7 +43,8 @@ use yamc_nuclide::load_scope::{LoadScope, SectionScope};
 ///     ``name``, ``atomic_number``, ``mass_number``, ``atomic_weight_ratio``,
 ///     ``fissionable``, ``urr_present``, ``available_temperatures``,
 ///     ``loaded_temperatures``, ``mts``, ``energy_points``,
-///     ``angular_covariance`` and ``scope_loaded``.
+///     ``angular_covariance``, ``nubar_covariance``, ``spectrum_covariance``
+///     and ``scope_loaded``.
 ///
 ///     ``energy_points`` is a dict of temperature to grid length, over the
 ///     loaded temperatures. Not one number: the reader also keeps the 0 K union
@@ -60,6 +61,14 @@ use yamc_nuclide::load_scope::{LoadScope, SectionScope};
 ///     pairs of Legendre orders a covariance block correlates. ``None`` when
 ///     the folder has none. It is read whatever ``scope`` says, since it is a
 ///     separate optional section.
+///
+///     ``nubar_covariance`` is the folder's MF=31 (``nubar_covariance.arrow``),
+///     summarised as the sorted fission multiplicity MTs (of 452, 455 and 456)
+///     it carries covariance for, and ``spectrum_covariance`` its MF=35
+///     (``spectrum_covariance.arrow``), as ``{mt: [(e1, e2), ...]}``: per
+///     reaction, the incident energy range of each covariance block, in tape
+///     order. Each is ``None`` when the folder has none, and both are read
+///     whatever ``scope`` says, as ``angular_covariance`` is.
 ///
 ///     ``scope_loaded`` is the one to assert on, and it is not always the
 ///     ``scope`` asked for: a directory holding no transport sections narrows a
@@ -80,13 +89,16 @@ use yamc_nuclide::load_scope::{LoadScope, SectionScope};
 #[pyo3(signature = (path, scope = "full"))]
 pub fn read_nuclide_from_arrow(py: Python, path: &str, scope: &str) -> PyResult<Py<PyAny>> {
     let requested = match scope {
-        "full" => LoadScope::full().with_angular_covariance(true),
+        "full" => LoadScope::full()
+            .with_angular_covariance(true)
+            .with_fission_covariance(true),
         "xs" => LoadScope {
             sections: SectionScope::XsOnly,
             mts: None,
             temperatures: None,
             covariance: false,
             angular_covariance: true,
+            fission_covariance: true,
         },
         other => {
             return Err(PyValueError::new_err(format!(
@@ -150,6 +162,24 @@ pub fn read_nuclide_from_arrow(py: Python, path: &str, scope: &str) -> PyResult<
         by_mt
     });
     dict.set_item("angular_covariance", angular)?;
+    let nubar = nuclide.nubar_covariance.as_ref().map(|blocks| {
+        blocks
+            .iter()
+            .map(|b| b.mt)
+            .collect::<std::collections::BTreeSet<i32>>()
+            .into_iter()
+            .collect::<Vec<i32>>()
+    });
+    dict.set_item("nubar_covariance", nubar)?;
+    let spectrum = nuclide.spectrum_covariance.as_ref().map(|blocks| {
+        let mut by_mt: std::collections::BTreeMap<i32, Vec<(f64, f64)>> =
+            std::collections::BTreeMap::new();
+        for b in blocks.iter() {
+            by_mt.entry(b.mt).or_default().push((b.e1, b.e2));
+        }
+        by_mt
+    });
+    dict.set_item("spectrum_covariance", spectrum)?;
     dict.set_item(
         "scope_loaded",
         match nuclide.load_scope.sections {

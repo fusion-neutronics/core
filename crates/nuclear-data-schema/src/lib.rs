@@ -61,10 +61,12 @@ pub fn all_sections() -> Vec<(&'static str, Schema)> {
             "fission_yields/fission_yields.arrow",
             fission_yields_fission_yields(),
         ),
+        ("nubar_covariance.arrow", nubar_covariance()),
         ("nuclide.arrow", nuclide()),
         ("products.arrow", products()),
         ("reactions.arrow", reactions()),
         ("reactions/reactions.arrow", reactions_reactions()),
+        ("spectrum_covariance.arrow", spectrum_covariance()),
         ("subshells.arrow", subshells()),
         ("total_nu.arrow", total_nu()),
         ("urr.arrow", urr()),
@@ -579,6 +581,44 @@ pub fn angular_covariance() -> Schema {
     ])
 }
 
+/// `nubar_covariance.arrow`: MF=31, the covariance of the fission neutron
+/// multiplicities (MT=452 total, 455 delayed, 456 prompt), one row per
+/// covariance block.
+///
+/// MF=31 is MF=33's format (ENDF-102 chapter 31), so the columns are
+/// [`covariance()`]'s, read the same way, with `mt` and `mt1` naming
+/// multiplicities rather than cross sections. A section of its own rather
+/// than rows in `covariance.arrow`, where every block is read as a
+/// cross-section covariance and an MF=31 MT=452 block would be folded as one.
+pub fn nubar_covariance() -> Schema {
+    covariance()
+}
+
+/// `spectrum_covariance.arrow`: MF=35, the covariance of secondary energy
+/// distributions, one row per covariance block. On the tapes this is the
+/// prompt fission neutron spectrum (MT=18) only.
+///
+/// Each block is the LB=7 matrix of one incident energy range, `e1` to `e2`:
+/// `ne` outgoing energy bin boundaries `ek`, then the `ne - 1` by `ne - 1`
+/// symmetric matrix's upper triangle in the format's packed order, `fkk`.
+pub fn spectrum_covariance() -> Schema {
+    Schema::new(vec![
+        // Which block this is: the section's MT, and the block's position in
+        // it, in tape order.
+        i32("mt", false),
+        i32("block_idx", false),
+        // The incident energy range the block applies to.
+        f64("e1", true),
+        f64("e2", true),
+        // The symmetry flag (always 1) and matrix type (always 7).
+        i32("ls", true),
+        i32("lb", true),
+        i32("ne", true),
+        f64s("ek", true),
+        f64s("fkk", true),
+    ])
+}
+
 /// `decay/decay_modes.arrow`
 pub fn decay_decay_modes() -> Schema {
     Schema::new(vec![
@@ -972,7 +1012,7 @@ mod tests {
         let sections = all_sections();
         assert_eq!(
             sections.len(),
-            23,
+            25,
             "section count changed; update the manifest"
         );
         let mut paths: Vec<&str> = sections.iter().map(|(p, _)| *p).collect();

@@ -2524,7 +2524,12 @@ class Model:
               when its data folder records none) and ``warnings`` (what that
               library's own documentation says is wrong with this covariance,
               with the source; every FENDL-3.2 covariance, and the ENDF/B-VIII.1
-              evaluations its release paper names).
+              evaluations its release paper names), ``nubar_covariance`` (the
+              sorted fission multiplicity MTs, of 452, 455 and 456, the
+              evaluation carries MF=31 covariance for) and
+              ``spectrum_covariance`` (whether it carries MF=35, the covariance
+              of the fission spectrum). Both are reported so the data is
+              visible; neither is sampled yet.
             - ``without_data``: sorted names of nuclides whose data carries no
               covariance at all.
             - ``not_perturbed``: inputs no transport uncertainty run perturbs
@@ -6602,8 +6607,10 @@ def convert_neutron_transport(input_path: builtins.str, output_dir: builtins.str
     library, data_version, created_utc
         Recorded in ``version.json``.
     covariance : bool
-        Also write ``covariance.arrow``, the MF=33 cross-section covariance.
-        Off by default: the matrices are large and only an uncertainty
+        Also write ``covariance.arrow``, the MF=33 cross-section covariance,
+        and the evaluation's other covariance sections where it has them:
+        ``angular_covariance.arrow`` (MF=34), ``nubar_covariance.arrow``
+        (MF=31) and ``spectrum_covariance.arrow`` (MF=35). Off by default: the matrices are large and only an uncertainty
         calculation reads them.
     
     Returns
@@ -6647,8 +6654,10 @@ def convert_neutron_xs(input_path: builtins.str, output_dir: builtins.str, sourc
         Recorded in ``version.json``. ``data_version`` identifies the published
         release and is what a consumer compares a cached copy against.
     covariance : bool
-        Also write ``covariance.arrow``, the MF=33 cross-section covariance.
-        Off by default: the matrices are large and only an uncertainty
+        Also write ``covariance.arrow``, the MF=33 cross-section covariance,
+        and the evaluation's other covariance sections where it has them:
+        ``angular_covariance.arrow`` (MF=34), ``nubar_covariance.arrow``
+        (MF=31) and ``spectrum_covariance.arrow`` (MF=35). Off by default: the matrices are large and only an uncertainty
         calculation reads them. Requires ``source_format="endf"`` -- MF=33 is
         not carried through ACER, so asking for it from an ACE table raises.
     
@@ -7032,7 +7041,8 @@ def read_nuclide_from_arrow(path: builtins.str, scope: builtins.str = 'full') ->
         ``name``, ``atomic_number``, ``mass_number``, ``atomic_weight_ratio``,
         ``fissionable``, ``urr_present``, ``available_temperatures``,
         ``loaded_temperatures``, ``mts``, ``energy_points``,
-        ``angular_covariance`` and ``scope_loaded``.
+        ``angular_covariance``, ``nubar_covariance``, ``spectrum_covariance``
+        and ``scope_loaded``.
     
         ``energy_points`` is a dict of temperature to grid length, over the
         loaded temperatures. Not one number: the reader also keeps the 0 K union
@@ -7049,6 +7059,14 @@ def read_nuclide_from_arrow(path: builtins.str, scope: builtins.str = 'full') ->
         pairs of Legendre orders a covariance block correlates. ``None`` when
         the folder has none. It is read whatever ``scope`` says, since it is a
         separate optional section.
+    
+        ``nubar_covariance`` is the folder's MF=31 (``nubar_covariance.arrow``),
+        summarised as the sorted fission multiplicity MTs (of 452, 455 and 456)
+        it carries covariance for, and ``spectrum_covariance`` its MF=35
+        (``spectrum_covariance.arrow``), as ``{mt: [(e1, e2), ...]}``: per
+        reaction, the incident energy range of each covariance block, in tape
+        order. Each is ``None`` when the folder has none, and both are read
+        whatever ``scope`` says, as ``angular_covariance`` is.
     
         ``scope_loaded`` is the one to assert on, and it is not always the
         ``scope`` asked for: a directory holding no transport sections narrows a

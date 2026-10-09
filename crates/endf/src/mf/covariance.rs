@@ -1,7 +1,8 @@
-//! MF=33, 34 and 40: covariances.
+//! MF=31, 33, 34, 35 and 40: covariances.
 //!
-//! Grouped into one module because MF=40 reuses MF=33's subsection format
-//! verbatim, and MF=34 is the same idea applied to angular distributions.
+//! Grouped into one module because MF=31 and MF=40 reuse MF=33's format
+//! verbatim (MF=31 whole, MF=40 per subsection), and MF=34 and MF=35 are the
+//! same idea applied to angular and energy distributions.
 
 use crate::error::{Error, Result};
 use crate::records::Reader;
@@ -386,6 +387,76 @@ pub fn split_mf34_block(
 }
 
 // -------------------------------------------------------------------------
+// MF=35
+// -------------------------------------------------------------------------
+
+/// One MF=35 covariance block: the covariance of the normalised spectrum of
+/// secondary energies for incident energies from `e1` to `e2`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Mf35Block {
+    /// The incident energy range this block applies to.
+    pub e1: f64,
+    pub e2: f64,
+    /// The symmetry flag. Always 1: ENDF-102 gives MF=35 symmetric blocks only.
+    pub ls: i64,
+    /// The covariance matrix type. Always 7, the only one MF=35 allows.
+    pub lb: i64,
+    /// The number of outgoing energy bin boundaries.
+    pub ne: i64,
+    /// The `NE` outgoing energy bin boundaries.
+    pub ek: Vec<f64>,
+    /// The `NE - 1` by `NE - 1` matrix's upper triangle, row by row, in the
+    /// format's packed order.
+    pub fkk: Vec<f64>,
+}
+
+/// MF=35: covariances of energy distributions of secondary particles.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Mf35 {
+    pub za: i64,
+    pub awr: f64,
+    /// The blocks, one per incident energy range, in tape order.
+    pub blocks: Vec<Mf35Block>,
+}
+
+/// Parse an MF=35 section (ENDF-102 chapter 35).
+///
+/// A HEAD record carrying NK, then NK LIST records
+/// `[E1, E2, LS, LB, NT, NE / Ek(NE), Fkk(NT - NE)]`. Any LB other than 7 is
+/// refused: 7 is the only matrix type the format defines for MF=35, so another
+/// is an error rather than a block read with the wrong layout.
+pub fn parse_mf35(reader: &mut Reader) -> Result<Mf35> {
+    let head = reader.head_record()?;
+    let mut data = Mf35 {
+        za: head.za,
+        awr: head.awr,
+        blocks: Vec::new(),
+    };
+    for _ in 0..head.n1.max(0) {
+        let list = reader.list_record()?;
+        let lb = list.cont.l2;
+        if lb != 7 {
+            return Err(Error::Unsupported {
+                what: "an MF=35 LB value other than 7",
+            });
+        }
+        let v = &list.values;
+        let ne = list.cont.n2;
+        let split = ne.clamp(0, v.len() as i64) as usize;
+        data.blocks.push(Mf35Block {
+            e1: list.cont.c1,
+            e2: list.cont.c2,
+            ls: list.cont.l1,
+            lb,
+            ne,
+            ek: v[..split].to_vec(),
+            fkk: v[split..].to_vec(),
+        });
+    }
+    Ok(data)
+}
+
+// -------------------------------------------------------------------------
 // MF=40
 // -------------------------------------------------------------------------
 
@@ -477,6 +548,41 @@ mod tests {
     #[test]
     fn an_mf34_block_with_an_unknown_lb_is_refused() {
         assert!(split_mf34_block(0, 8, 2, 1, &[1.0, 2.0]).is_err());
+    }
+
+    /// An MF=35 section of `lbs.len()` blocks, each with NE=3 energies and so
+    /// a 2 by 2 upper triangle of three values.
+    fn mf35_text(lbs: &[i64]) -> String {
+        let mut text = line([
+            f(92235.0),
+            f(233.0248),
+            i(0),
+            i(0),
+            i(lbs.len() as i64),
+            i(0),
+        ]);
+        for (k, lb) in lbs.iter().enumerate() {
+            let e1 = k as f64;
+            text += &line([f(e1), f(e1 + 1.0), i(1), i(*lb), i(6), i(3)]);
+            text += &line([f(1.0), f(2.0), f(3.0), f(0.1), f(0.2), f(0.3)]);
+        }
+        text
+    }
+
+    #[test]
+    fn an_mf35_section_splits_each_block_into_energies_and_matrix() {
+        let mf35 = parse_mf35(&mut Reader::new(&mf35_text(&[7, 7]))).unwrap();
+        assert_eq!(mf35.za, 92235);
+        assert_eq!(mf35.blocks.len(), 2);
+        let b = &mf35.blocks[1];
+        assert_eq!((b.e1, b.e2, b.ls, b.lb, b.ne), (1.0, 2.0, 1, 7, 3));
+        assert_eq!(b.ek, vec![1.0, 2.0, 3.0]);
+        assert_eq!(b.fkk, vec![0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn an_mf35_block_with_an_lb_other_than_7_is_refused() {
+        assert!(parse_mf35(&mut Reader::new(&mf35_text(&[7, 5]))).is_err());
     }
 
     use super::*;

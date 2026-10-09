@@ -352,8 +352,10 @@ pub fn convert_branching(
 ///     Recorded in ``version.json``. ``data_version`` identifies the published
 ///     release and is what a consumer compares a cached copy against.
 /// covariance : bool
-///     Also write ``covariance.arrow``, the MF=33 cross-section covariance.
-///     Off by default: the matrices are large and only an uncertainty
+///     Also write ``covariance.arrow``, the MF=33 cross-section covariance,
+///     and the evaluation's other covariance sections where it has them:
+///     ``angular_covariance.arrow`` (MF=34), ``nubar_covariance.arrow``
+///     (MF=31) and ``spectrum_covariance.arrow`` (MF=35). Off by default: the matrices are large and only an uncertainty
 ///     calculation reads them. Requires ``source_format="endf"`` -- MF=33 is
 ///     not carried through ACER, so asking for it from an ACE table raises.
 ///
@@ -443,8 +445,10 @@ pub fn convert_neutron_xs(
 /// library, data_version, created_utc
 ///     Recorded in ``version.json``.
 /// covariance : bool
-///     Also write ``covariance.arrow``, the MF=33 cross-section covariance.
-///     Off by default: the matrices are large and only an uncertainty
+///     Also write ``covariance.arrow``, the MF=33 cross-section covariance,
+///     and the evaluation's other covariance sections where it has them:
+///     ``angular_covariance.arrow`` (MF=34), ``nubar_covariance.arrow``
+///     (MF=31) and ``spectrum_covariance.arrow`` (MF=35). Off by default: the matrices are large and only an uncertainty
 ///     calculation reads them.
 ///
 /// Returns

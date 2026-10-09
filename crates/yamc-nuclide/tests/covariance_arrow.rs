@@ -108,3 +108,24 @@ fn a_directory_without_angular_covariance_still_loads() {
         "a load without MF=34 must not stand in for one that asked for it"
     );
 }
+
+/// MF=31 and MF=35 the same way: a directory without `nubar_covariance.arrow`
+/// or `spectrum_covariance.arrow` loads with neither when asked, and a load
+/// without them does not cover one with them.
+#[test]
+fn a_directory_without_fission_covariance_still_loads() {
+    let Some(dir) = fe56() else {
+        return skip("a_directory_without_fission_covariance_still_loads");
+    };
+    assert!(!dir.join("nubar_covariance.arrow").exists());
+    assert!(!dir.join("spectrum_covariance.arrow").exists());
+    let scope = LoadScope::activation(HashSet::from([102])).with_fission_covariance(true);
+    let nuclide = read_nuclide_from_arrow(&dir, &scope).expect("Fe56 loads");
+    assert!(nuclide.nubar_covariance.is_none());
+    assert!(nuclide.spectrum_covariance.is_none());
+    assert!(nuclide.load_scope.fission_covariance);
+    assert!(
+        !LoadScope::activation(HashSet::from([102])).covers(&scope),
+        "a load without MF=31 and MF=35 must not stand in for one that asked for them"
+    );
+}
