@@ -2662,7 +2662,8 @@ pub fn cell_fields(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Read {
     /// The evaluation states covariance for this reaction itself, directly or
-    /// through an NC derivation from other reactions.
+    /// through an NC derivation from other reactions
+    /// ([`TransportField::derived`]).
     Own,
     /// The reaction has no covariance of its own, but the summed reaction it
     /// is a component of does, and it takes that one's perturbation: MT 51 to
@@ -2672,8 +2673,31 @@ pub enum Read {
     /// the same). This adds no uncertainty the evaluation does not state: the
     /// sum moves exactly as its covariance says.
     Parent(i32),
-    /// No covariance reaches it; it is held at nominal.
+    /// No covariance transport can apply reaches it; it is held at nominal.
     Nominal,
+}
+
+/// One term an NC derivation adds to a transport reaction's perturbation.
+///
+/// Over `range`, an LTY=0 block states `σ_MT = Σ c_i σ_MTi` (ENDF-102
+/// 33.2.2.1), so a draw that moves each `σ_MTi` by `δσ_MTi` moves `σ_MT` by
+/// `Σ c_i δσ_MTi`. This is one such `c_i δσ_MTi`, expanded as the fold
+/// expands it ([`channel_terms`]): a named reaction derived in its turn
+/// contributes its own named reactions, with the coefficients multiplied and
+/// the ranges intersected. ENDF/B-VIII.1 Pb208 elastic above 1.5 MeV is
+/// `σ_1 - σ_4 - σ_16 - σ_102`, and has no cells of its own there.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DerivedTerm {
+    /// The product of the coefficients on the path that reached `mt`.
+    pub coefficient: f64,
+    /// The reaction whose cells the term reads.
+    pub mt: i32,
+    /// The reactions whose cross sections add up to `mt`'s: `mt` itself, or
+    /// the components of a lumped reaction, which has none of its own
+    /// (ENDF-102 33.2.3).
+    pub cross_sections: Vec<i32>,
+    /// `[lo, hi)` in eV, where the derivation holds.
+    pub range: (f64, f64),
 }
 
 /// One nuclide's cross-section field for transport, and how each reaction
@@ -2684,6 +2708,11 @@ pub struct TransportField {
     /// partials that make up its total, and where each one's perturbation
     /// comes from.
     pub reads: BTreeMap<i32, Read>,
+    /// Per [`Read::Own`] reaction whose covariance an NC block derives, the
+    /// terms the derivation adds to what its own cells give it. A reaction
+    /// absent here reads its own cells only. Only terms whose reaction has
+    /// cells over their range are kept, since the others move nothing.
+    pub derived: BTreeMap<i32, Vec<DerivedTerm>>,
     /// The field over the covariance cells those reactions reach, or `None`
     /// when none does. It has no spectrum projections: transport reads it at
     /// each event's energy rather than through a group spectrum.
@@ -2696,7 +2725,9 @@ pub struct TransportField {
 /// Transport perturbs the partial reactions it samples, the non-redundant
 /// ones, and rebuilds every total from them, so the field is built over
 /// exactly those. A redundant reaction's own covariance (MT 1, MT 4, MT 103)
-/// is used only through [`Read::Parent`], for components that state none.
+/// is used only through [`Read::Parent`], for components that state none,
+/// and through [`TransportField::derived`], for partials an NC block derives
+/// from it.
 /// The material's nuclides must be loaded with covariance (see
 /// `Material::ensure_covariance_loaded`); a nuclide whose data carries none
 /// is named in the returned set rather than reported as exact.
@@ -2743,6 +2774,21 @@ pub fn transport_fields(
     (out, without_data)
 }
 
+/// Whether `field` has a relative or absolute cell of reaction `mt` that
+/// overlaps `range`: something a transport draw moves `mt` by there.
+///
+/// Short-range (`lb = 8`) blocks do not count. Transport holds their noise at
+/// nominal, as it averages away along a track, so a reaction they alone
+/// cover is not perturbed by any replica.
+fn moves(field: &Option<CellField>, mt: i32, range: (f64, f64)) -> bool {
+    field.as_ref().is_some_and(|f| {
+        f.relative_cells
+            .iter()
+            .chain(&f.absolute_cells)
+            .any(|c| c.mt == mt && c.lo < range.1 && c.hi > range.0)
+    })
+}
+
 /// [`transport_fields`] for one nuclide.
 fn transport_field(
     name: &str,
@@ -2755,6 +2801,7 @@ fn transport_field(
     let sums = lump_cross_sections(blocks_ref, reactions);
     let mut all = reactions.clone();
     all.extend(sums.iter().map(|r| (r.mt_number, r)));
+    let components = lumped_reactions(blocks_ref);
 
     // The reactions some usable block states a covariance for.
     let stated: BTreeSet<i32> = blocks_ref
@@ -2766,15 +2813,12 @@ fn transport_field(
         })
         .flat_map(|b| [b.mt, b.partner_mt()])
         .collect();
-    let reaches = |mt: i32| {
-        channel_terms(blocks_ref, &all, &[(String::new(), mt)])
-            .terms
-            .iter()
-            .any(|t| stated.contains(&t.mt))
-    };
+    // A reaction's terms: itself everywhere, and what the NC blocks on it
+    // derive it from, exactly as the fold expands a channel.
+    let terms_of = |mt: i32| channel_terms(blocks_ref, &all, &[(String::new(), mt)]).terms;
+    let reaches = |mt: i32| terms_of(mt).iter().any(|t| stated.contains(&t.mt));
 
     let mut reads = BTreeMap::new();
-    let mut reach: Vec<(String, i32)> = Vec::new();
     for &mt in partials {
         let read = if reaches(mt) {
             Read::Own
@@ -2784,48 +2828,9 @@ fn transport_field(
                 _ => Read::Nominal,
             }
         };
-        match read {
-            Read::Own => reach.push((format!("MT{mt}"), mt)),
-            Read::Parent(sum) => reach.push((format!("MT{mt}"), sum)),
-            Read::Nominal => {}
-        }
         reads.insert(mt, read);
     }
-    let build = |reach: &mut Vec<(String, i32)>| {
-        // A parent read by several components is one set of cells.
-        reach.sort_by_key(|(_, mt)| *mt);
-        reach.dedup_by_key(|(_, mt)| *mt);
-        if reach.is_empty() {
-            None
-        } else {
-            nuclide_field(name, reach, blocks, reactions, &[], &[])
-        }
-    };
-    let mut field = build(&mut reach);
-
-    // A sum lends its perturbation only if it has cells of its own. One whose
-    // covariance is an NC derivation from its components (ENDF/B-VIII.1 Cr52
-    // MT 4 from its levels) states nothing beyond what those components
-    // state, so a component stating nothing takes nothing from it; nor does a
-    // sum whose only block is all zeros.
-    let has_cells = |f: &Option<CellField>, mt: i32| {
-        f.as_ref().is_some_and(|f| {
-            f.relative_cells.iter().any(|c| c.mt == mt)
-                || f.absolute_cells.iter().any(|c| c.mt == mt)
-                || f.short.iter().any(|b| b.mt == mt)
-        })
-    };
-    let demoted: Vec<i32> = reads
-        .iter()
-        .filter_map(|(mt, r)| match r {
-            Read::Parent(sum) if !has_cells(&field, *sum) => Some(*mt),
-            _ => None,
-        })
-        .collect();
-    if !demoted.is_empty() {
-        for mt in &demoted {
-            reads.insert(*mt, Read::Nominal);
-        }
+    let build = |reads: &BTreeMap<i32, Read>| {
         let mut reach: Vec<(String, i32)> = reads
             .iter()
             .filter_map(|(mt, r)| match r {
@@ -2834,9 +2839,75 @@ fn transport_field(
                 Read::Nominal => None,
             })
             .collect();
-        field = build(&mut reach);
+        // A parent read by several components is one set of cells.
+        reach.sort_by_key(|(_, mt)| *mt);
+        reach.dedup_by_key(|(_, mt)| *mt);
+        if reach.is_empty() {
+            None
+        } else {
+            nuclide_field(name, &reach, blocks, reactions, &[], &[])
+        }
+    };
+    let mut field = build(&reads);
+
+    // A read is kept only if a draw moves it, so nothing is reported as
+    // perturbed that every replica holds at nominal. A sum lends its
+    // perturbation only if it has cells of its own: one whose covariance is
+    // an NC derivation from its components (ENDF/B-VIII.1 Cr52 MT 4 from its
+    // levels) states nothing beyond what those components state, so a
+    // component stating nothing takes nothing from it; nor does a sum whose
+    // only block is all zeros, or only short-range. A reaction read as its
+    // own needs cells of its own, or of a reaction it is derived from over
+    // the range of the derivation. Dropping a read can drop the cells of a
+    // reaction only it reached, so this repeats until nothing changes.
+    loop {
+        let demoted: Vec<i32> = reads
+            .iter()
+            .filter_map(|(mt, r)| {
+                let kept = match r {
+                    Read::Own => terms_of(*mt).iter().any(|t| moves(&field, t.mt, t.range)),
+                    Read::Parent(sum) => moves(&field, *sum, EVERYWHERE),
+                    Read::Nominal => true,
+                };
+                (!kept).then_some(*mt)
+            })
+            .collect();
+        if demoted.is_empty() {
+            break;
+        }
+        for mt in demoted {
+            reads.insert(mt, Read::Nominal);
+        }
+        field = build(&reads);
     }
-    TransportField { reads, field }
+
+    let derived = reads
+        .iter()
+        .filter(|(_, r)| **r == Read::Own)
+        .filter_map(|(&mt, _)| {
+            let kinds = [(String::new(), mt)];
+            let terms: Vec<DerivedTerm> = terms_of(mt)
+                .into_iter()
+                .filter(|t| !t.is_own(&kinds))
+                .filter(|t| moves(&field, t.mt, t.range))
+                .map(|t| DerivedTerm {
+                    coefficient: t.coefficient,
+                    mt: t.mt,
+                    cross_sections: match components.get(&t.mt) {
+                        Some(c) if !reactions.contains_key(&t.mt) => c.iter().copied().collect(),
+                        _ => vec![t.mt],
+                    },
+                    range: t.range,
+                })
+                .collect();
+            (!terms.is_empty()).then_some((mt, terms))
+        })
+        .collect();
+    TransportField {
+        reads,
+        derived,
+        field,
+    }
 }
 
 /// [`cell_fields`] for one nuclide.
@@ -5797,5 +5868,124 @@ mod transport_field_tests {
         let t = field(&[2, 102], &[]);
         assert!(t.reads.values().all(|r| *r == Read::Nominal));
         assert!(t.field.is_none());
+    }
+
+    /// `self_block` with the variance on its first interval only, `[1e-5,
+    /// 1e6]`, and `lb` chosen.
+    fn low_block(mt: i32, lb: i64, variance: f64) -> CovarianceBlock {
+        let mut b = self_block(mt, variance);
+        if let CovarianceData::Ni(ni) = &mut b.data {
+            ni.lb = lb;
+            ni.fk = vec![variance, 0.0, 0.0];
+        }
+        b
+    }
+
+    /// An LTY=0 block on `mt` over `[e1, e2]`, `σ_mt = Σ c_i σ_mt_i`.
+    fn nc(mt: i32, e1: f64, e2: f64, terms: &[(f64, i32)]) -> CovarianceBlock {
+        CovarianceBlock {
+            data: CovarianceData::Nc(endf::mf::covariance::NcSubsection {
+                lty: 0,
+                e1,
+                e2,
+                nci: terms.len() as i64,
+                ci: terms.iter().map(|t| t.0).collect(),
+                xmti: terms.iter().map(|t| f64::from(t.1)).collect(),
+                ..Default::default()
+            }),
+            ..self_block(mt, 0.0)
+        }
+    }
+
+    /// [`field`] with the total held too, as a redundant reaction.
+    fn field_with_total(partials: &[i32], blocks: &[CovarianceBlock]) -> TransportField {
+        let owned: Vec<Reaction> = partials
+            .iter()
+            .map(|&mt| reaction(mt, false))
+            .chain([reaction(1, true), reaction(4, true)])
+            .collect();
+        let reactions: BTreeMap<i32, &Reaction> = owned.iter().map(|r| (r.mt_number, r)).collect();
+        transport_field("X", partials, blocks, &reactions)
+    }
+
+    /// Elastic with no cells of its own, derived above 1 MeV from the total
+    /// less the other partials as ENDF/B-VIII.1 Pb208 derives it above
+    /// 1.5 MeV, reads the named reactions' cells over that range. A named
+    /// reaction with no cells, here `(n,2n)`, adds nothing.
+    #[test]
+    fn a_partial_an_nc_block_derives_reads_the_named_reactions() {
+        let t = field_with_total(
+            &[2, 16, 51, 102],
+            &[
+                self_block(1, 0.01),
+                self_block(4, 0.04),
+                self_block(102, 0.09),
+                nc(
+                    2,
+                    1.0e6,
+                    2.0e7,
+                    &[(1.0, 1), (-1.0, 4), (-1.0, 16), (-1.0, 102)],
+                ),
+            ],
+        );
+        assert_eq!(t.reads[&2], Read::Own);
+        assert_eq!(t.reads[&16], Read::Nominal);
+        assert_eq!(t.reads[&51], Read::Parent(4));
+        assert_eq!(t.reads[&102], Read::Own);
+        let range = (1.0e6, 2.0e7);
+        let term = |coefficient: f64, mt: i32| DerivedTerm {
+            coefficient,
+            mt,
+            cross_sections: vec![mt],
+            range,
+        };
+        assert_eq!(
+            t.derived,
+            BTreeMap::from([(2, vec![term(1.0, 1), term(-1.0, 4), term(-1.0, 102)])])
+        );
+        let f = t.field.expect("a field");
+        assert!(f.relative_cells.iter().any(|c| c.mt == 1));
+        assert!(!f.relative_cells.iter().any(|c| c.mt == 2));
+    }
+
+    /// A derivation is kept only where it reaches cells: one naming a
+    /// reaction whose only variance lies below the derivation's range moves
+    /// nothing, so the partial is held at nominal rather than reported as
+    /// perturbed with no draw ever moving it.
+    #[test]
+    fn a_derivation_that_reaches_no_cells_over_its_range_is_held() {
+        let t = field_with_total(
+            &[2],
+            &[low_block(1, 1, 0.01), nc(2, 1.0e6, 2.0e7, &[(1.0, 1)])],
+        );
+        assert_eq!(t.reads[&2], Read::Nominal);
+        assert!(t.derived.is_empty());
+
+        // Over a range the named reaction's cells do cover, it reads them.
+        let t = field_with_total(
+            &[2],
+            &[low_block(1, 1, 0.01), nc(2, 1.0e-5, 2.0e7, &[(1.0, 1)])],
+        );
+        assert_eq!(t.reads[&2], Read::Own);
+        assert_eq!(t.derived[&2][0].mt, 1);
+    }
+
+    /// Transport holds short-range (`lb = 8`) noise at nominal, so a sum or
+    /// a reaction that only such a block covers perturbs nothing and is
+    /// reported held, not perturbed.
+    #[test]
+    fn short_range_blocks_alone_perturb_nothing_in_transport() {
+        let t = field(
+            &[2, 51, 102],
+            &[low_block(4, 8, 0.04), low_block(2, 8, 0.01)],
+        );
+        assert_eq!(t.reads[&2], Read::Nominal);
+        assert_eq!(t.reads[&51], Read::Nominal);
+        assert_eq!(t.reads[&102], Read::Nominal);
+        assert!(t.field.is_none());
+
+        // Beside a block transport applies, the read stands.
+        let t = field(&[51], &[low_block(4, 8, 0.04), self_block(4, 0.04)]);
+        assert_eq!(t.reads[&51], Read::Parent(4));
     }
 }
