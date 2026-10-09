@@ -2137,7 +2137,8 @@ fn dump_section(d: &mut Dump, path: &str, section: &Section) {
             }
         }
 
-        Section::Mf33(s) => {
+        // MF=31 is MF=33's format, so it dumps the same way.
+        Section::Mf31(s) | Section::Mf33(s) => {
             d.int(format!("{path}/ZA"), s.za);
             d.float(format!("{path}/AWR"), s.awr);
             d.int(format!("{path}/MTL"), s.mtl);
@@ -2181,6 +2182,21 @@ fn dump_section(d: &mut Dump, path: &str, section: &Section) {
                         d.floats(format!("{ssp}/Data/{k}"), values.clone());
                     }
                 }
+            }
+        }
+
+        Section::Mf35(s) => {
+            d.int(format!("{path}/ZA"), s.za);
+            d.float(format!("{path}/AWR"), s.awr);
+            for (i, b) in s.blocks.iter().enumerate() {
+                let bp = format!("{path}/blocks/{i}");
+                d.float(format!("{bp}/E1"), b.e1);
+                d.float(format!("{bp}/E2"), b.e2);
+                d.int(format!("{bp}/LS"), b.ls);
+                d.int(format!("{bp}/LB"), b.lb);
+                d.int(format!("{bp}/NE"), b.ne);
+                d.floats(format!("{bp}/Ek"), b.ek.clone());
+                d.floats(format!("{bp}/Fkk"), b.fkk.clone());
             }
         }
 
@@ -2771,10 +2787,10 @@ fn unported_files_keep_their_text() {
     // Built synthetically rather than taken from a fixture: every file in
     // every fixture on this branch is now ported, and a test that depends on
     // that not being true stops testing anything the moment it stops holding.
-    // MF=31 (covariances of the fission neutron multiplicity) has no parser
-    // and nothing here needs one, so it is a stable choice rather than one
-    // the next commit invalidates.
-    const MF: i32 = 31;
+    // MF=30 (covariances obtained from parameter covariances and
+    // sensitivities) has no parser and nothing here needs one, so it is a
+    // stable choice rather than one the next commit invalidates.
+    const MF: i32 = 30;
     let line =
         |body: &str, mat: i32, mf: i32, mt: i32| format!("{body:<66}{mat:>4}{mf:>2}{mt:>3}\n");
     let text = line(" tape id", 1, 0, 0)
@@ -2814,8 +2830,8 @@ fn unported_files_keep_their_text() {
 const UNCOVERED_BY_ANY_FIXTURE: [i32; 0] = [];
 
 /// The MF files that have a Rust parser at all.
-const PORTED: [i32; 22] = [
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 15, 23, 26, 27, 28, 32, 33, 34, 40,
+const PORTED: [i32; 24] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 15, 23, 26, 27, 28, 31, 32, 33, 34, 35, 40,
 ];
 
 #[test]

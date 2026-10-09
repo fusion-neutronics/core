@@ -50,6 +50,13 @@ pub struct NuclideCoverage {
     /// What the library's own documentation says is wrong with this
     /// covariance (see `yani_transmute::covariance_provenance`).
     pub warnings: Vec<String>,
+    /// The fission multiplicities the evaluation carries MF=31 covariance
+    /// for (452 total, 455 delayed, 456 prompt), ascending. Reported so the
+    /// data is visible; no run samples it yet, which `not_perturbed` says.
+    pub nubar_covariance: Vec<i32>,
+    /// Whether the evaluation carries MF=35, the covariance of the fission
+    /// spectrum. Reported, not sampled, as for `nubar_covariance`.
+    pub spectrum_covariance: bool,
 }
 
 /// What nuclear-data uncertainty a model's transport could carry.
@@ -109,6 +116,9 @@ impl Model {
             material
                 .ensure_angular_covariance_loaded()
                 .map_err(|e| format!("loading angular covariance: {e}"))?;
+            material
+                .ensure_fission_covariance_loaded()
+                .map_err(|e| format!("loading fission covariance: {e}"))?;
             for (name, nuclide) in &material.nuclide_data {
                 let Some(blocks) = &nuclide.angular_covariance else {
                     continue;
@@ -145,6 +155,14 @@ impl Model {
                 }
                 coverage.repair = repairs.get(&name).copied();
                 if let Some(nd) = material.nuclide_data.get(&name) {
+                    if let Some(blocks) = &nd.nubar_covariance {
+                        let mts: BTreeSet<i32> = blocks.iter().map(|b| b.mt).collect();
+                        coverage.nubar_covariance = mts.into_iter().collect();
+                    }
+                    coverage.spectrum_covariance = nd
+                        .spectrum_covariance
+                        .as_ref()
+                        .is_some_and(|b| !b.is_empty());
                     coverage.library = nd
                         .data_source
                         .as_deref()

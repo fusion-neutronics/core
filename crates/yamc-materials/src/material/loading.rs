@@ -190,6 +190,17 @@ impl Material {
         )
     }
 
+    /// [`Self::ensure_covariance_loaded`] for MF=31 and MF=35,
+    /// `nubar_covariance.arrow` and `spectrum_covariance.arrow`: re-read every
+    /// nuclide loaded without them, widening that axis alone. Absent data is
+    /// not an error, for the same reasons.
+    pub fn ensure_fission_covariance_loaded(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.widen_scope(
+            |s| s.fission_covariance,
+            |s| s.with_fission_covariance(true),
+        )
+    }
+
     /// Re-read every nuclide whose scope lacks what `has` asks for, at the
     /// scope `widen` makes of its current one.
     fn widen_scope(
