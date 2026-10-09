@@ -2698,6 +2698,22 @@ fn linearity_of(
                 .collect()
         })
         .collect();
+    // Each output's first replica, which the actual values are measured from.
+    // The sums below are one-pass, and on raw densities `sum(a^2) - sum(a)^2/n`
+    // cancels catastrophically once the spread is small against the density
+    // (an exactly linear output read r2 0.004 at a relative spread of 2e-9).
+    // Measured from a value inside the spread, every moment is of the spread's
+    // own size. The prediction is measured from the nominal for the same
+    // reason, which leaves only its first-order terms. Neither shift moves a
+    // variance or a correlation.
+    let reference: Vec<Vec<f64>> = actual
+        .iter()
+        .map(|o| {
+            o.iter()
+                .map(|samples| samples.first().copied().unwrap_or(0.0))
+                .collect()
+        })
+        .collect();
 
     #[derive(Clone, Default)]
     struct Sums {
@@ -2726,15 +2742,8 @@ fn linearity_of(
 
     for replica in 0..replicas {
         let delta = draws.relative_changes(sensitivities, replica as u64);
-        let mut predicted: Vec<Vec<f64>> = outputs
-            .iter()
-            .enumerate()
-            .map(|(step, o)| {
-                o.iter()
-                    .map(|n| first_order.nominal[step].get(n).copied().unwrap_or(0.0))
-                    .collect()
-            })
-            .collect();
+        // Each output's prediction less the nominal: its first-order terms.
+        let mut predicted: Vec<Vec<f64>> = outputs.iter().map(|o| vec![0.0; o.len()]).collect();
         let mut by_key: Vec<Vec<HashMap<usize, f64>>> = outputs
             .iter()
             .map(|o| vec![HashMap::new(); o.len()])
@@ -2751,7 +2760,7 @@ fn linearity_of(
         }
         for (step, (actual_step, predicted_step)) in actual.iter().zip(&predicted).enumerate() {
             for (o, (samples, &p)) in actual_step.iter().zip(predicted_step).enumerate() {
-                let a = samples[replica];
+                let a = samples[replica] - reference[step][o];
                 let s = &mut sums[step][o];
                 s.a += a;
                 s.aa += a * a;
@@ -2776,17 +2785,23 @@ fn linearity_of(
         let vb = sbb - sb * sb / n;
         let cab = sab - sa * sb / n;
         if va > 0.0 && vb > 0.0 {
+            // At most 1 by Cauchy-Schwarz; the clamp only absorbs rounding.
             (cab * cab / (va * vb)).min(1.0)
         } else {
             0.0
         }
     };
-    // The contributor ranked first by first-order variance at each output.
+    // The contributor ranked first by first-order variance at each output,
+    // among the sources `sensitivities` cover. A per-source check is run on
+    // that source's replicas alone, so another source's contributor ranking
+    // first there says nothing about this source's linearity.
+    let sources: std::collections::BTreeSet<&str> =
+        sensitivities.iter().map(|s| s.source).collect();
     let first_ranked = |step: usize, nuclide: &str| -> Option<(String, String)> {
         first_order
             .contributors
             .iter()
-            .filter(|c| c.reaction.is_none())
+            .filter(|c| c.reaction.is_none() && sources.contains(c.source.as_str()))
             .filter_map(|c| {
                 let v = *c.variance.get(step)?.get(nuclide)?;
                 Some(((c.source.clone(), c.nuclide.clone()), v))
@@ -4934,5 +4949,119 @@ mod tests {
             );
         }
         assert_ne!(format!("{:?}", got["Co60"]), format!("{:?}", chain["Co60"]));
+    }
+
+    /// A one-step ensemble whose output `X` is exactly linear in nuclide A's
+    /// half-life, `X = 1 + s (T_A / 100 - 1)`, with T_A drawn at a 10%
+    /// sigma, and the matching half-life sensitivity and draws.
+    fn linear_half_life_ensemble(
+        s: f64,
+    ) -> (
+        crate::uncertainty::Ensemble,
+        Sensitivity,
+        HalfLifeSampling,
+        u64,
+    ) {
+        let h = HalfLifeSampling {
+            candidates: vec![("A".to_string(), 100.0, 10.0)],
+            without: Default::default(),
+            not_carried: Default::default(),
+        };
+        let seed = 3;
+        let mut ensemble = crate::uncertainty::Ensemble::new(1);
+        for r in 0..256u64 {
+            let t = crate::uncertainty::sample_half_lives(&h.candidates, seed, r)["A"];
+            ensemble.push_with_half_lives(
+                vec![HashMap::from([(
+                    "X".to_string(),
+                    1.0 + s * (t / 100.0 - 1.0),
+                )])],
+                HashMap::from([("A".to_string(), t)]),
+            );
+        }
+        ensemble.fold_absences();
+        let sensitivity = Sensitivity {
+            source: "half_life",
+            nuclide: "A".to_string(),
+            input: Input::HalfLife { nominal: 100.0 },
+            s: vec![HashMap::from([("X".to_string(), s)])],
+        };
+        (ensemble, sensitivity, h, seed)
+    }
+
+    /// A per-source linearity check ranks only that source's contributors: a
+    /// cross-section contributor ranking first at the output must not flag an
+    /// exactly linear half-life ensemble.
+    #[test]
+    fn per_source_linearity_ranks_within_its_own_source() {
+        use crate::uncertainty::Contributor;
+        let s = -2.0;
+        let (ensemble, hl, h, seed) = linear_half_life_ensemble(s);
+        let first_order = FirstOrder {
+            contributors: vec![
+                Contributor {
+                    source: "cross_sections".to_string(),
+                    nuclide: "B".to_string(),
+                    reaction: None,
+                    variance: vec![HashMap::from([("X".to_string(), 1.0)])],
+                },
+                Contributor {
+                    source: "half_life".to_string(),
+                    nuclide: "A".to_string(),
+                    reaction: None,
+                    variance: vec![HashMap::from([("X".to_string(), (s * 0.1) * (s * 0.1))])],
+                },
+            ],
+            sensitivities: Vec::new(),
+            nominal: vec![HashMap::from([("X".to_string(), 1.0)])],
+        };
+        let draws = ReplicaDraws {
+            seed,
+            per_spectrum: &[],
+            sampler: None,
+            half_life: Some(&h),
+            decay_branching: None,
+        };
+        let lin = linearity_of(&ensemble, &first_order, &[&hl], &draws);
+        let l = &lin[0]["X"];
+        assert!(l.residual_share < 1e-12, "{l:?}");
+        assert!(l.r2 > 1.0 - 1e-12, "{l:?}");
+        assert!(l.ranking_agrees, "{l:?}");
+        assert!(!l.flagged, "{l:?}");
+    }
+
+    /// An exactly linear output keeps r2 at 1 however small its spread is
+    /// against its density: the sums must not cancel catastrophically.
+    #[test]
+    fn linearity_holds_at_small_relative_spread() {
+        use crate::uncertainty::Contributor;
+        // Relative spreads of 2e-1, 2e-7 and 2e-9.
+        for s in [-2.0, -2.0e-6, -2.0e-8] {
+            let (ensemble, hl, h, seed) = linear_half_life_ensemble(s);
+            let first_order = FirstOrder {
+                contributors: vec![Contributor {
+                    source: "half_life".to_string(),
+                    nuclide: "A".to_string(),
+                    reaction: None,
+                    variance: vec![HashMap::from([("X".to_string(), (s * 0.1) * (s * 0.1))])],
+                }],
+                sensitivities: Vec::new(),
+                nominal: vec![HashMap::from([("X".to_string(), 1.0)])],
+            };
+            let draws = ReplicaDraws {
+                seed,
+                per_spectrum: &[],
+                sampler: None,
+                half_life: Some(&h),
+                decay_branching: None,
+            };
+            let lin = linearity_of(&ensemble, &first_order, &[&hl], &draws);
+            let l = &lin[0]["X"];
+            let key = ("half_life".to_string(), "A".to_string());
+            assert!(l.by_contributor[&key] > 1.0 - 1e-6, "s={s}: {l:?}");
+            assert!(l.r2 > 1.0 - 1e-6, "s={s}: {l:?}");
+            assert!(l.residual_share < 1e-6, "s={s}: {l:?}");
+            assert!(!l.flagged, "s={s}: {l:?}");
+        }
     }
 }
