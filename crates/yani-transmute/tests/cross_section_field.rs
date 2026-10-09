@@ -181,13 +181,9 @@ fn the_field_reproduces_the_fold_under_every_spectrum() {
                     continue;
                 }
                 if repaired {
-                    // Clipping removes negative eigenvalues, so `C+ - C` is
-                    // PSD and no rate's variance can drop.
-                    assert!(
-                        sampled >= evaluated * (1.0 - 1e-6),
-                        "{label} {kind} under spectrum {a}: repaired to {sampled}, below the \
-                         folded {evaluated}"
-                    );
+                    // The repair keeps every cell's sigma and moves
+                    // correlations, so a channel folding several cells can
+                    // sit either side of its fold.
                     eprintln!(
                         "{label} {kind} spectrum {a}: repaired, sigma {evaluated:.4} -> {sampled:.4}"
                     );
@@ -343,5 +339,67 @@ fn a_schedule_split_over_two_copies_of_a_spectrum_attributes_the_same() {
     assert!(
         (two / one - 1.0).abs() < 5e-3,
         "one spectrum {one:e}, the same split over two copies {two:e}"
+    );
+}
+
+/// ENDF/B-VIII.1 W186's MF=33 cells are not PSD as evaluated: a cell is
+/// stated at zero variance with a covariance to others. Clipping the
+/// negative eigenvalues that gives sampled (n,3n) under a fusion spectrum at
+/// a relative sigma of 4.47% against the 4.32% its fold states. The repair
+/// now holds that cell, which has no correlation to keep, and keeps every
+/// other cell's sigma, and the channel is sampled at its evaluated sigma
+/// within sampling error. Skipped where the evaluation is not cached.
+#[test]
+fn w186_n3n_is_sampled_at_its_evaluated_sigma() {
+    let dir = yamc_test_cache::root().join("endf-b8.1-W186.arrow");
+    if !dir.join("covariance.arrow").is_file() || !dir.join("reactions.arrow").is_file() {
+        eprintln!("skipping: endf-b8.1 W186 is not cached");
+        return;
+    }
+    let chain = chain();
+    let groups = log_groups(175);
+    let flux = fusion(&groups);
+    let m = material("W186", &dir);
+    let rates = compute_multigroup_reaction_rates(&m, &chain, &flux, &groups, 1.0).0;
+    let fold = fold_rate_covariance(&m, &chain, &rates, &flux, &groups, None).0;
+    let spectrum = FoldSpectrum {
+        chain: &chain,
+        rates: &rates,
+        multigroup_flux: &flux,
+        group_boundaries: &groups,
+    };
+    let fields = cell_fields(&m, &chain, &[spectrum], None);
+    let sampler = Sampler::new(&fields, &[fold]);
+    let repair = sampler.field_repairs()["W186"];
+    assert!(repair.held_cells > 0 && repair.converged, "{repair:?}");
+    let (_, _, evaluated, sampled) = sampler
+        .channel_sigmas(0)
+        .find(|(n, k, _, _)| *n == "W186" && *k == "(n,3n)")
+        .expect("W186 (n,3n) is sampled");
+    assert!((evaluated - 0.0432).abs() < 5e-5, "{evaluated}");
+    assert!(
+        (sampled / evaluated - 1.0).abs() < 2e-3,
+        "{sampled} against {evaluated}"
+    );
+
+    // The draws themselves: the sigma of 20000 replicas is within 0.5% of
+    // the true one at one standard error, so the 3.5% widening clipping
+    // gave is six standard errors out.
+    let n = 20_000;
+    let nominal = rates["W186"]["(n,3n)"];
+    let (mut sum, mut square) = (0.0, 0.0);
+    for replica in 0..n {
+        let (perturbed, _) = sampler.perturb(0, &rates, 186, replica);
+        let x = perturbed["W186"]["(n,3n)"] / nominal - 1.0;
+        sum += x;
+        square += x * x;
+    }
+    let mean = sum / n as f64;
+    let sigma = (square / n as f64 - mean * mean).sqrt();
+    let error = evaluated / (2.0 * n as f64).sqrt();
+    eprintln!("W186 (n,3n): evaluated {evaluated:.5}, drawn {sigma:.5} +- {error:.5}");
+    assert!(
+        (sigma - evaluated).abs() < 3.0 * error,
+        "drawn {sigma} against evaluated {evaluated} +- {error}"
     );
 }

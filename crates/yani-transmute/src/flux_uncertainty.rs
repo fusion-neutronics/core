@@ -297,7 +297,7 @@ impl RelativeFluxCovariance {
         let (log_factor, sampled_log) = match (substituted, cholesky(&log, n)) {
             (false, Ok(l)) => (l, None),
             _ => {
-                let (l, _, sampled, _) = crate::covariance_sample::clipped_factor(&log, n, false);
+                let (l, sampled, _) = crate::covariance_sample::clipped_factor(&log, n);
                 (l, Some(sampled))
             }
         };

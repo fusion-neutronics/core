@@ -858,20 +858,27 @@ impl PyTransmutationResults {
     ///   it is; any warning makes ``has_gaps`` true.
     /// - ``covariance_repaired``: nuclides the material can populate (bounded
     ///   at or above the solver's density floor over the schedule at nominal
-    ///   rates; a replica's rates can sit above them) whose folded covariance
-    ///   was not positive semi-definite past round-off, with a channel a draw
-    ///   can move (a positive rate on a spectrum the schedule irradiates
-    ///   with). Past round-off means the correlation matrix has an eigenvalue
-    ///   below ``-m * 1e-12`` (``m`` the number of channels with a positive
-    ///   stated variance), or a channel is stated with a negative
-    ///   variance, or a zero one and a covariance to another channel.
-    ///   Clipping only adds variance, so these were sampled wider than
-    ///   evaluated, and any makes ``has_gaps`` true.
+    ///   rates; a replica's rates can sit above them) whose evaluated cell
+    ///   covariance was not positive semi-definite past round-off, with a
+    ///   channel a draw can move (a positive rate on a spectrum the schedule
+    ///   irradiates with). Past round-off means the correlation matrix of the
+    ///   cells has an eigenvalue below ``-m * 1e-12`` (``m`` the number of
+    ///   cells with a positive stated variance), or a cell is stated with a
+    ///   negative variance, or a zero one and a covariance to another cell.
+    ///   The correlation matrix is replaced by the nearest correlation
+    ///   matrix and rescaled by the evaluated sigmas, so every cell keeps its
+    ///   evaluated sigma and only correlations move (a cell stated at zero or
+    ///   negative variance is held at nominal); a channel folding several
+    ///   cells can still be sampled at a sigma other than its evaluation's,
+    ///   either way, and any makes ``has_gaps`` true.
     ///   ``covariance_repairs`` gives one dict per repaired populated nuclide
-    ///   and spectrum, including repairs no draw can move, with ``lambda_min``,
-    ///   ``lambda_max``, ``clipped_fraction`` (the variance added over the
-    ///   stated trace, ``float('inf')`` when that trace is not positive) and,
-    ///   per channel keyed by kind,
+    ///   and spectrum, including repairs no draw can move, with ``lambda_min``
+    ///   (the most negative eigenvalue of the cells' correlation matrix before
+    ///   the repair), ``largest_correlation_change`` and
+    ///   ``correlation_frobenius_change`` (the largest and the Frobenius
+    ///   change of that correlation matrix), ``cells`` (in the coupled blocks
+    ///   repaired), ``held_cells``, ``converged`` and, per channel keyed by
+    ///   kind,
     ///   ``evaluated_variance`` (the folded diagonal as stated, which can be
     ///   negative), ``evaluated_sigma`` (``None`` when that variance is
     ///   negative) and ``sampled_sigma``. A repair of a nuclide outside the
@@ -879,12 +886,12 @@ impl PyTransmutationResults {
     ///   names those with a channel a draw can move. The bound holds at
     ///   nominal rates only and a replica's rates can populate them, so any
     ///   also makes ``has_gaps`` true.
-    /// - ``worst_sigma_inflation``: the largest sampled over evaluated sigma,
-    ///   minus one, over the repaired channels of populated nuclides with a
+    /// - ``worst_sigma_change``: the largest ``|sampled / evaluated sigma -
+    ///   1|`` over the repaired channels of populated nuclides with a
     ///   positive rate on a spectrum the schedule irradiates with,
     ///   ``float('inf')`` when a repair gave a spread to a channel whose stated
-    ///   variance is zero or negative. ``rate_weighted_sigma_inflation`` is the
-    ///   weighted mean of sampled over evaluated sigma, minus one, over every
+    ///   variance is zero or negative. ``rate_weighted_sigma_change`` is the
+    ///   weighted mean of ``|sampled / evaluated sigma - 1|`` over every
     ///   sampled channel of a populated nuclide, each weighted by its unit-flux
     ///   rate times its spectrum's fluence in the schedule times its parent's
     ///   initial density, so it covers first-generation reactions only (a
@@ -905,12 +912,18 @@ impl PyTransmutationResults {
     ///   covariance is not a lognormal's, keyed by nuclide, each with
     ///   ``cells`` (cells whose sampled sigma or correlation differs from the
     ///   evaluated one), ``largest_sigma_change`` (the largest
-    ///   ``|sampled / evaluated sigma - 1|``) and ``largest_correlation_change``.
+    ///   ``|sampled / evaluated sigma - 1|``), ``largest_correlation_change``
+    ///   and ``log_space_repair`` (``None``, or a dict with the keys of a
+    ///   repair above, of the log-space correlation matrix).
     ///   Two fully correlated cells with different sigmas, or an
     ///   anticorrelation with ``1 + C <= 0``, are not, and the nearest
-    ///   lognormal is sampled. A property of the distribution rather than a
+    ///   lognormal is sampled: where the log-space covariance is not PSD its
+    ///   correlation matrix is replaced by the nearest correlation matrix,
+    ///   which keeps every sigma. A property of the distribution rather than a
     ///   defect of the data, so not a gap. ``flux_lognormal_not_carried`` is
-    ///   the same for a stated flux covariance, keyed by spectrum index.
+    ///   the same for a stated flux covariance, keyed by spectrum index,
+    ///   whose ``log_space_repair`` is always ``None``: a flux covariance's
+    ///   log-space negative eigenvalues are clipped.
     /// - ``rates_sampled``: cross-section rate draws made, each read off one
     ///   draw of the nuclide's cross sections. ``rates_floored`` counts those
     ///   that came out negative and were floored at zero, which only a channel

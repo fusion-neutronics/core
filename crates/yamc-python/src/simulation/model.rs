@@ -456,9 +456,15 @@ impl PyModel {
     ///       others the largest its derived cross section has at any
     ///       energy), ``held_at_nominal`` (sorted MTs no applied covariance
     ///       reaches), ``cells`` and ``short_range_blocks`` (the size of the
-    ///       nuclide's covariance field), ``repair`` (``None``, or a dict
-    ///       with ``lambda_min``, ``lambda_max`` and ``clipped_fraction``, the
-    ///       variance the repair added as a share of the stated variance),
+    ///       nuclide's covariance field), ``repair`` (``None``, or a dict of
+    ///       what the repair to the nearest correlation matrix did, which
+    ///       keeps every cell's evaluated sigma: ``lambda_min``, the most
+    ///       negative eigenvalue of the cells' correlation matrix before it,
+    ///       ``largest_correlation_change`` and
+    ///       ``correlation_frobenius_change``, how far it moved the
+    ///       correlations, ``cells`` in the blocks it repaired,
+    ///       ``held_cells`` stated at zero or negative variance with a
+    ///       covariance and so held at nominal, and ``converged``),
     ///       ``library`` (the library the covariance came from, or ``None``
     ///       when its data folder records none) and ``warnings`` (what that
     ///       library's own documentation says is wrong with this covariance,
@@ -519,8 +525,14 @@ impl PyModel {
                 Some(r) => {
                     let repair = PyDict::new(py);
                     repair.set_item("lambda_min", r.lambda_min)?;
-                    repair.set_item("lambda_max", r.lambda_max)?;
-                    repair.set_item("clipped_fraction", r.clipped_fraction)?;
+                    repair.set_item("largest_correlation_change", r.largest_correlation_change)?;
+                    repair.set_item(
+                        "correlation_frobenius_change",
+                        r.correlation_frobenius_change,
+                    )?;
+                    repair.set_item("cells", r.cells)?;
+                    repair.set_item("held_cells", r.held_cells)?;
+                    repair.set_item("converged", r.converged)?;
                     entry.set_item("repair", repair)?;
                 }
                 None => entry.set_item("repair", py.None())?,
