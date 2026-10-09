@@ -1537,7 +1537,10 @@ impl PyModel {
     ///           reaction rates, from their per-history covariance, so the
     ///           correlations between rates scored by the same histories are
     ///           kept. Each rate's own sigma is read with
-    ///           ``get_reaction_rate_uncertainty``;
+    ///           ``get_reaction_rate_uncertainty``. Different materials'
+    ///           tallies are separate estimates and are drawn independently,
+    ///           while the nuclear-data sources below are drawn once per
+    ///           replica and shared by every material;
     ///         - ``"cross_sections"``: the ENDF MF=33 covariance, folded against
     ///           the spectrum the tally actually saw;
     ///         - ``"half_life"``: the decay data's half-life sigmas;
