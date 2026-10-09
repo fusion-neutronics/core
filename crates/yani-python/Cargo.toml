@@ -8,7 +8,7 @@ name = "yani-python"
 # transport converter says nothing about the inventory package. Bump it with
 # `cargo set-version -p yani-python <version>`.
 # See .github/workflows/ci-python.yml and docs/developer_info.md.
-version = "0.20.0"
+version = "0.21.0"
 edition = "2021"
 rust-version.workspace = true
 license = "MIT OR Apache-2.0"
