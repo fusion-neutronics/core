@@ -48,8 +48,16 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 /// - ``"decay_photon_lines"``: each decay photon spectrum's normalisation
 ///   (FD for lines, FC for a continuum), one draw per spectrum common to all
 ///   its lines, and each line's own intensity (dRI) and energy (dER), from
-///   the decay data's MT=457 sigmas. It moves the decay photon spectrum and
-///   the contact dose only: no photon enters the solve;
+///   the decay data's MT=457 sigmas. It moves the decay photon spectrum, the
+///   contact dose and, through the gamma decay energy E_EM, which follows
+///   each replica's drawn lines in place of a ``"decay_energy"`` draw, the
+///   decay heat; no photon enters the solve. The decay data do not state how
+///   a nuclide's photon intensities are correlated beyond the normalisation
+///   (between the lines' dRI, between a normalisation and its lines, between
+///   gamma and x-ray spectra), so each output is evaluated at both ends:
+///   ``Estimate.std_dev`` takes them independent and
+///   ``Estimate.std_dev_correlated`` fully correlated. A D1S dose
+///   (``PulseSchedule.time_correct_tally``) draws the normalisations alone;
 /// - ``"fission_yield"``: each fissioning parent's independent yields (MT=454),
 ///   from the DY the evaluation states on each, drawn on the tape's own
 ///   products and summed onto the chain's the way the converter summed the
@@ -69,7 +77,8 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 /// states a mean and a sigma for each and no correlation, so the draws carry
 /// exactly what the evaluation states and are never negative. So are the decay
 /// photon normalisations, intensities and energies, with the one correlation
-/// the data does state: a spectrum's normalisation is common to its lines.
+/// the data does state, a spectrum's normalisation common to its lines, and
+/// the ones it does not state bounded rather than assumed.
 ///
 /// Held at their nominal values, with uncertainties of their own that this
 /// does not propagate:
@@ -533,6 +542,10 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     ] {
         d.set_item(key, set.iter().cloned().collect::<Vec<_>>())?;
     }
+    d.set_item(
+        "decay_photon_spectra_folded",
+        info.decay_photon_spectra_folded.clone(),
+    )?;
     for (key, set) in [
         ("fission_yields_perturbed", &info.fission_yields_perturbed),
         (

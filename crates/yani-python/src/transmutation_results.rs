@@ -16,6 +16,15 @@ use crate::material::PyMaterial;
 /// uncertainty was asked for. ``mean`` and ``std_dev`` are ``None`` below two
 /// replicas: a spread over fewer than two samples is unmeasured, not zero, and
 /// reporting it as zero would read as a quantity known exactly.
+///
+/// A quantity a decay photon intensity enters (contact dose, the photon
+/// spectrum, and the decay heat through its gamma part) has a range rather
+/// than one spread when the ``"decay_photon_lines"`` source is on, because
+/// the decay data do not state how a nuclide's photon intensities are
+/// correlated. ``std_dev`` is the lower end, every unstated correlation taken
+/// as zero, and ``std_dev_correlated`` the upper end, every one taken as one;
+/// ``std_dev_range`` gives both. For any other quantity, or with the source
+/// off, the two are equal.
 #[gen_stub_pyclass]
 #[pyclass(name = "Estimate", frozen, skip_from_py_object)]
 #[derive(Clone)]
@@ -44,15 +53,52 @@ impl PyEstimate {
     }
 
     /// The ensemble's sample standard deviation, or None below two replicas.
+    ///
+    /// The lower end of ``std_dev_range``: where the ``"decay_photon_lines"``
+    /// source is drawn, the correlations the decay data leave unstated
+    /// between a nuclide's photon intensities are taken as zero, which is the
+    /// evaluation read literally.
     #[getter]
     fn std_dev(&self) -> Option<f64> {
         self.inner.std_dev
+    }
+
+    /// The ensemble's sample standard deviation with those correlations taken
+    /// as one, or None below two replicas: within each nuclide the lines of a
+    /// spectrum, the spectrum's normalisation and its lines, and its gamma and
+    /// x-ray spectra all move together. The upper end of ``std_dev_range``.
+    ///
+    /// Evaluated on the same inventories as ``std_dev``, so the two differ by
+    /// the line data alone. Equal to ``std_dev`` for activity, or when the
+    /// ``"decay_photon_lines"`` source is not drawn.
+    #[getter]
+    fn std_dev_correlated(&self) -> Option<f64> {
+        self.inner.std_dev_correlated
+    }
+
+    /// ``(std_dev, std_dev_correlated)``, the range every non-negative
+    /// correlation between a nuclide's photon intensities gives, or None below
+    /// two replicas.
+    ///
+    /// Negative correlations are not considered: what the intensities leave
+    /// unstated is a shared normalisation, which moves every line it scales
+    /// the same way and cannot anticorrelate them.
+    #[getter]
+    fn std_dev_range(&self) -> Option<(f64, f64)> {
+        Some((self.inner.std_dev?, self.inner.std_dev_correlated?))
     }
 
     /// ``std_dev`` as a fraction of ``nominal``, or None if either is absent.
     #[getter]
     fn relative_std_dev(&self) -> Option<f64> {
         self.inner.relative_std_dev()
+    }
+
+    /// ``std_dev_correlated`` as a fraction of ``nominal``, or None if either
+    /// is absent.
+    #[getter]
+    fn relative_std_dev_correlated(&self) -> Option<f64> {
+        self.inner.relative_std_dev_correlated()
     }
 
     /// The standard error of ``std_dev``: how far another ensemble of the
@@ -73,13 +119,17 @@ impl PyEstimate {
     }
 
     fn __repr__(&self) -> String {
+        let correlated = match (self.inner.std_dev, self.inner.std_dev_correlated) {
+            (Some(low), Some(high)) if high != low => format!(", std_dev_correlated={high:.4e}"),
+            _ => String::new(),
+        };
         match (self.inner.std_dev, self.inner.std_dev_standard_error) {
             (Some(sigma), Some(se)) => format!(
-                "Estimate(nominal={:.4e}, std_dev={:.4e} +/- {:.2e}, replicas={})",
+                "Estimate(nominal={:.4e}, std_dev={:.4e} +/- {:.2e}{correlated}, replicas={})",
                 self.inner.nominal, sigma, se, self.inner.replicas
             ),
             (Some(sigma), None) => format!(
-                "Estimate(nominal={:.4e}, std_dev={:.4e}, replicas={})",
+                "Estimate(nominal={:.4e}, std_dev={:.4e}{correlated}, replicas={})",
                 self.inner.nominal, sigma, self.inner.replicas
             ),
             (None, _) => format!(
@@ -150,16 +200,57 @@ impl PyLineEstimate {
         self.inner.estimate.mean
     }
 
-    /// The ensemble's sample standard deviation, or None below two replicas.
+    /// The ensemble's sample standard deviation [photons/s], or None below
+    /// two replicas.
+    ///
+    /// The lower end of ``std_dev_range``: where the ``"decay_photon_lines"``
+    /// source is drawn, the correlations the decay data leave unstated
+    /// between a nuclide's photon intensities are taken as zero, which is the
+    /// evaluation read literally.
     #[getter]
     fn std_dev(&self) -> Option<f64> {
         self.inner.estimate.std_dev
+    }
+
+    /// The ensemble's sample standard deviation with those correlations taken
+    /// as one, or None below two replicas: within each nuclide the lines of a
+    /// spectrum, the spectrum's normalisation and its lines, and its gamma and
+    /// x-ray spectra all move together. The upper end of ``std_dev_range``.
+    ///
+    /// Evaluated on the same inventories as ``std_dev``, so the two differ by
+    /// the line data alone. Equal to ``std_dev`` when the
+    /// ``"decay_photon_lines"`` source is not drawn.
+    #[getter]
+    fn std_dev_correlated(&self) -> Option<f64> {
+        self.inner.estimate.std_dev_correlated
+    }
+
+    /// ``(std_dev, std_dev_correlated)``, the range every non-negative
+    /// correlation between a nuclide's photon intensities gives, or None below
+    /// two replicas.
+    ///
+    /// Negative correlations are not considered: what the intensities leave
+    /// unstated is a shared normalisation, which moves every line it scales
+    /// the same way and cannot anticorrelate them.
+    #[getter]
+    fn std_dev_range(&self) -> Option<(f64, f64)> {
+        Some((
+            self.inner.estimate.std_dev?,
+            self.inner.estimate.std_dev_correlated?,
+        ))
     }
 
     /// ``std_dev`` as a fraction of ``nominal``, or None if either is absent.
     #[getter]
     fn relative_std_dev(&self) -> Option<f64> {
         self.inner.estimate.relative_std_dev()
+    }
+
+    /// ``std_dev_correlated`` as a fraction of ``nominal``, or None if either
+    /// is absent.
+    #[getter]
+    fn relative_std_dev_correlated(&self) -> Option<f64> {
+        self.inner.estimate.relative_std_dev_correlated()
     }
 
     /// The standard error of ``std_dev``, or None below four replicas (see
@@ -590,9 +681,23 @@ impl PyTransmutationResults {
     ///
     /// Args:
     ///     material_id: Material ID number.
+    /// With the ``"decay_photon_lines"`` source on, each replica's gamma decay
+    /// energy E_EM follows its drawn photon lines and continua rather than an
+    /// independent ``"decay_energy"`` draw, so its gamma heat and its contact
+    /// dose come from the same draw of one evaluation. E_EM moves by the drawn
+    /// change in the photon energy per decay (each line's energy times its
+    /// intensity, plus each continuum's energy integral), and the part of E_EM
+    /// the tabulated spectra do not carry is held at nominal. The beta and
+    /// alpha parts keep their ``"decay_energy"`` draws. The heat then has a
+    /// range, ``Estimate.std_dev`` to ``Estimate.std_dev_correlated``, from the
+    /// photon intensities' unstated correlations.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
     ///     step: Timestep index (0 = initial composition). As in
     ///         ``get_activity_uncertainty``, step 0 has a spread whenever the
-    ///         ``"half_life"`` or ``"decay_energy"`` source is sampled.
+    ///         ``"half_life"``, ``"decay_energy"`` or ``"decay_photon_lines"``
+    ///         source is sampled.
     ///     by_nuclide (bool): Return a ``dict[str, Estimate]`` of W by nuclide
     ///         instead of one ``Estimate`` for the total.
     ///
@@ -633,6 +738,16 @@ impl PyTransmutationResults {
     /// (XCOM), air energy absorption (NIST SRD 126), ICRP-116 dose
     /// coefficients and the build-up factor are held at their nominal values
     /// and contribute nothing to it.
+    ///
+    /// With the ``"decay_photon_lines"`` source on, the band is a range:
+    /// ``Estimate.std_dev`` takes each nuclide's photon intensities as
+    /// independent where the decay data state no correlation, and
+    /// ``Estimate.std_dev_correlated`` as fully correlated (the lines of a
+    /// spectrum, its normalisation and lines, and its gamma and x-ray
+    /// spectra). ENDF/B-VIII.1 folds each spectrum's normalisation sigma into
+    /// every line's, so a multi-line emitter's range there is wide;
+    /// ``get_data_uncertainty_info`` names those spectra under
+    /// ``decay_photon_spectra_folded``.
     ///
     /// Args:
     ///     material_id: Material ID number.
@@ -694,7 +809,9 @@ impl PyTransmutationResults {
     /// intensity per decay when the ``"decay_photon_lines"`` source is on.
     /// That source draws each line's energy too, so lines are matched across
     /// replicas on their nominal energy, and ``LineEstimate.energy_std_dev``
-    /// gives the spread of the energy drawn.
+    /// gives the spread of the energy drawn. A line's rate spread is a range,
+    /// ``LineEstimate.std_dev`` to ``LineEstimate.std_dev_correlated``, for the
+    /// reason ``get_contact_dose_uncertainty`` gives.
     ///
     ///     >>> lines = results.get_decay_photon_spectrum_uncertainty(mid, step)
     ///     >>> [(l.energy, l.nominal, l.std_dev) for l in lines[:2]]
@@ -938,6 +1055,12 @@ impl PyTransmutationResults {
     ///   ``decay_photon_line_uncertainty_not_carried`` names those with a
     ///   sigma stated on a zero value, or not finite, which no draw can carry;
     ///   that value is held at nominal and counted as a gap.
+    ///   ``decay_photon_spectra_folded`` maps each perturbed nuclide with a
+    ///   spectrum written the ENDF/B way (a normalisation of 1 with no sigma,
+    ///   its sigma folded into every line's dRI) to the radiation of each such
+    ///   spectrum (``"gamma"``, ``"xray"``). How much of those dRI the lines
+    ///   share is not stated, so they are where most of the range between a
+    ///   photon output's ``std_dev`` and ``std_dev_correlated`` comes from.
     /// - ``fission_yields_perturbed`` / ``no_fission_yield_uncertainty``: the
     ///   same for the ``"fission_yield"`` source, over the reachable
     ///   fissioning parents. ``fission_yield_uncertainty_not_carried`` names
