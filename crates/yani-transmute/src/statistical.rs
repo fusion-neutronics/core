@@ -11,6 +11,13 @@
 //! The draw uses a stream of its own, keyed on the replica, so the statistical
 //! axis is independent of the nuclear-data ones and the total spread over all
 //! sources is their quadrature sum.
+//!
+//! The stream is also keyed on the material. Different materials' tallies are
+//! separate estimates, so their statistical errors are drawn independently: on
+//! a shared stream two materials would move up and down together replica by
+//! replica, and a per-replica sum over materials would overstate the spread.
+//! The nuclear-data streams are keyed on the nuclide alone and stay shared
+//! across materials, since one evaluation's error is common to all of them.
 
 use std::collections::HashMap;
 
@@ -88,11 +95,24 @@ impl StatisticalRates {
     /// at zero. A negative rate is not a physical state; with a statistical
     /// error of a few percent it is vanishingly rare, and counting it says when
     /// it is not.
-    pub fn sample(&self, base_seed: u64, replica: u64) -> (ReactionRates, PartialRates, usize) {
+    ///
+    /// `material_id` keys the draw to the material whose tally this is, so
+    /// two materials' draws are independent. It is the material's id rather
+    /// than its position in a call, so the draw does not depend on the order
+    /// materials are visited in.
+    pub fn sample(
+        &self,
+        base_seed: u64,
+        material_id: u32,
+        replica: u64,
+    ) -> (ReactionRates, PartialRates, usize) {
         let m = self.len();
         let replica_seed = yamc_rng::history_seed(base_seed, replica);
-        let mut state =
-            yamc_rng::expand_seed(yamc_rng::secondary_seed(replica_seed, STATISTICAL_STREAM));
+        // A second level under the statistical stream, rather than the id
+        // folded into the stream tag, so the tag stays clear of every other
+        // replica stream whatever the id.
+        let stream = yamc_rng::secondary_seed(replica_seed, STATISTICAL_STREAM);
+        let mut state = yamc_rng::expand_seed(yamc_rng::secondary_seed(stream, material_id));
         let z = crate::covariance_sample::standard_normals(&mut state, m);
         let mut totals: ReactionRates = HashMap::new();
         let mut partials: PartialRates = HashMap::new();
@@ -170,7 +190,7 @@ mod tests {
         let n = 20000;
         let mut xs: Vec<Vec<f64>> = (0..3).map(|_| Vec::with_capacity(n)).collect();
         for r in 0..n as u64 {
-            let (totals, partials, floored) = s.sample(3, r);
+            let (totals, partials, floored) = s.sample(3, 0, r);
             assert_eq!(floored, 0);
             xs[0].push(totals["Fe56"]["(n,p)"]);
             xs[1].push(totals["Fe56"]["(n,a)"]);
@@ -206,8 +226,71 @@ mod tests {
             vec![0.25],
         );
         let s = StatisticalRates::new(&rc);
-        let one = s.sample(9, 4).0["Fe56"]["(n,p)"];
-        assert_eq!(one.to_bits(), s.sample(9, 4).0["Fe56"]["(n,p)"].to_bits());
-        assert_ne!(one.to_bits(), s.sample(9, 5).0["Fe56"]["(n,p)"].to_bits());
+        let one = s.sample(9, 0, 4).0["Fe56"]["(n,p)"];
+        assert_eq!(
+            one.to_bits(),
+            s.sample(9, 0, 4).0["Fe56"]["(n,p)"].to_bits()
+        );
+        assert_ne!(
+            one.to_bits(),
+            s.sample(9, 0, 5).0["Fe56"]["(n,p)"].to_bits()
+        );
+    }
+
+    /// Two materials' tallies are separate estimates, so their draws are
+    /// independent: across replicas the deviates of two materials with the
+    /// same seed are uncorrelated, while each material's own draw reproduces
+    /// under the same seed.
+    #[test]
+    fn materials_draw_independently_and_reproducibly() {
+        let a = StatisticalRates::new(&RateCovariance::from_parts(
+            vec![label("Fe56", "(n,p)", None)],
+            vec![2.0],
+            100,
+            vec![0.25],
+        ));
+        let b = StatisticalRates::new(&RateCovariance::from_parts(
+            vec![label("Fe56", "(n,p)", None)],
+            vec![7.0],
+            100,
+            vec![0.81],
+        ));
+        let n = 20000;
+        let draw = |s: &StatisticalRates, id: u32| -> Vec<f64> {
+            (0..n as u64)
+                .map(|r| s.sample(11, id, r).0["Fe56"]["(n,p)"])
+                .collect()
+        };
+        let (xa, xb) = (draw(&a, 1), draw(&b, 2));
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+        let (ma, mb) = (mean(&xa), mean(&xb));
+        let cov: f64 = xa.iter().zip(&xb).map(|(x, y)| (x - ma) * (y - mb)).sum();
+        let var = |v: &[f64], m: f64| v.iter().map(|x| (x - m) * (x - m)).sum::<f64>();
+        let corr = cov / (var(&xa, ma) * var(&xb, mb)).sqrt();
+        // Five sigma of a zero correlation at this sample size.
+        assert!(
+            corr.abs() < 5.0 / (n as f64).sqrt(),
+            "materials 1 and 2 are correlated: {corr}"
+        );
+        // The same seed reproduces each material bit for bit.
+        assert_eq!(
+            xa.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            draw(&a, 1).iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            xb.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            draw(&b, 2).iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        );
+        // The id is what separates them: the same tally under the same id
+        // draws the same deviates.
+        let first = a.sample(11, 1, 0).0["Fe56"]["(n,p)"];
+        assert_eq!(
+            first.to_bits(),
+            a.sample(11, 1, 0).0["Fe56"]["(n,p)"].to_bits()
+        );
+        assert_ne!(
+            first.to_bits(),
+            a.sample(11, 2, 0).0["Fe56"]["(n,p)"].to_bits()
+        );
     }
 }

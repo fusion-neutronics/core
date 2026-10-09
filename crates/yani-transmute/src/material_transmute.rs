@@ -1157,6 +1157,9 @@ fn replica_steps(
 /// the unfolded chain their branching is refined from.
 pub(crate) struct TransportStatistics {
     rates: crate::statistical::StatisticalRates,
+    /// Keys the statistical draw, so different materials' tallies are drawn
+    /// independently.
+    material_id: u32,
     base_chain: Arc<HashMap<String, ChainNuclide>>,
     branch: Arc<BranchTable>,
 }
@@ -1193,6 +1196,10 @@ pub struct TransportTallied {
 /// Every source in [`crate::uncertainty::Source::IMPLEMENTED`] applies except
 /// `flux_spectrum`: there is no supplied spectrum, and the flux's error is the
 /// statistical one. Covariances are folded against the tally's own flux shape.
+///
+/// The statistical draw is keyed on `initial.material_id`, so materials with
+/// distinct ids draw their tallies' errors independently, while the
+/// nuclear-data draws are shared across them.
 ///
 /// `source_rates` scale the per-source-particle rates per step, which is how
 /// independent mode scales them. The coupled method re-runs transport per step
@@ -1236,8 +1243,13 @@ pub fn transport_replicas(
             irradiation: (rate > 0.0).then_some((0, rate)),
         })
         .collect();
+    // The material's id, the key its tally and its results are stored under,
+    // and so the same whatever order the materials are visited in. A material
+    // with no id answers to 0, as in `transmute_materials`.
+    let material_id = initial.material_id.unwrap_or(0);
     let statistics = tallied.statistics.as_ref().map(|c| TransportStatistics {
         rates: crate::statistical::StatisticalRates::new(c),
+        material_id,
         base_chain: Arc::clone(chain),
         branch: Arc::clone(&tallied.branch),
     });
@@ -1245,6 +1257,7 @@ pub fn transport_replicas(
         rates: crate::statistical::StatisticalRates::new(
             &crate::history_statistics::RateCovariance::empty(),
         ),
+        material_id,
         base_chain: Arc::clone(chain),
         branch: Arc::clone(&tallied.branch),
     };
@@ -1906,7 +1919,8 @@ fn run_replicas(
         let mut statistical_floored = 0usize;
         let drawn = match statistical {
             Some(st) => {
-                let (mut totals, partials, floored) = st.rates.sample(request.seed, replica);
+                let (mut totals, partials, floored) =
+                    st.rates.sample(request.seed, st.material_id, replica);
                 statistical_floored = floored;
                 // The nominal was guarded; a draw around it only moves the
                 // productions it is made of.
