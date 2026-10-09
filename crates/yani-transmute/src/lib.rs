@@ -98,8 +98,10 @@ pub use material_transmute::{
 /// verbatim energy-dependent curves are scored directly at the collision
 /// energy during transport (see `transmutation_tallies`); the
 /// flux-given `Material::transmute` path folds them against the user's
-/// multigroup spectrum (see `material_transmute`). When unset, the overlay is
-/// empty and physics matches the plain three-part chain.
+/// multigroup spectrum (see `material_transmute`). When unset, the overlay
+/// holds only the reactions subsection's own MT=5 `(n,X)` multiplicities,
+/// which are folded the same way whatever branching source is set, and every
+/// other reaction's product lands where the plain three-part chain puts it.
 pub fn load_configured_chain() -> Result<yani::LoadedChain, Box<dyn std::error::Error>> {
     let (decay_src, reactions_src, fpy_src, branch_src) = {
         let cfg = yamc_nuclide::config::Config::global();

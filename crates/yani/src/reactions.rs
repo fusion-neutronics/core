@@ -120,7 +120,26 @@ pub const REACTION_MT_MAP: &[(&str, i32)] = &[
     ("(n,n3p)", 198),
     ("(n,3n2pa)", 199),
     ("(n,5n2p)", 200),
+    // MT=5, everything an evaluation does not give a reaction of its own:
+    // several residuals and light particles from one total, each with an
+    // energy-dependent multiplicity. See [`ANYTHING`].
+    (ANYTHING, 5),
 ];
+
+/// The chain's name for MT=5, `(n,anything)`.
+///
+/// Unlike every other kind, its channels carry no fixed branching. A row
+/// names one product of the reaction, a residual nucleus or a light particle,
+/// and the converter writes beside it the product's multiplicity against
+/// incident energy, from the evaluation's MF=6 MT=5, and whether it is a share
+/// (see `reactions/reactions.arrow` in `nuclear-data-schema`). The split is
+/// folded against each spectrum (yani-transmute's branching rule): the
+/// residuals as shares of the MT=5 total, pointwise, and every other product
+/// as its multiplicity times that total. Until a fold sets it, a row's
+/// `branching` is NaN, which the matrix builder refuses to solve with. A row
+/// with no target says the evaluation gives no residual for MT=5, and carries
+/// zero.
+pub const ANYTHING: &str = "(n,X)";
 
 /// The two lookups over [`REACTION_MT_MAP`], indexed once per process.
 ///

@@ -1330,10 +1330,20 @@ impl PyTransmutationResults {
     /// much of the parent's removal rate rests on anything the evaluation
     /// does not give.
     ///
+    /// MT=5, ``(n,anything)``, is the ``(n,X)`` reaction: its residuals, read
+    /// from the reaction library's MF=6 MT=5, are shares of the MT=5 total
+    /// at each energy (``file`` 6, ``representation`` ``"share"``), and its
+    /// light particles H1 to He4 are their multiplicities times that total
+    /// (``representation`` ``"multiplicity"``, each state's ``share`` the
+    /// multiplicity folded over the spectrum, which can exceed one).
+    ///
     /// A run refuses when a channel's clipped or held production is more than
     /// 0.1% of that parent's neutron removal rate, so what comes back here is
-    /// below that. MT=5's share is reported whatever its size: its products
-    /// are not modelled yet.
+    /// below that. A multiplicity above what the target's nucleons allow is
+    /// clipped like any other impossible value. ``unmodelled_mt5`` lists the
+    /// parents whose MT=5 residuals the chain does not model, with the reason;
+    /// a run refuses when those of the material's own nuclides carry more
+    /// than 0.1% of the material's removal rate.
     ///
     /// Args:
     ///     material_id: Material ID number.
@@ -1342,8 +1352,9 @@ impl PyTransmutationResults {
     /// Returns:
     ///     dict | None: ``channels``, ``dropped`` and ``unmodelled_mt5``, or
     ///     None if the material or the step is unknown. Each channel has
-    ///     ``parent``, ``reaction``, ``mt``, ``file`` (9 or 10),
-    ///     ``representation`` (``"share"`` or ``"absolute"``), ``complete``,
+    ///     ``parent``, ``reaction``, ``mt``, ``file`` (6, 9 or 10),
+    ///     ``representation`` (``"share"``, ``"absolute"`` or
+    ///     ``"multiplicity"``), ``complete``,
     ///     ``completeness_source``, ``denominator``, ``states`` (each with
     ///     ``target``, ``lfs``, ``level_route``, ``level_energy_difference``
     ///     and ``share``, its share of the reaction), ``removal_share`` (the
@@ -1354,8 +1365,9 @@ impl PyTransmutationResults {
     ///     ``normalisation``. Each dropped channel has ``parent``,
     ///     ``reaction``, ``target``, ``reason`` and ``removal_share`` (None
     ///     where it cannot be folded). ``unmodelled_mt5`` is
-    ///     ``[(nuclide, share)]``, MT=5's share of each parent's removal
-    ///     rate, largest first. Empty for a decay-only step.
+    ///     ``[(nuclide, share, reason)]``, MT=5's share of the removal rate
+    ///     of each parent whose MT=5 residuals are not modelled, largest
+    ///     first. Empty for a decay-only step.
     ///
     /// Examples:
     ///     >>> report = results.get_branching_report(material_id=1, step=0)
@@ -1412,10 +1424,10 @@ impl PyTransmutationResults {
             dropped.append(d)?;
         }
         out.set_item("dropped", dropped)?;
-        let mt5: Vec<(String, f64)> = report
+        let mt5: Vec<(String, f64, String)> = report
             .unmodelled_mt5
             .iter()
-            .map(|u| (u.nuclide.clone(), u.share))
+            .map(|u| (u.nuclide.clone(), u.share, u.reason.clone()))
             .collect();
         out.set_item("unmodelled_mt5", mt5)?;
         Ok(Some(out))

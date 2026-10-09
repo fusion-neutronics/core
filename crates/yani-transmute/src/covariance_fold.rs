@@ -5848,6 +5848,7 @@ mod lumped_tests {
                 q_value: Some(0.0),
                 branching_uncertainty: None,
                 evaluated_branching: None,
+                multiplicity: None,
             }],
             decays: Vec::new(),
             fission_yields: None,

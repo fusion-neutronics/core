@@ -626,6 +626,7 @@ impl Info {
             sigma_at_least_one_outside_bound: sigmas.sigma_at_least_one_outside_bound.clone(),
             not_perturbed: [
                 "isomeric branching (MF=9/MF=10)",
+                "MT=5 product multiplicities (MF=6 MT=5), whose split of the perturbed MT=5 rate is held",
                 "covariance with another evaluation (MAT1 naming another material)",
                 "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
                 "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, or LTY=0 in skipped_nc)",
@@ -1684,6 +1685,7 @@ mod tests {
             .expect("no shares to check");
         for held in [
             "isomeric branching (MF=9/MF=10)",
+            "MT=5 product multiplicities (MF=6 MT=5), whose split of the perturbed MT=5 rate is held",
             "covariance with another evaluation (MAT1 naming another material)",
             "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
             "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, or LTY=0 in skipped_nc)",

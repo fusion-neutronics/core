@@ -398,6 +398,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
                 vec![],
                 vec![],
@@ -416,6 +417,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
                 vec![], // no photons on the parent
             ),
@@ -461,6 +463,7 @@ mod tests {
             q_value: None,
             branching_uncertainty: None,
             evaluated_branching: None,
+            multiplicity: None,
         };
         chain.get_mut("X").unwrap().reactions = vec![rx("(n,gamma)", "P")];
         chain.get_mut("A").unwrap().reactions = vec![rx("(n,p)", "A")];

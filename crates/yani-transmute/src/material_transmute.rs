@@ -1,7 +1,7 @@
 use crate::branching_rule::{
-    build_lists, measure_unmodelled_mt5, removal_rate, Bound, BranchingChannel, BranchingReport,
-    BranchingState, Denominator, DroppedChannel, ListRates, ListRule, Lists,
-    BRANCHING_RATE_TOLERANCE, INELASTIC, MT_ANYTHING, MT_INELASTIC,
+    build_lists, measure_unmodelled_mt5, refuse_unmodelled_mt5, removal_rate, Bound,
+    BranchingChannel, BranchingReport, BranchingState, Denominator, DroppedChannel, ListRates,
+    ListRule, Lists, ANYTHING, BRANCHING_RATE_TOLERANCE, INELASTIC, MT_ANYTHING, MT_INELASTIC,
 };
 use crate::covariance_fold::{cell_fields, fold_rate_covariance, reachable_mts, FoldSpectrum};
 use crate::covariance_sample::Sampler;
@@ -69,9 +69,10 @@ pub struct TransmuteStep {
 /// Three sources, all needed. The chain's own reaction kinds give the transport
 /// cross sections the rate collapse folds against. The branching overlay adds
 /// the totals its lists split (see [`crate::branching_rule`]), MT=4 among them
-/// for `(n,n')`, which has no chain total of its own. And MT=5, whose products
-/// the chain does not model, is read so its share of each parent's removal
-/// can be reported (see [`crate::branching_rule::measure_unmodelled_mt5`]).
+/// for `(n,n')`, which has no chain total of its own. And MT=5, which is the
+/// `(n,X)` total where the chain carries that reaction and is read for every
+/// parent so the share whose residuals it does not model can be reported (see
+/// [`crate::branching_rule::measure_unmodelled_mt5`]).
 pub fn activation_mts(
     chain: &HashMap<String, yani::ChainNuclide>,
     branch: &BranchTable,
@@ -3001,8 +3002,10 @@ type LoadOutcome = Result<Option<(String, std::sync::Arc<yamc_nuclide::Nuclide>)
 ///
 /// Refuses the spectrum where the rule would rest more than
 /// [`BRANCHING_RATE_TOLERANCE`] of a parent's removal rate on a clipped or
-/// held value, and reports MT=5's share of each parent's removal (see
-/// [`measure_unmodelled_mt5`]).
+/// held value, reports MT=5's share of each parent's removal where the chain
+/// does not model its residuals (see [`measure_unmodelled_mt5`]), and refuses
+/// where that is more than the tolerance of the material's own removal (see
+/// [`refuse_unmodelled_mt5`]).
 pub(crate) fn collapse_and_fold(
     material: &Material,
     spectrum: &MultigroupSpectrum,
@@ -3058,8 +3061,23 @@ pub(crate) fn collapse_and_fold(
         folded.insert(parent.clone(), per);
     }
     let (folded_chain, mut report) = fold_branching_into_chain(chain, lists, &folded, &mut rates)?;
-    report.unmodelled_mt5 = measure_unmodelled_mt5(&rates, &mt5);
+    report.unmodelled_mt5 = measure_unmodelled_mt5(chain, &rates, &mt5);
+    let densities = material.get_atoms_per_barn_cm().unwrap_or_default();
+    refuse_unmodelled_mt5(&report.unmodelled_mt5, &rates, &mt5, &densities, &|n| {
+        library_of(material, n)
+    })?;
     Ok(((rates, fy_weights, folded_chain), info, report))
+}
+
+/// Which library a nuclide's cross sections came from, as a message should
+/// name it: the keyword it was loaded by, else what its folder says.
+fn library_of(material: &Material, nuclide: &str) -> Option<String> {
+    let nd = material.nuclide_data.get(nuclide)?;
+    nd.data_source
+        .as_deref()
+        .filter(|s| yamc_nuclide::storage::url_cache::is_keyword(s))
+        .map(str::to_string)
+        .or_else(|| nd.library.clone())
 }
 
 /// Apply folded branching lists to the chain and the rates.
@@ -3291,9 +3309,14 @@ fn resolve_list(
         }
         return;
     }
+    // A light particle's is a multiplicity, which can exceed one; every
+    // other list's is a share of its reaction.
     let shares: Vec<(String, f64)> = per_target
         .iter()
-        .map(|(t, p)| (t.clone(), (p / whole).min(1.0)))
+        .map(|(t, p)| {
+            let f = p / whole;
+            (t.clone(), if rule.emits { f } else { f.min(1.0) })
+        })
         .collect();
 
     // What the chain can carry of it.
@@ -3316,8 +3339,10 @@ fn resolve_list(
             ));
         }
     }
-    let remainder = rule.has_remainder() && kind != INELASTIC;
-    if kind != INELASTIC {
+    // `(n,X)` has no ground state to take a rest: its residuals are a
+    // complete list and its particles are not shares.
+    let remainder = rule.has_remainder() && kind != INELASTIC && kind != ANYTHING;
+    if kind != INELASTIC && kind != ANYTHING {
         if remainder {
             let listed: f64 = shares
                 .iter()
@@ -3394,6 +3419,13 @@ fn resolve_list(
         (Denominator::ListedSum, true) => "sum of the listed yields",
         (Denominator::TransportTotal, _) => "transport total",
     };
+    let representation = if rule.emits {
+        "multiplicity"
+    } else if rule.is_absolute() {
+        "absolute"
+    } else {
+        "share"
+    };
     channels.push(Resolved {
         channel: BranchingChannel {
             parent: parent.to_string(),
@@ -3404,13 +3436,14 @@ fn resolve_list(
                 .flat_map(|c| c.states.iter())
                 .map(|s| s.mt)
                 .next(),
-            file: if rule.yields { 9 } else { 10 },
-            representation: if rule.is_absolute() {
-                "absolute"
+            file: if kind == ANYTHING {
+                6
+            } else if rule.yields {
+                9
             } else {
-                "share"
-            }
-            .to_string(),
+                10
+            },
+            representation: representation.to_string(),
             complete: rule.complete,
             completeness_source: "converter (list_complete)".to_string(),
             denominator: denominator.to_string(),
@@ -3484,6 +3517,20 @@ fn refine_chain(
                         }
                     }
                 }
+            } else if kind.as_str() == ANYTHING {
+                // Every `(n,X)` row is assigned outright, from NaN: a residual
+                // its share of the MT=5 rate, a light particle its
+                // multiplicity, and a row the fold made nothing for (the one
+                // saying no residual is given, or a product this spectrum
+                // does not reach) zero.
+                for rx in nuc.reactions.iter_mut().filter(|r| &r.kind == kind) {
+                    rx.branching = rx
+                        .target
+                        .as_ref()
+                        .and_then(|t| tmap.get(t))
+                        .copied()
+                        .unwrap_or(0.0);
+                }
             } else if split.remainder {
                 // Each fraction is a share of the whole reaction, and the
                 // targets the list does not name take the rest in the
@@ -3552,6 +3599,29 @@ pub struct CoupledDiagnostics {
     pub inelastic_totals: HashMap<String, f64>,
     /// `parent -> MT=5 rate`.
     pub mt5: HashMap<String, f64>,
+    /// The tallied material's composition, atoms per barn-cm, which the
+    /// unmodelled MT=5 guard weighs parents by (see
+    /// [`crate::branching_rule::refuse_unmodelled_mt5`]). Empty refuses
+    /// nothing; [`CoupledDiagnostics::with_material`] fills it.
+    pub densities: HashMap<String, f64>,
+    /// Where each of the material's nuclides' cross sections came from, for
+    /// that guard's message.
+    pub libraries: HashMap<String, String>,
+}
+
+impl CoupledDiagnostics {
+    /// The same diagnostics, with the composition and libraries of the
+    /// material the tally was scored in, which the MT=5 guard needs and the
+    /// tally does not keep.
+    pub fn with_material(mut self, material: &Material) -> Self {
+        self.densities = material.get_atoms_per_barn_cm().unwrap_or_default();
+        self.libraries = material
+            .nuclide_data
+            .keys()
+            .filter_map(|n| library_of(material, n).map(|l| (n.clone(), l)))
+            .collect();
+        self
+    }
 }
 
 /// Apply the isomeric-branching overlay on the coupled path.
@@ -3590,54 +3660,56 @@ pub fn apply_coupled_branching(
             let Some(curves) = kinds.get(kind) else {
                 continue;
             };
-            let Some(rule) = ListRule::new(parent, kind, curves)? else {
-                continue;
-            };
-            let per_target = &tallied_kinds[kind];
-            // Each target's tallied production on its first curve, so the
-            // per-target sum in `resolve_list` counts it once.
-            let mut production = vec![0.0; rule.curves.len()];
-            for (t, p) in per_target {
-                if let Some(k) = rule
-                    .curves
-                    .iter()
-                    .zip(&rule.produces)
-                    .position(|(c, produces)| *produces && c.target == *t)
-                {
-                    production[k] += p;
+            for rule in ListRule::all(parent, kind, curves)? {
+                let per_target = &tallied_kinds[kind];
+                // Each target's tallied production on its first curve, so the
+                // per-target sum in `resolve_list` counts it once.
+                let mut production = vec![0.0; rule.curves.len()];
+                for (t, p) in per_target {
+                    if let Some(k) = rule
+                        .curves
+                        .iter()
+                        .zip(&rule.produces)
+                        .position(|(c, produces)| *produces && c.target == *t)
+                    {
+                        production[k] += p;
+                    }
                 }
+                let total = if kind == INELASTIC {
+                    diagnostics.and_then(|d| d.inelastic_totals.get(parent).copied())
+                } else {
+                    rates.get(parent).and_then(|r| r.get(kind)).copied()
+                };
+                let (clipped, extrapolated) = diagnostics
+                    .and_then(|d| d.lists.get(parent))
+                    .and_then(|k| k.get(&rule.label()))
+                    .copied()
+                    .unwrap_or((0.0, 0.0));
+                // The tally scores a list only where the parent has the transport
+                // cross section, so every list but `(n,n')` has its total; a
+                // missing rate is a zero one.
+                let has_total = kind != INELASTIC || total.is_some();
+                folded
+                    .entry(parent.clone())
+                    .or_default()
+                    .push(Some(ListRates {
+                        production,
+                        to_rate: 1.0,
+                        total: total.unwrap_or(0.0),
+                        clipped,
+                        extrapolated,
+                        has_total,
+                    }));
+                lists.entry(parent.clone()).or_default().push(rule);
             }
-            let total = if kind == INELASTIC {
-                diagnostics.and_then(|d| d.inelastic_totals.get(parent).copied())
-            } else {
-                rates.get(parent).and_then(|r| r.get(kind)).copied()
-            };
-            let (clipped, extrapolated) = diagnostics
-                .and_then(|d| d.lists.get(parent))
-                .and_then(|k| k.get(kind))
-                .copied()
-                .unwrap_or((0.0, 0.0));
-            // The tally scores a list only where the parent has the transport
-            // cross section, so every list but `(n,n')` has its total; a
-            // missing rate is a zero one.
-            let has_total = kind != INELASTIC || total.is_some();
-            folded
-                .entry(parent.clone())
-                .or_default()
-                .push(Some(ListRates {
-                    production,
-                    to_rate: 1.0,
-                    total: total.unwrap_or(0.0),
-                    clipped,
-                    extrapolated,
-                    has_total,
-                }));
-            lists.entry(parent.clone()).or_default().push(rule);
         }
     }
     let (folded_chain, mut report) = fold_branching_into_chain(chain, &lists, &folded, rates)?;
     if let Some(d) = diagnostics {
-        report.unmodelled_mt5 = measure_unmodelled_mt5(rates, &d.mt5);
+        report.unmodelled_mt5 = measure_unmodelled_mt5(chain, rates, &d.mt5);
+        refuse_unmodelled_mt5(&report.unmodelled_mt5, rates, &d.mt5, &d.densities, &|n| {
+            d.libraries.get(n).cloned()
+        })?;
     }
     Ok((folded_chain, report))
 }
@@ -3747,6 +3819,7 @@ mod tests {
             branching,
             branching_uncertainty: None,
             evaluated_branching: None,
+            multiplicity: None,
             q_value: None,
         }
     }
@@ -4450,25 +4523,26 @@ mod tests {
         );
     }
 
-    /// MT=5, whose products no chain reaction carries, is measured against
-    /// each parent's removal and reported: at 30 MeV it is half of In115's
-    /// here, and a D-T spectrum below its 20 MeV threshold reports nothing.
+    /// MT=5 on a chain that carries no `(n,X)` reaction for the parent is
+    /// measured against its removal: at 30 MeV it is half of In115's here,
+    /// all of the material, so the run is refused and says why; a D-T
+    /// spectrum below its 20 MeV threshold reports nothing and runs.
     #[test]
-    fn mt5_is_reported_against_the_removal() {
+    fn unmodelled_mt5_refuses_a_material_made_of_it() {
         let material = indium(vec![
             reaction(16, vec![1.0e7, 4.0e7], vec![1.0, 1.0]),
             reaction(5, vec![2.0e7, 4.0e7], vec![0.0, 2.0]),
         ]);
-        let (_, _, report) = fold(
+        let err = fold(
             &material,
             &indium_chain(),
             &BranchTable::new(),
             &one_group(2.9e7, 3.1e7),
         )
-        .unwrap();
-        let mt5 = &report.unmodelled_mt5[0];
-        assert_eq!(mt5.nuclide, "In115");
-        assert!((mt5.share - 0.5).abs() < 1e-3, "{mt5:?}");
+        .unwrap_err();
+        assert!(err.contains("In115"), "{err}");
+        assert!(err.contains("no (n,X) reaction"), "{err}");
+        assert!(err.contains("50.000% of its own"), "{err}");
 
         let (_, _, report) = fold(
             &material,
@@ -4785,6 +4859,7 @@ mod tests {
                             branching: 1.0,
                             branching_uncertainty: None,
                             evaluated_branching: None,
+                            multiplicity: None,
                             q_value: None,
                         })
                         .collect(),
@@ -4859,6 +4934,7 @@ mod tests {
             q_value: None,
             branching_uncertainty: sigma,
             evaluated_branching: None,
+            multiplicity: None,
         };
         let nuclide = |name: &str,
                        half_life: Option<f64>,
@@ -5007,6 +5083,7 @@ mod tests {
                 q_value: None,
                 branching_uncertainty: None,
                 evaluated_branching: None,
+                multiplicity: None,
             }],
             fission_yields: None,
             sources: vec![yani::DecaySource {

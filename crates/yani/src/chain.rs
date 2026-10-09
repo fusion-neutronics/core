@@ -64,6 +64,15 @@ pub struct ChainReaction {
     /// column. Nothing in the solver reads it; it is kept so the file loses
     /// nothing the tape gives and a re-export writes back what it read.
     pub evaluated_branching: Option<f64>,
+    /// The product's multiplicity against incident energy, on an
+    /// [`ANYTHING`](crate::reactions::ANYTHING) row read from
+    /// `reactions/reactions.arrow`; `None` on every other row.
+    ///
+    /// The same curve the reader puts in the [`BranchTable`] under the
+    /// parent and `(n,X)`, which is what the solve folds. Kept here as well
+    /// so that a chain re-exported with `export_chain_parts` writes it back:
+    /// an `(n,X)` row without its curve has no split to fold.
+    pub multiplicity: Option<Arc<BranchCurve>>,
 }
 
 impl ChainReaction {
@@ -94,6 +103,12 @@ pub enum BranchQuantity {
     Yield,
     /// Partial cross section to the final state (MF=10) in barns.
     CrossSection,
+    /// How many of a product one reaction emits, against incident energy: the
+    /// MF=6 multiplicity of an `(n,X)` light particle, or of any product of an
+    /// `(n,X)` list whose residuals are not one per reaction. Not a share of
+    /// anything, and it can exceed one, so it is never folded with a
+    /// reaction's residual shares.
+    Multiplicity,
 }
 
 /// One verbatim, energy-dependent isomeric-branching curve for a single
@@ -191,7 +206,13 @@ pub struct BranchState {
 
 /// Isomeric-branching curves keyed by parent nuclide then reaction kind.
 /// `branch_table.curves()[parent][kind]` is the list of per-final-state curves
-/// for that reaction. Empty when no `branching/` subsection was supplied.
+/// for that reaction.
+///
+/// It also holds the `(n,X)` (MT=5) multiplicities of the reactions
+/// subsection, under the kind [`ANYTHING`](crate::reactions::ANYTHING): they
+/// are folded by the same rule, but come from the reaction library itself,
+/// so they are here whether or not a `branching/` subsection was supplied.
+/// The table is empty only when neither gives anything.
 ///
 /// The table also holds the subsection's `branching_covariance.arrow`, the
 /// MF=40 covariance of the MF=10 partials, when the subsection carries one.
@@ -1227,6 +1248,21 @@ fn overlay_branching_bounds<'a>(
     curves: &'a [BranchCurve],
 ) -> HashMap<&'a str, f64> {
     let well_formed = |c: &&BranchCurve| !c.energy.is_empty() && c.energy.len() == c.values.len();
+    // MT=5's split is assigned outright: a residual's is a share of the
+    // reaction, at most one, and a light particle's is its multiplicity
+    // folded over the spectrum, at most the largest value its curve takes.
+    if kind == crate::reactions::ANYTHING {
+        let mut bounds = HashMap::new();
+        for c in curves.iter().filter(well_formed) {
+            let bound = match c.quantity {
+                BranchQuantity::Multiplicity => c.values.iter().copied().fold(0.0, f64::max),
+                _ => 1.0,
+            };
+            let entry = bounds.entry(c.target.as_str()).or_insert(0.0);
+            *entry = f64::max(*entry, bound);
+        }
+        return bounds;
+    }
     let selected: Vec<&BranchCurve> = if kind == "(n,n')" {
         curves
             .iter()
@@ -1593,6 +1629,7 @@ mod tests {
             q_value: None,
             branching_uncertainty: None,
             evaluated_branching: None,
+            multiplicity: None,
         }
     }
 

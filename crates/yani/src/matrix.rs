@@ -406,6 +406,21 @@ where
                 if rate == 0.0 {
                     continue;
                 }
+                // An `(n,X)` channel's split depends on the spectrum, and the
+                // chain holds NaN for it until a fold has set it (see
+                // `crate::reactions::ANYTHING`). Solving with it would put NaN
+                // in every inventory the parent feeds, so a rate reaching an
+                // unfolded split is refused here.
+                if rx_list.iter().any(|rx| !rx.branching.is_finite()) {
+                    return Err(format!(
+                        "{name} has a non-zero {rx_type} rate but its split over products \
+                         has not been folded against the spectrum (a branching is not a \
+                         number). The {rx_type} split depends on incident energy and is set \
+                         by the branching rule from the multiplicities the chain carries; \
+                         solve through the transmutation driver, which folds it, rather than \
+                         with the chain as loaded"
+                    ));
+                }
                 loss += rate;
                 for rx in rx_list {
                     // `target` rather than `produced_target`: a reaction back
@@ -784,6 +799,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
                 vec![],
             ),
@@ -822,6 +838,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
             ),
         );
@@ -862,6 +879,7 @@ mod tests {
                         q_value: None,
                         branching_uncertainty: None,
                         evaluated_branching: None,
+                        multiplicity: None,
                     },
                     ChainReaction {
                         kind: "(n,gamma)".to_string(),
@@ -870,6 +888,7 @@ mod tests {
                         q_value: None,
                         branching_uncertainty: None,
                         evaluated_branching: None,
+                        multiplicity: None,
                     },
                     ChainReaction {
                         kind: "(n,2n)".to_string(),
@@ -878,6 +897,7 @@ mod tests {
                         q_value: None,
                         branching_uncertainty: None,
                         evaluated_branching: None,
+                        multiplicity: None,
                     },
                     // No named product, and no rate given for it below.
                     ChainReaction {
@@ -887,6 +907,7 @@ mod tests {
                         q_value: None,
                         branching_uncertainty: None,
                         evaluated_branching: None,
+                        multiplicity: None,
                     },
                 ],
             ),
@@ -943,6 +964,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
             ),
         );
@@ -992,6 +1014,7 @@ mod tests {
                         q_value: None,
                         branching_uncertainty: None,
                         evaluated_branching: None,
+                        multiplicity: None,
                     }],
                 ),
             ),
@@ -1016,6 +1039,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
                 decays: vec![],
                 fission_yields: Some(Arc::new(FissionYieldSet {
@@ -1075,6 +1099,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
                 decays: vec![],
                 fission_yields: Some(Arc::new(FissionYieldSet {
@@ -1145,6 +1170,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
                 vec![],
             ),
@@ -1187,6 +1213,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
             ),
         );
@@ -1231,6 +1258,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
             ),
         );
@@ -1269,6 +1297,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
                 vec![ChainReaction {
                     kind: "(n,p)".to_string(),
@@ -1277,6 +1306,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
             ),
         );
@@ -1293,6 +1323,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
             ),
         );
@@ -1388,6 +1419,7 @@ mod tests {
                         q_value: None,
                         branching_uncertainty: None,
                         evaluated_branching: None,
+                        multiplicity: None,
                     },
                     ChainReaction {
                         kind: "(n,fission)".to_string(),
@@ -1396,6 +1428,7 @@ mod tests {
                         q_value: None,
                         branching_uncertainty: None,
                         evaluated_branching: None,
+                        multiplicity: None,
                     },
                 ],
                 decays: vec![ChainReaction {
@@ -1405,6 +1438,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
                 fission_yields: Some(Arc::new(FissionYieldSet {
                     yields: vec![FissionYield {
@@ -1491,6 +1525,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
                 vec![ChainReaction {
                     kind: "(n,gamma)".to_string(),
@@ -1499,6 +1534,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
             ),
         );
@@ -1539,6 +1575,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
                 decays: vec![],
                 fission_yields: Some(Arc::new(FissionYieldSet {
@@ -1602,6 +1639,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
                 decays: vec![],
                 fission_yields: Some(Arc::new(FissionYieldSet::new(vec![
@@ -1845,6 +1883,7 @@ mod tests {
                         q_value: None,
                         branching_uncertainty: None,
                         evaluated_branching: None,
+                        multiplicity: None,
                     })
                     .collect(),
             ),

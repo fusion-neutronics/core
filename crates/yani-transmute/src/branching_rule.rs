@@ -31,6 +31,23 @@
 //! the transport total, isomer yields summing above one, a negative partial)
 //! the excess is clipped at that energy and its folded rate is reported; see
 //! [`BRANCHING_RATE_TOLERANCE`] for when that, or a held fraction, stops a run.
+//!
+//! # MT=5
+//!
+//! `(n,X)`, MT=5, goes through the same rule with two lists. Its residuals,
+//! the MF=6 MT=5 multiplicities the reactions subsection carries (see
+//! [`yani::reactions::ANYTHING`]), are a complete MF=9-like list: shares of the
+//! MT=5 total of the transport library, `y_r(E) / sum_r' y_r'(E) * sigma_5(E)`,
+//! with the isomeric state of each residual its own curve, from MF=6's LIP.
+//! Its light particles are a list of their own ([`ListRule::particles`]),
+//! each `m_p(E) * sigma_5(E)`, a multiplicity rather than a share. Both are
+//! folded in the walk that collapses MT=5, so a residual's share, a particle's
+//! multiplicity and the total see one spectrum under one weight. A
+//! multiplicity above what the target's nucleons allow is clipped and
+//! reported like a negative one; ENDF/B-VIII.1's Cr50 to Cr54 have residual
+//! "multiplicities" up to 1e9 where MT=5 vanishes. Where the chain does not
+//! model MT=5's residuals at all, the rate is reported, and refused above the
+//! tolerance by [`refuse_unmodelled_mt5`].
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -45,8 +62,9 @@ use yani::{BranchCurve, BranchQuantity};
 /// removal rate in the run's own spectrum: the production clipped because it
 /// was impossible (absolute partials above the transport total, isomer yields
 /// above one, negative partials), and the production resting on a held
-/// fraction outside a list's tabulated range. MT=5's share is reported beside
-/// them, not refused yet (see [`measure_unmodelled_mt5`]).
+/// fraction outside a list's tabulated range. MT=5 whose residuals the chain
+/// does not model is measured against it too, as a share of the material's
+/// removal (see [`refuse_unmodelled_mt5`]).
 ///
 /// It is the solver's tolerance for a rate it has no data for, the same
 /// 0.1% as [`crate::multigroup::ABOVE_EVALUATION_TOLERANCE`], which refuses a
@@ -59,8 +77,10 @@ pub const BRANCHING_RATE_TOLERANCE: f64 = 1.0e-3;
 pub(crate) const INELASTIC: &str = "(n,n')";
 /// The transport MT of `(n,n')`, the total its partials are shares of.
 pub(crate) const MT_INELASTIC: i32 = 4;
-/// MT=5, `(n,anything)`: a reaction whose products the chain does not model.
+/// MT=5, `(n,anything)`: the transport total of the `(n,X)` kind.
 pub(crate) const MT_ANYTHING: i32 = 5;
+/// The chain's name for MT=5 (see [`yani::reactions::ANYTHING`]).
+pub(crate) const ANYTHING: &str = yani::reactions::ANYTHING;
 
 /// What a list's shares are taken over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +121,25 @@ pub(crate) struct ListRule<'a> {
     /// (`mf3_cross_section`), for a list whose values are not normalised:
     /// `(energy [eV], ratio)`. `None` when nowhere above it, or unstated.
     pub(crate) own_total_excess: Option<(f64, f64)>,
+    /// Whether the curves are light particles an `(n,X)` reaction emits:
+    /// multiplicities times the transport total, neither a split nor bounded
+    /// by one in sum (see [`ListRule::particles`]).
+    pub(crate) emits: bool,
+    /// The most of each curve's product one reaction can make, infinite where
+    /// nothing bounds it. For `(n,X)`, the nucleons of the target and the
+    /// neutron allow at most `floor((A + 1) / A_product)` of a product, and a
+    /// multiplicity above that is clipped like any other impossible value.
+    pub(crate) bounds: Vec<f64>,
+}
+
+/// The most of `product` one neutron reaction on `parent` can make, by
+/// nucleon count: infinite where either name does not parse.
+fn nucleon_bound(parent: &str, product: &str) -> f64 {
+    let mass = |name: &str| endf::data::zam(name).ok().map(|(_, a, _)| a as f64);
+    match (mass(parent), mass(product)) {
+        (Some(a), Some(a_p)) if a_p > 0.0 => ((a + 1.0) / a_p).floor(),
+        _ => f64::INFINITY,
+    }
 }
 
 /// What one energy point of a list gives.
@@ -221,6 +260,16 @@ impl<'a> ListRule<'a> {
             .iter()
             .map(|c| c.energy[c.energy.len() - 1])
             .fold(f64::INFINITY, f64::min);
+        let bounds = chosen
+            .iter()
+            .map(|c| {
+                if kind == ANYTHING {
+                    nucleon_bound(parent, &c.target)
+                } else {
+                    f64::INFINITY
+                }
+            })
+            .collect();
         let mut rule = ListRule {
             parent: parent.to_string(),
             kind: kind.to_string(),
@@ -235,9 +284,97 @@ impl<'a> ListRule<'a> {
             first,
             last,
             own_total_excess: None,
+            emits: false,
+            bounds,
         };
         rule.own_total_excess = rule.excess_over_own_total();
         Ok(Some(rule))
+    }
+
+    /// The light particles an `(n,X)` reaction emits, from `curves`' MF=6
+    /// multiplicities ([`BranchQuantity::Multiplicity`]), or `None` when it
+    /// lists none.
+    ///
+    /// Each particle's production is `m(E) * sigma_5(E)`, folded in the same
+    /// walk as the MT=5 total, which is the MF=9 rule for an isomer-only
+    /// list without its bound on the sum: several particles of several kinds
+    /// leave one reaction, so the multiplicities are not shares of it. A
+    /// negative multiplicity, or one above [`nucleon_bound`], is impossible and
+    /// is clipped and reported as any other list's would be. Beyond a curve's
+    /// last point it is held flat, as a yield is, and that production is
+    /// reported as held.
+    pub(crate) fn particles(
+        parent: &str,
+        kind: &str,
+        curves: &'a [BranchCurve],
+    ) -> Option<ListRule<'a>> {
+        let chosen: Vec<&BranchCurve> = curves
+            .iter()
+            .filter(|c| well_formed(c) && c.quantity == BranchQuantity::Multiplicity)
+            .collect();
+        if chosen.is_empty() {
+            return None;
+        }
+        let mut nodes: Vec<f64> = chosen
+            .iter()
+            .flat_map(|c| c.energy.iter().copied())
+            .collect();
+        nodes.sort_by(f64::total_cmp);
+        nodes.dedup();
+        let first = chosen
+            .iter()
+            .map(|c| c.energy[0])
+            .fold(f64::INFINITY, f64::min);
+        let last = chosen
+            .iter()
+            .map(|c| c.energy[c.energy.len() - 1])
+            .fold(f64::INFINITY, f64::min);
+        Some(ListRule {
+            parent: parent.to_string(),
+            kind: kind.to_string(),
+            mt: crate::reaction_type_to_mt(kind),
+            yields: true,
+            complete: false,
+            denominator: Denominator::TransportTotal,
+            bounds: chosen
+                .iter()
+                .map(|c| nucleon_bound(parent, &c.target))
+                .collect(),
+            produces: vec![true; chosen.len()],
+            curves: chosen.into_iter().map(Cow::Borrowed).collect(),
+            passed_over: Vec::new(),
+            nodes,
+            first,
+            last,
+            own_total_excess: None,
+            emits: true,
+        })
+    }
+
+    /// Every list `curves` makes for `(parent, kind)`: the one of
+    /// [`ListRule::new`], and for `(n,X)` its light particles as well, in
+    /// that order.
+    pub(crate) fn all(
+        parent: &str,
+        kind: &str,
+        curves: &'a [BranchCurve],
+    ) -> Result<Vec<ListRule<'a>>, String> {
+        let mut out: Vec<ListRule<'a>> = ListRule::new(parent, kind, curves)?.into_iter().collect();
+        if kind == ANYTHING {
+            out.extend(ListRule::particles(parent, kind, curves));
+        }
+        Ok(out)
+    }
+
+    /// The key a list's diagnostics are kept under: its kind, and for the
+    /// particles of an `(n,X)` reaction a key of their own, since that kind
+    /// has two lists.
+    pub(crate) fn label(&self) -> String {
+        if self.emits {
+            format!("{} particles", self.kind)
+        } else {
+            self.kind.clone()
+        }
     }
 
     /// Whether the listed values are absolute productions rather than shares.
@@ -255,7 +392,9 @@ impl<'a> ListRule<'a> {
     /// isomer yields over one. Only for lists whose values stand as they are,
     /// since a normalised list cannot exceed anything.
     fn excess_over_own_total(&self) -> Option<(f64, f64)> {
-        if self.denominator != Denominator::TransportTotal {
+        // Multiplicities are not bounded by one in sum, so there is no own
+        // total for them to exceed; each is bounded on its own (`bounds`).
+        if self.denominator != Denominator::TransportTotal || self.emits {
             return None;
         }
         let mut worst: Option<(f64, f64)> = None;
@@ -324,6 +463,8 @@ impl<'a> ListRule<'a> {
             first: self.first,
             last: self.last,
             own_total_excess: self.own_total_excess,
+            emits: self.emits,
+            bounds: self.bounds,
         }
     }
 
@@ -421,7 +562,7 @@ impl Bound<'_, '_> {
         // held split below.
         // What is held only matters where there is a total to share out.
         let live = t > 0.0;
-        let (mut sum, mut negative) = (0.0, 0.0);
+        let (mut sum, mut negative, mut over) = (0.0, 0.0, 0.0);
         for (k, c) in rule.curves.iter().enumerate() {
             let mut v = if rule.yields && e < c.energy[0] {
                 // A yield starting at zero starts at its threshold, and
@@ -441,18 +582,29 @@ impl Bound<'_, '_> {
                 }
                 v = 0.0;
             }
+            // More of a product than the nucleons allow is as impossible as a
+            // negative amount, and is taken at the bound.
+            let bound = rule.bounds.get(k).copied().unwrap_or(f64::INFINITY);
+            if v > bound {
+                if counted {
+                    over += v - bound;
+                }
+                v = bound;
+            }
             out[k] = v;
             if counted {
                 sum += v;
             }
         }
-        // A negative value is impossible and is taken as zero. What it would
-        // have moved is its share of the total: of the listed values' sum for
-        // a normalised list, of the whole for a yield standing as it is.
-        if negative > 0.0 {
+        // A negative value is impossible and is taken as zero, and a value
+        // above its bound as the bound. What either would have moved is its
+        // share of the total: of the listed values' sum for a normalised
+        // list, of the whole for a yield standing as it is.
+        let moved = negative + over;
+        if moved > 0.0 {
             point.clipped += match rule.denominator {
-                Denominator::ListedSum => negative / (sum + negative) * t,
-                Denominator::TransportTotal => negative * t,
+                Denominator::ListedSum => moved / (sum + moved) * t,
+                Denominator::TransportTotal => moved * t,
             };
         }
         match rule.denominator {
@@ -496,7 +648,7 @@ impl Bound<'_, '_> {
                 }
             }
             Denominator::TransportTotal => {
-                if sum > 1.0 {
+                if sum > 1.0 && !rule.emits {
                     point.clipped += (sum - 1.0) * t;
                     for v in out.iter_mut() {
                         *v /= sum;
@@ -590,9 +742,7 @@ pub(crate) fn build_lists<'a>(
         names.sort();
         let mut rules = Vec::new();
         for kind in names {
-            if let Some(rule) = ListRule::new(parent, kind, &kinds[kind])? {
-                rules.push(rule);
-            }
+            rules.extend(ListRule::all(parent, kind, &kinds[kind])?);
         }
         if !rules.is_empty() {
             out.insert(parent.clone(), rules);
@@ -684,12 +834,19 @@ pub struct DroppedChannel {
     pub removal_share: Option<f64>,
 }
 
-/// MT=5's share of one parent's neutron removal rate.
+/// MT=5's share of one parent's neutron removal rate, where the chain does
+/// not model where its residuals go.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnmodelledRate {
     pub nuclide: String,
-    /// `R_5 / (R_removal + R_5)`.
+    /// `R_5 / R_removal`, with `R_5` counted in the removal whether or not the
+    /// chain charges it.
     pub share: f64,
+    /// Why: the chain carries no `(n,X)` reaction for the parent (a reactions
+    /// subsection written before MT=5 was carried, or a parent the reaction
+    /// library has no MT=5 products for), or it carries one whose evaluation
+    /// gives light particles and no residual.
+    pub reason: String,
 }
 
 /// What the isomeric-branching rule did over one step's spectrum, and what it
@@ -718,42 +875,56 @@ pub(crate) fn removal_rate(rates: &yani::ReactionRates, parent: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// MT=5's share of each parent's neutron removal rate, largest first, for the
-/// report.
+/// Why a parent's MT=5 residuals are not modelled, or `None` when they are:
+/// the chain carries `(n,X)` for it, and none of its rows is the one with no
+/// target that says the evaluation gives no residual.
+fn unmodelled_reason(nuclide: Option<&yani::ChainNuclide>) -> Option<&'static str> {
+    let rows: Vec<&yani::ChainReaction> = nuclide
+        .map(|n| n.reactions.iter().filter(|r| r.kind == ANYTHING).collect())
+        .unwrap_or_default();
+    if rows.is_empty() {
+        return Some("the chain carries no (n,X) reaction for it");
+    }
+    rows.iter().any(|r| r.target.is_none()).then_some(
+        "its evaluation gives MT=5's light particles but not its residuals, so the \
+         parent is removed at the MT=5 rate and the residuals are not made",
+    )
+}
+
+/// MT=5's share of each parent's neutron removal rate, largest first, for
+/// every parent whose MT=5 residuals the chain does not model.
 ///
-/// MT=5 is `(n,anything)`: its products are given as MF=6 residual yields
-/// (the LIP isomer flag with them), MF=10 MT=5 partials and light-particle
-/// production, none of which the chain reads, so every atom it removes is
-/// missing from the inventory. TENDL starts MT=5 above about 20 MeV, where a
-/// D-T or fission spectrum has no flux, but some evaluations lump reactions
-/// into it lower down: ENDF/B-VIII.1, JEFF-4.0 and FENDL-3.2d give Fe54's
-/// (n,np) and most of its (n,alpha) as MT=5, 0.55 b of 1.39 b nonelastic at
-/// 14 MeV.
+/// MT=5 is `(n,anything)`. Where the reactions subsection carries it, as
+/// `(n,X)` rows read from MF=6 MT=5, its residuals and light particles are
+/// folded like any other list and nothing here is listed for it. What is
+/// left is listed: a parent the chain has no `(n,X)` reaction for, whose MT=5
+/// removes atoms the inventory never sees (every parent, on a reactions
+/// subsection written before MT=5 was carried), and a parent whose
+/// evaluation gives the light particles and no residual (95 ENDF/B-VIII.1
+/// evaluations, Fe58 and the Zr isotopes among them), whose MT=5 removes the
+/// parent and makes its gas but no residual nucleus.
 ///
-/// Measured and reported, not refused. Refusing above
-/// [`BRANCHING_RATE_TOLERANCE`] would refuse every steel on those three
-/// libraries under a D-T spectrum (Fe54 38 to 60% of its removal, Fe56 12 to
-/// 23%, Mn55 8%, Cr52 2.4%) and under a fission one (Fe56 0.8%, Mn55 1.0%),
-/// which is where most runs are; whether to refuse there, or to model MT=5
-/// first, is an open decision.
+/// The key is kept rather than removed now that MT=5 is modelled, because
+/// both cases are real and a run on them should say so; on a reactions
+/// subsection that carries `(n,X)` it lists only those. Whether the run
+/// refuses is [`refuse_unmodelled_mt5`]'s decision.
 ///
 /// `mt5` is each parent's MT=5 rate on the same footing as `rates`.
 pub(crate) fn measure_unmodelled_mt5(
+    chain: &HashMap<String, yani::ChainNuclide>,
     rates: &yani::ReactionRates,
     mt5: &HashMap<String, f64>,
 ) -> Vec<UnmodelledRate> {
-    // TODO: model MT=5 residual production (MF=6 LIP, MF=10 MT=5 and the
-    // light-particle gas) as an (n,X) reaction; until then, decide whether a
-    // share above the tolerance refuses the run.
     let mut out: Vec<UnmodelledRate> = mt5
         .iter()
         .filter(|(_, r)| **r > 0.0)
-        .map(|(nuclide, &r5)| {
-            let removal = removal_rate(rates, nuclide);
-            UnmodelledRate {
+        .filter_map(|(nuclide, &r5)| {
+            let reason = unmodelled_reason(chain.get(nuclide))?;
+            Some(UnmodelledRate {
                 nuclide: nuclide.clone(),
-                share: r5 / (removal + r5),
-            }
+                share: r5 / (removal_without_anything(rates, nuclide) + r5),
+                reason: reason.to_string(),
+            })
         })
         .collect();
     out.sort_by(|a, b| {
@@ -762,6 +933,105 @@ pub(crate) fn measure_unmodelled_mt5(
             .then_with(|| a.nuclide.cmp(&b.nuclide))
     });
     out
+}
+
+/// A parent's removal rate without its `(n,X)` rate, which the share above
+/// counts once whether or not the chain charges it.
+fn removal_without_anything(rates: &yani::ReactionRates, parent: &str) -> f64 {
+    rates
+        .get(parent)
+        .map(|kinds| {
+            kinds
+                .iter()
+                .filter(|(k, r)| k.as_str() != ANYTHING && r.is_finite())
+                .map(|(_, r)| r)
+                .sum()
+        })
+        .unwrap_or(0.0)
+}
+
+/// Refuse a run where too much of the material's neutron removal rests on
+/// MT=5 residuals the chain does not model.
+///
+/// What is weighed is the material's own composition, `densities` (atoms per
+/// barn-cm, those the rates were taken for): the removal those nuclides'
+/// unmodelled MT=5 carries, `sum N_i R_5,i`, over the removal of the whole
+/// composition, `sum N_i (R_removal,i + R_5,i)`, refused above
+/// [`BRANCHING_RATE_TOLERANCE`]. Not each parent's share on its own, which
+/// every other guard here uses, because a chain parent here can be a product
+/// present at a trace: ENDF/B-VIII.1 gives no MT=5 residuals for Al26_m1, V49
+/// or Ca41, whose MT=5 is half their removal under a D-T spectrum, and they
+/// are in the network of every iron irradiation at densities far below
+/// anything their residuals could matter for. A per-parent test would
+/// refuse every such run for nuclides that are not in the material; this
+/// one refuses a material whose own nuclides lose that much (ENDF/B-VIII.1
+/// zirconium, whose MT=5 is 0.6% of its removal at 14 MeV), and lets natural
+/// iron through, whose Fe58 loses 1.5% of its own removal but is 0.28% of
+/// the atoms. Every parent's share is still reported.
+///
+/// With no densities (a statistical replica, or a caller that gave none) it
+/// refuses nothing. `library` names where a nuclide's cross sections came
+/// from, for the message.
+pub(crate) fn refuse_unmodelled_mt5(
+    unmodelled: &[UnmodelledRate],
+    rates: &yani::ReactionRates,
+    mt5: &HashMap<String, f64>,
+    densities: &HashMap<String, f64>,
+    library: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), String> {
+    let mut names: Vec<&String> = densities.keys().collect();
+    names.sort();
+    let whole: f64 = names
+        .iter()
+        .map(|n| {
+            densities[*n]
+                * (removal_without_anything(rates, n) + mt5.get(*n).copied().unwrap_or(0.0))
+        })
+        .sum();
+    if whole <= 0.0 {
+        return Ok(());
+    }
+    let mut lost: Vec<(f64, &UnmodelledRate)> = unmodelled
+        .iter()
+        .filter_map(|u| {
+            let n = densities.get(&u.nuclide).copied().unwrap_or(0.0);
+            let r5 = mt5.get(&u.nuclide).copied().unwrap_or(0.0);
+            (n * r5 > 0.0).then(|| (n * r5 / whole, u))
+        })
+        .collect();
+    let total: f64 = lost.iter().map(|(share, _)| share).sum();
+    if total <= BRANCHING_RATE_TOLERANCE {
+        return Ok(());
+    }
+    lost.sort_by(|a, b| {
+        b.0.total_cmp(&a.0)
+            .then_with(|| a.1.nuclide.cmp(&b.1.nuclide))
+    });
+    let named: Vec<String> = lost
+        .iter()
+        .map(|(share, u)| {
+            let from = library(&u.nuclide)
+                .map(|l| format!(" ({l})"))
+                .unwrap_or_default();
+            format!(
+                "{}{from}: {:.3}% of the material's removal, {:.2}% of its own; {}",
+                u.nuclide,
+                100.0 * share,
+                100.0 * u.share,
+                u.reason
+            )
+        })
+        .collect();
+    Err(format!(
+        "{:.3}% of this material's neutron removal rate is MT=5 (n,anything) whose \
+         residual nuclei the chain does not model, above the {:.1}% the solver carries \
+         without them: {}. The atoms MT=5 removes would leave the inventory unaccounted \
+         for. Use a reaction library whose evaluations give MT=5's residuals (MF=6 MT=5), \
+         or a reactions subsection converted with MT=5 carried.",
+        100.0 * total,
+        100.0 * BRANCHING_RATE_TOLERANCE,
+        named.join("; ")
+    ))
 }
 
 #[cfg(test)]
@@ -960,7 +1230,7 @@ mod tests {
             HashMap::from([("(n,p)".to_string(), 1.0)]),
         )]);
         let mt5 = HashMap::from([("Fe54".to_string(), 1.5), ("Fe56".to_string(), 0.0)]);
-        let report = measure_unmodelled_mt5(&rates, &mt5);
+        let report = measure_unmodelled_mt5(&HashMap::new(), &rates, &mt5);
         assert_eq!(report.len(), 1);
         assert_eq!(report[0].nuclide, "Fe54");
         assert!((report[0].share - 0.6).abs() < 1e-15);
