@@ -83,7 +83,7 @@ pub(crate) struct Timeouts {
 
 impl Timeouts {
     /// The values every download uses. See the type's docs for why each is
-    /// what it is; the user-facing docs (docs/nuclear_data.md) quote them.
+    /// what it is; docs/developer_info.md quotes them.
     pub(crate) const DEFAULT: Timeouts = Timeouts {
         connect: Duration::from_secs(3),
         pointer: Duration::from_secs(3),
@@ -611,8 +611,7 @@ fn not_published_error(keyword: &str, url: &str) -> String {
          build of yamc reads only versioned releases (<keyword>/<release>/ with a manifest), and \
          the origin still serves only the older unversioned layout for this library. Use a yamc \
          release that reads that layout, or point the data source at a local directory holding \
-         the library (e.g. Material.set_cross_section_data / yamc.set_cross_section_data with a \
-         path)."
+         the library (e.g. yamc.cross_section_data = \"/path/to/library\")."
     )
 }
 

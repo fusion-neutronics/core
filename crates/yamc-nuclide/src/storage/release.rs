@@ -215,6 +215,46 @@ fn safe_relative_path(p: &str) -> bool {
     !p.starts_with('/') && p.split('/').all(safe_segment)
 }
 
+/// Check the files of `entry` (a folder of the release, such as
+/// `neutron/Fe56.arrow`) that are present under `dir` against the sizes the
+/// release manifest `manifest_bytes` lists. A listed file that is absent is
+/// not an error: a release folder may hold only what was downloaded.
+pub fn check_sizes(
+    dir: &std::path::Path,
+    manifest_bytes: &[u8],
+    entry: &str,
+) -> Result<(), String> {
+    let manifest: Manifest = serde_json::from_slice(manifest_bytes).map_err(|e| {
+        format!(
+            "{}: not a valid release manifest: {e}",
+            dir.join(MANIFEST).display()
+        )
+    })?;
+    let prefix = format!("{entry}/");
+    for file in manifest
+        .files
+        .iter()
+        .filter(|f| f.path.starts_with(&prefix))
+    {
+        if !safe_relative_path(&file.path) {
+            continue;
+        }
+        let path = dir.join(&file.path);
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() != file.bytes {
+                return Err(format!(
+                    "{}: size mismatch, the release manifest says {} bytes and the file has {}. \
+                     The local copy is incomplete or modified; download it again.",
+                    path.display(),
+                    file.bytes,
+                    meta.len()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Refuse a release whose format this build cannot read, saying what to do.
 pub fn check_format_version(
     keyword: &str,
@@ -442,6 +482,25 @@ mod tests {
             "manifest": "x/manifest.json", "manifest_sha256": "00", "manifest_bytes": 1
         });
         assert!(parse_latest("endf-b8.1", pointer.to_string().as_bytes()).is_err());
+    }
+
+    #[test]
+    fn a_local_release_folder_has_its_sizes_checked() {
+        let dir = std::env::temp_dir().join(format!("yamc-release-sizes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("neutron/Fe56.arrow")).unwrap();
+        std::fs::write(dir.join("neutron/Fe56.arrow/version.json"), b"abc").unwrap();
+        let manifest = manifest_json("endf-b8.1", "2026-10-01", 2);
+        assert!(check_sizes(&dir, &manifest, "neutron/Fe56.arrow").is_ok());
+        // Absent files are fine: Li6 was never downloaded.
+        assert!(check_sizes(&dir, &manifest, "neutron/Li6.arrow").is_ok());
+        std::fs::write(dir.join("neutron/Fe56.arrow/version.json"), b"ab").unwrap();
+        let err = check_sizes(&dir, &manifest, "neutron/Fe56.arrow").unwrap_err();
+        assert!(
+            err.contains("size mismatch") && err.contains("version.json"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -994,14 +994,30 @@ pub fn get_cache_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(cache_dir)
 }
 
-/// Resolve a nuclide name within a directory.
-/// Checks for Arrow directory.
+/// Resolve a nuclide (or element) name within a directory.
+///
+/// A directory holding a release `manifest.json` is a release folder, laid out
+/// `neutron/<Name>.arrow/` and `photon/<Name>.arrow/` (a library downloaded
+/// whole, or a cached release folder). The files of the entry that the
+/// manifest lists and that are present are checked against their manifest
+/// sizes, which costs a `stat` each and catches a truncated copy; a full hash
+/// check is `verify_library`'s job. Any other directory holds
+/// `<Name>.arrow/` directly.
 fn resolve_nuclide_in_dir(
     dir: &std::path::Path,
     nuclide_name: &str,
+    kind: DataKind,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let arrow_path = dir.join(format!("{}.arrow", nuclide_name));
-    Ok(arrow_path)
+    let manifest = dir.join(super::release::MANIFEST);
+    if !manifest.is_file() {
+        return Ok(dir.join(format!("{}.arrow", nuclide_name)));
+    }
+    let entry = match kind {
+        DataKind::Neutron => format!("neutron/{nuclide_name}.arrow"),
+        DataKind::Photon => format!("photon/{nuclide_name}.arrow"),
+    };
+    super::release::check_sizes(dir, &std::fs::read(&manifest)?, &entry)?;
+    Ok(dir.join(entry))
 }
 
 /// Check if a string looks like a URL (starts with http:// or https://)
@@ -1040,7 +1056,7 @@ pub fn resolve_path_or_url(
             Ok(dir)
         } else {
             // It's a parent directory - resolve to nuclide data file/directory inside it
-            resolve_nuclide_in_dir(&dir, nuclide_name)
+            resolve_nuclide_in_dir(&dir, nuclide_name, kind)
         }
     } else if is_url(path_url_or_keyword) {
         // It's a direct URL
@@ -1133,7 +1149,7 @@ pub fn resolve_subsection(
 pub fn resolve_path_or_url(
     path_url_or_keyword: &str,
     nuclide_name: &str,
-    _kind: DataKind,
+    kind: DataKind,
     _scope: &crate::load_scope::LoadScope,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if is_keyword(path_url_or_keyword) {
@@ -1145,7 +1161,7 @@ pub fn resolve_path_or_url(
             Ok(dir)
         } else {
             // It's a parent directory - resolve to nuclide data file/directory inside it
-            resolve_nuclide_in_dir(&dir, nuclide_name)
+            resolve_nuclide_in_dir(&dir, nuclide_name, kind)
         }
     } else if is_url(path_url_or_keyword) {
         Err("URL downloading is not supported in WASM builds. Please use local file paths.".into())
