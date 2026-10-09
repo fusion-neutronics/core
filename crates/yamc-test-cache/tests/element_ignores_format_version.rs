@@ -12,8 +12,9 @@
 //! sweep had just run on as absent.
 //!
 //! One test in its own binary because it points the cache root at a temporary
-//! directory through `YAMC_CACHE_DIR`, which `cache_root` re-reads on every
-//! call, and a process-wide variable is not something to share with parallel
+//! directory through the process-global test hook
+//! (`url_cache::set_cache_root_for_tests`), which `cache_root` re-reads on
+//! every call, and process-wide state is not something to share with parallel
 //! tests.
 
 use std::path::Path;
@@ -33,7 +34,7 @@ fn stamp(dir: &Path, format_version: i64) {
 #[test]
 fn a_superseded_element_stamp_is_still_present_and_a_nuclide_one_is_not() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    std::env::set_var("YAMC_CACHE_DIR", tmp.path());
+    yamc_nuclide::url_cache::set_cache_root_for_tests(Some(tmp.path().to_path_buf()));
 
     let lib = yamc_test_cache::LIBRARY;
     stamp(&tmp.path().join(format!("{lib}-W.arrow")), 1);
