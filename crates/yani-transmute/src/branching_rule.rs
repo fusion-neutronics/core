@@ -45,9 +45,12 @@
 //! multiplicity and the total see one spectrum under one weight. A
 //! multiplicity above what the target's nucleons allow is clipped and
 //! reported like a negative one; ENDF/B-VIII.1's Cr50 to Cr54 have residual
-//! "multiplicities" up to 1e9 where MT=5 vanishes. Where the chain does not
+//! "multiplicities" up to 1e9 where MT=5 vanishes. Because every MT=5
+//! evaluation sits in the network of every irradiation, what MT=5 clips or
+//! holds is refused by its share of the material's removal rather than of
+//! one parent's ([`refuse_anything_clipped`]). Where the chain does not
 //! model MT=5's residuals at all, the rate is reported, and refused above the
-//! tolerance by [`refuse_unmodelled_mt5`].
+//! tolerance the same way by [`refuse_unmodelled_mt5`].
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -1050,6 +1053,81 @@ pub(crate) fn refuse_unmodelled_mt5(
          without them: {}. The atoms MT=5 removes would leave the inventory unaccounted \
          for. Use a reaction library whose evaluations give MT=5's residuals (MF=6 MT=5), \
          or a reactions subsection converted with MT=5 carried.",
+        100.0 * total,
+        100.0 * BRANCHING_RATE_TOLERANCE,
+        named.join("; ")
+    ))
+}
+
+/// Refuse a run where too much of the material's neutron removal rests on
+/// `(n,X)` production the rule clipped as impossible or held beyond the
+/// evaluation's range.
+///
+/// The same measure as [`refuse_unmodelled_mt5`], for the same reason: a
+/// parent's clipped and held MT=5 production, as the report gives it (shares
+/// of that parent's removal), weighted by its density in the material, over
+/// the removal of the whole composition. ENDF/B-VIII.1's Cr50 to Cr54 give
+/// residual "multiplicities" in the hundreds where their MT=5 is small, so
+/// Cr50's clipped share is 0.2% to 0.4% of its own removal under the FNS
+/// spectra; a per-parent test refuses every irradiation whose network reaches
+/// Cr50 at all, and this one refuses a material made of chromium if, and only
+/// if, that much of its removal is affected. With no densities it refuses
+/// nothing.
+pub(crate) fn refuse_anything_clipped(
+    channels: &[BranchingChannel],
+    rates: &yani::ReactionRates,
+    densities: &HashMap<String, f64>,
+    library: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), String> {
+    let mut names: Vec<&String> = densities.keys().collect();
+    names.sort();
+    let whole: f64 = names
+        .iter()
+        .map(|n| densities[*n] * removal_rate(rates, n))
+        .sum();
+    if whole <= 0.0 {
+        return Ok(());
+    }
+    let mut lost: Vec<(f64, &BranchingChannel)> = channels
+        .iter()
+        .filter(|c| c.reaction == ANYTHING)
+        .filter_map(|c| {
+            let n = densities.get(&c.parent).copied().unwrap_or(0.0);
+            let rate = (c.clipped_share + c.extrapolated_share) * removal_rate(rates, &c.parent);
+            (n * rate > 0.0).then(|| (n * rate / whole, c))
+        })
+        .collect();
+    let total: f64 = lost.iter().map(|(share, _)| share).sum();
+    if total <= BRANCHING_RATE_TOLERANCE {
+        return Ok(());
+    }
+    lost.sort_by(|a, b| {
+        b.0.total_cmp(&a.0)
+            .then_with(|| a.1.parent.cmp(&b.1.parent))
+    });
+    let named: Vec<String> = lost
+        .iter()
+        .map(|(share, c)| {
+            let from = library(&c.parent)
+                .map(|l| format!(" ({l})"))
+                .unwrap_or_default();
+            format!(
+                "{} {}{from}: {:.3}% of the material's removal, {:.3}% of its own clipped \
+                 as impossible (a multiplicity above what the nucleons allow, or negative) \
+                 and {:.3}% held beyond the evaluation's range",
+                c.parent,
+                c.reaction,
+                100.0 * share,
+                100.0 * c.clipped_share,
+                100.0 * c.extrapolated_share
+            )
+        })
+        .collect();
+    Err(format!(
+        "{:.3}% of this material's neutron removal rate rests on MT=5 (n,X) production the \
+         evaluation does not give, above the {:.1}% the solver carries: {}. Nothing is clipped \
+         or extrapolated silently: use a reaction library whose MF=6 MT=5 conserves the \
+         target's nucleons over this spectrum.",
         100.0 * total,
         100.0 * BRANCHING_RATE_TOLERANCE,
         named.join("; ")

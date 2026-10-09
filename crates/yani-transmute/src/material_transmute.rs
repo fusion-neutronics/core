@@ -1,7 +1,8 @@
 use crate::branching_rule::{
-    build_lists, measure_unmodelled_mt5, refuse_unmodelled_mt5, removal_rate, Bound,
-    BranchingChannel, BranchingReport, BranchingState, Denominator, DroppedChannel, ListRates,
-    ListRule, Lists, ANYTHING, BRANCHING_RATE_TOLERANCE, INELASTIC, MT_ANYTHING, MT_INELASTIC,
+    build_lists, measure_unmodelled_mt5, refuse_anything_clipped, refuse_unmodelled_mt5,
+    removal_rate, Bound, BranchingChannel, BranchingReport, BranchingState, Denominator,
+    DroppedChannel, ListRates, ListRule, Lists, ANYTHING, BRANCHING_RATE_TOLERANCE, INELASTIC,
+    MT_ANYTHING, MT_INELASTIC,
 };
 use crate::covariance_fold::{cell_fields, fold_rate_covariance, reachable_mts, FoldSpectrum};
 use crate::covariance_sample::Sampler;
@@ -3063,6 +3064,9 @@ pub(crate) fn collapse_and_fold(
     let (folded_chain, mut report) = fold_branching_into_chain(chain, lists, &folded, &mut rates)?;
     report.unmodelled_mt5 = measure_unmodelled_mt5(chain, &rates, &mt5);
     let densities = material.get_atoms_per_barn_cm().unwrap_or_default();
+    refuse_anything_clipped(&report.channels, &rates, &densities, &|n| {
+        library_of(material, n)
+    })?;
     refuse_unmodelled_mt5(&report.unmodelled_mt5, &rates, &mt5, &densities, &|n| {
         library_of(material, n)
     })?;
@@ -3143,6 +3147,15 @@ pub(crate) fn fold_branching_into_chain(
         channel.removal_share = share_of(resolved.rate);
         channel.clipped_share = share_of(resolved.clipped);
         channel.extrapolated_share = share_of(resolved.extrapolated);
+        // MT=5's lists are judged by the material instead (see
+        // `refuse_anything_clipped`): every MT=5 evaluation is in the network
+        // of every irradiation, ENDF/B-VIII.1's Cr50 at a trace in each of the
+        // 132 FNS foils, so a per-parent test would refuse all of them for a
+        // nuclide none of them is made of.
+        if channel.reaction == ANYTHING {
+            report.channels.push(channel);
+            continue;
+        }
         if channel.clipped_share > BRANCHING_RATE_TOLERANCE {
             let excess = match channel.own_total_excess {
                 Some((e, ratio)) if ratio.is_finite() => format!(
@@ -3708,6 +3721,9 @@ pub fn apply_coupled_branching(
     let (folded_chain, mut report) = fold_branching_into_chain(chain, &lists, &folded, rates)?;
     if let Some(d) = diagnostics {
         report.unmodelled_mt5 = measure_unmodelled_mt5(chain, rates, &d.mt5);
+        refuse_anything_clipped(&report.channels, rates, &d.densities, &|n| {
+            d.libraries.get(n).cloned()
+        })?;
         refuse_unmodelled_mt5(&report.unmodelled_mt5, rates, &d.mt5, &d.densities, &|n| {
             d.libraries.get(n).cloned()
         })?;
