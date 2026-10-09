@@ -828,12 +828,20 @@ pub fn fission_yields_evaluated_yields() -> Schema {
 }
 
 /// `fission_yields/fission_yields.arrow`
+///
+/// `interpolation` is the ENDF law the yields are read with from the next
+/// lower energy of the same nuclide to this one: the I of that energy's
+/// MT=454 LIST, which ENDF-102 (section 8.3) defines as the scheme between
+/// E(i-1) and E(i). Null at the lowest energy, where the tape puts LE in that
+/// field instead. A file written before the column lacks it, and a reader
+/// takes the laws from `evaluated_yields.arrow` then, where that is present.
 pub fn fission_yields_fission_yields() -> Schema {
     Schema::new(vec![
         utf8("nuclide", false),
         f64("energy", false),
         utf8s("products", false),
         f64s("yields", false),
+        i32("interpolation", true),
     ])
     .with_metadata(meta([
         ("filetype", "transmutation-fission_yields"),

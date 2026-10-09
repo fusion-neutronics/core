@@ -1197,6 +1197,34 @@ fn fission_yield_evaluations_are_written_verbatim() {
     assert_eq!(nominal.schema().fields(), declared.fields());
     let u235 = chain.get("U235").unwrap();
     assert_eq!(nominal.num_rows(), u235.yield_data.len());
+    // Each row carries the law of the MT=454 LIST at its energy, null at the
+    // lowest, which states LE there instead.
+    let nominal_energy = nominal.column_by_name("energy").unwrap();
+    let nominal_energy = nominal_energy
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    let nominal_law = nominal.column_by_name("interpolation").unwrap();
+    let nominal_law = nominal_law.as_any().downcast_ref::<Int32Array>().unwrap();
+    for row in 0..nominal.num_rows() {
+        let i = tape
+            .energies
+            .iter()
+            .position(|e| *e == nominal_energy.value(row))
+            .expect("a nominal row at a tape energy");
+        assert_eq!(
+            (!nominal_law.is_null(row)).then(|| nominal_law.value(row) as i64),
+            tape.independent_interpolation[i],
+            "nominal law at {} eV",
+            tape.energies[i]
+        );
+    }
+    assert!(
+        tape.independent_interpolation[1..]
+            .iter()
+            .all(Option::is_some),
+        "the fixture states a law on every set above the lowest"
+    );
 
     // And yani carries the evaluation on the yields it solves with.
     let (back, _) = yani::parse_chain_parts(
@@ -1216,6 +1244,12 @@ fn fission_yield_evaluations_are_written_verbatim() {
         let nominal = &u235.yield_data[&format!("{}", y.energy)];
         let products: Vec<(String, f64)> = nominal.iter().map(|(k, v)| (k.clone(), *v)).collect();
         assert_eq!(y.products, products, "nominal yields at {} eV", y.energy);
+        assert_eq!(
+            y.interpolation.map(|l| l.endf_code() as i64),
+            tape.independent_interpolation[i],
+            "law yani reads at {} eV",
+            y.energy
+        );
         for (evaluated, tape_set) in [
             (&y.independent, &tape.independent[i]),
             (&y.cumulative, &tape.cumulative[i]),

@@ -17,12 +17,13 @@ use crate::ReactionRates;
 /// Y_eff(p) = Sum_k c_k * Y_k(p)
 /// ```
 ///
-/// The drivers own the spectrum and compute `c_k` by summing the linear
+/// The drivers own the spectrum and compute `c_k` by summing the
 /// interpolation weights of [`FissionYieldSet::interp_weights`] over the
 /// fission-rate distribution `R_g = sigma_f,g * phi_g`, normalized so the
 /// coefficients sum to one. That is the exact commuted form of folding the
-/// yield vectors group by group, since the interpolation is linear and so
-/// commutes with the sum, and it costs `n_groups + 4 * n_products` instead of
+/// yield vectors group by group, since either law the yields are tabulated
+/// with (histogram or linear-linear) is linear in the yields and so commutes
+/// with the sum, and it costs `n_groups + 4 * n_products` instead of
 /// `n_groups * n_products`.
 pub type FissionYieldWeights = HashMap<String, Vec<f64>>;
 
@@ -1023,6 +1024,7 @@ mod tests {
                         products: vec![("B".to_string(), 1.0), ("C".to_string(), 1.0)],
                         independent: None,
                         cumulative: None,
+                        interpolation: None,
                     }],
                 })),
                 sources: Vec::new(),
@@ -1081,6 +1083,7 @@ mod tests {
                         products: vec![("Xe".to_string(), 0.06), ("Sr".to_string(), 0.04)],
                         independent: None,
                         cumulative: None,
+                        interpolation: None,
                     }],
                 })),
                 sources: Vec::new(),
@@ -1409,6 +1412,7 @@ mod tests {
                         products: vec![("Xe".to_string(), 0.065), ("Cs".to_string(), 0.062)],
                         independent: None,
                         cumulative: None,
+                        interpolation: None,
                     }],
                 })),
                 sources: Vec::new(),
@@ -1543,6 +1547,7 @@ mod tests {
                         products: vec![("Xe".to_string(), 0.065), ("NotInNames".to_string(), 0.05)],
                         independent: None,
                         cumulative: None,
+                        interpolation: None,
                     }],
                 })),
                 sources: Vec::new(),
@@ -1605,12 +1610,14 @@ mod tests {
                         products: vec![("B".to_string(), 1.6), ("C".to_string(), 0.4)],
                         independent: None,
                         cumulative: None,
+                        interpolation: None,
                     },
                     FissionYield {
                         energy: 1.4e7,
                         products: vec![("B".to_string(), 0.6), ("C".to_string(), 1.4)],
                         independent: None,
                         cumulative: None,
+                        interpolation: None,
                     },
                 ]))),
                 sources: Vec::new(),

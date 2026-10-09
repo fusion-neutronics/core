@@ -15,11 +15,11 @@ pub use chain::{
     reachable_nuclides, reduce_chain, BranchCurve, BranchQuantity, BranchState, BranchTable,
     ChainNuclide, ChainParts, ChainReaction, DecayEnergyComponent, DecaySource,
     DecaySourceDistribution, DecaySourceUncertainty, EvaluatedYields, FissionYield,
-    FissionYieldSet, LoadedChain, SourceCovariance, DECAY_ENERGY_COMPONENTS,
+    FissionYieldSet, LoadedChain, SourceCovariance, YieldInterpolation, DECAY_ENERGY_COMPONENTS,
 };
 pub use chain_arrow::{
     export_chain_arrow, export_chain_parts, parse_chain_arrow, parse_chain_parts,
-    parse_chain_parts_from_bytes, ChainSections, SectionFiles,
+    parse_chain_parts_from_bytes, unstated_yield_laws, ChainSections, SectionFiles,
 };
 pub use continuum::{Continuum, Interpolation, UnreadableContinuum};
 pub use cram::{cram48, cram48_sparse};
