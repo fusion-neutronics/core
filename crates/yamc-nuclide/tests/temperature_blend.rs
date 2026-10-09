@@ -173,6 +173,7 @@ fn two_temperature_nuclide_from(
         angular_covariance: None,
         nubar_covariance: None,
         spectrum_covariance: None,
+        resonance_parameters: None,
         elastic_flat_cache: Default::default(),
         fission_chi_flat_cache: Default::default(),
         delayed_neutron_cache: Default::default(),

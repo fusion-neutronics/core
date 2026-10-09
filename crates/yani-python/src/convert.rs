@@ -356,7 +356,10 @@ pub fn convert_branching(
 ///     Also write ``covariance.arrow``, the MF=33 cross-section covariance,
 ///     and the evaluation's other covariance sections where it has them:
 ///     ``angular_covariance.arrow`` (MF=34), ``nubar_covariance.arrow``
-///     (MF=31) and ``spectrum_covariance.arrow`` (MF=35). Off by default: the matrices are large and only an uncertainty
+///     (MF=31), ``spectrum_covariance.arrow`` (MF=35) and
+///     ``resonance_parameters.arrow`` (the MF=2 resonance parameters with
+///     their MF=32 covariance). Off by default: the matrices are large and
+///     only an uncertainty
 ///     calculation reads them. Requires ``source_format="endf"`` -- MF=33 is
 ///     not carried through ACER, so asking for it from an ACE table raises.
 ///
@@ -449,7 +452,10 @@ pub fn convert_neutron_xs(
 ///     Also write ``covariance.arrow``, the MF=33 cross-section covariance,
 ///     and the evaluation's other covariance sections where it has them:
 ///     ``angular_covariance.arrow`` (MF=34), ``nubar_covariance.arrow``
-///     (MF=31) and ``spectrum_covariance.arrow`` (MF=35). Off by default: the matrices are large and only an uncertainty
+///     (MF=31), ``spectrum_covariance.arrow`` (MF=35) and
+///     ``resonance_parameters.arrow`` (the MF=2 resonance parameters with
+///     their MF=32 covariance). Off by default: the matrices are large and
+///     only an uncertainty
 ///     calculation reads them.
 ///
 /// Returns

@@ -20,12 +20,13 @@ use arrow_array::Array;
 use endf::mf::covariance::{NcSubsection, NiSubsection};
 
 use crate::arrow::arrow_helpers::{
-    get_str, read_arrow_file, try_get_f64, try_get_f64_list, try_get_i32, try_get_str,
+    get_i32, get_str, read_arrow_file, try_get_f64, try_get_f64_list, try_get_i32, try_get_str,
 };
 use crate::covariance::{
     AngularCovarianceBlock, BranchingCovarianceBlock, CovarianceBlock, CovarianceData,
     SpectrumCovarianceBlock,
 };
+use crate::resonance_parameters::ResonanceParameters;
 
 /// A nullable `int32` column read as the parser's `i64`, with null as zero.
 ///
@@ -199,6 +200,59 @@ pub fn read_spectrum_covariance(
         })
         .collect();
     Ok(Some(blocks))
+}
+
+/// Read `resonance_parameters.arrow` (MF=2 and MF=32, MT=151) from a
+/// `{Nuclide}.arrow/` directory.
+///
+/// The text is kept as it is, not parsed: [`ResonanceParameters`] parses it
+/// on demand. `Ok(None)` when the file is not there, which is every
+/// evaluation without MF=32 and every folder written before the section
+/// existed. A file that is there but lacks either section, or holds one
+/// twice, is an error: the writer always writes both.
+pub fn read_resonance_parameters(
+    dir: &Path,
+    nuclide: &str,
+) -> Result<Option<ResonanceParameters>, Box<dyn Error>> {
+    let path = dir.join("resonance_parameters.arrow");
+    if !crate::storage::exists(&path) {
+        return Ok(None);
+    }
+    let batch = read_arrow_file(&path)?;
+    let mut mf2_text = None;
+    let mut mf32_text = None;
+    for row in 0..batch.num_rows() {
+        let section = (get_i32(&batch, "mf", row)?, get_i32(&batch, "mt", row)?);
+        let slot = match section {
+            (2, 151) => &mut mf2_text,
+            (32, 151) => &mut mf32_text,
+            (mf, mt) => {
+                return Err(format!(
+                    "{nuclide} resonance_parameters.arrow holds MF={mf} MT={mt}; \
+                     only MF=2 and MF=32 MT=151 belong there"
+                )
+                .into())
+            }
+        };
+        if slot.replace(get_str(&batch, "text", row)?).is_some() {
+            return Err(format!(
+                "{nuclide} resonance_parameters.arrow holds MF={} MT={} twice",
+                section.0, section.1
+            )
+            .into());
+        }
+    }
+    match (mf2_text, mf32_text) {
+        (Some(mf2_text), Some(mf32_text)) => Ok(Some(ResonanceParameters {
+            mf2_text,
+            mf32_text,
+        })),
+        _ => Err(format!(
+            "{nuclide} resonance_parameters.arrow does not hold both MF=2 and MF=32 \
+             MT=151; re-convert or re-download this nuclide"
+        )
+        .into()),
+    }
 }
 
 /// One row's block, in the columns `covariance.arrow`,
