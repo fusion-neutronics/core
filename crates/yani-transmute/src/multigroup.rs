@@ -911,15 +911,24 @@ pub(crate) fn group_averaged_xs(reaction: &Reaction, e_lo: f64, e_hi: f64) -> f6
 /// yield energies, adding each share into `out`.
 ///
 /// Entry `k` accumulates `∫ σ_f(E) · φ_k(E) dE / (E_hi - E_lo)`, where `φ_k` is
-/// the linear interpolation hat function of tabulated point `k` (clamped flat
-/// outside the tabulated range).
+/// the interpolation weight of tabulated point `k` under the law of each
+/// interval (clamped flat outside the tabulated range): a linear hat across a
+/// linear-linear interval, and across a histogram interval one on its lower
+/// point and zero on its upper.
 ///
-/// The hats are a partition of unity at every evaluation point and the
+/// The weights are a partition of unity at every evaluation point and the
 /// trapezoid rule is linear in its integrand, so the entries sum to the group
 /// average of `σ_f` over this same point set. Weighting them by the group
 /// fluxes and normalizing therefore gives coefficients that sum to one, and
 /// folding those against the yield vectors is the commuted form of
 /// interpolating the yields group by group.
+///
+/// A histogram's weights jump at the upper energy of the interval, which the
+/// point set includes, so the trapezoid there must not read them at the
+/// segment's two ends: the upper end already belongs to the next point. A
+/// segment inside a histogram interval gives its whole share to the
+/// interval's lower point instead, which is exact, since the weight is
+/// constant across it.
 ///
 /// The point set refines [`group_averaged_xs`]'s by the tabulated energies,
 /// where the hats bend, so the totals agree exactly for a cross section that
@@ -963,6 +972,16 @@ fn add_group_fission_xs_by_yield_point(
         let next = term(next_e);
         let de = next_e - prev_e;
         if de > 0.0 {
+            if let Some(k) = fy_set.histogram_point(0.5 * (prev_e + next_e)) {
+                for xs in [prev.0, next.0] {
+                    if xs != 0.0 {
+                        out[k] += scale * 0.5 * xs * de / width;
+                    }
+                }
+                prev_e = next_e;
+                prev = next;
+                continue;
+            }
             for (xs, hats) in [&prev, &next] {
                 if *xs == 0.0 {
                     continue;
@@ -2341,9 +2360,79 @@ mod tests {
                     products: vec![],
                     independent: None,
                     cumulative: None,
+                    interpolation: None,
                 })
                 .collect(),
         )
+    }
+
+    /// `fy_set` with every interval above the lowest energy stated as `law`.
+    fn fy_set_with(energies: &[f64], law: yani::YieldInterpolation) -> FissionYieldSet {
+        let mut set = fy_set(energies);
+        for y in set.yields.iter_mut().skip(1) {
+            y.interpolation = Some(law);
+        }
+        set
+    }
+
+    #[test]
+    fn a_histogram_interval_gives_its_whole_share_to_its_lower_point() {
+        // JEFF-4.0's laws: the 0.4 MeV yields hold up to 14 MeV, so a group
+        // anywhere between them is all 0.4 MeV, and a group across 14 MeV
+        // splits exactly at it, with no half segment leaking either way.
+        let rxn = flat_reaction((0.0, 2.0e7), 3.0, MT_FISSION);
+        let set = fy_set_with(&[0.0253, 4.0e5, 1.4e7], yani::YieldInterpolation::Histogram);
+        let fold = |e_lo: f64, e_hi: f64| {
+            let mut out = vec![0.0; 3];
+            add_group_fission_xs_by_yield_point(
+                &rxn,
+                &set,
+                &set.energies(),
+                e_lo,
+                e_hi,
+                1.0,
+                &mut out,
+            );
+            out
+        };
+
+        let inside = fold(1.0e6, 1.0e7);
+        assert_eq!(inside[0], 0.0);
+        assert_eq!(inside[2], 0.0);
+        assert!((inside[1] - 3.0).abs() < 1e-12, "{inside:?}");
+
+        let across = fold(1.0e7, 2.0e7);
+        assert_eq!(across[0], 0.0);
+        assert!((across[1] - 3.0 * 0.4).abs() < 1e-12, "{across:?}");
+        assert!((across[2] - 3.0 * 0.6).abs() < 1e-12, "{across:?}");
+
+        // Still a split of the group average, whatever the groups.
+        for (e_lo, e_hi) in [(0.0, 2.0e7), (1.0, 5.0e5), (4.0e5, 1.4e7)] {
+            let split: f64 = fold(e_lo, e_hi).iter().sum();
+            let whole = group_averaged_xs(&rxn, e_lo, e_hi);
+            assert!((split - whole).abs() <= 1e-12 * whole, "({e_lo}, {e_hi})");
+        }
+    }
+
+    #[test]
+    fn a_stated_linear_law_folds_as_an_unstated_one_did() {
+        // ENDF/B-VIII.1 states linear-linear, which is how every interval was
+        // read before the law was carried, so its folds must not move a bit.
+        let rxn = ramp_reaction(0.0, 2.0e7, 1.0, 4.0, MT_FISSION);
+        let energies = [0.0253, 5.0e5, 1.4e7];
+        let (unstated, stated) = (
+            fy_set(&energies),
+            fy_set_with(&energies, yani::YieldInterpolation::LinearLinear),
+        );
+        for (e_lo, e_hi) in [(0.0, 2.0e7), (1.0e6, 2.0e6), (4.0e5, 6.0e5)] {
+            let mut a = vec![0.0; 3];
+            let mut b = vec![0.0; 3];
+            add_group_fission_xs_by_yield_point(
+                &rxn, &unstated, &energies, e_lo, e_hi, 1.0, &mut a,
+            );
+            add_group_fission_xs_by_yield_point(&rxn, &stated, &energies, e_lo, e_hi, 1.0, &mut b);
+            assert_eq!(a, b, "({e_lo}, {e_hi})");
+        }
     }
 
     #[test]

@@ -143,7 +143,18 @@ def test_fission_yield_evaluations_are_stored_as_the_tape_gives_them(tmp_path):
     )
 
     nominal = ipc.open_file(out / "fission_yields" / "fission_yields.arrow").read_all()
-    assert nominal.schema.names == ["nuclide", "energy", "products", "yields"]
+    assert nominal.schema.names == [
+        "nuclide",
+        "energy",
+        "products",
+        "yields",
+        "interpolation",
+    ]
+    # The law of each energy's MT=454 LIST, which the solver reads the yields
+    # with, null at the lowest energy where the tape states LE instead.
+    energies = nominal.column("energy").to_pylist()
+    laws = dict(zip(energies, nominal.column("interpolation").to_pylist()))
+    assert laws == {0.0253: None, 5.0e5: 2}
 
     table = ipc.open_file(out / "fission_yields" / "evaluated_yields.arrow").read_all()
     assert table.schema.names == [

@@ -34,7 +34,7 @@ use super::{mt_to_reaction_type, reaction_type_to_mt};
 use yamc_materials::material::Material;
 use yani::{
     fission_yield_interp_weights, BranchQuantity, BranchTable, ChainNuclide, FissionYieldWeights,
-    ReactionRates,
+    ReactionRates, YieldInterpolation,
 };
 
 /// MT for total fission, whose rate distribution weights the yield fold.
@@ -94,16 +94,21 @@ struct ScoredList {
 /// A fissionable nuclide of this material whose tabulated fission-yield
 /// energies are folded against the continuous-energy fission-rate distribution.
 ///
-/// The linear interpolation hats of the tabulated energies are scored with the
-/// same `sigma_MT(E) * TL` the fission total uses, so the fold sees exactly the
-/// flux the rate sees. At most two hats are non-zero at any energy, so this
-/// costs two atomic adds per fissionable nuclide per track segment, and nothing
-/// at all in a material with no fissionable nuclide.
+/// The interpolation weights of the tabulated energies, under the law the
+/// yields state between them, are scored with the same `sigma_MT(E) * TL` the
+/// fission total uses, so the fold sees exactly the flux the rate sees. At
+/// most two weights are non-zero at any energy (one, inside a histogram
+/// interval), so this costs at most two atomic adds per fissionable nuclide
+/// per track segment, and nothing at all in a material with no fissionable
+/// nuclide.
 struct FissionYieldChannel {
     /// Tabulated incident energies [eV], ascending. Positionally identical to
     /// the nuclide's `FissionYieldSet::yields`, which is what the resulting
     /// weights index into.
     energies: Vec<f64>,
+    /// The law each energy is reached with from the one below, beside
+    /// `energies`, so a histogram interval scores its lower point alone.
+    laws: Vec<Option<YieldInterpolation>>,
     /// Offset of this channel's first accumulator slot; it owns
     /// `energies.len()` consecutive slots.
     offset: usize,
@@ -587,15 +592,19 @@ impl TransmutationTallies {
                 .iter()
                 .map(|name| {
                     fy_mt_idx?;
-                    let energies = chain
+                    let set = chain
                         .get(name)?
                         .fission_yields
                         .as_ref()
-                        .filter(|s| !s.yields.is_empty())?
-                        .energies();
+                        .filter(|s| !s.yields.is_empty())?;
+                    let energies = set.energies();
                     let offset = n_fy_slots;
                     n_fy_slots += energies.len();
-                    Some(FissionYieldChannel { energies, offset })
+                    Some(FissionYieldChannel {
+                        energies,
+                        laws: set.laws(),
+                        offset,
+                    })
                 })
                 .collect();
 
@@ -1019,7 +1028,7 @@ impl TransmutationTallies {
                             if Some(mt_idx) == mat_data.fy_mt_idx {
                                 if let Some(ch) = &mat_data.fy_channels[nuc_idx] {
                                     if let Some(hats) =
-                                        fission_yield_interp_weights(&ch.energies, energy)
+                                        fission_yield_interp_weights(&ch.energies, &ch.laws, energy)
                                     {
                                         for (k, w) in hats {
                                             if w != 0.0 {
@@ -1413,10 +1422,11 @@ impl TransmutationTallies {
     /// yields against the flux this material actually saw.
     ///
     /// Entry `k` of a nuclide's vector is the share of its fission rate that
-    /// the linear interpolation assigns to tabulated point `k`, normalized to
+    /// the yields' interpolation assigns to tabulated point `k`, normalized to
     /// sum to one. Feeding these to the matrix builder is the commuted form of
     /// interpolating the yield vector at every collision energy: exact, since
-    /// the interpolation is linear and so commutes with the sum over segments.
+    /// either law (histogram or linear-linear) is linear in the yields and so
+    /// commutes with the sum over segments.
     ///
     /// Normalization is by the nuclide's own accumulated fission rate, so no
     /// particle count or volume enters and the result is independent of how the

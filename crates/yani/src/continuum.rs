@@ -27,10 +27,10 @@ use std::fmt;
 /// as something else.
 ///
 /// [`crate::chain::EvaluatedYields::interpolation`] keeps its law as the raw
-/// ENDF code instead. Nothing in yani interpolates evaluated yields between
-/// energies yet, so the code is only carried from tape to file and back, and
-/// a raw integer carries any code the tape wrote without a refusal that
-/// nothing would act on.
+/// ENDF code instead, so it carries any code the tape wrote. The law the
+/// solver interpolates the yields with is a
+/// [`crate::chain::YieldInterpolation`], which has only the two laws
+/// evaluations use, and a chain stating another is refused when it is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Interpolation {
     /// INT=1: each point's value holds up to the next point.
