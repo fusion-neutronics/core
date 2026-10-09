@@ -5582,6 +5582,65 @@ class TransmutationResults:
         Raises:
             ValueError: if the material has no ``volume`` in cm^3.
         """
+    def get_gas_production(self, material_id: builtins.int, *, produced: builtins.bool = True) -> typing.Optional[builtins.dict[builtins.str, builtins.list[builtins.float]]]:
+        r"""
+        Hydrogen and helium gas production in appm, at every time point.
+        
+        appm is gas atoms per million **initial** atoms of the material, so the
+        denominator stays fixed as the material transmutes. The gas is what the
+        inventory already holds: H1, H2, H3, He3 and He4 emitted by reactions
+        and by decays, so tritium decaying to He3 during a cooldown shows up as
+        He3 there.
+        
+            >>> gas = results.get_gas_production(material_id=mid)
+            >>> gas["He4"][-1], gas["H"][-1]
+        
+        Args:
+            material_id: Material ID number.
+            produced (bool): Subtract the gas the material started with (water,
+                polymers, lithium compounds), the default, so index 0 is zero
+                and each value is what the schedule made by then. A nuclide
+                consumed faster than it is made reads negative, as H1 in water
+                can through H1(n,gamma)H2. ``False`` gives the gas present,
+                starting inventory included.
+        
+        Returns:
+            dict[str, list[float]] | None: appm keyed ``"H1"``, ``"H2"``,
+            ``"H3"``, ``"He3"``, ``"He4"`` and the totals ``"H"`` (H1 + H2 + H3)
+            and ``"He"`` (He3 + He4). Each list is parallel to ``times``, as
+            ``get_nuclide_evolution`` is: index 0 is the initial composition,
+            index i is after step i. None if the material is not in the results.
+        
+        Raises:
+            ValueError: if the chain the solve used has no entry for one of the
+                five gas nuclides. The solve follows an emitted particle only
+                when the chain has it, so that gas was dropped and a zero would
+                be wrong rather than measured. The message names the missing
+                nuclides.
+        """
+    def get_gas_production_uncertainty(self, material_id: builtins.int, step: builtins.int, *, produced: builtins.bool = True) -> typing.Optional[builtins.dict[builtins.str, Estimate]]:
+        r"""
+        Gas production in appm at one timestep, with the nuclear-data spread
+        on it.
+        
+        See ``get_gas_production`` for the quantity. Evaluated on every
+        replica's inventory against the one initial inventory, which is an
+        input and the same in each, and the totals ``"H"`` and ``"He"`` are
+        summed within a replica before the spread is taken, as
+        ``get_activity_uncertainty`` does.
+        
+        Args:
+            material_id: Material ID number.
+            step: Timestep index (0 = initial composition, which has no spread).
+            produced (bool): As in ``get_gas_production``.
+        
+        Returns:
+            dict[str, Estimate] | None: keyed as ``get_gas_production``; None if
+            the transmutation was run without ``data_uncertainty``.
+        
+        Raises:
+            ValueError: as ``get_gas_production``, or if there is no such step.
+        """
     def get_data_uncertainty_info(self, material_id: builtins.int) -> typing.Optional[dict]:
         r"""
         What the nuclear-data uncertainty covered for one material, and what it

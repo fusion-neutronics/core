@@ -112,7 +112,7 @@ fn spread(values: &[f64]) -> (Option<f64>, Option<f64>) {
 }
 
 /// Assemble one [`Estimate`] from a nominal value and one value per replica.
-fn estimate(nominal: f64, values: &[f64]) -> Estimate {
+pub(crate) fn estimate(nominal: f64, values: &[f64]) -> Estimate {
     let (mean, std_dev) = spread(values);
     Estimate {
         nominal,
