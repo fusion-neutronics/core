@@ -34,7 +34,9 @@ use arrow_array::builder::{
 };
 use endf::function::Tabulated1D;
 use endf::mf::covariance::{Mf33Subsection, Mf40, Mf40Subsection};
-use endf::radionuclide_production::{LevelRoute, RadionuclideProduction};
+use endf::radionuclide_production::{
+    LevelRoute, RadionuclideProduction, ISOMER_ENERGY_RELATIVE_TOLERANCE,
+};
 use endf::Material;
 use yamc_convert::covariance::narrow;
 use yamc_convert::sections::ints;
@@ -201,6 +203,26 @@ fn tape_limits(curve: &Tabulated1D, e: f64) -> (Option<f64>, Option<f64>) {
 fn level_energy_difference(lfs: i64, level_energy: f64, booked: Option<f64>) -> Option<f64> {
     let stated = level_energy > 0.0 || (lfs == 0 && level_energy == 0.0);
     booked.filter(|_| stated).map(|e| level_energy - e)
+}
+
+/// How far a level lies from the isomer it was booked to, when that is
+/// further than either energy pass of `resolve_level` would accept: more than
+/// `tol_ev`, and more than [`ISOMER_ENERGY_RELATIVE_TOLERANCE`] of the
+/// isomer's energy. `None` when it is within them, or either energy is
+/// unknown.
+///
+/// A level booked to a nuclide's only isomer reaches that route because the
+/// energy passes found nothing, so where both energies are known it is
+/// always this far off. It is checked here rather than assumed, so a change
+/// to those passes cannot quietly drop a level from the report. The booking
+/// stands (the evaluation says the level is excited and there is
+/// one isomer to take it), but a level hundreds of keV from the isomer may
+/// well cascade to ground instead, so it is said rather than recorded only
+/// as a difference: ENDF/B-VIII.1's Pt194 (n,d) level at 930 keV, booked to
+/// Ir193_m1 850 keV below it, is one.
+fn far_from_isomer(excitation_energy: Option<f64>, e_iso: Option<f64>, tol_ev: f64) -> Option<f64> {
+    let d = excitation_energy? - e_iso?;
+    (d.abs() > tol_ev && d.abs() > ISOMER_ENERGY_RELATIVE_TOLERANCE * e_iso?).then_some(d)
 }
 
 /// The interpolation law of the bin from point `bin` to the next: that of the
@@ -520,9 +542,11 @@ pub struct BranchingStats {
     pub level_routes: BTreeMap<String, usize>,
     /// The levels worth a look, one line each: unresolved and so taken as
     /// ground, excited but taken as ground because the decay data has no
-    /// isomer for the product, matched only by the looser energy pass, or
-    /// matched by energy while the level index pointed at another isomer.
-    /// Every excited level that ends up at ground is here.
+    /// isomer for the product, matched only by the looser energy pass,
+    /// matched by energy while the level index pointed at another isomer, or
+    /// taken as a nuclide's only isomer while further from it than either
+    /// energy pass accepts. Every excited level that ends up at ground is
+    /// here.
     pub flagged_levels: Vec<String>,
     /// The reactions whose partials do not reconstruct their total within
     /// [`PARTIAL_SUM_TOLERANCE`], one line each with the worst point. yani
@@ -943,6 +967,11 @@ impl BranchingExtractor {
                         }
                         (LevelRoute::NearEnergy, _) => {
                             Some("matched by energy only within a tenth".to_string())
+                        }
+                        (LevelRoute::SingleIsomer, _) => {
+                            far_from_isomer(s.excitation_energy(), booked_energy, tol_ev).map(|d| {
+                                format!("taken as the only isomer, {:+.1} keV from it", d / 1.0e3)
+                            })
                         }
                         (_, Some(other)) => Some(format!(
                             "level index points at {}",
@@ -1963,6 +1992,28 @@ mod tests {
         assert_eq!(level_energy_difference(0, 0.0, Some(0.0)), Some(0.0));
         assert_eq!(level_energy_difference(1, 100.0, Some(90.0)), Some(10.0));
         assert_eq!(level_energy_difference(1, 100.0, None), None);
+    }
+
+    #[test]
+    fn a_level_is_far_from_an_isomer_only_beyond_both_energy_passes() {
+        let tol = endf::radionuclide_production::ISOMER_ENERGY_TOLERANCE;
+        // Within the absolute tolerance, or within a tenth of the isomer's
+        // energy, is a match either pass would have made.
+        assert_eq!(far_from_isomer(Some(102.0e3), Some(100.0e3), tol), None);
+        assert_eq!(far_from_isomer(Some(1.09e6), Some(1.0e6), tol), None);
+        // Beyond both, by sign: ENDF/B-VIII.1's Pt190 (n,t) level at 211 keV
+        // and Ir188_m1 714 keV above it, and Np237 (n,2n)'s at 185 keV.
+        let below = far_from_isomer(Some(211.0e3), Some(925.0e3), tol).unwrap();
+        assert!((below + 714.0e3).abs() < 1.0);
+        assert_eq!(
+            far_from_isomer(Some(185.0e3), Some(56.0e3), tol),
+            Some(129.0e3)
+        );
+        // Just past the absolute tolerance of a low isomer is far.
+        assert!(far_from_isomer(Some(5.0e3), Some(1.0e3), tol).is_some());
+        // An unknown energy is not compared.
+        assert_eq!(far_from_isomer(None, Some(100.0e3), tol), None);
+        assert_eq!(far_from_isomer(Some(100.0e3), None, tol), None);
     }
 
     /// A step jump in the sum survives the merge as a duplicated breakpoint.
