@@ -65,6 +65,48 @@ fn routes_are_counted_and_excited_levels_taken_as_ground_are_flagged() {
     );
 }
 
+/// A level booked to a nuclide's only isomer while far from it is flagged,
+/// and still booked there. With In116_m2 the only In116 isomer in the decay
+/// data, In115's capture level at 127.3 keV (In116_m1's energy) matches no
+/// isomer by energy or by index and goes to In116_m2, 162.4 keV above it.
+/// That is the shape of ENDF/B-VIII.1's Pt194 (n,d) level at 930 keV, booked
+/// to Ir193_m1 850 keV below it, which used to be recorded only as a
+/// difference.
+#[test]
+fn a_level_far_from_the_only_isomer_is_flagged_and_still_booked_there() {
+    let neutron = vec![material(fixture!("n-049_In-115_trimmed.endf.xz"))];
+    let decay = vec![material(fixture!("dec-049_In_116m2.endf.xz"))];
+    let yani_convert::branching::Extracted { rows, stats, .. } =
+        yani_convert::branching::extract_branching(
+            &neutron,
+            &decay,
+            endf::radionuclide_production::ISOMER_ENERGY_TOLERANCE,
+            yani_convert::branching::DEFAULT_LINEARIZE_TOL,
+        )
+        .expect("branching extracts");
+    assert_eq!(stats.level_routes.get("single_isomer"), Some(&1));
+    assert_eq!(
+        stats.flagged_levels.last().map(String::as_str),
+        Some(
+            "In115 MT102 -> In116_m2: level 1 at 127.3 keV, taken as the only isomer, \
+             -162.4 keV from it"
+        ),
+        "{:?}",
+        stats.flagged_levels
+    );
+
+    // Reported, not rebooked: the row and its facts are what they were.
+    let capture = rows
+        .iter()
+        .find(|r| r.reaction == "(n,gamma)" && r.target != "In116")
+        .expect("a capture row to the isomer");
+    assert_eq!(capture.target, "In116_m2");
+    let state = &capture.states[0];
+    assert_eq!(state.level_route.label(), "single_isomer");
+    let difference = state.level_energy_difference.expect("both energies known");
+    assert!((difference / 1.0e3 + 162.4).abs() < 0.05, "{difference}");
+}
+
 /// FENDL-3.2d's Al27, the JEFF-3.1.1 file of a 1997 LANL evaluation, is
 /// written to the layout before IZAP joined MF=9, so its (n,2n) and (n,alpha)
 /// yields carry IZAP = 0 and only MF=8 names the products, Al26 and Na24.

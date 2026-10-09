@@ -611,10 +611,11 @@ class DataUncertainty:
       pair's total is kept. Other multi-mode parents stay at their evaluated
       ratios and the report names them by why;
     - ``"statistical"``: the Monte Carlo uncertainty of transport-tallied
-      reaction rates, from their per-history covariance. It applies to
-      ``Model.simulate_transmutation``, as ``"flux_spectrum"`` applies only to
-      ``Material.transmute``; each call ignores the other's, and the report's
-      ``sources`` lists what actually applied;
+      reaction rates, from their per-history covariance, drawn independently
+      for each material since their tallies are separate estimates. It
+      applies to ``Model.simulate_transmutation``, as ``"flux_spectrum"``
+      applies only to ``Material.transmute``; each call ignores the other's,
+      and the report's ``sources`` lists what actually applied;
     - ``"decay_energy"``: each nuclide's mean decay energy, from the sigma the
       decay data gives each recoverable-heat component (beta, gamma, alpha),
       or the total's where it gives no split. It moves decay heat only: a decay
@@ -685,7 +686,9 @@ class DataUncertainty:
     - any source switched off with ``sources``, or with nothing to act on (a
       spectrum given without ``flux_std_dev``). When only some of a material's
       spectra have one, the entry is ``"flux spectrum (spectra without a sigma
-      only)"`` and ``spectra_without_flux_sigma`` gives the count.
+      only)"`` and ``spectra_without_flux_sigma`` gives the count. A rate
+      under a spectrum with a sigma that the flux draw cannot move is named
+      in ``flux_rates_without_terms``.
     
     ``TransmutationResults.get_data_uncertainty_info`` lists every one of these
     that applied to a material under ``not_perturbed``, along with any nuclide
@@ -2526,7 +2529,12 @@ class Model:
               when its data folder records none) and ``warnings`` (what that
               library's own documentation says is wrong with this covariance,
               with the source; every FENDL-3.2 covariance, and the ENDF/B-VIII.1
-              evaluations its release paper names).
+              evaluations its release paper names), ``nubar_covariance`` (the
+              sorted fission multiplicity MTs, of 452, 455 and 456, the
+              evaluation carries MF=31 covariance for) and
+              ``spectrum_covariance`` (whether it carries MF=35, the covariance
+              of the fission spectrum). Both are reported so the data is
+              visible; neither is sampled yet.
             - ``without_data``: sorted names of nuclides whose data carries no
               covariance at all.
             - ``not_perturbed``: inputs no transport uncertainty run perturbs
@@ -2835,7 +2843,10 @@ class Model:
                   reaction rates, from their per-history covariance, so the
                   correlations between rates scored by the same histories are
                   kept. Each rate's own sigma is read with
-                  ``get_reaction_rate_uncertainty``;
+                  ``get_reaction_rate_uncertainty``. Different materials'
+                  tallies are separate estimates and are drawn independently,
+                  while the nuclear-data sources below are drawn once per
+                  replica and shared by every material;
                 - ``"cross_sections"``: the ENDF MF=33 covariance, folded against
                   the spectrum the tally actually saw;
                 - ``"half_life"``: the decay data's half-life sigmas;
@@ -5297,10 +5308,16 @@ class TransmutationResults:
           {nuclide: r2}}``, each contributor's term alone), ``ranking_agrees``
           (whether the first-order top contributor is also the best
           correlated), and ``flagged`` (``residual_share`` above 0.1, or the
-          ranking disagrees: read the contributors with care). ``None`` for a
-          source first order has no terms for (``flux_spectrum``,
-          ``statistical``, ``decay_energy``), and for ``"all"`` when any
-          applied source is one of those; absent for a nuclide with no spread.
+          ranking disagrees: read the contributors with care). First order has
+          terms only for ``cross_sections``, ``half_life`` and
+          ``decay_branching``. ``None`` for every other source
+          (``flux_spectrum``, ``statistical``, ``decay_energy``,
+          ``decay_photon_lines``, ``fission_yield``), and for ``"all"`` when
+          any applied source is one of those; absent for a nuclide with no
+          spread. The default source set applies several of them, so with the
+          defaults ``"all"`` is ``None``: restrict ``DataUncertainty(sources=...)``
+          to ``cross_sections``, ``half_life`` and ``decay_branching`` (or a
+          subset) for an ``"all"`` entry.
         
         Args:
             material_id: Material ID number.
@@ -5449,8 +5466,10 @@ class TransmutationResults:
         
         Args:
             material_id: Material ID number.
-            step: Timestep index (0 = initial composition, whose spread is zero
-                because it is an input rather than a result).
+            step: Timestep index (0 = initial composition). The composition at
+                step 0 is an input, but each replica evaluates it with its own
+                sampled half-lives, so the activity at step 0 has a spread
+                whenever the ``"half_life"`` source is sampled.
             by_nuclide (bool): Return a ``dict[str, Estimate]`` instead of one
                 ``Estimate`` for the total. These do not add up to the total in
                 quadrature, and are not meant to.
@@ -5474,7 +5493,9 @@ class TransmutationResults:
         
         Args:
             material_id: Material ID number.
-            step: Timestep index (0 = initial composition).
+            step: Timestep index (0 = initial composition). As in
+                ``get_activity_uncertainty``, step 0 has a spread whenever the
+                ``"half_life"`` or ``"decay_energy"`` source is sampled.
             by_nuclide (bool): Return a ``dict[str, Estimate]`` of W by nuclide
                 instead of one ``Estimate`` for the total.
         
@@ -5510,7 +5531,9 @@ class TransmutationResults:
         
         Args:
             material_id: Material ID number.
-            step: Timestep index (0 = initial composition).
+            step: Timestep index (0 = initial composition). As in
+                ``get_activity_uncertainty``, step 0 has a spread whenever the
+                ``"half_life"`` or ``"decay_photon_lines"`` source is sampled.
             dose_quantity (str): ``'absorbed-air'`` (Gy/h, the default) or
                 ``'effective'`` (Sv/h), as ``Material.contact_dose`` takes them.
             build_up (float): Build-up factor, a plain multiplier on the answer.
@@ -5548,7 +5571,9 @@ class TransmutationResults:
         
         Args:
             material_id: Material ID number.
-            step: Timestep index (0 = initial composition).
+            step: Timestep index (0 = initial composition). As in
+                ``get_activity_uncertainty``, step 0 has a spread whenever the
+                ``"half_life"`` or ``"decay_photon_lines"`` source is sampled.
         
         Returns:
             list[LineEstimate] | None: None if the transmutation was run without
@@ -6525,9 +6550,10 @@ def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files:
         energy within a tenth, by level index, as the only isomer, or not at
         all) and ``flagged_levels`` (one line per level that was unresolved,
         taken as ground because the decay data has no isomer for its product,
-        matched only by the looser energy pass, or matched by energy while its
-        level index pointed at another isomer; every excited level that ends
-        up at ground is listed), ``partial_sum_mismatches``
+        matched only by the looser energy pass, matched by energy while its
+        level index pointed at another isomer, or taken as its product's only
+        isomer while further from it than either energy pass accepts; every
+        excited level that ends up at ground is listed), ``partial_sum_mismatches``
         (one line per reaction whose MF=10 partial cross sections do not sum to
         its MF=3 total, or whose MF=9 yields do not sum to one, within two
         percent below 20 MeV), and ``skipped_states`` (one line per production
@@ -6604,8 +6630,10 @@ def convert_neutron_transport(input_path: builtins.str, output_dir: builtins.str
     library, data_version, created_utc
         Recorded in ``version.json``.
     covariance : bool
-        Also write ``covariance.arrow``, the MF=33 cross-section covariance.
-        Off by default: the matrices are large and only an uncertainty
+        Also write ``covariance.arrow``, the MF=33 cross-section covariance,
+        and the evaluation's other covariance sections where it has them:
+        ``angular_covariance.arrow`` (MF=34), ``nubar_covariance.arrow``
+        (MF=31) and ``spectrum_covariance.arrow`` (MF=35). Off by default: the matrices are large and only an uncertainty
         calculation reads them.
     
     Returns
@@ -6649,8 +6677,10 @@ def convert_neutron_xs(input_path: builtins.str, output_dir: builtins.str, sourc
         Recorded in ``version.json``. ``data_version`` identifies the published
         release and is what a consumer compares a cached copy against.
     covariance : bool
-        Also write ``covariance.arrow``, the MF=33 cross-section covariance.
-        Off by default: the matrices are large and only an uncertainty
+        Also write ``covariance.arrow``, the MF=33 cross-section covariance,
+        and the evaluation's other covariance sections where it has them:
+        ``angular_covariance.arrow`` (MF=34), ``nubar_covariance.arrow``
+        (MF=31) and ``spectrum_covariance.arrow`` (MF=35). Off by default: the matrices are large and only an uncertainty
         calculation reads them. Requires ``source_format="endf"`` -- MF=33 is
         not carried through ACER, so asking for it from an ACE table raises.
     
@@ -7034,7 +7064,8 @@ def read_nuclide_from_arrow(path: builtins.str, scope: builtins.str = 'full') ->
         ``name``, ``atomic_number``, ``mass_number``, ``atomic_weight_ratio``,
         ``fissionable``, ``urr_present``, ``available_temperatures``,
         ``loaded_temperatures``, ``mts``, ``energy_points``,
-        ``angular_covariance`` and ``scope_loaded``.
+        ``angular_covariance``, ``nubar_covariance``, ``spectrum_covariance``
+        and ``scope_loaded``.
     
         ``energy_points`` is a dict of temperature to grid length, over the
         loaded temperatures. Not one number: the reader also keeps the 0 K union
@@ -7051,6 +7082,14 @@ def read_nuclide_from_arrow(path: builtins.str, scope: builtins.str = 'full') ->
         pairs of Legendre orders a covariance block correlates. ``None`` when
         the folder has none. It is read whatever ``scope`` says, since it is a
         separate optional section.
+    
+        ``nubar_covariance`` is the folder's MF=31 (``nubar_covariance.arrow``),
+        summarised as the sorted fission multiplicity MTs (of 452, 455 and 456)
+        it carries covariance for, and ``spectrum_covariance`` its MF=35
+        (``spectrum_covariance.arrow``), as ``{mt: [(e1, e2), ...]}``: per
+        reaction, the incident energy range of each covariance block, in tape
+        order. Each is ``None`` when the folder has none, and both are read
+        whatever ``scope`` says, as ``angular_covariance`` is.
     
         ``scope_loaded`` is the one to assert on, and it is not always the
         ``scope`` asked for: a directory holding no transport sections narrows a

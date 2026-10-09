@@ -297,6 +297,48 @@ pub struct FissionYield {
     /// not solved with: a cumulative yield already includes the decay the
     /// solver models, so using it as a source would count that decay twice.
     pub cumulative: Option<EvaluatedYields>,
+    /// How the yields are read between the next lower tabulated energy and
+    /// this one: the law I the tape states on this energy's MT=454 LIST
+    /// (ENDF-102, section 8.3). `None` at the lowest energy, where the tape
+    /// puts LE in that field instead, and on yields read from a file written
+    /// before the law was carried, which are read linear-linear.
+    pub interpolation: Option<YieldInterpolation>,
+}
+
+/// The law fission yields are interpolated with between two incident
+/// energies.
+///
+/// Only the two laws evaluations use. ENDF/B-VIII.1 states linear-linear
+/// (I=2) on every yield set above the lowest, JEFF-4.0 a histogram (I=1) on
+/// every one, and JENDL-5.0 one or the other by nuclide; FENDL-3.2d,
+/// IRDFF-II and TENDL carry no fission yields. A file stating any other law
+/// is refused when it is read rather than interpolated as one of these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum YieldInterpolation {
+    /// I=1: the yields at the lower energy hold up to the next one.
+    Histogram,
+    /// I=2.
+    LinearLinear,
+}
+
+impl YieldInterpolation {
+    /// The law an ENDF interpolation code names, or `None` for a code that is
+    /// not histogram (1) or linear-linear (2).
+    pub fn from_endf_code(code: i32) -> Option<YieldInterpolation> {
+        match code {
+            1 => Some(YieldInterpolation::Histogram),
+            2 => Some(YieldInterpolation::LinearLinear),
+            _ => None,
+        }
+    }
+
+    /// The ENDF interpolation code.
+    pub fn endf_code(self) -> i32 {
+        match self {
+            YieldInterpolation::Histogram => 1,
+            YieldInterpolation::LinearLinear => 2,
+        }
+    }
 }
 
 /// One set of evaluated fission product yields, as the tape gives them.
@@ -350,8 +392,24 @@ impl FissionYieldSet {
         self.yields.iter().map(|y| y.energy).collect()
     }
 
-    /// Bracketing tabulated points and their linear interpolation weights for
-    /// an incident neutron `energy`. See [`fission_yield_interp_weights`].
+    /// The law each tabulated energy is reached with from the one below,
+    /// positionally beside [`FissionYieldSet::energies`].
+    pub fn laws(&self) -> Vec<Option<YieldInterpolation>> {
+        self.yields.iter().map(|y| y.interpolation).collect()
+    }
+
+    /// Whether any interval between tabulated energies states no law, and so
+    /// is read linear-linear for want of one. Never true of a single energy,
+    /// which has no interval.
+    pub fn has_unstated_law(&self) -> bool {
+        self.yields
+            .iter()
+            .skip(1)
+            .any(|y| y.interpolation.is_none())
+    }
+
+    /// Bracketing tabulated points and their interpolation weights for an
+    /// incident neutron `energy`. See [`fission_yield_interp_weights`].
     pub fn interp_weights(&self, energy: f64) -> Option<[(usize, f64); 2]> {
         // Same walk as the free function, without materialising the energies.
         let n = self.yields.len();
@@ -368,20 +426,50 @@ impl FissionYieldSet {
         Some(bracket(
             self.yields[hi - 1].energy,
             self.yields[hi].energy,
+            self.yields[hi].interpolation,
             hi,
             energy,
         ))
     }
+
+    /// The tabulated point whose yields hold unchanged around `energy`, when
+    /// `energy` lies strictly inside a histogram interval. `None` anywhere
+    /// else, including outside the tabulated range and on a tabulated energy.
+    ///
+    /// For a fold that integrates the weights over an interval rather than
+    /// sampling them at a point: across a histogram interval they are a
+    /// constant that jumps at the upper energy, so a rule reading them at the
+    /// two ends would give half of the last segment to the wrong point.
+    pub fn histogram_point(&self, energy: f64) -> Option<usize> {
+        let n = self.yields.len();
+        if n < 2 || energy <= self.yields[0].energy || energy >= self.yields[n - 1].energy {
+            return None;
+        }
+        let hi = self.yields.partition_point(|y| y.energy <= energy);
+        (self.yields[hi - 1].energy < energy
+            && self.yields[hi].interpolation == Some(YieldInterpolation::Histogram))
+        .then_some(hi - 1)
+    }
 }
 
-/// Linear interpolation weights over `energies` (ascending) at `energy`.
+/// Interpolation weights over `energies` (ascending) at `energy`, under the
+/// law `laws[k]` states for the interval ending at `energies[k]`.
 ///
 /// Returns two `(index, weight)` pairs whose weights sum to one, so summing
 /// them over a spectrum gives coefficients that are themselves a partition of
-/// unity. Outside the tabulated range the interpolation is clamped flat,
-/// putting all the weight on the nearest end point. Returns `None` for an empty
-/// grid, which has nothing to interpolate.
-pub fn fission_yield_interp_weights(energies: &[f64], energy: f64) -> Option<[(usize, f64); 2]> {
+/// unity. Inside a histogram interval all the weight is on its lower point;
+/// inside a linear-linear one, or one whose law is `None` (not stated), it is
+/// split linearly. Outside the tabulated range the interpolation is clamped
+/// flat, putting all the weight on the nearest end point. Returns `None` for
+/// an empty grid, which has nothing to interpolate.
+///
+/// `laws` pairs with `energies` one to one, as [`FissionYieldSet::laws`] gives
+/// them; an entry it is missing reads as not stated.
+pub fn fission_yield_interp_weights(
+    energies: &[f64],
+    laws: &[Option<YieldInterpolation>],
+    energy: f64,
+) -> Option<[(usize, f64); 2]> {
     let n = energies.len();
     if n == 0 {
         return None;
@@ -395,15 +483,38 @@ pub fn fission_yield_interp_weights(energies: &[f64], energy: f64) -> Option<[(u
     // `hi` is the first point strictly above `energy`; the guards above leave
     // it in 1..n, so `hi - 1` brackets from below.
     let hi = energies.partition_point(|&e| e <= energy);
-    Some(bracket(energies[hi - 1], energies[hi], hi, energy))
+    Some(bracket(
+        energies[hi - 1],
+        energies[hi],
+        laws.get(hi).copied().flatten(),
+        hi,
+        energy,
+    ))
 }
 
 /// Split `energy` between the bracketing points `e_lo` (index `hi - 1`) and
-/// `e_hi` (index `hi`). `e_hi > e_lo` because the grid is sorted and `energy`
-/// lies strictly between them, so the division is safe.
-fn bracket(e_lo: f64, e_hi: f64, hi: usize, energy: f64) -> [(usize, f64); 2] {
-    let f = (energy - e_lo) / (e_hi - e_lo);
-    [(hi - 1, 1.0 - f), (hi, f)]
+/// `e_hi` (index `hi`) under the law of the interval between them. `e_hi >
+/// e_lo` because the grid is sorted and `energy` lies strictly between them,
+/// so the division is safe.
+///
+/// A histogram keeps the lower point's yields across the interval: ENDF-102
+/// (section 0.5) defines law 1 as constant and equal to the value at the
+/// lower limit of the interval. On a tabulated point the fraction is zero, so
+/// the two laws give it the same weights.
+fn bracket(
+    e_lo: f64,
+    e_hi: f64,
+    law: Option<YieldInterpolation>,
+    hi: usize,
+    energy: f64,
+) -> [(usize, f64); 2] {
+    match law {
+        Some(YieldInterpolation::Histogram) => [(hi - 1, 1.0), (hi, 0.0)],
+        Some(YieldInterpolation::LinearLinear) | None => {
+            let f = (energy - e_lo) / (e_hi - e_lo);
+            [(hi - 1, 1.0 - f), (hi, f)]
+        }
+    }
 }
 
 /// Distribution data for a decay photon source.
@@ -1587,6 +1698,7 @@ mod tests {
                 ],
                 independent: None,
                 cumulative: None,
+                interpolation: None,
             }],
         }));
         chain.insert("U235".into(), u235);
@@ -2178,6 +2290,7 @@ mod tests {
             products: vec![],
             independent: None,
             cumulative: None,
+            interpolation: None,
         }
     }
 
@@ -2245,19 +2358,116 @@ mod tests {
     #[test]
     fn interp_weights_on_an_empty_set_are_undefined() {
         assert!(FissionYieldSet::new(vec![]).interp_weights(1.0).is_none());
-        assert!(fission_yield_interp_weights(&[], 1.0).is_none());
+        assert!(fission_yield_interp_weights(&[], &[], 1.0).is_none());
+    }
+
+    /// JEFF-4.0 U235 MT=454 as the tape gives it: sets at thermal, 0.4 MeV and
+    /// 14 MeV, the upper two stating I=1, with the tape's Pd112 yield at
+    /// each.
+    fn jeff_u235_pd112() -> FissionYieldSet {
+        let at = |energy, y, law| FissionYield {
+            products: vec![("Pd112".to_string(), y)],
+            interpolation: law,
+            ..fy_at(energy)
+        };
+        FissionYieldSet::new(vec![
+            at(0.0253, 1.1481e-5, None),
+            at(4.0e5, 1.4775e-5, Some(YieldInterpolation::Histogram)),
+            at(1.4e7, 8.9771e-4, Some(YieldInterpolation::Histogram)),
+        ])
+    }
+
+    #[test]
+    fn a_histogram_holds_the_lower_sets_yields_up_to_the_next_energy() {
+        let set = jeff_u235_pd112();
+        let pd112 = |e: f64| -> f64 {
+            set.interp_weights(e)
+                .unwrap()
+                .iter()
+                .map(|&(k, w)| w * set.yields[k].products[0].1)
+                .sum()
+        };
+        // At 7.2 MeV the 0.4 MeV set holds, not the mean of it and 14 MeV.
+        assert_eq!(set.interp_weights(7.2e6).unwrap(), [(1, 1.0), (2, 0.0)]);
+        // Read linear-linear it would be 4.56e-4, 31 times the tape's.
+        assert_eq!(pd112(7.2e6), 1.4775e-5);
+        assert_eq!(pd112(1.0e5), 1.1481e-5);
+        // Each tabulated energy is its own set, and the ends clamp flat.
+        assert_eq!(pd112(4.0e5), 1.4775e-5);
+        assert_eq!(pd112(1.4e7), 8.9771e-4);
+        assert_eq!(pd112(2.0e7), 8.9771e-4);
+        assert_eq!(pd112(1e-5), 1.1481e-5);
+        // Strictly inside an interval, histogram_point names the lower set.
+        assert_eq!(set.histogram_point(7.2e6), Some(1));
+        assert_eq!(set.histogram_point(1.0), Some(0));
+        assert_eq!(set.histogram_point(4.0e5), None);
+        assert_eq!(set.histogram_point(2.0e7), None);
+        assert!(!set.has_unstated_law());
+    }
+
+    #[test]
+    fn a_stated_linear_law_interpolates_as_an_unstated_one_did() {
+        // ENDF/B-VIII.1 states I=2, which is how yields were always read.
+        let mut set = jeff_u235_pd112();
+        let unstated = FissionYieldSet::new(
+            set.yields
+                .iter()
+                .map(|y| FissionYield {
+                    interpolation: None,
+                    ..y.clone()
+                })
+                .collect(),
+        );
+        for y in set.yields.iter_mut().skip(1) {
+            y.interpolation = Some(YieldInterpolation::LinearLinear);
+        }
+        for e in [1e-5, 0.0253, 3.0, 4.0e5, 7.2e6, 1.4e7, 3.0e7] {
+            assert_eq!(set.interp_weights(e), unstated.interp_weights(e), "{e} eV");
+            assert_eq!(set.histogram_point(e), None);
+        }
+        assert_eq!(set.interp_weights(7.2e6).unwrap()[0].0, 1);
+        assert!(unstated.has_unstated_law());
+        assert!(!set.has_unstated_law());
+    }
+
+    #[test]
+    fn only_histogram_and_linear_yield_laws_are_read() {
+        assert_eq!(
+            YieldInterpolation::from_endf_code(1),
+            Some(YieldInterpolation::Histogram)
+        );
+        assert_eq!(
+            YieldInterpolation::from_endf_code(2),
+            Some(YieldInterpolation::LinearLinear)
+        );
+        for code in [0, 3, 4, 5, 6, 22] {
+            assert_eq!(YieldInterpolation::from_endf_code(code), None, "law {code}");
+        }
+        for law in [
+            YieldInterpolation::Histogram,
+            YieldInterpolation::LinearLinear,
+        ] {
+            assert_eq!(
+                YieldInterpolation::from_endf_code(law.endf_code()),
+                Some(law)
+            );
+        }
     }
 
     #[test]
     fn free_interp_weights_match_the_method() {
-        let set = FissionYieldSet::new(vec![fy_at(0.0253), fy_at(5.0e5), fy_at(1.4e7)]);
-        let energies = set.energies();
-        for e in [1e-5, 0.0253, 3.0, 5.0e5, 7.5e6, 1.4e7, 3.0e7] {
-            assert_eq!(
-                set.interp_weights(e),
-                fission_yield_interp_weights(&energies, e),
-                "hot-path form must agree with the method at {e} eV"
-            );
+        for set in [
+            FissionYieldSet::new(vec![fy_at(0.0253), fy_at(5.0e5), fy_at(1.4e7)]),
+            jeff_u235_pd112(),
+        ] {
+            let energies = set.energies();
+            for e in [1e-5, 0.0253, 3.0, 4.0e5, 5.0e5, 7.5e6, 1.4e7, 3.0e7] {
+                assert_eq!(
+                    set.interp_weights(e),
+                    fission_yield_interp_weights(&energies, &set.laws(), e),
+                    "hot-path form must agree with the method at {e} eV"
+                );
+            }
         }
     }
 }

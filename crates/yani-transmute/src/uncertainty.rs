@@ -463,6 +463,12 @@ pub struct Info {
     /// flux known exactly.
     pub spectra_with_flux_sigma: usize,
     pub spectra_without_flux_sigma: usize,
+    /// `(nuclide, reaction)` rates under a spectrum with a stated flux error
+    /// that have no per-group terms, so the flux perturbation could not move
+    /// them and they were held at nominal. Empty unless a rate reaches the
+    /// solve by a route that is neither a collapsed channel nor a branching
+    /// list's fold.
+    pub flux_rates_without_terms: BTreeSet<(String, String)>,
     /// Flux bins drawn, one per bin per spectrum with a stated error per
     /// replica. Each is a lognormal factor with mean one, so none can go
     /// negative and none is floored.
@@ -645,6 +651,7 @@ impl Info {
     pub(crate) fn add_flux_coverage(&mut self, c: &crate::flux_uncertainty::FluxCoverage) {
         self.spectra_with_flux_sigma = c.spectra_with_sigma;
         self.spectra_without_flux_sigma = c.spectra_without_sigma;
+        self.flux_rates_without_terms = c.rates_without_terms.clone();
         self.flux_bins_sampled = c.bins_sampled;
         self.flux_lognormal_not_carried = c.lognormal_not_carried.clone();
     }
@@ -667,6 +674,7 @@ impl Info {
             || !self.covariance_warnings.is_empty()
             || !self.covariance_repaired_outside_bound.is_empty()
             || self.spectra_without_flux_sigma > 0
+            || !self.flux_rates_without_terms.is_empty()
             || !self.no_half_life_uncertainty.is_empty()
             || !self.no_decay_branching_uncertainty.is_empty()
             || !self.decay_branchings_three_or_more_modes.is_empty()
@@ -765,10 +773,15 @@ pub struct Attribution {
     /// First-order contributions, the largest-reaching first.
     pub contributors: Vec<Contributor>,
     /// How well first order explains the replicas, per source and as
-    /// `"all"` for every source together: `[step][nuclide]`. `None` for a
-    /// source with no first-order terms (`flux_spectrum`, `statistical`,
-    /// `decay_energy`), whose variance first order does not try to explain,
-    /// and for `"all"` when any applied source is one of those.
+    /// `"all"` for every source together: `[step][nuclide]`. First order has
+    /// terms only for `cross_sections`, `half_life` and `decay_branching`.
+    /// `None` for every other source (`flux_spectrum`, `statistical`,
+    /// `decay_energy`, `decay_photon_lines`, `fission_yield`), whose variance
+    /// first order does not try to explain, and for `"all"` when any applied
+    /// source is one of those. The default source set applies several of them
+    /// (`flux_spectrum` or `statistical`, `decay_energy`, `decay_photon_lines`
+    /// and `fission_yield`), so with the defaults `"all"` is `None`: restrict
+    /// the sources to the three above for an `"all"` entry.
     pub linearity: BTreeMap<String, Option<Vec<HashMap<String, Linearity>>>>,
 }
 

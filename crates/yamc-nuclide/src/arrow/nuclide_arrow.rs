@@ -269,6 +269,7 @@ fn narrow_to_present_sections(dir: &Path, scope: &LoadScope) -> Result<LoadScope
         // Covariance is a separate file and its own decision, so it survives.
         covariance: scope.covariance,
         angular_covariance: scope.angular_covariance,
+        fission_covariance: scope.fission_covariance,
     })
 }
 
@@ -723,6 +724,17 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
     } else {
         None
     };
+    // MF=31 and MF=35, behind one axis of their own: only fissionable
+    // evaluations carry them, and nothing samples them yet.
+    let (nubar_covariance, spectrum_covariance) = if scope.fission_covariance {
+        (
+            crate::arrow::covariance_arrow::read_nubar_covariance(dir, &name)?
+                .map(std::sync::Arc::new),
+            crate::arrow::covariance_arrow::read_spectrum_covariance(dir)?.map(std::sync::Arc::new),
+        )
+    } else {
+        (None, None)
+    };
 
     let mut fission_nu: Option<FissionNuData> = None;
     let total_nu_path = dir.join("total_nu.arrow");
@@ -804,6 +816,8 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
         fission_photon_release: photon_release,
         covariance,
         angular_covariance,
+        nubar_covariance,
+        spectrum_covariance,
         elastic_flat_cache: Default::default(),
         fission_chi_flat_cache: Default::default(),
         delayed_neutron_cache: Default::default(),

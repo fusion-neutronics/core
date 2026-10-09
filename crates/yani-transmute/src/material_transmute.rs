@@ -375,6 +375,7 @@ pub fn transmute_materials(
                 .collect(),
             request,
             shielding: cases[c].shielding.as_ref(),
+            lists: &lists,
         });
         solve_case(
             &initial[c],
@@ -512,6 +513,23 @@ fn validate_case(
         }
         if s.masses.iter().any(|&m| !m.is_finite() || m < 0.0) {
             return Err(format!("spectrum {i}: masses must be finite and non-negative").into());
+        }
+        // A flux error that does not line up with the bins would be truncated
+        // to the shorter of the two where the deviates meet the per-group
+        // rates, silently leaving bins exact or dropping entries.
+        if let Some(error) = &s.flux_error {
+            if error.len() != s.masses.len() {
+                return Err(format!(
+                    "spectrum {i}: the flux error describes {} bins but the spectrum has {}",
+                    error.len(),
+                    s.masses.len()
+                )
+                .into());
+            }
+            if let crate::flux_uncertainty::FluxError::RelativeStdDev(sigma) = error {
+                crate::flux_uncertainty::check_std_dev(sigma)
+                    .map_err(|e| format!("spectrum {i}: {e}"))?;
+            }
         }
     }
     for (i, st) in steps.iter().enumerate() {
@@ -728,6 +746,14 @@ struct CaseOutcome {
     uncertainty: Option<(Ensemble, Info)>,
 }
 
+/// One spectrum's stated flux error and the per-group terms it perturbs: the
+/// transport channels' group averages and the branching lists' folds.
+struct FluxTerms {
+    error: crate::flux_uncertainty::FluxError,
+    rates: crate::flux_uncertainty::PerGroupRates,
+    lists: crate::flux_uncertainty::PerGroupLists,
+}
+
 /// One material's inputs to the uncertainty replicas, in its own indexing.
 struct Replicas<'a> {
     spectra: &'a [MultigroupSpectrum],
@@ -735,6 +761,9 @@ struct Replicas<'a> {
     per_spectrum: Vec<PerSpectrum>,
     request: &'a DataUncertainty,
     shielding: Option<&'a Shielding>,
+    /// The branching lists the nominal fold applied, which a flux replica
+    /// re-folds under its own perturbation.
+    lists: &'a Lists<'a>,
 }
 
 /// One material's timeline, stepped from `initial` with steps whose spectrum
@@ -792,6 +821,7 @@ fn solve_case(
             &stepper,
             r.request,
             r.shielding,
+            r.lists,
             None,
         )?),
         None => None,
@@ -1157,6 +1187,9 @@ fn replica_steps(
 /// the unfolded chain their branching is refined from.
 pub(crate) struct TransportStatistics {
     rates: crate::statistical::StatisticalRates,
+    /// Keys the statistical draw, so different materials' tallies are drawn
+    /// independently.
+    material_id: u32,
     base_chain: Arc<HashMap<String, ChainNuclide>>,
     branch: Arc<BranchTable>,
 }
@@ -1193,6 +1226,10 @@ pub struct TransportTallied {
 /// Every source in [`crate::uncertainty::Source::IMPLEMENTED`] applies except
 /// `flux_spectrum`: there is no supplied spectrum, and the flux's error is the
 /// statistical one. Covariances are folded against the tally's own flux shape.
+///
+/// The statistical draw is keyed on `initial.material_id`, so materials with
+/// distinct ids draw their tallies' errors independently, while the
+/// nuclear-data draws are shared across them.
 ///
 /// `source_rates` scale the per-source-particle rates per step, which is how
 /// independent mode scales them. The coupled method re-runs transport per step
@@ -1236,8 +1273,13 @@ pub fn transport_replicas(
             irradiation: (rate > 0.0).then_some((0, rate)),
         })
         .collect();
+    // The material's id, the key its tally and its results are stored under,
+    // and so the same whatever order the materials are visited in. A material
+    // with no id answers to 0, as in `transmute_materials`.
+    let material_id = initial.material_id.unwrap_or(0);
     let statistics = tallied.statistics.as_ref().map(|c| TransportStatistics {
         rates: crate::statistical::StatisticalRates::new(c),
+        material_id,
         base_chain: Arc::clone(chain),
         branch: Arc::clone(&tallied.branch),
     });
@@ -1245,6 +1287,7 @@ pub fn transport_replicas(
         rates: crate::statistical::StatisticalRates::new(
             &crate::history_statistics::RateCovariance::empty(),
         ),
+        material_id,
         base_chain: Arc::clone(chain),
         branch: Arc::clone(&tallied.branch),
     };
@@ -1258,6 +1301,8 @@ pub fn transport_replicas(
         &ForwardEulerStepper,
         request,
         None,
+        // No supplied flux, so nothing for a flux replica to re-fold.
+        &HashMap::new(),
         // Always the transport path, even with no statistics to sample: that
         // is what keeps `flux_spectrum` out of it.
         Some(statistics.as_ref().unwrap_or(&no_statistics)),
@@ -1448,6 +1493,7 @@ fn run_replicas(
     stepper: &ForwardEulerStepper,
     request: &DataUncertainty,
     shielding: Option<&Shielding>,
+    lists: &Lists<'_>,
     statistical: Option<&TransportStatistics>,
 ) -> Result<(Ensemble, Info), Box<dyn std::error::Error>> {
     // The two paths each have one source the other lacks. A transport run has
@@ -1548,26 +1594,42 @@ fn run_replicas(
     // the report says so.
     let want_flux = !transport && request.wants(crate::uncertainty::Source::FluxSpectrum);
     let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
-    let mut per_group: Vec<
-        Option<(
-            crate::flux_uncertainty::FluxError,
-            crate::flux_uncertainty::PerGroupRates,
-        )>,
-    > = Vec::with_capacity(per_spectrum.len());
+    let mut per_group: Vec<Option<FluxTerms>> = Vec::with_capacity(per_spectrum.len());
     for (idx, spectrum) in spectra.iter().enumerate() {
         match spectrum.flux_error.as_ref().filter(|_| want_flux) {
             Some(relative) => {
                 flux_coverage.spectra_with_sigma += 1;
-                per_group.push(Some((
-                    relative.clone(),
-                    crate::multigroup::per_group_reaction_rates(
-                        initial,
-                        &per_spectrum[idx].2,
-                        &spectrum.masses,
-                        &spectrum.boundaries,
-                        shielding,
+                let rates = crate::multigroup::per_group_reaction_rates(
+                    initial,
+                    &per_spectrum[idx].2,
+                    &spectrum.masses,
+                    &spectrum.boundaries,
+                    shielding,
+                );
+                // The overlay's rates and splits are folds of the branching
+                // lists, not group averages, so they get terms of their own
+                // and each replica re-folds them.
+                let lists_terms = crate::multigroup::per_group_list_rates(
+                    initial,
+                    chain,
+                    lists,
+                    &spectrum.masses,
+                    &spectrum.boundaries,
+                    shielding,
+                );
+                flux_coverage.rates_without_terms.extend(
+                    crate::flux_uncertainty::rates_without_terms(
+                        &per_spectrum[idx].0,
+                        &rates,
+                        lists,
+                        &lists_terms,
                     ),
-                )));
+                );
+                per_group.push(Some(FluxTerms {
+                    error: relative.clone(),
+                    rates,
+                    lists: lists_terms,
+                }));
             }
             None => {
                 if want_flux {
@@ -1585,7 +1647,13 @@ fn run_replicas(
     let want_decay_branching = request.wants(crate::uncertainty::Source::DecayBranching);
     let want_fission_yield = request.wants(crate::uncertainty::Source::FissionYield);
     let edits_chain = want_half_life || want_decay_branching || want_fission_yield;
-    let chains = edits_chain.then(|| replica_chains(initial, chain, per_spectrum));
+    // A flux replica re-folds the branching into the base chain, so it wants
+    // the pruned base too.
+    let refolds = per_group
+        .iter()
+        .flatten()
+        .any(|terms| !terms.lists.is_empty());
+    let chains = (edits_chain || refolds).then(|| replica_chains(initial, chain, per_spectrum));
 
     // Half-lives: sampled per replica from the evaluation's stated sigma, and
     // substituted into every chain the replica is solved with, the base one
@@ -1906,7 +1974,8 @@ fn run_replicas(
         let mut statistical_floored = 0usize;
         let drawn = match statistical {
             Some(st) => {
-                let (mut totals, partials, floored) = st.rates.sample(request.seed, replica);
+                let (mut totals, partials, floored) =
+                    st.rates.sample(request.seed, st.material_id, replica);
                 statistical_floored = floored;
                 // The nominal was guarded; a draw around it only moves the
                 // productions it is made of.
@@ -1968,27 +2037,50 @@ fn run_replicas(
                 (Some((totals, chain_k)), 0) => (totals, chain_k),
                 _ => (rates, folded_chain),
             };
-            let rates = match &per_group[idx] {
-                Some((relative, terms)) => {
+            let (rates, refolded) = match &per_group[idx] {
+                Some(terms) => {
                     let delta = crate::flux_uncertainty::flux_deviates(
-                        relative,
+                        &terms.error,
                         request.seed,
                         replica,
                         idx,
                         &mut flux_coverage,
                     );
-                    crate::flux_uncertainty::perturb_rates(rates, terms, &delta)
+                    let mut rates =
+                        crate::flux_uncertainty::perturb_rates(rates, &terms.rates, &delta);
+                    // The branching re-folded from this replica's productions,
+                    // into the unfolded chain the nominal was folded into:
+                    // the `(n,n')` isomer rates are re-made and every split
+                    // moves with the bins its states are produced in. Pruned,
+                    // which leaves every parent the material reaches as it is.
+                    let refolded = match &chains {
+                        Some(c) if !terms.lists.is_empty() => Some(
+                            fold_branching_into_chain(
+                                &c.base,
+                                lists,
+                                &crate::flux_uncertainty::perturb_lists(&terms.lists, &delta),
+                                &mut rates,
+                            )?
+                            .0,
+                        ),
+                        _ => None,
+                    };
+                    (rates, refolded)
                 }
-                None => rates.clone(),
+                None => (rates.clone(), None),
             };
             let (rates, n, floored) = sampler.perturb_with(&xs_draw, idx, &rates);
             rates_sampled += n;
             rates_floored += floored;
-            let folded_chain = match &chains {
+            let folded_chain = match (&chains, refolded) {
+                // A chain the flux perturbation re-folded carries the edits
+                // itself.
+                (_, Some(k)) if !edits.is_empty() => Arc::new(edits.apply(&k)),
+                (_, Some(k)) => k,
                 // The pruned nominal chain, unless the statistical draw
                 // re-folded this replica's own chain, which then carries the
                 // edits instead.
-                Some(c) if !edits.is_empty() => Arc::new(if drawn.is_some() {
+                (Some(c), None) if !edits.is_empty() => Arc::new(if drawn.is_some() {
                     edits.apply(folded_chain)
                 } else {
                     edits.apply(&c.folded[idx])
@@ -2109,8 +2201,9 @@ fn run_replicas(
             decay_branching: decay_branching.as_ref(),
         };
         // The sources first order has terms for. The flux, the tallies'
-        // statistics and the decay energies enter linearly or not through a
-        // rate sensitivity, and have none.
+        // statistics, the decay energies, the decay photon lines and the
+        // fission yields have none, so their linearity (and the "all" one
+        // whenever any of them is applied, as in the default set) is None.
         let covered = |s: &Source| {
             matches!(
                 s,
@@ -2154,6 +2247,7 @@ fn run_replicas(
                     stepper,
                     &alone,
                     shielding,
+                    lists,
                     statistical_in,
                 )?;
                 by_source.insert(source.name().to_string(), variances_of(&sub, steps.len()));
@@ -2698,6 +2792,22 @@ fn linearity_of(
                 .collect()
         })
         .collect();
+    // Each output's first replica, which the actual values are measured from.
+    // The sums below are one-pass, and on raw densities `sum(a^2) - sum(a)^2/n`
+    // cancels catastrophically once the spread is small against the density
+    // (an exactly linear output read r2 0.004 at a relative spread of 2e-9).
+    // Measured from a value inside the spread, every moment is of the spread's
+    // own size. The prediction is measured from the nominal for the same
+    // reason, which leaves only its first-order terms. Neither shift moves a
+    // variance or a correlation.
+    let reference: Vec<Vec<f64>> = actual
+        .iter()
+        .map(|o| {
+            o.iter()
+                .map(|samples| samples.first().copied().unwrap_or(0.0))
+                .collect()
+        })
+        .collect();
 
     #[derive(Clone, Default)]
     struct Sums {
@@ -2726,15 +2836,8 @@ fn linearity_of(
 
     for replica in 0..replicas {
         let delta = draws.relative_changes(sensitivities, replica as u64);
-        let mut predicted: Vec<Vec<f64>> = outputs
-            .iter()
-            .enumerate()
-            .map(|(step, o)| {
-                o.iter()
-                    .map(|n| first_order.nominal[step].get(n).copied().unwrap_or(0.0))
-                    .collect()
-            })
-            .collect();
+        // Each output's prediction less the nominal: its first-order terms.
+        let mut predicted: Vec<Vec<f64>> = outputs.iter().map(|o| vec![0.0; o.len()]).collect();
         let mut by_key: Vec<Vec<HashMap<usize, f64>>> = outputs
             .iter()
             .map(|o| vec![HashMap::new(); o.len()])
@@ -2751,7 +2854,7 @@ fn linearity_of(
         }
         for (step, (actual_step, predicted_step)) in actual.iter().zip(&predicted).enumerate() {
             for (o, (samples, &p)) in actual_step.iter().zip(predicted_step).enumerate() {
-                let a = samples[replica];
+                let a = samples[replica] - reference[step][o];
                 let s = &mut sums[step][o];
                 s.a += a;
                 s.aa += a * a;
@@ -2776,17 +2879,23 @@ fn linearity_of(
         let vb = sbb - sb * sb / n;
         let cab = sab - sa * sb / n;
         if va > 0.0 && vb > 0.0 {
+            // At most 1 by Cauchy-Schwarz; the clamp only absorbs rounding.
             (cab * cab / (va * vb)).min(1.0)
         } else {
             0.0
         }
     };
-    // The contributor ranked first by first-order variance at each output.
+    // The contributor ranked first by first-order variance at each output,
+    // among the sources `sensitivities` cover. A per-source check is run on
+    // that source's replicas alone, so another source's contributor ranking
+    // first there says nothing about this source's linearity.
+    let sources: std::collections::BTreeSet<&str> =
+        sensitivities.iter().map(|s| s.source).collect();
     let first_ranked = |step: usize, nuclide: &str| -> Option<(String, String)> {
         first_order
             .contributors
             .iter()
-            .filter(|c| c.reaction.is_none())
+            .filter(|c| c.reaction.is_none() && sources.contains(c.source.as_str()))
             .filter_map(|c| {
                 let v = *c.variance.get(step)?.get(nuclide)?;
                 Some(((c.source.clone(), c.nuclide.clone()), v))
@@ -4019,6 +4128,8 @@ mod tests {
             fission_photon_release: None,
             covariance: None,
             angular_covariance: None,
+            nubar_covariance: None,
+            spectrum_covariance: None,
             elastic_flat_cache: Default::default(),
             fission_chi_flat_cache: Default::default(),
             delayed_neutron_cache: Default::default(),
@@ -4934,5 +5045,119 @@ mod tests {
             );
         }
         assert_ne!(format!("{:?}", got["Co60"]), format!("{:?}", chain["Co60"]));
+    }
+
+    /// A one-step ensemble whose output `X` is exactly linear in nuclide A's
+    /// half-life, `X = 1 + s (T_A / 100 - 1)`, with T_A drawn at a 10%
+    /// sigma, and the matching half-life sensitivity and draws.
+    fn linear_half_life_ensemble(
+        s: f64,
+    ) -> (
+        crate::uncertainty::Ensemble,
+        Sensitivity,
+        HalfLifeSampling,
+        u64,
+    ) {
+        let h = HalfLifeSampling {
+            candidates: vec![("A".to_string(), 100.0, 10.0)],
+            without: Default::default(),
+            not_carried: Default::default(),
+        };
+        let seed = 3;
+        let mut ensemble = crate::uncertainty::Ensemble::new(1);
+        for r in 0..256u64 {
+            let t = crate::uncertainty::sample_half_lives(&h.candidates, seed, r)["A"];
+            ensemble.push_with_half_lives(
+                vec![HashMap::from([(
+                    "X".to_string(),
+                    1.0 + s * (t / 100.0 - 1.0),
+                )])],
+                HashMap::from([("A".to_string(), t)]),
+            );
+        }
+        ensemble.fold_absences();
+        let sensitivity = Sensitivity {
+            source: "half_life",
+            nuclide: "A".to_string(),
+            input: Input::HalfLife { nominal: 100.0 },
+            s: vec![HashMap::from([("X".to_string(), s)])],
+        };
+        (ensemble, sensitivity, h, seed)
+    }
+
+    /// A per-source linearity check ranks only that source's contributors: a
+    /// cross-section contributor ranking first at the output must not flag an
+    /// exactly linear half-life ensemble.
+    #[test]
+    fn per_source_linearity_ranks_within_its_own_source() {
+        use crate::uncertainty::Contributor;
+        let s = -2.0;
+        let (ensemble, hl, h, seed) = linear_half_life_ensemble(s);
+        let first_order = FirstOrder {
+            contributors: vec![
+                Contributor {
+                    source: "cross_sections".to_string(),
+                    nuclide: "B".to_string(),
+                    reaction: None,
+                    variance: vec![HashMap::from([("X".to_string(), 1.0)])],
+                },
+                Contributor {
+                    source: "half_life".to_string(),
+                    nuclide: "A".to_string(),
+                    reaction: None,
+                    variance: vec![HashMap::from([("X".to_string(), (s * 0.1) * (s * 0.1))])],
+                },
+            ],
+            sensitivities: Vec::new(),
+            nominal: vec![HashMap::from([("X".to_string(), 1.0)])],
+        };
+        let draws = ReplicaDraws {
+            seed,
+            per_spectrum: &[],
+            sampler: None,
+            half_life: Some(&h),
+            decay_branching: None,
+        };
+        let lin = linearity_of(&ensemble, &first_order, &[&hl], &draws);
+        let l = &lin[0]["X"];
+        assert!(l.residual_share < 1e-12, "{l:?}");
+        assert!(l.r2 > 1.0 - 1e-12, "{l:?}");
+        assert!(l.ranking_agrees, "{l:?}");
+        assert!(!l.flagged, "{l:?}");
+    }
+
+    /// An exactly linear output keeps r2 at 1 however small its spread is
+    /// against its density: the sums must not cancel catastrophically.
+    #[test]
+    fn linearity_holds_at_small_relative_spread() {
+        use crate::uncertainty::Contributor;
+        // Relative spreads of 2e-1, 2e-7 and 2e-9.
+        for s in [-2.0, -2.0e-6, -2.0e-8] {
+            let (ensemble, hl, h, seed) = linear_half_life_ensemble(s);
+            let first_order = FirstOrder {
+                contributors: vec![Contributor {
+                    source: "half_life".to_string(),
+                    nuclide: "A".to_string(),
+                    reaction: None,
+                    variance: vec![HashMap::from([("X".to_string(), (s * 0.1) * (s * 0.1))])],
+                }],
+                sensitivities: Vec::new(),
+                nominal: vec![HashMap::from([("X".to_string(), 1.0)])],
+            };
+            let draws = ReplicaDraws {
+                seed,
+                per_spectrum: &[],
+                sampler: None,
+                half_life: Some(&h),
+                decay_branching: None,
+            };
+            let lin = linearity_of(&ensemble, &first_order, &[&hl], &draws);
+            let l = &lin[0]["X"];
+            let key = ("half_life".to_string(), "A".to_string());
+            assert!(l.by_contributor[&key] > 1.0 - 1e-6, "s={s}: {l:?}");
+            assert!(l.r2 > 1.0 - 1e-6, "s={s}: {l:?}");
+            assert!(l.residual_share < 1e-6, "s={s}: {l:?}");
+            assert!(!l.flagged, "s={s}: {l:?}");
+        }
     }
 }

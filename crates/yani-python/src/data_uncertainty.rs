@@ -35,10 +35,11 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///   pair's total is kept. Other multi-mode parents stay at their evaluated
 ///   ratios and the report names them by why;
 /// - ``"statistical"``: the Monte Carlo uncertainty of transport-tallied
-///   reaction rates, from their per-history covariance. It applies to
-///   ``Model.simulate_transmutation``, as ``"flux_spectrum"`` applies only to
-///   ``Material.transmute``; each call ignores the other's, and the report's
-///   ``sources`` lists what actually applied;
+///   reaction rates, from their per-history covariance, drawn independently
+///   for each material since their tallies are separate estimates. It
+///   applies to ``Model.simulate_transmutation``, as ``"flux_spectrum"``
+///   applies only to ``Material.transmute``; each call ignores the other's,
+///   and the report's ``sources`` lists what actually applied;
 /// - ``"decay_energy"``: each nuclide's mean decay energy, from the sigma the
 ///   decay data gives each recoverable-heat component (beta, gamma, alpha),
 ///   or the total's where it gives no split. It moves decay heat only: a decay
@@ -109,7 +110,9 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 /// - any source switched off with ``sources``, or with nothing to act on (a
 ///   spectrum given without ``flux_std_dev``). When only some of a material's
 ///   spectra have one, the entry is ``"flux spectrum (spectra without a sigma
-///   only)"`` and ``spectra_without_flux_sigma`` gives the count.
+///   only)"`` and ``spectra_without_flux_sigma`` gives the count. A rate
+///   under a spectrum with a sigma that the flux draw cannot move is named
+///   in ``flux_rates_without_terms``.
 ///
 /// ``TransmutationResults.get_data_uncertainty_info`` lists every one of these
 /// that applied to a material under ``not_perturbed``, along with any nuclide
@@ -421,6 +424,13 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     d.set_item(
         "spectra_without_flux_sigma",
         info.spectra_without_flux_sigma,
+    )?;
+    d.set_item(
+        "flux_rates_without_terms",
+        info.flux_rates_without_terms
+            .iter()
+            .map(|(nuclide, kind)| format!("{nuclide} {kind}"))
+            .collect::<Vec<_>>(),
     )?;
     let limit_dict =
         |l: &yani_transmute::covariance_sample::LognormalLimit| -> PyResult<Bound<'py, PyDict>> {

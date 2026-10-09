@@ -384,6 +384,7 @@ pub(crate) fn sample(
                     products,
                     independent: None,
                     cumulative: None,
+                    interpolation: point.interpolation,
                 }
             })
             .collect();
@@ -429,6 +430,7 @@ mod tests {
                 interpolation: None,
             }),
             cumulative: None,
+            interpolation: None,
         }
     }
 
@@ -472,6 +474,25 @@ mod tests {
         assert_ne!(set.yields[0].products[1].1, 0.003, "Xe135 moved too");
         // The nominal set is untouched.
         assert_eq!(kr85(chain["U235"].fission_yields.as_ref().unwrap()), 0.013);
+    }
+
+    /// A drawn set reads its energies with the evaluation's laws, so a
+    /// histogram (JEFF-4.0) is folded as one in every replica, as it is at
+    /// nominal, and the spectrum weights folded for the nominal yields index
+    /// the same sets.
+    #[test]
+    fn a_drawn_set_keeps_the_laws_between_its_energies() {
+        let mut fast = point([0.1, 0.2, 0.05], 0.013);
+        fast.energy = 1.4e7;
+        fast.interpolation = Some(yani::YieldInterpolation::Histogram);
+        let nominal = FissionYieldSet::new(vec![point([0.1, 0.2, 0.05], 0.013), fast]);
+        let chain = library(nominal.clone());
+        let c = candidates(&chain, &chain);
+        for replica in 0..4 {
+            let drawn = &sample(&c, 5, replica)["U235"];
+            assert_eq!(drawn.laws(), nominal.laws());
+            assert_eq!(drawn.interp_weights(7.2e6), Some([(0, 1.0), (1, 0.0)]));
+        }
     }
 
     /// Products that do not sum back to the solver's are a mapping this rule

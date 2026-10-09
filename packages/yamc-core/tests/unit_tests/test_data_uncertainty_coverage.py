@@ -66,6 +66,11 @@ def test_iron_reports_what_it_covers_and_how():
     for by_mt in coverage["angular_covariance"].values():
         for pairs in by_mt.values():
             assert pairs == sorted(pairs) and all(len(p) == 2 for p in pairs)
+    # MF=31 and MF=35 are reported per nuclide; iron is not fissionable, so it
+    # has neither, and both are listed among the inputs not perturbed.
+    assert fe56["nubar_covariance"] == []
+    assert fe56["spectrum_covariance"] is False
+    assert any("MF=31" in item for item in coverage["not_perturbed"])
 
 
 def test_a_nuclide_without_covariance_is_named_not_reported_exact():

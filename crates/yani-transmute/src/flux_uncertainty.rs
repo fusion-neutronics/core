@@ -58,6 +58,23 @@ use yani::ReactionRates;
 /// that on the default path.
 pub type PerGroupRates = HashMap<String, HashMap<String, Vec<f64>>>;
 
+/// One branching list's fold, with its per-group terms.
+///
+/// The overlay's rates and splits are ratios and sums of these folds rather
+/// than group averages of a transport channel, so they need terms of their
+/// own: `production[k][g]` and `total[g]` are group `g`'s share of
+/// `folded.production[k]` and `folded.total`, in the fold's own units.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ListTerms {
+    pub(crate) folded: crate::branching_rule::ListRates,
+    pub(crate) production: Vec<Vec<f64>>,
+    pub(crate) total: Vec<f64>,
+}
+
+/// Per parent, one entry per branching list in [`crate::branching_rule::Lists`]
+/// order, `None` where the nominal run folded no rates for the list.
+pub(crate) type PerGroupLists = HashMap<String, Vec<Option<ListTerms>>>;
+
 /// What the flux uncertainty could and could not be applied to.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FluxCoverage {
@@ -65,6 +82,10 @@ pub struct FluxCoverage {
     pub spectra_with_sigma: usize,
     /// Spectra that did not, so contributed no flux uncertainty.
     pub spectra_without_sigma: usize,
+    /// `(nuclide, reaction)` rates under a spectrum with a stated error that
+    /// have no per-group terms, so its perturbation could not move them and
+    /// they were held at nominal.
+    pub rates_without_terms: std::collections::BTreeSet<(String, String)>,
     pub bins_sampled: usize,
     /// Spectra, by index, whose stated covariance is not a lognormal's, with
     /// how far the sampled one is from it (see
@@ -76,7 +97,7 @@ pub struct FluxCoverage {
 
 impl FluxCoverage {
     pub fn has_gaps(&self) -> bool {
-        self.spectra_without_sigma > 0
+        self.spectra_without_sigma > 0 || !self.rates_without_terms.is_empty()
     }
 }
 
@@ -85,19 +106,41 @@ impl FluxCoverage {
 ///
 /// A bin with zero flux has no relative error to state, and one with a zero
 /// sigma is a bin the caller says is exact; both come out as zero, which
-/// perturbs nothing. Returns `None` when the lengths disagree, which is a
+/// perturbs nothing.
+///
+/// Refuses a sigma vector whose length disagrees with the flux, which is a
 /// caller error rather than something to paper over: a sigma vector that does
-/// not line up with the flux is not a sigma for that flux.
-pub fn relative_std_dev(flux: &[f64], std_dev: &[f64]) -> Option<Vec<f64>> {
+/// not line up with the flux is not a sigma for that flux. Refuses a negative
+/// or non-finite entry too. A NaN in particular would otherwise read as an
+/// exact bin, since every comparison against it is false, and the replicas
+/// would understate the spread with nothing to say so.
+pub fn relative_std_dev(flux: &[f64], std_dev: &[f64]) -> Result<Vec<f64>, String> {
     if flux.len() != std_dev.len() {
-        return None;
+        return Err(format!(
+            "flux_std_dev has {} entries but the spectrum has {} bins; they must line up, \
+             since each entry is the error on the bin beside it",
+            std_dev.len(),
+            flux.len()
+        ));
     }
-    Some(
-        flux.iter()
-            .zip(std_dev)
-            .map(|(f, s)| if *f > 0.0 { (s / f).abs() } else { 0.0 })
-            .collect(),
-    )
+    check_std_dev(std_dev)?;
+    Ok(flux
+        .iter()
+        .zip(std_dev)
+        .map(|(f, s)| if *f > 0.0 { s / f } else { 0.0 })
+        .collect())
+}
+
+/// Refuse a standard deviation entry that is negative or not finite.
+pub(crate) fn check_std_dev(std_dev: &[f64]) -> Result<(), String> {
+    match std_dev.iter().position(|s| !s.is_finite() || *s < 0.0) {
+        Some(bad) => Err(format!(
+            "flux standard deviation entry {bad} is {}; a standard deviation is finite and \
+             non-negative",
+            std_dev[bad]
+        )),
+        None => Ok(()),
+    }
 }
 
 /// A spectrum's stated error, relative to its own values.
@@ -348,8 +391,9 @@ pub(crate) const FLUX_STREAM: u32 = 0xF10D_5EED;
 ///
 /// Rates with no per-group terms are passed through unchanged, which is what a
 /// nuclide whose cross sections were never collapsed against this spectrum
-/// looks like, and so is a channel whose rate comes from the branching overlay
-/// rather than from a group average.
+/// looks like. A rate the branching overlay makes, an `(n,n')` isomer's, is
+/// not a group average and has none here: [`perturb_lists`] moves it, and
+/// [`rates_without_terms`] names any rate neither covers.
 pub fn perturb_rates(
     rates: &ReactionRates,
     per_group: &PerGroupRates,
@@ -379,6 +423,99 @@ pub fn perturb_rates(
     out
 }
 
+/// Apply one replica's flux perturbation to the branching lists' folds.
+///
+/// The same factor form as [`perturb_rates`], per curve and for the total, so
+/// an unperturbed replica re-folds the nominal branching bit for bit. What
+/// comes back is re-folded the way the nominal was
+/// ([`crate::material_transmute::fold_branching_into_chain`]): an `(n,n')`
+/// isomer rate is its production, and every other split is a ratio of
+/// productions to the total, so a bin that moves one state's production more
+/// than the total moves that state's share with it.
+///
+/// The clipped and held production are left out. They only guard and report
+/// the nominal run, which was refused if they mattered; a replica drawn
+/// around it moves only the productions, as the statistical draw does.
+pub(crate) fn perturb_lists(
+    per_group: &PerGroupLists,
+    delta: &[f64],
+) -> HashMap<String, Vec<Option<crate::branching_rule::ListRates>>> {
+    let factor = |terms: &[f64]| -> f64 {
+        let nominal: f64 = terms.iter().sum();
+        if nominal <= 0.0 {
+            return 1.0;
+        }
+        let perturbed: f64 = terms
+            .iter()
+            .zip(delta)
+            .map(|(term, d)| term * (1.0 + d))
+            .sum();
+        perturbed / nominal
+    };
+    per_group
+        .iter()
+        .map(|(parent, per)| {
+            let per = per
+                .iter()
+                .map(|list| {
+                    list.as_ref().map(|list| {
+                        let mut folded = list.folded.clone();
+                        for (p, terms) in folded.production.iter_mut().zip(&list.production) {
+                            *p *= factor(terms);
+                        }
+                        folded.total *= factor(&list.total);
+                        folded.clipped = 0.0;
+                        folded.extrapolated = 0.0;
+                        folded
+                    })
+                })
+                .collect();
+            (parent.clone(), per)
+        })
+        .collect()
+}
+
+/// The rates a flux perturbation cannot move: positive, with no per-group
+/// terms in `per_group`, and not an `(n,n')` rate one of `lists` re-folds.
+///
+/// Every rate the overlay does not make is a group average with terms, so
+/// this is empty unless a rate arrives by some other route; it is checked
+/// rather than assumed so that such a rate is reported instead of held at
+/// nominal without a word.
+pub(crate) fn rates_without_terms(
+    rates: &ReactionRates,
+    per_group: &PerGroupRates,
+    lists: &crate::branching_rule::Lists<'_>,
+    list_terms: &PerGroupLists,
+) -> std::collections::BTreeSet<(String, String)> {
+    let mut out = std::collections::BTreeSet::new();
+    for (nuclide, kinds) in rates {
+        for (kind, rate) in kinds {
+            if *rate <= 0.0 {
+                continue;
+            }
+            let has_terms = per_group
+                .get(nuclide)
+                .and_then(|k| k.get(kind))
+                .is_some_and(|t| t.iter().sum::<f64>() > 0.0);
+            let refolded = kind == crate::branching_rule::INELASTIC
+                && lists
+                    .get(nuclide)
+                    .zip(list_terms.get(nuclide))
+                    .is_some_and(|(rules, per)| {
+                        rules
+                            .iter()
+                            .zip(per)
+                            .any(|(rule, terms)| rule.kind == *kind && terms.is_some())
+                    });
+            if !has_terms && !refolded {
+                out.insert((nuclide.clone(), kind.clone()));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,21 +533,42 @@ mod tests {
 
     #[test]
     fn a_relative_sigma_is_the_absolute_one_over_the_flux() {
-        let r = relative_std_dev(&[100.0, 50.0], &[5.0, 10.0]).expect("same length");
+        let r = relative_std_dev(&[100.0, 50.0], &[5.0, 10.0]).expect("valid sigma");
         assert_eq!(r, vec![0.05, 0.2]);
     }
 
     /// A bin with no flux has no relative error to state.
     #[test]
     fn a_zero_flux_bin_gets_no_relative_error() {
-        let r = relative_std_dev(&[0.0, 50.0], &[5.0, 10.0]).expect("same length");
+        let r = relative_std_dev(&[0.0, 50.0], &[5.0, 10.0]).expect("valid sigma");
         assert_eq!(r, vec![0.0, 0.2]);
     }
 
     /// A sigma that does not line up with the flux is not a sigma for it.
     #[test]
     fn a_length_mismatch_is_refused_rather_than_truncated() {
-        assert_eq!(relative_std_dev(&[1.0, 2.0], &[0.1]), None);
+        let err = relative_std_dev(&[1.0, 2.0], &[0.1]).expect_err("length mismatch");
+        assert!(err.contains("must line up"), "got {err:?}");
+    }
+
+    /// A NaN sigma fails every comparison, so unchecked it read as an exact
+    /// bin: no deviate drawn and no gap reported.
+    #[test]
+    fn a_nan_sigma_is_refused_rather_than_taken_as_exact() {
+        let err = relative_std_dev(&[1.0, 1.0], &[f64::NAN, 0.1]).expect_err("NaN sigma");
+        assert!(err.contains("entry 0 is NaN"), "got {err:?}");
+    }
+
+    #[test]
+    fn an_infinite_sigma_is_refused() {
+        let err = relative_std_dev(&[1.0, 1.0], &[0.1, f64::INFINITY]).expect_err("inf sigma");
+        assert!(err.contains("entry 1 is inf"), "got {err:?}");
+    }
+
+    #[test]
+    fn a_negative_sigma_is_refused() {
+        let err = relative_std_dev(&[1.0, 1.0], &[0.1, -0.1]).expect_err("negative sigma");
+        assert!(err.contains("finite and non-negative"), "got {err:?}");
     }
 
     /// Zero perturbation reproduces the nominal rate exactly.

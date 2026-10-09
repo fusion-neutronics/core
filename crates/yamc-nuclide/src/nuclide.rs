@@ -1161,6 +1161,19 @@ pub struct Nuclide {
     /// [`LoadScope::angular_covariance`]: crate::LoadScope::angular_covariance
     #[serde(skip, default)]
     pub angular_covariance: Option<std::sync::Arc<Vec<crate::covariance::AngularCovarianceBlock>>>,
+    /// MF=31, the covariance of the fission neutron multiplicities, when
+    /// [`LoadScope::fission_covariance`] asked for it and the evaluation has
+    /// some. In MF=33's block form, but `mt` and `mt1` are multiplicities
+    /// (452, 455, 456). Read and carried, not sampled.
+    ///
+    /// [`LoadScope::fission_covariance`]: crate::LoadScope::fission_covariance
+    #[serde(skip, default)]
+    pub nubar_covariance: Option<std::sync::Arc<Vec<crate::covariance::CovarianceBlock>>>,
+    /// MF=35, the covariance of the fission spectrum, under the same scope
+    /// flag as `nubar_covariance`. Read and carried, not sampled.
+    #[serde(skip, default)]
+    pub spectrum_covariance:
+        Option<std::sync::Arc<Vec<crate::covariance::SpectrumCovarianceBlock>>>,
     /// Lazily-built flat elastic angular table. Routes the
     /// production CPU elastic scatter through the same
     /// `yamc_physics::gpu::flat::elastic_mu_cm` sampler the GPU kernel/twin

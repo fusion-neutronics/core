@@ -64,12 +64,17 @@ pub enum Section {
     Mf27(Box<mf::atomic::Mf27>),
     /// MF=28, atomic relaxation data.
     Mf28(Box<mf::atomic::Mf28>),
+    /// MF=31, covariances of the fission neutron multiplicity. The same
+    /// format as MF=33.
+    Mf31(Box<mf::covariance::Mf33>),
     /// MF=32 MT=151, covariances of resonance parameters.
     Mf32(Box<mf::mf32::Mf32>),
     /// MF=33, covariances of neutron cross sections.
     Mf33(Box<mf::covariance::Mf33>),
     /// MF=34, covariances of angular distributions.
     Mf34(Box<mf::covariance::Mf34>),
+    /// MF=35, covariances of energy distributions of secondary particles.
+    Mf35(Box<mf::covariance::Mf35>),
     /// MF=40, covariances of radionuclide production.
     Mf40(Box<mf::covariance::Mf40>),
     Unparsed {
@@ -361,6 +366,15 @@ impl Material {
         }
     }
 
+    /// The MF=31 covariance section for a fission multiplicity (MT=452, 455
+    /// or 456), in MF=33's format.
+    pub fn mf31(&self, mt: i32) -> Option<&mf::covariance::Mf33> {
+        match self.section_data.get(&(31, mt))? {
+            Section::Mf31(s) => Some(s),
+            _ => None,
+        }
+    }
+
     /// The MF=33 covariance section for a reaction.
     pub fn mf33(&self, mt: i32) -> Option<&mf::covariance::Mf33> {
         match self.section_data.get(&(33, mt))? {
@@ -373,6 +387,15 @@ impl Material {
     pub fn mf34(&self, mt: i32) -> Option<&mf::covariance::Mf34> {
         match self.section_data.get(&(34, mt))? {
             Section::Mf34(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The MF=35 covariance section for a reaction's secondary energy
+    /// distribution.
+    pub fn mf35(&self, mt: i32) -> Option<&mf::covariance::Mf35> {
+        match self.section_data.get(&(35, mt))? {
+            Section::Mf35(s) => Some(s),
             _ => None,
         }
     }
@@ -498,9 +521,11 @@ fn parse_section(mf: i32, mt: i32, text: &str) -> Result<Section> {
         (26, _) => Section::Mf26(Box::new(mf::atomic::parse_mf26(&mut r)?)),
         (27, _) => Section::Mf27(Box::new(mf::atomic::parse_mf27(&mut r)?)),
         (28, _) => Section::Mf28(Box::new(mf::atomic::parse_mf28(&mut r)?)),
+        (31, _) => Section::Mf31(Box::new(mf::covariance::parse_mf33(&mut r)?)),
         (32, 151) => Section::Mf32(Box::new(mf::mf32::parse_mf32(&mut r)?)),
         (33, _) => Section::Mf33(Box::new(mf::covariance::parse_mf33(&mut r)?)),
         (34, _) => Section::Mf34(Box::new(mf::covariance::parse_mf34(&mut r, mt as i64)?)),
+        (35, _) => Section::Mf35(Box::new(mf::covariance::parse_mf35(&mut r)?)),
         (40, _) => Section::Mf40(Box::new(mf::covariance::parse_mf40(&mut r)?)),
         _ => Section::Unparsed { mf, mt },
     })

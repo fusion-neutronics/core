@@ -110,6 +110,50 @@ fn a_nan_mass_is_refused() {
     assert!(err.contains("finite and non-negative"), "got {err:?}");
 }
 
+fn with_flux_error(error: yani_transmute::flux_uncertainty::FluxError) -> MultigroupSpectrum {
+    MultigroupSpectrum {
+        boundaries: vec![1.0e-5, 1.0e5, 2.0e7],
+        masses: vec![0.5, 0.5],
+        flux_error: Some(error),
+    }
+}
+
+#[test]
+fn a_nan_flux_sigma_is_refused_rather_than_taken_as_exact() {
+    // A NaN fails `sigma > 0.0`, so unchecked it drew no deviate and reported
+    // no gap: the bin read as exact and the spread came out too narrow.
+    let err = run(with_flux_error(
+        yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(vec![f64::NAN, 0.1]),
+    ))
+    .expect_err("a NaN flux sigma must be refused");
+    assert!(err.contains("finite and non-negative"), "got {err:?}");
+}
+
+#[test]
+fn an_infinite_or_negative_flux_sigma_is_refused() {
+    for bad in [f64::INFINITY, -0.1] {
+        let err = run(with_flux_error(
+            yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(vec![0.1, bad]),
+        ))
+        .expect_err("a bad flux sigma must be refused");
+        assert!(
+            err.contains("finite and non-negative"),
+            "{bad}: got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn a_flux_error_of_the_wrong_length_is_refused() {
+    // `perturb_rates` meets the deviates through a zip, so a short error
+    // would silently leave the trailing bins exact.
+    let err = run(with_flux_error(
+        yani_transmute::flux_uncertainty::FluxError::RelativeStdDev(vec![0.1]),
+    ))
+    .expect_err("a flux error that does not line up must be refused");
+    assert!(err.contains("describes 1 bins"), "got {err:?}");
+}
+
 #[test]
 fn an_ordinary_spectrum_still_passes_validation() {
     // Whatever it goes on to do without nuclear data loaded, it must not fail

@@ -143,7 +143,18 @@ def test_fission_yield_evaluations_are_stored_as_the_tape_gives_them(tmp_path):
     )
 
     nominal = ipc.open_file(out / "fission_yields" / "fission_yields.arrow").read_all()
-    assert nominal.schema.names == ["nuclide", "energy", "products", "yields"]
+    assert nominal.schema.names == [
+        "nuclide",
+        "energy",
+        "products",
+        "yields",
+        "interpolation",
+    ]
+    # The law of each energy's MT=454 LIST, which the solver reads the yields
+    # with, null at the lowest energy where the tape states LE instead.
+    energies = nominal.column("energy").to_pylist()
+    laws = dict(zip(energies, nominal.column("interpolation").to_pylist()))
+    assert laws == {0.0253: None, 5.0e5: 2}
 
     table = ipc.open_file(out / "fission_yields" / "evaluated_yields.arrow").read_all()
     assert table.schema.names == [
@@ -308,6 +319,26 @@ def test_branching_subsection(tmp_path):
     # In115 carries no MF=40, so there is no covariance file beside the curves.
     assert stats["mf40_sections"] == 0
     assert not (out / "branching" / "branching_covariance.arrow").exists()
+
+
+def test_a_level_far_from_the_only_isomer_is_flagged(tmp_path):
+    """With In116_m2 the only In116 isomer in the decay data, In115's capture
+    level at 127.3 keV is booked to it, 162.4 keV away, and the stats say so."""
+    inputs = tmp_path / "endf"
+    inputs.mkdir()
+    stats = yamc.convert_branching(
+        neutron_files=_plain(["n-049_In-115_trimmed.endf.xz"], inputs),
+        decay_files=_plain(["dec-049_In_116m2.endf.xz"], inputs),
+        output_path=str(tmp_path / "transmutation_endf-b8.1.arrow"),
+        library="endf-b8.1",
+        data_version="2026-10-09.1",
+        created_utc="2026-10-09T00:00:00+00:00",
+    )
+    assert stats["level_routes"]["single_isomer"] == 1
+    assert (
+        "In115 MT102 -> In116_m2: level 1 at 127.3 keV, taken as the only isomer, "
+        "-162.4 keV from it"
+    ) in stats["flagged_levels"], stats["flagged_levels"]
 
 
 def test_branching_covariance_is_written_beside_the_curves(tmp_path):

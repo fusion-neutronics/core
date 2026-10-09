@@ -1758,9 +1758,11 @@ fn summed(mt: i32, parts: &[&Reaction]) -> Option<Reaction> {
 
 /// The redundant reaction whose cross section holds level `mt`, per ENDF-102
 /// Appendix B.1: MT 4 holds 51 to 91, MT 103 to 107 the levels of each emitted
-/// particle, and MT 16 its levels 875 to 891.
+/// particle, MT 16 its levels 875 to 891, and MT 18 the fission chances 19,
+/// 20, 21 and 38 (`endf::data`'s sum rule for 18).
 fn level_sum(mt: i32) -> Option<i32> {
     match mt {
+        19 | 20 | 21 | 38 => Some(18),
         51..=91 => Some(4),
         600..=649 => Some(103),
         650..=699 => Some(104),
@@ -5859,6 +5861,35 @@ mod transport_field_tests {
         let t = field(&[51, 52], &[self_block(51, 0.09), self_block(4, 0.04)]);
         assert_eq!(t.reads[&51], Read::Own);
         assert_eq!(t.reads[&52], Read::Parent(4));
+    }
+
+    /// Fission given by chance, as ENDF/B-VIII.1 Pu240 is: MT 18 is the
+    /// redundant sum of 19, 20, 21 and 38, and MF=33 states MT 18's covariance
+    /// only. Each chance reads MT 18's, as a level reads MT 4's; 63
+    /// ENDF/B-VIII.1 actinides were held at nominal instead.
+    #[test]
+    fn fission_chances_read_the_total_fissions() {
+        let partials = [2, 19, 20, 21, 38, 102];
+        let owned: Vec<Reaction> = partials
+            .iter()
+            .map(|&mt| reaction(mt, false))
+            .chain([reaction(18, true)])
+            .collect();
+        let reactions: BTreeMap<i32, &Reaction> = owned.iter().map(|r| (r.mt_number, r)).collect();
+        let t = transport_field(
+            "X",
+            &partials,
+            &[self_block(18, 0.04), self_block(102, 0.01)],
+            &reactions,
+        );
+        for mt in [19, 20, 21, 38] {
+            assert_eq!(t.reads[&mt], Read::Parent(18), "MT {mt}");
+        }
+        assert_eq!(t.reads[&102], Read::Own);
+        assert_eq!(t.reads[&2], Read::Nominal);
+        let f = t.field.expect("covered reactions make a field");
+        let mts: BTreeSet<i32> = f.relative_cells.iter().map(|c| c.mt).collect();
+        assert_eq!(mts, BTreeSet::from([18, 102]));
     }
 
     /// With no covariance anywhere, every partial is held and there is no
