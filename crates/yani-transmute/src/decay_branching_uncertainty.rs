@@ -328,6 +328,7 @@ mod tests {
             crate::uncertainty::DECAY_ENERGY_STREAM,
             crate::uncertainty::DECAY_PHOTON_STREAM,
             DECAY_BRANCHING_STREAM,
+            crate::resonance_sampling::RESONANCE_PARAMETER_STREAM,
         ];
         let mut keys = std::collections::HashSet::new();
         for name in chain.keys() {
