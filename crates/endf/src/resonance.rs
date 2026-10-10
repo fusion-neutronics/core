@@ -2984,34 +2984,70 @@ mod r_matrix_tests {
     }
 
     /// ENDF/B-VIII.1 Ca40: an alpha channel (MT=800, Q = +1.75 MeV) and a
-    /// proton channel (MT=600) closed below 542 keV. NJOY 2016 RECONR at 0 K,
-    /// less the MF=3 background, `(E, elastic, capture)` below 0.82 MeV.
+    /// proton channel (MT=600) closed below 542 keV. NJOY 2016.80 RECONR at
+    /// 0 K (err 0.001), whose MF=3 background is zero over the resolved
+    /// range: `(E, elastic, capture)` at its own grid points, to the top of
+    /// the range NJOY writes seven digits for.
     const CA40_NJOY: &[(f64, f64, f64)] = &[
         (1e-5, 2.629753e0, 2.062027e1),
-        (3.449957e4, 1.010069e0, 2.021545e-3),
+        (3.450043e4, 1.010307e0, 2.109481e-3),
         (1.10002e5, 1.787824e-1, 1.821381e-4),
-        (2.799985e5, 1.315065e0, 2.450266e-4),
-        (4.749992e5, 7.805748e-1, 4.574448e-4),
-        (6.199994e5, 3.52773e0, 2.535537e-3),
+        (2.799657e5, 1.318207e0, 2.312778e-4),
+        (4.750092e5, 7.802493e-1, 5.012943e-4),
+        (6.200024e5, 3.518493e0, 2.437962e-3),
         (7.00035e5, 1.388453e0, 2.556458e-5),
-        (7.640008e5, 2.127604e-1, 1.056679e-3),
-        (8.000002e5, 2.900387e0, 2.738641e-2),
+        (7.639946e5, 2.13029e-1, 1.022599e-3),
+        (8.000018e5, 2.969043e0, 2.872541e-2),
+        (8.500214e5, 9.067932e-1, 1.028981e-4),
+        (9.001622e5, 3.528998e0, 5.950353e-5),
+        (9.500245e5, 1.756498e0, 4.570464e-5),
+        (1.0000004e6, 4.645448e0, 1.255616e-1),
+        (1.100035e6, 3.028377e0, 5.577822e-4),
+        (1.200062e6, 4.765469e0, 8.886368e-4),
     ];
 
-    /// Ca40 against NJOY where NJOY's Coulomb functions hold, and continuous
-    /// where they do not.
+    /// The same run's (n,p), MT=600, `(E, sigma)` at its own grid points:
+    /// two below the 822.77 keV boundary and the rest above it, to the top of
+    /// the resolved range at 1.5 MeV.
+    const CA40_NJOY_NP: &[(f64, f64)] = &[
+        (7.639946e5, 1.2598e-8),
+        (8.000018e5, 4.660769e-6),
+        (8.500214e5, 3.799265e-8),
+        (9.001622e5, 8.55124e-8),
+        (9.500245e5, 3.861193e-7),
+        (1.0000004e6, 2.60293e-5),
+        (1.049973e6, 3.731444e-6),
+        (1.100035e6, 9.068571e-6),
+        (1.200062e6, 1.680174e-5),
+        (1.299989e6, 1.292482e-4),
+        (1.400114e6, 3.424013e-4),
+        (1.499999e6, 7.598807e-4),
+    ];
+
+    /// The proton channel's eta crosses ten times its rho at 822.77 keV.
+    const CA40_COULOMB_BOUNDARY: f64 = 822_770.0;
+
+    /// Ca40 against NJOY 2016.80 across the whole resolved range.
     ///
-    /// Elastic and capture agree below 0.82 MeV to NJOY's digits, and so
-    /// does the (n,p) cross section, to 2%. NJOY 2016's large-eta Coulomb
-    /// form (`bigeta`, taken where eta > 10 rho and eta > 5) builds its K_0
-    /// and K_1 series with integer division in the harmonic numbers, so its
-    /// penetrability is far too small: 1.31e-18 for l=2 where it is 3.35e-13
-    /// at rho = 0.567, eta = 5.67. Ca40's proton channel leaves that branch
-    /// at 822.77 keV, where NJOY's (n,p) jumps 2.6e5-fold within 15 eV, and
-    /// every resonance whose penetrability `bigeta` gave is mis-normalized
-    /// above it (3.1e-3 b at 925 keV, where the widths give 5.6e-7 b). With
-    /// real division NJOY agrees with this reconstruction to 3 to 5% there
-    /// (shimwell/NJOY2016#5). Ours is continuous across 822.77 keV.
+    /// Elastic and capture agree to NJOY's digits from 1e-5 eV to 1.2 MeV.
+    /// The (n,p) cross section agrees to 0.2% below 822.77 keV. Beyond it
+    /// ours sits above NJOY's, typically by 5% and by up to 7% (0.7% at the
+    /// 1 MeV resonance peak). That boundary is where NJOY's `coulx` leaves
+    /// its large-eta form (`bigeta`, taken where eta > 10 rho and eta > 5)
+    /// for its eta >= 5 form, and the two forms do not meet: NJOY's (n,p)
+    /// drops 6% across the 19 eV between its grid points 822.7545 and
+    /// 822.7738 keV, where ours rises 2% on the 825.7 keV resonance's tail.
+    /// Our penetrability holds to mpmath at 30 digits
+    /// (`coulomb::tests::it_matches_mpmath`), so the step and the excess are
+    /// NJOY's. At an interference minimum the excess is amplified (17% at
+    /// 837.5 keV, where the (n,p) is 1.3e-9 b), so the points here sit off
+    /// those minima.
+    ///
+    /// NJOY 2016.79 and earlier built `bigeta`'s K_0 and K_1 series with
+    /// integer division in the harmonic numbers (njoy/NJOY2016#415, fixed by
+    /// #417 in 2016.80), which made its (n,p) jump 2.6e5-fold at the
+    /// boundary. Ours
+    /// is continuous across it, as the end of this test checks.
     #[test]
     fn r_matrix_charged_channels_hold_where_njoy_switches_coulomb_forms() {
         let rm = range(CA40);
@@ -3031,19 +3067,32 @@ mod r_matrix_tests {
                 );
             }
         }
-        for (e, njoy) in [(7.640008e5, 1.290136e-8), (8.000002e5, 4.417897e-6)] {
+        let mut beyond = Vec::new();
+        for &(e, njoy) in CA40_NJOY_NP {
             let ours = rm.cross_sections(e).other[1];
+            let excess = ours / njoy - 1.0;
+            let allowed = if e < CA40_COULOMB_BOUNDARY {
+                -2e-3..2e-3
+            } else {
+                beyond.push(excess);
+                0.0..0.07
+            };
             assert!(
-                (ours / njoy - 1.0).abs() < 0.02,
+                allowed.contains(&excess),
                 "(n,p) at {e} eV: {ours} against NJOY's {njoy}"
             );
         }
+        beyond.sort_by(f64::total_cmp);
+        let median = beyond[beyond.len() / 2];
+        assert!(
+            (0.03..0.06).contains(&median),
+            "(n,p) beyond the boundary sits {median} above NJOY's at the median"
+        );
         let (below, above) = (
             rm.cross_sections(822_760.0).other[1],
             rm.cross_sections(822_776.0).other[1],
         );
-        // The 825.7 keV resonance's tail rises 1.7% over these 16 eV; NJOY's
-        // jumps by 2.6e5.
+        // The 825.7 keV resonance's tail rises 1.7% over these 16 eV.
         assert!(
             (above / below - 1.0).abs() < 0.05,
             "(n,p) {below} then {above}"
