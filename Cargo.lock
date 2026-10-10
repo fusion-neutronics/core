@@ -7341,6 +7341,7 @@ dependencies = [
  "rayon",
  "tempfile",
  "yamc-convert",
+ "yamc-element",
  "yamc-materials",
  "yamc-nuclide",
  "yamc-rng",

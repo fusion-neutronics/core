@@ -1341,7 +1341,7 @@ class Material:
         Returns:
             Tuple[List[float], List[float]]: (cross_section_values, energy_grid)
         """
-    def transmute(self, schedule: typing.Any, data_uncertainty: typing.Optional[DataUncertainty] = None, self_shielding_chord: typing.Optional[builtins.float] = None, self_shielding_shape: typing.Optional[typing.Any] = None) -> TransmutationResults:
+    def transmute(self, schedule: typing.Any, data_uncertainty: typing.Optional[DataUncertainty] = None, self_shielding_chord: typing.Optional[builtins.float] = None, self_shielding_shape: typing.Optional[typing.Any] = None, displacement_damage: builtins.bool = False, displacement_energies: typing.Optional[typing.Mapping[builtins.str, builtins.float]] = None) -> TransmutationResults:
         r"""
         Transmute this material over an irradiation/cooling schedule, without
         re-running transport.
@@ -1425,6 +1425,27 @@ class Material:
                 longest chord and shields more than any other shape of the same
                 size. It is an upper bound rather than a safe default, which is
                 why there is no default here at all.
+        
+            displacement_damage (bool): Also compute displacement damage over the
+                schedule: the damage energy deposited per atom (eV) and NRT
+                displacements per atom, per element and for the material, read
+                with ``get_dpa``, ``get_damage_energy`` and
+                ``get_displacement_damage_info``. Each nuclide's MT=444
+                damage-energy cross section is folded against the pulse spectrum
+                by the same collapse as the reaction rates (self-shielding
+                included), using each step's composition and flux; cooldowns
+                add nothing. dpa is ``0.8 * E_damage / (2 * E_d)`` per element,
+                and the material total weights the elements by atom fraction.
+                Off by default, and then MT=444 is not fetched and nothing about
+                the solve changes. No uncertainty is given for it yet.
+        
+            displacement_energies (dict[str, float], optional): Displacement
+                threshold energies ``E_d`` in eV by element symbol, e.g.
+                ``{"Fe": 40.0}``, replacing the defaults (ASTM E521, and the
+                OECD-NEA 2015 report "Primary Radiation Damage in Materials"
+                for elements it does not cover). An element of the material in
+                neither source must be given here; it is never guessed. Needs
+                ``displacement_damage=True``.
         
         Raises:
             ValueError: If an irradiation pulse lacks a NeutronSource, its energy
@@ -3352,6 +3373,99 @@ class TransmutationResults:
             Material at the end of the schedule, or None if the material is
             unknown.
         """
+    def get_dpa(self, material_id: builtins.int, element: typing.Optional[builtins.str] = None) -> typing.Optional[builtins.list[builtins.float]]:
+        r"""
+        Cumulative NRT displacements per atom (dpa) over the schedule.
+        
+        Present when the transmute call was given
+        ``displacement_damage=True``, and ``None`` otherwise. One value per
+        state, aligned with ``times``: entry 0 is the initial composition and
+        is zero, and entry ``i`` is the total after schedule step ``i - 1``.
+        Cooldowns add nothing.
+        
+        For an element ``X`` it is the damage energy deposited per atom of
+        ``X``, from ``X``'s own nuclides, converted with ``X``'s displacement
+        threshold energy as ``0.8 * E_damage / (2 * E_d)`` (the NRT model,
+        ASTM E521). The material total, with ``element`` omitted, is the
+        atom-fraction-weighted sum over elements: each element's recoils are
+        treated as slowing down among atoms of their own kind, which reduces to
+        the elemental value for a pure element and leaves out energy transfer
+        between elements in a cascade. MT=444 is already integrated over the
+        recoil spectrum, so the per-recoil threshold steps of the NRT model
+        (no displacement below ``E_d``, one up to ``2 * E_d / 0.8``) are not
+        applied, which is the standard practice for a damage-energy cross
+        section. The ``E_d`` used and its source are in
+        ``get_displacement_damage_info``.
+        
+        Args:
+            material_id: Material ID number.
+            element: Element symbol, e.g. ``"W"``, for that element's dpa;
+                omit it for the material total.
+        
+        Returns:
+            List of cumulative dpa, one per state, or None if damage was not
+            asked for or the material is not in the results.
+        
+        Raises:
+            ValueError: If ``element`` has no dpa: it is not in the material
+                on an irradiated step, or it is a transmutation product with no
+                displacement threshold energy.
+        """
+    def get_damage_energy(self, material_id: builtins.int, element: typing.Optional[builtins.str] = None) -> typing.Optional[builtins.list[builtins.float]]:
+        r"""
+        Cumulative damage energy deposited per atom [eV] over the schedule.
+        
+        The quantity dpa is computed from, kept separate so the displacement
+        model can be changed without the data: each nuclide's MT=444
+        damage-energy cross section [eV barn] folded against the pulse
+        spectrum by the same collapse as the reaction rates, times the flux
+        magnitude and the step duration, at each step's composition. Indexed
+        as ``get_dpa``. For an element it is per atom of that element; the
+        material total weights the elements by atom fraction, so it is per atom
+        of the material.
+        
+        Args:
+            material_id: Material ID number.
+            element: Element symbol for that element's damage energy; omit it
+                for the material total.
+        
+        Returns:
+            List of cumulative damage energy [eV per atom], one per state, or
+            None if damage was not asked for or the material is not in the
+            results.
+        
+        Raises:
+            ValueError: If ``element`` is not in the material on an irradiated
+                step.
+        """
+    def get_displacement_damage_info(self, material_id: builtins.int) -> typing.Optional[dict]:
+        r"""
+        What the displacement damage was computed with, and what it could not
+        count.
+        
+        ``None`` unless the transmute call was given
+        ``displacement_damage=True``. A dict:
+        
+        - ``model``: ``"NRT"``, and ``efficiency``: ``0.8``.
+        - ``displacement_energies``: per element with dpa,
+          ``{"energy": E_d in eV, "source": ...}``, where ``source`` is
+          ``"ASTM E521"``, ``"OECD-NEA 2015"`` (Table 2.4 of NEA/NSC/DOC(2015)9,
+          for an element ASTM E521 does not cover) or ``"user"``.
+        - ``without_damage_energy``: nuclides present on an irradiated step
+          whose data has no MT=444, each with the largest atom fraction it
+          reached there. Their damage energy is not counted, so a large entry
+          here means the totals are low by about that share. Only
+          transmutation products can appear: a nuclide of the starting
+          composition without MT=444 is refused.
+        - ``without_displacement_energy``: transmutation-product elements with
+          no displacement threshold energy (hydrogen and helium, typically),
+          each with the largest atom fraction reached. Their damage energy is
+          counted in ``get_damage_energy``; they add nothing to ``get_dpa``.
+          Pass ``displacement_energies`` to include them.
+        
+        Args:
+            material_id: Material ID number.
+        """
     def get_reaction_rates(self, material_id: builtins.int, step: builtins.int) -> typing.Optional[typing.Any]:
         r"""
         Per-edge reaction rates the solve drove one step with.
@@ -4242,7 +4356,7 @@ def set_transmutation_reactions(value: typing.Optional[builtins.str | typing.Lit
     rather than being solved as though the reaction produced nothing.
     """
 
-def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | typing.Sequence[PulseSchedule], data_uncertainty: typing.Optional[DataUncertainty] = None, self_shielding_chord: typing.Optional[builtins.float] = None, self_shielding_shape: shapes.SphereLump | shapes.CubeLump | shapes.FoilLump | shapes.CylinderLump | shapes.WireLump | None = None) -> TransmutationResults:
+def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | typing.Sequence[PulseSchedule], data_uncertainty: typing.Optional[DataUncertainty] = None, self_shielding_chord: typing.Optional[builtins.float] = None, self_shielding_shape: shapes.SphereLump | shapes.CubeLump | shapes.FoilLump | shapes.CylinderLump | shapes.WireLump | None = None, displacement_damage: builtins.bool = False, displacement_energies: typing.Optional[typing.Mapping[builtins.str, builtins.float]] = None) -> TransmutationResults:
     r"""
     Transmute several materials over one timeline in one call.
     
@@ -4282,6 +4396,13 @@ def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | t
             One lump shape for every material, turned into a chord through each
             material's own ``volume``. Give this or ``self_shielding_chord``,
             not both.
+        displacement_damage (bool): Also compute each material's displacement
+            damage, damage energy per atom and NRT dpa. See
+            ``Material.transmute``. Off by default, and then nothing about the
+            solve or the data it loads changes.
+        displacement_energies (dict[str, float], optional): Displacement
+            threshold energies in eV by element symbol, replacing the defaults,
+            for every material. Needs ``displacement_damage=True``.
     
     Returns:
         TransmutationResults: Keyed by each material's ``id``. Per material,

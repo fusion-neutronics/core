@@ -173,6 +173,7 @@ fn each_material_matches_its_own_solve() {
         &Default::default(),
         Default::default(),
         None,
+        None,
     )
     .expect("transmute together");
 
@@ -226,6 +227,7 @@ fn a_different_composition_is_collapsed_again() {
         chain(),
         &Default::default(),
         Default::default(),
+        None,
         None,
     )
     .expect("transmute together");
@@ -295,6 +297,7 @@ fn uncertainty_matches_each_materials_own_solve() {
         &Default::default(),
         Default::default(),
         Some(&request),
+        None,
     )
     .expect("transmute together");
 
@@ -339,6 +342,7 @@ fn a_repeated_id_is_refused() {
         &Default::default(),
         Default::default(),
         None,
+        None,
     )
     .expect_err("duplicate ids");
     assert!(err.to_string().contains("both have id 4"), "{err}");
@@ -374,6 +378,7 @@ fn a_different_timeline_is_refused() {
             chain(),
             &Default::default(),
             Default::default(),
+            None,
             None,
         )
         .expect_err("timelines differ")
