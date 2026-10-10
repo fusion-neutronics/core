@@ -143,7 +143,7 @@ pub struct RangeCovariance {
     /// [`ENERGY_TOLERANCE`].
     pub approximate: usize,
     /// Energies of MF=32 resonances MF=2 does not list, left out of the
-    /// matrix.
+    /// matrix. For an unresolved range, the J of each MF=32 spin left out.
     pub unmatched: Vec<f64>,
     /// Per MF=2 section, how far one standard deviation of the range's radius
     /// parameter moves the section's radius (1e-12 cm). Empty where the
@@ -706,13 +706,18 @@ fn read_unresolved(
     };
     let mut rows = Vec::new();
     for lv in &u.l_values {
-        let orbital = mf2
-            .ranges
-            .iter()
-            .position(|r| r.l == lv.l)
-            .ok_or(Error::Mismatched {
-                what: "an MF=32 unresolved l that MF=2 does not have",
-            })?;
+        // An l MF=2 does not have (FENDL-3.2d La138 gives l=2, MF=2 only 0
+        // and 1) moves no cross section: its spins are left out of the
+        // matrix and listed as unmatched, as a missing resonance is.
+        let Some(orbital) = mf2.ranges.iter().position(|r| r.l == lv.l) else {
+            for par in &lv.parameters {
+                b.unmatched.push(par[1]);
+                for _ in 0..mpar {
+                    rows.push(None);
+                }
+            }
+            continue;
+        };
         let section = &mf2.ranges[orbital];
         let spins: Vec<f64> = if section.parameters.is_empty() {
             section.aj.clone()
@@ -1418,6 +1423,56 @@ mod tests {
         );
         // A J twice and the counts differ: the second is unmatched.
         assert_eq!(unresolved_spins(&[0.5, 0.5]), (vec![Some(0)], 0, vec![0.5]));
+    }
+
+    #[test]
+    fn an_unresolved_l_mf2_does_not_have_is_left_out() {
+        // MF=32 lists l=1 before l=0, MF=2 has only l=0 (FENDL-3.2d La138
+        // gives l=2 over MF=2's 0 and 1): the matrix is l=0's own block.
+        let mf2 = ResonanceParameters::Unresolved(Box::new(crate::mf::mf2::Unresolved {
+            ranges: vec![crate::mf::mf2::UnresolvedRange {
+                l: 0,
+                aj: vec![0.5],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }));
+        let section = |l: i64, js: &[f64]| crate::mf::mf32::UnresolvedL {
+            l,
+            njs: js.len() as i64,
+            parameters: js.iter().map(|&j| [1.0, j, 1.0, 1.0, 0.0, 0.0]).collect(),
+            ..Default::default()
+        };
+        let covariance = PackedCovariance {
+            order: 3,
+            values: vec![0.01, 0.002, 0.003, 0.04, 0.005, 0.09],
+        };
+        let range = Range {
+            el: 1e3,
+            eh: 1e4,
+            lru: 2,
+            lrf: 1,
+            nro: 0,
+            naps: 0,
+            covariance: Covariance::Unresolved(Box::new(crate::mf::mf32::Unresolved {
+                l_values: vec![section(1, &[0.5, 1.5]), section(0, &[0.5])],
+                mpar: 1,
+                relative_covariance: covariance.clone(),
+                ..Default::default()
+            })),
+        };
+        let mut b = Builder::default();
+        read_unresolved(&range, &mf2, 0, &mut b).unwrap();
+        assert_eq!(b.parameters.len(), 1);
+        assert_eq!(
+            b.parameters[0].location,
+            Location::Unresolved {
+                orbital: 0,
+                spin: 0
+            }
+        );
+        assert_eq!(b.entries, [(0, 0, covariance.get(2, 2))]);
+        assert_eq!(b.unmatched, [0.5, 1.5]);
     }
 
     const DY158: &[u8] = include_bytes!("../fixtures/n-066_Dy_158_mf2_mf32.endf.xz");
