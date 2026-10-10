@@ -392,7 +392,10 @@ mod tests {
             .map(|r| (r.0 - 1.0e-6) / total * 1e6)
             .collect();
         let he4: Vec<f64> = replicas.iter().map(|r| r.1 / total * 1e6).collect();
-        assert_eq!(got["H1"], estimate((3.0e-6 - 1.0e-6) / total * 1e6, &h1, None));
+        assert_eq!(
+            got["H1"],
+            estimate((3.0e-6 - 1.0e-6) / total * 1e6, &h1, None)
+        );
         assert_eq!(got["He4"], estimate(2.0e-6 / total * 1e6, &he4, None));
         assert_eq!(got["H1"].replicas, 4);
         assert!(got["H1"].std_dev.unwrap() > 0.0);
