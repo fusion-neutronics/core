@@ -39,11 +39,12 @@
 //! A file is only ever renamed into a release folder after it verified, so a
 //! file that is present there is a verified one.
 //!
-//! `reactions.arrow` is always downloaded whole on this path. A byte-range
-//! fetch of a few MTs cannot be checked against a whole-file hash, so the
-//! ranged subset fetch is kept for raw URL sources only (which have no
-//! manifest to check against); a keyword load that names its MTs downloads the
-//! whole table once, verified, and every later load reads it from the cache.
+//! `reactions.arrow` and `energy.arrow` are always downloaded whole on this
+//! path. A byte-range fetch of a few MTs or temperatures cannot be checked
+//! against a whole-file hash, so the ranged fetches are kept for raw URL
+//! sources only (which have no manifest to check against); a keyword load that
+//! names its MTs or temperatures downloads the whole tables once, verified,
+//! and every later load reads them from the cache.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
