@@ -41,6 +41,18 @@ class TestTally:
         with pytest.raises(ValueError):
             yamc.Tally(scores=['invalid_score'])
 
+    def test_unknown_score_lists_valid_scores(self):
+        """An unknown score names the bad input and lists what is accepted."""
+        with pytest.raises(ValueError) as excinfo:
+            yamc.Tally(scores=['h3-production'])
+
+        message = str(excinfo.value)
+        assert "Unknown score: 'h3-production'" in message
+        assert "Did you mean 'H3-production'?" in message
+        assert "'flux'" in message
+        assert "'He4-production'" in message
+        assert 'MT number' in message
+
     def test_tally_heating_scores(self):
         """Test setting heating scores using strings and MT numbers."""
         assert yamc.Tally(scores=['heating']).scores == ['heating']

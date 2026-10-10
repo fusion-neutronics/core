@@ -608,6 +608,54 @@ mod tests {
     }
 
     #[test]
+    fn test_from_str_unknown_lists_valid_scores() {
+        let err = "h3-production".parse::<Score>().unwrap_err();
+        assert!(err.contains("Unknown score: 'h3-production'"), "{err}");
+        assert!(err.contains("Did you mean 'H3-production'?"), "{err}");
+        // Every named score is listed, and each listed name parses.
+        for name in [
+            "flux",
+            "heating",
+            "heating-local",
+            "damage-energy",
+            "H1-production",
+            "H2-production",
+            "H3-production",
+            "He3-production",
+            "He4-production",
+            "total",
+            "elastic",
+            "inelastic",
+            "fission",
+            "absorption",
+            "coherent-scatter",
+            "incoherent-scatter",
+            "photoelectric",
+            "pair-production",
+        ] {
+            assert!(
+                err.contains(&format!("'{name}'")),
+                "{name} missing from: {err}"
+            );
+            assert!(name.parse::<Score>().is_ok(), "{name} should parse");
+        }
+        // The other accepted forms are mentioned, and their examples parse.
+        assert!(
+            err.contains("'(n,t)'") && err.contains("MT number"),
+            "{err}"
+        );
+        assert!("(n,t)".parse::<Score>().is_ok());
+        assert!("(n,gamma)".parse::<Score>().is_ok());
+    }
+
+    #[test]
+    fn test_from_str_unknown_without_close_match_has_no_suggestion() {
+        let err = "not_a_real_score_xyz".parse::<Score>().unwrap_err();
+        assert!(!err.contains("Did you mean"), "{err}");
+        assert!(err.contains("'H3-production'"), "{err}");
+    }
+
+    #[test]
     fn test_from_str_invalid_integer() {
         // 0 is out of MT range
         let result = "0".parse::<Score>();
