@@ -262,6 +262,7 @@ fn uncertainty_matches_each_materials_own_solve() {
         samples: Some(64),
         sources: vec![Source::FluxSpectrum],
         attribution: false,
+        ..Default::default()
     };
     let solo = |mut m: Material, s: &MultigroupSpectrum| {
         transmute_material(

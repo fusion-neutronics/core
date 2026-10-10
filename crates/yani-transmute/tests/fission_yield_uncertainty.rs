@@ -97,6 +97,7 @@ fn the_fission_product_total_moves_by_the_yields_in_quadrature() {
         samples: Some(2048),
         sources: vec![Source::FissionYield],
         attribution: false,
+        ..Default::default()
     };
     let results = transmute_material(
         &mut material,

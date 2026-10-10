@@ -1066,7 +1066,8 @@ impl PyModel {
     ///         ``nuclear_data_standard_deviation``, ``replica_mean`` and
     ///         ``replica_standard_error``. Cross sections only: leave
     ///         ``sources`` unset or pass ``["cross_sections"]``, and
-    ///         ``attribution`` is not supported. Not yet supported, and refused with the reason:
+    ///         ``attribution`` and ``convergence`` are not supported (the
+    ///         replica count is fixed). Not yet supported, and refused with the reason:
     ///         ``compute='gpu'``, MPI, ``tracking_mode`` other than
     ///         ``'surface'``, survival biasing, weight windows, photon
     ///         transport, collision-estimator tallies, overlay tallies, mesh
@@ -1154,7 +1155,7 @@ impl PyModel {
             threads,
             max_runtime: max_runtime_secs,
             data_uncertainty: data_uncertainty
-                .map(|d| transport_data_uncertainty(&d.inner, d.sources_given))
+                .map(|d| transport_data_uncertainty(&d.inner, d.sources_given, d.convergence_given))
                 .transpose()?,
         };
         if compute == "cpu" {
@@ -1834,16 +1835,24 @@ impl PyModel {
 
 /// The transport run's nuclear-data uncertainty from a ``DataUncertainty``:
 /// its seed and replica count (32 when not set). Transport perturbs cross
-/// sections only and has no attribution, so a request for anything else is
-/// refused rather than ignored.
+/// sections only, has no attribution and runs a fixed replica count, so a
+/// request for anything else is refused rather than ignored.
 fn transport_data_uncertainty(
     d: &yani_transmute::uncertainty::DataUncertainty,
     sources_given: bool,
+    convergence_given: bool,
 ) -> PyResult<yamc::model::TransportDataUncertainty> {
     use yani_transmute::uncertainty::Source;
     if d.attribution {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "data_uncertainty: attribution is not supported by simulate_transport",
+        ));
+    }
+    if convergence_given {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "data_uncertainty: simulate_transport carries a fixed number of replica \
+             weights per history (samples, 32 when not set) and does not stop on \
+             convergence; remove convergence",
         ));
     }
     // `sources=None` is every source the build implements, which for a

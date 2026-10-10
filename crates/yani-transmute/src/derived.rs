@@ -782,6 +782,43 @@ impl TransmutationResults {
     }
 }
 
+/// The derived totals the uncertainty driver's stopping rule tracks, for one
+/// replica's inventory at one step: activity [Bq], decay heat [W] and the
+/// decay photon line rate [photons/s], per cm^3.
+///
+/// Evaluated as the accessors above evaluate a replica, with its own
+/// half-lives, decay energies and decay photon data (the photons at the
+/// independent end of their range), so the spread judged is the spread
+/// reported. Per cm^3 because the volume scales every replica alike
+/// and leaves a relative standard error where it is.
+pub(crate) fn tracked_totals(
+    inventory: &HashMap<String, f64>,
+    chain: &HashMap<String, ChainNuclide>,
+    half_lives: &HashMap<String, f64>,
+    decay_energy: Option<(u64, u64)>,
+    decay_photons: Option<(u64, u64)>,
+) -> [f64; 3] {
+    let drawn;
+    let chain = if half_lives.is_empty() && decay_energy.is_none() && decay_photons.is_none() {
+        chain
+    } else {
+        // The independent end, the one `Estimate::std_dev` reports.
+        let photons =
+            decay_photons.map(|(seed, replica)| (seed, replica, PhotonCorrelation::Independent));
+        drawn = replica_chain(chain, inventory, half_lives, decay_energy, photons);
+        &drawn
+    };
+    let lines: f64 = yani_decay::decay_photon_lines(inventory, 1.0, chain)
+        .iter()
+        .map(|(_, rate)| rate)
+        .sum();
+    [
+        yani_decay::activity_total(inventory, 1.0, chain),
+        yani_decay::decay_heat_total(inventory, 1.0, chain),
+        lines,
+    ]
+}
+
 /// The chain entries an inventory's derived quantities read, with one
 /// replica's half-lives substituted and its decay energies and photons drawn,
 /// the photon intensities at the given end of the range their unstated

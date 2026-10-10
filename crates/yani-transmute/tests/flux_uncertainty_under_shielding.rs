@@ -86,6 +86,7 @@ fn run(data: &str, shielding: Option<&Shielding>, with_sigma: bool) -> Transmuta
         // ensemble's spread is the flux sigma alone.
         sources: vec![Source::FluxSpectrum],
         attribution: false,
+        ..Default::default()
     };
     transmute_material_shielded(
         &mut iron(data),
@@ -240,6 +241,7 @@ fn an_unperturbed_shielded_replica_is_the_nominal_run() {
         samples: Some(2),
         sources: vec![Source::FluxSpectrum],
         attribution: false,
+        ..Default::default()
     };
     let results = transmute_material_shielded(
         &mut iron(&data),

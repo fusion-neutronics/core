@@ -233,6 +233,7 @@ def test_simulate_transmutation_rejects_multiple_distinct_sources():
 def test_no_data_uncertainty_unless_asked(dp_result):
     dose = _sched(_dt_source()).time_correct_tally(dp_result)
     assert dose.data_std_dev is None
+    assert dose.data_std_dev_standard_error is None
     assert dose.total_std_dev is None
     assert dose.data_uncertainty_info is None
 
@@ -249,9 +250,22 @@ def test_the_time_correction_carries_the_half_life_uncertainty(dp_result):
     assert data.shape == std.shape == total.shape
     # Statistical and nuclear-data uncertainties are independent.
     assert np.allclose(total, np.sqrt(std**2 + data**2))
+    # The standard error of each bin's data sigma, same shape, zero where the
+    # sigma is.
+    se = np.array(dose.data_std_dev_standard_error)
+    assert se.shape == data.shape
+    assert np.all(se >= 0.0)
+    assert np.all(se[data == 0.0] == 0.0)
     info = dose.data_uncertainty_info
     assert info["sources"] == ["half_life"]
     assert info["samples"] == 64
+    # A fixed count never claims the cap, and says what missed the target.
+    assert not info["hit_cap"]
+    assert info["convergence"] == 0.05
+    assert info["converged"] == (info["unconverged"] == [])
+    for miss in info["unconverged"]:
+        assert miss["output"] == "time_correction_factor"
+        assert miss["relative_standard_error"] > 0.05
     # A TCF depends on decay branching too, and D1S does not draw it. With
     # the photon source off its data are held too.
     assert info["not_perturbed"] == [

@@ -1215,8 +1215,15 @@ impl PyTransmutationResults {
     ///   applied, the self-shielding correction, the flux's response to a
     ///   perturbed cross section on a transport run, and the per-branch decay
     ///   emission of a parent whose branching was drawn.
-    /// - ``samples`` / ``converged``: how many replicas ran, and whether the
-    ///   sigmas settled or the cap was hit.
+    /// - ``samples`` / ``converged`` / ``convergence`` / ``hit_cap`` /
+    ///   ``unconverged``: how many replicas ran; whether every tracked sigma
+    ///   reached the target, ``convergence``, for the standard error of a
+    ///   sigma relative to it; whether the 1024-replica cap stopped the run
+    ///   first; and, worst first, every sigma that missed, as dicts of
+    ///   ``output`` (``"density"``, ``"activity"``, ``"decay_heat"`` or
+    ///   ``"decay_photon_rate"``), ``nuclide`` (``None`` for a total),
+    ///   ``step`` and the ``relative_standard_error`` it reached. Listed with
+    ///   a fixed ``samples`` too, where ``hit_cap`` is never set.
     ///
     /// Args:
     ///     material_id: Material ID number.

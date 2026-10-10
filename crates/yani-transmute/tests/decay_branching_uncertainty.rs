@@ -168,6 +168,7 @@ fn request(sources: Vec<Source>, attribution: bool) -> DataUncertainty {
         samples: Some(SAMPLES),
         sources,
         attribution,
+        ..Default::default()
     }
 }
 

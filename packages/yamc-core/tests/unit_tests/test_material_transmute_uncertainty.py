@@ -86,6 +86,19 @@ def test_data_uncertainty_round_trips_its_arguments():
     assert (fixed.seed, fixed.samples) == (7, 128)
 
 
+def test_the_convergence_target_defaults_to_five_percent():
+    u = yamc.DataUncertainty()
+    assert u.convergence == 0.05
+    assert yamc.DataUncertainty(convergence=0.02).convergence == 0.02
+    assert "convergence=0.05" in repr(u)
+
+
+@pytest.mark.parametrize("bad", [0.0, 1.0, -0.05, 1.5, float("nan"), float("inf")])
+def test_a_convergence_target_outside_zero_to_one_is_rejected(bad):
+    with pytest.raises(ValueError, match="convergence must be between 0 and 1"):
+        yamc.DataUncertainty(convergence=bad)
+
+
 def test_zero_samples_is_rejected_rather_than_meaning_adaptive():
     # `samples=0` is the kind of thing that would otherwise be read as "use the
     # default", producing a silently unsampled run.
@@ -544,7 +557,12 @@ def test_no_covariance_gives_an_absent_spread_rather_than_a_confident_zero():
     nobody would check; `None` cannot be plotted by accident.
     """
     results, mid = _uncertain_results()
-    assert results.get_data_uncertainty_info(mid)["samples"] == 0
+    info = results.get_data_uncertainty_info(mid)
+    assert info["samples"] == 0
+    # Nothing to resample is nothing to converge, not a run the cap stopped.
+    assert info["converged"] and not info["hit_cap"]
+    assert info["unconverged"] == []
+    assert info["convergence"] == 0.05
 
     estimate = results.get_activity_uncertainty(mid, 1)
     assert estimate.replicas == 0

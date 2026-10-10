@@ -83,6 +83,7 @@ fn run_with(
         samples: Some(1024),
         sources,
         attribution,
+        ..Default::default()
     };
     Some(
         transmute_material(
