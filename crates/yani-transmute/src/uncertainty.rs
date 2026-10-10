@@ -359,10 +359,10 @@ pub struct Info {
     /// product of interest, which leaves the count reading as full coverage
     /// while the ensemble perturbs almost nothing.
     pub rate_fraction_covered_total: Option<f64>,
-    /// Nuclides the material can populate whose folded covariance was not
-    /// positive semi-definite on at least one spectrum, past round-off, and
-    /// had its negative eigenvalues clipped to be sampled, with a channel of
-    /// that matrix a draw can move (a positive rate on a spectrum the
+    /// Nuclides the material can populate whose evaluated cell covariance was
+    /// not positive semi-definite past round-off, and was repaired to the
+    /// nearest correlation matrix to be sampled, with a channel a draw can
+    /// move on at least one spectrum (a positive rate on a spectrum the
     /// schedule irradiates with).
     ///
     /// Populated means `yani::populated_nuclides` bounds the nuclide at or
@@ -373,14 +373,16 @@ pub struct Info {
     /// that floor. A replica's lognormal rates on a wide channel can sit
     /// orders above nominal, so the bound does not hold for every replica.
     /// Past round-off means the smallest eigenvalue of the correlation matrix
-    /// is below `-m * 1e-12`, `m` the number of channels with a positive
+    /// is below `-m * 1e-12`, `m` the number of cells with a positive
     /// stated variance (see `covariance_sample::REPAIR_TOLERANCE`), or a
-    /// channel is stated with a negative variance, or with a zero one and a
-    /// covariance to another channel.
+    /// cell is stated with a negative variance, or with a zero one and a
+    /// covariance to another cell.
     ///
-    /// A gap: clipping only ever adds variance, so each of these was sampled
-    /// wider than its evaluation states. How much is in `covariance_repairs`,
-    /// which also keeps the repairs of populated nuclides no draw can move.
+    /// A gap: the repair keeps every cell's evaluated sigma but moves
+    /// correlations the evaluation states, so a channel that folds several
+    /// cells can be sampled at a sigma other than its evaluation's, either
+    /// way. How much is in `covariance_repairs`, which also keeps the repairs
+    /// of populated nuclides no draw can move.
     pub covariance_repaired: BTreeSet<String>,
     /// Where each perturbed nuclide's covariance came from, as
     /// `"<library>, MAT <n>"`: the library its data folder records, and the
@@ -392,9 +394,10 @@ pub struct Info {
     /// evaluation is sampled as it is, and its own authors say not to rely on
     /// it as it is.
     pub covariance_warnings: BTreeMap<String, Vec<String>>,
-    /// One record per repaired (populated nuclide, spectrum): the eigenvalues,
-    /// the share of the stated variance the clipping added, and every
-    /// channel's evaluated sigma beside the sigma it was sampled at. A repair
+    /// One record per repaired (populated nuclide, spectrum): the smallest
+    /// eigenvalue of the correlation matrix before the repair, how far the
+    /// repair moved the correlations, and every channel's evaluated sigma
+    /// beside the sigma it was sampled at. A repair
     /// of a nuclide outside the populated bound has no record here; its
     /// nuclide is in `covariance_repaired_outside_bound`.
     pub covariance_repairs: Vec<Repair>,
@@ -406,13 +409,13 @@ pub struct Info {
     /// can settle, since the solve applies every reachable nuclide's rates
     /// within a step. Their per-channel records are not kept.
     pub covariance_repaired_outside_bound: BTreeSet<String>,
-    /// The largest `sampled / evaluated - 1` over the repaired channels a draw
-    /// can move: a populated nuclide, present at the start or produced, with a
-    /// positive rate on a spectrum the schedule irradiates with. Zero
+    /// The largest `|sampled / evaluated - 1|` over the repaired channels a
+    /// draw can move: a populated nuclide, present at the start or produced,
+    /// with a positive rate on a spectrum the schedule irradiates with. Zero
     /// with no such repair; infinite when a repair gave a spread to a channel
     /// whose stated variance is zero or negative.
-    pub worst_sigma_inflation: f64,
-    /// The weighted mean of `sampled / evaluated - 1` over every sampled
+    pub worst_sigma_change: f64,
+    /// The weighted mean of `|sampled / evaluated - 1|` over every sampled
     /// channel of a populated nuclide, each weighted by its unit-flux rate
     /// times its spectrum's fluence in the schedule times its parent's
     /// initial density, so a repair on a channel nothing went through reads
@@ -420,13 +423,13 @@ pub struct Info {
     /// full, however wide the channels beside them. The weight is the initial
     /// composition's, so this covers first-generation reactions only: a
     /// nuclide the material starts without carries no weight, and its repairs
-    /// are in `worst_sigma_inflation` and `covariance_repairs`. On a matrix
+    /// are in `worst_sigma_change` and `covariance_repairs`. On a matrix
     /// that needed no repair a channel's sampled sigma differs from the
     /// evaluated one by the decomposition's round-off, which shows here as it
     /// is. Infinite when a weighted channel with no evaluated sigma was
     /// sampled with a spread; `None` when no weighted channel has an
     /// evaluated sigma.
-    pub rate_weighted_sigma_inflation: Option<f64>,
+    pub rate_weighted_sigma_change: Option<f64>,
     /// Sampled channels of populated nuclides with a positive rate on a
     /// spectrum the schedule irradiates with, keyed by (nuclide, kind), whose
     /// folded relative sigma `sqrt(C_ii)`, as evaluated and before any repair,
@@ -636,8 +639,8 @@ impl Info {
             covariance_repaired: sigmas.repaired.clone(),
             covariance_repairs: sigmas.repairs.clone(),
             covariance_repaired_outside_bound: sigmas.repaired_outside_bound.clone(),
-            worst_sigma_inflation: sigmas.worst_sigma_inflation,
-            rate_weighted_sigma_inflation: sigmas.rate_weighted_sigma_inflation(),
+            worst_sigma_change: sigmas.worst_sigma_change,
+            rate_weighted_sigma_change: sigmas.rate_weighted_sigma_change(),
             sigma_at_least_one: sigmas.sigma_at_least_one.clone(),
             sigma_at_least_ten: sigmas.sigma_at_least_ten.clone(),
             sigma_at_least_one_outside_bound: sigmas.sigma_at_least_one_outside_bound.clone(),
@@ -1822,16 +1825,22 @@ mod tests {
         );
     }
 
-    /// A repair a draw can move is a gap: the sampled spread is wider than
+    /// A repair a draw can move is a gap: the sampled correlations are not
     /// the evaluation's. One on two spectra is one repaired nuclide.
     #[test]
     fn a_repair_counts_once_per_nuclide_and_is_a_gap() {
+        use crate::covariance_sample::FieldRepair;
         let repair = |spectrum| Repair {
             nuclide: "W182".to_string(),
             spectrum,
-            lambda_min: -1.0e-4,
-            lambda_max: 1.0e-2,
-            clipped_fraction: 0.01,
+            field: FieldRepair {
+                lambda_min: -1.0e-4,
+                largest_correlation_change: 1.0e-4,
+                correlation_frobenius_change: 2.0e-4,
+                cells: 2,
+                held_cells: 0,
+                converged: true,
+            },
             channels: Vec::new(),
         };
         let mut sigmas = SigmaReport::default();

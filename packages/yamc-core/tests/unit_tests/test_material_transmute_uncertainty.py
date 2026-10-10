@@ -940,7 +940,7 @@ def test_with_no_rate_drawn_the_repair_report_is_empty():
     """With no rate drawn, the repair report is empty and exact."""
     iron = _iron()
     # Half-lives only, so no cross-section rate is drawn whatever covariance
-    # the cached fixture carries, and the weighted inflation has nothing to
+    # the cached fixture carries, and the weighted change has nothing to
     # weigh. The values of a real repair and the nested layout are pinned in
     # Rust (covariance_sample.rs and the yani-python data_uncertainty.rs
     # tests).
@@ -953,8 +953,8 @@ def test_with_no_rate_drawn_the_repair_report_is_empty():
     assert info["covariance_repaired"] == []
     assert info["covariance_repairs"] == []
     assert info["covariance_repaired_outside_bound"] == []
-    assert info["worst_sigma_inflation"] == 0.0
-    assert info["rate_weighted_sigma_inflation"] is None
+    assert info["worst_sigma_change"] == 0.0
+    assert info["rate_weighted_sigma_change"] is None
     assert info["sigma_at_least_one"] == {}
     assert info["sigma_at_least_ten"] == {}
     assert info["sigma_at_least_one_outside_bound"] == {}
