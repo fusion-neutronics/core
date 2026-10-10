@@ -53,6 +53,18 @@ rustflags = [
     '--remap-path-prefix=/Users/runner=/build',
 ]
 
+# The Pyodide wheel (.github/workflows/ci-pyodide.yml). Same reason as above:
+# pyodide-build passes its link flags in CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS,
+# a target-specific source, so `[build].rustflags` is skipped for this target.
+# cargo joins that variable with this entry rather than replacing it, so the
+# remaps survive alongside pyodide-build's flags.
+[target.wasm32-unknown-emscripten]
+rustflags = [
+    '--remap-path-prefix=/root=/build',
+    '--remap-path-prefix=/home/runner=/build',
+    '--remap-path-prefix=/Users/runner=/build',
+]
+
 [alias]
 # GPU tests share a process-global cubecl client, so they must run
 # single-threaded (parallel launches corrupt results). See developer_info.md.
