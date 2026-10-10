@@ -34,10 +34,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        # The latest image of each OS. One macOS runner: macos-latest and
-        # macos-14 are both Apple Silicon now (macos-26-arm64 and
-        # macos-14-arm64), so running both repeated one architecture.
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # The latest image of each OS on every run. macos-latest and macos-14
+        # are both Apple Silicon (macos-26-arm64 and macos-14-arm64), so a pull
+        # request runs only the latest, which keeps it off the macOS queue PRs
+        # wait on. A push to main, a release and a manual dispatch add macos-14
+        # back, so the older macOS the wheels are built on still gets the Rust
+        # suite once per merge. A failure there opens an issue (main-health.yml).
+        os: >-
+          ${{ fromJSON(github.event_name == 'pull_request'
+          && '["ubuntu-latest","windows-latest","macos-latest"]'
+          || '["ubuntu-latest","windows-latest","macos-latest","macos-14"]') }}
     steps:
       - uses: actions/checkout@v7
       - name: Install system dependencies (Linux)
