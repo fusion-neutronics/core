@@ -2,8 +2,17 @@ name: Licenses
 
 on:
   pull_request:
+    # Only a dependency change can change the licence set.
+    paths: ['**/Cargo.toml', 'Cargo.lock', 'about.toml', 'about.hbs', '.github/workflows/licenses.yml']
   push:
     branches: [main]
+
+# A newer push to a pull request makes its older run moot, so that run is
+# cancelled. Only pull-request runs: a push to main, a release and a manual
+# dispatch always finish, so nothing that builds or publishes is cut short.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # License gate: `cargo about generate` fails if any dependency in the
 # shipped tree uses a license that is not in about.toml's `accepted`

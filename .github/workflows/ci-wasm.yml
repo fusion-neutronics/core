@@ -12,9 +12,20 @@ on:
   # Every pull request, whatever its base, so a PR stacked on another
   # PR's branch is tested before it is retargeted at main.
   pull_request:
+    # A change to prose alone cannot break a build or a test: no test, script or
+    # include_str! reads a Markdown file. Pushes to main and releases are not
+    # filtered.
+    paths-ignore: ['**/*.md', 'docs/**', 'mkdocs.yml', 'LICENSE*']
   release:
     types: [published]
   workflow_dispatch:
+
+# A newer push to a pull request makes its older run moot, so that run is
+# cancelled. Only pull-request runs: a push to main, a release and a manual
+# dispatch always finish, so nothing that builds or publishes is cut short.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always

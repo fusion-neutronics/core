@@ -6,9 +6,20 @@ on:
   # Every pull request, whatever its base, so a PR stacked on another
   # PR's branch is tested before it is retargeted at main.
   pull_request:
+    # A change to prose alone cannot break a build or a test: no test, script or
+    # include_str! reads a Markdown file. Pushes to main and releases are not
+    # filtered.
+    paths-ignore: ['**/*.md', 'docs/**', 'mkdocs.yml', 'LICENSE*']
   release:
     types: [published]
   workflow_dispatch:
+
+# A newer push to a pull request makes its older run moot, so that run is
+# cancelled. Only pull-request runs: a push to main, a release and a manual
+# dispatch always finish, so nothing that builds or publishes is cut short.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,8 +34,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        # macos-latest = Intel (x86_64), macos-14 = Apple Silicon (ARM64)
-        os: [ubuntu-latest, windows-latest, macos-latest, macos-14]
+        # The latest image of each OS on every run. macos-latest and macos-14
+        # are both Apple Silicon (macos-26-arm64 and macos-14-arm64), so a pull
+        # request runs only the latest, which keeps it off the macOS queue PRs
+        # wait on. A push to main, a release and a manual dispatch add macos-14
+        # back, so the older macOS the wheels are built on still gets the Rust
+        # suite once per merge. A failure there opens an issue (main-health.yml).
+        os: >-
+          ${{ fromJSON(github.event_name == 'pull_request'
+          && '["ubuntu-latest","windows-latest","macos-latest"]'
+          || '["ubuntu-latest","windows-latest","macos-latest","macos-14"]') }}
     steps:
       - uses: actions/checkout@v7
       - name: Install system dependencies (Linux)
@@ -113,6 +132,28 @@ jobs:
           cargo run -p yamc --example flux_example
       - name: Test yamt benchmark example
         run: cargo run -p yamt --example benchmark --release
+      - name: Install cross-compilers (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Test cross-compilation (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          # aarch64 is graviola-supported, so it gets the full default-feature
+          # workspace check (the C-free HTTPS `download-tls` path).
+          rustup target add aarch64-unknown-linux-gnu
+          cargo check --workspace --target aarch64-unknown-linux-gnu
+          # graviola supports x86_64 + aarch64 only. On other arches yamc uses the
+          # crypto-free HTTP-only download path (or local data files), so verify
+          # core + http-only build on representative HPC arches. These are pure
+          # Rust (no cross C toolchain needed). 32-bit ARM is dropped: not a
+          # target for this memory/compute-heavy workload.
+          rustup target add powerpc64le-unknown-linux-gnu riscv64gc-unknown-linux-gnu
+          for t in powerpc64le-unknown-linux-gnu riscv64gc-unknown-linux-gnu; do
+            cargo check -p yamc --no-default-features --features arrow,download --target "$t"
+          done
 
   # There is no `gpu_tests_compile` job any more. It existed because "the `gpu`
   # feature's integration tests are compiled by no other job", which stopped
@@ -127,10 +168,15 @@ jobs:
   # already done by `build_and_test` above.
 
   # Code coverage (informational only -- never fails the build yet).
-  # Self-contained: prints the % in the log, uploads the lcov + HTML report as
-  # an artifact, and posts the summary as a PR comment. No external service.
+  # Self-contained: prints the % in the log and uploads the lcov + HTML report
+  # as an artifact. No external service.
+  #
+  # Not on pull requests: it is a second, instrumented run of the whole Linux
+  # Rust suite that build_and_test already runs, and it gates nothing. A push to
+  # main (or a manual dispatch) still produces the report.
   coverage:
     name: Coverage (Linux, informational)
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -178,16 +224,6 @@ jobs:
           cargo llvm-cov --workspace --no-fail-fast --summary-only | tee coverage-summary.txt
       - name: Generate HTML report
         run: cargo llvm-cov report --html
-      - name: Build PR comment body
-        if: github.event_name == 'pull_request'
-        run: |
-          {
-            echo '### Coverage (workspace, default features - informational)'
-            echo '```'
-            cat coverage-summary.txt
-            echo '```'
-            echo '_GPU device tests and the `mpi` feature are excluded from this run._'
-          } > coverage-comment.md
       - name: Upload coverage report
         uses: actions/upload-artifact@v7
         with:
@@ -196,13 +232,6 @@ jobs:
             coverage.lcov
             coverage-summary.txt
             target/llvm-cov/html
-      - name: Post coverage PR comment
-        if: github.event_name == 'pull_request'
-        uses: marocchino/sticky-pull-request-comment@v3
-        with:
-          header: coverage
-          recreate: true
-          path: coverage-comment.md
 
   # The live origin must serve, for every library keyword, a latest.json whose
   # format_version this build reads, naming a manifest whose size and sha256
@@ -229,117 +258,6 @@ jobs:
           cargo test -p yamc-nuclide --features download-tls --lib --
           --ignored origin_serves_a_readable_release_for_every_keyword --nocapture
 
-  # Test MPI build
-  test-mpi:
-    name: Test MPI on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-14]
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libhdf5-dev cmake libopenmpi-dev openmpi-bin
-
-      - name: Install system dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install hdf5 open-mpi
-
-      - name: Set up Rust
-        run: rustup update stable && rustup default stable
-
-      # `mpi-sys` bakes an absolute `-L` into its build-script output, and cargo
-      # will not re-run a build script whose Rust-side inputs have not changed.
-      # So when the macOS image upgraded open-mpi from 5.0.9 to 5.0.10 the
-      # cached output kept pointing at
-      # /opt/homebrew/Cellar/open-mpi/5.0.9/lib, a directory that no longer
-      # existed, and every build here failed with `ld: library 'mpi' not found`
-      # on a full cache hit. Keying on the native version is what makes an image
-      # upgrade invalidate the cache instead of poisoning it.
-      - name: Record the native MPI version for the cache key
-        id: mpi
-        shell: bash
-        run: |
-          version="$( { mpirun --version 2>/dev/null || mpiexec --version 2>/dev/null; } \
-                      | head -1 | tr -cs '[:alnum:].' '-' | sed 's/^-*//; s/-*$//' )"
-          echo "version=${version:-unknown}" >> "$GITHUB_OUTPUT"
-          echo "native MPI: ${version:-unknown}"
-
-      # Cache the dependency build. Without this every Rust job recompiled the
-      # whole workspace -- arrow, faer, wgpu, cubecl -- from scratch on every
-      # push, which is most of why these jobs ran as long as they did.
-      #
-      # Deliberately NOT the `ci` key the workspace tests use. That cache is
-      # shared with jobs that never link MPI, so this job's `mpi-sys` output
-      # went in there and came back out on a machine whose open-mpi had moved.
-      # Its own key costs one cold build per MPI version and keeps a native
-      # upgrade from reaching jobs that do not link against it.
-      - name: Cache the Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-mpi-${{ steps.mpi.outputs.version }}
-          cache-on-failure: true
-
-      - name: Verify MPI installation
-        run: |
-          which mpicc
-          mpicc --version
-          which mpirun || which mpiexec
-
-      - name: Cache nuclear-data test fixtures
-        uses: actions/cache@v6
-        with:
-          # The platform cache directory yamc resolves (url_cache::cache_root):
-          # one of these exists on any runner, the others are ignored.
-          path: |
-            ~/.cache/yamc
-            ~/Library/Caches/yamc
-            ~/AppData/Local/yamc
-          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
-      - name: Fetch nuclear-data test fixtures
-        run: python scripts/fetch_test_fixtures.py
-
-      - name: Build with MPI feature
-        run: cargo build -p yamc --features mpi --verbose
-
-      - name: Test with MPI feature
-        env:
-          YAMC_REQUIRE_FIXTURES: "1"
-        run: cargo test -p yamc --features mpi --verbose
-
-      - name: Run TBR example with MPI
-        run: |
-          cargo build -p yamc --example tbr --features mpi --release
-          mpirun -np 2 ./target/release/examples/tbr
-
-      - name: Run TBR example serial (for comparison)
-        run: |
-          cargo run -p yamc --example tbr --release
-
-      - name: Install cross-compilers (Linux only)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-
-      - name: Test cross-compilation (Linux only)
-        if: runner.os == 'Linux'
-        run: |
-          # aarch64 is graviola-supported, so it gets the full default-feature
-          # workspace check (the C-free HTTPS `download-tls` path).
-          rustup target add aarch64-unknown-linux-gnu
-          cargo check --workspace --target aarch64-unknown-linux-gnu
-          # graviola supports x86_64 + aarch64 only. On other arches yamc uses the
-          # crypto-free HTTP-only download path (or local data files), so verify
-          # core + http-only build on representative HPC arches. These are pure
-          # Rust (no cross C toolchain needed). 32-bit ARM is dropped: not a
-          # target for this memory/compute-heavy workload.
-          rustup target add powerpc64le-unknown-linux-gnu riscv64gc-unknown-linux-gnu
-          for t in powerpc64le-unknown-linux-gnu riscv64gc-unknown-linux-gnu; do
-            cargo check -p yamc --no-default-features --features arrow,download --target "$t"
-          done
+  # MPI is tested in ci-python.yml's test-mpi, which runs the Rust MPI tests
+  # and the Rust tbr example as well as the Python ones. One job per OS builds
+  # and links open-mpi once instead of twice, and that job gates releases.

@@ -6,6 +6,10 @@ on:
   # Every pull request, whatever its base, so a PR stacked on another
   # PR's branch is tested before it is retargeted at main.
   pull_request:
+    # A change to prose alone cannot break a build or a test: no test, script or
+    # include_str! reads a Markdown file. Pushes to main and releases are not
+    # filtered.
+    paths-ignore: ['**/*.md', 'docs/**', 'mkdocs.yml', 'LICENSE*']
   release:
     types: [published]
   # A release tag NAMES EVERY PROJECT IT PUBLISHES, AND THE VERSION EACH GOES
@@ -67,6 +71,13 @@ on:
         description: "Override yani-core's version (default: crates/yani-python/Cargo.toml)"
         type: string
         required: false
+
+# A newer push to a pull request makes its older run moot, so that run is
+# cancelled. Only pull-request runs: a push to main, a release and a manual
+# dispatch always finish, so nothing that builds or publishes is cut short.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # A crates.io hiccup must not cost a release. Cargo gives up after three tries
 # spread over about ten seconds, and that is exactly how the yani-core 0.11.0
@@ -665,7 +676,10 @@ jobs:
           name: wheels-macos-aarch64
           path: packages/yamc-core/dist
 
-  # Test MPI build and functionality
+  # Test MPI build and functionality: the Rust `mpi` feature and the Python
+  # bindings built with it. This is the only MPI job. ci-rust.yml used to run
+  # the Rust half on the same two runners, building and linking open-mpi a
+  # second time.
   test-mpi:
     name: Test MPI on ${{ matrix.os }}
     needs: [plan]
@@ -685,30 +699,30 @@ jobs:
         with:
           python-version: "3.13"
 
+      # hdf5 and cmake are what the Rust workspace tests below install for
+      # themselves in ci-rust.yml.
       - name: Install MPI (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libopenmpi-dev openmpi-bin
+          sudo apt-get install -y libhdf5-dev cmake libopenmpi-dev openmpi-bin
 
       - name: Install MPI (macOS)
         if: matrix.os == 'macos-14'
         run: |
-          brew install open-mpi
+          brew install hdf5 open-mpi
 
-      # Same fix as the MPI job in ci-rust.yml. `mpi-sys` bakes an absolute `-L`
+      # `mpi-sys` bakes an absolute `-L`
       # into its build-script output and cargo will not re-run a build script
       # whose Rust-side inputs have not changed, so a cache saved when the macOS
       # image carried open-mpi 5.0.9 keeps pointing at
       # /opt/homebrew/Cellar/open-mpi/5.0.9/lib after the image moves on, and
       # the link fails with `ld: library 'mpi' not found` on a full cache hit.
       #
-      # The ci-rust.yml job caches through an explicit `Swatinem/rust-cache`
-      # step. This one caches through `actions-rust-lang/setup-rust-toolchain`,
-      # which does it internally and keys on the job rather than on the native
-      # library, so it poisons itself across runs in exactly the same way. That is why a pull request
-      # could pass here and fail there, or pass or fail by which runner image
-      # it drew.
+      # `actions-rust-lang/setup-rust-toolchain`'s own cache keys on the job
+      # rather than on the native library, so it poisons itself across runs in
+      # exactly this way, and a pull request passed or failed by which runner
+      # image it drew.
       - name: Record the native MPI version for the cache key
         id: mpi
         shell: bash
@@ -719,8 +733,7 @@ jobs:
           echo "native MPI: ${version:-unknown}"
 
       # `cache: false` and an explicit cache below, rather than this action's
-      # built-in one, so the key can carry the MPI version. It is also what
-      # makes the two MPI jobs use one mechanism instead of two.
+      # built-in one, so the key can carry the MPI version.
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -793,6 +806,24 @@ jobs:
           source .venv/bin/activate
           python examples/python/tbr.py
 
+      - name: Build the Rust crate with the MPI feature
+        run: cargo build -p yamc --features mpi --verbose
+
+      - name: Test the Rust crate with the MPI feature
+        env:
+          # The fixtures were fetched above, so the data-dependent tests must
+          # read them rather than self-skip (crates/yamc/tests/fixture_cache_is_readable.rs).
+          YAMC_REQUIRE_FIXTURES: "1"
+        run: cargo test -p yamc --features mpi --verbose
+
+      - name: Run the Rust TBR example with MPI
+        run: |
+          cargo build -p yamc --example tbr --features mpi --release
+          mpirun -np 2 ./target/release/examples/tbr
+
+      - name: Run the Rust TBR example serial (for comparison)
+        run: cargo run -p yamc --example tbr --release
+
   # Test wheels on each platform
   test:
     name: Test on ${{ matrix.os }} / Python ${{ matrix.python-version }}
@@ -810,11 +841,19 @@ jobs:
       # Turn it off so the other ~5 jobs keep running and the PR can still
       # land if only the flaky one died.
       fail-fast: false
+      # Only the oldest and newest supported Python: middle versions exercise
+      # the same abi3 wheel and rarely surface unique regressions.
+      #
+      # A pull request runs both on Linux and one on each other platform (the
+      # oldest on Windows, the newest on macOS), so both ends are covered
+      # somewhere and the macOS pool, the one PRs queue on, carries one job
+      # instead of two. A push to main and a release run all six, so `collect`
+      # still gates publishing on the full set.
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]
-        # Test only oldest and newest supported Python -- middle versions
-        # exercise the same abi3 wheel and rarely surface unique regressions.
-        python-version: ["3.10", "3.14"]
+        include: >-
+          ${{ fromJSON(github.event_name == 'pull_request'
+          && '[{"os":"ubuntu-latest","python-version":"3.10"},{"os":"ubuntu-latest","python-version":"3.14"},{"os":"windows-latest","python-version":"3.10"},{"os":"macos-14","python-version":"3.14"}]'
+          || '[{"os":"ubuntu-latest","python-version":"3.10"},{"os":"ubuntu-latest","python-version":"3.14"},{"os":"windows-latest","python-version":"3.10"},{"os":"windows-latest","python-version":"3.14"},{"os":"macos-14","python-version":"3.10"},{"os":"macos-14","python-version":"3.14"}]') }}
     steps:
       - uses: actions/checkout@v7
 
