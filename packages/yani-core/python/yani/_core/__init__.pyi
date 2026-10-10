@@ -28,6 +28,7 @@ __all__ = [
     "Reaction",
     "TransmutationChain",
     "TransmutationResults",
+    "cache_dir",
     "convert_branching",
     "convert_neutron_transport",
     "convert_neutron_xs",
@@ -2615,6 +2616,17 @@ class TransmutationResults:
         the saving ``transmute`` made over solving them one at a time.
         """
     @property
+    def data_releases(self) -> dict:
+        r"""
+        The published nuclear-data release each library keyword came from, as
+        a dict keyed by keyword. Each value is a dict with ``release`` (the
+        release identifier), ``manifest_sha256`` (the hash of that release's
+        manifest, which pins every file in it), ``format_version`` and
+        ``offline`` (True when the data origin was unreachable and the newest
+        complete cached release was used). Empty when every data source was a
+        local directory.
+        """
+    @property
     def num_steps(self) -> builtins.int:
         r"""
         Number of transmutation steps.
@@ -3774,6 +3786,26 @@ class TransmutationResults:
             W186(n,2n)W185                   46.8%
         """
     def __repr__(self) -> builtins.str: ...
+
+def cache_dir() -> builtins.str:
+    r"""
+    The directory downloaded nuclear data is cached in.
+    
+    A folder in the platform's per-user cache directory (under ``~/.cache`` on
+    Linux, or ``$XDG_CACHE_HOME`` when that is set; ``~/Library/Caches`` on
+    macOS; ``%LOCALAPPDATA%`` on Windows), shared by both wheels. Inside it
+    each library keeps one folder per published release,
+    ``<keyword>/<release>/``, holding that release's ``manifest.json`` and the
+    files downloaded from it, each verified against the manifest. Read only:
+    to use data from somewhere else, point the data source at a local
+    directory instead.
+    
+    Returns:
+        The cache directory as a string, whether or not it exists yet.
+    
+    Raises:
+        RuntimeError: If the platform resolves no home directory.
+    """
 
 def convert_branching(neutron_files: typing.Sequence[builtins.str], decay_files: typing.Sequence[builtins.str], output_path: builtins.str, library: builtins.str = '', decay_library: builtins.str = '', data_version: builtins.str = '', created_utc: typing.Optional[builtins.str] = None, tol_ev: builtins.float = 3000.0, linearize_tol: builtins.float = 0.001) -> dict:
     r"""

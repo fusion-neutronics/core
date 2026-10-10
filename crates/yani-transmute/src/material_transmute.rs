@@ -510,6 +510,7 @@ pub fn transmute_materials(
     // Kept so routes can be derived from the same topology the solve used,
     // rather than from whatever a second load of the chain path returns.
     results.chain = Some(Arc::clone(&chain));
+    results.data_releases = yamc_nuclide::url_cache::data_releases();
     Ok(results)
 }
 

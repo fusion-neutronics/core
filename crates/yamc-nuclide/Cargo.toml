@@ -47,6 +47,10 @@ rustls-graviola = { version = "0.4", optional = true }
 # HOME (a container, a service, `env -i`) has a home directory by those and
 # not by the variable.
 etcetera = "0.11"
+# Verifies every downloaded file against its release manifest. Pure Rust and
+# not optional: the browser fetcher in yamc verifies through the same
+# `storage::release` helpers, and yamc already links this version.
+sha2 = "0.10"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 

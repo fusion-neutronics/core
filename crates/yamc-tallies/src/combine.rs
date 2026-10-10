@@ -280,6 +280,19 @@ fn validate_compatible(
 ) -> Result<(), String> {
     let reference = &accumulated[0];
     for run in &next.runs {
+        // The fingerprint names a library, not its release, so two runs on two
+        // releases of one library match there and are caught here.
+        for (keyword, release) in &run.data_releases {
+            if let Some(ref_release) = reference.data_releases.get(keyword) {
+                if ref_release.manifest_sha256 != release.manifest_sha256 {
+                    return Err(format!(
+                        "cannot combine: the runs read different releases of {keyword}: \
+                         {} vs {}",
+                        ref_release.release, release.release
+                    ));
+                }
+            }
+        }
         if run.fingerprint != reference.fingerprint {
             // Try to give a precise reason: differing nuclear data is the
             // named case, otherwise a generic identity mismatch.
@@ -464,6 +477,7 @@ mod tests {
             elapsed_secs: 1.0,
             fingerprint: fingerprint.into(),
             data_libraries: BTreeMap::new(),
+            data_releases: BTreeMap::new(),
             compute: "cpu".into(),
             yamc_version: "test".into(),
             mpi_size: 1,
@@ -633,6 +647,43 @@ mod tests {
         );
         let err = combine_results(&[&a]).unwrap_err();
         assert!(err.contains("at least two"), "got: {err}");
+    }
+
+    /// Two releases of one library share a fingerprint (it names the library,
+    /// not the release), so the release check is what refuses them.
+    #[test]
+    fn refuses_runs_on_different_releases_of_one_library() {
+        let with_release = |seed: u64, release: &str| {
+            let mut r = run(seed, "fp");
+            r.data_releases.insert(
+                "endf-b8.1".into(),
+                yamc_nuclide::storage::release::DataRelease {
+                    release: release.into(),
+                    manifest_sha256: format!("sha-of-{release}"),
+                    format_version: 2,
+                    offline: false,
+                },
+            );
+            r
+        };
+        let a = sim(
+            vec![result_from_samples(tally("flux"), &[1.0, 2.0], 1.0)],
+            vec![with_release(1, "2026-10-01")],
+        );
+        let b = sim(
+            vec![result_from_samples(tally("flux"), &[3.0, 4.0], 1.0)],
+            vec![with_release(2, "2026-11-15")],
+        );
+        let err = combine_results(&[&a, &b]).unwrap_err();
+        assert!(
+            err.contains("different releases of endf-b8.1"),
+            "got: {err}"
+        );
+        let c = sim(
+            vec![result_from_samples(tally("flux"), &[3.0, 4.0], 1.0)],
+            vec![with_release(3, "2026-10-01")],
+        );
+        assert!(combine_results(&[&a, &c]).is_ok());
     }
 
     #[test]

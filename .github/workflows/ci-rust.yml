@@ -93,7 +93,12 @@ jobs:
       - name: Cache nuclear-data test fixtures
         uses: actions/cache@v6
         with:
-          path: ~/.cache/yamc
+          # The platform cache directory yamc resolves (url_cache::cache_root):
+          # one of these exists on any runner, the others are ignored.
+          path: |
+            ~/.cache/yamc
+            ~/Library/Caches/yamc
+            ~/AppData/Local/yamc
           key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
       - name: Fetch nuclear-data test fixtures
         shell: bash
@@ -198,7 +203,12 @@ jobs:
       - name: Cache nuclear-data test fixtures
         uses: actions/cache@v6
         with:
-          path: ~/.cache/yamc
+          # The platform cache directory yamc resolves (url_cache::cache_root):
+          # one of these exists on any runner, the others are ignored.
+          path: |
+            ~/.cache/yamc
+            ~/Library/Caches/yamc
+            ~/AppData/Local/yamc
           key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
       - name: Fetch nuclear-data test fixtures
         run: python3 scripts/fetch_test_fixtures.py
@@ -223,13 +233,16 @@ jobs:
             coverage-summary.txt
             target/llvm-cov/html
 
-  # The data pins compiled into yamc-nuclide must name the stamps the live
-  # origin serves. A pin the origin does not carry fails every download, fresh
-  # installs included, so a pull request that bumps a pin goes red until the
-  # data is uploaded, and main goes red if the origin moves without the pin.
-  # The release gate in ci-python.yml runs the same test.
-  data-pins:
-    name: Data pins match the origin
+  # The live origin must serve, for every library keyword, a latest.json whose
+  # format_version this build reads, naming a manifest whose size and sha256
+  # match. A keyword whose latest.json is absent has not been republished in
+  # the release layout yet: the test prints a ::notice:: and skips it, and the
+  # first publish in that layout turns the check on. Anything else (a format
+  # this build cannot read, a manifest that does not match its pointer, an
+  # unreachable origin) fails. The release gate in ci-python.yml runs the same
+  # test.
+  data-release:
+    name: The origin serves a release this build reads
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -240,10 +253,10 @@ jobs:
         with:
           shared-key: ci
           cache-on-failure: true
-      - name: The origin serves every pinned data stamp
+      - name: The origin serves a readable, verified release for every keyword
         run: >-
           cargo test -p yamc-nuclide --features download-tls --lib --
-          --ignored origin_serves_every_pinned_data_version --nocapture
+          --ignored origin_serves_a_readable_release_for_every_keyword --nocapture
 
   # MPI is tested in ci-python.yml's test-mpi, which runs the Rust MPI tests
   # and the Rust tbr example as well as the Python ones. One job per OS builds

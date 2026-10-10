@@ -31,6 +31,34 @@ pub fn get_cross_section_data(py: Python<'_>) -> PyResult<Py<PyAny>> {
     Ok(dict.into_any().unbind())
 }
 
+/// The directory downloaded nuclear data is cached in.
+///
+/// A folder in the platform's per-user cache directory (under ``~/.cache`` on
+/// Linux, or ``$XDG_CACHE_HOME`` when that is set; ``~/Library/Caches`` on
+/// macOS; ``%LOCALAPPDATA%`` on Windows), shared by both wheels. Inside it
+/// each library keeps one folder per published release,
+/// ``<keyword>/<release>/``, holding that release's ``manifest.json`` and the
+/// files downloaded from it, each verified against the manifest. Read only:
+/// to use data from somewhere else, point the data source at a local
+/// directory instead.
+///
+/// Returns:
+///     The cache directory as a string, whether or not it exists yet.
+///
+/// Raises:
+///     RuntimeError: If the platform resolves no home directory.
+#[gen_stub_pyfunction]
+#[pyfunction]
+pub fn cache_dir() -> PyResult<String> {
+    yamc_nuclide::url_cache::cache_root()
+        .map(|p| p.to_string_lossy().into_owned())
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "no nuclear-data cache directory: the platform resolved no home directory",
+            )
+        })
+}
+
 /// Set the cross-section data mapping.
 ///
 /// Accepts ``None`` to clear, a string for a global library keyword or

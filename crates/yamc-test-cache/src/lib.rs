@@ -67,25 +67,29 @@ pub fn on_ci() -> bool {
 }
 
 /// Root of the fixture cache, as [`yamc_nuclide::url_cache::cache_root`]
-/// resolves it: `YAMC_CACHE_DIR` when set, else `<home>/.cache/yamc`.
+/// resolves it: the platform cache directory with `yamc` appended
+/// (`~/.cache/yamc` on Linux, `~/Library/Caches/yamc` on macOS,
+/// `%LOCALAPPDATA%\yamc` on Windows). `scripts/fetch_test_fixtures.py`
+/// resolves the same directory.
 ///
-/// Panics when neither resolves. That is a broken environment rather than an
+/// Panics when it does not resolve. That is a broken environment rather than an
 /// empty cache, and the two must not look alike: skipping on it lets a
 /// wrongly resolved cache pass silently.
 pub fn root() -> PathBuf {
-    yamc_nuclide::url_cache::cache_root().expect(
-        "no nuclear-data cache location: set YAMC_CACHE_DIR, or HOME (USERPROFILE on Windows)",
-    )
+    yamc_nuclide::url_cache::cache_root()
+        .expect("no nuclear-data cache location: the platform resolved no home directory")
 }
 
-/// Path a fixture for `nuclide` would occupy, whether or not it is there.
+/// Path a fixture for `nuclide` would occupy, whether or not it is there:
+/// `<root>/endf-b8.1-<nuclide>.arrow`, the folder
+/// `scripts/fetch_test_fixtures.py` writes. The fixtures are read as local
+/// directories, so this layout is the fixture script's own and not the
+/// downloader's release layout (`<root>/<keyword>/<release>/...`).
 ///
 /// Returned as a `String` because that is what the load entry points take.
 pub fn nuclide_path(nuclide: &str) -> String {
-    yamc_nuclide::url_cache::cached_entry_path(LIBRARY, nuclide)
-        .expect(
-            "no nuclear-data cache location: set YAMC_CACHE_DIR, or HOME (USERPROFILE on Windows)",
-        )
+    root()
+        .join(format!("{LIBRARY}-{nuclide}.arrow"))
         .to_string_lossy()
         .into_owned()
 }

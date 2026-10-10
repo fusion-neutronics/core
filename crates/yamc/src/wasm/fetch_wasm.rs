@@ -13,6 +13,19 @@
 //! them, and the next nuclide starts once this one is registered. A progress
 //! callback, when the host passes one, hears about each nuclide as it starts.
 //!
+//! The library URL names a library's folder on the origin (for example
+//! `https://yamc-data.xsplot.com/endf-b8.1`). Before any nuclide is fetched its
+//! `latest.json` names the current release, whose `manifest.json` is fetched,
+//! checked against the pointer's size and sha256, and used for the rest of the
+//! fetch: every section comes from `<library>/<release>/`, an optional section
+//! the manifest does not list is not requested at all, and a section fetched
+//! whole is checked against its manifest size and sha256 before it is
+//! registered. A section fetched as byte ranges cannot be checked against a
+//! whole-file hash and is registered unverified: the browser path keeps the
+//! per-temperature ranges because they are most of its saving, and the native
+//! downloader, which downloads and verifies every file whole, is the verified
+//! path.
+//!
 //! The origin answers a `Range` request with 206 and the bytes asked for, or,
 //! if some proxy on the way dropped the header, with 200 and the whole object.
 //! The second is not an error: what arrived is the entire file and is
@@ -33,6 +46,9 @@ use web_sys::{RequestInit, Response};
 use nuclear_data_schema::reaction_ranges::{splice_spans, Range};
 use yamc_nuclide::in_memory_storage::InMemoryStorage;
 use yamc_nuclide::nuclide_arrow::read_available_temperatures;
+use yamc_nuclide::storage::release::{
+    parse_latest, parse_manifest, sha256_hex, verify, ManifestFile, Release, LATEST,
+};
 use yamc_nuclide::storage::Storage;
 
 use super::fetch_plan::{
@@ -182,17 +198,32 @@ fn start_section(base_url: &str, plan: SectionPlan) -> SectionFetch {
 #[derive(Default)]
 struct Stats {
     requests: usize,
+    /// Section bytes, the data itself.
     bytes: usize,
+    /// The release pointer and manifest, counted apart so `bytes` stays the
+    /// measure of the data a model needed.
+    metadata_bytes: usize,
 }
 
 /// Collect a section. `Ok(Some(bytes))` is the object, whole or spliced from
-/// its spans; `Ok(None)` is an absent optional section.
-async fn finish_section(fetch: SectionFetch, stats: &mut Stats) -> Result<Option<Vec<u8>>, String> {
+/// its spans; `Ok(None)` is an absent optional section. A whole object is
+/// checked against `expected`, its manifest entry; spliced spans are not.
+async fn finish_section(
+    fetch: SectionFetch,
+    expected: Option<&ManifestFile>,
+    stats: &mut Stats,
+) -> Result<Option<Vec<u8>>, String> {
     let SectionFetch {
         plan,
         url,
         requests,
     } = fetch;
+    let checked = |bytes: Vec<u8>| -> Result<Vec<u8>, String> {
+        if let Some(expected) = expected {
+            verify(&url, expected, bytes.len() as u64, &sha256_hex(&bytes))?;
+        }
+        Ok(bytes)
+    };
     stats.requests += requests.len();
     if plan.spans.is_none() {
         let request = requests
@@ -202,7 +233,7 @@ async fn finish_section(fetch: SectionFetch, stats: &mut Stats) -> Result<Option
         return match finish_retrying(request).await? {
             Fetched::Body { bytes, .. } => {
                 stats.bytes += bytes.len();
-                Ok(Some(bytes))
+                Ok(Some(checked(bytes)?))
             }
             Fetched::Absent if plan.required => {
                 Err(format!("{url}: 404, and this section is required"))
@@ -227,7 +258,7 @@ async fn finish_section(fetch: SectionFetch, stats: &mut Stats) -> Result<Option
                 partial: false,
             } => {
                 stats.bytes += bytes.len();
-                return Ok(Some(bytes));
+                return Ok(Some(checked(bytes)?));
             }
             // The nuclide has a version.json naming ranges but no object to
             // range into, which is a broken publish rather than an absent
@@ -240,6 +271,79 @@ async fn finish_section(fetch: SectionFetch, stats: &mut Stats) -> Result<Option
         }
     }
     Ok(Some(splice_spans(&bodies)))
+}
+
+/// The release a fetch reads from.
+struct ReleaseView {
+    /// `<library_url>/<release>`, the root every section URL hangs off.
+    base_url: String,
+    release: Release,
+}
+
+impl ReleaseView {
+    /// Drop the sections the manifest does not list, refusing a required one
+    /// (the nuclide or element is not in the release), and pair each kept one
+    /// with its manifest entry.
+    fn listed(
+        &self,
+        dir: &str,
+        plan: Vec<SectionPlan>,
+        what: &str,
+    ) -> Result<Vec<(SectionPlan, ManifestFile)>, String> {
+        let mut kept = Vec::with_capacity(plan.len());
+        for section in plan {
+            match self.release.file(&format!("{dir}/{}", section.name)) {
+                Some(entry) => kept.push((section, entry.clone())),
+                None if section.required => {
+                    return Err(format!(
+                        "{what} is not available in '{}' release {} ({dir}/{} is not in its \
+                         manifest)",
+                        self.release.manifest.keyword, self.release.manifest.release, section.name
+                    ))
+                }
+                None => {}
+            }
+        }
+        Ok(kept)
+    }
+}
+
+/// Resolve the library's current release: `latest.json`, then the manifest it
+/// names, checked against it. The keyword is the last segment of
+/// `library_url`, which is how the origin lays libraries out.
+async fn resolve_release(library_url: &str, stats: &mut Stats) -> Result<ReleaseView, String> {
+    let library_url = library_url.trim_end_matches('/');
+    let keyword = library_url.rsplit('/').next().unwrap_or(library_url);
+    let latest_url = format!("{library_url}/{LATEST}");
+    stats.requests += 1;
+    let latest = match finish_retrying(start(&latest_url, None)).await? {
+        Fetched::Body { bytes, .. } => bytes,
+        Fetched::Absent => {
+            return Err(format!(
+                "{latest_url}: 404. '{keyword}' has not been published in the release layout \
+                 yet, which this build reads; use a page exported by a yamc release that reads \
+                 the older layout, or embed the cross sections in the page."
+            ))
+        }
+    };
+    let pointer = parse_latest(keyword, &latest)?;
+    let manifest_url = format!("{library_url}/{}", pointer.manifest);
+    stats.requests += 1;
+    let manifest = match finish_retrying(start(&manifest_url, None)).await? {
+        Fetched::Body { bytes, .. } => bytes,
+        Fetched::Absent => {
+            return Err(format!(
+                "{manifest_url}: 404, named by {latest_url}; the release is not completely \
+                 published, try again shortly"
+            ))
+        }
+    };
+    stats.metadata_bytes += latest.len() + manifest.len();
+    let release = parse_manifest(keyword, &manifest, Some(&pointer))?;
+    Ok(ReleaseView {
+        base_url: format!("{library_url}/{}", pointer.release),
+        release,
+    })
 }
 
 /// The host's progress callback, if any: `(message, done, total)`.
@@ -272,32 +376,36 @@ struct Targets {
 /// Fetch and register one nuclide. Returns whether its reactions were ranged.
 async fn fetch_nuclide(
     storage: &InMemoryStorage,
-    library_url: &str,
+    release: &ReleaseView,
     name: &str,
     temperatures: Option<&BTreeSet<String>>,
     stats: &mut Stats,
 ) -> Result<bool, String> {
-    let base_url = neutron_url(library_url, name);
+    let base_url = neutron_url(&release.base_url, name);
     let dir = store_dir(name);
+    let published = format!("neutron/{name}.arrow");
+    let what = format!("Nuclide '{name}'");
 
     // The stamp and the temperature list first: the plan for everything else
     // needs the byte-range index out of one and the published temperatures
     // out of the other.
-    let mut first = Vec::with_capacity(2);
-    for name in ["version.json", "nuclide.arrow"] {
-        first.push(start_section(
-            &base_url,
-            SectionPlan {
-                name,
-                required: true,
-                spans: None,
-            },
-        ));
-    }
+    let first_plan = ["version.json", "nuclide.arrow"]
+        .into_iter()
+        .map(|name| SectionPlan {
+            name,
+            required: true,
+            spans: None,
+        })
+        .collect();
+    let first: Vec<(SectionFetch, ManifestFile)> = release
+        .listed(&published, first_plan, &what)?
+        .into_iter()
+        .map(|(plan, entry)| (start_section(&base_url, plan), entry))
+        .collect();
     let mut first_bytes = Vec::with_capacity(2);
-    for fetch in first {
+    for (fetch, entry) in first {
         let section = fetch.plan.name;
-        let bytes = finish_section(fetch, stats)
+        let bytes = finish_section(fetch, Some(&entry), stats)
             .await?
             .expect("a required section is bytes or an error");
         storage.add_file(format!("{dir}/{section}"), bytes.clone());
@@ -320,13 +428,14 @@ async fn fetch_nuclide(
         .iter()
         .any(|section| section.name == "reactions.arrow" && section.spans.is_some());
 
-    let fetches: Vec<SectionFetch> = plan
+    let fetches: Vec<(SectionFetch, ManifestFile)> = release
+        .listed(&published, plan, &what)?
         .into_iter()
-        .map(|section| start_section(&base_url, section))
+        .map(|(section, entry)| (start_section(&base_url, section), entry))
         .collect();
-    for fetch in fetches {
+    for (fetch, entry) in fetches {
         let section = fetch.plan.name;
-        if let Some(bytes) = finish_section(fetch, stats).await? {
+        if let Some(bytes) = finish_section(fetch, Some(&entry), stats).await? {
             storage.add_file(format!("{dir}/{section}"), bytes);
         }
     }
@@ -336,19 +445,24 @@ async fn fetch_nuclide(
 /// Fetch and register one element's photon data.
 async fn fetch_element(
     storage: &InMemoryStorage,
-    library_url: &str,
+    release: &ReleaseView,
     element: &str,
     stats: &mut Stats,
 ) -> Result<(), String> {
-    let base_url = photon_url(library_url, element);
+    let base_url = photon_url(&release.base_url, element);
     let dir = store_dir(element);
-    let fetches: Vec<SectionFetch> = plan_photon_sections()
+    let fetches: Vec<(SectionFetch, ManifestFile)> = release
+        .listed(
+            &format!("photon/{element}.arrow"),
+            plan_photon_sections(),
+            &format!("Photon data for '{element}'"),
+        )?
         .into_iter()
-        .map(|section| start_section(&base_url, section))
+        .map(|(section, entry)| (start_section(&base_url, section), entry))
         .collect();
-    for fetch in fetches {
+    for (fetch, entry) in fetches {
         let section = fetch.plan.name;
-        if let Some(bytes) = finish_section(fetch, stats).await? {
+        if let Some(bytes) = finish_section(fetch, Some(&entry), stats).await? {
             storage.add_file(format!("{dir}/{section}"), bytes);
         }
     }
@@ -367,6 +481,20 @@ async fn fetch_all(
     let mut ranged = Vec::new();
     let mut elements = Vec::new();
     let mut done = 0;
+    if total == 0 {
+        progress.report("Done", 0, 0);
+        return Ok(serde_json::json!({
+            "status": "ok",
+            "nuclides": nuclides,
+            "ranged": ranged,
+            "elements": elements,
+            "requests": 0,
+            "bytes": 0,
+            "metadata_bytes": 0,
+        })
+        .to_string());
+    }
+    let release = resolve_release(&library_url, &mut stats).await?;
 
     for (name, temperatures) in &targets.nuclides {
         progress.report(
@@ -374,15 +502,7 @@ async fn fetch_all(
             done,
             total,
         );
-        if fetch_nuclide(
-            &storage,
-            &library_url,
-            name,
-            temperatures.as_ref(),
-            &mut stats,
-        )
-        .await?
-        {
+        if fetch_nuclide(&storage, &release, name, temperatures.as_ref(), &mut stats).await? {
             ranged.push(name.clone());
         }
         nuclides.push(name.clone());
@@ -394,7 +514,7 @@ async fn fetch_all(
             done,
             total,
         );
-        fetch_element(&storage, &library_url, element, &mut stats).await?;
+        fetch_element(&storage, &release, element, &mut stats).await?;
         elements.push(element.clone());
         done += 1;
     }
@@ -402,11 +522,15 @@ async fn fetch_all(
 
     Ok(serde_json::json!({
         "status": "ok",
+        "library": release.release.manifest.keyword,
+        "release": release.release.manifest.release,
+        "manifest_sha256": release.release.manifest_sha256,
         "nuclides": nuclides,
         "ranged": ranged,
         "elements": elements,
         "requests": stats.requests,
         "bytes": stats.bytes,
+        "metadata_bytes": stats.metadata_bytes,
     })
     .to_string())
 }
@@ -416,6 +540,11 @@ impl WasmSimulation {
     /// Fetch the nuclear data the loaded model needs and does not yet hold
     /// into the in-memory store, from `library_url` (see
     /// [`default_library_url`](super::simulation_wasm::default_library_url)).
+    ///
+    /// The library's current release is resolved first (`latest.json`, then
+    /// its manifest, checked against it), and every section comes from that
+    /// release: whole sections are checked against their manifest size and
+    /// sha256, byte-range fetches are not (see the module docs).
     ///
     /// Each required nuclide is fetched as its published section objects. Where
     /// `version.json` carries the byte-range index, `reactions.arrow` and
@@ -430,7 +559,10 @@ impl WasmSimulation {
     /// nuclide or element starts.
     ///
     /// Resolves to a JSON string,
-    /// `{"status":"ok","nuclides":[...],"ranged":[...],"elements":[...],"requests":n,"bytes":n}`,
+    /// `{"status":"ok","library":k,"release":r,"manifest_sha256":h,"nuclides":[...],"ranged":[...],"elements":[...],"requests":n,"bytes":n,"metadata_bytes":n}`,
+    /// where `bytes` counts section data and `metadata_bytes` the release
+    /// pointer and manifest (`library`, `release` and `manifest_sha256` are
+    /// absent when there was nothing to fetch),
     /// where `ranged` lists the nuclides whose reactions were fetched by byte
     /// range. Rejects with a message naming the URL that failed. A material
     /// temperature the published data does not cover is refused before any

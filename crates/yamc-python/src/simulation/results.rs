@@ -849,9 +849,16 @@ impl PySimulationResults {
 
     /// Provenance of the run(s) behind these results: a list of dicts
     /// with ``seed``, ``n_histories``, ``elapsed_secs``, ``fingerprint``,
-    /// ``data_libraries``, ``compute``, ``yamc_version``, ``mpi_size``
-    /// and ``mpi_rank``. One entry per ``simulate_transport`` run;
-    /// concatenated by ``combine_results``.
+    /// ``data_libraries``, ``data_releases``, ``compute``, ``yamc_version``,
+    /// ``mpi_size`` and ``mpi_rank``. One entry per ``simulate_transport``
+    /// run; concatenated by ``combine_results``.
+    ///
+    /// ``data_releases`` maps each library keyword the run downloaded data
+    /// from to a dict with ``release`` (the published release identifier),
+    /// ``manifest_sha256`` (the hash of that release's manifest, which pins
+    /// every file in it), ``format_version`` and ``offline`` (True when the
+    /// data origin was unreachable and the newest complete cached release was
+    /// used). Empty when all data came from local directories.
     #[getter]
     fn runs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let items: Vec<Bound<'py, PyDict>> = self
@@ -865,6 +872,7 @@ impl PySimulationResults {
                 d.set_item("elapsed_secs", run.elapsed_secs)?;
                 d.set_item("fingerprint", run.fingerprint.clone())?;
                 d.set_item("data_libraries", run.data_libraries.clone())?;
+                d.set_item("data_releases", data_releases_dict(py, &run.data_releases)?)?;
                 d.set_item("compute", run.compute.clone())?;
                 d.set_item("yamc_version", run.yamc_version.clone())?;
                 d.set_item("mpi_size", run.mpi_size)?;
@@ -1094,6 +1102,24 @@ fn provenance_version() -> String {
 /// model fingerprint, data libraries, compute path, MPI placement), so the
 /// returned results are combinable via `combine_results`. Surfaces
 /// duplicate-name / duplicate-id validation as `ValueError`.
+/// The `data_releases` provenance of a run as a dict of dicts, keyed by
+/// library keyword.
+pub(crate) fn data_releases_dict<'py>(
+    py: Python<'py>,
+    releases: &std::collections::BTreeMap<String, yamc_nuclide::storage::release::DataRelease>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    for (keyword, release) in releases {
+        let d = PyDict::new(py);
+        d.set_item("release", &release.release)?;
+        d.set_item("manifest_sha256", &release.manifest_sha256)?;
+        d.set_item("format_version", release.format_version)?;
+        d.set_item("offline", release.offline)?;
+        out.set_item(keyword, d)?;
+    }
+    Ok(out)
+}
+
 pub(crate) fn build_results(
     model: &yamc::model::Model,
     settings: &yamc::model::TransportSettings,
@@ -1119,6 +1145,7 @@ pub(crate) fn build_results(
         elapsed_secs,
         fingerprint,
         data_libraries: model.data_libraries(),
+        data_releases: model.data_releases(),
         compute: compute.to_string(),
         yamc_version: provenance_version(),
         mpi_size: yamc::mpi_context::mpi_size(),
