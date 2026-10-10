@@ -200,6 +200,19 @@ pub struct SamplerReport {
     /// The repair of the transformed (log-space) correlation matrix, where
     /// it was not PSD.
     pub transformed_repair: Option<CorrelationRepair>,
+    /// How far the correlations the draws actually have are from the
+    /// evaluated ones: the largest `|ρ'_ij - ρ_ij|` over pairs of drawn
+    /// parameters, `ρ` the stated correlation before any repair and `ρ'` the
+    /// draw's own, in the parameters themselves rather than in log space.
+    /// Every drawn parameter keeps its stated mean and sigma exactly (both
+    /// repairs keep a unit diagonal), so this and
+    /// [`SamplerReport::correlation_frobenius_change`] are the whole of the
+    /// difference in the first two moments; held parameters are in `held`.
+    /// A pair no lognormal carries ([`SamplerReport::unattainable_pairs`]) is
+    /// where it is largest: ENDF/B-VIII.1 Th232.
+    pub correlation_change: f64,
+    /// `||ρ' - ρ||_F` over the drawn parameters, both triangles.
+    pub correlation_frobenius_change: f64,
 }
 
 /// One block of parameters the covariance couples, and its factor.
@@ -281,6 +294,8 @@ impl ResonanceSampler {
             stated_repair: None,
             unattainable_pairs: 0,
             transformed_repair: None,
+            correlation_change: 0.0,
+            correlation_frobenius_change: 0.0,
         };
         let mut marginals = Vec::with_capacity(n);
         for (i, p) in range.parameters.iter().enumerate() {
@@ -389,6 +404,27 @@ impl ResonanceSampler {
                 }
                 factor = Some(eigen_factor(&transformed, m));
             }
+            // The correlation the draws have, against the stated one: `Σ'` is
+            // `transformed` scaled back, and the moments of `y` follow from it
+            // as in the module documentation, read backwards.
+            let mut frobenius = report.correlation_frobenius_change.powi(2);
+            for (a, &i) in members.iter().enumerate() {
+                for (b, &j) in members.iter().enumerate().skip(a + 1) {
+                    let log_cov = transformed[a * m + b] * scale[a] * scale[b];
+                    let cov = match (marginals[i], marginals[j]) {
+                        (Marginal::Lognormal, Marginal::Lognormal) => {
+                            values[i] * values[j] * log_cov.exp_m1()
+                        }
+                        (Marginal::Lognormal, _) => values[i] * log_cov,
+                        (_, Marginal::Lognormal) => values[j] * log_cov,
+                        _ => log_cov,
+                    };
+                    let change = (cov - c(i, j)).abs() / (sigma[a] * sigma[b]);
+                    report.correlation_change = report.correlation_change.max(change);
+                    frobenius += 2.0 * change * change;
+                }
+            }
+            report.correlation_frobenius_change = frobenius.sqrt();
             let mut factor = factor.expect("factorized above");
             for a in 0..m {
                 for b in 0..m {
@@ -1248,6 +1284,7 @@ mod tests {
         assert_eq!(report.stated_repair, None);
         assert_eq!(report.transformed_repair, None);
         assert_eq!(sampler.marginals(), [Marginal::Gaussian; 3]);
+        assert!(report.correlation_change < 1e-12, "{report:?}");
         assert!(
             report.zero_mean_widths.is_empty(),
             "R-matrix widths are signed"
@@ -1355,6 +1392,17 @@ mod tests {
         // 1 + C/(μμ) = 1 - 0.5 * 9 < 0.
         let (sampler, report) = ResonanceSampler::new(&range).unwrap();
         assert_eq!(report.unattainable_pairs, 1);
+        // Held at the most negative log-space covariance, ln(1 + 9) apart:
+        // C' = 0.01 (exp(-ln 10) - 1) = -0.009, a correlation of -0.1 where
+        // the evaluation states -0.5.
+        assert!(
+            (report.correlation_change - 0.4).abs() < 1e-12,
+            "{report:?}"
+        );
+        assert!(
+            (report.correlation_frobenius_change - 0.4 * 2f64.sqrt()).abs() < 1e-12,
+            "{report:?}"
+        );
         let y = sampler.draw(1, 2, "X", 0);
         assert!(y.iter().all(|v| *v > 0.0));
     }

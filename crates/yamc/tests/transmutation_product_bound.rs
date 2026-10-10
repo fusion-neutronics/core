@@ -65,6 +65,7 @@ fn rx(kind: &str, target: &str) -> ChainReaction {
         q_value: None,
         branching_uncertainty: None,
         evaluated_branching: None,
+        multiplicity: None,
     }
 }
 

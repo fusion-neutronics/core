@@ -9,6 +9,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
+use yani_transmute::resonance_rates::ResonanceMethod;
+use yani_transmute::resonance_sampling::{CorrelationRepair, NotedParameter};
 use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 
 /// Request nuclear-data uncertainty on a transmutation.
@@ -19,7 +21,15 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 /// What it can cover, by source (``DataUncertainty.available_sources()``):
 ///
 /// - ``"cross_sections"``: the activation cross sections, sampled from the
-///   ENDF MF=33 covariance folded against this material's own spectrum;
+///   ENDF MF=33 covariance folded against this material's own spectrum, and
+///   where the library folder carries the evaluation's resonance parameters
+///   (MF=2 and MF=32, ``resonance_parameters.arrow``), the parameters
+///   themselves: each replica draws them from their covariance, rebuilds the
+///   resonance range's cross sections from the draw and Doppler broadens the
+///   change to the temperature in use, so the resonance range's uncertainty
+///   is exact in the parameters rather than first order. A nuclide whose
+///   parameters cannot be sampled keeps the first-order MF=32 rows of
+///   ``covariance.arrow``, and the report says which and why;
 /// - ``"flux_spectrum"``: the spectrum itself, from the per-bin
 ///   ``flux_std_dev`` given on a ``Pulse``;
 /// - ``"half_life"``: every reachable nuclide's half-life, from the decay
@@ -94,19 +104,21 @@ use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 ///   be derived (LTY 1-4, or an LTY=0 block counted in ``skipped_nc``), the
 ///   covariance of a lumped reaction (MT=851-870) with several components
 ///   that no derivation names, listed in ``lumped_covariance_not_assignable``,
-///   and the resonance-parameter covariance (MF=32) wherever it is not in
-///   ``covariance.arrow``: a library converted before the converter derived
-///   it, or a resonance range whose formalism the converter does not
-///   reconstruct. What is sampled is each reaction's explicit MF=33 blocks,
-///   the resonance-range blocks the converter derives from MF=32 and writes
-///   beside them where a library has them, the blocks of a lumped reaction
+///   and the resonance-parameter covariance (MF=32) of a range neither
+///   sampled nor in ``covariance.arrow``: a library converted before the
+///   converter wrote either, or a resonance range whose formalism ``endf``
+///   does not reconstruct. What is sampled is each reaction's explicit MF=33
+///   blocks, the resonance parameters where the folder carries them and
+///   otherwise the resonance-range blocks the converter derives from MF=32
+///   and writes beside them, the blocks of a lumped reaction
 ///   whose one component it is, and for a reaction an LTY=0 NC block states
 ///   as a sum of others (ENDF/B-VIII.1 O16 (n,p) as MT 600 to 603, U235 MT 4
 ///   as MT 51 plus the lumped MT 851), the covariance derived from the named
 ///   reactions' own blocks and the cross blocks between them;
 /// - the self-shielding correction, when ``self_shielding_chord`` or
 ///   ``self_shielding_shape`` is given: the shielded flux is built once from
-///   the nominal cross sections and reused by every replica;
+///   the nominal cross sections and reused by every replica, sampled
+///   resonance parameters included;
 /// - on a transport run, the flux's response to a perturbed cross section:
 ///   there is one transport, not one per replica. The tallied values
 ///   themselves are still drawn by the ``"statistical"`` source;
@@ -459,6 +471,10 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
         limits.set_item(nuclide, limit_dict(l)?)?;
     }
     d.set_item("lognormal_not_carried", limits)?;
+    d.set_item(
+        "resonance_parameters",
+        resonance_parameters_dict(py, &info.resonance_parameters)?,
+    )?;
     d.set_item("flux_bins_sampled", info.flux_bins_sampled)?;
     d.set_item(
         "half_lives_perturbed",
@@ -570,6 +586,86 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     d.set_item("sources", info.sources.clone())?;
     d.set_item("has_gaps", info.has_gaps())?;
     Ok(d)
+}
+
+/// `Info::resonance_parameters` as a dict keyed by nuclide: each entry's
+/// `method`, the `reason` it fell back to the first-order rows (`None` where
+/// the parameters were sampled), and per sampled range its sampler report.
+fn resonance_parameters_dict<'py>(
+    py: Python<'py>,
+    methods: &std::collections::BTreeMap<String, ResonanceMethod>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let noted = |p: &NotedParameter| -> PyResult<Bound<'py, PyDict>> {
+        let e = PyDict::new(py);
+        e.set_item("index", p.index)?;
+        e.set_item("location", format!("{:?}", p.location))?;
+        e.set_item("quantity", format!("{:?}", p.quantity))?;
+        e.set_item("value", p.value)?;
+        e.set_item("sigma", p.sigma)?;
+        Ok(e)
+    };
+    let repair = |r: &Option<CorrelationRepair>| -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(r) = r else { return Ok(None) };
+        let e = PyDict::new(py);
+        e.set_item("lambda_min", r.lambda_min)?;
+        e.set_item("frobenius_change", r.frobenius_change)?;
+        e.set_item("max_change", r.max_change)?;
+        e.set_item("parameters", r.parameters)?;
+        e.set_item("iterations", r.iterations)?;
+        e.set_item("converged", r.converged)?;
+        Ok(Some(e))
+    };
+    let out = PyDict::new(py);
+    for (nuclide, method) in methods {
+        let entry = PyDict::new(py);
+        entry.set_item("method", method.name())?;
+        let (largest, frobenius) = method.correlation_change();
+        entry.set_item("largest_correlation_change", largest)?;
+        entry.set_item("correlation_frobenius_change", frobenius)?;
+        let ranges = PyList::empty(py);
+        match method {
+            ResonanceMethod::Sampled { ranges: reports } => {
+                entry.set_item("reason", py.None())?;
+                for r in reports {
+                    let range = PyDict::new(py);
+                    range.set_item("isotope", r.isotope)?;
+                    range.set_item("range", r.range)?;
+                    range.set_item("gaussian", r.gaussian)?;
+                    range.set_item("lognormal", r.lognormal)?;
+                    range.set_item("held", r.held)?;
+                    let zero = PyList::empty(py);
+                    for p in &r.zero_mean_widths {
+                        zero.append(noted(p)?)?;
+                    }
+                    range.set_item("zero_mean_widths", zero)?;
+                    let negative = PyList::empty(py);
+                    for p in &r.negative_mean_widths {
+                        negative.append(noted(p)?)?;
+                    }
+                    range.set_item("negative_mean_widths", negative)?;
+                    range.set_item(
+                        "zero_variance_with_covariance",
+                        r.zero_variance_with_covariance,
+                    )?;
+                    range.set_item("stated_repair", repair(&r.stated_repair)?)?;
+                    range.set_item("unattainable_pairs", r.unattainable_pairs)?;
+                    range.set_item("transformed_repair", repair(&r.transformed_repair)?)?;
+                    range.set_item("largest_correlation_change", r.correlation_change)?;
+                    range.set_item(
+                        "correlation_frobenius_change",
+                        r.correlation_frobenius_change,
+                    )?;
+                    ranges.append(range)?;
+                }
+            }
+            ResonanceMethod::FirstOrder { reason } => {
+                entry.set_item("reason", reason)?;
+            }
+        }
+        entry.set_item("ranges", ranges)?;
+        out.set_item(nuclide, entry)?;
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -729,6 +825,107 @@ mod tests {
                     12.0
                 );
             }
+        });
+    }
+    /// Each nuclide's resonance method reaches the dict: a sampled one with
+    /// its ranges' reports and no reason, a fallback with its reason and no
+    /// ranges.
+    #[test]
+    fn resonance_methods_reach_the_dict() {
+        use yani_transmute::resonance_sampling::SamplerReport;
+        let report = SamplerReport {
+            isotope: 0,
+            range: 0,
+            gaussian: 3,
+            lognormal: 5,
+            held: 1,
+            zero_mean_widths: Vec::new(),
+            negative_mean_widths: Vec::new(),
+            zero_variance_with_covariance: 0,
+            stated_repair: Some(CorrelationRepair {
+                lambda_min: -1e-3,
+                frobenius_change: 2e-3,
+                max_change: 1e-3,
+                parameters: 9,
+                iterations: 4,
+                converged: true,
+            }),
+            unattainable_pairs: 0,
+            transformed_repair: None,
+            correlation_change: 1e-3,
+            correlation_frobenius_change: 2e-3,
+        };
+        let info = Info {
+            resonance_parameters: [
+                (
+                    "W186".to_string(),
+                    ResonanceMethod::Sampled {
+                        ranges: vec![report],
+                    },
+                ),
+                (
+                    "La138".to_string(),
+                    ResonanceMethod::FirstOrder {
+                        reason: "MF=32 does not match MF=2".to_string(),
+                    },
+                ),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        Python::initialize();
+        Python::attach(|py| {
+            let d = info_to_dict(py, &info).unwrap();
+            let methods = d.get_item("resonance_parameters").unwrap().unwrap();
+            let w = methods.get_item("W186").unwrap();
+            assert_eq!(
+                w.get_item("method").unwrap().extract::<String>().unwrap(),
+                "parameters sampled"
+            );
+            assert!(w.get_item("reason").unwrap().is_none());
+            let range = w.get_item("ranges").unwrap().get_item(0).unwrap();
+            assert_eq!(
+                range
+                    .get_item("lognormal")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                5
+            );
+            let repair = range.get_item("stated_repair").unwrap();
+            assert_eq!(
+                repair
+                    .get_item("iterations")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                4
+            );
+            assert!(range.get_item("transformed_repair").unwrap().is_none());
+            assert_eq!(
+                w.get_item("largest_correlation_change")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                1e-3
+            );
+            assert_eq!(
+                w.get_item("correlation_frobenius_change")
+                    .unwrap()
+                    .extract::<f64>()
+                    .unwrap(),
+                2e-3
+            );
+            let la = methods.get_item("La138").unwrap();
+            assert_eq!(
+                la.get_item("method").unwrap().extract::<String>().unwrap(),
+                "first-order rows"
+            );
+            assert_eq!(
+                la.get_item("reason").unwrap().extract::<String>().unwrap(),
+                "MF=32 does not match MF=2"
+            );
+            assert_eq!(la.get_item("ranges").unwrap().len().unwrap(), 0);
         });
     }
 }
