@@ -116,7 +116,6 @@ struct Entry {
     total_count: Vec<u64>,
     shape: Vec<usize>,
     dim_labels: Vec<String>,
-    particles_per_chunk: u32,
     elapsed_secs: f64,
     run_indices: Vec<usize>,
 }
@@ -222,23 +221,10 @@ pub fn combine_results(
         results.push(Arc::new(result));
     }
 
-    let (n_batches, particles_per_chunk) = results
-        .first()
-        .map(|r| (r.n_batches, r.particles_per_chunk))
-        .unwrap_or((0, 0));
     let elapsed_total: f64 = runs.iter().map(|r| r.elapsed_secs).sum();
 
     Ok((
-        SimulationResults::from_parts(
-            results,
-            by_name,
-            by_id,
-            by_ptr,
-            n_batches,
-            particles_per_chunk,
-            elapsed_total,
-            runs,
-        ),
+        SimulationResults::from_parts(results, by_name, by_id, by_ptr, elapsed_total, runs),
         warnings,
     ))
 }
@@ -359,7 +345,6 @@ fn entry_from_result(r: &Arc<TallyResult>, run_offset: usize) -> Result<Entry, S
         total_count: r.total_count.clone(),
         shape: r.shape.clone(),
         dim_labels: r.dim_labels.clone(),
-        particles_per_chunk: r.particles_per_chunk,
         elapsed_secs: r.elapsed_secs,
         run_indices: r.run_indices.iter().map(|&i| i + run_offset).collect(),
     })
@@ -421,7 +406,6 @@ fn finish_entry(
         .zip(standard_deviation.iter())
         .map(|(&m, &s)| if m > 0.0 { s / m } else { 0.0 })
         .collect();
-    let n_batches = u32::try_from(entry.stats.n_histories).unwrap_or(u32::MAX);
     // Figure of merit is filled centrally by `SimulationResults::from_parts`
     // from each result's `elapsed_secs` (set below).
     TallyResult {
@@ -442,8 +426,6 @@ fn finish_entry(
         convergence_history: Vec::new(),
         shape: entry.shape,
         dim_labels: entry.dim_labels,
-        n_batches,
-        particles_per_chunk: entry.particles_per_chunk,
         elapsed_secs: entry.elapsed_secs,
         run_indices: entry.run_indices,
     }
@@ -475,7 +457,7 @@ mod tests {
         let mut t = Tally::new();
         t.scores = vec![Score::Flux(FluxScore)];
         t.name = Some(name.into());
-        t.initialize_batches(1);
+        t.reset_accumulation();
         Arc::new(t)
     }
 
@@ -502,8 +484,6 @@ mod tests {
             convergence_history: Vec::new(),
             shape: vec![1],
             dim_labels: vec!["score".into()],
-            n_batches: samples.len() as u32,
-            particles_per_chunk: 1,
             elapsed_secs: elapsed,
             run_indices: vec![0],
         })
@@ -523,7 +503,7 @@ mod tests {
             by_ptr.insert(Arc::as_ptr(&r.tally) as usize, i);
         }
         let elapsed: f64 = runs.iter().map(|r| r.elapsed_secs).sum();
-        SimulationResults::from_parts(results, by_name, by_id, by_ptr, 0, 0, elapsed, runs)
+        SimulationResults::from_parts(results, by_name, by_id, by_ptr, elapsed, runs)
     }
 
     #[test]
@@ -621,8 +601,6 @@ mod tests {
         let (m, _) = combine_results(&[&a, &b]).unwrap();
         let r = m.get_by_name("flux").unwrap();
         assert_eq!(r.n_histories, 6_000_000_000);
-        // The legacy u32 mirror saturates rather than wrapping.
-        assert_eq!(r.n_batches, u32::MAX);
     }
 
     #[test]
@@ -741,7 +719,7 @@ mod tests {
         let mut t2 = Tally::new();
         t2.scores = vec![Score::Flux(FluxScore), Score::Heating(HeatingScore)];
         t2.name = Some("flux".into());
-        t2.initialize_batches(1);
+        t2.reset_accumulation();
         let mut r2 = (*result_from_samples(Arc::new(t2), &[3.0, 4.0], 1.0)).clone();
         r2.mean = vec![3.5, 1.0];
         r2.m2 = vec![0.5, 0.1];
@@ -841,7 +819,6 @@ mod tests {
             r.total_count = vec![n as u64, n as u64];
             r.shape = vec![2];
             r.n_histories = n as u64;
-            r.n_batches = n as u32;
             sim(vec![Arc::new(r)], vec![run(seed, "fp")])
         };
         let a = mk(1, &[5.0, 7.0], &[0.0, 0.0], "flux");

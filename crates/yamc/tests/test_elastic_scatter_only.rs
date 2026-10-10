@@ -80,7 +80,7 @@ fn test_elastic_scatter_only_flux() {
     tally.filters = vec![Filter::Energy(energy_filter)];
     tally.scores = vec![Score::Flux(FluxScore)];
     tally.name = Some("flux_energy_binned".to_string());
-    tally.initialize_batches(batches);
+    tally.reset_accumulation();
 
     let tallies = vec![Arc::new(tally)];
     let mut model = Model::new(geometry, vec![source], tallies);

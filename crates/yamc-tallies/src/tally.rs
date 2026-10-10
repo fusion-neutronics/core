@@ -3,7 +3,7 @@ use crate::filter::Filter;
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 // Re-export score types so `use yamc::tallies::tally::*` still works
@@ -140,8 +140,8 @@ impl fmt::Display for NuclideBin {
 ///
 /// Goes via [`TallySerde`] -- only the user-supplied configuration
 /// (id, name, scores, nuclides, filters, units, multiply_density,
-/// estimator). Atomic batch counters and the accumulator are rebuilt
-/// with their `::new()` defaults on deserialize; tally *results*
+/// estimator). The accumulator is rebuilt with its `::new()` defaults
+/// on deserialize; tally *results*
 /// (accumulated values) are never serialized -- a tally on disk is a
 /// *specification*, not a *result*.
 #[derive(Debug, serde::Deserialize)]
@@ -161,10 +161,6 @@ pub struct Tally {
     /// (lower variance in optically-thick regions, fewer bins touched
     /// per history). See [`crate::estimator`].
     pub estimator: crate::Estimator,
-
-    // Batch tracking
-    pub n_batches: AtomicU32, // Total batches configured (for compatibility)
-    pub particles_per_chunk: AtomicU32,
 
     // --- Overlay (multiply_density=false) ---
     /// When false, the tally is decoupled from the cell material and scores a
@@ -260,8 +256,7 @@ impl Tally {
 /// Configuration equality: two tallies are equal iff their user-supplied
 /// configurations (id, name, scores, nuclides, filters, units,
 /// multiply_density, estimator) are equal -- exactly the surface that
-/// serializes. Runtime accumulator state and batch counters are
-/// execution detail, not identity, and are deliberately excluded (which
+/// serializes. Runtime accumulator state is execution detail, not identity, and are deliberately excluded (which
 /// is why this cannot be `#[derive]`d). Used by `combine_results` to
 /// verify that same-name tallies from different runs measure the same
 /// quantity.
@@ -273,7 +268,7 @@ impl PartialEq for Tally {
 
 // Manual `Serialize` impl rather than `#[serde(into = "TallySerde")]`
 // because `into` requires `Tally: Clone`, which is impossible while the
-// struct contains `AtomicU32` counters.
+// struct contains the atomic accumulator.
 impl serde::Serialize for Tally {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
         self.to_serde().serialize(ser)
@@ -294,11 +289,9 @@ impl From<TallySerde> for Tally {
         t.overlay_material = s.overlay_material;
         t.covariance = s.covariance;
         // Allocate accumulator storage now that the bin layout is known.
-        // `initialize_batches_shared` (which `model.simulate_transport`
+        // `reset_accumulation_shared` (which `model.simulate_transport`
         // calls) only resets the values vec; it won't allocate it.
-        // Pass 1 as the placeholder batch count -- the real count gets
-        // written by the later `initialize_batches_shared` call.
-        t.initialize_batches(1);
+        t.reset_accumulation();
         t
     }
 }
@@ -1785,8 +1778,6 @@ impl Tally {
             nuclides: Vec::new(),
             filters: Vec::new(),
             units: String::new(),
-            n_batches: AtomicU32::new(0),
-            particles_per_chunk: AtomicU32::new(0),
             multiply_density: true,
             overlay_material: None,
             covariance: false,
@@ -1984,46 +1975,32 @@ impl Tally {
             .get_or_init(|| photon_indices);
     }
 
-    /// Initialize storage for simulation (mutable version).
-    /// Sets up the per-history Welford state via the
-    /// `simulate_transport`-side worker pool; here we only reset
-    /// counters and the cached scoring indices, plus the small
-    /// per-bin `values` atomic vector used by the GPU writeback path.
-    pub fn initialize_batches(&mut self, n_batches: usize) {
+    /// Prepare the tally for a fresh run (mutable version).
+    /// The per-history Welford state lives in the `simulate_transport`-side
+    /// worker pool; here we only refresh the cached scoring indices,
+    /// (re)allocate the small per-bin `values` atomic vector used by the
+    /// GPU writeback path, and zero the history counter.
+    pub fn reset_accumulation(&mut self) {
         self.update_cache();
         let num_bins = self.num_bins();
         self.accumulator.values = (0..num_bins).map(|_| AtomicU64::new(0)).collect();
-        self.n_batches.store(n_batches as u32, Ordering::Relaxed);
         self.accumulator.n_realizations.store(0, Ordering::Relaxed);
     }
 
-    /// Initialize through shared reference (for use with Arc<Tally>)
-    pub fn initialize_batches_shared(&self, n_batches: usize) {
+    /// Reset through a shared reference (for use with Arc<Tally>). Zeroes
+    /// the existing per-bin `values` without reallocating them.
+    pub fn reset_accumulation_shared(&self) {
         self.update_cache();
         let num_bins = self.num_bins();
         for i in 0..num_bins.min(self.accumulator.values.len()) {
             self.accumulator.values[i].store(0, Ordering::Relaxed);
         }
-        self.n_batches.store(n_batches as u32, Ordering::Relaxed);
         self.accumulator.n_realizations.store(0, Ordering::Relaxed);
     }
 
-    /// Per-particle chunk size bookkeeping for compatibility with the
-    /// existing simulation loop. With per-history Welford there's no
-    /// batch fold to perform here; the per-rayon-worker `WorkerState`
-    /// already holds the per-history stats and the global combine
-    /// happens once in `simulate_transport`'s post-batch reduce.
-    pub fn accumulate_batch(&self, particles_in_batch: u32) {
-        if particles_in_batch == 0 {
-            return;
-        }
-        self.particles_per_chunk
-            .store(particles_in_batch, Ordering::Relaxed);
-    }
-
     /// Store a single per-history bin value atomically. Used by yamc's GPU
-    /// dispatch path to fold a batch's worth of kernel-side accumulation into
-    /// the host-side tally before `accumulate_batch` finalises the realization.
+    /// dispatch path to fold kernel-side accumulation into the host-side
+    /// tally.
     ///
     /// Bin indices come from [`Tally::get_bin_index_7d`]; callers are expected
     /// to pass a valid index.
@@ -2122,13 +2099,13 @@ impl Tally {
     }
 
     /// Standard deviation of the summed bin total, assuming bin scores
-    /// are independent across batches (true for the score patterns used
+    /// are independent across histories (true for the score patterns used
     /// here -- each particle contributes to one bin at a time, so per-
-    /// batch bin scores are uncorrelated). Computed in place without
+    /// history bin scores are uncorrelated). Computed in place without
     /// allocating the per-bin std vector -- for huge meshes this is the
     /// difference between ~ms and ~tens-of-ms per call.
     ///
-    /// Returns 0.0 when fewer than 2 batches have been folded in
+    /// Returns 0.0 when fewer than 2 histories have been folded in
     /// (Bessel's correction divides by n-1).
     pub fn total_std(&self) -> f64 {
         if let Some(stats) = self
@@ -2260,33 +2237,27 @@ impl Tally {
             .collect()
     }
 
-    /// Get the total count across all batches (sum of normalized values * n)
+    /// Total score per bin summed over all source histories
+    /// (`mean * n_histories`, truncated to an integer).
     pub fn total_count(&self) -> Vec<u64> {
         let means = self.get_mean();
         // Prefer the exact u64 history count: the u32 `n_realizations`
         // mirror saturates above ~4.29e9 (reachable via the MPI rank
-        // fold) and would corrupt the counts here. Paths without Welford
-        // state (GPU) still rely on `n_realizations`.
+        // fold) and would corrupt the counts here.
         let n_histories = self.get_n_histories();
         let n = if n_histories > 0 {
             n_histories as f64
         } else {
             self.accumulator.n_realizations.load(Ordering::Relaxed) as f64
         };
-        let ppb = self.particles_per_chunk.load(Ordering::Relaxed) as f64;
 
-        means
-            .iter()
-            .map(|&m| {
-                // mean is per-particle, so total = mean * particles_per_chunk * n_batches
-                (m * ppb * n) as u64
-            })
-            .collect()
+        // mean is per source history, so the total is mean * n_histories
+        means.iter().map(|&m| (m * n) as u64).collect()
     }
 
     /// Snapshot the currently-accumulated statistics into a `TallyResult`.
     ///
-    /// Produces an immutable result value from the current batch state
+    /// Produces an immutable result value from the current accumulated state
     /// without disturbing any existing scoring machinery. A set of these is
     /// wrapped into `SimulationResults`, which `model.simulate_transport()`
     /// returns.
@@ -2316,8 +2287,6 @@ impl Tally {
             convergence_history: self.get_convergence_history(),
             shape,
             dim_labels,
-            n_batches: self.get_n_realizations(),
-            particles_per_chunk: self.particles_per_chunk.load(Ordering::Relaxed),
             // Provenance fields are filled by `with_fom` (elapsed) and
             // `SimulationResults::from_tallies_with_run` (run_indices).
             elapsed_secs: 0.0,
@@ -2334,8 +2303,6 @@ impl Tally {
             nuclides: Vec::new(),
             filters: Vec::new(),
             units: units.to_string(),
-            n_batches: AtomicU32::new(0),
-            particles_per_chunk: AtomicU32::new(0),
             multiply_density: true,
             overlay_material: None,
             covariance: false,
@@ -2678,7 +2645,9 @@ impl Tally {
             .unwrap_or_else(|| "Unnamed Tally".to_string())
     }
 
-    /// Get number of realizations (batches accumulated)
+    /// Number of source histories behind the variance estimate, as a u32
+    /// that saturates at ~4.29e9. Prefer `get_n_histories` for the exact
+    /// count.
     pub fn get_n_realizations(&self) -> u32 {
         self.accumulator.n_realizations.load(Ordering::Relaxed)
     }
@@ -2838,82 +2807,6 @@ mod tests {
         arc.install_finalized(stats);
         // Unwrap the Arc back -- tests want owned Tally to mutate filters etc.
         std::sync::Arc::try_unwrap(arc).ok().unwrap()
-    }
-
-    /// Pre-rip-out: exercised the GPU-dispatch writeback into the
-    /// per-batch atomic-CAS accumulator. With per-history Welford
-    /// the GPU dispatch installs `WelfordTallyStats` directly
-    /// via `install_finalized`, so this test no longer
-    /// reflects how the path is wired. Kept disabled as a marker;
-    /// a fresh GPU-writeback test will be added when the GPU
-    /// dispatcher is updated for the per-history-only path.
-    #[ignore]
-    #[test]
-    fn gpu_writeback_shape_yields_correct_stats() {
-        // 4-bin Flux tally (no filters so num_bins == 1 score × 1 bin… use mesh)
-        let mesh = RegularRectangularMesh::new([0.0, 0.0, 0.0], [2.0, 2.0, 1.0], [2, 2, 1]);
-        let mut tally = Tally::new();
-        tally.scores = vec![Score::Flux(FluxScore)];
-        tally.filters = vec![Filter::Mesh(MeshFilter::new(mesh))];
-        // 3 batches of fixed per-bin values; particles_per_chunk = 100.
-        // Per-bin per-batch normalized values are values[batch][bin] / 100.
-        let raw_values: [[f64; 4]; 3] = [
-            [10.0, 20.0, 30.0, 40.0],
-            [12.0, 18.0, 32.0, 38.0],
-            [8.0, 22.0, 28.0, 42.0],
-        ];
-        let particles_per_chunk: u32 = 100;
-        tally.initialize_batches(raw_values.len());
-
-        for batch_values in raw_values.iter() {
-            for (bin, &v) in batch_values.iter().enumerate() {
-                tally.store_bin_value(bin, v);
-            }
-            tally.accumulate_batch(particles_per_chunk);
-        }
-
-        // Expected per-bin mean = average of (raw / 100) over 3 batches.
-        let n = raw_values.len() as f64;
-        let mut expected_mean = [0.0_f64; 4];
-        let mut expected_m2 = [0.0_f64; 4];
-        for batch_values in raw_values.iter() {
-            for (bin, &v) in batch_values.iter().enumerate() {
-                let normalized = v / particles_per_chunk as f64;
-                expected_mean[bin] += normalized;
-            }
-        }
-        for m in expected_mean.iter_mut() {
-            *m /= n;
-        }
-        for batch_values in raw_values.iter() {
-            for (bin, &v) in batch_values.iter().enumerate() {
-                let normalized = v / particles_per_chunk as f64;
-                let d = normalized - expected_mean[bin];
-                expected_m2[bin] += d * d;
-            }
-        }
-
-        let mean = tally.get_mean();
-        let std_dev = tally.get_std_dev();
-        assert_eq!(mean.len(), 4);
-        assert_eq!(std_dev.len(), 4);
-
-        for bin in 0..4 {
-            assert!(
-                (mean[bin] - expected_mean[bin]).abs() < 1e-12,
-                "bin {bin}: get_mean = {} vs expected {}",
-                mean[bin],
-                expected_mean[bin]
-            );
-            // std_err = sqrt(var / n) = sqrt((M2 / (n-1)) / n)
-            let expected_std = (expected_m2[bin] / ((n - 1.0) * n)).sqrt();
-            assert!(
-                (std_dev[bin] - expected_std).abs() < 1e-12,
-                "bin {bin}: get_std_dev = {} vs expected {}",
-                std_dev[bin],
-                expected_std
-            );
-        }
     }
 
     /// The slice reads through the full bin layout, so a tally with nuclide

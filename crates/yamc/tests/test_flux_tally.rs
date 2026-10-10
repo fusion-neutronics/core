@@ -104,13 +104,8 @@ fn test_flux_tally_simulation() {
         mean_flux
     );
 
-    // Should have proper batch count
-    use std::sync::atomic::Ordering;
-    assert_eq!(tally_result.n_batches.load(Ordering::Relaxed), 10);
-    assert_eq!(
-        tally_result.particles_per_chunk.load(Ordering::Relaxed),
-        1000
-    );
+    // One Welford sample per source history.
+    assert_eq!(tally_result.get_n_histories(), 10_000);
 }
 
 #[test]

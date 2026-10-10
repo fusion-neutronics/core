@@ -114,7 +114,6 @@ fn model_with_flux_tally(
     seed: u64,
     radius: f64,
     n_particles: usize,
-    n_batches: usize,
 ) -> (Model, Arc<Tally>, TransportSettings) {
     let (geometry, source, mat_cell_id) = fe_sphere_with_implicit_complement(radius);
 
@@ -123,13 +122,13 @@ fn model_with_flux_tally(
         .filters
         .push(Filter::Cell(CellFilter::from_id(mat_cell_id)));
     tally.scores = vec![Score::Flux(FluxScore)];
-    tally.initialize_batches(n_batches);
+    tally.reset_accumulation();
     let tally = Arc::new(tally);
 
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&tally)]);
     model.gpu_max_steps_per_particle = 5_000;
     let settings = TransportSettings {
-        total_particles: Some(n_particles * n_batches),
+        total_particles: Some(n_particles),
         seed,
         threads: Some(1),
         ..Default::default()
@@ -150,17 +149,16 @@ fn gpu_implicit_complement_sphere_vacuum_matches_cpu() {
 
     let seed = 7777;
     let radius = 5.0;
-    let n_particles = 20_000;
-    let n_batches = 8;
+    let n_particles = 160_000;
 
     // CPU reference.
-    let (mut cpu_m, cpu_t, settings) = model_with_flux_tally(seed, radius, n_particles, n_batches);
+    let (mut cpu_m, cpu_t, settings) = model_with_flux_tally(seed, radius, n_particles);
     cpu_m.simulate_transport(&settings).unwrap();
     let cpu_flux = cpu_t.get_mean().iter().sum::<f64>();
 
     // GPU run -- this is the path that the unbounded implicit-complement
     // cell used to make impossible (it errored in `translate_cells`).
-    let (mut gpu_m, gpu_t, settings) = model_with_flux_tally(seed, radius, n_particles, n_batches);
+    let (mut gpu_m, gpu_t, settings) = model_with_flux_tally(seed, radius, n_particles);
     yamc::gpu::run_on_gpu(&mut gpu_m, &settings)
         .expect("GPU dispatch must succeed with a vacuum implicit complement");
     let gpu_flux = gpu_t.get_mean().iter().sum::<f64>();

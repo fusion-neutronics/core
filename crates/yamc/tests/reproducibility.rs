@@ -59,7 +59,6 @@ fn test_separate_vs_multi_score_tallies_equivalence() {
     });
     let particles = 100;
     let batches = 10;
-    let num_batches = batches;
     let settings = TransportSettings {
         total_particles: Some(particles * batches),
         seed: 12345,
@@ -72,14 +71,14 @@ fn test_separate_vs_multi_score_tallies_equivalence() {
         101,
     )))];
     tally_a.name = Some("absorption_101".to_string());
-    tally_a.initialize_batches(num_batches);
+    tally_a.reset_accumulation();
 
     let mut tally_b = Tally::new();
     tally_b.scores = vec![Score::ReactionRate(ReactionRateScore::from_mt(Mt::new(
         102,
     )))];
     tally_b.name = Some("absorption_102".to_string());
-    tally_b.initialize_batches(num_batches);
+    tally_b.reset_accumulation();
 
     let mut model_sep = Model::new(
         geometry.clone(),
@@ -97,7 +96,7 @@ fn test_separate_vs_multi_score_tallies_equivalence() {
         Score::ReactionRate(ReactionRateScore::from_mt(Mt::new(102))),
     ];
     tally_multi.name = Some("absorption_101_102".to_string());
-    tally_multi.initialize_batches(num_batches);
+    tally_multi.reset_accumulation();
 
     let mut model_multi = Model::new(
         geometry.clone(),
@@ -124,21 +123,21 @@ fn test_separate_vs_multi_score_tallies_equivalence() {
         101,
     )))];
     tally_a3.name = Some("absorption_101".to_string());
-    tally_a3.initialize_batches(num_batches);
+    tally_a3.reset_accumulation();
 
     let mut tally_b3 = Tally::new();
     tally_b3.scores = vec![Score::ReactionRate(ReactionRateScore::from_mt(Mt::new(
         102,
     )))];
     tally_b3.name = Some("absorption_102".to_string());
-    tally_b3.initialize_batches(num_batches);
+    tally_b3.reset_accumulation();
 
     let mut tally_c = Tally::new();
     tally_c.scores = vec![Score::ReactionRate(ReactionRateScore::from_mt(Mt::new(
         103,
     )))];
     tally_c.name = Some("absorption_103".to_string());
-    tally_c.initialize_batches(num_batches);
+    tally_c.reset_accumulation();
 
     let mut model_sep3 = Model::new(
         geometry.clone(),
@@ -158,7 +157,7 @@ fn test_separate_vs_multi_score_tallies_equivalence() {
         Score::ReactionRate(ReactionRateScore::from_mt(Mt::new(103))),
     ];
     tally_multi3.name = Some("absorption_101_102_103".to_string());
-    tally_multi3.initialize_batches(num_batches);
+    tally_multi3.reset_accumulation();
 
     let mut model_multi3 = Model::new(
         geometry.clone(),
@@ -234,7 +233,6 @@ fn test_reproducibility_with_same_seed() {
 
     let particles = 100;
     let batches = 10;
-    let num_batches = batches;
     let settings = TransportSettings {
         total_particles: Some(particles * batches),
         seed: 42,
@@ -257,10 +255,10 @@ fn test_reproducibility_with_same_seed() {
         101,
     )))];
     tally3.name = Some("test_absorption_3".to_string());
-    // Initialize batch data for all tallies before wrapping in Arc
-    tally1.initialize_batches(num_batches);
-    tally2.initialize_batches(num_batches);
-    tally3.initialize_batches(num_batches);
+    // Reset accumulation for all tallies before wrapping in Arc
+    tally1.reset_accumulation();
+    tally2.reset_accumulation();
+    tally3.reset_accumulation();
 
     // Run simulation 1
     let mut model1 = Model::new(
@@ -392,7 +390,6 @@ fn test_different_seeds_produce_different_results() {
 
     let particles = 100;
     let batches = 10;
-    let num_batches = batches;
 
     // Create tallies
     let mut tally1 = Tally::new();
@@ -405,9 +402,9 @@ fn test_different_seeds_produce_different_results() {
         101,
     )))]; // absorption
     tally2.name = Some("test_absorption_2".to_string());
-    // Initialize batch data for all tallies before wrapping in Arc
-    tally1.initialize_batches(num_batches);
-    tally2.initialize_batches(num_batches);
+    // Reset accumulation for all tallies before wrapping in Arc
+    tally1.reset_accumulation();
+    tally2.reset_accumulation();
 
     // Run simulation with seed 42
     let mut model1 = Model::new(

@@ -118,7 +118,7 @@ fn build_tbr_model(batches: usize) -> Model {
         105,
     )))];
     tally.name = Some("tbr".to_string());
-    tally.initialize_batches(batches);
+    tally.reset_accumulation();
 
     Model::new(geometry, vec![source], vec![Arc::new(tally)])
 }

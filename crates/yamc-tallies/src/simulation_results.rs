@@ -78,13 +78,6 @@ pub struct SimulationResults {
     /// the struct remains `Send + Sync`.
     by_ptr: HashMap<usize, usize>,
 
-    /// Number of batches accumulated. Mirrored from the first tally's
-    /// `TallyResult::n_batches`.
-    pub n_batches: u32,
-
-    /// Source particles per batch. Mirrored from the first tally.
-    pub particles_per_chunk: u32,
-
     /// Wall-clock time elapsed during the simulate call (seconds). For a
     /// combined result this is the sum over all contributing runs.
     pub elapsed_secs: f64,
@@ -175,20 +168,11 @@ impl SimulationResults {
             by_ptr.insert(Arc::as_ptr(t) as usize, i);
         }
 
-        // Run-level metadata: mirror from the first tally if present, else
-        // fall back to zero (empty-tallies case).
-        let (n_batches, particles_per_chunk) = results
-            .first()
-            .map(|r| (r.n_batches, r.particles_per_chunk))
-            .unwrap_or((0, 0));
-
         Ok(Self::from_parts(
             results,
             by_name,
             by_id,
             by_ptr,
-            n_batches,
-            particles_per_chunk,
             elapsed_secs,
             runs,
         ))
@@ -205,14 +189,11 @@ impl SimulationResults {
     /// already applied it (or only set `elapsed_secs`) both end up correct --
     /// no constructor path can ship a result with empty figure-of-merit.
     #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
         results: Vec<Arc<TallyResult>>,
         by_name: HashMap<String, usize>,
         by_id: HashMap<u32, usize>,
         by_ptr: HashMap<usize, usize>,
-        n_batches: u32,
-        particles_per_chunk: u32,
         elapsed_secs: f64,
         runs: Vec<RunProvenance>,
     ) -> Self {
@@ -229,8 +210,6 @@ impl SimulationResults {
             by_name,
             by_id,
             by_ptr,
-            n_batches,
-            particles_per_chunk,
             elapsed_secs,
             runs,
         }
@@ -316,7 +295,7 @@ mod tests {
         t.scores = vec![Score::Flux(FluxScore)];
         t.name = name.map(|s| s.to_string());
         t.tally_id = id;
-        t.initialize_batches(1);
+        t.reset_accumulation();
         Arc::new(t)
     }
 
@@ -382,8 +361,6 @@ mod tests {
     fn empty_input_ok() {
         let results = SimulationResults::from_tallies(&[], 0.0).unwrap();
         assert!(results.is_empty());
-        assert_eq!(results.n_batches, 0);
-        assert_eq!(results.particles_per_chunk, 0);
     }
 
     #[test]
@@ -433,8 +410,6 @@ mod tests {
             std::collections::HashMap::new(),
             std::collections::HashMap::new(),
             by_ptr,
-            1,
-            1,
             4.0,
             Vec::new(),
         );

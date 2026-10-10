@@ -167,7 +167,7 @@ fn flux_tally(cell_id: u32, ptype: ParticleType, bins: Option<Vec<f64>>) -> Arc<
         t.filters.push(Filter::Energy(EnergyFilter::new(b)));
     }
     t.scores = vec![Score::Flux(FluxScore)];
-    t.initialize_batches(10);
+    t.reset_accumulation();
     Arc::new(t)
 }
 

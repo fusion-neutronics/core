@@ -204,7 +204,7 @@ fn capture_rate(material: Material) -> f64 {
     tally.filters.push(Filter::Cell(CellFilter::from_id(1)));
     tally.scores = vec!["(n,gamma)".parse::<Score>().expect("score")];
     tally.estimator = Estimator::TrackLength;
-    tally.initialize_batches(1);
+    tally.reset_accumulation();
     let tally = Arc::new(tally);
     let source = ParticleSource::Neutron(Source {
         space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),

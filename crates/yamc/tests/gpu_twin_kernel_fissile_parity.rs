@@ -882,7 +882,7 @@ fn compare_bank_on(nuclide: &str, density: f64, radius: f64, energy_ev: f64, n: 
         ));
         tally.scores = vec!["flux".parse::<yamc_tallies::score::Score>().unwrap()];
         tally.estimator = yamc_tallies::Estimator::TrackLength;
-        tally.initialize_batches(1);
+        tally.reset_accumulation();
         let tally = Arc::new(tally);
         disp_model.tallies = vec![Arc::clone(&tally)];
         let settings = yamc::model::TransportSettings {
@@ -1105,7 +1105,7 @@ fn compare_cpu_vs_twin(nuclide: &str, density: f64, radius: f64, energy_ev: f64,
             ));
             t.scores = vec![score.parse::<yamc_tallies::score::Score>().unwrap()];
             t.estimator = yamc_tallies::Estimator::TrackLength;
-            t.initialize_batches(1);
+            t.reset_accumulation();
             Arc::new(t)
         };
         let flux = mk("flux");

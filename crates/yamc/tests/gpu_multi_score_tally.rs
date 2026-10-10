@@ -53,7 +53,6 @@ use yamc_tallies::tally::Tally;
 use yamc_tallies::Estimator;
 
 const N_PARTICLES: usize = 40_000;
-const N_BATCHES: usize = 8;
 const SEED: u64 = 20260803;
 
 /// The three scores the multi-score tally carries, in order. Chosen to span
@@ -131,7 +130,7 @@ fn tally(name: &str, scores: &[&str], filters: Vec<Filter>) -> Arc<Tally> {
     t.scores = scores.iter().map(|s| s.parse::<Score>().unwrap()).collect();
     t.estimator = Estimator::TrackLength;
     t.name = Some(name.to_string());
-    t.initialize_batches(N_BATCHES);
+    t.reset_accumulation();
     Arc::new(t)
 }
 

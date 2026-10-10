@@ -79,7 +79,7 @@ fn build(nuclide: &str, density: f64) -> Option<(Model, Arc<Tally>, TransportSet
     tally.filters.push(Filter::Cell(CellFilter::from_id(1)));
     tally.filters.push(Filter::Energy(EnergyFilter::new(edges)));
     tally.scores = vec![Score::Flux(FluxScore)];
-    tally.initialize_batches(1);
+    tally.reset_accumulation();
     let tally = Arc::new(tally);
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&tally)]);
     model.verbose = Verbose::silent();

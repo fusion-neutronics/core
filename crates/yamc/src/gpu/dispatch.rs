@@ -14,8 +14,8 @@
 //! edges (from `EnergyFilter`, or a single `[-∞, +∞]` bin if the tally
 //! is cell-only). After the launch the dispatch walks every (tally,
 //! spatial-bin, energy-bin) triple and stores the value into the
-//! corresponding tally accumulator slot, then runs `accumulate_batch`
-//! to fold it into the sum/sum² stream the Python layer reads.
+//! corresponding per-bin sum/sum² accumulators, which are finalized into
+//! the tally's per-history Welford state via `install_finalized`.
 //!
 //! An `EnergyFunctionFilter` (`energy_function=` / `dose_coefficients=`)
 //! rides along as a per-tally table rather than a bin dimension: the
@@ -512,10 +512,9 @@ fn warn_if_tracking_mode_ignored(tracking_mode: crate::model::TrackingMode) {
 /// Run `model` on the GPU. Splits `settings.total_particles` into chunks
 /// sized by the tallies' `particles_per_cache_write` (same derivation
 /// the CPU path uses), then issues one kernel launch per chunk and
-/// folds each realisation into the tally accumulators via
-/// `accumulate_batch`. This matches the CPU path's variance estimator:
-/// per-tally `standard_deviation` is computed across the realisations,
-/// not across particles within a single launch.
+/// folds each launch's per-history sums into the tally accumulators.
+/// This matches the CPU path's variance estimator: per-tally
+/// `standard_deviation` is computed across source histories.
 ///
 /// Each batch gets a distinct RNG stream (see
 /// `sample_initial_particles_for_batch`); identical `(settings.seed,
@@ -4085,8 +4084,9 @@ fn run_on_gpu_mixed(
 /// reads the neutron pass alone (photons contribute zero to it), a
 /// photon-filtered tally the photon pass alone, and an unfiltered (all-particle)
 /// flux / total / heating tally the per-batch SUM of both passes -- the same
-/// per-source-particle quantity the CPU reports. The batch-means Welford over
-/// `n_batches` then yields per-source-particle means and a valid variance.
+/// per-source-particle quantity the CPU reports. Finalizing the summed
+/// per-history accumulators over `n_histories` then yields per-source-particle
+/// means and a valid variance.
 ///
 /// To match the CPU reference, the neutron share runs through the COUPLED kernel
 /// so it emits secondary photons (capture / inelastic gammas) into a bank, and

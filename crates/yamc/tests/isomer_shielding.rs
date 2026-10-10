@@ -260,7 +260,7 @@ fn tallied_spectrum(paths: &HashMap<&str, String>, bins: &[f64]) -> MultigroupSp
         .push(Filter::Energy(EnergyFilter::new(bins.to_vec())));
     t.scores = vec!["flux".parse::<Score>().expect("flux")];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(1);
+    t.reset_accumulation();
     let t = Arc::new(t);
     let mut m = model(paths, vec![Arc::clone(&t)]);
     m.simulate_transport(&settings()).expect("transport");

@@ -141,7 +141,7 @@ fn fe_sphere_model(seed: u64, n_particles: usize) -> (Model, Arc<Tally>, Transpo
         Filter::ParentNuclide(ParentNuclideFilter::new(vec!["Mn56".to_string()])),
     ];
     photon_tally.scores = vec![Score::Flux(FluxScore)];
-    photon_tally.initialize_batches(1);
+    photon_tally.reset_accumulation();
     let photon_tally = Arc::new(photon_tally);
 
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&photon_tally)]);

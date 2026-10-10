@@ -97,19 +97,18 @@ fn pb208_sphere(seed: u64, radius: f64) -> (Model, Arc<Tally>, TransportSettings
         strength: 1.0,
     });
 
-    let n_particles = 5_000;
-    let n_batches = 4;
+    let n_particles = 20_000;
     let mut tally = Tally::new();
     tally
         .filters
         .push(Filter::Cell(CellFilter::from_id(cell.cell_id.unwrap())));
     tally.scores = vec![Score::Flux(FluxScore)];
-    tally.initialize_batches(n_batches);
+    tally.reset_accumulation();
     let tally = Arc::new(tally);
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&tally)]);
     model.gpu_max_steps_per_particle = 10_000;
     let settings = TransportSettings {
-        total_particles: Some(n_particles * n_batches),
+        total_particles: Some(n_particles),
         seed,
         threads: Some(1),
         ..Default::default()

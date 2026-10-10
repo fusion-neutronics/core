@@ -834,10 +834,9 @@ impl WasmSimulation {
             }
         }
 
-        // Tallies need their batch storage initialised against the
-        // (possibly overridden) batch count.
+        // Clear any accumulation left over from a previous run.
         for tally in &model.tallies {
-            tally.initialize_batches_shared(batches);
+            tally.reset_accumulation_shared();
         }
 
         // Wall-clock around transport, for the figure of merit. The shared

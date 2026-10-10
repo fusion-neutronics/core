@@ -165,7 +165,7 @@ fn build_model(case: &Case, photon_path: &str) -> (Model, Arc<Tally>, TransportS
     )));
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(1);
+    t.reset_accumulation();
     let t = Arc::new(t);
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&t)]);
     model.verbose = Verbose::silent();

@@ -57,7 +57,7 @@ fn tally(score: &str, bins: Option<Vec<f64>>) -> Arc<Tally> {
     }
     t.scores = vec![score.parse::<Score>().expect("score name")];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(1);
+    t.reset_accumulation();
     Arc::new(t)
 }
 

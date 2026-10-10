@@ -117,8 +117,8 @@ fn main() {
     )))]; // n,t (tritium production)
     tally1.name = Some("tbr".to_string());
 
-    // Initialize batch data
-    tally1.initialize_batches(batches);
+    // Allocate the accumulator storage
+    tally1.reset_accumulation();
 
     let tallies = vec![Arc::new(tally1)];
 

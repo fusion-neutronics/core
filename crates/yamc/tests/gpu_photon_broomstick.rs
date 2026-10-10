@@ -137,7 +137,7 @@ fn build() -> (Model, Arc<Tally>, TransportSettings) {
     )));
     t.filters.push(Filter::Energy(EnergyFilter::new(bins())));
     t.scores = vec![Score::Flux(FluxScore)];
-    t.initialize_batches(8);
+    t.reset_accumulation();
     let t = Arc::new(t);
 
     let mut model = Model::new(geometry, vec![source], vec![t.clone()]);
