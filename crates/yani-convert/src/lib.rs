@@ -23,6 +23,7 @@
 //! they are read from the same decay evaluations separately and joined by
 //! nuclide. See [`decay_sources`].
 
+pub mod anything;
 pub mod branching;
 pub mod production;
 
@@ -32,7 +33,9 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow_array::builder::{Float64Builder, Int32Builder, ListBuilder, StringBuilder};
+use arrow_array::builder::{
+    BooleanBuilder, Float64Builder, Int32Builder, ListBuilder, StringBuilder,
+};
 use arrow_array::{ArrayRef, Int32Array, RecordBatch};
 use arrow_ipc::writer::{FileWriter, IpcWriteOptions};
 use arrow_ipc::CompressionType;
@@ -190,6 +193,14 @@ pub(crate) fn string_lists(values: &[Vec<String>]) -> ArrayRef {
 
 pub(crate) fn opt_ints(values: &[Option<i32>]) -> ArrayRef {
     let mut b = Int32Builder::new();
+    for v in values {
+        b.append_option(*v);
+    }
+    Arc::new(b.finish())
+}
+
+pub(crate) fn opt_bools(values: &[Option<bool>]) -> ArrayRef {
+    let mut b = BooleanBuilder::new();
     for v in values {
         b.append_option(*v);
     }
@@ -377,13 +388,26 @@ pub fn write_decay(
 ///
 /// The `Q` column is why this is written from `endf::Chain`: it is declared
 /// non-nullable and the yani chain types have nowhere to hold it.
-pub fn write_reactions(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Error>> {
+///
+/// `anything` are the `(n,X)` rows of MT=5 by parent (see [`anything`]),
+/// written after each parent's other reactions. Their `branching_ratio` is
+/// NaN, since their split depends on incident energy, except on the row
+/// that says no residual is given, which makes nothing and carries 0.
+pub fn write_reactions(
+    chain: &Chain,
+    anything: &BTreeMap<String, anything::Rows>,
+    dir: &Path,
+) -> Result<(), Box<dyn Error>> {
     std::fs::create_dir_all(dir)?;
     let mut nuc = Vec::new();
     let mut kind = Vec::new();
     let mut target = Vec::new();
     let mut q = Vec::new();
     let mut branching = Vec::new();
+    let mut energy = Vec::new();
+    let mut multiplicity = Vec::new();
+    let mut lip = Vec::new();
+    let mut share = Vec::new();
     for n in &chain.nuclides {
         for r in &n.reactions {
             nuc.push(n.name.clone());
@@ -391,6 +415,27 @@ pub fn write_reactions(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Error>> 
             target.push(r.target.clone());
             q.push(r.q_value);
             branching.push(r.branching_ratio);
+            energy.push(None);
+            multiplicity.push(None);
+            lip.push(None);
+            share.push(None);
+        }
+        for row in anything
+            .get(&n.name)
+            .iter()
+            .flat_map(|rows| rows.rows.iter().map(move |row| (rows.q_value, row)))
+        {
+            let (q_value, row) = row;
+            nuc.push(n.name.clone());
+            kind.push(anything::ANYTHING.to_string());
+            target.push(row.target.clone());
+            q.push(q_value);
+            let curve = row.target.is_some();
+            branching.push(if curve { f64::NAN } else { 0.0 });
+            energy.push(curve.then(|| row.energy.clone()));
+            multiplicity.push(curve.then(|| row.multiplicity.clone()));
+            lip.push(row.lip);
+            share.push(row.share);
         }
     }
     write_section(
@@ -402,6 +447,10 @@ pub fn write_reactions(chain: &Chain, dir: &Path) -> Result<(), Box<dyn Error>> 
             opt_strings(&target),
             floats(&q),
             floats(&branching),
+            opt_list_of(&energy),
+            opt_list_of(&multiplicity),
+            opt_ints(&lip),
+            opt_bools(&share),
         ],
     )
 }
@@ -757,6 +806,10 @@ pub struct Inputs<'a> {
     pub decay_fill: &'a [Material],
     /// The library `decay_fill` came from, recorded per replaced nuclide.
     pub decay_fill_library: &'a str,
+    /// MT=5 of each neutron evaluation that has one, by parent, read with
+    /// [`anything::read`] in the same pass as the Q values. Empty writes no
+    /// `(n,X)` rows, which is a chain that leaves MT=5 unmodelled.
+    pub anything: &'a BTreeMap<String, anything::Evaluation>,
 }
 
 /// Convert decay, fission yield and neutron evaluations into a transmutation
@@ -805,8 +858,22 @@ pub fn convert_transmutation(
     if wants("decay") {
         write_decay(&chain, &sources, &out.join("decay"))?;
     }
+    // MT=5's products, named against the same decay data as every other
+    // reaction's, for the parents the chain carries.
+    let named = if wants("reactions") {
+        let parents: std::collections::BTreeSet<String> =
+            chain.nuclides.iter().map(|n| n.name.clone()).collect();
+        anything::name_all(inputs.anything, &anything::DecayIndex::new(decay), &parents)
+    } else {
+        anything::Named::default()
+    };
+    let mut reactions_record = serde_json::Map::new();
+    reactions_record.insert(
+        "mt5".to_string(),
+        serde_json::Value::Object(named.record.clone()),
+    );
     if wants("reactions") {
-        write_reactions(&chain, &out.join("reactions"))?;
+        write_reactions(&chain, &named.rows, &out.join("reactions"))?;
     }
     if wants("fission_yields") {
         write_fission_yields(&chain, &out.join("fission_yields"))?;
@@ -820,7 +887,11 @@ pub fn convert_transmutation(
             decay_library,
             data_version,
             created_utc,
-            (*subsection == "decay").then_some(&decay_record),
+            match *subsection {
+                "decay" => Some(&decay_record),
+                "reactions" => Some(&reactions_record),
+                _ => None,
+            },
         )?;
     }
 
@@ -831,7 +902,7 @@ pub fn convert_transmutation(
     let parents: Vec<String> = chain
         .nuclides
         .iter()
-        .filter(|n| !n.reactions.is_empty())
+        .filter(|n| !n.reactions.is_empty() || named.rows.contains_key(&n.name))
         .map(|n| n.name.clone())
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
@@ -1017,14 +1088,19 @@ pub fn convert_transmutation_files(
     // core count rather than by the size of the sublibrary, and parsing is what
     // the pass spends effectively all of its time on: 41 s of the 41.4 s a
     // TENDL-2017 reactions build took on one core.
-    let read_q = |path: &String| -> Result<QValues, String> {
+    //
+    // MT=5's products are read in the same pass, for the same reason: they
+    // are the one part of a neutron evaluation the reactions subsection needs
+    // beyond its Q values.
+    type PerFile = (QValues, Option<anything::Evaluation>);
+    let read_q = |path: &String| -> Result<PerFile, String> {
         let material = Material::from_file(path).map_err(|e| format!("{path}: {e}"))?;
         let mut out = QValues::new();
         collect_q_values(&material, &mut out);
-        Ok(out)
+        Ok((out, anything::read(&material)))
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let per_file: Vec<QValues> = {
+    let per_file: Vec<PerFile> = {
         use rayon::prelude::*;
         neutron_files
             .par_iter()
@@ -1032,15 +1108,21 @@ pub fn convert_transmutation_files(
             .collect::<Result<Vec<_>, _>>()?
     };
     #[cfg(target_arch = "wasm32")]
-    let per_file: Vec<QValues> = neutron_files
+    let per_file: Vec<PerFile> = neutron_files
         .iter()
         .map(read_q)
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut q_values = QValues::new();
-    for map in per_file {
+    let mut anything_by_parent: BTreeMap<String, anything::Evaluation> = BTreeMap::new();
+    for (map, mt5) in per_file {
         for (nuclide, channels) in map {
             q_values.entry(nuclide).or_default().extend(channels);
+        }
+        // A later evaluation of the same nuclide replaces an earlier one, as
+        // its Q values do.
+        if let Some(mt5) = mt5 {
+            anything_by_parent.insert(mt5.parent.clone(), mt5);
         }
     }
 
@@ -1085,6 +1167,7 @@ pub fn convert_transmutation_files(
             q_values: &q_values,
             decay_fill: &decay_fill,
             decay_fill_library,
+            anything: &anything_by_parent,
         },
         &names,
         branch_ratios,

@@ -33,6 +33,7 @@ use crate::chain::{
     FissionYieldSet, SourceCovariance, YieldInterpolation,
 };
 use crate::continuum::Interpolation;
+use crate::reactions::ANYTHING;
 
 fn read_arrow_bytes(bytes: &[u8]) -> Result<Vec<RecordBatch>, Box<dyn Error>> {
     let reader = FileReader::try_new(std::io::Cursor::new(bytes), None)?;
@@ -535,6 +536,88 @@ fn read_sources(batch: &RecordBatch) -> Result<Vec<(String, DecaySource)>, Box<d
     Ok(out)
 }
 
+/// The curve an `(n,X)` row of `reactions/reactions.arrow` carries, `None`
+/// for every other row and for the `(n,X)` row that says the residual is not
+/// given (null target, nothing else).
+///
+/// A share row becomes a [`BranchQuantity::Yield`] curve and any other a
+/// [`BranchQuantity::Multiplicity`] one. The facts the branching rule reads
+/// are the MF=6 ones: MT 5, the product's isomeric state (MF=6's LIP) as its
+/// level, and a list that is complete, since MF=6 names every product, ground
+/// states included. Anything else on such a row (a curve on another kind, a
+/// multiplicity with no energies, a target with no curve) is not something the
+/// converter writes, and is refused rather than guessed at.
+fn anything_curve(
+    parent: &str,
+    kind: &str,
+    target: Option<&str>,
+    energy: Option<Vec<f64>>,
+    values: Option<Vec<f64>>,
+    lip: Option<i32>,
+    share: Option<bool>,
+) -> Result<Option<BranchCurve>, Box<dyn Error>> {
+    let here = || format!("reactions/reactions.arrow: {parent} {kind} -> {target:?}");
+    if kind != ANYTHING {
+        if energy.is_some() || values.is_some() || lip.is_some() || share.is_some() {
+            return Err(format!(
+                "{} carries a multiplicity, which only {ANYTHING} rows have",
+                here()
+            )
+            .into());
+        }
+        return Ok(None);
+    }
+    let (target, energy, values, lfs, share) = match (target, energy, values, lip, share) {
+        (None, None, None, None, None) => return Ok(None),
+        (Some(t), Some(e), Some(v), Some(lip), Some(share)) => (t, e, v, lip, share),
+        _ => {
+            return Err(format!(
+                "{} must name a product with its energies, multiplicities, isomeric state \
+                 and representation, or none of the five (the residual the evaluation \
+                 does not give)",
+                here()
+            )
+            .into())
+        }
+    };
+    if energy.is_empty() || energy.len() != values.len() {
+        return Err(format!(
+            "{} has {} energies and {} multiplicities",
+            here(),
+            energy.len(),
+            values.len()
+        )
+        .into());
+    }
+    if energy.windows(2).any(|w| w[0] > w[1] || w[0].is_nan()) {
+        return Err(format!("{} has energies out of order", here()).into());
+    }
+    let state = BranchState {
+        mt: 5,
+        lfs,
+        lmf: None,
+        list_complete: true,
+        level_route: if lfs == 0 { "ground" } else { "level_index" }.to_string(),
+        // MF=6 states a product's isomer by index only; zero on an excited
+        // state is the format's "not stated".
+        level_energy: 0.0,
+        level_energy_difference: (lfs == 0).then_some(0.0),
+        mf3_cross_section: None,
+    };
+    Ok(Some(BranchCurve {
+        target: target.to_string(),
+        quantity: if share {
+            BranchQuantity::Yield
+        } else {
+            BranchQuantity::Multiplicity
+        },
+        energy,
+        values,
+        states: Arc::from(vec![state]),
+        normalisation: None,
+    }))
+}
+
 /// Whether a branching row `(kind, target)` should be grafted onto `parent`.
 ///
 /// A graft adds a metastable-production channel the base three-part chain lacks
@@ -686,6 +769,7 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
                         q_value: None,
                         branching_uncertainty: None,
                         evaluated_branching: None,
+                        multiplicity: None,
                     });
                 }
             }
@@ -716,6 +800,7 @@ pub fn parse_chain_arrow<P: AsRef<Path>>(
                         q_value: q_values.as_ref().map(|q| q.value(i)),
                         branching_uncertainty: None,
                         evaluated_branching: None,
+                        multiplicity: None,
                     });
                 }
             }
@@ -1173,6 +1258,7 @@ pub fn parse_chain_parts_from_bytes(
                     evaluated_branching: evaluated
                         .filter(|column| !column.is_null(i))
                         .map(|column| column.value(i)),
+                    multiplicity: None,
                 });
             }
         }
@@ -1188,6 +1274,11 @@ pub fn parse_chain_parts_from_bytes(
     }
 
     // reactions/reactions.arrow -- optional.
+    //
+    // The `(n,X)` rows' multiplicities are collected here and become curves of
+    // the branching table below, which is what the solve folds; see
+    // `anything_curve`.
+    let mut anything_curves: Vec<(String, BranchCurve)> = Vec::new();
     if let Some(bytes) = parts.reactions.get("reactions.arrow") {
         for batch in read_section_bytes(
             bytes,
@@ -1199,19 +1290,39 @@ pub fn parse_chain_parts_from_bytes(
             let targets = col::<StringArray>(&batch, "target")?;
             let branching = col::<Float64Array>(&batch, "branching_ratio")?;
             let q_values = col::<Float64Array>(&batch, "Q").ok();
+            // Optional: a file written before MT=5 was carried has none.
+            let energies = optional_col::<ListArray>(&batch, "energy")?;
+            let multiplicities = optional_col::<ListArray>(&batch, "multiplicity")?;
+            let lips = optional_col::<Int32Array>(&batch, "lip")?;
+            let shares = optional_col::<BooleanArray>(&batch, "share")?;
             for i in 0..batch.num_rows() {
-                let nuc = ensure_nuclide(&mut chain, nuclides.value(i));
+                let parent = nuclides.value(i);
+                let kind = types.value(i);
+                let target = (!targets.is_null(i)).then(|| targets.value(i).to_string());
+                let lip = lips.filter(|c| !c.is_null(i)).map(|c| c.value(i));
+                let share = shares.filter(|c| !c.is_null(i)).map(|c| c.value(i));
+                let multiplicity = anything_curve(
+                    parent,
+                    kind,
+                    target.as_deref(),
+                    optional_list(energies, i)?,
+                    optional_list(multiplicities, i)?,
+                    lip,
+                    share,
+                )?
+                .map(Arc::new);
+                if let Some(curve) = &multiplicity {
+                    anything_curves.push((parent.to_string(), (**curve).clone()));
+                }
+                let nuc = ensure_nuclide(&mut chain, parent);
                 nuc.reactions.push(ChainReaction {
-                    kind: types.value(i).to_string(),
-                    target: if targets.is_null(i) {
-                        None
-                    } else {
-                        Some(targets.value(i).to_string())
-                    },
+                    kind: kind.to_string(),
+                    target,
                     branching: branching.value(i),
                     q_value: q_values.as_ref().map(|q| q.value(i)),
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity,
                 });
             }
         }
@@ -1343,6 +1454,17 @@ pub fn parse_chain_parts_from_bytes(
     // placeholder. The ground/self `(n,n')` row (target == parent) is a
     // depletion no-op and is skipped.
     let mut branch_table: BranchTable = BranchTable::new();
+    // MT=5's products, from the reactions subsection: the same evaluation as
+    // the topology, whatever branching subsection is or is not loaded.
+    for (parent, curve) in anything_curves {
+        branch_table
+            .curves_mut()
+            .entry(parent)
+            .or_default()
+            .entry(ANYTHING.to_string())
+            .or_default()
+            .push(curve);
+    }
     {
         if let Some(bytes) = parts.branching.get("branching.arrow") {
             for batch in read_arrow_bytes(bytes)? {
@@ -1359,6 +1481,15 @@ pub fn parse_chain_parts_from_bytes(
                         continue;
                     }
                     let kind = reactions.value(i).to_string();
+                    if kind == ANYTHING {
+                        return Err(format!(
+                            "branching.arrow has an {ANYTHING} row for {parent}. MT=5's \
+                             products are read from the reactions subsection, the same \
+                             evaluation as the chain's topology, and a second source for \
+                             them would mix two libraries in one reaction"
+                        )
+                        .into());
+                    }
                     let target = targets.value(i).to_string();
                     let quantity = match quantities.value(i) {
                         "yield" => BranchQuantity::Yield,
@@ -1394,6 +1525,7 @@ pub fn parse_chain_parts_from_bytes(
                                 q_value: None,
                                 branching_uncertainty: None,
                                 evaluated_branching: None,
+                                multiplicity: None,
                             });
                         }
                     }
@@ -1702,6 +1834,11 @@ pub fn export_chain_parts<P: AsRef<Path>>(
         let mut br_b = Float64Builder::new();
         let mut br_sigma_b = Float64Builder::new();
         let mut br_evaluated_b = Float64Builder::new();
+        // An `(n,X)` row's multiplicity, the reactions section's own.
+        let mut energy_b = ListBuilder::new(Float64Builder::new());
+        let mut multiplicity_b = ListBuilder::new(Float64Builder::new());
+        let mut lip_b = Int32Builder::new();
+        let mut share_b = arrow_array::builder::BooleanBuilder::new();
         for name in &names {
             let nuc = &chain[*name];
             for r in pick(nuc) {
@@ -1717,6 +1854,22 @@ pub fn export_chain_parts<P: AsRef<Path>>(
                 br_b.append_value(r.branching);
                 br_sigma_b.append_option(r.branching_uncertainty);
                 br_evaluated_b.append_option(r.evaluated_branching);
+                match &r.multiplicity {
+                    Some(curve) => {
+                        energy_b.values().append_slice(&curve.energy);
+                        energy_b.append(true);
+                        multiplicity_b.values().append_slice(&curve.values);
+                        multiplicity_b.append(true);
+                        lip_b.append_value(curve.states.first().map_or(0, |s| s.lfs));
+                        share_b.append_value(curve.quantity == BranchQuantity::Yield);
+                    }
+                    None => {
+                        energy_b.append(false);
+                        multiplicity_b.append(false);
+                        lip_b.append_null();
+                        share_b.append_null();
+                    }
+                }
             }
         }
         // The two files do NOT share a schema, though they share a shape.
@@ -1735,6 +1888,12 @@ pub fn export_chain_parts<P: AsRef<Path>>(
             columns.push(Arc::new(q_b.finish()));
         }
         columns.push(Arc::new(br_b.finish()));
+        if section == "reactions/reactions.arrow" {
+            columns.push(Arc::new(energy_b.finish()));
+            columns.push(Arc::new(multiplicity_b.finish()));
+            columns.push(Arc::new(lip_b.finish()));
+            columns.push(Arc::new(share_b.finish()));
+        }
         // The mirror image: only decay_modes declares a branching sigma and
         // an evaluated ratio, and check_batch refuses a reactions file that
         // carries either.
@@ -2340,6 +2499,7 @@ mod tests {
             q_value: None,
             branching_uncertainty: sigma,
             evaluated_branching: sigma.map(|_| branching),
+            multiplicity: None,
         };
         let nuclide = |name: &str, decays: Vec<ChainReaction>| ChainNuclide {
             name: name.to_string(),
@@ -2386,6 +2546,7 @@ mod tests {
                     "Ir169",
                     vec![ChainReaction {
                         evaluated_branching: Some(0.45),
+                        multiplicity: None,
                         ..mode("alpha", "Re165", 1.0, Some(0.15))
                     }],
                 ),
@@ -2531,6 +2692,7 @@ mod tests {
                     q_value: Some(7.492e6),
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
                 decays: vec![ChainReaction {
                     kind: "beta-".to_string(),
@@ -2539,6 +2701,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
                 fission_yields: None,
                 // Lines, and a continuum under each state its law can be in:
