@@ -209,7 +209,7 @@ def test_the_report_names_what_is_never_perturbed():
     for source in (
         "isomeric branching (MF=9/MF=10)",
         "covariance with another evaluation (MAT1 naming another material)",
-        "resonance-parameter covariance not written into covariance.arrow (MF=32)",
+        "resonance-parameter covariance (MF=32) of a range neither sampled nor written into covariance.arrow",
         "decay photon spectrum covariance and continuum shape (MF=8 MT=457 LCOV, which no library states)",
         "photon attenuation coefficient (XCOM)",
         "air energy-absorption coefficient (NIST SRD 126)",

@@ -11,7 +11,7 @@
 //! evaluation's MF=33. The cached libraries add `lb = 8`, absolute and
 //! cross-reaction blocks, and are skipped where absent.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -163,7 +163,7 @@ fn the_field_reproduces_the_fold_under_every_spectrum() {
             })
             .collect();
         let started = std::time::Instant::now();
-        let fields = cell_fields(&m, &chain, &fold_spectra, None);
+        let fields = cell_fields(&m, &chain, &fold_spectra, None, &BTreeSet::new());
         let sampler = Sampler::new(&fields, &folds);
         let elapsed = started.elapsed();
         if let Some(field) = fields.get(nuclide.as_str()) {
@@ -243,11 +243,14 @@ fn every_spectrum_reads_one_draw_of_the_cross_sections() {
                 group_boundaries: &groups,
             })
             .collect();
-        let sampler = Sampler::new(&cell_fields(&m, &chain, &fold_spectra, None), &folds);
+        let sampler = Sampler::new(
+            &cell_fields(&m, &chain, &fold_spectra, None, &BTreeSet::new()),
+            &folds,
+        );
         for replica in 0..16 {
             let draw = sampler.draw(7, replica);
             let perturbed: Vec<_> = (0..3)
-                .map(|s| sampler.perturb_with(&draw, s, &rates[s]).0)
+                .map(|s| sampler.perturb_with(&draw, s, &rates[s], None).0)
                 .collect();
             for (kind, r_mean) in &perturbed[2][nuclide.as_str()] {
                 let (Some(ra), Some(rb)) = (

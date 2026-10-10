@@ -46,6 +46,7 @@ fn chain_driven_by(parent: &str) -> Arc<HashMap<String, yani::ChainNuclide>> {
         q_value: Some(0.0),
         branching_uncertainty: None,
         evaluated_branching: None,
+        multiplicity: None,
     };
     Arc::new(HashMap::from([
         (parent.to_string(), nuclide(parent, vec![capture])),

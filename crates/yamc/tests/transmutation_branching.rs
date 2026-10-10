@@ -114,6 +114,7 @@ fn synthetic_chain() -> Arc<HashMap<String, ChainNuclide>> {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 },
                 ChainReaction {
                     kind: "(n,gamma)".to_string(),
@@ -122,6 +123,7 @@ fn synthetic_chain() -> Arc<HashMap<String, ChainNuclide>> {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 },
             ],
             decays: vec![],
@@ -322,6 +324,7 @@ fn coupled_branching_folds_parents_outside_material() {
                 q_value: None,
                 branching_uncertainty: None,
                 evaluated_branching: None,
+                multiplicity: None,
             }],
             decays: vec![],
             fission_yields: None,
@@ -347,6 +350,7 @@ fn coupled_branching_folds_parents_outside_material() {
                 q_value: None,
                 branching_uncertainty: None,
                 evaluated_branching: None,
+                multiplicity: None,
             }],
             decays: vec![],
             fission_yields: None,
@@ -550,6 +554,7 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
                     branching: 1.0,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                     q_value: None,
                 },
                 // Exactly what `parse_chain_parts_from_bytes` grafts.
@@ -559,6 +564,7 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
                     branching: 0.0,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                     q_value: None,
                 },
             ],
@@ -578,6 +584,7 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
         branching: 1.0,
         branching_uncertainty: None,
         evaluated_branching: None,
+        multiplicity: None,
         q_value: None,
     });
     map.insert("Li7_m2".to_string(), li7m);

@@ -43,6 +43,7 @@ fn convert(name: &str, fill: &[Material]) -> (std::path::PathBuf, serde_json::Va
             q_values: &endf::chain::QValues::new(),
             decay_fill: fill,
             decay_fill_library: if fill.is_empty() { "" } else { "jendl-5.0" },
+            anything: &Default::default(),
         },
         &[],
         None,

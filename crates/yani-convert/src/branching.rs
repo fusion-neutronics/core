@@ -888,12 +888,11 @@ impl BranchingExtractor {
         let mut emitted_any = false;
 
         for (mt, states) in &production {
-            // TODO: MT=5 names no chain reaction, so its MF=10 partials
-            // are passed over here, as are the MF=6 residual yields (with
-            // their LIP isomer flag) that `radionuclide_production` does not
-            // read. Until they are carried as an (n,X) reaction, the solve
-            // measures MT=5's share of each parent's removal and reports it
-            // (`measure_unmodelled_mt5`).
+            // MT=5 names no reaction here: its products, isomers included
+            // (MF=6's LIP), are the reactions subsection's `(n,X)` rows, from
+            // the reaction library itself (see `crate::anything`), and its
+            // MF=9/MF=10 states are recorded there rather than written as a
+            // second source of the same split.
             let Some(rtype) = mt2type.get(&(*mt as i64)) else {
                 continue;
             };
