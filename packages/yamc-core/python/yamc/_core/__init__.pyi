@@ -632,8 +632,16 @@ class DataUncertainty:
     - ``"decay_photon_lines"``: each decay photon spectrum's normalisation
       (FD for lines, FC for a continuum), one draw per spectrum common to all
       its lines, and each line's own intensity (dRI) and energy (dER), from
-      the decay data's MT=457 sigmas. It moves the decay photon spectrum and
-      the contact dose only: no photon enters the solve;
+      the decay data's MT=457 sigmas. It moves the decay photon spectrum, the
+      contact dose and, through the gamma decay energy E_EM, which follows
+      each replica's drawn lines in place of a ``"decay_energy"`` draw, the
+      decay heat; no photon enters the solve. The decay data do not state how
+      a nuclide's photon intensities are correlated beyond the normalisation
+      (between the lines' dRI, between a normalisation and its lines, between
+      gamma and x-ray spectra), so each output is evaluated at both ends:
+      ``Estimate.std_dev`` takes them independent and
+      ``Estimate.std_dev_correlated`` fully correlated. A D1S dose
+      (``PulseSchedule.time_correct_tally``) draws the normalisations alone;
     - ``"fission_yield"``: each fissioning parent's independent yields (MT=454),
       from the DY the evaluation states on each, drawn on the tape's own
       products and summed onto the chain's the way the converter summed the
@@ -653,7 +661,8 @@ class DataUncertainty:
     states a mean and a sigma for each and no correlation, so the draws carry
     exactly what the evaluation states and are never negative. So are the decay
     photon normalisations, intensities and energies, with the one correlation
-    the data does state: a spectrum's normalisation is common to its lines.
+    the data does state, a spectrum's normalisation common to its lines, and
+    the ones it does not state bounded rather than assumed.
     
     Held at their nominal values, with uncertainties of their own that this
     does not propagate:
@@ -821,21 +830,43 @@ class DoseResult:
         r"""
         The nuclear-data uncertainty on `mean`, same shape, when
         ``time_correct_tally`` was given ``data_uncertainty``; ``None``
-        otherwise. From the half-lives behind the time-correction factors.
+        otherwise. From the half-lives behind the time-correction factors and
+        the decay photon spectrum normalisations that scale each emitter's
+        tally, with an emitter's gamma and x-ray normalisations drawn
+        independently: the lower end of the range ``data_std_dev_correlated``
+        closes.
+        """
+    @property
+    def data_std_dev_correlated(self) -> typing.Optional[typing.Any]:
+        r"""
+        ``data_std_dev`` with each emitter's gamma and x-ray normalisations
+        drawn fully correlated, the upper end of the range the decay data
+        leave by not stating their correlation. Equal to ``data_std_dev`` when
+        no normalisation is drawn. Negative correlations are not considered:
+        what the spectra share (a decay scheme's normalisation, its conversion
+        coefficients) moves them the same way.
         """
     @property
     def total_std_dev(self) -> typing.Optional[typing.Any]:
         r"""
         `std_dev` and `data_std_dev` in quadrature, when both exist. They are
         independent: one is the transport's sampling, the other the evaluated
-        half-lives.
+        decay data.
+        """
+    @property
+    def total_std_dev_correlated(self) -> typing.Optional[typing.Any]:
+        r"""
+        `std_dev` and `data_std_dev_correlated` in quadrature, when both exist.
         """
     @property
     def data_uncertainty_info(self) -> typing.Optional[typing.Any]:
         r"""
         What the nuclear-data uncertainty covered, when asked for: the
-        half-lives sampled, those with no stated sigma, the replica count and
-        whether it settled.
+        half-lives sampled, those with no stated sigma, the emitters whose
+        photon normalisation was drawn (``decay_photon_normalisations_perturbed``)
+        and those with a spectrum whose normalisation is folded into its line
+        sigmas (``decay_photon_spectra_folded``), the replica count, whether it
+        settled, and what was held at nominal (``not_perturbed``).
         """
     @property
     def by_nuclide(self) -> typing.Any:
@@ -932,6 +963,15 @@ class Estimate:
     uncertainty was asked for. ``mean`` and ``std_dev`` are ``None`` below two
     replicas: a spread over fewer than two samples is unmeasured, not zero, and
     reporting it as zero would read as a quantity known exactly.
+    
+    A quantity a decay photon intensity enters (contact dose, the photon
+    spectrum, and the decay heat through its gamma part) has a range rather
+    than one spread when the ``"decay_photon_lines"`` source is on, because
+    the decay data do not state how a nuclide's photon intensities are
+    correlated. ``std_dev`` is the lower end, every unstated correlation taken
+    as zero, and ``std_dev_correlated`` the upper end, every one taken as one;
+    ``std_dev_range`` gives both. For any other quantity, or with the source
+    off, the two are equal.
     """
     @property
     def nominal(self) -> builtins.float:
@@ -952,11 +992,45 @@ class Estimate:
     def std_dev(self) -> typing.Optional[builtins.float]:
         r"""
         The ensemble's sample standard deviation, or None below two replicas.
+        
+        The lower end of ``std_dev_range``: where the ``"decay_photon_lines"``
+        source is drawn, the correlations the decay data leave unstated
+        between a nuclide's photon intensities are taken as zero, which is the
+        evaluation read literally.
+        """
+    @property
+    def std_dev_correlated(self) -> typing.Optional[builtins.float]:
+        r"""
+        The ensemble's sample standard deviation with those correlations taken
+        as one, or None below two replicas: within each nuclide the lines of a
+        spectrum, the spectrum's normalisation and its lines, and its gamma and
+        x-ray spectra all move together. The upper end of ``std_dev_range``.
+        
+        Evaluated on the same inventories as ``std_dev``, so the two differ by
+        the line data alone. Equal to ``std_dev`` for activity, or when the
+        ``"decay_photon_lines"`` source is not drawn.
+        """
+    @property
+    def std_dev_range(self) -> typing.Optional[tuple[builtins.float, builtins.float]]:
+        r"""
+        ``(std_dev, std_dev_correlated)``, the range every non-negative
+        correlation between a nuclide's photon intensities gives, or None below
+        two replicas.
+        
+        Negative correlations are not considered: what the intensities leave
+        unstated is a shared normalisation, which moves every line it scales
+        the same way and cannot anticorrelate them.
         """
     @property
     def relative_std_dev(self) -> typing.Optional[builtins.float]:
         r"""
         ``std_dev`` as a fraction of ``nominal``, or None if either is absent.
+        """
+    @property
+    def relative_std_dev_correlated(self) -> typing.Optional[builtins.float]:
+        r"""
+        ``std_dev_correlated`` as a fraction of ``nominal``, or None if either
+        is absent.
         """
     @property
     def std_dev_standard_error(self) -> typing.Optional[builtins.float]:
@@ -1291,12 +1365,47 @@ class LineEstimate:
     @property
     def std_dev(self) -> typing.Optional[builtins.float]:
         r"""
-        The ensemble's sample standard deviation, or None below two replicas.
+        The ensemble's sample standard deviation [photons/s], or None below
+        two replicas.
+        
+        The lower end of ``std_dev_range``: where the ``"decay_photon_lines"``
+        source is drawn, the correlations the decay data leave unstated
+        between a nuclide's photon intensities are taken as zero, which is the
+        evaluation read literally.
+        """
+    @property
+    def std_dev_correlated(self) -> typing.Optional[builtins.float]:
+        r"""
+        The ensemble's sample standard deviation with those correlations taken
+        as one, or None below two replicas: within each nuclide the lines of a
+        spectrum, the spectrum's normalisation and its lines, and its gamma and
+        x-ray spectra all move together. The upper end of ``std_dev_range``.
+        
+        Evaluated on the same inventories as ``std_dev``, so the two differ by
+        the line data alone. Equal to ``std_dev`` when the
+        ``"decay_photon_lines"`` source is not drawn.
+        """
+    @property
+    def std_dev_range(self) -> typing.Optional[tuple[builtins.float, builtins.float]]:
+        r"""
+        ``(std_dev, std_dev_correlated)``, the range every non-negative
+        correlation between a nuclide's photon intensities gives, or None below
+        two replicas.
+        
+        Negative correlations are not considered: what the intensities leave
+        unstated is a shared normalisation, which moves every line it scales
+        the same way and cannot anticorrelate them.
         """
     @property
     def relative_std_dev(self) -> typing.Optional[builtins.float]:
         r"""
         ``std_dev`` as a fraction of ``nominal``, or None if either is absent.
+        """
+    @property
+    def relative_std_dev_correlated(self) -> typing.Optional[builtins.float]:
+        r"""
+        ``std_dev_correlated`` as a fraction of ``nominal``, or None if either
+        is absent.
         """
     @property
     def std_dev_standard_error(self) -> typing.Optional[builtins.float]:
@@ -3643,17 +3752,28 @@ class PulseSchedule:
         sources (``yamc.transmutation_decay_data`` etc.).
         
             data_uncertainty (DataUncertainty, optional): Also propagate the
-                nuclear-data uncertainty of the time correction. Only the
-                ``"half_life"`` source acts on it: a time-correction factor is an
-                activity over the schedule, and the tally's in-line photon yield
-                is per decay, so the half-lives enter through the correction and
-                nowhere else. Each replica draws every half-life feeding an
-                emitter once and uses it for every campaign, so one evaluation
-                is one uncertainty; the draws are those a transmutation with the
-                same seed makes. Read ``.data_std_dev`` and ``.total_std_dev``.
-                Decay branching ratios also shape a time correction and are held
-                at nominal here, which ``.data_uncertainty_info`` lists under
-                ``not_perturbed``.
+                nuclear-data uncertainty of the dose. Two sources act on it.
+                ``"half_life"`` acts through the time correction: a
+                time-correction factor is an activity over the schedule, and the
+                tally's in-line photon yield is per decay, so the half-lives
+                enter there and nowhere else. Each replica draws every half-life
+                feeding an emitter once and uses it for every campaign, so one
+                evaluation is one uncertainty. ``"decay_photon_lines"`` acts
+                through the photon spectrum normalisation (FD, FC), which scales
+                an emitter's whole spectrum and so its tally, and is applied to
+                it after the fact; an emitter with several spectra is scaled by
+                their multipliers weighted by each one's share of its photon
+                energy. The draws are those a transmutation with the same seed
+                makes. Read ``.data_std_dev`` and ``.total_std_dev``, and
+                ``.data_std_dev_correlated`` and ``.total_std_dev_correlated``
+                for the upper end of the range the unstated correlation between
+                an emitter's gamma and x-ray normalisations leaves. The line
+                intensities (dRI) and energies change the spectrum's shape,
+                which needs line-resolved tallies, and are held at nominal;
+                ENDF/B-VIII.1 folds the normalisation into the dRI, so under it
+                almost nothing is drawn. Decay branching ratios also shape a
+                time correction and are held at nominal. ``.data_uncertainty_info``
+                lists everything held under ``not_perturbed``.
         
         Returns:
             DoseResult with ``.mean`` / ``.std_dev`` / ``.by_nuclide`` / ``.times``,
@@ -5503,9 +5623,23 @@ class TransmutationResults:
         
         Args:
             material_id: Material ID number.
+        With the ``"decay_photon_lines"`` source on, each replica's gamma decay
+        energy E_EM follows its drawn photon lines and continua rather than an
+        independent ``"decay_energy"`` draw, so its gamma heat and its contact
+        dose come from the same draw of one evaluation. E_EM moves by the drawn
+        change in the photon energy per decay (each line's energy times its
+        intensity, plus each continuum's energy integral), and the part of E_EM
+        the tabulated spectra do not carry is held at nominal. The beta and
+        alpha parts keep their ``"decay_energy"`` draws. The heat then has a
+        range, ``Estimate.std_dev`` to ``Estimate.std_dev_correlated``, from the
+        photon intensities' unstated correlations.
+        
+        Args:
+            material_id: Material ID number.
             step: Timestep index (0 = initial composition). As in
                 ``get_activity_uncertainty``, step 0 has a spread whenever the
-                ``"half_life"`` or ``"decay_energy"`` source is sampled.
+                ``"half_life"``, ``"decay_energy"`` or ``"decay_photon_lines"``
+                source is sampled.
             by_nuclide (bool): Return a ``dict[str, Estimate]`` of W by nuclide
                 instead of one ``Estimate`` for the total.
         
@@ -5538,6 +5672,16 @@ class TransmutationResults:
         (XCOM), air energy absorption (NIST SRD 126), ICRP-116 dose
         coefficients and the build-up factor are held at their nominal values
         and contribute nothing to it.
+        
+        With the ``"decay_photon_lines"`` source on, the band is a range:
+        ``Estimate.std_dev`` takes each nuclide's photon intensities as
+        independent where the decay data state no correlation, and
+        ``Estimate.std_dev_correlated`` as fully correlated (the lines of a
+        spectrum, its normalisation and lines, and its gamma and x-ray
+        spectra). ENDF/B-VIII.1 folds each spectrum's normalisation sigma into
+        every line's, so a multi-line emitter's range there is wide;
+        ``get_data_uncertainty_info`` names those spectra under
+        ``decay_photon_spectra_folded``.
         
         Args:
             material_id: Material ID number.
@@ -5574,7 +5718,9 @@ class TransmutationResults:
         intensity per decay when the ``"decay_photon_lines"`` source is on.
         That source draws each line's energy too, so lines are matched across
         replicas on their nominal energy, and ``LineEstimate.energy_std_dev``
-        gives the spread of the energy drawn.
+        gives the spread of the energy drawn. A line's rate spread is a range,
+        ``LineEstimate.std_dev`` to ``LineEstimate.std_dev_correlated``, for the
+        reason ``get_contact_dose_uncertainty`` gives.
         
             >>> lines = results.get_decay_photon_spectrum_uncertainty(mid, step)
             >>> [(l.energy, l.nominal, l.std_dev) for l in lines[:2]]
@@ -5808,6 +5954,12 @@ class TransmutationResults:
           ``decay_photon_line_uncertainty_not_carried`` names those with a
           sigma stated on a zero value, or not finite, which no draw can carry;
           that value is held at nominal and counted as a gap.
+          ``decay_photon_spectra_folded`` maps each perturbed nuclide with a
+          spectrum written the ENDF/B way (a normalisation of 1 with no sigma,
+          its sigma folded into every line's dRI) to the radiation of each such
+          spectrum (``"gamma"``, ``"xray"``). How much of those dRI the lines
+          share is not stated, so they are where most of the range between a
+          photon output's ``std_dev`` and ``std_dev_correlated`` comes from.
         - ``fission_yields_perturbed`` / ``no_fission_yield_uncertainty``: the
           same for the ``"fission_yield"`` source, over the reachable
           fissioning parents. ``fission_yield_uncertainty_not_carried`` names
