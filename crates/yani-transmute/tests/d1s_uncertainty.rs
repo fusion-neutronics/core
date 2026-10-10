@@ -47,6 +47,7 @@ fn the_time_correction_moves_with_the_half_life_it_reads() {
         samples: Some(512),
         sources: vec![Source::HalfLife],
         attribution: false,
+        ..Default::default()
     };
     let ensemble =
         time_correction_factor_ensemble(&emitters, &timesteps, &rates, &chain, &request).unwrap();
@@ -86,6 +87,7 @@ fn without_the_half_life_source_nothing_is_drawn() {
         samples: Some(16),
         sources: vec![Source::CrossSections],
         attribution: false,
+        ..Default::default()
     };
     let ensemble = time_correction_factor_ensemble(
         &["Mn56".to_string()],
@@ -112,6 +114,7 @@ fn a_half_life_sigma_no_draw_can_carry_is_reported() {
         samples: Some(8),
         sources: vec![Source::HalfLife],
         attribution: false,
+        ..Default::default()
     };
     let ensemble = time_correction_factor_ensemble(
         &emitters,
@@ -124,6 +127,60 @@ fn a_half_life_sigma_no_draw_can_carry_is_reported() {
     assert!(ensemble.half_life_uncertainty_not_carried.contains("Mn56"));
     assert!(!ensemble.half_lives_perturbed.contains("Mn56"));
     assert!(!ensemble.no_half_life_uncertainty.contains("Mn56"));
+}
+
+/// Left to itself the ensemble stops when every TCF's sigma is known to the
+/// convergence target, and names the ones that were not when the cap stops it.
+#[test]
+fn an_adaptive_ensemble_stops_on_the_standard_error_of_each_sigma() {
+    use yani_transmute::uncertainty::Output;
+
+    let chain = chain();
+    let emitters = vec!["Mn56".to_string()];
+    let timesteps = [48.0 * HOUR, 5.0 * HOUR];
+    let rates = vec![vec![1.0e10, 0.0]];
+    let request = DataUncertainty {
+        seed: 3,
+        sources: vec![Source::HalfLife],
+        ..Default::default()
+    };
+    let ensemble =
+        time_correction_factor_ensemble(&emitters, &timesteps, &rates, &chain, &request).unwrap();
+    let n = ensemble.replicas.len();
+    // About 201 replicas for a Gaussian sigma at 5%, so a block past it.
+    assert!((192..=384).contains(&n), "{n}");
+    assert!(ensemble.converged && !ensemble.hit_cap, "{ensemble:?}");
+    assert_eq!(ensemble.convergence, 0.05);
+
+    let tight = DataUncertainty {
+        convergence: 0.01,
+        ..request.clone()
+    };
+    let ensemble =
+        time_correction_factor_ensemble(&emitters, &timesteps, &rates, &chain, &tight).unwrap();
+    assert_eq!(
+        ensemble.replicas.len(),
+        1024,
+        "1% cannot be met inside the cap"
+    );
+    assert!(ensemble.hit_cap && !ensemble.converged);
+    let miss = &ensemble.unconverged[0];
+    assert_eq!(
+        miss.output,
+        Output::TimeCorrectionFactor {
+            campaign: 0,
+            emitter: "Mn56".to_string()
+        }
+    );
+    assert!(miss.relative_standard_error.unwrap() > 0.01);
+
+    let bad = DataUncertainty {
+        convergence: 1.5,
+        ..request
+    };
+    let err =
+        time_correction_factor_ensemble(&emitters, &timesteps, &rates, &chain, &bad).unwrap_err();
+    assert!(err.contains("convergence"), "{err}");
 }
 
 /// Mn56's photon spectra, with relative normalisation sigmas `gamma` and
@@ -163,6 +220,7 @@ fn photon_request(samples: usize) -> DataUncertainty {
         samples: Some(samples),
         sources: vec![Source::DecayPhotonLines],
         attribution: false,
+        ..Default::default()
     }
 }
 

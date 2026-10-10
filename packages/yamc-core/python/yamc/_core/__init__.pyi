@@ -722,9 +722,11 @@ class DataUncertainty:
             reproduces the same answer regardless of replica count, iteration
             order, or what else is in the material.
         samples (int, optional): Fixed replica count. Leave as ``None`` (the
-            default) to let the solver add replicas until the reported standard
-            deviations stop moving. A number here bounds cost or reproduces a
-            specific run; it is not an accuracy dial.
+            default) to let the solver add replicas, 64 at a time, until every
+            tracked standard deviation is known to ``convergence``. A number
+            here bounds cost or reproduces a specific run: exactly that many
+            replicas run, and the info still lists any standard deviation that
+            did not reach ``convergence``.
         sources (list[str], optional): Which inputs to perturb. ``None`` (the
             default) means every source this build implements. Restricting it is
             how a run isolates one contribution, so that adding a source and
@@ -740,6 +742,23 @@ class DataUncertainty:
             default because it costs further solves: one ensemble per source,
             each source alone, and one deterministic solve per contributor. It
             changes none of the numbers the run otherwise reports.
+        convergence (float, optional): How well each standard deviation must
+            be known before the run stops: the standard error of the sample
+            standard deviation, relative to it, ``SE(sigma) / sigma``. ``None``
+            (the default) means 0.05.
+            The standard error allows for a heavy tail (it carries the sample
+            kurtosis), so a skewed output needs more replicas than a Gaussian
+            one, for which a target ``t`` needs about ``1 / (2 t^2) + 1``: 201
+            at 0.05. It is judged at every step, not only the last, on every
+            nuclide density within 1e-6 of the largest at that step and on the
+            total activity, decay heat and decay photon line rate, leaving out
+            any whose standard deviation is under 0.01% of its value. The
+            photon spectrum line by line and the contact dose are not judged,
+            as their dose quantity and build-up are chosen when they are read.
+            At least 128 replicas run whatever the target, since the kurtosis
+            is too noisy to trust on fewer, and at most 1024: a run that stops
+            there sets ``hit_cap`` in the info and lists every output, nuclide
+            and step that missed under ``unconverged``. Must be between 0 and 1.
     
     Examples:
         >>> results = iron.transmute(
@@ -761,8 +780,14 @@ class DataUncertainty:
         Whether the run also says where the uncertainty comes from.
         """
     @property
+    def convergence(self) -> builtins.float:
+        r"""
+        The target for each standard deviation's standard error, relative to
+        it, that an adaptive run stops on.
+        """
+    @property
     def sources(self) -> builtins.list[builtins.str]: ...
-    def __new__(cls, seed: builtins.int = 1, samples: typing.Optional[builtins.int] = None, sources: typing.Optional[typing.Sequence[builtins.str]] = None, attribution: builtins.bool = False) -> DataUncertainty: ...
+    def __new__(cls, seed: builtins.int = 1, samples: typing.Optional[builtins.int] = None, sources: typing.Optional[typing.Sequence[builtins.str]] = None, attribution: builtins.bool = False, convergence: typing.Optional[builtins.float] = None) -> DataUncertainty: ...
     @staticmethod
     def available_sources() -> builtins.list[builtins.str]:
         r"""
@@ -838,6 +863,14 @@ class DoseResult:
         closes.
         """
     @property
+    def data_std_dev_standard_error(self) -> typing.Optional[typing.Any]:
+        r"""
+        The standard error of `data_std_dev`, same shape: how far another
+        ensemble of the same size could put it. It allows for a heavy tail
+        (it carries the sample kurtosis). ``None`` when ``data_std_dev`` is,
+        and NaN in a bin below four replicas.
+        """
+    @property
     def data_std_dev_correlated(self) -> typing.Optional[typing.Any]:
         r"""
         ``data_std_dev`` with each emitter's gamma and x-ray normalisations
@@ -866,8 +899,11 @@ class DoseResult:
         half-lives sampled, those with no stated sigma, the emitters whose
         photon normalisation was drawn (``decay_photon_normalisations_perturbed``)
         and those with a spectrum whose normalisation is folded into its line
-        sigmas (``decay_photon_spectra_folded``), the replica count, whether it
-        settled, and what was held at nominal (``not_perturbed``).
+        sigmas (``decay_photon_spectra_folded``), the replica count, the
+        ``convergence`` target, whether every time-correction factor's sigma
+        reached it (``converged``), whether the replica cap stopped the run
+        (``hit_cap``), the ones that missed (``unconverged``), and what was
+        held at nominal (``not_perturbed``).
         """
     @property
     def by_nuclide(self) -> typing.Any:
@@ -2066,7 +2102,8 @@ class Material:
                 uncertainty on the result. Each source ``DataUncertainty`` names
                 is sampled where it applies (``statistical`` needs a transport
                 run, ``flux_spectrum`` a supplied flux sigma), and the schedule
-                is re-solved until the reported standard deviations settle.
+                is re-solved until every tracked standard deviation is known to
+                ``DataUncertainty.convergence`` (5% by default).
                 Omit it (the default) and nothing is read, folded or sampled:
                 the inventories are bit-identical either way. Read the sigmas
                 with ``get_nuclide_uncertainty``, and what was and was not
@@ -2882,7 +2919,8 @@ class Model:
                 ``nuclear_data_standard_deviation``, ``replica_mean`` and
                 ``replica_standard_error``. Cross sections only: leave
                 ``sources`` unset or pass ``["cross_sections"]``, and
-                ``attribution`` is not supported. Not yet supported, and refused with the reason:
+                ``attribution`` and ``convergence`` are not supported (the
+                replica count is fixed). Not yet supported, and refused with the reason:
                 ``compute='gpu'``, MPI, ``tracking_mode`` other than
                 ``'surface'``, survival biasing, weight windows, photon
                 transport, collision-estimator tallies, overlay tallies, mesh
@@ -3792,21 +3830,27 @@ class PulseSchedule:
                 it after the fact; an emitter with several spectra is scaled by
                 their multipliers weighted by each one's share of its photon
                 energy. The draws are those a transmutation with the same seed
-                makes. Read ``.data_std_dev`` and ``.total_std_dev``, and
+                makes. Read ``.data_std_dev``, its standard error
+                ``.data_std_dev_standard_error``, and ``.total_std_dev``, and
                 ``.data_std_dev_correlated`` and ``.total_std_dev_correlated``
                 for the upper end of the range the unstated correlation between
-                an emitter's gamma and x-ray normalisations leaves. The line
-                intensities (dRI) and energies change the spectrum's shape,
-                which needs line-resolved tallies, and are held at nominal;
-                ENDF/B-VIII.1 folds the normalisation into the dRI, so under it
-                almost nothing is drawn. Decay branching ratios also shape a
-                time correction and are held at nominal. ``.data_uncertainty_info``
-                lists everything held under ``not_perturbed``.
+                an emitter's gamma and x-ray normalisations leaves. Replicas are
+                added until every emitter's time-correction factor has a
+                standard deviation known to the request's ``convergence`` at
+                every schedule step, or the request's ``samples`` fixes the
+                count. The line intensities (dRI) and energies change the
+                spectrum's shape, which needs line-resolved tallies, and are
+                held at nominal; ENDF/B-VIII.1 folds the normalisation into the
+                dRI, so under it almost nothing is drawn. Decay branching ratios
+                also shape a time correction and are held at nominal.
+                ``.data_uncertainty_info`` lists everything held under
+                ``not_perturbed``.
         
         Returns:
             DoseResult with ``.mean`` / ``.std_dev`` / ``.by_nuclide`` / ``.times``,
-            and ``.data_std_dev`` / ``.total_std_dev`` /
-            ``.data_uncertainty_info`` when ``data_uncertainty`` was given.
+            and ``.data_std_dev`` / ``.data_std_dev_standard_error`` /
+            ``.total_std_dev`` / ``.data_uncertainty_info`` when
+            ``data_uncertainty`` was given.
         """
 
 @typing.final
@@ -5132,7 +5176,7 @@ class TallyResult:
     def _repr_html_(self) -> builtins.str:
         r"""
         Rich Jupyter display: a stats panel (mean ± σ, relative error, figure
-        of merit, shape, history / batch counts) beside the
+        of merit, shape, total particle count) beside the
         statistical-reliability checks.
         """
     def __repr__(self) -> builtins.str: ...
@@ -6136,8 +6180,15 @@ class TransmutationResults:
           applied, the self-shielding correction, the flux's response to a
           perturbed cross section on a transport run, and the per-branch decay
           emission of a parent whose branching was drawn.
-        - ``samples`` / ``converged``: how many replicas ran, and whether the
-          sigmas settled or the cap was hit.
+        - ``samples`` / ``converged`` / ``convergence`` / ``hit_cap`` /
+          ``unconverged``: how many replicas ran; whether every tracked sigma
+          reached the target, ``convergence``, for the standard error of a
+          sigma relative to it; whether the 1024-replica cap stopped the run
+          first; and, worst first, every sigma that missed, as dicts of
+          ``output`` (``"density"``, ``"activity"``, ``"decay_heat"`` or
+          ``"decay_photon_rate"``), ``nuclide`` (``None`` for a total),
+          ``step`` and the ``relative_standard_error`` it reached. Listed with
+          a fixed ``samples`` too, where ``hit_cap`` is never set.
         
         Args:
             material_id: Material ID number.

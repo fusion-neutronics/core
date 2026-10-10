@@ -1298,7 +1298,8 @@ impl PyMaterial {
     ///         uncertainty on the result. Each source ``DataUncertainty`` names
     ///         is sampled where it applies (``statistical`` needs a transport
     ///         run, ``flux_spectrum`` a supplied flux sigma), and the schedule
-    ///         is re-solved until the reported standard deviations settle.
+    ///         is re-solved until every tracked standard deviation is known to
+    ///         ``DataUncertainty.convergence`` (5% by default).
     ///         Omit it (the default) and nothing is read, folded or sampled:
     ///         the inventories are bit-identical either way. Read the sigmas
     ///         with ``get_nuclide_uncertainty``, and what was and was not

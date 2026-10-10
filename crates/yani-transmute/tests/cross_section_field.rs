@@ -317,6 +317,7 @@ fn fe56_contribution(data: &Path, n: usize, spectra: [usize; 2]) -> f64 {
             samples: Some(128),
             sources: vec![Source::CrossSections],
             attribution: true,
+            ..Default::default()
         }),
     )
     .expect("transmute");

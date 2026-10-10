@@ -54,6 +54,17 @@ def test_the_nominal_mean_is_unchanged_and_the_uncertainty_is_reported():
     assert results[capture].nuclear_data_variance_negative == [False]
 
 
+def test_a_convergence_target_is_refused_on_a_fixed_replica_count():
+    # Transport carries a fixed number of replica weights per history, so a
+    # target it would never stop on is refused rather than ignored. Checked
+    # before any data is read, so no covariance is needed.
+    model, _ = _model()
+    with pytest.raises(ValueError, match="remove convergence"):
+        model.simulate_transport(
+            total_particles=10, data_uncertainty=yamc.DataUncertainty(convergence=0.05)
+        )
+
+
 def test_unsupported_requests_are_refused_with_the_reason():
     if not _has_covariance():
         pytest.skip("Fe56 fixture carries no covariance")

@@ -90,6 +90,7 @@ fn run(
         samples: Some(samples),
         sources,
         attribution: false,
+        ..Default::default()
     };
     transmute_material(
         &mut material,
@@ -324,6 +325,7 @@ fn endf_b8_1_contact_dose_ranges_from_the_lines_alone() {
             samples: Some(4096),
             sources: vec![Source::DecayPhotonLines],
             attribution: false,
+            ..Default::default()
         };
         let results = transmute_material(
             &mut material,

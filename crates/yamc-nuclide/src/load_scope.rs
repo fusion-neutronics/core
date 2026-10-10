@@ -143,6 +143,19 @@ impl LoadScope {
         self.sections == SectionScope::Full
     }
 
+    /// Whether this load reads `reactions.arrow` and `energy.arrow` at named
+    /// temperatures only, so a download may fetch just those temperatures'
+    /// batches.
+    ///
+    /// Transport at a material's temperature, which is the bulk of every
+    /// transport download: the published libraries carry six or seven
+    /// temperatures, and a material reads one (or the two that bracket it).
+    /// An activation load ranges by MT instead, at every temperature, so the
+    /// two never apply to the same load.
+    pub fn ranges_temperatures(&self) -> bool {
+        self.wants_transport_sections() && self.temperatures.is_some()
+    }
+
     /// Whether data loaded under `self` satisfies a request for `other`.
     ///
     /// Every axis widens the same way: `None` means "all of it" and so covers

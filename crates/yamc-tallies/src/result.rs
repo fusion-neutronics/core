@@ -329,7 +329,7 @@ impl TallyResult {
 
         let mut s = String::new();
         s.push_str(&format!(
-            "TallyResult '{name}'   shape={:?}   histories={}   elapsed={:.3} s\n",
+            "TallyResult '{name}'   shape={:?}   particles={}   elapsed={:.3} s\n",
             self.shape, self.n_histories, self.elapsed_secs
         ));
         s.push_str(&format!(
@@ -710,6 +710,33 @@ mod tests {
 
         // Config back-reference should point at the same Arc.
         assert!(Arc::ptr_eq(&result.tally, &tally));
+    }
+
+    /// The plain-text summary and the tally's `Display` report the total
+    /// particle count, not batches.
+    #[test]
+    fn summary_and_display_show_particles_not_batches() {
+        let mut tally = Tally::new();
+        tally.scores = vec![Score::Flux(FluxScore)];
+        let tally = Arc::new(tally);
+        tally.install_finalized(crate::welford::WelfordTallyStats {
+            mean: vec![1.0],
+            m2: vec![0.5],
+            n_histories: 5000,
+            agg: crate::welford::AggMoments::ZERO,
+            score_pdf: crate::welford::ScorePdf::default(),
+            comoment: None,
+            replicas: None,
+        });
+
+        let summary = tally.finalize().summary();
+        assert!(summary.contains("particles=5000"), "{summary}");
+        let display = tally.to_string();
+        assert!(display.contains("Particles: 5000"), "{display}");
+        for text in [&summary, &display] {
+            assert!(!text.to_lowercase().contains("batch"), "{text}");
+            assert!(!text.contains("histories"), "{text}");
+        }
     }
 
     /// Multi-bin cell and material filters each add a dimension, in the

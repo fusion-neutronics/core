@@ -87,6 +87,14 @@ stack; pick `yamc` when the spectrum should come from a transport solve.
   `Estimate.std_dev_correlated` as one, which bounds every non-negative
   correlation. `get_data_uncertainty_info()["decay_photon_spectra_folded"]`
   names the spectra the range mostly comes from.
+- Replicas are added 64 at a time until every tracked sigma (each nuclide
+  density within 1e-6 of the largest, and the total activity, decay heat and
+  decay photon line rate, at every step) has a standard error under 5% of
+  itself, set with `DataUncertainty(convergence=...)`. The standard error
+  carries the sample kurtosis, so a heavy-tailed output needs more replicas
+  than a Gaussian one (about 201 at 5%). At least 128 and at most 1024 run;
+  a run that stops on the cap says so (`hit_cap`) and lists the outputs that
+  missed (`unconverged`).
 - Damage energy and dpa carry no uncertainty yet: MT=444 has no covariance,
   and the flux and composition replicas are not folded into it.
 - Pathways are reported per product (`get_production_routes`), but there is no

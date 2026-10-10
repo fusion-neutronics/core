@@ -11,7 +11,7 @@ use crate::results::TransmutationResults;
 use crate::self_shielding::{Shielding, ShieldingInfo};
 use crate::transmutation_tallies::PartialRates;
 use crate::uncertainty::{
-    densities_of, settled, DataUncertainty, Ensemble, Info, BLOCK, MAX_SAMPLES, MIN_SAMPLES,
+    check_convergence, densities_of, DataUncertainty, Ensemble, Info, BLOCK, MAX_SAMPLES,
 };
 use crate::{reaction_type_to_mt, ForwardEulerStepper, TransmutationStepper};
 use std::collections::{HashMap, HashSet};
@@ -1553,13 +1553,14 @@ fn sigma_report_nuclides(
     )
 }
 
-/// Fold the covariance, factorize it, and re-solve until the sigmas settle.
+/// Fold the covariance, factorize it, and re-solve until every tracked sigma
+/// is known to the request's `convergence`.
 ///
 /// Replicas are added in blocks and convergence is judged between blocks on the
-/// worst significant nuclide, so a problem dominated by one well-known channel
-/// stops early and a genuinely noisy one keeps going. There is no user-facing
-/// sample count on the default path: a knob that trades accuracy for time is a
-/// knob that gets turned the wrong way.
+/// worst tracked sigma's standard error ([`Ensemble::unconverged`]), so a
+/// problem dominated by one well-behaved channel stops early and a heavy-tailed
+/// one keeps going. The knob is the precision of the sigmas, not a sample
+/// count, so turning it says what it buys.
 #[allow(clippy::too_many_arguments)]
 fn run_replicas(
     initial: &Material,
@@ -1574,6 +1575,7 @@ fn run_replicas(
     lists: &Lists<'_>,
     statistical: Option<&TransportStatistics>,
 ) -> Result<(Ensemble, Info), Box<dyn std::error::Error>> {
+    check_convergence(request.convergence)?;
     // The two paths each have one source the other lacks. A transport run has
     // tallied rates with a statistical covariance and no caller-supplied flux
     // error (its flux error IS the statistical one); a spectrum run has the
@@ -2082,21 +2084,29 @@ fn run_replicas(
         && statistical.is_none()
     {
         info.converged = true;
+        info.convergence = request.convergence;
         info.add_flux_coverage(&flux_coverage);
         // Decay energies and photons alone leave every inventory at nominal,
         // but the decay heat, photon spectrum and dose of each still move, so
         // the replicas are the nominal inventory repeated: no solve beyond
-        // the one.
+        // the one. Added in blocks and stopped on the same rule as a solve.
         if !decay_energy_perturbed.is_empty() || !decay_photons_perturbed.is_empty() {
             let nominal = densities_of(
                 &replica_steps(initial, steps, per_spectrum, chain, parts, stepper)
                     .map_err(|e| e.to_string())?,
             );
-            for _ in 0..request.samples.unwrap_or(MIN_SAMPLES) {
-                ensemble.push_with_half_lives(nominal.clone(), HashMap::new());
+            let cap = request.samples.unwrap_or(MAX_SAMPLES);
+            while ensemble.replicas() < cap {
+                let end = (ensemble.replicas() + BLOCK).min(cap);
+                while ensemble.replicas() < end {
+                    ensemble.push_with_half_lives(nominal.clone(), HashMap::new());
+                }
+                if request.samples.is_none() && ensemble.may_stop(chain, request.convergence) {
+                    break;
+                }
             }
             ensemble.fold_absences();
-            info.samples = ensemble.replicas();
+            info.conclude(&mut ensemble, chain, request);
         }
         if request.attribution {
             ensemble.attribution = Some(Default::default());
@@ -2106,7 +2116,6 @@ fn run_replicas(
 
     let target = request.samples;
     let cap = target.unwrap_or(MAX_SAMPLES);
-    let mut previous_probe = std::collections::BTreeMap::new();
     let mut replica: u64 = 0;
 
     // One replica, start to finish, reading nothing that is not shared
@@ -2323,12 +2332,9 @@ fn run_replicas(
             continue;
         }
 
-        let probe = ensemble.convergence_probe();
-        if (replica as usize) >= MIN_SAMPLES && settled(&previous_probe, &probe) {
-            info.converged = true;
+        if ensemble.may_stop(chain, request.convergence) {
             break;
         }
-        previous_probe = probe;
     }
 
     // A nuclide the stepper dropped below its density floor in one replica is a
@@ -2336,10 +2342,7 @@ fn run_replicas(
     // taken over a different number of replicas than its neighbours'.
     ensemble.fold_absences();
     info.add_flux_coverage(&flux_coverage);
-    info.samples = ensemble.replicas();
-    if target.is_some() {
-        info.converged = true;
-    }
+    info.conclude(&mut ensemble, chain, request);
 
     if request.attribution {
         use crate::uncertainty::Source;
@@ -2406,6 +2409,7 @@ fn run_replicas(
                     samples: request.samples,
                     sources: vec![source],
                     attribution: false,
+                    convergence: request.convergence,
                 };
                 let (sub, _) = run_replicas(
                     initial,
@@ -5378,6 +5382,7 @@ mod tests {
             samples: Some(SAMPLES),
             sources: vec![Source::Statistical, Source::DecayBranching],
             attribution: false,
+            ..Default::default()
         };
         let (ensemble, info) = transport_replicas(
             &material,

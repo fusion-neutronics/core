@@ -1,5 +1,5 @@
 #[cfg(feature = "download")]
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 #[cfg(feature = "download")]
@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex};
 use once_cell::sync::Lazy;
 
 #[cfg(feature = "download")]
-use nuclear_data_schema::reaction_ranges::{splice_spans, ReactionRanges};
+use nuclear_data_schema::energy_ranges::EnergyRanges;
+#[cfg(feature = "download")]
+use nuclear_data_schema::reaction_ranges::{splice_spans, Range, ReactionRanges};
 
 /// Per-cache-path mutexes to serialize concurrent downloads of the same nuclide.
 /// Without this, parallel rayon threads loading the same nuclide would each issue
@@ -111,23 +113,32 @@ fn client() -> Result<&'static reqwest::blocking::Client, Box<dyn std::error::Er
         .map_err(|e| format!("could not build an HTTP client: {e}").into())
 }
 
-/// Issue a blocking GET over the shared client, optionally for one byte range.
+/// Issue a blocking GET over the shared client, optionally for byte ranges.
 ///
-/// `span` is `(offset, length)`; the header is inclusive of both ends, so the
-/// last byte is `offset + length - 1`.
+/// `spans` are `(offset, length)` pairs, all named in one `Range` header; each
+/// is inclusive of both ends, so its last byte is `offset + length - 1`. Empty
+/// asks for the whole object. More than one span is answered with a
+/// `multipart/byteranges` body, which [`parse_byteranges`] reads.
 #[cfg(feature = "download")]
 fn blocking_get(
     url: &str,
-    span: Option<(u64, u64)>,
+    spans: &[Range],
 ) -> Result<reqwest::blocking::Response, Box<dyn std::error::Error>> {
     let mut request = client()?.get(url);
-    if let Some((offset, len)) = span {
-        request = request.header(
-            reqwest::header::RANGE,
-            format!("bytes={}-{}", offset, offset + len - 1),
-        );
+    if !spans.is_empty() {
+        request = request.header(reqwest::header::RANGE, range_header(spans));
     }
     Ok(request.send()?)
+}
+
+/// The `Range` header value naming `spans`: `bytes=0-99,200-299`.
+#[cfg(feature = "download")]
+fn range_header(spans: &[Range]) -> String {
+    let ranges: Vec<String> = spans
+        .iter()
+        .map(|(offset, len)| format!("{}-{}", offset, offset + len - 1))
+        .collect();
+    format!("bytes={}", ranges.join(","))
 }
 
 /// Every recognized library keyword. Each is published on the data origin as
@@ -279,16 +290,17 @@ pub fn download_and_cache(
     let local_path = cache_dir.join(format!("{nuclide_name}.arrow"));
     let sections = sections_for(kind, scope);
     let sections = sections.as_slice();
-    // Which MTs, if this load reads only some of them. Decides whether
-    // reactions.arrow is fetched whole or as the byte ranges those MTs occupy.
-    let subset = subset_mts(kind, scope);
+    // Which MTs or temperatures, if this load reads only some of them. Decides
+    // whether reactions.arrow (and, by temperature, energy.arrow) is fetched
+    // whole or as the byte ranges the load reads.
+    let ranging = ranged(kind, scope);
 
     // Fast path: cache hit without any locking. The gate is per-section rather
     // than per-directory, because a cache dir populated by an earlier
     // transmutation load holds only some of what transport now wants. Each
     // section is published by rename, so a section that is present
     // is complete.
-    if have_all_sections(&local_path, sections, subset) {
+    if have_all_sections(&local_path, sections, ranging) {
         return Ok(local_path);
     }
 
@@ -297,11 +309,11 @@ pub fn download_and_cache(
     // we were waiting.
     let path_lock = get_path_lock(&local_path);
     let _guard = path_lock.lock().unwrap_or_else(|p| p.into_inner());
-    if have_all_sections(&local_path, sections, subset) {
+    if have_all_sections(&local_path, sections, ranging) {
         return Ok(local_path);
     }
 
-    download_sections(url, &local_path, sections, source, nuclide_name, subset)?;
+    download_sections(url, &local_path, sections, source, nuclide_name, ranging)?;
     Ok(local_path)
 }
 
@@ -473,17 +485,72 @@ const SUBSET_MTS: &str = "subset/mts.json";
 #[cfg(feature = "download")]
 const SUBSET_REACTIONS: &str = "subset/reactions.arrow";
 
-/// The MTs a scope wants out of `reactions.arrow`, when it wants only some.
-///
-/// `None` means fetch the section whole, which is every case that is not a
-/// transport-free load with a named MT set: photon data, transport, and an
-/// activation load that asked for every MT.
+/// The section of union energy grids, one batch per temperature, which a
+/// temperature-ranged load fetches a few byte ranges at a time.
 #[cfg(feature = "download")]
-fn subset_mts(kind: DataKind, scope: &crate::load_scope::LoadScope) -> Option<&HashSet<i32>> {
+const ENERGY: &str = "energy.arrow";
+
+/// Where a temperature-ranged `reactions.arrow` or `energy.arrow` is cached,
+/// relative to the nuclide directory.
+///
+/// Its own subdirectory for the reason `subset/` is one: under the canonical
+/// name a partial file would satisfy every existence gate here, and a later
+/// load at another temperature would read a table with nothing at that
+/// temperature. Beside each file is a `<section>.json` naming the temperature
+/// labels it holds (see [`ranged_section`] and [`ranged_labels_file`]).
+#[cfg(feature = "download")]
+const RANGED_DIR: &str = "temperatures";
+
+/// A temperature-ranged section's path, relative to the nuclide directory.
+#[cfg(feature = "download")]
+fn ranged_section(section: &str) -> String {
+    format!("{RANGED_DIR}/{section}")
+}
+
+/// The record of which temperature labels a ranged section holds.
+#[cfg(feature = "download")]
+fn ranged_labels_file(section: &str) -> String {
+    format!("{RANGED_DIR}/{}.json", section.trim_end_matches(".arrow"))
+}
+
+/// What a load wants out of the two sections that carry a byte-range index.
+#[cfg(feature = "download")]
+#[derive(Debug, Clone, Copy)]
+enum Ranged<'a> {
+    /// Every section whole.
+    Whole,
+    /// These MTs of `reactions.arrow`, at every temperature. An activation
+    /// load, cached under `subset/`.
+    Mts(&'a HashSet<i32>),
+    /// Every MT of `reactions.arrow`, and the energy grids, at these
+    /// temperatures. A transport load for materials with a temperature,
+    /// cached under `temperatures/`.
+    Temperatures(&'a HashSet<String>),
+}
+
+/// How a scope's load ranges, if it does.
+///
+/// [`Ranged::Whole`] for photon data, for transport with no temperature (the
+/// loader then reads every temperature), and for an activation load that
+/// asked for every MT.
+#[cfg(feature = "download")]
+fn ranged(kind: DataKind, scope: &crate::load_scope::LoadScope) -> Ranged<'_> {
     match kind {
-        DataKind::Neutron if !scope.wants_transport_sections() => scope.mts.as_ref(),
-        _ => None,
+        DataKind::Neutron if scope.ranges_temperatures() => scope
+            .temperatures
+            .as_ref()
+            .map_or(Ranged::Whole, Ranged::Temperatures),
+        DataKind::Neutron if !scope.wants_transport_sections() => {
+            scope.mts.as_ref().map_or(Ranged::Whole, Ranged::Mts)
+        }
+        _ => Ranged::Whole,
     }
+}
+
+/// A nuclide directory's parsed `version.json`, if it has a readable one.
+#[cfg(feature = "download")]
+fn cached_version(dir: &std::path::Path) -> Option<serde_json::Value> {
+    serde_json::from_str(&fs::read_to_string(dir.join("version.json")).ok()?).ok()
 }
 
 /// The byte-range index in a nuclide directory's `version.json`.
@@ -493,8 +560,74 @@ fn subset_mts(kind: DataKind, scope: &crate::load_scope::LoadScope) -> Option<&H
 /// thing to the caller, which is to fetch the section whole.
 #[cfg(feature = "download")]
 fn cached_index(dir: &std::path::Path) -> Option<ReactionRanges> {
-    let text = fs::read_to_string(dir.join("version.json")).ok()?;
-    ReactionRanges::from_version_json(&serde_json::from_str(&text).ok()?)
+    ReactionRanges::from_version_json(&cached_version(dir)?)
+}
+
+/// Every temperature label the reactions index publishes a batch at, spelled
+/// as the files spell them (`"294K"`). The nuclide's temperature ladder.
+#[cfg(feature = "download")]
+fn published_labels(index: &ReactionRanges) -> BTreeSet<String> {
+    index
+        .mts
+        .values()
+        .flat_map(|by_temperature| by_temperature.keys().cloned())
+        .collect()
+}
+
+/// The published labels the reader will parse for `requested`.
+///
+/// Resolved by `temperature::resolve`, the function the reader applies to the
+/// same request, so what is fetched is what is read: a temperature the data
+/// carries resolves to itself, and one it brackets to both neighbours, which
+/// the reader blends. A temperature outside the ladder is the reader's error,
+/// raised here before any bytes are fetched.
+#[cfg(feature = "download")]
+fn labels_for(
+    index: &ReactionRanges,
+    requested: &HashSet<String>,
+) -> Result<BTreeSet<String>, crate::temperature::TemperatureError> {
+    use crate::temperature::{resolve, TemperatureSource};
+    let available: Vec<String> = published_labels(index).into_iter().collect();
+    let mut labels = BTreeSet::new();
+    for label in requested {
+        match resolve(label, &available)? {
+            TemperatureSource::Exact { idx } => {
+                labels.insert(available[idx].clone());
+            }
+            TemperatureSource::Blend { lo_idx, hi_idx, .. } => {
+                labels.insert(available[lo_idx].clone());
+                labels.insert(available[hi_idx].clone());
+            }
+        }
+    }
+    Ok(labels)
+}
+
+/// The temperature labels a cached ranged section holds, as recorded beside it.
+#[cfg(feature = "download")]
+fn cached_labels(dir: &std::path::Path, section: &str) -> Option<BTreeSet<String>> {
+    let text = fs::read_to_string(dir.join(ranged_labels_file(section))).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Whether `dir` already holds `section` at every temperature `requested`
+/// resolves to.
+///
+/// The whole object covers everything. Otherwise the ranged copy covers the
+/// request when it holds every label the request resolves to. A request that
+/// does not resolve is not covered, so the fetch runs and reports why.
+#[cfg(feature = "download")]
+fn temperatures_covered(dir: &std::path::Path, section: &str, requested: &HashSet<String>) -> bool {
+    if dir.join(section).exists() {
+        return true;
+    }
+    if !dir.join(ranged_section(section)).exists() {
+        return false;
+    }
+    let (Some(index), Some(held)) = (cached_index(dir), cached_labels(dir, section)) else {
+        return false;
+    };
+    labels_for(&index, requested).is_ok_and(|wanted| wanted.is_subset(&held))
 }
 
 /// The MTs a cached subset holds, as recorded beside it.
@@ -549,21 +682,28 @@ fn section_is_resolved(dir: &std::path::Path, section: &str) -> bool {
     dir.join(section).exists() || dir.join(format!("{section}{ABSENT_SUFFIX}")).exists()
 }
 
+/// Whether `dir` already holds `section` as far as this load needs it.
+#[cfg(feature = "download")]
+fn section_covered(dir: &std::path::Path, section: &str, wanted: Ranged<'_>) -> bool {
+    match wanted {
+        Ranged::Mts(mts) if section == REACTIONS => reactions_covered(dir, mts),
+        Ranged::Temperatures(temperatures) if section == REACTIONS || section == ENERGY => {
+            temperatures_covered(dir, section, temperatures)
+        }
+        _ => section_is_resolved(dir, section),
+    }
+}
+
 /// Whether `dir` already holds every one of `sections`.
 ///
 /// Per-section rather than "does the directory exist": a dir populated by an
 /// earlier transmutation load holds only some of what transport now wants.
 #[cfg(feature = "download")]
-fn have_all_sections(
-    dir: &std::path::Path,
-    sections: &[(&str, bool)],
-    subset: Option<&HashSet<i32>>,
-) -> bool {
+fn have_all_sections(dir: &std::path::Path, sections: &[(&str, bool)], wanted: Ranged<'_>) -> bool {
     dir.is_dir()
-        && sections.iter().all(|(name, _)| match subset {
-            Some(wanted) if *name == REACTIONS => reactions_covered(dir, wanted),
-            _ => section_is_resolved(dir, name),
-        })
+        && sections
+            .iter()
+            .all(|(name, _)| section_covered(dir, name, wanted))
 }
 
 /// The subset of `sections` still to fetch into `dir`.
@@ -575,19 +715,13 @@ fn have_all_sections(
 fn sections_to_fetch<'a>(
     dir: &std::path::Path,
     sections: &[(&'a str, bool)],
-    subset: Option<&HashSet<i32>>,
+    wanted: Ranged<'_>,
 ) -> Vec<(&'a str, bool)> {
     let existing = dir.is_dir();
     sections
         .iter()
         .copied()
-        .filter(|(name, _)| {
-            !existing
-                || match subset {
-                    Some(wanted) if *name == REACTIONS => !reactions_covered(dir, wanted),
-                    _ => !section_is_resolved(dir, name),
-                }
-        })
+        .filter(|(name, _)| !existing || !section_covered(dir, name, wanted))
         .collect()
 }
 
@@ -601,7 +735,7 @@ enum Fetched {
     Absent,
 }
 
-/// Fetch `url`, optionally just one byte range, retrying transient failures.
+/// Fetch `url`, optionally just some byte ranges, retrying transient failures.
 ///
 /// A 200 answer to a ranged request is not an error: some proxy dropped the
 /// header and sent the whole object, which is more than was wanted and still
@@ -616,7 +750,7 @@ enum Fetched {
 /// succeeds on a fresh attempt. A fresh cache issues hundreds of these in
 /// parallel, so without the retry a first run failed on whichever one hit it.
 #[cfg(feature = "download")]
-fn fetch(url: &str, span: Option<(u64, u64)>) -> Result<Fetched, Box<dyn std::error::Error>> {
+fn fetch(url: &str, spans: &[Range]) -> Result<Fetched, Box<dyn std::error::Error>> {
     const RETRY_DELAYS_MS: &[u64] = &[200, 500, 1000];
     // A client that failed to build will not build on a retry either.
     client()?;
@@ -625,7 +759,7 @@ fn fetch(url: &str, span: Option<(u64, u64)>) -> Result<Fetched, Box<dyn std::er
         if delay_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
         }
-        let r = match blocking_get(url, span) {
+        let r = match blocking_get(url, spans) {
             Ok(r) => r,
             Err(e) => {
                 last_failure = e.to_string();
@@ -662,6 +796,277 @@ fn fetch(url: &str, span: Option<(u64, u64)>) -> Result<Fetched, Box<dyn std::er
     .into())
 }
 
+/// What a ranged fetch came back with.
+#[cfg(feature = "download")]
+enum Spans {
+    /// The exact bytes of each span asked for, in order.
+    Parts(Vec<Vec<u8>>),
+    /// The whole object: the origin ignored the `Range` header and answered
+    /// 200. More than was wanted and still the right bytes, so the caller
+    /// caches it under the canonical name rather than splicing it.
+    Whole(Vec<u8>),
+}
+
+/// The most ranges named in one request.
+///
+/// A transport load at one temperature wants one batch per MT, which is over a
+/// hundred spans on a heavy nuclide, and a request each is a round trip each:
+/// in the browser, where every request is a synchronous one made in turn, that
+/// cost more time than the bytes it saved. Naming them all in one `Range`
+/// header makes it one round trip. Capped so the header stays far below the
+/// limits servers put on one (about 20 bytes a range, so 4 kB here).
+#[cfg(feature = "download")]
+const MAX_RANGES_PER_REQUEST: usize = 200;
+
+/// Fetch `spans` of `url`, as few requests as the origin allows.
+///
+/// Up to [`MAX_RANGES_PER_REQUEST`] spans go in each request, and the
+/// `multipart/byteranges` answer is cut back into the spans. An origin that
+/// answers a multi-range request some other way (one range, or a body that
+/// does not parse) is asked again a span at a time, which every origin that
+/// serves ranges at all supports.
+#[cfg(feature = "download")]
+fn fetch_spans(url: &str, spans: &[Range]) -> Result<Spans, Box<dyn std::error::Error>> {
+    let mut bodies = Vec::with_capacity(spans.len());
+    for chunk in spans.chunks(MAX_RANGES_PER_REQUEST) {
+        if chunk.len() > 1 {
+            match fetch(url, chunk)? {
+                Fetched::Body {
+                    bytes,
+                    partial: false,
+                } => return Ok(Spans::Whole(bytes)),
+                Fetched::Body {
+                    bytes,
+                    partial: true,
+                } => {
+                    if let Some(parts) =
+                        parse_byteranges(&bytes).and_then(|parts| cut_spans(&parts, chunk))
+                    {
+                        bodies.extend(parts);
+                        continue;
+                    }
+                }
+                Fetched::Absent => {
+                    return Err(
+                        format!("{url}: 404, but its version.json names byte ranges").into(),
+                    )
+                }
+            }
+        }
+        for span in chunk {
+            match fetch_one_span(url, *span)? {
+                Spans::Parts(mut part) => bodies.append(&mut part),
+                whole => return Ok(whole),
+            }
+        }
+    }
+    Ok(Spans::Parts(bodies))
+}
+
+/// Fetch one span of `url` on its own request.
+#[cfg(feature = "download")]
+fn fetch_one_span(url: &str, span: Range) -> Result<Spans, Box<dyn std::error::Error>> {
+    match fetch(url, &[span])? {
+        Fetched::Body {
+            bytes,
+            partial: true,
+        } => {
+            if bytes.len() as u64 != span.1 {
+                // A short span is not recoverable by splicing it: the framing
+                // still walks, and the message header at the cut is read as
+                // whatever the next bytes happen to be.
+                return Err(format!(
+                    "{url}: asked for {} bytes at {} and got {}",
+                    span.1,
+                    span.0,
+                    bytes.len()
+                )
+                .into());
+            }
+            Ok(Spans::Parts(vec![bytes]))
+        }
+        // Range ignored somewhere in the path: what is in hand IS the whole
+        // object, so cache it as one rather than splicing it as a slice.
+        Fetched::Body {
+            bytes,
+            partial: false,
+        } => Ok(Spans::Whole(bytes)),
+        // The nuclide has a version.json naming ranges but no section to range
+        // into, which is a broken publish rather than an absent optional
+        // section.
+        Fetched::Absent => {
+            Err(format!("{url}: 404, but its version.json names byte ranges").into())
+        }
+    }
+}
+
+/// Read a `multipart/byteranges` body into `(offset, bytes)` parts.
+///
+/// The boundary is taken from the body's first line rather than from the
+/// `Content-Type` header, so a host fetcher that hands back only the body (the
+/// browser's) is read the same way. Each part is read by the length its
+/// `Content-Range` gives rather than by searching for the next boundary, which
+/// binary data could contain.
+///
+/// `None` for anything else, which is what a single-range answer looks like:
+/// Arrow messages start with the `0xFFFFFFFF` continuation marker, never
+/// with `--`.
+#[cfg(feature = "download")]
+fn parse_byteranges(body: &[u8]) -> Option<Vec<(u64, Vec<u8>)>> {
+    fn line_end(body: &[u8], from: usize) -> Option<usize> {
+        body.get(from..)?
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .map(|i| from + i)
+    }
+    let mut pos = 0;
+    while body.get(pos..pos + 2) == Some(&b"\r\n"[..]) {
+        pos += 2;
+    }
+    let end = line_end(body, pos)?;
+    let boundary = body.get(pos..end)?.strip_prefix(b"--")?;
+    if boundary.is_empty() {
+        return None;
+    }
+    pos = end + 2;
+
+    let mut parts = Vec::new();
+    loop {
+        // The part's headers, up to the blank line.
+        let mut range: Option<(u64, u64)> = None;
+        loop {
+            let end = line_end(body, pos)?;
+            let line = std::str::from_utf8(&body[pos..end]).ok()?;
+            pos = end + 2;
+            if line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.trim().eq_ignore_ascii_case("content-range") {
+                    // `bytes 64-767/10442154`
+                    let spec = value.trim().strip_prefix("bytes ")?;
+                    let (first_last, _) = spec.split_once('/')?;
+                    let (first, last) = first_last.split_once('-')?;
+                    range = Some((first.parse().ok()?, last.parse().ok()?));
+                }
+            }
+        }
+        let (first, last) = range?;
+        let len = usize::try_from(last.checked_sub(first)? + 1).ok()?;
+        parts.push((first, body.get(pos..pos + len)?.to_vec()));
+        pos += len;
+
+        // CRLF, then `--boundary`, then either `--` (the end) or CRLF.
+        let rest = body.get(pos..)?.strip_prefix(b"\r\n--")?;
+        let rest = rest.strip_prefix(boundary)?;
+        if rest.starts_with(b"--") {
+            return Some(parts);
+        }
+        rest.strip_prefix(b"\r\n")?;
+        pos = body.len() - rest.len() + 2;
+    }
+}
+
+/// The bytes of each of `spans`, cut from the parts an origin sent back.
+///
+/// An origin may merge ranges it was asked for into fewer, larger parts, so
+/// each span is looked for inside whichever part covers it. `None` if one is
+/// not covered, and the caller asks for the spans one at a time instead.
+#[cfg(feature = "download")]
+fn cut_spans(parts: &[(u64, Vec<u8>)], spans: &[Range]) -> Option<Vec<Vec<u8>>> {
+    spans
+        .iter()
+        .map(|&(offset, len)| {
+            parts.iter().find_map(|(first, bytes)| {
+                let start = usize::try_from(offset.checked_sub(*first)?).ok()?;
+                bytes
+                    .get(start..start + usize::try_from(len).ok()?)
+                    .map(<[u8]>::to_vec)
+            })
+        })
+        .collect()
+}
+
+/// Fetch `section` (`reactions.arrow` or `energy.arrow`) at the temperatures
+/// `requested` resolves to, into `staging`.
+///
+/// Writes `temperatures/<section>` (a spliced Arrow IPC stream holding every
+/// MT, or every grid, at those temperatures) and `temperatures/<section
+/// stem>.json` (the labels it holds), and returns the staged relative paths.
+///
+/// Labels the cache already holds for this section are fetched again with the
+/// new ones, so the rewritten file still serves the loads that wrote the old
+/// one. That refetch is the price of keeping one file per section: a model
+/// with the same nuclide at two temperatures asks for the second one at most
+/// once.
+///
+/// The energy section also keeps every grid whose label is not a temperature
+/// of the nuclide (the 0 K grid the NJOY route publishes), because the reader
+/// keeps those on any load and a ranged file must provide what a whole one
+/// does.
+///
+/// `Ok(None)` means fetch the section whole: no index (data published before
+/// it), or the labels wanted are every temperature there is, which one plain
+/// GET serves better than a span per batch. A 200 answer to a ranged request
+/// is cached whole under the canonical name and returned as that path.
+#[cfg(feature = "download")]
+fn fetch_temperatures(
+    base_url: &str,
+    staging: &std::path::Path,
+    target_dir: &std::path::Path,
+    section: &str,
+    requested: &HashSet<String>,
+    nuclide_name: &str,
+) -> Result<Option<Vec<String>>, Box<dyn std::error::Error>> {
+    // version.json is first in every section list, so it is either staged by
+    // this download already or in the cache dir from an earlier one.
+    let Some(version) = cached_version(staging).or_else(|| cached_version(target_dir)) else {
+        return Ok(None);
+    };
+    let Some(index) = ReactionRanges::from_version_json(&version) else {
+        return Ok(None);
+    };
+    let ladder = published_labels(&index);
+    let mut labels = labels_for(&index, requested).map_err(|e| format!("{nuclide_name}: {e}"))?;
+    if target_dir.join(ranged_section(section)).exists() {
+        labels.extend(cached_labels(target_dir, section).unwrap_or_default());
+    }
+    if labels.is_empty() || labels.is_superset(&ladder) {
+        return Ok(None);
+    }
+
+    let spans = if section == REACTIONS {
+        index.spans_where(|_, label| labels.contains(label))
+    } else {
+        let Some(energy) = EnergyRanges::from_version_json(&version) else {
+            return Ok(None);
+        };
+        energy.spans_for(|label| labels.contains(label) || !ladder.contains(label))
+    };
+
+    let url = format!("{base_url}/{section}");
+    let bodies = match fetch_spans(&url, &spans)? {
+        Spans::Parts(bodies) => bodies,
+        Spans::Whole(bytes) => {
+            fs::write(staging.join(section), bytes)?;
+            return Ok(Some(vec![section.to_string()]));
+        }
+    };
+
+    fs::create_dir_all(staging.join(RANGED_DIR))?;
+    fs::write(staging.join(ranged_section(section)), splice_spans(&bodies))?;
+    fs::write(
+        staging.join(ranged_labels_file(section)),
+        serde_json::to_vec(&labels)?,
+    )?;
+    // The section before its label record, so a publish interrupted between
+    // the two renames leaves a record naming no more than the file holds.
+    Ok(Some(vec![
+        ranged_section(section),
+        ranged_labels_file(section),
+    ]))
+}
+
 /// Fetch just the MTs `wanted` names out of `reactions.arrow`, into `staging`.
 ///
 /// Writes `subset/reactions.arrow` (a spliced Arrow IPC stream) and
@@ -681,44 +1086,13 @@ fn fetch_reactions_subset(
     let url = format!("{base_url}/{REACTIONS}");
     let spans = index.spans_for(|mt| wanted.contains(&mt));
 
-    let mut bodies = Vec::with_capacity(spans.len());
-    for span in &spans {
-        match fetch(&url, Some(*span))? {
-            Fetched::Body {
-                bytes,
-                partial: true,
-            } => {
-                if bytes.len() as u64 != span.1 {
-                    // A short span is not recoverable by splicing it: the
-                    // framing still walks, and the message header at the cut is
-                    // read as whatever the next bytes happen to be.
-                    return Err(format!(
-                        "{url}: asked for {} bytes at {} and got {}",
-                        span.1,
-                        span.0,
-                        bytes.len()
-                    )
-                    .into());
-                }
-                bodies.push(bytes);
-            }
-            // Range ignored somewhere in the path: what is in hand IS the whole
-            // object, so cache it as one rather than splicing it as a slice.
-            Fetched::Body {
-                bytes,
-                partial: false,
-            } => {
-                fs::write(staging.join(REACTIONS), bytes)?;
-                return Ok(None);
-            }
-            // The nuclide has a version.json naming ranges but no
-            // reactions.arrow to range into, which is a broken publish rather
-            // than an absent optional section.
-            Fetched::Absent => {
-                return Err(format!("{url}: 404, but its version.json names byte ranges").into())
-            }
+    let bodies = match fetch_spans(&url, &spans)? {
+        Spans::Parts(bodies) => bodies,
+        Spans::Whole(bytes) => {
+            fs::write(staging.join(REACTIONS), bytes)?;
+            return Ok(None);
         }
-    }
+    };
 
     fs::create_dir_all(staging.join(SUBSET_DIR))?;
     fs::write(staging.join(SUBSET_REACTIONS), splice_spans(&bodies))?;
@@ -743,7 +1117,7 @@ fn fetch_section_to_file(
     url: &str,
     dest: &std::path::Path,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    match fetch(url, None)? {
+    match fetch(url, &[])? {
         Fetched::Body { bytes, .. } => {
             fs::write(dest, bytes)?;
             Ok(true)
@@ -774,10 +1148,10 @@ fn download_sections(
     sections: &[(&str, bool)],
     source: &str,
     nuclide_name: &str,
-    subset: Option<&HashSet<i32>>,
+    ranging: Ranged<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let existing = target_dir.is_dir();
-    let wanted = sections_to_fetch(target_dir, sections, subset);
+    let wanted = sections_to_fetch(target_dir, sections, ranging);
     if wanted.is_empty() {
         return Ok(());
     }
@@ -813,7 +1187,7 @@ fn download_sections(
             // few byte ranges those MTs occupy. The index comes from
             // version.json, which is first in every section list and so is
             // either already staged by this loop or already in the cache dir.
-            if let (Some(mts), true) = (subset, *name == REACTIONS) {
+            if let (Ranged::Mts(mts), true) = (ranging, *name == REACTIONS) {
                 let index = cached_index(&staging).or_else(|| cached_index(target_dir));
                 if let Some(index) = index {
                     if let Some(paths) = fetch_reactions_subset(base_url, &staging, &index, mts)? {
@@ -827,6 +1201,23 @@ fn download_sections(
                 }
                 // No index: data published before it existed. Fetch it whole,
                 // exactly as this did before.
+            }
+            // reactions.arrow and energy.arrow, for a transport load at named
+            // temperatures, are fetched as those temperatures' batches.
+            if let (Ranged::Temperatures(temperatures), true) =
+                (ranging, *name == REACTIONS || *name == ENERGY)
+            {
+                if let Some(paths) = fetch_temperatures(
+                    base_url,
+                    &staging,
+                    target_dir,
+                    name,
+                    temperatures,
+                    nuclide_name,
+                )? {
+                    staged.extend(paths);
+                    continue;
+                }
             }
             let url = format!("{}/{}", base_url, name);
             let fetched = fetch_section_to_file(&url, &staging.join(name))?;
@@ -872,6 +1263,14 @@ fn download_sections(
                 // in place and the directory still usable.
                 if staged.iter().any(|name| name == REACTIONS) {
                     fs::remove_dir_all(target_dir.join(SUBSET_DIR)).ok();
+                }
+                // Likewise a temperature-ranged copy of a section now held
+                // whole.
+                for section in [REACTIONS, ENERGY] {
+                    if staged.iter().any(|name| name == section) {
+                        fs::remove_file(target_dir.join(ranged_section(section))).ok();
+                        fs::remove_file(target_dir.join(ranged_labels_file(section))).ok();
+                    }
                 }
                 fs::remove_dir_all(&staging).ok();
             } else {
@@ -1358,10 +1757,10 @@ mod tests {
         }
         let full = sections_for(DataKind::Neutron, &crate::LoadScope::full());
         assert!(
-            !have_all_sections(&dir.0, &full, None),
+            !have_all_sections(&dir.0, &full, Ranged::Whole),
             "transport must not be satisfied by a subset"
         );
-        let todo: Vec<&str> = sections_to_fetch(&dir.0, &full, None)
+        let todo: Vec<&str> = sections_to_fetch(&dir.0, &full, Ranged::Whole)
             .iter()
             .map(|(n, _)| *n)
             .collect();
@@ -1387,24 +1786,226 @@ mod tests {
             DataKind::Neutron,
             &crate::LoadScope::activation(wanted.clone()),
         );
-        assert!(have_all_sections(&dir.0, &xs_only, Some(&wanted)));
-        assert!(sections_to_fetch(&dir.0, &xs_only, Some(&wanted)).is_empty());
+        assert!(have_all_sections(&dir.0, &xs_only, Ranged::Mts(&wanted)));
+        assert!(sections_to_fetch(&dir.0, &xs_only, Ranged::Mts(&wanted)).is_empty());
     }
 
-    /// Only a neutron load that named its MTs may range. Photon data has no
-    /// per-MT batches, and transport reads every MT there is.
+    /// Write a ranged copy of `section` holding `labels`, as a temperature-ranged
+    /// fetch leaves it.
+    fn write_ranged(dir: &std::path::Path, section: &str, labels: &[&str]) {
+        fs::create_dir_all(dir.join(RANGED_DIR)).expect("ranged dir");
+        fs::write(dir.join(ranged_section(section)), b"stream").expect("ranged stream");
+        fs::write(
+            dir.join(ranged_labels_file(section)),
+            serde_json::to_vec(&labels).unwrap(),
+        )
+        .expect("ranged labels");
+    }
+
+    fn temperatures(labels: &[&str]) -> HashSet<String> {
+        labels.iter().map(|l| l.to_string()).collect()
+    }
+
+    /// A ranged copy covers the temperatures it holds, spelled either way, and
+    /// a temperature it brackets only when it holds both neighbours.
     #[test]
-    fn only_a_named_activation_neutron_scope_ranges() {
-        let wanted = mts(&[102]);
-        assert_eq!(
-            subset_mts(
-                DataKind::Neutron,
-                &crate::LoadScope::activation(wanted.clone())
-            ),
-            Some(&wanted),
+    fn a_ranged_copy_covers_only_the_temperatures_it_holds() {
+        let dir = TempDir::new("covers-temperatures");
+        write_index(&dir.0, &[2, 102]);
+        write_ranged(&dir.0, REACTIONS, &["294K"]);
+
+        assert!(temperatures_covered(
+            &dir.0,
+            REACTIONS,
+            &temperatures(&["294"])
+        ));
+        assert!(temperatures_covered(
+            &dir.0,
+            REACTIONS,
+            &temperatures(&["294K"])
+        ));
+        assert!(!temperatures_covered(
+            &dir.0,
+            REACTIONS,
+            &temperatures(&["600"])
+        ));
+        assert!(
+            !temperatures_covered(&dir.0, REACTIONS, &temperatures(&["400"])),
+            "400 K blends 294 K and 600 K, and 600 K is not held"
         );
-        assert!(subset_mts(DataKind::Neutron, &crate::LoadScope::full()).is_none());
-        assert!(subset_mts(DataKind::Photon, &crate::LoadScope::activation(wanted)).is_none());
+
+        write_ranged(&dir.0, REACTIONS, &["294K", "600K"]);
+        assert!(temperatures_covered(
+            &dir.0,
+            REACTIONS,
+            &temperatures(&["400"])
+        ));
+        assert!(
+            !temperatures_covered(&dir.0, REACTIONS, &temperatures(&["5000"])),
+            "out of range is never covered, so the fetch runs and says why"
+        );
+    }
+
+    /// The whole object covers every temperature, and with no index a ranged
+    /// copy can never be shown to cover anything.
+    #[test]
+    fn the_whole_object_covers_every_temperature_and_no_index_covers_none() {
+        let dir = TempDir::new("covers-temperatures-whole");
+        dir.touch(ENERGY);
+        assert!(temperatures_covered(
+            &dir.0,
+            ENERGY,
+            &temperatures(&["294"])
+        ));
+
+        fs::write(dir.0.join("version.json"), r#"{"data_version": "1"}"#).expect("write");
+        write_ranged(&dir.0, REACTIONS, &["294K"]);
+        assert!(!temperatures_covered(
+            &dir.0,
+            REACTIONS,
+            &temperatures(&["294"])
+        ));
+    }
+
+    /// A transport load at a held temperature is satisfied by the ranged
+    /// copies, and a load with no temperature, which reads every one, is not.
+    #[test]
+    fn a_ranged_copy_satisfies_only_a_load_at_its_temperatures() {
+        let dir = TempDir::new("ranged-vs-transport");
+        write_index(&dir.0, &[2, 102]);
+        write_ranged(&dir.0, REACTIONS, &["294K"]);
+        write_ranged(&dir.0, ENERGY, &["294K"]);
+        for name in ["nuclide.arrow", "products.arrow", "distributions.arrow"] {
+            dir.touch(name);
+        }
+        for name in ["urr.arrow", "total_nu.arrow", "fission_photon.arrow"] {
+            dir.touch(&format!("{name}{ABSENT_SUFFIX}"));
+        }
+        let full = sections_for(DataKind::Neutron, &crate::LoadScope::full());
+
+        let at_294 = temperatures(&["294"]);
+        assert!(have_all_sections(
+            &dir.0,
+            &full,
+            Ranged::Temperatures(&at_294)
+        ));
+
+        let at_600 = temperatures(&["600"]);
+        let todo: Vec<&str> = sections_to_fetch(&dir.0, &full, Ranged::Temperatures(&at_600))
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(
+            todo,
+            [ENERGY, REACTIONS],
+            "only the two ranged sections top up"
+        );
+
+        let todo: Vec<&str> = sections_to_fetch(&dir.0, &full, Ranged::Whole)
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(
+            todo,
+            [ENERGY, REACTIONS],
+            "a load at every temperature must not be satisfied by a ranged copy"
+        );
+    }
+
+    /// A multipart body as an origin writes one, for parts at `(offset, bytes)`.
+    fn multipart(parts: &[(u64, &[u8])], total: u64) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (offset, bytes) in parts {
+            body.extend_from_slice(b"\r\n--b0und4ry\r\nContent-Type: application/octet-stream\r\n");
+            body.extend_from_slice(
+                format!(
+                    "Content-Range: bytes {}-{}/{total}\r\n\r\n",
+                    offset,
+                    offset + bytes.len() as u64 - 1
+                )
+                .as_bytes(),
+            );
+            body.extend_from_slice(bytes);
+        }
+        body.extend_from_slice(b"\r\n--b0und4ry--\r\n");
+        body
+    }
+
+    /// Parts are read by their `Content-Range` length, so a part carrying the
+    /// boundary text in its own bytes is still cut in the right place.
+    #[test]
+    fn a_multipart_body_parses_into_its_parts() {
+        let tricky: &[u8] = b"ab\r\n--b0und4ry\r\ncd";
+        let body = multipart(&[(10, b"hello"), (100, tricky)], 1000);
+        let parts = parse_byteranges(&body).expect("parses");
+        assert_eq!(parts, vec![(10, b"hello".to_vec()), (100, tricky.to_vec())]);
+
+        // Without the leading CRLF, as some origins write it.
+        let parts = parse_byteranges(&body[2..]).expect("parses");
+        assert_eq!(parts.len(), 2);
+    }
+
+    /// A single-range answer, a truncated body and a part shorter than its
+    /// `Content-Range` are not multipart bodies, so the caller asks again a
+    /// span at a time.
+    #[test]
+    fn anything_else_is_not_a_multipart_body() {
+        assert!(parse_byteranges(&[0xff, 0xff, 0xff, 0xff, 0x10, 0, 0, 0]).is_none());
+        let body = multipart(&[(10, b"hello"), (100, b"world")], 1000);
+        assert!(parse_byteranges(&body[..body.len() - 12]).is_none());
+        let short = String::from_utf8(body.clone())
+            .unwrap()
+            .replace("bytes 100-104", "bytes 100-140");
+        assert!(parse_byteranges(short.as_bytes()).is_none());
+    }
+
+    /// Spans are cut from whichever part covers them, so an origin that merged
+    /// ranges into one part still answers each span.
+    #[test]
+    fn spans_are_cut_from_the_parts_that_cover_them() {
+        let parts = vec![(10, b"0123456789".to_vec()), (100, b"abc".to_vec())];
+        assert_eq!(
+            cut_spans(&parts, &[(10, 2), (15, 3), (101, 2)]),
+            Some(vec![b"01".to_vec(), b"567".to_vec(), b"bc".to_vec()])
+        );
+        assert_eq!(
+            cut_spans(&parts, &[(18, 5)]),
+            None,
+            "runs off the end of a part"
+        );
+        assert_eq!(cut_spans(&parts, &[(50, 1)]), None, "in no part at all");
+    }
+
+    #[test]
+    fn the_range_header_names_every_span_inclusively() {
+        assert_eq!(range_header(&[(0, 100), (200, 1)]), "bytes=0-99,200-200");
+    }
+
+    /// Only a neutron load that named its MTs or its temperatures may range.
+    /// Photon data has no per-MT batches, and transport with no temperature
+    /// reads every temperature there is.
+    #[test]
+    fn only_a_neutron_scope_naming_mts_or_temperatures_ranges() {
+        let wanted = mts(&[102]);
+        let activation = crate::LoadScope::activation(wanted.clone());
+        assert!(matches!(
+            ranged(DataKind::Neutron, &activation),
+            Ranged::Mts(m) if *m == wanted
+        ));
+        assert!(matches!(
+            ranged(DataKind::Photon, &activation),
+            Ranged::Whole
+        ));
+        assert!(matches!(
+            ranged(DataKind::Neutron, &crate::LoadScope::full()),
+            Ranged::Whole
+        ));
+        let at_294 = crate::LoadScope::full().with_temperatures(Some(["294".to_string()].into()));
+        assert!(matches!(
+            ranged(DataKind::Neutron, &at_294),
+            Ranged::Temperatures(t) if t.contains("294")
+        ));
+        assert!(matches!(ranged(DataKind::Photon, &at_294), Ranged::Whole));
         // XsOnly with no MT filter reads every MT, so there is nothing to narrow.
         let all_mts = crate::LoadScope {
             sections: crate::load_scope::SectionScope::XsOnly,
@@ -1415,7 +2016,7 @@ mod tests {
             fission_covariance: false,
             resonance_parameters: false,
         };
-        assert!(subset_mts(DataKind::Neutron, &all_mts).is_none());
+        assert!(matches!(ranged(DataKind::Neutron, &all_mts), Ranged::Whole));
     }
 
     #[test]
@@ -1618,27 +2219,27 @@ mod tests {
         // Nothing cached yet: both scopes want all of their own sections.
         let empty = dir.0.join("missing.arrow");
         assert_eq!(
-            sections_to_fetch(&empty, &xs_only, None).len(),
+            sections_to_fetch(&empty, &xs_only, Ranged::Whole).len(),
             xs_only.len()
         );
-        assert!(!have_all_sections(&empty, &xs_only, None));
+        assert!(!have_all_sections(&empty, &xs_only, Ranged::Whole));
 
         // Simulate the transmutation load having run.
         for (name, _) in &xs_only {
             dir.touch(name);
         }
         assert!(
-            have_all_sections(&dir.0, &xs_only, None),
+            have_all_sections(&dir.0, &xs_only, Ranged::Whole),
             "the activation scope is satisfied"
         );
         assert!(
-            !have_all_sections(&dir.0, &full, None),
+            !have_all_sections(&dir.0, &full, Ranged::Whole),
             "but transport still needs the rest"
         );
 
         // The follow-up transport fetch asks only for what is missing, which is
         // the whole point: the earlier three are not refetched.
-        let todo: Vec<&str> = sections_to_fetch(&dir.0, &full, None)
+        let todo: Vec<&str> = sections_to_fetch(&dir.0, &full, Ranged::Whole)
             .iter()
             .map(|(n, _)| *n)
             .collect();
@@ -1666,7 +2267,7 @@ mod tests {
             }
         }
         assert!(
-            !have_all_sections(&dir.0, &full, None),
+            !have_all_sections(&dir.0, &full, Ranged::Whole),
             "an unmarked optional section still looks unfetched"
         );
 
@@ -1674,10 +2275,10 @@ mod tests {
         dir.touch(&format!("total_nu.arrow{ABSENT_SUFFIX}"));
         dir.touch(&format!("fission_photon.arrow{ABSENT_SUFFIX}"));
         assert!(
-            have_all_sections(&dir.0, &full, None),
+            have_all_sections(&dir.0, &full, Ranged::Whole),
             "a marker means the origin answered 404, so stop asking"
         );
-        assert!(sections_to_fetch(&dir.0, &full, None).is_empty());
+        assert!(sections_to_fetch(&dir.0, &full, Ranged::Whole).is_empty());
     }
 }
 
@@ -1772,21 +2373,21 @@ mod fetch_retry_tests {
     #[test]
     fn a_dropped_connection_is_retried() {
         let (url, accepted) = origin(2, Fault::Drop, b"sections");
-        assert_eq!(body_of(fetch(&url, None).unwrap()), b"sections");
+        assert_eq!(body_of(fetch(&url, &[]).unwrap()), b"sections");
         assert_eq!(accepted.load(Ordering::SeqCst), 3);
     }
 
     #[test]
     fn a_truncated_body_is_retried() {
         let (url, accepted) = origin(1, Fault::Truncate, b"sections");
-        assert_eq!(body_of(fetch(&url, None).unwrap()), b"sections");
+        assert_eq!(body_of(fetch(&url, &[]).unwrap()), b"sections");
         assert_eq!(accepted.load(Ordering::SeqCst), 2);
     }
 
     #[test]
     fn a_persistent_failure_gives_up_and_says_why() {
         let (url, accepted) = origin(usize::MAX, Fault::Drop, b"sections");
-        let err = fetch(&url, None)
+        let err = fetch(&url, &[])
             .err()
             .expect("every attempt fails")
             .to_string();

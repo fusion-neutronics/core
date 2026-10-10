@@ -190,16 +190,78 @@ pub const FORMAT_VERSION: i64 = 2;
 /// naming it, which is the right answer: the file it needs has not been
 /// downloaded. Silently reading the subset would hand transport a nuclide
 /// missing whole channels.
+///
+/// A transport load at named temperatures may instead read the copy ranged by
+/// temperature (see [`temperature_section_path`]), which carries every MT.
 fn reactions_path(dir: &Path, scope: &LoadScope) -> std::path::PathBuf {
-    let whole = dir.join("reactions.arrow");
-    if scope.wants_transport_sections() || crate::storage::exists(&whole) {
-        return whole;
+    let path = temperature_section_path(dir, "reactions.arrow", scope);
+    if scope.wants_transport_sections() || crate::storage::exists(&path) {
+        return path;
     }
     let subset = dir.join("subset").join("reactions.arrow");
     if crate::storage::exists(&subset) {
         return subset;
     }
+    path
+}
+
+/// Where a load reads `reactions.arrow` or `energy.arrow` from.
+///
+/// The whole published object when it is there. Otherwise, for a transport
+/// load at named temperatures, the copy a download fetched at only those
+/// temperatures and cached under `temperatures/` (see `RANGED_DIR` in
+/// `storage/url_cache.rs`). Beside it, `temperatures/<section stem>.json`
+/// names the labels it holds, which [`check_ranged_labels`] holds the load to.
+///
+/// No other scope reads the ranged copy: a load with no temperature reads
+/// every temperature, and an activation load ranges by MT instead, so for
+/// either the copy may lack something it wants.
+fn temperature_section_path(dir: &Path, section: &str, scope: &LoadScope) -> std::path::PathBuf {
+    let whole = dir.join(section);
+    if scope.ranges_temperatures() && !crate::storage::exists(&whole) {
+        let ranged = dir.join("temperatures").join(section);
+        if crate::storage::exists(&ranged) {
+            return ranged;
+        }
+    }
     whole
+}
+
+/// Fail a load that would read a temperature-ranged section at a temperature
+/// it does not hold.
+///
+/// The download only ever writes a ranged copy that covers the load it was
+/// made for, so this is the guard for a directory used some other way: a copy
+/// taken offline, or a cache shared with an older build. Without it the
+/// missing temperature would have no reactions and no energy grid, and the
+/// failure would surface far from here as a cross section of zero.
+fn check_ranged_labels(path: &Path, loaded_temps: &[String]) -> Result<(), Box<dyn Error>> {
+    let Some(parent) = path.parent().filter(|p| p.ends_with("temperatures")) else {
+        return Ok(());
+    };
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let record = parent.join(format!("{stem}.json"));
+    let held: Vec<String> = serde_json::from_str(&crate::storage::read_to_string(&record)?)?;
+    let missing: Vec<&String> = loaded_temps
+        .iter()
+        .filter(|t| {
+            !held
+                .iter()
+                .any(|h| crate::temperature::strip_k(h) == t.as_str())
+        })
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{}: holds temperatures {held:?}, and this load needs {missing:?} as well. Delete \
+         the nuclide's cache directory and load it again to download them.",
+        path.display(),
+    )
+    .into())
 }
 
 /// Narrow a `Full` request to the sections the directory actually carries.
@@ -234,8 +296,9 @@ fn narrow_to_present_sections(dir: &Path, scope: &LoadScope) -> Result<LoadScope
     // conversion either, because that writes one. It is a download cache holding
     // only a ranged subset under `subset/`, and narrowing onto it would send this
     // transport request to a reactions table missing whole channels. Leave the
-    // scope alone, so the read below fails naming the file it wanted.
-    if !crate::storage::exists(&dir.join("reactions.arrow")) {
+    // scope alone, so the read below fails naming the file it wanted. (A copy
+    // ranged by temperature carries every MT, and counts as present.)
+    if !crate::storage::exists(&reactions_path(dir, scope)) {
         return Ok(scope.clone());
     }
 
@@ -369,7 +432,7 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
     // download loud: on a nuclide that HAS temperatures a missing section is an
     // error here, not an empty map that would leave every cross section
     // interpolating against nothing.
-    let energy_path = dir.join("energy.arrow");
+    let energy_path = temperature_section_path(dir, "energy.arrow", scope);
     let (energy_temps_raw, energy_values): (Vec<String>, Vec<ScalarBuffer<f64>>) =
         if crate::storage::exists(&energy_path) {
             let energy_batch = read_arrow_file(&energy_path)?;
@@ -473,6 +536,8 @@ pub fn read_nuclide_from_arrow(dir: &Path, scope: &LoadScope) -> Result<Nuclide,
             format!("No matching temperatures found for {name}. Available: {all_temps:?}").into(),
         );
     }
+    check_ranged_labels(&energy_path, &loaded_temps)?;
+    check_ranged_labels(&reactions_path(dir, scope), &loaded_temps)?;
 
     // Build energy grids per temperature (using normalized keys), keeping only
     // the temperatures this load actually asked for.

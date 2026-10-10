@@ -349,7 +349,8 @@ fn the_per_replica_inventories_are_available() {
     );
 }
 
-/// Left to itself the driver stops when the sigmas settle.
+/// Left to itself the driver stops when every tracked sigma is known to the
+/// default 5% of itself.
 #[test]
 fn the_adaptive_driver_converges_and_says_so() {
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -380,6 +381,8 @@ fn the_adaptive_driver_converges_and_says_so() {
         info.converged,
         "a single well-behaved channel must settle inside the cap"
     );
+    assert_eq!(info.convergence, 0.05);
+    assert!(!info.hit_cap && info.unconverged.is_empty(), "{info:?}");
 }
 
 /// Switching the only source off leaves nothing to sample, and says so.
@@ -405,6 +408,7 @@ fn a_source_switched_off_contributes_nothing() {
             samples: Some(64),
             sources: vec![Source::CrossSections],
             attribution: false,
+            ..Default::default()
         }),
     );
     let without = run(
@@ -414,6 +418,7 @@ fn a_source_switched_off_contributes_nothing() {
             samples: Some(64),
             sources: vec![],
             attribution: false,
+            ..Default::default()
         }),
     );
 
@@ -460,6 +465,7 @@ fn adding_a_source_never_decreases_the_uncertainty() {
                 samples: Some(96),
                 sources,
                 attribution: false,
+                ..Default::default()
             }),
         )
         .get_nuclide_uncertainty(id, "Mn56", 1)
@@ -512,6 +518,7 @@ fn a_flux_error_moves_the_inventory_on_its_own() {
             samples: Some(256),
             sources: vec![Source::FluxSpectrum],
             attribution: false,
+            ..Default::default()
         }),
     )
     .expect("transmute");
@@ -565,6 +572,7 @@ fn a_spectrum_without_an_error_is_reported_not_assumed_exact() {
             samples: Some(32),
             sources: vec![Source::FluxSpectrum],
             attribution: false,
+            ..Default::default()
         }),
     )
     .expect("transmute");
@@ -615,6 +623,7 @@ fn a_source_switched_off_is_named_as_held() {
                 samples: Some(8),
                 sources,
                 attribution: false,
+                ..Default::default()
             }),
         )
         .expect("transmute")
@@ -700,6 +709,7 @@ fn the_inventory_spread_scales_with_the_flux_error() {
                 samples: Some(256),
                 sources: vec![Source::FluxSpectrum],
                 attribution: false,
+                ..Default::default()
             }),
         )
         .expect("transmute")
@@ -735,6 +745,7 @@ fn the_cross_section_attribution_names_the_evaluation() {
             samples: Some(512),
             sources: vec![yani_transmute::uncertainty::Source::CrossSections],
             attribution: true,
+            ..Default::default()
         }),
     );
     let b = results

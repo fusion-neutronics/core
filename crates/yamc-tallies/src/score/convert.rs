@@ -16,50 +16,8 @@ impl FromStr for Score {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // First check for special named scores
-        match s {
-            "flux" => return Ok(Self::Flux(FluxScore)),
-            "heating" => return Ok(Self::Heating(HeatingScore)),
-            "heating-local" => return Ok(Self::HeatingLocal(HeatingLocalScore)),
-            "damage-energy" => return Ok(Self::DamageEnergy(DamageEnergyScore)),
-
-            // Production scores
-            "H1-production" => return Ok(Self::Production(ProductionScore::H1)),
-            "H2-production" => return Ok(Self::Production(ProductionScore::H2)),
-            "H3-production" => return Ok(Self::Production(ProductionScore::H3)),
-            "He3-production" => return Ok(Self::Production(ProductionScore::HE3)),
-            "He4-production" => return Ok(Self::Production(ProductionScore::HE4)),
-
-            // Common reaction names
-            "total" => return Ok(Self::ReactionRate(ReactionRateScore::total())),
-            "elastic" => return Ok(Self::ReactionRate(ReactionRateScore::elastic())),
-            "inelastic" => return Ok(Self::ReactionRate(ReactionRateScore::inelastic())),
-            "fission" => return Ok(Self::ReactionRate(ReactionRateScore::fission())),
-            "absorption" => return Ok(Self::ReactionRate(ReactionRateScore::absorption())),
-
-            // Photon scores
-            "coherent-scatter" => {
-                return Ok(Self::PhotonXS(PhotonXSScore {
-                    component: PhotonComponent::Coherent,
-                }))
-            }
-            "incoherent-scatter" => {
-                return Ok(Self::PhotonXS(PhotonXSScore {
-                    component: PhotonComponent::Incoherent,
-                }))
-            }
-            "photoelectric" => {
-                return Ok(Self::PhotonXS(PhotonXSScore {
-                    component: PhotonComponent::Photoelectric,
-                }))
-            }
-            "pair-production" => {
-                return Ok(Self::PhotonXS(PhotonXSScore {
-                    component: PhotonComponent::PairProduction,
-                }))
-            }
-
-            _ => {}
+        if let Some((_, make)) = NAMED_SCORES.iter().find(|(name, _)| *name == s) {
+            return Ok(make());
         }
 
         // Try parsing as integer MT number
@@ -90,8 +48,88 @@ impl FromStr for Score {
             )));
         }
 
-        Err(format!("Unknown score: '{s}'"))
+        Err(unknown_score_message(s))
     }
+}
+
+/// Builds the score a name in [`NAMED_SCORES`] stands for.
+type MakeScore = fn() -> Score;
+
+/// The score names `from_str` accepts directly, each with its constructor.
+///
+/// The parser and the "Unknown score" message both read this table, so the
+/// list of valid names in the error cannot drift from what actually parses.
+const NAMED_SCORES: &[(&str, MakeScore)] = &[
+    ("flux", || Score::Flux(FluxScore)),
+    ("heating", || Score::Heating(HeatingScore)),
+    ("heating-local", || Score::HeatingLocal(HeatingLocalScore)),
+    ("damage-energy", || Score::DamageEnergy(DamageEnergyScore)),
+    // Production scores
+    ("H1-production", || Score::Production(ProductionScore::H1)),
+    ("H2-production", || Score::Production(ProductionScore::H2)),
+    ("H3-production", || Score::Production(ProductionScore::H3)),
+    ("He3-production", || Score::Production(ProductionScore::HE3)),
+    ("He4-production", || Score::Production(ProductionScore::HE4)),
+    // Common reaction names
+    ("total", || Score::ReactionRate(ReactionRateScore::total())),
+    ("elastic", || {
+        Score::ReactionRate(ReactionRateScore::elastic())
+    }),
+    ("inelastic", || {
+        Score::ReactionRate(ReactionRateScore::inelastic())
+    }),
+    ("fission", || {
+        Score::ReactionRate(ReactionRateScore::fission())
+    }),
+    ("absorption", || {
+        Score::ReactionRate(ReactionRateScore::absorption())
+    }),
+    // Photon scores
+    ("coherent-scatter", || {
+        Score::PhotonXS(PhotonXSScore {
+            component: PhotonComponent::Coherent,
+        })
+    }),
+    ("incoherent-scatter", || {
+        Score::PhotonXS(PhotonXSScore {
+            component: PhotonComponent::Incoherent,
+        })
+    }),
+    ("photoelectric", || {
+        Score::PhotonXS(PhotonXSScore {
+            component: PhotonComponent::Photoelectric,
+        })
+    }),
+    ("pair-production", || {
+        Score::PhotonXS(PhotonXSScore {
+            component: PhotonComponent::PairProduction,
+        })
+    }),
+];
+
+/// Build the error for a score string nothing recognises: the bad input, a
+/// case-insensitive "did you mean" when one exists, the named scores, and the
+/// reaction-name and MT-number forms that are also accepted.
+fn unknown_score_message(s: &str) -> String {
+    let suggestion = NAMED_SCORES
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(yamc_nuclide::data::REACTION_MT.keys().copied())
+        .find(|name| name.eq_ignore_ascii_case(s));
+    let did_you_mean = match suggestion {
+        Some(name) => format!(" Did you mean '{name}'?"),
+        None => String::new(),
+    };
+    let names: Vec<String> = NAMED_SCORES
+        .iter()
+        .map(|(name, _)| format!("'{name}'"))
+        .collect();
+    format!(
+        "Unknown score: '{s}'.{did_you_mean} Valid named scores are: {}. A score can also be \
+         an ENDF reaction name such as '(n,gamma)' or '(n,t)', or an MT number such as 102 \
+         (as an int or a string).",
+        names.join(", ")
+    )
 }
 
 // ----------------------------- Tests -----------------------------
