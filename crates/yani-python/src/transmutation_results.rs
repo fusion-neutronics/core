@@ -962,9 +962,36 @@ impl PyTransmutationResults {
     ///   transport run, how many tallied rates were sampled from their
     ///   covariance; ``statistical_floored`` / ``statistical_sampled`` count
     ///   draws that came out negative and were floored.
+    /// - ``resonance_parameters``: per nuclide with resonance parameters
+    ///   (MF=2 and MF=32) and a rate in this run, how its resonance-range
+    ///   uncertainty was sampled. ``method`` is ``"parameters sampled"``
+    ///   (drawn per replica and the cross sections rebuilt from them) or
+    ///   ``"first-order rows"`` (the MF=32 rows of ``covariance.arrow``),
+    ///   ``reason`` why the parameters were not sampled (``None`` where they
+    ///   were), and ``ranges`` one sampler report per sampled range:
+    ///   ``isotope`` and ``range`` indices, the ``gaussian``, ``lognormal``
+    ///   and ``held`` parameter counts, ``zero_mean_widths`` (widths stated
+    ///   with a zero mean and a nonzero sigma, held at zero) and
+    ///   ``negative_mean_widths`` (drawn as signed), each with ``index``,
+    ///   ``location``, ``quantity``, ``value`` and ``sigma``,
+    ///   ``zero_variance_with_covariance``, ``unattainable_pairs``, and
+    ///   ``stated_repair`` / ``transformed_repair`` (the nearest-correlation
+    ///   repair of the stated and of the log-space matrix, each with
+    ///   ``lambda_min``, ``frobenius_change``, ``max_change``, ``parameters``,
+    ///   ``iterations`` and ``converged``, ``None`` where none was needed).
+    ///   How far the draws' parameter correlations are from the evaluated
+    ///   ones, in the parameters themselves after both repairs and the
+    ///   lognormal transform, reads off ``largest_correlation_change`` (the
+    ///   largest change of one correlation) and
+    ///   ``correlation_frobenius_change``, per range and per nuclide over its
+    ///   ranges; every drawn parameter keeps its evaluated mean and sigma, so
+    ///   that is the whole of the difference in the first two moments. Widths
+    ///   stay lognormal, so a pair no lognormal carries
+    ///   (``unattainable_pairs``) is where it is largest. Empty on a transport
+    ///   run, which keeps the rows.
     /// - ``not_perturbed``: every input this run held at its nominal value,
-    ///   such as any MF=32 resonance-parameter covariance the library's
-    ///   ``covariance.arrow`` does not carry, the photon and dose data, the
+    ///   such as any MF=32 resonance-parameter covariance neither sampled nor
+    ///   in the library's ``covariance.arrow``, the photon and dose data, the
     ///   material composition, any source switched off, and, where they
     ///   applied, the self-shielding correction, the flux's response to a
     ///   perturbed cross section on a transport run, and the per-branch decay

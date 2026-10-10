@@ -241,7 +241,15 @@ class DataUncertainty:
     What it can cover, by source (``DataUncertainty.available_sources()``):
     
     - ``"cross_sections"``: the activation cross sections, sampled from the
-      ENDF MF=33 covariance folded against this material's own spectrum;
+      ENDF MF=33 covariance folded against this material's own spectrum, and
+      where the library folder carries the evaluation's resonance parameters
+      (MF=2 and MF=32, ``resonance_parameters.arrow``), the parameters
+      themselves: each replica draws them from their covariance, rebuilds the
+      resonance range's cross sections from the draw and Doppler broadens the
+      change to the temperature in use, so the resonance range's uncertainty
+      is exact in the parameters rather than first order. A nuclide whose
+      parameters cannot be sampled keeps the first-order MF=32 rows of
+      ``covariance.arrow``, and the report says which and why;
     - ``"flux_spectrum"``: the spectrum itself, from the per-bin
       ``flux_std_dev`` given on a ``Pulse``;
     - ``"half_life"``: every reachable nuclide's half-life, from the decay
@@ -307,19 +315,21 @@ class DataUncertainty:
       be derived (LTY 1-4, or an LTY=0 block counted in ``skipped_nc``), the
       covariance of a lumped reaction (MT=851-870) with several components
       that no derivation names, listed in ``lumped_covariance_not_assignable``,
-      and the resonance-parameter covariance (MF=32) wherever it is not in
-      ``covariance.arrow``: a library converted before the converter derived
-      it, or a resonance range whose formalism the converter does not
-      reconstruct. What is sampled is each reaction's explicit MF=33 blocks,
-      the resonance-range blocks the converter derives from MF=32 and writes
-      beside them where a library has them, the blocks of a lumped reaction
+      and the resonance-parameter covariance (MF=32) of a range neither
+      sampled nor in ``covariance.arrow``: a library converted before the
+      converter wrote either, or a resonance range whose formalism ``endf``
+      does not reconstruct. What is sampled is each reaction's explicit MF=33
+      blocks, the resonance parameters where the folder carries them and
+      otherwise the resonance-range blocks the converter derives from MF=32
+      and writes beside them, the blocks of a lumped reaction
       whose one component it is, and for a reaction an LTY=0 NC block states
       as a sum of others (ENDF/B-VIII.1 O16 (n,p) as MT 600 to 603, U235 MT 4
       as MT 51 plus the lumped MT 851), the covariance derived from the named
       reactions' own blocks and the cross blocks between them;
     - the self-shielding correction, when ``self_shielding_chord`` or
       ``self_shielding_shape`` is given: the shielded flux is built once from
-      the nominal cross sections and reused by every replica;
+      the nominal cross sections and reused by every replica, sampled
+      resonance parameters included;
     - on a transport run, the flux's response to a perturbed cross section:
       there is one transport, not one per replica. The tallied values
       themselves are still drawn by the ``"statistical"`` source;
@@ -2991,9 +3001,36 @@ class TransmutationResults:
           transport run, how many tallied rates were sampled from their
           covariance; ``statistical_floored`` / ``statistical_sampled`` count
           draws that came out negative and were floored.
+        - ``resonance_parameters``: per nuclide with resonance parameters
+          (MF=2 and MF=32) and a rate in this run, how its resonance-range
+          uncertainty was sampled. ``method`` is ``"parameters sampled"``
+          (drawn per replica and the cross sections rebuilt from them) or
+          ``"first-order rows"`` (the MF=32 rows of ``covariance.arrow``),
+          ``reason`` why the parameters were not sampled (``None`` where they
+          were), and ``ranges`` one sampler report per sampled range:
+          ``isotope`` and ``range`` indices, the ``gaussian``, ``lognormal``
+          and ``held`` parameter counts, ``zero_mean_widths`` (widths stated
+          with a zero mean and a nonzero sigma, held at zero) and
+          ``negative_mean_widths`` (drawn as signed), each with ``index``,
+          ``location``, ``quantity``, ``value`` and ``sigma``,
+          ``zero_variance_with_covariance``, ``unattainable_pairs``, and
+          ``stated_repair`` / ``transformed_repair`` (the nearest-correlation
+          repair of the stated and of the log-space matrix, each with
+          ``lambda_min``, ``frobenius_change``, ``max_change``, ``parameters``,
+          ``iterations`` and ``converged``, ``None`` where none was needed).
+          How far the draws' parameter correlations are from the evaluated
+          ones, in the parameters themselves after both repairs and the
+          lognormal transform, reads off ``largest_correlation_change`` (the
+          largest change of one correlation) and
+          ``correlation_frobenius_change``, per range and per nuclide over its
+          ranges; every drawn parameter keeps its evaluated mean and sigma, so
+          that is the whole of the difference in the first two moments. Widths
+          stay lognormal, so a pair no lognormal carries
+          (``unattainable_pairs``) is where it is largest. Empty on a transport
+          run, which keeps the rows.
         - ``not_perturbed``: every input this run held at its nominal value,
-          such as any MF=32 resonance-parameter covariance the library's
-          ``covariance.arrow`` does not carry, the photon and dose data, the
+          such as any MF=32 resonance-parameter covariance neither sampled nor
+          in the library's ``covariance.arrow``, the photon and dose data, the
           material composition, any source switched off, and, where they
           applied, the self-shielding correction, the flux's response to a
           perturbed cross section on a transport run, and the per-branch decay

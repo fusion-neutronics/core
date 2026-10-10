@@ -483,6 +483,15 @@ pub struct Info {
     /// moments, not a defect of the data, and the effect on each channel is
     /// also in its sampled sigma beside the evaluated one.
     pub lognormal_not_carried: BTreeMap<String, crate::covariance_sample::LognormalLimit>,
+    /// Per nuclide with MF=2 and MF=32 resonance parameters and a rate in
+    /// this run, how its resonance-range uncertainty was sampled: the
+    /// parameters drawn per replica and the cross sections rebuilt from them,
+    /// with each range's sampler report (the repairs it made and the widths
+    /// it held), or the first-order MF=32 rows of `covariance.arrow`, with
+    /// the reason the parameters were not sampled. See
+    /// [`crate::resonance_rates`]. Empty with the cross-section source off,
+    /// and on a transport run, which keeps the rows for every nuclide.
+    pub resonance_parameters: BTreeMap<String, crate::resonance_rates::ResonanceMethod>,
     /// Unstable nuclides the material can reach whose half-life was perturbed.
     pub half_lives_perturbed: BTreeSet<String>,
     /// Unstable nuclides the material can reach whose evaluation states no
@@ -630,7 +639,7 @@ impl Info {
                 "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
                 "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, or LTY=0 in skipped_nc)",
                 "lumped-reaction covariance of several components no derivation names (MF=33 MT=851-870, in lumped_covariance_not_assignable)",
-                "resonance-parameter covariance not written into covariance.arrow (MF=32)",
+                "resonance-parameter covariance (MF=32) of a range neither sampled nor written into covariance.arrow",
                 "decay photon spectrum covariance and continuum shape (MF=8 MT=457 LCOV, which no library states)",
                 "photon attenuation coefficient (XCOM)",
                 "air energy-absorption coefficient (NIST SRD 126)",
@@ -1688,7 +1697,7 @@ mod tests {
             "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
             "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, or LTY=0 in skipped_nc)",
             "lumped-reaction covariance of several components no derivation names (MF=33 MT=851-870, in lumped_covariance_not_assignable)",
-            "resonance-parameter covariance not written into covariance.arrow (MF=32)",
+            "resonance-parameter covariance (MF=32) of a range neither sampled nor written into covariance.arrow",
             "decay photon spectrum covariance and continuum shape (MF=8 MT=457 LCOV, which no library states)",
             "photon attenuation coefficient (XCOM)",
             "air energy-absorption coefficient (NIST SRD 126)",

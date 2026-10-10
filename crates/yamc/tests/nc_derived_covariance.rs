@@ -285,7 +285,7 @@ fn be9_activation_and_transport_move_the_same_rates_by_the_same_amount() {
         multigroup_flux: &flux,
         group_boundaries: &groups,
     };
-    let activation = cell_fields(&m, &chain, &[spectrum], None);
+    let activation = cell_fields(&m, &chain, &[spectrum], None, &BTreeSet::new());
     let a = &activation["Be9"];
     let projection = a.projections[0].as_ref().expect("a projection");
     let dm = per_cell(&a.relative_cells, &change);
