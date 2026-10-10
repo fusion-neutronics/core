@@ -25,6 +25,7 @@ mod gas;
 mod history_statistics;
 mod material_transmute;
 pub mod multigroup;
+pub mod nearest_correlation;
 pub mod resonance_rates;
 pub mod resonance_sampling;
 mod results;

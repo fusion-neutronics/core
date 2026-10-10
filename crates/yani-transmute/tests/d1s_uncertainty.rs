@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use yani_transmute::d1s_uncertainty::time_correction_factor_ensemble;
+use yani_transmute::d1s_uncertainty::{time_correction_factor_ensemble, D1S_LINES_NOT_PERTURBED};
 use yani_transmute::uncertainty::{DataUncertainty, Source};
 
 const HOUR: f64 = 3600.0;
@@ -124,4 +124,185 @@ fn a_half_life_sigma_no_draw_can_carry_is_reported() {
     assert!(ensemble.half_life_uncertainty_not_carried.contains("Mn56"));
     assert!(!ensemble.half_lives_perturbed.contains("Mn56"));
     assert!(!ensemble.no_half_life_uncertainty.contains("Mn56"));
+}
+
+/// Mn56's photon spectra, with relative normalisation sigmas `gamma` and
+/// `xray` (`None` writes the ENDF/B way, FD = 1 with dFD = 0, and a 2% dRI on
+/// every line, which no per-emitter tally can follow).
+fn mn56_photons(gamma: Option<f64>, xray: Option<f64>) -> Arc<HashMap<String, yani::ChainNuclide>> {
+    let mut chain = Arc::unwrap_or_clone(chain());
+    let mn56 = chain.get_mut("Mn56").expect("Mn56");
+    let mut kinds = ["gamma", "xray"].into_iter();
+    let mut spectra = 0;
+    for source in mn56.sources.iter_mut().filter(|s| s.particle == "photon") {
+        let yani::DecaySourceDistribution::Discrete { intensities, .. } = &source.distribution
+        else {
+            continue;
+        };
+        // The fixture names no radiation; the strongest spectrum is the gamma
+        // one, the rest x-rays.
+        let kind = kinds.next().unwrap_or("xray");
+        source.radiation = Some(kind.to_string());
+        let sigma = if kind == "gamma" { gamma } else { xray };
+        source.uncertainty = Some(Arc::new(yani::DecaySourceUncertainty {
+            normalization: Some(if sigma.is_some() { 0.9 } else { 1.0 }),
+            normalization_uncertainty: Some(sigma.map_or(0.0, |s| 0.9 * s)),
+            intensity_uncertainties: Some(intensities.iter().map(|i| 0.02 * i).collect()),
+            energy_uncertainties: None,
+            covariance: None,
+        }));
+        spectra += 1;
+    }
+    assert!(spectra >= 1, "Mn56 has photon lines");
+    Arc::new(chain)
+}
+
+fn photon_request(samples: usize) -> DataUncertainty {
+    DataUncertainty {
+        seed: 3,
+        samples: Some(samples),
+        sources: vec![Source::DecayPhotonLines],
+        attribution: false,
+    }
+}
+
+/// The normalisation scales an emitter's whole spectrum, so its tally: a
+/// D1S dose of one emitter moves by FD's sigma, applied after the fact,
+/// weighted by the spectrum's share of the emitter's photon energy. The line
+/// intensities and energies are reported as held.
+#[test]
+fn a_d1s_dose_moves_by_the_photon_normalisation() {
+    let sigma = 0.03;
+    let chain = mn56_photons(Some(sigma), None);
+    let emitters = vec!["Mn56".to_string()];
+    let ensemble = time_correction_factor_ensemble(
+        &emitters,
+        &[48.0 * HOUR, 5.0 * HOUR],
+        &[vec![1.0e10, 0.0]],
+        &chain,
+        &photon_request(4096),
+    )
+    .unwrap();
+    assert_eq!(ensemble.sources, vec!["decay_photon_lines".to_string()]);
+    assert!(ensemble
+        .decay_photon_normalisations_perturbed
+        .contains("Mn56"));
+    assert!(ensemble
+        .not_perturbed
+        .iter()
+        .any(|s| s == D1S_LINES_NOT_PERTURBED));
+    assert!(ensemble.not_perturbed.iter().any(|s| s == "half-life"));
+    assert_eq!(ensemble.replicas.len(), 4096);
+
+    // The gamma spectrum carries nearly all of Mn56's photon energy.
+    let mn56 = &chain["Mn56"];
+    let energy = |s: &yani::DecaySource| match &s.distribution {
+        yani::DecaySourceDistribution::Discrete {
+            energies,
+            intensities,
+        } => energies.iter().zip(intensities).map(|(e, i)| e * i).sum(),
+        _ => 0.0,
+    };
+    let photons = mn56.sources.iter().filter(|s| s.particle == "photon");
+    let total: f64 = photons.clone().map(energy).sum();
+    let gamma: f64 = photons
+        .filter(|s| s.radiation.as_deref() == Some("gamma"))
+        .map(energy)
+        .sum();
+    for step in [1, 2] {
+        let values: Vec<f64> = ensemble
+            .replicas
+            .iter()
+            .map(|r| r[0]["Mn56"][step])
+            .collect();
+        let spread = relative_spread(&values);
+        let want = sigma * gamma / total;
+        assert!(
+            (spread / want - 1.0).abs() < 0.06,
+            "step {step}: {spread:.4} against {want:.4}"
+        );
+    }
+}
+
+/// Gamma and x-ray normalisations of one emitter: drawn independently the
+/// lower end, one deviate between them the upper, which is wider. The
+/// fixture merges Mn56's photons into one spectrum, so an x-ray spectrum
+/// carrying a fifth of the gamma one's photon energy is added beside it.
+#[test]
+fn a_d1s_dose_ranges_over_the_correlation_between_spectra() {
+    let mut chain = Arc::unwrap_or_clone(mn56_photons(Some(0.03), None));
+    let mn56 = chain.get_mut("Mn56").expect("Mn56");
+    let gamma_energy: f64 = mn56
+        .sources
+        .iter()
+        .filter(|s| s.particle == "photon")
+        .map(|s| match &s.distribution {
+            yani::DecaySourceDistribution::Discrete {
+                energies,
+                intensities,
+            } => energies.iter().zip(intensities).map(|(e, i)| e * i).sum(),
+            _ => 0.0,
+        })
+        .sum();
+    let intensity = 0.2 * gamma_energy / 6.0e3;
+    mn56.sources.push(yani::DecaySource {
+        particle: "photon".to_string(),
+        radiation: Some("xray".to_string()),
+        distribution: yani::DecaySourceDistribution::Discrete {
+            energies: vec![6.0e3],
+            intensities: vec![intensity],
+        },
+        uncertainty: Some(Arc::new(yani::DecaySourceUncertainty {
+            normalization: Some(0.5),
+            normalization_uncertainty: Some(0.5 * 0.1),
+            ..Default::default()
+        })),
+    });
+    let chain = Arc::new(chain);
+    let ensemble = time_correction_factor_ensemble(
+        &["Mn56".to_string()],
+        &[48.0 * HOUR],
+        &[vec![1.0e10]],
+        &chain,
+        &photon_request(4096),
+    )
+    .unwrap();
+    let at = |replicas: &[yani_transmute::d1s_uncertainty::ReplicaTcfs]| -> f64 {
+        relative_spread(&replicas.iter().map(|r| r[0]["Mn56"][1]).collect::<Vec<_>>())
+    };
+    let (low, high) = (at(&ensemble.replicas), at(&ensemble.replicas_correlated));
+    // Shares of the photon energy: 5/6 gamma at 3%, 1/6 x-ray at 10%.
+    let (g, x): (f64, f64) = (5.0 / 6.0 * 0.03, 1.0 / 6.0 * 0.1);
+    let quadrature = (g * g + x * x).sqrt();
+    assert!(
+        (low / quadrature - 1.0).abs() < 0.06,
+        "{low} against {quadrature}"
+    );
+    assert!(
+        (high / (g + x) - 1.0).abs() < 0.06,
+        "{high} against {}",
+        g + x
+    );
+}
+
+/// A spectrum written the ENDF/B way has no normalisation sigma to draw, so
+/// nothing moves the tally, and the report names it as folded.
+#[test]
+fn a_folded_spectrum_is_named_and_draws_nothing() {
+    let chain = mn56_photons(None, None);
+    let ensemble = time_correction_factor_ensemble(
+        &["Mn56".to_string()],
+        &[48.0 * HOUR],
+        &[vec![1.0e10]],
+        &chain,
+        &photon_request(16),
+    )
+    .unwrap();
+    assert!(ensemble.decay_photon_normalisations_perturbed.is_empty());
+    assert!(ensemble.replicas.is_empty());
+    assert!(ensemble.decay_photon_spectra_folded["Mn56"].contains(&"gamma".to_string()));
+    assert!(ensemble
+        .not_perturbed
+        .iter()
+        .any(|s| s == D1S_LINES_NOT_PERTURBED));
 }

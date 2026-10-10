@@ -1990,6 +1990,13 @@ fn run_replicas(
     info.no_decay_energy_uncertainty = no_decay_energy_sigma;
     info.decay_energy_uncertainty_not_carried = decay_energy_not_carried;
     info.decay_photon_lines_perturbed = decay_photons_perturbed.clone();
+    info.decay_photon_spectra_folded = decay_photons_perturbed
+        .iter()
+        .filter_map(|name| {
+            let folded = crate::uncertainty::folded_photon_spectra(chain.get(name)?);
+            (!folded.is_empty()).then(|| (name.clone(), folded))
+        })
+        .collect();
     info.no_decay_photon_line_uncertainty = no_decay_photon_sigma;
     info.decay_photon_line_uncertainty_not_carried = decay_photon_not_carried;
     if let Some(h) = &half_life {

@@ -54,11 +54,20 @@ stack; pick `yamc` when the spectrum should come from a transport solve.
   dose and gas production. It perturbs MF=33 cross sections, MF=32 resonance
   parameters (drawn per replica and the resonance cross sections rebuilt from
   them, where the library publishes them, and otherwise their first-order
-  group covariance), half-lives, decay energies, two-mode decay branching and
-  a supplied flux spectrum's stated error. Other inputs (the self-shielding
-  correction, photon line intensities, the material composition) are held at
-  nominal, and `get_data_uncertainty_info` lists every one it held. There are
-  no first-order sensitivity coefficients.
+  group covariance), half-lives, decay energies, decay photon line
+  intensities and energies, two-mode decay branching and a supplied flux
+  spectrum's stated error. Other inputs (the self-shielding correction, the
+  material composition) are held at nominal, and `get_data_uncertainty_info`
+  lists every one it held. There are no first-order sensitivity coefficients.
+- The decay data do not state how a nuclide's photon line intensities are
+  correlated (between lines, between a spectrum's normalisation and its
+  lines, between its gamma and x-ray spectra), and ENDF/B-VIII.1 folds each
+  spectrum's normalisation sigma into every line's. So a photon spectrum,
+  contact dose or decay heat is reported as a range rather than assumed:
+  `Estimate.std_dev` takes those correlations as zero and
+  `Estimate.std_dev_correlated` as one, which bounds every non-negative
+  correlation. `get_data_uncertainty_info()["decay_photon_spectra_folded"]`
+  names the spectra the range mostly comes from.
 - Pathways are reported per product (`get_production_routes`), but there is no
   automatic pathway search across the whole inventory.
 - No ingestion or inhalation dose.

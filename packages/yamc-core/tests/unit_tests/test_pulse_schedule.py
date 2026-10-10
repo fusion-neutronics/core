@@ -252,10 +252,36 @@ def test_the_time_correction_carries_the_half_life_uncertainty(dp_result):
     info = dose.data_uncertainty_info
     assert info["sources"] == ["half_life"]
     assert info["samples"] == 64
-    # A TCF depends on decay branching too, and D1S does not draw it.
-    assert info["not_perturbed"] == ["decay branching ratio"]
+    # A TCF depends on decay branching too, and D1S does not draw it. With
+    # the photon source off its data are held too.
+    assert info["not_perturbed"] == [
+        "decay branching ratio",
+        "decay photon spectrum normalisation, line intensity and line energy",
+    ]
+    # Without a photon normalisation drawn there is no range.
+    assert np.array_equal(np.array(dose.data_std_dev_correlated), data)
     if info["half_lives_perturbed"]:
         # After two weeks' cooling the dose hangs on the emitters' half-lives.
         assert data[-1].max() > 0.0
     else:
         assert not data.any()
+
+
+def test_the_photon_normalisation_scales_the_tally_and_the_line_shape_is_held(dp_result):
+    sched = _sched(_dt_source())
+    dose = sched.time_correct_tally(
+        dp_result,
+        data_uncertainty=yamc.DataUncertainty(
+            seed=1, samples=16, sources=["half_life", "decay_photon_lines"]
+        ),
+    )
+    info = dose.data_uncertainty_info
+    assert info["sources"] == ["half_life", "decay_photon_lines"]
+    assert isinstance(info["decay_photon_normalisations_perturbed"], list)
+    assert isinstance(info["decay_photon_spectra_folded"], dict)
+    assert any("line-resolved tallies" in s for s in info["not_perturbed"])
+    std = np.array(dose.std_dev)
+    low = np.array(dose.data_std_dev)
+    high = np.array(dose.data_std_dev_correlated)
+    assert low.shape == high.shape == std.shape
+    assert np.allclose(np.array(dose.total_std_dev_correlated), np.sqrt(std**2 + high**2))
