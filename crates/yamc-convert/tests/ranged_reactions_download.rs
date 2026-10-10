@@ -117,11 +117,12 @@ impl Drop for Served {
 
 /// A one-nuclide origin, serving the fixture with byte-range support.
 ///
-/// Counts the bytes it has written for `reactions.arrow`, which is what the
-/// saving is actually measured on.
+/// Counts the bytes it has written for `reactions.arrow` and `energy.arrow`,
+/// which is what the saving is actually measured on.
 struct Origin {
     port: u16,
     reactions_bytes: Arc<AtomicUsize>,
+    energy_bytes: Arc<AtomicUsize>,
     /// Answer ranged requests with the whole object and a 200, the way a proxy
     /// that strips the header does.
     ignore_ranges: bool,
@@ -132,15 +133,17 @@ impl Origin {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().unwrap().port();
         let reactions_bytes = Arc::new(AtomicUsize::new(0));
-        let counter = reactions_bytes.clone();
+        let energy_bytes = Arc::new(AtomicUsize::new(0));
+        let counters = [reactions_bytes.clone(), energy_bytes.clone()];
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                let _ = serve(stream, &dir, &counter, ignore_ranges);
+                let _ = serve(stream, &dir, &counters, ignore_ranges);
             }
         });
         Self {
             port,
             reactions_bytes,
+            energy_bytes,
             ignore_ranges,
         }
     }
@@ -160,7 +163,7 @@ impl Origin {
 fn serve(
     mut stream: TcpStream,
     dir: &Path,
-    counter: &AtomicUsize,
+    counters: &[Arc<AtomicUsize>; 2],
     ignore_ranges: bool,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -201,9 +204,11 @@ fn serve(
             }
             _ => ("200 OK", &body[..]),
         };
-        if name == "reactions.arrow" {
-            counter.fetch_add(slice.len(), Ordering::Relaxed);
-        }
+        match name.as_str() {
+            "reactions.arrow" => counters[0].fetch_add(slice.len(), Ordering::Relaxed),
+            "energy.arrow" => counters[1].fetch_add(slice.len(), Ordering::Relaxed),
+            _ => 0,
+        };
         stream.write_all(
             format!(
                 "HTTP/1.1 {status}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n\r\n",
@@ -502,4 +507,230 @@ fn a_library_with_no_index_still_downloads_whole() {
             "MT {mt} should have loaded",
         );
     }
+}
+
+// ---- transport at a material's temperature -----------------------------------
+
+/// A transport scope at the given temperatures, as a material with a
+/// temperature asks for it.
+fn transport_at(temperatures: &[&str]) -> LoadScope {
+    LoadScope::full().with_temperatures(Some(temperatures.iter().map(|t| t.to_string()).collect()))
+}
+
+/// Every cross section and energy grid a load parsed, keyed by temperature, so
+/// two loads compare as wholes.
+fn tables(
+    nuclide: &yamc_nuclide::nuclide::Nuclide,
+) -> std::collections::BTreeMap<String, (Vec<f64>, Vec<(i32, Vec<f64>)>)> {
+    nuclide
+        .loaded_temperatures
+        .iter()
+        .map(|t| {
+            let idx = nuclide.get_temp_idx(t).expect("temp idx");
+            let mut reactions: Vec<(i32, Vec<f64>)> = nuclide.reactions[idx]
+                .iter()
+                .map(|(mt, r)| (*mt, r.cross_section.to_vec()))
+                .collect();
+            reactions.sort_by_key(|(mt, _)| *mt);
+            let grid = nuclide.energy_grid(t).expect("energy grid").to_vec();
+            (t.clone(), (grid, reactions))
+        })
+        .collect()
+}
+
+/// Transport at one temperature fetches that temperature's batches of
+/// `reactions.arrow` and `energy.arrow`, and loads exactly what the whole
+/// files give at that temperature.
+#[test]
+fn transport_at_one_temperature_fetches_only_that_temperature() {
+    let _guard = exclusive();
+    let Some(dir) = fixture() else {
+        eprintln!("skip: Fe56.arrow not present");
+        return;
+    };
+    let scope = transport_at(&["294"]);
+    let served = Served::new("temperature-equiv", &dir, true);
+
+    let (whole, whole_reactions, whole_energy) = {
+        let _cache = Cache::new("temperature-whole");
+        let origin = Origin::start(served.dir.clone(), false);
+        let path = yamc_nuclide::url_cache::download_and_cache(
+            &origin.url(),
+            &origin.url(),
+            "Fe56",
+            yamc_nuclide::url_cache::DataKind::Neutron,
+            &LoadScope::full(),
+        )
+        .expect("whole download");
+        let nuclide = yamc_nuclide::nuclide::load_nuclide(&path, &scope).expect("load");
+        (
+            tables(&nuclide),
+            origin.reactions_bytes.load(Ordering::Relaxed),
+            origin.energy_bytes.load(Ordering::Relaxed),
+        )
+    };
+
+    let cache = Cache::new("temperature-ranged");
+    let origin = Origin::start(served.dir.clone(), false);
+    let nuclide = download_and_load(&origin, &scope).expect("ranged download");
+    let reactions = origin.reactions_bytes.load(Ordering::Relaxed);
+    let energy = origin.energy_bytes.load(Ordering::Relaxed);
+
+    // Fe56 is published at six temperatures.
+    assert!(
+        reactions * 4 < whole_reactions,
+        "reactions: {reactions} bytes against {whole_reactions} for the whole file",
+    );
+    assert!(
+        energy * 3 < whole_energy,
+        "energy: {energy} bytes against {whole_energy} for the whole file",
+    );
+    assert!(
+        !xs(&nuclide, 2).iter().all(Vec::is_empty),
+        "elastic is there"
+    );
+    assert_eq!(
+        tables(&nuclide),
+        whole,
+        "same tables as the whole files at 294 K"
+    );
+
+    let cached = cache.nuclide_dir();
+    assert!(cached.join("temperatures/reactions.arrow").exists());
+    assert!(cached.join("temperatures/energy.arrow").exists());
+    assert!(
+        !cached.join("reactions.arrow").exists() && !cached.join("energy.arrow").exists(),
+        "a partial must never be written under the canonical name",
+    );
+
+    // Loading again at the same temperature fetches nothing.
+    download_and_load(&origin, &scope).expect("second load");
+    assert_eq!(origin.reactions_bytes.load(Ordering::Relaxed), reactions);
+    assert_eq!(origin.energy_bytes.load(Ordering::Relaxed), energy);
+}
+
+/// A temperature between two published ones fetches both neighbours, which the
+/// loader blends, and comes out the same as a blend from the whole files.
+#[test]
+fn a_bracketed_temperature_fetches_both_neighbours() {
+    let _guard = exclusive();
+    let Some(dir) = fixture() else {
+        eprintln!("skip: Fe56.arrow not present");
+        return;
+    };
+    let scope = transport_at(&["400"]);
+    let served = Served::new("temperature-blend", &dir, true);
+
+    let whole = {
+        let _cache = Cache::new("temperature-blend-whole");
+        let origin = Origin::start(served.dir.clone(), false);
+        let path = yamc_nuclide::url_cache::download_and_cache(
+            &origin.url(),
+            &origin.url(),
+            "Fe56",
+            yamc_nuclide::url_cache::DataKind::Neutron,
+            &LoadScope::full(),
+        )
+        .expect("whole download");
+        tables(&yamc_nuclide::nuclide::load_nuclide(&path, &scope).expect("load"))
+    };
+
+    let _cache = Cache::new("temperature-blend-ranged");
+    let origin = Origin::start(served.dir.clone(), false);
+    let nuclide = download_and_load(&origin, &scope).expect("ranged download");
+    assert_eq!(nuclide.loaded_temperatures, ["400"]);
+    assert_eq!(
+        tables(&nuclide),
+        whole,
+        "same blend as from the whole files"
+    );
+}
+
+/// A load at a second temperature tops the ranged copy up to hold both, and a
+/// load with no temperature fetches the whole files and drops the copy.
+#[test]
+fn a_second_temperature_tops_up_and_every_temperature_fetches_whole() {
+    let _guard = exclusive();
+    let Some(dir) = fixture() else {
+        eprintln!("skip: Fe56.arrow not present");
+        return;
+    };
+    let cache = Cache::new("temperature-topup");
+    let served = Served::new("temperature-topup", &dir, true);
+    let origin = Origin::start(served.dir.clone(), false);
+
+    download_and_load(&origin, &transport_at(&["294"])).expect("294 K");
+    let after_294 = origin.reactions_bytes.load(Ordering::Relaxed);
+
+    let both = download_and_load(&origin, &transport_at(&["294", "600"])).expect("294 K and 600 K");
+    assert!(
+        origin.reactions_bytes.load(Ordering::Relaxed) > after_294,
+        "600 K was fetched"
+    );
+    assert_eq!(both.loaded_temperatures, ["294", "600"]);
+    let held: Vec<String> = serde_json::from_str(
+        &std::fs::read_to_string(cache.nuclide_dir().join("temperatures/reactions.json"))
+            .expect("label record"),
+    )
+    .expect("parse");
+    assert_eq!(held, ["294K", "600K"]);
+
+    // Still covered for either temperature on its own.
+    let before = origin.reactions_bytes.load(Ordering::Relaxed);
+    download_and_load(&origin, &transport_at(&["600"])).expect("600 K");
+    assert_eq!(origin.reactions_bytes.load(Ordering::Relaxed), before);
+
+    download_and_load(&origin, &LoadScope::full()).expect("every temperature");
+    let cached = cache.nuclide_dir();
+    assert!(cached.join("reactions.arrow").exists() && cached.join("energy.arrow").exists());
+    assert!(
+        !cached.join("temperatures/reactions.arrow").exists()
+            && !cached.join("temperatures/energy.arrow").exists(),
+        "the ranged copies are superseded by the whole files, not left beside them",
+    );
+}
+
+/// A temperature outside the published range is the loader's error, raised
+/// before a byte of either section is fetched.
+#[test]
+fn an_out_of_range_temperature_fails_before_fetching() {
+    let _guard = exclusive();
+    let Some(dir) = fixture() else {
+        eprintln!("skip: Fe56.arrow not present");
+        return;
+    };
+    let _cache = Cache::new("temperature-out-of-range");
+    let served = Served::new("temperature-out-of-range", &dir, true);
+    let origin = Origin::start(served.dir.clone(), false);
+
+    let error = download_and_load(&origin, &transport_at(&["5000"]))
+        .expect_err("5000 K is above Fe56's highest temperature")
+        .to_string();
+    assert!(error.contains("Fe56") && error.contains("5000"), "{error}");
+    assert_eq!(origin.reactions_bytes.load(Ordering::Relaxed), 0);
+    assert_eq!(origin.energy_bytes.load(Ordering::Relaxed), 0);
+}
+
+/// Reading a ranged copy at a temperature it does not hold, past the
+/// downloader, fails naming what is missing rather than loading a temperature
+/// with no reactions.
+#[test]
+fn reading_a_ranged_copy_at_a_temperature_it_lacks_fails() {
+    let _guard = exclusive();
+    let Some(dir) = fixture() else {
+        eprintln!("skip: Fe56.arrow not present");
+        return;
+    };
+    let cache = Cache::new("temperature-lacking");
+    let served = Served::new("temperature-lacking", &dir, true);
+    let origin = Origin::start(served.dir.clone(), false);
+    download_and_load(&origin, &transport_at(&["294"])).expect("294 K");
+
+    let error = yamc_nuclide::nuclide::load_nuclide(&cache.nuclide_dir(), &transport_at(&["600"]))
+        .expect_err("the cache holds 294 K only")
+        .to_string();
+    assert!(
+        error.contains("holds temperatures") && error.contains("600"),
+        "{error}"
+    );
 }
