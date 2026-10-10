@@ -5168,7 +5168,7 @@ class TallyResult:
     def _repr_html_(self) -> builtins.str:
         r"""
         Rich Jupyter display: a stats panel (mean ± σ, relative error, figure
-        of merit, shape, history / batch counts) beside the
+        of merit, shape, total particle count) beside the
         statistical-reliability checks.
         """
     def __repr__(self) -> builtins.str: ...
