@@ -494,6 +494,10 @@ fn principal(matrix: &[f64], n: usize, kept: f64) -> (Vec<f64>, Vec<f64>, Vec<f6
     )
 }
 
+/// Per nuclide and reaction kind, a change in a rate relative to its nominal
+/// value, added to the ratio a draw gives it ([`Sampler::perturb_with`]).
+pub type RateShifts = BTreeMap<String, BTreeMap<String, f64>>;
+
 /// One replica's draw of every nuclide's field.
 pub struct Draw {
     nuclides: BTreeMap<String, NuclideDraw>,
@@ -1337,6 +1341,11 @@ impl Sampler {
     /// Apply one replica's draw to `spectrum`'s unit-flux rates, and count the
     /// rates it drew and the ones it floored at zero.
     ///
+    /// `shifts` adds, per nuclide and kind, a change relative to the nominal
+    /// rate to the ratio the draw gives: what the replica's sampled resonance
+    /// parameters move the rate by ([`crate::resonance_rates`]). A rate with
+    /// a shift and no view moves by the shift alone, and counts as drawn.
+    ///
     /// Rates for nuclides or kinds with no covariance are passed through
     /// unchanged. That is deliberate and is what the coverage report is for:
     /// an unperturbed rate contributes no uncertainty, and the reason has to
@@ -1351,12 +1360,14 @@ impl Sampler {
         draw: &Draw,
         spectrum: usize,
         rates: &ReactionRates,
+        shifts: Option<&RateShifts>,
     ) -> (ReactionRates, usize, usize) {
         let mut out = rates.clone();
         let (mut sampled, mut floored) = (0, 0);
-        let Some(views) = self.views.get(spectrum) else {
-            return (out, 0, 0);
-        };
+        let shift =
+            |name: &str, kind: &str| -> Option<f64> { shifts?.get(name)?.get(kind).copied() };
+        let empty = BTreeMap::new();
+        let views = self.views.get(spectrum).unwrap_or(&empty);
         for (name, view) in views {
             let (Some(d), Some(nuclide_rates)) = (draw.nuclides.get(name), out.get_mut(name))
             else {
@@ -1367,7 +1378,33 @@ impl Sampler {
                     continue;
                 };
                 sampled += 1;
-                let ratio = view.ratio(i, d);
+                let mut ratio = view.ratio(i, d);
+                if let Some(s) = shift(name, kind) {
+                    ratio += s;
+                }
+                if ratio < 0.0 {
+                    floored += 1;
+                }
+                *rate *= ratio.max(0.0);
+            }
+        }
+        // The shifted rates no view read: a nuclide whose only covariance
+        // was its first-order MF=32 rows, or a channel its MF=33 does not
+        // reach.
+        for (name, kinds) in shifts.into_iter().flatten() {
+            let view = views.get(name).filter(|_| draw.nuclides.contains_key(name));
+            let Some(nuclide_rates) = out.get_mut(name) else {
+                continue;
+            };
+            for (kind, s) in kinds {
+                if view.is_some_and(|v| v.kinds.contains(kind)) {
+                    continue;
+                }
+                let Some(rate) = nuclide_rates.get_mut(kind) else {
+                    continue;
+                };
+                sampled += 1;
+                let ratio = 1.0 + s;
                 if ratio < 0.0 {
                     floored += 1;
                 }
@@ -1385,7 +1422,7 @@ impl Sampler {
         base_seed: u64,
         replica: u64,
     ) -> (ReactionRates, usize) {
-        let (out, n, _) = self.perturb_with(&self.draw(base_seed, replica), spectrum, rates);
+        let (out, n, _) = self.perturb_with(&self.draw(base_seed, replica), spectrum, rates, None);
         (out, n)
     }
 }
@@ -3029,8 +3066,8 @@ mod tests {
         let (mut sab, mut saa, mut sbb, mut ma, mut mb) = (0.0, 0.0, 0.0, 0.0, 0.0);
         for r in 0..n {
             let draw = s.draw(13, r);
-            let a = s.perturb_with(&draw, 0, &rates).0["X"]["x"] - 1.0;
-            let b = s.perturb_with(&draw, 1, &rates).0["X"]["x"] - 1.0;
+            let a = s.perturb_with(&draw, 0, &rates, None).0["X"]["x"] - 1.0;
+            let b = s.perturb_with(&draw, 1, &rates, None).0["X"]["x"] - 1.0;
             sab += a * b;
             saa += a * a;
             sbb += b * b;

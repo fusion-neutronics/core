@@ -1097,8 +1097,9 @@ pub(crate) struct Collapsed {
     /// [`crate::branching_rule`]), in the order `lists` holds them. Only for
     /// parents the collapse walked, which are those with transport data.
     pub(crate) lists: HashMap<String, Vec<ListRates>>,
-    /// Per parent with an MT=5 cross section, its MT=5 rate, which no chain
-    /// reaction carries.
+    /// Per parent with an MT=5 cross section, its MT=5 rate, measured whether
+    /// or not the chain drives `(n,X)` on it, for the share whose residuals
+    /// it does not model.
     pub(crate) mt5: HashMap<String, f64>,
 }
 
@@ -1679,8 +1680,9 @@ impl Collapse<'_> {
             ));
         }
 
-        // MT=5, which no chain reaction carries and whose products are not
-        // modelled: its rate is only measured, against the removal rate.
+        // MT=5, measured for every parent with it: the `(n,X)` rate above is
+        // there only where the chain drives it, and the report weighs what
+        // it does not model against the removal rate.
         if let Some(reaction) = reactions.get(&MT_ANYTHING) {
             let mut sigma_phi_sum = 0.0;
             self.walk_channel(reaction, shape.as_ref(), None, |_, sigma_g, phi| {

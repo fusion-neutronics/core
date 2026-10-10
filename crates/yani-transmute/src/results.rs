@@ -100,8 +100,9 @@ pub struct TransmutationResults {
     /// Material ID -> per step, what the isomeric-branching rule did over that
     /// step's spectrum (see [`crate::branching_rule`]): each channel's
     /// representation, denominator, level routes and shares, the clipped and
-    /// held production, the channels dropped, and MT=5's share of each
-    /// parent's removal. Indexed as `timesteps`; a decay-only step holds an
+    /// held production, the channels dropped (MT=5's `(n,X)` among them), and
+    /// MT=5's share of the removal of each parent whose MT=5 residuals the
+    /// chain does not model. Indexed as `timesteps`; a decay-only step holds an
     /// empty report. Steps sharing a spectrum share its report.
     pub branching_report: HashMap<u32, Vec<std::sync::Arc<crate::branching_rule::BranchingReport>>>,
 
@@ -927,6 +928,7 @@ mod tests {
             q_value: Some(0.0),
             branching_uncertainty: None,
             evaluated_branching: None,
+            multiplicity: None,
         };
 
         let chain = Arc::new(HashMap::from([
@@ -1013,6 +1015,7 @@ mod tests {
             q_value: Some(0.0),
             branching_uncertainty: None,
             evaluated_branching: None,
+            multiplicity: None,
         };
         let nuclide = |name: &str, reactions: Vec<yani::ChainReaction>| yani::ChainNuclide {
             name: name.to_string(),
