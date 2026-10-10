@@ -340,7 +340,7 @@ impl PyTallyResult {
     }
 
     /// Rich Jupyter display: a stats panel (mean ± σ, relative error, figure
-    /// of merit, shape, history / batch counts) beside the
+    /// of merit, shape, total particle count) beside the
     /// statistical-reliability checks.
     fn _repr_html_(&self) -> String {
         use crate::html_repr::{card, esc, kv, num};
@@ -377,8 +377,7 @@ impl PyTallyResult {
             ),
             ("figure of merit", num(self.aggregate_figure_of_merit())),
             ("shape", esc(&shape)),
-            ("histories", format!("{}", self.inner.n_histories)),
-            ("batches", format!("{}", self.inner.n_batches)),
+            ("particles", format!("{}", self.inner.n_histories)),
         ]);
         let checks = self.statistical_checks().checks_table();
         let body = format!(
@@ -1010,8 +1009,9 @@ impl PySimulationResults {
         }
         let tword = if n == 1 { "tally" } else { "tallies" };
         let subtitle = format!(
-            "{n} {tword} · {} batches · {:.3}s",
-            self.inner.n_batches, self.inner.elapsed_secs
+            "{n} {tword} · {} particles · {:.3}s",
+            total_particles(&self.inner),
+            self.inner.elapsed_secs
         );
         let tbl = table(&["tally", "shape", "mean", "rel. err", "checks"], &rows, 2);
         let body = if any_eval {
@@ -1027,12 +1027,19 @@ impl PySimulationResults {
 
     fn __repr__(&self) -> String {
         format!(
-            "SimulationResults(n_tallies={}, n_batches={}, elapsed_secs={:.3})",
+            "SimulationResults(n_tallies={}, particles={}, elapsed_secs={:.3})",
             self.inner.len(),
-            self.inner.n_batches,
+            total_particles(&self.inner),
             self.inner.elapsed_secs
         )
     }
+}
+
+/// Total source particles behind the results, for display. Every tally of a
+/// run (or of a combined result) carries the same history count, so the
+/// first tally's is used; 0 when there are no tallies.
+fn total_particles(results: &SimulationResults) -> u64 {
+    results.iter().next().map_or(0, |r| r.n_histories)
 }
 
 /// Iterator over the `Tally` configs in a `SimulationResults`.

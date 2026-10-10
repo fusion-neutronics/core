@@ -2738,7 +2738,6 @@ impl fmt::Display for Tally {
         let std_devs = self.get_std_dev();
         let rel_errors = self.get_rel_error();
         let total_counts = self.total_count();
-        let n_realizations = self.accumulator.n_realizations.load(Ordering::Relaxed);
         let units = self.derive_units();
 
         for (i, score) in self.scores.iter().enumerate() {
@@ -2773,12 +2772,7 @@ impl fmt::Display for Tally {
             )?;
             writeln!(f, "    Total count: {}", total)?;
         }
-        writeln!(f, "    Batches: {n_realizations}")?;
-        writeln!(
-            f,
-            "    Particles per batch: {}",
-            self.particles_per_chunk.load(Ordering::Relaxed)
-        )
+        writeln!(f, "    Particles: {}", self.get_n_histories())
     }
 }
 

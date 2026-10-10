@@ -219,3 +219,29 @@ def test_shape_matches_dim_labels():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@requires_keywords
+def test_displays_show_particles_not_batches():
+    """Result reprs and HTML show the total particle count, never batches."""
+    yamc.set_cross_section_data_entry("fendl-3.2d")
+    tally = yamc.Tally(scores=["flux"])
+    model, run_kwargs = _make_model(tally, total_particles=2000)
+    results = model.simulate_transport(**run_kwargs)
+    result = results[tally]
+    assert result.n_histories == 2000
+
+    texts = [
+        results._repr_html_(),
+        repr(results),
+        result._repr_html_(),
+        repr(result),
+        str(result),
+        str(result.tally),
+    ]
+    for text in texts:
+        assert "2000" in text
+        assert "batch" not in text.lower()
+        assert "histories" not in text
+    assert "2000 particles" in results._repr_html_()
+    assert "particles=2000" in repr(results)
