@@ -5,7 +5,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use yani_transmute::{Estimate, LineEstimate, TransmutationResults};
 
 use crate::material::PyMaterial;
@@ -841,6 +841,89 @@ impl PyTransmutationResults {
             .map(|lines| lines.into_iter().map(PyLineEstimate::from).collect()))
     }
 
+    /// Hydrogen and helium gas production in appm, at every time point.
+    ///
+    /// appm is gas atoms per million **initial** atoms of the material, so the
+    /// denominator stays fixed as the material transmutes. The gas is what the
+    /// inventory already holds: H1, H2, H3, He3 and He4 emitted by reactions
+    /// and by decays, so tritium decaying to He3 during a cooldown shows up as
+    /// He3 there.
+    ///
+    ///     >>> gas = results.get_gas_production(material_id=mid)
+    ///     >>> gas["He4"][-1], gas["H"][-1]
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     produced (bool): Subtract the gas the material started with (water,
+    ///         polymers, lithium compounds), the default, so index 0 is zero
+    ///         and each value is what the schedule made by then. A nuclide
+    ///         consumed faster than it is made reads negative, as H1 in water
+    ///         can through H1(n,gamma)H2. ``False`` gives the gas present,
+    ///         starting inventory included.
+    ///
+    /// Returns:
+    ///     dict[str, list[float]] | None: appm keyed ``"H1"``, ``"H2"``,
+    ///     ``"H3"``, ``"He3"``, ``"He4"`` and the totals ``"H"`` (H1 + H2 + H3)
+    ///     and ``"He"`` (He3 + He4). Each list is parallel to ``times``, as
+    ///     ``get_nuclide_evolution`` is: index 0 is the initial composition,
+    ///     index i is after step i. None if the material is not in the results.
+    ///
+    /// Raises:
+    ///     ValueError: if the chain the solve used has no entry for one of the
+    ///         five gas nuclides. The solve follows an emitted particle only
+    ///         when the chain has it, so that gas was dropped and a zero would
+    ///         be wrong rather than measured. The message names the missing
+    ///         nuclides.
+    #[pyo3(signature = (material_id, *, produced=true))]
+    fn get_gas_production(
+        &self,
+        material_id: u32,
+        produced: bool,
+    ) -> PyResult<Option<BTreeMap<String, Vec<f64>>>> {
+        self.inner
+            .gas_production(material_id, produced)
+            .map_err(PyValueError::new_err)
+    }
+
+    /// Gas production in appm at one timestep, with the nuclear-data spread
+    /// on it.
+    ///
+    /// See ``get_gas_production`` for the quantity. Evaluated on every
+    /// replica's inventory against the one initial inventory, which is an
+    /// input and the same in each, and the totals ``"H"`` and ``"He"`` are
+    /// summed within a replica before the spread is taken, as
+    /// ``get_activity_uncertainty`` does.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     step: Timestep index (0 = initial composition, which has no spread).
+    ///     produced (bool): As in ``get_gas_production``.
+    ///
+    /// Returns:
+    ///     dict[str, Estimate] | None: keyed as ``get_gas_production``; None if
+    ///     the transmutation was run without ``data_uncertainty``.
+    ///
+    /// Raises:
+    ///     ValueError: as ``get_gas_production``, or if there is no such step.
+    #[pyo3(signature = (material_id, step, *, produced=true))]
+    fn get_gas_production_uncertainty(
+        &self,
+        material_id: u32,
+        step: usize,
+        produced: bool,
+    ) -> PyResult<Option<BTreeMap<String, PyEstimate>>> {
+        Ok(self
+            .inner
+            .gas_production_uncertainty(material_id, step, produced)
+            .map_err(PyValueError::new_err)?
+            .map(|by_key| {
+                by_key
+                    .into_iter()
+                    .map(|(key, estimate)| (key, PyEstimate::from(estimate)))
+                    .collect()
+            }))
+    }
+
     /// What the nuclear-data uncertainty covered for one material, and what it
     /// did not.
     ///
@@ -1283,6 +1366,178 @@ impl PyTransmutationResults {
         Some(PyMaterial {
             internal: mat.clone(),
         })
+    }
+
+    /// Cumulative NRT displacements per atom (dpa) over the schedule.
+    ///
+    /// Present when the transmute call was given
+    /// ``displacement_damage=True``, and ``None`` otherwise. One value per
+    /// state, aligned with ``times``: entry 0 is the initial composition and
+    /// is zero, and entry ``i`` is the total after schedule step ``i - 1``.
+    /// Cooldowns add nothing.
+    ///
+    /// For an element ``X`` it is the damage energy deposited per atom of
+    /// ``X``, from ``X``'s own nuclides, converted with ``X``'s displacement
+    /// threshold energy as ``0.8 * E_damage / (2 * E_d)`` (the NRT model,
+    /// ASTM E521). The material total, with ``element`` omitted, is the
+    /// atom-fraction-weighted sum over elements: each element's recoils are
+    /// treated as slowing down among atoms of their own kind, which reduces to
+    /// the elemental value for a pure element and leaves out energy transfer
+    /// between elements in a cascade. MT=444 is already integrated over the
+    /// recoil spectrum, so the per-recoil threshold steps of the NRT model
+    /// (no displacement below ``E_d``, one up to ``2 * E_d / 0.8``) are not
+    /// applied, which is the standard practice for a damage-energy cross
+    /// section. The ``E_d`` used and its source are in
+    /// ``get_displacement_damage_info``.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     element: Element symbol, e.g. ``"W"``, for that element's dpa;
+    ///         omit it for the material total.
+    ///
+    /// Returns:
+    ///     List of cumulative dpa, one per state, or None if damage was not
+    ///     asked for or the material is not in the results.
+    ///
+    /// Raises:
+    ///     ValueError: If ``element`` has no dpa: it is not in the material
+    ///         on an irradiated step, or it is a transmutation product with no
+    ///         displacement threshold energy.
+    #[pyo3(signature = (material_id, element = None))]
+    fn get_dpa(&self, material_id: u32, element: Option<&str>) -> PyResult<Option<Vec<f64>>> {
+        let Some(damage) = self.inner.get_displacement_damage(material_id) else {
+            return Ok(None);
+        };
+        match element {
+            None => Ok(Some(damage.dpa.clone())),
+            Some(el) => damage
+                .element_dpa
+                .get(el)
+                .cloned()
+                .map(Some)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "no dpa for element {el:?}; elements with dpa: {}",
+                        damage
+                            .element_dpa
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                }),
+        }
+    }
+
+    /// Cumulative damage energy deposited per atom [eV] over the schedule.
+    ///
+    /// The quantity dpa is computed from, kept separate so the displacement
+    /// model can be changed without the data: each nuclide's MT=444
+    /// damage-energy cross section [eV barn] folded against the pulse
+    /// spectrum by the same collapse as the reaction rates, times the flux
+    /// magnitude and the step duration, at each step's composition. Indexed
+    /// as ``get_dpa``. For an element it is per atom of that element; the
+    /// material total weights the elements by atom fraction, so it is per atom
+    /// of the material.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     element: Element symbol for that element's damage energy; omit it
+    ///         for the material total.
+    ///
+    /// Returns:
+    ///     List of cumulative damage energy [eV per atom], one per state, or
+    ///     None if damage was not asked for or the material is not in the
+    ///     results.
+    ///
+    /// Raises:
+    ///     ValueError: If ``element`` is not in the material on an irradiated
+    ///         step.
+    #[pyo3(signature = (material_id, element = None))]
+    fn get_damage_energy(
+        &self,
+        material_id: u32,
+        element: Option<&str>,
+    ) -> PyResult<Option<Vec<f64>>> {
+        let Some(damage) = self.inner.get_displacement_damage(material_id) else {
+            return Ok(None);
+        };
+        match element {
+            None => Ok(Some(damage.damage_energy.clone())),
+            Some(el) => damage
+                .element_damage_energy
+                .get(el)
+                .cloned()
+                .map(Some)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "no damage energy for element {el:?}; elements present: {}",
+                        damage
+                            .element_damage_energy
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                }),
+        }
+    }
+
+    /// What the displacement damage was computed with, and what it could not
+    /// count.
+    ///
+    /// ``None`` unless the transmute call was given
+    /// ``displacement_damage=True``. A dict:
+    ///
+    /// - ``model``: ``"NRT"``, and ``efficiency``: ``0.8``.
+    /// - ``displacement_energies``: per element with dpa,
+    ///   ``{"energy": E_d in eV, "source": ...}``, where ``source`` is
+    ///   ``"ASTM E521"``, ``"OECD-NEA 2015"`` (Table 2.4 of NEA/NSC/DOC(2015)9,
+    ///   for an element ASTM E521 does not cover) or ``"user"``.
+    /// - ``without_damage_energy``: nuclides present on an irradiated step
+    ///   whose data has no MT=444, each with the largest atom fraction it
+    ///   reached there. Their damage energy is not counted, so a large entry
+    ///   here means the totals are low by about that share. Only
+    ///   transmutation products can appear: a nuclide of the starting
+    ///   composition without MT=444 is refused.
+    /// - ``without_displacement_energy``: transmutation-product elements with
+    ///   no displacement threshold energy (hydrogen and helium, typically),
+    ///   each with the largest atom fraction reached. Their damage energy is
+    ///   counted in ``get_damage_energy``; they add nothing to ``get_dpa``.
+    ///   Pass ``displacement_energies`` to include them.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    fn get_displacement_damage_info<'py>(
+        &self,
+        py: Python<'py>,
+        material_id: u32,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(damage) = self.inner.get_displacement_damage(material_id) else {
+            return Ok(None);
+        };
+        let d = PyDict::new(py);
+        d.set_item("model", "NRT")?;
+        d.set_item("efficiency", yamc_element::displacement::NRT_EFFICIENCY)?;
+        let energies = PyDict::new(py);
+        for (el, ed) in &damage.displacement_energies {
+            let entry = PyDict::new(py);
+            entry.set_item("energy", ed.energy_ev)?;
+            entry.set_item("source", ed.source.label())?;
+            energies.set_item(el, entry)?;
+        }
+        d.set_item("displacement_energies", energies)?;
+        let without = PyDict::new(py);
+        for (name, fraction) in &damage.without_damage_energy {
+            without.set_item(name, fraction)?;
+        }
+        d.set_item("without_damage_energy", without)?;
+        let without = PyDict::new(py);
+        for (el, fraction) in &damage.without_displacement_energy {
+            without.set_item(el, fraction)?;
+        }
+        d.set_item("without_displacement_energy", without)?;
+        Ok(Some(d))
     }
 
     /// Per-edge reaction rates the solve drove one step with.

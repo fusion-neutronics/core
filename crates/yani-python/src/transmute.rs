@@ -46,6 +46,13 @@ use crate::transmutation_results::PyTransmutationResults;
 ///         One lump shape for every material, turned into a chord through each
 ///         material's own ``volume``. Give this or ``self_shielding_chord``,
 ///         not both.
+///     displacement_damage (bool): Also compute each material's displacement
+///         damage, damage energy per atom and NRT dpa. See
+///         ``Material.transmute``. Off by default, and then nothing about the
+///         solve or the data it loads changes.
+///     displacement_energies (dict[str, float], optional): Displacement
+///         threshold energies in eV by element symbol, replacing the defaults,
+///         for every material. Needs ``displacement_damage=True``.
 ///
 /// Returns:
 ///     TransmutationResults: Keyed by each material's ``id``. Per material,
@@ -72,7 +79,7 @@ use crate::transmutation_results::PyTransmutationResults;
 ///     >>> results.get_final_material(cells[3].id)
 #[gen_stub_pyfunction]
 #[pyfunction]
-#[pyo3(signature = (materials, schedules, data_uncertainty = None, self_shielding_chord = None, self_shielding_shape = None))]
+#[pyo3(signature = (materials, schedules, data_uncertainty = None, self_shielding_chord = None, self_shielding_shape = None, displacement_damage = false, displacement_energies = None))]
 pub fn transmute(
     py: Python<'_>,
     materials: Vec<Bound<'_, PyMaterial>>,
@@ -86,7 +93,10 @@ pub fn transmute(
         type_repr = "shapes.SphereLump | shapes.CubeLump | shapes.FoilLump | shapes.CylinderLump | shapes.WireLump | None"
     ))]
     self_shielding_shape: Option<Bound<'_, PyAny>>,
+    displacement_damage: bool,
+    displacement_energies: Option<std::collections::HashMap<String, f64>>,
 ) -> PyResult<PyTransmutationResults> {
+    let damage = crate::material::damage_request(displacement_damage, displacement_energies)?;
     if materials.is_empty() {
         return Err(PyValueError::new_err(
             "materials is empty: nothing to transmute",
@@ -165,6 +175,7 @@ pub fn transmute(
             &loaded.branch,
             loaded.parts,
             uncertainty.as_ref(),
+            damage.as_ref(),
         )
         // `Box<dyn Error>` is not `Send`, so it cannot come back out through
         // `detach`; the message is what the caller sees anyway.

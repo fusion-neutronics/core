@@ -26,6 +26,10 @@ yani-decay = { path = "../yani-decay" }
 # answer on every platform.
 yamc-rng = { path = "../yamc-rng" }
 yamc-materials = { path = "../yamc-materials", default-features = false }
+# The displacement threshold energies and the NRT conversion, shared with the
+# transport side's damage-energy tally. Already reached through
+# `yamc-materials`, so the edge adds nothing to the build.
+yamc-element = { path = "../yamc-element", default-features = false }
 yamc-nuclide = { path = "../yamc-nuclide", default-features = false }
 
 # Split on target the way `yani/Cargo.toml` splits faer, and for the same
