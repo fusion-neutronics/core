@@ -7,43 +7,45 @@
 //! transport: Z s)" summary), so it needs a no-panic fallback to be
 //! callable from the browser.
 //!
+//! Emscripten (Pyodide) has a clock, so it takes the native path.
+//!
 //! The wasm32 stub always reports 0.0 seconds. That makes the timing
 //! summary line meaningless under wasm, but the transport itself runs
 //! without panicking. A future browser host can swap in a real timer
 //! by wrapping `performance.now()` via web-sys.
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), target_os = "emscripten"))]
 pub struct Timer {
     inner: std::time::Instant,
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))]
 pub struct Timer;
 
 impl Timer {
     /// Start a new timer.
     #[inline]
     pub fn start() -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(any(not(target_arch = "wasm32"), target_os = "emscripten"))]
         {
             Timer {
                 inner: std::time::Instant::now(),
             }
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))]
         {
             Timer
         }
     }
 
-    /// Seconds elapsed since [`Timer::start`]. Always 0.0 on wasm32.
+    /// Seconds elapsed since [`Timer::start`]. Always 0.0 on `wasm32-unknown-unknown`.
     #[inline]
     pub fn elapsed_secs(&self) -> f64 {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(any(not(target_arch = "wasm32"), target_os = "emscripten"))]
         {
             self.inner.elapsed().as_secs_f64()
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))]
         {
             0.0
         }
