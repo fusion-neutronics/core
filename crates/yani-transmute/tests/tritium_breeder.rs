@@ -370,9 +370,16 @@ fn flux_and_cross_sections_combine() {
     );
 
     assert!(flux_only > 0.0, "a 5% flux error must move tritium");
+    // Each source draws the same replicas alone as together, so `both^2` is
+    // `flux^2 + xs^2` plus twice the sample covariance of the two, which is
+    // zero in expectation with a standard error of `flux xs / sqrt(n)`. Here
+    // `xs^2` is a hundredth of `flux^2` and of the order of that term, so the
+    // combined sigma can sit a little below the flux one alone on any given
+    // seed; it is held to three standard errors of it.
+    let cross = 2.0 * flux_only * xs_only / 256.0_f64.sqrt();
     assert!(
-        both > xs_only && both > flux_only,
-        "two independent sources must exceed either alone: \
+        both > xs_only && both * both > flux_only * flux_only + xs_only * xs_only - 3.0 * cross,
+        "two independent sources must exceed either alone, to sampling noise: \
          xs {xs_only:e}, flux {flux_only:e}, both {both:e}"
     );
 

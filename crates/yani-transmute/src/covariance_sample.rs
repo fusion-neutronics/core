@@ -28,23 +28,36 @@
 //! tridiagonalization and implicit QL ([`symmetric_eigen`]): bit-reproducible
 //! across platforms because it is pure arithmetic in a fixed order, O(n³)
 //! once on fields that run to hundreds of cells, and it gives the
-//! eigenvectors the negative-eigenvalue clipping below needs anyway. A
+//! eigenvectors that set the round-off negatives of a PSD matrix to zero. A
 //! Cholesky would be the obvious choice if the matrices were positive
-//! definite, and the whole point is that they are not.
+//! definite, and they are only semi-definite at best.
 //!
-//! # Clipping is reported, not silent
+//! # Repair keeps every evaluated sigma
 //!
-//! MF=33 matrices are frequently not positive semi-definite as evaluated, and a
-//! covariance that is not PSD has no square root, so the negative eigenvalues
-//! have to go. Setting them to zero is the standard repair and it is what
-//! happens here. It is not neutral: with `C = C+ + C-` split by the sign of
-//! the eigenvalues, the matrix sampled is `C+ = C - C-`, and `-C-` is positive
-//! semi-definite, so every diagonal of `C+` is at least the evaluated one.
-//! Clipping only ever adds variance, and it can give a spread to a channel the
-//! evaluation states as exactly zero. What it did is recorded per nuclide and
-//! spectrum in [`Repair`], with the evaluated sigma `sqrt(C_ii)` next to the
-//! sampled `sqrt(C+_ii)` for every channel, because a small `|λ_min| / λ_max`
-//! does not mean a small change to the sigma that matters.
+//! MF=33 matrices are frequently not positive semi-definite as evaluated, and
+//! a covariance that is not PSD has no square root, so it has to be repaired
+//! to be sampled. Clipping its negative eigenvalues would only ever add
+//! variance, so the repair is instead on the correlation matrix of the cells
+//! with a positive stated variance: it is replaced by the nearest correlation
+//! matrix (Higham; see [`crate::nearest_correlation`]) and rescaled by the
+//! evaluated sigmas,
+//!
+//! ```text
+//! R = D^-1/2 C D^-1/2,   R' = nearest correlation matrix to R,   C' = D^1/2 R' D^1/2
+//! ```
+//!
+//! so every cell is sampled at its evaluated sigma exactly and only
+//! correlations move, by as little as any PSD matrix allows. A cell stated
+//! with a negative variance, or a zero one and a covariance to another cell,
+//! has no correlation to keep and is held at nominal. The repair is on the
+//! evaluation's own `C`, before the lognormal transform; where `ln(1 + C')`
+//! is still not PSD, its own correlation matrix is repaired the same way,
+//! keeping every log-space variance and so again every sigma (see
+//! [`LognormalLimit`]). The relative and absolute cells are repaired apart,
+//! as they are drawn apart. What each repair did is recorded per nuclide in
+//! [`FieldRepair`] and per spectrum in [`Repair`], with each channel's
+//! evaluated sigma next to its sampled one: a channel that folds several
+//! cells reads their correlations, so its sigma can still move, either way.
 //!
 //! # Seeds
 //!
@@ -75,7 +88,7 @@ use crate::covariance_fold::RateCovariance;
 /// scale. The eigensolver's round-off on `C` is absolute, about `eps · λ_max`, and a
 /// small channel can carry an O(1) share of a null-space eigenvector, so on
 /// `C` a rank-one matrix whose channels span a few orders in sigma already
-/// reads as needing clipping. On `R` every diagonal is one, so the trace is
+/// reads as needing repair. On `R` every diagonal is one, so the trace is
 /// `m`, and the round-off is about `eps` times the largest `|λ|` of `R`. That
 /// is at most `m` on a PSD `R` and near it close to the PSD boundary, where
 /// the test decides anything, so the round-off is about `m · eps`, orders
@@ -86,10 +99,10 @@ use crate::covariance_fold::RateCovariance;
 /// channels beside one.
 ///
 /// Below the threshold the matrix is PSD to within round-off and the
-/// eigenvalues that come back negative are still clipped, since they have no
-/// square root either. What that clipping adds to a channel is round-off of
-/// the decomposition of `C`, about `eps · λ_max`, and it is not counted as a
-/// repair. It is not hidden either: the rate-weighted headline reads every
+/// eigenvalues that come back negative are set to zero in the factor, since
+/// they have no square root either. What that adds to a channel is round-off
+/// of the decomposition of `C`, about `eps · λ_max`, and it is not counted as
+/// a repair. It is not hidden either: the rate-weighted headline reads every
 /// channel's sampled sigma off the factorization, so a matrix below the
 /// threshold shows its round-off there as it is.
 pub const REPAIR_TOLERANCE: f64 = 1.0e-12;
@@ -102,8 +115,10 @@ pub struct ChannelSigma {
     /// it. A matrix that is not PSD can fold to a negative diagonal, and that
     /// is kept as it is rather than read as a zero.
     pub evaluated_variance: f64,
-    /// `sqrt(C+_ii)`, the relative sigma the lognormal is matched to after the
-    /// repair. Never below the evaluated sigma beyond round-off.
+    /// The relative sigma the channel is sampled at after the repair. Every
+    /// cell keeps its evaluated sigma, but a channel that folds several cells
+    /// reads their correlations, which the repair moves, so this can sit
+    /// either side of the evaluated sigma.
     pub sampled: f64,
 }
 
@@ -114,10 +129,10 @@ impl ChannelSigma {
         (self.evaluated_variance >= 0.0).then(|| self.evaluated_variance.sqrt())
     }
 
-    /// `sampled / evaluated - 1`: how far the repair widened this channel.
-    /// Infinite when the repair gave a spread to a channel whose stated
-    /// variance is zero or negative.
-    pub fn inflation(&self) -> f64 {
+    /// `sampled / evaluated - 1`: how far the repair moved this channel's
+    /// sigma, negative where it narrowed. Infinite when the repair gave a
+    /// spread to a channel whose stated variance is zero or negative.
+    pub fn change(&self) -> f64 {
         match self.evaluated_sigma() {
             Some(e) if e > 0.0 => self.sampled / e - 1.0,
             _ if self.sampled > 0.0 => f64::INFINITY,
@@ -134,22 +149,10 @@ pub struct Repair {
     /// Index of the spectrum the covariance was folded against, in the order
     /// the schedule names them.
     pub spectrum: usize,
-    /// The most negative eigenvalue of the folded relative covariance `C`.
-    ///
-    /// Read off the same decomposition of `C` that is sampled, not off the
-    /// correlation matrix the repair was decided on, so this and every other
-    /// value here describe what was drawn. The guarantee on `C` is only about
-    /// `eps · λ_max(C)`: next
-    /// to a channel at a variance of 1e17 a flagged repair could in principle
-    /// read here as a `lambda_min` near zero or above it.
-    pub lambda_min: f64,
-    /// The largest eigenvalue of `C`.
-    pub lambda_max: f64,
-    /// `sum |λ_neg| / trace(C)`: the variance the clipping added, as a share
-    /// of the variance the evaluation states. Infinite when the stated trace
-    /// is not positive.
-    pub clipped_fraction: f64,
-    /// Every channel of the matrix, in the fold's kind order.
+    /// What the repair of the nuclide's cell covariance did, the same under
+    /// every spectrum.
+    pub field: FieldRepair,
+    /// Every channel the spectrum reads, in the fold's kind order.
     pub channels: Vec<ChannelSigma>,
 }
 
@@ -160,9 +163,12 @@ pub struct Repair {
 /// elementwise, which carries `C` exactly only where `Σ_N` is positive
 /// semi-definite and every `1 + C_kl` is positive. Two fully correlated cells
 /// with different sigmas, or an anticorrelation with `1 + C_kl <= 0`, are not
-/// a lognormal's, and the nearest one is sampled instead. That is a property
-/// of the distribution rather than a defect of the data, so it is reported
-/// here and not as a repair, and it does not count as a gap.
+/// a lognormal's, and the nearest one is sampled instead: where `Σ_N` is not
+/// PSD its correlation matrix is replaced by the nearest correlation matrix,
+/// which keeps every `Σ_N,kk` and so every sigma, and moves correlations
+/// only. That is a property of the distribution rather than a defect of the
+/// data, so it is reported here and not as a repair, and it does not count as
+/// a gap.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LognormalLimit {
     /// Cells (or flux bins) whose sampled sigma, or whose correlation with
@@ -174,6 +180,12 @@ pub struct LognormalLimit {
     /// The largest change in a correlation coefficient,
     /// `|C'_kl - C_kl| / sqrt(C_kk C_ll)`, over the pairs of cells.
     pub largest_correlation_change: f64,
+    /// The log-space repair, where `Σ_N` was not PSD past
+    /// [`REPAIR_TOLERANCE`]: its eigenvalue and correlation changes are of the
+    /// correlation matrix of `Σ_N`, not of `C`. `None` where the sampled
+    /// covariance differs only by round-off of a PSD `Σ_N`, or by entries
+    /// with no logarithm.
+    pub log_space_repair: Option<FieldRepair>,
 }
 
 /// The relative change below which a sampled sigma or correlation counts as
@@ -217,6 +229,7 @@ pub(crate) fn lognormal_limit(stated: &[f64], sampled: &[f64], n: usize) -> Opti
         cells,
         largest_sigma_change,
         largest_correlation_change,
+        log_space_repair: None,
     })
 }
 
@@ -248,25 +261,126 @@ pub(crate) fn log_covariance(relative: &[f64], n: usize) -> (Vec<f64>, bool) {
     (log, substituted)
 }
 
-/// What the repair of one nuclide's evaluated cell covariance did, read off
-/// the matrix that was clipped (see [`Repair`] for the per-spectrum record).
+/// What the repair of one nuclide's evaluated cell covariance did (see
+/// [`Repair`] for the per-spectrum record), over its relative and absolute
+/// cells together.
+///
+/// `R` is the correlation matrix of the cells with a positive stated
+/// variance and `R'` the nearest correlation matrix to it that was sampled.
+/// Every such cell keeps its evaluated variance exactly, so the correlations
+/// are all that moved.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FieldRepair {
-    /// The most negative eigenvalue of the evaluated covariance.
+    /// The most negative eigenvalue of `R` before the repair (one where fewer
+    /// than two cells have a positive variance).
     pub lambda_min: f64,
-    /// The largest eigenvalue of the evaluated covariance.
-    pub lambda_max: f64,
-    /// `sum |λ_neg| / trace(C)`: the variance the clipping added, as a share of
-    /// the variance the evaluation states.
-    pub clipped_fraction: f64,
+    /// The largest `|R'_kl - R_kl|`: the most any correlation moved.
+    pub largest_correlation_change: f64,
+    /// `||R' - R||_F` over both triangles.
+    pub correlation_frobenius_change: f64,
+    /// Cells in the coupled blocks that were repaired.
+    pub cells: usize,
+    /// Cells stated with a negative variance, or a zero one and a covariance
+    /// to another cell. A PSD matrix has neither, and neither has a
+    /// correlation to keep, so each is held at nominal: its variance and its
+    /// covariances are sampled as zero.
+    pub held_cells: usize,
+    /// Whether every repaired block met
+    /// [`crate::nearest_correlation::NEAREST_CORRELATION_TOLERANCE`]. A block
+    /// that did not is still repaired to a valid correlation matrix, only not
+    /// the nearest one.
+    pub converged: bool,
 }
 
-/// The eigenvalue summary of a matrix whose repair counts as one.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Eigen {
-    lambda_min: f64,
-    lambda_max: f64,
-    clipped_fraction: f64,
+impl FieldRepair {
+    /// The two repairs as one, of the block-diagonal matrix they make.
+    fn merge(a: Option<Self>, b: Option<Self>) -> Option<Self> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(FieldRepair {
+                lambda_min: a.lambda_min.min(b.lambda_min),
+                largest_correlation_change: a
+                    .largest_correlation_change
+                    .max(b.largest_correlation_change),
+                correlation_frobenius_change: a
+                    .correlation_frobenius_change
+                    .hypot(b.correlation_frobenius_change),
+                cells: a.cells + b.cells,
+                held_cells: a.held_cells + b.held_cells,
+                converged: a.converged && b.converged,
+            }),
+            (a, b) => a.or(b),
+        }
+    }
+}
+
+/// `covariance` (row-major `n × n`) repaired to be sampled, keeping every
+/// positive variance it states, and what the repair did, or `None` where it
+/// is PSD past [`REPAIR_TOLERANCE`].
+///
+/// A PSD matrix with a zero diagonal has a zero row there, so a cell stated
+/// with a negative variance, or a zero one and any covariance to another
+/// cell, needs a repair, and an exact one to state: it is held (its row and
+/// column zero). The cells with a positive variance are judged and repaired
+/// on their correlation matrix by
+/// [`crate::nearest_correlation::repaired_with_minimum`], so that round-off
+/// is relative to each cell (see [`REPAIR_TOLERANCE`]), and rescaled by
+/// their evaluated sigmas. A block of cells the threshold passes is kept bit
+/// for bit.
+fn repaired_covariance(covariance: &[f64], n: usize) -> Option<(Vec<f64>, FieldRepair)> {
+    let c = |i: usize, j: usize| covariance[i * n + j];
+    let held_cells = (0..n)
+        .filter(|&i| c(i, i) < 0.0 || (c(i, i) == 0.0 && (0..n).any(|j| j != i && c(i, j) != 0.0)))
+        .count();
+    let positive: Vec<usize> = (0..n).filter(|&i| c(i, i) > 0.0).collect();
+    let m = positive.len();
+    let sigma: Vec<f64> = positive.iter().map(|&i| c(i, i).sqrt()).collect();
+    let mut correlation = vec![0.0; m * m];
+    for (a, &i) in positive.iter().enumerate() {
+        for (b, &j) in positive.iter().enumerate() {
+            correlation[a * m + b] = if a == b {
+                1.0
+            } else {
+                c(i, j) / sigma[a] / sigma[b]
+            };
+        }
+    }
+    let (lambda_min, near) = crate::nearest_correlation::repaired_with_minimum(&correlation, m);
+    if near.is_none() && held_cells == 0 {
+        return None;
+    }
+    let mut out = vec![0.0; n * n];
+    for (a, &i) in positive.iter().enumerate() {
+        out[i * n + i] = c(i, i);
+        for (b, &j) in positive.iter().enumerate().skip(a + 1) {
+            // The upper triangle of the repaired correlation, mirrored, so
+            // the result is symmetric to the bit.
+            let v = match &near {
+                Some((r, _)) => r[a * m + b] * sigma[a] * sigma[b],
+                None => c(i, j),
+            };
+            out[i * n + j] = v;
+            out[j * n + i] = v;
+        }
+    }
+    let record = match near {
+        Some((_, r)) => FieldRepair {
+            lambda_min,
+            largest_correlation_change: r.max_change,
+            correlation_frobenius_change: r.frobenius_change,
+            cells: r.parameters,
+            held_cells,
+            converged: r.converged,
+        },
+        None => FieldRepair {
+            lambda_min,
+            largest_correlation_change: 0.0,
+            correlation_frobenius_change: 0.0,
+            cells: 0,
+            held_cells,
+            converged: true,
+        },
+    };
+    Some((out, record))
 }
 
 /// Keeps the absolute-cell streams clear of every other per-nuclide stream.
@@ -296,7 +410,7 @@ struct Factorized {
     absolute_rank: usize,
     /// The absolute cells' sampled covariance, in barn^2.
     absolute_sampled: Vec<f64>,
-    repair: Option<Eigen>,
+    repair: Option<FieldRepair>,
     /// Where the relative cells are not a lognormal's (see [`LognormalLimit`]).
     lognormal_limit: Option<LognormalLimit>,
     /// The inputs, so a cache hit is checked exactly rather than trusted to a
@@ -526,50 +640,22 @@ struct NuclideDraw {
     short: Vec<Vec<Vec<f64>>>,
 }
 
-/// The factor `L` of a symmetric matrix with its negative eigenvalues
-/// clipped, `L Lᵀ`, and whether the clipping did anything.
+/// The factor `L` of a symmetric matrix with its negative eigenvalues set
+/// to zero, `L Lᵀ`, and whether that did anything: any eigenvalue below
+/// `-1e-12` of the largest. Where it did not, `L Lᵀ` is the matrix itself,
+/// exactly, and is not recomputed.
 ///
-/// With `judge`, whether it did is [`needs_repair`]'s decision, summarized as
-/// a repair; without, it is any eigenvalue below `-1e-12` of the largest, and
-/// no repair is reported. Where nothing was clipped `L Lᵀ` is the matrix
-/// itself, exactly, and is not recomputed.
-pub(crate) fn clipped_factor(
-    matrix: &[f64],
-    n: usize,
-    judge: bool,
-) -> (Vec<f64>, Option<Eigen>, Vec<f64>, bool) {
+/// Only for a matrix that is PSD to round-off, or one whose remaining
+/// negative part is reported where it is made: a repair of the evaluation is
+/// [`repaired_covariance`]'s, before this.
+pub(crate) fn clipped_factor(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>, bool) {
     if n == 0 {
-        return (Vec::new(), None, Vec::new(), false);
+        return (Vec::new(), Vec::new(), false);
     }
     let (values, vectors) = eigen(matrix, n);
     let lambda_min = values.iter().cloned().fold(f64::INFINITY, f64::min);
     let lambda_max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let repair = judge
-        .then(|| {
-            let as_cov = RateCovariance {
-                kinds: vec![String::new(); n],
-                relative: matrix.to_vec(),
-            };
-            needs_repair(&as_cov).then(|| {
-                let trace: f64 = (0..n).map(|i| matrix[i * n + i]).sum();
-                let clipped: f64 = values.iter().filter(|v| **v < 0.0).map(|v| -v).sum();
-                Eigen {
-                    lambda_min,
-                    lambda_max,
-                    clipped_fraction: if trace > 0.0 {
-                        clipped / trace
-                    } else {
-                        f64::INFINITY
-                    },
-                }
-            })
-        })
-        .flatten();
-    let clipped = if judge {
-        repair.is_some()
-    } else {
-        lambda_min < -1.0e-12 * lambda_max.abs().max(lambda_min.abs())
-    };
+    let clipped = lambda_min < -1.0e-12 * lambda_max.abs().max(lambda_min.abs());
     // L = V √Λ: column j of V is eigenvector j, so L[i][j] = V[i][j] · √λ_j.
     let mut l = vec![0.0; n * n];
     for j in 0..n {
@@ -594,19 +680,7 @@ pub(crate) fn clipped_factor(
     } else {
         matrix.to_vec()
     };
-    (l, repair, product, clipped)
-}
-
-/// The worse of two repair summaries, by how much variance each added.
-fn worse(a: Option<Eigen>, b: Option<Eigen>) -> Option<Eigen> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(if b.clipped_fraction > a.clipped_fraction {
-            b
-        } else {
-            a
-        }),
-        (a, b) => a.or(b),
-    }
+    (l, product, clipped)
 }
 
 /// Drop the columns of a row-major `n × n` factor whose variance is below
@@ -648,51 +722,54 @@ impl Factorized {
     ///
     /// Not every covariance is a lognormal's: two fully correlated cells with
     /// different sigmas cannot be, and an anticorrelation with
-    /// `1 + C_kl <= 0` cannot be at all. So `Σ_N` can come out slightly
-    /// indefinite from a perfectly good evaluation, and is clipped to the
-    /// nearest lognormal the factorization reaches. That is a property of
-    /// the distribution, not a defect of the data, so it is not reported as a
-    /// repair: its effect on every channel is in the sampled sigma beside the
-    /// evaluated one, and it shrinks as `σ⁴`, so it only shows on wide
-    /// channels, which the report names separately. A repair is the
-    /// evaluation's own matrix `C` not being PSD, decided and summarized on
-    /// `C` before the transform, as it always was.
+    /// `1 + C_kl <= 0` cannot be at all. So `Σ_N` can come out indefinite
+    /// from a perfectly good evaluation, and where it does past
+    /// [`REPAIR_TOLERANCE`] its correlation matrix is replaced by the nearest
+    /// correlation matrix, keeping every `Σ_N,kk` and so every cell's sigma.
+    /// That is a property of the distribution, not a defect of the data, so
+    /// it is not reported as a repair but in [`LognormalLimit`], beside how
+    /// far the sampled covariance is from `C`. It shrinks as `σ⁴`, so it only
+    /// shows on wide channels, which the report names separately. A repair is
+    /// the evaluation's own matrix `C` not being PSD, decided and made on `C`
+    /// before the transform ([`repaired_covariance`]).
     fn new(relative: &[f64], absolute: &[f64]) -> Self {
         let n = (relative.len() as f64).sqrt() as usize;
-        // The evaluation's own matrix is decomposed in full only when it needs
-        // a repair: deciding that takes its correlation matrix's eigenvalues
-        // alone, and sampling uses the log-space factor below.
-        let evaluated = RateCovariance {
-            kinds: vec![String::new(); n],
-            relative: relative.to_vec(),
-        };
-        let (relative_repair, repaired) = if n > 0 && needs_repair(&evaluated) {
-            let (_, repair, product, _) = clipped_factor(relative, n, true);
-            (repair, product)
-        } else {
-            (None, relative.to_vec())
+        let (relative_repair, repaired) = match repaired_covariance(relative, n) {
+            Some((repaired, record)) => (Some(record), repaired),
+            None => (None, relative.to_vec()),
         };
         let (log, substituted) = log_covariance(&repaired, n);
-        let (log_factor, _, log_sampled, log_clipped) = clipped_factor(&log, n, false);
+        let (log, log_space_repair) = match repaired_covariance(&log, n) {
+            Some((log, record)) => (log, Some(record)),
+            None => (log, None),
+        };
+        let (log_factor, log_sampled, log_clipped) = clipped_factor(&log, n);
         let half_log_variance = (0..n).map(|k| 0.5 * log_sampled[k * n + k]).collect();
         let (log_factor, log_rank) = truncated(log_factor, n);
         // Where the lognormal carries the covariance, what is sampled is the
         // (repaired) evaluation itself, exactly, and is reported as that
         // rather than through a round trip through `ln` and `exp` that costs an
-        // ulp. Only where it had to be clipped, or an entry had no logarithm,
-        // is the sampled one different, and then it is recorded how much.
+        // ulp. Only where `Σ_N` had to be repaired or clipped, or an entry had
+        // no logarithm, is the sampled one different, and then it is recorded
+        // how much.
         let (relative_sampled, lognormal_limit): (Vec<f64>, Option<LognormalLimit>) =
-            if log_clipped || substituted {
+            if log_clipped || substituted || log_space_repair.is_some() {
                 let sampled: Vec<f64> = log_sampled.iter().map(|v| v.exp_m1()).collect();
-                let limit = lognormal_limit(&repaired, &sampled, n);
+                let limit = lognormal_limit(&repaired, &sampled, n).map(|l| LognormalLimit {
+                    log_space_repair,
+                    ..l
+                });
                 (sampled, limit)
             } else {
                 (repaired, None)
             };
 
         let m = (absolute.len() as f64).sqrt() as usize;
-        let (absolute_factor, absolute_repair, absolute_sampled, _) =
-            clipped_factor(absolute, m, true);
+        let (absolute_repair, absolute_sampled) = match repaired_covariance(absolute, m) {
+            Some((repaired, record)) => (Some(record), repaired),
+            None => (None, absolute.to_vec()),
+        };
+        let (absolute_factor, _, _) = clipped_factor(&absolute_sampled, m);
         let (absolute_factor, absolute_rank) = truncated(absolute_factor, m);
 
         Factorized {
@@ -704,7 +781,7 @@ impl Factorized {
             absolute_factor,
             absolute_rank,
             absolute_sampled,
-            repair: worse(relative_repair, absolute_repair),
+            repair: FieldRepair::merge(relative_repair, absolute_repair),
             lognormal_limit,
             relative_input: relative.to_vec(),
             absolute_input: absolute.to_vec(),
@@ -1127,9 +1204,7 @@ impl Sampler {
     ///
     /// A nuclide's field is factorized once for every spectrum, so a repair
     /// of it is listed under each spectrum that reads it, with that
-    /// spectrum's channels. The eigenvalues are of the evaluated covariance
-    /// that was clipped, over the relative cells or the absolute ones,
-    /// whichever the repair added more to.
+    /// spectrum's channels and the same [`FieldRepair`].
     pub fn repairs(&self, spectrum: usize) -> Vec<Repair> {
         let Some(views) = self.views.get(spectrum) else {
             return Vec::new();
@@ -1141,9 +1216,7 @@ impl Sampler {
                 Some(Repair {
                     nuclide: name.clone(),
                     spectrum,
-                    lambda_min: r.lambda_min,
-                    lambda_max: r.lambda_max,
-                    clipped_fraction: r.clipped_fraction,
+                    field: r,
                     channels: v
                         .kinds
                         .iter()
@@ -1164,17 +1237,7 @@ impl Sampler {
     pub fn field_repairs(&self) -> BTreeMap<String, FieldRepair> {
         self.fields
             .iter()
-            .filter_map(|(name, f)| {
-                let r = f.core.repair?;
-                Some((
-                    name.clone(),
-                    FieldRepair {
-                        lambda_min: r.lambda_min,
-                        lambda_max: r.lambda_max,
-                        clipped_fraction: r.clipped_fraction,
-                    },
-                ))
-            })
+            .filter_map(|(name, f)| Some((name.clone(), f.core.repair?)))
             .collect()
     }
 
@@ -1259,7 +1322,7 @@ impl Sampler {
                     let relative_factor = f
                         .core
                         .relative_factor
-                        .get_or_init(|| clipped_factor(&f.core.relative_sampled, nr, false).0);
+                        .get_or_init(|| clipped_factor(&f.core.relative_sampled, nr).0);
                     for (c, o) in out[..nr].iter_mut().enumerate() {
                         *o = (0..nr)
                             .map(|k| p[k] * relative_factor[k * nr + c])
@@ -1430,8 +1493,8 @@ impl Sampler {
 /// The repairs and the widest sigmas over every spectrum of a run, for the
 /// nuclides the material can populate.
 ///
-/// All of it is read off the factorization that is sampled, so it is what was
-/// drawn, to that decomposition's round-off (see [`Repair::lambda_min`]):
+/// Every sampled sigma is read off the factorization that is sampled, so it
+/// is what was drawn, to that decomposition's round-off:
 /// nothing here is a modelling choice, it says where one was made. The fold covers every chain nuclide with data, and from almost
 /// any composition the chain's closure saturates on one large component, so
 /// a pure W182 material folds Xe135 and Mo100. Those are left out here by
@@ -1460,36 +1523,37 @@ pub struct SigmaReport {
     /// The nuclides of `repairs` with at least one repaired channel a draw
     /// can move: a positive rate on a spectrum the schedule irradiates with.
     /// A repair only on an unirradiated spectrum, or only on channels with no
-    /// rate, widens nothing the ensemble sees, so it is recorded but is not
+    /// rate, moves nothing the ensemble sees, so it is recorded but is not
     /// a gap.
     pub repaired: BTreeSet<String>,
-    /// The largest [`ChannelSigma::inflation`] over the repaired channels
+    /// The largest `|`[`ChannelSigma::change`]`|` over the repaired channels
     /// that can move the result: a populated nuclide with a positive rate on
     /// a spectrum the schedule irradiates with. Zero with no such repair, and
     /// infinite when the repair gave a spread to a channel whose stated
     /// variance is zero or negative.
-    pub worst_sigma_inflation: f64,
-    /// `sum_c w_c (sampled_c / evaluated_c - 1)` and `sum_c w_c` over every
+    pub worst_sigma_change: f64,
+    /// `sum_c w_c |sampled_c / evaluated_c - 1|` and `sum_c w_c` over every
     /// sampled channel `c` of every spectrum with a positive evaluated sigma,
     /// `w_c` the channel's unit-flux rate times the spectrum's fluence in the
     /// schedule times the parent's initial density: the reactions the
     /// schedule puts through the channel, at the starting composition. The
-    /// weight is on each channel's own inflation, not on its sigma, so a wide
+    /// weight is on each channel's own change, not on its sigma, so a wide
     /// channel with a small rate cannot drown out a repair on the channels
-    /// that carry the reactions. Kept as sums because sums merge across
-    /// spectra.
-    weighted_inflation: f64,
+    /// that carry the reactions, and the change is absolute, since a repair
+    /// can move a channel either way and two channels moved opposite ways do
+    /// not cancel. Kept as sums because sums merge across spectra.
+    weighted_change: f64,
     weight: f64,
     /// Whether a weighted channel with no evaluated sigma was sampled with a
-    /// spread, which makes the weighted inflation infinite.
+    /// spread, which makes the weighted change infinite.
     weighted_spread_from_nothing: bool,
     /// Sampled channels of populated nuclides with a positive rate on a
     /// spectrum the schedule irradiates with, whose folded relative sigma
     /// `sqrt(C_ii)`, as evaluated and before any repair, is at least one,
     /// keyed by (nuclide, kind), the largest over the spectra. Past this
     /// width the answer depends on the distribution chosen to carry the two
-    /// moments, not only on the moments the evaluation states. A repair's own
-    /// widening is in `repairs`.
+    /// moments, not only on the moments the evaluation states. What a repair
+    /// did to a channel is in `repairs`.
     pub sigma_at_least_one: BTreeMap<(String, String), f64>,
     /// The subset at ten or more.
     pub sigma_at_least_ten: BTreeMap<(String, String), f64>,
@@ -1550,7 +1614,7 @@ impl SigmaReport {
                 .filter(|c| moves(&repair.nuclide, &c.kind))
             {
                 self.repaired.insert(repair.nuclide.clone());
-                self.worst_sigma_inflation = self.worst_sigma_inflation.max(c.inflation());
+                self.worst_sigma_change = self.worst_sigma_change.max(c.change().abs());
             }
             self.repairs.push(repair);
         }
@@ -1572,7 +1636,7 @@ impl SigmaReport {
             let w = rates[nuclide][kind] * fluence * densities.get(nuclide).copied().unwrap_or(0.0);
             if w > 0.0 && w.is_finite() {
                 if evaluated > 0.0 {
-                    self.weighted_inflation += w * (sampled / evaluated - 1.0);
+                    self.weighted_change += w * (sampled / evaluated - 1.0).abs();
                     self.weight += w;
                 } else if sampled > 0.0 {
                     self.weighted_spread_from_nothing = true;
@@ -1590,63 +1654,29 @@ impl SigmaReport {
         }
     }
 
-    /// The weighted mean of `sampled / evaluated - 1` over every sampled
+    /// The weighted mean of `|sampled / evaluated - 1|` over every sampled
     /// channel of a populated nuclide, each weighted by the reactions the
     /// schedule puts through it at the initial composition (see
-    /// `weighted_inflation`).
+    /// `weighted_change`).
     ///
-    /// The headline beside [`SigmaReport::worst_sigma_inflation`]: a repair on
+    /// The headline beside [`SigmaReport::worst_sigma_change`]: a repair on
     /// a channel that carries no reactions costs nothing here, and one on the
     /// dominant channel costs its full share, however wide the channels
     /// beside it are. It covers the reactions on the initial composition
     /// only: a nuclide the material starts without has no initial density and
     /// so no weight, however much of the inventory passes through it, and its
-    /// repairs are in `repairs` and `worst_sigma_inflation` instead. Infinite
+    /// repairs are in `repairs` and `worst_sigma_change` instead. Infinite
     /// when a weighted channel with no evaluated sigma was sampled with a
     /// spread, and `None` when no weighted channel has an evaluated sigma.
-    pub fn rate_weighted_sigma_inflation(&self) -> Option<f64> {
+    pub fn rate_weighted_sigma_change(&self) -> Option<f64> {
         if self.weighted_spread_from_nothing {
             Some(f64::INFINITY)
         } else if self.weight > 0.0 {
-            Some(self.weighted_inflation / self.weight)
+            Some(self.weighted_change / self.weight)
         } else {
             None
         }
     }
-}
-
-/// Whether `cov` is not PSD past [`REPAIR_TOLERANCE`], judged on its
-/// correlation matrix so that round-off is relative to each channel.
-fn needs_repair(cov: &RateCovariance) -> bool {
-    let n = cov.n();
-    let positive: Vec<usize> = (0..n).filter(|&i| cov.get(i, i) > 0.0).collect();
-    // A PSD matrix with a zero diagonal has a zero row there, so any
-    // covariance from such a channel, or a negative variance, is a repair,
-    // and an exact one to state.
-    let stated_without_variance = (0..n)
-        .filter(|&i| cov.get(i, i) <= 0.0)
-        .any(|i| cov.get(i, i) < 0.0 || (0..n).any(|j| j != i && cov.get(i, j) != 0.0));
-    if stated_without_variance {
-        return true;
-    }
-    let m = positive.len();
-    if m < 2 {
-        return false;
-    }
-    let scale: Vec<f64> = positive.iter().map(|&i| cov.get(i, i).sqrt()).collect();
-    let mut r = vec![0.0; m * m];
-    for (a, &i) in positive.iter().enumerate() {
-        for (b, &j) in positive.iter().enumerate() {
-            r[a * m + b] = if a == b {
-                1.0
-            } else {
-                cov.get(i, j) / scale[a] / scale[b]
-            };
-        }
-    }
-    let values = eigenvalues(&r, m);
-    let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
-    min < -(m as f64) * REPAIR_TOLERANCE
 }
 
 /// A stable 32-bit hash of a nuclide name.
@@ -1730,37 +1760,13 @@ fn blocks_eigen(
     want_vectors: bool,
     small_accurately: bool,
 ) -> (Vec<f64>, Vec<f64>) {
-    // Union-find over the nonzero couplings.
-    let mut parent: Vec<usize> = (0..n).collect();
-    fn root(parent: &mut [usize], mut i: usize) -> usize {
-        while parent[i] != i {
-            parent[i] = parent[parent[i]];
-            i = parent[i];
-        }
-        i
-    }
-    for i in 0..n {
-        for j in (i + 1)..n {
-            if matrix[i * n + j] != 0.0 || matrix[j * n + i] != 0.0 {
-                let (a, b) = (root(&mut parent, i), root(&mut parent, j));
-                if a != b {
-                    parent[a.max(b)] = a.min(b);
-                }
-            }
-        }
-    }
-    let mut blocks: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for i in 0..n {
-        let r = root(&mut parent, i);
-        blocks.entry(r).or_default().push(i);
-    }
     let mut values = Vec::with_capacity(n);
     let mut vectors = if want_vectors {
         vec![0.0; n * n]
     } else {
         Vec::new()
     };
-    for members in blocks.values() {
+    for members in &coupled_blocks(matrix, n) {
         let m = members.len();
         let mut sub = vec![0.0; m * m];
         for (a, &i) in members.iter().enumerate() {
@@ -1792,6 +1798,37 @@ fn blocks_eigen(
         }
     }
     (values, vectors)
+}
+
+/// The connected blocks of a symmetric `n × n` matrix: indices joined by a
+/// nonzero off-diagonal, each block in ascending order and the blocks in
+/// order of their first index.
+pub(crate) fn coupled_blocks(matrix: &[f64], n: usize) -> Vec<Vec<usize>> {
+    // Union-find over the nonzero couplings.
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if matrix[i * n + j] != 0.0 || matrix[j * n + i] != 0.0 {
+                let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+                if a != b {
+                    parent[a.max(b)] = a.min(b);
+                }
+            }
+        }
+    }
+    let mut blocks: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for i in 0..n {
+        let r = root(&mut parent, i);
+        blocks.entry(r).or_default().push(i);
+    }
+    blocks.into_values().collect()
 }
 
 /// Blocks at most this size go to [`jacobi_eigen`]: there its cost is nothing
@@ -2280,46 +2317,330 @@ mod tests {
         }
     }
 
-    /// A matrix that is not a covariance is repaired, and the repair is
-    /// reported rather than absorbed, with what it did to each sigma.
+    /// One nuclide's name, cell covariance and channels, each a kind and its
+    /// partial rates on the cells.
+    type FoldedNuclide<'a> = (&'a str, Vec<f64>, &'a [(&'a str, &'a [f64])]);
+
+    /// A sampler over one spectrum (or `spectra` alike) of nuclides each
+    /// with relative cells of covariance `cells` (row-major), read by
+    /// channels that fold the cells with the given partial rates, a channel's
+    /// rate their sum. Each channel's evaluated variance is the fold of
+    /// `cells` as stated, by the same arithmetic the sampler reads its
+    /// sampled one with, so where nothing is repaired the two agree to the
+    /// bit.
+    fn folded_sampler(nuclides: &[FoldedNuclide], spectra: usize) -> Sampler {
+        use crate::covariance_fold::{Cell, CellField, Projection};
+        let mut fields = BTreeMap::new();
+        let mut fold = BTreeMap::new();
+        for (name, cells, channels) in nuclides {
+            let n = (cells.len() as f64).sqrt() as usize;
+            let kinds: Vec<String> = channels.iter().map(|(k, _)| k.to_string()).collect();
+            let rates: Vec<f64> = channels.iter().map(|(_, p)| p.iter().sum()).collect();
+            let partial: Vec<f64> = channels
+                .iter()
+                .flat_map(|(_, p)| p.iter().copied())
+                .collect();
+            let k = channels.len();
+            let mut folded = vec![0.0; k * k];
+            for i in 0..k {
+                for j in 0..k {
+                    let (p, q) = (channels[i].1, channels[j].1);
+                    let v: f64 = (0..n)
+                        .filter(|&a| p[a] != 0.0)
+                        .map(|a| p[a] * (0..n).map(|b| cells[a * n + b] * q[b]).sum::<f64>())
+                        .sum();
+                    folded[i * k + j] = v / (rates[i] * rates[j]);
+                }
+            }
+            fold.insert(
+                name.to_string(),
+                RateCovariance {
+                    kinds: kinds.clone(),
+                    relative: folded,
+                },
+            );
+            fields.insert(
+                name.to_string(),
+                CellField {
+                    relative_cells: (0..n)
+                        .map(|i| Cell {
+                            mt: i as i32,
+                            lo: 0.0,
+                            hi: 1.0,
+                        })
+                        .collect(),
+                    relative: cells.clone(),
+                    absolute_cells: Vec::new(),
+                    absolute: Vec::new(),
+                    short: Vec::new(),
+                    projections: vec![
+                        Some(Projection {
+                            kinds,
+                            rates,
+                            relative: partial,
+                            absolute: Vec::new(),
+                            short: vec![Vec::new(); k],
+                        });
+                        spectra
+                    ],
+                },
+            );
+        }
+        Sampler::new(&fields, &vec![fold; spectra])
+    }
+
+    /// Two cells at a sigma of 0.1 with a stated correlation of 1.5, which
+    /// the repair takes to 1, read by a channel of one cell and a channel of
+    /// both. The one-cell channel keeps its sigma; the two-cell one reads the
+    /// correlation, so it is sampled at 0.1 against the `sqrt(0.0125)` its
+    /// fold states.
+    fn over_correlated() -> (Vec<f64>, &'static [(&'static str, &'static [f64])]) {
+        (
+            vec![0.01, 0.015, 0.015, 0.01],
+            &[("a", &[1.0, 0.0]), ("sum", &[1.0, 1.0])],
+        )
+    }
+
+    /// `over_correlated`'s two-cell channel: sampled over evaluated sigma,
+    /// minus one.
+    fn over_correlated_change() -> f64 {
+        0.1 / 0.0125_f64.sqrt() - 1.0
+    }
+
+    /// A matrix that is not a covariance is repaired to the nearest
+    /// correlation matrix, keeping every sigma, and the repair is reported
+    /// rather than absorbed.
     #[test]
-    fn a_non_psd_matrix_is_clipped_and_recorded() {
-        // Correlation of five: eigenvalues 0.06 and -0.04. Clipping keeps
-        // 0.06 along (1, 1)/sqrt(2), so each diagonal becomes 0.03 against
-        // the 0.01 evaluated, and the variance added is 0.04 on a trace of 0.02.
+    fn a_non_psd_matrix_is_repaired_keeping_every_sigma() {
+        // A correlation of five: R has eigenvalues 6 and -4, and the nearest
+        // correlation matrix is the correlation of one.
         let c = cov(&["a", "b"], vec![0.01, 0.05, 0.05, 0.01]);
         let s = Sampler::from_rate_covariance(&BTreeMap::from([("X".to_string(), c)]), 4);
         let repairs = s.repairs(3);
         assert_eq!(repairs.len(), 1);
         let r = &repairs[0];
         assert_eq!((r.nuclide.as_str(), r.spectrum), ("X", 3));
-        assert!((r.lambda_min + 0.04).abs() < 1e-12, "{}", r.lambda_min);
-        assert!((r.lambda_max - 0.06).abs() < 1e-12, "{}", r.lambda_max);
+        let f = r.field;
+        assert!((f.lambda_min + 4.0).abs() < 1e-12, "{f:?}");
+        assert!((f.largest_correlation_change - 4.0).abs() < 1e-9, "{f:?}");
         assert!(
-            (r.clipped_fraction - 2.0).abs() < 1e-9,
-            "{}",
-            r.clipped_fraction
+            (f.correlation_frobenius_change - 32.0_f64.sqrt()).abs() < 1e-9,
+            "{f:?}"
         );
+        assert_eq!((f.cells, f.held_cells, f.converged), (2, 0, true));
+        assert_eq!(s.field_repairs()["X"], f);
         for ch in &r.channels {
             assert_eq!(ch.evaluated_variance, 0.01);
+            assert!((ch.sampled - 0.1).abs() < 1e-15, "{ch:?}");
+            assert!(ch.change().abs() < 1e-14, "{ch:?}");
+        }
+        let (relative, _) = s.sampled_covariance("X").unwrap();
+        assert!((relative[1] - 0.01).abs() < 1e-11, "{relative:?}");
+    }
+
+    /// A matrix just past the threshold, with sigmas over three orders, is
+    /// repaired to a PSD matrix with every variance as stated, whose
+    /// correlation is the one Higham's alternating projections converge to.
+    #[test]
+    fn a_just_indefinite_matrix_keeps_its_sigmas_and_is_the_nearest() {
+        let sigma = [0.001, 0.02, 0.3];
+        let rho = [[1.0, 0.725, 0.725], [0.725, 1.0, 0.04], [0.725, 0.04, 1.0]];
+        let n = 3;
+        let stated_correlation: Vec<f64> = (0..n * n).map(|k| rho[k / n][k % n]).collect();
+        let c: Vec<f64> = (0..n * n)
+            .map(|k| rho[k / n][k % n] * sigma[k / n] * sigma[k % n])
+            .collect();
+        let f = Factorized::new(&c, &[]);
+        let repair = f.repair.expect("repaired");
+        // 1 + b/2 - sqrt(b^2/4 + 2a^2) for a = 0.725, b = 0.04: just below
+        // zero.
+        let lambda = 1.02 - (0.0004_f64 + 2.0 * 0.725 * 0.725).sqrt();
+        assert!(lambda < 0.0 && lambda > -1e-2, "{lambda}");
+        assert!((repair.lambda_min - lambda).abs() < 1e-12, "{repair:?}");
+        assert!(repair.converged && repair.cells == 3, "{repair:?}");
+        let repaired = repaired_covariance(&c, n).expect("repaired").0;
+        let mut correlation = vec![0.0; n * n];
+        for i in 0..n {
+            assert_eq!(repaired[i * n + i], c[i * n + i]);
+            for j in 0..n {
+                assert_eq!(repaired[i * n + j], repaired[j * n + i]);
+                correlation[i * n + j] = repaired[i * n + j] / (sigma[i] * sigma[j]);
+            }
+        }
+        let min = eigenvalues(&correlation, n)
+            .into_iter()
+            .fold(f64::INFINITY, f64::min);
+        assert!(min >= -1e-14, "{min}");
+        let reference = crate::nearest_correlation::tests::dykstra(&stated_correlation, n);
+        for (a, b) in correlation.iter().zip(&reference) {
             assert!(
-                (ch.evaluated_sigma().unwrap() - 0.1).abs() < 1e-12,
-                "{ch:?}"
+                (a - b).abs() < 1e-8,
+                "{correlation:?} against {reference:?}"
             );
-            assert!((ch.sampled - 0.03_f64.sqrt()).abs() < 1e-12, "{ch:?}");
+        }
+        let max = correlation
+            .iter()
+            .zip(&stated_correlation)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            (repair.largest_correlation_change - max).abs() < 1e-12,
+            "{repair:?}"
+        );
+        // And the multipliers carry the stated sigmas.
+        for (i, s) in sigma.iter().enumerate() {
+            let sampled = f.relative_sampled[i * n + i].sqrt();
+            assert!((sampled / s - 1.0).abs() < 1e-12, "{i} {sampled}");
         }
     }
 
-    /// Clipping only adds variance, and gives a spread to a channel the
-    /// evaluation states as exactly zero.
+    /// A covariance that needs no repair is sampled exactly as before the
+    /// nearest-correlation repair existed: these are the bits the clipping
+    /// sampler drew for the same seeds, relative and absolute. The bits were
+    /// taken on x86-64 Linux; other targets may round the last place
+    /// differently in `ln`, `exp` and fused arithmetic, so each value is held
+    /// to within a few units in the last place rather than bit for bit.
     #[test]
-    fn clipping_can_give_sigma_to_a_zero_diagonal() {
+    fn a_valid_matrix_draws_as_it_always_did() {
+        // Within `ulps` units in the last place, for finite values of one sign.
+        fn assert_ulps(got: &[u64], want: &[u64], ulps: u64, what: &str) {
+            assert_eq!(got.len(), want.len(), "{what}");
+            for (g, w) in got.iter().zip(want) {
+                let (gv, wv) = (f64::from_bits(*g), f64::from_bits(*w));
+                assert!(
+                    gv.signum() == wv.signum() && g.abs_diff(*w) <= ulps,
+                    "{what}: got {gv:e} ({g}), want {wv:e} ({w})"
+                );
+            }
+        }
+        let c = cov(
+            &["a", "b", "c"],
+            vec![
+                0.04, 0.012, -0.004, //
+                0.012, 0.09, 0.006, //
+                -0.004, 0.006, 0.0025,
+            ],
+        );
+        let s = rate_sampler(&BTreeMap::from([("X".to_string(), c)]));
+        assert!(s.repairs(0).is_empty());
+        let before: [[u64; 3]; 3] = [
+            [
+                13816687105146680565,
+                13809921563573214875,
+                13807147318081454187,
+            ],
+            [
+                13799776928416527474,
+                4596996472187675269,
+                4591291726209650103,
+            ],
+            [
+                13821431275358218956,
+                13820582890229615446,
+                4569554506801662790,
+            ],
+        ];
+        for (r, want) in before.iter().enumerate() {
+            let got: Vec<u64> = s.deviates(11, r as u64)["X"]
+                .iter()
+                .map(|v| v.to_bits())
+                .collect();
+            assert_ulps(&got, want, 4, &format!("replica {r}"));
+        }
+        let sampled: Vec<u64> = s
+            .sampled_covariance("X")
+            .unwrap()
+            .0
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        assert_ulps(
+            &sampled,
+            &[
+                4585925428558828667,
+                4578071150808694522,
+                13794633745026886140,
+                4578071150808694522,
+                4591149604126578442,
+                4573567551181324026,
+                13794633745026886140,
+                4573567551181324026,
+                4567911030049346683,
+            ],
+            4,
+            "sampled covariance",
+        );
+
+        let f = Factorized::new(&[0.01, 0.002, 0.002, 0.04], &[4.0, -1.0, -1.0, 9.0]);
+        assert_eq!(f.repair, None);
+        let g = f.gaussian_draw(7, 11, 2);
+        let bits = |v: &[f64]| v.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        assert_ulps(
+            &bits(&g.0),
+            &[4580321971225683108, 13814906861411971440],
+            4,
+            "gaussian draw",
+        );
+        assert_ulps(
+            &bits(&g.1),
+            &[4613374713056438380, 4607834391228464327],
+            4,
+            "gaussian draw multipliers",
+        );
+    }
+
+    /// Absolute cells are repaired as the relative ones are, on their own
+    /// correlation matrix, keeping every variance in barn².
+    #[test]
+    fn absolute_cells_are_repaired_keeping_their_variances() {
+        let absolute = [4.0, 9.0, 9.0, 16.0];
+        let f = Factorized::new(&[], &absolute);
+        let repair = f.repair.expect("repaired");
+        // Correlation 9 / 8: eigenvalues 2.125 and -0.125.
+        assert!((repair.lambda_min + 0.125).abs() < 1e-12, "{repair:?}");
+        assert!((repair.largest_correlation_change - 0.125).abs() < 1e-9);
+        assert_eq!(f.absolute_sampled[0], 4.0);
+        assert_eq!(f.absolute_sampled[3], 16.0);
+        assert!(
+            (f.absolute_sampled[1] - 8.0).abs() < 1e-8,
+            "{:?}",
+            f.absolute_sampled
+        );
+    }
+
+    /// Two fully correlated cells of different sigmas are a PSD `C` whose
+    /// `ln(1 + C)` is not PSD. That is repaired in log space, keeping every
+    /// log variance and so every sigma, and reported as a lognormal limit,
+    /// not as a repair of the data.
+    #[test]
+    fn an_indefinite_log_covariance_keeps_every_sigma() {
+        let (a, b) = (0.5_f64, 2.0_f64);
+        let c = [a * a, a * b, a * b, b * b];
+        let f = Factorized::new(&c, &[]);
+        assert_eq!(f.repair, None);
+        let limit = f.lognormal_limit.expect("not a lognormal's");
+        let log = limit.log_space_repair.expect("repaired in log space");
+        assert!(log.lambda_min < 0.0 && log.converged, "{log:?}");
+        assert_eq!(log.held_cells, 0);
+        assert!(limit.largest_sigma_change < 1e-12, "{limit:?}");
+        assert!(limit.largest_correlation_change > 0.0, "{limit:?}");
+        for (i, s) in [a, b].iter().enumerate() {
+            let sampled = f.relative_sampled[i * 2 + i].sqrt();
+            assert!((sampled / s - 1.0).abs() < 1e-12, "{sampled}");
+        }
+    }
+
+    /// A cell stated at zero variance with a covariance to another has no
+    /// correlation to keep: it is held, and every other cell keeps its sigma.
+    #[test]
+    fn a_zero_variance_cell_with_a_covariance_is_held() {
         let c = cov(&["a", "b"], vec![0.04, 0.01, 0.01, 0.0]);
         let s = rate_sampler(&BTreeMap::from([("X".to_string(), c)]));
         let r = &s.repairs(0)[0];
+        assert_eq!((r.field.held_cells, r.field.cells), (1, 0));
         assert_eq!(r.channels[1].evaluated_sigma(), Some(0.0));
-        assert!(r.channels[1].sampled > 0.0, "{:?}", r.channels[1]);
-        assert!(r.channels[0].sampled >= r.channels[0].evaluated_sigma().unwrap());
+        assert_eq!(r.channels[1].sampled, 0.0);
+        assert_eq!(r.channels[0].sampled, 0.2);
 
         let mut report = SigmaReport::default();
         report.add(
@@ -2330,7 +2651,8 @@ mod tests {
             &Default::default(),
             &everyone(),
         );
-        assert_eq!(report.worst_sigma_inflation, f64::INFINITY);
+        assert_eq!(report.worst_sigma_change, 0.0);
+        assert_eq!(report.repaired, BTreeSet::from(["X".to_string()]));
     }
 
     /// Unit-flux rates for one nuclide.
@@ -2342,53 +2664,88 @@ mod tests {
     }
 
     /// A negative folded diagonal is kept as the evaluation gives it, not
-    /// read as a sigma of zero, and a spread the repair gives it is infinite
-    /// inflation.
+    /// read as a sigma of zero, and its cell, which has no sigma to keep, is
+    /// held.
     #[test]
     fn a_negative_diagonal_is_kept_as_stated() {
         let c = cov(&["a", "b"], vec![0.04, 0.01, 0.01, -0.001]);
         let s = rate_sampler(&BTreeMap::from([("X".to_string(), c)]));
-        let ch = &s.repairs(0)[0].channels[1];
+        let r = &s.repairs(0)[0];
+        assert_eq!(r.field.held_cells, 1);
+        let ch = &r.channels[1];
         assert_eq!(ch.evaluated_variance, -0.001);
         assert_eq!(ch.evaluated_sigma(), None);
-        assert!(ch.sampled > 0.0, "{ch:?}");
-        assert_eq!(ch.inflation(), f64::INFINITY);
+        assert_eq!(ch.sampled, 0.0);
+        assert_eq!(ch.change(), 0.0);
+    }
+
+    /// A channel that folds repaired cells reads their moved correlation, so
+    /// its sigma can narrow, and the change is reported as it is.
+    #[test]
+    fn a_channel_over_repaired_cells_reads_the_moved_correlation() {
+        let (cells, channels) = over_correlated();
+        let s = folded_sampler(&[("X", cells, channels)], 1);
+        let r = &s.repairs(0)[0];
+        assert_eq!(r.channels[0].kind, "a");
+        assert!(r.channels[0].change().abs() < 1e-12, "{:?}", r.channels[0]);
+        let change = r.channels[1].change();
+        assert!(
+            (change - over_correlated_change()).abs() < 1e-9,
+            "{change} against {}",
+            over_correlated_change()
+        );
+        assert!(change < 0.0);
     }
 
     /// A repaired channel with no rate, or on a spectrum the schedule never
     /// irradiates with, cannot move the result, so it stays in the record but
     /// not in the headline, and a repair with no such channel is not a gap.
     #[test]
-    fn the_worst_inflation_counts_only_channels_a_draw_can_move() {
-        let c = cov(&["a", "b"], vec![0.04, 0.01, 0.01, 0.0]);
-        let s = rate_sampler(&BTreeMap::from([("X".to_string(), c)]));
+    fn the_worst_change_counts_only_channels_a_draw_can_move() {
+        let (cells, channels) = over_correlated();
+        let s = folded_sampler(&[("X", cells, channels)], 1);
 
         let mut no_rate = SigmaReport::default();
         no_rate.add(
             0,
             &s,
-            &unit_rates("X", &[("a", 1.0), ("b", 0.0)]),
+            &unit_rates("X", &[("a", 0.0), ("sum", 1.0)]),
             1.0,
             &Default::default(),
             &everyone(),
         );
         assert_eq!(no_rate.repairs.len(), 1);
         assert_eq!(no_rate.repaired, BTreeSet::from(["X".to_string()]));
-        assert!(no_rate.worst_sigma_inflation.is_finite());
-        assert!(no_rate.worst_sigma_inflation > 0.0);
+        assert!(
+            (no_rate.worst_sigma_change - over_correlated_change().abs()).abs() < 1e-9,
+            "{}",
+            no_rate.worst_sigma_change
+        );
+
+        // Only the channel the repair did not move has a rate.
+        let mut unmoved = SigmaReport::default();
+        unmoved.add(
+            0,
+            &s,
+            &unit_rates("X", &[("a", 1.0), ("sum", 0.0)]),
+            1.0,
+            &Default::default(),
+            &everyone(),
+        );
+        assert!(unmoved.worst_sigma_change < 1e-12);
 
         let mut no_fluence = SigmaReport::default();
         no_fluence.add(
             0,
             &s,
-            &unit_rates("X", &[("a", 1.0), ("b", 1.0)]),
+            &unit_rates("X", &[("a", 1.0), ("sum", 1.0)]),
             0.0,
             &Default::default(),
             &everyone(),
         );
         assert_eq!(no_fluence.repairs.len(), 1);
         assert!(no_fluence.repaired.is_empty());
-        assert_eq!(no_fluence.worst_sigma_inflation, 0.0);
+        assert_eq!(no_fluence.worst_sigma_change, 0.0);
     }
 
     /// A nuclide repaired on two spectra is one repaired nuclide with a
@@ -2413,27 +2770,20 @@ mod tests {
     /// Each spectrum is weighted by the fluence the schedule gives it, so a
     /// short, weak spectrum barely moves the headline.
     #[test]
-    fn the_rate_weighted_inflation_weighs_spectra_by_fluence() {
-        let repaired = Sampler::from_rate_covariance(
-            &BTreeMap::from([(
-                "X".to_string(),
-                cov(&["a", "b"], vec![0.01, 0.05, 0.05, 0.01]),
-            )]),
-            2,
-        );
-        let clean = rate_sampler(&BTreeMap::from([(
-            "X".to_string(),
-            cov(&["a", "b"], vec![0.01, 0.0, 0.0, 0.01]),
-        )]));
-        let r = unit_rates("X", &[("a", 1.0), ("b", 1.0)]);
+    fn the_rate_weighted_change_weighs_spectra_by_fluence() {
+        let (cells, channels) = over_correlated();
+        let repaired = folded_sampler(&[("X", cells, channels)], 2);
+        let clean = folded_sampler(&[("X", vec![0.01, 0.0, 0.0, 0.01], channels)], 1);
+        let r = unit_rates("X", &[("a", 1.0), ("sum", 1.0)]);
         let densities = HashMap::from([("X".to_string(), 1.0)]);
         let mut report = SigmaReport::default();
         report.add(0, &clean, &r, 1.0e3, &densities, &everyone());
         report.add(1, &repaired, &r, 1.0, &densities, &everyone());
 
-        // 2e3 channel-weights at no inflation against 2 at sqrt(3) - 1.
-        let want = 2.0 * (3.0_f64.sqrt() - 1.0) / 2.002e3;
-        let got = report.rate_weighted_sigma_inflation().unwrap();
+        // 2e3 channel-weights at no change and one at no change, against one
+        // at the two-cell channel's.
+        let want = over_correlated_change().abs() / 2.002e3;
+        let got = report.rate_weighted_sigma_change().unwrap();
         assert!((got - want).abs() < 1e-12, "{got} against {want}");
     }
 
@@ -2508,8 +2858,8 @@ mod tests {
 
     /// A huge variance on one channel cannot hide a real repair on the
     /// others: the test is on the correlation matrix, not against the largest
-    /// eigenvalue of the covariance, which here is 1e17 against a clipped
-    /// -0.04.
+    /// eigenvalue of the covariance, and the repair is of the coupled pair
+    /// alone, which leaves the wide channel exactly as stated.
     #[test]
     fn a_huge_channel_does_not_hide_a_repair_beside_it() {
         let c = cov(
@@ -2524,11 +2874,11 @@ mod tests {
         let repairs = s.repairs(0);
         assert_eq!(repairs.len(), 1);
         let r = &repairs[0];
-        assert!((r.lambda_min + 0.04).abs() < 1e-12, "{}", r.lambda_min);
-        assert_eq!(r.lambda_max, 1.0e17);
+        assert!((r.field.lambda_min + 4.0).abs() < 1e-12, "{:?}", r.field);
+        assert_eq!(r.field.cells, 2);
         assert_eq!(r.channels[0].sampled, 1.0e17_f64.sqrt());
         for ch in &r.channels[1..] {
-            assert!((ch.sampled - 0.03_f64.sqrt()).abs() < 1e-12, "{ch:?}");
+            assert!((ch.sampled - 0.1).abs() < 1e-15, "{ch:?}");
         }
 
         let mut report = SigmaReport::default();
@@ -2540,20 +2890,18 @@ mod tests {
             &Default::default(),
             &everyone(),
         );
-        let want = 0.03_f64.sqrt() / 0.1 - 1.0;
         assert!(
-            (report.worst_sigma_inflation - want).abs() < 1e-12,
+            report.worst_sigma_change < 1e-14,
             "{}",
-            report.worst_sigma_inflation
+            report.worst_sigma_change
         );
     }
 
-    /// Coupled to the repaired pair, the wide channel still leaves the
-    /// recorded eigenvalue exact rather than round-off of `eps · 1e17`, about
-    /// 22. The negative eigenvalue is the one of the pair's block less the
-    /// wide channel's share, `x^2 / w` on `a`, to a relative 1e-19.
+    /// Coupled to the repaired pair, the wide channel is in the repaired
+    /// block, and still keeps its sigma: the repair is on the correlation
+    /// matrix, where it is one more unit diagonal.
     #[test]
-    fn a_huge_channel_coupled_to_a_repair_keeps_its_eigenvalue() {
+    fn a_huge_channel_coupled_to_a_repair_keeps_its_sigma() {
         let w = 1.0e17_f64;
         let x = 0.5 * w.sqrt() * 0.1;
         let c = cov(
@@ -2568,11 +2916,13 @@ mod tests {
         let repairs = s.repairs(0);
         assert_eq!(repairs.len(), 1);
         let r = &repairs[0];
-        // [[0.01 - x^2 / w, 0.05], [0.05, 0.01]] = [[0.0075, 0.05], [0.05, 0.01]].
-        let want = 0.00875 - (0.00125_f64.powi(2) + 0.05_f64.powi(2)).sqrt();
-        assert!((r.lambda_min - want).abs() < 1e-12, "{}", r.lambda_min);
-        for ch in &r.channels[1..] {
-            assert!(ch.sampled > 0.1, "{ch:?}");
+        // R = [[1, 0.5, 0], [0.5, 1, 5], [0, 5, 1]], eigenvalues 1 and
+        // 1 ± sqrt(25.25).
+        let want = 1.0 - 25.25_f64.sqrt();
+        assert!((r.field.lambda_min - want).abs() < 1e-12, "{:?}", r.field);
+        assert_eq!(r.field.cells, 3);
+        for (ch, sigma) in r.channels.iter().zip([w.sqrt(), 0.1, 0.1]) {
+            assert!((ch.sampled / sigma - 1.0).abs() < 1e-9, "{ch:?}");
         }
     }
 
@@ -2628,65 +2978,67 @@ mod tests {
 
     /// A wide channel with a small rate beside a repair on the channels that
     /// carry the reactions does not drown the repair out: the weight is on
-    /// each channel's inflation, not on its sigma.
+    /// each channel's change, not on its sigma.
     #[test]
     fn a_wide_channel_does_not_mask_a_repair_on_the_dominant_ones() {
-        let s = rate_sampler(&BTreeMap::from([
-            (
-                "X".to_string(),
-                cov(&["a", "b"], vec![0.01, 0.05, 0.05, 0.01]),
-            ),
-            ("Y".to_string(), cov(&["a"], vec![1.0e6])),
-        ]));
+        let (cells, _) = over_correlated();
+        let s = folded_sampler(
+            &[
+                ("X", cells, &[("sum", &[1.0, 1.0])]),
+                ("Y", vec![1.0e6], &[("a", &[1.0])]),
+            ],
+            1,
+        );
         let rates: ReactionRates = HashMap::from([
-            (
-                "X".to_string(),
-                HashMap::from([("a".to_string(), 1.0), ("b".to_string(), 1.0)]),
-            ),
+            ("X".to_string(), HashMap::from([("sum".to_string(), 1.0)])),
             ("Y".to_string(), HashMap::from([("a".to_string(), 0.01)])),
         ]);
         let densities = HashMap::from([("X".to_string(), 1.0), ("Y".to_string(), 1.0)]);
         let mut report = SigmaReport::default();
         report.add(0, &s, &rates, 1.0, &densities, &everyone());
 
-        // 99.5% of the weight on channels widened by sqrt(3) - 1.
-        let want = 2.0 * (3.0_f64.sqrt() - 1.0) / 2.01;
-        let got = report.rate_weighted_sigma_inflation().unwrap();
+        // 99% of the weight on the channel the repair moved.
+        let want = over_correlated_change().abs() / 1.01;
+        let got = report.rate_weighted_sigma_change().unwrap();
         assert!((got - want).abs() < 1e-12, "{got} against {want}");
-        assert!(got > 0.7);
+        assert!(got > 0.1);
     }
 
     /// A weighted channel the evaluation gives no sigma but the repair gives
     /// a spread makes the weighted headline infinite rather than ignored.
     #[test]
-    fn a_spread_from_nothing_makes_the_weighted_inflation_infinite() {
-        let s = rate_sampler(&BTreeMap::from([(
-            "X".to_string(),
-            cov(&["a", "b"], vec![0.01, 0.05, 0.05, 0.0]),
-        )]));
-        let rates = unit_rates("X", &[("a", 1.0), ("b", 1.0)]);
+    fn a_spread_from_nothing_makes_the_weighted_change_infinite() {
+        // Sigmas 0.1 and 0.2 at a stated correlation of -1.5: the two-cell
+        // channel folds to a negative variance, and the repaired correlation
+        // of -1 leaves it a spread.
+        let s = folded_sampler(
+            &[("X", vec![0.01, -0.03, -0.03, 0.04], &[("sum", &[1.0, 1.0])])],
+            1,
+        );
+        let rates = unit_rates("X", &[("sum", 1.0)]);
         let densities = HashMap::from([("X".to_string(), 1.0)]);
         let mut report = SigmaReport::default();
         report.add(0, &s, &rates, 1.0, &densities, &everyone());
-        assert!(report.repairs[0].channels[1].sampled > 0.0);
-        assert_eq!(report.rate_weighted_sigma_inflation(), Some(f64::INFINITY));
+        let ch = &report.repairs[0].channels[0];
+        assert_eq!(ch.evaluated_sigma(), None);
+        assert!(ch.sampled > 0.0, "{ch:?}");
+        assert_eq!(report.worst_sigma_change, f64::INFINITY);
+        assert_eq!(report.rate_weighted_sigma_change(), Some(f64::INFINITY));
     }
 
     /// The rate-weighted headline weighs each channel by its rate times its
     /// parent's density, over every sampled channel.
     #[test]
-    fn the_rate_weighted_inflation_counts_every_sampled_channel() {
-        let s = rate_sampler(&BTreeMap::from([
-            (
-                "X".to_string(),
-                cov(&["a", "b"], vec![0.01, 0.05, 0.05, 0.01]),
-            ),
-            ("Y".to_string(), cov(&["a"], vec![0.04])),
-        ]));
+    fn the_rate_weighted_change_counts_every_sampled_channel() {
+        let (cells, channels) = over_correlated();
+        let s = folded_sampler(
+            &[("X", cells, channels), ("Y", vec![0.04], &[("a", &[1.0])])],
+            1,
+        );
         let rates: ReactionRates = HashMap::from([
             (
                 "X".to_string(),
-                HashMap::from([("a".to_string(), 1.0), ("b".to_string(), 1.0)]),
+                HashMap::from([("a".to_string(), 1.0), ("sum".to_string(), 1.0)]),
             ),
             ("Y".to_string(), HashMap::from([("a".to_string(), 2.0)])),
         ]);
@@ -2694,12 +3046,12 @@ mod tests {
         let mut report = SigmaReport::default();
         report.add(0, &s, &rates, 1.0, &densities, &everyone());
 
-        // X: two channels at 0.1 evaluated, sqrt(0.03) sampled, weight 1 each.
-        // Y: one channel at 0.2 and not widened, weight 2 * 0.5.
-        let want = 2.0 * (3.0_f64.sqrt() - 1.0) / 3.0;
-        let got = report.rate_weighted_sigma_inflation().unwrap();
+        // X: a one-cell channel unmoved and the two-cell one moved, weight 1
+        // each. Y: one channel unmoved, weight 2 * 0.5.
+        let want = over_correlated_change().abs() / 3.0;
+        let got = report.rate_weighted_sigma_change().unwrap();
         assert!((got - want).abs() < 1e-12, "{got} against {want}");
-        assert!((report.worst_sigma_inflation - (0.03_f64.sqrt() / 0.1 - 1.0)).abs() < 1e-12);
+        assert!((report.worst_sigma_change - over_correlated_change().abs()).abs() < 1e-9);
         assert_eq!(report.repairs.len(), 1);
 
         // No repair anywhere reads as exactly zero, not as round-off.
@@ -2709,8 +3061,8 @@ mod tests {
             cov(&["a"], vec![0.04]),
         )]));
         clean.add(0, &y, &rates, 1.0, &densities, &everyone());
-        assert_eq!(clean.rate_weighted_sigma_inflation(), Some(0.0));
-        assert_eq!(clean.worst_sigma_inflation, 0.0);
+        assert_eq!(clean.rate_weighted_sigma_change(), Some(0.0));
+        assert_eq!(clean.worst_sigma_change, 0.0);
     }
 
     /// Channels evaluated at a relative sigma of one or ten and above are named,
@@ -2760,9 +3112,8 @@ mod tests {
         );
         assert!((report.sigma_at_least_ten[&key("b")] - 20.0).abs() < 1e-12);
 
-        // Evaluated at 0.9 and sampled at sqrt(1.405) after the repair: the
-        // list is of what the evaluation states, and the widening is in the
-        // repair record instead.
+        // Evaluated at 0.9 and repaired, keeping the sigma: the list is of
+        // what the evaluation states, and the repair is in its own record.
         let y = rate_sampler(&BTreeMap::from([(
             "Y".to_string(),
             cov(&["a", "b"], vec![0.81, 2.0, 2.0, 0.81]),
@@ -2776,7 +3127,8 @@ mod tests {
             &Default::default(),
             &everyone(),
         );
-        assert!(repaired.repairs[0].channels[0].sampled > 1.0);
+        let sampled = repaired.repairs[0].channels[0].sampled;
+        assert!((sampled - 0.9).abs() < 1e-12, "{sampled}");
         assert!(repaired.sigma_at_least_one.is_empty());
     }
 
