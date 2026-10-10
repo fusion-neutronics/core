@@ -140,7 +140,7 @@ fn spread(values: &[f64]) -> (Option<f64>, Option<f64>) {
 /// Assemble one [`Estimate`] from a nominal value and one value per replica,
 /// and the same replicas evaluated with the photon intensities fully
 /// correlated, where that end differs.
-fn estimate(nominal: f64, values: &[f64], correlated: Option<&[f64]>) -> Estimate {
+pub(crate) fn estimate(nominal: f64, values: &[f64], correlated: Option<&[f64]>) -> Estimate {
     let (mean, std_dev) = spread(values);
     Estimate {
         nominal,

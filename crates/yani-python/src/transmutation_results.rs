@@ -5,7 +5,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use yani_transmute::{Estimate, LineEstimate, TransmutationResults};
 
 use crate::material::PyMaterial;
@@ -839,6 +839,89 @@ impl PyTransmutationResults {
             .photon_spectrum_uncertainty(material_id, step, &chain)
             .map_err(PyValueError::new_err)?
             .map(|lines| lines.into_iter().map(PyLineEstimate::from).collect()))
+    }
+
+    /// Hydrogen and helium gas production in appm, at every time point.
+    ///
+    /// appm is gas atoms per million **initial** atoms of the material, so the
+    /// denominator stays fixed as the material transmutes. The gas is what the
+    /// inventory already holds: H1, H2, H3, He3 and He4 emitted by reactions
+    /// and by decays, so tritium decaying to He3 during a cooldown shows up as
+    /// He3 there.
+    ///
+    ///     >>> gas = results.get_gas_production(material_id=mid)
+    ///     >>> gas["He4"][-1], gas["H"][-1]
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     produced (bool): Subtract the gas the material started with (water,
+    ///         polymers, lithium compounds), the default, so index 0 is zero
+    ///         and each value is what the schedule made by then. A nuclide
+    ///         consumed faster than it is made reads negative, as H1 in water
+    ///         can through H1(n,gamma)H2. ``False`` gives the gas present,
+    ///         starting inventory included.
+    ///
+    /// Returns:
+    ///     dict[str, list[float]] | None: appm keyed ``"H1"``, ``"H2"``,
+    ///     ``"H3"``, ``"He3"``, ``"He4"`` and the totals ``"H"`` (H1 + H2 + H3)
+    ///     and ``"He"`` (He3 + He4). Each list is parallel to ``times``, as
+    ///     ``get_nuclide_evolution`` is: index 0 is the initial composition,
+    ///     index i is after step i. None if the material is not in the results.
+    ///
+    /// Raises:
+    ///     ValueError: if the chain the solve used has no entry for one of the
+    ///         five gas nuclides. The solve follows an emitted particle only
+    ///         when the chain has it, so that gas was dropped and a zero would
+    ///         be wrong rather than measured. The message names the missing
+    ///         nuclides.
+    #[pyo3(signature = (material_id, *, produced=true))]
+    fn get_gas_production(
+        &self,
+        material_id: u32,
+        produced: bool,
+    ) -> PyResult<Option<BTreeMap<String, Vec<f64>>>> {
+        self.inner
+            .gas_production(material_id, produced)
+            .map_err(PyValueError::new_err)
+    }
+
+    /// Gas production in appm at one timestep, with the nuclear-data spread
+    /// on it.
+    ///
+    /// See ``get_gas_production`` for the quantity. Evaluated on every
+    /// replica's inventory against the one initial inventory, which is an
+    /// input and the same in each, and the totals ``"H"`` and ``"He"`` are
+    /// summed within a replica before the spread is taken, as
+    /// ``get_activity_uncertainty`` does.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     step: Timestep index (0 = initial composition, which has no spread).
+    ///     produced (bool): As in ``get_gas_production``.
+    ///
+    /// Returns:
+    ///     dict[str, Estimate] | None: keyed as ``get_gas_production``; None if
+    ///     the transmutation was run without ``data_uncertainty``.
+    ///
+    /// Raises:
+    ///     ValueError: as ``get_gas_production``, or if there is no such step.
+    #[pyo3(signature = (material_id, step, *, produced=true))]
+    fn get_gas_production_uncertainty(
+        &self,
+        material_id: u32,
+        step: usize,
+        produced: bool,
+    ) -> PyResult<Option<BTreeMap<String, PyEstimate>>> {
+        Ok(self
+            .inner
+            .gas_production_uncertainty(material_id, step, produced)
+            .map_err(PyValueError::new_err)?
+            .map(|by_key| {
+                by_key
+                    .into_iter()
+                    .map(|(key, estimate)| (key, PyEstimate::from(estimate)))
+                    .collect()
+            }))
     }
 
     /// What the nuclear-data uncertainty covered for one material, and what it
