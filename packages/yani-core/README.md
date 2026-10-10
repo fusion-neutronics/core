@@ -51,12 +51,14 @@ stack; pick `yamc` when the spectrum should come from a transport solve.
   predictor-corrector.
 - Uncertainty is by resampling: pass `data_uncertainty=yani.DataUncertainty()`
   to `transmute` for a standard deviation on inventories, activity, decay heat,
-  dose and gas production. It perturbs MF=33 cross sections, half-lives, decay
-  energies, two-mode decay branching and a supplied flux spectrum's stated
-  error. Other inputs (MF=32 resonance covariance, self-shielding, photon
-  line intensities, the material composition) are held at nominal, and
-  `get_data_uncertainty_info` lists every one it held. There are no
-  first-order sensitivity coefficients.
+  dose and gas production. It perturbs MF=33 cross sections, MF=32 resonance
+  parameters (drawn per replica and the resonance cross sections rebuilt from
+  them, where the library publishes them, and otherwise their first-order
+  group covariance), half-lives, decay energies, two-mode decay branching and
+  a supplied flux spectrum's stated error. Other inputs (the self-shielding
+  correction, photon line intensities, the material composition) are held at
+  nominal, and `get_data_uncertainty_info` lists every one it held. There are
+  no first-order sensitivity coefficients.
 - Pathways are reported per product (`get_production_routes`), but there is no
   automatic pathway search across the whole inventory.
 - No ingestion or inhalation dose.

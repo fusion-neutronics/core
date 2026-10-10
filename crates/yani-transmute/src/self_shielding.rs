@@ -279,6 +279,11 @@ pub struct FluxShape {
 }
 
 impl FluxShape {
+    /// The shape's own points, `(energy descending, phi)`.
+    pub(crate) fn points(&self) -> (&[f64], &[f64]) {
+        (&self.energy, &self.phi)
+    }
+
     /// Flux per unit lethargy at `e`, by linear interpolation in log energy.
     pub(crate) fn at(&self, e: f64) -> f64 {
         if self.energy.is_empty() {

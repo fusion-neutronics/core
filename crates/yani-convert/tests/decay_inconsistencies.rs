@@ -39,6 +39,7 @@ fn inconsistent_records_are_listed_by_kind() {
             q_values: &endf::chain::QValues::new(),
             decay_fill: &[],
             decay_fill_library: "",
+            anything: &Default::default(),
         },
         &[],
         None,

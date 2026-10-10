@@ -25,7 +25,8 @@ use endf::REACTIONS;
 ///
 /// `endf::chain` emits `ReactionInfo::name` for a neutron-induced path, plus
 /// the bare `"fission"` for a fissionable nuclide (see the `FISSION_MTS` arm of
-/// `Chain::from_endf`). Those two sources are the whole vocabulary.
+/// `Chain::from_endf`), and this crate adds MT=5's `(n,X)` rows itself
+/// (`yani_convert::anything`). Those three sources are the whole vocabulary.
 fn writer_vocabulary() -> Vec<&'static str> {
     // Asserted rather than assumed: if `REACTIONS` ever gains a "fission" entry
     // of its own, this list would quietly grow a duplicate and the reason for
@@ -38,7 +39,19 @@ fn writer_vocabulary() -> Vec<&'static str> {
         .iter()
         .map(|r| r.name)
         .chain(std::iter::once("fission"))
+        .chain(std::iter::once(yani_convert::anything::ANYTHING))
         .collect()
+}
+
+/// The converter cannot link `yani`, so it names MT=5's kind itself; the two
+/// spellings are one name, and it is MT=5 on the reader's side.
+#[test]
+fn the_anything_kind_is_the_readers_mt5() {
+    assert_eq!(yani_convert::anything::ANYTHING, yani::reactions::ANYTHING);
+    assert_eq!(
+        yani::reaction_type_to_mt(yani_convert::anything::ANYTHING),
+        Some(5)
+    );
 }
 
 /// Every name the writer can emit must resolve to an MT on the reader's side.

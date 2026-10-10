@@ -980,6 +980,36 @@ pub fn reactions() -> Schema {
 }
 
 /// `reactions/reactions.arrow`
+///
+/// One row per channel: a parent, a reaction kind, the product it leaves
+/// (null for fission) and the fraction of the kind's rate that goes there.
+///
+/// The `(n,X)` rows are MT=5, `(n,anything)`, and differ in two ways. Their
+/// split depends on incident energy, so `branching_ratio` is NaN, not a
+/// fraction: the solver folds the split from `energy` and `multiplicity`
+/// against each spectrum. And one parent has several, one per product of the
+/// evaluation's MF=6 MT=5:
+///
+/// * a residual nucleus, named with its isomeric state from MF=6's LIP and,
+///   where the decay data has no such nuclide, the stand-in every other
+///   reaction's product gets;
+/// * a light particle, H1, H2, H3, He3 or He4;
+/// * where the evaluation gives no residual and what it does give does not
+///   carry the target's charge, one row with a null `target` and null
+///   `energy`, `multiplicity`, `lip` and `share`, which says the residual is
+///   not given, so a reader reports that part of MT=5 as unmodelled rather
+///   than mistaking the light particles for the whole of it.
+///
+/// `energy` (eV, ascending) and `multiplicity` (per MT=5 reaction) are the
+/// tape's MF=6 yield, linearized so lin-lin interpolation reproduces the
+/// declared law. `lip` is the target's isomeric state (0 for a ground state
+/// and for a light particle). `share` says how the multiplicity is folded:
+/// true for a residual of a list that leaves one residual per reaction, whose
+/// multiplicities are shares of MT=5 normalised pointwise, false for a light
+/// particle and for every product of a list that does not (a light target
+/// breaking up into light particles, Li6 to Be9), each a multiplicity times
+/// MT=5. All five are null on every other row, and nullable and optional, so a
+/// file written before them reads unchanged.
 pub fn reactions_reactions() -> Schema {
     Schema::new(vec![
         utf8("nuclide", false),
@@ -987,6 +1017,10 @@ pub fn reactions_reactions() -> Schema {
         utf8("target", true),
         f64("Q", false),
         f64("branching_ratio", false),
+        f64s("energy", true),
+        f64s("multiplicity", true),
+        i32("lip", true),
+        boolean("share", true),
     ])
     .with_metadata(meta([
         ("filetype", "transmutation-reactions"),
