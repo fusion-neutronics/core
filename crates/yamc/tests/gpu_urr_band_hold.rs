@@ -116,7 +116,7 @@ fn build(n_mats: usize) -> Option<(Model, Arc<Tally>, TransportSettings)> {
         .filters
         .push(Filter::Cell(CellFilter::from_id(n_mats as u32)));
     tally.scores = vec![Score::Flux(FluxScore)];
-    tally.initialize_batches(1);
+    tally.reset_accumulation();
     let tally = Arc::new(tally);
 
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&tally)]);

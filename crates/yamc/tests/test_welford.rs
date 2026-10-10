@@ -79,7 +79,7 @@ fn run_li6_sim(seed: u64, particles: usize, batches: usize) -> Arc<Tally> {
         105,
     )))];
     tally.name = Some("welford_tally".to_string());
-    tally.initialize_batches(batches);
+    tally.reset_accumulation();
 
     let mut model = Model::new(geometry, vec![source], vec![Arc::new(tally)]);
     model
@@ -179,10 +179,10 @@ fn std_dev_within_statistical_tolerance_of_default() {
     let welford_std = tally.get_std_dev()[0];
     let default_std = 0.007761421038803751_f64;
     // Standard error of the std_dev estimator on a sample of size n:
-    // approximately std_dev / sqrt(2(n-1)). The default uses
-    // n=10 batches; that's the looser bound.
-    let n_batches: f64 = 10.0;
-    let std_err_of_std = default_std / (2.0_f64 * (n_batches - 1.0)).sqrt();
+    // approximately std_dev / sqrt(2(n-1)). The reference value was
+    // estimated from n=10 per-batch samples; that's the looser bound.
+    let n_ref_samples: f64 = 10.0;
+    let std_err_of_std = default_std / (2.0_f64 * (n_ref_samples - 1.0)).sqrt();
     let diff = (welford_std - default_std).abs();
     let n_sigma = diff / std_err_of_std;
     assert!(

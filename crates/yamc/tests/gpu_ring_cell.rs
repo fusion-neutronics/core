@@ -143,7 +143,7 @@ fn ring_flux_tally() -> Arc<Tally> {
     )));
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(10);
+    t.reset_accumulation();
     Arc::new(t)
 }
 

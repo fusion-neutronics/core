@@ -51,7 +51,6 @@ use yamc_tallies::tally::Tally;
 use yamc_tallies::{Estimator, MaterialFilter};
 
 const N_PARTICLES: usize = 40_000;
-const N_BATCHES: usize = 8;
 const SEED: u64 = 8675309;
 
 /// Material ids the tallies filter on. Cells 1 and 3 hold `MAT_A`, cells 2
@@ -135,7 +134,7 @@ fn flux_tally(name: &str, filters: Vec<Filter>) -> Arc<Tally> {
     t.scores = vec!["flux".parse::<Score>().unwrap()];
     t.estimator = Estimator::TrackLength;
     t.name = Some(name.to_string());
-    t.initialize_batches(N_BATCHES);
+    t.reset_accumulation();
     Arc::new(t)
 }
 

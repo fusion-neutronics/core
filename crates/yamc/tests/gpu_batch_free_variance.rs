@@ -179,7 +179,7 @@ fn fine_spectrum_bins() -> Vec<f64> {
         .collect()
 }
 
-fn spectral_tally(cell_id: u32, n_batches: usize) -> Arc<Tally> {
+fn spectral_tally(cell_id: u32) -> Arc<Tally> {
     let mut t = Tally::new();
     t.filters.push(Filter::Cell(CellFilter::from_id(cell_id)));
     t.filters.push(Filter::ParticleType(ParticleTypeFilter::new(
@@ -189,7 +189,7 @@ fn spectral_tally(cell_id: u32, n_batches: usize) -> Arc<Tally> {
         .push(Filter::Energy(EnergyFilter::new(fine_spectrum_bins())));
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(n_batches);
+    t.reset_accumulation();
     Arc::new(t)
 }
 
@@ -197,13 +197,13 @@ fn spectral_tally(cell_id: u32, n_batches: usize) -> Arc<Tally> {
 /// scale is 1.0, so it exercises the dedicated KERMA `sum_sq` scale on the
 /// per-history path (the generic `s^2/2^40` form would underflow its
 /// eV-magnitude squares and collapse the variance to ~0).
-fn heating_tally(cell_id: u32, n_batches: usize) -> Arc<Tally> {
+fn heating_tally(cell_id: u32) -> Arc<Tally> {
     use yamc_tallies::score::{HeatingScore, Score};
     let mut t = Tally::new();
     t.filters.push(Filter::Cell(CellFilter::from_id(cell_id)));
     t.scores = vec![Score::Heating(HeatingScore)];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(n_batches);
+    t.reset_accumulation();
     Arc::new(t)
 }
 
@@ -258,12 +258,12 @@ fn total_particles_invariance() {
 
     // Run N histories.
     let (g1, c1) = nuclide_sphere(nuclide, 2.0);
-    let (mut m1, s1) = build_model(g1, vec![spectral_tally(c1, 1)], n);
+    let (mut m1, s1) = build_model(g1, vec![spectral_tally(c1)], n);
     let r1 = run_gpu_retry(&mut m1, &s1).expect("GPU run N");
 
     // Run 2N histories (same fixed chunk, same seed).
     let (g2, c2) = nuclide_sphere(nuclide, 2.0);
-    let (mut m2, s2) = build_model(g2, vec![spectral_tally(c2, 1)], 2 * n);
+    let (mut m2, s2) = build_model(g2, vec![spectral_tally(c2)], 2 * n);
     let r2 = run_gpu_retry(&mut m2, &s2).expect("GPU run 2N");
 
     assert_eq!(r1.final_energies.len(), n);
@@ -303,11 +303,11 @@ fn total_particles_invariance_multi_chunk() {
     let _held = GpuTest::with_chunk(chunk);
 
     let (g1, c1) = nuclide_sphere(nuclide, 2.0);
-    let (mut m1, s1) = build_model(g1, vec![spectral_tally(c1, 1)], n);
+    let (mut m1, s1) = build_model(g1, vec![spectral_tally(c1)], n);
     let r1 = run_gpu_retry(&mut m1, &s1);
 
     let (g2, c2) = nuclide_sphere(nuclide, 2.0);
-    let (mut m2, s2) = build_model(g2, vec![spectral_tally(c2, 1)], 2 * n);
+    let (mut m2, s2) = build_model(g2, vec![spectral_tally(c2)], 2 * n);
     let r2 = run_gpu_retry(&mut m2, &s2);
 
     let r1 = r1.expect("GPU run N");
@@ -351,8 +351,8 @@ fn gpu_cpu_per_history_std_dev_parity() {
     // spectrum (exercises the spill) plus a cell-only heating tally (exercises
     // the dedicated KERMA sum_sq scale).
     let (gc, cc) = nuclide_sphere(nuclide, density);
-    let cpu_t = spectral_tally(cc, 10);
-    let cpu_h = heating_tally(cc, 10);
+    let cpu_t = spectral_tally(cc);
+    let cpu_h = heating_tally(cc);
     let (mut cpu_model, csettings) =
         build_model(gc, vec![Arc::clone(&cpu_t), Arc::clone(&cpu_h)], total);
     cpu_model
@@ -365,8 +365,8 @@ fn gpu_cpu_per_history_std_dev_parity() {
 
     // GPU (batch-free per-history sum + sum_sq).
     let (gg, cg) = nuclide_sphere(nuclide, density);
-    let gpu_t = spectral_tally(cg, 10);
-    let gpu_h = heating_tally(cg, 10);
+    let gpu_t = spectral_tally(cg);
+    let gpu_h = heating_tally(cg);
     let (mut gpu_model, gsettings) =
         build_model(gg, vec![Arc::clone(&gpu_t), Arc::clone(&gpu_h)], total);
     run_gpu_retry(&mut gpu_model, &gsettings).expect("GPU run failed");

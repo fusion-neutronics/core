@@ -97,7 +97,7 @@ fn build(
             let mut t = Tally::new();
             t.filters.push(Filter::Cell(CellFilter::from_id(1)));
             t.scores = vec![sc.clone()];
-            t.initialize_batches(1);
+            t.reset_accumulation();
             Arc::new(t)
         })
         .collect();

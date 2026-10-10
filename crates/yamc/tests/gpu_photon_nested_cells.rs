@@ -145,7 +145,7 @@ fn build(det_id: u32) -> (Model, Arc<Tally>, TransportSettings) {
         ParticleType::Photon,
     )));
     t.scores = vec!["flux".parse().unwrap()];
-    t.initialize_batches(10);
+    t.reset_accumulation();
     let tally = Arc::new(t);
     let mut model = Model::new(geo, vec![photon_source()], vec![Arc::clone(&tally)]);
     model.verbose = Verbose::silent();

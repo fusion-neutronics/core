@@ -134,7 +134,7 @@ impl PyTallyResult {
         self.inner.variance()
     }
 
-    /// Total count per bin: `mean * particles_per_chunk * n_batches`.
+    /// Total score per bin over all histories: `mean * n_histories`.
     #[getter]
     pub fn total_count(&self) -> Vec<u64> {
         self.inner.total_count.clone()
@@ -150,18 +150,6 @@ impl PyTallyResult {
     #[getter]
     pub fn dim_labels(&self) -> Vec<String> {
         self.inner.dim_labels.clone()
-    }
-
-    /// Number of batches accumulated.
-    #[getter]
-    pub fn n_batches(&self) -> u32 {
-        self.inner.n_batches
-    }
-
-    /// Source particles per batch.
-    #[getter]
-    pub fn particles_per_chunk(&self) -> u32 {
-        self.inner.particles_per_chunk
     }
 
     /// Covariance of the bin means, a ``num_bins x num_bins`` nested list in
@@ -185,8 +173,7 @@ impl PyTallyResult {
         self.inner.m2.clone()
     }
 
-    /// Exact total source-history count behind this tally's statistics
-    /// (u64; unlike ``n_batches`` it does not saturate).
+    /// Exact total source-history count behind this tally's statistics.
     #[getter]
     pub fn n_histories(&self) -> u64 {
         self.inner.n_histories
@@ -788,18 +775,6 @@ impl PySimulationResults {
             })
             .collect();
         PyList::new(py, keys)
-    }
-
-    /// Number of batches accumulated.
-    #[getter]
-    fn n_batches(&self) -> u32 {
-        self.inner.n_batches
-    }
-
-    /// Source particles per batch.
-    #[getter]
-    fn particles_per_chunk(&self) -> u32 {
-        self.inner.particles_per_chunk
     }
 
     /// Wall-clock elapsed seconds for the simulate call.

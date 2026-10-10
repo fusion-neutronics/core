@@ -73,7 +73,7 @@ fn energy_binned_tally(cell_id: u32) -> Arc<Tally> {
         1.0e-5, 0.5, 1.0e2, 1.0e4, 1.0e6, 2.0e7,
     ])));
     tally.scores = vec![Score::Flux(FluxScore)];
-    tally.initialize_batches(N_BATCHES);
+    tally.reset_accumulation();
     Arc::new(tally)
 }
 

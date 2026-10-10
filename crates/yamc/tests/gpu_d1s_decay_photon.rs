@@ -112,7 +112,6 @@ fn d1s_fe_sphere(
     seed: u64,
     radius: f64,
     n_particles: usize,
-    n_batches: usize,
 ) -> (Model, Arc<Tally>, Arc<Tally>, TransportSettings) {
     let (geometry, source, cell_id) = fe_sphere_geo_source(radius);
 
@@ -126,7 +125,7 @@ fn d1s_fe_sphere(
             ParticleType::Neutron,
         )));
     neutron_tally.scores = vec![Score::Flux(FluxScore)];
-    neutron_tally.initialize_batches(n_batches);
+    neutron_tally.reset_accumulation();
     let neutron_tally = Arc::new(neutron_tally);
 
     // Photon flux tally with a parent_nuclides filter (Mn56, the Fe56(n,p)
@@ -152,7 +151,7 @@ fn d1s_fe_sphere(
             "Mn56".to_string(),
         ])));
     photon_tally.scores = vec![Score::Flux(FluxScore)];
-    photon_tally.initialize_batches(n_batches);
+    photon_tally.reset_accumulation();
     let photon_tally = Arc::new(photon_tally);
 
     let tallies: Vec<Arc<Tally>> = vec![Arc::clone(&neutron_tally), Arc::clone(&photon_tally)];
@@ -163,7 +162,7 @@ fn d1s_fe_sphere(
     model.use_decay_photons = true;
     model.photon_cutoff_energy = 1000.0;
     let settings = TransportSettings {
-        total_particles: Some(n_particles * n_batches),
+        total_particles: Some(n_particles),
         seed,
         ..Default::default()
     };
@@ -175,7 +174,6 @@ fn neutron_only_fe_sphere(
     seed: u64,
     radius: f64,
     n_particles: usize,
-    n_batches: usize,
 ) -> (Model, Arc<Tally>, TransportSettings) {
     let (geometry, source, cell_id) = fe_sphere_geo_source(radius);
     let mut neutron_tally = Tally::new();
@@ -188,12 +186,12 @@ fn neutron_only_fe_sphere(
             ParticleType::Neutron,
         )));
     neutron_tally.scores = vec![Score::Flux(FluxScore)];
-    neutron_tally.initialize_batches(n_batches);
+    neutron_tally.reset_accumulation();
     let neutron_tally = Arc::new(neutron_tally);
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&neutron_tally)]);
     model.gpu_max_steps_per_particle = 5_000;
     let settings = TransportSettings {
-        total_particles: Some(n_particles * n_batches),
+        total_particles: Some(n_particles),
         seed,
         ..Default::default()
     };
@@ -227,11 +225,9 @@ fn gpu_d1s_decay_photon_matches_cpu() {
     let seed = 7;
     let radius = 10.0;
     let n_particles = 4_000;
-    let n_batches = 1;
 
     // --- CPU reference (single coupled transport loop) ---
-    let (mut cpu_m, cpu_neutron, cpu_photon, settings) =
-        d1s_fe_sphere(seed, radius, n_particles, n_batches);
+    let (mut cpu_m, cpu_neutron, cpu_photon, settings) = d1s_fe_sphere(seed, radius, n_particles);
     cpu_m
         .simulate_transport(&TransportSettings {
             threads: Some(1),
@@ -242,15 +238,14 @@ fn gpu_d1s_decay_photon_matches_cpu() {
     let cpu_photon_flux = cpu_photon.get_mean();
 
     // --- GPU D1S (two-pass: neutron bank -> photon sub-pass) ---
-    let (mut gpu_m, gpu_neutron, gpu_photon, settings) =
-        d1s_fe_sphere(seed, radius, n_particles, n_batches);
+    let (mut gpu_m, gpu_neutron, gpu_photon, settings) = d1s_fe_sphere(seed, radius, n_particles);
     yamc::gpu::run_on_gpu(&mut gpu_m, &settings).expect("GPU D1S dispatch");
     let gpu_neutron_flux = gpu_neutron.get_mean();
     let gpu_photon_flux = gpu_photon.get_mean();
 
     // --- GPU neutron-only baseline for the byte-identity claim ---
     let (mut gpu_n_only_m, gpu_n_only, settings) =
-        neutron_only_fe_sphere(seed, radius, n_particles, n_batches);
+        neutron_only_fe_sphere(seed, radius, n_particles);
     yamc::gpu::run_on_gpu(&mut gpu_n_only_m, &settings).expect("GPU neutron-only dispatch");
     let gpu_n_only_flux = gpu_n_only.get_mean();
 

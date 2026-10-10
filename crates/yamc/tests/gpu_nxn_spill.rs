@@ -150,7 +150,7 @@ fn particle_flux_tally(cell_id: u32, particle: ParticleType) -> Arc<Tally> {
         .push(Filter::ParticleType(ParticleTypeFilter::new(particle)));
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(1);
+    t.reset_accumulation();
     Arc::new(t)
 }
 

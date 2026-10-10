@@ -123,7 +123,7 @@ fn spectrum_bins() -> Vec<f64> {
         .collect()
 }
 
-fn spectral_tally(cell_id: u32, n_batches: usize) -> Arc<Tally> {
+fn spectral_tally(cell_id: u32) -> Arc<Tally> {
     let mut t = Tally::new();
     t.filters.push(Filter::Cell(CellFilter::from_id(cell_id)));
     t.filters.push(Filter::ParticleType(ParticleTypeFilter::new(
@@ -133,7 +133,7 @@ fn spectral_tally(cell_id: u32, n_batches: usize) -> Arc<Tally> {
         .push(Filter::Energy(EnergyFilter::new(spectrum_bins())));
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(n_batches);
+    t.reset_accumulation();
     Arc::new(t)
 }
 
@@ -195,7 +195,7 @@ fn fissile_gpu_cpu_per_history_std_dev_parity() {
 
     // CPU (production per-history Welford, per source neutron = exact reference).
     let (gc, cc) = fissile_sphere();
-    let cpu_t = spectral_tally(cc, 10);
+    let cpu_t = spectral_tally(cc);
     let (mut cpu_model, cs) = build_model(gc, vec![Arc::clone(&cpu_t)], total);
     cpu_model.simulate_transport(&cs).expect("CPU run failed");
     let cpu_mean = cpu_t.get_mean().to_vec();
@@ -203,7 +203,7 @@ fn fissile_gpu_cpu_per_history_std_dev_parity() {
 
     // GPU (batch-free per-source sum + host square).
     let (gg, cg) = fissile_sphere();
-    let gpu_t = spectral_tally(cg, 10);
+    let gpu_t = spectral_tally(cg);
     let (mut gpu_model, gs) = build_model(gg, vec![Arc::clone(&gpu_t)], total);
     let gpu_res = run_gpu_retry(&mut gpu_model, &gs).expect("GPU run failed");
     let gpu_mean = gpu_t.get_mean().to_vec();
@@ -280,11 +280,11 @@ fn fissile_total_particles_invariance() {
     let n: usize = 4000;
 
     let (g1, c1) = fissile_sphere();
-    let (mut m1, s1) = build_model(g1, vec![spectral_tally(c1, 1)], n);
+    let (mut m1, s1) = build_model(g1, vec![spectral_tally(c1)], n);
     let r1 = run_gpu_retry(&mut m1, &s1).expect("GPU run N");
 
     let (g2, c2) = fissile_sphere();
-    let (mut m2, s2) = build_model(g2, vec![spectral_tally(c2, 1)], 2 * n);
+    let (mut m2, s2) = build_model(g2, vec![spectral_tally(c2)], 2 * n);
     let r2 = run_gpu_retry(&mut m2, &s2).expect("GPU run 2N");
 
     // The diagnostics carry the SOURCE neutrons (ordered by global source index).
@@ -357,6 +357,6 @@ fn integrated_score_tally(cell_id: u32, score: &str) -> Arc<Tally> {
     )));
     t.scores = vec![score.parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(1);
+    t.reset_accumulation();
     Arc::new(t)
 }

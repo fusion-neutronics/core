@@ -101,7 +101,7 @@ fn photon_source() -> ParticleSource {
 }
 
 /// One photon-heating tally on the cell with the given estimator.
-fn heating_tally_est(cell_id: u32, n_batches: usize, estimator: Estimator) -> Arc<Tally> {
+fn heating_tally_est(cell_id: u32, estimator: Estimator) -> Arc<Tally> {
     let mut t = Tally::new();
     t.filters.push(Filter::Cell(CellFilter::from_id(cell_id)));
     t.filters.push(Filter::ParticleType(ParticleTypeFilter::new(
@@ -109,27 +109,26 @@ fn heating_tally_est(cell_id: u32, n_batches: usize, estimator: Estimator) -> Ar
     )));
     t.scores = vec!["heating".parse::<Score>().unwrap()];
     t.estimator = estimator;
-    t.initialize_batches(n_batches);
+    t.reset_accumulation();
     Arc::new(t)
 }
 
-fn heating_tally(cell_id: u32, n_batches: usize) -> Arc<Tally> {
-    heating_tally_est(cell_id, n_batches, Estimator::Collision)
+fn heating_tally(cell_id: u32) -> Arc<Tally> {
+    heating_tally_est(cell_id, Estimator::Collision)
 }
 
 fn build_model(
     geometry: Geometry,
     tallies: Vec<Arc<Tally>>,
     seed: u64,
-    n_per_batch: usize,
-    n_batches: usize,
+    n_particles: usize,
 ) -> (Model, TransportSettings) {
     let mut model = Model::new(geometry, vec![photon_source()], tallies);
     model.verbose = Verbose::silent();
     model.gpu_max_steps_per_particle = MAX_STEPS;
     model.tracking_mode = TrackingMode::Surface;
     let settings = TransportSettings {
-        total_particles: Some(n_per_batch * n_batches),
+        total_particles: Some(n_particles),
         seed,
         ..Default::default()
     };
@@ -140,11 +139,10 @@ fn tally_sum(t: &Arc<Tally>) -> f64 {
     t.get_mean().iter().sum::<f64>()
 }
 
-fn run_cpu(seed: u64, n_per_batch: usize, n_batches: usize) -> f64 {
+fn run_cpu(seed: u64, n_particles: usize) -> f64 {
     let (geometry, cell_id) = fe_sphere(1);
-    let t = heating_tally(cell_id, n_batches);
-    let (mut model, settings) =
-        build_model(geometry, vec![Arc::clone(&t)], seed, n_per_batch, n_batches);
+    let t = heating_tally(cell_id);
+    let (mut model, settings) = build_model(geometry, vec![Arc::clone(&t)], seed, n_particles);
     model
         .simulate_transport(&TransportSettings {
             threads: Some(1),
@@ -156,13 +154,12 @@ fn run_cpu(seed: u64, n_per_batch: usize, n_batches: usize) -> f64 {
 
 /// GPU run with bounded retry on transient errors (shared AMD GPU can return a
 /// `BufferAsyncError` under contention).
-fn run_gpu(seed: u64, n_per_batch: usize, n_batches: usize) -> f64 {
+fn run_gpu(seed: u64, n_particles: usize) -> f64 {
     let mut last_err = String::new();
     for attempt in 0..6 {
         let (geometry, cell_id) = fe_sphere(1);
-        let t = heating_tally(cell_id, n_batches);
-        let (mut model, settings) =
-            build_model(geometry, vec![Arc::clone(&t)], seed, n_per_batch, n_batches);
+        let t = heating_tally(cell_id);
+        let (mut model, settings) = build_model(geometry, vec![Arc::clone(&t)], seed, n_particles);
         match yamc::gpu::run_on_gpu(&mut model, &settings) {
             Ok(_) => return tally_sum(&t),
             Err(e) => {
@@ -188,21 +185,17 @@ fn gpu_photon_heating_collision_bias() {
 
     // High statistics: 1M per seed in the quick pass, plus a convergence check.
     let seeds: [u64; 5] = [1, 7, 42, 1234, 98765];
-    let n_per_batch = 100_000usize;
-    let n_batches = 10usize; // 1M histories per seed
+    let n_particles = 1_000_000usize;
 
     println!("\n# Collision-estimator photon-heating GPU/CPU, 1.25 MeV Fe sphere");
-    println!(
-        "\n{} histories per seed ({n_per_batch} x {n_batches}).",
-        n_per_batch * n_batches
-    );
+    println!("\n{n_particles} histories per seed.");
     println!("\n| seed | CPU heating | GPU heating | GPU/CPU |");
     println!("|---|---|---|---|");
 
     let mut ratios = Vec::new();
     for &seed in &seeds {
-        let cpu = run_cpu(seed, n_per_batch, n_batches);
-        let gpu = run_gpu(seed, n_per_batch, n_batches);
+        let cpu = run_cpu(seed, n_particles);
+        let gpu = run_gpu(seed, n_particles);
         let ratio = gpu / cpu;
         ratios.push(ratio);
         println!("| {seed} | {cpu:.6e} | {gpu:.6e} | {ratio:.5} |");
@@ -221,8 +214,8 @@ fn gpu_photon_heating_collision_bias() {
 
     // Convergence check at one seed: 5M histories.
     let seed = 42u64;
-    let cpu_hi = run_cpu(seed, n_per_batch, 50);
-    let gpu_hi = run_gpu(seed, n_per_batch, 50);
+    let cpu_hi = run_cpu(seed, 5_000_000);
+    let gpu_hi = run_gpu(seed, 5_000_000);
     println!(
         "\nconvergence (seed {seed}, 5M histories): CPU {cpu_hi:.6e}  GPU {gpu_hi:.6e}  ratio {:.5}",
         gpu_hi / cpu_hi
@@ -234,14 +227,13 @@ fn gpu_photon_heating_collision_bias() {
     // collision uses the analog deposit).
     {
         let (g, cid) = fe_sphere(1);
-        let t_coll = heating_tally_est(cid, n_batches, Estimator::Collision);
-        let t_tl = heating_tally_est(cid, n_batches, Estimator::TrackLength);
+        let t_coll = heating_tally_est(cid, Estimator::Collision);
+        let t_tl = heating_tally_est(cid, Estimator::TrackLength);
         let (mut m, settings) = build_model(
             g,
             vec![Arc::clone(&t_coll), Arc::clone(&t_tl)],
             42,
-            n_per_batch,
-            n_batches,
+            n_particles,
         );
         m.simulate_transport(&TransportSettings {
             threads: Some(1),

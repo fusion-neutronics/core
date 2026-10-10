@@ -104,7 +104,7 @@ fn b10_sphere() -> (Model, Vec<Arc<Tally>>, TransportSettings) {
                 .filters
                 .push(Filter::Cell(CellFilter::from_id(cell.cell_id.unwrap())));
             tally.scores = vec![Score::ReactionRate(ReactionRateScore::from_mt(Mt::new(mt)))];
-            tally.initialize_batches(4);
+            tally.reset_accumulation();
             Arc::new(tally)
         })
         .collect();

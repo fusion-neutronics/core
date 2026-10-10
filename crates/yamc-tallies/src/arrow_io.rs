@@ -43,8 +43,6 @@ const COL_COUNT: &str = "count";
 /// Metadata keys used in the schema.
 const META_FORMAT: &str = "yamc_results_format";
 const META_VERSION: &str = "yamc_version";
-const META_N_BATCHES: &str = "n_batches";
-const META_PPB: &str = "particles_per_chunk";
 const META_ELAPSED: &str = "elapsed_secs";
 const META_N_TALLIES: &str = "n_tallies";
 const META_RUNS: &str = "runs";
@@ -101,8 +99,6 @@ fn build_metadata(results: &SimulationResults) -> Result<HashMap<String, String>
     let mut m = HashMap::new();
     m.insert(META_FORMAT.into(), FORMAT_VERSION.into());
     m.insert(META_VERSION.into(), env!("CARGO_PKG_VERSION").into());
-    m.insert(META_N_BATCHES.into(), results.n_batches.to_string());
-    m.insert(META_PPB.into(), results.particles_per_chunk.to_string());
     m.insert(META_ELAPSED.into(), results.elapsed_secs.to_string());
     m.insert(META_N_TALLIES.into(), results.len().to_string());
     m.insert(
@@ -132,12 +128,7 @@ fn build_metadata(results: &SimulationResults) -> Result<HashMap<String, String>
                 .join(","),
         );
         m.insert(format!("tally.{i}.dim_labels"), r.dim_labels.join(","));
-        m.insert(format!("tally.{i}.n_batches"), r.n_batches.to_string());
         m.insert(format!("tally.{i}.n_histories"), r.n_histories.to_string());
-        m.insert(
-            format!("tally.{i}.particles_per_chunk"),
-            r.particles_per_chunk.to_string(),
-        );
         m.insert(
             format!("tally.{i}.elapsed_secs"),
             r.elapsed_secs.to_string(),
@@ -314,11 +305,7 @@ pub fn read_simulation_results_arrow(path: &Path) -> Result<SimulationResults, S
         let dim_labels = get("dim_labels")
             .map(|s| parse_str_list(s))
             .unwrap_or_else(|| vec!["bin".to_string()]);
-        let n_batches: u32 = get("n_batches").and_then(|s| s.parse().ok()).unwrap_or(0);
         let n_histories: u64 = get("n_histories").and_then(|s| s.parse().ok()).unwrap_or(0);
-        let particles_per_chunk: u32 = get("particles_per_chunk")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
         let tally_elapsed: f64 = get("elapsed_secs")
             .and_then(|s| s.parse().ok())
             .unwrap_or(elapsed_secs);
@@ -377,8 +364,6 @@ pub fn read_simulation_results_arrow(path: &Path) -> Result<SimulationResults, S
             convergence_history: Vec::new(),
             shape,
             dim_labels,
-            n_batches,
-            particles_per_chunk,
             elapsed_secs: tally_elapsed,
             run_indices,
         };
@@ -387,18 +372,11 @@ pub fn read_simulation_results_arrow(path: &Path) -> Result<SimulationResults, S
         results.push(Arc::new(result));
     }
 
-    let (n_batches_run, ppb_run) = results
-        .first()
-        .map(|r| (r.n_batches, r.particles_per_chunk))
-        .unwrap_or((0, 0));
-
     Ok(SimulationResults::from_parts(
         results,
         by_name,
         by_id,
         by_ptr,
-        n_batches_run,
-        ppb_run,
         elapsed_secs,
         runs,
     ))
@@ -427,7 +405,7 @@ mod tests {
         t.scores = vec![Score::Flux(FluxScore)];
         t.name = name.map(String::from);
         t.tally_id = id;
-        t.initialize_batches(1);
+        t.reset_accumulation();
         Arc::new(t)
     }
 
@@ -444,8 +422,6 @@ mod tests {
 
         assert_eq!(loaded.len(), original.len());
         assert_eq!(loaded.elapsed_secs, 4.25);
-        assert_eq!(loaded.n_batches, original.n_batches);
-        assert_eq!(loaded.particles_per_chunk, original.particles_per_chunk);
 
         for i in 0..original.len() {
             let orig = original.get(i).unwrap();
@@ -456,8 +432,7 @@ mod tests {
             assert_eq!(back.total_count, orig.total_count);
             assert_eq!(back.shape, orig.shape);
             assert_eq!(back.dim_labels, orig.dim_labels);
-            assert_eq!(back.n_batches, orig.n_batches);
-            assert_eq!(back.particles_per_chunk, orig.particles_per_chunk);
+            assert_eq!(back.n_histories, orig.n_histories);
             assert_eq!(back.tally.name, orig.tally.name);
             assert_eq!(back.tally.tally_id, orig.tally.tally_id);
         }
@@ -486,8 +461,6 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
-            1,
-            1,
             1.0,
             Vec::new(),
         );

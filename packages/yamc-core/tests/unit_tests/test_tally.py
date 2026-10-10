@@ -361,11 +361,8 @@ class TestTallySimulation:
         # Check absorption tally
         absorption_result = results[absorption_tally]
         assert absorption_tally.name == "Absorption Tally"
-        # WelfordPerHistory default: n_batches == total_particles (one
-        # sample per history). particles_per_chunk reports the transport
-        # chunk size (derive_particles_per_chunk → total/10).
-        assert absorption_result.n_batches == 500
-        assert absorption_result.particles_per_chunk == 50
+        # One Welford sample per source history.
+        assert absorption_result.n_histories == 500
 
         # Statistics should be calculated
         if absorption_result.total_count[0] > 0:
@@ -389,12 +386,10 @@ class TestTallySimulation:
         assert absorption_tally.name == "Absorption Events"
         assert elastic_tally.name == "Elastic Scattering Events"
 
-        # WelfordPerHistory default: n_batches == total_particles.
-        # particles_per_chunk is the transport chunk size (total/10).
+        # One Welford sample per source history.
         for tally in tallies:
             tally_result = results[tally]
-            assert tally_result.n_batches == 500
-            assert tally_result.particles_per_chunk == 50
+            assert tally_result.n_histories == 500
             
     def test_simulation_without_user_tallies(self, simple_model):
         """Test simulation with only leakage tally (no user tallies)."""
@@ -444,8 +439,8 @@ class TestTallySimulation:
 
         # Test statistics consistency
         absorption_result = results[absorption_tally]
-        # WelfordPerHistory default: n_batches == total_particles.
-        assert absorption_result.n_batches == 500
+        # One Welford sample per source history.
+        assert absorption_result.n_histories == 500
 
         # If we have results, test statistical relationships
         if absorption_result.total_count[0] > 0:
@@ -509,10 +504,8 @@ class TestFluxTally:
         # Check flux tally results
         flux_result = results[flux_tally]
         assert flux_tally.name == "Flux Tally"
-        # WelfordPerHistory default: n_batches == total_particles.
-        # particles_per_chunk is the transport chunk size (total/10).
-        assert flux_result.n_batches == 10000
-        assert flux_result.particles_per_chunk == 1000
+        # One Welford sample per source history.
+        assert flux_result.n_histories == 10000
         assert len(flux_result.mean) == 1
 
         # Flux should be positive
