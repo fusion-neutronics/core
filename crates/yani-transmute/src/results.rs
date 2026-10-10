@@ -100,8 +100,9 @@ pub struct TransmutationResults {
     /// Material ID -> per step, what the isomeric-branching rule did over that
     /// step's spectrum (see [`crate::branching_rule`]): each channel's
     /// representation, denominator, level routes and shares, the clipped and
-    /// held production, the channels dropped, and MT=5's share of each
-    /// parent's removal. Indexed as `timesteps`; a decay-only step holds an
+    /// held production, the channels dropped (MT=5's `(n,X)` among them), and
+    /// MT=5's share of the removal of each parent whose MT=5 residuals the
+    /// chain does not model. Indexed as `timesteps`; a decay-only step holds an
     /// empty report. Steps sharing a spectrum share its report.
     pub branching_report: HashMap<u32, Vec<std::sync::Arc<crate::branching_rule::BranchingReport>>>,
 
@@ -114,6 +115,12 @@ pub struct TransmutationResults {
     /// directory, and on results built by hand.
     pub data_releases:
         std::collections::BTreeMap<String, yamc_nuclide::storage::release::DataRelease>,
+    /// Material ID -> its displacement damage over the schedule, when a
+    /// spectrum solve was asked for it with a [`crate::damage::DamageRequest`].
+    ///
+    /// Empty otherwise, and always for a transport-coupled solve, whose
+    /// damage-energy tally is not converted here.
+    pub displacement_damage: HashMap<u32, crate::damage::DisplacementDamage>,
 }
 
 /// How much of a spectrum solve's collapse work was shared.
@@ -280,6 +287,7 @@ impl TransmutationResults {
             rate_covariance: HashMap::new(),
             branching_report: HashMap::new(),
             data_releases: Default::default(),
+            displacement_damage: HashMap::new(),
         }
     }
 
@@ -301,6 +309,14 @@ impl TransmutationResults {
     /// The rate each step drove `material_id` at, indexed as `timesteps`.
     pub fn get_source_rates(&self, material_id: u32) -> Option<&[f64]> {
         self.source_rates.get(&material_id).map(|r| r.as_slice())
+    }
+
+    /// `material_id`'s displacement damage, when it was asked for.
+    pub fn get_displacement_damage(
+        &self,
+        material_id: u32,
+    ) -> Option<&crate::damage::DisplacementDamage> {
+        self.displacement_damage.get(&material_id)
     }
 
     /// Add material state after a timestep.
@@ -922,6 +938,7 @@ mod tests {
             q_value: Some(0.0),
             branching_uncertainty: None,
             evaluated_branching: None,
+            multiplicity: None,
         };
 
         let chain = Arc::new(HashMap::from([
@@ -1008,6 +1025,7 @@ mod tests {
             q_value: Some(0.0),
             branching_uncertainty: None,
             evaluated_branching: None,
+            multiplicity: None,
         };
         let nuclide = |name: &str, reactions: Vec<yani::ChainReaction>| yani::ChainNuclide {
             name: name.to_string(),

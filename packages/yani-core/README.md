@@ -2,7 +2,7 @@
 
 Yet Another Nuclide Inventory: transmutation and activation without transport. A
 material, an irradiation schedule and a neutron spectrum in; inventories,
-activities and decay heat out.
+activities, decay heat and hydrogen and helium gas production out.
 
 This is the compiled distribution, and it provides the `yani` module itself, so
 the import name and the distribution name differ (as `pillow` provides `PIL`).
@@ -29,7 +29,27 @@ print(final.activity(), "Bq")
 print(final.decay_heat(), "W")
 print(final.contact_dose(), "Gy/h")
 print(final.clearance_index("UK_EPR16_out_of_scope").index)
+print(results.get_gas_production(steel.id or 0)["He"], "appm He")
 ```
+
+Displacement damage comes from the same call: pass `displacement_damage=True`
+for the damage energy per atom and NRT dpa over the schedule, per element and
+for the material.
+
+```python
+tungsten = yani.Material({"W": 1.0}, density=19.3)
+results = tungsten.transmute(schedule=schedule, displacement_damage=True)
+results.get_dpa(0)  # cumulative, one value per state
+results.get_dpa(0, element="W")
+results.get_damage_energy(0)  # eV per atom, the model-free input
+results.get_displacement_damage_info(0)["displacement_energies"]
+```
+
+The displacement threshold energies default to ASTM E521, and to the OECD-NEA
+2015 report "Primary Radiation Damage in Materials" (NEA/NSC/DOC(2015)9) for
+elements E521 does not cover; override any of them with
+`displacement_energies={"Fe": 40.0}`. An element in neither source must be
+given, and is never guessed.
 
 ## Relationship to yamc
 
@@ -49,13 +69,26 @@ stack; pick `yamc` when the spectrum should come from a transport solve.
 - One stepper (`ForwardEulerStepper`, beginning-of-step rates). No
   predictor-corrector.
 - Uncertainty is by resampling: pass `data_uncertainty=yani.DataUncertainty()`
-  to `transmute` for a standard deviation on inventories, activity, decay heat
-  and dose. It perturbs MF=33 cross sections, half-lives, decay energies,
-  two-mode decay branching and a supplied flux spectrum's stated error. Other
-  inputs (MF=32 resonance covariance, self-shielding, photon line
-  intensities, the material composition) are held at nominal, and
-  `get_data_uncertainty_info` lists every one it held. There are no
-  first-order sensitivity coefficients.
+  to `transmute` for a standard deviation on inventories, activity, decay heat,
+  dose and gas production. It perturbs MF=33 cross sections, MF=32 resonance
+  parameters (drawn per replica and the resonance cross sections rebuilt from
+  them, where the library publishes them, and otherwise their first-order
+  group covariance), half-lives, decay energies, decay photon line
+  intensities and energies, two-mode decay branching and a supplied flux
+  spectrum's stated error. Other inputs (the self-shielding correction, the
+  material composition) are held at nominal, and `get_data_uncertainty_info`
+  lists every one it held. There are no first-order sensitivity coefficients.
+- The decay data do not state how a nuclide's photon line intensities are
+  correlated (between lines, between a spectrum's normalisation and its
+  lines, between its gamma and x-ray spectra), and ENDF/B-VIII.1 folds each
+  spectrum's normalisation sigma into every line's. So a photon spectrum,
+  contact dose or decay heat is reported as a range rather than assumed:
+  `Estimate.std_dev` takes those correlations as zero and
+  `Estimate.std_dev_correlated` as one, which bounds every non-negative
+  correlation. `get_data_uncertainty_info()["decay_photon_spectra_folded"]`
+  names the spectra the range mostly comes from.
+- Damage energy and dpa carry no uncertainty yet: MT=444 has no covariance,
+  and the flux and composition replicas are not folded into it.
 - Pathways are reported per product (`get_production_routes`), but there is no
   automatic pathway search across the whole inventory.
 - No ingestion or inhalation dose.

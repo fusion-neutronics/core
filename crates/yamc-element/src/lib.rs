@@ -1,7 +1,9 @@
 //! Evaluated photon nuclear data: `Element`, photon interaction
 //! cross-sections (Compton, photoelectric, pair production, …),
 //! atomic transition / electron-shell data, and the Arrow loader
-//! that reads them off disk.
+//! that reads them off disk. Also the per-element displacement threshold
+//! energies and the NRT conversion from damage energy to dpa
+//! ([`displacement`]), shared by the transport and transport-free paths.
 //!
 //! Extracted from `yamc` so downstream tools -- the GPU integration
 //! (photon transport kernel), cross-section plotters, data
@@ -24,6 +26,7 @@
 //! and sampled from there.
 
 pub mod bremsstrahlung;
+pub mod displacement;
 pub mod element;
 pub mod photon;
 #[cfg(feature = "arrow")]

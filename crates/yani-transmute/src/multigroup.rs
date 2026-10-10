@@ -1097,8 +1097,9 @@ pub(crate) struct Collapsed {
     /// [`crate::branching_rule`]), in the order `lists` holds them. Only for
     /// parents the collapse walked, which are those with transport data.
     pub(crate) lists: HashMap<String, Vec<ListRates>>,
-    /// Per parent with an MT=5 cross section, its MT=5 rate, which no chain
-    /// reaction carries.
+    /// Per parent with an MT=5 cross section, its MT=5 rate, measured whether
+    /// or not the chain drives `(n,X)` on it, for the share whose residuals
+    /// it does not model.
     pub(crate) mt5: HashMap<String, f64>,
 }
 
@@ -1679,8 +1680,9 @@ impl Collapse<'_> {
             ));
         }
 
-        // MT=5, which no chain reaction carries and whose products are not
-        // modelled: its rate is only measured, against the removal rate.
+        // MT=5, measured for every parent with it: the `(n,X)` rate above is
+        // there only where the chain drives it, and the report weighs what
+        // it does not model against the removal rate.
         if let Some(reaction) = reactions.get(&MT_ANYTHING) {
             let mut sigma_phi_sum = 0.0;
             self.walk_channel(reaction, shape.as_ref(), None, |_, sigma_g, phi| {
@@ -1787,6 +1789,61 @@ pub fn reaction_rate_spectrum(
         out[g] = sigma_g * phi * 1.0e-24 * source_rate;
     });
     Some(out)
+}
+
+/// Each named nuclide's damage-energy production rate per atom, from its
+/// MT=444 damage-energy cross section [eV barn] folded against the spectrum.
+///
+/// The fold is the rate collapse's own: [`Collapse::walk_channel`] under the
+/// same within-group weight and, on a shielded run, the same per-nuclide flux
+/// shape, so damage energy and the reaction rates see one spectrum under one
+/// treatment. The result is `1e-24 * sum_g sigma_g * phi_g * source_rate`,
+/// in eV/s per atom, normalized exactly as the collapsed reaction rates are.
+///
+/// `None` for a nuclide with no data at the temperature in use or no MT=444
+/// in it, which is not the same as a zero: the caller reports those rather
+/// than counting them as undamaged. An empty map when the spectrum carries no
+/// flux.
+pub(crate) fn damage_energy_rates(
+    material: &Material,
+    multigroup_flux: &[f64],
+    group_boundaries: &[f64],
+    source_rate: f64,
+    shielding: Option<&Shielding>,
+    nuclides: &[String],
+) -> HashMap<String, Option<f64>> {
+    let Some(setup) = CollapseSetup::new(material, multigroup_flux, shielding) else {
+        return HashMap::new();
+    };
+    let context = setup.context(
+        material,
+        multigroup_flux,
+        group_boundaries,
+        source_rate,
+        shielding,
+    );
+    let one = |name: &String| {
+        let reactions = context.reactions_for(name)?;
+        let reaction = reactions.get(&crate::damage::MT_DAMAGE_ENERGY)?;
+        let (shape, _, _) = context.shape_for(name, reactions);
+        let mut sigma_phi_sum = 0.0;
+        context.walk_channel(reaction, shape.as_ref(), None, |_, sigma_g, phi| {
+            sigma_phi_sum += sigma_g * phi;
+        });
+        Some(sigma_phi_sum * 1.0e-24 * source_rate)
+    };
+    let rates: Vec<Option<f64>> = {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use rayon::prelude::*;
+            nuclides.par_iter().map(one).collect()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            nuclides.iter().map(one).collect()
+        }
+    };
+    nuclides.iter().cloned().zip(rates).collect()
 }
 
 /// The per-group contributions to each reaction rate, for flux uncertainty.

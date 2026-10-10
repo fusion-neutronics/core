@@ -5,7 +5,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use yani_transmute::{Estimate, LineEstimate, TransmutationResults};
 
 use crate::material::PyMaterial;
@@ -16,6 +16,15 @@ use crate::material::PyMaterial;
 /// uncertainty was asked for. ``mean`` and ``std_dev`` are ``None`` below two
 /// replicas: a spread over fewer than two samples is unmeasured, not zero, and
 /// reporting it as zero would read as a quantity known exactly.
+///
+/// A quantity a decay photon intensity enters (contact dose, the photon
+/// spectrum, and the decay heat through its gamma part) has a range rather
+/// than one spread when the ``"decay_photon_lines"`` source is on, because
+/// the decay data do not state how a nuclide's photon intensities are
+/// correlated. ``std_dev`` is the lower end, every unstated correlation taken
+/// as zero, and ``std_dev_correlated`` the upper end, every one taken as one;
+/// ``std_dev_range`` gives both. For any other quantity, or with the source
+/// off, the two are equal.
 #[gen_stub_pyclass]
 #[pyclass(name = "Estimate", frozen, skip_from_py_object)]
 #[derive(Clone)]
@@ -44,15 +53,52 @@ impl PyEstimate {
     }
 
     /// The ensemble's sample standard deviation, or None below two replicas.
+    ///
+    /// The lower end of ``std_dev_range``: where the ``"decay_photon_lines"``
+    /// source is drawn, the correlations the decay data leave unstated
+    /// between a nuclide's photon intensities are taken as zero, which is the
+    /// evaluation read literally.
     #[getter]
     fn std_dev(&self) -> Option<f64> {
         self.inner.std_dev
+    }
+
+    /// The ensemble's sample standard deviation with those correlations taken
+    /// as one, or None below two replicas: within each nuclide the lines of a
+    /// spectrum, the spectrum's normalisation and its lines, and its gamma and
+    /// x-ray spectra all move together. The upper end of ``std_dev_range``.
+    ///
+    /// Evaluated on the same inventories as ``std_dev``, so the two differ by
+    /// the line data alone. Equal to ``std_dev`` for activity, or when the
+    /// ``"decay_photon_lines"`` source is not drawn.
+    #[getter]
+    fn std_dev_correlated(&self) -> Option<f64> {
+        self.inner.std_dev_correlated
+    }
+
+    /// ``(std_dev, std_dev_correlated)``, the range every non-negative
+    /// correlation between a nuclide's photon intensities gives, or None below
+    /// two replicas.
+    ///
+    /// Negative correlations are not considered: what the intensities leave
+    /// unstated is a shared normalisation, which moves every line it scales
+    /// the same way and cannot anticorrelate them.
+    #[getter]
+    fn std_dev_range(&self) -> Option<(f64, f64)> {
+        Some((self.inner.std_dev?, self.inner.std_dev_correlated?))
     }
 
     /// ``std_dev`` as a fraction of ``nominal``, or None if either is absent.
     #[getter]
     fn relative_std_dev(&self) -> Option<f64> {
         self.inner.relative_std_dev()
+    }
+
+    /// ``std_dev_correlated`` as a fraction of ``nominal``, or None if either
+    /// is absent.
+    #[getter]
+    fn relative_std_dev_correlated(&self) -> Option<f64> {
+        self.inner.relative_std_dev_correlated()
     }
 
     /// The standard error of ``std_dev``: how far another ensemble of the
@@ -73,13 +119,17 @@ impl PyEstimate {
     }
 
     fn __repr__(&self) -> String {
+        let correlated = match (self.inner.std_dev, self.inner.std_dev_correlated) {
+            (Some(low), Some(high)) if high != low => format!(", std_dev_correlated={high:.4e}"),
+            _ => String::new(),
+        };
         match (self.inner.std_dev, self.inner.std_dev_standard_error) {
             (Some(sigma), Some(se)) => format!(
-                "Estimate(nominal={:.4e}, std_dev={:.4e} +/- {:.2e}, replicas={})",
+                "Estimate(nominal={:.4e}, std_dev={:.4e} +/- {:.2e}{correlated}, replicas={})",
                 self.inner.nominal, sigma, se, self.inner.replicas
             ),
             (Some(sigma), None) => format!(
-                "Estimate(nominal={:.4e}, std_dev={:.4e}, replicas={})",
+                "Estimate(nominal={:.4e}, std_dev={:.4e}{correlated}, replicas={})",
                 self.inner.nominal, sigma, self.inner.replicas
             ),
             (None, _) => format!(
@@ -150,16 +200,57 @@ impl PyLineEstimate {
         self.inner.estimate.mean
     }
 
-    /// The ensemble's sample standard deviation, or None below two replicas.
+    /// The ensemble's sample standard deviation [photons/s], or None below
+    /// two replicas.
+    ///
+    /// The lower end of ``std_dev_range``: where the ``"decay_photon_lines"``
+    /// source is drawn, the correlations the decay data leave unstated
+    /// between a nuclide's photon intensities are taken as zero, which is the
+    /// evaluation read literally.
     #[getter]
     fn std_dev(&self) -> Option<f64> {
         self.inner.estimate.std_dev
+    }
+
+    /// The ensemble's sample standard deviation with those correlations taken
+    /// as one, or None below two replicas: within each nuclide the lines of a
+    /// spectrum, the spectrum's normalisation and its lines, and its gamma and
+    /// x-ray spectra all move together. The upper end of ``std_dev_range``.
+    ///
+    /// Evaluated on the same inventories as ``std_dev``, so the two differ by
+    /// the line data alone. Equal to ``std_dev`` when the
+    /// ``"decay_photon_lines"`` source is not drawn.
+    #[getter]
+    fn std_dev_correlated(&self) -> Option<f64> {
+        self.inner.estimate.std_dev_correlated
+    }
+
+    /// ``(std_dev, std_dev_correlated)``, the range every non-negative
+    /// correlation between a nuclide's photon intensities gives, or None below
+    /// two replicas.
+    ///
+    /// Negative correlations are not considered: what the intensities leave
+    /// unstated is a shared normalisation, which moves every line it scales
+    /// the same way and cannot anticorrelate them.
+    #[getter]
+    fn std_dev_range(&self) -> Option<(f64, f64)> {
+        Some((
+            self.inner.estimate.std_dev?,
+            self.inner.estimate.std_dev_correlated?,
+        ))
     }
 
     /// ``std_dev`` as a fraction of ``nominal``, or None if either is absent.
     #[getter]
     fn relative_std_dev(&self) -> Option<f64> {
         self.inner.estimate.relative_std_dev()
+    }
+
+    /// ``std_dev_correlated`` as a fraction of ``nominal``, or None if either
+    /// is absent.
+    #[getter]
+    fn relative_std_dev_correlated(&self) -> Option<f64> {
+        self.inner.estimate.relative_std_dev_correlated()
     }
 
     /// The standard error of ``std_dev``, or None below four replicas (see
@@ -611,9 +702,23 @@ impl PyTransmutationResults {
     ///
     /// Args:
     ///     material_id: Material ID number.
+    /// With the ``"decay_photon_lines"`` source on, each replica's gamma decay
+    /// energy E_EM follows its drawn photon lines and continua rather than an
+    /// independent ``"decay_energy"`` draw, so its gamma heat and its contact
+    /// dose come from the same draw of one evaluation. E_EM moves by the drawn
+    /// change in the photon energy per decay (each line's energy times its
+    /// intensity, plus each continuum's energy integral), and the part of E_EM
+    /// the tabulated spectra do not carry is held at nominal. The beta and
+    /// alpha parts keep their ``"decay_energy"`` draws. The heat then has a
+    /// range, ``Estimate.std_dev`` to ``Estimate.std_dev_correlated``, from the
+    /// photon intensities' unstated correlations.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
     ///     step: Timestep index (0 = initial composition). As in
     ///         ``get_activity_uncertainty``, step 0 has a spread whenever the
-    ///         ``"half_life"`` or ``"decay_energy"`` source is sampled.
+    ///         ``"half_life"``, ``"decay_energy"`` or ``"decay_photon_lines"``
+    ///         source is sampled.
     ///     by_nuclide (bool): Return a ``dict[str, Estimate]`` of W by nuclide
     ///         instead of one ``Estimate`` for the total.
     ///
@@ -654,6 +759,16 @@ impl PyTransmutationResults {
     /// (XCOM), air energy absorption (NIST SRD 126), ICRP-116 dose
     /// coefficients and the build-up factor are held at their nominal values
     /// and contribute nothing to it.
+    ///
+    /// With the ``"decay_photon_lines"`` source on, the band is a range:
+    /// ``Estimate.std_dev`` takes each nuclide's photon intensities as
+    /// independent where the decay data state no correlation, and
+    /// ``Estimate.std_dev_correlated`` as fully correlated (the lines of a
+    /// spectrum, its normalisation and lines, and its gamma and x-ray
+    /// spectra). ENDF/B-VIII.1 folds each spectrum's normalisation sigma into
+    /// every line's, so a multi-line emitter's range there is wide;
+    /// ``get_data_uncertainty_info`` names those spectra under
+    /// ``decay_photon_spectra_folded``.
     ///
     /// Args:
     ///     material_id: Material ID number.
@@ -715,7 +830,9 @@ impl PyTransmutationResults {
     /// intensity per decay when the ``"decay_photon_lines"`` source is on.
     /// That source draws each line's energy too, so lines are matched across
     /// replicas on their nominal energy, and ``LineEstimate.energy_std_dev``
-    /// gives the spread of the energy drawn.
+    /// gives the spread of the energy drawn. A line's rate spread is a range,
+    /// ``LineEstimate.std_dev`` to ``LineEstimate.std_dev_correlated``, for the
+    /// reason ``get_contact_dose_uncertainty`` gives.
     ///
     ///     >>> lines = results.get_decay_photon_spectrum_uncertainty(mid, step)
     ///     >>> [(l.energy, l.nominal, l.std_dev) for l in lines[:2]]
@@ -743,6 +860,89 @@ impl PyTransmutationResults {
             .photon_spectrum_uncertainty(material_id, step, &chain)
             .map_err(PyValueError::new_err)?
             .map(|lines| lines.into_iter().map(PyLineEstimate::from).collect()))
+    }
+
+    /// Hydrogen and helium gas production in appm, at every time point.
+    ///
+    /// appm is gas atoms per million **initial** atoms of the material, so the
+    /// denominator stays fixed as the material transmutes. The gas is what the
+    /// inventory already holds: H1, H2, H3, He3 and He4 emitted by reactions
+    /// and by decays, so tritium decaying to He3 during a cooldown shows up as
+    /// He3 there.
+    ///
+    ///     >>> gas = results.get_gas_production(material_id=mid)
+    ///     >>> gas["He4"][-1], gas["H"][-1]
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     produced (bool): Subtract the gas the material started with (water,
+    ///         polymers, lithium compounds), the default, so index 0 is zero
+    ///         and each value is what the schedule made by then. A nuclide
+    ///         consumed faster than it is made reads negative, as H1 in water
+    ///         can through H1(n,gamma)H2. ``False`` gives the gas present,
+    ///         starting inventory included.
+    ///
+    /// Returns:
+    ///     dict[str, list[float]] | None: appm keyed ``"H1"``, ``"H2"``,
+    ///     ``"H3"``, ``"He3"``, ``"He4"`` and the totals ``"H"`` (H1 + H2 + H3)
+    ///     and ``"He"`` (He3 + He4). Each list is parallel to ``times``, as
+    ///     ``get_nuclide_evolution`` is: index 0 is the initial composition,
+    ///     index i is after step i. None if the material is not in the results.
+    ///
+    /// Raises:
+    ///     ValueError: if the chain the solve used has no entry for one of the
+    ///         five gas nuclides. The solve follows an emitted particle only
+    ///         when the chain has it, so that gas was dropped and a zero would
+    ///         be wrong rather than measured. The message names the missing
+    ///         nuclides.
+    #[pyo3(signature = (material_id, *, produced=true))]
+    fn get_gas_production(
+        &self,
+        material_id: u32,
+        produced: bool,
+    ) -> PyResult<Option<BTreeMap<String, Vec<f64>>>> {
+        self.inner
+            .gas_production(material_id, produced)
+            .map_err(PyValueError::new_err)
+    }
+
+    /// Gas production in appm at one timestep, with the nuclear-data spread
+    /// on it.
+    ///
+    /// See ``get_gas_production`` for the quantity. Evaluated on every
+    /// replica's inventory against the one initial inventory, which is an
+    /// input and the same in each, and the totals ``"H"`` and ``"He"`` are
+    /// summed within a replica before the spread is taken, as
+    /// ``get_activity_uncertainty`` does.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     step: Timestep index (0 = initial composition, which has no spread).
+    ///     produced (bool): As in ``get_gas_production``.
+    ///
+    /// Returns:
+    ///     dict[str, Estimate] | None: keyed as ``get_gas_production``; None if
+    ///     the transmutation was run without ``data_uncertainty``.
+    ///
+    /// Raises:
+    ///     ValueError: as ``get_gas_production``, or if there is no such step.
+    #[pyo3(signature = (material_id, step, *, produced=true))]
+    fn get_gas_production_uncertainty(
+        &self,
+        material_id: u32,
+        step: usize,
+        produced: bool,
+    ) -> PyResult<Option<BTreeMap<String, PyEstimate>>> {
+        Ok(self
+            .inner
+            .gas_production_uncertainty(material_id, step, produced)
+            .map_err(PyValueError::new_err)?
+            .map(|by_key| {
+                by_key
+                    .into_iter()
+                    .map(|(key, estimate)| (key, PyEstimate::from(estimate)))
+                    .collect()
+            }))
     }
 
     /// What the nuclear-data uncertainty covered for one material, and what it
@@ -879,20 +1079,27 @@ impl PyTransmutationResults {
     ///   it is; any warning makes ``has_gaps`` true.
     /// - ``covariance_repaired``: nuclides the material can populate (bounded
     ///   at or above the solver's density floor over the schedule at nominal
-    ///   rates; a replica's rates can sit above them) whose folded covariance
-    ///   was not positive semi-definite past round-off, with a channel a draw
-    ///   can move (a positive rate on a spectrum the schedule irradiates
-    ///   with). Past round-off means the correlation matrix has an eigenvalue
-    ///   below ``-m * 1e-12`` (``m`` the number of channels with a positive
-    ///   stated variance), or a channel is stated with a negative
-    ///   variance, or a zero one and a covariance to another channel.
-    ///   Clipping only adds variance, so these were sampled wider than
-    ///   evaluated, and any makes ``has_gaps`` true.
+    ///   rates; a replica's rates can sit above them) whose evaluated cell
+    ///   covariance was not positive semi-definite past round-off, with a
+    ///   channel a draw can move (a positive rate on a spectrum the schedule
+    ///   irradiates with). Past round-off means the correlation matrix of the
+    ///   cells has an eigenvalue below ``-m * 1e-12`` (``m`` the number of
+    ///   cells with a positive stated variance), or a cell is stated with a
+    ///   negative variance, or a zero one and a covariance to another cell.
+    ///   The correlation matrix is replaced by the nearest correlation
+    ///   matrix and rescaled by the evaluated sigmas, so every cell keeps its
+    ///   evaluated sigma and only correlations move (a cell stated at zero or
+    ///   negative variance is held at nominal); a channel folding several
+    ///   cells can still be sampled at a sigma other than its evaluation's,
+    ///   either way, and any makes ``has_gaps`` true.
     ///   ``covariance_repairs`` gives one dict per repaired populated nuclide
-    ///   and spectrum, including repairs no draw can move, with ``lambda_min``,
-    ///   ``lambda_max``, ``clipped_fraction`` (the variance added over the
-    ///   stated trace, ``float('inf')`` when that trace is not positive) and,
-    ///   per channel keyed by kind,
+    ///   and spectrum, including repairs no draw can move, with ``lambda_min``
+    ///   (the most negative eigenvalue of the cells' correlation matrix before
+    ///   the repair), ``largest_correlation_change`` and
+    ///   ``correlation_frobenius_change`` (the largest and the Frobenius
+    ///   change of that correlation matrix), ``cells`` (in the coupled blocks
+    ///   repaired), ``held_cells``, ``converged`` and, per channel keyed by
+    ///   kind,
     ///   ``evaluated_variance`` (the folded diagonal as stated, which can be
     ///   negative), ``evaluated_sigma`` (``None`` when that variance is
     ///   negative) and ``sampled_sigma``. A repair of a nuclide outside the
@@ -900,12 +1107,12 @@ impl PyTransmutationResults {
     ///   names those with a channel a draw can move. The bound holds at
     ///   nominal rates only and a replica's rates can populate them, so any
     ///   also makes ``has_gaps`` true.
-    /// - ``worst_sigma_inflation``: the largest sampled over evaluated sigma,
-    ///   minus one, over the repaired channels of populated nuclides with a
+    /// - ``worst_sigma_change``: the largest ``|sampled / evaluated sigma -
+    ///   1|`` over the repaired channels of populated nuclides with a
     ///   positive rate on a spectrum the schedule irradiates with,
     ///   ``float('inf')`` when a repair gave a spread to a channel whose stated
-    ///   variance is zero or negative. ``rate_weighted_sigma_inflation`` is the
-    ///   weighted mean of sampled over evaluated sigma, minus one, over every
+    ///   variance is zero or negative. ``rate_weighted_sigma_change`` is the
+    ///   weighted mean of ``|sampled / evaluated sigma - 1|`` over every
     ///   sampled channel of a populated nuclide, each weighted by its unit-flux
     ///   rate times its spectrum's fluence in the schedule times its parent's
     ///   initial density, so it covers first-generation reactions only (a
@@ -926,12 +1133,18 @@ impl PyTransmutationResults {
     ///   covariance is not a lognormal's, keyed by nuclide, each with
     ///   ``cells`` (cells whose sampled sigma or correlation differs from the
     ///   evaluated one), ``largest_sigma_change`` (the largest
-    ///   ``|sampled / evaluated sigma - 1|``) and ``largest_correlation_change``.
+    ///   ``|sampled / evaluated sigma - 1|``), ``largest_correlation_change``
+    ///   and ``log_space_repair`` (``None``, or a dict with the keys of a
+    ///   repair above, of the log-space correlation matrix).
     ///   Two fully correlated cells with different sigmas, or an
     ///   anticorrelation with ``1 + C <= 0``, are not, and the nearest
-    ///   lognormal is sampled. A property of the distribution rather than a
+    ///   lognormal is sampled: where the log-space covariance is not PSD its
+    ///   correlation matrix is replaced by the nearest correlation matrix,
+    ///   which keeps every sigma. A property of the distribution rather than a
     ///   defect of the data, so not a gap. ``flux_lognormal_not_carried`` is
-    ///   the same for a stated flux covariance, keyed by spectrum index.
+    ///   the same for a stated flux covariance, keyed by spectrum index,
+    ///   whose ``log_space_repair`` is always ``None``: a flux covariance's
+    ///   log-space negative eigenvalues are clipped.
     /// - ``rates_sampled``: cross-section rate draws made, each read off one
     ///   draw of the nuclide's cross sections. ``rates_floored`` counts those
     ///   that came out negative and were floored at zero, which only a channel
@@ -959,6 +1172,12 @@ impl PyTransmutationResults {
     ///   ``decay_photon_line_uncertainty_not_carried`` names those with a
     ///   sigma stated on a zero value, or not finite, which no draw can carry;
     ///   that value is held at nominal and counted as a gap.
+    ///   ``decay_photon_spectra_folded`` maps each perturbed nuclide with a
+    ///   spectrum written the ENDF/B way (a normalisation of 1 with no sigma,
+    ///   its sigma folded into every line's dRI) to the radiation of each such
+    ///   spectrum (``"gamma"``, ``"xray"``). How much of those dRI the lines
+    ///   share is not stated, so they are where most of the range between a
+    ///   photon output's ``std_dev`` and ``std_dev_correlated`` comes from.
     /// - ``fission_yields_perturbed`` / ``no_fission_yield_uncertainty``: the
     ///   same for the ``"fission_yield"`` source, over the reachable
     ///   fissioning parents. ``fission_yield_uncertainty_not_carried`` names
@@ -983,9 +1202,36 @@ impl PyTransmutationResults {
     ///   transport run, how many tallied rates were sampled from their
     ///   covariance; ``statistical_floored`` / ``statistical_sampled`` count
     ///   draws that came out negative and were floored.
+    /// - ``resonance_parameters``: per nuclide with resonance parameters
+    ///   (MF=2 and MF=32) and a rate in this run, how its resonance-range
+    ///   uncertainty was sampled. ``method`` is ``"parameters sampled"``
+    ///   (drawn per replica and the cross sections rebuilt from them) or
+    ///   ``"first-order rows"`` (the MF=32 rows of ``covariance.arrow``),
+    ///   ``reason`` why the parameters were not sampled (``None`` where they
+    ///   were), and ``ranges`` one sampler report per sampled range:
+    ///   ``isotope`` and ``range`` indices, the ``gaussian``, ``lognormal``
+    ///   and ``held`` parameter counts, ``zero_mean_widths`` (widths stated
+    ///   with a zero mean and a nonzero sigma, held at zero) and
+    ///   ``negative_mean_widths`` (drawn as signed), each with ``index``,
+    ///   ``location``, ``quantity``, ``value`` and ``sigma``,
+    ///   ``zero_variance_with_covariance``, ``unattainable_pairs``, and
+    ///   ``stated_repair`` / ``transformed_repair`` (the nearest-correlation
+    ///   repair of the stated and of the log-space matrix, each with
+    ///   ``lambda_min``, ``frobenius_change``, ``max_change``, ``parameters``,
+    ///   ``iterations`` and ``converged``, ``None`` where none was needed).
+    ///   How far the draws' parameter correlations are from the evaluated
+    ///   ones, in the parameters themselves after both repairs and the
+    ///   lognormal transform, reads off ``largest_correlation_change`` (the
+    ///   largest change of one correlation) and
+    ///   ``correlation_frobenius_change``, per range and per nuclide over its
+    ///   ranges; every drawn parameter keeps its evaluated mean and sigma, so
+    ///   that is the whole of the difference in the first two moments. Widths
+    ///   stay lognormal, so a pair no lognormal carries
+    ///   (``unattainable_pairs``) is where it is largest. Empty on a transport
+    ///   run, which keeps the rows.
     /// - ``not_perturbed``: every input this run held at its nominal value,
-    ///   such as any MF=32 resonance-parameter covariance the library's
-    ///   ``covariance.arrow`` does not carry, the photon and dose data, the
+    ///   such as any MF=32 resonance-parameter covariance neither sampled nor
+    ///   in the library's ``covariance.arrow``, the photon and dose data, the
     ///   material composition, any source switched off, and, where they
     ///   applied, the self-shielding correction, the flux's response to a
     ///   perturbed cross section on a transport run, and the per-branch decay
@@ -1134,6 +1380,178 @@ impl PyTransmutationResults {
         Some(PyMaterial {
             internal: mat.clone(),
         })
+    }
+
+    /// Cumulative NRT displacements per atom (dpa) over the schedule.
+    ///
+    /// Present when the transmute call was given
+    /// ``displacement_damage=True``, and ``None`` otherwise. One value per
+    /// state, aligned with ``times``: entry 0 is the initial composition and
+    /// is zero, and entry ``i`` is the total after schedule step ``i - 1``.
+    /// Cooldowns add nothing.
+    ///
+    /// For an element ``X`` it is the damage energy deposited per atom of
+    /// ``X``, from ``X``'s own nuclides, converted with ``X``'s displacement
+    /// threshold energy as ``0.8 * E_damage / (2 * E_d)`` (the NRT model,
+    /// ASTM E521). The material total, with ``element`` omitted, is the
+    /// atom-fraction-weighted sum over elements: each element's recoils are
+    /// treated as slowing down among atoms of their own kind, which reduces to
+    /// the elemental value for a pure element and leaves out energy transfer
+    /// between elements in a cascade. MT=444 is already integrated over the
+    /// recoil spectrum, so the per-recoil threshold steps of the NRT model
+    /// (no displacement below ``E_d``, one up to ``2 * E_d / 0.8``) are not
+    /// applied, which is the standard practice for a damage-energy cross
+    /// section. The ``E_d`` used and its source are in
+    /// ``get_displacement_damage_info``.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     element: Element symbol, e.g. ``"W"``, for that element's dpa;
+    ///         omit it for the material total.
+    ///
+    /// Returns:
+    ///     List of cumulative dpa, one per state, or None if damage was not
+    ///     asked for or the material is not in the results.
+    ///
+    /// Raises:
+    ///     ValueError: If ``element`` has no dpa: it is not in the material
+    ///         on an irradiated step, or it is a transmutation product with no
+    ///         displacement threshold energy.
+    #[pyo3(signature = (material_id, element = None))]
+    fn get_dpa(&self, material_id: u32, element: Option<&str>) -> PyResult<Option<Vec<f64>>> {
+        let Some(damage) = self.inner.get_displacement_damage(material_id) else {
+            return Ok(None);
+        };
+        match element {
+            None => Ok(Some(damage.dpa.clone())),
+            Some(el) => damage
+                .element_dpa
+                .get(el)
+                .cloned()
+                .map(Some)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "no dpa for element {el:?}; elements with dpa: {}",
+                        damage
+                            .element_dpa
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                }),
+        }
+    }
+
+    /// Cumulative damage energy deposited per atom [eV] over the schedule.
+    ///
+    /// The quantity dpa is computed from, kept separate so the displacement
+    /// model can be changed without the data: each nuclide's MT=444
+    /// damage-energy cross section [eV barn] folded against the pulse
+    /// spectrum by the same collapse as the reaction rates, times the flux
+    /// magnitude and the step duration, at each step's composition. Indexed
+    /// as ``get_dpa``. For an element it is per atom of that element; the
+    /// material total weights the elements by atom fraction, so it is per atom
+    /// of the material.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    ///     element: Element symbol for that element's damage energy; omit it
+    ///         for the material total.
+    ///
+    /// Returns:
+    ///     List of cumulative damage energy [eV per atom], one per state, or
+    ///     None if damage was not asked for or the material is not in the
+    ///     results.
+    ///
+    /// Raises:
+    ///     ValueError: If ``element`` is not in the material on an irradiated
+    ///         step.
+    #[pyo3(signature = (material_id, element = None))]
+    fn get_damage_energy(
+        &self,
+        material_id: u32,
+        element: Option<&str>,
+    ) -> PyResult<Option<Vec<f64>>> {
+        let Some(damage) = self.inner.get_displacement_damage(material_id) else {
+            return Ok(None);
+        };
+        match element {
+            None => Ok(Some(damage.damage_energy.clone())),
+            Some(el) => damage
+                .element_damage_energy
+                .get(el)
+                .cloned()
+                .map(Some)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "no damage energy for element {el:?}; elements present: {}",
+                        damage
+                            .element_damage_energy
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                }),
+        }
+    }
+
+    /// What the displacement damage was computed with, and what it could not
+    /// count.
+    ///
+    /// ``None`` unless the transmute call was given
+    /// ``displacement_damage=True``. A dict:
+    ///
+    /// - ``model``: ``"NRT"``, and ``efficiency``: ``0.8``.
+    /// - ``displacement_energies``: per element with dpa,
+    ///   ``{"energy": E_d in eV, "source": ...}``, where ``source`` is
+    ///   ``"ASTM E521"``, ``"OECD-NEA 2015"`` (Table 2.4 of NEA/NSC/DOC(2015)9,
+    ///   for an element ASTM E521 does not cover) or ``"user"``.
+    /// - ``without_damage_energy``: nuclides present on an irradiated step
+    ///   whose data has no MT=444, each with the largest atom fraction it
+    ///   reached there. Their damage energy is not counted, so a large entry
+    ///   here means the totals are low by about that share. Only
+    ///   transmutation products can appear: a nuclide of the starting
+    ///   composition without MT=444 is refused.
+    /// - ``without_displacement_energy``: transmutation-product elements with
+    ///   no displacement threshold energy (hydrogen and helium, typically),
+    ///   each with the largest atom fraction reached. Their damage energy is
+    ///   counted in ``get_damage_energy``; they add nothing to ``get_dpa``.
+    ///   Pass ``displacement_energies`` to include them.
+    ///
+    /// Args:
+    ///     material_id: Material ID number.
+    fn get_displacement_damage_info<'py>(
+        &self,
+        py: Python<'py>,
+        material_id: u32,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(damage) = self.inner.get_displacement_damage(material_id) else {
+            return Ok(None);
+        };
+        let d = PyDict::new(py);
+        d.set_item("model", "NRT")?;
+        d.set_item("efficiency", yamc_element::displacement::NRT_EFFICIENCY)?;
+        let energies = PyDict::new(py);
+        for (el, ed) in &damage.displacement_energies {
+            let entry = PyDict::new(py);
+            entry.set_item("energy", ed.energy_ev)?;
+            entry.set_item("source", ed.source.label())?;
+            energies.set_item(el, entry)?;
+        }
+        d.set_item("displacement_energies", energies)?;
+        let without = PyDict::new(py);
+        for (name, fraction) in &damage.without_damage_energy {
+            without.set_item(name, fraction)?;
+        }
+        d.set_item("without_damage_energy", without)?;
+        let without = PyDict::new(py);
+        for (el, fraction) in &damage.without_displacement_energy {
+            without.set_item(el, fraction)?;
+        }
+        d.set_item("without_displacement_energy", without)?;
+        Ok(Some(d))
     }
 
     /// Per-edge reaction rates the solve drove one step with.
@@ -1351,10 +1769,22 @@ impl PyTransmutationResults {
     /// much of the parent's removal rate rests on anything the evaluation
     /// does not give.
     ///
-    /// A run refuses when a channel's clipped or held production is more than
-    /// 0.1% of that parent's neutron removal rate, so what comes back here is
-    /// below that. MT=5's share is reported whatever its size: its products
-    /// are not modelled yet.
+    /// MT=5, ``(n,anything)``, is the ``(n,X)`` reaction: its residuals, read
+    /// from the reaction library's MF=6 MT=5, are shares of the MT=5 total
+    /// at each energy (``file`` 6, ``representation`` ``"share"``), and its
+    /// light particles H1 to He4 are their multiplicities times that total
+    /// (``representation`` ``"multiplicity"``, each state's ``share`` the
+    /// multiplicity folded over the spectrum, which can exceed one).
+    ///
+    /// A run refuses when the clipped or held production of its channels,
+    /// each parent weighted by its density, is more than 0.1% of the
+    /// material's neutron removal rate; each channel's ``clipped_share`` and
+    /// ``extrapolated_share`` are of its own parent's removal. A multiplicity above what the target's nucleons allow is
+    /// clipped like any other impossible value. ``unmodelled_mt5`` lists the
+    /// parents whose MT=5 residuals the chain does not model, with the reason;
+    /// on a reactions subsection that carries MT=5, a run refuses when those
+    /// of the material's own nuclides carry more than 0.1% of the material's
+    /// removal rate (one written before MT=5 was carried is reported only).
     ///
     /// Args:
     ///     material_id: Material ID number.
@@ -1363,8 +1793,9 @@ impl PyTransmutationResults {
     /// Returns:
     ///     dict | None: ``channels``, ``dropped`` and ``unmodelled_mt5``, or
     ///     None if the material or the step is unknown. Each channel has
-    ///     ``parent``, ``reaction``, ``mt``, ``file`` (9 or 10),
-    ///     ``representation`` (``"share"`` or ``"absolute"``), ``complete``,
+    ///     ``parent``, ``reaction``, ``mt``, ``file`` (6, 9 or 10),
+    ///     ``representation`` (``"share"``, ``"absolute"`` or
+    ///     ``"multiplicity"``), ``complete``,
     ///     ``completeness_source``, ``denominator``, ``states`` (each with
     ///     ``target``, ``lfs``, ``level_route``, ``level_energy_difference``
     ///     and ``share``, its share of the reaction), ``removal_share`` (the
@@ -1375,8 +1806,9 @@ impl PyTransmutationResults {
     ///     ``normalisation``. Each dropped channel has ``parent``,
     ///     ``reaction``, ``target``, ``reason`` and ``removal_share`` (None
     ///     where it cannot be folded). ``unmodelled_mt5`` is
-    ///     ``[(nuclide, share)]``, MT=5's share of each parent's removal
-    ///     rate, largest first. Empty for a decay-only step.
+    ///     ``[(nuclide, share, reason)]``, MT=5's share of the removal rate
+    ///     of each parent whose MT=5 residuals are not modelled, largest
+    ///     first. Empty for a decay-only step.
     ///
     /// Examples:
     ///     >>> report = results.get_branching_report(material_id=1, step=0)
@@ -1433,10 +1865,10 @@ impl PyTransmutationResults {
             dropped.append(d)?;
         }
         out.set_item("dropped", dropped)?;
-        let mt5: Vec<(String, f64)> = report
+        let mt5: Vec<(String, f64, String)> = report
             .unmodelled_mt5
             .iter()
-            .map(|u| (u.nuclide.clone(), u.share))
+            .map(|u| (u.nuclide.clone(), u.share, u.reason.clone()))
             .collect();
         out.set_item("unmodelled_mt5", mt5)?;
         Ok(Some(out))

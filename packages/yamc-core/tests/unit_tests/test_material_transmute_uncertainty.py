@@ -209,7 +209,7 @@ def test_the_report_names_what_is_never_perturbed():
     for source in (
         "isomeric branching (MF=9/MF=10)",
         "covariance with another evaluation (MAT1 naming another material)",
-        "resonance-parameter covariance not written into covariance.arrow (MF=32)",
+        "resonance-parameter covariance (MF=32) of a range neither sampled nor written into covariance.arrow",
         "decay photon spectrum covariance and continuum shape (MF=8 MT=457 LCOV, which no library states)",
         "photon attenuation coefficient (XCOM)",
         "air energy-absorption coefficient (NIST SRD 126)",
@@ -880,6 +880,9 @@ def test_drawn_photon_lines_keep_the_nominal_spectrum_and_report_an_energy_sprea
         assert isinstance(info[key], list)
     assert not any(s.startswith("decay photon line energy") for s in info["not_perturbed"])
 
+    assert isinstance(info["decay_photon_spectra_folded"], dict)
+    assert set(info["decay_photon_spectra_folded"]) <= set(info["decay_photon_lines_perturbed"])
+
     lines = results.get_decay_photon_spectrum_uncertainty(mid, 1)
     energies, rates = results.get_material(mid, 1).decay_photon_spectrum()
     assert [line.energy for line in lines] == energies
@@ -888,6 +891,20 @@ def test_drawn_photon_lines_keep_the_nominal_spectrum_and_report_an_energy_sprea
         assert line.energy_std_dev is None or line.energy_std_dev >= 0.0
         if line.energy_std_dev == 0.0:
             assert line.energy_mean == line.energy
+        # Eight replicas are too few to order the two ends; the Rust tests pin
+        # them. Here: the range is the pair.
+        assert line.std_dev_range == (line.std_dev, line.std_dev_correlated)
+
+    # The activity reads no photon intensity, so its range is empty; the decay
+    # heat and contact dose read them, the heat through E_EM.
+    activity = results.get_activity_uncertainty(mid, 1)
+    assert activity.std_dev_correlated == activity.std_dev
+    for estimate in (
+        results.get_decay_heat_uncertainty(mid, 1),
+        results.get_contact_dose_uncertainty(mid, 1),
+    ):
+        assert estimate.std_dev_range == (estimate.std_dev, estimate.std_dev_correlated)
+        assert estimate.relative_std_dev_correlated is not None
 
 
 # --- fission yields -----------------------------------------------------------
@@ -923,7 +940,7 @@ def test_with_no_rate_drawn_the_repair_report_is_empty():
     """With no rate drawn, the repair report is empty and exact."""
     iron = _iron()
     # Half-lives only, so no cross-section rate is drawn whatever covariance
-    # the cached fixture carries, and the weighted inflation has nothing to
+    # the cached fixture carries, and the weighted change has nothing to
     # weigh. The values of a real repair and the nested layout are pinned in
     # Rust (covariance_sample.rs and the yani-python data_uncertainty.rs
     # tests).
@@ -936,8 +953,8 @@ def test_with_no_rate_drawn_the_repair_report_is_empty():
     assert info["covariance_repaired"] == []
     assert info["covariance_repairs"] == []
     assert info["covariance_repaired_outside_bound"] == []
-    assert info["worst_sigma_inflation"] == 0.0
-    assert info["rate_weighted_sigma_inflation"] is None
+    assert info["worst_sigma_change"] == 0.0
+    assert info["rate_weighted_sigma_change"] is None
     assert info["sigma_at_least_one"] == {}
     assert info["sigma_at_least_ten"] == {}
     assert info["sigma_at_least_one_outside_bound"] == {}

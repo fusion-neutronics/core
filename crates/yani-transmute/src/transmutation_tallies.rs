@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use super::branching_rule::{
-    curve_interp, well_formed, Bound, ListRule, INELASTIC, MT_ANYTHING, MT_INELASTIC,
+    curve_interp, well_formed, Bound, ListRule, ANYTHING, INELASTIC, MT_ANYTHING, MT_INELASTIC,
 };
 use super::history_statistics::{
     fold_covariance, HistoryCovariance, HistoryStatistics, RateCovariance, RateLabel,
@@ -131,6 +131,11 @@ struct MomentCurve {
 struct MaterialTransmutationData {
     /// Nuclide names (ordered, defines row index)
     nuclide_names: Vec<String>,
+    /// Per nuclide, whether the chain drives an `(n,X)` reaction on it. MT=5
+    /// is scored for every nuclide that has it, to measure what no chain
+    /// reaction carries, but is a rate only where the chain drives it, as it
+    /// is on the multigroup path.
+    drives_anything: Vec<bool>,
     /// MT numbers tracked (ordered, defines column index)
     mt_numbers: Vec<i32>,
     /// Accumulator: [nuclide_idx * n_mts + mt_idx] -> AtomicU64
@@ -384,40 +389,39 @@ fn build_lists(
                 if kind != INELASTIC && !chain_nuclide.reactions.iter().any(|r| &r.kind == kind) {
                     continue;
                 }
-                let Some(rule) = ListRule::new(name, kind, &kinds[kind])? else {
-                    continue;
-                };
-                let Some(mt) = rule.mt else {
-                    continue;
-                };
-                let Some(total) = reactions.get(&mt) else {
-                    continue;
-                };
-                let tails = rule.tails(Some(total));
-                let rule = rule.into_owned();
-                let listed = rule
-                    .curves
-                    .iter()
-                    .zip(&rule.produces)
-                    .map(|(c, &produces)| {
-                        produces.then(|| {
-                            channels.push(YieldChannel {
-                                parent: name.clone(),
-                                kind: kind.clone(),
-                                target: c.target.clone(),
-                            });
-                            channels.len() - 1
+                for rule in ListRule::all(name, kind, &kinds[kind])? {
+                    let Some(mt) = rule.mt else {
+                        continue;
+                    };
+                    let Some(total) = reactions.get(&mt) else {
+                        continue;
+                    };
+                    let tails = rule.tails(Some(total));
+                    let rule = rule.into_owned();
+                    let listed = rule
+                        .curves
+                        .iter()
+                        .zip(&rule.produces)
+                        .map(|(c, &produces)| {
+                            produces.then(|| {
+                                channels.push(YieldChannel {
+                                    parent: name.clone(),
+                                    kind: kind.clone(),
+                                    target: c.target.clone(),
+                                });
+                                channels.len() - 1
+                            })
                         })
-                    })
-                    .collect();
-                own.push(ScoredList {
-                    nuclide,
-                    mt,
-                    rule,
-                    tails,
-                    channels: listed,
-                    slot: 2 * (lists.iter().map(Vec::len).sum::<usize>() + own.len()),
-                });
+                        .collect();
+                    own.push(ScoredList {
+                        nuclide,
+                        mt,
+                        rule,
+                        tails,
+                        channels: listed,
+                        slot: 2 * (lists.iter().map(Vec::len).sum::<usize>() + own.len()),
+                    });
+                }
             }
         }
         lists.push(own);
@@ -528,9 +532,10 @@ impl TransmutationTallies {
 
             // Collect all unique MTs needed for these nuclides from the chain,
             // and the totals the branching lists split. MT=5 is scored too,
-            // where a nuclide has it, to measure the removal no chain reaction
-            // carries (see `measure_unmodelled_mt5`); it and MT=4 name no chain
-            // reaction, so `get_reaction_rates` passes over them.
+            // where a nuclide has it: it is the `(n,X)` total where the chain
+            // drives that reaction, and otherwise measures the removal no
+            // chain reaction carries (see `measure_unmodelled_mt5`), which
+            // `get_reaction_rates` passes over, as it does MT=4.
             let mut mt_set = std::collections::HashSet::new();
             for name in &nuclide_names {
                 if let Some(chain_nuclide) = chain.get(name) {
@@ -611,6 +616,14 @@ impl TransmutationTallies {
             mat_data.insert(
                 mat_id,
                 MaterialTransmutationData {
+                    drives_anything: nuclide_names
+                        .iter()
+                        .map(|n| {
+                            chain
+                                .get(n)
+                                .is_some_and(|c| c.reactions.iter().any(|r| r.kind == ANYTHING))
+                        })
+                        .collect(),
                     nuclide_names,
                     mt_numbers,
                     batch_accum,
@@ -845,6 +858,9 @@ impl TransmutationTallies {
                 let (Some(kind), true) = (mt_to_reaction_type(mt), sums[j] > 0.0) else {
                     continue;
                 };
+                if mt == MT_ANYTHING && !mat_data.drives_anything[nuc_idx] {
+                    continue;
+                }
                 labels.push(RateLabel {
                     nuclide: name.clone(),
                     kind: kind.to_string(),
@@ -1275,6 +1291,9 @@ impl TransmutationTallies {
                         );
                     }
 
+                    if mt == MT_ANYTHING && !mat_data.drives_anything[nuc_idx] {
+                        continue;
+                    }
                     if let Some(rx_name) = mt_to_reaction_type(mt) {
                         nuclide_rates.insert(rx_name.to_string(), rate);
                     }
@@ -1782,7 +1801,8 @@ impl TransmutationTallies {
     /// resting on a held fraction, and the `(n,n')` partials' flat tails past
     /// their last breakpoint for parents folded from the moments (held too);
     /// per material nuclide its MT=4 total, where it has an `(n,n')` list, and
-    /// its MT=5 rate, which no chain reaction carries.
+    /// its MT=5 rate, for the share of it whose residuals no chain reaction
+    /// carries.
     pub fn get_branching_diagnostics(
         &self,
         material_id: u32,
@@ -1808,7 +1828,7 @@ impl TransmutationTallies {
                 .entry(list.rule.parent.clone())
                 .or_default()
                 .insert(
-                    list.rule.kind.clone(),
+                    list.rule.label(),
                     (dsums[list.slot] * scale, dsums[list.slot + 1] * scale),
                 );
         }
@@ -1967,6 +1987,7 @@ mod tests {
         materials.insert(
             7u32,
             MaterialTransmutationData {
+                drives_anything: vec![false],
                 nuclide_names: vec!["U238".to_string()],
                 mt_numbers: vec![102], // (n,gamma)
                 batch_accum: vec![AtomicU64::new(0)],
@@ -2862,6 +2883,7 @@ mod tests {
             branching,
             branching_uncertainty: None,
             evaluated_branching: None,
+            multiplicity: None,
             q_value: None,
         };
         let mut chain: HashMap<String, ChainNuclide> = HashMap::new();

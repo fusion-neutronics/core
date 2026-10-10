@@ -373,7 +373,11 @@ impl YaniSession {
     /// photons/s/eV, the interpolation law, and the emission rate, null where
     /// this build cannot integrate the continuum: no stated law, a law other
     /// than histogram or linear-linear, or a malformed table: unpaired lists,
-    /// a non-finite or descending energy, a negative or non-finite rate).
+    /// a non-finite or descending energy, a negative or non-finite rate), and
+    /// the hydrogen and helium produced (`gas_production_appm`: appm of the
+    /// initial atoms, starting gas subtracted, keyed `H1`, `H2`, `H3`, `He3`,
+    /// `He4` and the totals `H` and `He`). A chain without all five gas
+    /// nuclides is an error rather than a zero.
     /// Everything the plots need, in one call, so the host does not pay a
     /// boundary crossing per series.
     pub fn run(&mut self, spectra_json: &str, schedule_json: &str) -> Result<String, String> {
@@ -414,11 +418,24 @@ impl YaniSession {
 
         // One entry per schedule step: `results` also carries the initial
         // composition at index 0, which is not a step.
-        let step_materials = results.step_materials(material.material_id.unwrap_or(0));
+        let material_id = material.material_id.unwrap_or(0);
+        let step_materials = results.step_materials(material_id);
+        // Gas produced, in appm of the initial atoms, with the starting H and
+        // He subtracted. Index 0 of each series is the initial composition, so
+        // step `i` reads entry `i + 1`. A chain without one of the five gas
+        // nuclides is an error here as in Python: the solve dropped that gas,
+        // and a zero would be a wrong answer.
+        let gas = results
+            .gas_production(material_id, true)?
+            .ok_or("the material is missing from its own results")?;
         let mut out = Vec::with_capacity(step_materials.len());
         let mut elapsed = 0.0;
-        for (step, mat) in steps.iter().zip(step_materials) {
+        for (i, (step, mat)) in steps.iter().zip(step_materials).enumerate() {
             elapsed += step.dt;
+            let gas_production: HashMap<&String, f64> = gas
+                .iter()
+                .map(|(key, series)| (key, series[i + 1]))
+                .collect();
             let densities = mat.get_atoms_per_barn_cm()?;
             let activity = yani_decay::activity_by_nuclide(&densities, volume, &chain);
             let heat = yani_decay::decay_heat_by_nuclide(&densities, volume, &chain);
@@ -457,6 +474,7 @@ impl YaniSession {
                 "photon_continua": continua,
                 "contact_dose": yani_decay::total(&contact_dose),
                 "contact_dose_by_nuclide": contact_dose,
+                "gas_production_appm": gas_production,
             }));
         }
         Ok(serde_json::Value::Array(out).to_string())

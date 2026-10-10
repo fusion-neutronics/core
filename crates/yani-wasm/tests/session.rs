@@ -526,6 +526,19 @@ fn a_transmutation_runs_and_reports_every_series_the_plots_need() {
             "{nuclide} carries dose but no activity",
         );
     }
+
+    // Fe56(n,p) and (n,a) make hydrogen and helium, and the totals are the
+    // sums of their isotopes.
+    for step in &steps {
+        let gas = step["gas_production_appm"].as_object().unwrap();
+        let appm = |key: &str| gas[key].as_f64().unwrap();
+        assert!(appm("H1") > 0.0, "expected hydrogen, got {gas:?}");
+        assert!(appm("He4") > 0.0, "expected helium, got {gas:?}");
+        let h = appm("H1") + appm("H2") + appm("H3");
+        let he = appm("He3") + appm("He4");
+        assert!((appm("H") - h).abs() <= h * 1e-12);
+        assert!((appm("He") - he).abs() <= he * 1e-12);
+    }
 }
 
 /// The same run, repeated on one session, must give the same answer.

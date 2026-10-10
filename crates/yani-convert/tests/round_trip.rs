@@ -85,7 +85,8 @@ fn convert(name: &str) -> Converted {
     let dir = std::env::temp_dir().join(format!("yani-convert-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     yani_convert::write_decay(&chain, &sources, &dir.join("decay")).expect("decay written");
-    yani_convert::write_reactions(&chain, &dir.join("reactions")).expect("reactions written");
+    yani_convert::write_reactions(&chain, &Default::default(), &dir.join("reactions"))
+        .expect("reactions written");
     yani_convert::write_fission_yields(&chain, &dir.join("fission_yields"))
         .expect("fission yields written");
 
@@ -508,6 +509,7 @@ fn convert_transmutation_writes_a_complete_directory() {
             q_values: &q_values,
             decay_fill: &[],
             decay_fill_library: "",
+            anything: &Default::default(),
         },
         &endf::chain::DEFAULT_REACTIONS,
         None,
@@ -576,6 +578,7 @@ fn convert_transmutation_writes_a_complete_directory() {
             q_values: &q_values,
             decay_fill: &[],
             decay_fill_library: "",
+            anything: &Default::default(),
         },
         &endf::chain::DEFAULT_REACTIONS,
         None,
@@ -967,6 +970,7 @@ fn streaming_the_neutron_files_writes_the_same_tree_as_holding_them() {
             q_values: &q_values,
             decay_fill: &[],
             decay_fill_library: "",
+            anything: &Default::default(),
         },
         &endf::chain::DEFAULT_REACTIONS,
         None,
