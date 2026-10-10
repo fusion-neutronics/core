@@ -174,8 +174,14 @@ fn the_field_reproduces_the_fold_under_every_spectrum() {
                 field.short.len()
             );
         }
+        // A lognormal field repaired in log space has its correlations
+        // moved the same way, so it is judged like a repaired field.
+        let log_repaired = sampler
+            .lognormal_limits()
+            .get(nuclide.as_str())
+            .is_some_and(|l| l.log_space_repair.is_some());
         for a in 0..spectra.len() {
-            let repaired = !sampler.repairs(a).is_empty();
+            let repaired = log_repaired || !sampler.repairs(a).is_empty();
             for (n, kind, evaluated, sampled) in sampler.channel_sigmas(a) {
                 if n != nuclide || evaluated == 0.0 || evaluated > 0.3 {
                     continue;
@@ -371,7 +377,7 @@ fn w186_n3n_is_sampled_at_its_evaluated_sigma() {
         multigroup_flux: &flux,
         group_boundaries: &groups,
     };
-    let fields = cell_fields(&m, &chain, &[spectrum], None);
+    let fields = cell_fields(&m, &chain, &[spectrum], None, &BTreeSet::new());
     let sampler = Sampler::new(&fields, &[fold]);
     let repair = sampler.field_repairs()["W186"];
     assert!(repair.held_cells > 0 && repair.converged, "{repair:?}");

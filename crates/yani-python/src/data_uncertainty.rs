@@ -9,8 +9,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
+use yani_transmute::nearest_correlation::CorrelationRepair;
 use yani_transmute::resonance_rates::ResonanceMethod;
-use yani_transmute::resonance_sampling::{CorrelationRepair, NotedParameter};
+use yani_transmute::resonance_sampling::NotedParameter;
 use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 
 /// Request nuclear-data uncertainty on a transmutation.
