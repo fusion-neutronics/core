@@ -9,8 +9,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
+use yani_transmute::nearest_correlation::CorrelationRepair;
 use yani_transmute::resonance_rates::ResonanceMethod;
-use yani_transmute::resonance_sampling::{CorrelationRepair, NotedParameter};
+use yani_transmute::resonance_sampling::NotedParameter;
 use yani_transmute::uncertainty::{
     check_convergence, DataUncertainty, Info, Source, Unconverged, DEFAULT_CONVERGENCE,
 };
@@ -60,8 +61,16 @@ use yani_transmute::uncertainty::{
 /// - ``"decay_photon_lines"``: each decay photon spectrum's normalisation
 ///   (FD for lines, FC for a continuum), one draw per spectrum common to all
 ///   its lines, and each line's own intensity (dRI) and energy (dER), from
-///   the decay data's MT=457 sigmas. It moves the decay photon spectrum and
-///   the contact dose only: no photon enters the solve;
+///   the decay data's MT=457 sigmas. It moves the decay photon spectrum, the
+///   contact dose and, through the gamma decay energy E_EM, which follows
+///   each replica's drawn lines in place of a ``"decay_energy"`` draw, the
+///   decay heat; no photon enters the solve. The decay data do not state how
+///   a nuclide's photon intensities are correlated beyond the normalisation
+///   (between the lines' dRI, between a normalisation and its lines, between
+///   gamma and x-ray spectra), so each output is evaluated at both ends:
+///   ``Estimate.std_dev`` takes them independent and
+///   ``Estimate.std_dev_correlated`` fully correlated. A D1S dose
+///   (``PulseSchedule.time_correct_tally``) draws the normalisations alone;
 /// - ``"fission_yield"``: each fissioning parent's independent yields (MT=454),
 ///   from the DY the evaluation states on each, drawn on the tape's own
 ///   products and summed onto the chain's the way the converter summed the
@@ -81,7 +90,8 @@ use yani_transmute::uncertainty::{
 /// states a mean and a sigma for each and no correlation, so the draws carry
 /// exactly what the evaluation states and are never negative. So are the decay
 /// photon normalisations, intensities and energies, with the one correlation
-/// the data does state: a spectrum's normalisation is common to its lines.
+/// the data does state, a spectrum's normalisation common to its lines, and
+/// the ones it does not state bounded rather than assumed.
 ///
 /// Held at their nominal values, with uncertainties of their own that this
 /// does not propagate:
@@ -449,16 +459,29 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     )?;
     d.set_item("covariance_source", &info.covariance_source)?;
     d.set_item("covariance_warnings", &info.covariance_warnings)?;
+    // What one repair of a nuclide's cells did, into `entry`.
+    let field_repair = |entry: &Bound<'py, PyDict>,
+                        r: &yani_transmute::covariance_sample::FieldRepair|
+     -> PyResult<()> {
+        entry.set_item("lambda_min", r.lambda_min)?;
+        entry.set_item("largest_correlation_change", r.largest_correlation_change)?;
+        entry.set_item(
+            "correlation_frobenius_change",
+            r.correlation_frobenius_change,
+        )?;
+        entry.set_item("cells", r.cells)?;
+        entry.set_item("held_cells", r.held_cells)?;
+        entry.set_item("converged", r.converged)?;
+        Ok(())
+    };
     let repairs = PyList::empty(py);
     for r in &info.covariance_repairs {
         let entry = PyDict::new(py);
         entry.set_item("nuclide", &r.nuclide)?;
         entry.set_item("spectrum", r.spectrum)?;
-        entry.set_item("lambda_min", r.lambda_min)?;
-        entry.set_item("lambda_max", r.lambda_max)?;
-        entry.set_item("clipped_fraction", r.clipped_fraction)?;
+        field_repair(&entry, &r.field)?;
         // Keyed by kind, each the evaluated variance and the evaluated and
-        // sampled relative sigmas, so the widening reads off a single entry.
+        // sampled relative sigmas, so the change reads off a single entry.
         // A negative stated variance has no sigma and reads as None.
         let channels = PyDict::new(py);
         for c in &r.channels {
@@ -479,10 +502,10 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
             .cloned()
             .collect::<Vec<_>>(),
     )?;
-    d.set_item("worst_sigma_inflation", info.worst_sigma_inflation)?;
+    d.set_item("worst_sigma_change", info.worst_sigma_change)?;
     d.set_item(
-        "rate_weighted_sigma_inflation",
-        info.rate_weighted_sigma_inflation,
+        "rate_weighted_sigma_change",
+        info.rate_weighted_sigma_change,
     )?;
     for (key, channels) in [
         ("sigma_at_least_one", &info.sigma_at_least_one),
@@ -518,6 +541,14 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
             e.set_item("cells", l.cells)?;
             e.set_item("largest_sigma_change", l.largest_sigma_change)?;
             e.set_item("largest_correlation_change", l.largest_correlation_change)?;
+            match &l.log_space_repair {
+                Some(r) => {
+                    let repair = PyDict::new(py);
+                    field_repair(&repair, r)?;
+                    e.set_item("log_space_repair", repair)?;
+                }
+                None => e.set_item("log_space_repair", py.None())?,
+            }
             Ok(e)
         };
     let flux_limits = PyDict::new(py);
@@ -617,6 +648,10 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
     ] {
         d.set_item(key, set.iter().cloned().collect::<Vec<_>>())?;
     }
+    d.set_item(
+        "decay_photon_spectra_folded",
+        info.decay_photon_spectra_folded.clone(),
+    )?;
     for (key, set) in [
         ("fission_yields_perturbed", &info.fission_yields_perturbed),
         (
@@ -726,7 +761,7 @@ fn resonance_parameters_dict<'py>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yani_transmute::covariance_sample::{ChannelSigma, Repair};
+    use yani_transmute::covariance_sample::{ChannelSigma, FieldRepair, Repair};
 
     /// A repaired, wide-sigma report reaches Python with the nested layout the
     /// docstring promises: channels keyed by kind, a negative stated variance
@@ -738,9 +773,14 @@ mod tests {
             covariance_repairs: vec![Repair {
                 nuclide: "W182".to_string(),
                 spectrum: 1,
-                lambda_min: -1.0e-4,
-                lambda_max: 1.0e-2,
-                clipped_fraction: 0.5,
+                field: FieldRepair {
+                    lambda_min: -1.0e-4,
+                    largest_correlation_change: 2.0e-4,
+                    correlation_frobenius_change: 3.0e-4,
+                    cells: 4,
+                    held_cells: 1,
+                    converged: true,
+                },
                 channels: vec![
                     ChannelSigma {
                         kind: "(n,2n)".to_string(),
@@ -755,8 +795,8 @@ mod tests {
                 ],
             }],
             covariance_repaired_outside_bound: ["Xe135".to_string()].into(),
-            worst_sigma_inflation: f64::INFINITY,
-            rate_weighted_sigma_inflation: Some(0.25),
+            worst_sigma_change: f64::INFINITY,
+            rate_weighted_sigma_change: Some(0.25),
             sigma_at_least_one: [(("W186".to_string(), "(n,p)".to_string()), 12.0)].into(),
             sigma_at_least_ten: [(("W186".to_string(), "(n,p)".to_string()), 12.0)].into(),
             sigma_at_least_one_outside_bound: [(("W186".to_string(), "(n,p)".to_string()), 12.0)]
@@ -777,14 +817,12 @@ mod tests {
                     .unwrap(),
                 ["Xe135"]
             );
-            assert!(get("worst_sigma_inflation")
+            assert!(get("worst_sigma_change")
                 .extract::<f64>()
                 .unwrap()
                 .is_infinite());
             assert_eq!(
-                get("rate_weighted_sigma_inflation")
-                    .extract::<f64>()
-                    .unwrap(),
+                get("rate_weighted_sigma_change").extract::<f64>().unwrap(),
                 0.25
             );
             assert!(get("has_gaps").extract::<bool>().unwrap());
@@ -817,19 +855,27 @@ mod tests {
             );
             assert_eq!(
                 repair
-                    .get_item("lambda_max")
+                    .get_item("largest_correlation_change")
                     .unwrap()
                     .extract::<f64>()
                     .unwrap(),
-                1.0e-2
+                2.0e-4
             );
             assert_eq!(
                 repair
-                    .get_item("clipped_fraction")
+                    .get_item("correlation_frobenius_change")
                     .unwrap()
                     .extract::<f64>()
                     .unwrap(),
-                0.5
+                3.0e-4
+            );
+            assert_eq!(
+                repair
+                    .get_item("held_cells")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap(),
+                1
             );
             let channels = repair.get_item("channels").unwrap();
             let n2n = channels.get_item("(n,2n)").unwrap();

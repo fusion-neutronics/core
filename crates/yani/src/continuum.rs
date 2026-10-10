@@ -277,6 +277,28 @@ impl<'a> Continuum<'a> {
         self.interval_integrals().sum()
     }
 
+    /// The integral of energy times the density over the whole tabulated
+    /// range, exact under the law: the energy a continuum of photons per eV
+    /// carries, in eV per unit of `integral`.
+    ///
+    /// On a linear-linear interval the integrand is the product of two linear
+    /// functions, whose integral is `width / 6 * (y0 (2 e0 + e1) + y1 (e0 + 2
+    /// e1))`; on a histogram one it is `y0 (e1^2 - e0^2) / 2`.
+    pub fn energy_integral(&self) -> f64 {
+        self.energies
+            .windows(2)
+            .zip(self.densities.windows(2))
+            .map(|(e, y)| {
+                let width = e[1] - e[0];
+                if self.linear {
+                    width / 6.0 * (y[0] * (2.0 * e[0] + e[1]) + y[1] * (e[0] + 2.0 * e[1]))
+                } else {
+                    y[0] * 0.5 * (e[1] + e[0]) * width
+                }
+            })
+            .sum()
+    }
+
     /// The energy in interval `i` below which `part` of that interval's
     /// integral lies: the exact inverse of the running integral from
     /// `energies[i]`, for `part` between zero and the interval's integral.
@@ -339,6 +361,32 @@ mod tests {
             linear().integral(),
             2.0 * 1e3 + 1.5 * 2e3 + 1.0 * 4e3,
             "trapezoids"
+        );
+    }
+
+    /// The energy integral against a midpoint sum fine enough to agree to
+    /// many digits, under each law.
+    #[test]
+    fn the_energy_integral_follows_the_law() {
+        for continuum in [histogram(), linear()] {
+            let n = 200_000;
+            let (lo, hi) = (ENERGIES[0], ENERGIES[3]);
+            let h = (hi - lo) / n as f64;
+            let sum: f64 = (0..n)
+                .map(|k| {
+                    let e = lo + (k as f64 + 0.5) * h;
+                    e * continuum.density(e) * h
+                })
+                .sum();
+            let exact = continuum.energy_integral();
+            assert!((exact / sum - 1.0).abs() < 1e-6, "{exact} against {sum}");
+        }
+        // One histogram bin of height 3 from 1 to 2 keV carries 3 * 1.5e6 eV.
+        assert_eq!(
+            Continuum::new(&[1.0e3, 2.0e3], &[3.0, 0.0], Some(Interpolation::Histogram))
+                .unwrap()
+                .energy_integral(),
+            4.5e6
         );
     }
 

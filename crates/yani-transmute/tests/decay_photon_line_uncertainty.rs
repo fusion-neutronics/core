@@ -232,3 +232,153 @@ fn photons_without_a_sigma_are_listed() {
     assert!(info.decay_photon_lines_perturbed.is_empty());
     assert!(info.has_gaps());
 }
+
+/// With only the photons drawn, the decay heat moves by the photon energy the
+/// lines carry per decay, and nothing else: the gamma decay energy follows the
+/// drawn lines rather than a draw of its own. Its relative spread is then the
+/// spread of `sum E_r p_r` (p_r per decay) over the decay energy, which for one
+/// spectrum is FD's sigma on the whole sum, each line's dRI on its own term,
+/// and each dER on its intensity, in quadrature.
+#[test]
+fn the_decay_heat_follows_the_drawn_lines() {
+    let fd = 0.01;
+    let chain = chain(fd, true);
+    let results = run(&chain, vec![Source::DecayPhotonLines], 4096);
+    let heat = results
+        .decay_heat_uncertainty(0, 1, &chain)
+        .unwrap()
+        .expect("an ensemble");
+    let co60 = &chain["Co60"];
+    let lambda = std::f64::consts::LN_2 / co60.half_life.unwrap();
+    let source = co60
+        .sources
+        .iter()
+        .find(|s| s.uncertainty.is_some())
+        .unwrap();
+    let yani::DecaySourceDistribution::Discrete {
+        energies,
+        intensities,
+    } = &source.distribution
+    else {
+        unreachable!()
+    };
+    let (mut sum, mut own) = (0.0, 0.0);
+    for (energy, intensity) in energies.iter().zip(intensities) {
+        let p = intensity / lambda;
+        sum += energy * p;
+        let (dri, der) = match *energy {
+            LINE_1173 => (0.02, 30.0),
+            LINE_1332 => (0.03, 20.0),
+            _ => (0.0, 0.0),
+        };
+        own += (energy * p * dri).powi(2) + (p * der).powi(2);
+    }
+    let want = ((fd * sum).powi(2) + own).sqrt() / co60.decay_energy;
+    assert_close(
+        heat.relative_std_dev().expect("a spread"),
+        want,
+        0.06,
+        "decay heat sigma from the lines",
+    );
+    // Its upper end takes FD and every dRI as one: the linear sum.
+    assert!(heat.std_dev_correlated.unwrap() > heat.std_dev.unwrap());
+}
+
+/// The ENDF/B-VIII.1 decay data, where it is cached, with one emitter as a
+/// trace in iron and its photon line data alone drawn: the contact dose's
+/// range from independent line sigmas to fully correlated ones. Co60's two
+/// lines are near-certain, so its range is tiny. W187's spectrum writes FD = 1
+/// and folds the normalisation into every dRI, so read independently its dose
+/// moves by about 0.8%, and fully correlated by about twice that.
+#[test]
+fn endf_b8_1_contact_dose_ranges_from_the_lines_alone() {
+    let decay = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../yamc/tests/transmutation-endf-b8.1-sfr.arrow/decay");
+    if !decay.join("sources.arrow").is_file() {
+        eprintln!("skipping -- {} absent", decay.display());
+        return;
+    }
+    let chain = yani::load_chain_parts(&decay.to_string_lossy(), None, None, None)
+        .expect("decay data")
+        .chain;
+    let has_sigmas = chain["W187"]
+        .sources
+        .iter()
+        .any(|s| s.uncertainty.is_some());
+    if !has_sigmas {
+        eprintln!("skipping -- cached decay data predates the line sigmas");
+        return;
+    }
+    let range = |emitter: &str| -> (f64, f64) {
+        let mut material = Material::new(
+            HashMap::from([("Fe56".to_string(), 1.0)]),
+            "atom",
+            "sum",
+            None,
+        )
+        .expect("material");
+        material.nuclides.insert("Fe56".to_string(), 8.4e-2);
+        material.nuclides.insert(emitter.to_string(), 1.0e-9);
+        material.volume = Some(1.0);
+        let request = DataUncertainty {
+            seed: 5,
+            samples: Some(4096),
+            sources: vec![Source::DecayPhotonLines],
+            attribution: false,
+            ..Default::default()
+        };
+        let results = transmute_material(
+            &mut material,
+            &[],
+            &[TransmuteStep {
+                dt: 1.0,
+                irradiation: None,
+            }],
+            Arc::clone(&chain),
+            &Default::default(),
+            Default::default(),
+            Some(&request),
+        )
+        .expect("transmute");
+        let info = &results.uncertainty_info[&0];
+        let dose = results
+            .contact_dose_uncertainty(0, 1, &chain, yani_decay::DoseQuantity::AbsorbedAir, 2.0)
+            .unwrap()
+            .expect("an ensemble");
+        let by_nuclide = results
+            .contact_dose_uncertainty_by_nuclide(
+                0,
+                1,
+                &chain,
+                yani_decay::DoseQuantity::AbsorbedAir,
+                2.0,
+            )
+            .unwrap()
+            .expect("an ensemble");
+        let own = by_nuclide[emitter];
+        let (low, high) = (
+            own.relative_std_dev().unwrap(),
+            own.relative_std_dev_correlated().unwrap(),
+        );
+        eprintln!(
+            "{emitter}: contact dose from its lines alone {:.3}% to {:.3}% (folded spectra {:?})",
+            100.0 * low,
+            100.0 * high,
+            info.decay_photon_spectra_folded.get(emitter)
+        );
+        assert!(dose.std_dev.unwrap() > 0.0);
+        (low, high)
+    };
+
+    let (low, high) = range("W187");
+    assert!((low / 0.0083 - 1.0).abs() < 0.1, "W187 independent: {low}");
+    assert!(high > 1.5 * low, "W187 correlated: {high} against {low}");
+
+    let (low, high) = range("Co60");
+    assert!(high >= low && high < 1.0e-3, "Co60: {low} to {high}");
+
+    for emitter in ["Mn56", "Fe59"] {
+        let (low, high) = range(emitter);
+        assert!(high > low, "{emitter}: {low} to {high}");
+    }
+}

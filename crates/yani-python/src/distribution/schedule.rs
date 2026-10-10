@@ -341,7 +341,9 @@ pub struct PyDoseResult {
     times: Py<PyAny>,
     data_std_dev: Option<Py<PyAny>>,
     data_std_dev_standard_error: Option<Py<PyAny>>,
+    data_std_dev_correlated: Option<Py<PyAny>>,
     total_std_dev: Option<Py<PyAny>>,
+    total_std_dev_correlated: Option<Py<PyAny>>,
     data_uncertainty_info: Option<Py<PyAny>>,
 }
 
@@ -363,7 +365,11 @@ impl PyDoseResult {
 
     /// The nuclear-data uncertainty on `mean`, same shape, when
     /// ``time_correct_tally`` was given ``data_uncertainty``; ``None``
-    /// otherwise. From the half-lives behind the time-correction factors.
+    /// otherwise. From the half-lives behind the time-correction factors and
+    /// the decay photon spectrum normalisations that scale each emitter's
+    /// tally, with an emitter's gamma and x-ray normalisations drawn
+    /// independently: the lower end of the range ``data_std_dev_correlated``
+    /// closes.
     #[getter]
     fn data_std_dev(&self, py: Python<'_>) -> Option<Py<PyAny>> {
         self.data_std_dev.as_ref().map(|v| v.clone_ref(py))
@@ -380,19 +386,44 @@ impl PyDoseResult {
             .map(|v| v.clone_ref(py))
     }
 
+    /// ``data_std_dev`` with each emitter's gamma and x-ray normalisations
+    /// drawn fully correlated, the upper end of the range the decay data
+    /// leave by not stating their correlation. Equal to ``data_std_dev`` when
+    /// no normalisation is drawn. Negative correlations are not considered:
+    /// what the spectra share (a decay scheme's normalisation, its conversion
+    /// coefficients) moves them the same way.
+    #[getter]
+    fn data_std_dev_correlated(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.data_std_dev_correlated
+            .as_ref()
+            .map(|v| v.clone_ref(py))
+    }
+
     /// `std_dev` and `data_std_dev` in quadrature, when both exist. They are
     /// independent: one is the transport's sampling, the other the evaluated
-    /// half-lives.
+    /// decay data.
     #[getter]
     fn total_std_dev(&self, py: Python<'_>) -> Option<Py<PyAny>> {
         self.total_std_dev.as_ref().map(|v| v.clone_ref(py))
     }
 
+    /// `std_dev` and `data_std_dev_correlated` in quadrature, when both exist.
+    #[getter]
+    fn total_std_dev_correlated(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.total_std_dev_correlated
+            .as_ref()
+            .map(|v| v.clone_ref(py))
+    }
+
     /// What the nuclear-data uncertainty covered, when asked for: the
-    /// half-lives sampled, those with no stated sigma, the replica count, the
+    /// half-lives sampled, those with no stated sigma, the emitters whose
+    /// photon normalisation was drawn (``decay_photon_normalisations_perturbed``)
+    /// and those with a spectrum whose normalisation is folded into its line
+    /// sigmas (``decay_photon_spectra_folded``), the replica count, the
     /// ``convergence`` target, whether every time-correction factor's sigma
     /// reached it (``converged``), whether the replica cap stopped the run
-    /// (``hit_cap``), and the ones that missed (``unconverged``).
+    /// (``hit_cap``), the ones that missed (``unconverged``), and what was
+    /// held at nominal (``not_perturbed``).
     #[getter]
     fn data_uncertainty_info(&self, py: Python<'_>) -> Option<Py<PyAny>> {
         self.data_uncertainty_info.as_ref().map(|v| v.clone_ref(py))
@@ -519,21 +550,32 @@ impl PyPulseSchedule {
     /// sources (``yamc.transmutation_decay_data`` etc.).
     ///
     ///     data_uncertainty (DataUncertainty, optional): Also propagate the
-    ///         nuclear-data uncertainty of the time correction. Only the
-    ///         ``"half_life"`` source acts on it: a time-correction factor is an
-    ///         activity over the schedule, and the tally's in-line photon yield
-    ///         is per decay, so the half-lives enter through the correction and
-    ///         nowhere else. Each replica draws every half-life feeding an
-    ///         emitter once and uses it for every campaign, so one evaluation
-    ///         is one uncertainty; the draws are those a transmutation with the
-    ///         same seed makes. Read ``.data_std_dev``, its standard error
-    ///         ``.data_std_dev_standard_error``, and ``.total_std_dev``.
-    ///         Replicas are added until every emitter's time-correction factor
-    ///         has a standard deviation known to the request's
-    ///         ``convergence`` at every schedule step, or the request's
-    ///         ``samples`` fixes the count.
-    ///         Decay branching ratios also shape a time correction and are held
-    ///         at nominal here, which ``.data_uncertainty_info`` lists under
+    ///         nuclear-data uncertainty of the dose. Two sources act on it.
+    ///         ``"half_life"`` acts through the time correction: a
+    ///         time-correction factor is an activity over the schedule, and the
+    ///         tally's in-line photon yield is per decay, so the half-lives
+    ///         enter there and nowhere else. Each replica draws every half-life
+    ///         feeding an emitter once and uses it for every campaign, so one
+    ///         evaluation is one uncertainty. ``"decay_photon_lines"`` acts
+    ///         through the photon spectrum normalisation (FD, FC), which scales
+    ///         an emitter's whole spectrum and so its tally, and is applied to
+    ///         it after the fact; an emitter with several spectra is scaled by
+    ///         their multipliers weighted by each one's share of its photon
+    ///         energy. The draws are those a transmutation with the same seed
+    ///         makes. Read ``.data_std_dev``, its standard error
+    ///         ``.data_std_dev_standard_error``, and ``.total_std_dev``, and
+    ///         ``.data_std_dev_correlated`` and ``.total_std_dev_correlated``
+    ///         for the upper end of the range the unstated correlation between
+    ///         an emitter's gamma and x-ray normalisations leaves. Replicas are
+    ///         added until every emitter's time-correction factor has a
+    ///         standard deviation known to the request's ``convergence`` at
+    ///         every schedule step, or the request's ``samples`` fixes the
+    ///         count. The line intensities (dRI) and energies change the
+    ///         spectrum's shape, which needs line-resolved tallies, and are
+    ///         held at nominal; ENDF/B-VIII.1 folds the normalisation into the
+    ///         dRI, so under it almost nothing is drawn. Decay branching ratios
+    ///         also shape a time correction and are held at nominal.
+    ///         ``.data_uncertainty_info`` lists everything held under
     ///         ``not_perturbed``.
     ///
     /// Returns:
@@ -685,7 +727,9 @@ impl PyPulseSchedule {
         // applied to the same tallies, and the spread taken per bin.
         let mut data_std_dev = None;
         let mut data_std_dev_standard_error = None;
+        let mut data_std_dev_correlated = None;
         let mut total_std_dev = None;
+        let mut total_std_dev_correlated = None;
         let mut data_uncertainty_info = None;
         if let Some(request) = data_uncertainty {
             let emitters = campaigns.first().map(|c| c.0.clone()).unwrap_or_default();
@@ -699,58 +743,75 @@ impl PyPulseSchedule {
             )
             .map_err(PyValueError::new_err)?;
             // Running moments per (row, bin): replicas never held all at once.
-            let mut spread: Vec<Vec<SpreadAccumulator>> = total_mean
-                .iter()
-                .map(|r| vec![SpreadAccumulator::default(); r.len()])
-                .collect();
-            for tcfs in &ensemble.replicas {
-                let mut rows: Vec<Vec<f64>> =
-                    total_mean.iter().map(|r| vec![0.0; r.len()]).collect();
-                for ((nuclides, n_scores, mean, std_dev, _), tcf) in campaigns.iter().zip(tcfs) {
-                    let (corrected, _) = yani_decay::apply_time_correction(
-                        mean,
-                        std_dev,
-                        nuclides,
-                        *n_scores,
-                        tcf,
-                        &tcf_indices,
-                        true,
-                    )
-                    .map_err(PyValueError::new_err)?;
-                    for (row, c) in rows.iter_mut().zip(corrected) {
-                        for (v, x) in row.iter_mut().zip(c) {
-                            *v += x;
+            // Each bin's sigma and the standard error of that sigma.
+            type Spread = (Vec<Vec<f64>>, Vec<Vec<f64>>);
+            let spread =
+                |replicas: &[yani_transmute::d1s_uncertainty::ReplicaTcfs]| -> PyResult<Spread> {
+                    let mut acc: Vec<Vec<SpreadAccumulator>> = total_mean
+                        .iter()
+                        .map(|r| vec![SpreadAccumulator::default(); r.len()])
+                        .collect();
+                    for tcfs in replicas {
+                        let mut rows: Vec<Vec<f64>> =
+                            total_mean.iter().map(|r| vec![0.0; r.len()]).collect();
+                        for ((nuclides, n_scores, mean, std_dev, _), tcf) in
+                            campaigns.iter().zip(tcfs)
+                        {
+                            let (corrected, _) = yani_decay::apply_time_correction(
+                                mean,
+                                std_dev,
+                                nuclides,
+                                *n_scores,
+                                tcf,
+                                &tcf_indices,
+                                true,
+                            )
+                            .map_err(PyValueError::new_err)?;
+                            for (row, c) in rows.iter_mut().zip(corrected) {
+                                for (v, x) in row.iter_mut().zip(c) {
+                                    *v += x;
+                                }
+                            }
+                        }
+                        for (a, row) in acc.iter_mut().zip(rows) {
+                            for (a, x) in a.iter_mut().zip(row) {
+                                a.update(x);
+                            }
                         }
                     }
-                }
-                for (acc, row) in spread.iter_mut().zip(rows) {
-                    for (a, x) in acc.iter_mut().zip(row) {
-                        a.update(x);
-                    }
-                }
-            }
-            let data: Vec<Vec<f64>> = spread
-                .iter()
-                .map(|row| row.iter().map(SpreadAccumulator::std_dev).collect())
-                .collect();
-            let data_se: Vec<Vec<f64>> = spread
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .map(|a| a.std_dev_standard_error().unwrap_or(f64::NAN))
-                        .collect()
-                })
-                .collect();
-            let total: Vec<Vec<f64>> = data
-                .iter()
-                .zip(&total_std)
-                .map(|(d, s)| {
-                    d.iter()
-                        .zip(s)
-                        .map(|(d, s)| (d * d + s * s).sqrt())
-                        .collect()
-                })
-                .collect();
+                    let sigma = acc
+                        .iter()
+                        .map(|row| row.iter().map(SpreadAccumulator::std_dev).collect())
+                        .collect();
+                    let se = acc
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .map(|a| a.std_dev_standard_error().unwrap_or(f64::NAN))
+                                .collect()
+                        })
+                        .collect();
+                    Ok((sigma, se))
+                };
+            let with_transport = |data: &[Vec<f64>]| -> Vec<Vec<f64>> {
+                data.iter()
+                    .zip(&total_std)
+                    .map(|(d, s)| {
+                        d.iter()
+                            .zip(s)
+                            .map(|(d, s)| (d * d + s * s).sqrt())
+                            .collect()
+                    })
+                    .collect()
+            };
+            let (data, data_se) = spread(&ensemble.replicas)?;
+            let data_correlated = if ensemble.replicas_correlated == ensemble.replicas {
+                data.clone()
+            } else {
+                spread(&ensemble.replicas_correlated)?.0
+            };
+            let total = with_transport(&data);
+            let total_correlated = with_transport(&data_correlated);
             let info = PyDict::new(py);
             info.set_item(
                 "half_lives_perturbed",
@@ -776,6 +837,18 @@ impl PyPulseSchedule {
                     .cloned()
                     .collect::<Vec<_>>(),
             )?;
+            info.set_item(
+                "decay_photon_normalisations_perturbed",
+                ensemble
+                    .decay_photon_normalisations_perturbed
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )?;
+            info.set_item(
+                "decay_photon_spectra_folded",
+                ensemble.decay_photon_spectra_folded.clone(),
+            )?;
             info.set_item("samples", ensemble.replicas.len())?;
             info.set_item("converged", ensemble.converged)?;
             info.set_item("convergence", ensemble.convergence)?;
@@ -788,7 +861,9 @@ impl PyPulseSchedule {
             info.set_item("not_perturbed", ensemble.not_perturbed.clone())?;
             data_std_dev = Some(shape_rows(py, data, single)?);
             data_std_dev_standard_error = Some(shape_rows(py, data_se, single)?);
+            data_std_dev_correlated = Some(shape_rows(py, data_correlated, single)?);
             total_std_dev = Some(shape_rows(py, total, single)?);
+            total_std_dev_correlated = Some(shape_rows(py, total_correlated, single)?);
             data_uncertainty_info = Some(info.into_any().unbind());
         }
 
@@ -813,7 +888,9 @@ impl PyPulseSchedule {
             times: times_obj,
             data_std_dev,
             data_std_dev_standard_error,
+            data_std_dev_correlated,
             total_std_dev,
+            total_std_dev_correlated,
             data_uncertainty_info,
         })
     }

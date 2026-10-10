@@ -15,7 +15,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use yamc_materials::Material;
-use yani_transmute::d1s_uncertainty::time_correction_factor_ensemble;
+use yani_transmute::d1s_uncertainty::{
+    time_correction_factor_ensemble, D1S_LINES_NOT_PERTURBED, D1S_PHOTONS_NOT_PERTURBED,
+};
 use yani_transmute::uncertainty::{DataUncertainty, Info, Source};
 use yani_transmute::{transmute_material, MultigroupSpectrum, TransmuteStep};
 
@@ -400,7 +402,10 @@ fn a_d1s_time_correction_lists_the_branching_as_not_perturbed() {
     .expect("tcf");
     assert_eq!(
         ensemble.not_perturbed,
-        vec!["decay branching ratio".to_string()]
+        vec![
+            "decay branching ratio".to_string(),
+            D1S_LINES_NOT_PERTURBED.to_string()
+        ]
     );
 }
 
@@ -420,6 +425,10 @@ fn a_d1s_time_correction_without_half_lives_lists_them_as_not_perturbed() {
     assert!(ensemble.sources.is_empty());
     assert_eq!(
         ensemble.not_perturbed,
-        vec!["half-life".to_string(), "decay branching ratio".to_string()]
+        vec![
+            "half-life".to_string(),
+            "decay branching ratio".to_string(),
+            D1S_PHOTONS_NOT_PERTURBED.to_string()
+        ]
     );
 }
