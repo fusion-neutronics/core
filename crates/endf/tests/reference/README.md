@@ -33,7 +33,7 @@ open('crates/endf/tests/reference/njoy-deck.txt.xz', 'wb').write(
 
 ## `doppler-w186.txt.xz`
 
-NJOY2016 (2016.79, commit `ac5adf5`) run on ENDF/B-VIII.1 W186
+NJOY2016 (2016.80, commit `ab27c64`) run on ENDF/B-VIII.1 W186
 (`n-074_W_186.endf`, MAT 7443): RECONR to a 0 K PENDF, then BROADR to 293.6 K
 and 900 K, both at a fractional tolerance of 0.001. With the evaluation as
 `tape20`, the deck is
@@ -68,3 +68,6 @@ DOPPLER_NJOY_DIR=/path/to/njoy/run \
 
 `tests/doppler.rs` broadens the 0 K tables at the broadened tables' energies
 and compares.
+
+The file was first written with 2016.79 (commit `ac5adf5`); 2016.80 writes it
+byte for byte the same.
