@@ -170,6 +170,14 @@ pub fn precompute_decay_photon_data(
                     Some(mt) => mt,
                     None => continue,
                 };
+                // An `(n,X)` (MT=5) channel has no fixed branching: its split
+                // depends on incident energy and is NaN until a solve folds
+                // it against a spectrum. D1S weights each emitter by one
+                // constant per channel, so MT=5's residuals are not D1S
+                // emitters here; the transmutation solve models them.
+                if !reaction.branching.is_finite() {
+                    continue;
+                }
 
                 // Get reaction XS vector on the full energy grid
                 let xs_vec = match get_reaction_xs_vector(fast_grid, mt) {
@@ -668,6 +676,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
                 decays: vec![],
                 fission_yields: None,
@@ -849,6 +858,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
                 decays: vec![],
                 fission_yields: None,
@@ -873,6 +883,7 @@ mod tests {
                     q_value: None,
                     branching_uncertainty: None,
                     evaluated_branching: None,
+                    multiplicity: None,
                 }],
                 fission_yields: None,
                 sources: vec![],
@@ -1056,6 +1067,7 @@ mod tests {
                         branching: 1.0,
                         branching_uncertainty: None,
                         evaluated_branching: None,
+                        multiplicity: None,
                         q_value: None,
                     }],
                     decays: vec![],
@@ -1145,6 +1157,7 @@ mod tests {
             q_value: None,
             branching_uncertainty: None,
             evaluated_branching: None,
+            multiplicity: None,
         };
         let emitter = |name: &str, reactions: Vec<ChainReaction>| ChainNuclide {
             name: name.to_string(),

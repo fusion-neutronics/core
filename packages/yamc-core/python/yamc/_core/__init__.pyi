@@ -595,7 +595,15 @@ class DataUncertainty:
     What it can cover, by source (``DataUncertainty.available_sources()``):
     
     - ``"cross_sections"``: the activation cross sections, sampled from the
-      ENDF MF=33 covariance folded against this material's own spectrum;
+      ENDF MF=33 covariance folded against this material's own spectrum, and
+      where the library folder carries the evaluation's resonance parameters
+      (MF=2 and MF=32, ``resonance_parameters.arrow``), the parameters
+      themselves: each replica draws them from their covariance, rebuilds the
+      resonance range's cross sections from the draw and Doppler broadens the
+      change to the temperature in use, so the resonance range's uncertainty
+      is exact in the parameters rather than first order. A nuclide whose
+      parameters cannot be sampled keeps the first-order MF=32 rows of
+      ``covariance.arrow``, and the report says which and why;
     - ``"flux_spectrum"``: the spectrum itself, from the per-bin
       ``flux_std_dev`` given on a ``Pulse``;
     - ``"half_life"``: every reachable nuclide's half-life, from the decay
@@ -661,19 +669,21 @@ class DataUncertainty:
       be derived (LTY 1-4, or an LTY=0 block counted in ``skipped_nc``), the
       covariance of a lumped reaction (MT=851-870) with several components
       that no derivation names, listed in ``lumped_covariance_not_assignable``,
-      and the resonance-parameter covariance (MF=32) wherever it is not in
-      ``covariance.arrow``: a library converted before the converter derived
-      it, or a resonance range whose formalism the converter does not
-      reconstruct. What is sampled is each reaction's explicit MF=33 blocks,
-      the resonance-range blocks the converter derives from MF=32 and writes
-      beside them where a library has them, the blocks of a lumped reaction
+      and the resonance-parameter covariance (MF=32) of a range neither
+      sampled nor in ``covariance.arrow``: a library converted before the
+      converter wrote either, or a resonance range whose formalism ``endf``
+      does not reconstruct. What is sampled is each reaction's explicit MF=33
+      blocks, the resonance parameters where the folder carries them and
+      otherwise the resonance-range blocks the converter derives from MF=32
+      and writes beside them, the blocks of a lumped reaction
       whose one component it is, and for a reaction an LTY=0 NC block states
       as a sum of others (ENDF/B-VIII.1 O16 (n,p) as MT 600 to 603, U235 MT 4
       as MT 51 plus the lumped MT 851), the covariance derived from the named
       reactions' own blocks and the cross blocks between them;
     - the self-shielding correction, when ``self_shielding_chord`` or
       ``self_shielding_shape`` is given: the shielded flux is built once from
-      the nominal cross sections and reused by every replica;
+      the nominal cross sections and reused by every replica, sampled
+      resonance parameters included;
     - on a transport run, the flux's response to a perturbed cross section:
       there is one transport, not one per replica. The tallied values
       themselves are still drawn by the ``"statistical"`` source;
@@ -5865,9 +5875,36 @@ class TransmutationResults:
           transport run, how many tallied rates were sampled from their
           covariance; ``statistical_floored`` / ``statistical_sampled`` count
           draws that came out negative and were floored.
+        - ``resonance_parameters``: per nuclide with resonance parameters
+          (MF=2 and MF=32) and a rate in this run, how its resonance-range
+          uncertainty was sampled. ``method`` is ``"parameters sampled"``
+          (drawn per replica and the cross sections rebuilt from them) or
+          ``"first-order rows"`` (the MF=32 rows of ``covariance.arrow``),
+          ``reason`` why the parameters were not sampled (``None`` where they
+          were), and ``ranges`` one sampler report per sampled range:
+          ``isotope`` and ``range`` indices, the ``gaussian``, ``lognormal``
+          and ``held`` parameter counts, ``zero_mean_widths`` (widths stated
+          with a zero mean and a nonzero sigma, held at zero) and
+          ``negative_mean_widths`` (drawn as signed), each with ``index``,
+          ``location``, ``quantity``, ``value`` and ``sigma``,
+          ``zero_variance_with_covariance``, ``unattainable_pairs``, and
+          ``stated_repair`` / ``transformed_repair`` (the nearest-correlation
+          repair of the stated and of the log-space matrix, each with
+          ``lambda_min``, ``frobenius_change``, ``max_change``, ``parameters``,
+          ``iterations`` and ``converged``, ``None`` where none was needed).
+          How far the draws' parameter correlations are from the evaluated
+          ones, in the parameters themselves after both repairs and the
+          lognormal transform, reads off ``largest_correlation_change`` (the
+          largest change of one correlation) and
+          ``correlation_frobenius_change``, per range and per nuclide over its
+          ranges; every drawn parameter keeps its evaluated mean and sigma, so
+          that is the whole of the difference in the first two moments. Widths
+          stay lognormal, so a pair no lognormal carries
+          (``unattainable_pairs``) is where it is largest. Empty on a transport
+          run, which keeps the rows.
         - ``not_perturbed``: every input this run held at its nominal value,
-          such as any MF=32 resonance-parameter covariance the library's
-          ``covariance.arrow`` does not carry, the photon and dose data, the
+          such as any MF=32 resonance-parameter covariance neither sampled nor
+          in the library's ``covariance.arrow``, the photon and dose data, the
           material composition, any source switched off, and, where they
           applied, the self-shielding correction, the flux's response to a
           perturbed cross section on a transport run, and the per-branch decay
@@ -6136,10 +6173,22 @@ class TransmutationResults:
         much of the parent's removal rate rests on anything the evaluation
         does not give.
         
-        A run refuses when a channel's clipped or held production is more than
-        0.1% of that parent's neutron removal rate, so what comes back here is
-        below that. MT=5's share is reported whatever its size: its products
-        are not modelled yet.
+        MT=5, ``(n,anything)``, is the ``(n,X)`` reaction: its residuals, read
+        from the reaction library's MF=6 MT=5, are shares of the MT=5 total
+        at each energy (``file`` 6, ``representation`` ``"share"``), and its
+        light particles H1 to He4 are their multiplicities times that total
+        (``representation`` ``"multiplicity"``, each state's ``share`` the
+        multiplicity folded over the spectrum, which can exceed one).
+        
+        A run refuses when the clipped or held production of its channels,
+        each parent weighted by its density, is more than 0.1% of the
+        material's neutron removal rate; each channel's ``clipped_share`` and
+        ``extrapolated_share`` are of its own parent's removal. A multiplicity above what the target's nucleons allow is
+        clipped like any other impossible value. ``unmodelled_mt5`` lists the
+        parents whose MT=5 residuals the chain does not model, with the reason;
+        on a reactions subsection that carries MT=5, a run refuses when those
+        of the material's own nuclides carry more than 0.1% of the material's
+        removal rate (one written before MT=5 was carried is reported only).
         
         Args:
             material_id: Material ID number.
@@ -6148,8 +6197,9 @@ class TransmutationResults:
         Returns:
             dict | None: ``channels``, ``dropped`` and ``unmodelled_mt5``, or
             None if the material or the step is unknown. Each channel has
-            ``parent``, ``reaction``, ``mt``, ``file`` (9 or 10),
-            ``representation`` (``"share"`` or ``"absolute"``), ``complete``,
+            ``parent``, ``reaction``, ``mt``, ``file`` (6, 9 or 10),
+            ``representation`` (``"share"``, ``"absolute"`` or
+            ``"multiplicity"``), ``complete``,
             ``completeness_source``, ``denominator``, ``states`` (each with
             ``target``, ``lfs``, ``level_route``, ``level_energy_difference``
             and ``share``, its share of the reaction), ``removal_share`` (the
@@ -6160,8 +6210,9 @@ class TransmutationResults:
             ``normalisation``. Each dropped channel has ``parent``,
             ``reaction``, ``target``, ``reason`` and ``removal_share`` (None
             where it cannot be folded). ``unmodelled_mt5`` is
-            ``[(nuclide, share)]``, MT=5's share of each parent's removal
-            rate, largest first. Empty for a decay-only step.
+            ``[(nuclide, share, reason)]``, MT=5's share of the removal rate
+            of each parent whose MT=5 residuals are not modelled, largest
+            first. Empty for a decay-only step.
         
         Examples:
             >>> report = results.get_branching_report(material_id=1, step=0)

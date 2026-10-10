@@ -619,7 +619,9 @@ impl Model {
                             spectrum,
                             statistics,
                             branch: Arc::clone(&branch),
-                            diagnostics: dep_tallies.get_branching_diagnostics(mat_id, volume, 1.0),
+                            diagnostics: dep_tallies
+                                .get_branching_diagnostics(mat_id, volume, 1.0)
+                                .with_material(material),
                         },
                     );
                 }
@@ -762,8 +764,10 @@ impl Model {
             // union-grid flux moments (covering products that build up during
             // the step too), their rates injected. When no branching
             // subsection is configured the overlay is empty and the physics is
-            // identical to before. MT=5, whose products are not modelled, is
-            // measured and reported either way.
+            // identical to before. MT=5's `(n,X)` multiplicities come from the
+            // reactions subsection and are folded either way; what of MT=5 the
+            // chain does not model is reported, and refused above the
+            // tolerance of the material's removal.
             let mut folded_chains: HashMap<u32, Arc<HashMap<String, ChainNuclide>>> =
                 HashMap::new();
             let mut step_reports: HashMap<u32, Arc<yani_transmute::BranchingReport>> =
@@ -775,8 +779,9 @@ impl Model {
                         .expect("transmutable cell must have a material");
                     let cell_material = self.geometry.materials()[slot as usize].as_ref();
                     let volume = cell_material.volume.unwrap_or(1.0);
-                    let diagnostics =
-                        dep_tallies.get_branching_diagnostics(mat_id, volume, source_rate);
+                    let diagnostics = dep_tallies
+                        .get_branching_diagnostics(mat_id, volume, source_rate)
+                        .with_material(cell_material);
                     let partials = if branch.curves().is_empty() {
                         HashMap::new()
                     } else {
@@ -1207,6 +1212,7 @@ mod tests {
                         q_value: None,
                         branching_uncertainty: None,
                         evaluated_branching: None,
+                        multiplicity: None,
                     })
                     .collect(),
                 decays: vec![],

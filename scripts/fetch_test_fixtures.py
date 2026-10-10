@@ -147,6 +147,11 @@ NUCLIDES = [
     # against the library itself, with the branching rows committed beside it.
     # About 17 MB and 3 MB.
     "In115", "Mo92",
+    # The cross sections crates/yani-transmute/tests/resonance_parameter_sampling.rs
+    # rebuilds W186's resolved range against: its MF=2 and MF=32 are committed
+    # (crates/endf/fixtures), and the test compares the capture rate's sigma
+    # from sampled parameters with the first-order rows'. About 20 MB.
+    "W186",
 ]
 ELEMENTS = ["Be", "Fe", "Li"]
 CHAIN_FIXTURE = "transmutation-endf-b8.1-sfr"

@@ -1,7 +1,7 @@
 use crate::branching_rule::{
-    build_lists, measure_unmodelled_mt5, removal_rate, Bound, BranchingChannel, BranchingReport,
-    BranchingState, Denominator, DroppedChannel, ListRates, ListRule, Lists,
-    BRANCHING_RATE_TOLERANCE, INELASTIC, MT_ANYTHING, MT_INELASTIC,
+    build_lists, measure_unmodelled_mt5, refuse_clipped_or_held, refuse_unmodelled_mt5,
+    removal_rate, Bound, BranchingChannel, BranchingReport, BranchingState, Denominator,
+    DroppedChannel, ListRates, ListRule, Lists, ANYTHING, INELASTIC, MT_ANYTHING, MT_INELASTIC,
 };
 use crate::covariance_fold::{cell_fields, fold_rate_covariance, reachable_mts, FoldSpectrum};
 use crate::covariance_sample::Sampler;
@@ -69,9 +69,10 @@ pub struct TransmuteStep {
 /// Three sources, all needed. The chain's own reaction kinds give the transport
 /// cross sections the rate collapse folds against. The branching overlay adds
 /// the totals its lists split (see [`crate::branching_rule`]), MT=4 among them
-/// for `(n,n')`, which has no chain total of its own. And MT=5, whose products
-/// the chain does not model, is read so its share of each parent's removal
-/// can be reported (see [`crate::branching_rule::measure_unmodelled_mt5`]).
+/// for `(n,n')`, which has no chain total of its own. And MT=5, which is the
+/// `(n,X)` total where the chain carries that reaction and is read for every
+/// parent so the share whose residuals it does not model can be reported (see
+/// [`crate::branching_rule::measure_unmodelled_mt5`]).
 pub fn activation_mts(
     chain: &HashMap<String, yani::ChainNuclide>,
     branch: &BranchTable,
@@ -983,9 +984,13 @@ pub fn preload_activation_data(
         // full-grid kind the comment above is about, so they are read only when
         // a chord was actually given and the correction is going to be applied.
         let wanted = collapse_mts(chain, branch, shielding);
+        // MF=2 and MF=32 ride along with the covariance: a replica samples
+        // the resonance parameters where a folder carries them
+        // (`resonance_rates`), and a folder without them reads as before.
         let scope = LoadScope::activation(wanted)
             .with_temperatures(temp_filter)
-            .with_covariance(want_covariance);
+            .with_covariance(want_covariance)
+            .with_resonance_parameters(want_covariance);
 
         // One Arrow decode per nuclide, and they are independent: `to_load`'s
         // names are distinct, so no two tasks want the same file, and the
@@ -1085,9 +1090,42 @@ pub fn preload_activation_data(
     // covariance, which reads exactly like an evaluation that has none.
     if want_covariance {
         material.ensure_covariance_loaded()?;
+        ensure_resonance_parameters_loaded(material)?;
         ensure_derivations_loaded(material, chain)?;
     }
 
+    Ok(())
+}
+
+/// Read the resonance parameters of each loaded nuclide whose folder has
+/// `resonance_parameters.arrow` and that was loaded without it.
+///
+/// Only those, rather than every nuclide loaded without the axis as
+/// `Material::ensure_resonance_parameters_loaded` would: re-reading a nuclide
+/// replaces everything it holds, and a folder without the file has nothing to
+/// add, so a material whose nuclides were loaded (or edited) in memory reads
+/// exactly as it did before the section existed.
+fn ensure_resonance_parameters_loaded(
+    material: &mut Material,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let lacking: Vec<(String, String, LoadScope)> = material
+        .nuclide_data
+        .iter()
+        .filter(|(_, nd)| !nd.load_scope.resonance_parameters)
+        .filter(|(_, nd)| {
+            nd.data_path.as_deref().is_some_and(|dir| {
+                yamc_nuclide::storage::exists(
+                    &std::path::Path::new(dir).join("resonance_parameters.arrow"),
+                )
+            })
+        })
+        .filter_map(|(name, nd)| Some((name.clone(), nd.reload_source()?, nd.load_scope.clone())))
+        .collect();
+    for (name, source, scope) in lacking {
+        let sources = HashMap::from([(name.clone(), source)]);
+        let widened = get_or_load_nuclide(&name, &sources, &scope.with_resonance_parameters(true))?;
+        material.nuclide_data.insert(name, widened);
+    }
     Ok(())
 }
 
@@ -1570,18 +1608,24 @@ fn run_replicas(
     // statement of what the evaluation says per spectrum, and the sampler's
     // own rate covariance under each spectrum is checked against it in the
     // sigma report.
+    let fold_spectra: Vec<FoldSpectrum> = per_spectrum
+        .iter()
+        .zip(spectra)
+        .map(|(p, s)| FoldSpectrum {
+            chain: &p.2,
+            rates: &p.0,
+            multigroup_flux: &s.masses,
+            group_boundaries: &s.boundaries,
+        })
+        .collect();
     let fields = if cross_sections {
-        let fold_spectra: Vec<FoldSpectrum> = per_spectrum
-            .iter()
-            .zip(spectra)
-            .map(|(p, s)| FoldSpectrum {
-                chain: &p.2,
-                rates: &p.0,
-                multigroup_flux: &s.masses,
-                group_boundaries: &s.boundaries,
-            })
-            .collect();
-        cell_fields(initial, chain, &fold_spectra, shielding)
+        cell_fields(
+            initial,
+            chain,
+            &fold_spectra,
+            shielding,
+            &std::collections::BTreeSet::new(),
+        )
     } else {
         std::collections::BTreeMap::new()
     };
@@ -1589,6 +1633,67 @@ fn run_replicas(
     for (idx, (rates, _, _)) in per_spectrum.iter().enumerate() {
         sigmas.add(idx, &sampler, rates, fluence[idx], &densities, &populated);
     }
+
+    // Resonance parameters, where a nuclide's folder carries them: drawn per
+    // replica and its cross sections rebuilt, exact in the parameters. Not on
+    // a transport run, which keeps the first-order MF=32 rows (its flux is
+    // one transport's, so a replica has no spectrum to weight a rebuilt
+    // cross section with but the tally's).
+    let resonance = (cross_sections && !transport).then(|| {
+        let weight_spectra: Vec<crate::resonance_rates::WeightSpectrum> = per_spectrum
+            .iter()
+            .zip(spectra)
+            .map(|(p, s)| crate::resonance_rates::WeightSpectrum {
+                rates: &p.0,
+                masses: &s.masses,
+                boundaries: &s.boundaries,
+            })
+            .collect();
+        crate::resonance_rates::ResonanceRun::new(initial, &weight_spectra, shielding, request.seed)
+    });
+    // What a replica draws MF=33 from: the same fields, less the first-order
+    // MF=32 rows of every nuclide whose parameters are sampled, so the
+    // resonance range is counted once. Everything that reads the
+    // evaluation's statement (the sigma report above, first-order
+    // attribution) keeps `sampler`, rows and all, as the first-order image
+    // of the same source. Only the sampled nuclides are fielded again; every
+    // other nuclide's field, and so its draw, is the one in `sampler`.
+    let sampled = resonance.as_ref().map(|r| r.sampled()).unwrap_or_default();
+    let mf33_sampler = (!sampled.is_empty()).then(|| {
+        let restricted: Vec<ReactionRates> = per_spectrum
+            .iter()
+            .map(|p| {
+                p.0.iter()
+                    .filter(|(name, _)| sampled.contains(*name))
+                    .map(|(name, kinds)| (name.clone(), kinds.clone()))
+                    .collect()
+            })
+            .collect();
+        let restricted_spectra: Vec<FoldSpectrum> = fold_spectra
+            .iter()
+            .zip(&restricted)
+            .map(|(f, rates)| FoldSpectrum {
+                chain: f.chain,
+                rates,
+                multigroup_flux: f.multigroup_flux,
+                group_boundaries: f.group_boundaries,
+            })
+            .collect();
+        let mut draw_fields: std::collections::BTreeMap<_, _> = fields
+            .iter()
+            .filter(|(name, _)| !sampled.contains(*name))
+            .map(|(name, field)| (name.clone(), field.clone()))
+            .collect();
+        draw_fields.extend(cell_fields(
+            initial,
+            chain,
+            &restricted_spectra,
+            shielding,
+            &sampled,
+        ));
+        Sampler::new(&draw_fields, &folds)
+    });
+    let draw_sampler = mf33_sampler.as_ref().unwrap_or(&sampler);
 
     // The flux is the caller's own input, so it needs no nuclear data: only a
     // per-bin sigma, which a spectrum lifted from a published reference set
@@ -1844,6 +1949,9 @@ fn run_replicas(
         info.not_perturbed
             .insert(0, "activation cross section (MF=33)".to_string());
     }
+    if let Some(r) = &resonance {
+        info.resonance_parameters = r.methods().clone();
+    }
     // On the spectrum path a spectrum without a per-bin sigma, or any spectrum
     // with the source off, is used as given. When only some are, the entry
     // says so, so it never reads as held for a flux that was partly sampled.
@@ -1921,6 +2029,7 @@ fn run_replicas(
         .is_none_or(|b| b.two_modes.is_empty());
     let no_fission_yields = fission_yield.as_ref().is_none_or(|f| f.is_empty());
     if sampler.is_empty()
+        && resonance.as_ref().is_none_or(|r| r.is_empty())
         && per_group.iter().all(Option::is_none)
         && no_half_lives
         && no_decay_branchings
@@ -1974,8 +2083,14 @@ fn run_replicas(
         let mut flux_coverage = crate::flux_uncertainty::FluxCoverage::default();
         let mut rates_sampled = 0usize;
         let mut rates_floored = 0usize;
-        // One draw of every nuclide's cross sections, read by every spectrum.
-        let xs_draw = sampler.draw(request.seed, replica);
+        // One draw of every nuclide's cross sections, read by every spectrum,
+        // and of every sampled nuclide's resonance parameters, rebuilt into
+        // a shift of each rate they move.
+        let xs_draw = draw_sampler.draw(request.seed, replica);
+        let resonance_shifts = match &resonance {
+            Some(r) if !r.is_empty() => Some(r.shifts(replica)?),
+            _ => None,
+        };
         let mut decay_branchings_floored = 0usize;
         // A statistical draw of the whole tallied rate vector, the partials
         // re-folded into the branching the way the nominal was, so an
@@ -2078,7 +2193,12 @@ fn run_replicas(
                 }
                 None => (rates.clone(), None),
             };
-            let (rates, n, floored) = sampler.perturb_with(&xs_draw, idx, &rates);
+            let (rates, n, floored) = draw_sampler.perturb_with(
+                &xs_draw,
+                idx,
+                &rates,
+                resonance_shifts.as_ref().map(|s| &s[idx]),
+            );
             rates_sampled += n;
             rates_floored += floored;
             let folded_chain = match (&chains, refolded) {
@@ -2196,10 +2316,13 @@ fn run_replicas(
             half_life.as_ref(),
             decay_branching.as_ref(),
         )?;
+        // The draws each replica was solved with: MF=33 less the rows of the
+        // sampled nuclides, and their parameters' shifts.
         let draws = ReplicaDraws {
             seed: request.seed,
             per_spectrum,
-            sampler: Some(&sampler),
+            sampler: Some(draw_sampler),
+            resonance: resonance.as_ref().filter(|r| !r.is_empty()),
             half_life: half_life.as_ref(),
             decay_branching: decay_branching.as_ref(),
         };
@@ -2656,6 +2779,7 @@ struct ReplicaDraws<'a> {
     seed: u64,
     per_spectrum: &'a [PerSpectrum],
     sampler: Option<&'a Sampler>,
+    resonance: Option<&'a crate::resonance_rates::ResonanceRun>,
     half_life: Option<&'a HalfLifeSampling>,
     decay_branching: Option<&'a crate::decay_branching_uncertainty::Candidates>,
 }
@@ -2667,8 +2791,24 @@ impl ReplicaDraws<'_> {
         let rates: Vec<ReactionRates> = match self.sampler {
             Some(sampler) if needs(|i| matches!(i, Input::Rate { .. })) => {
                 let draw = sampler.draw(self.seed, replica);
+                // The replica that solved this draw computed its shifts
+                // already, here or in an attribution sub-run on the same
+                // seed, and they are a pure function of the replica.
+                let shifts = self.resonance.map(|r| {
+                    r.shifts(replica)
+                        .expect("a replica's resonance shifts were computed when it was solved")
+                });
                 (0..self.per_spectrum.len())
-                    .map(|a| sampler.perturb_with(&draw, a, &self.per_spectrum[a].0).0)
+                    .map(|a| {
+                        sampler
+                            .perturb_with(
+                                &draw,
+                                a,
+                                &self.per_spectrum[a].0,
+                                shifts.as_ref().map(|s| &s[a]),
+                            )
+                            .0
+                    })
                     .collect()
             }
             _ => Vec::new(),
@@ -3004,9 +3144,11 @@ type LoadOutcome = Result<Option<(String, std::sync::Arc<yamc_nuclide::Nuclide>)
 /// the partials alone.
 ///
 /// Refuses the spectrum where the rule would rest more than
-/// [`BRANCHING_RATE_TOLERANCE`] of a parent's removal rate on a clipped or
-/// held value, and reports MT=5's share of each parent's removal (see
-/// [`measure_unmodelled_mt5`]).
+/// [`BRANCHING_RATE_TOLERANCE`](crate::branching_rule::BRANCHING_RATE_TOLERANCE) of a parent's removal rate on a clipped or
+/// held value, reports MT=5's share of each parent's removal where the chain
+/// does not model its residuals (see [`measure_unmodelled_mt5`]), and refuses
+/// where that is more than the tolerance of the material's own removal (see
+/// [`refuse_unmodelled_mt5`]).
 pub(crate) fn collapse_and_fold(
     material: &Material,
     spectrum: &MultigroupSpectrum,
@@ -3062,8 +3204,26 @@ pub(crate) fn collapse_and_fold(
         folded.insert(parent.clone(), per);
     }
     let (folded_chain, mut report) = fold_branching_into_chain(chain, lists, &folded, &mut rates)?;
-    report.unmodelled_mt5 = measure_unmodelled_mt5(&rates, &mt5);
+    report.unmodelled_mt5 = measure_unmodelled_mt5(chain, &rates, &mt5);
+    let densities = material.get_atoms_per_barn_cm().unwrap_or_default();
+    refuse_clipped_or_held(&report.channels, &rates, &densities, &|n| {
+        library_of(material, n)
+    })?;
+    refuse_unmodelled_mt5(&report.unmodelled_mt5, &rates, &mt5, &densities, &|n| {
+        library_of(material, n)
+    })?;
     Ok(((rates, fy_weights, folded_chain), info, report))
+}
+
+/// Which library a nuclide's cross sections came from, as a message should
+/// name it: the keyword it was loaded by, else what its folder says.
+fn library_of(material: &Material, nuclide: &str) -> Option<String> {
+    let nd = material.nuclide_data.get(nuclide)?;
+    nd.data_source
+        .as_deref()
+        .filter(|s| yamc_nuclide::storage::url_cache::is_keyword(s))
+        .map(str::to_string)
+        .or_else(|| nd.library.clone())
 }
 
 /// Apply folded branching lists to the chain and the rates.
@@ -3082,9 +3242,9 @@ pub(crate) fn collapse_and_fold(
 ///   transport total folded in the same walk, and the chain's other targets
 ///   for the reaction (the ground state) take the rest.
 ///
-/// Then the guards: a list whose clipped or held production is more than
-/// [`BRANCHING_RATE_TOLERANCE`] of its parent's removal rate refuses the run.
-/// Below that it is reported, with everything else the report carries.
+/// Each channel's clipped and held production is reported as a share of its
+/// parent's removal; whether the run may go on is the caller's to decide
+/// against the material (see [`refuse_clipped_or_held`]).
 pub(crate) fn fold_branching_into_chain(
     chain: &Arc<HashMap<String, ChainNuclide>>,
     lists: &Lists<'_>,
@@ -3120,7 +3280,6 @@ pub(crate) fn fold_branching_into_chain(
 
     // Measured against removal rates that include the `(n,n')` rates the
     // lists injected, so every list is judged against the same whole.
-    let mut refusals: Vec<String> = Vec::new();
     let mut report = BranchingReport::default();
     for resolved in channels {
         let mut channel = resolved.channel;
@@ -3129,49 +3288,7 @@ pub(crate) fn fold_branching_into_chain(
         channel.removal_share = share_of(resolved.rate);
         channel.clipped_share = share_of(resolved.clipped);
         channel.extrapolated_share = share_of(resolved.extrapolated);
-        if channel.clipped_share > BRANCHING_RATE_TOLERANCE {
-            let excess = match channel.own_total_excess {
-                Some((e, ratio)) if ratio.is_finite() => format!(
-                    " (the listed values reach {ratio:.4} times the evaluation's own total, at \
-                     {e:.4e} eV)"
-                ),
-                Some((e, _)) => {
-                    format!(" (the listed values are non-zero where the evaluation's own total is zero, at {e:.4e} eV)")
-                }
-                None => String::new(),
-            };
-            refusals.push(format!(
-                "{} {}: {:.3}% of {}'s neutron removal rate is production the evaluation gives \
-                 above the reaction's transport total, or as a negative value{excess}",
-                channel.parent,
-                channel.reaction,
-                100.0 * channel.clipped_share,
-                channel.parent
-            ));
-        }
-        if channel.extrapolated_share > BRANCHING_RATE_TOLERANCE {
-            refusals.push(format!(
-                "{} {}: {:.3}% of {}'s neutron removal rate lies where the branching \
-                 evaluation tabulates no split, and would rest on a fraction held from the \
-                 edge of its range",
-                channel.parent,
-                channel.reaction,
-                100.0 * channel.extrapolated_share,
-                channel.parent
-            ));
-        }
         report.channels.push(channel);
-    }
-    if !refusals.is_empty() {
-        return Err(format!(
-            "the isomeric branching cannot be applied to this spectrum without moving more \
-             than {:.1}% of a parent's removal rate onto values the evaluation does not give. \
-             {}. Nothing is clipped or extrapolated silently: use a branching evaluation that \
-             covers this spectrum consistently with the cross-section library, or leave the \
-             branching overlay out for these nuclides.",
-            100.0 * BRANCHING_RATE_TOLERANCE,
-            refusals.join("; ")
-        ));
     }
     for (mut d, rate) in dropped {
         let removal = removal_rate(rates, &d.parent);
@@ -3295,9 +3412,14 @@ fn resolve_list(
         }
         return;
     }
+    // A light particle's is a multiplicity, which can exceed one; every
+    // other list's is a share of its reaction.
     let shares: Vec<(String, f64)> = per_target
         .iter()
-        .map(|(t, p)| (t.clone(), (p / whole).min(1.0)))
+        .map(|(t, p)| {
+            let f = p / whole;
+            (t.clone(), if rule.emits { f } else { f.min(1.0) })
+        })
         .collect();
 
     // What the chain can carry of it.
@@ -3320,8 +3442,10 @@ fn resolve_list(
             ));
         }
     }
-    let remainder = rule.has_remainder() && kind != INELASTIC;
-    if kind != INELASTIC {
+    // `(n,X)` has no ground state to take a rest: its residuals are a
+    // complete list and its particles are not shares.
+    let remainder = rule.has_remainder() && kind != INELASTIC && kind != ANYTHING;
+    if kind != INELASTIC && kind != ANYTHING {
         if remainder {
             let listed: f64 = shares
                 .iter()
@@ -3398,6 +3522,13 @@ fn resolve_list(
         (Denominator::ListedSum, true) => "sum of the listed yields",
         (Denominator::TransportTotal, _) => "transport total",
     };
+    let representation = if rule.emits {
+        "multiplicity"
+    } else if rule.is_absolute() {
+        "absolute"
+    } else {
+        "share"
+    };
     channels.push(Resolved {
         channel: BranchingChannel {
             parent: parent.to_string(),
@@ -3408,13 +3539,14 @@ fn resolve_list(
                 .flat_map(|c| c.states.iter())
                 .map(|s| s.mt)
                 .next(),
-            file: if rule.yields { 9 } else { 10 },
-            representation: if rule.is_absolute() {
-                "absolute"
+            file: if kind == ANYTHING {
+                6
+            } else if rule.yields {
+                9
             } else {
-                "share"
-            }
-            .to_string(),
+                10
+            },
+            representation: representation.to_string(),
             complete: rule.complete,
             completeness_source: "converter (list_complete)".to_string(),
             denominator: denominator.to_string(),
@@ -3488,6 +3620,20 @@ fn refine_chain(
                         }
                     }
                 }
+            } else if kind.as_str() == ANYTHING {
+                // Every `(n,X)` row is assigned outright, from NaN: a residual
+                // its share of the MT=5 rate, a light particle its
+                // multiplicity, and a row the fold made nothing for (the one
+                // saying no residual is given, or a product this spectrum
+                // does not reach) zero.
+                for rx in nuc.reactions.iter_mut().filter(|r| &r.kind == kind) {
+                    rx.branching = rx
+                        .target
+                        .as_ref()
+                        .and_then(|t| tmap.get(t))
+                        .copied()
+                        .unwrap_or(0.0);
+                }
             } else if split.remainder {
                 // Each fraction is a share of the whole reaction, and the
                 // targets the list does not name take the rest in the
@@ -3556,6 +3702,29 @@ pub struct CoupledDiagnostics {
     pub inelastic_totals: HashMap<String, f64>,
     /// `parent -> MT=5 rate`.
     pub mt5: HashMap<String, f64>,
+    /// The tallied material's composition, atoms per barn-cm, which the
+    /// unmodelled MT=5 guard weighs parents by (see
+    /// [`crate::branching_rule::refuse_unmodelled_mt5`]). Empty refuses
+    /// nothing; [`CoupledDiagnostics::with_material`] fills it.
+    pub densities: HashMap<String, f64>,
+    /// Where each of the material's nuclides' cross sections came from, for
+    /// that guard's message.
+    pub libraries: HashMap<String, String>,
+}
+
+impl CoupledDiagnostics {
+    /// The same diagnostics, with the composition and libraries of the
+    /// material the tally was scored in, which the MT=5 guard needs and the
+    /// tally does not keep.
+    pub fn with_material(mut self, material: &Material) -> Self {
+        self.densities = material.get_atoms_per_barn_cm().unwrap_or_default();
+        self.libraries = material
+            .nuclide_data
+            .keys()
+            .filter_map(|n| library_of(material, n).map(|l| (n.clone(), l)))
+            .collect();
+        self
+    }
 }
 
 /// Apply the isomeric-branching overlay on the coupled path.
@@ -3594,54 +3763,59 @@ pub fn apply_coupled_branching(
             let Some(curves) = kinds.get(kind) else {
                 continue;
             };
-            let Some(rule) = ListRule::new(parent, kind, curves)? else {
-                continue;
-            };
-            let per_target = &tallied_kinds[kind];
-            // Each target's tallied production on its first curve, so the
-            // per-target sum in `resolve_list` counts it once.
-            let mut production = vec![0.0; rule.curves.len()];
-            for (t, p) in per_target {
-                if let Some(k) = rule
-                    .curves
-                    .iter()
-                    .zip(&rule.produces)
-                    .position(|(c, produces)| *produces && c.target == *t)
-                {
-                    production[k] += p;
+            for rule in ListRule::all(parent, kind, curves)? {
+                let per_target = &tallied_kinds[kind];
+                // Each target's tallied production on its first curve, so the
+                // per-target sum in `resolve_list` counts it once.
+                let mut production = vec![0.0; rule.curves.len()];
+                for (t, p) in per_target {
+                    if let Some(k) = rule
+                        .curves
+                        .iter()
+                        .zip(&rule.produces)
+                        .position(|(c, produces)| *produces && c.target == *t)
+                    {
+                        production[k] += p;
+                    }
                 }
+                let total = if kind == INELASTIC {
+                    diagnostics.and_then(|d| d.inelastic_totals.get(parent).copied())
+                } else {
+                    rates.get(parent).and_then(|r| r.get(kind)).copied()
+                };
+                let (clipped, extrapolated) = diagnostics
+                    .and_then(|d| d.lists.get(parent))
+                    .and_then(|k| k.get(&rule.label()))
+                    .copied()
+                    .unwrap_or((0.0, 0.0));
+                // The tally scores a list only where the parent has the transport
+                // cross section, so every list but `(n,n')` has its total; a
+                // missing rate is a zero one.
+                let has_total = kind != INELASTIC || total.is_some();
+                folded
+                    .entry(parent.clone())
+                    .or_default()
+                    .push(Some(ListRates {
+                        production,
+                        to_rate: 1.0,
+                        total: total.unwrap_or(0.0),
+                        clipped,
+                        extrapolated,
+                        has_total,
+                    }));
+                lists.entry(parent.clone()).or_default().push(rule);
             }
-            let total = if kind == INELASTIC {
-                diagnostics.and_then(|d| d.inelastic_totals.get(parent).copied())
-            } else {
-                rates.get(parent).and_then(|r| r.get(kind)).copied()
-            };
-            let (clipped, extrapolated) = diagnostics
-                .and_then(|d| d.lists.get(parent))
-                .and_then(|k| k.get(kind))
-                .copied()
-                .unwrap_or((0.0, 0.0));
-            // The tally scores a list only where the parent has the transport
-            // cross section, so every list but `(n,n')` has its total; a
-            // missing rate is a zero one.
-            let has_total = kind != INELASTIC || total.is_some();
-            folded
-                .entry(parent.clone())
-                .or_default()
-                .push(Some(ListRates {
-                    production,
-                    to_rate: 1.0,
-                    total: total.unwrap_or(0.0),
-                    clipped,
-                    extrapolated,
-                    has_total,
-                }));
-            lists.entry(parent.clone()).or_default().push(rule);
         }
     }
     let (folded_chain, mut report) = fold_branching_into_chain(chain, &lists, &folded, rates)?;
     if let Some(d) = diagnostics {
-        report.unmodelled_mt5 = measure_unmodelled_mt5(rates, &d.mt5);
+        report.unmodelled_mt5 = measure_unmodelled_mt5(chain, rates, &d.mt5);
+        refuse_clipped_or_held(&report.channels, rates, &d.densities, &|n| {
+            d.libraries.get(n).cloned()
+        })?;
+        refuse_unmodelled_mt5(&report.unmodelled_mt5, rates, &d.mt5, &d.densities, &|n| {
+            d.libraries.get(n).cloned()
+        })?;
     }
     Ok((folded_chain, report))
 }
@@ -3751,6 +3925,7 @@ mod tests {
             branching,
             branching_uncertainty: None,
             evaluated_branching: None,
+            multiplicity: None,
             q_value: None,
         }
     }
@@ -4454,15 +4629,203 @@ mod tests {
         );
     }
 
-    /// MT=5, whose products no chain reaction carries, is measured against
-    /// each parent's removal and reported: at 30 MeV it is half of In115's
-    /// here, and a D-T spectrum below its 20 MeV threshold reports nothing.
+    /// In115 with an `(n,X)` reaction as the reactions subsection carries
+    /// one: two residuals and two light particles, each row NaN until folded.
+    fn anything_chain() -> Arc<HashMap<String, ChainNuclide>> {
+        let row = |t: &str| ChainReaction {
+            branching: f64::NAN,
+            ..edge(ANYTHING, t, 0.0)
+        };
+        Arc::new(HashMap::from([(
+            "In115".to_string(),
+            nuclide_entry(
+                "In115",
+                vec![
+                    edge("(n,2n)", "In114", 1.0),
+                    row("Ag112"),
+                    row("Ag111"),
+                    row("He4"),
+                    row("H1"),
+                ],
+            ),
+        )]))
+    }
+
+    /// The `(n,X)` curves as the reader builds them: residuals as shares
+    /// (MF=6 yields of a complete list), particles as multiplicities.
+    fn anything_branch(ag111: f64) -> BranchTable {
+        let e = [1.0e7, 2.0e7];
+        let residual = |t: &str, v: f64| {
+            let mut c = curve(t, BranchQuantity::Yield, &e, &[v, v], true);
+            c.states = facts(5, 0, true);
+            c
+        };
+        let particle = |t: &str, v: &[f64]| {
+            let mut c = curve(t, BranchQuantity::Multiplicity, &e, v, true);
+            c.states = facts(5, 0, true);
+            c
+        };
+        indium_branch(
+            ANYTHING,
+            vec![
+                residual("Ag112", 0.75),
+                residual("Ag111", ag111),
+                particle("He4", &[0.5, 1.5]),
+                particle("H1", &[1.0, 1.0]),
+            ],
+        )
+    }
+
+    fn anything_of(chain: &HashMap<String, ChainNuclide>, target: &str) -> f64 {
+        branching_of(chain, ANYTHING, target)
+    }
+
+    /// MT=5 rising from 1 to 3 b over one group: the residuals split it as
+    /// their shares, 0.75 and 0.25, and each light particle takes its
+    /// multiplicity folded against MT=5, `int m sigma / int sigma`: He4's
+    /// rises from 0.5 to 1.5 with MT=5 and folds to 13/12, H1's is a flat 1.
+    /// The parent is removed once, at the MT=5 rate, and nothing is left
+    /// unmodelled.
     #[test]
-    fn mt5_is_reported_against_the_removal() {
+    fn an_anything_reaction_folds_residuals_as_shares_and_particles_as_multiplicities() {
+        let material = indium(vec![
+            reaction(16, vec![1.0e7, 2.0e7], vec![1.0, 1.0]),
+            reaction(5, vec![1.0e7, 2.0e7], vec![1.0, 3.0]),
+        ]);
+        let (rates, folded, report) = fold(
+            &material,
+            &anything_chain(),
+            &anything_branch(0.25),
+            &one_group(1.0e7, 2.0e7),
+        )
+        .unwrap();
+        assert!((anything_of(&folded, "Ag112") - 0.75).abs() < 1e-12);
+        assert!((anything_of(&folded, "Ag111") - 0.25).abs() < 1e-12);
+        assert!((anything_of(&folded, "He4") - 13.0 / 12.0).abs() < 1e-12);
+        assert!((anything_of(&folded, "H1") - 1.0).abs() < 1e-12);
+        assert!((rates["In115"][ANYTHING] - 2.0e-24).abs() < 1e-36);
+        assert!(report.unmodelled_mt5.is_empty(), "{report:?}");
+        let channels: Vec<(&str, i32, &str)> = report
+            .channels
+            .iter()
+            .filter(|c| c.reaction == ANYTHING)
+            .map(|c| (c.representation.as_str(), c.file, c.denominator.as_str()))
+            .collect();
+        assert_eq!(
+            channels,
+            [
+                ("share", 6, "sum of the listed yields"),
+                ("multiplicity", 6, "transport total")
+            ]
+        );
+
+        // Through the matrix: the gains are the shares and multiplicities of
+        // one removal.
+        let names: Vec<String> = ["Ag111", "Ag112", "H1", "He4", "In114", "In115"]
+            .map(String::from)
+            .to_vec();
+        let (triplets, _) = yani::build_matrix_triplets(
+            &folded,
+            &names,
+            &rates,
+            &Default::default(),
+            Default::default(),
+        )
+        .unwrap();
+        let at = |row: &str| -> f64 {
+            let r = names.iter().position(|n| n == row).unwrap();
+            triplets
+                .iter()
+                .filter(|t| t.0 == r && t.1 == 5)
+                .map(|t| t.2)
+                .sum()
+        };
+        assert!((at("In115") + 3.0e-24).abs() < 1e-36);
+        assert!((at("Ag112") - 1.5e-24).abs() < 1e-36);
+        assert!((at("He4") - 2.0e-24 * 13.0 / 12.0).abs() < 1e-36);
+    }
+
+    /// A residual multiplicity above what the target's nucleons allow (one
+    /// Ag111 per reaction on In115) is impossible, as ENDF/B-VIII.1's Cr
+    /// isotopes' V and Ti "multiplicities" of 400 are: clipped to the bound
+    /// and reported, and refused when MT=5 carries the parent's removal.
+    #[test]
+    fn an_impossible_multiplicity_is_clipped_and_refused_by_size() {
+        let branch = anything_branch(400.0);
+        let only = indium(vec![reaction(5, vec![1.0e7, 2.0e7], vec![1.0, 3.0])]);
+        let err = fold(&only, &anything_chain(), &branch, &one_group(1.0e7, 2.0e7)).unwrap_err();
+        assert!(err.contains("In115 (n,X)"), "{err}");
+        assert!(err.contains("nucleons allow"), "{err}");
+
+        let beside = indium(vec![
+            reaction(16, vec![1.0e7, 2.0e7], vec![1.0e5, 1.0e5]),
+            reaction(5, vec![1.0e7, 2.0e7], vec![1.0, 3.0]),
+        ]);
+        let (_, folded, report) = fold(
+            &beside,
+            &anything_chain(),
+            &branch,
+            &one_group(1.0e7, 2.0e7),
+        )
+        .unwrap();
+        // Capped at one, the split is 1 : 0.75.
+        assert!((anything_of(&folded, "Ag111") - 1.0 / 1.75).abs() < 1e-12);
+        let channel = report
+            .channels
+            .iter()
+            .find(|c| c.reaction == ANYTHING && c.representation == "share")
+            .unwrap();
+        // 399 of 400.75 moved at every energy, over a 2 b mean MT=5.
+        let want = 399.0 / 400.75 * 2.0 / (1.0e5 + 2.0);
+        assert!(
+            (channel.clipped_share - want).abs() < 1e-9 * want,
+            "{}",
+            channel.clipped_share
+        );
+    }
+
+    /// The coupled path takes the tallied productions and makes the same
+    /// split the fold does, the particles' kept apart from the residuals'.
+    #[test]
+    fn coupled_anything_partials_set_shares_and_multiplicities() {
+        let mut partials: PartialRates = HashMap::new();
+        partials.entry("In115".to_string()).or_default().insert(
+            ANYTHING.to_string(),
+            vec![
+                ("Ag112".to_string(), 1.5),
+                ("Ag111".to_string(), 0.5),
+                ("He4".to_string(), 13.0 / 6.0),
+                ("H1".to_string(), 2.0),
+            ],
+        );
+        let mut rates: ReactionRates = HashMap::from([(
+            "In115".to_string(),
+            HashMap::from([(ANYTHING.to_string(), 2.0)]),
+        )]);
+        let folded = coupled(
+            &anything_chain(),
+            &anything_branch(0.25),
+            &partials,
+            &mut rates,
+        );
+        assert!((anything_of(&folded, "Ag112") - 0.75).abs() < 1e-12);
+        assert!((anything_of(&folded, "He4") - 13.0 / 12.0).abs() < 1e-12);
+        assert!((anything_of(&folded, "H1") - 1.0).abs() < 1e-12);
+    }
+
+    /// MT=5 whose residuals the chain does not model is measured against the
+    /// removal: at 30 MeV it is half of In115's here, all of the material. On
+    /// a reactions subsection written before MT=5 was carried that is
+    /// reported, as it was; on one that carries MT=5 and says In115's
+    /// residual is not given the run is refused and says why. A D-T spectrum
+    /// below the 20 MeV threshold reports nothing and runs.
+    #[test]
+    fn unmodelled_mt5_refuses_a_material_made_of_it() {
         let material = indium(vec![
             reaction(16, vec![1.0e7, 4.0e7], vec![1.0, 1.0]),
             reaction(5, vec![2.0e7, 4.0e7], vec![0.0, 2.0]),
         ]);
+        // A reactions subsection that predates MT=5: reported, as before.
         let (_, _, report) = fold(
             &material,
             &indium_chain(),
@@ -4473,10 +4836,29 @@ mod tests {
         let mt5 = &report.unmodelled_mt5[0];
         assert_eq!(mt5.nuclide, "In115");
         assert!((mt5.share - 0.5).abs() < 1e-3, "{mt5:?}");
+        assert!(!mt5.guarded);
+
+        // One that carries MT=5 and says In115's residual is not given.
+        let mut nuc = indium_chain()["In115"].clone();
+        nuc.reactions.push(ChainReaction {
+            target: None,
+            ..edge(ANYTHING, "", 0.0)
+        });
+        let chain = Arc::new(HashMap::from([("In115".to_string(), nuc)]));
+        let err = fold(
+            &material,
+            &chain,
+            &BranchTable::new(),
+            &one_group(2.9e7, 3.1e7),
+        )
+        .unwrap_err();
+        assert!(err.contains("In115"), "{err}");
+        assert!(err.contains("not its residuals"), "{err}");
+        assert!(err.contains("50.00% of its own"), "{err}");
 
         let (_, _, report) = fold(
             &material,
-            &indium_chain(),
+            &chain,
             &BranchTable::new(),
             &one_group(1.35e7, 1.45e7),
         )
@@ -4789,6 +5171,7 @@ mod tests {
                             branching: 1.0,
                             branching_uncertainty: None,
                             evaluated_branching: None,
+                            multiplicity: None,
                             q_value: None,
                         })
                         .collect(),
@@ -4863,6 +5246,7 @@ mod tests {
             q_value: None,
             branching_uncertainty: sigma,
             evaluated_branching: None,
+            multiplicity: None,
         };
         let nuclide = |name: &str,
                        half_life: Option<f64>,
@@ -5012,6 +5396,7 @@ mod tests {
                 q_value: None,
                 branching_uncertainty: None,
                 evaluated_branching: None,
+                multiplicity: None,
             }],
             fission_yields: None,
             sources: vec![yani::DecaySource {
@@ -5121,6 +5506,7 @@ mod tests {
             seed,
             per_spectrum: &[],
             sampler: None,
+            resonance: None,
             half_life: Some(&h),
             decay_branching: None,
         };
@@ -5154,6 +5540,7 @@ mod tests {
                 seed,
                 per_spectrum: &[],
                 sampler: None,
+                resonance: None,
                 half_life: Some(&h),
                 decay_branching: None,
             };

@@ -33,6 +33,7 @@ fn mode(kind: &str, target: Option<&str>, b: f64, sigma: Option<f64>) -> yani::C
         q_value: None,
         branching_uncertainty: sigma,
         evaluated_branching: None,
+        multiplicity: None,
     }
 }
 
