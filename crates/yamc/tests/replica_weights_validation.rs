@@ -12,7 +12,8 @@
 //!
 //! `YAMC_VALIDATION_REPLICAS` (16), `YAMC_VALIDATION_PARTICLES` (100000, the
 //! replica-weight run) and `YAMC_VALIDATION_RERUN_PARTICLES` (200000, each
-//! rerun) size it, and `YAMC_VALIDATION_CASES` picks cases by name.
+//! rerun) size it, and `YAMC_VALIDATION_CASES` picks cases by comma-separated parts of their
+//! names.
 //!
 //! Each replica `k`'s relative shift from the replica weights,
 //! `x_k / y - 1` from one run, is compared with the reruns', `Y_k / Y_0 - 1`
@@ -24,7 +25,7 @@
 //! shifts over replicas (the nuclear-data sigma) from each method, the
 //! reruns' with their noise deconvolved.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -33,7 +34,9 @@ use yamc::geometry::cell::Cell;
 use yamc::geometry::Geometry;
 use yamc::model::{Model, TrackingMode, TransportDataUncertainty, TransportSettings, Verbose};
 use yamc::variance_reduction::{SurvivalBiasing, VarianceReduction, WeightWindowBounds};
-use yamc::xs_perturbation::perturbed_material;
+use yamc::xs_perturbation::{
+    perturbed_material, resonance_sampling, sampled_names, ResonanceChange,
+};
 use yamc_materials::Material;
 use yamc_particle::particle::ParticleType;
 use yamc_source::distribution::angular::AngularDistribution;
@@ -150,14 +153,11 @@ fn setups(photons: bool) -> Vec<Setup> {
             ],
         },
         Setup {
-            name: "iron core, void gap, water shell",
+            name: "iron core, void gap, graphite shell",
             shells: vec![
                 (4.0, Some(material(1, &[("Fe56", 1.0)], 7.87, false))),
                 (6.0, None),
-                (
-                    20.0,
-                    Some(material(2, &[("H1", 2.0), ("O16", 1.0)], 1.0, false)),
-                ),
+                (20.0, Some(material(2, &[("C12", 1.0)], 1.8, false))),
             ],
             tallies: vec![
                 (1, vec!["flux", "(n,p)"], ParticleType::Neutron),
@@ -342,21 +342,46 @@ fn run(
     out
 }
 
-/// Every material of the setup with replica `k`'s draw applied.
-fn perturbed(materials: &[Material], k: u64) -> Vec<Material> {
-    materials
+/// Every material of the setup with each replica's draw applied, replica
+/// by replica: its MF=33 cells as the replica weights draw them (without the
+/// first-order MF=32 rows of a nuclide whose resonance parameters are
+/// sampled) and its resonance parameters' change. One factorization of each
+/// material's covariance.
+fn perturbed(materials: &[Material], replicas: usize) -> Vec<Vec<Material>> {
+    let per_material: Vec<Vec<Material>> = materials
         .iter()
         .map(|m| {
-            let (fields, _) = transport_fields(m, &Default::default());
+            let sampling = resonance_sampling(m);
+            let (fields, _) = transport_fields(m, &sampled_names(&sampling));
             let cells = fields
                 .iter()
                 .filter_map(|(n, t)| t.field.clone().map(|f| (n.clone(), f)))
                 .collect();
-            let draw = Sampler::new(&cells, &[]).draw(SEED, k);
-            perturbed_material(m, &fields, &draw, &Default::default())
-                .expect("perturb")
-                .0
+            let sampler = Sampler::new(&cells, &[]);
+            (0..replicas as u64)
+                .map(|k| {
+                    let mut resonance = BTreeMap::new();
+                    for (name, sampled) in &sampling {
+                        let Ok(r) = sampled else { continue };
+                        let grid =
+                            m.nuclide_data[name].energy.as_ref().expect("grid")["294"].as_slice();
+                        resonance.insert(
+                            name.clone(),
+                            ResonanceChange {
+                                temperature: "294".to_string(),
+                                by_mt: r.changes(SEED, k, grid).expect("changes"),
+                            },
+                        );
+                    }
+                    perturbed_material(m, &fields, &sampler.draw(SEED, k), &resonance)
+                        .expect("perturb")
+                        .0
+                })
+                .collect()
         })
+        .collect();
+    (0..replicas)
+        .map(|k| per_material.iter().map(|v| v[k].clone()).collect())
         .collect()
 }
 
@@ -396,7 +421,10 @@ fn replica_weights_against_reruns() {
     );
     println!("|---|---|---|---|---|---|---|");
     for setup in setups(true) {
-        if picked.as_ref().is_some_and(|p| !p.contains(setup.name)) {
+        if picked
+            .as_ref()
+            .is_some_and(|p| !p.split(',').any(|w| setup.name.contains(w.trim())))
+        {
             continue;
         }
         let materials: Vec<Material> = setup.shells.iter().filter_map(|(_, m)| m.clone()).collect();
@@ -410,9 +438,7 @@ fn replica_weights_against_reruns() {
             })
             .collect();
         let started = std::time::Instant::now();
-        let draws: Vec<Vec<Material>> = (0..replicas as u64)
-            .map(|k| perturbed(&materials, k))
-            .collect();
+        let draws = perturbed(&materials, replicas);
         eprintln!(
             "{}: draws {:.0} s",
             setup.name,
