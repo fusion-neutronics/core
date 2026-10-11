@@ -183,13 +183,15 @@ fn replica(t: &Arc<Tally>, k: usize) -> (f64, f64) {
 
 /// The material with replica `k`'s draw applied to its data.
 fn rerun_material(m: &Material, k: u64) -> Material {
-    let (fields, _) = transport_fields(m);
+    let (fields, _) = transport_fields(m, &Default::default());
     let cells = fields
         .iter()
         .filter_map(|(n, t)| t.field.clone().map(|f| (n.clone(), f)))
         .collect();
     let draw = Sampler::new(&cells, &[]).draw(SEED, k);
-    perturbed_material(m, &fields, &draw).expect("perturb").0
+    perturbed_material(m, &fields, &draw, &Default::default())
+        .expect("perturb")
+        .0
 }
 
 #[test]
@@ -810,7 +812,7 @@ fn modes_diagonalize_the_draws() {
         eprintln!("skipping: W184 fixture missing, or without covariance or tables");
         return;
     };
-    let (fields, _) = transport_fields(&m);
+    let (fields, _) = transport_fields(&m, &Default::default());
     let cells = fields
         .iter()
         .filter_map(|(n, t)| t.field.clone().map(|f| (n.clone(), f)))

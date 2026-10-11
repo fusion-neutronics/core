@@ -242,12 +242,21 @@ impl CrossMaterial {
     }
 
     /// The transport field of every linked nuclide, as
-    /// [`crate::covariance_fold::transport_fields`] builds it.
-    pub fn transport_fields(&self) -> BTreeMap<String, CellField> {
+    /// [`crate::covariance_fold::transport_fields`] builds it, the ones in
+    /// `without_mf32_rows` from their tape blocks alone.
+    pub fn transport_fields(
+        &self,
+        without_mf32_rows: &BTreeSet<String>,
+    ) -> BTreeMap<String, CellField> {
         self.nuclides
             .iter()
             .filter_map(|(name, l)| {
-                let t = nuclide_transport_field(name, &l.nuclide, &l.temperature)?;
+                let t = nuclide_transport_field(
+                    name,
+                    &l.nuclide,
+                    &l.temperature,
+                    without_mf32_rows.contains(name),
+                )?;
                 Some((name.clone(), t.field?))
             })
             .collect()
@@ -560,7 +569,7 @@ mod tests {
     }
 
     fn fields(m: &Material) -> BTreeMap<String, CellField> {
-        crate::covariance_fold::transport_fields(m)
+        crate::covariance_fold::transport_fields(m, &BTreeSet::new())
             .0
             .into_iter()
             .filter_map(|(n, t)| Some((n, t.field?)))
@@ -620,7 +629,12 @@ mod tests {
         let cross = CrossMaterial::new(&[&m]);
         assert!(cross.is_empty());
         let coupled = fields(&m);
-        let s = Sampler::coupled(&coupled, &[], &cross, &cross.transport_fields());
+        let s = Sampler::coupled(
+            &coupled,
+            &[],
+            &cross,
+            &cross.transport_fields(&BTreeSet::new()),
+        );
         assert_eq!(s.drawn_with("U235"), None);
         assert_eq!(s.deviates(7, 3), Sampler::new(&coupled, &[]).deviates(7, 3));
     }
@@ -633,7 +647,7 @@ mod tests {
         let m = material(&[("U235", &a), ("U238", &b)]);
         let cross = CrossMaterial::new(&[&m]);
         let f = fields(&m);
-        let s = Sampler::coupled(&f, &[], &cross, &cross.transport_fields());
+        let s = Sampler::coupled(&f, &[], &cross, &cross.transport_fields(&BTreeSet::new()));
         assert_eq!(
             s.drawn_with("U238"),
             Some(&["U235".to_string(), "U238".to_string()][..])
@@ -699,7 +713,7 @@ mod tests {
         let m = material(&[("U235", &a), ("U238", &b)]);
         let cross = CrossMaterial::new(&[&m]);
         let f = fields(&m);
-        let s = Sampler::coupled(&f, &[], &cross, &cross.transport_fields());
+        let s = Sampler::coupled(&f, &[], &cross, &cross.transport_fields(&BTreeSet::new()));
         let drawn = s.sampled_cross_covariance("U235", "U238").unwrap();
         assert!((drawn[0] - 0.01).abs() < 1e-12, "{drawn:?}");
         for n in ["U235", "U238"] {
@@ -743,7 +757,12 @@ mod tests {
         let b = nuclide("U238", vec![diagonal(U238)]);
         let m = material(&[("U235", &a), ("U238", &b)]);
         let cross = CrossMaterial::new(&[&m]);
-        let s = Sampler::coupled(&fields(&m), &[], &cross, &cross.transport_fields());
+        let s = Sampler::coupled(
+            &fields(&m),
+            &[],
+            &cross,
+            &cross.transport_fields(&BTreeSet::new()),
+        );
         let drawn = s.sampled_cross_covariance("U235", "U238").unwrap();
         assert!((drawn[0] - 0.01).abs() < 1e-12, "{drawn:?}");
         assert!(
@@ -773,7 +792,7 @@ mod tests {
         let m = material(&[("U235", &a), ("U238", &b), ("Pu239", &c)]);
         let cross = CrossMaterial::new(&[&m]);
         let f = fields(&m);
-        let s = Sampler::coupled(&f, &[], &cross, &cross.transport_fields());
+        let s = Sampler::coupled(&f, &[], &cross, &cross.transport_fields(&BTreeSet::new()));
         assert_eq!(s.drawn_with("Pu239").map(|m| m.len()), Some(3));
         assert!(
             s.joint_adjustments().is_empty(),
@@ -828,7 +847,7 @@ mod tests {
         let both = material(&[("U235", &a), ("U238", &b)]);
         let alone = material(&[("U238", &b)]);
         let cross = CrossMaterial::new(&[&both, &alone]);
-        let partners = cross.transport_fields();
+        let partners = cross.transport_fields(&BTreeSet::new());
         let s_both = Sampler::coupled(&fields(&both), &[], &cross, &partners);
         let s_alone = Sampler::coupled(&fields(&alone), &[], &cross, &partners);
         assert!(s_alone.drawn_with("U238").is_some());

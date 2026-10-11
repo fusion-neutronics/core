@@ -30,9 +30,12 @@ use yani_transmute::uncertainty::{
 ///   themselves: each replica draws them from their covariance, rebuilds the
 ///   resonance range's cross sections from the draw and Doppler broadens the
 ///   change to the temperature in use, so the resonance range's uncertainty
-///   is exact in the parameters rather than first order. A nuclide whose
-///   parameters cannot be sampled keeps the first-order MF=32 rows of
-///   ``covariance.arrow``, and the report says which and why;
+///   is exact in the parameters rather than first order. On a
+///   transport-coupled run the change is folded against the flux the
+///   transport tallied on the nuclide's own energy grid through its
+///   resonances, so a self-shielded resonance is weighted with its own flux
+///   dip. A nuclide whose parameters cannot be sampled keeps the first-order
+///   MF=32 rows of ``covariance.arrow``, and the report says which and why;
 /// - ``"flux_spectrum"``: the spectrum itself, from the per-bin
 ///   ``flux_std_dev`` given on a ``Pulse``;
 /// - ``"half_life"``: every reachable nuclide's half-life, from the decay
@@ -41,12 +44,19 @@ use yani_transmute::uncertainty::{
 ///   saturated activity (``lambda N = R``) is correctly insensitive to its
 ///   own half-life rather than inheriting the density's spread;
 /// - ``"decay_branching"``: the decay branching ratios of every reachable
-///   parent with exactly two modes and one stated sigma between them (both
-///   state the same one, or one states it and the other is its complement),
-///   whose smaller ratio is at least five sigmas from zero. One draw per
-///   parent moves one mode up and the other down by the same amount, so the
-///   pair's total is kept. Other multi-mode parents stay at their evaluated
-///   ratios and the report names them by why;
+///   parent with several modes and a stated sigma, drawn so the parent's
+///   total is kept and every ratio stays between zero and it: each mode but
+///   one from a logit-normal with the evaluated ratio as its mean and the
+///   stated sigma as its standard deviation, the last their complement,
+///   coupled so the modes carry the zero-sum covariance of largest entropy
+///   that realises every stated sigma (for two or three modes the only one).
+///   A small branch with a large relative sigma is drawn skewed, never below
+///   zero. A largest sigma above the sum of the others' is drawn as that sum;
+///   a single mode stating no sigma is the complement of the rest when it is
+///   the largest or the only way to trade; a mode whose sigma no ratio with
+///   its mean can have (``sigma**2 >= b * (T - b)``), and a mode stating none
+///   otherwise, are held at their ratios and the rest share what is left.
+///   The report names every parent short of its stated sigmas by why;
 /// - ``"statistical"``: the Monte Carlo uncertainty of transport-tallied
 ///   reaction rates, from their per-history covariance, drawn independently
 ///   for each material since their tallies are separate estimates. It
@@ -96,10 +106,10 @@ use yani_transmute::uncertainty::{
 /// Held at their nominal values, with uncertainties of their own that this
 /// does not propagate:
 ///
-/// - the decay branching ratios ``"decay_branching"`` does not sample (three
-///   or more modes, unequal sigmas, too wide to sample untruncated, or no
-///   sigma), and the per-decay photon lines and decay energy of a drawn
-///   parent, which follow its nominal branching;
+/// - the decay branching ratios ``"decay_branching"`` does not sample (a
+///   sigma wider than the ratio allows, or no sigma to draw), and the per-decay
+///   photon lines and decay energy of a drawn parent, which follow its
+///   nominal branching;
 /// - the isomeric-branching overlay from MF=9/MF=10;
 /// - covariance correlating an evaluation with one the run does not hold
 ///   (MAT1 naming a material not in the run, counted in
@@ -622,15 +632,15 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
             "no_decay_branching_uncertainty",
             &info.no_decay_branching_uncertainty,
         ),
-        (
-            "decay_branchings_three_or_more_modes",
-            &info.decay_branchings_three_or_more_modes,
-        ),
-        (
-            "decay_branchings_unequal_sigmas",
-            &info.decay_branchings_unequal_sigmas,
-        ),
         ("decay_branchings_too_wide", &info.decay_branchings_too_wide),
+        (
+            "decay_branchings_partly_held",
+            &info.decay_branchings_partly_held,
+        ),
+        (
+            "decay_branchings_sigma_adjusted",
+            &info.decay_branchings_sigma_adjusted,
+        ),
     ] {
         d.set_item(key, set.iter().cloned().collect::<Vec<_>>())?;
     }
@@ -706,7 +716,8 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
 /// `Info::resonance_parameters` as a dict keyed by nuclide: each entry's
 /// `method`, the `reason` it fell back to the first-order rows (`None` where
 /// the parameters were sampled), and per sampled range its sampler report.
-fn resonance_parameters_dict<'py>(
+/// `yamc`'s transport coverage report gives its own the same shape.
+pub fn resonance_parameters_dict<'py>(
     py: Python<'py>,
     methods: &std::collections::BTreeMap<String, ResonanceMethod>,
 ) -> PyResult<Bound<'py, PyDict>> {

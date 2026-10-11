@@ -114,7 +114,7 @@ fn every_transport_partial_is_classified_and_reads_cells_that_exist() {
     for (library, nuclide, dir) in &evaluations {
         let nuclide = nuclide.as_str();
         let m = material(nuclide, dir);
-        let (fields, without) = transport_fields(&m);
+        let (fields, without) = transport_fields(&m, &Default::default());
         let Some(t) = fields.get(nuclide) else {
             assert!(
                 without.contains(nuclide),

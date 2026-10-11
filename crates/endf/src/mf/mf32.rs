@@ -1458,4 +1458,32 @@ mod tests {
         assert_eq!(d.za, 26056);
         assert_eq!(d.isotopes[0].ranges[0].lru, 2);
     }
+
+    /// An MF=32 the reader does not implement is recorded as such and the
+    /// rest of the material is read: Am244 with a single-level Breit-Wigner
+    /// MF=32 spliced in before its MEND record.
+    #[test]
+    fn an_unsupported_mf32_leaves_the_rest_of_the_material() {
+        const AM244: &[u8] = include_bytes!("../../fixtures/n-095_Am_244.endf.xz");
+        let mut t = Tape::head(1);
+        t.cont(0.00001, 1000.0, 1, 1, 0, 0);
+        let section = t.text.replace("9999321511", "9552321511")
+            + &format!("{:<66}9552{:>2}{:>3}\n", "", 32, 0)
+            + &format!("{:<66}9552{:>2}{:>3}\n", "", 0, 0);
+        let tape = crate::testdata::text(AM244);
+        let mend = tape.find("   0 0  0").expect("a MEND record");
+        let mend = tape[..mend].rfind('\n').unwrap() + 1;
+        let text = format!("{}{section}{}", &tape[..mend], &tape[mend..]);
+
+        let m = Material::from_str(&text).unwrap();
+        assert!(m.mf32().is_none());
+        let what = m.mf32_unsupported().expect("MF=32 is present and unread");
+        assert!(what.contains("LRF=1"), "{what:?}");
+        assert!(m.mf2().is_some());
+        assert!(m.mf3(1).is_some());
+        assert!(matches!(
+            m.interpret(),
+            Ok(crate::Interpretation::IncidentNeutron(_))
+        ));
+    }
 }

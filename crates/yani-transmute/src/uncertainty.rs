@@ -60,17 +60,22 @@ pub enum Source {
     /// insensitive to its own half-life (`N ~ R / lambda`, so `A ~ R`), and
     /// inflate its uncertainty.
     HalfLife,
-    /// Decay branching ratios, from the MT=457 sigma on each mode, for the
-    /// parents whose sum rule fixes the joint distribution: exactly two modes,
-    /// one sigma between them (both state the same one, or one states it and
-    /// the other is its complement), and the smaller ratio at least five
-    /// sigmas from zero. A replica draws one deviate per parent, moves one
-    /// mode by `sigma z` and the other by `-sigma z`, so the pair's total is
-    /// kept and the two are perfectly anticorrelated.
+    /// Decay branching ratios, from the MT=457 sigma on each mode. A replica
+    /// draws a parent's ratios keeping their total and every ratio in
+    /// `[0, T]`: each mode but one from a logit-normal with the evaluated
+    /// ratio as its mean and the stated sigma as its standard deviation, the
+    /// last their complement, coupled by a Gaussian copula so the modes carry
+    /// the zero-sum covariance of largest entropy that realises every stated
+    /// sigma (for two or three modes the only one). A largest sigma above the
+    /// sum of the others' is drawn as that sum. A single mode stating none is
+    /// the complement of the rest when it is the largest or the only way to
+    /// trade, and is held otherwise, as are two or more stating none and a
+    /// mode whose sigma no ratio with its mean can have
+    /// (`sigma^2 >= b (T - b)`); the rest share what is left.
     ///
-    /// Any other multi-mode parent stays at nominal and [`Info`] names it by
-    /// why. It moves the inventory only: a parent's own per-decay emission is
-    /// the decay scheme's.
+    /// [`Info`] names every parent short of its stated sigmas by why. It
+    /// moves the inventory only: a parent's own per-decay emission is the
+    /// decay scheme's.
     DecayBranching,
     /// The Monte Carlo statistical uncertainty of transport-tallied reaction
     /// rates, from their per-history covariance.
@@ -653,8 +658,7 @@ pub struct Info {
     /// with each range's sampler report (the repairs it made and the widths
     /// it held), or the first-order MF=32 rows of `covariance.arrow`, with
     /// the reason the parameters were not sampled. See
-    /// [`crate::resonance_rates`]. Empty with the cross-section source off,
-    /// and on a transport run, which keeps the rows for every nuclide.
+    /// [`crate::resonance_rates`]. Empty with the cross-section source off.
     pub resonance_parameters: BTreeMap<String, crate::resonance_rates::ResonanceMethod>,
     /// Unstable nuclides the material can reach whose half-life was perturbed.
     pub half_lives_perturbed: BTreeSet<String>,
@@ -672,25 +676,35 @@ pub struct Info {
     /// Each is a lognormal matched to the evaluation's mean and sigma, so none
     /// can go non-positive and there is no floor to count.
     pub half_lives_sampled: usize,
-    /// Reachable parents whose decay branching was perturbed: two modes whose
-    /// sum rule fixes how the stated sigma is shared.
+    /// Reachable parents whose decay branching was perturbed: every moving
+    /// mode at its evaluated mean, within `[0, T]`, with every stated sigma
+    /// realised where the sum rule and non-negative ratios allow it.
     pub decay_branchings_perturbed: BTreeSet<String>,
-    /// Reachable parents with several decay modes and no stated sigma on any,
-    /// held at nominal. Not a claim that the split is exact.
+    /// Reachable parents with several decay modes held at nominal for want of
+    /// sigmas: none is stated, or one is beside modes stating none that
+    /// cannot take up its change. Not a claim that the split is exact.
     pub no_decay_branching_uncertainty: BTreeSet<String>,
-    /// Reachable parents with three or more modes and a stated sigma, held at
-    /// nominal: MT=457 gives no covariance between the modes, and with more
-    /// than one degree of freedom the sum rule does not supply it.
-    pub decay_branchings_three_or_more_modes: BTreeSet<String>,
-    /// Reachable two-mode parents whose modes state different sigmas, held at
-    /// nominal: a sum rule leaves room for one.
-    pub decay_branchings_unequal_sigmas: BTreeSet<String>,
-    /// Reachable two-mode parents whose smaller ratio is under five sigmas,
-    /// held at nominal: a Gaussian that wide would have to be truncated at
-    /// zero, which the evaluation does not describe.
+    /// Reachable parents held at nominal because every mode that could move
+    /// states a sigma no ratio in `[0, T]` with its mean can have,
+    /// `sigma^2 >= b (T - b)` (JENDL-5.0 has ratios near 1e-16 stating 0.04),
+    /// which describes no distribution.
     pub decay_branchings_too_wide: BTreeSet<String>,
-    /// Branching draws that fell outside `[0, T]` and were clamped, and draws
-    /// made, one per perturbed parent per replica.
+    /// Perturbed parents with one or more modes held at their ratios: a sigma
+    /// no ratio with its mean can have, or no sigma beside another mode
+    /// stating none or beside stated modes that trade between themselves. The
+    /// other modes share what those leave.
+    pub decay_branchings_partly_held: BTreeSet<String>,
+    /// Perturbed parents with a mode drawn more than 0.1% from its stated
+    /// sigma. Either the largest stated sigma exceeds the sum of the others',
+    /// which no split keeping the total can realise, and it was drawn as that
+    /// sum; or the modes drawn beside the complement cannot carry the
+    /// correlation its sigma needs while staying non-negative (two small
+    /// skewed modes cannot be strongly anticorrelated), and it was drawn at
+    /// the nearest sigma they allow.
+    pub decay_branchings_sigma_adjusted: BTreeSet<String>,
+    /// Branching draws whose complement fell below zero, the other modes
+    /// together exceeding the total, and were pulled back towards the nominal
+    /// ratios, and draws made, one per perturbed parent per replica.
     pub decay_branchings_floored: usize,
     pub decay_branchings_sampled: usize,
     /// Reachable unstable nuclides whose decay energy was perturbed.
@@ -877,9 +891,9 @@ impl Info {
             || !self.flux_rates_without_terms.is_empty()
             || !self.no_half_life_uncertainty.is_empty()
             || !self.no_decay_branching_uncertainty.is_empty()
-            || !self.decay_branchings_three_or_more_modes.is_empty()
-            || !self.decay_branchings_unequal_sigmas.is_empty()
             || !self.decay_branchings_too_wide.is_empty()
+            || !self.decay_branchings_partly_held.is_empty()
+            || !self.decay_branchings_sigma_adjusted.is_empty()
             || !self.no_decay_energy_uncertainty.is_empty()
             || !self.half_life_uncertainty_not_carried.is_empty()
             || !self.decay_energy_uncertainty_not_carried.is_empty()
@@ -1028,8 +1042,8 @@ pub struct Contributor {
     pub nuclide: String,
     /// The reaction, for one cross-section channel alone; `None` for the
     /// nuclide's whole evaluation (every channel with its correlations) or for
-    /// a half-life. A `decay_branching` contributor is a two-mode parent's
-    /// one degree of freedom, so `None` too.
+    /// a half-life. A `decay_branching` contributor is a parent's whole
+    /// split, every direction of it, so `None` too.
     pub reaction: Option<String>,
     /// `[step][nuclide]` variance it contributes, only where it is non-zero.
     pub variance: Vec<HashMap<String, f64>>,

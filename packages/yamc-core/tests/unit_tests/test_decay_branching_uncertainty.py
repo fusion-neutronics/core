@@ -1,8 +1,9 @@
 """Decay branching ratio uncertainty, at the Python boundary.
 
-The numerical rules (a two-mode parent's sigma realised on both modes,
-anticorrelated, with the pair's total kept, and every other multi-mode parent
-held at nominal and named by why) are pinned in Rust, in
+The numerical rules (each parent's ratios drawn from logit-normal marginals
+coupled to realise its stated sigmas, keeping its total and every ratio within
+it, and every parent short of its stated sigmas named by why) are pinned in
+Rust, in
 crates/yani-transmute/tests/decay_branching_uncertainty.rs. Here: the source is
 offered and on by default, and the report carries its keys either way.
 """
@@ -19,9 +20,11 @@ RATE = sum(MULTIGROUP_FLUX)
 
 HELD_AT_NOMINAL = (
     "no_decay_branching_uncertainty",
-    "decay_branchings_three_or_more_modes",
-    "decay_branchings_unequal_sigmas",
     "decay_branchings_too_wide",
+)
+SAMPLED_SHORT = (
+    "decay_branchings_partly_held",
+    "decay_branchings_sigma_adjusted",
 )
 
 
@@ -70,7 +73,7 @@ def test_leaving_decay_branching_out_is_reported():
     info = _info(["cross_sections"])
     assert "decay branching ratio" in info["not_perturbed"]
     assert info["decay_branchings_perturbed"] == []
-    for key in HELD_AT_NOMINAL:
+    for key in (*HELD_AT_NOMINAL, *SAMPLED_SHORT):
         assert info[key] == [], key
     assert info["decay_branchings_sampled"] == 0
     assert info["decay_branchings_floored"] == 0
@@ -78,6 +81,9 @@ def test_leaving_decay_branching_out_is_reported():
 
 def test_asking_for_decay_branching_reports_disjoint_categories():
     """Every category key is present and no parent is in two of them.
+
+    A parent sampled short of its stated sigmas is perturbed and named
+    again by why, so those keys are subsets of the perturbed parents.
 
     Which parent lands in which category, and the realised spread of a
     draw, are pinned on a synthetic chain in the Rust tests. The local
@@ -89,11 +95,14 @@ def test_asking_for_decay_branching_reports_disjoint_categories():
     assert "decay branching ratio" not in info["not_perturbed"]
     assert info["sources"] == ["decay_branching"]
     assert isinstance(info["has_gaps"], bool)
-    for key in ("decay_branchings_perturbed", *HELD_AT_NOMINAL):
+    for key in ("decay_branchings_perturbed", *HELD_AT_NOMINAL, *SAMPLED_SHORT):
         assert all(isinstance(name, str) for name in info[key]), key
-    # Every parent held at nominal is a gap the summary flag must show.
-    if any(info[key] for key in HELD_AT_NOMINAL):
+    # Every parent short of its stated sigmas is a gap the summary flag must
+    # show.
+    if any(info[key] for key in (*HELD_AT_NOMINAL, *SAMPLED_SHORT)):
         assert info["has_gaps"]
+    for key in SAMPLED_SHORT:
+        assert set(info[key]) <= set(info["decay_branchings_perturbed"]), key
     # A parent is in at most one category.
     seen = set(info["decay_branchings_perturbed"])
     for key in HELD_AT_NOMINAL:

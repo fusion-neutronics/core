@@ -17,8 +17,10 @@ use yamc_nuclide::nuclide::Nuclide;
 use yani_transmute::covariance_fold::{transport_fields, DerivedTerm, Read, TransportField};
 use yani_transmute::covariance_sample::{FieldRepair, Sampler};
 use yani_transmute::cross_material::CrossMaterial;
+use yani_transmute::resonance_rates::ResonanceMethod;
 
 use crate::model::Model;
+use crate::xs_perturbation::{resonance_sampling, sampled_names};
 
 /// One transport reaction the evaluation covers.
 #[derive(Debug, Clone, PartialEq)]
@@ -88,13 +90,22 @@ pub struct DataUncertaintyCoverage {
     /// Legendre orders a covariance block correlates. Reported so the data is
     /// visible; no run samples it yet, which `not_perturbed` says.
     pub angular_covariance: BTreeMap<String, BTreeMap<i32, Vec<(i32, i32)>>>,
+    /// Every nuclide whose folder carries resonance parameters (MF=2 and
+    /// MF=32), and how a run takes its resonance-range uncertainty: the
+    /// parameters drawn per replica and the cross sections rebuilt from them,
+    /// or the first-order MF=32 rows of `covariance.arrow` and why
+    /// ([`crate::xs_perturbation::resonance_sampling`]). A sampled nuclide's
+    /// `perturbed` reactions are those its MF=33 blocks reach, without the
+    /// rows.
+    pub resonance_parameters: BTreeMap<String, ResonanceMethod>,
 }
 
 /// The inputs no transport uncertainty run perturbs, whatever the evaluation
 /// carries.
 const NOT_PERTURBED: [&str; 8] = [
     "angular and energy distributions of secondaries (MF=34, MF=35, MF=6)",
-    "resonance-parameter covariance (MF=32)",
+    "resonance-parameter covariance (MF=32) of a nuclide whose folder has no \
+     resonance_parameters.arrow and no first-order MF=32 rows in covariance.arrow",
     "fission multiplicity and spectrum (MF=31, MF=35)",
     "unresolved-resonance probability tables beyond the cross-section covariance",
     "photon production and photon interaction data",
@@ -212,6 +223,9 @@ impl Model {
             material
                 .ensure_fission_covariance_loaded()
                 .map_err(|e| format!("loading fission covariance: {e}"))?;
+            material
+                .ensure_resonance_parameters_loaded()
+                .map_err(|e| format!("loading resonance parameters: {e}"))?;
             for (name, nuclide) in &material.nuclide_data {
                 let Some(blocks) = &nuclide.angular_covariance else {
                     continue;
@@ -230,10 +244,23 @@ impl Model {
             loaded.push(material);
         }
         // Read from every material at once, as a run reads it.
+        let samplings: Vec<_> = loaded.iter().map(|m| resonance_sampling(m)).collect();
+        let sampled: BTreeSet<String> = samplings.iter().flat_map(sampled_names).collect();
         let cross = CrossMaterial::new(&loaded.iter().map(|m| m.as_ref()).collect::<Vec<_>>());
-        let partners = cross.transport_fields();
-        for material in &loaded {
-            let (fields, without_data) = transport_fields(material);
+        let partners = cross.transport_fields(&sampled);
+        for (material, sampling) in loaded.iter().zip(&samplings) {
+            for (name, sampled) in sampling {
+                report
+                    .resonance_parameters
+                    .entry(name.clone())
+                    .or_insert_with(|| match sampled {
+                        Ok(r) => r.method(),
+                        Err(reason) => ResonanceMethod::FirstOrder {
+                            reason: reason.clone(),
+                        },
+                    });
+            }
+            let (fields, without_data) = transport_fields(material, &sampled_names(sampling));
             report.without_data.extend(without_data);
             let cell_fields: BTreeMap<String, _> = fields
                 .iter()
@@ -399,9 +426,9 @@ impl Model {
         Ok(())
     }
 
-    /// Load every material's nuclear data with covariance, before the run
-    /// prepares its tables, so the replica weights read the same data the run
-    /// transports.
+    /// Load every material's nuclear data with covariance and resonance
+    /// parameters, before the run prepares its tables, so the replica weights
+    /// read the same data the run transports.
     pub(crate) fn load_covariance_for_replicas(&mut self) -> Result<(), String> {
         for material_arc in self.geometry.materials_mut().iter_mut() {
             let mut material = (**material_arc).clone();
@@ -411,6 +438,9 @@ impl Model {
             material
                 .ensure_covariance_loaded()
                 .map_err(|e| format!("loading covariance: {e}"))?;
+            material
+                .ensure_resonance_parameters_loaded()
+                .map_err(|e| format!("loading resonance parameters: {e}"))?;
             *material_arc = Arc::new(material);
         }
         Ok(())

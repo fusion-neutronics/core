@@ -41,7 +41,7 @@
 //! two cells' multipliers. That touches one grid interval per cell edge, on
 //! grids of tens of thousands of points.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use yamc_materials::Material;
@@ -50,6 +50,7 @@ use yamc_nuclide::reaction::Reaction;
 use yamc_nuclide::synthesis::{synthesize, SYNTHETIC_MTS};
 use yani_transmute::covariance_fold::{Cell, DerivedTerm, Read, TransportField};
 use yani_transmute::covariance_sample::Draw;
+use yani_transmute::resonance_rates::TransportResonance;
 
 /// The redundant rows rebuilt from their components before the totals are
 /// synthesized, because the loader's synthesis reads them as partials.
@@ -160,24 +161,115 @@ fn with_values(reaction: &Reaction, values: Vec<f64>) -> Reaction {
     }
 }
 
+/// One replica's change to a nuclide's resonance cross sections, at one
+/// temperature: [`TransportResonance::changes`] on that temperature's grid.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResonanceChange {
+    /// The temperature label whose grid `by_mt` is on.
+    pub temperature: String,
+    /// Per reaction, the change in barns at every point of the grid.
+    pub by_mt: BTreeMap<i32, Vec<f64>>,
+}
+
+/// Why `nuclide`'s resonance parameters cannot be applied by a transport at
+/// `temperature`, or `None` where they can: every reaction the ranges give
+/// must be a partial the transport samples, since a change to a reaction
+/// held only as a sum, or not at all, has nowhere to go.
+fn unplaceable(nuclide: &Nuclide, temperature: &str, reactions: &[i32]) -> Option<String> {
+    let held = nuclide.reactions_for_temp(temperature)?;
+    let missing: Vec<String> = reactions
+        .iter()
+        .filter(|mt| !held.get(mt).is_some_and(|r| !r.redundant))
+        .map(|mt| mt.to_string())
+        .collect();
+    (!missing.is_empty()).then(|| {
+        format!(
+            "its transport data has no partial reaction (MT {}) for a reaction its \
+             resonance ranges give to move",
+            missing.join(", ")
+        )
+    })
+}
+
+/// Every nuclide of `material` with resonance parameters (MF=2 and MF=32,
+/// `resonance_parameters.arrow`), and whether a transport samples them: the
+/// prepared parameters, or why the nuclide keeps the first-order MF=32 rows
+/// of its `covariance.arrow` instead. The material's nuclear data must be
+/// loaded with its resonance parameters
+/// (`Material::ensure_resonance_parameters_loaded`).
+///
+/// The replica weights and the coverage report both read this, so they agree
+/// on which nuclides are sampled.
+pub fn resonance_sampling(
+    material: &Material,
+) -> BTreeMap<String, Result<TransportResonance, String>> {
+    let mut out = BTreeMap::new();
+    for (name, nuclide) in &material.nuclide_data {
+        if !material.nuclides.contains_key(name) {
+            continue;
+        }
+        let Some(data) = nuclide.resonance_parameters.as_ref() else {
+            continue;
+        };
+        let temperature = if material.temperature().is_empty() {
+            nuclide
+                .loaded_temperatures
+                .first()
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            material.temperature().to_string()
+        };
+        let sampled = TransportResonance::new(name, data, &temperature).and_then(|r| {
+            match unplaceable(nuclide, &temperature, &r.reactions()) {
+                Some(reason) => Err(reason),
+                None => Ok(r),
+            }
+        });
+        out.insert(name.clone(), sampled);
+    }
+    out
+}
+
+/// The names [`resonance_sampling`] samples.
+pub fn sampled_names(
+    sampling: &BTreeMap<String, Result<TransportResonance, String>>,
+) -> BTreeSet<String> {
+    sampling
+        .iter()
+        .filter(|(_, r)| r.is_ok())
+        .map(|(n, _)| n.clone())
+        .collect()
+}
+
 /// A copy of `nuclide` with one replica's draw applied, and how many
 /// perturbed grid values came out negative and were floored at zero.
 ///
 /// `relative` holds `m_k - 1` and `absolute` the shift in barns per cell of
 /// `transport`'s field, as [`Draw::relative`] and [`Draw::absolute`] give
 /// them. Every loaded temperature gets the same draw: covariance does not
-/// depend on temperature.
+/// depend on temperature. `resonance`, where the replica samples the
+/// nuclide's resonance parameters, is added to the partials it names at its
+/// own temperature only, as broadening makes it depend on that; `transport`
+/// should then be fielded without the first-order MF=32 rows
+/// ([`yani_transmute::covariance_fold::transport_fields`]).
 pub fn perturbed_nuclide(
     nuclide: &Nuclide,
     transport: &TransportField,
     relative: &[f64],
     absolute: &[f64],
+    resonance: Option<&ResonanceChange>,
 ) -> Result<(Nuclide, usize), String> {
-    let Some(field) = &transport.field else {
+    if transport.field.is_none() && resonance.is_none() {
         return Ok((nuclide.clone(), 0));
+    }
+    let (relative_cells, absolute_cells) = match &transport.field {
+        Some(field) => (
+            cells_by_mt(&field.relative_cells),
+            cells_by_mt(&field.absolute_cells),
+        ),
+        None => (BTreeMap::new(), BTreeMap::new()),
     };
-    let relative_cells = cells_by_mt(&field.relative_cells);
-    let absolute_cells = cells_by_mt(&field.absolute_cells);
     let name = nuclide
         .name
         .clone()
@@ -281,6 +373,39 @@ pub fn perturbed_nuclide(
                 })
                 .collect();
             new.insert(*mt, Arc::new(with_values(reaction, values)));
+        }
+
+        // The resonance parameters' change, onto the partials as perturbed
+        // above: the two sources are independent and add.
+        if let Some(change) = resonance.filter(|c| c.temperature == *temperature) {
+            for (mt, delta) in &change.by_mt {
+                let Some(reaction) = new.get(mt).cloned() else {
+                    continue;
+                };
+                if delta.len() != n {
+                    return Err(format!(
+                        "{name}: a resonance change of {} points for a grid of {n}",
+                        delta.len()
+                    ));
+                }
+                let start = reaction.threshold_idx;
+                let values: Vec<f64> = reaction
+                    .cross_section
+                    .as_slice()
+                    .iter()
+                    .zip(&delta[start.min(n)..])
+                    .map(|(&xs, d)| {
+                        let v = xs + d;
+                        if v < 0.0 {
+                            floored += 1;
+                            0.0
+                        } else {
+                            v
+                        }
+                    })
+                    .collect();
+                new.insert(*mt, Arc::new(with_values(&reaction, values)));
+            }
         }
 
         // 2. The redundant rows other code reads, moved by exactly what their
@@ -404,9 +529,9 @@ pub fn perturbed_nuclide(
 }
 
 /// A copy of `material` with every nuclide that has a field in `fields`
-/// perturbed by `draw`, its cross-section tables cleared so the next run
-/// rebuilds them from the perturbed data, and how many grid values were
-/// floored at zero.
+/// perturbed by `draw`, and every nuclide in `resonance` by its change, its
+/// cross-section tables cleared so the next run rebuilds them from the
+/// perturbed data, and how many grid values were floored at zero.
 ///
 /// The material's nuclear data must already be loaded at the run's
 /// temperature and with covariance: a lazy load after this would read the
@@ -415,18 +540,30 @@ pub fn perturbed_material(
     material: &Material,
     fields: &BTreeMap<String, TransportField>,
     draw: &Draw,
+    resonance: &BTreeMap<String, ResonanceChange>,
 ) -> Result<(Material, usize), String> {
     let mut out = material.clone();
     let mut floored = 0;
-    for (name, transport) in fields {
-        let (Some(nuclide), Some(relative), Some(absolute)) = (
-            material.nuclide_data.get(name),
-            draw.relative(name),
-            draw.absolute(name),
-        ) else {
+    let unfielded = TransportField {
+        reads: BTreeMap::new(),
+        derived: BTreeMap::new(),
+        field: None,
+    };
+    let names: BTreeSet<&String> = fields.keys().chain(resonance.keys()).collect();
+    for name in names {
+        let Some(nuclide) = material.nuclide_data.get(name) else {
             continue;
         };
-        let (perturbed, n) = perturbed_nuclide(nuclide, transport, relative, absolute)?;
+        // A nuclide the draw has no field for moves by its resonance change
+        // alone, if it has one.
+        let drawn = draw.relative(name).zip(draw.absolute(name));
+        let change = resonance.get(name);
+        let (transport, relative, absolute) = match (fields.get(name), drawn) {
+            (Some(t), Some((r, a))) => (t, r, a),
+            _ if change.is_some() => (&unfielded, &[][..], &[][..]),
+            _ => continue,
+        };
+        let (perturbed, n) = perturbed_nuclide(nuclide, transport, relative, absolute, change)?;
         floored += n;
         out.nuclide_data.insert(name.clone(), Arc::new(perturbed));
     }

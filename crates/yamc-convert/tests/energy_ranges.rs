@@ -234,6 +234,15 @@ fn a_migrated_folder_indexes_one_batch_per_temperature() {
         .flatten()
         .collect();
     assert_eq!(got, grids[1]);
+
+    // Each entry carries the sha256 of its bytes, the schema's included.
+    for r in std::iter::once(index.schema).chain(index.temperatures.values().copied()) {
+        assert_eq!(
+            index.sha256[&r],
+            yamc_nuclide::storage::release::sha256_hex(&range(&bytes, r))
+        );
+    }
+    assert_eq!(index.sha256.len(), 3);
 }
 
 /// The real fixture, end to end through the loader, and the saving measured.

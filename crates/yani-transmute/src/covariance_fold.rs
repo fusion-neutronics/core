@@ -2981,8 +2981,14 @@ pub struct TransportField {
 /// The material's nuclides must be loaded with covariance (see
 /// `Material::ensure_covariance_loaded`); a nuclide whose data carries none
 /// is named in the returned set rather than reported as exact.
+///
+/// The nuclides in `without_mf32_rows` are fielded from their tape blocks
+/// alone, as [`cell_fields`] fields them: the transport samples their
+/// resonance parameters instead, and drawing the first-order rows too would
+/// count the resonance range's uncertainty twice.
 pub fn transport_fields(
     material: &Material,
+    without_mf32_rows: &BTreeSet<String>,
 ) -> (BTreeMap<String, TransportField>, BTreeSet<String>) {
     let mut names: Vec<&String> = material.nuclides.keys().collect();
     names.sort();
@@ -2999,7 +3005,12 @@ pub fn transport_fields(
             }
             continue;
         }
-        if let Some(field) = nuclide_transport_field(name, nuclide_data, material.temperature()) {
+        if let Some(field) = nuclide_transport_field(
+            name,
+            nuclide_data,
+            material.temperature(),
+            without_mf32_rows.contains(name),
+        ) {
             out.insert(name.clone(), field);
         }
     }
@@ -3020,15 +3031,24 @@ fn reactions_at<'a>(
 }
 
 /// One nuclide's [`TransportField`] at `temperature` (its default where
-/// empty), or `None` where it has no cross sections there or no covariance.
-/// See [`transport_fields`].
+/// empty), from its tape blocks alone with `without_mf32_rows`, or `None`
+/// where it has no cross sections there or no covariance. See
+/// [`transport_fields`].
 pub(crate) fn nuclide_transport_field(
     name: &str,
     nuclide_data: &yamc_nuclide::Nuclide,
     temperature: &str,
+    without_mf32_rows: bool,
 ) -> Option<TransportField> {
     let by_mt = reactions_at(nuclide_data, temperature)?;
     let blocks = nuclide_data.covariance.as_ref()?;
+    let tape_only: Vec<CovarianceBlock>;
+    let blocks: &[CovarianceBlock] = if without_mf32_rows {
+        tape_only = blocks.iter().filter(|b| on_tape(b)).cloned().collect();
+        &tape_only
+    } else {
+        &blocks[..]
+    };
     let partials: Vec<i32> = by_mt
         .iter()
         .filter(|(_, r)| !r.redundant)
