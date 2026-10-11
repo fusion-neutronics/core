@@ -171,7 +171,7 @@ fn make_flux_tally(cell_id: u32) -> Arc<Tally> {
     t.scores = vec!["flux".parse::<Score>().unwrap()];
     t.estimator = Estimator::TrackLength;
     t.name = Some(format!("flux_cell_{cell_id}"));
-    t.initialize_batches(N_BATCHES);
+    t.reset_accumulation();
     Arc::new(t)
 }
 

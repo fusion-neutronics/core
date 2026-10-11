@@ -21,9 +21,9 @@ use super::mesh_slice::{parse_scores_arg, PyMeshSliceData};
 
 /// A tally used to score physical quantities during particle transport simulation.
 ///
-/// Tallies accumulate statistics over batches for quantities like flux, heating,
-/// or reaction rates (via MT numbers). Results include mean values, standard
-/// deviations, and relative errors.
+/// Tallies accumulate per-history statistics over all source particles for
+/// quantities like flux, heating, or reaction rates (via MT numbers). Results
+/// include mean values, standard deviations, and relative errors.
 #[gen_stub_pyclass]
 #[pyclass(module = "yamc._core", name = "Tally", unsendable, from_py_object)]
 #[derive(Clone)]

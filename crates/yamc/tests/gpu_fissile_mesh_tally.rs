@@ -87,7 +87,7 @@ fn mesh_flux_tally(radius: f64) -> Arc<Tally> {
     t.filters.push(Filter::Mesh(MeshFilter::new(mesh)));
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(1);
+    t.reset_accumulation();
     Arc::new(t)
 }
 
@@ -98,7 +98,7 @@ fn cell_flux_tally(cell_id: u32) -> Arc<Tally> {
     t.filters.push(Filter::Cell(CellFilter::from_id(cell_id)));
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(1);
+    t.reset_accumulation();
     Arc::new(t)
 }
 

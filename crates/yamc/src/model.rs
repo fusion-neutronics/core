@@ -1673,9 +1673,8 @@ impl Model {
         // `MAX_PARTICLES_PER_CPU_CHUNK` so a huge total never materialises a
         // giant schedule). An uncapped run (`None`) has no finite
         // count: the batch loop instead draws sizes from `uncapped_chunk_size`
-        // and runs until `max_runtime`/convergence trips. `num_chunks` (used
-        // only to seed the tally batch counter, which finalize overwrites with
-        // the real realization count) is 0 for an uncapped run.
+        // and runs until `max_runtime`/convergence trips. `num_chunks` is 0
+        // for an uncapped run.
         let num_chunks = match settings.total_particles {
             Some(total) => derive_chunk_count(total),
             None => 0,
@@ -1730,11 +1729,9 @@ impl Model {
             None => None,
         };
 
-        // Ensure all tallies are initialized with the correct number
-        // of batches. The runtime now derives this from the tally
-        // configuration (see `derive_chunk_count`).
+        // Clear any accumulation left over from a previous run.
         for tally_arc in &self.tallies {
-            tally_arc.initialize_batches_shared(num_chunks);
+            tally_arc.reset_accumulation_shared();
         }
 
         // Validate every tally (filter consistency, multiply_density
@@ -2528,14 +2525,9 @@ impl Model {
                 );
                 }
 
-                // Accumulate batch results into running totals for online variance estimation
-                for tally in tallies.iter() {
-                    tally.accumulate_batch(chunk_size as u32);
-                }
                 if let Some(dep_tallies) = &transmutation_tallies {
                     // Pass the real per-chunk source-particle count so the tally
                     // normalizes by the true total, not the CPU chunk count.
-                    // Mirrors the main tally above.
                     dep_tallies.accumulate_batch(chunk_size);
                 }
 

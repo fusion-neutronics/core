@@ -140,7 +140,7 @@ fn photon_source() -> ParticleSource {
 }
 
 /// One tally: a CellFilter, an optional ParticleType filter, one score, one
-/// estimator. `initialize_batches(N_BATCHES)` so the GPU/CPU per-batch Welford
+/// estimator. `reset_accumulation()` so the GPU/CPU per-batch Welford
 /// fold matches.
 fn make_tally(
     cell_id: u32,
@@ -156,7 +156,7 @@ fn make_tally(
     }
     t.scores = vec![score];
     t.estimator = estimator;
-    t.initialize_batches(N_BATCHES);
+    t.reset_accumulation();
     Arc::new(t)
 }
 
@@ -998,7 +998,7 @@ fn cpu_only_table() {
             t.filters.push(dose_filter());
             t.scores = vec!["flux".parse().unwrap()];
             t.estimator = Estimator::TrackLength;
-            t.initialize_batches(N_BATCHES);
+            t.reset_accumulation();
             Arc::new(t)
         };
 
@@ -1101,7 +1101,7 @@ fn d1s_row() {
             ])));
         t.scores = vec!["flux".parse().unwrap()];
         t.estimator = Estimator::TrackLength;
-        t.initialize_batches(N_BATCHES);
+        t.reset_accumulation();
         Arc::new(t)
     };
 
@@ -1195,7 +1195,7 @@ fn mesh_row() {
         let mesh = MeshGeometry::from_arrow(path, &materials).expect("load two_region.arrow");
         let mut t = Tally::new();
         t.scores = vec!["flux".parse::<Score>().unwrap()];
-        t.initialize_batches(N_BATCHES);
+        t.reset_accumulation();
         let t = Arc::new(t);
         let mut m = Model::new_with_mesh(mesh, vec![neutron_source()], vec![Arc::clone(&t)]);
         m.verbose = Verbose::silent();
@@ -1216,7 +1216,7 @@ fn mesh_row() {
         let mesh = MeshGeometry::from_arrow(path, &materials).expect("load two_region.arrow");
         let mut t = Tally::new();
         t.scores = vec!["flux".parse::<Score>().unwrap()];
-        t.initialize_batches(N_BATCHES);
+        t.reset_accumulation();
         let mut m = Model::new_with_mesh(mesh, vec![neutron_source()], vec![Arc::new(t)]);
         m.verbose = Verbose::silent();
         m.gpu_max_steps_per_particle = MAX_STEPS;

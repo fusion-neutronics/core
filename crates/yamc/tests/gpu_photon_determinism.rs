@@ -49,12 +49,12 @@ use yamc_tallies::filter::Filter;
 use yamc_tallies::score::{FluxScore, PhotonComponent, PhotonXSScore, Score};
 use yamc_tallies::tally::Tally;
 
-fn make_tally(cell: &Cell, score: Score, n_batches: usize) -> Arc<Tally> {
+fn make_tally(cell: &Cell, score: Score) -> Arc<Tally> {
     let mut t = Tally::new();
     t.filters
         .push(Filter::Cell(CellFilter::from_id(cell.cell_id.unwrap())));
     t.scores = vec![score];
-    t.initialize_batches(n_batches);
+    t.reset_accumulation();
     Arc::new(t)
 }
 
@@ -96,36 +96,31 @@ fn build_model(n: usize, seed: u64) -> (Model, Vec<Arc<Tally>>, TransportSetting
         energy: SourceEnergyDistribution::Discrete(Discrete::new(vec![5.0e6], vec![1.0]).unwrap()),
         strength: 1.0,
     });
-    let n_batches = 1;
     let tallies: Vec<Arc<Tally>> = vec![
-        make_tally(&cell, Score::Flux(FluxScore), n_batches),
+        make_tally(&cell, Score::Flux(FluxScore)),
         make_tally(
             &cell,
             Score::PhotonXS(PhotonXSScore {
                 component: PhotonComponent::Coherent,
             }),
-            n_batches,
         ),
         make_tally(
             &cell,
             Score::PhotonXS(PhotonXSScore {
                 component: PhotonComponent::Incoherent,
             }),
-            n_batches,
         ),
         make_tally(
             &cell,
             Score::PhotonXS(PhotonXSScore {
                 component: PhotonComponent::Photoelectric,
             }),
-            n_batches,
         ),
         make_tally(
             &cell,
             Score::PhotonXS(PhotonXSScore {
                 component: PhotonComponent::PairProduction,
             }),
-            n_batches,
         ),
     ];
     let tally_refs: Vec<Arc<Tally>> = tallies.iter().map(Arc::clone).collect();

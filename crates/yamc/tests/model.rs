@@ -1,6 +1,5 @@
 mod tests {
     use std::collections::HashMap;
-    use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use yamc::geometry::cell::Cell;
     use yamc::geometry::Geometry;
@@ -65,7 +64,7 @@ mod tests {
         )]; // MT 101 = absorption
         absorption_tally.name = Some("Absorption Tally".to_string());
         absorption_tally.units = "events".to_string();
-        absorption_tally.initialize_batches(batches);
+        absorption_tally.reset_accumulation();
         let absorption_tally_arc = Arc::new(absorption_tally);
 
         let mut model = Model::new(
@@ -100,7 +99,10 @@ mod tests {
             Some("Absorption Tally".to_string())
         );
         assert_eq!(absorption_tally_arc.units, "events");
-        assert_eq!(absorption_tally_arc.n_batches.load(Ordering::Relaxed), 10);
+        assert_eq!(
+            absorption_tally_arc.get_n_histories(),
+            (particles * batches) as u64
+        );
 
         println!("Test tally results:");
         println!("Absorption Tally: {}", absorption_tally_arc);
@@ -175,7 +177,7 @@ mod tests {
             tally.scores = vec![yamc_tallies::tally::Score::ReactionRate(
                 yamc_tallies::tally::ReactionRateScore::from_mt(yamc_tallies::tally::Mt::new(1)),
             )];
-            tally.initialize_batches(batches);
+            tally.reset_accumulation();
             Arc::new(tally)
         };
 

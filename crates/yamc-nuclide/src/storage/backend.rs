@@ -42,11 +42,12 @@ pub trait Storage: Send + Sync {
     fn exists(&self, path: &Path) -> bool;
 }
 
-/// Storage backend that delegates to `std::fs`. The default on native targets.
-#[cfg(not(target_arch = "wasm32"))]
+/// Storage backend that delegates to `std::fs`. The default on native targets,
+/// and on emscripten (Pyodide), whose `std::fs` is the in-memory filesystem.
+#[cfg(any(not(target_arch = "wasm32"), target_os = "emscripten"))]
 pub struct NativeStorage;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), target_os = "emscripten"))]
 impl Storage for NativeStorage {
     fn open_read(&self, path: &Path) -> io::Result<Box<dyn ReadSeek + Send>> {
         Ok(Box::new(std::fs::File::open(path)?))
@@ -62,12 +63,13 @@ impl Storage for NativeStorage {
     }
 }
 
-/// wasm32 default -- every call fails. A browser host is expected to call
+/// Default on wasm32 without a filesystem (`wasm32-unknown-unknown`) -- every
+/// call fails. A browser host is expected to call
 /// [`set_storage`] with an OPFS-backed implementation at startup.
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))]
 pub struct UnconfiguredStorage;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))]
 impl Storage for UnconfiguredStorage {
     fn open_read(&self, _: &Path) -> io::Result<Box<dyn ReadSeek + Send>> {
         Err(io::Error::other(
@@ -86,11 +88,11 @@ impl Storage for UnconfiguredStorage {
 }
 
 static STORAGE: Lazy<RwLock<Box<dyn Storage>>> = Lazy::new(|| {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), target_os = "emscripten"))]
     {
         RwLock::new(Box::new(NativeStorage))
     }
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", not(target_os = "emscripten")))]
     {
         RwLock::new(Box::new(UnconfiguredStorage))
     }

@@ -84,8 +84,7 @@ fn fe_sphere_with_component_tallies(
         ),
         strength: 1.0,
     });
-    let n_particles = 20_000;
-    let n_batches = 4;
+    let n_particles = 80_000;
 
     // Build 5 tallies: flux + 4 photon-component XS. Each carries a
     // `particle="photon"` filter, mirroring what the broomstick
@@ -98,7 +97,7 @@ fn fe_sphere_with_component_tallies(
             yamc_particle::particle::ParticleType::Photon,
         )));
         t.scores = vec![score];
-        t.initialize_batches(n_batches);
+        t.reset_accumulation();
         Arc::new(t)
     };
     let tallies = vec![
@@ -121,7 +120,7 @@ fn fe_sphere_with_component_tallies(
     model.gpu_max_steps_per_particle = 5_000;
     model.transport_secondary_photons = true;
     let settings = TransportSettings {
-        total_particles: Some(n_particles * n_batches),
+        total_particles: Some(n_particles),
         seed,
         ..Default::default()
     };

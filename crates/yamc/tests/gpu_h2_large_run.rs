@@ -93,7 +93,7 @@ fn gpu_h2_two_million_histories_does_not_lose_device() {
     let mut tally = Tally::new();
     tally.filters.push(Filter::Cell(CellFilter::from_id(1)));
     tally.scores = vec![Score::Flux(FluxScore)];
-    tally.initialize_batches(1);
+    tally.reset_accumulation();
     let tally = Arc::new(tally);
 
     // 2M histories: pre-fix this dispatched 200k/launch (total/10) and lost the

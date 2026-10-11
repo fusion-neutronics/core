@@ -96,7 +96,7 @@ fn photon_source() -> ParticleSource {
 
 /// A `mesh=`-only photon flux tally (no CellFilter): `shape^3` voxels over the
 /// sphere bounding box, row-major (the GPU-supported layout).
-fn mesh_flux_tally(shape: usize, n_batches: usize) -> Arc<Tally> {
+fn mesh_flux_tally(shape: usize) -> Arc<Tally> {
     let mesh = RegularRectangularMesh::new(
         [-RADIUS, -RADIUS, -RADIUS],
         [RADIUS, RADIUS, RADIUS],
@@ -106,7 +106,7 @@ fn mesh_flux_tally(shape: usize, n_batches: usize) -> Arc<Tally> {
     t.filters.push(Filter::Mesh(MeshFilter::new(mesh)));
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(n_batches);
+    t.reset_accumulation();
     Arc::new(t)
 }
 
@@ -153,7 +153,7 @@ fn gpu_cpu_photon_mesh_flux_parity() {
     let total: usize = 200_000;
 
     // CPU reference.
-    let cpu_t = mesh_flux_tally(shape, 10);
+    let cpu_t = mesh_flux_tally(shape);
     let (mut cpu_model, csettings) = build_model(vec![Arc::clone(&cpu_t)], total);
     cpu_model
         .simulate_transport(&csettings)
@@ -161,7 +161,7 @@ fn gpu_cpu_photon_mesh_flux_parity() {
     let cpu_mean = cpu_t.get_mean().to_vec();
 
     // GPU.
-    let gpu_t = mesh_flux_tally(shape, 10);
+    let gpu_t = mesh_flux_tally(shape);
     let (mut gpu_model, gsettings) = build_model(vec![Arc::clone(&gpu_t)], total);
     run_gpu_retry(&mut gpu_model, &gsettings).expect("GPU run failed");
     let gpu_mean = gpu_t.get_mean().to_vec();

@@ -92,8 +92,7 @@ fn fe_sphere(energy_function: Option<&[f64]>) -> (Model, Arc<Tally>, TransportSe
         strength: 1.0,
     });
 
-    let n_particles = 20_000;
-    let n_batches = 4;
+    let n_particles = 80_000;
 
     let mut t = Tally::new();
     t.filters
@@ -112,13 +111,13 @@ fn fe_sphere(energy_function: Option<&[f64]>) -> (Model, Arc<Tally>, TransportSe
     t.scores = vec![Score::Heating(HeatingScore)];
     // The analog eV deposit is the collision-estimator arm.
     t.estimator = yamc_tallies::Estimator::Collision;
-    t.initialize_batches(n_batches);
+    t.reset_accumulation();
     let tally = Arc::new(t);
 
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&tally)]);
     model.gpu_max_steps_per_particle = 5_000;
     let settings = TransportSettings {
-        total_particles: Some(n_particles * n_batches),
+        total_particles: Some(n_particles),
         seed: 42,
         ..Default::default()
     };

@@ -3,7 +3,7 @@
 //! `TallyResult` is a snapshot of a `Tally`'s accumulated data at the point
 //! simulation ends. It contains only the computed outputs (mean, std-dev,
 //! relative error, counts) plus metadata (shape, dim-labels,
-//! batch counts) and a reference back to the config `Tally` that produced it.
+//! history count) and a reference back to the config `Tally` that produced it.
 //!
 //! `Tally::finalize` produces a `TallyResult` without disturbing the tally's
 //! accumulation state, and `SimulationResults` is built on top of this type.
@@ -37,7 +37,7 @@ pub struct TallyResult {
     pub tally: Arc<Tally>,
 
     // --- Finalized numeric data, flat (row-major over `dim_labels`) ---
-    /// Mean value per bin: `sum / n_batches`.
+    /// Mean value per bin per source history: `sum / n_histories`.
     pub mean: Vec<f64>,
     /// Standard error of the mean per bin (Bessel-corrected, divided by sqrt(n)).
     pub standard_deviation: Vec<f64>,
@@ -49,10 +49,9 @@ pub struct TallyResult {
     /// loss; empty when the producing path installed no Welford state
     /// (e.g. GPU runs).
     pub m2: Vec<f64>,
-    /// Exact total source-history count. `n_batches` is the legacy u32
-    /// mirror of this and saturates at ~4.29e9; this field does not.
+    /// Exact total source-history count.
     pub n_histories: u64,
-    /// Total count per bin: `mean * particles_per_chunk * n_batches`.
+    /// Total score per bin over all histories: `mean * n_histories`.
     pub total_count: Vec<u64>,
     /// Figure of merit per bin: `1 / (relative_error² × elapsed_secs)`. The
     /// standard Monte Carlo metric for "convergence rate": higher = faster
@@ -102,12 +101,6 @@ pub struct TallyResult {
     pub shape: Vec<usize>,
     /// Dimension name per axis of `shape`. Same length as `shape`.
     pub dim_labels: Vec<String>,
-
-    // --- Batch metadata ---
-    /// Number of batches accumulated (`n_realizations`).
-    pub n_batches: u32,
-    /// Number of source particles per batch.
-    pub particles_per_chunk: u32,
 
     // --- Provenance ---
     /// Wall-clock seconds attributed to this tally's data: the producing
@@ -692,7 +685,7 @@ mod tests {
         // Build a minimal tally with a single flux score, no filters.
         let mut tally = Tally::new();
         tally.scores = vec![Score::Flux(FluxScore)];
-        tally.initialize_batches(1);
+        tally.reset_accumulation();
         let tally = Arc::new(tally);
 
         let result = tally.finalize();
@@ -702,7 +695,7 @@ mod tests {
         assert_eq!(result.standard_deviation, tally.get_std_dev());
         assert_eq!(result.relative_error, tally.get_rel_error());
         assert_eq!(result.total_count, tally.total_count());
-        assert_eq!(result.n_batches, tally.get_n_realizations());
+        assert_eq!(result.n_histories, tally.get_n_histories());
 
         // FOM fields default to empty / zero until `with_fom` is called.
         assert!(result.figure_of_merit.is_empty());
@@ -755,7 +748,7 @@ mod tests {
             }),
             Filter::Energy(EnergyFilter::new(vec![0.0, 1e6, 2e7])),
         ];
-        tally.initialize_batches(1);
+        tally.reset_accumulation();
         let tally = Arc::new(tally);
         let result = tally.finalize();
 
@@ -774,7 +767,7 @@ mod tests {
     fn with_fom_computes_standard_definition() {
         let mut tally = Tally::new();
         tally.scores = vec![Score::Flux(FluxScore)];
-        tally.initialize_batches(1);
+        tally.reset_accumulation();
         let tally = Arc::new(tally);
         let mut result = tally.finalize();
 
@@ -815,7 +808,7 @@ mod tests {
     fn with_fom_zero_elapsed_returns_zero_foms() {
         let mut tally = Tally::new();
         tally.scores = vec![Score::Flux(FluxScore)];
-        tally.initialize_batches(1);
+        tally.reset_accumulation();
         let tally = Arc::new(tally);
         let mut result = tally.finalize();
         result.mean = vec![1.0, 2.0];
@@ -833,7 +826,7 @@ mod tests {
     fn with_fom_zero_rel_err_bins_get_zero_fom() {
         let mut tally = Tally::new();
         tally.scores = vec![Score::Flux(FluxScore)];
-        tally.initialize_batches(1);
+        tally.reset_accumulation();
         let tally = Arc::new(tally);
         let mut result = tally.finalize();
         result.mean = vec![1.0, 0.0, 2.0];
@@ -858,7 +851,7 @@ mod tests {
     fn with_fom_inversely_proportional_to_elapsed() {
         let mut tally = Tally::new();
         tally.scores = vec![Score::Flux(FluxScore)];
-        tally.initialize_batches(1);
+        tally.reset_accumulation();
         let tally = Arc::new(tally);
         let mut result = tally.finalize();
         result.mean = vec![1.0];
@@ -879,7 +872,7 @@ mod tests {
     fn variance_is_std_dev_squared() {
         let mut tally = Tally::new();
         tally.scores = vec![Score::Flux(FluxScore)];
-        tally.initialize_batches(1);
+        tally.reset_accumulation();
         let tally = Arc::new(tally);
         let mut result = tally.finalize();
         result.standard_deviation = vec![0.1, 0.2, 0.5];
@@ -915,7 +908,7 @@ mod tests {
     fn flux_result() -> TallyResult {
         let mut tally = Tally::new();
         tally.scores = vec![Score::Flux(FluxScore)];
-        tally.initialize_batches(1);
+        tally.reset_accumulation();
         Arc::new(tally).finalize()
     }
 

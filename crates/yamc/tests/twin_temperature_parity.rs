@@ -106,7 +106,7 @@ fn build(temperature: &str) -> Option<(Model, Arc<Tally>, TransportSettings)> {
     let mut tally = Tally::new();
     tally.filters.push(Filter::Cell(CellFilter::from_id(1)));
     tally.scores = vec![Score::Flux(FluxScore)];
-    tally.initialize_batches(1);
+    tally.reset_accumulation();
     let tally = Arc::new(tally);
 
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&tally)]);

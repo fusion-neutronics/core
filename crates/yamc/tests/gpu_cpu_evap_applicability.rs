@@ -177,7 +177,7 @@ fn spectral_tally(cell_id: u32) -> Arc<Tally> {
         .push(Filter::Energy(EnergyFilter::new(spectrum_bins())));
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(N_BATCHES);
+    t.reset_accumulation();
     Arc::new(t)
 }
 
@@ -189,7 +189,7 @@ fn total_tally(cell_id: u32) -> Arc<Tally> {
     )));
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(N_BATCHES);
+    t.reset_accumulation();
     Arc::new(t)
 }
 

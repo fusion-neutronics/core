@@ -228,7 +228,7 @@ mod tests {
             Score::ReactionRate(ReactionRateScore::named(Mt::new(107), "(n,a)")),
             Score::ReactionRate(ReactionRateScore::absorption()),
         ];
-        tally.initialize_batches(1);
+        tally.reset_accumulation();
 
         // The cache should include MT scores with correct MT numbers
         // Flux should NOT be in the MT cache

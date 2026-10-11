@@ -18,7 +18,7 @@ use crate::tally::OverlayXsData;
 
 /// Internal accumulation state for a `Tally`.
 ///
-/// Holds the hot-path scoring buffers (atomic values per bin), the cross-batch
+/// Holds the hot-path scoring buffers (atomic values per bin), the cross-history
 /// running sums, and the score-index / filter caches that are populated once
 /// on first scoring.
 ///
@@ -44,7 +44,9 @@ pub(crate) struct TallyAccumulator {
     /// the convergence/trend diagnostics. Empty until the run records it.
     pub(crate) convergence_history: Mutex<Vec<crate::result::ConvergencePoint>>,
 
-    /// Number of batches accumulated so far. Kept on the accumulator
+    /// Number of source histories behind the variance estimate, saturating
+    /// at u32::MAX (the exact u64 count is in the Welford state). Kept on
+    /// the accumulator
     /// rather than `Tally` so the simulation loop can update it
     /// without taking a mutable reference to the tally.
     pub(crate) n_realizations: AtomicU32,

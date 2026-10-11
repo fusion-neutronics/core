@@ -63,7 +63,7 @@ fn spectrum_tally(cell_id: u32) -> Arc<Tally> {
         .push(Filter::Energy(EnergyFilter::new(spectrum_edges())));
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(1);
+    t.reset_accumulation();
     Arc::new(t)
 }
 

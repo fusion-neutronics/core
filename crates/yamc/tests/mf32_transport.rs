@@ -88,7 +88,7 @@ fn tally(score: &str) -> Arc<Tally> {
     t.filters.push(Filter::Cell(CellFilter::from_id(1)));
     t.scores = vec![score.parse::<Score>().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(1);
+    t.reset_accumulation();
     Arc::new(t)
 }
 

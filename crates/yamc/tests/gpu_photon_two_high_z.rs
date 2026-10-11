@@ -130,7 +130,7 @@ fn flux_tally(cell_id: u32) -> Arc<Tally> {
     t.filters.push(Filter::Energy(EnergyFilter::new(edges)));
     t.scores = vec![Score::Flux(yamc_tallies::score::FluxScore)];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(N_BATCHES);
+    t.reset_accumulation();
     Arc::new(t)
 }
 
@@ -139,7 +139,7 @@ fn component_tally(cell_id: u32, component: PhotonComponent) -> Arc<Tally> {
     t.filters.push(Filter::Cell(CellFilter::from_id(cell_id)));
     t.scores = vec![Score::PhotonXS(PhotonXSScore { component })];
     t.estimator = Estimator::Collision;
-    t.initialize_batches(N_BATCHES);
+    t.reset_accumulation();
     Arc::new(t)
 }
 

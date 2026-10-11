@@ -103,7 +103,7 @@ fn build(
         .push(Filter::Cell(CellFilter::from_id(cell_id)));
     tally.scores = vec!["102".parse().unwrap()];
     tally.estimator = Estimator::TrackLength;
-    tally.initialize_batches(1);
+    tally.reset_accumulation();
     let tally = Arc::new(tally);
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&tally)]);
     model.verbose = Verbose::silent();

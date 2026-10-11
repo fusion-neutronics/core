@@ -121,7 +121,7 @@ fn flux_tally(cell_id: u32, energy_edges: Option<Vec<f64>>) -> Arc<Tally> {
     }
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(1);
+    t.reset_accumulation();
     Arc::new(t)
 }
 
@@ -472,7 +472,7 @@ fn build_photon_model(
             .push(Filter::ParticleType(ParticleTypeFilter::new(kind)));
         t.scores = vec!["flux".parse().unwrap()];
         t.estimator = Estimator::TrackLength;
-        t.initialize_batches(1);
+        t.reset_accumulation();
         Arc::new(t)
     };
     let photon_t = particle_tally("p", yamc_particle::particle::ParticleType::Photon);

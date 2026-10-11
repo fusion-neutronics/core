@@ -1430,7 +1430,7 @@ impl PyModel {
         // through `Geometry::find_cell`), so it is the authoritative view and
         // `viewer.js` refuses to re-sample when `HAS_MESH_FILLS` is set.
         let has_mesh_fills = match &self.inner.geometry {
-            yamc::geometry::backend::GeometryKind::Csg(g) => !g.fills.is_empty(),
+            yamc::geometry::backend::GeometryKind::Csg(g) => g.has_mesh_fills(),
             #[cfg(feature = "mesh")]
             yamc::geometry::backend::GeometryKind::Mesh(_) => false,
         };

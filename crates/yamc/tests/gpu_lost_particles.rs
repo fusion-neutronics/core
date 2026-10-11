@@ -123,7 +123,7 @@ fn cell_flux_tally() -> Arc<Tally> {
         .push(Filter::Cell(CellFilter::from_ids(vec![1, 2])));
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(1);
+    t.reset_accumulation();
     Arc::new(t)
 }
 

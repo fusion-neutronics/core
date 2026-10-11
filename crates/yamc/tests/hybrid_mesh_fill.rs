@@ -567,7 +567,7 @@ fn flux_tally(name: &str, cell_id: Option<u32>) -> Arc<Tally> {
     }
     t.scores = vec!["flux".parse::<Score>().unwrap()];
     t.name = Some(name.to_string());
-    t.initialize_batches(1);
+    t.reset_accumulation();
     Arc::new(t)
 }
 

@@ -53,7 +53,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use once_cell::sync::{Lazy, OnceCell};
+use once_cell::sync::Lazy;
+#[cfg(not(target_os = "emscripten"))]
+use once_cell::sync::OnceCell;
 
 use super::release::{
     parse_latest, parse_manifest, verify, DataRelease, LatestPointer, ManifestFile, Release,
@@ -94,6 +96,7 @@ impl Timeouts {
 }
 
 /// Build an HTTP client with `timeouts` applied.
+#[cfg(not(target_os = "emscripten"))]
 pub(crate) fn build_client(timeouts: Timeouts) -> reqwest::Result<reqwest::blocking::Client> {
     #[cfg(feature = "download-tls")]
     super::url_cache::ensure_tls_provider();
@@ -104,6 +107,14 @@ pub(crate) fn build_client(timeouts: Timeouts) -> reqwest::Result<reqwest::block
         .timeout(timeouts.read)
         .build()
 }
+
+/// What a download goes through: an HTTP client, or in a build with no
+/// sockets of its own, the fetcher the host installed
+/// ([`super::url_cache::set_host_fetcher`]).
+#[cfg(not(target_os = "emscripten"))]
+type Client = reqwest::blocking::Client;
+#[cfg(target_os = "emscripten")]
+struct Client;
 
 /// A release folder in the cache, with its parsed manifest.
 #[derive(Debug)]
@@ -157,7 +168,8 @@ pub(crate) struct Registry {
     /// Cache root; `None` resolves [`cache_root`] at each use.
     root: Option<PathBuf>,
     timeouts: Timeouts,
-    client: OnceCell<reqwest::Result<reqwest::blocking::Client>>,
+    #[cfg(not(target_os = "emscripten"))]
+    client: OnceCell<reqwest::Result<Client>>,
     /// Keyword -> its resolution, success or failure, made once.
     libraries: Mutex<HashMap<String, Arc<ResolutionSlot>>>,
     /// Keyword -> the release the run used, for provenance.
@@ -181,6 +193,7 @@ impl Registry {
             origin,
             root,
             timeouts,
+            #[cfg(not(target_os = "emscripten"))]
             client: OnceCell::new(),
             libraries: Mutex::new(HashMap::new()),
             used: Mutex::new(BTreeMap::new()),
@@ -194,11 +207,23 @@ impl Registry {
         })
     }
 
-    fn client(&self) -> Result<&reqwest::blocking::Client, String> {
+    #[cfg(not(target_os = "emscripten"))]
+    fn client(&self) -> Result<&Client, String> {
         self.client
             .get_or_init(|| build_client(self.timeouts))
             .as_ref()
             .map_err(|e| format!("could not build an HTTP client: {e}"))
+    }
+
+    #[cfg(target_os = "emscripten")]
+    fn client(&self) -> Result<&Client, String> {
+        if super::url_cache::host_fetcher_installed() {
+            Ok(&Client)
+        } else {
+            Err("no data fetcher is installed for this build; \
+                 the host must call set_host_fetcher before downloading"
+                .to_string())
+        }
     }
 
     pub(crate) fn data_releases(&self) -> BTreeMap<String, DataRelease> {
@@ -334,28 +359,12 @@ impl Registry {
                     RETRY_DELAYS_MS[(attempt - 1).min(RETRY_DELAYS_MS.len() - 1)],
                 ));
             }
-            let mut request = client.get(url);
-            if pointer {
-                request = request.timeout(self.timeouts.pointer);
-            }
-            let response = match request.send() {
-                Ok(r) => r,
-                Err(e) => {
-                    last = describe(&e);
-                    continue;
-                }
-            };
-            let status = response.status();
-            if status == reqwest::StatusCode::NOT_FOUND {
-                return Ok(None);
-            }
-            if !status.is_success() {
-                last = format!("{url}: HTTP {status}");
-                continue;
-            }
-            match response.bytes() {
-                Ok(bytes) => return Ok(Some(bytes.to_vec())),
-                Err(e) => last = format!("{url}: reading the body: {}", describe(&e)),
+            let timeout = pointer.then_some(self.timeouts.pointer);
+            match get_small_once(client, url, timeout) {
+                Ok((404, _)) => return Ok(None),
+                Ok((200..=299, body)) => return Ok(Some(body)),
+                Ok((status, _)) => last = format!("{url}: HTTP {status}"),
+                Err(e) => last = e,
             }
         }
         Err(Unreachable(last))
@@ -507,8 +516,86 @@ enum ManifestError {
     Invalid(String),
 }
 
+/// One GET of a small object: the status, and the body of a success. A
+/// transport failure, or a body cut short, is the error.
+#[cfg(not(target_os = "emscripten"))]
+fn get_small_once(
+    client: &Client,
+    url: &str,
+    timeout: Option<Duration>,
+) -> Result<(u16, Vec<u8>), String> {
+    let mut request = client.get(url);
+    if let Some(timeout) = timeout {
+        request = request.timeout(timeout);
+    }
+    let response = request.send().map_err(|e| describe(&e))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Ok((status.as_u16(), Vec::new()));
+    }
+    let body = response
+        .bytes()
+        .map_err(|e| format!("{url}: reading the body: {}", describe(&e)))?;
+    Ok((status.as_u16(), body.to_vec()))
+}
+
+/// One GET of a small object through the host's fetcher. The host owns the
+/// request, so `timeout` is not applied here.
+#[cfg(target_os = "emscripten")]
+fn get_small_once(
+    _client: &Client,
+    url: &str,
+    _timeout: Option<Duration>,
+) -> Result<(u16, Vec<u8>), String> {
+    let (status, body) = super::url_cache::host_get(url)?;
+    Ok((
+        status,
+        if (200..300).contains(&status) {
+            body
+        } else {
+            Vec::new()
+        },
+    ))
+}
+
+/// One GET of `url` into `dest`, hashed as it is written: the status, and for
+/// a success the byte count and sha256 of what was written.
+#[cfg(not(target_os = "emscripten"))]
+fn get_to_file(
+    client: &Client,
+    url: &str,
+    dest: &Path,
+) -> Result<(u16, Option<(u64, String)>), String> {
+    let mut response = client.get(url).send().map_err(|e| describe(&e))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Ok((status.as_u16(), None));
+    }
+    let written = stream_to_file(&mut response, dest)
+        .map_err(|e| format!("reading the response body: {e}"))?;
+    Ok((status.as_u16(), Some(written)))
+}
+
+/// One GET of `url` into `dest` through the host's fetcher, which answers
+/// with the whole body.
+#[cfg(target_os = "emscripten")]
+fn get_to_file(
+    _client: &Client,
+    url: &str,
+    dest: &Path,
+) -> Result<(u16, Option<(u64, String)>), String> {
+    let (status, body) = super::url_cache::host_get(url)?;
+    if !(200..300).contains(&status) {
+        return Ok((status, None));
+    }
+    let written = stream_to_file(&mut body.as_slice(), dest)
+        .map_err(|e| format!("writing {}: {e}", dest.display()))?;
+    Ok((status, Some(written)))
+}
+
 /// A reqwest error with its causes, which is where "dns error" or "timed out"
 /// actually is.
+#[cfg(not(target_os = "emscripten"))]
 fn describe(e: &reqwest::Error) -> String {
     let mut text = e.to_string();
     let mut source = std::error::Error::source(e);
@@ -688,7 +775,7 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// origin is serving the wrong bytes, and asking again would only make the
 /// error slower.
 fn fetch_verified(
-    client: &reqwest::blocking::Client,
+    client: &Client,
     url: &str,
     expected: &ManifestFile,
     dest: &Path,
@@ -698,26 +785,14 @@ fn fetch_verified(
         if delay_ms > 0 {
             std::thread::sleep(Duration::from_millis(delay_ms));
         }
-        let mut response = match client.get(url).send() {
-            Ok(r) => r,
-            Err(e) => {
-                last = describe(&e);
-                continue;
+        match get_to_file(client, url, dest) {
+            Ok((404, _)) => {
+                return Err(format!(
+                    "{url}: 404, but the release manifest lists {} ({} bytes)",
+                    expected.path, expected.bytes
+                ))
             }
-        };
-        let status = response.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(format!(
-                "{url}: 404, but the release manifest lists {} ({} bytes)",
-                expected.path, expected.bytes
-            ));
-        }
-        if !status.is_success() {
-            last = format!("HTTP {status}");
-            continue;
-        }
-        match stream_to_file(&mut response, dest) {
-            Ok((bytes, sha256)) => {
+            Ok((_, Some((bytes, sha256)))) => {
                 return verify(
                     &format!("{url} ({})", expected.path),
                     expected,
@@ -728,7 +803,8 @@ fn fetch_verified(
                     fs::remove_file(dest).ok();
                 })
             }
-            Err(e) => last = format!("reading the response body: {e}"),
+            Ok((status, None)) => last = format!("HTTP {status}"),
+            Err(e) => last = e,
         }
     }
     Err(format!(

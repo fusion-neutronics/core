@@ -87,8 +87,7 @@ fn fe_sphere_with_heating(
         ),
         strength: 1.0,
     });
-    let n_particles = 20_000;
-    let n_batches = 4;
+    let n_particles = 80_000;
 
     let mk = |score: Score| {
         let mut t = Tally::new();
@@ -98,7 +97,7 @@ fn fe_sphere_with_heating(
             yamc_particle::particle::ParticleType::Photon,
         )));
         t.scores = vec![score];
-        t.initialize_batches(n_batches);
+        t.reset_accumulation();
         Arc::new(t)
     };
     let flux = mk(Score::Flux(FluxScore));
@@ -112,7 +111,7 @@ fn fe_sphere_with_heating(
     model.gpu_max_steps_per_particle = 5_000;
     model.transport_secondary_photons = true;
     let settings = TransportSettings {
-        total_particles: Some(n_particles * n_batches),
+        total_particles: Some(n_particles),
         seed,
         ..Default::default()
     };

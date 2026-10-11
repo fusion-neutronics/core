@@ -161,11 +161,7 @@ fn neutron_source() -> ParticleSource {
 /// D1S model over the Fe56/void/Fe56 stack: a photon flux tally binned by
 /// `parent_nuclides=["Mn56"]` with a coarse energy filter, over the whole box
 /// (cells 1 + 3 are the only emitters; the void scores zero photon flux).
-fn d1s_void_model(
-    seed: u64,
-    n_particles: usize,
-    n_batches: usize,
-) -> (Model, Arc<Tally>, TransportSettings) {
+fn d1s_void_model(seed: u64, n_particles: usize) -> (Model, Arc<Tally>, TransportSettings) {
     let geometry = build_void_d1s_geometry();
 
     let mut photon_tally = Tally::new();
@@ -190,7 +186,7 @@ fn d1s_void_model(
             "Mn56".to_string(),
         ])));
     photon_tally.scores = vec![Score::Flux(FluxScore)];
-    photon_tally.initialize_batches(n_batches);
+    photon_tally.reset_accumulation();
     let photon_tally = Arc::new(photon_tally);
 
     let mut model = Model::new(
@@ -204,7 +200,7 @@ fn d1s_void_model(
     model.use_decay_photons = true;
     model.photon_cutoff_energy = 1000.0;
     let settings = TransportSettings {
-        total_particles: Some(n_particles * n_batches),
+        total_particles: Some(n_particles),
         seed,
         ..Default::default()
     };
@@ -240,10 +236,9 @@ fn gpu_d1s_decay_photon_void_matches_cpu() {
 
     let seed = 7;
     let n_particles = 4_000;
-    let n_batches = 1;
 
     // --- CPU reference ---
-    let (mut cpu_m, cpu_photon, settings) = d1s_void_model(seed, n_particles, n_batches);
+    let (mut cpu_m, cpu_photon, settings) = d1s_void_model(seed, n_particles);
     cpu_m
         .simulate_transport(&TransportSettings {
             threads: Some(1),
@@ -253,7 +248,7 @@ fn gpu_d1s_decay_photon_void_matches_cpu() {
     let cpu_photon_flux = cpu_photon.get_mean();
 
     // --- GPU D1S+void (must not panic / OOB on the void decay slot) ---
-    let (mut gpu_m, gpu_photon, settings) = d1s_void_model(seed, n_particles, n_batches);
+    let (mut gpu_m, gpu_photon, settings) = d1s_void_model(seed, n_particles);
     yamc::gpu::run_on_gpu(&mut gpu_m, &settings).expect("GPU D1S+void dispatch");
     let gpu_photon_flux = gpu_photon.get_mean();
 

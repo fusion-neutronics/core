@@ -4260,16 +4260,6 @@ class SimulationResults:
           fingerprint, ...) that combining validates.
     """
     @property
-    def n_batches(self) -> builtins.int:
-        r"""
-        Number of batches accumulated.
-        """
-    @property
-    def particles_per_chunk(self) -> builtins.int:
-        r"""
-        Source particles per batch.
-        """
-    @property
     def elapsed(self) -> builtins.float:
         r"""
         Wall-clock elapsed seconds for the simulate call.
@@ -4601,9 +4591,9 @@ class Tally:
     r"""
     A tally used to score physical quantities during particle transport simulation.
     
-    Tallies accumulate statistics over batches for quantities like flux, heating,
-    or reaction rates (via MT numbers). Results include mean values, standard
-    deviations, and relative errors.
+    Tallies accumulate per-history statistics over all source particles for
+    quantities like flux, heating, or reaction rates (via MT numbers). Results
+    include mean values, standard deviations, and relative errors.
     """
     @property
     def scores(self) -> builtins.list[typing.Any]:
@@ -5036,7 +5026,7 @@ class TallyResult:
     @property
     def total_count(self) -> builtins.list[builtins.int]:
         r"""
-        Total count per bin: `mean * particles_per_chunk * n_batches`.
+        Total score per bin over all histories: `mean * n_histories`.
         """
     @property
     def shape(self) -> builtins.list[builtins.int]:
@@ -5047,16 +5037,6 @@ class TallyResult:
     def dim_labels(self) -> builtins.list[builtins.str]:
         r"""
         Dimension names matching `shape` axes.
-        """
-    @property
-    def n_batches(self) -> builtins.int:
-        r"""
-        Number of batches accumulated.
-        """
-    @property
-    def particles_per_chunk(self) -> builtins.int:
-        r"""
-        Source particles per batch.
         """
     @property
     def covariance(self) -> typing.Optional[builtins.list[builtins.list[builtins.float]]]:
@@ -5077,8 +5057,7 @@ class TallyResult:
     @property
     def n_histories(self) -> builtins.int:
         r"""
-        Exact total source-history count behind this tally's statistics
-        (u64; unlike ``n_batches`` it does not saturate).
+        Exact total source-history count behind this tally's statistics.
         """
     @property
     def elapsed_secs(self) -> builtins.float:

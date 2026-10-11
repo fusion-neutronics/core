@@ -55,7 +55,7 @@ fn flux_tally(cell_id: u32, particle: Option<ParticleType>) -> Arc<Tally> {
             .push(Filter::ParticleType(ParticleTypeFilter::new(p)));
     }
     t.scores = vec![Score::Flux(FluxScore)];
-    t.initialize_batches(N_BATCHES);
+    t.reset_accumulation();
     Arc::new(t)
 }
 

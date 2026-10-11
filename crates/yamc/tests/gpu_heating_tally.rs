@@ -77,15 +77,14 @@ fn pb208_sphere_model(seed: u64) -> (Model, Vec<Arc<Tally>>, TransportSettings) 
         strength: 1.0,
     });
 
-    let n_particles = 2_000;
-    let n_batches = 4;
+    let n_particles = 8_000;
     let make_tally = |score: Score, name: &str| {
         let mut t = Tally::new();
         t.filters
             .push(Filter::Cell(CellFilter::from_id(cell.cell_id.unwrap())));
         t.scores = vec![score];
         t.name = Some(name.to_string());
-        t.initialize_batches(n_batches);
+        t.reset_accumulation();
         Arc::new(t)
     };
     let tallies = vec![
@@ -97,7 +96,7 @@ fn pb208_sphere_model(seed: u64) -> (Model, Vec<Arc<Tally>>, TransportSettings) 
     let mut model = Model::new(geometry, vec![source], tallies.clone());
     model.gpu_max_steps_per_particle = 10_000;
     let settings = TransportSettings {
-        total_particles: Some(n_particles * n_batches),
+        total_particles: Some(n_particles),
         seed,
         threads: Some(1),
         ..Default::default()

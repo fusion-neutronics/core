@@ -94,7 +94,7 @@ fn tally_in(cell: u32, score: &str) -> Arc<Tally> {
     t.filters.push(Filter::Cell(CellFilter::from_id(cell)));
     t.scores = vec![score.parse::<Score>().expect("score")];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(1);
+    t.reset_accumulation();
     Arc::new(t)
 }
 
@@ -383,7 +383,7 @@ fn modes_the_weights_do_not_carry_yet_are_refused() {
             yamc_tallies::mesh::RegularRectangularMesh::new([-1.0; 3], [1.0; 3], [2, 2, 2]),
         )));
     mesh.scores = vec!["flux".parse::<Score>().unwrap()];
-    mesh.initialize_batches(1);
+    mesh.reset_accumulation();
     model.tallies = vec![Arc::new(mesh)];
     let err = model
         .simulate_transport(&TransportSettings {

@@ -102,7 +102,7 @@ fn photon_total_tally(cell_id: u32, estimator: Estimator) -> Arc<Tally> {
     )));
     t.scores = vec![Score::ReactionRate(ReactionRateScore::total())];
     t.estimator = estimator;
-    t.initialize_batches(4);
+    t.reset_accumulation();
     Arc::new(t)
 }
 
@@ -181,7 +181,7 @@ fn specific_neutron_mt_on_photon_rejected_gpu_zero_cpu() {
         t.scores = vec![Score::ReactionRate(ReactionRateScore::from_mt(Mt::new(
             102,
         )))];
-        t.initialize_batches(4);
+        t.reset_accumulation();
         let tally = Arc::new(t);
         let mut model = Model::new(geometry, vec![photon_source()], vec![tally.clone()]);
         model.gpu_max_steps_per_particle = 5_000;
@@ -272,7 +272,7 @@ fn neutron_total_reaction_rate_unchanged() {
         t.filters.push(Filter::Cell(CellFilter::from_id(cell_id)));
         t.scores = vec![Score::ReactionRate(ReactionRateScore::total())];
         t.estimator = estimator;
-        t.initialize_batches(4);
+        t.reset_accumulation();
         Arc::new(t)
     };
     let tl = mk(Estimator::TrackLength);

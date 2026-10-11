@@ -96,13 +96,13 @@ fn neutron_source() -> ParticleSource {
 }
 
 /// A `mesh=`-only flux tally (no CellFilter) over the given cylindrical mesh.
-fn cyl_mesh_flux_tally(mesh: CylindricalMesh, n_batches: usize) -> Arc<Tally> {
+fn cyl_mesh_flux_tally(mesh: CylindricalMesh) -> Arc<Tally> {
     let mut t = Tally::new();
     t.filters
         .push(Filter::Mesh(MeshFilter::new_cylindrical(mesh)));
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(n_batches);
+    t.reset_accumulation();
     Arc::new(t)
 }
 
@@ -151,7 +151,7 @@ fn assert_cyl_parity(mesh: CylindricalMesh, total: usize, label: &str, worst_dev
     let n_voxels = mesh.num_bins();
 
     // CPU reference.
-    let cpu_t = cyl_mesh_flux_tally(mesh.clone(), 10);
+    let cpu_t = cyl_mesh_flux_tally(mesh.clone());
     let (mut cpu_model, csettings) = build_model(
         nuclide_sphere(nuclide, density),
         vec![Arc::clone(&cpu_t)],
@@ -164,7 +164,7 @@ fn assert_cyl_parity(mesh: CylindricalMesh, total: usize, label: &str, worst_dev
     let cpu_sd = cpu_t.get_std_dev().to_vec();
 
     // GPU.
-    let gpu_t = cyl_mesh_flux_tally(mesh, 10);
+    let gpu_t = cyl_mesh_flux_tally(mesh);
     let (mut gpu_model, gsettings) = build_model(
         nuclide_sphere(nuclide, density),
         vec![Arc::clone(&gpu_t)],

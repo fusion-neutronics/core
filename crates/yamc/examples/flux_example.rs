@@ -89,7 +89,7 @@ fn main() {
     flux_tally.filters = vec![cell_filter.clone()];
     flux_tally.scores = vec![Score::Flux(FluxScore)];
     flux_tally.name = Some("flux".to_string());
-    flux_tally.initialize_batches(batches);
+    flux_tally.reset_accumulation();
 
     // Create energy-binned flux tally - use same bins as Python example
     // Energy bins: logarithmically spaced from 0.01 eV to 20 MeV (20 bins)
@@ -110,7 +110,7 @@ fn main() {
     flux_energy_tally.filters = vec![cell_filter, Filter::Energy(energy_filter)];
     flux_energy_tally.scores = vec![Score::Flux(FluxScore)];
     flux_energy_tally.name = Some("flux_energy_binned".to_string());
-    flux_energy_tally.initialize_batches(batches);
+    flux_energy_tally.reset_accumulation();
 
     let tallies = vec![Arc::new(flux_tally), Arc::new(flux_energy_tally)];
 

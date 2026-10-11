@@ -175,7 +175,7 @@ fn tallies(cell_ids: &[u32], n_energy: usize) -> Vec<Arc<Tally>> {
         .push(Filter::Energy(EnergyFilter::new(energy_bins(n_energy))));
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(1);
+    t.reset_accumulation();
     vec![Arc::new(t)]
 }
 

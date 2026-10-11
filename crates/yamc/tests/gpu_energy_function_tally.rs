@@ -48,7 +48,6 @@ use yamc_tallies::tally::Tally;
 use yamc_tallies::{EnergyFunctionFilter, Estimator};
 
 const N_PARTICLES: usize = 40_000;
-const N_BATCHES: usize = 8;
 const SEED: u64 = 20260802;
 const RADIUS: f64 = 25.0;
 const SOURCE_E: f64 = 14.06e6;
@@ -119,7 +118,7 @@ fn flux_tally(name: &str, filters: Vec<Filter>) -> Arc<Tally> {
     t.scores = vec!["flux".parse::<Score>().unwrap()];
     t.estimator = Estimator::TrackLength;
     t.name = Some(name.to_string());
-    t.initialize_batches(N_BATCHES);
+    t.reset_accumulation();
     Arc::new(t)
 }
 

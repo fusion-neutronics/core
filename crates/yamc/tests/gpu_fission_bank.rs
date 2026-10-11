@@ -135,7 +135,7 @@ fn make_tally(cell_id: u32, score: Score, energy_bins: Option<Vec<f64>>) -> Arc<
     }
     t.scores = vec![score];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(N_BATCHES);
+    t.reset_accumulation();
     Arc::new(t)
 }
 

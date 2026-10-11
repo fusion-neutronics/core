@@ -96,7 +96,7 @@ fn build_model() -> (Model, Arc<Tally>, TransportSettings) {
         .push(Filter::Energy(EnergyFilter::new(band_edges())));
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(1);
+    t.reset_accumulation();
     let t = Arc::new(t);
     let mut model = Model::new(geometry, vec![source], vec![Arc::clone(&t)]);
     model.verbose = Verbose::silent();

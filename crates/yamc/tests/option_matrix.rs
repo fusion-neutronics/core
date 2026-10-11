@@ -133,7 +133,7 @@ fn make_tally(score: &str, estimator: Estimator, cell_id: u32) -> Arc<Tally> {
     t.scores = vec![score.parse::<Score>().unwrap()];
     t.estimator = estimator;
     t.name = Some(score.to_string());
-    t.initialize_batches(N_BATCHES);
+    t.reset_accumulation();
     Arc::new(t)
 }
 
@@ -292,7 +292,7 @@ fn cpu_neutron_mesh_geometry_runs_all_modes() {
             t.scores = vec!["flux".parse::<Score>().unwrap()];
             t.estimator = estimator;
             t.name = Some("mesh_flux".to_string());
-            t.initialize_batches(N_BATCHES);
+            t.reset_accumulation();
             let t = Arc::new(t);
 
             let mut model = Model::new_with_mesh(mesh, vec![neutron_source()], vec![t.clone()]);
@@ -811,7 +811,7 @@ mod gpu_guards {
                     yamc_particle::particle::ParticleType::Photon,
                 )));
                 t.scores = vec![score];
-                t.initialize_batches(N_BATCHES);
+                t.reset_accumulation();
                 Arc::new(t)
             };
             let tallies = vec![
@@ -1071,7 +1071,7 @@ mod gpu_guards {
                 )));
                 t.scores = vec![score];
                 t.estimator = Estimator::Collision;
-                t.initialize_batches(N_BATCHES);
+                t.reset_accumulation();
                 Arc::new(t)
             };
             let tallies = vec![

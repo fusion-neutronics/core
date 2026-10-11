@@ -76,7 +76,7 @@ fn build_li6_sphere_model() -> Model {
         Mt::try_from(105).unwrap(),
     ))];
     tally.name = Some("tritium_production".to_string());
-    tally.initialize_batches(5);
+    tally.reset_accumulation();
 
     Model::new(geometry, vec![source], vec![Arc::new(tally)])
 }

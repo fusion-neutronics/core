@@ -99,7 +99,6 @@ fn coupled_fe_sphere(
     seed: u64,
     radius: f64,
     n_particles: usize,
-    n_batches: usize,
     with_photon: bool,
 ) -> (Model, Arc<Tally>, Option<Arc<Tally>>, TransportSettings) {
     let (geometry, source, cell_id) = fe_sphere_geo_source(radius);
@@ -119,7 +118,7 @@ fn coupled_fe_sphere(
             ParticleType::Neutron,
         )));
     neutron_tally.scores = vec![Score::Flux(FluxScore)];
-    neutron_tally.initialize_batches(n_batches);
+    neutron_tally.reset_accumulation();
     let neutron_tally = Arc::new(neutron_tally);
 
     let mut tallies: Vec<Arc<Tally>> = vec![Arc::clone(&neutron_tally)];
@@ -131,7 +130,7 @@ fn coupled_fe_sphere(
             ParticleType::Photon,
         )));
         t.scores = vec![Score::Flux(FluxScore)];
-        t.initialize_batches(n_batches);
+        t.reset_accumulation();
         let t = Arc::new(t);
         tallies.push(Arc::clone(&t));
         Some(t)
@@ -144,7 +143,7 @@ fn coupled_fe_sphere(
     model.transport_secondary_photons = true;
     model.photon_cutoff_energy = 1000.0;
     let settings = TransportSettings {
-        total_particles: Some(n_particles * n_batches),
+        total_particles: Some(n_particles),
         seed,
         ..Default::default()
     };
@@ -164,12 +163,11 @@ fn gpu_coupled_neutron_photon_matches_cpu() {
 
     let seed = 4242;
     let radius = 5.0;
-    let n_particles = 20_000;
-    let n_batches = 8;
+    let n_particles = 160_000;
 
     // --- CPU coupled reference ---
     let (mut cpu_m, cpu_n_t, cpu_p_t, settings) =
-        coupled_fe_sphere(seed, radius, n_particles, n_batches, true);
+        coupled_fe_sphere(seed, radius, n_particles, true);
     cpu_m
         .simulate_transport(&TransportSettings {
             threads: Some(1),
@@ -182,7 +180,7 @@ fn gpu_coupled_neutron_photon_matches_cpu() {
 
     // --- GPU coupled run (neutron + photon tally) ---
     let (mut gpu_m, gpu_n_t, gpu_p_t, settings) =
-        coupled_fe_sphere(seed, radius, n_particles, n_batches, true);
+        coupled_fe_sphere(seed, radius, n_particles, true);
     yamc::gpu::run_on_gpu(&mut gpu_m, &settings)
         .expect("coupled GPU dispatch must succeed (no overflow)");
     let gpu_neutron_coupled_mean = gpu_n_t.get_mean();
@@ -197,7 +195,7 @@ fn gpu_coupled_neutron_photon_matches_cpu() {
     //     coupled neutron tally to a run with photon production OFF: that is
     //     the strongest "coupling did not perturb neutron transport" check. ---
     let (mut gpu_neutron_only_m, gpu_no_t, _none, settings) =
-        coupled_fe_sphere(seed, radius, n_particles, n_batches, false);
+        coupled_fe_sphere(seed, radius, n_particles, false);
     gpu_neutron_only_m.transport_secondary_photons = false;
     yamc::gpu::run_on_gpu(&mut gpu_neutron_only_m, &settings).expect("neutron-only GPU dispatch");
     let gpu_neutron_only_mean = gpu_no_t.get_mean();
@@ -282,7 +280,6 @@ fn three_tally_model(
     seed: u64,
     radius: f64,
     n_particles: usize,
-    n_batches: usize,
 ) -> (Model, Arc<Tally>, Arc<Tally>, Arc<Tally>, TransportSettings) {
     let (geometry, source, cell_id) = fe_sphere_geo_source(radius);
     let flux_tally = |pt: Option<ParticleType>| {
@@ -293,7 +290,7 @@ fn three_tally_model(
                 .push(Filter::ParticleType(ParticleTypeFilter::new(p)));
         }
         t.scores = vec![Score::Flux(FluxScore)];
-        t.initialize_batches(n_batches);
+        t.reset_accumulation();
         Arc::new(t)
     };
     let unfiltered = flux_tally(None);
@@ -309,7 +306,7 @@ fn three_tally_model(
     model.transport_secondary_photons = true;
     model.photon_cutoff_energy = 1000.0;
     let settings = TransportSettings {
-        total_particles: Some(n_particles * n_batches),
+        total_particles: Some(n_particles),
         seed,
         ..Default::default()
     };
@@ -335,12 +332,10 @@ fn gpu_coupled_unfiltered_flux_sums_both_particles() {
 
     let seed = 4242;
     let radius = 5.0;
-    let n_particles = 20_000;
-    let n_batches = 8;
+    let n_particles = 160_000;
 
     // CPU reference: an unfiltered tally scores all particles (n + gamma).
-    let (mut cpu_m, cpu_unf, _n, _p, settings) =
-        three_tally_model(seed, radius, n_particles, n_batches);
+    let (mut cpu_m, cpu_unf, _n, _p, settings) = three_tally_model(seed, radius, n_particles);
     cpu_m
         .simulate_transport(&TransportSettings {
             threads: Some(1),
@@ -350,8 +345,7 @@ fn gpu_coupled_unfiltered_flux_sums_both_particles() {
     let cpu_unfiltered = cpu_unf.get_mean().iter().sum::<f64>();
 
     // GPU coupled run with all three tallies.
-    let (mut gpu_m, gpu_unf, gpu_n, gpu_p, settings) =
-        three_tally_model(seed, radius, n_particles, n_batches);
+    let (mut gpu_m, gpu_unf, gpu_n, gpu_p, settings) = three_tally_model(seed, radius, n_particles);
     yamc::gpu::run_on_gpu(&mut gpu_m, &settings).expect("coupled GPU dispatch");
     let gpu_unfiltered = gpu_unf.get_mean().iter().sum::<f64>();
     let gpu_neutron = gpu_n.get_mean().iter().sum::<f64>();

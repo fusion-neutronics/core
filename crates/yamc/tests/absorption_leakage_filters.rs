@@ -162,35 +162,32 @@ fn test_absorption_leakage_filters() {
     )))];
     tally5_zero.name = Some("absorption in material 2 AND cell 1 (should be zero)".to_string());
 
-    // Initialize batch data for all tallies before wrapping in Arc
-    let num_batches = batches;
-    tally1.initialize_batches(num_batches);
-    tally2.initialize_batches(num_batches);
-    tally1_mat.initialize_batches(num_batches);
-    tally2_mat.initialize_batches(num_batches);
-    tally3.initialize_batches(num_batches);
-    tally4_match.initialize_batches(num_batches);
-    tally5_zero.initialize_batches(num_batches);
+    // Reset accumulation for all tallies before wrapping in Arc
+    tally1.reset_accumulation();
+    tally2.reset_accumulation();
+    tally1_mat.reset_accumulation();
+    tally2_mat.reset_accumulation();
+    tally3.reset_accumulation();
+    tally4_match.reset_accumulation();
+    tally5_zero.reset_accumulation();
 
-    // Initialize batch data for all tallies before wrapping in Arc
-    let num_batches = batches;
-    tally1.initialize_batches(num_batches);
-    tally2.initialize_batches(num_batches);
-    tally1_mat.initialize_batches(num_batches);
-    tally2_mat.initialize_batches(num_batches);
-    tally3.initialize_batches(num_batches);
-    tally4_match.initialize_batches(num_batches);
-    tally5_zero.initialize_batches(num_batches);
+    // Reset accumulation for all tallies before wrapping in Arc
+    tally1.reset_accumulation();
+    tally2.reset_accumulation();
+    tally1_mat.reset_accumulation();
+    tally2_mat.reset_accumulation();
+    tally3.reset_accumulation();
+    tally4_match.reset_accumulation();
+    tally5_zero.reset_accumulation();
 
-    // Initialize batch data for all tallies before wrapping in Arc
-    let num_batches = batches;
-    tally1.initialize_batches(num_batches);
-    tally2.initialize_batches(num_batches);
-    tally1_mat.initialize_batches(num_batches);
-    tally2_mat.initialize_batches(num_batches);
-    tally3.initialize_batches(num_batches);
-    tally4_match.initialize_batches(num_batches);
-    tally5_zero.initialize_batches(num_batches);
+    // Reset accumulation for all tallies before wrapping in Arc
+    tally1.reset_accumulation();
+    tally2.reset_accumulation();
+    tally1_mat.reset_accumulation();
+    tally2_mat.reset_accumulation();
+    tally3.reset_accumulation();
+    tally4_match.reset_accumulation();
+    tally5_zero.reset_accumulation();
 
     // Place the total absorption tally before the filtered tallies to ensure mutually exclusive scoring works as intended
     let tallies = vec![

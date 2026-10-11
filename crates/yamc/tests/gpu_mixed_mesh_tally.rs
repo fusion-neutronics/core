@@ -108,7 +108,7 @@ fn mixed_sources() -> Vec<ParticleSource> {
 
 /// A `mesh=`-only flux tally filtered to `particle`: `shape^3` voxels over the
 /// sphere bounding box, row-major (the GPU-supported layout).
-fn mesh_flux_tally(particle: ParticleType, shape: usize, n_batches: usize) -> Arc<Tally> {
+fn mesh_flux_tally(particle: ParticleType, shape: usize) -> Arc<Tally> {
     let mesh = RegularRectangularMesh::new(
         [-RADIUS, -RADIUS, -RADIUS],
         [RADIUS, RADIUS, RADIUS],
@@ -120,7 +120,7 @@ fn mesh_flux_tally(particle: ParticleType, shape: usize, n_batches: usize) -> Ar
         .push(Filter::ParticleType(ParticleTypeFilter::new(particle)));
     t.scores = vec!["flux".parse().unwrap()];
     t.estimator = Estimator::TrackLength;
-    t.initialize_batches(n_batches);
+    t.reset_accumulation();
     Arc::new(t)
 }
 
@@ -167,8 +167,8 @@ fn gpu_cpu_mixed_mesh_flux_parity() {
     let total: usize = 200_000;
 
     // CPU reference.
-    let cpu_n = mesh_flux_tally(ParticleType::Neutron, shape, 10);
-    let cpu_p = mesh_flux_tally(ParticleType::Photon, shape, 10);
+    let cpu_n = mesh_flux_tally(ParticleType::Neutron, shape);
+    let cpu_p = mesh_flux_tally(ParticleType::Photon, shape);
     let (mut cpu_model, csettings) =
         build_model(vec![Arc::clone(&cpu_n), Arc::clone(&cpu_p)], total);
     cpu_model
@@ -178,8 +178,8 @@ fn gpu_cpu_mixed_mesh_flux_parity() {
     let cpu_p_mean = cpu_p.get_mean().to_vec();
 
     // GPU mixed run through the three-pass dispatch.
-    let gpu_n = mesh_flux_tally(ParticleType::Neutron, shape, 10);
-    let gpu_p = mesh_flux_tally(ParticleType::Photon, shape, 10);
+    let gpu_n = mesh_flux_tally(ParticleType::Neutron, shape);
+    let gpu_p = mesh_flux_tally(ParticleType::Photon, shape);
     let (mut gpu_model, gsettings) =
         build_model(vec![Arc::clone(&gpu_n), Arc::clone(&gpu_p)], total);
     run_gpu_retry(&mut gpu_model, &gsettings).expect("GPU run failed");

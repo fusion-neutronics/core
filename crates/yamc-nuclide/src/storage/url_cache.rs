@@ -40,13 +40,17 @@ pub(crate) fn get_path_lock(path: &std::path::Path) -> Arc<Mutex<()>> {
 /// which has no TLS backend at all and is the pure-Rust fallback for
 /// architectures graviola does not support and for minimal C-toolchain-free
 /// containers. Kept as a compile-time literal so the URLs stay `&'static str`.
-#[cfg(feature = "download-tls")]
+#[cfg(any(feature = "download-tls", target_os = "emscripten"))]
 macro_rules! data_origin {
     () => {
         "https://yamc-data.xsplot.com/"
     };
 }
-#[cfg(all(feature = "download", not(feature = "download-tls")))]
+#[cfg(all(
+    feature = "download",
+    not(feature = "download-tls"),
+    not(target_os = "emscripten")
+))]
 macro_rules! data_origin {
     () => {
         "http://yamc-data.xsplot.com/"
@@ -101,12 +105,12 @@ pub(crate) fn ensure_tls_provider() {
 /// Connect and read timeouts are the ones every download uses
 /// ([`super::release_cache::Timeouts::DEFAULT`]), so a stalled origin fails a
 /// fetch rather than hanging it.
-#[cfg(feature = "download")]
+#[cfg(all(feature = "download", not(target_os = "emscripten")))]
 static CLIENT: Lazy<reqwest::Result<reqwest::blocking::Client>> =
     Lazy::new(|| super::release_cache::build_client(super::release_cache::Timeouts::DEFAULT));
 
 /// The shared client, or the error it failed to build with.
-#[cfg(feature = "download")]
+#[cfg(all(feature = "download", not(target_os = "emscripten")))]
 fn client() -> Result<&'static reqwest::blocking::Client, Box<dyn std::error::Error>> {
     CLIENT
         .as_ref()
@@ -119,16 +123,93 @@ fn client() -> Result<&'static reqwest::blocking::Client, Box<dyn std::error::Er
 /// is inclusive of both ends, so its last byte is `offset + length - 1`. Empty
 /// asks for the whole object. More than one span is answered with a
 /// `multipart/byteranges` body, which [`parse_byteranges`] reads.
-#[cfg(feature = "download")]
-fn blocking_get(
-    url: &str,
-    spans: &[Range],
-) -> Result<reqwest::blocking::Response, Box<dyn std::error::Error>> {
+#[cfg(all(feature = "download", not(target_os = "emscripten")))]
+fn blocking_get(url: &str, spans: &[Range]) -> Result<Reply, Box<dyn std::error::Error>> {
     let mut request = client()?.get(url);
     if !spans.is_empty() {
         request = request.header(reqwest::header::RANGE, range_header(spans));
     }
-    Ok(request.send()?)
+    let response = request.send()?;
+    let status = response.status().as_u16();
+    // Only a success carries a body worth reading.
+    let body = if response.status().is_success() {
+        response
+            .bytes()
+            .map(|b| b.to_vec())
+            .map_err(|e| format!("reading the response body: {e}"))
+    } else {
+        Ok(Vec::new())
+    };
+    Ok(Reply { status, body })
+}
+
+/// What one GET came back with, before retry policy is applied.
+#[cfg(feature = "download")]
+struct Reply {
+    status: u16,
+    body: Result<Vec<u8>, String>,
+}
+
+/// A blocking GET supplied by the host, for builds with no socket of their own.
+///
+/// Called as `(url, range)` with `range` the `Range` header value to send
+/// (`bytes=0-99,200-299`), or `None` for the whole object, and answers the
+/// HTTP status and the body. In the browser this is a synchronous XMLHttpRequest
+/// made from a Web Worker, so the Range planning, temperature selection and
+/// caching above it are the same code a native build runs.
+#[cfg(all(feature = "download", target_os = "emscripten"))]
+pub type HostFetcher = dyn Fn(&str, Option<&str>) -> Result<(u16, Vec<u8>), String> + Send + Sync;
+
+#[cfg(all(feature = "download", target_os = "emscripten"))]
+static HOST_FETCHER: std::sync::RwLock<Option<Box<HostFetcher>>> = std::sync::RwLock::new(None);
+
+/// Install the fetcher every download goes through on this target.
+#[cfg(all(feature = "download", target_os = "emscripten"))]
+pub fn set_host_fetcher(fetcher: Box<HostFetcher>) {
+    *HOST_FETCHER.write().unwrap_or_else(|e| e.into_inner()) = Some(fetcher);
+}
+
+/// Whether the host has installed a fetcher yet.
+#[cfg(all(feature = "download", target_os = "emscripten"))]
+pub(super) fn host_fetcher_installed() -> bool {
+    HOST_FETCHER
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+}
+
+/// A whole-object GET through the host's fetcher: the status and the body.
+#[cfg(all(feature = "download", target_os = "emscripten"))]
+pub(super) fn host_get(url: &str) -> Result<(u16, Vec<u8>), String> {
+    let guard = HOST_FETCHER.read().unwrap_or_else(|e| e.into_inner());
+    let fetcher = guard.as_ref().ok_or("no data fetcher is installed")?;
+    fetcher(url, None)
+}
+
+#[cfg(all(feature = "download", target_os = "emscripten"))]
+fn client() -> Result<(), Box<dyn std::error::Error>> {
+    match HOST_FETCHER
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
+        Some(_) => Ok(()),
+        None => Err("no data fetcher is installed for this build; \
+                     the host must call set_host_fetcher before downloading"
+            .into()),
+    }
+}
+
+#[cfg(all(feature = "download", target_os = "emscripten"))]
+fn blocking_get(url: &str, spans: &[Range]) -> Result<Reply, Box<dyn std::error::Error>> {
+    let guard = HOST_FETCHER.read().unwrap_or_else(|e| e.into_inner());
+    let fetcher = guard.as_ref().ok_or("no data fetcher is installed")?;
+    let range = (!spans.is_empty()).then(|| range_header(spans));
+    let (status, bytes) = fetcher(url, range.as_deref())?;
+    Ok(Reply {
+        status,
+        body: Ok(bytes),
+    })
 }
 
 /// The `Range` header value naming `spans`: `bytes=0-99,200-299`.
@@ -322,7 +403,7 @@ pub fn download_and_cache(
 #[cfg(feature = "download")]
 fn download_error(
     url: &str,
-    status: reqwest::StatusCode,
+    status: &str,
     source: &str,
     nuclide_name: &str,
 ) -> Box<dyn std::error::Error> {
@@ -766,26 +847,26 @@ fn fetch(url: &str, spans: &[Range]) -> Result<Fetched, Box<dyn std::error::Erro
                 continue;
             }
         };
-        let status = r.status();
-        if status.is_success() {
-            match r.bytes() {
+        let status = r.status;
+        if (200..300).contains(&status) {
+            match r.body {
                 Ok(bytes) => {
                     return Ok(Fetched::Body {
-                        partial: status == reqwest::StatusCode::PARTIAL_CONTENT,
-                        bytes: bytes.to_vec(),
+                        partial: status == 206,
+                        bytes,
                     })
                 }
                 Err(e) => {
-                    last_failure = format!("reading the response body: {e}");
+                    last_failure = e;
                     continue;
                 }
             }
         }
-        if status == reqwest::StatusCode::NOT_FOUND {
+        if status == 404 {
             // Definitively absent: R2 answers authoritatively, no retry.
             return Ok(Fetched::Absent);
         }
-        last_failure = status.to_string();
+        last_failure = format!("HTTP {status}");
     }
     Err(format!(
         "Failed to download {} after {} attempts: {}",
@@ -1226,12 +1307,7 @@ fn download_sections(
             } else if *required {
                 // A missing required section on the first request usually means
                 // the nuclide itself is absent from the library.
-                return Err(download_error(
-                    &url,
-                    reqwest::StatusCode::NOT_FOUND,
-                    source,
-                    nuclide_name,
-                ));
+                return Err(download_error(&url, "404 Not Found", source, nuclide_name));
             } else {
                 let marker = format!("{name}{ABSENT_SUFFIX}");
                 fs::File::create(staging.join(&marker))?;
