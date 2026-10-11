@@ -77,6 +77,26 @@
 //! Nothing is linearized: a production is linear in its cross section, and
 //! each multiplier is constant on its interval.
 //!
+//! # On a transport run
+//!
+//! A transport-coupled run has no group fold: its split is the tallied
+//! partials, each state's `p_s(E) * TL` summed over the track segments. So the
+//! tally also bins that same score by the segment's energy on each stated
+//! state's MF=40 intervals (`TransmutationTallies::with_isomer_intervals`),
+//! and `w_j` is the state's tallied production on interval `j`. That is the
+//! continuous-energy weight, in the flux the transport saw, self-shielding
+//! and all, where the spectrum path splits a group a covariance edge cuts by
+//! energy width. The draw then goes through the same rule, on the lists
+//! folded from the tallied partials, and on a statistical replica's own
+//! partials where the statistical source drew them. The `(n,n')` states of a
+//! parent the material does not carry are folded from the union-grid flux
+//! moments bin by bin, a bin a covariance edge cuts split by energy width.
+//!
+//! The weights are the nominal transport's. An MF=40 draw moves no transport
+//! cross section, so it has no flux response of its own; what is held is the
+//! response of the weights `w_j / P` to the cross-section draws that do move
+//! the flux, which is second order in the split.
+//!
 //! # Sampling
 //!
 //! A parent's states and their intervals are one field, and a replica draws
@@ -511,11 +531,135 @@ pub(crate) struct IsomerRun {
     spectra: Vec<SpectrumTerms>,
 }
 
-/// One spectrum's inputs to [`IsomerRun::new`]: the per-group terms of every
-/// list (those of the drawn parents kept) and its group boundaries.
-pub(crate) struct IsomerSpectrum<'a> {
-    pub(crate) lists: &'a crate::flux_uncertainty::PerGroupLists,
-    pub(crate) boundaries: &'a [f64],
+/// One spectrum's inputs to [`IsomerRun::new`]: every list's nominal fold and
+/// each stated state's production on its intervals.
+pub(crate) enum IsomerSpectrum<'a> {
+    /// A supplied spectrum: the per-group terms of every list (those of the
+    /// drawn parents kept) and its group boundaries, from which a state's
+    /// production on each interval is read off group by group.
+    Groups {
+        lists: &'a crate::flux_uncertainty::PerGroupLists,
+        boundaries: &'a [f64],
+    },
+    /// A transport tally: the lists folded from its partials, in
+    /// [`Lists`] order, and each state's production on its intervals, scored
+    /// at the energy of each track segment.
+    Tallied {
+        nominal: &'a HashMap<String, Vec<Option<ListRates>>>,
+        productions: &'a IsomerIntervalProductions,
+    },
+}
+
+impl IsomerSpectrum<'_> {
+    /// `state`'s production on each of its intervals, and the curve of `rule`
+    /// whose nominal production they are parts of.
+    fn weights(
+        &self,
+        parent: &str,
+        state: &State,
+        rule: &ListRule<'_>,
+    ) -> Option<(usize, Vec<f64>)> {
+        match self {
+            IsomerSpectrum::Groups { lists, boundaries } => {
+                let list = lists.get(parent)?.get(state.list)?.as_ref()?;
+                let groups = list.production.get(state.curve)?;
+                let curve = &rule.curves[state.curve];
+                let w = cell_weights(
+                    &state.edges,
+                    state.own.as_ref(),
+                    groups,
+                    boundaries,
+                    (&curve.energy, &curve.values),
+                );
+                Some((state.curve, w))
+            }
+            IsomerSpectrum::Tallied { productions, .. } => {
+                let w = productions
+                    .productions
+                    .get(&(parent.to_string(), state.key))?;
+                if w.len() != state.cells() {
+                    return None;
+                }
+                // The coupled fold books a target's tallied production on the
+                // first of the list's producing curves with that target (see
+                // `apply_coupled_branching`), so that is the curve it moves.
+                let target = &rule.curves[state.curve].target;
+                let curve = rule
+                    .curves
+                    .iter()
+                    .zip(&rule.produces)
+                    .position(|(c, p)| *p && c.target == *target)?;
+                Some((curve, w.clone()))
+            }
+        }
+    }
+}
+
+/// What a transport tally scored for the `isomer_branching` source, beside
+/// the partials: the MF=40 covariance placed on the chain's branching lists,
+/// and each stated state's production on each interval of its covariance
+/// grid, at the partials' normalization (see
+/// `TransmutationTallies::with_isomer_intervals`).
+///
+/// A state of a list the material scores is binned at the energy of each
+/// track segment, with the production the partial itself is scored with, so
+/// its intervals sum to its partial wherever its grid covers the flux. An
+/// `(n,n')` state of a parent folded from the flux moments is folded the
+/// same way, bin by bin, a bin a covariance edge cuts split by energy width.
+#[derive(Debug, Clone, Default)]
+pub struct IsomerIntervalProductions {
+    pub(crate) covariance: std::sync::Arc<IsomerCovariance>,
+    /// Per `(parent, (MT, LFS))`, the production on each interval.
+    pub(crate) productions: HashMap<(String, StateKey), Vec<f64>>,
+}
+
+impl IsomerIntervalProductions {
+    /// How many stated states have a tallied production.
+    pub fn states(&self) -> usize {
+        self.productions.len()
+    }
+}
+
+/// One stated state as a transport tally scores it: the list it sits on, the
+/// curve, and its covariance grid.
+#[derive(Debug, Clone)]
+pub(crate) struct IntervalState {
+    pub(crate) parent: String,
+    pub(crate) key: StateKey,
+    /// The list's reaction kind: the first list of it that is not emitted
+    /// particles, as the state was placed.
+    pub(crate) kind: String,
+    /// The curve in that list, as [`ListRule::all`] orders them.
+    pub(crate) curve: usize,
+    pub(crate) target: String,
+    pub(crate) own: Option<(Vec<f64>, Vec<f64>)>,
+    pub(crate) edges: Vec<f64>,
+}
+
+impl IsomerCovariance {
+    /// Every placed state, for a transport tally to score per interval.
+    /// `lists` must be the lists the covariance was placed on.
+    pub(crate) fn interval_states(&self, lists: &Lists<'_>) -> Vec<IntervalState> {
+        let mut out = Vec::new();
+        for (parent, field) in &self.fields {
+            let Some(rules) = lists.get(parent) else {
+                continue;
+            };
+            for state in &field.states {
+                let rule = &rules[state.list];
+                out.push(IntervalState {
+                    parent: parent.clone(),
+                    key: state.key,
+                    kind: rule.kind.clone(),
+                    curve: state.curve,
+                    target: rule.curves[state.curve].target.clone(),
+                    own: state.own.clone(),
+                    edges: state.edges.clone(),
+                });
+            }
+        }
+        out
+    }
 }
 
 /// One replica's draw: per drawn parent, its multipliers minus one.
@@ -544,46 +688,46 @@ impl IsomerRun {
         };
         let mut terms: Vec<SpectrumTerms> = Vec::with_capacity(spectra.len());
         for s in spectra {
-            let nominal: HashMap<String, Vec<Option<ListRates>>> = s
-                .lists
-                .iter()
-                .map(|(p, per)| {
-                    let per = per.iter().map(|l| l.as_ref().map(|l| l.folded.clone()));
-                    (p.clone(), per.collect())
-                })
-                .collect();
+            let nominal: HashMap<String, Vec<Option<ListRates>>> = match s {
+                IsomerSpectrum::Groups { lists, .. } => lists
+                    .iter()
+                    .map(|(p, per)| {
+                        let per = per.iter().map(|l| l.as_ref().map(|l| l.folded.clone()));
+                        (p.clone(), per.collect())
+                    })
+                    .collect(),
+                IsomerSpectrum::Tallied { nominal, .. } => (*nominal).clone(),
+            };
             let mut curves: BTreeMap<String, Vec<CurveTerms>> = BTreeMap::new();
             for (parent, field) in &covariance.fields {
                 if !reachable.contains(parent) {
                     continue;
                 }
-                let Some(per) = s.lists.get(parent) else {
+                let Some(per) = nominal.get(parent) else {
                     continue;
                 };
                 let mut out: Vec<CurveTerms> = Vec::new();
                 for state in &field.states {
-                    let Some(Some(list)) = per.get(state.list) else {
+                    let Some(Some(folded)) = per.get(state.list) else {
                         continue;
                     };
-                    let Some(groups) = list.production.get(state.curve) else {
+                    let rule = &lists[parent][state.list];
+                    let Some((curve, weights)) = s.weights(parent, state, rule) else {
                         continue;
                     };
-                    let total = list.folded.production[state.curve];
+                    let total = folded.production[curve];
                     if total <= 0.0 {
                         continue;
                     }
-                    let rule = &lists[parent][state.list];
-                    let curve = &rule.curves[state.curve];
-                    let weights = cell_weights(state, groups, s.boundaries, curve);
                     let entry = match out
                         .iter_mut()
-                        .position(|c| c.list == state.list && c.curve == state.curve)
+                        .position(|c| c.list == state.list && c.curve == curve)
                     {
                         Some(i) => &mut out[i],
                         None => {
                             out.push(CurveTerms {
                                 list: state.list,
-                                curve: state.curve,
+                                curve,
                                 stated: 0.0,
                                 cells: Vec::new(),
                             });
@@ -799,18 +943,19 @@ impl IsomerRun {
     }
 }
 
-/// `state`'s nominal production on each of its intervals under one spectrum:
-/// the curve's per-group production `groups` (in the fold's units), each
-/// group split across an interval edge by energy width, and for a state
-/// summed with others into `curve`, its own part of each piece.
-fn cell_weights(
-    state: &State,
+/// A state's nominal production on each of its intervals `edges` under one
+/// spectrum: the curve's per-group production `groups` (in the fold's units),
+/// each group split across an interval edge by energy width, and for a state
+/// summed with others into the curve `(energy, values)`, its own part `own`
+/// of each piece.
+pub(crate) fn cell_weights(
+    edges: &[f64],
+    own: Option<&(Vec<f64>, Vec<f64>)>,
     groups: &[f64],
     boundaries: &[f64],
-    curve: &yani::BranchCurve,
+    (curve_energy, curve_values): (&[f64], &[f64]),
 ) -> Vec<f64> {
-    let edges = &state.edges;
-    let mut w = vec![0.0; state.cells()];
+    let mut w = vec![0.0; edges.len().saturating_sub(1)];
     for (g, &p) in groups.iter().enumerate() {
         if p == 0.0 || g + 1 >= boundaries.len() {
             continue;
@@ -828,10 +973,10 @@ fn cell_weights(
             if b <= a {
                 continue;
             }
-            let share = match &state.own {
+            let share = match own {
                 None => 1.0,
                 Some((energy, values)) => {
-                    let sum = curve_integral(&curve.energy, &curve.values, a, b);
+                    let sum = curve_integral(curve_energy, curve_values, a, b);
                     if sum > 0.0 {
                         (curve_integral(energy, values, a, b) / sum).clamp(0.0, 1.0)
                     } else {
@@ -1127,27 +1272,13 @@ mod tests {
     /// summed with another takes its own curve's part of each piece.
     #[test]
     fn cell_weights_split_groups_and_merged_curves() {
-        let mut s = State {
-            key: (16, 1),
-            list: 0,
-            curve: 0,
-            own: None,
-            edges: vec![0.0, 1.5, 4.0],
-            first: 0,
-        };
-        let c = BranchCurve {
-            target: "X".to_string(),
-            quantity: BranchQuantity::CrossSection,
-            energy: vec![0.0, 4.0],
-            values: vec![2.0, 2.0],
-            states: Arc::from(Vec::new()),
-            normalisation: None,
-        };
-        let w = cell_weights(&s, &[10.0, 20.0], &[0.0, 2.0, 4.0], &c);
+        let edges = [0.0, 1.5, 4.0];
+        let c = ([0.0, 4.0].as_slice(), [2.0, 2.0].as_slice());
+        let w = cell_weights(&edges, None, &[10.0, 20.0], &[0.0, 2.0, 4.0], c);
         assert!((w[0] - 7.5).abs() < 1e-12, "{w:?}");
         assert!((w[1] - 22.5).abs() < 1e-12, "{w:?}");
-        s.own = Some((vec![0.0, 4.0], vec![0.5, 0.5]));
-        let w = cell_weights(&s, &[10.0, 20.0], &[0.0, 2.0, 4.0], &c);
+        let own = (vec![0.0, 4.0], vec![0.5, 0.5]);
+        let w = cell_weights(&edges, Some(&own), &[10.0, 20.0], &[0.0, 2.0, 4.0], c);
         assert!((w[0] - 7.5 / 4.0).abs() < 1e-12, "{w:?}");
         assert!((w[1] - 22.5 / 4.0).abs() < 1e-12, "{w:?}");
     }
@@ -1212,7 +1343,7 @@ mod tests {
         let (run, report) = IsomerRun::new(
             &cov,
             &lists,
-            &[IsomerSpectrum {
+            &[IsomerSpectrum::Groups {
                 lists: terms,
                 boundaries: &[1.0e6, 2.0e7],
             }],
@@ -1319,7 +1450,7 @@ mod tests {
         let (run, _) = IsomerRun::new(
             &cov,
             &lists,
-            &[IsomerSpectrum {
+            &[IsomerSpectrum::Groups {
                 lists: &terms,
                 boundaries: &[1.0e6, 2.0e7],
             }],

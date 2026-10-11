@@ -75,6 +75,7 @@ pub use branching_rule::{
     BranchingChannel, BranchingReport, BranchingState, DroppedChannel, UnmodelledRate,
     BRANCHING_RATE_TOLERANCE,
 };
+pub use isomer_branching_uncertainty::IsomerIntervalProductions;
 pub use material_transmute::{
     activation_mts, apply_coupled_branching, preload_activation_data, transmute_material,
     transmute_material_shielded, transmute_materials, transport_replicas, CoupledDiagnostics,

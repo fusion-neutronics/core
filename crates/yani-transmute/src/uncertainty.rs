@@ -125,8 +125,10 @@ pub enum Source {
     /// while the reaction total stays MF=33's, and an isomer listed alone is
     /// made at its drawn production, the ground taking the rest. See
     /// `isomer_branching_uncertainty` for why that counts no uncertainty
-    /// twice. A spectrum run only: a transport run's split comes from the
-    /// tallied partials, which hold no energy to fold MF=40 over.
+    /// twice. On a transport run the tally scores each stated state's
+    /// production on its MF=40 intervals beside the partials, at each track
+    /// segment's energy, and the draw re-splits the tallied partials with
+    /// those weights in place of the spectrum's group fold.
     IsomerBranching,
 }
 

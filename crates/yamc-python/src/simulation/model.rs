@@ -1571,11 +1571,12 @@ impl PyModel {
     ///           DY the evaluation states on each.
     ///
     ///         ``"flux_spectrum"`` does not apply: there is no supplied spectrum,
-    ///         and the flux's error is the statistical one. Nor does
-    ///         ``"isomer_branching"``: the isomeric split here is the tallied
-    ///         partials', scored at collisions with no energy to fold the MF=40
-    ///         covariance over, so every split is held and the report says so
-    ///         under ``not_perturbed``. The transport runs
+    ///         and the flux's error is the statistical one.
+    ///         ``"isomer_branching"`` re-splits the tallied partials: the tally
+    ///         scores each MF=40 state's production on its covariance
+    ///         intervals at the energy of each track segment, and each replica
+    ///         draws the state's production from those weights, as a spectrum
+    ///         run does from its group fold. The transport runs
     ///         once, so every replica is solved in the flux it tallied: a
     ///         perturbed cross section does not change the flux or the
     ///         shielding the transport saw, and the report lists that held
