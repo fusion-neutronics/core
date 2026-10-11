@@ -17,6 +17,39 @@
 //!   multiplied by `σ'_mt,k / σ_mt`. Absorption ends the history and needs no
 //!   factor; a fission's neutrons inherit `σ'_f,k / σ_f`.
 //!
+//! The same reasoning carries every game the transport plays, because the
+//! ratio only has to follow what the nominal game samples:
+//!
+//! - **Delta tracking** samples flights against a majorant `Σ_maj` that is
+//!   the same for every replica, so a flight moves no ratio. A delta
+//!   collision is real with probability `Σ_t / Σ_maj`; replica `k` would
+//!   have accepted it with `Σ'_t,k / Σ_maj`, so a virtual one multiplies the
+//!   ratio by `(Σ_maj - Σ'_t,k) / (Σ_maj - Σ_t)` and a real one, whose
+//!   reaction then has density `N σ_mt / Σ_maj`, by `σ'_mt / σ_mt` as above
+//!   (weighted delta tracking: Carter, Cashwell and Taylor, Nucl. Sci. Eng.
+//!   48 (1972) 403; its use for perturbations is the same likelihood
+//!   ratio). That is unbiased for any `Σ_maj > Σ_t`, and the run's majorant
+//!   is raised by a margin covering every replica's total, so the virtual
+//!   factors stay positive ([`ReplicaContext::majorant`]). The collision
+//!   density estimator scores `r_k` at each delta collision.
+//! - **Survival biasing** banks the absorbed share of a collision's weight:
+//!   the survivor's reaction has density `N σ_mt` times the nominal weight
+//!   factor already on `weight`, so its ratio is `σ'_mt / σ_mt` as in an
+//!   analog collision, and fission progeny banked from the absorbed share
+//!   take `σ'_f / σ_f`.
+//! - **Russian roulette and weight windows** play their games on the
+//!   nominal weight, and a game that conserves the nominal weight in
+//!   expectation conserves `weight · r_k` too, because `r_k` rides along
+//!   unchanged: survivors and split copies keep the ratios.
+//! - **Photons** are born with their neutron's ratio before the collision
+//!   times their own reaction's `σ'_mt / σ_mt` (prompt production and D1S
+//!   decay photons alike, a sum such as MT 3 or MT 103 read through its
+//!   partials). Photon data carries no covariance, so their flights,
+//!   collisions and secondaries keep the ratios and every photon tally and
+//!   photon heating score carries the neutron data's uncertainty.
+//! - **MPI** ranks draw the same replicas from the same seed and each
+//!   scores its own histories; the per-replica sums add across ranks.
+//!
 //! A track-length score over a segment is the integral of the likelihood
 //! ratio of reaching each point along it, `r_k ∫_0^d exp(-ΔΣ_k s) ds`, which
 //! is `r_k d φ(ΔΣ_k d)` with `φ(x) = (1 - e^-x) / x`. A reaction-rate score
@@ -1461,7 +1494,7 @@ impl ReplicaContext {
         inner: Arc<dyn yamc_materials::Majorant>,
     ) -> Arc<dyn yamc_materials::Majorant> {
         use rayon::prelude::*;
-        let bands = MarginBands::default();
+        let bands = MarginBands;
         let mut margin = vec![0.0_f64; bands.len()];
         let nuclides = self
             .materials
@@ -1509,8 +1542,9 @@ impl ReplicaContext {
                 .collect();
             for i in 0..n - 1 {
                 let m = relative[i].max(relative[i + 1]);
-                for b in bands.index(nuc.grid[i])..=bands.index(nuc.grid[i + 1]) {
-                    margin[b] = margin[b].max(m);
+                let (lo, hi) = (bands.index(nuc.grid[i]), bands.index(nuc.grid[i + 1]));
+                for band in &mut margin[lo..=hi] {
+                    *band = band.max(m);
                 }
             }
         }
@@ -1686,12 +1720,6 @@ impl ReplicaChanges for ReplicaContext {
 /// from 1e-5 eV to 1e8 eV, the ends extended to cover any energy.
 #[derive(Clone, Copy)]
 struct MarginBands;
-
-impl Default for MarginBands {
-    fn default() -> Self {
-        MarginBands
-    }
-}
 
 impl MarginBands {
     const LOG_LO: f64 = -5.0;

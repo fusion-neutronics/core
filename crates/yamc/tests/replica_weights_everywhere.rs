@@ -43,8 +43,72 @@ use yani_transmute::covariance_sample::Sampler;
 
 const SEED: u64 = 11;
 const REPLICAS: usize = 4;
-const RADIUS: f64 = 8.0;
-const ENERGY: f64 = 14.1e6;
+const W186_ENDF: &[u8] = include_bytes!("../../endf/fixtures/n-074_W_186_mf2_mf32.endf.xz");
+
+/// What a run transports through.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Target {
+    /// An 8 cm Fe56 sphere around a 14.1 MeV source: MF=33 covariance.
+    Iron,
+    /// A 5 cm W186 sphere around a 1 keV source: sampled resonance
+    /// parameters (MF=2 and MF=32), from the committed evaluation.
+    Tungsten,
+}
+
+impl Target {
+    fn radius(self) -> f64 {
+        match self {
+            Target::Iron => 8.0,
+            Target::Tungsten => 5.0,
+        }
+    }
+
+    fn energy(self) -> f64 {
+        match self {
+            Target::Iron => 14.1e6,
+            Target::Tungsten => 1.0e3,
+        }
+    }
+}
+
+/// W186 with the covariance and resonance parameters the converter writes
+/// from the committed MF=2 and MF=32 evaluation, copied under `tmp`.
+fn tungsten(tmp: &std::path::Path) -> Option<Material> {
+    let cached = PathBuf::from(yamc_test_cache::nuclide("W186")?);
+    let dir = tmp.join("W186.arrow");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    for entry in std::fs::read_dir(&cached).expect("read cached W186") {
+        let entry = entry.expect("dir entry");
+        if entry.path().is_file() {
+            std::fs::copy(entry.path(), dir.join(entry.file_name())).expect("copy section");
+        }
+    }
+    let mut raw = Vec::new();
+    lzma_rs::xz_decompress(&mut &W186_ENDF[..], &mut raw).expect("fixture decompresses");
+    let text = String::from_utf8(raw).expect("ENDF is text");
+    let evaluation = endf::Material::from_str(&text).expect("W186 parses");
+    assert!(yamc_convert::covariance::write_covariance(&evaluation, &dir).expect("covariance"));
+    assert!(
+        yamc_convert::resonance_parameters::write_resonance_parameters(&evaluation, &dir)
+            .expect("resonance parameters")
+    );
+    let mut m = Material::new(
+        HashMap::from([("W186".to_string(), 1.0)]),
+        "atom",
+        "g/cm3",
+        Some(19.3),
+    )
+    .expect("material");
+    m.set_material_id(1);
+    m.set_temperature("294");
+    m.read_nuclear_data(
+        &HashMap::from([("W186".to_string(), dir.to_string_lossy().into_owned())]),
+        None,
+    )
+    .expect("read W186");
+    m.ensure_covariance_loaded().expect("read covariance");
+    Some(m)
+}
 
 fn tests_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests")
@@ -100,9 +164,9 @@ impl Mode {
 /// Weight windows over the sphere that roulette every collision in the
 /// central voxels up to a weight of 6 and split it again outside, so both
 /// games are played on most histories.
-fn weight_windows() -> WeightWindowBounds {
+fn weight_windows(radius: f64) -> WeightWindowBounds {
     let n = 4;
-    let mesh = RegularRectangularMesh::new([-RADIUS; 3], [RADIUS; 3], [n, n, n]);
+    let mesh = RegularRectangularMesh::new([-radius; 3], [radius; 3], [n, n, n]);
     let mut lower = Vec::with_capacity(n * n * n);
     let mut upper = Vec::with_capacity(n * n * n);
     for k in 0..n {
@@ -144,6 +208,7 @@ fn tally(scores: &[&str], particle: ParticleType) -> Arc<Tally> {
 /// tally of flux and capture, and with photons a photon tally of flux and
 /// heating.
 fn run(
+    target: Target,
     material: Material,
     mode: Mode,
     particles: usize,
@@ -156,7 +221,7 @@ fn run(
             x0: 0.0,
             y0: 0.0,
             z0: 0.0,
-            radius: RADIUS,
+            radius: target.radius(),
         },
         boundary: BoundaryType::Vacuum,
         name: None,
@@ -171,7 +236,9 @@ fn run(
     let source = ParticleSource::Neutron(Source {
         space: SourceSpatialDistribution::Point(Point::new([0.0, 0.0, 0.0])),
         angle: AngularDistribution::Isotropic,
-        energy: SourceEnergyDistribution::Discrete(Discrete::new(vec![ENERGY], vec![1.0]).unwrap()),
+        energy: SourceEnergyDistribution::Discrete(
+            Discrete::new(vec![target.energy()], vec![1.0]).unwrap(),
+        ),
         strength: 1.0,
     });
     let mut model = Model::new(
@@ -197,7 +264,7 @@ fn run(
         model
             .variance_reduction
             .push(VarianceReduction::WeightWindowBounds(Box::new(
-                weight_windows(),
+                weight_windows(target.radius()),
             )));
     }
     model.transport_secondary_photons = mode.photons();
@@ -238,10 +305,16 @@ fn means(t: &Arc<Tally>) -> Vec<(f64, Vec<f64>)> {
 
 /// Mean and standard error over seeds of each replica's relative shift
 /// `x_k / y - 1` in every (tally, score), flattened.
-fn shifts(material: &Material, mode: Mode, particles: usize, seeds: &[u64]) -> Vec<(f64, f64)> {
+fn shifts(
+    target: Target,
+    material: &Material,
+    mode: Mode,
+    particles: usize,
+    seeds: &[u64],
+) -> Vec<(f64, f64)> {
     let mut per_seed: Vec<Vec<f64>> = Vec::new();
     for &seed in seeds {
-        let tallies = run(material.clone(), mode, particles, seed, uq());
+        let tallies = run(target, material.clone(), mode, particles, seed, uq());
         let mut row = Vec::new();
         for t in &tallies {
             for (y, xs) in means(t) {
@@ -269,9 +342,13 @@ fn agrees_with_analog(mode: Mode, particles: usize) {
         eprintln!("skipping: Fe56 fixture carries no covariance");
         return;
     };
+    agrees_on(Target::Iron, &m, mode, particles);
+}
+
+fn agrees_on(target: Target, m: &Material, mode: Mode, particles: usize) {
     let seeds: Vec<u64> = (1..=6).collect();
-    let reference = shifts(&m, Mode::Analog, particles, &seeds);
-    let tested = shifts(&m, mode, particles, &seeds);
+    let reference = shifts(target, m, Mode::Analog, particles, &seeds);
+    let tested = shifts(target, m, mode, particles, &seeds);
     let mut resolved = 0.0_f64;
     for (i, ((a, sa), (b, sb))) in reference.iter().zip(&tested).enumerate() {
         let z = (b - a) / (sa * sa + sb * sb).sqrt();
@@ -290,6 +367,20 @@ fn agrees_with_analog(mode: Mode, particles: usize) {
 #[test]
 fn delta_tracking_carries_the_replicas() {
     agrees_with_analog(Mode::Woodcock, 3_000);
+}
+
+/// The same through sampled resonance parameters, whose changes reach the
+/// majorant's margin and the virtual collisions through the resonance
+/// tables. Runs wherever the W186 fixture is fetched.
+#[test]
+fn delta_tracking_carries_sampled_resonance_parameters() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let Some(m) = tungsten(tmp.path()) else {
+        eprintln!("skipping: W186 fixture not fetched");
+        return;
+    };
+    agrees_on(Target::Tungsten, &m, Mode::Woodcock, 2_000);
+    agrees_on(Target::Tungsten, &m, Mode::SurvivalBiasing, 2_000);
 }
 
 #[test]
@@ -322,8 +413,8 @@ fn the_nominal_tallies_are_unchanged_by_the_replicas() {
         return;
     };
     for mode in [Mode::SurvivalBiasing, Mode::WeightWindows, Mode::Photons] {
-        let plain = run(m.clone(), mode, 500, 3, None);
-        let with = run(m.clone(), mode, 500, 3, uq());
+        let plain = run(Target::Iron, m.clone(), mode, 500, 3, None);
+        let with = run(Target::Iron, m.clone(), mode, 500, 3, uq());
         for (a, b) in plain.iter().zip(&with) {
             assert_eq!(
                 a.get_mean(),
@@ -358,10 +449,11 @@ fn photons_match_their_reruns(mode: Mode) {
         return;
     };
     let particles = 4_000;
-    let weighted = run(m.clone(), mode, particles, 21, uq());
+    let weighted = run(Target::Iron, m.clone(), mode, particles, 21, uq());
     let h = weighted[0].finalize().n_histories as f64;
     for k in 0..REPLICAS {
         let rerun = run(
+            Target::Iron,
             rerun_material(&m, k as u64),
             mode,
             particles,
