@@ -134,6 +134,8 @@ impl Model {
         }
         let want_statistics =
             uncertainty.is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::Statistical));
+        let want_cross_sections = uncertainty
+            .is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::CrossSections));
 
         // Expand the schedule into per-step timesteps / source rates. The
         // schedule guarantees at least one step, and equal lengths by
@@ -524,8 +526,23 @@ impl Model {
             )?;
             // The per-history covariance the statistical source samples from.
             // Off otherwise, so the default run allocates nothing for it.
-            Arc::new(if want_statistics {
+            let tallies = if want_statistics {
                 tallies.with_history_statistics()
+            } else {
+                tallies
+            };
+            // The flux through each material's resonances, which the
+            // replicas fold their sampled resonance parameters against. Off
+            // without the cross-section source.
+            Arc::new(if want_cross_sections {
+                let mut grids = HashMap::new();
+                for (&mat_id, material) in &materials_for_init {
+                    let grid = yani_transmute::resonance_rates::resolved_flux_grid(material)?;
+                    if !grid.is_empty() {
+                        grids.insert(mat_id, grid);
+                    }
+                }
+                tallies.with_resolved_flux(grids)
             } else {
                 tallies
             })
@@ -631,6 +648,7 @@ impl Model {
                             },
                             fy_weights: dep_tallies.get_fission_yield_weights(mat_id),
                             spectrum,
+                            resolved_spectrum: dep_tallies.resolved_flux_spectrum(mat_id, volume),
                             statistics,
                             branch: Arc::clone(&branch),
                             diagnostics: dep_tallies

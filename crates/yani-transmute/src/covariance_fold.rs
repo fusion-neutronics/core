@@ -2769,8 +2769,14 @@ pub struct TransportField {
 /// The material's nuclides must be loaded with covariance (see
 /// `Material::ensure_covariance_loaded`); a nuclide whose data carries none
 /// is named in the returned set rather than reported as exact.
+///
+/// The nuclides in `without_mf32_rows` are fielded from their tape blocks
+/// alone, as [`cell_fields`] fields them: the transport samples their
+/// resonance parameters instead, and drawing the first-order rows too would
+/// count the resonance range's uncertainty twice.
 pub fn transport_fields(
     material: &Material,
+    without_mf32_rows: &BTreeSet<String>,
 ) -> (BTreeMap<String, TransportField>, BTreeSet<String>) {
     let mut names: Vec<&String> = material.nuclides.keys().collect();
     names.sort();
@@ -2801,6 +2807,13 @@ pub fn transport_fields(
         let Some(blocks) = nuclide_data.covariance.as_ref() else {
             without_data.insert(name.clone());
             continue;
+        };
+        let tape_only: Vec<CovarianceBlock>;
+        let blocks: &[CovarianceBlock] = if without_mf32_rows.contains(name) {
+            tape_only = blocks.iter().filter(|b| on_tape(b)).cloned().collect();
+            &tape_only
+        } else {
+            &blocks[..]
         };
         let reactions: BTreeMap<i32, &Reaction> =
             by_mt.iter().map(|(mt, r)| (*mt, r.as_ref())).collect();

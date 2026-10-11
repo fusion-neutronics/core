@@ -636,8 +636,7 @@ pub struct Info {
     /// with each range's sampler report (the repairs it made and the widths
     /// it held), or the first-order MF=32 rows of `covariance.arrow`, with
     /// the reason the parameters were not sampled. See
-    /// [`crate::resonance_rates`]. Empty with the cross-section source off,
-    /// and on a transport run, which keeps the rows for every nuclide.
+    /// [`crate::resonance_rates`]. Empty with the cross-section source off.
     pub resonance_parameters: BTreeMap<String, crate::resonance_rates::ResonanceMethod>,
     /// Unstable nuclides the material can reach whose half-life was perturbed.
     pub half_lives_perturbed: BTreeSet<String>,
