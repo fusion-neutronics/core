@@ -415,21 +415,6 @@ class DataUncertainty:
             is too noisy to trust on fewer, and at most 1024: a run that stops
             there sets ``hit_cap`` in the info and lists every output, nuclide
             and step that missed under ``unconverged``. Must be between 0 and 1.
-        flux_response (str, optional): For ``Model.simulate_transmutation``
-            only, how the flux answers each replica's perturbed cross
-            sections. ``"replica_weights"`` (the default when ``None``): the
-            transport carries one likelihood-ratio weight per replica along
-            every history and tallies every reaction rate once per replica
-            under it, so each replica's rates come from the flux its own data
-            would give, self-shielding dips and all. The replica count is then
-            fixed before the transport: ``samples``, or the count a Gaussian
-            output needs to reach ``convergence`` (256 at 0.05), and every one
-            is solved. ``"held"``: one nominal transport whose tallied flux
-            every replica's cross sections are folded against; cheaper and
-            open to every transport configuration, but it overstates the
-            sigma of a self-shielded resonance, several-fold for a strong
-            one. ``Material.transmute`` and ``simulate_transport`` have no
-            choice to make, and raise if it is given.
     
     Examples:
         >>> results = iron.transmute(
@@ -457,14 +442,8 @@ class DataUncertainty:
         it, that an adaptive run stops on.
         """
     @property
-    def flux_response(self) -> builtins.str:
-        r"""
-        How a transport-coupled run takes the flux's response to each
-        replica's cross sections: ``"replica_weights"`` or ``"held"``.
-        """
-    @property
     def sources(self) -> builtins.list[builtins.str]: ...
-    def __new__(cls, seed: builtins.int = 1, samples: typing.Optional[builtins.int] = None, sources: typing.Optional[typing.Sequence[builtins.str]] = None, attribution: builtins.bool = False, convergence: typing.Optional[builtins.float] = None, flux_response: typing.Optional[builtins.str] = None) -> DataUncertainty: ...
+    def __new__(cls, seed: builtins.int = 1, samples: typing.Optional[builtins.int] = None, sources: typing.Optional[typing.Sequence[builtins.str]] = None, attribution: builtins.bool = False, convergence: typing.Optional[builtins.float] = None) -> DataUncertainty: ...
     @staticmethod
     def available_sources() -> builtins.list[builtins.str]:
         r"""

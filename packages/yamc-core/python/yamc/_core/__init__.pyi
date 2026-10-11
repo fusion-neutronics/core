@@ -769,21 +769,6 @@ class DataUncertainty:
             is too noisy to trust on fewer, and at most 1024: a run that stops
             there sets ``hit_cap`` in the info and lists every output, nuclide
             and step that missed under ``unconverged``. Must be between 0 and 1.
-        flux_response (str, optional): For ``Model.simulate_transmutation``
-            only, how the flux answers each replica's perturbed cross
-            sections. ``"replica_weights"`` (the default when ``None``): the
-            transport carries one likelihood-ratio weight per replica along
-            every history and tallies every reaction rate once per replica
-            under it, so each replica's rates come from the flux its own data
-            would give, self-shielding dips and all. The replica count is then
-            fixed before the transport: ``samples``, or the count a Gaussian
-            output needs to reach ``convergence`` (256 at 0.05), and every one
-            is solved. ``"held"``: one nominal transport whose tallied flux
-            every replica's cross sections are folded against; cheaper and
-            open to every transport configuration, but it overstates the
-            sigma of a self-shielded resonance, several-fold for a strong
-            one. ``Material.transmute`` and ``simulate_transport`` have no
-            choice to make, and raise if it is given.
     
     Examples:
         >>> results = iron.transmute(
@@ -811,14 +796,8 @@ class DataUncertainty:
         it, that an adaptive run stops on.
         """
     @property
-    def flux_response(self) -> builtins.str:
-        r"""
-        How a transport-coupled run takes the flux's response to each
-        replica's cross sections: ``"replica_weights"`` or ``"held"``.
-        """
-    @property
     def sources(self) -> builtins.list[builtins.str]: ...
-    def __new__(cls, seed: builtins.int = 1, samples: typing.Optional[builtins.int] = None, sources: typing.Optional[typing.Sequence[builtins.str]] = None, attribution: builtins.bool = False, convergence: typing.Optional[builtins.float] = None, flux_response: typing.Optional[builtins.str] = None) -> DataUncertainty: ...
+    def __new__(cls, seed: builtins.int = 1, samples: typing.Optional[builtins.int] = None, sources: typing.Optional[typing.Sequence[builtins.str]] = None, attribution: builtins.bool = False, convergence: typing.Optional[builtins.float] = None) -> DataUncertainty: ...
     @staticmethod
     def available_sources() -> builtins.list[builtins.str]:
         r"""
@@ -2970,12 +2949,19 @@ class Model:
                 ``replica_standard_error``. Cross sections only: leave
                 ``sources`` unset or pass ``["cross_sections"]``, and
                 ``attribution`` and ``convergence`` are not supported (the
-                replica count is fixed). Not yet supported, and refused with the reason:
-                ``compute='gpu'``, MPI, ``tracking_mode`` other than
-                ``'surface'``, survival biasing, weight windows, photon
-                transport, collision-estimator tallies, overlay tallies, mesh
-                tallies and per-nuclide tally bins. ``model.data_uncertainty_coverage()``
-                lists what the evaluations cover. Default ``None``.
+                replica count is fixed). The weights are carried through every
+                tracking mode (under delta tracking the majorant is raised to
+                cover every replica's total and virtual collisions carry the
+                replicas' rejection odds), survival biasing, weight windows and
+                MPI. Photons inherit their neutron's weights times the change to
+                the cross section of the reaction that made them, and keep them
+                (photon data carries no covariance), so photon tallies and
+                photon heating get the nuclear-data uncertainty of the neutron
+                transport. Not yet supported, and refused with the reason:
+                ``compute='gpu'``, collision-estimator tallies, overlay tallies,
+                mesh tallies and per-nuclide tally bins.
+                ``model.data_uncertainty_coverage()`` lists what the evaluations
+                cover. Default ``None``.
         
         Returns:
             ``SimulationResults`` containing finalized ``TallyResult``s for
@@ -3085,32 +3071,22 @@ class Model:
                 - ``"cross_sections"``: the ENDF MF=33 covariance and, where a
                   nuclide's data folder carries them, its resonance parameters
                   (MF=2 and MF=32) drawn per replica and rebuilt in place of the
-                  first-order MF=32 rows. How the flux answers each replica's
-                  cross sections is ``DataUncertainty``'s ``flux_response``.
-                  With ``"replica_weights"`` (the default) the transport carries
-                  one likelihood-ratio weight per replica along every history,
+                  first-order MF=32 rows. The transport carries one
+                  likelihood-ratio weight per replica along every history,
                   exactly as ``simulate_transport(data_uncertainty=...)`` does,
                   with the same draws, and tallies every reaction rate, isomeric
                   partial and fission-yield weight once per replica under it:
                   replica ``k``'s rates are those its own data would give,
                   self-shielding and spectrum shifts included, so a stronger
                   resonance deepens its own dip and a perturbed scatterer moves
-                  every rate. The replica count is fixed before the transport
-                  (``samples``, or 256 at the default ``convergence``), every
-                  replica is solved, and the info says whether the sigmas reached
-                  the target at that count. Transport configurations the weights
-                  do not carry (delta tracking, survival biasing, weight windows,
-                  photon transport, MPI) raise before anything runs. With
-                  ``"held"`` the transport runs once without weights and each
-                  replica's cross sections are folded against the flux it
-                  tallied, the resonance parameters against a flux tallied on
-                  each such nuclide's own energy grid: cheaper and open to every
-                  configuration, but the held flux overstates the sigma of a
-                  self-shielded resonance (W186 capture in a graphite sphere,
-                  C:W = 50: 1.4% held against 0.2% from replica weights and from
-                  perturbed reruns). ``get_data_uncertainty_info``'s
-                  ``flux_response`` and ``resonance_parameters`` say which was
-                  used;
+                  every rate (W186 capture in a graphite sphere, C:W = 50: 0.2%
+                  from replica weights and from perturbed reruns, against 1.4%
+                  for a fold of the same draws against the nominal flux). The
+                  replica count is fixed before the transport (``samples``, or
+                  256 at the default ``convergence``), every replica is solved,
+                  and the info says whether the sigmas reached the target at that
+                  count. ``get_data_uncertainty_info``'s ``flux_response``,
+                  ``transport_replicas`` and ``resonance_parameters`` report it;
                 - ``"half_life"``: the decay data's half-life sigmas;
                 - ``"decay_branching"``: the decay branching ratios of the
                   parents with a stated sigma, each drawn keeping its total, as

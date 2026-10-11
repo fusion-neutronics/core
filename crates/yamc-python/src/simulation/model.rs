@@ -1188,12 +1188,7 @@ impl PyModel {
             threads,
             max_runtime: max_runtime_secs,
             data_uncertainty: data_uncertainty
-                .map(|d| {
-                    d.without_flux_response("simulate_transport")
-                        .and_then(|inner| {
-                            transport_data_uncertainty(&inner, d.sources_given, d.convergence_given)
-                        })
-                })
+                .map(|d| transport_data_uncertainty(&d.inner, d.sources_given, d.convergence_given))
                 .transpose()?,
         };
         if compute == "cpu" {
@@ -1597,32 +1592,22 @@ impl PyModel {
     ///         - ``"cross_sections"``: the ENDF MF=33 covariance and, where a
     ///           nuclide's data folder carries them, its resonance parameters
     ///           (MF=2 and MF=32) drawn per replica and rebuilt in place of the
-    ///           first-order MF=32 rows. How the flux answers each replica's
-    ///           cross sections is ``DataUncertainty``'s ``flux_response``.
-    ///           With ``"replica_weights"`` (the default) the transport carries
-    ///           one likelihood-ratio weight per replica along every history,
+    ///           first-order MF=32 rows. The transport carries one
+    ///           likelihood-ratio weight per replica along every history,
     ///           exactly as ``simulate_transport(data_uncertainty=...)`` does,
     ///           with the same draws, and tallies every reaction rate, isomeric
     ///           partial and fission-yield weight once per replica under it:
     ///           replica ``k``'s rates are those its own data would give,
     ///           self-shielding and spectrum shifts included, so a stronger
     ///           resonance deepens its own dip and a perturbed scatterer moves
-    ///           every rate. The replica count is fixed before the transport
-    ///           (``samples``, or 256 at the default ``convergence``), every
-    ///           replica is solved, and the info says whether the sigmas reached
-    ///           the target at that count. Transport configurations the weights
-    ///           do not carry (delta tracking, survival biasing, weight windows,
-    ///           photon transport, MPI) raise before anything runs. With
-    ///           ``"held"`` the transport runs once without weights and each
-    ///           replica's cross sections are folded against the flux it
-    ///           tallied, the resonance parameters against a flux tallied on
-    ///           each such nuclide's own energy grid: cheaper and open to every
-    ///           configuration, but the held flux overstates the sigma of a
-    ///           self-shielded resonance (W186 capture in a graphite sphere,
-    ///           C:W = 50: 1.4% held against 0.2% from replica weights and from
-    ///           perturbed reruns). ``get_data_uncertainty_info``'s
-    ///           ``flux_response`` and ``resonance_parameters`` say which was
-    ///           used;
+    ///           every rate (W186 capture in a graphite sphere, C:W = 50: 0.2%
+    ///           from replica weights and from perturbed reruns, against 1.4%
+    ///           for a fold of the same draws against the nominal flux). The
+    ///           replica count is fixed before the transport (``samples``, or
+    ///           256 at the default ``convergence``), every replica is solved,
+    ///           and the info says whether the sigmas reached the target at that
+    ///           count. ``get_data_uncertainty_info``'s ``flux_response``,
+    ///           ``transport_replicas`` and ``resonance_parameters`` report it;
     ///         - ``"half_life"``: the decay data's half-life sigmas;
     ///         - ``"decay_branching"``: the decay branching ratios of the
     ///           parents with a stated sigma, each drawn keeping its total, as

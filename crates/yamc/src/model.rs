@@ -1909,7 +1909,7 @@ impl Model {
                     "data_uncertainty would keep {:.1} GiB of transmutation replica sums \
                      ({} replicas x the rates, yield channels and flux bins of every \
                      transmutable material, x {n_rayon_threads} threads); reduce samples or \
-                     threads, or use DataUncertainty(flux_response=\"held\")",
+                     threads",
                     transmutation_bytes / 1024f64.powi(3),
                     data.replicas
                 ));

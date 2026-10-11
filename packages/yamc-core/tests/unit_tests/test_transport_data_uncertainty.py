@@ -65,16 +65,6 @@ def test_a_convergence_target_is_refused_on_a_fixed_replica_count():
         )
 
 
-def test_a_flux_response_is_refused_on_a_transport_run():
-    # A transport run always carries the flux's response in its weights;
-    # there is nothing to choose, so the choice is refused rather than ignored.
-    model, _ = _model()
-    with pytest.raises(ValueError, match="flux_response applies to Model.simulate_transmutation"):
-        model.simulate_transport(
-            total_particles=10, data_uncertainty=yamc.DataUncertainty(flux_response="held")
-        )
-
-
 def test_unsupported_requests_are_refused_with_the_reason():
     if not _has_covariance():
         pytest.skip("Fe56 fixture carries no covariance")

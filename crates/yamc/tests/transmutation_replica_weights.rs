@@ -31,9 +31,7 @@ use yamc_tallies::score::Score;
 use yamc_tallies::tally::Tally;
 use yamc_tallies::Estimator;
 use yani_transmute::resonance_rates::ResonanceMethod;
-use yani_transmute::uncertainty::{
-    DataUncertainty, FluxResponse, FluxResponseReport, Source as UqSource,
-};
+use yani_transmute::uncertainty::{DataUncertainty, FluxResponseReport, Source as UqSource};
 use yani_transmute::{Schedule, ScheduleStep};
 
 const W186_ENDF: &[u8] = include_bytes!("../../endf/fixtures/n-074_W_186_mf2_mf32.endf.xz");
@@ -129,12 +127,11 @@ fn settings() -> TransportSettings {
     }
 }
 
-fn request(flux_response: FluxResponse) -> DataUncertainty {
+fn request() -> DataUncertainty {
     DataUncertainty {
         seed: SEED,
         samples: Some(REPLICAS),
         sources: vec![UqSource::CrossSections],
-        flux_response,
         ..Default::default()
     }
 }
@@ -194,7 +191,7 @@ fn each_replica_is_the_transports_replica() {
     };
 
     let plain = transmute(&dir, &chain, None);
-    let weighted = transmute(&dir, &chain, Some(&request(FluxResponse::ReplicaWeights)));
+    let weighted = transmute(&dir, &chain, Some(&request()));
     assert_eq!(
         plain.get_material(1, 1).map(|m| &m.nuclides),
         weighted.get_material(1, 1).map(|m| &m.nuclides),
@@ -252,32 +249,4 @@ fn each_replica_is_the_transports_replica() {
         moved > 1e-3,
         "the replicas move capture, by up to {moved:e}"
     );
-}
-
-/// Held, every replica folds its capture against the one nominal flux, which
-/// in this self-shielded sphere overstates the spread: a stronger resonance
-/// would deepen its own dip, which the held flux does not, so the held
-/// capture moves further than the transported one on the same draws (about
-/// 1.35% against 1.20% here, and 1.4% against 0.2% in a 30 cm graphite
-/// sphere fifty carbon atoms to one tungsten, where perturbed reruns give
-/// 0.18%). The report says the response was held.
-#[test]
-fn the_held_flux_overstates_a_self_shielded_spread() {
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let (Some(dir), Some(chain)) = (w186(tmp.path()), chain()) else {
-        eprintln!("skipping: W186 or chain fixture not fetched");
-        return;
-    };
-    let rms = |v: &[f64]| (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64).sqrt();
-    let held = transmute(&dir, &chain, Some(&request(FluxResponse::Held)));
-    let info = &held.uncertainty_info[&1];
-    assert_eq!(info.flux_response, FluxResponseReport::Held);
-    assert!(info
-        .not_perturbed
-        .iter()
-        .any(|s| s == "flux response to perturbed cross sections (one transport)"));
-    let weighted = transmute(&dir, &chain, Some(&request(FluxResponse::ReplicaWeights)));
-    let (h, w) = (rms(&shifts(&held)), rms(&shifts(&weighted)));
-    eprintln!("rms W187 shift: held {h:.4e}, replica weights {w:.4e}");
-    assert!(h > 1.05 * w, "held {h:e} against replica weights {w:e}");
 }

@@ -73,8 +73,11 @@ Pick `yamc` when the neutron spectrum should come from a transport solve; pick
     the reason, GPU, collision-estimator tallies, overlay tallies, mesh tallies
     and per-nuclide bins.
   - `simulate_transmutation(method="independent", data_uncertainty=...)` gives
-    a standard deviation on inventories, activity and decay heat. Its flux is
-    transported once, so it does not respond to a perturbed cross section, and
-    the coupled method does not take `data_uncertainty`.
+    a standard deviation on inventories, activity and decay heat. Its one
+    transport carries the same replica weights and tallies every reaction rate
+    once per replica, so each replica's rates carry the flux's response to its
+    own cross sections (self-shielding, shield transmission). The transport
+    configurations the weights refuse for `simulate_transport` are refused here
+    too, and the coupled method does not take `data_uncertainty`.
 - Pathways are reported per product (`get_production_routes`), but there is no
   automatic pathway search across the whole inventory.
