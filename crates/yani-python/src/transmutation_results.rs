@@ -498,6 +498,27 @@ impl PyTransmutationResults {
         Ok(Some(d))
     }
 
+    /// The published nuclear-data release each library keyword came from, as
+    /// a dict keyed by keyword. Each value is a dict with ``release`` (the
+    /// release identifier), ``manifest_sha256`` (the hash of that release's
+    /// manifest, which pins every file in it), ``format_version`` and
+    /// ``offline`` (True when the data origin was unreachable and the newest
+    /// complete cached release was used). Empty when every data source was a
+    /// local directory.
+    #[getter]
+    fn data_releases<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let out = PyDict::new(py);
+        for (keyword, release) in &self.inner.data_releases {
+            let d = PyDict::new(py);
+            d.set_item("release", &release.release)?;
+            d.set_item("manifest_sha256", &release.manifest_sha256)?;
+            d.set_item("format_version", release.format_version)?;
+            d.set_item("offline", release.offline)?;
+            out.set_item(keyword, d)?;
+        }
+        Ok(out)
+    }
+
     /// Number of transmutation steps.
     #[getter]
     fn num_steps(&self) -> usize {

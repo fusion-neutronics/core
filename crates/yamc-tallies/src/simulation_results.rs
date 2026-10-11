@@ -43,6 +43,13 @@ pub struct RunProvenance {
     /// into `fingerprint`; kept readable here so mismatch errors can name
     /// the nuclide and libraries.
     pub data_libraries: BTreeMap<String, String>,
+    /// Per library keyword, the published release the run's data came from:
+    /// release identifier, manifest sha256 (which pins every file of the
+    /// release) and whether the origin was unreachable so a cached release was
+    /// used. Empty when every nuclide came from a local directory. Defaulted
+    /// when reading results written before releases were recorded.
+    #[serde(default)]
+    pub data_releases: BTreeMap<String, yamc_nuclide::storage::release::DataRelease>,
     /// Compute path that produced the run: `"cpu"` or `"gpu"`. GPU runs
     /// carry no Welford merge state and are refused by `combine_results`.
     pub compute: String,

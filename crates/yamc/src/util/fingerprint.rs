@@ -62,6 +62,53 @@ impl Model {
         map
     }
 
+    /// The published release of each library keyword this model's data came
+    /// from: release identifier, manifest sha256, and whether the origin was
+    /// unreachable so a cached release was used. Keyed by keyword.
+    ///
+    /// A library is listed when a nuclide was loaded from that release's cache
+    /// folder (`<cache root>/<keyword>/<release>/...`) or a material names the
+    /// keyword as its data source. One release per library per process (see
+    /// `yamc_nuclide::url_cache::data_releases`), so this is exact for a run.
+    /// Empty for data loaded from local directories.
+    pub fn data_releases(&self) -> BTreeMap<String, yamc_nuclide::storage::release::DataRelease> {
+        let in_use = yamc_nuclide::url_cache::data_releases();
+        if in_use.is_empty() {
+            return BTreeMap::new();
+        }
+        let libraries = self.data_libraries();
+        let mut paths: Vec<std::path::PathBuf> = Vec::new();
+        for material in self.geometry.materials() {
+            for nuclide in material.nuclide_data.values() {
+                if let Some(p) = &nuclide.data_path {
+                    paths.push(std::path::PathBuf::from(p));
+                }
+            }
+            for p in material.photon_data_paths.values() {
+                paths.push(std::path::PathBuf::from(p));
+            }
+        }
+        in_use
+            .into_iter()
+            .filter(|(keyword, release)| {
+                let named = libraries.values().any(|lib| {
+                    yamc_nuclide::url_cache::library_keyword(lib) == keyword
+                        || lib.split('/').next() == Some(keyword.as_str())
+                });
+                let loaded = paths.iter().any(|p| {
+                    p.ancestors().any(|a| {
+                        a.file_name().and_then(|n| n.to_str()) == Some(release.release.as_str())
+                            && a.parent()
+                                .and_then(|q| q.file_name())
+                                .and_then(|n| n.to_str())
+                                == Some(keyword.as_str())
+                    })
+                });
+                named || loaded
+            })
+            .collect()
+    }
+
     /// Stable hash (SHA-256 hex) of the model's physics identity. See
     /// the module docs for what is included and excluded.
     ///

@@ -294,22 +294,22 @@ impl Cache {
         ));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).expect("cache dir");
-        // `YAMC_CACHE_DIR` names the cache root verbatim, which is the whole
-        // reason it exists: this used to redirect by moving the home directory
-        // out from under the library, and that is a fight the test cannot win
-        // on every platform at once. Setting only HOME left Windows resolving
-        // to the real profile, so the library cached there while the
-        // assertions looked in this temp directory and found nothing.
+        // The test hook names the cache root verbatim. This used to redirect
+        // by moving the home directory out from under the library, and that
+        // is a fight the test cannot win on every platform at once: setting
+        // only HOME left Windows resolving to the real profile, so the library
+        // cached there while the assertions looked in this temp directory and
+        // found nothing.
         //
         // The tests in this binary each get their own root, so they must not
-        // run in parallel against one variable.
-        std::env::set_var("YAMC_CACHE_DIR", &p);
+        // run in parallel against one process-global hook.
+        yamc_nuclide::url_cache::set_cache_root_for_tests(Some(p.clone()));
         Cache(p)
     }
     /// Where `download_and_cache` puts a nuclide fetched from a raw URL.
     ///
-    /// Directly under the root, with no `.cache/yamc` below it: the override
-    /// IS the root rather than a home directory to derive one from.
+    /// Directly under the root: the hook IS the root rather than a home
+    /// directory to derive one from.
     fn nuclide_dir(&self) -> PathBuf {
         self.0.join("Fe56.arrow")
     }
@@ -321,8 +321,8 @@ impl Drop for Cache {
     }
 }
 
-/// Serialises the tests: they share `YAMC_CACHE_DIR` and the process-global
-/// nuclide cache.
+/// Serialises the tests: they share the cache-root hook and the
+/// process-global nuclide cache.
 fn exclusive() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|p| p.into_inner())

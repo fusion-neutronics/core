@@ -53,12 +53,31 @@ def _require_wasm() -> None:
         "always ships them, so this only happens when working from a checkout."
     )
 
-# Local on-disk cross-section cache yamc populates via the URL cache layer.
-# Same layout the wasm side expects after extraction:
-#   ~/.cache/yamc/endf-b8.1-<Name>.arrow/{nuclide,reactions,distributions,...}.arrow
-_DEFAULT_CACHE_DIR = Path.home() / ".cache" / "yamc"
-_NUCLIDE_DIR_PREFIX = "endf-b8.1-"
-_NUCLIDE_DIR_SUFFIX = ".arrow"
+# The library the exported page fetches from, and whose cached release the
+# embedded data is read from. yamc caches each published release of a library
+# under ``<cache_dir()>/<library>/<release>/``, with nuclide sections in
+# ``neutron/<Name>.arrow/`` and element sections in ``photon/<El>.arrow/``.
+_LIBRARY = "endf-b8.1"
+_NUCLIDE_SUBDIR = "neutron"
+_ELEMENT_SUBDIR = "photon"
+_DIR_SUFFIX = ".arrow"
+
+
+def _default_release_dir() -> Path:
+    """The newest cached release of the page's library.
+
+    Releases are named by date (``2026-10-01``), so the lexically last folder
+    holding a ``manifest.json`` is the newest. When none is cached yet, the
+    library folder itself is returned so the "not in the local cache" errors
+    below name where yamc would put it.
+    """
+    from yamc._core import cache_dir
+
+    library = Path(cache_dir()) / _LIBRARY
+    releases = sorted(
+        d for d in library.glob("*") if d.is_dir() and (d / "manifest.json").is_file()
+    )
+    return releases[-1] if releases else library
 
 
 def _expand_nuclide_or_element(item: str, cache_dir: Path) -> list[str]:
@@ -71,24 +90,25 @@ def _expand_nuclide_or_element(item: str, cache_dir: Path) -> list[str]:
     Heuristic: anything containing a digit is treated as a nuclide,
     otherwise as an element to expand. Element expansion is strict --
     matches ``Element + one-or-more-digits``, so ``Li`` won't match the
-    natural-element file ``endf-b8.1-Li.arrow``.
+    natural-element folder ``neutron/Li.arrow``.
     """
     if re.search(r"\d", item):
         return [item]
     iso_re = re.compile(rf"^{re.escape(item)}(\d+)$")
     expansions: list[str] = []
-    if cache_dir.is_dir():
-        for entry in sorted(cache_dir.iterdir()):
+    nuclides = cache_dir / _NUCLIDE_SUBDIR
+    if nuclides.is_dir():
+        for entry in sorted(nuclides.iterdir()):
             name = entry.name
-            if not name.startswith(_NUCLIDE_DIR_PREFIX) or not name.endswith(_NUCLIDE_DIR_SUFFIX):
+            if not name.endswith(_DIR_SUFFIX):
                 continue
-            short = name[len(_NUCLIDE_DIR_PREFIX) : -len(_NUCLIDE_DIR_SUFFIX)]
+            short = name[: -len(_DIR_SUFFIX)]
             if iso_re.match(short):
                 expansions.append(short)
     if not expansions:
         raise FileNotFoundError(
-            f"Could not expand element '{item}' -- no isotope files matching "
-            f"{cache_dir}/{_NUCLIDE_DIR_PREFIX}{item}<digits>{_NUCLIDE_DIR_SUFFIX}/. "
+            f"Could not expand element '{item}' -- no isotope folders matching "
+            f"{nuclides}/{item}<digits>{_DIR_SUFFIX}/. "
             f"Either pass explicit nuclide names (e.g. ['{item}1']) or run "
             f"yamc once with this element in a material so the cache populates."
         )
@@ -121,13 +141,14 @@ def _resolve_embed_list(
     return resolved
 
 
-def _load_nuclide_files(name: str, cache_dir: Path) -> dict[str, bytes]:
-    """Read every `.arrow` file for a single nuclide from the local cache.
+def _load_nuclide_files(name: str, cache_dir: Path, subdir: str) -> dict[str, bytes]:
+    """Read every file of one nuclide (``subdir="neutron"``) or element
+    (``subdir="photon"``) from a cached release folder.
 
     Returns {filename → raw bytes}. The wasm side will register each as
     ``/<name>.arrow/<filename>``.
     """
-    nuc_dir = cache_dir / f"{_NUCLIDE_DIR_PREFIX}{name}{_NUCLIDE_DIR_SUFFIX}"
+    nuc_dir = cache_dir / subdir / f"{name}{_DIR_SUFFIX}"
     if not nuc_dir.is_dir():
         raise FileNotFoundError(
             f"Nuclide '{name}' is not in the local cache at {nuc_dir}. "
@@ -144,14 +165,14 @@ def _load_nuclide_files(name: str, cache_dir: Path) -> dict[str, bytes]:
     return files
 
 
-def _build_embedded_xs_json(nuclides: list[str], cache_dir: Path) -> str:
+def _build_embedded_xs_json(nuclides: list[str], cache_dir: Path, subdir: str) -> str:
     """JSON payload for the `EMBEDDED_XS` global.
 
     Shape: ``{nuclide: {filename: base64_bytes, ...}, ...}``.
     """
     payload: dict[str, dict[str, str]] = {}
     for name in nuclides:
-        files = _load_nuclide_files(name, cache_dir)
+        files = _load_nuclide_files(name, cache_dir, subdir)
         payload[name] = {
             filename: base64.b64encode(data).decode("ascii")
             for filename, data in files.items()
@@ -212,8 +233,11 @@ def to_html(
             consistent set of pre-run numbers next to the spatial plot
             on first load. The Simulate handler overwrites it with the
             recipient's own result after they click.
-        cache_dir: Override the local on-disk XS cache (default:
-            ``~/.cache/yamc``). Useful for tests or vendored data layouts.
+        cache_dir: The release folder to read embedded data from, laid out
+            as ``neutron/<Name>.arrow/`` and ``photon/<El>.arrow/`` (default:
+            the newest cached endf-b8.1 release,
+            ``<yamc.cache_dir()>/endf-b8.1/<release>/``). Useful for tests or
+            vendored data layouts.
 
     Returns:
         The output path (as a :class:`~pathlib.Path`).
@@ -243,22 +267,26 @@ def to_html(
         >>> model.to_html("locked.html", show_surfaces=False, show_tallies=False)
     """
     out = Path(path)
-    cache = Path(cache_dir) if cache_dir is not None else _DEFAULT_CACHE_DIR
+    cache = Path(cache_dir) if cache_dir is not None else _default_release_dir()
 
     required = self.required_nuclides()
     embed_list = _resolve_embed_list(embed_cross_sections, required, cache)
 
-    embedded_xs_json = _build_embedded_xs_json(embed_list, cache) if embed_list else "{}"
+    embedded_xs_json = (
+        _build_embedded_xs_json(embed_list, cache, _NUCLIDE_SUBDIR) if embed_list else "{}"
+    )
 
     # Photon transport needs per-element data too. When the engineer asked
     # to embed (any truthy `embed_cross_sections`) and the model uses photon
     # transport, embed every element the materials reference so the offline
     # HTML can run photon transport with no network. `_build_embedded_xs_json`
-    # reads `endf-b8.1-<El>.arrow/` dirs (element.arrow, subshells.arrow, ...)
-    # the same way it reads neutron nuclide dirs.
+    # reads `photon/<El>.arrow/` dirs (element.arrow, subshells.arrow, ...)
+    # the same way it reads `neutron/<Name>.arrow/` dirs.
     photon_elements = self.required_elements() if embed_list else []
     embedded_photon_json = (
-        _build_embedded_xs_json(photon_elements, cache) if photon_elements else "{}"
+        _build_embedded_xs_json(photon_elements, cache, _ELEMENT_SUBDIR)
+        if photon_elements
+        else "{}"
     )
 
     # Section visibility flags -- app.js hides fieldsets whose flag is false.

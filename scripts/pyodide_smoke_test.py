@@ -7,18 +7,65 @@ Usage (from a `pyodide venv` with the wheel installed)::
 `<fixture-cache-dir>` is the cache `scripts/fetch_test_fixtures.py` fills
 (`~/.cache/yamc`). Pyodide under Node has no sockets and no synchronous
 XMLHttpRequest, so the data fetcher installed here answers each download from
-those files instead of the network. It honours the `Range` header the way the
-CDN does, including the `multipart/byteranges` answer to a header naming
-several ranges, so the ranged temperature download, the cache and the transport
-run the same code they run in the browser. Only the transfer is local.
+those files instead of the network. It serves them as a release of
+`endf-b8.1` the way the origin does (`latest.json`, then the release's
+`manifest.json`, then each file), so release resolution, verification against
+the manifest, the cache and the transport run the same code they run in the
+browser. Only the transfer is local.
 """
 
+import hashlib
+import json
 import os
 import sys
-import tempfile
 
 ORIGIN = "https://yamc-data.xsplot.com/"
-BOUNDARY = "yamc-smoke-test-boundary"
+KEYWORD = "endf-b8.1"
+RELEASE = "2026-01-01"
+# The nuclides the model below is made of, the only ones the release carries.
+NUCLIDES = ("Li6",)
+
+
+def publish(fixtures):
+    """The release the fetcher serves: origin-relative path to bytes.
+
+    Args:
+        fixtures: The directory of fixture sections, laid out as
+            `<library>-<name>.arrow/<section>`.
+
+    Returns:
+        Every object of the release, keyed by its path under the origin.
+    """
+    objects = {}
+    files = []
+    for name in NUCLIDES:
+        folder = os.path.join(fixtures, f"{KEYWORD}-{name}.arrow")
+        for section in sorted(os.listdir(folder)):
+            # `.absent` markers record a 404 upstream; the manifest just
+            # leaves those sections out.
+            if section.endswith(".absent"):
+                continue
+            with open(os.path.join(folder, section), "rb") as f:
+                body = f.read()
+            path = f"neutron/{name}.arrow/{section}"
+            objects[f"{KEYWORD}/{RELEASE}/{path}"] = body
+            files.append(
+                {"path": path, "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+            )
+    manifest = json.dumps(
+        {"keyword": KEYWORD, "release": RELEASE, "format_version": 2, "files": files}
+    ).encode()
+    objects[f"{KEYWORD}/{RELEASE}/manifest.json"] = manifest
+    objects[f"{KEYWORD}/latest.json"] = json.dumps(
+        {
+            "release": RELEASE,
+            "format_version": 2,
+            "manifest": f"{RELEASE}/manifest.json",
+            "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+            "manifest_bytes": len(manifest),
+        }
+    ).encode()
+    return objects
 
 
 def main(fixtures):
@@ -28,47 +75,24 @@ def main(fixtures):
         fixtures: The directory of fixture sections, laid out as
             `<library>-<name>.arrow/<section>`.
     """
-    # A fresh cache in Pyodide's own filesystem, so every section the run
-    # needs goes through the fetcher rather than being found on disk.
-    os.environ["YAMC_CACHE_DIR"] = tempfile.mkdtemp()
-
+    # The cache is in Pyodide's own filesystem, empty at start, so every
+    # file the run needs goes through the fetcher.
     import yamc
     from yamc import _core
 
+    objects = publish(fixtures)
     requests = []
 
     def fetch(url, range_header):
-        """Answer one GET from the fixture files, as the CDN would."""
+        """Answer one GET from the published release, as the origin would."""
         requests.append((url, range_header))
-        if not url.startswith(ORIGIN):
+        if range_header is not None:
+            # A keyword load downloads every file whole, to verify it.
+            return 416, b""
+        body = objects.get(url.removeprefix(ORIGIN)) if url.startswith(ORIGIN) else None
+        if body is None:
             return 404, b""
-        # `endf-b8.1/neutron/Li6.arrow/reactions.arrow` is cached by the
-        # fixture script as `endf-b8.1-Li6.arrow/reactions.arrow`.
-        library, _kind, name, section = url[len(ORIGIN) :].split("/")
-        path = os.path.join(fixtures, f"{library}-{name}", section)
-        if not os.path.isfile(path):
-            return 404, b""
-        with open(path, "rb") as f:
-            body = f.read()
-        if range_header is None:
-            return 200, body
-        spans = []
-        for spec in range_header.removeprefix("bytes=").split(","):
-            first, last = (int(n) for n in spec.split("-"))
-            spans.append((first, last))
-        if len(spans) == 1:
-            first, last = spans[0]
-            return 206, body[first : last + 1]
-        parts = []
-        for first, last in spans:
-            parts.append(
-                f"--{BOUNDARY}\r\n"
-                f"Content-Type: application/octet-stream\r\n"
-                f"Content-Range: bytes {first}-{last}/{len(body)}\r\n\r\n".encode()
-                + body[first : last + 1]
-                + b"\r\n"
-            )
-        return 206, b"".join(parts) + f"--{BOUNDARY}--\r\n".encode()
+        return 200, body
 
     _core._set_data_fetcher(fetch)
 
@@ -87,12 +111,15 @@ def main(fixtures):
     results = model.simulate_transport(total_particles=2_000, seed=1)
     mean = results[tritium].mean[0]
     print(f"tritium production: {mean:.4e} per source neutron")
-    print(f"{len(requests)} requests, {sum(r is not None for _, r in requests)} ranged")
+    print(f"{len(requests)} requests")
 
     if not requests:
         sys.exit("the data fetcher was never called")
-    if not any(r is not None and "," in r for _, r in requests):
-        sys.exit("no request named several ranges, so the ranged download did not run")
+    if requests[0][0] != f"{ORIGIN}{KEYWORD}/latest.json":
+        sys.exit(f"the first request was {requests[0][0]}, not the release pointer")
+    release = results.runs[0]["data_releases"][KEYWORD]["release"]
+    if release != RELEASE:
+        sys.exit(f"the run recorded release {release}, not {RELEASE}")
     if not 0.0 < mean < 1.0:
         sys.exit(f"tritium production {mean} is outside (0, 1)")
 

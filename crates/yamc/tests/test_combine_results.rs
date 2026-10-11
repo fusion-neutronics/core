@@ -120,6 +120,7 @@ fn run_to_results(built: (Model, TransportSettings)) -> SimulationResults {
         elapsed_secs: 1.0, // fixed so FOM comparisons are deterministic
         fingerprint: model.fingerprint().unwrap(),
         data_libraries: model.data_libraries(),
+        data_releases: model.data_releases(),
         compute: "cpu".into(),
         yamc_version: "test".into(),
         mpi_size: 1,

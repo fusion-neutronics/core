@@ -127,9 +127,9 @@ jobs:
       # `pyodide venv` makes a virtualenv whose `python` is Pyodide running in
       # Node, so this imports the wheel as the browser does. Node has no
       # synchronous XMLHttpRequest, so the smoke test installs a data fetcher
-      # that answers from the fixtures above, Range headers included, and runs
-      # a Li-6 transport through the same download, cache and transport code
-      # the page runs.
+      # that serves the fixtures above as a published release (pointer,
+      # manifest, files), and runs a Li-6 transport through the same release
+      # resolution, verification, cache and transport code the page runs.
       - name: Smoke test the wheel inside Pyodide
         run: |
           set -euo pipefail
