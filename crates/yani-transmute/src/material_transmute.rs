@@ -913,9 +913,10 @@ struct ReplicaOutcome {
     decay_branchings_floored: usize,
     /// Statistically drawn rates that came out negative and were floored.
     statistical_floored: usize,
-    /// MF=40 parents drawn, and list draws scaled back to the drawn total.
+    /// MF=40 parents drawn, and the stated productions scaled back to the
+    /// drawn total.
     isomer_branchings_sampled: usize,
-    isomer_branchings_clipped: usize,
+    isomer_branchings_clipped: crate::isomer_branching_uncertainty::Clipped,
 }
 
 /// Load the cross sections a transport-free solve of this material needs, into
@@ -2246,7 +2247,7 @@ fn run_replicas(
         // One draw of every MF=40 parent's productions, read by every
         // spectrum, as the cross sections are.
         let isomer_draw = isomer_run.as_ref().map(|r| r.draw(request.seed, replica));
-        let mut isomer_branchings_clipped = 0usize;
+        let mut isomer_branchings_clipped = crate::isomer_branching_uncertainty::Clipped::new();
         // A statistical draw of the whole tallied rate vector, the partials
         // re-folded into the branching the way the nominal was, so an
         // isomeric split moves with the rates it is made of.
@@ -2377,7 +2378,9 @@ fn run_replicas(
                         }
                     };
                     let (folds, clipped) = run.perturb(idx, draw, lists, base, &ratio);
-                    isomer_branchings_clipped += clipped;
+                    for (key, n) in clipped {
+                        *isomer_branchings_clipped.entry(key).or_insert(0) += n;
+                    }
                     Some(fold_branching_into_chain(&c.base, lists, &folds, &mut drawn_rates)?.0)
                 }
                 _ => refolded,
@@ -2457,7 +2460,9 @@ fn run_replicas(
             info.decay_branchings_floored += outcome.decay_branchings_floored;
             info.statistical_floored += outcome.statistical_floored;
             info.isomer_branchings_sampled += outcome.isomer_branchings_sampled;
-            info.isomer_branchings_clipped += outcome.isomer_branchings_clipped;
+            for (key, n) in outcome.isomer_branchings_clipped {
+                *info.isomer_branchings_clipped.entry(key).or_insert(0) += n;
+            }
             if statistical.is_some() {
                 info.statistical_sampled += info.statistical_rates;
             }

@@ -769,11 +769,15 @@ pub struct Info {
     /// largest over the run's spectra: what the evaluation says before the
     /// split re-normalises it.
     pub isomer_production_sigma: BTreeMap<(String, String, String), f64>,
-    /// MF=40 draws made, one per drawn parent per replica, and the list draws
-    /// whose stated productions came out above the drawn reaction total and
-    /// were scaled back to it.
+    /// MF=40 draws made, one per drawn parent per replica.
     pub isomer_branchings_sampled: usize,
-    pub isomer_branchings_clipped: usize,
+    /// Per `(parent, reaction, product)`, how many list draws (one per
+    /// replica per spectrum) gave the product's stated production a value
+    /// that, with the list's other productions, came out above the drawn
+    /// reaction total, and scaled it back to it. Only a list whose ground
+    /// takes the rest (isomers listed alone, and every `(n,n')` list) can
+    /// clip; every stated product of a clipped list draw is counted.
+    pub isomer_branchings_clipped: BTreeMap<(String, String, String), usize>,
     /// Tallied rates sampled statistically, the totals and partials together;
     /// zero off the transport path or with the source off.
     pub statistical_rates: usize,

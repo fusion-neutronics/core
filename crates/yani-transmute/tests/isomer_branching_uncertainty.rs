@@ -384,6 +384,13 @@ fn an_isomer_listed_alone_moves_by_its_folded_sigma() {
         (stated - folded).abs() < 1e-12,
         "the report's {stated} against the fold's {folded}"
     );
+    // A clipped production is a stated one, named as the sigma report names
+    // it: a few percent on 40% of the total leaves the headroom untouched.
+    assert!(r
+        .info
+        .isomer_branchings_clipped
+        .keys()
+        .all(|k| r.info.isomer_production_sigma.contains_key(k)));
     assert!(
         (r.relative["In114_m1"] / folded - 1.0).abs() < 0.08,
         "In114_m1 relative sigma {} against {folded}",
