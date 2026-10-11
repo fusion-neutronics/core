@@ -424,7 +424,7 @@ struct Factorized {
 }
 
 /// One replica's relative multipliers minus one and absolute shifts.
-type GaussianDraw = std::sync::Arc<(Vec<f64>, Vec<f64>)>;
+pub(crate) type GaussianDraw = std::sync::Arc<(Vec<f64>, Vec<f64>)>;
 
 /// How many draws one factorization keeps before it starts over.
 const DRAW_CACHE: usize = 1 << 13;
@@ -882,6 +882,49 @@ fn factorized(relative: &[f64], absolute: &[f64]) -> std::sync::Arc<Factorized> 
     }
     bucket.push(built.clone());
     built
+}
+
+/// A relative covariance on its own, drawn exactly as a nuclide's relative
+/// cross-section cells are: the same repair of the evaluated matrix, the same
+/// lognormal transform and log-space repair, and the same shared
+/// factorization (see [`Factorized::new`]).
+///
+/// For a covariance that is not MF=33's, so one source's draws are made the
+/// same way as every other's. Today that is the MF=40 isomer production
+/// covariance ([`crate::isomer_branching_uncertainty`]).
+pub(crate) struct RelativeLognormal {
+    core: std::sync::Arc<Factorized>,
+}
+
+impl RelativeLognormal {
+    /// Factorize the row-major `n x n` relative covariance `relative`.
+    pub(crate) fn new(relative: &[f64]) -> Self {
+        Self {
+            core: factorized(relative, &[]),
+        }
+    }
+
+    /// One replica's multipliers minus one (the first of the pair; the
+    /// second, the absolute shifts, is empty), each above `-1` with mean zero.
+    ///
+    /// `ordinal` names the stream, and must not be one another source draws
+    /// on with the same seed: pass the owner's [`name_ordinal`] mixed with a
+    /// constant of the source's own, as the absolute and short-range streams
+    /// are kept apart from the relative one.
+    pub(crate) fn draw(&self, ordinal: u32, base_seed: u64, replica: u64) -> GaussianDraw {
+        self.core.gaussian_draw(ordinal, base_seed, replica)
+    }
+
+    /// What the repair of the evaluated matrix did, where it needed one.
+    pub(crate) fn repair(&self) -> Option<FieldRepair> {
+        self.core.repair
+    }
+
+    /// Where the matrix is not a lognormal's, and how far the sampled one is
+    /// from it.
+    pub(crate) fn lognormal_limit(&self) -> Option<LognormalLimit> {
+        self.core.lognormal_limit
+    }
 }
 
 impl Field {

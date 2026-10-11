@@ -66,3 +66,9 @@ rayon = "1.10"
 # Resolves the nuclear-data fixture cache the same way the loader does,
 # rather than through `HOME` alone.
 yamc-test-cache = { path = "../yamc-test-cache" }
+# The MF=40 isomer-branching test writes its `branching_covariance.arrow` with
+# the converter's own writer and reads it back as the chain loader holds it, so
+# the blocks it draws are the file's, not a hand-built copy of its layout. No
+# cycle: neither depends on this crate.
+yani-convert = { path = "../yani-convert" }
+arrow-ipc = "60"
