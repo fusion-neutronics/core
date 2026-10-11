@@ -613,12 +613,14 @@ class DataUncertainty:
       saturated activity (``lambda N = R``) is correctly insensitive to its
       own half-life rather than inheriting the density's spread;
     - ``"decay_branching"``: the decay branching ratios of every reachable
-      parent with exactly two modes and one stated sigma between them (both
-      state the same one, or one states it and the other is its complement),
-      whose smaller ratio is at least five sigmas from zero. One draw per
-      parent moves one mode up and the other down by the same amount, so the
-      pair's total is kept. Other multi-mode parents stay at their evaluated
-      ratios and the report names them by why;
+      parent with several modes and a stated sigma, drawn as a zero-sum
+      Gaussian so the parent's total is kept: of the covariances that realise
+      every stated sigma, the one of largest entropy (for two or three modes
+      the only one). A largest sigma above the sum of the others' is drawn as
+      that sum; a single mode stating no sigma is the complement of the rest;
+      a mode under five sigmas from zero, or two or more stating none, are
+      held at their ratios and the rest share what is left. The report names
+      every parent short of its stated sigmas by why;
     - ``"statistical"``: the Monte Carlo uncertainty of transport-tallied
       reaction rates, from their per-history covariance, drawn independently
       for each material since their tallies are separate estimates. It
@@ -668,10 +670,10 @@ class DataUncertainty:
     Held at their nominal values, with uncertainties of their own that this
     does not propagate:
     
-    - the decay branching ratios ``"decay_branching"`` does not sample (three
-      or more modes, unequal sigmas, too wide to sample untruncated, or no
-      sigma), and the per-decay photon lines and decay energy of a drawn
-      parent, which follow its nominal branching;
+    - the decay branching ratios ``"decay_branching"`` does not sample (too
+      wide to sample untruncated, or no sigma to draw), and the per-decay
+      photon lines and decay energy of a drawn parent, which follow its
+      nominal branching;
     - the isomeric-branching overlay from MF=9/MF=10;
     - covariance correlating two evaluations (MAT1 naming another material),
       covariance with a quantity that is not a cross section (XMF1 not 0 or
@@ -3036,8 +3038,8 @@ class Model:
                   the spectrum the tally actually saw;
                 - ``"half_life"``: the decay data's half-life sigmas;
                 - ``"decay_branching"``: the decay branching ratios of the
-                  two-mode parents whose sum rule fixes how the stated sigma is
-                  shared, as ``DataUncertainty`` describes;
+                  parents with a stated sigma, each drawn keeping its total, as
+                  ``DataUncertainty`` describes;
                 - ``"decay_energy"``: the decay data's mean decay energy sigmas,
                   which move decay heat only;
                 - ``"decay_photon_lines"``: the decay data's photon spectrum
@@ -6111,16 +6113,17 @@ class TransmutationResults:
           the solver reads; they are held rather than drawn through a mapping
           their yields were not built with. Each is counted as a gap.
         - ``decay_branchings_perturbed``: with the ``"decay_branching"``
-          source, the reachable two-mode parents whose split was sampled. The
-          multi-mode parents held at their evaluated ratios, each a gap:
-          ``no_decay_branching_uncertainty`` (no mode states a sigma),
-          ``decay_branchings_three_or_more_modes`` (a sigma, but no stated
-          covariance to share it between three or more modes),
-          ``decay_branchings_unequal_sigmas`` (two modes stating different
-          sigmas) and ``decay_branchings_too_wide`` (the smaller ratio under
-          five sigmas). ``decay_branchings_floored`` /
-          ``decay_branchings_sampled`` count draws clamped to the pair's total
-          and draws made.
+          source, the reachable multi-mode parents whose split was sampled. Held
+          at their evaluated ratios, each a gap: ``no_decay_branching_uncertainty``
+          (no mode states a sigma, or one does beside two or more that do not)
+          and ``decay_branchings_too_wide`` (every mode that could move is under
+          five sigmas from zero). Sampled but short of the stated sigmas, each a
+          gap too: ``decay_branchings_partly_held`` (one or more modes held at
+          their ratios, too close to zero or unstated beside another unstated
+          mode) and ``decay_branchings_sigma_reduced`` (the largest sigma exceeds
+          the sum of the others', and is drawn as that sum).
+          ``decay_branchings_floored`` / ``decay_branchings_sampled`` count draws
+          pulled back onto the simplex and draws made.
         - ``statistical_rates``: with the ``"statistical"`` source on a
           transport run, how many tallied rates were sampled from their
           covariance; ``statistical_floored`` / ``statistical_sampled`` count
