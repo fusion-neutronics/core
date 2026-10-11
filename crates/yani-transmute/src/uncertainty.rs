@@ -377,15 +377,24 @@ pub struct Info {
     /// Nuclides with rates but no usable covariance, so no stated uncertainty.
     pub no_covariance_data: BTreeSet<String>,
     /// Per nuclide, blocks correlating one of its reactions with a reaction of
-    /// another evaluation, not consumed. A `mat1` naming the nuclide's own MAT
-    /// is its own evaluation and is folded, and a block is counted only on a
-    /// reaction the fold reaches (a channel, or one a channel is derived
-    /// from). The partner is not checked: a block is counted whether or not
-    /// the evaluation `mat1` names is in the run.
+    /// another evaluation, not applied: the evaluation `mat1` names is not in
+    /// the run (or carries no covariance, so its MAT is not known), or one of
+    /// the two reactions has no relative covariance to correlate. A `mat1`
+    /// naming the nuclide's own MAT is its own evaluation and is folded, and
+    /// a block is counted only on a reaction the fold reaches (a channel, or
+    /// one a channel is derived from).
     pub skipped_cross_material: BTreeMap<String, usize>,
+    /// Per nuclide, blocks correlating one of its reactions with a reaction of
+    /// another evaluation in the run, applied: the nuclides they link are
+    /// drawn jointly, one draw per replica shared by every material of the
+    /// run (see [`crate::cross_material`]). Counted like
+    /// `skipped_cross_material`.
+    pub applied_cross_material: BTreeMap<String, usize>,
     /// Per nuclide, blocks correlating one of its reactions with a quantity
     /// that is not a cross section (`xmf1` other than 0 or 3), not consumed.
-    /// Counted like `skipped_cross_material`.
+    /// Counted like `skipped_cross_material`. None of ENDF/B-VIII.1,
+    /// JEFF-4.0, JENDL-5.0, FENDL-3.2d, IRDFF-II, TENDL-2017 or TENDL-2025
+    /// has one.
     pub skipped_other_file: BTreeMap<String, usize>,
     /// Per (nuclide, kind, kind), where a pair stored in both orientations
     /// has copies that are not each other's transpose, the largest difference
@@ -397,7 +406,9 @@ pub struct Info {
     /// a cross-reaction subsection, one whose list of reactions is empty or
     /// does not match its coefficients, one whose own energy range is empty,
     /// one naming a reaction with no cross section, and one met only
-    /// circularly.
+    /// circularly. LTY 1 to 4 derive a covariance from a measurement's ratio
+    /// to another evaluation's standard (ENDF-102 33.2.2.1); none of the
+    /// libraries listed under `skipped_other_file` has one.
     pub skipped_nc: BTreeMap<String, usize>,
     /// Blocks whose `lb` layout is not implemented, counted per `lb`.
     pub unsupported_layouts: BTreeMap<i64, usize>,
@@ -461,17 +472,20 @@ pub struct Info {
     pub derived_opposing_uncorrelated: BTreeMap<(String, String), BTreeSet<(String, String)>>,
     /// Per (nuclide, lumped MT), a lumped reaction (MT 851-870) with several
     /// components, whose covariance ENDF-102 33.2.3 states for their sum and
-    /// for none of them, with the components by kind (`MT<n>` for one that
-    /// is not a channel). A lump with a single component is that component
-    /// and is folded as its covariance, and a lump an LTY=0 block names is
-    /// folded through that derivation, with its cross section the sum of its
+    /// for none of them, that no component could read, with the components
+    /// by kind (`MT<n>` for one that is not a channel). A lump with a single
+    /// component is that component; a lump an LTY=0 block names is folded
+    /// through that derivation, with its cross section the sum of its
     /// components' (ENDF/B-VIII.1 and TENDL-2017 U235 and U238 MT 4 is MT 51
-    /// plus MT 851). Listed only where neither holds, since giving the sum's
-    /// covariance to a component would be an assumption, for a lump with
-    /// blocks of its own where the fold reaches a component, or the redundant
-    /// reaction holding one as a level: ENDF/B-VIII.1, FENDL-3.2d and
-    /// JEFF-4.0 W180 to W186 give `(n,2n)` only as MT 852, the sum of MT 16
-    /// and 41. Counted as a gap.
+    /// plus MT 851); and a component with no covariance of its own takes the
+    /// lump's relative perturbation, the components of one lump moving
+    /// together (ENDF/B-VIII.1, FENDL-3.2d and JEFF-4.0 W180 to W186 give
+    /// `(n,2n)` only as MT 852, the sum of MT 16 and 41). A level sum stating
+    /// no covariance of its own is derived from its levels, so `(n,p)` reads
+    /// W186 MT 855, the sum of MT 600 and 649. Listed only for a lump with a
+    /// block that is not relative, absolute or short-range, which states the
+    /// sum's spread in barns and nothing of how it splits, where the fold
+    /// reaches a component. No library yani reads has one. Counted as a gap.
     pub lumped_covariance_not_assignable: BTreeMap<(String, i32), BTreeSet<String>>,
     /// Mean of the per-channel shares in [`Info::rate_fraction_covered`],
     /// weighted by the production each channel drove (the rate this run used
@@ -625,6 +639,14 @@ pub struct Info {
     /// moments, not a defect of the data, and the effect on each channel is
     /// also in its sampled sigma beside the evaluated one.
     pub lognormal_not_carried: BTreeMap<String, crate::covariance_sample::LognormalLimit>,
+    /// Per group of nuclides drawn jointly through cross-material
+    /// covariance (their names joined by `+`), where the covariance stated
+    /// between them was not admissible beside their own and was adjusted to
+    /// be drawn: the floor chosen, the largest canonical correlation met
+    /// and how far the drawn covariance between them is from the stated
+    /// one. Each nuclide's own covariance is kept exactly. Counted as a gap.
+    /// See [`crate::covariance_sample::JointAdjustment`].
+    pub cross_material_adjusted: BTreeMap<String, crate::covariance_sample::JointAdjustment>,
     /// Per nuclide with MF=2 and MF=32 resonance parameters and a rate in
     /// this run, how its resonance-range uncertainty was sampled: the
     /// parameters drawn per replica and the cross sections rebuilt from them,
@@ -758,6 +780,7 @@ impl Info {
             perturbed: coverage.covered.clone(),
             no_covariance_data: coverage.without_data.clone(),
             skipped_cross_material: coverage.skipped_cross_material.clone(),
+            applied_cross_material: coverage.applied_cross_material.clone(),
             skipped_other_file: coverage.skipped_other_file.clone(),
             mirrored_disagree: coverage.mirrored_disagree.clone(),
             skipped_nc: coverage.skipped_nc.clone(),
@@ -786,10 +809,10 @@ impl Info {
             not_perturbed: [
                 "isomeric branching (MF=9/MF=10)",
                 "MT=5 product multiplicities (MF=6 MT=5), whose split of the perturbed MT=5 rate is held",
-                "covariance with another evaluation (MAT1 naming another material)",
-                "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
-                "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, or LTY=0 in skipped_nc)",
-                "lumped-reaction covariance of several components no derivation names (MF=33 MT=851-870, in lumped_covariance_not_assignable)",
+                "covariance with another evaluation the run does not hold (MAT1 naming a material not in the run, in skipped_cross_material)",
+                "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3, which no library yani reads states)",
+                "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, which no library yani reads states, or LTY=0 in skipped_nc)",
+                "lumped-reaction covariance stated in barns, which no relative share carries to a component (MF=33 MT=851-870, in lumped_covariance_not_assignable)",
                 "resonance-parameter covariance (MF=32) of a range neither sampled nor written into covariance.arrow",
                 "decay photon spectrum covariance and continuum shape (MF=8 MT=457 LCOV, which no library states)",
                 "photon attenuation coefficient (XCOM)",
@@ -847,6 +870,7 @@ impl Info {
             || !self.derived_opposing_uncorrelated.is_empty()
             || !self.lumped_covariance_not_assignable.is_empty()
             || !self.covariance_repaired.is_empty()
+            || !self.cross_material_adjusted.is_empty()
             || !self.covariance_warnings.is_empty()
             || !self.covariance_repaired_outside_bound.is_empty()
             || self.spectra_without_flux_sigma > 0
@@ -2208,10 +2232,10 @@ mod tests {
         for held in [
             "isomeric branching (MF=9/MF=10)",
             "MT=5 product multiplicities (MF=6 MT=5), whose split of the perturbed MT=5 rate is held",
-            "covariance with another evaluation (MAT1 naming another material)",
-            "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3)",
-            "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, or LTY=0 in skipped_nc)",
-            "lumped-reaction covariance of several components no derivation names (MF=33 MT=851-870, in lumped_covariance_not_assignable)",
+            "covariance with another evaluation the run does not hold (MAT1 naming a material not in the run, in skipped_cross_material)",
+            "covariance with a quantity that is not a cross section (MF=33 XMF1 not 0 or 3, which no library yani reads states)",
+            "NC-derived covariance that cannot be derived (MF=33 NC LTY 1-4, which no library yani reads states, or LTY=0 in skipped_nc)",
+            "lumped-reaction covariance stated in barns, which no relative share carries to a component (MF=33 MT=851-870, in lumped_covariance_not_assignable)",
             "resonance-parameter covariance (MF=32) of a range neither sampled nor written into covariance.arrow",
             "decay photon spectrum covariance and continuum shape (MF=8 MT=457 LCOV, which no library states)",
             "photon attenuation coefficient (XCOM)",

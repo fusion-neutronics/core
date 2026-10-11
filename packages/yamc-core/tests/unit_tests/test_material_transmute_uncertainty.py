@@ -160,8 +160,8 @@ def test_asking_on_data_without_covariance_reports_it_rather_than_a_zero():
 def test_skipped_block_counters_are_per_nuclide_dicts():
     """The skipped block counters are keyed by nuclide, not summed to one int.
 
-    ``skipped_cross_material``, ``skipped_other_file`` and ``skipped_nc`` map
-    a nuclide to its count, ``mirrored_disagree`` maps
+    ``skipped_cross_material``, ``applied_cross_material``,
+    ``skipped_other_file`` and ``skipped_nc`` map a nuclide to its count, ``mirrored_disagree`` maps
     ``"Nuclide (n,a) (n,b)"`` to a relative difference, and
     ``derived_opposing_uncorrelated`` maps ``"Nuclide kind"`` to a list of
     ``[a, b]`` reaction pairs, and ``lumped_covariance_not_assignable`` maps
@@ -175,7 +175,12 @@ def test_skipped_block_counters_are_per_nuclide_dicts():
         data_uncertainty=yamc.DataUncertainty(seed=1, samples=8, sources=["cross_sections"]),
     )
     info = results.get_data_uncertainty_info(iron.id or 0)
-    counters = ("skipped_cross_material", "skipped_other_file", "skipped_nc")
+    counters = (
+        "skipped_cross_material",
+        "applied_cross_material",
+        "skipped_other_file",
+        "skipped_nc",
+    )
     maps = (
         "mirrored_disagree",
         "derived_opposing_uncorrelated",
@@ -203,6 +208,7 @@ def test_skipped_block_counters_are_per_nuclide_dicts():
         assert isinstance(components, list) and len(components) > 1, (lump, components)
     if "Fe56" not in info["perturbed"]:
         assert info["skipped_cross_material"] == {}
+        assert info["applied_cross_material"] == {}
         assert info["skipped_other_file"] == {}
         assert info["skipped_nc"] == {}
         assert info["mirrored_disagree"] == {}
@@ -221,7 +227,7 @@ def test_the_report_names_what_is_never_perturbed():
     joined = " ".join(not_perturbed)
     for source in (
         "isomeric branching (MF=9/MF=10)",
-        "covariance with another evaluation (MAT1 naming another material)",
+        "covariance with another evaluation the run does not hold (MAT1 naming a material not in the run, in skipped_cross_material)",
         "resonance-parameter covariance (MF=32) of a range neither sampled nor written into covariance.arrow",
         "decay photon spectrum covariance and continuum shape (MF=8 MT=457 LCOV, which no library states)",
         "photon attenuation coefficient (XCOM)",

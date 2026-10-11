@@ -1030,14 +1030,18 @@ impl PyTransmutationResults {
     ///   folded as the component's. A lump an LTY=0 block names is folded
     ///   through that derivation, with its cross section the sum of its
     ///   components': ENDF/B-VIII.1 and TENDL-2017 U235 and U238 MT 4 is MT 51
-    ///   plus MT 851. Any other lump is listed here and not folded, since
-    ///   giving the sum's covariance to a component would be an assumption:
-    ///   ENDF/B-VIII.1, FENDL-3.2d and JEFF-4.0 W180 to W186 give ``(n,2n)``
-    ///   only as MT 852, the sum of MT 16 and 41, listed as ``"(n,2n)"`` and
-    ///   ``"(n,2np)"`` when the chain carries both, and W186 MT 854 as
-    ///   ``"(n,np)"`` and ``"MT91"``. Listed where the fold reaches a
-    ///   component, or the reaction holding one as a level (MT 103 for MT 600
-    ///   to 649, and so on). Counted in ``has_gaps``.
+    ///   plus MT 851. A component with no covariance of its own takes the
+    ///   lump's relative perturbation, so the components of one lump move
+    ///   together and their sum moves as the lump's covariance states, as
+    ///   NJOY's ERRORR leaves a lump and SANDY applies it: ENDF/B-VIII.1,
+    ///   FENDL-3.2d and JEFF-4.0 W180 to W186 give ``(n,2n)`` only as MT 852,
+    ///   the sum of MT 16 and 41. A level sum with no covariance of its own is
+    ///   derived from its levels, each reading its own blocks or its lump's,
+    ///   so W186 ``(n,p)`` reads MT 855, the sum of MT 600 and 649. Listed
+    ///   here is only a lump with a block that is not relative, absolute or
+    ///   short-range, which states the sum's spread in barns and nothing of how
+    ///   it splits, where the fold reaches a component; no library yani reads
+    ///   has one. Counted in ``has_gaps``.
     /// - ``unsupported_layouts``: covariance blocks that were present but not
     ///   consumed, counted once per spectrum, so a run over several spectra
     ///   counts the same block once for each.
@@ -1045,18 +1049,24 @@ impl PyTransmutationResults {
     ///   other reactions) that could not be derived. An LTY=0 block is
     ///   derived from the NI covariances of the reactions it names, cross
     ///   blocks included, over its own energy range: ENDF/B-VIII.1 O16
-    ///   ``(n,p)`` is stated only that way. Left here are LTY 1 to 4, a block
-    ///   in a cross-reaction subsection, one whose list of reactions is empty
-    ///   or does not match its coefficients, one whose own energy range is
-    ///   empty, one naming a reaction with no cross section, and one met
-    ///   only circularly.
+    ///   ``(n,p)`` is stated only that way. Left here are LTY 1 to 4 (a
+    ///   covariance from a measurement's ratio to another evaluation's
+    ///   standard, which no library yani reads states), a block in a
+    ///   cross-reaction subsection, one whose list of reactions is empty or
+    ///   does not match its coefficients, one whose own energy range is empty,
+    ///   one naming a reaction with no cross section, and one met only
+    ///   circularly.
     /// - ``skipped_cross_material``: per nuclide, blocks on a reaction the
     ///   fold reaches (a channel, or one a channel is derived from) that
-    ///   correlate it with another evaluation, not consumed. A block naming
-    ///   the nuclide's own MAT is its own evaluation and is folded. The
-    ///   partner is not checked, so a block is counted whether or not the
-    ///   evaluation it names is in the run. ``skipped_other_file``: the same
-    ///   for blocks whose partner is not a cross section.
+    ///   correlate it with another evaluation, not applied: the evaluation
+    ///   they name is not in the run (or carries no covariance, so its MAT is
+    ///   not known), or one of the two reactions has no relative covariance to
+    ///   correlate. A block naming the nuclide's own MAT is its own evaluation
+    ///   and is folded. ``applied_cross_material``: the same count for the
+    ///   blocks applied, whose two nuclides are drawn jointly, one draw per
+    ///   replica shared by every material of the run. ``skipped_other_file``:
+    ///   blocks whose partner is not a cross section, which no library yani
+    ///   reads states.
     /// - ``mirrored_disagree``: keyed ``"Nuclide (n,a) (n,b)"``, where a pair
     ///   stored in both orientations has copies that are not each other's
     ///   transpose, the largest difference relative to the largest entry.
@@ -1145,6 +1155,18 @@ impl PyTransmutationResults {
     ///   the same for a stated flux covariance, keyed by spectrum index,
     ///   whose ``log_space_repair`` is always ``None``: a flux covariance's
     ///   log-space negative eigenvalues are clipped.
+    /// - ``cross_material_adjusted``: keyed by a group of nuclides drawn jointly
+    ///   through cross-material covariance, their names joined by ``+``
+    ///   (``"U235+U238"``), where the covariance stated between their interval
+    ///   averages is not admissible beside each one's own and was adjusted to be
+    ///   drawn, each own covariance kept exactly: ``floor`` (the share of a
+    ///   member's largest correlation eigenvalue below which its directions are
+    ///   not joined, the one that kept the drawn covariance closest to the
+    ///   stated), ``largest_singular_value`` (the largest canonical correlation
+    ///   met, clipped to one) and ``relative_change`` (``||X' - X|| / ||X||`` of
+    ///   the drawn against the stated log-space covariance between the
+    ///   averages). ENDF/B-VIII.1 U235 and U238 fission read about 0.32.
+    ///   Counted in ``has_gaps``.
     /// - ``rates_sampled``: cross-section rate draws made, each read off one
     ///   draw of the nuclide's cross sections. ``rates_floored`` counts those
     ///   that came out negative and were floored at zero, which only a channel

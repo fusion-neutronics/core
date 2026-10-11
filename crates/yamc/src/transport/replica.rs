@@ -53,8 +53,9 @@ use yamc_nuclide::urr::UrrBand;
 use yamc_tallies::score::Score;
 use yamc_tallies::tally::Tally;
 use yamc_tallies::welford::ReplicaModes;
-use yani_transmute::covariance_fold::{transport_fields, Read, TransportField};
+use yani_transmute::covariance_fold::{transport_fields, CellField, Read, TransportField};
 use yani_transmute::covariance_sample::{Modes, Sampler};
+use yani_transmute::cross_material::CrossMaterial;
 
 use crate::xs_perturbation::grid_terms;
 
@@ -504,6 +505,11 @@ impl ReplicaContext {
             .collect();
         let mut out = Vec::with_capacity(materials.len());
         let mut registry = ModeRegistry::default();
+        // The cross-material covariance links nuclides across the materials,
+        // so it is read from all of them, and each material draws the same
+        // groups (see `yani_transmute::cross_material`).
+        let cross = CrossMaterial::new(&materials.iter().map(|m| m.as_ref()).collect::<Vec<_>>());
+        let partners = cross.transport_fields();
         for material in materials {
             out.push(Self::material(
                 material,
@@ -511,6 +517,8 @@ impl ReplicaContext {
                 replicas,
                 seed,
                 &mut registry,
+                &cross,
+                &partners,
             )?);
         }
         // With no covariance anywhere every replica is the nominal run and
@@ -551,13 +559,15 @@ impl ReplicaContext {
         replicas: usize,
         seed: u64,
         registry: &mut ModeRegistry,
+        cross: &CrossMaterial,
+        partners: &BTreeMap<String, CellField>,
     ) -> Result<Option<ReplicaMaterial>, String> {
         let (fields, _) = transport_fields(material);
         let cell_fields = fields
             .iter()
             .filter_map(|(n, t)| t.field.clone().map(|f| (n.clone(), f)))
             .collect();
-        let sampler = Sampler::new(&cell_fields, &[]);
+        let sampler = Sampler::coupled(&cell_fields, &[], cross, partners);
         let draws: Vec<_> = (0..replicas as u64)
             .map(|k| sampler.draw(seed, k))
             .collect();

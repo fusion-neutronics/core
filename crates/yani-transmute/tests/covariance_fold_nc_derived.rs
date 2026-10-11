@@ -74,7 +74,8 @@ fn sigma(m: &Material, name: &str, kind: &str, lo: f64, hi: f64) -> (f64, Covera
     let (bounds, flux) = groups(lo, hi);
     let chain = chain();
     let rates = compute_multigroup_reaction_rates_shielded(m, &chain, &flux, &bounds, 1.0, None).0;
-    let (folded, coverage) = fold_rate_covariance(m, &chain, &rates, &flux, &bounds, None);
+    let (folded, coverage) =
+        fold_rate_covariance(m, &chain, &rates, &flux, &bounds, None, &Default::default());
     let cov = &folded[name];
     let i = cov
         .kinds
@@ -619,6 +620,7 @@ fn a_transport_run_reads_the_reactions_a_channel_is_derived_from() {
         &chain,
         yani::ChainParts::default(),
         &request,
+        &Default::default(),
     )
     .expect("replicas");
     assert!(

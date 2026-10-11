@@ -16,6 +16,7 @@ pub mod branching_rule;
 pub mod covariance_fold;
 pub mod covariance_provenance;
 pub mod covariance_sample;
+pub mod cross_material;
 pub mod d1s_uncertainty;
 pub mod damage;
 mod decay_branching_uncertainty;
@@ -76,8 +77,8 @@ pub use branching_rule::{
 };
 pub use material_transmute::{
     activation_mts, apply_coupled_branching, preload_activation_data, transmute_material,
-    transmute_material_shielded, transmute_materials, transport_replicas, CoupledDiagnostics,
-    MultigroupSpectrum, TransmuteCase, TransmuteStep, TransportTallied,
+    transmute_material_shielded, transmute_materials, transport_cross_material, transport_replicas,
+    CoupledDiagnostics, MultigroupSpectrum, TransmuteCase, TransmuteStep, TransportTallied,
 };
 
 /// Load the transmutation chain assembled from the configured per-subsection

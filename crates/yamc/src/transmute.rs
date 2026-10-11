@@ -1066,6 +1066,15 @@ impl Model {
         // the same schedule, per material, independently of the nominal loop
         // above, which is untouched and so bit-identical either way.
         if let Some(request) = uncertainty {
+            // The cross-material covariance links nuclides across the
+            // materials, so it is read from all of them at once, in id order.
+            let mut resampled: Vec<(&u32, &Material)> = initial_for_replicas
+                .iter()
+                .filter(|(id, _)| tallied.contains_key(*id))
+                .collect();
+            resampled.sort_by_key(|(id, _)| **id);
+            let materials: Vec<&Material> = resampled.iter().map(|(_, m)| *m).collect();
+            let cross = yani_transmute::transport_cross_material(&materials, &chain, request)?;
             for (mat_id, material) in &initial_for_replicas {
                 let Some(transport) = tallied.get(mat_id) else {
                     continue;
@@ -1078,6 +1087,7 @@ impl Model {
                     &chain,
                     parts,
                     request,
+                    &cross,
                 )?;
                 results.uncertainty.insert(*mat_id, ensemble);
                 results.uncertainty_info.insert(*mat_id, info);

@@ -101,23 +101,34 @@ use yani_transmute::uncertainty::{
 ///   sigma), and the per-decay photon lines and decay energy of a drawn
 ///   parent, which follow its nominal branching;
 /// - the isomeric-branching overlay from MF=9/MF=10;
-/// - covariance correlating two evaluations (MAT1 naming another material),
-///   covariance with a quantity that is not a cross section (XMF1 not 0 or
-///   3), covariance derived from other sections by an NC block that cannot
-///   be derived (LTY 1-4, or an LTY=0 block counted in ``skipped_nc``), the
-///   covariance of a lumped reaction (MT=851-870) with several components
-///   that no derivation names, listed in ``lumped_covariance_not_assignable``,
-///   and the resonance-parameter covariance (MF=32) of a range neither
-///   sampled nor in ``covariance.arrow``: a library converted before the
-///   converter wrote either, or a resonance range whose formalism ``endf``
-///   does not reconstruct. What is sampled is each reaction's explicit MF=33
-///   blocks, the resonance parameters where the folder carries them and
-///   otherwise the resonance-range blocks the converter derives from MF=32
-///   and writes beside them, the blocks of a lumped reaction
-///   whose one component it is, and for a reaction an LTY=0 NC block states
-///   as a sum of others (ENDF/B-VIII.1 O16 (n,p) as MT 600 to 603, U235 MT 4
-///   as MT 51 plus the lumped MT 851), the covariance derived from the named
-///   reactions' own blocks and the cross blocks between them;
+/// - covariance correlating an evaluation with one the run does not hold
+///   (MAT1 naming a material not in the run, counted in
+///   ``skipped_cross_material``), covariance with a quantity that is not a
+///   cross section (XMF1 not 0 or 3), covariance derived from other sections
+///   by an NC block that cannot be derived (LTY 1-4, or an LTY=0 block
+///   counted in ``skipped_nc``), the covariance of a lumped reaction
+///   (MT=851-870) stated in barns, listed in
+///   ``lumped_covariance_not_assignable``, and the resonance-parameter
+///   covariance (MF=32) of a range neither sampled nor in
+///   ``covariance.arrow``: a library converted before the converter wrote
+///   either, or a resonance range whose formalism ``endf`` does not
+///   reconstruct. No library yani reads states an XMF1 other than 0 or 3,
+///   an NC block with LTY 1-4, or a lump in barns. What is sampled is each
+///   reaction's explicit MF=33 blocks, the resonance parameters where the
+///   folder carries them and otherwise the resonance-range blocks the
+///   converter derives from MF=32 and writes beside them, the blocks of a
+///   lumped reaction for each of its components (one component is the lump;
+///   several each take the lump's relative perturbation, moving together),
+///   for a level sum with no covariance of its own its levels' (W186
+///   ``(n,p)`` as the lumped MT 855 of MT 600 and 649), and for a reaction
+///   an LTY=0 NC block states as a sum of others (ENDF/B-VIII.1 O16 (n,p) as
+///   MT 600 to 603, U235 MT 4 as MT 51 plus the lumped MT 851), the
+///   covariance derived from the named reactions' own blocks and the cross
+///   blocks between them. A block correlating two evaluations the run both
+///   holds (the neutron standards: ENDF/B-VIII.1 U235 fission with U238
+///   fission and capture, Pu239 fission, Au197 capture and Li6 (n,t)) is
+///   applied, counted in ``applied_cross_material``: the two nuclides are
+///   drawn jointly, one draw per replica shared by every material;
 /// - the self-shielding correction, when ``self_shielding_chord`` or
 ///   ``self_shielding_shape`` is given: the shielded flux is built once from
 ///   the nominal cross sections and reused by every replica, sampled
@@ -376,6 +387,11 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
         cross.set_item(nuclide, n)?;
     }
     d.set_item("skipped_cross_material", cross)?;
+    let applied = PyDict::new(py);
+    for (nuclide, n) in &info.applied_cross_material {
+        applied.set_item(nuclide, n)?;
+    }
+    d.set_item("applied_cross_material", applied)?;
     let other_file = PyDict::new(py);
     for (nuclide, n) in &info.skipped_other_file {
         other_file.set_item(nuclide, n)?;
@@ -556,6 +572,15 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
         flux_limits.set_item(*spectrum, limit_dict(l)?)?;
     }
     d.set_item("flux_lognormal_not_carried", flux_limits)?;
+    let adjusted = PyDict::new(py);
+    for (group, a) in &info.cross_material_adjusted {
+        let e = PyDict::new(py);
+        e.set_item("floor", a.floor)?;
+        e.set_item("largest_singular_value", a.largest_singular_value)?;
+        e.set_item("relative_change", a.relative_change)?;
+        adjusted.set_item(group, e)?;
+    }
+    d.set_item("cross_material_adjusted", adjusted)?;
     let limits = PyDict::new(py);
     for (nuclide, l) in &info.lognormal_not_carried {
         limits.set_item(nuclide, limit_dict(l)?)?;
