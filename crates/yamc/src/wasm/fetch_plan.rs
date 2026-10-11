@@ -1,9 +1,9 @@
 //! What a browser has to fetch to run the loaded model, and which bytes of it.
 //!
 //! A nuclide is published as a directory of section objects
-//! (`<library>/neutron/<Nuclide>.arrow/{version.json, nuclide.arrow,
-//! energy.arrow, reactions.arrow, ...}`), the same layout the native downloader
-//! in `yamc_nuclide::url_cache` reads. Two of those sections carry nearly all
+//! (`<library>/<release>/neutron/<Nuclide>.arrow/{version.json, nuclide.arrow,
+//! energy.arrow, reactions.arrow, ...}`), the same release layout the native
+//! downloader in `yamc_nuclide::url_cache` reads. Two of those sections carry nearly all
 //! of the bytes and are written one Arrow record batch per unit a reader might
 //! want on its own: `reactions.arrow` one batch per (MT, temperature) and
 //! `energy.arrow` one batch per temperature, with a byte-range index for both
@@ -34,15 +34,17 @@ use yamc_nuclide::url_cache::{NEUTRON_SECTIONS, PHOTON_SECTIONS};
 use crate::model::Model;
 
 /// The published library an exported page fetches from unless the host names
-/// another. Per-nuclide neutron data lives under `neutron/`, per-element photon
-/// data under `photon/`.
+/// another. Its `latest.json` names the current release; within the release
+/// folder, per-nuclide neutron data lives under `neutron/` and per-element
+/// photon data under `photon/`.
 pub const DEFAULT_LIBRARY_URL: &str = "https://yamc-data.xsplot.com/endf-b8.1";
 
 /// The two sections a temperature-aware fetch can range into.
 const REACTIONS: &str = "reactions.arrow";
 const ENERGY: &str = "energy.arrow";
 
-/// Base URL of one nuclide's neutron section objects.
+/// Base URL of one nuclide's neutron section objects, under a release URL
+/// (`<library>/<release>`).
 pub fn neutron_url(library_url: &str, nuclide: &str) -> String {
     format!(
         "{}/neutron/{nuclide}.arrow",
@@ -50,7 +52,7 @@ pub fn neutron_url(library_url: &str, nuclide: &str) -> String {
     )
 }
 
-/// Base URL of one element's photon section objects.
+/// Base URL of one element's photon section objects, under a release URL.
 pub fn photon_url(library_url: &str, element: &str) -> String {
     format!(
         "{}/photon/{element}.arrow",

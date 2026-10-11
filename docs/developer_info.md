@@ -38,7 +38,7 @@ published data, not source, so they are **downloaded once** rather than
 committed:
 
 ```bash
-python scripts/fetch_test_fixtures.py     # ~530 MB, into ~/.cache/yamc
+python scripts/fetch_test_fixtures.py     # ~530 MB, into the platform cache dir
 ```
 
 It fetches the endf-b8.1 nuclide, element and transmutation-chain sections into
@@ -46,11 +46,14 @@ the same on-disk cache production uses and symlinks them into
 `crates/yamc/tests/`. Re-running is cheap: anything already cached is left
 alone. `--check` reports what is missing without downloading.
 
-`YAMC_CACHE_DIR` overrides where that cache is, for the script and for yamc
-itself. It names the cache root verbatim rather than a home directory to derive
-one from, and it is the supported way to point a process at an isolated cache.
-Without it the root is `<home>/.cache/yamc`, where home is `USERPROFILE` on
-Windows and `HOME` everywhere else.
+The cache is the platform's per-user cache directory with `yamc` appended:
+`~/.cache/yamc` on Linux (`$XDG_CACHE_HOME/yamc` when that is set),
+`~/Library/Caches/yamc` on macOS and `%LOCALAPPDATA%\yamc` on Windows
+(`yamc.cache_dir()` reports it). There is no setting or environment variable
+that moves it. The fixtures keep their own flat layout there
+(`endf-b8.1-<Name>.arrow`), apart from the per-release folders the downloader
+writes, and are fetched from the unversioned layout until the libraries are
+republished in the release layout.
 
 The tests find it through `yamc_test_cache` (`crates/yamc-test-cache`) rather
 than resolving it themselves, so every test agrees with production on where the
@@ -504,3 +507,92 @@ cases where there should not be a release: a first upload that creates the
 project on PyPI, and a re-publish of one wheel after a fix. The `yamc_version` /
 `yani_version` inputs override the manifests for that run, since neither case has
 a tag to check against.
+
+## Nuclear data downloads
+
+A library keyword (`endf-b8.1`, `fendl-3.2d`, ...) resolves at run time to the
+library's current published release, once per process:
+
+1. `https://yamc-data.xsplot.com/<keyword>/latest.json` names the release, its
+   `format_version`, and its manifest with the manifest's size and sha256. A
+   build reads the `format_version`s in
+   `yamc_nuclide::storage::release::SUPPORTED_FORMAT_VERSIONS` and refuses any
+   other with a message saying to upgrade. A data fix that keeps the format
+   needs no yamc release.
+2. `<keyword>/<release>/manifest.json` lists every file of the release with its
+   size and sha256. It is checked against the pointer and kept in the cache.
+   It is also the index of what the release carries: a nuclide, element or
+   transmutation subsection the manifest does not list is reported as not
+   available, with the list of what is, and an optional section it does not
+   list is simply absent (nothing is probed).
+3. Each file a run needs is downloaded from `<keyword>/<release>/<path>`,
+   streamed to a temporary file in the cache while its size and sha256 are
+   computed, compared with the manifest, fsynced and renamed into place. A
+   mismatch is a hard error naming the file, the expected value and the
+   received one. Transport failures and 5xx answers are retried.
+
+The cache layout:
+
+```
+<cache dir>/<keyword>/<release>/manifest.json
+<cache dir>/<keyword>/<release>/neutron/<Nuclide>.arrow/<section>
+<cache dir>/<keyword>/<release>/photon/<Element>.arrow/<section>
+<cache dir>/<keyword>/<release>/transmutation/<subsection>.arrow/<section>
+```
+
+A file is present in a release folder only once it verified. Every file of a
+library a process reads comes from one release: when `latest.json` names a
+newer release than the cache holds, the files the run needs are downloaded
+from the new release and the switch is logged once ("updated endf-b8.1 from
+2026-10-01 to 2026-11-15"). Older release folders are left in place.
+
+A load that reads only some MTs (activation) or some temperatures (transport
+at a material temperature) fetches `reactions.arrow`, and for temperatures
+`energy.arrow`, as the byte ranges of just those record batches, when they can
+be verified. The byte-range index in each nuclide's `version.json` gives every
+entry as `[offset, length, "<sha256>"]`, the schema message included, and
+`version.json` is itself verified against the manifest before its index is
+used. Each batch received is cut back out of the (merged) spans and checked
+against its hash; a mismatch is a hard error naming the nuclide, the file, the
+MT or temperature, and both hashes, and is not retried. The spliced copy is
+cached under `temperatures/` or `subset/` in the nuclide's folder with a record
+of what it holds, never under the section's own name, so it is not taken for
+the whole verified file. It is logged as `<what>: <keyword> release <release>,
+downloaded and verified <n> byte range(s) of <section>, <bytes> of its <total>
+bytes -> <folder>`.
+
+An index entry with no hash (a library indexed before hashes existed) cannot
+be verified, so a load that needs it downloads that section whole, verified
+against the manifest. So does a load that wants every temperature, or every
+MT. An origin that ignores the `Range` header sends the whole object, which is
+checked against the manifest and cached as the whole file. The hashes are
+written by the converter, and `index_reactions` adds them to an already
+converted tree (it rewrites only `version.json`), which the publishing scripts
+run before building the release manifest.
+
+The wasm32 browser fetcher (`yamc::wasm`) keeps its per-temperature ranges,
+which it registers unverified; it verifies every section it fetches whole.
+
+When the origin cannot be reached (DNS, connect, timeout, TLS, a 5xx), yamc
+does not fail if the data is already local: it uses the newest cached release
+holding every file the run asks for, logs that the origin was unreachable and
+which release it used, and records that release in the results. Only a file
+missing from the cache is an error then, and the error names it. The first
+contact (`latest.json`) has a 3 s connect timeout, a 3 s request timeout and
+two attempts, so an offline machine waits at most about 6 s before the cache
+is used; data files have a 3 s connect timeout and a 30 s timeout on each read.
+
+Each file a run reads whole is logged as `<what>: <keyword> release <release>,
+downloaded and verified <n> file(s), <bytes> bytes -> <folder>` when it was
+downloaded, and as `<what>: <keyword> release <release>, from cache <folder>`
+when per-file load logging is on.
+
+Results record the release of each library a run used: `SimulationResults.runs`
+entries carry `data_releases` (`release`, `manifest_sha256`, `format_version`,
+`offline`), and `TransmutationResults.data_releases` carries the same.
+`combine_results` refuses to pool runs that read different releases of one
+library.
+
+A local directory passed as the data source is read as it is, with no
+download and no manifest check.
+

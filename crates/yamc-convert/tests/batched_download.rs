@@ -155,7 +155,7 @@ fn serve(stream: TcpStream, dir: &Path, seen: &Mutex<Seen>) -> std::io::Result<(
     }
 }
 
-/// A cache root of this test's own, named by `YAMC_CACHE_DIR`.
+/// A cache root of this test's own, named through the test hook.
 struct Cache(PathBuf);
 
 impl Cache {
@@ -163,7 +163,7 @@ impl Cache {
         let p = std::env::temp_dir().join(format!("yamc-batched-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).expect("cache dir");
-        std::env::set_var("YAMC_CACHE_DIR", &p);
+        yamc_nuclide::url_cache::set_cache_root_for_tests(Some(p.clone()));
         Cache(p)
     }
 
@@ -196,7 +196,7 @@ impl Drop for Cache {
     }
 }
 
-/// Serialises the tests: they share `YAMC_CACHE_DIR`.
+/// Serialises the tests: they share the cache-root hook.
 fn exclusive() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock().unwrap_or_else(|p| p.into_inner())

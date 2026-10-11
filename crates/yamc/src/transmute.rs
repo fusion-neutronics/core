@@ -1101,6 +1101,7 @@ impl Model {
             }
         }
 
+        results.data_releases = yamc_nuclide::url_cache::data_releases();
         Ok(results)
     }
 }

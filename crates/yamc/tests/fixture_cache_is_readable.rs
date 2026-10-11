@@ -48,8 +48,8 @@ fn the_resolved_cache_holds_what_the_fetch_script_downloads() {
         "YAMC_REQUIRE_FIXTURES=1, so the fixtures scripts/fetch_test_fixtures.py \
          downloads must be readable at the cache this build resolves, but {missing:?} \
          are absent from {}. Either the fetch step did not run, or it wrote \
-         somewhere else: it uses YAMC_CACHE_DIR then Path.home(), and this uses \
-         YAMC_CACHE_DIR then USERPROFILE on Windows and HOME elsewhere.",
+         somewhere else: both should resolve the platform cache directory \
+         (~/.cache/yamc, ~/Library/Caches/yamc, %LOCALAPPDATA%\\yamc).",
         root.display()
     );
     eprintln!("skip -- {missing:?} absent; run scripts/fetch_test_fixtures.py");
