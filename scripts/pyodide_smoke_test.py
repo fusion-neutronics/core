@@ -9,8 +9,9 @@ Usage (from a `pyodide venv` with the wheel installed)::
 XMLHttpRequest, so the data fetcher installed here answers each download from
 those files instead of the network. It honours the `Range` header the way the
 CDN does, including the `multipart/byteranges` answer to a header naming
-several ranges, so the ranged temperature download, the cache and the transport
-run the same code they run in the browser. Only the transfer is local.
+several ranges, so the batched prefetch, the ranged temperature download, the
+cache and the transport run the same code they run in the browser. Only the
+transfer is local.
 """
 
 import os
@@ -36,8 +37,14 @@ def main(fixtures):
     from yamc import _core
 
     requests = []
+    batches = []
 
-    def fetch(url, range_header):
+    def fetch(batch):
+        """Answer a batch of GETs, one `(status, body)` per `(url, range)`."""
+        batches.append(len(batch))
+        return [fetch_one(url, range_header) for url, range_header in batch]
+
+    def fetch_one(url, range_header):
         """Answer one GET from the fixture files, as the CDN would."""
         requests.append((url, range_header))
         if not url.startswith(ORIGIN):
@@ -87,10 +94,15 @@ def main(fixtures):
     results = model.simulate_transport(total_particles=2_000, seed=1)
     mean = results[tritium].mean[0]
     print(f"tritium production: {mean:.4e} per source neutron")
-    print(f"{len(requests)} requests, {sum(r is not None for _, r in requests)} ranged")
+    print(
+        f"{len(requests)} requests in {len(batches)} calls, "
+        f"{sum(r is not None for _, r in requests)} ranged"
+    )
 
     if not requests:
         sys.exit("the data fetcher was never called")
+    if max(batches) < 2:
+        sys.exit("no call carried more than one request, so the batched prefetch did not run")
     if not any(r is not None and "," in r for _, r in requests):
         sys.exit("no request named several ranges, so the ranged download did not run")
     if not 0.0 < mean < 1.0:

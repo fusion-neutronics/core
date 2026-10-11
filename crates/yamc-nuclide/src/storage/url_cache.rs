@@ -6,6 +6,9 @@ use std::path::PathBuf;
 use std::fs;
 
 #[cfg(feature = "download")]
+mod batch;
+
+#[cfg(feature = "download")]
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "download")]
@@ -112,19 +115,39 @@ fn client() -> Result<&'static reqwest::blocking::Client, Box<dyn std::error::Er
         .map_err(|e| format!("could not build an HTTP client: {e}").into())
 }
 
-/// Issue a blocking GET over the shared client, optionally for byte ranges.
+/// One GET as the transport sees it: the URL, and the `Range` header value to
+/// send with it (`bytes=0-99,200-299`), or `None` for the whole object.
+#[cfg(feature = "download")]
+type Get = (String, Option<String>);
+
+/// Issue a blocking GET, optionally for byte ranges.
 ///
 /// `spans` are `(offset, length)` pairs, all named in one `Range` header; each
 /// is inclusive of both ends, so its last byte is `offset + length - 1`. Empty
 /// asks for the whole object. More than one span is answered with a
 /// `multipart/byteranges` body, which [`parse_byteranges`] reads.
-#[cfg(all(feature = "download", not(target_os = "emscripten")))]
+///
+/// A reply [`prefetch`] already fetched for exactly this request is handed
+/// over instead of asking again, once: a retry after it goes to the network.
+#[cfg(feature = "download")]
 fn blocking_get(url: &str, spans: &[Range]) -> Result<Reply, Box<dyn std::error::Error>> {
-    let mut request = client()?.get(url);
-    if !spans.is_empty() {
-        request = request.header(reqwest::header::RANGE, range_header(spans));
+    let range = (!spans.is_empty()).then(|| range_header(spans));
+    let get = (url.to_string(), range);
+    if let Some(reply) = batch::take(&get) {
+        return Ok(reply?);
     }
-    let response = request.send()?;
+    let reply = send_many(std::slice::from_ref(&get)).pop();
+    Ok(reply.ok_or("the fetcher answered no requests")??)
+}
+
+/// Send one GET over the shared client.
+#[cfg(all(feature = "download", not(target_os = "emscripten")))]
+fn send(url: &str, range: Option<&str>) -> Result<Reply, String> {
+    let mut request = client().map_err(|e| e.to_string())?.get(url);
+    if let Some(range) = range {
+        request = request.header(reqwest::header::RANGE, range);
+    }
+    let response = request.send().map_err(|e| e.to_string())?;
     let status = response.status().as_u16();
     // Only a success carries a body worth reading.
     let body = if response.status().is_success() {
@@ -138,6 +161,42 @@ fn blocking_get(url: &str, spans: &[Range]) -> Result<Reply, Box<dyn std::error:
     Ok(Reply { status, body })
 }
 
+/// The most GETs a native batch has in flight at once.
+#[cfg(all(feature = "download", not(target_os = "emscripten")))]
+const NATIVE_CONCURRENCY: usize = 8;
+
+/// Send every one of `gets`, [`NATIVE_CONCURRENCY`] at a time, and answer them
+/// in the order asked. One failing does not fail the others.
+#[cfg(all(feature = "download", not(target_os = "emscripten")))]
+fn send_many(gets: &[Get]) -> Vec<Result<Reply, String>> {
+    if let [(url, range)] = gets {
+        return vec![send(url, range.as_deref())];
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let replies: Vec<Mutex<Option<Result<Reply, String>>>> =
+        gets.iter().map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|threads| {
+        for _ in 0..NATIVE_CONCURRENCY.min(gets.len()) {
+            threads.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some((url, range)) = gets.get(i) else {
+                    break;
+                };
+                let reply = send(url, range.as_deref());
+                *replies[i].lock().unwrap_or_else(|p| p.into_inner()) = Some(reply);
+            });
+        }
+    });
+    replies
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .unwrap_or_else(|p| p.into_inner())
+                .unwrap_or_else(|| Err("the request was never sent".to_string()))
+        })
+        .collect()
+}
+
 /// What one GET came back with, before retry policy is applied.
 #[cfg(feature = "download")]
 struct Reply {
@@ -145,15 +204,21 @@ struct Reply {
     body: Result<Vec<u8>, String>,
 }
 
-/// A blocking GET supplied by the host, for builds with no socket of their own.
+/// The GETs supplied by the host, for builds with no socket of their own.
 ///
-/// Called as `(url, range)` with `range` the `Range` header value to send
-/// (`bytes=0-99,200-299`), or `None` for the whole object, and answers the
-/// HTTP status and the body. In the browser this is a synchronous XMLHttpRequest
-/// made from a Web Worker, so the Range planning, temperature selection and
-/// caching above it are the same code a native build runs.
+/// Called with a list of `(url, range)` requests, `range` being the `Range`
+/// header value to send (`bytes=0-99,200-299`) or `None` for the whole object,
+/// and answers one `(status, body)` per request, in the same order. Status 0
+/// means the request did not complete (offline, refused), which is retried
+/// like a 5xx. The requests in one call are independent and the host should
+/// have them in flight together: that is what [`prefetch`] batches them for.
+/// In the browser the fetcher hands them to a helper worker, which has them in
+/// flight together with async `fetch()`, and blocks on `Atomics.wait` until
+/// all are answered, so the Range planning, temperature
+/// selection and caching above it are the same code a native build runs.
 #[cfg(all(feature = "download", target_os = "emscripten"))]
-pub type HostFetcher = dyn Fn(&str, Option<&str>) -> Result<(u16, Vec<u8>), String> + Send + Sync;
+pub type HostFetcher =
+    dyn Fn(&[(String, Option<String>)]) -> Result<Vec<(u16, Vec<u8>)>, String> + Send + Sync;
 
 #[cfg(all(feature = "download", target_os = "emscripten"))]
 static HOST_FETCHER: std::sync::RwLock<Option<Box<HostFetcher>>> = std::sync::RwLock::new(None);
@@ -178,16 +243,76 @@ fn client() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+/// Hand every one of `gets` to the host fetcher in one call.
 #[cfg(all(feature = "download", target_os = "emscripten"))]
-fn blocking_get(url: &str, spans: &[Range]) -> Result<Reply, Box<dyn std::error::Error>> {
-    let guard = HOST_FETCHER.read().unwrap_or_else(|e| e.into_inner());
-    let fetcher = guard.as_ref().ok_or("no data fetcher is installed")?;
-    let range = (!spans.is_empty()).then(|| range_header(spans));
-    let (status, bytes) = fetcher(url, range.as_deref())?;
-    Ok(Reply {
-        status,
-        body: Ok(bytes),
-    })
+fn send_many(gets: &[Get]) -> Vec<Result<Reply, String>> {
+    let answered = {
+        let guard = HOST_FETCHER.read().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(fetcher) => fetcher(gets),
+            None => Err("no data fetcher is installed".to_string()),
+        }
+    };
+    match answered {
+        Ok(replies) if replies.len() == gets.len() => replies
+            .into_iter()
+            .zip(gets)
+            .map(|((status, bytes), (url, _))| match status {
+                0 => Err(format!("the request for {url} did not complete")),
+                status => Ok(Reply {
+                    status,
+                    body: Ok(bytes),
+                }),
+            })
+            .collect(),
+        Ok(replies) => {
+            let e = format!(
+                "the data fetcher answered {} requests of {}",
+                replies.len(),
+                gets.len()
+            );
+            gets.iter().map(|_| Err(e.clone())).collect()
+        }
+        Err(e) => gets.iter().map(|_| Err(e.clone())).collect(),
+    }
+}
+
+/// One nuclide's (or element's) data a caller is about to load: the source as
+/// the config names it (a library keyword, a URL, a directory or a path), the
+/// name, which particle's data, and the scope it will be loaded at.
+#[derive(Debug, Clone, Copy)]
+pub struct DataRequest<'a> {
+    pub source: &'a str,
+    pub name: &'a str,
+    pub kind: DataKind,
+    pub scope: &'a crate::load_scope::LoadScope,
+}
+
+/// Download, into the cache, whatever `requests` will need that it does not
+/// already hold, with many requests in flight at once.
+///
+/// A load downloads its nuclides one at a time and each nuclide's sections one
+/// at a time, which is a round trip per request. A transmutation closure of a
+/// few hundred nuclides is thousands of those, and in the browser, where each
+/// is a synchronous request made in turn, that took minutes. Called before
+/// such a loop, this fetches the same data in two rounds per batch of
+/// nuclides: every request that needs nothing first (`version.json` and the
+/// sections fetched whole), then every byte-range request the indexes in those
+/// `version.json` files plan. Each round goes out concurrently, and the
+/// nuclides are then cached by the ordinary download path, which finds its
+/// requests already answered.
+///
+/// Purely an optimisation: nothing is cached here that the loop would not have
+/// cached itself, by the same code. A request this plans that the download does
+/// not make is dropped, and one the download makes that this did not plan goes
+/// to the network as before, as does every retry. Errors are not reported
+/// here, because the load that follows meets them again and reports them where
+/// it always has. Sources that are not keywords or URLs are skipped.
+pub fn prefetch(requests: &[DataRequest<'_>]) {
+    #[cfg(feature = "download")]
+    batch::prefetch(requests);
+    #[cfg(not(feature = "download"))]
+    let _ = requests;
 }
 
 /// The `Range` header value naming `spans`: `bytes=0-99,200-299`.
@@ -1689,6 +1814,53 @@ fn cut_spans(parts: &[(u64, Vec<u8>)], spans: &[Range]) -> Option<Vec<Vec<u8>>> 
         .collect()
 }
 
+/// The temperature labels a cached ranged copy of `section` in `dir` holds,
+/// which a refetch of the section keeps.
+#[cfg(feature = "download")]
+fn held_labels(dir: &std::path::Path, section: &str) -> BTreeSet<String> {
+    if dir.join(ranged_section(section)).exists() {
+        cached_labels(dir, section).unwrap_or_default()
+    } else {
+        BTreeSet::new()
+    }
+}
+
+/// The labels a temperature-ranged fetch of `section` writes and the spans it
+/// asks for, given the nuclide's `version.json` and the labels a cached copy
+/// already `held`. `Ok(None)` means fetch the section whole (see
+/// [`fetch_temperatures`]).
+///
+/// Shared by the fetch and by [`prefetch`], which plans the same requests ahead
+/// of it, so the two cannot drift apart.
+#[cfg(feature = "download")]
+fn temperature_spans(
+    version: &serde_json::Value,
+    section: &str,
+    requested: &HashSet<String>,
+    held: BTreeSet<String>,
+    nuclide_name: &str,
+) -> Result<Option<(BTreeSet<String>, Vec<Range>)>, Box<dyn std::error::Error>> {
+    let Some(index) = ReactionRanges::from_version_json(version) else {
+        return Ok(None);
+    };
+    let ladder = published_labels(&index);
+    let mut labels = labels_for(&index, requested).map_err(|e| format!("{nuclide_name}: {e}"))?;
+    labels.extend(held);
+    if labels.is_empty() || labels.is_superset(&ladder) {
+        return Ok(None);
+    }
+
+    let spans = if section == REACTIONS {
+        index.spans_where(|_, label| labels.contains(label))
+    } else {
+        let Some(energy) = EnergyRanges::from_version_json(version) else {
+            return Ok(None);
+        };
+        energy.spans_for(|label| labels.contains(label) || !ladder.contains(label))
+    };
+    Ok(Some((labels, spans)))
+}
+
 /// Fetch `section` (`reactions.arrow` or `energy.arrow`) at the temperatures
 /// `requested` resolves to, into `staging`.
 ///
@@ -1725,25 +1897,11 @@ fn fetch_temperatures(
     let Some(version) = cached_version(staging).or_else(|| cached_version(target_dir)) else {
         return Ok(None);
     };
-    let Some(index) = ReactionRanges::from_version_json(&version) else {
+    let held = held_labels(target_dir, section);
+    let Some((labels, spans)) =
+        temperature_spans(&version, section, requested, held, nuclide_name)?
+    else {
         return Ok(None);
-    };
-    let ladder = published_labels(&index);
-    let mut labels = labels_for(&index, requested).map_err(|e| format!("{nuclide_name}: {e}"))?;
-    if target_dir.join(ranged_section(section)).exists() {
-        labels.extend(cached_labels(target_dir, section).unwrap_or_default());
-    }
-    if labels.is_empty() || labels.is_superset(&ladder) {
-        return Ok(None);
-    }
-
-    let spans = if section == REACTIONS {
-        index.spans_where(|_, label| labels.contains(label))
-    } else {
-        let Some(energy) = EnergyRanges::from_version_json(&version) else {
-            return Ok(None);
-        };
-        energy.spans_for(|label| labels.contains(label) || !ladder.contains(label))
     };
 
     let url = format!("{base_url}/{section}");
@@ -1858,12 +2016,16 @@ fn download_sections(
         return Ok(());
     }
 
-    println!(
-        "Downloading {} section(s) to cache: {} -> {:?}",
-        wanted.len(),
-        base_url,
-        target_dir
-    );
+    // A prefetch counts nuclides instead, which reads better than a line
+    // each when there are hundreds.
+    if !batch::quiet() {
+        println!(
+            "Downloading {} section(s) to cache: {} -> {:?}",
+            wanted.len(),
+            base_url,
+            target_dir
+        );
+    }
     let cache_dir = target_dir
         .parent()
         .ok_or("cache target has no parent directory")?;

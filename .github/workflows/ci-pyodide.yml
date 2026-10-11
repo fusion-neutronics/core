@@ -101,8 +101,9 @@ jobs:
 
       # `--no-default-features` drops mesh, cad, gpu and download-tls. Pyodide
       # has no sockets, so downloads go through the fetcher the host installs
-      # with `yamc._core._set_data_fetcher` (a synchronous XMLHttpRequest from a
-      # Web Worker, in yamc-online). The wasm viewer blobs the native wheels
+      # with `yamc._core._set_data_fetcher` (in yamc-online, a helper worker's
+      # concurrent fetch() calls, which the Python worker blocks on with
+      # Atomics.wait). The wasm viewer blobs the native wheels
       # ship under yamc/_wasm/ are not added: the page draws plots without them.
       - name: Build the wheel
         working-directory: packages/yamc-core

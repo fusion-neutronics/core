@@ -348,21 +348,35 @@ impl Model {
                 let mut loaded: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
 
+                // Use material's temperature to ensure consistency
+                let temp_filter = if !material.temperature().is_empty() {
+                    let mut temps = std::collections::HashSet::new();
+                    temps.insert(material.temperature().to_string());
+                    Some(temps)
+                } else {
+                    None
+                };
+                let scope = yamc_nuclide::LoadScope::activation(product_mts.clone())
+                    .with_temperatures(temp_filter);
+
+                // The loads below are one at a time; the downloads behind
+                // them go out together first.
+                yamc_nuclide::url_cache::prefetch(
+                    &source_paths
+                        .iter()
+                        .map(|(name, path)| yamc_nuclide::url_cache::DataRequest {
+                            source: path,
+                            name,
+                            kind: yamc_nuclide::url_cache::DataKind::Neutron,
+                            scope: &scope,
+                        })
+                        .collect::<Vec<_>>(),
+                );
+
                 for (nuclide_name, h5_path) in &source_paths {
                     let mut source_map = HashMap::new();
                     source_map.insert(nuclide_name.clone(), h5_path.clone());
 
-                    // Use material's temperature to ensure consistency
-                    let temp_filter = if !material.temperature().is_empty() {
-                        let mut temps = std::collections::HashSet::new();
-                        temps.insert(material.temperature().to_string());
-                        Some(temps)
-                    } else {
-                        None
-                    };
-
-                    let scope = yamc_nuclide::LoadScope::activation(product_mts.clone())
-                        .with_temperatures(temp_filter.clone());
                     match get_or_load_nuclide(nuclide_name, &source_map, &scope) {
                         Ok(nuclide) => {
                             material.nuclide_data.insert(nuclide_name.clone(), nuclide);

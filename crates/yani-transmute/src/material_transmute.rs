@@ -1052,6 +1052,20 @@ pub fn preload_activation_data(
         // ("Nuclide 'Os190' is not available in 'fendl-3.2d'.") and was being
         // discarded by the `.ok()` this replaces.
         let composition: HashSet<&str> = material.nuclides.keys().map(|s| s.as_str()).collect();
+        // The downloads behind the loads below go out together first, with a
+        // count of nuclides as they arrive. Without threads (wasm32) the loads
+        // are one at a time and so were the hundreds of downloads behind them.
+        yamc_nuclide::url_cache::prefetch(
+            &to_load
+                .iter()
+                .map(|(name, path)| yamc_nuclide::url_cache::DataRequest {
+                    source: path,
+                    name,
+                    kind: yamc_nuclide::url_cache::DataKind::Neutron,
+                    scope: &scope,
+                })
+                .collect::<Vec<_>>(),
+        );
         let decoded: Vec<LoadOutcome> = {
             let load_one = |(name, path): (String, String)| {
                 let sources = HashMap::from([(name.clone(), path)]);
