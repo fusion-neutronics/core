@@ -676,6 +676,23 @@ jobs:
           name: wheels-macos-aarch64
           path: packages/yamc-core/dist
 
+  # The Pyodide (Emscripten) wheel, which yamc-core publishes alongside the
+  # native ones: `micropip.install("yamc-core")` in a browser resolves it from
+  # PyPI. ci-pyodide.yml builds it and smoke-tests it inside Pyodide, and runs
+  # on its own for pushes and pull requests. It is called from here only when
+  # this run publishes yamc-core, because the trusted publisher is bound to this
+  # file and the upload has to come from `publish-yamc-core` below. Its
+  # artifact is `wheels-pyodide-wasm32`, so `collect` picks it up with the rest.
+  pyodide:
+    name: Pyodide wheel
+    needs: [plan]
+    if: needs.plan.outputs.publish_yamc == 'true'
+    uses: ./.github/workflows/ci-pyodide.yml
+    with:
+      yamc_version: ${{ inputs.yamc_version }}
+    permissions:
+      contents: read
+
   # Test MPI build and functionality: the Rust `mpi` feature and the Python
   # bindings built with it. This is the only MPI job. ci-rust.yml used to run
   # the Rust half on the same two runners, building and linking open-mpi a
@@ -1235,7 +1252,7 @@ jobs:
     # yani-wheel is not an ancestor of `test` (which needs only the three
     # platform wheel jobs), so without naming it here the download step can run
     # before that wheel exists and the release goes out with yamc only.
-    needs: [plan, test, test-mpi, yani-wheel, parity, verify-versions]
+    needs: [plan, test, test-mpi, pyodide, yani-wheel, parity, verify-versions]
     runs-on: ubuntu-latest
     # `!cancelled()` opts out of the default success() gating over `needs`,
     # which is the whole difficulty of a single-project release: on a
@@ -1244,7 +1261,8 @@ jobs:
     # publish jobs. Nothing would go out, silently. So each need is named, and
     # a skip is accepted only where the plan says that project is not being
     # built. A test that skipped on a run that IS building yamc is still a
-    # stop. `parity` is the same rule over both flags at once: it needs the two
+    # stop. `pyodide` runs only when yamc-core is published, and is a stop
+    # whenever it does. `parity` is the same rule over both flags at once: it needs the two
     # wheels, so it runs, and gates, only when both are built.
     #
     # Hyphenated job ids go through needs['...'], since needs.test-mpi parses
@@ -1258,6 +1276,8 @@ jobs:
           (needs.plan.outputs.build_yamc != 'true' ||
            (needs.test.result == 'success' &&
             needs['test-mpi'].result == 'success')) &&
+          (needs.plan.outputs.publish_yamc != 'true' ||
+           needs.pyodide.result == 'success') &&
           (needs.plan.outputs.build_yani != 'true' ||
            needs['yani-wheel'].result == 'success') &&
           (needs.plan.outputs.build_yamc != 'true' ||
@@ -1287,6 +1307,14 @@ jobs:
           # breaks `collect` outright and publishes neither.
           if [ "$BUILD_YAMC" = true ]; then
             mv dist/yamc_core-* dist-yamc/
+            # Exactly one Pyodide wheel. Its job is a stop above, but nothing
+            # else would notice a run that built it and lost the artifact, and
+            # the release would then go out without it.
+            pyodide_wheels="$(ls dist-yamc | grep -c -- '-pyemscripten_' || true)"
+            if [ "$pyodide_wheels" != 1 ]; then
+              echo "::error::expected one yamc-core Pyodide wheel, found $pyodide_wheels." >&2
+              exit 1
+            fi
           fi
           if [ "$BUILD_YANI" = true ]; then
             mv dist/yani_core-* dist-yani/
@@ -1389,7 +1417,9 @@ jobs:
   # one that published everything unless something says so, and the failure mode
   # this whole file has to avoid is a release that quietly publishes nothing at
   # all. So the plan is echoed, and each project the plan named is confirmed to
-  # be resolvable on PyPI.
+  # be resolvable on PyPI with every file `collect` handed its publish job: a
+  # version that exists is not a release that is complete, and yamc-core's
+  # Pyodide wheel is one file among four.
   assert-published:
     name: Assert what went out
     needs: [plan, publish-yamc-core, publish-yani-core]
@@ -1404,6 +1434,19 @@ jobs:
            needs.plan.outputs.publish_yani == 'true') }}
     steps:
       - uses: actions/checkout@v7
+      # What each publish job was given, so the files PyPI lists can be checked
+      # against them. Only for a project being published: the other artifact
+      # does not exist on a single-project release.
+      - uses: actions/download-artifact@v8
+        if: needs.plan.outputs.publish_yamc == 'true'
+        with:
+          name: dist-yamc
+          path: dist-yamc
+      - uses: actions/download-artifact@v8
+        if: needs.plan.outputs.publish_yani == 'true'
+        with:
+          name: dist-yani
+          path: dist-yani
       - shell: bash
         env:
           PUBLISH_YAMC: ${{ needs.plan.outputs.publish_yamc }}
@@ -1417,9 +1460,10 @@ jobs:
           version_of () { sed -nE 's/^version = "(.*)"/\1/p' "$1" | head -1; }
           fail=0
 
-          # project, publishing?, that job's result, dispatch override, file
+          # project, publishing?, that job's result, dispatch override, file,
+          # directory of the files its publish job uploaded
           confirm () {
-            local project="$1" publish="$2" result="$3" override="$4" file="$5"
+            local project="$1" publish="$2" result="$3" override="$4" file="$5" dir="$6"
             if [ "$publish" != true ]; then
               echo "$project: not part of this release (job: $result)"
               return 0
@@ -1432,23 +1476,29 @@ jobs:
 
             local version="${override:-$(version_of "$file")}"
             # PyPI's JSON API trails the upload by seconds rather than by
-            # nothing, so a single 404 here is propagation, not a failed
-            # release. Two minutes is well past what it takes; beyond that the
-            # upload is the likelier explanation.
-            local code=""
+            # nothing, so a file missing here at first is propagation, not a
+            # failed release. Two minutes is well past what it takes; beyond
+            # that the upload is the likelier explanation.
+            local listed="" missing="" f
             for _ in $(seq 1 12); do
-              code="$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/$project/$version/json")"
-              [ "$code" = "200" ] && break
+              listed="$(curl -sf "https://pypi.org/pypi/$project/$version/json" |
+                python3 -c 'import json, sys; print("\n".join(u["filename"] for u in json.load(sys.stdin)["urls"]))' || true)"
+              missing=""
+              for f in "$dir"/*; do
+                grep -qxF -- "$(basename "$f")" <<< "$listed" || missing="$missing $(basename "$f")"
+              done
+              [ -n "$listed" ] && [ -z "$missing" ] && break
               sleep 10
             done
-            if [ "$code" = "200" ]; then
-              echo "PUBLISHED $project $version"
+            if [ -n "$listed" ] && [ -z "$missing" ]; then
+              echo "PUBLISHED $project $version:"
+              sed 's/^/  /' <<< "$listed"
             else
-              echo "::error::$project $version is not on PyPI two minutes after its publish job succeeded (HTTP $code)." >&2
+              echo "::error::$project $version is missing from PyPI two minutes after its publish job succeeded:${missing:- the whole release}" >&2
               fail=1
             fi
           }
 
-          confirm yamc-core "$PUBLISH_YAMC" "$RESULT_YAMC" "${YAMC_OVERRIDE:-}" crates/yamc-python/Cargo.toml
-          confirm yani-core "$PUBLISH_YANI" "$RESULT_YANI" "${YANI_OVERRIDE:-}" crates/yani-python/Cargo.toml
+          confirm yamc-core "$PUBLISH_YAMC" "$RESULT_YAMC" "${YAMC_OVERRIDE:-}" crates/yamc-python/Cargo.toml dist-yamc
+          confirm yani-core "$PUBLISH_YANI" "$RESULT_YANI" "${YANI_OVERRIDE:-}" crates/yani-python/Cargo.toml dist-yani
           exit $fail

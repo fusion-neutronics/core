@@ -500,13 +500,39 @@ tag component names a version that disagrees with its manifest, if the tag names
 no project at all, or if the version is already on PyPI. So a tag cannot ship a
 number nobody bumped, and a bump cannot ship under a number nobody tagged.
 
+### The Pyodide wheel
+
+A `yamc-core` release also publishes a Pyodide (Emscripten) wheel,
+`yamc_core-<version>-cp310-abi3-pyemscripten_2026_0_wasm32.whl`, next to the
+native ones, so `micropip.install("yamc-core")` in Pyodide resolves it from
+PyPI. Its platform tag is the
+[PEP 783](https://peps.python.org/pep-0783/) one for the Pyodide release it is
+built against (`PYODIDE_VERSION` in `.github/workflows/ci-pyodide.yml`), and it
+installs only in that Pyodide ABI. It is built with `--no-default-features`, so
+it has no mesh geometry, CAD, GPU or TLS download stack.
+
+`.github/workflows/ci-pyodide.yml` builds the wheel and runs a transport inside
+Pyodide under Node. Pushes and pull requests run it on its own. A run of
+`ci-python.yml` that publishes `yamc-core` calls it as a reusable workflow,
+because PyPI's trusted publisher for `yamc-core` is bound to `ci-python.yml`
+and the upload has to come from there: `collect` picks the wheel up with the
+native ones, refuses a `yamc-core` release without exactly one Pyodide wheel,
+and `publish-yamc-core` uploads all four files together. `assert-published` then
+checks that PyPI lists every file that was handed to the publish job, not only
+that the version exists.
+
+The wheel is not attached to the GitHub release. PyPI carries the same file,
+and serves it with the CORS headers a browser needs to fetch it; GitHub release
+assets do not.
+
 ### Publishing without a release
 
 `workflow_dispatch` on the same workflow publishes without a tag, for the two
 cases where there should not be a release: a first upload that creates the
 project on PyPI, and a re-publish of one wheel after a fix. The `yamc_version` /
 `yani_version` inputs override the manifests for that run, since neither case has
-a tag to check against.
+a tag to check against. A dispatch that publishes `yamc-core` builds and
+uploads its Pyodide wheel too, at the overridden version if one is given.
 
 ## Nuclear data downloads
 
