@@ -61,14 +61,17 @@ pub enum Source {
     /// inflate its uncertainty.
     HalfLife,
     /// Decay branching ratios, from the MT=457 sigma on each mode. A replica
-    /// draws a parent's ratios as a zero-sum Gaussian, so their total is
-    /// kept: of the covariances that realise every stated sigma, the one of
-    /// largest entropy, which for two or three modes is the only one (two
-    /// modes move by `sigma z` and `-sigma z`). A largest sigma above the sum
-    /// of the others' is drawn as that sum, a single mode stating none is the
-    /// complement of the rest, and a mode under five sigmas from zero, or two
-    /// or more stating none, are held at their ratios while the rest share
-    /// what is left.
+    /// draws a parent's ratios keeping their total and every ratio in
+    /// `[0, T]`: each mode but one from a logit-normal with the evaluated
+    /// ratio as its mean and the stated sigma as its standard deviation, the
+    /// last their complement, coupled by a Gaussian copula so the modes carry
+    /// the zero-sum covariance of largest entropy that realises every stated
+    /// sigma (for two or three modes the only one). A largest sigma above the
+    /// sum of the others' is drawn as that sum. A single mode stating none is
+    /// the complement of the rest when it is the largest or the only way to
+    /// trade, and is held otherwise, as are two or more stating none and a
+    /// mode whose sigma no ratio with its mean can have
+    /// (`sigma^2 >= b (T - b)`); the rest share what is left.
     ///
     /// [`Info`] names every parent short of its stated sigmas by why. It
     /// moves the inventory only: a parent's own per-decay emission is the
@@ -652,29 +655,35 @@ pub struct Info {
     /// Each is a lognormal matched to the evaluation's mean and sigma, so none
     /// can go non-positive and there is no floor to count.
     pub half_lives_sampled: usize,
-    /// Reachable parents whose decay branching was perturbed: a zero-sum
-    /// Gaussian over their modes, every stated sigma realised where the sum
-    /// rule allows it.
+    /// Reachable parents whose decay branching was perturbed: every moving
+    /// mode at its evaluated mean, within `[0, T]`, with every stated sigma
+    /// realised where the sum rule and non-negative ratios allow it.
     pub decay_branchings_perturbed: BTreeSet<String>,
     /// Reachable parents with several decay modes held at nominal for want of
-    /// sigmas: none is stated, or one is beside two or more modes stating
-    /// none, so no mode can take up its change. Not a claim that the split is
-    /// exact.
+    /// sigmas: none is stated, or one is beside modes stating none that
+    /// cannot take up its change. Not a claim that the split is exact.
     pub no_decay_branching_uncertainty: BTreeSet<String>,
     /// Reachable parents held at nominal because every mode that could move
-    /// is under five sigmas from zero: a Gaussian that wide would have to be
-    /// truncated, which the evaluation does not describe.
+    /// states a sigma no ratio in `[0, T]` with its mean can have,
+    /// `sigma^2 >= b (T - b)` (JENDL-5.0 has ratios near 1e-16 stating 0.04),
+    /// which describes no distribution.
     pub decay_branchings_too_wide: BTreeSet<String>,
-    /// Perturbed parents with one or more modes held at their ratios, under
-    /// five sigmas from zero or beside another mode stating no sigma; the
+    /// Perturbed parents with one or more modes held at their ratios: a sigma
+    /// no ratio with its mean can have, or no sigma beside another mode
+    /// stating none or beside stated modes that trade between themselves. The
     /// other modes share what those leave.
     pub decay_branchings_partly_held: BTreeSet<String>,
-    /// Perturbed parents whose largest stated sigma exceeds the sum of the
-    /// others', which no split keeping the total can realise: it was drawn as
-    /// that sum, the others as stated.
-    pub decay_branchings_sigma_reduced: BTreeSet<String>,
-    /// Branching draws that left the simplex and were pulled back onto it,
-    /// and draws made, one per perturbed parent per replica.
+    /// Perturbed parents with a mode drawn more than 0.1% from its stated
+    /// sigma. Either the largest stated sigma exceeds the sum of the others',
+    /// which no split keeping the total can realise, and it was drawn as that
+    /// sum; or the modes drawn beside the complement cannot carry the
+    /// correlation its sigma needs while staying non-negative (two small
+    /// skewed modes cannot be strongly anticorrelated), and it was drawn at
+    /// the nearest sigma they allow.
+    pub decay_branchings_sigma_adjusted: BTreeSet<String>,
+    /// Branching draws whose complement fell below zero, the other modes
+    /// together exceeding the total, and were pulled back towards the nominal
+    /// ratios, and draws made, one per perturbed parent per replica.
     pub decay_branchings_floored: usize,
     pub decay_branchings_sampled: usize,
     /// Reachable unstable nuclides whose decay energy was perturbed.
@@ -861,7 +870,7 @@ impl Info {
             || !self.no_decay_branching_uncertainty.is_empty()
             || !self.decay_branchings_too_wide.is_empty()
             || !self.decay_branchings_partly_held.is_empty()
-            || !self.decay_branchings_sigma_reduced.is_empty()
+            || !self.decay_branchings_sigma_adjusted.is_empty()
             || !self.no_decay_energy_uncertainty.is_empty()
             || !self.half_life_uncertainty_not_carried.is_empty()
             || !self.decay_energy_uncertainty_not_carried.is_empty()
