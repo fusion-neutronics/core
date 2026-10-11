@@ -703,6 +703,7 @@ pub(crate) fn transport_particle<T: Tracker>(
                     if let Some(ref macro_xs) = photon_macro_xs {
                         let incoming_energy = particle.energy;
                         let incoming_weight = particle.weight;
+                        let banked = particle_bank.len();
                         let (tally_mt, bank_second_photon_energy) = handle_photon_collision(
                             particle,
                             material,
@@ -711,6 +712,7 @@ pub(crate) fn transport_particle<T: Tracker>(
                             ctx.photon_cutoff_energy,
                             rng,
                         );
+                        replica::inherit_replicas(particle, particle_bank, banked);
 
                         // Score photon heating using the analog collision
                         // estimator. heat = (E_in - E_out - banked photon
@@ -920,6 +922,7 @@ pub(crate) fn do_photon_collision<T: Tracker>(
 
     let incoming_energy = particle.energy;
     let incoming_weight = particle.weight;
+    let banked = particle_bank.len();
     let (tally_mt, bank_second_photon_energy) = handle_photon_collision(
         particle,
         material,
@@ -928,6 +931,7 @@ pub(crate) fn do_photon_collision<T: Tracker>(
         photon_cutoff_energy,
         rng,
     );
+    replica::inherit_replicas(particle, particle_bank, banked);
     // Analog heating: (E_in - E_out - banked photon energy) * weight;
     // electron/positron kinetic energy deposits locally (see
     // handle_photon_collision).
@@ -1192,6 +1196,16 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                     if verify_crossing(ctx, particle, cell_index, boundary_hit.distance) {
                         continue;
                     }
+                    // A surface step flies against the local Σ_t, so its
+                    // replica factors are surface tracking's.
+                    let segment = ctx.replica.and_then(|r| {
+                        replica::ReplicaSegment::new(
+                            r,
+                            particle,
+                            cell.material_idx,
+                            boundary_hit.distance,
+                        )
+                    });
                     let end_position = score_track_length_segment(
                         particle,
                         cell,
@@ -1202,9 +1216,11 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                         ctx.tallies,
                         ctx.transmutation_tallies,
                         welford_worker,
-                        // Replica runs are refused under delta tracking.
-                        None,
+                        segment.as_ref(),
                     );
+                    if let Some(segment) = &segment {
+                        segment.apply(particle);
+                    }
                     handle_surface_crossing(
                         particle,
                         cell_index,
@@ -1221,6 +1237,9 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                     // Real collision in this cell (a finite collision
                     // distance implies a material cell -- a void has
                     // `dist_collision = inf` and takes the cross branch).
+                    let segment = ctx.replica.and_then(|r| {
+                        replica::ReplicaSegment::new(r, particle, cell.material_idx, dist_collision)
+                    });
                     let _ = score_track_length_segment(
                         particle,
                         cell,
@@ -1231,9 +1250,11 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                         ctx.tallies,
                         ctx.transmutation_tallies,
                         welford_worker,
-                        // Replica runs are refused under delta tracking.
-                        None,
+                        segment.as_ref(),
                     );
+                    if let Some(segment) = &segment {
+                        segment.apply(particle);
+                    }
                     particle.move_by(dist_collision);
                     let material = cell_material
                         .expect("a finite collision distance implies a material cell")
@@ -1457,6 +1478,12 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
             // Delta-tracking flux estimator (TrackLength tallies) at the
             // delta-collision point -- scored for vacuum and material
             // cells alike, since flux is nonzero in voids too.
+            // A photon's ratios do not move along its flights or at its
+            // collisions (photon data carries no covariance), so it scores
+            // with the ratios it was born with.
+            let point = ctx.replica.and_then(|r| {
+                replica::ReplicaSegment::at_point(r, particle, new_cell.material_idx)
+            });
             score_woodcock_flight_estimator(
                 particle,
                 new_cell,
@@ -1469,6 +1496,7 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
                 ctx.woodcock_tl_mesh_eligible,
                 ctx.transmutation_tallies,
                 welford_worker,
+                point.as_ref(),
             );
 
             // Vacuum at landing point -- purely fictitious, no collision
@@ -1551,6 +1579,12 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
         // Delta-tracking flux estimator (TrackLength tallies) at the
         // delta-collision point -- scored for vacuum and material cells
         // alike, since flux is nonzero in voids too.
+        // Every replica's flights are drawn against the same Σ_maj, so the
+        // delta collisions' density is replica-independent and the estimator
+        // scores each replica with the ratio the particle arrived with.
+        let point = ctx
+            .replica
+            .and_then(|r| replica::ReplicaSegment::at_point(r, particle, new_cell.material_idx));
         score_woodcock_flight_estimator(
             particle,
             new_cell,
@@ -1563,6 +1597,7 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
             ctx.woodcock_tl_mesh_eligible,
             ctx.transmutation_tallies,
             welford_worker,
+            point.as_ref(),
         );
 
         // Vacuum at landing point -- purely fictitious, no collision
@@ -1578,7 +1613,11 @@ pub(crate) fn transport_particle_woodcock<T: Tracker>(
         let reject_xi: f64 = rng.random();
         if reject_xi >= p_real {
             // Fictitious event -- loop continues from the post-flight
-            // position.
+            // position. Each replica would have rejected it with its own
+            // probability, which its ratio carries.
+            if let Some(r) = ctx.replica {
+                r.apply_virtual(particle, new_cell.material_idx, sigma_maj, sigma_t);
+            }
             continue;
         }
 
@@ -1911,6 +1950,29 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
             // the neutron's pre-scatter weight. Correct ordering:
             // sample_secondary_photons() → absorption() → scatter()
             if transport_secondary_photons {
+                // With replica weights a photon starts from its neutron's
+                // ratios before this collision, times its own reaction's
+                // `σ'_mt / σ_mt`: the photon's production density is
+                // `N y σ_mt` per unit path, which replica `k` scales by that
+                // ratio (the yield `y` carries no covariance). Photon data
+                // has none either, so it carries those ratios unchanged to
+                // every photon tally and photon heating score.
+                let parent_replica = ctx.replica.zip(particle.replica.as_deref());
+                let slot = cell.material_idx;
+                let inherit = |photon: &mut yamc_particle::particle::Particle, mt: i32| {
+                    if let Some((r, parent)) = parent_replica {
+                        let mut state: Box<[f64]> = parent.into();
+                        replica::apply_reaction(
+                            r,
+                            &mut state,
+                            slot,
+                            nuclide_name,
+                            mt,
+                            incoming_energy,
+                        );
+                        photon.replica = Some(state);
+                    }
+                };
                 if let Some(temp_idx) = nuclide.get_temp_idx(material.temperature()) {
                     if let Some(fast_grid) = nuclide.fast_xs.get(temp_idx) {
                         let (i_grid, f) = fast_grid.lookup_grid_index(incoming_energy);
@@ -1940,6 +2002,7 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                                                 total_xs,
                                                 particle_bank,
                                                 rng,
+                                                inherit,
                                             );
                                         }
                                     }
@@ -1962,6 +2025,7 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                                     photon_prod_xs,
                                     particle_bank,
                                     rng,
+                                    inherit,
                                 );
                             }
                         }
@@ -1993,7 +2057,21 @@ pub(crate) fn handle_neutron_collision<T: Tracker>(
                         rng,
                     );
                     let produced = fission_neutrons.len();
-                    for fission_n in fission_neutrons {
+                    for mut fission_n in fission_neutrons {
+                        // The progeny's density is `N ν σ_f` per unit path,
+                        // so each replica's ratio takes `σ'_f / σ_f` from the
+                        // survivor's before this collision; the survivor,
+                        // which scatters, takes its scatter's own factor.
+                        if let (Some(r), Some(state)) = (ctx.replica, fission_n.replica.as_mut()) {
+                            replica::apply_reaction(
+                                r,
+                                state,
+                                cell.material_idx,
+                                nuclide_name,
+                                18,
+                                incoming_energy,
+                            );
+                        }
                         particle_bank.bank_secondary(fission_n);
                     }
                     charge_fission_progeny(particle_bank, produced, material, nuclide_name);
@@ -2779,6 +2857,7 @@ mod tests {
             &[false],
             None,
             &mut welford,
+            None,
         );
 
         assert!(
@@ -2810,6 +2889,7 @@ mod tests {
             &[false],
             None,
             &mut welford,
+            None,
         );
         assert_eq!(bin0(&welford), 0.0);
     }

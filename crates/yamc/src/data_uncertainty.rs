@@ -347,7 +347,6 @@ impl Model {
     pub(crate) fn validate_data_uncertainty(
         &self,
         data: &crate::model::TransportDataUncertainty,
-        mpi_size: usize,
         transmutation: bool,
     ) -> Result<(), String> {
         let refuse = |what: &str| {
@@ -361,21 +360,6 @@ impl Model {
                 "data_uncertainty needs at least 2 replicas to estimate a spread, got {}",
                 data.replicas
             ));
-        }
-        if mpi_size > 1 {
-            return refuse("MPI runs");
-        }
-        if self.tracking_mode != crate::model::TrackingMode::Surface {
-            return refuse("tracking_mode other than 'surface' (delta tracking)");
-        }
-        if self.survival_biasing().is_some() {
-            return refuse("survival biasing (implicit capture)");
-        }
-        if !self.weight_windows().is_empty() {
-            return refuse("weight windows");
-        }
-        if self.has_photons() {
-            return refuse("photon transport (secondary, decay or source photons)");
         }
         let tallies: &[Arc<yamc_tallies::tally::Tally>] =
             if transmutation { &[] } else { &self.tallies };

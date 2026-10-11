@@ -1509,7 +1509,7 @@ impl Tally {
     /// than touching storage directly -- same pattern as
     /// `score_track_length_with`.
     #[allow(clippy::too_many_arguments)]
-    fn score_collision_with(
+    pub fn score_collision_with(
         &self,
         score_fn: &mut dyn FnMut(usize, f64),
         weight: f64,

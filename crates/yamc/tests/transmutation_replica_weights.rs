@@ -281,30 +281,3 @@ fn the_held_flux_overstates_a_self_shielded_spread() {
     eprintln!("rms W187 shift: held {h:.4e}, replica weights {w:.4e}");
     assert!(h > 1.05 * w, "held {h:e} against replica weights {w:e}");
 }
-
-/// A configuration the weights do not carry is refused before anything
-/// runs, naming the held flux as the way to run it anyway.
-#[test]
-fn an_unsupported_transport_names_the_held_flux() {
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let (Some(dir), Some(chain)) = (w186(tmp.path()), chain()) else {
-        eprintln!("skipping: W186 or chain fixture not fetched");
-        return;
-    };
-    let mut m = model(&dir, vec![]);
-    m.tracking_mode = TrackingMode::Woodcock;
-    let err = m
-        .transmute(
-            "independent",
-            &schedule(),
-            Arc::clone(&chain),
-            Arc::new(yani::BranchTable::new()),
-            Default::default(),
-            &settings(),
-            Some(&request(FluxResponse::ReplicaWeights)),
-        )
-        .expect_err("delta tracking carries no replica weights");
-    let message = err.to_string();
-    assert!(message.contains("delta tracking"), "{message}");
-    assert!(message.contains("flux_response=\"held\""), "{message}");
-}

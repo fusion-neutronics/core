@@ -1722,6 +1722,11 @@ impl TransmutationTallies {
             }
         }
 
+        // The per-replica sums, when the transport carried replica weights.
+        if let Some(replicas) = &self.replicas {
+            replicas.pack(&mut packed);
+        }
+
         mpi_ctx.reduce_sum_f64(&mut packed, 0);
         mpi_ctx.broadcast_f64(&mut packed, 0);
 
@@ -1788,6 +1793,9 @@ impl TransmutationTallies {
             if let Some(stats) = &self.statistics {
                 off = stats.unpack(*id, &packed, off);
             }
+        }
+        if let Some(replicas) = &self.replicas {
+            off = replicas.unpack(&packed, off);
         }
         debug_assert_eq!(off, packed.len(), "pack / unpack layout must agree");
     }

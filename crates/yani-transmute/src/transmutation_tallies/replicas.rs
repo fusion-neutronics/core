@@ -446,6 +446,27 @@ impl ReplicaSums {
         }
     }
 
+    /// Append the shared sums, slot by slot, for a reduction across ranks.
+    /// They are sums over each rank's histories of the same replicas' scores
+    /// (every rank draws the replicas from the same seed), so they add.
+    pub(crate) fn pack(&self, out: &mut Vec<f64>) {
+        for s in &self.sums {
+            out.extend_from_slice(&s.lock().unwrap_or_else(|p| p.into_inner()));
+        }
+    }
+
+    /// Read back what [`Self::pack`] wrote from `packed` at `off`; the offset
+    /// past it.
+    pub(crate) fn unpack(&self, packed: &[f64], mut off: usize) -> usize {
+        for s in &self.sums {
+            let mut s = s.lock().unwrap_or_else(|p| p.into_inner());
+            let n = s.len();
+            s.copy_from_slice(&packed[off..off + n]);
+            off += n;
+        }
+        off
+    }
+
     pub(crate) fn reset(&self) {
         for s in &self.sums {
             s.lock().unwrap_or_else(|p| p.into_inner()).fill(0.0);

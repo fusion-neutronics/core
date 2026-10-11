@@ -183,6 +183,16 @@ impl ParticleBank {
         self.stack.len()
     }
 
+    /// The particles banked since the bank held `start` of them, to adjust
+    /// in place before any is popped: a reaction's secondaries, given what
+    /// the reaction alone knows about them (the transport's nuclear-data
+    /// replica ratios, for one).
+    #[inline]
+    pub fn banked_since_mut(&mut self, start: usize) -> &mut [Particle] {
+        let start = start.min(self.stack.len());
+        &mut self.stack[start..]
+    }
+
     /// Clear all particles from the bank and reset the per-history split and
     /// fission-progeny counts and the secondary-seed bookkeeping.
     pub fn clear(&mut self) {
