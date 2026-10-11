@@ -248,9 +248,12 @@ class DataUncertainty:
       themselves: each replica draws them from their covariance, rebuilds the
       resonance range's cross sections from the draw and Doppler broadens the
       change to the temperature in use, so the resonance range's uncertainty
-      is exact in the parameters rather than first order. A nuclide whose
-      parameters cannot be sampled keeps the first-order MF=32 rows of
-      ``covariance.arrow``, and the report says which and why;
+      is exact in the parameters rather than first order. On a
+      transport-coupled run the change is folded against the flux the
+      transport tallied on the nuclide's own energy grid through its
+      resonances, so a self-shielded resonance is weighted with its own flux
+      dip. A nuclide whose parameters cannot be sampled keeps the first-order
+      MF=32 rows of ``covariance.arrow``, and the report says which and why;
     - ``"flux_spectrum"``: the spectrum itself, from the per-bin
       ``flux_std_dev`` given on a ``Pulse``;
     - ``"half_life"``: every reachable nuclide's half-life, from the decay
@@ -434,6 +437,21 @@ class DataUncertainty:
             is too noisy to trust on fewer, and at most 1024: a run that stops
             there sets ``hit_cap`` in the info and lists every output, nuclide
             and step that missed under ``unconverged``. Must be between 0 and 1.
+        flux_response (str, optional): For ``Model.simulate_transmutation``
+            only, how the flux answers each replica's perturbed cross
+            sections. ``"replica_weights"`` (the default when ``None``): the
+            transport carries one likelihood-ratio weight per replica along
+            every history and tallies every reaction rate once per replica
+            under it, so each replica's rates come from the flux its own data
+            would give, self-shielding dips and all. The replica count is then
+            fixed before the transport: ``samples``, or the count a Gaussian
+            output needs to reach ``convergence`` (256 at 0.05), and every one
+            is solved. ``"held"``: one nominal transport whose tallied flux
+            every replica's cross sections are folded against; cheaper and
+            open to every transport configuration, but it overstates the
+            sigma of a self-shielded resonance, several-fold for a strong
+            one. ``Material.transmute`` and ``simulate_transport`` have no
+            choice to make, and raise if it is given.
     
     Examples:
         >>> results = iron.transmute(
@@ -461,8 +479,14 @@ class DataUncertainty:
         it, that an adaptive run stops on.
         """
     @property
+    def flux_response(self) -> builtins.str:
+        r"""
+        How a transport-coupled run takes the flux's response to each
+        replica's cross sections: ``"replica_weights"`` or ``"held"``.
+        """
+    @property
     def sources(self) -> builtins.list[builtins.str]: ...
-    def __new__(cls, seed: builtins.int = 1, samples: typing.Optional[builtins.int] = None, sources: typing.Optional[typing.Sequence[builtins.str]] = None, attribution: builtins.bool = False, convergence: typing.Optional[builtins.float] = None) -> DataUncertainty: ...
+    def __new__(cls, seed: builtins.int = 1, samples: typing.Optional[builtins.int] = None, sources: typing.Optional[typing.Sequence[builtins.str]] = None, attribution: builtins.bool = False, convergence: typing.Optional[builtins.float] = None, flux_response: typing.Optional[builtins.str] = None) -> DataUncertainty: ...
     @staticmethod
     def available_sources() -> builtins.list[builtins.str]:
         r"""
@@ -3356,7 +3380,8 @@ class TransmutationResults:
         - ``resonance_parameters``: per nuclide with resonance parameters
           (MF=2 and MF=32) and a rate in this run, how its resonance-range
           uncertainty was sampled. ``method`` is ``"parameters sampled"``
-          (drawn per replica and the cross sections rebuilt from them) or
+          (drawn per replica and the cross sections rebuilt from them, on a
+          transport run against the flux it tallied through the resonances) or
           ``"first-order rows"`` (the MF=32 rows of ``covariance.arrow``),
           ``reason`` why the parameters were not sampled (``None`` where they
           were), and ``ranges`` one sampler report per sampled range:

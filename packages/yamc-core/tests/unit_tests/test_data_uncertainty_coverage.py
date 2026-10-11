@@ -71,6 +71,13 @@ def test_iron_reports_what_it_covers_and_how():
     assert fe56["nubar_covariance"] == []
     assert fe56["spectrum_covariance"] is False
     assert any("MF=31" in item for item in coverage["not_perturbed"])
+    # Resonance parameters are reported per nuclide whose folder carries
+    # them, each with how a run takes them and why not where they are not
+    # sampled.
+    assert isinstance(coverage["resonance_parameters"], dict)
+    for entry in coverage["resonance_parameters"].values():
+        assert entry["method"] in ("parameters sampled", "first-order rows")
+        assert (entry["reason"] is None) == (entry["method"] == "parameters sampled")
 
 
 def test_a_nuclide_without_covariance_is_named_not_reported_exact():

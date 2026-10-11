@@ -135,6 +135,10 @@ const PANEL_POINTS: usize = 16;
 /// of energy can be known better than `ε y ψ`.
 const PANEL_TOLERANCE: f64 = 1e-14;
 
+/// The closest two flux edges may be, in Doppler widths, and each still
+/// start a panel of `w`.
+const KNOT_SPACING: f64 = 0.25;
+
 /// The inverse square root of pi.
 const FRAC_1_SQRT_PI: f64 = 0.564_189_583_547_756_3;
 
@@ -961,6 +965,19 @@ impl WeightBuilder {
         knots.push(support_hi);
         knots.sort_by(f64::total_cmp);
         knots.dedup();
+        // Edges closer together than `KNOT_SPACING` widths are not features
+        // `w` can show apart, the kernel being a width wide: only the first
+        // of such a run starts a panel. A tallied flux has an edge at every
+        // point of a cross section's grid, thousands a resonance, and fitting
+        // a panel from each costs seconds and buys nothing the refinement
+        // below does not.
+        let mut thinned: Vec<f64> = Vec::with_capacity(knots.len());
+        for &k in &knots {
+            if thinned.last().is_none_or(|&last| k - last >= KNOT_SPACING) || k == support_hi {
+                thinned.push(k);
+            }
+        }
+        let knots = thinned;
 
         let mut starts = Vec::new();
         for w in knots.windows(2) {

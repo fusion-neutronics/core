@@ -10,7 +10,7 @@ use crate::isomer_branching_uncertainty::{IsomerCovariance, IsomerRun, IsomerSpe
 use crate::multigroup::{collapse_with_lists, fold_list, scale_rates, Collapsed};
 use crate::results::TransmutationResults;
 use crate::self_shielding::{Shielding, ShieldingInfo};
-use crate::transmutation_tallies::PartialRates;
+use crate::transmutation_tallies::{PartialRates, ReplicaTallied};
 use crate::uncertainty::{
     check_convergence, densities_of, DataUncertainty, Ensemble, Info, BLOCK, MAX_SAMPLES,
 };
@@ -1175,7 +1175,7 @@ pub fn preload_activation_data(
 /// replaces everything it holds, and a folder without the file has nothing to
 /// add, so a material whose nuclides were loaded (or edited) in memory reads
 /// exactly as it did before the section existed.
-fn ensure_resonance_parameters_loaded(
+pub(crate) fn ensure_resonance_parameters_loaded(
     material: &mut Material,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let lacking: Vec<(String, String, LoadScope)> = material
@@ -1293,13 +1293,20 @@ fn replica_steps(
 
 /// A transport run's tallied rates with their statistical covariance, and
 /// the unfolded chain their branching is refined from.
-pub(crate) struct TransportStatistics {
+pub(crate) struct TransportStatistics<'a> {
     rates: crate::statistical::StatisticalRates,
     /// Keys the statistical draw, so different materials' tallies are drawn
     /// independently.
     material_id: u32,
     base_chain: Arc<HashMap<String, ChainNuclide>>,
     branch: Arc<BranchTable>,
+    /// The tallied flux on [`crate::resonance_rates::resolved_flux_grid`],
+    /// which a replica's rebuilt resonance cross sections are folded
+    /// against.
+    resolved: Option<MultigroupSpectrum>,
+    /// Each replica's tally under the transport's replica weights, when the
+    /// transport carried them.
+    replicas: Option<&'a ReplicaTallied>,
 }
 
 /// One material's independent-mode transport result, per source particle.
@@ -1317,6 +1324,11 @@ pub struct TransportTallied {
     /// normalization as `rates`: the fold divides partial rates taken from it
     /// by `rates`, so its magnitude matters.
     pub spectrum: MultigroupSpectrum,
+    /// The tallied flux on [`crate::resonance_rates::resolved_flux_grid`], at
+    /// the same normalization, when the transport tallied it: what a
+    /// replica's resonance parameters are sampled against. `None` keeps every
+    /// nuclide's first-order MF=32 rows.
+    pub resolved_spectrum: Option<MultigroupSpectrum>,
     /// The statistical covariance of `rates` and `partials`, when the tally
     /// carried history statistics.
     pub statistics: Option<crate::history_statistics::RateCovariance>,
@@ -1326,6 +1338,13 @@ pub struct TransportTallied {
     /// The clipped and held production and the MT=5 rates the tally measured
     /// beside the partials, at the same normalization.
     pub diagnostics: CoupledDiagnostics,
+    /// Every replica's tally, when the transport carried nuclear-data replica
+    /// weights ([`crate::uncertainty::FluxResponse::ReplicaWeights`]): replica
+    /// `k`'s rates, partials and fission-yield weights are those transport
+    /// tallied under replica `k`'s cross sections, flux response and all, and
+    /// replace the fold of perturbed cross sections against the nominal
+    /// flux. `None` holds the flux at the nominal transport's.
+    pub replicas: Option<ReplicaTallied>,
 }
 
 /// Uncertainty on an independent-mode transport transmutation, by resampling and re-solving exactly as [`transmute_material`]
@@ -1333,7 +1352,21 @@ pub struct TransportTallied {
 ///
 /// Every source in [`crate::uncertainty::Source::IMPLEMENTED`] applies except
 /// `flux_spectrum`: there is no supplied spectrum, and the flux's error is the
-/// statistical one. Covariances are folded against the tally's own flux shape.
+/// statistical one.
+///
+/// The cross sections enter one of two ways. With [`TransportTallied::replicas`]
+/// (the transport carried replica weights), replica `k`'s rates, isomeric
+/// partials and fission-yield weights are the ones the transport tallied under
+/// replica `k`'s data, so the flux they come from answers that data, and
+/// nothing about the cross sections is folded here; every replica the
+/// transport carried is solved, and the convergence target is judged at that
+/// count. Without them, each replica's cross sections are folded against the
+/// one tallied flux, held for every replica: MF=33 against the tally's union
+/// grid spectrum, sampled resonance parameters against
+/// [`TransportTallied::resolved_spectrum`]. The sources that do not move the
+/// transport (half-lives, decay branchings, fission yields, decay energies and
+/// photon lines) are drawn here per replica either way, keyed on the same
+/// replica index, so a replica is one draw of every source.
 ///
 /// The statistical draw is keyed on `initial.material_id`, so materials with
 /// distinct ids draw their tallies' errors independently, while the
@@ -1354,6 +1387,7 @@ pub fn transport_replicas(
     let mut initial = initial.clone();
     if request.wants(crate::uncertainty::Source::CrossSections) {
         initial.ensure_covariance_loaded()?;
+        ensure_resonance_parameters_loaded(&mut initial)?;
         ensure_derivations_loaded(&mut initial, chain)?;
     }
     // The nominal the replicas scatter around: the same branching fold the
@@ -1390,6 +1424,8 @@ pub fn transport_replicas(
         material_id,
         base_chain: Arc::clone(chain),
         branch: Arc::clone(&tallied.branch),
+        resolved: tallied.resolved_spectrum.clone(),
+        replicas: tallied.replicas.as_ref(),
     });
     let no_statistics = TransportStatistics {
         rates: crate::statistical::StatisticalRates::new(
@@ -1398,6 +1434,8 @@ pub fn transport_replicas(
         material_id,
         base_chain: Arc::clone(chain),
         branch: Arc::clone(&tallied.branch),
+        resolved: tallied.resolved_spectrum.clone(),
+        replicas: tallied.replicas.as_ref(),
     };
     run_replicas(
         &initial,
@@ -1607,7 +1645,7 @@ fn run_replicas(
     shielding: Option<&Shielding>,
     lists: &Lists<'_>,
     isomer: Option<&IsomerCovariance>,
-    statistical: Option<&TransportStatistics>,
+    statistical: Option<&TransportStatistics<'_>>,
 ) -> Result<(Ensemble, Info), Box<dyn std::error::Error>> {
     check_convergence(request.convergence)?;
     // The two paths each have one source the other lacks. A transport run has
@@ -1622,9 +1660,36 @@ fn run_replicas(
         crate::uncertainty::Source::IsomerBranching => !transport,
         _ => true,
     };
+    if !transport && request.flux_response != crate::uncertainty::FluxResponse::default() {
+        return Err(format!(
+            "flux_response={:?} applies to a transport-coupled run \
+             (Model.simulate_transmutation); a spectrum run's flux is the one supplied",
+            request.flux_response.name()
+        )
+        .into());
+    }
     let want_statistical = transport && request.wants(crate::uncertainty::Source::Statistical);
     let statistical_in = statistical;
     let statistical = statistical.filter(|s| want_statistical && !s.rates.is_empty());
+    // The transport's own replicas, when it carried replica weights and the
+    // cross sections are perturbed: each replica's rates are then its tally,
+    // flux response and all, and nothing about the cross sections is folded
+    // on this side. Without the cross-section source (one source alone, for
+    // attribution) the nominal tally is the one to solve with.
+    let replica_tallies = statistical_in
+        .and_then(|s| s.replicas)
+        .filter(|_| request.wants(crate::uncertainty::Source::CrossSections));
+    if let (Some(t), Some(n)) = (replica_tallies, request.samples) {
+        if n != t.replicas() {
+            return Err(format!(
+                "the transport carried {} replica weights and the request asks for {n} \
+                 replicas; a transport-coupled run with replica weights solves exactly the \
+                 replicas its transport carried",
+                t.replicas()
+            )
+            .into());
+        }
+    }
 
     // One fold per distinct spectrum and one factorization per nuclide, not
     // per replica.
@@ -1710,11 +1775,17 @@ fn run_replicas(
     }
 
     // Resonance parameters, where a nuclide's folder carries them: drawn per
-    // replica and its cross sections rebuilt, exact in the parameters. Not on
-    // a transport run, which keeps the first-order MF=32 rows (its flux is
-    // one transport's, so a replica has no spectrum to weight a rebuilt
-    // cross section with but the tally's).
-    let resonance = (cross_sections && !transport).then(|| {
+    // replica and its cross sections rebuilt, exact in the parameters. A
+    // transport run weights them with the flux it tallied through the
+    // resonances, and its rates are the tally's; without that flux it keeps
+    // the first-order MF=32 rows, as the coarse spectrum cannot weight a
+    // resonance.
+    let resolved = statistical_in.and_then(|s| s.resolved.as_ref());
+    let resonance = if !cross_sections || replica_tallies.is_some() {
+        // With replica weights the transport applied each replica's drawn
+        // parameters itself, along every history.
+        None
+    } else if !transport {
         let weight_spectra: Vec<crate::resonance_rates::WeightSpectrum> = per_spectrum
             .iter()
             .zip(spectra)
@@ -1722,10 +1793,37 @@ fn run_replicas(
                 rates: &p.0,
                 masses: &s.masses,
                 boundaries: &s.boundaries,
+                resolved: false,
             })
             .collect();
-        crate::resonance_rates::ResonanceRun::new(initial, &weight_spectra, shielding, request.seed)
-    });
+        Some(crate::resonance_rates::ResonanceRun::new(
+            initial,
+            &weight_spectra,
+            shielding,
+            request.seed,
+        ))
+    } else if let Some(fine) = resolved {
+        let weight_spectra = [crate::resonance_rates::WeightSpectrum {
+            rates: &per_spectrum[0].0,
+            masses: &fine.masses,
+            boundaries: &fine.boundaries,
+            resolved: true,
+        }];
+        Some(crate::resonance_rates::ResonanceRun::new(
+            initial,
+            &weight_spectra,
+            None,
+            request.seed,
+        ))
+    } else {
+        Some(crate::resonance_rates::ResonanceRun::held(
+            initial,
+            &per_spectrum[0].0,
+            "the transport tallied no flux through the resonances \
+             (TransportTallied::resolved_spectrum), so there is no spectrum fine \
+             enough to weight a rebuilt resonance with",
+        ))
+    };
     // What a replica draws MF=33 from: the same fields, less the first-order
     // MF=32 rows of every nuclide whose parameters are sampled, so the
     // resonance range is counted once. Everything that reads the
@@ -1734,7 +1832,7 @@ fn run_replicas(
     // of the same source. Only the sampled nuclides are fielded again; every
     // other nuclide's field, and so its draw, is the one in `sampler`.
     let sampled = resonance.as_ref().map(|r| r.sampled()).unwrap_or_default();
-    let mf33_sampler = (!sampled.is_empty()).then(|| {
+    let mf33_sampler = (!sampled.is_empty() && replica_tallies.is_none()).then(|| {
         let restricted: Vec<ReactionRates> = per_spectrum
             .iter()
             .map(|p| {
@@ -2097,6 +2195,17 @@ fn run_replicas(
     if let Some(r) = &resonance {
         info.resonance_parameters = r.methods().clone();
     }
+    if let Some(t) = replica_tallies {
+        info.resonance_parameters = t.resonance_parameters.clone();
+    }
+    info.flux_response = match (transport, replica_tallies) {
+        (false, _) => crate::uncertainty::FluxResponseReport::Supplied,
+        (true, Some(t)) => crate::uncertainty::FluxResponseReport::ReplicaWeights {
+            replicas: t.replicas(),
+        },
+        (true, None) if cross_sections => crate::uncertainty::FluxResponseReport::Held,
+        (true, None) => crate::uncertainty::FluxResponseReport::Unperturbed,
+    };
     // On the spectrum path a spectrum without a per-bin sigma, or any spectrum
     // with the source off, is used as given. When only some are, the entry
     // says so, so it never reads as held for a flux that was partly sampled.
@@ -2129,7 +2238,7 @@ fn run_replicas(
     // tallied values may still be drawn statistically; what is held is how
     // the flux would answer a perturbed cross section. With cross sections off
     // there is no perturbed cross section for it to answer, so nothing is held.
-    if transport && cross_sections {
+    if transport && cross_sections && replica_tallies.is_none() {
         info.not_perturbed
             .push("flux response to perturbed cross sections (one transport)".to_string());
     }
@@ -2186,6 +2295,7 @@ fn run_replicas(
         && no_fission_yields
         && isomer_run.is_none()
         && statistical.is_none()
+        && replica_tallies.is_none()
     {
         info.converged = true;
         info.convergence = request.convergence;
@@ -2218,7 +2328,14 @@ fn run_replicas(
         return Ok((ensemble, info));
     }
 
-    let target = request.samples;
+    // With replica weights the transport fixed how many replicas there are,
+    // and every one of them is solved: the transport is the expensive part,
+    // and stopping early would only discard replicas already paid for.
+    // Whether the sigmas reached the target at that count is judged and
+    // reported all the same.
+    let target = request
+        .samples
+        .or(replica_tallies.map(ReplicaTallied::replicas));
     let cap = target.unwrap_or(MAX_SAMPLES);
     let mut replica: u64 = 0;
 
@@ -2237,7 +2354,10 @@ fn run_replicas(
         // One draw of every nuclide's cross sections, read by every spectrum,
         // and of every sampled nuclide's resonance parameters, rebuilt into
         // a shift of each rate they move.
-        let xs_draw = draw_sampler.draw(request.seed, replica);
+        let xs_draw = match replica_tallies {
+            Some(_) => Default::default(),
+            None => draw_sampler.draw(request.seed, replica),
+        };
         let resonance_shifts = match &resonance {
             Some(r) if !r.is_empty() => Some(r.shifts(replica)?),
             _ => None,
@@ -2251,8 +2371,40 @@ fn run_replicas(
         // re-folded into the branching the way the nominal was, so an
         // isomeric split moves with the rates it is made of.
         let mut statistical_floored = 0usize;
-        let drawn = match statistical {
-            Some(st) => {
+        let drawn = match (replica_tallies, statistical) {
+            (Some(t), st) => {
+                // The transport's replica: its rates and partials, with the
+                // nominal tally's statistical error added on top when that
+                // source is on (see `StatisticalRates::add_to`).
+                let k = replica as usize;
+                let mut totals = t.rates[k].clone();
+                let mut partials = t.partials[k].clone();
+                if let Some(st) = st {
+                    statistical_floored = st.rates.add_to(
+                        request.seed,
+                        st.material_id,
+                        replica,
+                        &mut totals,
+                        &mut partials,
+                    );
+                }
+                rates_sampled += totals.values().map(HashMap::len).sum::<usize>();
+                let base = statistical_in.expect("replica tallies come with the transport");
+                let chain_k = if partials.is_empty() {
+                    Arc::clone(&base.base_chain)
+                } else {
+                    apply_coupled_branching(
+                        &base.base_chain,
+                        &base.branch,
+                        &partials,
+                        &mut totals,
+                        None,
+                    )?
+                    .0
+                };
+                Some((totals, chain_k))
+            }
+            (None, Some(st)) => {
                 let (mut totals, partials, floored) =
                     st.rates.sample(request.seed, st.material_id, replica);
                 statistical_floored = floored;
@@ -2272,7 +2424,7 @@ fn run_replicas(
                 };
                 Some((totals, chain_k))
             }
-            None => None,
+            (None, None) => None,
         };
         let edits = ChainEdits {
             half_lives: match &half_life {
@@ -2346,14 +2498,20 @@ fn run_replicas(
                 }
                 None => (rates.clone(), None, None),
             };
-            let (mut drawn_rates, n, floored) = draw_sampler.perturb_with(
-                &xs_draw,
-                idx,
-                &rates,
-                resonance_shifts.as_ref().map(|s| &s[idx]),
-            );
-            rates_sampled += n;
-            rates_floored += floored;
+            // A transport replica's rates already carry its cross sections.
+            let mut drawn_rates = if replica_tallies.is_some() {
+                rates.clone()
+            } else {
+                let (drawn, n, floored) = draw_sampler.perturb_with(
+                    &xs_draw,
+                    idx,
+                    &rates,
+                    resonance_shifts.as_ref().map(|s| &s[idx]),
+                );
+                rates_sampled += n;
+                rates_floored += floored;
+                drawn
+            };
             // The MF=40 draw: every list re-folded, from the flux draw's
             // folds where there is one, with the stated productions drawn.
             // An isomer listed alone is made at its drawn production, so the
@@ -2383,6 +2541,10 @@ fn run_replicas(
                 _ => refolded,
             };
             let rates = drawn_rates;
+            let weights = match replica_tallies {
+                Some(t) => &t.fy_weights[replica as usize],
+                None => weights,
+            };
             let folded_chain = match (&chains, refolded) {
                 // A chain the flux perturbation re-folded carries the edits
                 // itself.
@@ -2516,11 +2678,14 @@ fn run_replicas(
         // statistics, the decay energies, the decay photon lines and the
         // fission yields have none, so their linearity (and the "all" one
         // whenever any of them is applied, as in the default set) is None.
-        let covered = |s: &Source| {
-            matches!(
-                s,
-                Source::CrossSections | Source::HalfLife | Source::DecayBranching
-            )
+        // Nor do the cross sections under replica weights: the first-order
+        // terms fold them against the nominal flux, so they leave out the
+        // flux response the replicas carry, and comparing the two would read
+        // that response as nonlinearity.
+        let covered = |s: &Source| match s {
+            Source::CrossSections => replica_tallies.is_none(),
+            Source::HalfLife | Source::DecayBranching => true,
+            _ => false,
         };
         let terms_of = |source: Option<&str>| -> Vec<&Sensitivity> {
             first_order
@@ -2549,6 +2714,7 @@ fn run_replicas(
                     sources: vec![source],
                     attribution: false,
                     convergence: request.convergence,
+                    flux_response: request.flux_response,
                 };
                 let (sub, _) = run_replicas(
                     initial,
@@ -5510,6 +5676,7 @@ mod tests {
                 masses: vec![1.0],
                 flux_error: None,
             },
+            resolved_spectrum: None,
             statistics: Some(RateCovariance::from_parts(
                 vec![RateLabel {
                     nuclide: "Fe56".to_string(),
@@ -5522,6 +5689,7 @@ mod tests {
             )),
             branch: Arc::new(BranchTable::default()),
             diagnostics: CoupledDiagnostics::default(),
+            replicas: None,
         };
         let request = DataUncertainty {
             seed: 5,

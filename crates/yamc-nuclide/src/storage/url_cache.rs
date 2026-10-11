@@ -375,7 +375,9 @@ fn range_header(spans: &[Range]) -> String {
 ///   reactions transmutation subsections. tendl-2017 is library-matched to the
 ///   TENDL-2017 activation chains, the apples-to-apples transport library for
 ///   FISPACT-II comparisons.
-/// - `fendl-3.2d`: neutron and photon cross sections, no transmutation data.
+/// - `fendl-3.2d`: neutron and photon cross sections, plus the branching and
+///   reactions transmutation subsections (its MF=8/9/10 isomer production and
+///   MF=40 covariances). Like TENDL it has no decay or fission-yield data.
 /// - `endf-b8.1`: neutron and photon (with atomic relaxation) cross sections
 ///   and all four transmutation subsections.
 /// - `jeff-4.0`: neutron cross sections and all four transmutation subsections.

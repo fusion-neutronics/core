@@ -97,7 +97,7 @@ fn pb208_elastic_reads_its_derivation_from_the_total() {
         return;
     };
     let m = material("Pb208", &dir);
-    let (fields, _) = transport_fields(&m);
+    let (fields, _) = transport_fields(&m, &Default::default());
     let t = &fields["Pb208"];
     assert_eq!(t.reads[&2], Read::Own);
     let terms: Vec<(f64, i32, (f64, f64))> = t.derived[&2]
@@ -132,13 +132,13 @@ fn a_rerun_moves_pb208_elastic_by_the_named_reactions_changes() {
         return;
     };
     let m = material("Pb208", &dir);
-    let (fields, _) = transport_fields(&m);
+    let (fields, _) = transport_fields(&m, &Default::default());
     let t = &fields["Pb208"];
     let field = t.field.as_ref().expect("a field");
     let relative = per_cell(&field.relative_cells, &PB208_CHANGE);
     let absolute = vec![0.0; field.absolute_cells.len()];
     let data = &m.nuclide_data["Pb208"];
-    let (p, floored) = perturbed_nuclide(data, t, &relative, &absolute).expect("perturb");
+    let (p, floored) = perturbed_nuclide(data, t, &relative, &absolute, None).expect("perturb");
     assert_eq!(floored, 0);
 
     let ti = data
@@ -237,7 +237,7 @@ fn be9_activation_and_transport_move_the_same_rates_by_the_same_amount() {
 
     // Transport: a rerun's redundant MT 103 and MT 105, rebuilt from the
     // partials, integrated over a flat flux.
-    let (fields, _) = transport_fields(&m);
+    let (fields, _) = transport_fields(&m, &Default::default());
     let t = &fields["Be9"];
     for mt in [2, 600, 650, 700, 800] {
         assert_eq!(t.reads[&mt], Read::Own, "MT {mt}");
@@ -247,7 +247,7 @@ fn be9_activation_and_transport_move_the_same_rates_by_the_same_amount() {
     let relative = per_cell(&field.relative_cells, &change);
     let absolute = vec![0.0; field.absolute_cells.len()];
     let data = &m.nuclide_data["Be9"];
-    let (p, _) = perturbed_nuclide(data, t, &relative, &absolute).expect("perturb");
+    let (p, _) = perturbed_nuclide(data, t, &relative, &absolute, None).expect("perturb");
     let ti = data
         .loaded_temperatures
         .iter()

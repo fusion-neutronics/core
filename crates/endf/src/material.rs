@@ -69,6 +69,15 @@ pub enum Section {
     Mf31(Box<mf::covariance::Mf33>),
     /// MF=32 MT=151, covariances of resonance parameters.
     Mf32(Box<mf::mf32::Mf32>),
+    /// MF=32 MT=151 in a representation the reader does not implement
+    /// (single-level Breit-Wigner, Adler-Adler, an energy-dependent scattering
+    /// radius covariance, ...), with what that is. The rest of the material
+    /// is still read: the section is a covariance of MF=2, which nothing else
+    /// depends on, so failing the material over it would lose the cross
+    /// sections, the transmutation data and every other covariance with it.
+    Mf32Unsupported {
+        what: &'static str,
+    },
     /// MF=33, covariances of neutron cross sections.
     Mf33(Box<mf::covariance::Mf33>),
     /// MF=34, covariances of angular distributions.
@@ -366,6 +375,15 @@ impl Material {
         }
     }
 
+    /// What the reader does not implement in MF=32 MT=151, when the section is
+    /// present but could not be read; `None` when it was read or is absent.
+    pub fn mf32_unsupported(&self) -> Option<&'static str> {
+        match self.section_data.get(&(32, 151))? {
+            Section::Mf32Unsupported { what } => Some(what),
+            _ => None,
+        }
+    }
+
     /// The MF=31 covariance section for a fission multiplicity (MT=452, 455
     /// or 456), in MF=33's format.
     pub fn mf31(&self, mt: i32) -> Option<&mf::covariance::Mf33> {
@@ -522,7 +540,11 @@ fn parse_section(mf: i32, mt: i32, text: &str) -> Result<Section> {
         (27, _) => Section::Mf27(Box::new(mf::atomic::parse_mf27(&mut r)?)),
         (28, _) => Section::Mf28(Box::new(mf::atomic::parse_mf28(&mut r)?)),
         (31, _) => Section::Mf31(Box::new(mf::covariance::parse_mf33(&mut r)?)),
-        (32, 151) => Section::Mf32(Box::new(mf::mf32::parse_mf32(&mut r)?)),
+        (32, 151) => match mf::mf32::parse_mf32(&mut r) {
+            Ok(s) => Section::Mf32(Box::new(s)),
+            Err(Error::Unsupported { what }) => Section::Mf32Unsupported { what },
+            Err(e) => return Err(e),
+        },
         (33, _) => Section::Mf33(Box::new(mf::covariance::parse_mf33(&mut r)?)),
         (34, _) => Section::Mf34(Box::new(mf::covariance::parse_mf34(&mut r, mt as i64)?)),
         (35, _) => Section::Mf35(Box::new(mf::covariance::parse_mf35(&mut r)?)),

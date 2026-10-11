@@ -9,7 +9,10 @@
 //!
 //! Only an evaluation with MF=32 MT=151 gets the file. MF=2 alone is already
 //! reconstructed into the pointwise cross sections, and the section exists so
-//! the parameters can be sampled from their covariance, which needs both.
+//! the parameters can be sampled from their covariance, which needs both. An
+//! MF=32 in a representation `endf` does not read gets none either, since a
+//! reader could not parse the text back; the conversion records why in
+//! `version.json` (see [`crate::entry`]).
 
 use std::error::Error;
 use std::path::Path;
@@ -28,11 +31,21 @@ const SECTIONS: [(i32, i32); 2] = [(2, 151), (32, 151)];
 /// writes nothing, and a reader takes the missing file as "no resonance
 /// parameter covariance". An evaluation with MF=32 and no MF=2 is refused,
 /// since MF=32 is a covariance of MF=2's parameters and means nothing alone.
+/// An MF=32 `endf` does not implement writes nothing, with a warning.
 ///
 /// No formalism is filtered out here: the parameters are stored whatever
 /// they are, and what can be sampled is the reader's decision.
 pub fn write_resonance_parameters(material: &Material, dir: &Path) -> Result<bool, Box<dyn Error>> {
     if !material.section_text.contains_key(&(32, 151)) {
+        return Ok(false);
+    }
+    if let Some(what) = material.mf32_unsupported() {
+        eprintln!(
+            "warning: MAT {} MF=32 MT=151 is not converted, so there is no \
+             resonance_parameters.arrow and no MF=32 part in covariance.arrow: \
+             endf does not implement {what}",
+            material.mat
+        );
         return Ok(false);
     }
     let mut mf = Vec::new();
