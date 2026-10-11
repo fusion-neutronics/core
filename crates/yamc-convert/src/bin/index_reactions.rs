@@ -1,7 +1,8 @@
 //! Add cross-section byte ranges to already-converted nuclide folders.
 //!
 //! Rewrites `version.json` in each `{Name}.arrow/` to carry the byte range of
-//! every (MT, temperature) record batch in `reactions.arrow`, so an activation
+//! every (MT, temperature) record batch in `reactions.arrow` (and of every
+//! temperature's grid in `energy.arrow`), so an activation
 //! reader can range-request just the channels its chain names (8.2x less on
 //! Fe56) instead of pulling the full-grid transport MTs it never looks at, and
 //! a plotter just the one temperature it draws.
@@ -19,6 +20,14 @@
 //! is then listed under every temperature its one batch carries.
 //! `split_reactions` is the separate step that also splits those batches.
 //!
+//! The `energy_ranges` index of `energy.arrow` is rewritten in the same pass,
+//! and both are written with the sha256 of every entry (schema message, each
+//! (MT, temperature) batch, each temperature's grid). Those hashes are what
+//! let a reader verify a byte-range fetch of a release, so this is also the
+//! backfill for a tree indexed before they existed. Run it before the release
+//! manifest is built: the manifest pins `version.json` by its hash, so a
+//! manifest built first would name the version without the hashes.
+//!
 //! ```text
 //! cargo run --release -p yamc-convert --bin index_reactions -- DIR [DIR ...]
 //! ```
@@ -28,6 +37,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use yamc_convert::energy_ranges::write_energy_ranges;
 use yamc_convert::reaction_ranges::write_reaction_ranges;
 
 /// The `*.arrow` folders under `root`, or `root` itself when it is one.
@@ -74,7 +84,9 @@ fn main() -> ExitCode {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            match write_reaction_ranges(&dir) {
+            let written = write_reaction_ranges(&dir)
+                .and_then(|reactions| Ok(write_energy_ranges(&dir)? || reactions));
+            match written {
                 // A photon element, or a conversion with no reactions table.
                 Ok(false) => skipped += 1,
                 Ok(true) => {

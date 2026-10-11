@@ -1188,16 +1188,17 @@ impl PyTransmutationResults {
     ///   the solver reads; they are held rather than drawn through a mapping
     ///   their yields were not built with. Each is counted as a gap.
     /// - ``decay_branchings_perturbed``: with the ``"decay_branching"``
-    ///   source, the reachable two-mode parents whose split was sampled. The
-    ///   multi-mode parents held at their evaluated ratios, each a gap:
-    ///   ``no_decay_branching_uncertainty`` (no mode states a sigma),
-    ///   ``decay_branchings_three_or_more_modes`` (a sigma, but no stated
-    ///   covariance to share it between three or more modes),
-    ///   ``decay_branchings_unequal_sigmas`` (two modes stating different
-    ///   sigmas) and ``decay_branchings_too_wide`` (the smaller ratio under
-    ///   five sigmas). ``decay_branchings_floored`` /
-    ///   ``decay_branchings_sampled`` count draws clamped to the pair's total
-    ///   and draws made.
+    ///   source, the reachable multi-mode parents whose split was sampled. Held
+    ///   at their evaluated ratios, each a gap: ``no_decay_branching_uncertainty``
+    ///   (no mode states a sigma, or one does beside two or more that do not)
+    ///   and ``decay_branchings_too_wide`` (every mode that could move is under
+    ///   five sigmas from zero). Sampled but short of the stated sigmas, each a
+    ///   gap too: ``decay_branchings_partly_held`` (one or more modes held at
+    ///   their ratios, too close to zero or unstated beside another unstated
+    ///   mode) and ``decay_branchings_sigma_reduced`` (the largest sigma exceeds
+    ///   the sum of the others', and is drawn as that sum).
+    ///   ``decay_branchings_floored`` / ``decay_branchings_sampled`` count draws
+    ///   pulled back onto the simplex and draws made.
     /// - ``isomer_branchings_perturbed``: with the ``"isomer_branching"``
     ///   source, the reachable reactions, as ``"Parent reaction"``, whose
     ///   isomeric split was drawn from the MF=40 covariance of at least one of

@@ -60,17 +60,19 @@ pub enum Source {
     /// insensitive to its own half-life (`N ~ R / lambda`, so `A ~ R`), and
     /// inflate its uncertainty.
     HalfLife,
-    /// Decay branching ratios, from the MT=457 sigma on each mode, for the
-    /// parents whose sum rule fixes the joint distribution: exactly two modes,
-    /// one sigma between them (both state the same one, or one states it and
-    /// the other is its complement), and the smaller ratio at least five
-    /// sigmas from zero. A replica draws one deviate per parent, moves one
-    /// mode by `sigma z` and the other by `-sigma z`, so the pair's total is
-    /// kept and the two are perfectly anticorrelated.
+    /// Decay branching ratios, from the MT=457 sigma on each mode. A replica
+    /// draws a parent's ratios as a zero-sum Gaussian, so their total is
+    /// kept: of the covariances that realise every stated sigma, the one of
+    /// largest entropy, which for two or three modes is the only one (two
+    /// modes move by `sigma z` and `-sigma z`). A largest sigma above the sum
+    /// of the others' is drawn as that sum, a single mode stating none is the
+    /// complement of the rest, and a mode under five sigmas from zero, or two
+    /// or more stating none, are held at their ratios while the rest share
+    /// what is left.
     ///
-    /// Any other multi-mode parent stays at nominal and [`Info`] names it by
-    /// why. It moves the inventory only: a parent's own per-decay emission is
-    /// the decay scheme's.
+    /// [`Info`] names every parent short of its stated sigmas by why. It
+    /// moves the inventory only: a parent's own per-decay emission is the
+    /// decay scheme's.
     DecayBranching,
     /// The Monte Carlo statistical uncertainty of transport-tallied reaction
     /// rates, from their per-history covariance.
@@ -667,25 +669,29 @@ pub struct Info {
     /// Each is a lognormal matched to the evaluation's mean and sigma, so none
     /// can go non-positive and there is no floor to count.
     pub half_lives_sampled: usize,
-    /// Reachable parents whose decay branching was perturbed: two modes whose
-    /// sum rule fixes how the stated sigma is shared.
+    /// Reachable parents whose decay branching was perturbed: a zero-sum
+    /// Gaussian over their modes, every stated sigma realised where the sum
+    /// rule allows it.
     pub decay_branchings_perturbed: BTreeSet<String>,
-    /// Reachable parents with several decay modes and no stated sigma on any,
-    /// held at nominal. Not a claim that the split is exact.
+    /// Reachable parents with several decay modes held at nominal for want of
+    /// sigmas: none is stated, or one is beside two or more modes stating
+    /// none, so no mode can take up its change. Not a claim that the split is
+    /// exact.
     pub no_decay_branching_uncertainty: BTreeSet<String>,
-    /// Reachable parents with three or more modes and a stated sigma, held at
-    /// nominal: MT=457 gives no covariance between the modes, and with more
-    /// than one degree of freedom the sum rule does not supply it.
-    pub decay_branchings_three_or_more_modes: BTreeSet<String>,
-    /// Reachable two-mode parents whose modes state different sigmas, held at
-    /// nominal: a sum rule leaves room for one.
-    pub decay_branchings_unequal_sigmas: BTreeSet<String>,
-    /// Reachable two-mode parents whose smaller ratio is under five sigmas,
-    /// held at nominal: a Gaussian that wide would have to be truncated at
-    /// zero, which the evaluation does not describe.
+    /// Reachable parents held at nominal because every mode that could move
+    /// is under five sigmas from zero: a Gaussian that wide would have to be
+    /// truncated, which the evaluation does not describe.
     pub decay_branchings_too_wide: BTreeSet<String>,
-    /// Branching draws that fell outside `[0, T]` and were clamped, and draws
-    /// made, one per perturbed parent per replica.
+    /// Perturbed parents with one or more modes held at their ratios, under
+    /// five sigmas from zero or beside another mode stating no sigma; the
+    /// other modes share what those leave.
+    pub decay_branchings_partly_held: BTreeSet<String>,
+    /// Perturbed parents whose largest stated sigma exceeds the sum of the
+    /// others', which no split keeping the total can realise: it was drawn as
+    /// that sum, the others as stated.
+    pub decay_branchings_sigma_reduced: BTreeSet<String>,
+    /// Branching draws that left the simplex and were pulled back onto it,
+    /// and draws made, one per perturbed parent per replica.
     pub decay_branchings_floored: usize,
     pub decay_branchings_sampled: usize,
     /// Reachable unstable nuclides whose decay energy was perturbed.
@@ -906,9 +912,9 @@ impl Info {
             || !self.flux_rates_without_terms.is_empty()
             || !self.no_half_life_uncertainty.is_empty()
             || !self.no_decay_branching_uncertainty.is_empty()
-            || !self.decay_branchings_three_or_more_modes.is_empty()
-            || !self.decay_branchings_unequal_sigmas.is_empty()
             || !self.decay_branchings_too_wide.is_empty()
+            || !self.decay_branchings_partly_held.is_empty()
+            || !self.decay_branchings_sigma_reduced.is_empty()
             || !self.no_decay_energy_uncertainty.is_empty()
             || !self.half_life_uncertainty_not_carried.is_empty()
             || !self.decay_energy_uncertainty_not_carried.is_empty()
@@ -1065,8 +1071,8 @@ pub struct Contributor {
     pub nuclide: String,
     /// The reaction, for one cross-section channel alone; `None` for the
     /// nuclide's whole evaluation (every channel with its correlations) or for
-    /// a half-life. A `decay_branching` contributor is a two-mode parent's
-    /// one degree of freedom, so `None` too.
+    /// a half-life. A `decay_branching` contributor is a parent's whole
+    /// split, every direction of it, so `None` too.
     pub reaction: Option<String>,
     /// `[step][nuclide]` variance it contributes, only where it is non-zero.
     pub variance: Vec<HashMap<String, f64>>,
