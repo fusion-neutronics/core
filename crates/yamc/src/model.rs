@@ -1322,6 +1322,16 @@ impl Model {
         // `calculate_macroscopic_xs` borrows a `&Vec<i32>`; own the slice
         // once here so the per-material loop borrows it without reallocating.
         let mt_filter = mt_filter.to_vec();
+        // The loop below loads one material, and one nuclide, at a time. The
+        // downloads behind those loads go out together first.
+        yamc_materials::Material::prefetch_nuclear_data(
+            self.geometry
+                .materials()
+                .iter()
+                .filter(|m| m.fast_xs.is_none())
+                .map(|m| m.as_ref()),
+            transport_secondary_photons,
+        );
         for (i, material_arc) in self.geometry.materials_mut().iter_mut().enumerate() {
             // Skip materials that already have transport XS computed (e.g., from transmutation step)
             if material_arc.fast_xs.is_some() {

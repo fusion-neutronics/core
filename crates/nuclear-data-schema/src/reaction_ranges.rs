@@ -26,6 +26,22 @@
 //! batch under each temperature it holds, so the index says the truth about
 //! where each (MT, temperature) can be read from, and a reader that fetches one
 //! temperature of it gets a batch carrying the others as well.
+//!
+//! # Hashes
+//!
+//! Each entry may carry the hex sha256 of the bytes at its range, as a third
+//! element: `[offset, length, "<sha256>"]`, the schema message's entry
+//! included. A release manifest pins every published file by its whole-file
+//! hash, which says nothing about a byte range of it, so these are what let a
+//! reader that fetched only some batches check each one it received.
+//! `version.json` is itself a manifest-listed file, so a reader that verified
+//! it can trust the hashes inside it exactly as far as it trusts the manifest.
+//!
+//! The hash is optional and an entry without one is still a valid entry: an
+//! index written before hashes existed parses unchanged, and a reader that
+//! needs hashes and finds one missing fetches the whole file instead. A reader
+//! from before hashes existed reads the first two elements and ignores the
+//! third, so adding them needs no format change.
 
 use std::collections::BTreeMap;
 
@@ -60,6 +76,53 @@ pub fn coalesce(schema: Range, mut ranges: Vec<Range>) -> Vec<Range> {
     spans
 }
 
+/// Hex sha256 of the bytes at each range, for the ranges an index carries one
+/// for.
+///
+/// Keyed by range rather than stored beside each entry because a hash belongs
+/// to bytes, not to a name: a batch listed under several temperatures (a file
+/// written one batch per MT) is one set of bytes with one hash.
+pub type Hashes = BTreeMap<Range, String>;
+
+/// One index entry as `version.json` spells it: `[offset, length]`, with the
+/// hash as a third element when there is one.
+pub(crate) fn entry_json(range: &Range, sha256: &Hashes) -> serde_json::Value {
+    let (off, len) = range;
+    match sha256.get(range) {
+        Some(hash) => serde_json::json!([off, len, hash]),
+        None => serde_json::json!([off, len]),
+    }
+}
+
+/// Parse one index entry, recording its hash in `sha256` when it has one.
+///
+/// `None` for anything that is not `[offset, length]` or
+/// `[offset, length, "<64 hex digits>"]`, and for a range already given a
+/// different hash by another entry. Either makes the whole index unusable,
+/// which the caller answers by fetching whole files: a hash that cannot be
+/// read cannot verify anything, and two hashes for the same bytes means one of
+/// them is wrong.
+pub(crate) fn parse_entry(value: &serde_json::Value, sha256: &mut Hashes) -> Option<Range> {
+    let a = value.as_array()?;
+    let range = (a.first()?.as_u64()?, a.get(1)?.as_u64()?);
+    match a.len() {
+        2 => {}
+        3 => {
+            let hash = a[2].as_str()?;
+            if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            let hash = hash.to_ascii_lowercase();
+            if sha256.get(&range).is_some_and(|held| *held != hash) {
+                return None;
+            }
+            sha256.insert(range, hash);
+        }
+        _ => return None,
+    }
+    Some(range)
+}
+
 /// Byte ranges for the schema message and each (MT, temperature) record batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReactionRanges {
@@ -68,20 +131,25 @@ pub struct ReactionRanges {
     /// MT number to temperature label (as the file spells it, `"294K"`) to the
     /// range of the record batch carrying that cross section.
     pub mts: BTreeMap<i32, BTreeMap<String, Range>>,
+    /// The sha256 of the schema message and of each batch, where the index
+    /// carries them (see the module docs). Empty for an index written before
+    /// hashes existed.
+    pub sha256: Hashes,
 }
 
 impl ReactionRanges {
     /// The `version.json` representation:
-    /// `{"schema": [off, len], "mts": {"102": {"294K": [off, len], ...}, ...}}`.
+    /// `{"schema": [off, len, sha], "mts": {"102": {"294K": [off, len, sha], ...}, ...}}`,
+    /// each entry losing its third element when [`Self::sha256`] has no hash
+    /// for it.
     pub fn to_json(&self) -> serde_json::Value {
-        let pair = |(off, len): &Range| serde_json::json!([off, len]);
         serde_json::json!({
-            "schema": pair(&self.schema),
+            "schema": entry_json(&self.schema, &self.sha256),
             "mts": self.mts.iter()
                 .map(|(mt, by_temperature)| {
                     let temps = by_temperature
                         .iter()
-                        .map(|(t, r)| (t.clone(), pair(r)))
+                        .map(|(t, r)| (t.clone(), entry_json(r, &self.sha256)))
                         .collect::<serde_json::Map<_, _>>();
                     (mt.to_string(), serde_json::Value::Object(temps))
                 })
@@ -89,30 +157,25 @@ impl ReactionRanges {
         })
     }
 
-    /// Parse back from `version.json`. `None` when the key is absent or the
-    /// shape is not this one, which is what a library indexed before the
-    /// temperature split looks like (its `mts` values are bare ranges); such a
-    /// library is fetched whole until it is reindexed.
+    /// Parse back from `version.json`, with or without hashes. `None` when the
+    /// key is absent or the shape is not this one, which is what a library
+    /// indexed before the temperature split looks like (its `mts` values are
+    /// bare ranges); such a library is fetched whole until it is reindexed.
     pub fn from_json(value: &serde_json::Value) -> Option<Self> {
-        let pair = |v: &serde_json::Value| -> Option<Range> {
-            let a = v.as_array()?;
-            Some((a.first()?.as_u64()?, a.get(1)?.as_u64()?))
-        };
+        let mut sha256 = Hashes::new();
+        let schema = parse_entry(value.get("schema")?, &mut sha256)?;
+        let mut mts = BTreeMap::new();
+        for (mt, by_temperature) in value.get("mts")?.as_object()? {
+            let mut temps = BTreeMap::new();
+            for (t, r) in by_temperature.as_object()? {
+                temps.insert(t.clone(), parse_entry(r, &mut sha256)?);
+            }
+            mts.insert(mt.parse().ok()?, temps);
+        }
         Some(Self {
-            schema: pair(value.get("schema")?)?,
-            mts: value
-                .get("mts")?
-                .as_object()?
-                .iter()
-                .map(|(mt, by_temperature)| {
-                    let temps = by_temperature
-                        .as_object()?
-                        .iter()
-                        .map(|(t, r)| Some((t.clone(), pair(r)?)))
-                        .collect::<Option<BTreeMap<_, _>>>()?;
-                    Some((mt.parse().ok()?, temps))
-                })
-                .collect::<Option<_>>()?,
+            schema,
+            mts,
+            sha256,
         })
     }
 
@@ -168,6 +231,31 @@ impl ReactionRanges {
         )
     }
 
+    /// The messages [`Self::spans_where`] covers, each once, with a name to
+    /// report it by: the schema message first, then every wanted batch in
+    /// offset order.
+    ///
+    /// What a reader checks a ranged fetch against, one hash per entry. A
+    /// batch listed under several temperatures is one entry, named by all of
+    /// them (`"MT 16 at 294K/600K"`).
+    pub fn pieces_where(&self, wants: impl Fn(i32, &str) -> bool) -> Vec<(Range, String)> {
+        let mut batches: BTreeMap<Range, (i32, Vec<&str>)> = BTreeMap::new();
+        for (mt, by_temperature) in &self.mts {
+            for (t, r) in by_temperature {
+                if wants(*mt, t) {
+                    batches.entry(*r).or_insert((*mt, Vec::new())).1.push(t);
+                }
+            }
+        }
+        std::iter::once((self.schema, "the schema message".to_string()))
+            .chain(
+                batches
+                    .into_iter()
+                    .map(|(r, (mt, temps))| (r, format!("MT {mt} at {}", temps.join("/")))),
+            )
+            .collect()
+    }
+
     /// Which of `wants` this nuclide actually publishes a batch for.
     ///
     /// What a cache has to record after a ranged fetch. The set asked for is the
@@ -219,7 +307,17 @@ mod tests {
         for (mt, t, r) in batches {
             mts.entry(*mt).or_default().insert((*t).to_string(), *r);
         }
-        ReactionRanges { schema, mts }
+        ReactionRanges {
+            schema,
+            mts,
+            sha256: Hashes::new(),
+        }
+    }
+
+    /// A hex digest that says which entry it belongs to, for tests that only
+    /// need the hashes to be distinct and well formed.
+    fn digest(n: u64) -> String {
+        format!("{n:064x}")
     }
 
     #[test]
@@ -235,6 +333,84 @@ mod tests {
         let json = r.to_json();
         assert_eq!(json["mts"]["16"]["600K"], serde_json::json!([868, 100]));
         assert_eq!(ReactionRanges::from_json(&json), Some(r));
+    }
+
+    /// Hashes ride as a third element of each entry and come back as they
+    /// went, the schema's included.
+    #[test]
+    fn json_round_trips_with_hashes() {
+        let mut r = ranges(
+            (64, 704),
+            &[(16, "294K", (768, 100)), (102, "294K", (868, 200))],
+        );
+        r.sha256 = Hashes::from([
+            ((64, 704), digest(1)),
+            ((768, 100), digest(2)),
+            ((868, 200), digest(3)),
+        ]);
+        let json = r.to_json();
+        assert_eq!(json["schema"], serde_json::json!([64, 704, digest(1)]));
+        assert_eq!(
+            json["mts"]["102"]["294K"],
+            serde_json::json!([868, 200, digest(3)])
+        );
+        assert_eq!(ReactionRanges::from_json(&json), Some(r));
+    }
+
+    /// An index from before hashes, and one with hashes on only some entries,
+    /// both parse: the hash is optional per entry.
+    #[test]
+    fn entries_without_hashes_still_parse() {
+        let json = serde_json::json!({
+            "schema": [64, 704],
+            "mts": {"16": {"294K": [768, 100, digest(2)], "600K": [868, 100]}},
+        });
+        let r = ReactionRanges::from_json(&json).expect("parses");
+        assert_eq!(r.mts[&16]["600K"], (868, 100));
+        assert_eq!(r.sha256, Hashes::from([((768, 100), digest(2))]));
+        assert_eq!(r.to_json(), json, "renders back to the same mix");
+    }
+
+    /// A third element that is not a sha256, or two hashes for one range,
+    /// makes the index unusable rather than half-trusted.
+    #[test]
+    fn a_malformed_or_contradictory_hash_is_no_index() {
+        for bad in [
+            serde_json::json!([768, 100, 7]),
+            serde_json::json!([768, 100, "not hex"]),
+            serde_json::json!([768, 100, digest(2), "extra"]),
+        ] {
+            let json = serde_json::json!({"schema": [64, 704], "mts": {"16": {"294K": bad}}});
+            assert_eq!(ReactionRanges::from_json(&json), None, "{json}");
+        }
+        let json = serde_json::json!({
+            "schema": [64, 704],
+            "mts": {"16": {"294K": [768, 100, digest(2)], "600K": [768, 100, digest(3)]}},
+        });
+        assert_eq!(ReactionRanges::from_json(&json), None);
+    }
+
+    /// Pieces are what a ranged fetch is checked against: the schema first,
+    /// then each wanted batch once, named for the error that would report it.
+    #[test]
+    fn pieces_name_each_wanted_message_once() {
+        let r = ranges(
+            (0, 8),
+            &[
+                (16, "294K", (8, 10)),
+                (16, "600K", (8, 10)),
+                (102, "294K", (18, 10)),
+            ],
+        );
+        assert_eq!(
+            r.pieces_where(|_, _| true),
+            vec![
+                ((0, 8), "the schema message".to_string()),
+                ((8, 10), "MT 16 at 294K/600K".to_string()),
+                ((18, 10), "MT 102 at 294K".to_string()),
+            ]
+        );
+        assert_eq!(r.pieces_where(|mt, _| mt == 102).len(), 2);
     }
 
     #[test]

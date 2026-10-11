@@ -219,6 +219,7 @@ fn json_round_trips() {
     let ranges = ReactionRanges {
         schema: (8, 1176),
         mts,
+        sha256: Default::default(),
     };
     assert_eq!(ReactionRanges::from_json(&ranges.to_json()), Some(ranges));
 }
@@ -309,6 +310,87 @@ fn a_file_this_crate_wrote_indexes_and_splices() {
             assert_eq!(temperatures_of(&got[0]), vec![t.clone()]);
         }
     }
+}
+
+/// Every entry the converter writes carries the sha256 of exactly its bytes,
+/// the schema message's included, so a reader that fetched only some batches of
+/// a release can check each one.
+#[test]
+fn every_entry_is_written_with_the_hash_of_its_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reactions.arrow");
+    yamc_convert::sections::write_section_per_row(
+        &path,
+        "reactions.arrow",
+        vec![
+            reaction_row(1, "294K", &[1.0, 2.0, 3.0, 4.0]),
+            reaction_row(2, "294K", &[1.5, 2.5, 3.5, 4.5]),
+            reaction_row(2, "600K", &[1.6, 2.6, 3.6, 4.6]),
+        ],
+    )
+    .unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let index = index_reactions(&path).unwrap();
+    let sha = |r: Range| yamc_nuclide::storage::release::sha256_hex(&range(&bytes, r));
+
+    assert_eq!(index.sha256[&index.schema], sha(index.schema));
+    let mut entries = 1;
+    for by_temperature in index.mts.values() {
+        for r in by_temperature.values() {
+            assert_eq!(index.sha256[r], sha(*r));
+            entries += 1;
+        }
+    }
+    assert_eq!(index.sha256.len(), entries, "one hash per entry, no strays");
+    let json = index.to_json();
+    assert_eq!(json["mts"]["2"]["600K"][2], sha(index.mts[&2]["600K"]));
+}
+
+/// The backfill: a `version.json` indexed before hashes existed gains them,
+/// with its ranges and every other key unchanged, when `write_reaction_ranges`
+/// is rerun over the folder. Nothing but `version.json` is touched.
+#[test]
+fn rerunning_the_indexer_backfills_hashes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reactions.arrow");
+    yamc_convert::sections::write_section_per_row(
+        &path,
+        "reactions.arrow",
+        vec![
+            reaction_row(1, "294K", &[1.0, 2.0]),
+            reaction_row(102, "294K", &[0.1, 0.2]),
+        ],
+    )
+    .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let mut old = index_reactions(&path).unwrap();
+    old.sha256.clear();
+    std::fs::write(
+        dir.path().join("version.json"),
+        serde_json::json!({"format_version": 2, "library": "endf-b8.1",
+                           "reaction_ranges": old.to_json()})
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        old.to_json()["mts"]["1"]["294K"].as_array().unwrap().len(),
+        2,
+        "the starting point carries no hashes"
+    );
+
+    assert!(write_reaction_ranges(dir.path()).unwrap());
+    let version: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("version.json")).unwrap())
+            .unwrap();
+    let new = ReactionRanges::from_version_json(&version).unwrap();
+    assert_eq!(
+        (new.schema, &new.mts),
+        (old.schema, &old.mts),
+        "same ranges"
+    );
+    assert_eq!(new.sha256.len(), 3, "the schema and both batches");
+    assert_eq!(version["library"], "endf-b8.1");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 /// The reader half of the claim. The two tests above prove the spliced bytes

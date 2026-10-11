@@ -1618,8 +1618,8 @@ impl PyModel {
     ///           used;
     ///         - ``"half_life"``: the decay data's half-life sigmas;
     ///         - ``"decay_branching"``: the decay branching ratios of the
-    ///           two-mode parents whose sum rule fixes how the stated sigma is
-    ///           shared, as ``DataUncertainty`` describes;
+    ///           parents with a stated sigma, each drawn keeping its total, as
+    ///           ``DataUncertainty`` describes;
     ///         - ``"decay_energy"``: the decay data's mean decay energy sigmas,
     ///           which move decay heat only;
     ///         - ``"decay_photon_lines"``: the decay data's photon spectrum

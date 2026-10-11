@@ -45,12 +45,14 @@ use yani_transmute::uncertainty::{
 ///   saturated activity (``lambda N = R``) is correctly insensitive to its
 ///   own half-life rather than inheriting the density's spread;
 /// - ``"decay_branching"``: the decay branching ratios of every reachable
-///   parent with exactly two modes and one stated sigma between them (both
-///   state the same one, or one states it and the other is its complement),
-///   whose smaller ratio is at least five sigmas from zero. One draw per
-///   parent moves one mode up and the other down by the same amount, so the
-///   pair's total is kept. Other multi-mode parents stay at their evaluated
-///   ratios and the report names them by why;
+///   parent with several modes and a stated sigma, drawn as a zero-sum
+///   Gaussian so the parent's total is kept: of the covariances that realise
+///   every stated sigma, the one of largest entropy (for two or three modes
+///   the only one). A largest sigma above the sum of the others' is drawn as
+///   that sum; a single mode stating no sigma is the complement of the rest;
+///   a mode under five sigmas from zero, or two or more stating none, are
+///   held at their ratios and the rest share what is left. The report names
+///   every parent short of its stated sigmas by why;
 /// - ``"statistical"``: the Monte Carlo uncertainty of transport-tallied
 ///   reaction rates, from their per-history covariance, drawn independently
 ///   for each material since their tallies are separate estimates. It
@@ -100,10 +102,10 @@ use yani_transmute::uncertainty::{
 /// Held at their nominal values, with uncertainties of their own that this
 /// does not propagate:
 ///
-/// - the decay branching ratios ``"decay_branching"`` does not sample (three
-///   or more modes, unequal sigmas, too wide to sample untruncated, or no
-///   sigma), and the per-decay photon lines and decay energy of a drawn
-///   parent, which follow its nominal branching;
+/// - the decay branching ratios ``"decay_branching"`` does not sample (too
+///   wide to sample untruncated, or no sigma to draw), and the per-decay
+///   photon lines and decay energy of a drawn parent, which follow its
+///   nominal branching;
 /// - the isomeric-branching overlay from MF=9/MF=10;
 /// - covariance correlating two evaluations (MAT1 naming another material),
 ///   covariance with a quantity that is not a cross section (XMF1 not 0 or
@@ -663,15 +665,15 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
             "no_decay_branching_uncertainty",
             &info.no_decay_branching_uncertainty,
         ),
-        (
-            "decay_branchings_three_or_more_modes",
-            &info.decay_branchings_three_or_more_modes,
-        ),
-        (
-            "decay_branchings_unequal_sigmas",
-            &info.decay_branchings_unequal_sigmas,
-        ),
         ("decay_branchings_too_wide", &info.decay_branchings_too_wide),
+        (
+            "decay_branchings_partly_held",
+            &info.decay_branchings_partly_held,
+        ),
+        (
+            "decay_branchings_sigma_reduced",
+            &info.decay_branchings_sigma_reduced,
+        ),
     ] {
         d.set_item(key, set.iter().cloned().collect::<Vec<_>>())?;
     }

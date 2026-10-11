@@ -1,13 +1,16 @@
-//! Decay branching ratio uncertainty, on the two-mode parents whose sum rule
-//! fixes it.
+//! Decay branching ratio uncertainty, a zero-sum Gaussian over each parent's
+//! modes.
 //!
 //! Each parent here decays for one of its half-lives into stable daughters, so
 //! a daughter holds `r N0 / 2` exactly and moves one for one with its ratio.
 //! Bi212 states the same sigma on both of its modes and K40 states one only
 //! on its minor mode, so each daughter should spread by `sigma N0 / 2`, the
-//! two in opposite directions, with their sum the same in every replica. Every
-//! other kind of multi-mode parent is held at nominal and must be named in the
-//! report by why.
+//! two in opposite directions, with their sum the same in every replica. Rb98
+//! has three modes, each realising its own sigma with the total kept. Cu64's
+//! two modes state different sigmas and are drawn at the smaller, and Np236's
+//! unstated alpha is held while its other two modes move. What cannot move at
+//! all is held at nominal, and every parent short of its full sigmas is named
+//! in the report by why.
 //!
 //! Needs no nuclear data: nothing is irradiated.
 
@@ -26,6 +29,11 @@ const HALF_LIFE: f64 = 3600.0;
 const SAMPLES: usize = 512;
 const BI212_SIGMA: f64 = 0.02;
 const K40_SIGMA: f64 = 0.013;
+const RB98: [(&str, f64, f64); 3] = [
+    ("Sr98", 0.6, 0.02),
+    ("Sr97", 0.3, 0.02),
+    ("Sr96", 0.1, 0.01),
+];
 
 fn mode(kind: &str, target: Option<&str>, b: f64, sigma: Option<f64>) -> yani::ChainReaction {
     yani::ChainReaction {
@@ -93,6 +101,12 @@ fn parents() -> Vec<yani::ChainNuclide> {
                 mode("beta-", Some("Pu236"), 0.125, Some(0.01)),
                 mode("alpha", Some("Pa232"), 0.005, None),
             ],
+        ),
+        nuclide(
+            "Rb98",
+            RB98.iter()
+                .map(|(d, b, s)| mode("beta-", Some(d), *b, Some(*s)))
+                .collect(),
         ),
         // A spontaneous-fission mode is a mode: the chain reader drops its
         // target, and it still takes a share of the decays.
@@ -251,19 +265,58 @@ fn a_sigma_on_one_mode_moves_its_complement_too() {
 }
 
 #[test]
-fn every_parent_held_at_nominal_is_named_by_why() {
+fn unequal_sigmas_are_drawn_at_the_smaller() {
+    let results = cool(chain(), Some(&request(vec![Source::DecayBranching], false)));
+    assert_pair_realises(&results, "Zn64", "Ni64", 0.01);
+}
+
+#[test]
+fn a_held_mode_leaves_the_others_their_share() {
+    let results = cool(chain(), Some(&request(vec![Source::DecayBranching], false)));
+    assert_pair_realises(&results, "U236", "Pu236", 0.01);
+}
+
+#[test]
+fn three_modes_each_realise_their_sigma_and_keep_the_total() {
+    let results = cool(chain(), Some(&request(vec![Source::DecayBranching], false)));
+    let daughters: Vec<Vec<f64>> = RB98.iter().map(|(d, _, _)| replicas(&results, d)).collect();
+    for ((name, _, sigma), x) in RB98.iter().zip(&daughters) {
+        let (got, want) = (std_dev(x), sigma * N0 / 2.0);
+        assert!(
+            (got / want - 1.0).abs() < 0.12,
+            "{name} spreads by {got:e}, the stated sigma gives {want:e}"
+        );
+    }
+    let nominal: f64 = RB98
+        .iter()
+        .map(|(d, _, _)| results.get_material(0, 1).unwrap().nuclides[*d])
+        .sum();
+    for k in 0..SAMPLES {
+        let total: f64 = daughters.iter().map(|x| x[k]).sum();
+        assert!(
+            (total / nominal - 1.0).abs() < 1e-12,
+            "{total} against {nominal}"
+        );
+    }
+}
+
+#[test]
+fn every_parent_short_of_its_sigmas_is_named_by_why() {
     let results = cool(chain(), Some(&request(vec![Source::DecayBranching], false)));
     let info = info_of(&results);
     let names = |xs: &[&str]| -> std::collections::BTreeSet<String> {
         xs.iter().map(|s| s.to_string()).collect()
     };
-    assert_eq!(info.decay_branchings_perturbed, names(&["Bi212", "K40"]));
-    assert_eq!(info.decay_branchings_unequal_sigmas, names(&["Cu64"]));
+    assert_eq!(
+        info.decay_branchings_perturbed,
+        names(&["Bi212", "Cu64", "K40", "Np236", "Rb98"])
+    );
+    assert_eq!(info.decay_branchings_sigma_reduced, names(&["Cu64"]));
+    assert_eq!(info.decay_branchings_partly_held, names(&["Np236"]));
     assert_eq!(info.decay_branchings_too_wide, names(&["Ca50"]));
-    assert_eq!(info.decay_branchings_three_or_more_modes, names(&["Np236"]));
     assert_eq!(info.no_decay_branching_uncertainty, names(&["Cf252"]));
     assert!(info.has_gaps());
-    assert_eq!(info.decay_branchings_sampled, 2 * SAMPLES);
+    assert_eq!(info.decay_branchings_sampled, 5 * SAMPLES);
     assert_eq!(info.decay_branchings_floored, 0);
     assert!(info.sources.contains(&"decay_branching".to_string()));
     assert!(!info
@@ -279,12 +332,7 @@ fn every_parent_held_at_nominal_is_named_by_why() {
     );
 
     // What is held at nominal does not move at all.
-    for (daughter, parent) in [
-        ("Zn64", "Cu64"),
-        ("Sc49", "Ca50"),
-        ("U236", "Np236"),
-        ("Cm248", "Cf252"),
-    ] {
+    for (daughter, parent) in [("Sc49", "Ca50"), ("Pa232", "Np236"), ("Cm248", "Cf252")] {
         let x = replicas(&results, daughter);
         assert!(
             x.iter().all(|v| v.to_bits() == x[0].to_bits()),
@@ -379,11 +427,35 @@ fn the_contributor_is_the_parent_with_its_whole_variance() {
             "{daughter}: {got:e} against {want:e}"
         );
     }
+    // Rb98's two directions together carry each daughter's whole variance.
+    let rb = attribution
+        .contributors
+        .iter()
+        .find(|c| c.source == "decay_branching" && c.nuclide == "Rb98")
+        .expect("Rb98 contributes");
+    for (daughter, _, sigma) in RB98 {
+        let want = (sigma * N0 / 2.0).powi(2);
+        let got = rb.variance[0][daughter];
+        assert!(
+            (got / want - 1.0).abs() < 1e-6,
+            "{daughter}: {got:e} against {want:e}"
+        );
+    }
+    // Each replica's first-order image, from its own regenerated normals,
+    // is what it solved to: the daughters are linear in the ratios.
+    let linearity = attribution.linearity["decay_branching"]
+        .as_ref()
+        .expect("first order explains decay_branching");
+    for (daughter, _, _) in RB98 {
+        let l = &linearity[0][daughter];
+        assert!(l.residual_share < 1e-6, "{daughter}: {l:?}");
+        assert!(!l.flagged, "{daughter}: {l:?}");
+    }
     assert!(
         !attribution
             .contributors
             .iter()
-            .any(|c| c.source == "decay_branching" && c.nuclide == "Cu64"),
+            .any(|c| c.source == "decay_branching" && c.nuclide == "Cf252"),
         "a parent held at nominal contributes nothing"
     );
 }
@@ -431,4 +503,98 @@ fn a_d1s_time_correction_without_half_lives_lists_them_as_not_perturbed() {
             D1S_PHOTONS_NOT_PERTURBED.to_string()
         ]
     );
+}
+
+/// ENDF/B-VIII.1 Pa230 (17.4 d) decays by electron capture to Th230 (0.922 +-
+/// 0.007), beta- to U230 (0.078 +- 0.007) and alpha to Ac226 (3.2e-5 +- 1e-6).
+/// Three modes, every one stating a sigma: held at nominal before, now drawn
+/// with each sigma realised. A daughter fed by one branch alone holds
+/// `r f(t)`, so its density's relative spread is its ratio's: 9.0% on U230
+/// (the activity a reader of an irradiated thorium or protactinium sample
+/// asks about), 3.1% on Ac226, 0.76% on Th230.
+///
+/// Opt-in, since it reads a whole local library. Set
+/// `YANI_DECAY_BRANCHING_DATA` to a directory holding the published
+/// `transmutation-endf-b8.1.arrow/decay/`, then run `cargo test -p
+/// yani-transmute --test decay_branching_uncertainty -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore = "reads a whole local library; set YANI_DECAY_BRANCHING_DATA"]
+fn endf_b8_1_pa230_spreads_its_daughters_by_their_ratios() {
+    let root = std::path::PathBuf::from(
+        std::env::var_os("YANI_DECAY_BRANCHING_DATA").expect("YANI_DECAY_BRANCHING_DATA"),
+    );
+    let decay = root.join("transmutation-endf-b8.1.arrow").join("decay");
+    let chain = yani::load_chain_parts(&decay.to_string_lossy(), None, None, None)
+        .expect("chain loads")
+        .chain;
+    let mut material = Material::new(
+        HashMap::from([("Pa230".to_string(), 1.0)]),
+        "atom",
+        "sum",
+        None,
+    )
+    .expect("material");
+    material.nuclides.insert("Pa230".to_string(), N0);
+    material.set_temperature("294");
+    material.volume = Some(1.0);
+    let spectrum = MultigroupSpectrum {
+        boundaries: vec![1.0e-5, 2.0e7],
+        masses: vec![1.0],
+        flux_error: None,
+    };
+    let steps = [TransmuteStep {
+        dt: 30.0 * 86400.0,
+        irradiation: None,
+    }];
+    let results = transmute_material(
+        &mut material,
+        &[spectrum],
+        &steps,
+        Arc::clone(&chain),
+        &Default::default(),
+        Default::default(),
+        Some(&request(vec![Source::DecayBranching], true)),
+    )
+    .expect("transmute");
+    let info = info_of(&results);
+    assert!(info.decay_branchings_perturbed.contains("Pa230"));
+    assert!(!info.decay_branchings_partly_held.contains("Pa230"));
+    assert!(!info.decay_branchings_sigma_reduced.contains("Pa230"));
+
+    for (daughter, ratio, sigma) in [
+        ("U230", 0.077984, 0.007),
+        ("Ac226", 3.2e-5, 1e-6),
+        ("Th230", 0.921984, 0.007),
+    ] {
+        let x = replicas(&results, daughter);
+        let (got, want) = (std_dev(&x) / mean(&x), sigma / ratio);
+        println!("{daughter}: relative spread {got:.5}, its ratio's {want:.5}");
+        assert!(
+            (got / want - 1.0).abs() < 0.12,
+            "{daughter}: {got} against {want}"
+        );
+    }
+    for (name, estimate) in [
+        ("activity", results.activity_uncertainty(0, 1, &chain)),
+        ("decay heat", results.decay_heat_uncertainty(0, 1, &chain)),
+    ] {
+        let e = estimate.expect("evaluated").expect("uncertainty asked");
+        let rel = e.std_dev.expect("replicas") / e.nominal;
+        println!("{name}: {:e} with relative spread {rel:.2e}", e.nominal);
+        assert!(rel > 0.0);
+    }
+    let attribution = results.uncertainty[&0]
+        .attribution
+        .as_ref()
+        .expect("attribution asked");
+    let pa = attribution
+        .contributors
+        .iter()
+        .find(|c| c.source == "decay_branching" && c.nuclide == "Pa230")
+        .expect("Pa230 contributes");
+    let nominal = &results.get_material(0, 1).unwrap().nuclides;
+    let rel = pa.variance[0]["U230"].sqrt() / nominal["U230"];
+    println!("first-order U230 relative spread from Pa230: {rel:.5}");
+    assert!((rel / (0.007 / 0.077984) - 1.0).abs() < 1e-3);
 }
