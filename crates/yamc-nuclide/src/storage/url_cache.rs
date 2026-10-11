@@ -1825,6 +1825,11 @@ fn held_labels(dir: &std::path::Path, section: &str) -> BTreeSet<String> {
     }
 }
 
+/// What a temperature-ranged fetch of a section writes and asks for: the
+/// temperature labels the file will hold, and the byte spans to request.
+#[cfg(feature = "download")]
+type TemperaturePlan = (BTreeSet<String>, Vec<Range>);
+
 /// The labels a temperature-ranged fetch of `section` writes and the spans it
 /// asks for, given the nuclide's `version.json` and the labels a cached copy
 /// already `held`. `Ok(None)` means fetch the section whole (see
@@ -1839,7 +1844,7 @@ fn temperature_spans(
     requested: &HashSet<String>,
     held: BTreeSet<String>,
     nuclide_name: &str,
-) -> Result<Option<(BTreeSet<String>, Vec<Range>)>, Box<dyn std::error::Error>> {
+) -> Result<Option<TemperaturePlan>, Box<dyn std::error::Error>> {
     let Some(index) = ReactionRanges::from_version_json(version) else {
         return Ok(None);
     };
