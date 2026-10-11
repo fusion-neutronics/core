@@ -55,6 +55,25 @@ fn peak_cross_section(material: &Material, name: &str) -> f64 {
     peak.max(ELASTIC_SCALE)
 }
 
+/// How the transport took each of `material`'s nuclides' resolved resonance
+/// range: sampled per replica, or the first-order MF=32 rows and why.
+fn resonance_methods(
+    material: &Material,
+) -> std::collections::BTreeMap<String, yani_transmute::resonance_rates::ResonanceMethod> {
+    crate::xs_perturbation::resonance_sampling(material)
+        .into_iter()
+        .map(|(name, sampled)| {
+            let method = match sampled {
+                Ok(r) => r.method(),
+                Err(reason) => {
+                    yani_transmute::resonance_rates::ResonanceMethod::FirstOrder { reason }
+                }
+            };
+            (name, method)
+        })
+        .collect()
+}
+
 impl Model {
     /// Run coupled transport-transmutation calculation (tally-based).
     ///
@@ -85,7 +104,13 @@ impl Model {
     /// * `uncertainty` - Resample the single transport of independent mode
     ///   and re-solve, for every source [`yani_transmute::transport_replicas`]
     ///   applies. `None` is the default path, bit-identical to a build without
-    ///   it; with the coupled method it is an error.
+    ///   it; with the coupled method it is an error. With the cross-section
+    ///   source on and [`yani_transmute::uncertainty::FluxResponse::ReplicaWeights`]
+    ///   (the default), the transport carries a fixed number of replica
+    ///   weights ([`yani_transmute::uncertainty::transport_replicas_for`]) and
+    ///   tallies every rate per replica under them, so each replica's rates
+    ///   carry the flux's response to its cross sections; its nominal rates
+    ///   are bit-identical to a run without.
     ///
     /// Product cross sections are loaded for the material's whole reachable
     /// closure (`yani::reachable_nuclides`) and then narrowed to the products
@@ -136,6 +161,34 @@ impl Model {
             uncertainty.is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::Statistical));
         let want_cross_sections = uncertainty
             .is_some_and(|u| u.wants(yani_transmute::uncertainty::Source::CrossSections));
+        // With the cross sections perturbed, the single transport carries one
+        // likelihood-ratio weight per replica and tallies every rate per
+        // replica under it, so each replica's rates answer its own data
+        // (`FluxResponse::ReplicaWeights`), unless the request holds the flux
+        // at the nominal transport's instead.
+        let replica_weights = uncertainty
+            .filter(|u| {
+                want_cross_sections
+                    && u.flux_response == yani_transmute::uncertainty::FluxResponse::ReplicaWeights
+            })
+            .map(|u| crate::model::TransportDataUncertainty {
+                seed: u.seed,
+                replicas: yani_transmute::uncertainty::transport_replicas_for(u),
+            });
+        if let Some(data) = &replica_weights {
+            // Refused before anything runs, naming the held alternative,
+            // rather than after the scouting transport.
+            let mpi_size = crate::mpi_context::MpiContext::init().size().max(1) as usize;
+            self.validate_data_uncertainty(data, mpi_size, true)
+                .map_err(|e| {
+                    format!(
+                        "{e}. To propagate the cross-section uncertainty with the flux held \
+                         at the nominal transport's instead (cheaper and open to every \
+                         transport configuration, but it overstates a self-shielded \
+                         resonance's sigma), use DataUncertainty(flux_response=\"held\")"
+                    )
+                })?;
+        }
 
         // Expand the schedule into per-step timesteps / source rates. The
         // schedule guarantees at least one step, and equal lengths by
@@ -517,10 +570,13 @@ impl Model {
             } else {
                 tallies
             };
-            // The flux through each material's resonances, which the
-            // replicas fold their sampled resonance parameters against. Off
-            // without the cross-section source.
-            Arc::new(if want_cross_sections {
+            // Every replica's tally under the transport's replica weights,
+            // or with the flux held, the flux through each material's
+            // resonances, which the replicas fold their sampled resonance
+            // parameters against. Off without the cross-section source.
+            Arc::new(if let Some(data) = &replica_weights {
+                tallies.with_replicas(data.replicas, data.seed)
+            } else if want_cross_sections {
                 let mut grids = HashMap::new();
                 for (&mat_id, material) in &materials_for_init {
                     let grid = yani_transmute::resonance_rates::resolved_flux_grid(material)?;
@@ -596,8 +652,15 @@ impl Model {
 
             dep_tallies.reset();
 
+            // With replica weights the one transport carries them; the
+            // nominal tallies it scores are those of a run without, bit for
+            // bit.
+            let transport_settings = crate::model::TransportSettings {
+                data_uncertainty: replica_weights,
+                ..settings.clone()
+            };
             self.run_internal::<NoOpTracker>(
-                settings,
+                &transport_settings,
                 None,
                 Some(Arc::clone(&dep_tallies)),
                 false,
@@ -640,6 +703,10 @@ impl Model {
                             diagnostics: dep_tallies
                                 .get_branching_diagnostics(mat_id, volume, 1.0)
                                 .with_material(material),
+                            replicas: dep_tallies.replica_tallied(mat_id, volume).map(|mut t| {
+                                t.resonance_parameters = resonance_methods(material);
+                                t
+                            }),
                         },
                     );
                 }

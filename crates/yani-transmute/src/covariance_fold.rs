@@ -2780,9 +2780,30 @@ pub fn transport_fields(
 ) -> (BTreeMap<String, TransportField>, BTreeSet<String>) {
     let mut names: Vec<&String> = material.nuclides.keys().collect();
     names.sort();
+    transport_fields_of(material, &names, &[], without_mf32_rows)
+}
+
+/// [`transport_fields`] for `names`, which may include nuclides the material
+/// carries data for but no density: the products a transmutation tally
+/// scores, which a transport-coupled uncertainty run perturbs as its
+/// replicas do.
+///
+/// A product is often loaded at activation scope, with the reactions the
+/// chain names and no others, so a summed reaction the chain scores (MT 103
+/// read for `(n,p)`) can be held without the partials it sums (MT 600 to
+/// 649). Each MT of `scored` held that way is fielded as a partial of its
+/// own, so the score moves by its own covariance. Where the partials are
+/// held, as they are at transport scope, nothing is added and the field is
+/// [`transport_fields`]'s, so a nuclide's draw is the one transport makes.
+pub fn transport_fields_of(
+    material: &Material,
+    names: &[&String],
+    scored: &[i32],
+    without_mf32_rows: &BTreeSet<String>,
+) -> (BTreeMap<String, TransportField>, BTreeSet<String>) {
     let mut without_data = BTreeSet::new();
     let mut out = BTreeMap::new();
-    for name in names {
+    for &name in names {
         let Some(nuclide_data) = material.nuclide_data.get(name) else {
             continue;
         };
@@ -2797,13 +2818,18 @@ pub fn transport_fields(
         let Some(by_mt) = nuclide_data.reactions_for_temp(&temperature) else {
             continue;
         };
-        let partials: Vec<i32> = by_mt
+        let mut partials: BTreeSet<i32> = by_mt
             .iter()
             .filter(|(_, r)| !r.redundant)
             .map(|(mt, _)| *mt)
-            .collect::<BTreeSet<i32>>()
-            .into_iter()
             .collect();
+        let unheld: Vec<i32> = scored
+            .iter()
+            .copied()
+            .filter(|mt| by_mt.contains_key(mt) && !sums_held_partials(*mt, &partials))
+            .collect();
+        partials.extend(unheld);
+        let partials: Vec<i32> = partials.into_iter().collect();
         let Some(blocks) = nuclide_data.covariance.as_ref() else {
             without_data.insert(name.clone());
             continue;
@@ -2823,6 +2849,14 @@ pub fn transport_fields(
         );
     }
     (out, without_data)
+}
+
+/// Whether `mt` is one of `partials` or sums (under the ENDF sum rules,
+/// recursively) any of them.
+fn sums_held_partials(mt: i32, partials: &BTreeSet<i32>) -> bool {
+    partials.contains(&mt)
+        || endf::data::sum_rule(mt)
+            .is_some_and(|rule| rule.iter().any(|c| sums_held_partials(*c, partials)))
 }
 
 /// Whether `field` has a relative or absolute cell of reaction `mt` that
