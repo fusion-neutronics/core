@@ -41,14 +41,19 @@ use yani_transmute::uncertainty::{
 ///   saturated activity (``lambda N = R``) is correctly insensitive to its
 ///   own half-life rather than inheriting the density's spread;
 /// - ``"decay_branching"``: the decay branching ratios of every reachable
-///   parent with several modes and a stated sigma, drawn as a zero-sum
-///   Gaussian so the parent's total is kept: of the covariances that realise
-///   every stated sigma, the one of largest entropy (for two or three modes
-///   the only one). A largest sigma above the sum of the others' is drawn as
-///   that sum; a single mode stating no sigma is the complement of the rest;
-///   a mode under five sigmas from zero, or two or more stating none, are
-///   held at their ratios and the rest share what is left. The report names
-///   every parent short of its stated sigmas by why;
+///   parent with several modes and a stated sigma, drawn so the parent's
+///   total is kept and every ratio stays between zero and it: each mode but
+///   one from a logit-normal with the evaluated ratio as its mean and the
+///   stated sigma as its standard deviation, the last their complement,
+///   coupled so the modes carry the zero-sum covariance of largest entropy
+///   that realises every stated sigma (for two or three modes the only one).
+///   A small branch with a large relative sigma is drawn skewed, never below
+///   zero. A largest sigma above the sum of the others' is drawn as that sum;
+///   a single mode stating no sigma is the complement of the rest when it is
+///   the largest or the only way to trade; a mode whose sigma no ratio with
+///   its mean can have (``sigma**2 >= b * (T - b)``), and a mode stating none
+///   otherwise, are held at their ratios and the rest share what is left.
+///   The report names every parent short of its stated sigmas by why;
 /// - ``"statistical"``: the Monte Carlo uncertainty of transport-tallied
 ///   reaction rates, from their per-history covariance, drawn independently
 ///   for each material since their tallies are separate estimates. It
@@ -98,8 +103,8 @@ use yani_transmute::uncertainty::{
 /// Held at their nominal values, with uncertainties of their own that this
 /// does not propagate:
 ///
-/// - the decay branching ratios ``"decay_branching"`` does not sample (too
-///   wide to sample untruncated, or no sigma to draw), and the per-decay
+/// - the decay branching ratios ``"decay_branching"`` does not sample (a
+///   sigma wider than the ratio allows, or no sigma to draw), and the per-decay
 ///   photon lines and decay energy of a drawn parent, which follow its
 ///   nominal branching;
 /// - the isomeric-branching overlay from MF=9/MF=10;
@@ -605,8 +610,8 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
             &info.decay_branchings_partly_held,
         ),
         (
-            "decay_branchings_sigma_reduced",
-            &info.decay_branchings_sigma_reduced,
+            "decay_branchings_sigma_adjusted",
+            &info.decay_branchings_sigma_adjusted,
         ),
     ] {
         d.set_item(key, set.iter().cloned().collect::<Vec<_>>())?;

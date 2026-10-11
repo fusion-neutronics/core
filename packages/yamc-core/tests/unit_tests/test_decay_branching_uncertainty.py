@@ -1,8 +1,9 @@
 """Decay branching ratio uncertainty, at the Python boundary.
 
-The numerical rules (each parent's ratios drawn as a zero-sum Gaussian that
-realises its stated sigmas and keeps its total, and every parent short of its
-stated sigmas named by why) are pinned in Rust, in
+The numerical rules (each parent's ratios drawn from logit-normal marginals
+coupled to realise its stated sigmas, keeping its total and every ratio within
+it, and every parent short of its stated sigmas named by why) are pinned in
+Rust, in
 crates/yani-transmute/tests/decay_branching_uncertainty.rs. Here: the source is
 offered and on by default, and the report carries its keys either way.
 """
@@ -23,7 +24,7 @@ HELD_AT_NOMINAL = (
 )
 SAMPLED_SHORT = (
     "decay_branchings_partly_held",
-    "decay_branchings_sigma_reduced",
+    "decay_branchings_sigma_adjusted",
 )
 
 
