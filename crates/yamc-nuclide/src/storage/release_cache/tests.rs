@@ -4,6 +4,8 @@
 use super::*;
 use crate::storage::release::sha256_hex;
 use crate::LoadScope;
+use nuclear_data_schema::energy_ranges::EnergyRanges;
+use nuclear_data_schema::reaction_ranges::{Hashes, Range, ReactionRanges};
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::net::{TcpListener, TcpStream};
@@ -12,9 +14,23 @@ use std::time::Instant;
 /// How the origin answers.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Behaviour {
+    /// Serve whole objects, and byte ranges when asked: one range as a plain
+    /// 206, several as `multipart/byteranges`, as R2 behind Cloudflare does.
     Serve,
+    /// Serve whole objects and ignore every `Range` header, as a proxy that
+    /// drops it does.
+    IgnoreRanges,
     /// Accept the connection and never answer, as a black-holed network does.
     Silent,
+}
+
+/// One answered request: the path, the `Range` header it carried, and how
+/// many bytes of the object the answer carried.
+#[derive(Clone, Debug)]
+struct Served {
+    path: String,
+    range: Option<String>,
+    bytes: usize,
 }
 
 /// A one-thread-per-connection HTTP/1.1 origin over a path -> bytes map.
@@ -22,6 +38,7 @@ struct Origin {
     url: String,
     files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     hits: Arc<Mutex<Vec<String>>>,
+    served: Arc<Mutex<Vec<Served>>>,
     behaviour: Arc<Mutex<Behaviour>>,
     /// Paths whose next answer promises more bytes than it sends, once each.
     cut_once: Arc<Mutex<HashSet<String>>>,
@@ -35,28 +52,36 @@ impl Origin {
             url,
             files: Arc::default(),
             hits: Arc::default(),
+            served: Arc::default(),
             behaviour: Arc::new(Mutex::new(Behaviour::Serve)),
             cut_once: Arc::default(),
         };
-        let (files, hits, behaviour, cut_once) = (
-            Arc::clone(&origin.files),
-            Arc::clone(&origin.hits),
-            Arc::clone(&origin.behaviour),
-            Arc::clone(&origin.cut_once),
-        );
+        let state = State {
+            files: Arc::clone(&origin.files),
+            hits: Arc::clone(&origin.hits),
+            served: Arc::clone(&origin.served),
+            behaviour: Arc::clone(&origin.behaviour),
+            cut_once: Arc::clone(&origin.cut_once),
+        };
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let (files, hits, behaviour, cut_once) = (
-                    Arc::clone(&files),
-                    Arc::clone(&hits),
-                    Arc::clone(&behaviour),
-                    Arc::clone(&cut_once),
-                );
-                std::thread::spawn(move || answer(stream, &files, &hits, &behaviour, &cut_once));
+                let state = state.clone();
+                std::thread::spawn(move || answer(stream, &state));
             }
         });
         origin
+    }
+
+    /// Every answered request for an object whose path ends with `suffix`.
+    fn served(&self, suffix: &str) -> Vec<Served> {
+        self.served
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| s.path.ends_with(suffix))
+            .cloned()
+            .collect()
     }
 
     fn put(&self, path: &str, bytes: &[u8]) {
@@ -113,22 +138,45 @@ impl Origin {
     }
 }
 
-fn answer(
-    mut stream: TcpStream,
-    files: &Mutex<HashMap<String, Vec<u8>>>,
-    hits: &Mutex<Vec<String>>,
-    behaviour: &Mutex<Behaviour>,
-    cut_once: &Mutex<HashSet<String>>,
-) {
+/// What every connection thread shares.
+#[derive(Clone)]
+struct State {
+    files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    hits: Arc<Mutex<Vec<String>>>,
+    served: Arc<Mutex<Vec<Served>>>,
+    behaviour: Arc<Mutex<Behaviour>>,
+    cut_once: Arc<Mutex<HashSet<String>>>,
+}
+
+/// The `(first, last)` byte positions a `Range` header names, inclusive.
+fn parse_range(header: &str) -> Option<Vec<(usize, usize)>> {
+    header
+        .trim()
+        .strip_prefix("bytes=")?
+        .split(',')
+        .map(|r| {
+            let (first, last) = r.trim().split_once('-')?;
+            Some((first.parse().ok()?, last.parse().ok()?))
+        })
+        .collect()
+}
+
+fn answer(mut stream: TcpStream, state: &State) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() {
         return;
     }
+    let mut range = None;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).map_or(true, |n| n == 0) || line == "\r\n" {
             break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("range") {
+                range = Some(value.trim().to_string());
+            }
         }
     }
     let path = request_line
@@ -140,23 +188,83 @@ fn answer(
         .next()
         .unwrap_or("")
         .to_string();
-    hits.lock().unwrap().push(path.clone());
-    if *behaviour.lock().unwrap() == Behaviour::Silent {
+    state.hits.lock().unwrap().push(path.clone());
+    let behaviour = *state.behaviour.lock().unwrap();
+    if behaviour == Behaviour::Silent {
         std::thread::sleep(Duration::from_secs(20));
         return;
     }
-    let body = files.lock().unwrap().get(&path).cloned();
+    let body = state.files.lock().unwrap().get(&path).cloned();
     let Some(body) = body else {
         let _ = stream
             .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         return;
     };
-    let cut = cut_once.lock().unwrap().remove(&path);
-    let promised = if cut { body.len() + 100 } else { body.len() };
-    let head =
-        format!("HTTP/1.1 200 OK\r\nContent-Length: {promised}\r\nConnection: close\r\n\r\n");
-    let _ = stream.write_all(head.as_bytes());
-    let _ = stream.write_all(&body);
+    let wanted = range
+        .as_deref()
+        .filter(|_| behaviour == Behaviour::Serve)
+        .and_then(parse_range);
+    let record = |bytes: usize| {
+        state.served.lock().unwrap().push(Served {
+            path: path.clone(),
+            range: range.clone(),
+            bytes,
+        })
+    };
+    match wanted {
+        Some(ranges) if ranges.iter().any(|&(f, l)| f > l || l >= body.len()) => {
+            let _ = stream.write_all(
+                b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+        Some(ranges) if ranges.len() == 1 => {
+            let (first, last) = ranges[0];
+            let part = &body[first..=last];
+            record(part.len());
+            let head = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {first}-{last}/{}\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len(),
+                part.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(part);
+        }
+        Some(ranges) => {
+            const BOUNDARY: &str = "yamc-test-boundary";
+            let mut out = Vec::new();
+            for &(first, last) in &ranges {
+                out.extend_from_slice(
+                    format!(
+                        "\r\n--{BOUNDARY}\r\nContent-Type: application/octet-stream\r\n\
+                         Content-Range: bytes {first}-{last}/{}\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                out.extend_from_slice(&body[first..=last]);
+            }
+            out.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+            record(ranges.iter().map(|&(f, l)| l - f + 1).sum());
+            let head = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Type: multipart/byteranges; \
+                 boundary={BOUNDARY}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                out.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&out);
+        }
+        None => {
+            record(body.len());
+            let cut = state.cut_once.lock().unwrap().remove(&path);
+            let promised = if cut { body.len() + 100 } else { body.len() };
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {promised}\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    }
 }
 
 /// A scratch cache root that removes itself.
@@ -645,4 +753,384 @@ fn origin_serves_a_readable_release_for_every_keyword() {
         "the origin does not serve a release this build reads:\n  {}",
         failures.join("\n  ")
     );
+}
+
+/// The MTs and temperatures of the synthetic indexed nuclide.
+const MTS: [i32; 4] = [1, 2, 102, 105];
+const TEMPERATURES: [&str; 3] = ["294K", "600K", "900K"];
+/// A batch's length, large beside the schema so a ranged fetch's saving shows.
+const BATCH: usize = 4000;
+
+/// The bytes of one synthetic message, distinct for every nuclide and entry.
+fn message(name: &str, what: &str, len: usize) -> Vec<u8> {
+    let seed = format!("{name} {what} ");
+    seed.bytes().cycle().take(len).collect()
+}
+
+/// A section laid out as the converter writes one, with its index entries:
+/// 8 bytes of magic, a 64-byte schema message, then one batch per key. The
+/// bytes are not Arrow, which nothing here parses: the downloader only cuts,
+/// checks and splices them.
+fn indexed_section(name: &str, keys: &[String]) -> (Vec<u8>, Range, Vec<(String, Range)>) {
+    let mut bytes = b"ARROW1\0\0".to_vec();
+    let schema = (bytes.len() as u64, 64);
+    bytes.extend(message(name, "schema", 64));
+    let mut entries = Vec::new();
+    for key in keys {
+        entries.push((key.clone(), (bytes.len() as u64, BATCH as u64)));
+        bytes.extend(message(name, key, BATCH));
+    }
+    // A footer the index does not name.
+    bytes.extend(message(name, "footer", 32));
+    (bytes, schema, entries)
+}
+
+/// The hashes of every entry of a section.
+fn hashes_of(bytes: &[u8], ranges: impl IntoIterator<Item = Range>) -> Hashes {
+    ranges
+        .into_iter()
+        .map(|(off, len)| {
+            let piece = &bytes[off as usize..(off + len) as usize];
+            ((off, len), sha256_hex(piece))
+        })
+        .collect()
+}
+
+/// A nuclide whose `reactions.arrow` and `energy.arrow` carry a byte-range
+/// index in `version.json`, with hashes when `hashed`. `energy.arrow` also has
+/// a 0 K grid, which is no temperature of the nuclide and rides with every
+/// ranged load.
+fn indexed_nuclide(name: &str, hashed: bool) -> Vec<(String, Vec<u8>)> {
+    let reaction_keys: Vec<String> = MTS
+        .iter()
+        .flat_map(|mt| TEMPERATURES.iter().map(move |t| format!("{mt}@{t}")))
+        .collect();
+    let (reactions, schema, entries) = indexed_section(name, &reaction_keys);
+    let mut mts: BTreeMap<i32, BTreeMap<String, Range>> = BTreeMap::new();
+    for (key, range) in &entries {
+        let (mt, t) = key.split_once('@').unwrap();
+        mts.entry(mt.parse().unwrap())
+            .or_default()
+            .insert(t.to_string(), *range);
+    }
+    let mut reaction_index = ReactionRanges {
+        schema,
+        mts,
+        sha256: Hashes::new(),
+    };
+
+    let energy_keys: Vec<String> = std::iter::once("0K")
+        .chain(TEMPERATURES)
+        .map(str::to_string)
+        .collect();
+    let (energy, schema, entries) = indexed_section(name, &energy_keys);
+    let mut energy_index = EnergyRanges {
+        schema,
+        temperatures: entries.into_iter().collect(),
+        sha256: Hashes::new(),
+    };
+    if hashed {
+        reaction_index.sha256 = hashes_of(
+            &reactions,
+            std::iter::once(reaction_index.schema).chain(
+                reaction_index
+                    .mts
+                    .values()
+                    .flat_map(|t| t.values().copied()),
+            ),
+        );
+        energy_index.sha256 = hashes_of(
+            &energy,
+            std::iter::once(energy_index.schema).chain(energy_index.temperatures.values().copied()),
+        );
+    }
+    let version = serde_json::json!({
+        "format_version": 2,
+        "reaction_ranges": reaction_index.to_json(),
+        "energy_ranges": energy_index.to_json(),
+    });
+    let dir = format!("neutron/{name}.arrow");
+    vec![
+        (
+            format!("{dir}/version.json"),
+            serde_json::to_vec_pretty(&version).unwrap(),
+        ),
+        (
+            format!("{dir}/nuclide.arrow"),
+            message(name, "nuclide", 100),
+        ),
+        (format!("{dir}/energy.arrow"), energy),
+        (format!("{dir}/reactions.arrow"), reactions),
+        (
+            format!("{dir}/products.arrow"),
+            message(name, "products", 100),
+        ),
+        (
+            format!("{dir}/distributions.arrow"),
+            message(name, "distributions", 100),
+        ),
+    ]
+}
+
+fn publish_indexed(origin: &Origin, release: &str, name: &str, hashed: bool) {
+    let owned = indexed_nuclide(name, hashed);
+    let files: Vec<(&str, &[u8])> = owned
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
+    origin.publish("endf-b8.1", release, &files);
+}
+
+/// The bytes of one published object.
+fn published(origin: &Origin, path: &str) -> Vec<u8> {
+    origin.files.lock().unwrap()[path].clone()
+}
+
+/// The bytes of `section` at `ranges`, spliced as the downloader splices them.
+fn spliced(bytes: &[u8], ranges: &[Range]) -> Vec<u8> {
+    let bodies: Vec<Vec<u8>> = ranges
+        .iter()
+        .map(|&(off, len)| bytes[off as usize..(off + len) as usize].to_vec())
+        .collect();
+    nuclear_data_schema::reaction_ranges::splice_spans(&bodies)
+}
+
+fn at_294() -> LoadScope {
+    LoadScope::full().with_temperatures(Some(["294".to_string()].into()))
+}
+
+fn fetch_scoped(reg: &Registry, name: &str, scope: &LoadScope) -> Result<PathBuf, String> {
+    fetch_particle(reg, "endf-b8.1", name, DataKind::Neutron, scope)
+}
+
+const FE56: &str = "endf-b8.1/2026-10-01/neutron/Fe56.arrow";
+
+/// A transport load at one temperature fetches just that temperature's
+/// batches of both indexed sections, each checked against its hash, and caches
+/// them under `temperatures/` where nothing takes them for the whole files.
+#[test]
+fn a_ranged_fetch_is_verified_and_cached_under_its_own_folder() {
+    let origin = Origin::start();
+    publish_indexed(&origin, "2026-10-01", "Fe56", true);
+    let root = Scratch::new("ranged");
+    let reg = registry(&origin.url, &root);
+
+    let dir = fetch_scoped(&reg, "Fe56", &at_294()).expect("ranged download");
+    assert!(
+        !dir.join("reactions.arrow").exists() && !dir.join("energy.arrow").exists(),
+        "the canonical names are kept for the whole verified files"
+    );
+
+    let reactions = published(&origin, &format!("{FE56}/reactions.arrow"));
+    let version: serde_json::Value =
+        serde_json::from_slice(&published(&origin, &format!("{FE56}/version.json"))).unwrap();
+    let index = ReactionRanges::from_version_json(&version).unwrap();
+    let mut want = vec![index.schema];
+    want.extend(MTS.iter().map(|mt| index.mts[mt]["294K"]));
+    assert_eq!(
+        fs::read(dir.join("temperatures/reactions.arrow")).unwrap(),
+        spliced(&reactions, &want),
+        "every MT at 294K, after the schema, and nothing else"
+    );
+    let labels: Vec<String> =
+        serde_json::from_slice(&fs::read(dir.join("temperatures/reactions.json")).unwrap())
+            .unwrap();
+    assert_eq!(labels, ["294K"]);
+
+    let energy = published(&origin, &format!("{FE56}/energy.arrow"));
+    let grids = EnergyRanges::from_version_json(&version).unwrap();
+    assert_eq!(
+        fs::read(dir.join("temperatures/energy.arrow")).unwrap(),
+        spliced(
+            &energy,
+            &[
+                grids.schema,
+                grids.temperatures["0K"],
+                grids.temperatures["294K"]
+            ]
+        ),
+        "the 294K grid, and the 0 K grid every load keeps"
+    );
+
+    // Ranged requests, for exactly the entries wanted: a third of the
+    // reactions, and two grids of four.
+    for (section, whole, batches) in [
+        ("reactions.arrow", &reactions, MTS.len()),
+        ("energy.arrow", &energy, 2),
+    ] {
+        let served = origin.served(&format!("Fe56.arrow/{section}"));
+        assert!(
+            served.iter().all(|s| s.range.is_some()),
+            "{section}: {served:?}"
+        );
+        let bytes: usize = served.iter().map(|s| s.bytes).sum();
+        assert_eq!(
+            bytes,
+            64 + batches * BATCH,
+            "{section}: {bytes} of {} bytes fetched",
+            whole.len()
+        );
+    }
+    assert!(origin.served("Fe56.arrow/reactions.arrow")[0].bytes * 2 < reactions.len());
+
+    // The ranged copy serves the same load later, online and offline.
+    let before = origin.hits().len();
+    fetch_scoped(&registry(&origin.url, &root), "Fe56", &at_294()).expect("cache hit");
+    assert_eq!(&origin.hits()[before..], ["endf-b8.1/latest.json"]);
+    let offline = registry(&dead_origin(), &root);
+    fetch_scoped(&offline, "Fe56", &at_294()).expect("offline from the ranged copy");
+    // A load that needs every temperature is not served by it offline.
+    let err = fetch_scoped(&offline, "Fe56", &LoadScope::full()).unwrap_err();
+    assert!(err.contains("reactions.arrow"), "{err}");
+
+    // Online, the whole files are downloaded, verified, and supersede it.
+    let dir = fetch_scoped(&reg, "Fe56", &LoadScope::full()).expect("whole download");
+    assert_eq!(fs::read(dir.join("reactions.arrow")).unwrap(), reactions);
+    assert!(!dir.join("temperatures/reactions.arrow").exists());
+    assert!(!dir.join("temperatures/energy.arrow").exists());
+}
+
+/// An activation load ranges `reactions.arrow` by MT at every temperature,
+/// verified the same way, and caches the result under `subset/`.
+#[test]
+fn an_activation_load_fetches_its_mts_verified() {
+    let origin = Origin::start();
+    publish_indexed(&origin, "2026-10-01", "Li6", true);
+    let root = Scratch::new("ranged-mts");
+    let scope = LoadScope::activation([105, 16].into());
+    let dir = fetch_scoped(&registry(&origin.url, &root), "Li6", &scope).expect("subset");
+
+    let path = "endf-b8.1/2026-10-01/neutron/Li6.arrow";
+    let reactions = published(&origin, &format!("{path}/reactions.arrow"));
+    let version: serde_json::Value =
+        serde_json::from_slice(&published(&origin, &format!("{path}/version.json"))).unwrap();
+    let index = ReactionRanges::from_version_json(&version).unwrap();
+    let mut want = vec![index.schema];
+    want.extend(TEMPERATURES.iter().map(|t| index.mts[&105][*t]));
+    assert_eq!(
+        fs::read(dir.join("subset/reactions.arrow")).unwrap(),
+        spliced(&reactions, &want)
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("subset/mts.json")).unwrap(),
+        "[105]",
+        "what the nuclide publishes, not what was asked"
+    );
+    assert!(!dir.join("reactions.arrow").exists());
+    // The activation scope reads energy.arrow at every temperature: whole.
+    assert!(dir.join("energy.arrow").is_file());
+
+    let served = origin.served("Li6.arrow/reactions.arrow");
+    assert_eq!(served.len(), 1, "one request for the one span: {served:?}");
+    let bytes = served[0].bytes;
+    assert_eq!(bytes, 64 + 3 * BATCH);
+    assert!(
+        bytes * 3 < reactions.len(),
+        "{bytes} of {}",
+        reactions.len()
+    );
+}
+
+/// A batch the origin serves wrong is refused, naming the nuclide, the file,
+/// the cross section and both hashes. It is not asked for again and nothing
+/// of the section is cached.
+///
+/// MT 1 at 294K directly follows the schema, so the two arrive as one merged
+/// span: the check has to cut the batch back out of it to catch this.
+#[test]
+fn a_corrupted_batch_is_refused_naming_it() {
+    let origin = Origin::start();
+    publish_indexed(&origin, "2026-10-01", "Fe56", true);
+    let path = format!("{FE56}/reactions.arrow");
+    let good = published(&origin, &path);
+    let version: serde_json::Value =
+        serde_json::from_slice(&published(&origin, &format!("{FE56}/version.json"))).unwrap();
+    let index = ReactionRanges::from_version_json(&version).unwrap();
+    let (off, len) = index.mts[&1]["294K"];
+    assert_eq!(
+        index.schema.0 + index.schema.1,
+        off,
+        "adjacent to the schema"
+    );
+    let mut bad = good.clone();
+    bad[off as usize + 10] ^= 1;
+    origin.put(&path, &bad);
+
+    let root = Scratch::new("ranged-corrupt");
+    let err = fetch_scoped(&registry(&origin.url, &root), "Fe56", &at_294()).unwrap_err();
+    let expected = sha256_hex(&good[off as usize..(off + len) as usize]);
+    let got = sha256_hex(&bad[off as usize..(off + len) as usize]);
+    for needle in [
+        "Fe56",
+        "neutron/Fe56.arrow/reactions.arrow",
+        "MT 1 at 294K",
+        "sha256 mismatch",
+        &expected,
+        &got,
+    ] {
+        assert!(err.contains(needle), "missing {needle:?}: {err}");
+    }
+    assert_eq!(
+        origin.served("Fe56.arrow/reactions.arrow").len(),
+        1,
+        "no retry"
+    );
+    let dir = root.0.join(FE56);
+    assert!(!dir.join("temperatures/reactions.arrow").exists());
+    assert!(!dir.join("reactions.arrow").exists());
+}
+
+/// An index from before hashes cannot verify a range, so the section is
+/// fetched whole and checked against the manifest, as it always was.
+#[test]
+fn an_index_without_hashes_falls_back_to_the_whole_verified_file() {
+    let origin = Origin::start();
+    publish_indexed(&origin, "2026-10-01", "Fe56", false);
+    let root = Scratch::new("ranged-unhashed");
+    let dir = fetch_scoped(&registry(&origin.url, &root), "Fe56", &at_294()).expect("whole");
+    assert_eq!(
+        fs::read(dir.join("reactions.arrow")).unwrap(),
+        published(&origin, &format!("{FE56}/reactions.arrow"))
+    );
+    assert!(dir.join("energy.arrow").is_file());
+    assert!(!dir.join("temperatures").exists());
+    assert!(
+        origin.served("").iter().all(|s| s.range.is_none()),
+        "no range was asked for: {:?}",
+        origin.served("")
+    );
+}
+
+/// An origin that ignores `Range` sends the whole object, which is checked
+/// against the manifest and cached under its canonical name.
+#[test]
+fn a_whole_answer_to_a_range_request_is_verified_against_the_manifest() {
+    let origin = Origin::start();
+    publish_indexed(&origin, "2026-10-01", "Fe56", true);
+    origin.set(Behaviour::IgnoreRanges);
+    let root = Scratch::new("ranged-ignored");
+    let dir = fetch_scoped(&registry(&origin.url, &root), "Fe56", &at_294()).expect("whole");
+    assert_eq!(
+        fs::read(dir.join("reactions.arrow")).unwrap(),
+        published(&origin, &format!("{FE56}/reactions.arrow"))
+    );
+    assert!(!dir.join("temperatures/reactions.arrow").exists());
+    assert!(origin
+        .served("Fe56.arrow/reactions.arrow")
+        .iter()
+        .all(|s| s.range.is_some()));
+
+    // And a whole answer that does not match the manifest is refused.
+    let origin = Origin::start();
+    publish_indexed(&origin, "2026-10-01", "Fe56", true);
+    origin.set(Behaviour::IgnoreRanges);
+    let path = format!("{FE56}/energy.arrow");
+    let mut bad = published(&origin, &path);
+    bad[100] ^= 1;
+    origin.put(&path, &bad);
+    let root = Scratch::new("ranged-ignored-corrupt");
+    let err = fetch_scoped(&registry(&origin.url, &root), "Fe56", &at_294()).unwrap_err();
+    assert!(err.contains("sha256 mismatch"), "{err}");
+    assert!(err.contains("neutron/Fe56.arrow/energy.arrow"), "{err}");
+    assert!(!root.0.join(FE56).join("energy.arrow").exists());
 }

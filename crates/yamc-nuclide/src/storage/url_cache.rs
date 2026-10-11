@@ -597,7 +597,7 @@ fn ranged_labels_file(section: &str) -> String {
 /// What a load wants out of the two sections that carry a byte-range index.
 #[cfg(feature = "download")]
 #[derive(Debug, Clone, Copy)]
-enum Ranged<'a> {
+pub(super) enum Ranged<'a> {
     /// Every section whole.
     Whole,
     /// These MTs of `reactions.arrow`, at every temperature. An activation
@@ -615,7 +615,7 @@ enum Ranged<'a> {
 /// loader then reads every temperature), and for an activation load that
 /// asked for every MT.
 #[cfg(feature = "download")]
-fn ranged(kind: DataKind, scope: &crate::load_scope::LoadScope) -> Ranged<'_> {
+pub(super) fn ranged(kind: DataKind, scope: &crate::load_scope::LoadScope) -> Ranged<'_> {
     match kind {
         DataKind::Neutron if scope.ranges_temperatures() => scope
             .temperatures
@@ -765,7 +765,7 @@ fn section_is_resolved(dir: &std::path::Path, section: &str) -> bool {
 
 /// Whether `dir` already holds `section` as far as this load needs it.
 #[cfg(feature = "download")]
-fn section_covered(dir: &std::path::Path, section: &str, wanted: Ranged<'_>) -> bool {
+pub(super) fn section_covered(dir: &std::path::Path, section: &str, wanted: Ranged<'_>) -> bool {
     match wanted {
         Ranged::Mts(mts) if section == REACTIONS => reactions_covered(dir, mts),
         Ranged::Temperatures(temperatures) if section == REACTIONS || section == ENERGY => {
@@ -1068,6 +1068,181 @@ fn cut_spans(parts: &[(u64, Vec<u8>)], spans: &[Range]) -> Option<Vec<Vec<u8>>> 
         .collect()
 }
 
+/// What a ranged fetch of one section staged, and what it cost.
+#[cfg(feature = "download")]
+pub(super) struct RangedFetch {
+    /// The staged paths, relative to the staging directory, in the order they
+    /// are to be published: the section before its record. Just the canonical
+    /// section name when the origin ignored the `Range` header and sent the
+    /// whole object.
+    pub staged: Vec<String>,
+    /// The ranges requested, after adjacent ones were merged.
+    pub spans: usize,
+    /// Bytes received.
+    pub bytes: u64,
+}
+
+#[cfg(feature = "download")]
+impl RangedFetch {
+    /// Whether what was staged is the whole object rather than a ranged copy.
+    pub(super) fn is_whole(&self) -> bool {
+        self.staged.len() == 1 && !self.staged[0].contains('/')
+    }
+}
+
+/// Fetch `section` of the nuclide at `base_url` as the byte ranges `ranging`
+/// needs, into `staging`, when it can be.
+///
+/// `Ok(None)` means fetch it whole instead, which is a normal answer: the
+/// section is not one `ranging` ranges, the nuclide's `version.json` carries no
+/// index, the ranges wanted are every temperature there is, or (with
+/// `verified`) some entry needed has no hash to check it against.
+///
+/// `verified` is the release manifest's entry for the section, given on the
+/// keyword path. With it every byte received is checked before anything is
+/// staged: each index entry against the sha256 `version.json` gives it, or, if
+/// the origin ignored the `Range` header and sent the whole object, that
+/// object against the manifest. A mismatch is the error, naming the nuclide,
+/// the file, the entry, and both hashes. It is not retried: the origin
+/// answered in full with the wrong bytes, and asking again would only make the
+/// error slower. Without `verified` (a raw URL, which has no manifest) the
+/// bytes are taken as they come, as they always have been.
+///
+/// `version.json` is read from `staging` or else `target_dir`: it is first in
+/// every section list, so it is either staged by the same download already or
+/// in the cache from an earlier one. On the keyword path it is a verified file
+/// either way, which is what makes the hashes inside it worth checking against.
+#[cfg(feature = "download")]
+pub(super) fn fetch_ranged(
+    base_url: &str,
+    staging: &std::path::Path,
+    target_dir: &std::path::Path,
+    section: &str,
+    ranging: Ranged<'_>,
+    nuclide_name: &str,
+    verified: Option<&super::release::ManifestFile>,
+) -> Result<Option<RangedFetch>, Box<dyn std::error::Error>> {
+    let check = verified.map(|file| Check {
+        file,
+        nuclide: nuclide_name,
+    });
+    match ranging {
+        Ranged::Mts(mts) if section == REACTIONS => {
+            fetch_reactions_subset(base_url, staging, target_dir, mts, check)
+        }
+        Ranged::Temperatures(temperatures) if section == REACTIONS || section == ENERGY => {
+            fetch_temperatures(
+                base_url,
+                staging,
+                target_dir,
+                section,
+                temperatures,
+                nuclide_name,
+                check,
+            )
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Whether `ranging` fetches `section` as byte ranges when it can.
+#[cfg(feature = "download")]
+pub(super) fn ranges_section(section: &str, ranging: Ranged<'_>) -> bool {
+    match ranging {
+        Ranged::Mts(_) => section == REACTIONS,
+        Ranged::Temperatures(_) => section == REACTIONS || section == ENERGY,
+        Ranged::Whole => false,
+    }
+}
+
+/// What a ranged fetch on the keyword path is checked against.
+#[cfg(feature = "download")]
+#[derive(Clone, Copy)]
+struct Check<'a> {
+    /// The release manifest's entry for the whole section.
+    file: &'a super::release::ManifestFile,
+    nuclide: &'a str,
+}
+
+/// Fetch the `spans` of `url` that cover `pieces`, checking what arrives when
+/// `check` is given.
+///
+/// `Ok(None)` when `check` is given and some piece has no hash in `hashes`:
+/// those bytes could not be verified, so the caller fetches the whole file,
+/// which the manifest can verify.
+#[cfg(feature = "download")]
+fn fetch_checked(
+    url: &str,
+    spans: &[Range],
+    pieces: &[(Range, String)],
+    hashes: &nuclear_data_schema::reaction_ranges::Hashes,
+    check: Option<Check<'_>>,
+) -> Result<Option<Spans>, Box<dyn std::error::Error>> {
+    if check.is_some() && pieces.iter().any(|(r, _)| !hashes.contains_key(r)) {
+        return Ok(None);
+    }
+    let fetched = fetch_spans(url, spans)?;
+    if let Some(check) = check {
+        match &fetched {
+            Spans::Whole(bytes) => super::release::verify(
+                &format!("{url} ({})", check.file.path),
+                check.file,
+                bytes.len() as u64,
+                &super::release::sha256_hex(bytes),
+            )?,
+            Spans::Parts(bodies) => check_pieces(spans, bodies, pieces, hashes, check)?,
+        }
+    }
+    Ok(Some(fetched))
+}
+
+/// Check each index entry a ranged fetch covers against its hash.
+///
+/// The spans requested are entries merged where they touch, so each entry is
+/// cut back out of the span that holds it before it is hashed. Every entry is
+/// checked, not just the first of a span: a batch the origin got wrong is only
+/// wrong where it is.
+#[cfg(feature = "download")]
+fn check_pieces(
+    spans: &[Range],
+    bodies: &[Vec<u8>],
+    pieces: &[(Range, String)],
+    hashes: &nuclear_data_schema::reaction_ranges::Hashes,
+    check: Check<'_>,
+) -> Result<(), String> {
+    for ((off, len), name) in pieces {
+        let piece = spans
+            .iter()
+            .zip(bodies)
+            .find(|((start, span_len), _)| *start <= *off && off + len <= start + span_len)
+            .and_then(|((start, _), body)| {
+                let at = usize::try_from(off - start).ok()?;
+                body.get(at..at + usize::try_from(*len).ok()?)
+            })
+            .ok_or_else(|| {
+                format!(
+                    "{}: {}: no span fetched covers {name} (bytes {off}..{})",
+                    check.nuclide,
+                    check.file.path,
+                    off + len
+                )
+            })?;
+        let expected = &hashes[&(*off, *len)];
+        let got = super::release::sha256_hex(piece);
+        if !got.eq_ignore_ascii_case(expected) {
+            return Err(format!(
+                "{}: {}: sha256 mismatch in {name} (bytes {off}..{}): the release's \
+                 version.json says {expected} and the received bytes hash to {got}. Nothing \
+                 was cached.",
+                check.nuclide,
+                check.file.path,
+                off + len
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Fetch `section` (`reactions.arrow` or `energy.arrow`) at the temperatures
 /// `requested` resolves to, into `staging`.
 ///
@@ -1087,9 +1262,10 @@ fn cut_spans(parts: &[(u64, Vec<u8>)], spans: &[Range]) -> Option<Vec<Vec<u8>>> 
 /// does.
 ///
 /// `Ok(None)` means fetch the section whole: no index (data published before
-/// it), or the labels wanted are every temperature there is, which one plain
-/// GET serves better than a span per batch. A 200 answer to a ranged request
-/// is cached whole under the canonical name and returned as that path.
+/// it), the labels wanted are every temperature there is, which one plain GET
+/// serves better than a span per batch, or an entry `check` would need has no
+/// hash. A 200 answer to a ranged request is cached whole under the canonical
+/// name and returned as that path.
 #[cfg(feature = "download")]
 fn fetch_temperatures(
     base_url: &str,
@@ -1098,9 +1274,8 @@ fn fetch_temperatures(
     section: &str,
     requested: &HashSet<String>,
     nuclide_name: &str,
-) -> Result<Option<Vec<String>>, Box<dyn std::error::Error>> {
-    // version.json is first in every section list, so it is either staged by
-    // this download already or in the cache dir from an earlier one.
+    check: Option<Check<'_>>,
+) -> Result<Option<RangedFetch>, Box<dyn std::error::Error>> {
     let Some(version) = cached_version(staging).or_else(|| cached_version(target_dir)) else {
         return Ok(None);
     };
@@ -1116,24 +1291,32 @@ fn fetch_temperatures(
         return Ok(None);
     }
 
-    let spans = if section == REACTIONS {
-        index.spans_where(|_, label| labels.contains(label))
+    let url = format!("{base_url}/{section}");
+    let (spans, fetched) = if section == REACTIONS {
+        let wants = |_: i32, label: &str| labels.contains(label);
+        let spans = index.spans_where(wants);
+        let pieces = index.pieces_where(wants);
+        let fetched = fetch_checked(&url, &spans, &pieces, &index.sha256, check)?;
+        (spans, fetched)
     } else {
         let Some(energy) = EnergyRanges::from_version_json(&version) else {
             return Ok(None);
         };
-        energy.spans_for(|label| labels.contains(label) || !ladder.contains(label))
+        let wants = |label: &str| labels.contains(label) || !ladder.contains(label);
+        let spans = energy.spans_for(wants);
+        let pieces = energy.pieces_for(wants);
+        let fetched = fetch_checked(&url, &spans, &pieces, &energy.sha256, check)?;
+        (spans, fetched)
     };
-
-    let url = format!("{base_url}/{section}");
-    let bodies = match fetch_spans(&url, &spans)? {
+    let Some(fetched) = fetched else {
+        return Ok(None);
+    };
+    let bodies = match fetched {
         Spans::Parts(bodies) => bodies,
-        Spans::Whole(bytes) => {
-            fs::write(staging.join(section), bytes)?;
-            return Ok(Some(vec![section.to_string()]));
-        }
+        Spans::Whole(bytes) => return stage_whole(staging, section, spans.len(), bytes),
     };
 
+    let bytes = bodies.iter().map(|b| b.len() as u64).sum();
     fs::create_dir_all(staging.join(RANGED_DIR))?;
     fs::write(staging.join(ranged_section(section)), splice_spans(&bodies))?;
     fs::write(
@@ -1142,10 +1325,28 @@ fn fetch_temperatures(
     )?;
     // The section before its label record, so a publish interrupted between
     // the two renames leaves a record naming no more than the file holds.
-    Ok(Some(vec![
-        ranged_section(section),
-        ranged_labels_file(section),
-    ]))
+    Ok(Some(RangedFetch {
+        staged: vec![ranged_section(section), ranged_labels_file(section)],
+        spans: spans.len(),
+        bytes,
+    }))
+}
+
+/// Stage the whole object an origin sent in answer to a ranged request under
+/// the section's canonical name.
+#[cfg(feature = "download")]
+fn stage_whole(
+    staging: &std::path::Path,
+    section: &str,
+    spans: usize,
+    bytes: Vec<u8>,
+) -> Result<Option<RangedFetch>, Box<dyn std::error::Error>> {
+    fs::write(staging.join(section), &bytes)?;
+    Ok(Some(RangedFetch {
+        staged: vec![section.to_string()],
+        spans,
+        bytes: bytes.len() as u64,
+    }))
 }
 
 /// Fetch just the MTs `wanted` names out of `reactions.arrow`, into `staging`.
@@ -1153,28 +1354,33 @@ fn fetch_temperatures(
 /// Writes `subset/reactions.arrow` (a spliced Arrow IPC stream) and
 /// `subset/mts.json` (the MTs it holds), and returns the staged relative paths.
 ///
-/// `Ok(None)` means the caller should fetch the section whole after all, which
-/// happens two ways: the origin ignored the `Range` header and answered 200
-/// with the entire object, or the spans coalesced into so much of the file that
-/// ranging buys nothing. Both are normal, and neither is worth a second attempt.
+/// `Ok(None)` means the caller should fetch the section whole: the nuclide's
+/// `version.json` has no index (data published before it), or an entry `check`
+/// would need has no hash. A 200 answer to the ranged request is cached whole
+/// under the canonical name and returned as that path, as
+/// [`fetch_temperatures`] does.
 #[cfg(feature = "download")]
 fn fetch_reactions_subset(
     base_url: &str,
     staging: &std::path::Path,
-    index: &ReactionRanges,
+    target_dir: &std::path::Path,
     wanted: &HashSet<i32>,
-) -> Result<Option<Vec<String>>, Box<dyn std::error::Error>> {
+    check: Option<Check<'_>>,
+) -> Result<Option<RangedFetch>, Box<dyn std::error::Error>> {
+    let Some(index) = cached_index(staging).or_else(|| cached_index(target_dir)) else {
+        return Ok(None);
+    };
     let url = format!("{base_url}/{REACTIONS}");
     let spans = index.spans_for(|mt| wanted.contains(&mt));
+    let pieces = index.pieces_where(|mt, _| wanted.contains(&mt));
 
-    let bodies = match fetch_spans(&url, &spans)? {
-        Spans::Parts(bodies) => bodies,
-        Spans::Whole(bytes) => {
-            fs::write(staging.join(REACTIONS), bytes)?;
-            return Ok(None);
-        }
+    let bodies = match fetch_checked(&url, &spans, &pieces, &index.sha256, check)? {
+        None => return Ok(None),
+        Some(Spans::Parts(bodies)) => bodies,
+        Some(Spans::Whole(bytes)) => return stage_whole(staging, REACTIONS, spans.len(), bytes),
     };
 
+    let bytes = bodies.iter().map(|b| b.len() as u64).sum();
     fs::create_dir_all(staging.join(SUBSET_DIR))?;
     fs::write(staging.join(SUBSET_REACTIONS), splice_spans(&bodies))?;
     // The MTs the nuclide actually published, not the ones asked for. Recording
@@ -1184,10 +1390,30 @@ fn fetch_reactions_subset(
         staging.join(SUBSET_MTS),
         serde_json::to_vec(&index.present(|mt| wanted.contains(&mt)))?,
     )?;
-    Ok(Some(vec![
-        SUBSET_REACTIONS.to_string(),
-        SUBSET_MTS.to_string(),
-    ]))
+    Ok(Some(RangedFetch {
+        staged: vec![SUBSET_REACTIONS.to_string(), SUBSET_MTS.to_string()],
+        spans: spans.len(),
+        bytes,
+    }))
+}
+
+/// Drop the ranged copies a newly published whole section supersedes.
+///
+/// The reader prefers the whole object, so what is left is dead bytes and a
+/// second copy of the same cross sections to puzzle over in a cache
+/// directory. Called after the rename, so a failure before it leaves the
+/// ranged copy in place and the directory still usable.
+#[cfg(feature = "download")]
+pub(super) fn drop_superseded(dir: &std::path::Path, published: &[String]) {
+    if published.iter().any(|name| name == REACTIONS) {
+        fs::remove_dir_all(dir.join(SUBSET_DIR)).ok();
+    }
+    for section in [REACTIONS, ENERGY] {
+        if published.iter().any(|name| name == section) {
+            fs::remove_file(dir.join(ranged_section(section))).ok();
+            fs::remove_file(dir.join(ranged_labels_file(section))).ok();
+        }
+    }
 }
 
 /// Fetch one whole section object to `dest`. Returns `Ok(true)` if written,
@@ -1264,41 +1490,22 @@ fn download_sections(
     let build = || -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let mut staged = Vec::new();
         for (name, required) in &wanted {
-            // reactions.arrow, for a load that named its MTs, is fetched as the
-            // few byte ranges those MTs occupy. The index comes from
-            // version.json, which is first in every section list and so is
-            // either already staged by this loop or already in the cache dir.
-            if let (Ranged::Mts(mts), true) = (ranging, *name == REACTIONS) {
-                let index = cached_index(&staging).or_else(|| cached_index(target_dir));
-                if let Some(index) = index {
-                    if let Some(paths) = fetch_reactions_subset(base_url, &staging, &index, mts)? {
-                        staged.extend(paths);
-                        continue;
-                    }
-                    // Fell back to the whole object, already staged under the
-                    // canonical name by the fetch above.
-                    staged.push((*name).to_string());
-                    continue;
-                }
-                // No index: data published before it existed. Fetch it whole,
-                // exactly as this did before.
-            }
-            // reactions.arrow and energy.arrow, for a transport load at named
-            // temperatures, are fetched as those temperatures' batches.
-            if let (Ranged::Temperatures(temperatures), true) =
-                (ranging, *name == REACTIONS || *name == ENERGY)
-            {
-                if let Some(paths) = fetch_temperatures(
-                    base_url,
-                    &staging,
-                    target_dir,
-                    name,
-                    temperatures,
-                    nuclide_name,
-                )? {
-                    staged.extend(paths);
-                    continue;
-                }
+            // reactions.arrow, for a load that named its MTs, and reactions.arrow
+            // and energy.arrow, for a transport load at named temperatures, are
+            // fetched as the few byte ranges the load reads. With no index
+            // (data published before it) they are fetched whole, exactly as
+            // before.
+            if let Some(fetched) = fetch_ranged(
+                base_url,
+                &staging,
+                target_dir,
+                name,
+                ranging,
+                nuclide_name,
+                None,
+            )? {
+                staged.extend(fetched.staged);
+                continue;
             }
             let url = format!("{}/{}", base_url, name);
             let fetched = fetch_section_to_file(&url, &staging.join(name))?;
@@ -1332,22 +1539,8 @@ fn download_sections(
                     }
                     fs::rename(staging.join(name), to)?;
                 }
-                // The whole object supersedes any subset beside it: the reader
-                // prefers it, so what is left is dead bytes and a second copy of
-                // the same cross sections to puzzle over in a cache directory.
-                // Dropped after the rename, so a failure above leaves the subset
-                // in place and the directory still usable.
-                if staged.iter().any(|name| name == REACTIONS) {
-                    fs::remove_dir_all(target_dir.join(SUBSET_DIR)).ok();
-                }
-                // Likewise a temperature-ranged copy of a section now held
-                // whole.
-                for section in [REACTIONS, ENERGY] {
-                    if staged.iter().any(|name| name == section) {
-                        fs::remove_file(target_dir.join(ranged_section(section))).ok();
-                        fs::remove_file(target_dir.join(ranged_labels_file(section))).ok();
-                    }
-                }
+                // The whole object supersedes any ranged copy beside it.
+                drop_superseded(target_dir, &staged);
                 fs::remove_dir_all(&staging).ok();
             } else {
                 // First fetch. Publish the directory atomically. Another racing
@@ -1741,6 +1934,7 @@ mod tests {
         let index = ReactionRanges {
             schema: (64, 704),
             mts: ranges,
+            sha256: Default::default(),
         };
         fs::write(
             dir.join("version.json"),
