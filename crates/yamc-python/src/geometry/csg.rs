@@ -698,7 +698,7 @@ impl PyGeometry {
         // cannot resolve a fill body from `geometry_json` (fills serialize as an
         // identity fingerprint), so it would draw the bare CSG frame. Ship the
         // fill-aware raster and let `viewer.js` refuse to re-sample.
-        let has_mesh_fills = !self.inner.fills.is_empty();
+        let has_mesh_fills = self.inner.has_mesh_fills();
         let presampled_for_html = if has_mesh_fills {
             Some(&presampled)
         } else {

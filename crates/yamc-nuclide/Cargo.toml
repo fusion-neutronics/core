@@ -33,7 +33,6 @@ arrow-array = { version = "60", optional = true }
 # reactions.arrow back into one batch on read.
 arrow-ipc = { version = "60", optional = true, features = ["lz4"] }
 arrow-select = { version = "60", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["blocking"], optional = true }
 # Pure-Rust rustls crypto provider for the `download-tls` (HTTPS) build. No C
 # toolchain required, unlike ring. graviola supports x86_64 + aarch64 only (it
 # emits a hard `compile_error!` on other targets); on POWER9 / RISC-V / other
@@ -49,6 +48,11 @@ rustls-graviola = { version = "0.4", optional = true }
 etcetera = "0.11"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+# The emscripten (Pyodide) build has no sockets: downloads go through a fetcher
+# the host installs (`url_cache::set_host_fetcher`), so reqwest stays out.
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking"], optional = true }
 
 [features]
 default = ["arrow"]

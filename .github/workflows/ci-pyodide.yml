@@ -1,0 +1,171 @@
+# Builds yamc-core as a Pyodide (Emscripten) wheel and runs it inside Pyodide.
+#
+# yamc-online (the browser page that runs yamc Python on Pyodide) vendors this
+# wheel. It used to vendor one built by hand from a local branch, so nothing
+# here noticed when a change stopped the emscripten build compiling, and the
+# page could not say which commit its wheel came from. The artifact uploaded
+# below is what it vendors now.
+#
+# Not published to PyPI. That is a separate decision; a release that names
+# yamc-core gets the wheel attached as a release asset, nothing more.
+name: Pyodide wheel
+
+on:
+  push:
+    branches: [ main ]
+  # Every pull request, whatever its base, so a PR stacked on another
+  # PR's branch is tested before it is retargeted at main.
+  pull_request:
+    # A change to prose alone cannot break a build or a test: no test, script or
+    # include_str! reads a Markdown file. Pushes to main and releases are not
+    # filtered.
+    paths-ignore: ['**/*.md', 'docs/**', 'mkdocs.yml', 'LICENSE*']
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# A newer push to a pull request makes its older run moot, so that run is
+# cancelled. Only pull-request runs: a push to main, a release and a manual
+# dispatch always finish, so nothing that builds or publishes is cut short.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Three tries over ten seconds is all cargo gives a registry that is briefly
+  # unreachable, and a release has already been lost to a twelve-second one
+  # (yani-core 0.11.0). Ten stretches the same ladder over about a minute.
+  CARGO_NET_RETRY: 10
+  # The Pyodide release the wheel is built against. MUST match yamc-online's
+  # vendor/PYODIDE_VERSION: the wheel's platform tag and ABI are Pyodide's, and
+  # the page loads that exact Pyodide from the CDN. Bump both together. The
+  # Python below has to match this release's Python (3.14 for 314.x).
+  PYODIDE_VERSION: 314.0.7
+  # pyodide-build drives the cross build. Pinned because each release supports
+  # a range of xbuildenv versions (`pyodide xbuildenv search` lists them), and
+  # an unpinned upgrade could drop the one above.
+  PYODIDE_BUILD_VERSION: 0.39.1
+
+jobs:
+  pyodide_wheel:
+    name: Build and test the Pyodide wheel
+    # A release that does not name yamc-core has no use for a transport wheel.
+    # ci-python.yml's `plan` job owns the tag grammar and refuses a malformed
+    # tag; all this needs to know is whether yamc-core is one of its components.
+    if: github.event_name != 'release' || contains(github.event.release.tag_name, 'yamc-core-')
+    runs-on: ubuntu-latest
+    permissions:
+      # Only the release step needs it, and only for `gh release upload`.
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      # dtolnay, as in the wheel jobs of ci-python.yml: it sets no RUSTFLAGS,
+      # which would replace the remaps in `.cargo/config.toml`.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-emscripten
+
+      # Its own key: wasm32-unknown-emscripten shares no compiled artifacts
+      # with any other job.
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pyodide
+          cache-on-failure: true
+
+      - name: Install pyodide-build and the cross-build environment
+        run: |
+          set -euo pipefail
+          pip install "pyodide-build==${PYODIDE_BUILD_VERSION}"
+          pyodide xbuildenv install "$PYODIDE_VERSION"
+          # The Emscripten SDK this Pyodide was built with, patched as Pyodide
+          # patches it. Its version comes from the xbuildenv.
+          pyodide xbuildenv install-emscripten
+          echo "Emscripten $(pyodide config get emscripten_version)"
+
+      # Same bundle the native wheels ship, generated the same way.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.0
+      - name: Generate THIRD-PARTY-LICENSES.html for the wheel
+        run: cargo about generate about.hbs --all-features --locked -o packages/yamc-core/THIRD-PARTY-LICENSES.html
+
+      # `--no-default-features` drops mesh, cad, gpu and download-tls. Pyodide
+      # has no sockets, so downloads go through the fetcher the host installs
+      # with `yamc._core._set_data_fetcher` (a synchronous XMLHttpRequest from a
+      # Web Worker, in yamc-online). The wasm viewer blobs the native wheels
+      # ship under yamc/_wasm/ are not added: the page draws plots without them.
+      - name: Build the wheel
+        working-directory: packages/yamc-core
+        env:
+          MATURIN_PEP517_ARGS: --no-default-features
+        run: pyodide build -o dist
+
+      # See `.cargo/config.toml`: pyodide-build's own rustflags are
+      # target-specific, which is why that file names this target separately.
+      # This is the step that notices if the remaps stop reaching it.
+      - name: The wheel must carry no builder paths
+        run: python3 scripts/check_binary_paths.py packages/yamc-core/dist/*.whl
+
+      - name: Cache nuclear-data test fixtures
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/yamc
+          key: yamc-test-fixtures-endf-b8.1-${{ hashFiles('crates/yamc-nuclide/src/storage/url_cache.rs', 'crates/nuclear-data-schema/src/lib.rs') }}
+      - name: Fetch nuclear-data test fixtures
+        run: python3 scripts/fetch_test_fixtures.py
+
+      # `pyodide venv` makes a virtualenv whose `python` is Pyodide running in
+      # Node, so this imports the wheel as the browser does. Node has no
+      # synchronous XMLHttpRequest, so the smoke test installs a data fetcher
+      # that answers from the fixtures above, Range headers included, and runs
+      # a Li-6 transport through the same download, cache and transport code
+      # the page runs.
+      - name: Smoke test the wheel inside Pyodide
+        run: |
+          set -euo pipefail
+          pyodide venv .venv-pyodide
+          .venv-pyodide/bin/pip install packages/yamc-core/dist/*.whl
+          .venv-pyodide/bin/python scripts/pyodide_smoke_test.py ~/.cache/yamc
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: yamc-core-pyodide-wheel
+          path: packages/yamc-core/dist/*.whl
+          if-no-files-found: error
+
+      # Only the wheel at the version the tag names. ci-python.yml's
+      # verify-versions fails the release when the crate's version disagrees,
+      # and this refuses to attach a wheel under a tag it does not match.
+      - name: Attach the wheel to the release
+        if: github.event_name == 'release' && github.event.action == 'published'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version=""
+          IFS=',' read -ra PARTS <<< "$TAG"
+          for part in "${PARTS[@]}"; do
+            part="$(printf '%s' "$part" | tr -d '[:space:]')"
+            case "$part" in
+              yamc-core-*) version="${part#yamc-core-}"; version="${version#v}" ;;
+            esac
+          done
+          shopt -s nullglob
+          wheels=(packages/yamc-core/dist/yamc_core-"$version"-*.whl)
+          if [ -z "$version" ] || [ "${#wheels[@]}" -ne 1 ]; then
+            echo "::error::tag '$TAG' names yamc-core '$version', and the built wheel is:" >&2
+            ls packages/yamc-core/dist >&2
+            exit 1
+          fi
+          gh release upload "$TAG" "${wheels[0]}" --clobber
