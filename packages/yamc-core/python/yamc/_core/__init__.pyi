@@ -3065,7 +3065,11 @@ class Model:
                   resonance cross sections are folded against that, self-shielding
                   dips and all, in place of the first-order MF=32 rows.
                   ``get_data_uncertainty_info``'s ``resonance_parameters`` says
-                  which nuclides and why not;
+                  which nuclides and why not. The flux is still the nominal
+                  transport's (see below), so for a self-shielded resonance the
+                  sigma is an overestimate: a stronger resonance deepens its own
+                  dip, which ``simulate_transport(data_uncertainty=...)``
+                  carries and this does not;
                 - ``"half_life"``: the decay data's half-life sigmas;
                 - ``"decay_branching"``: the decay branching ratios of the
                   parents with a stated sigma, each drawn keeping its total, as
