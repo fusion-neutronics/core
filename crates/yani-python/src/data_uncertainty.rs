@@ -30,9 +30,12 @@ use yani_transmute::uncertainty::{
 ///   themselves: each replica draws them from their covariance, rebuilds the
 ///   resonance range's cross sections from the draw and Doppler broadens the
 ///   change to the temperature in use, so the resonance range's uncertainty
-///   is exact in the parameters rather than first order. A nuclide whose
-///   parameters cannot be sampled keeps the first-order MF=32 rows of
-///   ``covariance.arrow``, and the report says which and why;
+///   is exact in the parameters rather than first order. On a
+///   transport-coupled run the change is folded against the flux the
+///   transport tallied on the nuclide's own energy grid through its
+///   resonances, so a self-shielded resonance is weighted with its own flux
+///   dip. A nuclide whose parameters cannot be sampled keeps the first-order
+///   MF=32 rows of ``covariance.arrow``, and the report says which and why;
 /// - ``"flux_spectrum"``: the spectrum itself, from the per-bin
 ///   ``flux_std_dev`` given on a ``Pulse``;
 /// - ``"half_life"``: every reachable nuclide's half-life, from the decay
@@ -681,7 +684,8 @@ pub fn info_to_dict<'py>(py: Python<'py>, info: &Info) -> PyResult<Bound<'py, Py
 /// `Info::resonance_parameters` as a dict keyed by nuclide: each entry's
 /// `method`, the `reason` it fell back to the first-order rows (`None` where
 /// the parameters were sampled), and per sampled range its sampler report.
-fn resonance_parameters_dict<'py>(
+/// `yamc`'s transport coverage report gives its own the same shape.
+pub fn resonance_parameters_dict<'py>(
     py: Python<'py>,
     methods: &std::collections::BTreeMap<String, ResonanceMethod>,
 ) -> PyResult<Bound<'py, PyDict>> {

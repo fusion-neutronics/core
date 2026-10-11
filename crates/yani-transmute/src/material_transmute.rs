@@ -1145,7 +1145,7 @@ pub fn preload_activation_data(
 /// replaces everything it holds, and a folder without the file has nothing to
 /// add, so a material whose nuclides were loaded (or edited) in memory reads
 /// exactly as it did before the section existed.
-fn ensure_resonance_parameters_loaded(
+pub(crate) fn ensure_resonance_parameters_loaded(
     material: &mut Material,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let lacking: Vec<(String, String, LoadScope)> = material
@@ -1270,6 +1270,10 @@ pub(crate) struct TransportStatistics {
     material_id: u32,
     base_chain: Arc<HashMap<String, ChainNuclide>>,
     branch: Arc<BranchTable>,
+    /// The tallied flux on [`crate::resonance_rates::resolved_flux_grid`],
+    /// which a replica's rebuilt resonance cross sections are folded
+    /// against.
+    resolved: Option<MultigroupSpectrum>,
 }
 
 /// One material's independent-mode transport result, per source particle.
@@ -1287,6 +1291,11 @@ pub struct TransportTallied {
     /// normalization as `rates`: the fold divides partial rates taken from it
     /// by `rates`, so its magnitude matters.
     pub spectrum: MultigroupSpectrum,
+    /// The tallied flux on [`crate::resonance_rates::resolved_flux_grid`], at
+    /// the same normalization, when the transport tallied it: what a
+    /// replica's resonance parameters are sampled against. `None` keeps every
+    /// nuclide's first-order MF=32 rows.
+    pub resolved_spectrum: Option<MultigroupSpectrum>,
     /// The statistical covariance of `rates` and `partials`, when the tally
     /// carried history statistics.
     pub statistics: Option<crate::history_statistics::RateCovariance>,
@@ -1324,6 +1333,7 @@ pub fn transport_replicas(
     let mut initial = initial.clone();
     if request.wants(crate::uncertainty::Source::CrossSections) {
         initial.ensure_covariance_loaded()?;
+        ensure_resonance_parameters_loaded(&mut initial)?;
         ensure_derivations_loaded(&mut initial, chain)?;
     }
     // The nominal the replicas scatter around: the same branching fold the
@@ -1360,6 +1370,7 @@ pub fn transport_replicas(
         material_id,
         base_chain: Arc::clone(chain),
         branch: Arc::clone(&tallied.branch),
+        resolved: tallied.resolved_spectrum.clone(),
     });
     let no_statistics = TransportStatistics {
         rates: crate::statistical::StatisticalRates::new(
@@ -1368,6 +1379,7 @@ pub fn transport_replicas(
         material_id,
         base_chain: Arc::clone(chain),
         branch: Arc::clone(&tallied.branch),
+        resolved: tallied.resolved_spectrum.clone(),
     };
     run_replicas(
         &initial,
@@ -1675,11 +1687,15 @@ fn run_replicas(
     }
 
     // Resonance parameters, where a nuclide's folder carries them: drawn per
-    // replica and its cross sections rebuilt, exact in the parameters. Not on
-    // a transport run, which keeps the first-order MF=32 rows (its flux is
-    // one transport's, so a replica has no spectrum to weight a rebuilt
-    // cross section with but the tally's).
-    let resonance = (cross_sections && !transport).then(|| {
+    // replica and its cross sections rebuilt, exact in the parameters. A
+    // transport run weights them with the flux it tallied through the
+    // resonances, and its rates are the tally's; without that flux it keeps
+    // the first-order MF=32 rows, as the coarse spectrum cannot weight a
+    // resonance.
+    let resolved = statistical_in.and_then(|s| s.resolved.as_ref());
+    let resonance = if !cross_sections {
+        None
+    } else if !transport {
         let weight_spectra: Vec<crate::resonance_rates::WeightSpectrum> = per_spectrum
             .iter()
             .zip(spectra)
@@ -1687,10 +1703,37 @@ fn run_replicas(
                 rates: &p.0,
                 masses: &s.masses,
                 boundaries: &s.boundaries,
+                resolved: false,
             })
             .collect();
-        crate::resonance_rates::ResonanceRun::new(initial, &weight_spectra, shielding, request.seed)
-    });
+        Some(crate::resonance_rates::ResonanceRun::new(
+            initial,
+            &weight_spectra,
+            shielding,
+            request.seed,
+        ))
+    } else if let Some(fine) = resolved {
+        let weight_spectra = [crate::resonance_rates::WeightSpectrum {
+            rates: &per_spectrum[0].0,
+            masses: &fine.masses,
+            boundaries: &fine.boundaries,
+            resolved: true,
+        }];
+        Some(crate::resonance_rates::ResonanceRun::new(
+            initial,
+            &weight_spectra,
+            None,
+            request.seed,
+        ))
+    } else {
+        Some(crate::resonance_rates::ResonanceRun::held(
+            initial,
+            &per_spectrum[0].0,
+            "the transport tallied no flux through the resonances \
+             (TransportTallied::resolved_spectrum), so there is no spectrum fine \
+             enough to weight a rebuilt resonance with",
+        ))
+    };
     // What a replica draws MF=33 from: the same fields, less the first-order
     // MF=32 rows of every nuclide whose parameters are sampled, so the
     // resonance range is counted once. Everything that reads the
@@ -5364,6 +5407,7 @@ mod tests {
                 masses: vec![1.0],
                 flux_error: None,
             },
+            resolved_spectrum: None,
             statistics: Some(RateCovariance::from_parts(
                 vec![RateLabel {
                     nuclide: "Fe56".to_string(),

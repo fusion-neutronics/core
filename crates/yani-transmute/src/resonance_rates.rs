@@ -86,13 +86,42 @@
 //!
 //! On a self-shielded run the weight is taken under the nominal shielded
 //! shape, as the MF=33 fold takes its partials: a perturbed resonance does
-//! not deepen its own flux dip here. A transport-coupled run keeps the
-//! first-order rows for every nuclide.
+//! not deepen its own flux dip here.
+//!
+//! # Transport
+//!
+//! A transport-coupled run has no spectrum but the tally's, and the 50 bins a
+//! decade the MF=33 fold reads are far too coarse to weight a resonance with:
+//! the flux dips inside a self-shielded resonance by orders of magnitude over
+//! a width hundreds of times narrower than a bin. So the transport tallies a
+//! second flux, on the energies of [`resolved_flux_grid`]: each sampled
+//! nuclide's own transport grid over the reach of its ranges, which traces
+//! every broadened resonance as finely as the cross section the rates were
+//! scored with. The weight is built from that histogram ([`WeightSpectrum`]
+//! with `resolved` set), so the fold sees the self-shielded flux the
+//! transport saw, dips and all, and the shift is relative to the tallied
+//! rate. What is held is the same as for every cross-section source of a
+//! transport-coupled run: the flux is the nominal transport's, so a perturbed
+//! resonance does not reshape its own dip. Where a resonance is
+//! self-shielded that overstates the rate's sigma, since a stronger
+//! resonance deepens its own dip and captures little more: on a 30 cm
+//! graphite sphere with one W186 atom in 51 under a 14 MeV source, W186
+//! capture moves by 1.4% (rms over 32 replicas) under the fixed flux and by
+//! 0.18% in reruns of the same draws, while the first-order rows folded
+//! against the coarse spectrum give 1.9%. The replica weights of a transport
+//! that applies the draws itself ([`TransportResonance`]) carry the flux
+//! response. Without the resolved tally every nuclide keeps the first-order
+//! rows, with the reason.
+//!
+//! A transport that applies the draws itself ([`TransportResonance`]) reads
+//! the same parameters, replica for replica, and gets each replica's change
+//! to the cross sections at its own temperature on its own energy grid,
+//! broadened.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use endf::doppler::{broadened_weight, BroadenedWeight, Flux};
+use endf::doppler::{broaden, broadened_weight, BroadenedWeight, Flux};
 use endf::mf::mf2::ResonanceRange;
 use endf::resonance::{cross_sections_on, CrossSections, RangeReconstruction, REACTIONS};
 use endf::resonance_covariance::{reconstruction_at, reconstruction_grid, RangeCovariance};
@@ -284,6 +313,9 @@ fn prepare(name: &str, data: &ResonanceParameters) -> Result<PreparedNuclide, St
             .map_err(|e| format!("{where_}: {e}"))?;
         let nominal_values = cross_sections_on(nominal.as_ref(), &nominal_grid);
         let others = nominal.other_reactions();
+        // A range with no fission width gives no fission, nominal or drawn: a
+        // width stated with a zero mean is held at zero.
+        let fissile = nominal_values.iter().any(|c| c.slots()[2] != 0.0);
         ranges.push(PreparedRange {
             index,
             cov,
@@ -291,7 +323,13 @@ fn prepare(name: &str, data: &ResonanceParameters) -> Result<PreparedNuclide, St
             sampler,
             report,
             edges,
-            slot_mts: [Some(2), Some(102), Some(18), others[0], others[1]],
+            slot_mts: [
+                Some(2),
+                Some(102),
+                fissile.then_some(18),
+                others[0],
+                others[1],
+            ],
             nominal_grid,
             nominal_values,
             nominal,
@@ -368,6 +406,11 @@ pub(crate) struct WeightSpectrum<'a> {
     pub rates: &'a ReactionRates,
     pub masses: &'a [f64],
     pub boundaries: &'a [f64],
+    /// Whether the bins resolve the flux through the resonances, as a
+    /// transport tally on [`resolved_flux_grid`] does: the density is then
+    /// flat in each bin, and no collapse shape or within-group weight is put
+    /// on it.
+    pub resolved: bool,
 }
 
 impl ResonanceRun {
@@ -392,7 +435,8 @@ impl ResonanceRun {
         let shapes: Vec<Option<CollapseShapes>> = spectra
             .iter()
             .map(|s| {
-                let valid = !s.masses.is_empty() && s.boundaries.len() == s.masses.len() + 1;
+                let valid =
+                    !s.resolved && !s.masses.is_empty() && s.boundaries.len() == s.masses.len() + 1;
                 valid
                     .then(|| CollapseShapes::new(material, s.masses, s.boundaries, shielding))
                     .flatten()
@@ -447,6 +491,32 @@ impl ResonanceRun {
             seed,
             n_spectra: spectra.len(),
             nuclides,
+            methods,
+            computed: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// No nuclide sampled: every nuclide of `material` with resonance
+    /// parameters and a rate in `rates` keeps the first-order rows, for
+    /// `reason`.
+    pub(crate) fn held(material: &Material, rates: &ReactionRates, reason: &str) -> Self {
+        let methods = material
+            .nuclide_data
+            .iter()
+            .filter(|(name, nd)| nd.resonance_parameters.is_some() && rates.contains_key(*name))
+            .map(|(name, _)| {
+                (
+                    name.clone(),
+                    ResonanceMethod::FirstOrder {
+                        reason: reason.to_string(),
+                    },
+                )
+            })
+            .collect();
+        ResonanceRun {
+            seed: 0,
+            n_spectra: 1,
+            nuclides: Vec::new(),
             methods,
             computed: Mutex::new(HashMap::new()),
         }
@@ -571,13 +641,7 @@ fn run_nuclide(
         .resonance_parameters
         .as_ref()
         .expect("only nuclides with resonance parameters are prepared");
-    let label = if material.temperature().is_empty() {
-        crate::default_temperature(nd).unwrap_or_default()
-    } else {
-        material.temperature().to_string()
-    };
-    let temperature = yamc_nuclide::temperature::label_to_kelvin(&label)
-        .ok_or_else(|| format!("its temperature label {label:?} is not a number of kelvin"))?;
+    let (_, temperature) = kelvin(material, nd)?;
 
     // Channels first: preparing a nuclide no channel could read is wasted.
     let any_candidate = spectra.iter().any(|s| {
@@ -623,6 +687,13 @@ fn run_nuclide(
         channels.sort_by(|a, b| a.kind.cmp(&b.kind));
         let shape = shapes.as_ref().and_then(|c| c.shape_for(name));
         let flux = flux_density(s, shape.as_ref(), &prepared, temperature)?;
+        // A tallied flux can be empty over a nuclide's ranges (a material the
+        // histories never slowed into them); its rates there are zero and
+        // nothing moves them.
+        if flux_is_zero(&flux) {
+            read.push(None);
+            continue;
+        }
         let weight = broadened_weight(&flux, prepared.awr, temperature, prepared.broaden_below)
             .map_err(|e| format!("its broadened flux weight cannot be built: {e}"))?;
         reads_any = true;
@@ -635,25 +706,42 @@ fn run_nuclide(
     }))
 }
 
-/// The collapse's flux density over the groups whose broadening reaches the
-/// nuclide's ranges: [`endf::doppler::WINDOW`] Doppler widths, plus one,
-/// either side, outside which the kernel is below `exp(-49)` of its peak.
-fn flux_density(
-    s: &WeightSpectrum<'_>,
-    shape: Option<&FluxShape>,
-    prepared: &PreparedNuclide,
-    temperature: f64,
-) -> Result<Flux, String> {
-    let (lo, hi) = prepared.span;
-    let (lo, hi) = if temperature > 0.0 {
-        let alpha = prepared.awr / (endf::K_BOLTZMANN * temperature);
+/// Whether a flux density is zero everywhere.
+fn flux_is_zero(flux: &Flux) -> bool {
+    match flux {
+        Flux::Histogram { density, .. } => density.iter().all(|v| *v == 0.0),
+        Flux::Lethargy { per_lethargy, .. } => per_lethargy.iter().all(|v| *v == 0.0),
+        Flux::Pointwise { value, .. } => value.iter().all(|v| *v == 0.0),
+    }
+}
+
+/// `[lo, hi]` widened by [`endf::doppler::WINDOW`] Doppler widths, plus one,
+/// either side, for a target of mass ratio `awr` at `temperature` kelvin:
+/// beyond it the kernel is below `exp(-49)` of its peak, so a change
+/// confined to `[lo, hi]` at 0 K is confined to this once broadened, and the
+/// flux outside it does not weight one.
+fn doppler_reach(lo: f64, hi: f64, awr: f64, temperature: f64) -> (f64, f64) {
+    if temperature > 0.0 {
+        let alpha = awr / (endf::K_BOLTZMANN * temperature);
         let reach = endf::doppler::WINDOW + 1.0;
         let x_lo = ((alpha * lo).sqrt() - reach).max(0.0);
         let x_hi = (alpha * hi).sqrt() + reach;
         (x_lo * x_lo / alpha, x_hi * x_hi / alpha)
     } else {
         (lo, hi)
-    };
+    }
+}
+
+/// The collapse's flux density over the groups whose broadening reaches the
+/// nuclide's ranges ([`doppler_reach`]). A resolved spectrum's is its
+/// histogram.
+fn flux_density(
+    s: &WeightSpectrum<'_>,
+    shape: Option<&FluxShape>,
+    prepared: &PreparedNuclide,
+    temperature: f64,
+) -> Result<Flux, String> {
+    let (lo, hi) = doppler_reach(prepared.span.0, prepared.span.1, prepared.awr, temperature);
     let b = s.boundaries;
     let groups: Vec<usize> = (0..s.masses.len())
         .filter(|&g| b[g + 1] > lo && b[g] < hi)
@@ -670,6 +758,20 @@ fn flux_density(
             lo.max(1e-11).min(b[1] * 0.5)
         }
     };
+    if s.resolved {
+        let edges: Vec<f64> = groups
+            .iter()
+            .map(|&g| floor(b[g]))
+            .chain(std::iter::once(b[groups[groups.len() - 1] + 1]))
+            .collect();
+        return Ok(Flux::Histogram {
+            density: groups
+                .iter()
+                .map(|&g| s.masses[g] / (b[g + 1] - floor(b[g])))
+                .collect(),
+            edges,
+        });
+    }
     match shape {
         None => {
             let edges: Vec<f64> = groups
@@ -724,6 +826,212 @@ fn flux_density(
             }
             Ok(Flux::Pointwise { energy, value })
         }
+    }
+}
+
+/// The temperature, in kelvin, a nuclide's resonance cross sections are
+/// broadened to in `material`: its label, or the nuclide's default where the
+/// material has none.
+fn kelvin(material: &Material, nd: &yamc_nuclide::Nuclide) -> Result<(String, f64), String> {
+    let label = if material.temperature().is_empty() {
+        crate::default_temperature(nd).unwrap_or_default()
+    } else {
+        material.temperature().to_string()
+    };
+    let kelvin = yamc_nuclide::temperature::label_to_kelvin(&label)
+        .ok_or_else(|| format!("its temperature label {label:?} is not a number of kelvin"))?;
+    Ok((label, kelvin))
+}
+
+/// The energies, eV, a transport tally resolves `material`'s flux on so a
+/// transport-coupled run can sample resonance parameters (see the module
+/// documentation): for every nuclide whose parameters can be sampled, the
+/// points of its own transport grid at the material's temperature that lie
+/// within the Doppler reach of its sampled ranges, and that reach's ends.
+/// Ascending and without repeats; empty where no nuclide's can be sampled.
+///
+/// Reads `resonance_parameters.arrow` for each nuclide whose folder has one,
+/// on a copy, so `material` itself is left as it is. Preparing a nuclide here
+/// is the preparation the run's replicas reuse.
+pub fn resolved_flux_grid(material: &Material) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
+    let mut copy = material.clone();
+    crate::material_transmute::ensure_resonance_parameters_loaded(&mut copy)?;
+    let mut points = Vec::new();
+    let mut names: Vec<&String> = copy.nuclide_data.keys().collect();
+    names.sort();
+    for name in names {
+        let nd = &copy.nuclide_data[name];
+        let Some(data) = nd.resonance_parameters.as_ref() else {
+            continue;
+        };
+        let Ok((label, temperature)) = kelvin(&copy, nd) else {
+            continue;
+        };
+        let Ok(prepared) = prepared(name, data) else {
+            continue;
+        };
+        let Some(grid) = nd.energy.as_ref().and_then(|m| m.get(&label)) else {
+            continue;
+        };
+        let grid = grid.as_slice();
+        let Some(&first) = grid.first() else {
+            continue;
+        };
+        let (lo, hi) = doppler_reach(prepared.span.0, prepared.span.1, prepared.awr, temperature);
+        let lo = lo.max(first);
+        points.push(lo);
+        points.push(hi);
+        points.extend(grid.iter().copied().filter(|&e| e > lo && e < hi));
+    }
+    points.sort_by(f64::total_cmp);
+    points.dedup();
+    Ok(points)
+}
+
+/// A nuclide's resonance parameters prepared for a transport that applies
+/// each replica's draw itself: the change the draw makes to its cross
+/// sections, broadened to the temperature in use, on the transport's own
+/// energy grid.
+///
+/// Replica `k` under seed `s` draws the parameters a transmutation's replica
+/// `k` under the same seed draws ([`resonance_deviates`]), so the two see the
+/// same evaluation. The change is `B_T[σ'_0 - σ_0]`, the drawn 0 K
+/// reconstruction less the nominal one, broadened by the exact free-gas
+/// kernel ([`endf::doppler::broaden`]) below BROADR's `thnmax` and taken at
+/// 0 K above it, as the library's own cross section was made. Added to the
+/// library's cross section it is the drawn evaluation's, to the library's
+/// linearization tolerance.
+pub struct TransportResonance {
+    name: String,
+    prepared: Arc<PreparedNuclide>,
+    temperature: f64,
+}
+
+impl TransportResonance {
+    /// Prepare `name`'s parameters, `data`, for transport at `temperature`
+    /// (a temperature label, in kelvin), or say why they cannot be sampled:
+    /// the reasons [`ResonanceMethod::FirstOrder`] gives.
+    pub fn new(
+        name: &str,
+        data: &Arc<ResonanceParameters>,
+        temperature: &str,
+    ) -> Result<Self, String> {
+        let temperature =
+            yamc_nuclide::temperature::label_to_kelvin(temperature).ok_or_else(|| {
+                format!("its temperature label {temperature:?} is not a number of kelvin")
+            })?;
+        Ok(TransportResonance {
+            name: name.to_string(),
+            prepared: prepared(name, data)?,
+            temperature,
+        })
+    }
+
+    /// `[lo, hi]`, eV: where a replica's change can be nonzero, the sampled
+    /// ranges widened by the kernel's reach.
+    pub fn reach(&self) -> (f64, f64) {
+        let p = &self.prepared;
+        doppler_reach(p.span.0, p.span.1, p.awr, self.temperature)
+    }
+
+    /// The MTs the sampled ranges give a cross section for, ascending:
+    /// elastic (2), capture (102), fission (18) where a range has it, and an
+    /// R-matrix limited range's other exit pairs.
+    pub fn reactions(&self) -> Vec<i32> {
+        let mut mts: Vec<i32> = self
+            .prepared
+            .ranges
+            .iter()
+            .flat_map(|r| r.slot_mts.iter().flatten().copied())
+            .collect();
+        mts.sort_unstable();
+        mts.dedup();
+        mts
+    }
+
+    /// How the parameters are sampled: one report per range.
+    pub fn method(&self) -> ResonanceMethod {
+        ResonanceMethod::Sampled {
+            ranges: self
+                .prepared
+                .ranges
+                .iter()
+                .map(|r| r.report.clone())
+                .collect(),
+        }
+    }
+
+    /// Replica `replica`'s change to each reaction of [`Self::reactions`] at
+    /// every energy of `grid` (eV, ascending), in barns, zero outside
+    /// [`Self::reach`]. An isotope of a natural element contributes its
+    /// abundance's share.
+    pub fn changes(
+        &self,
+        seed: u64,
+        replica: u64,
+        grid: &[f64],
+    ) -> Result<BTreeMap<i32, Vec<f64>>, String> {
+        let p = &self.prepared;
+        let mut out: BTreeMap<i32, Vec<f64>> = self
+            .reactions()
+            .into_iter()
+            .map(|mt| (mt, vec![0.0; grid.len()]))
+            .collect();
+        for r in &p.ranges {
+            let fail = |e: endf::Error| {
+                format!(
+                    "{} range {:.4e} to {:.4e} eV, replica {replica}: {e}",
+                    self.name, r.edges[0], r.edges[1]
+                )
+            };
+            let (lo, hi) = doppler_reach(r.edges[0], r.edges[1], p.awr, self.temperature);
+            let first = grid.partition_point(|&e| e < lo);
+            let last = grid.partition_point(|&e| e <= hi);
+            if first >= last {
+                continue;
+            }
+            let at = &grid[first..last];
+            // Below `thnmax` the library broadened, above it the 0 K cross
+            // section is what it holds.
+            let split = if self.temperature > 0.0 {
+                p.broaden_below
+                    .map_or(at.len(), |limit| at.partition_point(|&e| e <= limit))
+            } else {
+                0
+            };
+            let values = r.sampler.draw(seed, replica, &self.name, r.index);
+            let perturbed = reconstruction_at(&r.range, &r.cov, &values).map_err(fail)?;
+            let rgrid = reconstruction_grid(&[r.nominal.as_ref(), perturbed.as_ref()], &r.edges)
+                .map_err(fail)?;
+            let nominal = r.nominal_on(&rgrid);
+            let drawn = cross_sections_on(perturbed.as_ref(), &rgrid);
+            // Zero outside the range, by a step at each end, as for the fold.
+            let mut energy = Vec::with_capacity(rgrid.len() + 2);
+            energy.push(rgrid[0]);
+            energy.extend_from_slice(&rgrid);
+            energy.push(rgrid[rgrid.len() - 1]);
+            let mut sigma = vec![0.0; energy.len()];
+            for (slot, mt) in r.slot_mts.iter().enumerate() {
+                let Some(mt) = *mt else { continue };
+                for (i, (a, b)) in drawn.iter().zip(&nominal).enumerate() {
+                    sigma[i + 1] = r.abundance * (a.slots()[slot] - b.slots()[slot]);
+                }
+                if sigma.iter().all(|v| *v == 0.0) {
+                    continue;
+                }
+                let below = broaden(&energy, &sigma, p.awr, self.temperature, &at[..split])
+                    .map_err(fail)?;
+                let above = broaden(&energy, &sigma, p.awr, 0.0, &at[split..]).map_err(fail)?;
+                let target = out.get_mut(&mt).expect("every slot MT is a reaction");
+                for (o, v) in target[first..last]
+                    .iter_mut()
+                    .zip(below.iter().chain(&above))
+                {
+                    *o += v;
+                }
+            }
+        }
+        Ok(out)
     }
 }
 

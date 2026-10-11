@@ -1205,7 +1205,8 @@ impl PyTransmutationResults {
     /// - ``resonance_parameters``: per nuclide with resonance parameters
     ///   (MF=2 and MF=32) and a rate in this run, how its resonance-range
     ///   uncertainty was sampled. ``method`` is ``"parameters sampled"``
-    ///   (drawn per replica and the cross sections rebuilt from them) or
+    ///   (drawn per replica and the cross sections rebuilt from them, on a
+    ///   transport run against the flux it tallied through the resonances) or
     ///   ``"first-order rows"`` (the MF=32 rows of ``covariance.arrow``),
     ///   ``reason`` why the parameters were not sampled (``None`` where they
     ///   were), and ``ranges`` one sampler report per sampled range:

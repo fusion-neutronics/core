@@ -74,7 +74,7 @@ fn lead(dir: &Path) -> Material {
 /// The relative cells of `reaction` whose upper edge is inside the resolved
 /// range.
 fn resolved_cells(m: &Material, reaction: i32) -> usize {
-    let (fields, _) = transport_fields(m);
+    let (fields, _) = transport_fields(m, &Default::default());
     fields["Pb208"].field.as_ref().map_or(0, |f| {
         f.relative_cells
             .iter()
@@ -174,7 +174,7 @@ fn resonance_parameter_covariance_reaches_transport() {
         replicas,
     });
     let weighted = run(m.clone(), 21, data);
-    let (fields, _) = transport_fields(&m);
+    let (fields, _) = transport_fields(&m, &Default::default());
     let cells = fields
         .iter()
         .filter_map(|(n, t)| t.field.clone().map(|f| (n.clone(), f)))
@@ -182,7 +182,9 @@ fn resonance_parameter_covariance_reaches_transport() {
     for k in 0..replicas {
         let draw = Sampler::new(&cells, &[]).draw(SEED, k as u64);
         let rerun = run(
-            perturbed_material(&m, &fields, &draw).unwrap().0,
+            perturbed_material(&m, &fields, &draw, &Default::default())
+                .unwrap()
+                .0,
             1000 + k as u64,
             None,
         );

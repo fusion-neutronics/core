@@ -248,9 +248,12 @@ class DataUncertainty:
       themselves: each replica draws them from their covariance, rebuilds the
       resonance range's cross sections from the draw and Doppler broadens the
       change to the temperature in use, so the resonance range's uncertainty
-      is exact in the parameters rather than first order. A nuclide whose
-      parameters cannot be sampled keeps the first-order MF=32 rows of
-      ``covariance.arrow``, and the report says which and why;
+      is exact in the parameters rather than first order. On a
+      transport-coupled run the change is folded against the flux the
+      transport tallied on the nuclide's own energy grid through its
+      resonances, so a self-shielded resonance is weighted with its own flux
+      dip. A nuclide whose parameters cannot be sampled keeps the first-order
+      MF=32 rows of ``covariance.arrow``, and the report says which and why;
     - ``"flux_spectrum"``: the spectrum itself, from the per-bin
       ``flux_std_dev`` given on a ``Pulse``;
     - ``"half_life"``: every reachable nuclide's half-life, from the decay
@@ -3304,7 +3307,8 @@ class TransmutationResults:
         - ``resonance_parameters``: per nuclide with resonance parameters
           (MF=2 and MF=32) and a rate in this run, how its resonance-range
           uncertainty was sampled. ``method`` is ``"parameters sampled"``
-          (drawn per replica and the cross sections rebuilt from them) or
+          (drawn per replica and the cross sections rebuilt from them, on a
+          transport run against the flux it tallied through the resonances) or
           ``"first-order rows"`` (the MF=32 rows of ``covariance.arrow``),
           ``reason`` why the parameters were not sampled (``None`` where they
           were), and ``ranges`` one sampler report per sampled range:
