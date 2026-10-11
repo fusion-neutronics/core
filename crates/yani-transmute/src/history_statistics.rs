@@ -348,7 +348,7 @@ impl HistoryStatistics {
 
     fn worker_scratch(&self) -> MutexGuard<'_, Vec<Scratch>> {
         let slots = self.workers.get().expect(
-            "TransmutationTallies::prepare_history_workers must run before scoring \
+            "TransmutationTallies::prepare_workers must run before scoring \
              with history statistics on",
         );
         let idx = worker_index();

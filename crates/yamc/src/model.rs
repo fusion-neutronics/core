@@ -1732,7 +1732,15 @@ impl Model {
         let replica_ctx = match &settings.data_uncertainty {
             Some(data) => Some(crate::transport::replica::ReplicaContext::new(
                 self.geometry.materials(),
-                &self.tallies,
+                // A transmutation's replicas are its own tally's; the model's
+                // tallies are scored at nominal alongside (see
+                // `validate_data_uncertainty`).
+                if transmutation_tallies.is_some() {
+                    &[]
+                } else {
+                    &self.tallies
+                },
+                transmutation_tallies.as_deref(),
                 data.replicas,
                 data.seed,
             )?),
@@ -1876,8 +1884,17 @@ impl Model {
         // Replica sums cost `(2R + 2)` doubles per bin per worker, and with
         // `K` modes `2K + 2R + 2` more. Refuse a run that would not fit rather
         // than let it fail allocating mid-setup.
+        // A transmutation's replica weights are carried for its own tally
+        // alone, so the model's tallies keep no replica sums.
+        let replica_tallies = settings
+            .data_uncertainty
+            .filter(|_| transmutation_tallies.is_none());
         if let Some(data) = &settings.data_uncertainty {
-            let bins: usize = welford_tally_num_bins.iter().sum();
+            let bins: usize = if replica_tallies.is_some() {
+                welford_tally_num_bins.iter().sum()
+            } else {
+                0
+            };
             let modes = replica_ctx.as_ref().map_or(0, |r| r.n_modes());
             let width = 2 * data.replicas
                 + 2
@@ -1888,6 +1905,19 @@ impl Model {
                 };
             let bytes = bins as f64 * width as f64 * 8.0 * n_rayon_threads as f64;
             const LIMIT: f64 = 8.0 * 1024.0 * 1024.0 * 1024.0;
+            let transmutation_bytes = transmutation_tallies
+                .as_ref()
+                .map_or(0.0, |t| t.replica_doubles(n_rayon_threads) as f64 * 8.0);
+            if transmutation_bytes > LIMIT {
+                return Err(format!(
+                    "data_uncertainty would keep {:.1} GiB of transmutation replica sums \
+                     ({} replicas x the rates, yield channels and flux bins of every \
+                     transmutable material, x {n_rayon_threads} threads); reduce samples or \
+                     threads, or use DataUncertainty(flux_response=\"held\")",
+                    transmutation_bytes / 1024f64.powi(3),
+                    data.replicas
+                ));
+            }
             if bytes > LIMIT {
                 return Err(format!(
                     "data_uncertainty would keep {:.1} GiB of replica sums ({bins} tally bins x \
@@ -1904,7 +1934,7 @@ impl Model {
                     let state =
                         yamc_tallies::welford::WelfordWorkerState::new(&welford_tally_num_bins)
                             .with_covariance(&welford_covariance);
-                    parking_lot::Mutex::new(match &settings.data_uncertainty {
+                    parking_lot::Mutex::new(match &replica_tallies {
                         Some(data) => state.with_replicas(
                             &vec![true; welford_tally_num_bins.len()],
                             data.replicas,
@@ -1919,7 +1949,7 @@ impl Model {
         // The transmutation tally's per-history statistics, when on, keep a
         // scratch vector per rayon worker the same way; size it for this pool.
         if let Some(dep_tallies) = &transmutation_tallies {
-            dep_tallies.prepare_history_workers(n_rayon_threads)?;
+            dep_tallies.prepare_workers(n_rayon_threads)?;
         }
 
         // Per-tally convergence history (aggregate statistics versus number

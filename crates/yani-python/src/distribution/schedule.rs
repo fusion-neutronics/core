@@ -732,6 +732,7 @@ impl PyPulseSchedule {
         let mut total_std_dev_correlated = None;
         let mut data_uncertainty_info = None;
         if let Some(request) = data_uncertainty {
+            request.without_flux_response("PulseSchedule.time_correct_tally")?;
             let emitters = campaigns.first().map(|c| c.0.clone()).unwrap_or_default();
             let rates: Vec<Vec<f64>> = campaigns.iter().map(|c| c.4.clone()).collect();
             let ensemble = yani_transmute::d1s_uncertainty::time_correction_factor_ensemble(

@@ -1413,7 +1413,9 @@ impl PyMaterial {
         // interpreter for the length of the solve, so a Python-level
         // `ThreadPoolExecutor` over cases could not overlap them at all.
         drop(sched);
-        let uncertainty = data_uncertainty.map(|u| u.inner);
+        let uncertainty = data_uncertainty
+            .map(|u| u.without_flux_response("Material.transmute"))
+            .transpose()?;
         let material = &mut self.internal;
         let results = py.detach(move || {
             yani_transmute::transmute_materials(

@@ -89,7 +89,18 @@ pub(crate) fn score_track_length_segment(
         // weighted technique) the particle carries weight < 1, and the
         // transmutation rates must see it. Analog weight is 1, so this is
         // bit-identical for analog runs.
-        dep_tallies.score(mat_id, particle.energy, dist * particle.weight, mat_ref);
+        match replica.filter(|_| dep_tallies.replicas().is_some()) {
+            // Every replica's score too, under the segment's replica factors.
+            Some(seg) => dep_tallies.score_with_replicas(
+                mat_id,
+                particle.energy,
+                dist * particle.weight,
+                mat_ref,
+                seg.track_factors(),
+                seg.context(),
+            ),
+            None => dep_tallies.score(mat_id, particle.energy, dist * particle.weight, mat_ref),
+        }
     }
     end_position
 }

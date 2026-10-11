@@ -106,20 +106,11 @@ impl StatisticalRates {
         material_id: u32,
         replica: u64,
     ) -> (ReactionRates, PartialRates, usize) {
-        let m = self.len();
-        let replica_seed = yamc_rng::history_seed(base_seed, replica);
-        // A second level under the statistical stream, rather than the id
-        // folded into the stream tag, so the tag stays clear of every other
-        // replica stream whatever the id.
-        let stream = yamc_rng::secondary_seed(replica_seed, STATISTICAL_STREAM);
-        let mut state = yamc_rng::expand_seed(yamc_rng::secondary_seed(stream, material_id));
-        let z = crate::covariance_sample::standard_normals(&mut state, m);
+        let deltas = self.deviations(base_seed, material_id, replica);
         let mut totals: ReactionRates = HashMap::new();
         let mut partials: PartialRates = HashMap::new();
         let mut floored = 0;
-        for i in 0..m {
-            let row = &self.factor[i * m..i * m + i + 1];
-            let delta: f64 = row.iter().zip(&z).map(|(l, z)| l * z).sum();
+        for (i, delta) in deltas.into_iter().enumerate() {
             let mut value = self.means[i] + delta;
             if value < 0.0 {
                 floored += 1;
@@ -142,6 +133,80 @@ impl StatisticalRates {
             }
         }
         (totals, partials, floored)
+    }
+
+    /// One replica's draw as deviations from the tallied means, in the order
+    /// of the covariance's labels.
+    fn deviations(&self, base_seed: u64, material_id: u32, replica: u64) -> Vec<f64> {
+        let m = self.len();
+        let replica_seed = yamc_rng::history_seed(base_seed, replica);
+        // A second level under the statistical stream, rather than the id
+        // folded into the stream tag, so the tag stays clear of every other
+        // replica stream whatever the id.
+        let stream = yamc_rng::secondary_seed(replica_seed, STATISTICAL_STREAM);
+        let mut state = yamc_rng::expand_seed(yamc_rng::secondary_seed(stream, material_id));
+        let z = crate::covariance_sample::standard_normals(&mut state, m);
+        (0..m)
+            .map(|i| {
+                let row = &self.factor[i * m..i * m + i + 1];
+                row.iter().zip(&z).map(|(l, z)| l * z).sum()
+            })
+            .collect()
+    }
+
+    /// Add one replica's statistical draw, as its deviation from the tallied
+    /// means, to rates that are already a replica's: those a transport with
+    /// nuclear-data replica weights tallied for it. Returns how many came out
+    /// negative and were floored at zero.
+    ///
+    /// The replica's rates were scored by the same histories as the nominal
+    /// ones, so they share the nominal's Monte Carlo error: replica `k`'s
+    /// tally is the nominal plus a change that correlated sampling resolves
+    /// far more finely than either. Adding the nominal's error, drawn from
+    /// its per-history covariance, puts that shared error on every replica
+    /// once, and the two sources stay independent: the total spread is the
+    /// data's and the statistics' in quadrature. A rate the replica does not
+    /// carry is left absent rather than created.
+    pub fn add_to(
+        &self,
+        base_seed: u64,
+        material_id: u32,
+        replica: u64,
+        totals: &mut ReactionRates,
+        partials: &mut PartialRates,
+    ) -> usize {
+        let deltas = self.deviations(base_seed, material_id, replica);
+        let mut floored = 0;
+        let mut add = |value: &mut f64, delta: f64| {
+            *value += delta;
+            if *value < 0.0 {
+                floored += 1;
+                *value = 0.0;
+            }
+        };
+        for (label, delta) in self.labels.iter().zip(deltas) {
+            match &label.target {
+                None => {
+                    if let Some(v) = totals
+                        .get_mut(&label.nuclide)
+                        .and_then(|k| k.get_mut(&label.kind))
+                    {
+                        add(v, delta);
+                    }
+                }
+                Some(target) => {
+                    if let Some(states) = partials
+                        .get_mut(&label.nuclide)
+                        .and_then(|k| k.get_mut(&label.kind))
+                    {
+                        if let Some((_, v)) = states.iter_mut().find(|(t, _)| t == target) {
+                            add(v, delta);
+                        }
+                    }
+                }
+            }
+        }
+        floored
     }
 }
 

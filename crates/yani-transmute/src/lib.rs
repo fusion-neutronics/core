@@ -152,7 +152,9 @@ pub use schedule::{duration_to_seconds, Schedule, ScheduleStep};
 pub use self_shielding::{Shape, Shielding, ShieldingInfo};
 pub use transmutation::TransmutationDriver;
 pub use transmutation_stepper::{ForwardEulerStepper, TransmutationStepper, DENSITY_FLOOR};
-pub use transmutation_tallies::{CollectiveOps, PartialRates, TransmutationTallies};
+pub use transmutation_tallies::{
+    CollectiveOps, PartialRates, ReplicaChanges, ReplicaTallied, TransmutationTallies,
+};
 
 /// The chain reaction name to MT mapping, from its single definition in
 /// [`yani::reactions`]. Re-exported at crate visibility so the modules here
