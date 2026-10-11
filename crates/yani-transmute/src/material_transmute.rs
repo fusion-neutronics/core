@@ -1053,6 +1053,20 @@ pub fn preload_activation_data(
         // ("Nuclide 'Os190' is not available in 'fendl-3.2d'.") and was being
         // discarded by the `.ok()` this replaces.
         let composition: HashSet<&str> = material.nuclides.keys().map(|s| s.as_str()).collect();
+        // The downloads behind the loads below go out together first, with a
+        // count of nuclides as they arrive. Without threads (wasm32) the loads
+        // are one at a time and so were the hundreds of downloads behind them.
+        yamc_nuclide::url_cache::prefetch(
+            &to_load
+                .iter()
+                .map(|(name, path)| yamc_nuclide::url_cache::DataRequest {
+                    source: path,
+                    name,
+                    kind: yamc_nuclide::url_cache::DataKind::Neutron,
+                    scope: &scope,
+                })
+                .collect::<Vec<_>>(),
+        );
         let decoded: Vec<LoadOutcome> = {
             let load_one = |(name, path): (String, String)| {
                 let sources = HashMap::from([(name.clone(), path)]);
@@ -1862,7 +1876,7 @@ fn run_replicas(
         _ => None,
     };
 
-    // Decay branchings: the two-mode parents the sum rule fixes, substituted
+    // Decay branchings: every parent with a split to sample, substituted
     // into the same chains as the half-lives. Folding rewrites reactions and
     // never decays, so a parent's rows are the same in every chain.
     let decay_branching = match (&chains, want_decay_branching) {
@@ -1994,7 +2008,7 @@ fn run_replicas(
             // A drawn ratio moves the inventory only. The parent's own lines
             // and decay energy per decay stay those of the nominal scheme, so
             // a photon source or dose spread does not cover this coupling.
-            if !b.two_modes.is_empty() {
+            if !b.splits.is_empty() {
                 info.not_perturbed.insert(
                     0,
                     "decay emission per branch (line intensities and decay energy \
@@ -2002,12 +2016,11 @@ fn run_replicas(
                         .to_string(),
                 );
             }
-            info.decay_branchings_perturbed =
-                b.two_modes.iter().map(|t| t.parent.clone()).collect();
+            info.decay_branchings_perturbed = b.splits.iter().map(|t| t.parent.clone()).collect();
             info.no_decay_branching_uncertainty = b.without.clone();
-            info.decay_branchings_three_or_more_modes = b.three_or_more_modes.clone();
-            info.decay_branchings_unequal_sigmas = b.unequal_sigmas.clone();
             info.decay_branchings_too_wide = b.too_wide.clone();
+            info.decay_branchings_partly_held = b.partly_held.clone();
+            info.decay_branchings_sigma_reduced = b.sigma_reduced.clone();
         }
     }
     if !want_decay_energy {
@@ -2114,9 +2127,7 @@ fn run_replicas(
     // every sigma reads zero, with `info` saying why: no covariance data, not a
     // confident zero.
     let no_half_lives = half_life.as_ref().is_none_or(|h| h.candidates.is_empty());
-    let no_decay_branchings = decay_branching
-        .as_ref()
-        .is_none_or(|b| b.two_modes.is_empty());
+    let no_decay_branchings = decay_branching.as_ref().is_none_or(|b| b.splits.is_empty());
     let no_fission_yields = fission_yield.as_ref().is_none_or(|f| f.is_empty());
     if sampler.is_empty()
         && resonance.as_ref().is_none_or(|r| r.is_empty())
@@ -2217,8 +2228,8 @@ fn run_replicas(
                 _ => HashMap::new(),
             },
             decay_branchings: match &decay_branching {
-                Some(b) if !b.two_modes.is_empty() => crate::decay_branching_uncertainty::sample(
-                    &b.two_modes,
+                Some(b) if !b.splits.is_empty() => crate::decay_branching_uncertainty::sample(
+                    &b.splits,
                     request.seed,
                     replica,
                     &mut decay_branchings_floored,
@@ -2521,8 +2532,8 @@ const SENSITIVITY_STEP: f64 = 1.0e-3;
 /// and each channel alone. Half-lives: each nuclide the solve populates, as
 /// `(s sigma_T / T)^2`. A half-life of a nuclide that never appears in the
 /// inventory cannot move it, which keeps this to the nuclides that matter
-/// even in a fission chain. Decay branchings: each populated two-mode parent,
-/// along its one degree of freedom.
+/// even in a fission chain. Decay branchings: each populated sampled parent,
+/// along each of its independent directions.
 #[allow(clippy::too_many_arguments)]
 fn first_order_contributors(
     initial: &Material,
@@ -2745,26 +2756,34 @@ fn first_order_contributors(
         }
     }
 
-    // Decay branchings: one solve per populated parent, moving its one degree
-    // of freedom by a step relative to the smaller ratio, which is at least
-    // five sigmas and so well clear of zero. A parent absent from every
-    // inventory decays nowhere and cannot move one.
+    // Decay branchings: one solve per populated parent and direction, moving
+    // the ratios one unit normal's way by a step that changes none by more
+    // than the relative step, so every row stays well clear of zero. A parent
+    // absent from every inventory decays nowhere and cannot move one.
     if let (Some(b), Some(c)) = (decay_branching, chains) {
-        use crate::decay_branching_uncertainty::TwoModes;
-        let jobs: Vec<&TwoModes> = b
-            .two_modes
+        use crate::decay_branching_uncertainty::Split;
+        let jobs: Vec<(&Split, usize)> = b
+            .splits
             .iter()
             .filter(|t| populated.contains(t.parent.as_str()))
+            .flat_map(|t| (0..t.directions.len()).map(move |k| (t, k)))
             .collect();
-        let run = |t: &&TwoModes| -> Result<Vec<HashMap<String, f64>>, String> {
+        let run = |&(t, k): &(&Split, usize)| -> Result<Vec<HashMap<String, f64>>, String> {
+            let step = t.step(k, SENSITIVITY_STEP);
             let edits = ChainEdits {
-                decay_branchings: HashMap::from([(
-                    t.parent.clone(),
-                    t.shifted(SENSITIVITY_STEP * t.smaller()),
-                )]),
+                decay_branchings: HashMap::from([(t.parent.clone(), t.shifted(k, step))]),
                 ..Default::default()
             };
-            Ok(sensitivity(&solve_edited(&edits, c)?))
+            // `sensitivity` divides by the relative step; rescaled, `s` is dN
+            // per unit of the direction's normal.
+            Ok(sensitivity(&solve_edited(&edits, c)?)
+                .into_iter()
+                .map(|per| {
+                    per.into_iter()
+                        .map(|(n, s)| (n, s * SENSITIVITY_STEP / step))
+                        .collect()
+                })
+                .collect())
         };
         let results: Vec<Result<Vec<HashMap<String, f64>>, String>> = {
             #[cfg(not(target_arch = "wasm32"))]
@@ -2777,33 +2796,33 @@ fn first_order_contributors(
                 jobs.iter().map(run).collect()
             }
         };
-        for (t, sens) in jobs.into_iter().zip(results) {
-            // `sensitivity` divides by the relative step, so `s` is dN per
-            // unit relative change of the smaller ratio.
-            let rel = t.sigma / t.smaller();
+        // The normals are independent, so a parent's variance is the sum of
+        // its directions' squared sensitivities.
+        let mut by_parent: Vec<(String, Vec<HashMap<String, f64>>)> = Vec::new();
+        for ((t, k), sens) in jobs.into_iter().zip(results) {
             let sens = sens?;
             sensitivities.push(Sensitivity {
                 source: "decay_branching",
                 nuclide: t.parent.clone(),
-                input: Input::Branching {
-                    row: t.drawn,
-                    nominal: t.ratio,
-                    smaller: t.smaller(),
-                },
+                input: Input::Branching { direction: k },
                 s: sens.clone(),
             });
-            let variance = sens
-                .into_iter()
-                .map(|per| {
-                    per.into_iter()
-                        .map(|(k, s)| (k, (s * rel) * (s * rel)))
-                        .filter(|(_, v)| *v > 0.0)
-                        .collect()
-                })
-                .collect();
+            if k == 0 {
+                by_parent.push((t.parent.clone(), vec![HashMap::new(); sens.len()]));
+            }
+            let (_, variance) = by_parent.last_mut().expect("direction 0 comes first");
+            for (acc, per) in variance.iter_mut().zip(sens) {
+                for (n, s) in per {
+                    if s * s > 0.0 {
+                        *acc.entry(n).or_insert(0.0) += s * s;
+                    }
+                }
+            }
+        }
+        for (parent, variance) in by_parent {
             out.push(Contributor {
                 source: "decay_branching".to_string(),
-                nuclide: t.parent.clone(),
+                nuclide: parent,
                 reaction: None,
                 variance,
             });
@@ -2854,13 +2873,10 @@ enum Input {
     Rate { spectrum: usize, kind: String },
     /// A half-life, relative to its nominal.
     HalfLife { nominal: f64 },
-    /// A two-mode parent's drawn ratio, relative to the smaller nominal ratio,
-    /// which is what the sensitivity was taken along.
-    Branching {
-        row: usize,
-        nominal: f64,
-        smaller: f64,
-    },
+    /// One of a sampled parent's standard normals, by the index of its
+    /// direction: the sensitivity is per unit of it, so its change is the
+    /// replica's normal itself.
+    Branching { direction: usize },
 }
 
 /// Everything needed to regenerate one replica's inputs exactly as the replica
@@ -2909,15 +2925,21 @@ impl ReplicaDraws<'_> {
             }
             _ => HashMap::new(),
         };
-        let branchings = match self.decay_branching {
-            Some(b) if needs(|i| matches!(i, Input::Branching { .. })) => {
-                crate::decay_branching_uncertainty::sample(
-                    &b.two_modes,
-                    self.seed,
-                    replica,
-                    &mut 0usize,
-                )
-            }
+        // A draw pulled back onto the simplex moved by its scale times its
+        // normals.
+        let branchings: HashMap<&str, Vec<f64>> = match self.decay_branching {
+            Some(b) if needs(|i| matches!(i, Input::Branching { .. })) => b
+                .splits
+                .iter()
+                .map(|t| {
+                    let z = crate::decay_branching_uncertainty::normals(t, self.seed, replica);
+                    let (_, scale) = t.ratios_for(&z);
+                    (
+                        t.parent.as_str(),
+                        z.into_iter().map(|z| scale * z).collect(),
+                    )
+                })
+                .collect(),
             _ => HashMap::new(),
         };
         sensitivities
@@ -2945,13 +2967,9 @@ impl ReplicaDraws<'_> {
                 Input::HalfLife { nominal } => half_lives
                     .get(&s.nuclide)
                     .map_or(0.0, |t| t / nominal - 1.0),
-                Input::Branching {
-                    row,
-                    nominal,
-                    smaller,
-                } => branchings
-                    .get(&s.nuclide)
-                    .map_or(0.0, |r| (r[*row] - nominal) / smaller),
+                Input::Branching { direction } => branchings
+                    .get(s.nuclide.as_str())
+                    .map_or(0.0, |z| z[*direction]),
             })
             .collect()
     }

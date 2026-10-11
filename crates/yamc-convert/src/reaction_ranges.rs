@@ -51,6 +51,15 @@
 //! yields a valid Arrow IPC *stream* that reads with no special casing and
 //! produces batches identical to the whole-file path. [`splice_stream`] does
 //! this, and the round-trip test asserts the equality.
+//!
+//! # Hashes
+//!
+//! Every entry is written with the sha256 of its bytes, the schema message's
+//! included, so a reader that fetched only some batches of a release can check
+//! each one against `version.json`, which the release manifest pins. The
+//! hashes are taken from the file on disk, the same bytes that are published,
+//! so they are right for any file this indexes, including one this build did
+//! not write.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -61,7 +70,8 @@ use arrow_array::cast::AsArray;
 use arrow_array::Array;
 use arrow_ipc::reader::FileReader;
 
-pub use nuclear_data_schema::reaction_ranges::{splice_stream, Range, ReactionRanges, EOS};
+pub use nuclear_data_schema::reaction_ranges::{splice_stream, Hashes, Range, ReactionRanges, EOS};
+use yamc_nuclide::storage::release::sha256_hex;
 
 /// `"ARROW1\0\0"`, the file magic and padding the first message sits after.
 const FILE_HEADER_LEN: u64 = 8;
@@ -115,6 +125,35 @@ pub(crate) fn schema_offset(bytes: &[u8]) -> Result<u64, Box<dyn Error>> {
         at += 8;
     }
     Ok(u64::try_from(at)?)
+}
+
+/// The sha256 of the bytes at each of `ranges` within `bytes`, one per
+/// distinct range.
+///
+/// An error for a range that runs past the end of the file, which is an index
+/// that does not describe this file rather than one with a hash missing.
+pub(crate) fn hash_ranges(
+    bytes: &[u8],
+    ranges: impl IntoIterator<Item = Range>,
+) -> Result<Hashes, Box<dyn Error>> {
+    let mut hashes = Hashes::new();
+    for range @ (off, len) in ranges {
+        if hashes.contains_key(&range) {
+            continue;
+        }
+        let piece = usize::try_from(off)
+            .ok()
+            .zip(usize::try_from(off + len).ok())
+            .and_then(|(start, end)| bytes.get(start..end))
+            .ok_or_else(|| {
+                format!(
+                    "range ({off}, {len}) runs past the end of a {}-byte file",
+                    bytes.len()
+                )
+            })?;
+        hashes.insert(range, sha256_hex(piece));
+    }
+    Ok(hashes)
 }
 
 /// Index the record batches of a `{Nuclide}.arrow/reactions.arrow`.
@@ -196,9 +235,15 @@ pub fn index_reactions(reactions: &Path) -> Result<ReactionRanges, Box<dyn Error
     }
 
     let schema_at = schema_offset(&bytes)?;
+    let schema = (schema_at, message_len(&bytes, schema_at)?);
+    let sha256 = hash_ranges(
+        &bytes,
+        std::iter::once(schema).chain(mts.values().flat_map(|t| t.values().copied())),
+    )?;
     Ok(ReactionRanges {
-        schema: (schema_at, message_len(&bytes, schema_at)?),
+        schema,
         mts,
+        sha256,
     })
 }
 
@@ -206,7 +251,9 @@ pub fn index_reactions(reactions: &Path) -> Result<ReactionRanges, Box<dyn Error
 ///
 /// A post-process, so an already-built tree gains the index without being
 /// reconverted: only `version.json` is rewritten and the multi-GB cross-section
-/// files are never touched. A folder with no `reactions.arrow` -- a photon
+/// files are never touched. It is also the backfill for the per-entry hashes:
+/// rerun over a tree indexed before they existed, it writes the same ranges
+/// with a hash on each. A folder with no `reactions.arrow` -- a photon
 /// element, or a conversion that produced no reactions table -- is left alone.
 ///
 /// Returns whether an index was written.

@@ -39,12 +39,40 @@
 //! A file is only ever renamed into a release folder after it verified, so a
 //! file that is present there is a verified one.
 //!
-//! `reactions.arrow` and `energy.arrow` are always downloaded whole on this
-//! path. A byte-range fetch of a few MTs or temperatures cannot be checked
-//! against a whole-file hash, so the ranged fetches are kept for raw URL
-//! sources only (which have no manifest to check against); a keyword load that
-//! names its MTs or temperatures downloads the whole tables once, verified,
-//! and every later load reads them from the cache.
+//! # Byte-range fetches
+//!
+//! A load that names its MTs (activation) or its temperatures (transport at a
+//! material temperature) reads a few batches of `reactions.arrow` and
+//! `energy.arrow`, which are most of a nuclide's bytes. Those are fetched as
+//! byte ranges when they can be verified, which is when the nuclide's
+//! `version.json` gives a sha256 for every index entry the load needs (see
+//! `nuclear_data_schema::reaction_ranges`). `version.json` is downloaded and
+//! verified against the manifest first, so its hashes are as trustworthy as
+//! the manifest's own. Each entry received is checked against its hash before
+//! anything is cached, and a mismatch is a hard error naming the nuclide, the
+//! file, the MT or temperature, and both hashes, not retried.
+//!
+//! The ranged copy is spliced and cached exactly as the raw-URL path caches
+//! one (`url_cache::fetch_ranged`): under `temperatures/` or `subset/` in the
+//! nuclide's folder, with a record of the labels or MTs it holds. Those paths
+//! are not manifest paths, so a ranged copy is never taken for the whole
+//! verified file, and the whole file, once downloaded for a load that needs
+//! it, supersedes the copy.
+//!
+//! A release whose index carries no hash for some entry a load needs (a
+//! library indexed before hashes existed) is fetched whole for that section,
+//! verified against the manifest, as before. So is an origin that ignores the
+//! `Range` header: the whole object it sends is checked against the manifest.
+//!
+//! # Prefetched replies
+//!
+//! A load of many nuclides calls `url_cache::prefetch` first, which asks
+//! [`Registry::pending`] what each nuclide's download would fetch, fetches all
+//! of it a batch of nuclides at a time with many requests in flight, and holds
+//! the replies. The download here then takes a held reply in place of each
+//! request it would have sent, and checks it exactly as it checks a reply from
+//! the network: a whole file against the manifest as it is written, a range
+//! against the index. A request with no held reply goes to the network.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -61,7 +89,10 @@ use super::release::{
     parse_latest, parse_manifest, verify, DataRelease, LatestPointer, ManifestFile, Release,
     StreamHash, LATEST, MANIFEST,
 };
-use super::url_cache::{cache_root, get_path_lock, sections_for, transmutation_sections, DataKind};
+use super::url_cache::{
+    cache_root, drop_superseded, fetch_ranged, get_path_lock, ranged, ranges_section,
+    section_covered, sections_for, transmutation_sections, DataKind, Ranged,
+};
 
 /// How long each phase of a request may take.
 ///
@@ -370,15 +401,50 @@ impl Registry {
         Err(Unreachable(last))
     }
 
+    /// What a load of `name` at `scope` would download from `keyword` now, or
+    /// `None` when it would download nothing: every file is cached, the
+    /// release does not publish the nuclide, or the origin is unreachable.
+    ///
+    /// Resolves the library if nothing has yet, as the download would first.
+    /// For `url_cache::prefetch`, which fetches the files ahead of the
+    /// download.
+    pub(crate) fn pending(
+        &self,
+        keyword: &str,
+        name: &str,
+        kind: DataKind,
+        scope: &crate::load_scope::LoadScope,
+    ) -> Option<Pending> {
+        let library = self.library(keyword).ok()?;
+        let Library::Online { release, base_url } = &*library else {
+            return None;
+        };
+        let dir = particle_dir(kind, name);
+        let ranging = ranged(kind, scope);
+        let needed = needed_files(keyword, release, &dir, &sections_for(kind, scope), name).ok()?;
+        let sections: Vec<String> = needed
+            .into_iter()
+            .filter(|f| !held(release, f, ranging))
+            .map(|f| section_name(f).to_string())
+            .collect();
+        (!sections.is_empty()).then(|| Pending {
+            url: format!("{base_url}{dir}"),
+            local: release.dir.join(&dir),
+            sections,
+        })
+    }
+
     /// The local folder holding `sections` of `dir` (`neutron/Fe56.arrow`,
     /// `transmutation/decay.arrow`, ...) of `keyword`'s release, downloading
-    /// and verifying whatever the cache lacks. `what` names the data in
-    /// messages.
+    /// and verifying whatever the cache lacks. `ranging` is which MTs or
+    /// temperatures of the indexed sections the load reads, if only some.
+    /// `what` names the data in messages.
     pub(crate) fn fetch_dir(
         &self,
         keyword: &str,
         dir: &str,
         sections: &[(&str, bool)],
+        ranging: Ranged<'_>,
         what: &str,
     ) -> Result<PathBuf, String> {
         let library = self.library(keyword)?;
@@ -387,23 +453,18 @@ impl Registry {
                 let needed = needed_files(keyword, release, dir, sections, what)?;
                 let local = release.dir.join(dir);
                 self.record_use(keyword, release.record(false));
-                let missing: Vec<&ManifestFile> = needed
-                    .iter()
-                    .copied()
-                    .filter(|f| !release.dir.join(&f.path).is_file())
-                    .collect();
-                if missing.is_empty() {
+                if needed.iter().all(|f| held(release, f, ranging)) {
                     log_from_cache(keyword, release.id(), what, &local);
                     return Ok(local);
                 }
                 let lock = get_path_lock(&local);
                 let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
-                let missing: Vec<&ManifestFile> = missing
+                let missing: Vec<&ManifestFile> = needed
                     .into_iter()
-                    .filter(|f| !release.dir.join(&f.path).is_file())
+                    .filter(|f| !held(release, f, ranging))
                     .collect();
                 if !missing.is_empty() {
-                    self.download(keyword, release, base_url, &missing, what, &local)?;
+                    self.download(keyword, release, base_url, dir, &missing, ranging, what)?;
                 }
                 Ok(local)
             }
@@ -416,7 +477,7 @@ impl Registry {
                 if chosen.is_none() {
                     let pick = candidates.iter().find(|c| {
                         needed_files(keyword, c, dir, sections, what)
-                            .is_ok_and(|files| files.iter().all(|f| c.dir.join(&f.path).is_file()))
+                            .is_ok_and(|files| files.iter().all(|f| held(c, f, ranging)))
                     });
                     let Some(pick) = pick else {
                         return Err(offline_missing_error(
@@ -425,6 +486,7 @@ impl Registry {
                             candidates.first().map(|c| &**c),
                             dir,
                             sections,
+                            ranging,
                             what,
                             &self.root()?,
                         ));
@@ -441,13 +503,14 @@ impl Registry {
                 }
                 let release = chosen.as_ref().expect("chosen above");
                 let needed = needed_files(keyword, release, dir, sections, what)?;
-                if needed.iter().any(|f| !release.dir.join(&f.path).is_file()) {
+                if needed.iter().any(|f| !held(release, f, ranging)) {
                     return Err(offline_missing_error(
                         keyword,
                         reason,
                         Some(release),
                         dir,
                         sections,
+                        ranging,
                         what,
                         &self.root()?,
                     ));
@@ -459,9 +522,121 @@ impl Registry {
         }
     }
 
-    /// Download `files` into the release folder, each verified, then publish
-    /// them by rename.
+    /// Download `files` of `dir` into the release folder, every byte verified.
+    ///
+    /// The sections `ranging` reads only some of go last, as byte ranges where
+    /// the index lets them be verified: that needs the nuclide's
+    /// `version.json`, which is among the others when it is not cached yet and
+    /// so is in place, verified, by then. Whatever cannot be ranged is
+    /// downloaded whole.
+    #[allow(clippy::too_many_arguments)]
     fn download(
+        &self,
+        keyword: &str,
+        release: &CachedRelease,
+        base_url: &str,
+        dir: &str,
+        files: &[&ManifestFile],
+        ranging: Ranged<'_>,
+        what: &str,
+    ) -> Result<(), String> {
+        let local = release.dir.join(dir);
+        let (ranged_files, mut whole): (Vec<&ManifestFile>, Vec<&ManifestFile>) = files
+            .iter()
+            .copied()
+            .partition(|f| ranges_section(section_name(f), ranging));
+        self.download_whole(keyword, release, base_url, &whole, what, &local)?;
+
+        whole.clear();
+        for file in ranged_files {
+            if !self.download_ranged(keyword, release, base_url, dir, file, ranging, what)? {
+                whole.push(file);
+            }
+        }
+        self.download_whole(keyword, release, base_url, &whole, what, &local)
+    }
+
+    /// Fetch the byte ranges of `file` that `ranging` reads, verify each
+    /// against the index in the cached `version.json`, and publish the spliced
+    /// copy into the nuclide's folder.
+    ///
+    /// `Ok(false)` when the file is to be downloaded whole instead (see
+    /// [`fetch_ranged`]); nothing has been written then.
+    #[allow(clippy::too_many_arguments)]
+    fn download_ranged(
+        &self,
+        keyword: &str,
+        release: &CachedRelease,
+        base_url: &str,
+        dir: &str,
+        file: &ManifestFile,
+        ranging: Ranged<'_>,
+        what: &str,
+    ) -> Result<bool, String> {
+        self.client()?;
+        let local = release.dir.join(dir);
+        let name = dir
+            .rsplit('/')
+            .next()
+            .and_then(|n| n.strip_suffix(".arrow"))
+            .unwrap_or(dir);
+        let section = section_name(file);
+        let staging = tempdir_in(&release.dir)?;
+        let result = (|| -> Result<bool, String> {
+            let Some(fetched) = fetch_ranged(
+                &format!("{base_url}{dir}"),
+                &staging,
+                &local,
+                section,
+                ranging,
+                name,
+                Some(file),
+            )
+            .map_err(|e| e.to_string())?
+            else {
+                return Ok(false);
+            };
+            for path in &fetched.staged {
+                let to = local.join(path);
+                if let Some(parent) = to.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+                }
+                fs::rename(staging.join(path), &to)
+                    .map_err(|e| format!("could not publish {}: {e}", to.display()))?;
+            }
+            drop_superseded(&local, &fetched.staged);
+            // A prefetch counts nuclides instead.
+            if !super::url_cache::batch::quiet() {
+                if fetched.is_whole() {
+                    println!(
+                        "{what}: {keyword} release {}, the origin answered a range request for \
+                         {section} with the whole file; downloaded and verified it, {} bytes -> {}",
+                        release.id(),
+                        fetched.bytes,
+                        local.display()
+                    );
+                } else {
+                    println!(
+                        "{what}: {keyword} release {}, downloaded and verified {} byte range(s) of \
+                         {section}, {} of its {} bytes -> {}",
+                        release.id(),
+                        fetched.spans,
+                        fetched.bytes,
+                        file.bytes,
+                        local.display()
+                    );
+                }
+            }
+            Ok(true)
+        })();
+        fs::remove_dir_all(&staging).ok();
+        result
+    }
+
+    /// Download `files` whole into the release folder, each verified, then
+    /// publish them by rename.
+    fn download_whole(
         &self,
         keyword: &str,
         release: &CachedRelease,
@@ -470,6 +645,9 @@ impl Registry {
         what: &str,
         local: &Path,
     ) -> Result<(), String> {
+        if files.is_empty() {
+            return Ok(());
+        }
         let client = self.client()?;
         fs::create_dir_all(&release.dir)
             .map_err(|e| format!("could not create {}: {e}", release.dir.display()))?;
@@ -494,15 +672,55 @@ impl Registry {
         })();
         fs::remove_dir_all(&staging).ok();
         let total = result?;
-        println!(
-            "{what}: {keyword} release {}, downloaded and verified {} file(s), {} bytes -> {}",
-            release.id(),
-            files.len(),
-            total,
-            local.display()
-        );
+        // A section now held whole supersedes any ranged copy of it.
+        let names: Vec<String> = files.iter().map(|f| section_name(f).to_string()).collect();
+        drop_superseded(local, &names);
+        // A prefetch counts nuclides instead.
+        if !super::url_cache::batch::quiet() {
+            println!(
+                "{what}: {keyword} release {}, downloaded and verified {} file(s), {} bytes -> {}",
+                release.id(),
+                files.len(),
+                total,
+                local.display()
+            );
+        }
         Ok(())
     }
+}
+
+/// The files a keyword load of one nuclide or element would download: see
+/// [`Registry::pending`].
+pub(crate) struct Pending {
+    /// `<origin>/<keyword>/<release>/<dir>`: each file is `<url>/<section>`.
+    pub url: String,
+    /// The release folder's `<dir>` in the cache, which the files go into.
+    pub local: PathBuf,
+    /// The file names (`version.json`, `reactions.arrow`, ...) the cache lacks.
+    /// An indexed one is fetched as byte ranges when the load reads only some
+    /// of it and the index allows.
+    pub sections: Vec<String>,
+}
+
+/// The file name of a manifest entry: `reactions.arrow` for
+/// `neutron/Fe56.arrow/reactions.arrow`.
+fn section_name(file: &ManifestFile) -> &str {
+    file.path.rsplit('/').next().unwrap_or(&file.path)
+}
+
+/// Whether `release`'s cache folder already holds `file` as far as a load
+/// reading `ranging` of it needs: the whole verified file, or for a section
+/// `ranging` reads only some of, a ranged copy covering the load.
+fn held(release: &CachedRelease, file: &ManifestFile, ranging: Ranged<'_>) -> bool {
+    let path = release.dir.join(&file.path);
+    if path.is_file() {
+        return true;
+    }
+    let section = section_name(file);
+    ranges_section(section, ranging)
+        && path
+            .parent()
+            .is_some_and(|dir| section_covered(dir, section, ranging))
 }
 
 /// Delays before each retry of a transport failure or a 5xx.
@@ -524,6 +742,10 @@ fn get_small_once(
     url: &str,
     timeout: Option<Duration>,
 ) -> Result<(u16, Vec<u8>), String> {
+    if let Some(reply) = super::url_cache::take_prefetched(url) {
+        let (status, body) = reply?;
+        return Ok((status, if is_success(status) { body } else { Vec::new() }));
+    }
     let mut request = client.get(url);
     if let Some(timeout) = timeout {
         request = request.timeout(timeout);
@@ -548,24 +770,28 @@ fn get_small_once(
     _timeout: Option<Duration>,
 ) -> Result<(u16, Vec<u8>), String> {
     let (status, body) = super::url_cache::host_get(url)?;
-    Ok((
-        status,
-        if (200..300).contains(&status) {
-            body
-        } else {
-            Vec::new()
-        },
-    ))
+    Ok((status, if is_success(status) { body } else { Vec::new() }))
+}
+
+fn is_success(status: u16) -> bool {
+    (200..300).contains(&status)
 }
 
 /// One GET of `url` into `dest`, hashed as it is written: the status, and for
 /// a success the byte count and sha256 of what was written.
+///
+/// A reply a prefetch holds for `url` is written through the same hashing
+/// path, and checked by the caller the same way.
 #[cfg(not(target_os = "emscripten"))]
 fn get_to_file(
     client: &Client,
     url: &str,
     dest: &Path,
 ) -> Result<(u16, Option<(u64, String)>), String> {
+    if let Some(reply) = super::url_cache::take_prefetched(url) {
+        let (status, body) = reply?;
+        return body_to_file(status, &body, dest);
+    }
     let mut response = client.get(url).send().map_err(|e| describe(&e))?;
     let status = response.status();
     if !status.is_success() {
@@ -585,10 +811,20 @@ fn get_to_file(
     dest: &Path,
 ) -> Result<(u16, Option<(u64, String)>), String> {
     let (status, body) = super::url_cache::host_get(url)?;
-    if !(200..300).contains(&status) {
+    body_to_file(status, &body, dest)
+}
+
+/// Write a body already in memory into `dest` as [`get_to_file`] writes one
+/// it streams: the status, and for a success the byte count and sha256.
+fn body_to_file(
+    status: u16,
+    body: &[u8],
+    dest: &Path,
+) -> Result<(u16, Option<(u64, String)>), String> {
+    if !is_success(status) {
         return Ok((status, None));
     }
-    let written = stream_to_file(&mut body.as_slice(), dest)
+    let written = stream_to_file(&mut &body[..], dest)
         .map_err(|e| format!("writing {}: {e}", dest.display()))?;
     Ok((status, Some(written)))
 }
@@ -658,12 +894,14 @@ fn not_in_release_error(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn offline_missing_error(
     keyword: &str,
     reason: &str,
     release: Option<&CachedRelease>,
     dir: &str,
     sections: &[(&str, bool)],
+    ranging: Ranged<'_>,
     what: &str,
     root: &Path,
 ) -> String {
@@ -678,7 +916,7 @@ fn offline_missing_error(
     let missing = match needed_files(keyword, release, dir, sections, what) {
         Ok(files) => files
             .into_iter()
-            .filter(|f| !release.dir.join(&f.path).is_file())
+            .filter(|f| !held(release, f, ranging))
             .map(|f| f.path.clone())
             .collect::<Vec<_>>()
             .join(", "),
@@ -855,6 +1093,7 @@ pub(crate) fn fetch_particle(
         keyword,
         &particle_dir(kind, name),
         &sections_for(kind, scope),
+        ranged(kind, scope),
         &what,
     )
 }
@@ -875,6 +1114,7 @@ pub(crate) fn fetch_subsection(
             keyword,
             &format!("transmutation/{subsection}.arrow"),
             sections,
+            Ranged::Whole,
             &what,
         )
         .map_err(|e| {

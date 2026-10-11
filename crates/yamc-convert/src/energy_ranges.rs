@@ -28,7 +28,7 @@ use arrow_ipc::reader::FileReader;
 pub use nuclear_data_schema::energy_ranges::EnergyRanges;
 use nuclear_data_schema::reaction_ranges::Range;
 
-use crate::reaction_ranges::{message_len, schema_offset};
+use crate::reaction_ranges::{hash_ranges, message_len, schema_offset};
 
 /// Index the per-temperature record batches of an `energy.arrow`.
 ///
@@ -88,9 +88,17 @@ pub fn index_energy(energy: &Path) -> Result<EnergyRanges, Box<dyn Error>> {
     }
 
     let schema_at = schema_offset(&bytes)?;
+    let schema = (schema_at, message_len(&bytes, schema_at)?);
+    // One hash per entry, the schema's included, taken from the bytes on disk
+    // for the reason `index_reactions` gives.
+    let sha256 = hash_ranges(
+        &bytes,
+        std::iter::once(schema).chain(temperatures.values().copied()),
+    )?;
     Ok(EnergyRanges {
-        schema: (schema_at, message_len(&bytes, schema_at)?),
+        schema,
         temperatures,
+        sha256,
     })
 }
 
@@ -98,6 +106,7 @@ pub fn index_energy(energy: &Path) -> Result<EnergyRanges, Box<dyn Error>> {
 ///
 /// A post-process, like [`crate::reaction_ranges::write_reaction_ranges`]: only
 /// `version.json` is rewritten and `energy.arrow` is never opened for writing.
+/// Rerun over a tree indexed before hashes existed, it adds them.
 /// A folder with no `energy.arrow` (a photon element) is left alone.
 ///
 /// Returns whether an index was written.
