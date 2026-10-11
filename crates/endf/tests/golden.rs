@@ -2219,6 +2219,7 @@ fn dump_section(d: &mut Dump, path: &str, section: &Section) {
         }
 
         Section::Mf32(s) => dump_mf32(d, path, s),
+        Section::Mf32Unsupported { .. } => {}
 
         Section::Unparsed { .. } => {}
     }

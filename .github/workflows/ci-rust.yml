@@ -235,12 +235,13 @@ jobs:
 
   # The live origin must serve, for every library keyword, a latest.json whose
   # format_version this build reads, naming a manifest whose size and sha256
-  # match. A keyword whose latest.json is absent has not been republished in
-  # the release layout yet: the test prints a ::notice:: and skips it, and the
-  # first publish in that layout turns the check on. Anything else (a format
-  # this build cannot read, a manifest that does not match its pointer, an
-  # unreachable origin) fails. The release gate in ci-python.yml runs the same
-  # test.
+  # match. A keyword whose latest.json is absent fails, except on a pull
+  # request: whether a library has been published is the state of the data,
+  # not of the code under review, so there the test prints a ::notice:: for it
+  # instead. Anything else (a format this build cannot read, a manifest that
+  # does not match its pointer, an unreachable origin) fails everywhere. The
+  # release gate in ci-python.yml runs the same test strictly, so a release
+  # waits until every keyword is published.
   data-release:
     name: The origin serves a release this build reads
     runs-on: ubuntu-latest
@@ -254,6 +255,8 @@ jobs:
           shared-key: ci
           cache-on-failure: true
       - name: The origin serves a readable, verified release for every keyword
+        env:
+          YAMC_DATA_RELEASE_ALLOW_UNPUBLISHED: ${{ github.event_name == 'pull_request' && '1' || '' }}
         run: >-
           cargo test -p yamc-nuclide --features download-tls --lib --
           --ignored origin_serves_a_readable_release_for_every_keyword --nocapture
