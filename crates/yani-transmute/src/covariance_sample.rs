@@ -1481,6 +1481,7 @@ fn build_joint(group: &JointGroup, cores: &[std::sync::Arc<Factorized>]) -> Join
 pub type RateShifts = BTreeMap<String, BTreeMap<String, f64>>;
 
 /// One replica's draw of every nuclide's field.
+#[derive(Default)]
 pub struct Draw {
     nuclides: BTreeMap<String, NuclideDraw>,
 }

@@ -78,11 +78,18 @@ def test_the_statistical_sigma_predicts_the_seed_to_seed_spread():
     assert 0.35 <= ratio <= 2.2, f"measured over predicted variance {ratio:.3f}"
 
 
-def test_the_means_are_untouched():
+@pytest.mark.parametrize(
+    "request_",
+    [STATISTICAL, yamc.DataUncertainty(seed=5, samples=16, sources=["cross_sections"])],
+    ids=["statistical", "replica_weights"],
+)
+def test_the_means_are_untouched(request_):
     # One thread: the tally sums across threads with atomic adds, so two
     # multi-threaded runs already differ in the last bit whatever is asked.
+    # The replica weights ride along the nominal histories without drawing a
+    # random number, so the nominal tally is the one a plain run scores.
     plain = _run(threads=1)
-    uncertain = _run(threads=1, data_uncertainty=STATISTICAL)
+    uncertain = _run(threads=1, data_uncertainty=request_)
     for step in range(3):
         assert plain.get_material_nuclides(MAT_ID, step) == uncertain.get_material_nuclides(
             MAT_ID, step
@@ -98,10 +105,22 @@ def test_the_report_names_the_sources_that_applied():
     assert "flux_spectrum" not in info["sources"]
     assert info["statistical_rates"] > 0
     assert info["statistical_sampled"] == 16 * info["statistical_rates"]
+    # The transport carried a replica weight per replica, so each replica's
+    # rates answer its own cross sections and no flux response is held.
+    assert info["flux_response"] == "replica_weights"
+    assert info["transport_replicas"] == 16
+    assert "flux response to perturbed cross sections (one transport)" not in info["not_perturbed"]
+    assert "tallied-rate statistics" not in info["not_perturbed"]
+
+
+def test_the_report_names_the_flux_response_held():
+    held = yamc.DataUncertainty(seed=1, samples=16, flux_response="held")
+    info = _run(data_uncertainty=held).get_data_uncertainty_info(MAT_ID)
     # One transport feeds every replica, so how the flux would answer a
     # perturbed cross section is held, while the tallied values are drawn.
+    assert info["flux_response"] == "held"
+    assert info["transport_replicas"] is None
     assert "flux response to perturbed cross sections (one transport)" in info["not_perturbed"]
-    assert "tallied-rate statistics" not in info["not_perturbed"]
 
 
 def test_the_report_holds_no_flux_response_with_cross_sections_off():
@@ -111,6 +130,7 @@ def test_the_report_holds_no_flux_response_with_cross_sections_off():
     # hold; the unperturbed cross sections are named instead.
     assert "activation cross section (MF=33)" in info["not_perturbed"]
     assert "flux response to perturbed cross sections (one transport)" not in info["not_perturbed"]
+    assert info["flux_response"] == "unperturbed"
 
 
 def test_the_report_names_the_tallied_rates_held_with_statistical_off():
@@ -141,7 +161,9 @@ def test_the_coupled_method_is_refused():
         _run(method="coupled", data_uncertainty=STATISTICAL)
 
 
-CROSS_SECTIONS = yamc.DataUncertainty(seed=1, samples=64, sources=["cross_sections"])
+CROSS_SECTIONS = yamc.DataUncertainty(
+    seed=1, samples=64, sources=["cross_sections"], flux_response="held"
+)
 
 
 def _relative_fe57_sigma(results):
@@ -151,7 +173,7 @@ def _relative_fe57_sigma(results):
 
 
 def test_the_cross_section_sigma_matches_a_supplied_spectrum():
-    """The fold against the tallied flux gives what the same flux gives supplied.
+    """The held fold against the tallied flux gives what the same flux gives supplied.
 
     The sphere's flux is thermal, so ``Material.transmute`` under a thermal
     histogram folds the same Fe56 (n,gamma) covariance. The fold divides
@@ -186,5 +208,51 @@ def test_the_cross_section_sigma_matches_a_supplied_spectrum():
         yamc.Pulse(rate=1.0e14, duration=HOUR, source=thermal),
         yamc.Cooldown(duration=HOUR),
     ])
-    supplied = material.transmute(schedule, data_uncertainty=CROSS_SECTIONS)
+    spectrum_request = yamc.DataUncertainty(seed=1, samples=64, sources=["cross_sections"])
+    supplied = material.transmute(schedule, data_uncertainty=spectrum_request)
     assert sigmas[0] == pytest.approx(_relative_fe57_sigma(supplied), rel=0.05)
+
+
+def test_flux_response_is_checked_and_reported():
+    assert yamc.DataUncertainty().flux_response == "replica_weights"
+    assert yamc.DataUncertainty(flux_response="held").flux_response == "held"
+    assert 'flux_response="held"' in repr(yamc.DataUncertainty(flux_response="held"))
+    with pytest.raises(ValueError, match="replica_weights"):
+        yamc.DataUncertainty(flux_response="transport")
+
+
+def test_flux_response_is_refused_where_there_is_none_to_choose():
+    material = yamc.Material(composition={"Fe56": 1.0}, density=7.87, volume=1.0, temperature=294)
+    material.read_nuclear_data({"Fe56": os.path.join(TESTS_DIR, "Fe56.arrow")})
+    source = yamc.NeutronSource(
+        position=(0, 0, 0), energy=yamc.sources.Histogram([1.0e-3, 1.0], [1.0])
+    )
+    schedule = yamc.PulseSchedule([yamc.Pulse(rate=1.0e14, duration=HOUR, source=source)])
+    with pytest.raises(ValueError, match="flux_response applies to Model.simulate_transmutation"):
+        material.transmute(schedule, data_uncertainty=yamc.DataUncertainty(flux_response="held"))
+
+
+def test_replica_weights_refuse_delta_tracking_and_name_the_held_flux():
+    material = yamc.Material(
+        composition={"Fe56": 1.0},
+        density=7.87,
+        transmutable=True,
+        volume=4188.79,
+        temperature=294,
+        id=MAT_ID,
+    )
+    material.read_nuclear_data({"Fe56": os.path.join(TESTS_DIR, "Fe56.arrow")})
+    sphere = yamc.Sphere(radius=10.0, boundary="vacuum")
+    cell = yamc.Cell(name="sphere", region=sphere.below, material=material)
+    source = yamc.NeutronSource(position=(0, 0, 0), energy=yamc.sources.Discrete([1.0e6], [1.0]))
+    model = yamc.Model(
+        geometry=yamc.Geometry([cell]), source=source, verbose=[], tracking_mode="woodcock"
+    )
+    schedule = yamc.PulseSchedule([yamc.Pulse(rate=1.0e14, duration=HOUR, source=source)])
+    with pytest.raises(RuntimeError, match='flux_response="held"'):
+        model.simulate_transmutation(
+            method="independent",
+            schedule=schedule,
+            total_particles=100,
+            data_uncertainty=yamc.DataUncertainty(samples=16),
+        )

@@ -255,6 +255,7 @@ impl CrossMaterial {
                     name,
                     &l.nuclide,
                     &l.temperature,
+                    &[],
                     without_mf32_rows.contains(name),
                 )?;
                 Some((name.clone(), t.field?))

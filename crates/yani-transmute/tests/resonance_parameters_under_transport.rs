@@ -189,6 +189,7 @@ fn transport_samples_the_parameters_as_the_spectrum_run_does() {
         statistics: None,
         branch: Arc::new(yani::BranchTable::default()),
         diagnostics: Default::default(),
+        replicas: None,
     };
     let transport = |resolved: Option<MultigroupSpectrum>| {
         let (ensemble, info) = transport_replicas(

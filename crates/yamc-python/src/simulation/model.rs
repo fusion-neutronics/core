@@ -1186,7 +1186,12 @@ impl PyModel {
             threads,
             max_runtime: max_runtime_secs,
             data_uncertainty: data_uncertainty
-                .map(|d| transport_data_uncertainty(&d.inner, d.sources_given, d.convergence_given))
+                .map(|d| {
+                    d.without_flux_response("simulate_transport")
+                        .and_then(|inner| {
+                            transport_data_uncertainty(&inner, d.sources_given, d.convergence_given)
+                        })
+                })
                 .transpose()?,
         };
         if compute == "cpu" {
@@ -1587,20 +1592,35 @@ impl PyModel {
     ///           tallies are separate estimates and are drawn independently,
     ///           while the nuclear-data sources below are drawn once per
     ///           replica and shared by every material;
-    ///         - ``"cross_sections"``: the ENDF MF=33 covariance, folded against
-    ///           the spectrum the tally actually saw, and where a nuclide's
-    ///           data folder carries its resonance parameters (MF=2 and
-    ///           MF=32), the parameters themselves: the transport also tallies
-    ///           the flux on each such nuclide's own energy grid through its
-    ///           resonance ranges, and each replica's rebuilt and broadened
-    ///           resonance cross sections are folded against that, self-shielding
-    ///           dips and all, in place of the first-order MF=32 rows.
-    ///           ``get_data_uncertainty_info``'s ``resonance_parameters`` says
-    ///           which nuclides and why not. The flux is still the nominal
-    ///           transport's (see below), so for a self-shielded resonance the
-    ///           sigma is an overestimate: a stronger resonance deepens its own
-    ///           dip, which ``simulate_transport(data_uncertainty=...)``
-    ///           carries and this does not;
+    ///         - ``"cross_sections"``: the ENDF MF=33 covariance and, where a
+    ///           nuclide's data folder carries them, its resonance parameters
+    ///           (MF=2 and MF=32) drawn per replica and rebuilt in place of the
+    ///           first-order MF=32 rows. How the flux answers each replica's
+    ///           cross sections is ``DataUncertainty``'s ``flux_response``.
+    ///           With ``"replica_weights"`` (the default) the transport carries
+    ///           one likelihood-ratio weight per replica along every history,
+    ///           exactly as ``simulate_transport(data_uncertainty=...)`` does,
+    ///           with the same draws, and tallies every reaction rate, isomeric
+    ///           partial and fission-yield weight once per replica under it:
+    ///           replica ``k``'s rates are those its own data would give,
+    ///           self-shielding and spectrum shifts included, so a stronger
+    ///           resonance deepens its own dip and a perturbed scatterer moves
+    ///           every rate. The replica count is fixed before the transport
+    ///           (``samples``, or 256 at the default ``convergence``), every
+    ///           replica is solved, and the info says whether the sigmas reached
+    ///           the target at that count. Transport configurations the weights
+    ///           do not carry (delta tracking, survival biasing, weight windows,
+    ///           photon transport, MPI) raise before anything runs. With
+    ///           ``"held"`` the transport runs once without weights and each
+    ///           replica's cross sections are folded against the flux it
+    ///           tallied, the resonance parameters against a flux tallied on
+    ///           each such nuclide's own energy grid: cheaper and open to every
+    ///           configuration, but the held flux overstates the sigma of a
+    ///           self-shielded resonance (W186 capture in a graphite sphere,
+    ///           C:W = 50: 1.4% held against 0.2% from replica weights and from
+    ///           perturbed reruns). ``get_data_uncertainty_info``'s
+    ///           ``flux_response`` and ``resonance_parameters`` say which was
+    ///           used;
     ///         - ``"half_life"``: the decay data's half-life sigmas;
     ///         - ``"decay_branching"``: the decay branching ratios of the
     ///           parents with a stated sigma, each drawn keeping its total, as
@@ -1614,17 +1634,18 @@ impl PyModel {
     ///           DY the evaluation states on each.
     ///
     ///         ``"flux_spectrum"`` does not apply: there is no supplied spectrum,
-    ///         and the flux's error is the statistical one. The transport runs
-    ///         once, so every replica is solved in the flux it tallied: a
-    ///         perturbed cross section does not change the flux or the
-    ///         shielding the transport saw, and the report lists that held
-    ///         response under ``not_perturbed`` as ``"flux response to
-    ///         perturbed cross sections (one transport)"``. The tallied values
-    ///         themselves are still drawn by ``"statistical"``. The sources are
-    ///         independent, so ``sources=["statistical"]`` isolates the
-    ///         transport's contribution and the default gives the total. Omit
-    ///         it and nothing extra is tallied or solved: the inventories are
-    ///         bit-identical either way.
+    ///         and the flux's error is the statistical one. With replica weights
+    ///         every replica's rates come from the same histories as the
+    ///         nominal ones, so the differences between replicas are resolved
+    ///         far more finely than the rates themselves, and ``"statistical"``
+    ///         adds the nominal tally's error to each replica once; the sources
+    ///         are independent, so ``sources=["statistical"]`` isolates the
+    ///         transport's contribution and the default gives the total. The
+    ///         decay-data and fission-yield sources do not move the transport
+    ///         and are drawn per replica on the transmutation side, keyed on the
+    ///         same replica index. Omit ``data_uncertainty`` and nothing extra
+    ///         is tallied or solved: the inventories are bit-identical either
+    ///         way, and with replica weights the nominal inventories are too.
     ///
     /// Returns:
     ///     TransmutationResults object containing material compositions at each timestep.
@@ -1641,6 +1662,8 @@ impl PyModel {
     ///     ...     method="independent", schedule=schedule, total_particles=100_000,
     ///     ...     data_uncertainty=yamc.DataUncertainty(seed=1))
     ///     >>> results.get_nuclide_uncertainty(1, "Co60", 1)
+    ///     >>> results.get_data_uncertainty_info(1)["flux_response"]
+    ///     'replica_weights'
     #[pyo3(signature = (method, schedule, total_particles=None, seed=1, threads=None, max_runtime=None, compute="cpu", data_uncertainty=None))]
     pub fn simulate_transmutation(
         &mut self,

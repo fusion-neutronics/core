@@ -66,10 +66,11 @@ use yamc_nuclide::urr::UrrBand;
 use yamc_tallies::score::Score;
 use yamc_tallies::tally::Tally;
 use yamc_tallies::welford::ReplicaModes;
-use yani_transmute::covariance_fold::{transport_fields, CellField, Read, TransportField};
+use yani_transmute::covariance_fold::{transport_fields_of, CellField, Read, TransportField};
 use yani_transmute::covariance_sample::{Modes, Sampler};
 use yani_transmute::cross_material::CrossMaterial;
 use yani_transmute::resonance_rates::TransportResonance;
+use yani_transmute::{ReplicaChanges, TransmutationTallies};
 
 use crate::xs_perturbation::{grid_terms, resonance_sampling, sampled_names};
 
@@ -427,6 +428,16 @@ impl ReplicaNuclide {
 pub(crate) struct ReplicaMaterial {
     nuclides: Vec<ReplicaNuclide>,
     by_name: HashMap<String, usize>,
+    /// The nuclides a transmutation tally scores in this material that it
+    /// holds no density of, the products, as the replicas read them: their
+    /// cross sections move with the draw, and nothing they do moves the flux.
+    products: Vec<ReplicaNuclide>,
+    /// Per nuclide of the transmutation tally's layout for this material, in
+    /// its order, where its tables are: `(false, i)` for `nuclides[i]`,
+    /// `(true, i)` for `products[i]`, `None` for one with nothing to read.
+    transmutation: Vec<Option<(bool, usize)>>,
+    /// The transmutation tally's MTs for this material, in its order.
+    transmutation_mts: Vec<i32>,
 }
 
 /// The replica weights of one run: the draws, tabulated per material slot.
@@ -434,6 +445,8 @@ pub(crate) struct ReplicaContext {
     pub(crate) replicas: usize,
     /// By material slot (`Cell::material_idx`).
     materials: Vec<Option<ReplicaMaterial>>,
+    /// The slot whose tables a transmutation tally's material id reads.
+    transmutation_slots: HashMap<u32, usize>,
     /// The principal modes the control variate is built on, `None` where no
     /// nuclide has any.
     pub(crate) modes: Option<Arc<ReplicaModes>>,
@@ -542,6 +555,11 @@ fn on_grid(reaction: &Reaction, n: usize) -> Vec<f64> {
 /// The non-redundant partials a score of `mt` sums, among those the nuclide
 /// holds: `mt` itself when it is one, else its components under the ENDF sum
 /// rules, recursively.
+///
+/// A sum held without any of its components, as a transmutation product
+/// loaded at activation scope holds MT 103 without MT 600 to 649, is its own
+/// partial: it is what the score reads, and what the product's field reads it
+/// through ([`transport_fields_of`]).
 fn partials_of(mt: i32, held: &BTreeMap<i32, Arc<Reaction>>) -> BTreeSet<i32> {
     if held.get(&mt).is_some_and(|r| !r.redundant) {
         return BTreeSet::from([mt]);
@@ -551,6 +569,9 @@ fn partials_of(mt: i32, held: &BTreeMap<i32, Arc<Reaction>>) -> BTreeSet<i32> {
         for &c in rule {
             out.extend(partials_of(c, held));
         }
+    }
+    if out.is_empty() && held.contains_key(&mt) {
+        out.insert(mt);
     }
     out
 }
@@ -631,11 +652,13 @@ fn production_table(
 impl ReplicaContext {
     /// Tabulate `replicas` draws, seeded by `seed`, for every material in
     /// `materials` (indexed by slot), for the reaction-rate scores of
-    /// `tallies`. The materials' nuclear data must be loaded, with
-    /// covariance, at the run's temperature.
+    /// `tallies` and, with `transmutation`, for every nuclide and MT that
+    /// tally scores (see [`ReplicaChanges`]). The materials' nuclear data must
+    /// be loaded, with covariance, at the run's temperature.
     pub(crate) fn new(
         materials: &[Arc<Material>],
         tallies: &[Arc<Tally>],
+        transmutation: Option<&TransmutationTallies>,
         replicas: usize,
         seed: u64,
     ) -> Result<Self, String> {
@@ -662,21 +685,32 @@ impl ReplicaContext {
             .flat_map(|m| sampled_names(&resonance_sampling(m)))
             .collect();
         let partners = cross.transport_fields(&sampled);
-        for material in materials {
-            out.push(Self::material(
+        let mut transmutation_slots = HashMap::new();
+        for (slot, material) in materials.iter().enumerate() {
+            let layout = transmutation
+                .zip(material.material_id)
+                .and_then(|(t, id)| t.layout(id));
+            let tables = Self::material(
                 material,
                 &score_mts,
+                layout,
                 replicas,
                 seed,
                 &mut registry,
                 &cross,
                 &partners,
-            )?);
+            )?;
+            if let (Some(id), Some(_)) = (material.material_id, tables.as_ref().and(layout)) {
+                transmutation_slots.entry(id).or_insert(slot);
+            }
+            out.push(tables);
         }
         // With no covariance anywhere every replica is the nominal run and
         // every sigma would read zero, which looks like an answer. It is not
-        // one: the data says nothing about the uncertainty.
-        if out.iter().all(Option::is_none) {
+        // one: the data says nothing about the uncertainty. A transmutation
+        // reports that nuclide by nuclide instead, and has other sources to
+        // sample, so it runs on.
+        if transmutation.is_none() && out.iter().all(Option::is_none) {
             return Err(
                 "data_uncertainty: no nuclide in the model's materials carries covariance \
                  data, so every nuclear-data sigma would read zero. Use a library whose \
@@ -688,6 +722,7 @@ impl ReplicaContext {
         Ok(ReplicaContext {
             replicas,
             materials: out,
+            transmutation_slots,
             modes: registry.finish(),
         })
     }
@@ -705,9 +740,14 @@ impl ReplicaContext {
         state.into_boxed_slice()
     }
 
+    /// One material's tables, `layout` the nuclides and MTs a transmutation
+    /// tally scores in it, if any, and `cross` the run's cross-material
+    /// covariance with `partners` the fields of the nuclides it links.
+    #[allow(clippy::too_many_arguments)]
     fn material(
         material: &Material,
         score_mts: &BTreeSet<i32>,
+        layout: Option<(&[String], &[i32])>,
         replicas: usize,
         seed: u64,
         registry: &mut ModeRegistry,
@@ -715,7 +755,26 @@ impl ReplicaContext {
         partners: &BTreeMap<String, CellField>,
     ) -> Result<Option<ReplicaMaterial>, String> {
         let sampling = resonance_sampling(material);
-        let (fields, _) = transport_fields(material, &sampled_names(&sampling));
+        let mut score_mts = score_mts.clone();
+        let mut names: Vec<&String> = material.nuclides.keys().collect();
+        let mut product_names: Vec<&String> = Vec::new();
+        if let Some((tallied, mts)) = layout {
+            score_mts.extend(mts.iter().copied());
+            product_names = tallied
+                .iter()
+                .filter(|n| !material.nuclides.contains_key(*n))
+                .filter(|n| material.nuclide_data.contains_key(*n))
+                .collect();
+            names.extend(product_names.iter().copied());
+        }
+        let score_mts = &score_mts;
+        names.sort();
+        let (fields, _) = transport_fields_of(
+            material,
+            &names,
+            layout.map_or(&[][..], |(_, mts)| mts),
+            &sampled_names(&sampling),
+        );
         let cell_fields = fields
             .iter()
             .filter_map(|(n, t)| t.field.clone().map(|f| (n.clone(), f)))
@@ -774,7 +833,66 @@ impl ReplicaContext {
             by_name.insert(name.clone(), nuclides.len());
             nuclides.push(tab);
         }
-        Ok(any_covered.then_some(ReplicaMaterial { nuclides, by_name }))
+
+        // The products: their own draw of their own fields, read for the
+        // transmutation tally alone. They carry no density, so they add no
+        // modes and nothing to a flight.
+        let mut products = Vec::new();
+        let mut product_by_name = HashMap::new();
+        for name in product_names {
+            let nuclide = &material.nuclide_data[name];
+            let transport = fields.get(name).filter(|t| t.field.is_some());
+            if transport.is_none() {
+                continue;
+            }
+            let relative: Vec<&[f64]> = draws
+                .iter()
+                .map(|d| d.relative(name).unwrap_or(&[]))
+                .collect();
+            let absolute: Vec<&[f64]> = draws
+                .iter()
+                .map(|d| d.absolute(name).unwrap_or(&[]))
+                .collect();
+            let Some(tab) = Self::nuclide(
+                Arc::clone(nuclide),
+                material.temperature(),
+                transport,
+                &relative,
+                &absolute,
+                score_mts,
+                0.0,
+                None,
+                None,
+            )?
+            else {
+                continue;
+            };
+            any_covered |= !tab.sources.is_empty();
+            product_by_name.insert(name.clone(), products.len());
+            products.push(tab);
+        }
+        let (transmutation, transmutation_mts) = match layout {
+            Some((tallied, mts)) => (
+                tallied
+                    .iter()
+                    .map(|n| {
+                        by_name
+                            .get(n)
+                            .map(|&i| (false, i))
+                            .or_else(|| product_by_name.get(n).map(|&i| (true, i)))
+                    })
+                    .collect(),
+                mts.to_vec(),
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        Ok(any_covered.then_some(ReplicaMaterial {
+            nuclides,
+            by_name,
+            products,
+            transmutation,
+            transmutation_mts,
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1264,6 +1382,64 @@ impl ReplicaContext {
     }
 }
 
+impl ReplicaChanges for ReplicaContext {
+    /// Each replica's change to each MT the transmutation tally scores for
+    /// one of its nuclides, from the same tables (and so the same draw) the
+    /// flights, collisions and tally scores read: what the nuclide's covered
+    /// partials summing to the MT move by under its field, and what its
+    /// sampled resonance parameters move them by. The smooth cross sections,
+    /// as the transmutation tally scores them.
+    fn add_changes(&self, material_id: u32, nuclide: usize, energy: f64, out: &mut [f64]) -> bool {
+        let Some(m) = self
+            .transmutation_slots
+            .get(&material_id)
+            .and_then(|&slot| self.materials[slot].as_ref())
+        else {
+            return false;
+        };
+        let Some(&Some((product, i))) = m.transmutation.get(nuclide) else {
+            return false;
+        };
+        let nuc = if product {
+            &m.products[i]
+        } else {
+            &m.nuclides[i]
+        };
+        let Some(at) = nuc.locate(energy) else {
+            return false;
+        };
+        let r = self.replicas;
+        let local = nuc
+            .resonance
+            .as_ref()
+            .and_then(|res| Some((res, res.local(at)?)));
+        let mut moved = false;
+        for (k, x) in m.transmutation_mts.iter().enumerate() {
+            let out = &mut out[k * r..(k + 1) * r];
+            if let Some((by_source, _)) = nuc.scores.get(x) {
+                for (s, xs) in by_source {
+                    let w = ReplicaNuclide::at(xs, at);
+                    if w == 0.0 {
+                        continue;
+                    }
+                    let src = &nuc.sources[*s];
+                    let own = ReplicaNuclide::at(&src.own, at);
+                    src.add_change(energy, own, w, out, &mut []);
+                    moved = true;
+                }
+            }
+            if let Some(weights) = local.and_then(|(res, _)| res.scores.get(x)) {
+                let (res, at) = local.expect("checked above");
+                for &(m, w) in weights {
+                    res.add(m, at, w, out);
+                    moved = true;
+                }
+            }
+        }
+        moved
+    }
+}
+
 /// `(1 - e^-x) / x`, the mean of `e^-s` over `[0, x]`, stable near zero.
 pub(crate) fn mean_survival(x: f64) -> f64 {
     if x.abs() < 1e-8 {
@@ -1347,6 +1523,18 @@ impl<'a> ReplicaSegment<'a> {
             .map(|(a, b)| a * b)
             .chain(self.slope.iter().zip(&grad).map(|(s, g)| s + g))
             .collect()
+    }
+
+    /// `r_k φ(ΔΣ_k d)` per replica: the particle's ratio integrated along
+    /// the segment, per unit length, which every track-length score of
+    /// replica `k` is the nominal one times.
+    pub(crate) fn track_factors(&self) -> &[f64] {
+        &self.factors
+    }
+
+    /// The draws the segment's factors are of.
+    pub(crate) fn context(&self) -> &'a ReplicaContext {
+        self.ctx
     }
 
     /// Carry the particle's ratios and derivatives to the segment's end.
@@ -1463,9 +1651,10 @@ mod nc_derived_tests {
             return;
         };
         let replicas = 8;
-        let ctx = ReplicaContext::new(&[Arc::new(m.clone())], &[], replicas, SEED)
+        let ctx = ReplicaContext::new(&[Arc::new(m.clone())], &[], None, replicas, SEED)
             .expect("replica context");
-        let (fields, _) = transport_fields(&m, &Default::default());
+        let (fields, _) =
+            yani_transmute::covariance_fold::transport_fields(&m, &Default::default());
         let cells = fields
             .iter()
             .filter_map(|(n, t)| t.field.clone().map(|f| (n.clone(), f)))
@@ -1529,9 +1718,10 @@ mod nc_derived_tests {
             return;
         };
         let replicas = 4096;
-        let ctx = ReplicaContext::new(&[Arc::new(m.clone())], &[], replicas, SEED)
+        let ctx = ReplicaContext::new(&[Arc::new(m.clone())], &[], None, replicas, SEED)
             .expect("replica context");
-        let (fields, _) = transport_fields(&m, &Default::default());
+        let (fields, _) =
+            yani_transmute::covariance_fold::transport_fields(&m, &Default::default());
         let t = &fields["Pb208"];
         let field = t.field.as_ref().expect("a field");
         let data = &m.nuclide_data["Pb208"];

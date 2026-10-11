@@ -364,6 +364,10 @@ impl Model {
     /// Each refusal is a mode whose weight bookkeeping is not implemented:
     /// rather than a sigma that silently leaves part of the physics nominal,
     /// the run stops before it starts.
+    ///
+    /// With `transmutation` the weights are carried for the transmutation
+    /// tally alone and the model's own tallies are scored at nominal, so what
+    /// they are does not matter.
     pub(crate) fn validate_data_uncertainty(
         &self,
         data: &crate::model::TransportDataUncertainty,
@@ -385,9 +389,6 @@ impl Model {
         if mpi_size > 1 {
             return refuse("MPI runs");
         }
-        if transmutation {
-            return refuse("simulate_transmutation");
-        }
         if self.tracking_mode != crate::model::TrackingMode::Surface {
             return refuse("tracking_mode other than 'surface' (delta tracking)");
         }
@@ -400,7 +401,9 @@ impl Model {
         if self.has_photons() {
             return refuse("photon transport (secondary, decay or source photons)");
         }
-        for tally in &self.tallies {
+        let tallies: &[Arc<yamc_tallies::tally::Tally>] =
+            if transmutation { &[] } else { &self.tallies };
+        for tally in tallies {
             let name = tally.name.as_deref().unwrap_or("<unnamed>");
             if tally.estimator == yamc_tallies::Estimator::Collision {
                 return refuse(&format!("collision-estimator tallies (tally '{name}')"));
