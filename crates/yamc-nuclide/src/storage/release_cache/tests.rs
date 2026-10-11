@@ -676,12 +676,16 @@ fn the_default_timeouts_bound_the_first_contact() {
 
 /// The live origin serves, for every keyword, a `latest.json` whose
 /// `format_version` this build reads, naming a manifest whose size and sha256
-/// match. A keyword whose `latest.json` is absent has not been republished in
-/// the release layout yet and is skipped with a notice; once every library is
-/// published that way the skip never fires.
+/// match. Every keyword in `KEYWORDS` must be published: one whose
+/// `latest.json` is absent fails, since a wheel released then would offer a
+/// library it cannot download. With `YAMC_DATA_RELEASE_ALLOW_UNPUBLISHED=1` an
+/// absent keyword is reported with a notice instead, so a pull request is not
+/// blocked by the state of the data publish, while a keyword that is published
+/// is still checked in full.
 ///
 /// Ignored by default because it needs the network. CI runs it on every pull
-/// request and push and in the release gate:
+/// request (allowing unpublished keywords) and push, and strictly in the
+/// release gate:
 ///   cargo test -p yamc-nuclide --features download-tls --lib -- \
 ///       --ignored origin_serves_a_readable_release_for_every_keyword
 #[test]
@@ -704,6 +708,8 @@ fn origin_serves_a_readable_release_for_every_keyword() {
         let r = r.error_for_status().map_err(|e| describe(&e))?;
         Ok(Some(r.bytes().map_err(|e| describe(&e))?.to_vec()))
     };
+    let allow_unpublished =
+        std::env::var("YAMC_DATA_RELEASE_ALLOW_UNPUBLISHED").is_ok_and(|v| v == "1");
     let mut failures = Vec::new();
     for keyword in super::super::url_cache::KEYWORDS {
         let latest_url = format!("{}{keyword}/{LATEST}", super::super::url_cache::ORIGIN);
@@ -715,12 +721,18 @@ fn origin_serves_a_readable_release_for_every_keyword() {
                     continue;
                 }
             },
-            Ok(None) => {
+            Ok(None) if allow_unpublished => {
                 println!(
                     "::notice::{keyword}: {latest_url} is absent, so the library has not been \
-                     published in the release layout yet; skipped. The next data publish turns \
-                     this check on."
+                     published in the release layout yet. Allowed here; a release is blocked \
+                     until it is."
                 );
+                continue;
+            }
+            Ok(None) => {
+                failures.push(format!(
+                    "{latest_url}: 404, so {keyword} is not published in the release layout"
+                ));
                 continue;
             }
             Err(e) => {

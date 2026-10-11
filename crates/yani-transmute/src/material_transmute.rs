@@ -2075,7 +2075,7 @@ fn run_replicas(
             info.no_decay_branching_uncertainty = b.without.clone();
             info.decay_branchings_too_wide = b.too_wide.clone();
             info.decay_branchings_partly_held = b.partly_held.clone();
-            info.decay_branchings_sigma_reduced = b.sigma_reduced.clone();
+            info.decay_branchings_sigma_adjusted = b.sigma_adjusted.clone();
         }
     }
     if !want_decay_energy {
@@ -2880,9 +2880,9 @@ fn first_order_contributors(
     }
 
     // Decay branchings: one solve per populated parent and direction, moving
-    // the ratios one unit normal's way by a step that changes none by more
-    // than the relative step, so every row stays well clear of zero. A parent
-    // absent from every inventory decays nowhere and cannot move one.
+    // the ratios along it by a step that changes none by more than the
+    // relative step, so every row stays well clear of zero. A parent absent
+    // from every inventory decays nowhere and cannot move one.
     if let (Some(b), Some(c)) = (decay_branching, chains) {
         use crate::decay_branching_uncertainty::Split;
         let jobs: Vec<(&Split, usize)> = b
@@ -2898,7 +2898,7 @@ fn first_order_contributors(
                 ..Default::default()
             };
             // `sensitivity` divides by the relative step; rescaled, `s` is dN
-            // per unit of the direction's normal.
+            // per unit along the direction.
             Ok(sensitivity(&solve_edited(&edits, c)?)
                 .into_iter()
                 .map(|per| {
@@ -2919,8 +2919,9 @@ fn first_order_contributors(
                 jobs.iter().map(run).collect()
             }
         };
-        // The normals are independent, so a parent's variance is the sum of
-        // its directions' squared sensitivities.
+        // The directions factor the ratios' covariance, so a parent's
+        // first-order variance, `J C J^T`, is the sum of their squared
+        // sensitivities, whatever the shape the ratios are drawn with.
         let mut by_parent: Vec<(String, Vec<HashMap<String, f64>>)> = Vec::new();
         for ((t, k), sens) in jobs.into_iter().zip(results) {
             let sens = sens?;
@@ -2996,9 +2997,10 @@ enum Input {
     Rate { spectrum: usize, kind: String },
     /// A half-life, relative to its nominal.
     HalfLife { nominal: f64 },
-    /// One of a sampled parent's standard normals, by the index of its
-    /// direction: the sensitivity is per unit of it, so its change is the
-    /// replica's normal itself.
+    /// One of a sampled parent's directions, a factor of the covariance its
+    /// ratios are drawn with: the sensitivity is per unit along it, so its
+    /// change is the replica's drawn deviation in coordinates along the
+    /// directions.
     Branching { direction: usize },
 }
 
@@ -3048,19 +3050,16 @@ impl ReplicaDraws<'_> {
             }
             _ => HashMap::new(),
         };
-        // A draw pulled back onto the simplex moved by its scale times its
-        // normals.
+        // A replica's drawn ratios, as coordinates along the directions the
+        // sensitivities were taken on.
         let branchings: HashMap<&str, Vec<f64>> = match self.decay_branching {
             Some(b) if needs(|i| matches!(i, Input::Branching { .. })) => b
                 .splits
                 .iter()
                 .map(|t| {
                     let z = crate::decay_branching_uncertainty::normals(t, self.seed, replica);
-                    let (_, scale) = t.ratios_for(&z);
-                    (
-                        t.parent.as_str(),
-                        z.into_iter().map(|z| scale * z).collect(),
-                    )
+                    let (ratios, _) = t.ratios_for(&z);
+                    (t.parent.as_str(), t.coordinates_of(&ratios))
                 })
                 .collect(),
             _ => HashMap::new(),
