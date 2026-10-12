@@ -365,19 +365,6 @@ fn modes_the_weights_do_not_carry_yet_are_refused() {
     });
     let mut model = Model::new(geometry, vec![source], vec![tally("flux")]);
     model.verbose = Verbose::silent();
-    model.tracking_mode = TrackingMode::Woodcock;
-    let err = model
-        .simulate_transport(&TransportSettings {
-            total_particles: Some(10),
-            data_uncertainty: Some(TransportDataUncertainty {
-                seed: 1,
-                replicas: 4,
-            }),
-            ..Default::default()
-        })
-        .expect_err("delta tracking is refused");
-    assert!(err.contains("delta tracking"), "{err}");
-
     model.tracking_mode = TrackingMode::Surface;
     let mut mesh = Tally::new();
     mesh.filters

@@ -178,16 +178,14 @@ impl Model {
         if let Some(data) = &replica_weights {
             // Refused before anything runs, naming the held alternative,
             // rather than after the scouting transport.
-            let mpi_size = crate::mpi_context::MpiContext::init().size().max(1) as usize;
-            self.validate_data_uncertainty(data, mpi_size, true)
-                .map_err(|e| {
-                    format!(
-                        "{e}. To propagate the cross-section uncertainty with the flux held \
+            self.validate_data_uncertainty(data, true).map_err(|e| {
+                format!(
+                    "{e}. To propagate the cross-section uncertainty with the flux held \
                          at the nominal transport's instead (cheaper and open to every \
                          transport configuration, but it overstates a self-shielded \
                          resonance's sigma), use DataUncertainty(flux_response=\"held\")"
-                    )
-                })?;
+                )
+            })?;
         }
 
         // Expand the schedule into per-step timesteps / source rates. The

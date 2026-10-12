@@ -36,6 +36,7 @@ pub fn sample_secondary_photons<R: rand::Rng>(
     photon_prod_xs: f64,
     bank: &mut ParticleBank,
     rng: &mut R,
+    mut on_photon: impl FnMut(&mut Particle, i32),
 ) {
     if photon_prod_xs <= 0.0 || micro_xs_total <= 0.0 {
         return;
@@ -127,6 +128,8 @@ pub fn sample_secondary_photons<R: rand::Rng>(
         photon.particle_type = ParticleType::Photon;
         photon.weight = particle.weight;
         photon.current_cell_index = particle.current_cell_index;
+        // The caller's say on the photon, given the reaction it came from.
+        on_photon(&mut photon, reaction.mt_number);
 
         bank.bank_secondary(photon);
     }
@@ -340,6 +343,7 @@ mod tests {
                 photon_prod_xs,
                 &mut bank,
                 &mut rng,
+                |_, _| {},
             );
             total_photons += bank.len();
         }
@@ -393,6 +397,7 @@ mod tests {
                 boosted_prod,
                 &mut bank,
                 &mut rng,
+                |_, _| {},
             );
             if !bank.is_empty() {
                 break;

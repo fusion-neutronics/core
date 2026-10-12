@@ -17,6 +17,39 @@
 //!   multiplied by `σ'_mt,k / σ_mt`. Absorption ends the history and needs no
 //!   factor; a fission's neutrons inherit `σ'_f,k / σ_f`.
 //!
+//! The same reasoning carries every game the transport plays, because the
+//! ratio only has to follow what the nominal game samples:
+//!
+//! - **Delta tracking** samples flights against a majorant `Σ_maj` that is
+//!   the same for every replica, so a flight moves no ratio. A delta
+//!   collision is real with probability `Σ_t / Σ_maj`; replica `k` would
+//!   have accepted it with `Σ'_t,k / Σ_maj`, so a virtual one multiplies the
+//!   ratio by `(Σ_maj - Σ'_t,k) / (Σ_maj - Σ_t)` and a real one, whose
+//!   reaction then has density `N σ_mt / Σ_maj`, by `σ'_mt / σ_mt` as above
+//!   (weighted delta tracking: Carter, Cashwell and Taylor, Nucl. Sci. Eng.
+//!   48 (1972) 403; its use for perturbations is the same likelihood
+//!   ratio). That is unbiased for any `Σ_maj > Σ_t`, and the run's majorant
+//!   is raised by a margin covering every replica's total, so the virtual
+//!   factors stay positive ([`ReplicaContext::majorant`]). The collision
+//!   density estimator scores `r_k` at each delta collision.
+//! - **Survival biasing** banks the absorbed share of a collision's weight:
+//!   the survivor's reaction has density `N σ_mt` times the nominal weight
+//!   factor already on `weight`, so its ratio is `σ'_mt / σ_mt` as in an
+//!   analog collision, and fission progeny banked from the absorbed share
+//!   take `σ'_f / σ_f`.
+//! - **Russian roulette and weight windows** play their games on the
+//!   nominal weight, and a game that conserves the nominal weight in
+//!   expectation conserves `weight · r_k` too, because `r_k` rides along
+//!   unchanged: survivors and split copies keep the ratios.
+//! - **Photons** are born with their neutron's ratio before the collision
+//!   times their own reaction's `σ'_mt / σ_mt` (prompt production and D1S
+//!   decay photons alike, a sum such as MT 3 or MT 103 read through its
+//!   partials). Photon data carries no covariance, so their flights,
+//!   collisions and secondaries keep the ratios and every photon tally and
+//!   photon heating score carries the neutron data's uncertainty.
+//! - **MPI** ranks draw the same replicas from the same seed and each
+//!   scores its own histories; the per-replica sums add across ranks.
+//!
 //! A track-length score over a segment is the integral of the likelihood
 //! ratio of reaching each point along it, `r_k ∫_0^d exp(-ΔΣ_k s) ds`, which
 //! is `r_k d φ(ΔΣ_k d)` with `φ(x) = (1 - e^-x) / x`. A reaction-rate score
@@ -348,6 +381,37 @@ struct ReplicaNuclide {
     urr: Option<(Arc<Nuclide>, usize)>,
     /// Its sampled resonance parameters' changes, where they are sampled.
     resonance: Option<ResonanceTables>,
+    /// Per summed MT (held as a redundant row, or not held but with held
+    /// components), its row where held and the partials it sums: what a
+    /// photon produced by the sum, or a D1S channel keyed on it, reads its
+    /// replica factor from ([`ReplicaContext::reaction_factor`]).
+    sums: HashMap<i32, SumOfPartials>,
+    /// Its total cross section (MT 1), for the delta-tracking majorant's
+    /// margin ([`ReplicaContext::majorant`]).
+    total: Option<Arc<Reaction>>,
+}
+
+/// A summed reaction as [`ReplicaNuclide::sums`] keeps it.
+struct SumOfPartials {
+    /// The sum's own row, where the nuclide holds one.
+    own: Option<Arc<Reaction>>,
+    /// Its non-redundant partials, by MT.
+    partials: Vec<(i32, Arc<Reaction>)>,
+}
+
+/// A reaction's cross section at `(index, fraction)` of its nuclide's grid,
+/// zero below threshold: [`on_grid`] interpolated without building the row.
+fn xs_at(reaction: &Reaction, (i, f): (usize, f64)) -> f64 {
+    let xs = reaction.cross_section.as_slice();
+    let t = reaction.threshold_idx;
+    let v = |j: usize| {
+        j.checked_sub(t)
+            .and_then(|j| xs.get(j))
+            .copied()
+            .unwrap_or(0.0)
+    };
+    let (a, b) = (v(i), v(i + 1));
+    a + f * (b - a)
 }
 
 /// The channels whose bands a tally's score of `mt` reads inside the
@@ -411,6 +475,43 @@ impl ReplicaNuclide {
     fn band(&self, e: f64, urr_random: Option<f64>) -> Option<UrrBand> {
         let (nuclide, t) = self.urr.as_ref()?;
         nuclide.urr_band(*t, e, urr_random?)
+    }
+
+    /// `out[k] += scale Δσ_p,k` and its gradient into `grad`, for partial
+    /// `p` with nominal cross section `xs` at `at`: its covariance terms
+    /// and its sampled resonance parameters' change. Whether anything moves
+    /// it.
+    #[allow(clippy::too_many_arguments)]
+    fn add_partial_change(
+        &self,
+        p: i32,
+        xs: f64,
+        at: (usize, f64),
+        e: f64,
+        scale: f64,
+        out: &mut [f64],
+        grad: &mut [f64],
+    ) -> bool {
+        let mut moved = false;
+        if let Some(terms) = self.terms_of.get(&p) {
+            for (s, weight) in terms {
+                let src = &self.sources[*s];
+                let own = Self::at(&src.own, at);
+                src.add_change(e, own, scale * term_weight(weight, xs, at), out, grad);
+                moved = true;
+            }
+        }
+        if let Some((res, local)) = self
+            .resonance
+            .as_ref()
+            .and_then(|r| Some((r, r.local(at)?)))
+        {
+            if let Some(m) = res.reactions.iter().position(|(rmt, _)| *rmt == p) {
+                res.add(m, local, scale, out);
+                moved = true;
+            }
+        }
+        moved
     }
 
     /// `Σ_c g_c σ_c,s(E)` over `channels`: what a source's partials in
@@ -1092,8 +1193,37 @@ impl ReplicaContext {
             None => None,
         };
 
+        // Every sum a photon's or a D1S channel's reaction may name: the
+        // nuclide's redundant rows, and the ENDF sums whose components it
+        // holds without the sum itself.
+        let mut sums = HashMap::new();
+        let candidates = held
+            .keys()
+            .copied()
+            .chain([3, 4, 18, 27, 101, 103, 104, 105, 106, 107]);
+        for mt in candidates {
+            if held.get(&mt).is_some_and(|r| !r.redundant) || sums.contains_key(&mt) {
+                continue;
+            }
+            let partials: Vec<(i32, Arc<Reaction>)> = partials_of(mt, &held)
+                .into_iter()
+                .filter(|p| *p != mt)
+                .filter_map(|p| Some((p, Arc::clone(held.get(&p)?))))
+                .collect();
+            if !partials.is_empty() {
+                sums.insert(
+                    mt,
+                    SumOfPartials {
+                        own: held.get(&mt).cloned(),
+                        partials,
+                    },
+                );
+            }
+        }
+
         Ok(Some(ReplicaNuclide {
             density,
+            total: held.get(&1).cloned(),
             grid,
             sources,
             terms_of,
@@ -1102,6 +1232,7 @@ impl ReplicaContext {
             scores,
             urr,
             resonance,
+            sums,
         }))
     }
 
@@ -1256,6 +1387,176 @@ impl ReplicaContext {
                 }
             }
         }
+    }
+
+    /// The factor `σ'_mt,k / σ_mt` of a reaction on `nuclide` at `e` that
+    /// need not be a partial the collision sampled: [`Self::collision_factor`]
+    /// for a partial, and for a sum (a photon production keyed on MT 3 or 4,
+    /// a D1S channel keyed on MT 103 whose partials are MT 600 to 649) one
+    /// plus each partial's change over the sum, `Σ_p Δσ_p,k / σ_mt`. The
+    /// sum is its own row where the nuclide holds one, its partials' sum
+    /// otherwise.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn reaction_factor(
+        &self,
+        slot: Option<u32>,
+        nuclide: &str,
+        mt: i32,
+        e: f64,
+        out: &mut [f64],
+        grad: &mut [f64],
+    ) {
+        let sum = self
+            .material_at(slot)
+            .and_then(|m| m.by_name.get(nuclide).map(|&i| &m.nuclides[i]))
+            .and_then(|nuc| Some((nuc, nuc.sums.get(&mt)?, nuc.locate(e)?)));
+        let Some((nuc, sum, at)) = sum else {
+            return self.collision_factor(slot, nuclide, mt, e, out, grad);
+        };
+        out.fill(1.0);
+        grad.fill(0.0);
+        let total = match &sum.own {
+            Some(own) => xs_at(own, at),
+            None => sum.partials.iter().map(|(_, r)| xs_at(r, at)).sum(),
+        };
+        if total <= 0.0 {
+            return;
+        }
+        let mut moved = false;
+        for (p, reaction) in &sum.partials {
+            let xs = xs_at(reaction, at);
+            if xs > 0.0 {
+                moved |= nuc.add_partial_change(*p, xs, at, e, 1.0 / total, out, grad);
+            }
+        }
+        if moved {
+            for f in out.iter_mut() {
+                *f = f.max(0.0);
+            }
+        }
+    }
+
+    /// Carry a particle's ratios and derivatives through a virtual (delta)
+    /// collision at its position in the material of `slot`, the nominal
+    /// game having rejected it with probability `1 - Σ_t / Σ_maj`.
+    ///
+    /// Replica `k` would have rejected it with probability
+    /// `1 - Σ'_t,k / Σ_maj`, so its ratio is multiplied by
+    /// `(Σ_maj - Σ'_t,k) / (Σ_maj - Σ_t) = 1 - ΔΣ_k / (Σ_maj - Σ_t)`, the
+    /// non-analog virtual-collision weight of weighted delta tracking
+    /// (Carter, Cashwell and Taylor, Nucl. Sci. Eng. 48 (1972) 403). That
+    /// factor is unbiased for any `Σ_maj > Σ_t`, also where a replica's
+    /// total passes the majorant (the factor is then negative); the majorant
+    /// margin of [`Self::majorant`] keeps that from happening, so the
+    /// factors stay positive and bounded. A real collision needs no factor of
+    /// its own beyond [`apply_collision`]'s: its density `Σ_t / Σ_maj` times
+    /// the reaction's `N σ_mt / Σ_t` is `N σ_mt / Σ_maj`, whose ratio is
+    /// `σ'_mt / σ_mt` as on a surface-tracked flight.
+    pub(crate) fn apply_virtual(
+        &self,
+        particle: &mut yamc_particle::particle::Particle,
+        slot: Option<u32>,
+        sigma_maj: f64,
+        sigma_t: f64,
+    ) {
+        let gap = sigma_maj - sigma_t;
+        if gap <= 0.0 || self.material_at(slot).is_none() {
+            return;
+        }
+        let urr_random = yamc_particle::particle::urr_to_option(particle.urr_random);
+        let energy = particle.energy;
+        let Some(state) = particle.replica.as_mut() else {
+            return;
+        };
+        let (ratios, sensitivity) = state.split_at_mut(self.replicas);
+        let mut delta = vec![0.0; ratios.len()];
+        let mut grad = vec![0.0; sensitivity.len()];
+        self.flight_delta(slot, energy, urr_random, &mut delta, &mut grad);
+        for (x, d) in ratios.iter_mut().zip(&delta) {
+            *x *= 1.0 - d / gap;
+        }
+        for (x, g) in sensitivity.iter_mut().zip(&grad) {
+            *x -= g / gap;
+        }
+    }
+
+    /// The neutron majorant delta tracking samples flights against when the
+    /// run carries replica weights: `inner` raised by a margin over each
+    /// energy band, so the majorant also bounds every replica's total there
+    /// and the virtual-collision factors of [`Self::apply_virtual`] stay
+    /// positive. The margin is `1.25` times the largest relative change any
+    /// replica makes to any nuclide's total in the band (a material's total
+    /// moves by at most its most-moved nuclide's share), plus 2%, capped at
+    /// 100%: the cap only costs variance where a replica's total passes it,
+    /// never bias.
+    pub(crate) fn majorant(
+        &self,
+        inner: Arc<dyn yamc_materials::Majorant>,
+    ) -> Arc<dyn yamc_materials::Majorant> {
+        use rayon::prelude::*;
+        let bands = MarginBands;
+        let mut margin = vec![0.0_f64; bands.len()];
+        let nuclides = self
+            .materials
+            .iter()
+            .flatten()
+            .flat_map(|m| m.nuclides.iter());
+        for nuc in nuclides {
+            let Some(total) = &nuc.total else {
+                continue;
+            };
+            let n = nuc.grid.len();
+            if n < 2 {
+                continue;
+            }
+            let r = self.replicas;
+            let relative: Vec<f64> = (0..n)
+                .into_par_iter()
+                .map_init(
+                    || vec![0.0; r],
+                    |out, i| {
+                        let at = (i.min(n - 2), if i == n - 1 { 1.0 } else { 0.0 });
+                        let sigma = xs_at(total, at);
+                        if sigma <= 0.0 {
+                            return 0.0;
+                        }
+                        out.fill(0.0);
+                        let e = nuc.grid[i];
+                        for s in &nuc.sources {
+                            let sum = ReplicaNuclide::at(&s.sum, at);
+                            if sum != 0.0 {
+                                let own = ReplicaNuclide::at(&s.own, at);
+                                s.add_change(e, own, sum, out, &mut []);
+                            }
+                        }
+                        if let Some((res, local)) =
+                            nuc.resonance.as_ref().and_then(|r| Some((r, r.local(at)?)))
+                        {
+                            for m in 0..res.reactions.len() {
+                                res.add(m, local, 1.0, out);
+                            }
+                        }
+                        out.iter().fold(0.0_f64, |a, d| a.max(d.abs())) / sigma
+                    },
+                )
+                .collect();
+            for i in 0..n - 1 {
+                let m = relative[i].max(relative[i + 1]);
+                let (lo, hi) = (bands.index(nuc.grid[i]), bands.index(nuc.grid[i + 1]));
+                for band in &mut margin[lo..=hi] {
+                    *band = band.max(m);
+                }
+            }
+        }
+        let factor = margin
+            .iter()
+            .map(|m| 1.0 + (1.25 * m + 0.02).min(1.0))
+            .collect();
+        Arc::new(ReplicaMajorant {
+            inner,
+            bands,
+            factor,
+        })
     }
 
     /// `Σ'_x,k / Σ_x` for a reaction-rate or particle-production score at `e`
@@ -1415,6 +1716,40 @@ impl ReplicaChanges for ReplicaContext {
     }
 }
 
+/// Log-spaced energy bands for the replica majorant's margin: 20 per decade
+/// from 1e-5 eV to 1e8 eV, the ends extended to cover any energy.
+#[derive(Clone, Copy)]
+struct MarginBands;
+
+impl MarginBands {
+    const LOG_LO: f64 = -5.0;
+    const PER_DECADE: f64 = 20.0;
+    const DECADES: f64 = 13.0;
+
+    fn len(self) -> usize {
+        (Self::DECADES * Self::PER_DECADE) as usize
+    }
+
+    fn index(self, e: f64) -> usize {
+        let x = ((e.max(1e-300).log10() - Self::LOG_LO) * Self::PER_DECADE).floor();
+        (x.max(0.0) as usize).min(self.len() - 1)
+    }
+}
+
+/// A neutron majorant raised per energy band by a factor that covers every
+/// replica's total ([`ReplicaContext::majorant`]).
+struct ReplicaMajorant {
+    inner: Arc<dyn yamc_materials::Majorant>,
+    bands: MarginBands,
+    factor: Vec<f64>,
+}
+
+impl yamc_materials::Majorant for ReplicaMajorant {
+    fn sigma_max(&self, material_id: Option<u32>, energy: f64) -> f64 {
+        self.inner.sigma_max(material_id, energy) * self.factor[self.bands.index(energy)]
+    }
+}
+
 /// `(1 - e^-x) / x`, the mean of `e^-s` over `[0, x]`, stable near zero.
 pub(crate) fn mean_survival(x: f64) -> f64 {
     if x.abs() < 1e-8 {
@@ -1444,11 +1779,18 @@ pub(crate) struct ReplicaSegment<'a> {
     /// `ΔΣ`'s gradient along the modes, in 1/cm, and the segment's length.
     grad: Vec<f64>,
     dist: f64,
+    /// A photon's segment: photon data carries no covariance, so the flight
+    /// and every score keep the ratios the photon was born with.
+    photon: bool,
 }
 
 impl<'a> ReplicaSegment<'a> {
     /// The segment a particle at its current energy flies for `dist` in the
     /// material of `slot`, or `None` on a particle without replica ratios.
+    ///
+    /// A photon's flight moves nothing: its cross sections are not
+    /// perturbed, so it carries the ratios it inherited from the neutron
+    /// reaction that made it (see [`ReplicaContext::reaction_factor`]).
     pub(crate) fn new(
         ctx: &'a ReplicaContext,
         particle: &yamc_particle::particle::Particle,
@@ -1460,7 +1802,10 @@ impl<'a> ReplicaSegment<'a> {
         let urr_random = yamc_particle::particle::urr_to_option(particle.urr_random);
         let mut delta = vec![0.0; ratios.len()];
         let mut grad = vec![0.0; sensitivity.len()];
-        ctx.flight_delta(slot, particle.energy, urr_random, &mut delta, &mut grad);
+        let photon = particle.particle_type == yamc_particle::ParticleType::Photon;
+        if !photon {
+            ctx.flight_delta(slot, particle.energy, urr_random, &mut delta, &mut grad);
+        }
         let factors = ratios
             .iter()
             .zip(&delta)
@@ -1481,6 +1826,32 @@ impl<'a> ReplicaSegment<'a> {
             slope,
             grad,
             dist,
+            photon,
+        })
+    }
+
+    /// The replica state a point estimator scores with at the particle's
+    /// position in the material of `slot`, without a flight: the ratios
+    /// themselves, `r_k`, and the particle's derivatives. What delta
+    /// tracking's collision-density estimator scores at each delta
+    /// collision, whose density `Σ_maj` is the same for every replica.
+    pub(crate) fn at_point(
+        ctx: &'a ReplicaContext,
+        particle: &yamc_particle::particle::Particle,
+        slot: Option<u32>,
+    ) -> Option<Self> {
+        let state = particle.replica.as_ref()?;
+        let (ratios, sensitivity) = state.split_at(ctx.replicas);
+        Some(Self {
+            ctx,
+            slot,
+            urr_random: yamc_particle::particle::urr_to_option(particle.urr_random),
+            factors: ratios.to_vec(),
+            survival: vec![1.0; ratios.len()],
+            slope: sensitivity.to_vec(),
+            grad: vec![0.0; sensitivity.len()],
+            dist: 0.0,
+            photon: particle.particle_type == yamc_particle::ParticleType::Photon,
         })
     }
 
@@ -1490,8 +1861,10 @@ impl<'a> ReplicaSegment<'a> {
     pub(crate) fn factors_for(&self, score: &Score, e: f64) -> Vec<f64> {
         let mut ratio = vec![1.0; self.factors.len()];
         let mut grad = vec![0.0; self.slope.len()];
-        self.ctx
-            .score_ratio(self.slot, score, e, self.urr_random, &mut ratio, &mut grad);
+        if !self.photon {
+            self.ctx
+                .score_ratio(self.slot, score, e, self.urr_random, &mut ratio, &mut grad);
+        }
         ratio
             .iter()
             .zip(&self.factors)
@@ -1523,6 +1896,50 @@ impl<'a> ReplicaSegment<'a> {
                 *x -= self.dist * g;
             }
         }
+    }
+}
+
+/// Give every particle banked since the bank held `start` that carries no
+/// replica state the state of `parent`: the secondaries of a photon
+/// collision (fluorescence, annihilation and bremsstrahlung photons), born
+/// of photon physics, which no replica perturbs.
+pub(crate) fn inherit_replicas(
+    parent: &yamc_particle::particle::Particle,
+    bank: &mut yamc_physics::util::bank::ParticleBank,
+    start: usize,
+) {
+    let Some(state) = parent.replica.as_ref() else {
+        return;
+    };
+    for secondary in bank.banked_since_mut(start) {
+        if secondary.replica.is_none() {
+            secondary.replica = Some(state.clone());
+        }
+    }
+}
+
+/// Multiply a replica state (ratios, then derivatives) by the factor of
+/// reaction `mt` on `nuclide` at `energy` in the material of `slot`
+/// ([`ReplicaContext::reaction_factor`]), adding the factor's gradient to
+/// the derivatives: the state a secondary born of that reaction starts
+/// with, from its parent's.
+pub(crate) fn apply_reaction(
+    ctx: &ReplicaContext,
+    state: &mut [f64],
+    slot: Option<u32>,
+    nuclide: &str,
+    mt: i32,
+    energy: f64,
+) {
+    let (ratios, sensitivity) = state.split_at_mut(ctx.replicas);
+    let mut factor = vec![1.0; ratios.len()];
+    let mut grad = vec![0.0; sensitivity.len()];
+    ctx.reaction_factor(slot, nuclide, mt, energy, &mut factor, &mut grad);
+    for (x, f) in ratios.iter_mut().zip(factor) {
+        *x *= f;
+    }
+    for (x, g) in sensitivity.iter_mut().zip(grad) {
+        *x += g;
     }
 }
 

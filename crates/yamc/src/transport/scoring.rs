@@ -82,9 +82,14 @@ pub(crate) fn score_track_length_segment(
             particle.parent_nuclide,
         );
     }
-    if let (Some(dep_tallies), Some(mat_id), Some(mat_ref)) =
-        (transmutation_tallies, material_id, material_ref)
-    {
+    // Transmutation reaction rates are neutron rates: a photon's track in
+    // the same material is not neutron flux.
+    if let (Some(dep_tallies), Some(mat_id), Some(mat_ref), yamc_particle::ParticleType::Neutron) = (
+        transmutation_tallies,
+        material_id,
+        material_ref,
+        particle.particle_type,
+    ) {
         // Weighted track length: under survival biasing (and any future
         // weighted technique) the particle carries weight < 1, and the
         // transmutation rates must see it. Analog weight is 1, so this is
@@ -209,6 +214,7 @@ pub(crate) fn score_woodcock_flight_estimator(
     tl_mesh_eligible: &[bool],
     transmutation_tallies: Option<&TransmutationTallies>,
     welford_worker: &mut yamc_tallies::welford::WelfordWorkerState,
+    replica: Option<&super::replica::ReplicaSegment>,
 ) {
     let material_ref = cell_material.map(|m| m.as_ref());
     // Zipped (not indexed) so this per-delta-collision loop carries no
@@ -220,6 +226,35 @@ pub(crate) fn score_woodcock_flight_estimator(
         if mesh_eligible {
             // Scored with the TRUE track-length estimator along the
             // full flight segment instead.
+            continue;
+        }
+        if let Some(point) = replica.filter(|_| welford_worker.has_replicas(tally_idx)) {
+            // Each score's replica factors at the delta collision: the
+            // particle's ratio times the score's own Σ'_x / Σ_x.
+            let factors: Vec<Vec<f64>> = tally
+                .scores
+                .iter()
+                .map(|score| point.factors_for(score, particle.energy))
+                .collect();
+            tally.score_collision_with(
+                &mut |bin_idx, v| {
+                    welford_worker.add_contribution(tally_idx, bin_idx, v);
+                    let score = tally.score_index_of_bin(bin_idx);
+                    welford_worker.add_replica_contribution(tally_idx, bin_idx, v, &factors[score]);
+                },
+                particle.weight,
+                sigma_maj,
+                particle.position,
+                cell.cell_id,
+                material_ref,
+                material_id,
+                urr_macro_xs,
+                photon_macro_xs,
+                particle.energy,
+                particle.particle_type,
+                particle.parent_nuclide,
+                None,
+            );
             continue;
         }
         tally.score_collision(
@@ -243,7 +278,23 @@ pub(crate) fn score_woodcock_flight_estimator(
     // track-length contribution is `weight / Sigma_maj` per
     // delta-collision (weighted for survival biasing; analog weight is
     // 1, so analog runs are bit-identical).
-    if let (Some(dep), Some(mid), Some(mref)) = (transmutation_tallies, material_id, material_ref) {
-        dep.score(mid, particle.energy, particle.weight / sigma_maj, mref);
+    if let (Some(dep), Some(mid), Some(mref), yamc_particle::ParticleType::Neutron) = (
+        transmutation_tallies,
+        material_id,
+        material_ref,
+        particle.particle_type,
+    ) {
+        let weighted = particle.weight / sigma_maj;
+        match replica.filter(|_| dep.replicas().is_some()) {
+            Some(point) => dep.score_with_replicas(
+                mid,
+                particle.energy,
+                weighted,
+                mref,
+                point.track_factors(),
+                point.context(),
+            ),
+            None => dep.score(mid, particle.energy, weighted, mref),
+        }
     }
 }
