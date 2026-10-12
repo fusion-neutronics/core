@@ -196,6 +196,7 @@ fn run(
             Default::default(),
             &settings,
             None,
+            yani_transmute::DEFAULT_PRODUCT_THRESHOLD,
         )
         .unwrap();
     let final_mat = results.get_final_material(1).expect("material 1 present");
@@ -517,6 +518,7 @@ fn coupled_isomer_only_partial_past_its_last_point_is_refused() {
             Default::default(),
             &settings,
             None,
+            yani_transmute::DEFAULT_PRODUCT_THRESHOLD,
         )
         .expect_err("refused")
         .to_string();
@@ -624,6 +626,7 @@ fn coupled_bound_keeps_grafted_metastable_reactions() {
             Default::default(),
             &settings,
             None,
+            yani_transmute::DEFAULT_PRODUCT_THRESHOLD,
         )
         .unwrap();
     let nuclides = &results.get_final_material(1).expect("material 1").nuclides;

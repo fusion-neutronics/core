@@ -358,3 +358,53 @@ def test_no_rate_spectrum_where_there_is_no_rate():
     assert ask(mat_id, "U235", "(n,gamma)", 0) is None
     assert ask(mat_id, "Fe56", "(n,banana)", 0) is None
     assert ask(9999, "Fe56", "(n,gamma)", 0) is None
+
+
+# --- product screening ---------------------------------------------------------
+
+def _year_schedule():
+    return yamc.PulseSchedule([
+        yamc.Pulse(rate=RATE, duration=365 * DAY, source=_spectrum()),
+        yamc.Cooldown(duration=DAY),
+    ])
+
+
+def test_the_screening_reports_what_it_loaded_and_left_out():
+    iron = _make_iron()
+    results = iron.transmute(schedule=_year_schedule())
+    info = results.get_product_screening_info(iron.id or 0)
+    assert info["threshold"] == 1e-12
+    assert "Fe56" in info["loaded"]
+    assert info["rounds"] >= 1
+    # Far fewer than the chain reaches from iron: that is the point.
+    assert len(info["loaded"]) < info["closure"]
+    assert all(0.0 < f < 1e-12 for f in info["below_threshold"].values())
+    assert info["dropped_fraction"] == pytest.approx(
+        sum(info["below_threshold"].values())
+    )
+
+
+def test_a_zero_threshold_loads_everything_populated_and_agrees():
+    exact_iron, screened_iron = _make_iron(), _make_iron()
+    exact = exact_iron.transmute(schedule=_year_schedule(), product_threshold=0.0)
+    screened = screened_iron.transmute(schedule=_year_schedule())
+    exact_info = exact.get_product_screening_info(0)
+    assert exact_info["below_threshold"] == {}
+    assert set(screened.get_product_screening_info(0)["loaded"]) <= set(
+        exact_info["loaded"]
+    )
+    for step in (1, 2):
+        a, b = exact.get_material(0, step), screened.get_material(0, step)
+        assert b.activity() == pytest.approx(a.activity(), rel=1e-8)
+        assert b.decay_heat() == pytest.approx(a.decay_heat(), rel=1e-8)
+        atoms_a, atoms_b = a.get_atoms_per_barn_cm(), b.get_atoms_per_barn_cm()
+        total = sum(atoms_a.values())
+        for name, n in atoms_a.items():
+            if n / total > 1e-9:
+                assert atoms_b.get(name, 0.0) == pytest.approx(n, rel=1e-8), name
+
+
+@pytest.mark.parametrize("bad", [-1e-12, 1.0, float("nan")])
+def test_a_threshold_that_is_not_a_fraction_is_refused(bad):
+    with pytest.raises(ValueError, match="product_threshold"):
+        _make_iron().transmute(schedule=_year_schedule(), product_threshold=bad)

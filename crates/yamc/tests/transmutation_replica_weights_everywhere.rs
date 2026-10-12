@@ -222,6 +222,7 @@ fn each_replica_is_the_transports_replica_in_every_game() {
                 Default::default(),
                 &settings(),
                 Some(&request),
+                yani_transmute::DEFAULT_PRODUCT_THRESHOLD,
             )
             .expect("transmute");
         let nominal = results.get_nuclide_density(1, "W187", 1).expect("W187");

@@ -476,7 +476,8 @@ fn the_activation_load_reads_the_reactions_a_channel_is_derived_from() {
         sources: vec![yani_transmute::uncertainty::Source::CrossSections],
         ..Default::default()
     };
-    yani_transmute::preload_activation_data(&mut m, &chain, &branch, Some(&request), None)
+    let names: std::collections::BTreeSet<String> = m.nuclide_data.keys().cloned().collect();
+    yani_transmute::preload_activation_data(&mut m, &chain, &branch, Some(&request), None, &names)
         .expect("preload");
     let held = |name: &str, mt: i32| {
         m.nuclide_data[name]

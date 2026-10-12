@@ -1644,6 +1644,18 @@ impl PyModel {
     ///         is tallied or solved: the inventories are bit-identical either
     ///         way, and with replica weights the nominal inventories are too.
     ///
+    ///     product_threshold (float): The atom fraction, or share of the
+    ///         activity, decay heat or decay photon power, a transmutation
+    ///         product must reach at some point of the schedule for its cross
+    ///         sections to be downloaded and its own reactions tallied and
+    ///         solved. Default 1e-12. The scouting transport's spectrum is
+    ///         solved over the schedule, products crossing this are loaded,
+    ///         and the solve is repeated until nothing new crosses it. A
+    ///         product below it is still produced, decays and is reported;
+    ///         only its neutron reactions are dropped
+    ///         (``get_product_screening_info`` says which). 0 loads every
+    ///         product the solve populates. See ``Material.transmute``.
+    ///
     /// Returns:
     ///     TransmutationResults object containing material compositions at each timestep.
     ///
@@ -1661,7 +1673,8 @@ impl PyModel {
     ///     >>> results.get_nuclide_uncertainty(1, "Co60", 1)
     ///     >>> results.get_data_uncertainty_info(1)["flux_response"]
     ///     'replica_weights'
-    #[pyo3(signature = (method, schedule, total_particles=None, seed=1, threads=None, max_runtime=None, compute="cpu", data_uncertainty=None))]
+    #[pyo3(signature = (method, schedule, total_particles=None, seed=1, threads=None, max_runtime=None, compute="cpu", data_uncertainty=None, product_threshold=1e-12))]
+    #[allow(clippy::too_many_arguments)]
     pub fn simulate_transmutation(
         &mut self,
         method: String,
@@ -1672,8 +1685,11 @@ impl PyModel {
         max_runtime: Option<pyo3::Py<pyo3::types::PyAny>>,
         compute: &str,
         data_uncertainty: Option<yani_python::data_uncertainty::PyDataUncertainty>,
+        product_threshold: f64,
         py: Python<'_>,
     ) -> PyResult<PyTransmutationResults> {
+        yani_transmute::screening::check_threshold(product_threshold)
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
         // As on `generate_weight_windows`: present so the answer is a sentence
         // rather than a missing argument.
         if compute.trim() != "cpu" {
@@ -1760,6 +1776,7 @@ impl PyModel {
                         parts,
                         &settings,
                         uncertainty.as_ref(),
+                        product_threshold,
                     )
                     .map_err(|e| e.to_string())
             });

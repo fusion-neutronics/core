@@ -33,6 +33,7 @@ pub mod resonance_rates;
 pub mod resonance_sampling;
 mod results;
 mod schedule;
+pub mod screening;
 pub mod self_shielding;
 pub mod statistical;
 mod transmutation;
@@ -78,9 +79,10 @@ pub use branching_rule::{
 };
 pub use isomer_branching_uncertainty::IsomerIntervalProductions;
 pub use material_transmute::{
-    activation_mts, apply_coupled_branching, preload_activation_data, transmute_material,
-    transmute_material_shielded, transmute_materials, transport_cross_material, transport_replicas,
-    CoupledDiagnostics, MultigroupSpectrum, TransmuteCase, TransmuteStep, TransportTallied,
+    activation_mts, apply_coupled_branching, preload_activation_data, screen_activation_products,
+    transmute_material, transmute_material_shielded, transmute_materials, transport_cross_material,
+    transport_replicas, CoupledDiagnostics, MultigroupSpectrum, TransmuteCase, TransmuteStep,
+    TransportTallied,
 };
 
 /// Load the transmutation chain assembled from the configured per-subsection
@@ -152,6 +154,7 @@ pub use results::{
     CollapseInputs, CollapseReuse, RateSpectrum, TransmutationResults, UncertaintyBreakdown,
 };
 pub use schedule::{duration_to_seconds, Schedule, ScheduleStep};
+pub use screening::{ProductScreening, DEFAULT_PRODUCT_THRESHOLD};
 pub use self_shielding::{Shape, Shielding, ShieldingInfo};
 pub use transmutation::TransmutationDriver;
 pub use transmutation_stepper::{ForwardEulerStepper, TransmutationStepper, DENSITY_FLOOR};

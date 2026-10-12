@@ -2098,7 +2098,7 @@ class Material:
         Returns:
             Tuple[List[float], List[float]]: (cross_section_values, energy_grid)
         """
-    def transmute(self, schedule: typing.Any, data_uncertainty: typing.Optional[DataUncertainty] = None, self_shielding_chord: typing.Optional[builtins.float] = None, self_shielding_shape: typing.Optional[typing.Any] = None, displacement_damage: builtins.bool = False, displacement_energies: typing.Optional[typing.Mapping[builtins.str, builtins.float]] = None) -> TransmutationResults:
+    def transmute(self, schedule: typing.Any, data_uncertainty: typing.Optional[DataUncertainty] = None, self_shielding_chord: typing.Optional[builtins.float] = None, self_shielding_shape: typing.Optional[typing.Any] = None, displacement_damage: builtins.bool = False, displacement_energies: typing.Optional[typing.Mapping[builtins.str, builtins.float]] = None, product_threshold: builtins.float = 1e-12) -> TransmutationResults:
         r"""
         Transmute this material over an irradiation/cooling schedule, without
         re-running transport.
@@ -2126,12 +2126,13 @@ class Material:
         deplete; here you have already named the one you mean.
         
         The cross sections this needs are loaded **into the material** and kept,
-        so calling it again on the same material does no file reading at all --
-        on a steel against ENDF/B-8.1 that is 1.8 s of a 2.3 s call. The
-        composition is not modified. A sweep over thousands of *distinct*
-        compositions should call ``release_nuclear_data()`` on each material when
-        it is done with it, since otherwise every one of them holds a few hundred
-        nuclides' data for as long as it lives.
+        so calling it again on the same material does no file reading at all.
+        Only the composition's and those of the products the schedule populates
+        are loaded (see ``product_threshold``), not every nuclide the chain can
+        reach. The composition is not modified. A sweep over thousands of
+        *distinct* compositions should call ``release_nuclear_data()`` on each
+        material when it is done with it, since otherwise every one of them
+        holds its nuclides' data for as long as it lives.
         
         Returns:
             TransmutationResults: The same object ``Model.simulate_transmutation``
@@ -2205,6 +2206,23 @@ class Material:
                 neither source must be given here; it is never guessed. Needs
                 ``displacement_damage=True``.
         
+            product_threshold (float): The atom fraction, or share of the
+                activity, decay heat or decay photon power, a transmutation
+                product must reach at some state of the schedule for its cross
+                sections to be downloaded and its own neutron reactions solved.
+                Default 1e-12. The schedule is solved with the composition's
+                cross sections, every product crossing this is loaded, and the
+                solve is repeated until nothing new crosses it, so a run fetches
+                the few dozen nuclides an irradiation populates rather than the
+                hundreds its chain can reach. A product below it is still
+                produced, decays and is reported; only its reactions are
+                dropped, which moves its own atom fraction and decay-quantity
+                shares by less than the threshold and what it would have made
+                by less than the summed peak fraction of the products left out.
+                What was loaded and left out is in
+                ``get_product_screening_info(id)``. 0 loads every product the
+                solve populates, which is exact.
+        
         Raises:
             ValueError: If an irradiation pulse lacks a NeutronSource, its energy
                 is not a Histogram, or on other invalid inputs.
@@ -2228,8 +2246,9 @@ class Material:
         
         ``transmute()`` loads the cross sections it needs into the material and
         leaves them there, so calling it again on the same material does no file
-        reading at all. On an ENDF/B-8.1 chain that is a few hundred nuclides
-        held for as long as the material is.
+        reading at all. That is the composition and the products the
+        irradiation populates, a few dozen nuclides for a pure metal and up to a
+        couple of hundred for a steel, held for as long as the material is.
         
         That is the right trade for a material you transmute more than once, and
         the wrong one for a sweep over thousands of *distinct* compositions --
@@ -3043,7 +3062,7 @@ class Model:
         Returns:
             A :class:`GeometrySliceData` -- also supports tuple unpacking.
         """
-    def simulate_transmutation(self, method: builtins.str, schedule: typing.Any, total_particles: typing.Optional[builtins.int] = None, seed: builtins.int = 1, threads: typing.Optional[builtins.int] = None, max_runtime: typing.Optional[typing.Any] = None, compute: builtins.str = 'cpu', data_uncertainty: typing.Optional[DataUncertainty] = None) -> TransmutationResults:
+    def simulate_transmutation(self, method: builtins.str, schedule: typing.Any, total_particles: typing.Optional[builtins.int] = None, seed: builtins.int = 1, threads: typing.Optional[builtins.int] = None, max_runtime: typing.Optional[typing.Any] = None, compute: builtins.str = 'cpu', data_uncertainty: typing.Optional[DataUncertainty] = None, product_threshold: builtins.float = 1e-12) -> TransmutationResults:
         r"""
         Run transport-transmutation calculation.
         
@@ -3154,6 +3173,18 @@ class Model:
                 same replica index. Omit ``data_uncertainty`` and nothing extra
                 is tallied or solved: the inventories are bit-identical either
                 way, and with replica weights the nominal inventories are too.
+        
+            product_threshold (float): The atom fraction, or share of the
+                activity, decay heat or decay photon power, a transmutation
+                product must reach at some point of the schedule for its cross
+                sections to be downloaded and its own reactions tallied and
+                solved. Default 1e-12. The scouting transport's spectrum is
+                solved over the schedule, products crossing this are loaded,
+                and the solve is repeated until nothing new crosses it. A
+                product below it is still produced, decays and is reported;
+                only its neutron reactions are dropped
+                (``get_product_screening_info`` says which). 0 loads every
+                product the solve populates. See ``Material.transmute``.
         
         Returns:
             TransmutationResults object containing material compositions at each timestep.
@@ -6357,6 +6388,33 @@ class TransmutationResults:
         Args:
             material_id: Material ID number.
         """
+    def get_product_screening_info(self, material_id: builtins.int) -> typing.Optional[dict]:
+        r"""
+        Which transmutation products had their cross sections loaded, and
+        which were left out below ``product_threshold``.
+        
+        A product is loaded once its atom fraction, or its share of the
+        activity, decay heat or decay photon power, reaches the threshold at
+        any state of the schedule; one left out is still produced, decays and
+        is reported, and only its own neutron reactions are dropped.
+        
+        Keys: ``threshold``; ``rounds``, the screening solves run;
+        ``closure``, how many nuclides with neutron reactions the chain
+        reaches from the composition, which is what loading without screening
+        fetched; ``loaded``, the sorted nuclides whose cross sections drive
+        the solve; ``unavailable``, products that crossed the threshold but
+        the library has no data for; ``below_threshold``, each product left
+        out mapped to its largest atom fraction over the schedule; and
+        ``dropped_fraction``, the sum of those, which bounds the share of the
+        material's atoms the left-out reactions could have moved before
+        multiplying by the share of them that react.
+        
+        ``None`` for a material not in the results, and for one a
+        transport-coupled solve did not irradiate.
+        
+        Args:
+            material_id: Material ID number.
+        """
     def get_material_nuclides(self, material_id: builtins.int, step: builtins.int) -> typing.Optional[builtins.dict[builtins.str, builtins.float]]:
         r"""
         Get material composition at a specific timestep as a dict.
@@ -7807,7 +7865,7 @@ def set_transmutation_reactions(value: typing.Optional[builtins.str | typing.Lit
     rather than being solved as though the reaction produced nothing.
     """
 
-def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | typing.Sequence[PulseSchedule], data_uncertainty: typing.Optional[DataUncertainty] = None, self_shielding_chord: typing.Optional[builtins.float] = None, self_shielding_shape: shapes.SphereLump | shapes.CubeLump | shapes.FoilLump | shapes.CylinderLump | shapes.WireLump | None = None, displacement_damage: builtins.bool = False, displacement_energies: typing.Optional[typing.Mapping[builtins.str, builtins.float]] = None) -> TransmutationResults:
+def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | typing.Sequence[PulseSchedule], data_uncertainty: typing.Optional[DataUncertainty] = None, self_shielding_chord: typing.Optional[builtins.float] = None, self_shielding_shape: shapes.SphereLump | shapes.CubeLump | shapes.FoilLump | shapes.CylinderLump | shapes.WireLump | None = None, displacement_damage: builtins.bool = False, displacement_energies: typing.Optional[typing.Mapping[builtins.str, builtins.float]] = None, product_threshold: builtins.float = 1e-12) -> TransmutationResults:
     r"""
     Transmute several materials over one timeline in one call.
     
@@ -7854,6 +7912,10 @@ def transmute(materials: typing.Sequence[Material], schedules: PulseSchedule | t
         displacement_energies (dict[str, float], optional): Displacement
             threshold energies in eV by element symbol, replacing the defaults,
             for every material. Needs ``displacement_damage=True``.
+        product_threshold (float): The atom fraction, or share of a decay
+            quantity, a product must reach for its cross sections to be loaded
+            and its reactions solved, applied to each material's own schedule.
+            Default 1e-12. See ``Material.transmute``.
     
     Returns:
         TransmutationResults: Keyed by each material's ``id``. Per material,

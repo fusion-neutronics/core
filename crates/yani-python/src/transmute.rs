@@ -53,6 +53,10 @@ use crate::transmutation_results::PyTransmutationResults;
 ///     displacement_energies (dict[str, float], optional): Displacement
 ///         threshold energies in eV by element symbol, replacing the defaults,
 ///         for every material. Needs ``displacement_damage=True``.
+///     product_threshold (float): The atom fraction, or share of a decay
+///         quantity, a product must reach for its cross sections to be loaded
+///         and its reactions solved, applied to each material's own schedule.
+///         Default 1e-12. See ``Material.transmute``.
 ///
 /// Returns:
 ///     TransmutationResults: Keyed by each material's ``id``. Per material,
@@ -79,7 +83,8 @@ use crate::transmutation_results::PyTransmutationResults;
 ///     >>> results.get_final_material(cells[3].id)
 #[gen_stub_pyfunction]
 #[pyfunction]
-#[pyo3(signature = (materials, schedules, data_uncertainty = None, self_shielding_chord = None, self_shielding_shape = None, displacement_damage = false, displacement_energies = None))]
+#[pyo3(signature = (materials, schedules, data_uncertainty = None, self_shielding_chord = None, self_shielding_shape = None, displacement_damage = false, displacement_energies = None, product_threshold = 1e-12))]
+#[allow(clippy::too_many_arguments)]
 pub fn transmute(
     py: Python<'_>,
     materials: Vec<Bound<'_, PyMaterial>>,
@@ -95,7 +100,9 @@ pub fn transmute(
     self_shielding_shape: Option<Bound<'_, PyAny>>,
     displacement_damage: bool,
     displacement_energies: Option<std::collections::HashMap<String, f64>>,
+    product_threshold: f64,
 ) -> PyResult<PyTransmutationResults> {
+    yani_transmute::screening::check_threshold(product_threshold).map_err(PyValueError::new_err)?;
     let damage = crate::material::damage_request(displacement_damage, displacement_energies)?;
     if materials.is_empty() {
         return Err(PyValueError::new_err(
@@ -166,6 +173,7 @@ pub fn transmute(
                     spectra,
                     steps,
                     shielding,
+                    product_threshold,
                 },
             )
             .collect();

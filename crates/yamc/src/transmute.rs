@@ -12,8 +12,6 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use yamc_materials::material::{DensityUnits, Material};
-use yamc_nuclide::config::Config;
-use yamc_nuclide::nuclide::get_or_load_nuclide;
 use yani_transmute::{
     apply_coupled_branching, ChainNuclide, FissionYieldWeights, ForwardEulerStepper, ReactionRates,
     TransmutationResults, TransmutationStepper, TransmutationTallies,
@@ -111,14 +109,14 @@ impl Model {
     ///   carry the flux's response to its cross sections; its nominal rates
     ///   are bit-identical to a run without.
     ///
-    /// Product cross sections are loaded for the material's whole reachable
-    /// closure (`yani::reachable_nuclides`) and then narrowed to the products
-    /// that irradiation can populate above the solver's density floor
-    /// (`yani::populated_nuclides`), so which products are carried is derived
-    /// from the composition and the fluence rather than from a caller-supplied
-    /// depth. A cheap scouting transport runs first to supply the flux spectrum
-    /// that bound is folded against.
-    /// Product nuclide paths are resolved from CONFIG.cross_sections or material data.
+    /// * `product_threshold` - The atom fraction a product must reach, at any
+    ///   point of the schedule, for its cross sections to be loaded and its
+    ///   reactions tallied and solved
+    ///   ([`yani_transmute::DEFAULT_PRODUCT_THRESHOLD`] is the usual choice).
+    ///   A cheap scouting transport runs first to supply the flux spectrum the
+    ///   screening solves against (see [`yani_transmute::screening`]); a
+    ///   product left out still decays and is still produced. Product nuclide
+    ///   paths are resolved from CONFIG.cross_sections or material data.
     ///
     /// # Returns
     /// TransmutationResults containing material compositions at each timestep
@@ -132,7 +130,9 @@ impl Model {
         parts: yani::ChainParts,
         settings: &crate::model::TransportSettings,
         uncertainty: Option<&yani_transmute::uncertainty::DataUncertainty>,
+        product_threshold: f64,
     ) -> Result<TransmutationResults, Box<dyn std::error::Error>> {
+        yani_transmute::screening::check_threshold(product_threshold)?;
         // Validate method
         let is_independent = match method {
             "independent" => true,
@@ -234,21 +234,18 @@ impl Model {
             }
         }
 
-        // The whole irradiation, as the product bound below sees it: every
-        // step's duration (decay runs during cooling steps too) and the largest
-        // source rate any step reaches, so a rate folded at that rate bounds
-        // every step's.
-        let total_time: f64 = timesteps.iter().sum();
         let peak_source_rate = source_rates.iter().copied().fold(0.0, f64::max);
 
-        // Scouting transport: the flux spectrum the product bound needs.
+        // Scouting transport: the flux spectrum the product screening solves
+        // against.
         //
         // A product's reaction rate comes from continuous-energy scoring during
-        // transport, so it cannot be folded from a stored group flux after the
-        // fact. What CAN be folded afterwards is a bound on it, from the flux
-        // moments this tally accumulates per energy bin (one binary search and
-        // two adds per track segment, whatever the nuclide count), and a bound
-        // is all that deciding which products to carry needs.
+        // transport, but which products are worth scoring has to be known
+        // before the tallies are built. The flux moments this tally
+        // accumulates per union-grid bin (one binary search and two adds per
+        // track segment, whatever the nuclide count) give a fine-group
+        // spectrum, and a multigroup solve on it is all that deciding which
+        // products to carry needs.
         //
         // This runs before the products are loaded, so its tally carries only
         // the material's own nuclides and costs a bare transport. In coupled
@@ -260,7 +257,7 @@ impl Model {
         let scout_start = std::time::Instant::now();
 
         let scout: Option<Arc<TransmutationTallies>> = if peak_source_rate > 0.0 {
-            println!("Scouting transport for the flux spectrum the product bound needs...");
+            println!("Scouting transport for the flux spectrum the product screening needs...");
             let scout = {
                 let seeded: HashMap<u32, &Material> = transmutable_cells
                     .iter()
@@ -283,49 +280,46 @@ impl Model {
             Some(scout)
         } else {
             // Nothing is irradiated, so no reaction can fire and no product
-            // needs a cross section. The bound reaches the same conclusion from
-            // rates that are all zero, which is exactly right here rather than
-            // merely conservative, so there is nothing to scout for.
+            // needs a cross section: there is nothing to scout for.
             None
         };
 
         #[cfg(feature = "debug_timing")]
         eprintln!(
-            "[TIMING] Scouting transport for the product bound: {:.3}s",
+            "[TIMING] Scouting transport for the product screening: {:.3}s",
             scout_start.elapsed().as_secs_f64()
         );
 
-        // Load cross sections for every product the material can reach, then
-        // keep the ones the irradiation can actually populate.
+        // Load cross sections for the products the irradiation populates, and
+        // nothing else.
         //
-        // A caller-supplied hop count cannot express the right answer: how far
-        // a product chain runs depends on the fluence, not on graph distance.
-        // The reachable closure is derived from the composition instead, so
-        // there is nothing to set.
+        // The chain's reachable closure is no guide: it saturates on one large
+        // strongly connected component, so Fe56, water and steel all reach the
+        // same few hundred reactive nuclides while a real solve of an iron
+        // sphere populates 49, and loading the closure is hundreds of MB. The
+        // screening solves the schedule on the scouting spectrum instead,
+        // loading a product once its atom fraction or its share of a decay
+        // quantity reaches `product_threshold` and solving again until nothing
+        // new crosses it (see
+        // `yani_transmute::screening`). A product left out still decays and is
+        // still produced; only its own reactions are dropped.
         //
-        // Reachability is blunt, though: it saturates on one large strongly
-        // connected component, so Fe56, water and steel all reach the same 461
-        // reactive nuclides while a real solve of an iron sphere populates 49.
-        // `yani::populated_nuclides` carries an upper bound on the density each
-        // node could attain and drops those that stay under the solver's own
-        // floor, so depth tracks fluence and there is still nothing to set.
-        //
-        // The closure is large, so these load at activation scope: the MTs the
-        // network names and no transport sections, the same scope
-        // `transmute_material` uses. A product enters the run at
-        // zero density and so cannot be collided on; if one later grows a
-        // density, the coupled loop's `ensure_nuclide_loaded` widens it to
-        // transport scope on demand.
+        // These load at activation scope: the MTs the network names and no
+        // transport sections. A product enters the run at zero density and so
+        // cannot be collided on; if one later grows a density, the coupled
+        // loop's `ensure_nuclide_loaded` widens it to transport scope on
+        // demand.
         #[cfg(feature = "debug_timing")]
         let preload_start = std::time::Instant::now();
 
-        // Per material, the products the bound says are worth scoring. A
-        // material missing from this map scores everything it has, which is
-        // what happens when nothing was irradiated or nothing was loaded.
+        // Per material, the nuclides the tallies score: the composition and
+        // the screened products. A material missing from this map scores
+        // everything it has, which is what happens when nothing was
+        // irradiated.
         let mut carried: HashMap<u32, std::collections::HashSet<String>> = HashMap::new();
+        let mut screenings: HashMap<u32, yani_transmute::ProductScreening> = HashMap::new();
 
-        {
-            let product_mts = yani_transmute::activation_mts(&chain, &branch);
+        if let Some(scout) = &scout {
             for (&mat_id, cell_indices) in &transmutable_cells {
                 let cell_idx = cell_indices[0];
                 let first_mat_idx = self.geometry.cells()[cell_idx]
@@ -333,186 +327,78 @@ impl Model {
                     .expect("transmutable cell must have a material");
                 let material_arc = &self.geometry.materials()[first_mat_idx as usize];
                 let mut material = (**material_arc).clone();
+                let volume = material.volume.unwrap_or(1.0);
 
-                // Walk the chain from the material's own nuclides. Seeds are the
-                // composition UNION whatever is already loaded, since a material
-                // built in Python may carry no `nuclide_data` yet.
-                let seeds: Vec<String> = material
-                    .nuclides
-                    .keys()
-                    .chain(material.nuclide_data.keys())
-                    .cloned()
-                    .collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect();
-                let seed_refs: Vec<&str> = seeds.iter().map(|s| s.as_str()).collect();
-                let reachable = yani::reachable_nuclides(&chain, &seed_refs);
-
-                // Filter to nuclides not already loaded, and skip decay-only
-                // sinks: chain nodes with no neutron reactions don't need
-                // cross-section data.
-                let to_load: Vec<&String> = reachable
-                    .iter()
-                    .filter(|n| !material.nuclide_data.contains_key(*n))
-                    .filter(|n| chain.get(*n).is_some_and(|cn| !cn.reactions.is_empty()))
-                    .collect();
-
-                if to_load.is_empty() {
+                // The scouting flux on the tally's union grid, per unit source
+                // rate, as the shape the collapse takes and the magnitude each
+                // step scales it by. A material the scout never reached sees
+                // no flux and screens to its composition.
+                let Some(mut spectrum) = scout.flux_spectrum(mat_id, volume) else {
+                    continue;
+                };
+                let per_source: f64 = spectrum.masses.iter().sum();
+                if per_source.is_nan() || per_source <= 0.0 {
                     continue;
                 }
-
-                // Load product nuclides from CONFIG - warn about missing ones
-                // Collect paths from config, then drop the lock before loading
-                let source_paths: Vec<(String, String)> = {
-                    let config = Config::global();
-                    to_load
-                        .iter()
-                        .filter_map(|nuclide_name| {
-                            match config.get_cross_section(nuclide_name) {
-                                Some(path) => {
-                                    Some(((*nuclide_name).clone(), path))
-                                }
-                                None => {
-                                    eprintln!(
-                                        "\x1b[33mWarning: Transmutation product \"{nuclide_name}\" not found. \
-                                         It will not participate in neutron transport reactions.\x1b[0m"
-                                    );
-                                    None
-                                }
-                            }
-                        })
-                        .collect()
-                };
-
-                // What this block put into `nuclide_data`, and so the only
-                // thing the bound below may take back out again: whatever the
-                // material arrived with is the caller's, not a product.
-                let mut loaded: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-
-                // Use material's temperature to ensure consistency
-                let temp_filter = if !material.temperature().is_empty() {
-                    let mut temps = std::collections::HashSet::new();
-                    temps.insert(material.temperature().to_string());
-                    Some(temps)
-                } else {
-                    None
-                };
-                let scope = yamc_nuclide::LoadScope::activation(product_mts.clone())
-                    .with_temperatures(temp_filter);
-
-                // The loads below are one at a time; the downloads behind
-                // them go out together first.
-                yamc_nuclide::url_cache::prefetch(
-                    &source_paths
-                        .iter()
-                        .map(|(name, path)| yamc_nuclide::url_cache::DataRequest {
-                            source: path,
-                            name,
-                            kind: yamc_nuclide::url_cache::DataKind::Neutron,
-                            scope: &scope,
-                        })
-                        .collect::<Vec<_>>(),
-                );
-
-                for (nuclide_name, h5_path) in &source_paths {
-                    let mut source_map = HashMap::new();
-                    source_map.insert(nuclide_name.clone(), h5_path.clone());
-
-                    match get_or_load_nuclide(nuclide_name, &source_map, &scope) {
-                        Ok(nuclide) => {
-                            material.nuclide_data.insert(nuclide_name.clone(), nuclide);
-                            loaded.insert(nuclide_name.clone());
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "\x1b[33mWarning: Failed to load chain nuclide \"{nuclide_name}\": {e}\x1b[0m"
-                            );
-                        }
-                    }
+                for m in spectrum.masses.iter_mut() {
+                    *m /= per_source;
                 }
+                let steps: Vec<yani_transmute::TransmuteStep> = timesteps
+                    .iter()
+                    .zip(source_rates.iter())
+                    .map(|(&dt, &sr)| yani_transmute::TransmuteStep {
+                        dt,
+                        irradiation: (sr > 0.0).then_some((0, sr * per_source)),
+                    })
+                    .collect();
+                let before = material.nuclide_data.len();
+                let screening = yani_transmute::screen_activation_products(
+                    &mut material,
+                    &[spectrum],
+                    &steps,
+                    &chain,
+                    &branch,
+                    parts,
+                    None,
+                    None,
+                    product_threshold,
+                )
+                .map_err(|e| format!("material {mat_id}: {e}"))?;
+                if self.verbose.nuclear_data {
+                    println!(
+                        "Transmutation products for material {mat_id}: cross sections for {} of \
+                         the {} reactive nuclides the chain reaches, after {} screening \
+                         solve(s); {} populated below an atom fraction of {:e} react no further \
+                         (summed peak fraction {:.3e})",
+                        screening.loaded().len(),
+                        screening.closure,
+                        screening.rounds,
+                        screening.below_threshold.len(),
+                        screening.threshold,
+                        screening.dropped_fraction(),
+                    );
+                }
+                let mut keep: std::collections::HashSet<String> =
+                    screening.loaded().into_iter().collect();
+                // The transport composition is not the screening's to rule
+                // on: those nuclides are collided on, not produced.
+                keep.extend(material.nuclides.keys().cloned());
+                carried.insert(mat_id, keep);
+                screenings.insert(mat_id, screening);
 
-                if !loaded.is_empty() {
-                    // Work out which of these products the irradiation can
-                    // actually populate. The answer decides what the tallies
-                    // score, not what the material carries: leave the loaded
-                    // cross sections where they are.
-                    //
-                    // Scoring a product costs `n_MTs` cross-section lookups on
-                    // every track segment of every step, so the bill is
-                    // `n_nuclides x n_MTs x n_segments` and grows without bound
-                    // in particle count: 461 products cost 12.1 s against 3.3 s
-                    // for 50 at 100 000 particles on the Fe56 sphere.
-                    //
-                    // Every parent here is rated for real, from the scouting
-                    // spectrum. That is what makes the bound a bound: rating an
-                    // unloaded parent at zero is not sound (a node fed by
-                    // enough sub-floor parents clears the floor, and zeroed
-                    // edges hide that), and rating it at a cross-section
-                    // ceiling instead is sound but only terminates once the
-                    // whole closure is loaded anyway, returning this same set
-                    // after thirteen rounds instead of one. Nothing is rated at
-                    // zero except what this run would also rate at zero: a
-                    // nuclide with no cross-section data cannot react here any
-                    // more than it can in the solve.
-                    if let Some(scout) = &scout {
-                        let volume = material.volume.unwrap_or(1.0);
-                        let bound_rates = scout.bounding_reaction_rates(
-                            mat_id,
-                            &material,
-                            &chain,
-                            volume,
-                            peak_source_rate,
-                        );
-                        let initial = material.get_atoms_per_barn_cm()?;
-                        let mut keep = yani::populated_nuclides(
-                            &chain,
-                            &branch,
-                            &initial,
-                            total_time,
-                            yani_transmute::DENSITY_FLOOR,
-                            |parent, kind| {
-                                bound_rates
-                                    .get(parent)
-                                    .and_then(|kinds| kinds.get(kind))
-                                    .copied()
-                                    .unwrap_or(0.0)
-                            },
-                        );
-                        // The transport composition is not the bound's to rule
-                        // on: those nuclides are collided on, not produced.
-                        keep.extend(material.nuclides.keys().cloned());
-                        if self.verbose.nuclear_data {
-                            let scored = material
-                                .nuclide_data
-                                .keys()
-                                .filter(|n| chain.contains_key(*n) && keep.contains(*n))
-                                .count();
-                            println!(
-                                "Transmutation products for material {mat_id}: {scored} of {} \
-                                 can reach {:e} atoms/b-cm over {total_time:.3e} s",
-                                material.nuclide_data.len(),
-                                yani_transmute::DENSITY_FLOOR,
-                            );
-                        }
-                        carried.insert(mat_id, keep);
-                    }
-
+                if material.nuclide_data.len() != before {
                     // Validate temperature consistency after loading new nuclides
                     if let Err(e) = material.validate_temperature_consistency() {
                         eprintln!(
                             "\x1b[33mWarning: Temperature inconsistency after loading transmutation products: {e}\x1b[0m"
                         );
                     }
-                    // Products are deliberately NOT seeded into `nuclides` at zero
-                    // density. That used to pull their energy points into the
-                    // unified grid up front to save a rebuild later, which was
-                    // affordable for the handful of nuclides a hop count of 1 or 2
-                    // reached. Over the full closure it would put hundreds of grids
-                    // into every lookup, and activation-scope data has no transport
-                    // sections to offer transport anyway.
-                    // Use full transport MT filter so the microscopic XS cache
-                    // is valid for subsequent transport steps
+                    // Products are deliberately NOT seeded into `nuclides` at
+                    // zero density: that would put their energy grids into
+                    // every lookup, and activation-scope data has no transport
+                    // sections to offer transport anyway. Use full transport
+                    // MT filter so the microscopic XS cache is valid for
+                    // subsequent transport steps.
                     let mt_filter = self.transport_mt_filter();
                     material.invalidate_xs_cache();
                     material.calculate_macroscopic_xs(&mt_filter, true);
@@ -590,6 +476,7 @@ impl Model {
 
         // Initialize results
         let mut results = TransmutationResults::new(timesteps.to_vec());
+        results.product_screening = screenings;
 
         // Track full compositions (including all chain products) across steps.
         // The cell material only has transport nuclides (with HDF5 data),
