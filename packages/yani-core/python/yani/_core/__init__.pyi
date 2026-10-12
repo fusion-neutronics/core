@@ -346,7 +346,7 @@ class DataUncertainty:
       nominal branching;
     - the isomeric split of a reaction whose evaluation states no MF=40
       covariance on any of its states, listed in
-      ``no_isomer_branching_uncertainty``, every split on a transport run, and
+      ``no_isomer_branching_uncertainty``, and
       MF=40 blocks ``"isomer_branching"`` cannot use (another evaluation's
       partner, a partner that is not an MF=10 production, NC, absolute and
       short-range layouts, a state the branching rule folds no curve for),

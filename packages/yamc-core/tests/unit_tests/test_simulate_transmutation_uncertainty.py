@@ -103,6 +103,10 @@ def test_the_report_names_the_sources_that_applied():
     # a transport run, whose flux error is the statistical one.
     assert "statistical" in info["sources"]
     assert "flux_spectrum" not in info["sources"]
+    # The tally scores each MF=40 state per interval, so the isomeric split
+    # is drawn on a transport run too, not held wholesale.
+    assert "isomer_branching" in info["sources"]
+    assert not any("every split held" in s for s in info["not_perturbed"])
     assert info["statistical_rates"] > 0
     assert info["statistical_sampled"] == 16 * info["statistical_rates"]
     # The transport carried a replica weight per replica, so each replica's

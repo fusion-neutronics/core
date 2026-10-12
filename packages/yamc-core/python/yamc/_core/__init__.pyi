@@ -700,7 +700,7 @@ class DataUncertainty:
       nominal branching;
     - the isomeric split of a reaction whose evaluation states no MF=40
       covariance on any of its states, listed in
-      ``no_isomer_branching_uncertainty``, every split on a transport run, and
+      ``no_isomer_branching_uncertainty``, and
       MF=40 blocks ``"isomer_branching"`` cannot use (another evaluation's
       partner, a partner that is not an MF=10 production, NC, absolute and
       short-range layouts, a state the branching rule folds no curve for),
@@ -3154,10 +3154,11 @@ class Model:
         
                 ``"flux_spectrum"`` does not apply: there is no supplied spectrum,
                 and the flux's error is the statistical one.
-                Nor does ``"isomer_branching"``: the isomeric split here is the
-                tallied partials', scored at collisions with no energy to fold
-                the MF=40 covariance over, so every split is held and the report
-                says so under ``not_perturbed``.
+                ``"isomer_branching"`` re-splits the tallied partials: the tally
+                scores each MF=40 state's production on its covariance
+                intervals at the energy of each track segment (per replica with
+                replica weights), and each replica draws the state's production
+                from those weights, as a spectrum run does from its group fold.
                 With replica weights every replica's rates come from the same
                 histories as the nominal ones, so the differences between replicas are resolved
                 far more finely than the rates themselves, and ``"statistical"``

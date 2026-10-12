@@ -21,13 +21,16 @@
 /// Rate formula: rate_ij [1/s] = mean(σ_ij · TL) * 1e-24 * source_rate / volume
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use super::branching_rule::{
     curve_interp, well_formed, Bound, ListRule, ANYTHING, INELASTIC, MT_ANYTHING, MT_INELASTIC,
 };
 use super::history_statistics::{
     fold_covariance, HistoryCovariance, HistoryStatistics, RateCovariance, RateLabel,
+};
+use super::isomer_branching_uncertainty::{
+    cell_weights, IntervalState, IsomerCovariance, IsomerIntervalProductions,
 };
 use super::material_transmute::CoupledDiagnostics;
 use super::{mt_to_reaction_type, reaction_type_to_mt};
@@ -92,6 +95,91 @@ struct ScoredList {
     channels: Vec<Option<usize>>,
     /// Its first slot of the two in `diagnostic_batch`.
     slot: usize,
+    /// The MF=40 states scored per interval on its curves, when
+    /// [`TransmutationTallies::with_isomer_intervals`] asked for them; empty
+    /// otherwise, which costs the hot path one empty loop per channel.
+    intervals: Vec<IntervalScore>,
+}
+
+/// One MF=40 state of a scored list, binned on its covariance grid: the
+/// channel's production `p * TL` at each segment, into the interval holding
+/// the segment's energy.
+struct IntervalScore {
+    /// The curve, in the list's order, whose channel it splits.
+    curve: usize,
+    /// Its intervals' boundaries, ascending.
+    edges: Vec<f64>,
+    /// The state's own curve where the list's curve is several states
+    /// summed: it takes `own(E) / curve(E)` of the channel's production.
+    own: Option<(Vec<f64>, Vec<f64>)>,
+    /// Its first slot in the material's [`IsomerTally`].
+    offset: usize,
+}
+
+impl IntervalScore {
+    /// Where a segment at `energy` on the channel's curve `curve` lands: its
+    /// slot in the material's [`IsomerTally`] and the share of the channel's
+    /// production that is this state's. `None` off the grid; the top edge
+    /// belongs to the last interval.
+    #[inline]
+    fn locate(&self, energy: f64, curve: &yani::BranchCurve) -> Option<(usize, f64)> {
+        let e = &self.edges;
+        if energy < e[0] || energy > e[e.len() - 1] {
+            return None;
+        }
+        let j = (e.partition_point(|&x| x <= energy) - 1).min(e.len() - 2);
+        let share = match &self.own {
+            None => 1.0,
+            Some((energy_own, values_own)) => {
+                let sum = curve_interp(&curve.energy, &curve.values, energy);
+                if sum > 0.0 {
+                    (curve_interp(energy_own, values_own, energy) / sum).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                }
+            }
+        };
+        (share > 0.0).then_some((self.offset + j, share))
+    }
+
+    /// Score `production` (`p * TL`) of a segment at `energy`.
+    #[inline]
+    fn score(&self, tally: &IsomerTally, energy: f64, production: f64, curve: &yani::BranchCurve) {
+        if let Some((slot, share)) = self.locate(energy, curve) {
+            atomic_add_f64(&tally.batch[slot], share * production);
+        }
+    }
+}
+
+/// One material's MF=40 interval productions: the scored states' slots, and
+/// the moment-folded `(n,n')` states read off the flux moments at extraction.
+struct IsomerTally {
+    /// Per scored state: parent, `(MT, LFS)`, first slot and interval count.
+    slots: Vec<(String, (i32, i32), usize, usize)>,
+    /// Per `(n,n')` state of a parent this material folds from the moments:
+    /// the moment curve and the state.
+    moments: Vec<(usize, IntervalState)>,
+    /// This chunk's sums (f64 as bits), and the running sums.
+    batch: Vec<AtomicU64>,
+    sums: Mutex<Vec<f64>>,
+}
+
+impl IsomerTally {
+    fn accumulate(&self) {
+        let mut sums = self.sums.lock().unwrap_or_else(|p| p.into_inner());
+        for (s, b) in sums.iter_mut().zip(&self.batch) {
+            *s += f64::from_bits(b.load(Ordering::Relaxed));
+            b.store(0, Ordering::Relaxed);
+        }
+    }
+
+    fn reset(&self) {
+        let mut sums = self.sums.lock().unwrap_or_else(|p| p.into_inner());
+        for (s, b) in sums.iter_mut().zip(&self.batch) {
+            *s = 0.0;
+            b.store(0, Ordering::Relaxed);
+        }
+    }
 }
 
 /// A fissionable nuclide of this material whose tabulated fission-yield
@@ -201,6 +289,9 @@ struct MaterialTransmutationData {
     fy_batch: Vec<AtomicU64>,
     /// Running per-tabulated-energy sums across all CPU chunks.
     fy_sums: Mutex<Vec<f64>>,
+    /// The MF=40 interval productions, when asked for with
+    /// [`TransmutationTallies::with_isomer_intervals`].
+    isomer: Option<IsomerTally>,
     /// The flux through the resonances, when asked for with
     /// [`TransmutationTallies::with_resolved_flux`].
     resolved: Option<ResolvedFlux>,
@@ -284,6 +375,9 @@ pub struct TransmutationTallies {
     /// [`TransmutationTallies::with_history_statistics`]. `None` on the default
     /// path, which then allocates nothing for it and scores exactly as before.
     statistics: Option<HistoryStatistics>,
+    /// The MF=40 covariance the interval productions are scored for, when
+    /// asked for with [`TransmutationTallies::with_isomer_intervals`].
+    isomer: Option<Arc<IsomerCovariance>>,
     /// Per-replica sums under the transport's nuclear-data replica weights,
     /// when asked for with [`TransmutationTallies::with_replicas`]. `None` on
     /// the default path, which allocates nothing for them.
@@ -480,6 +574,7 @@ fn build_lists(
                         tails,
                         channels: listed,
                         slot: 2 * (lists.iter().map(Vec::len).sum::<usize>() + own.len()),
+                        intervals: Vec::new(),
                     });
                 }
             }
@@ -535,6 +630,39 @@ fn fold_curve_from_moments(
         }
     }
     (total, tail)
+}
+
+/// [`fold_curve_from_moments`] bin by bin: each union-grid bin's part of
+/// `sum(sigma(E_i) * TL_i)`, the flat tail above the last breakpoint included.
+fn fold_curve_by_bin(
+    energy: &[f64],
+    values: &[f64],
+    grid: &[f64],
+    s0: &[f64],
+    s1: &[f64],
+) -> Vec<f64> {
+    let mut out = vec![0.0; s0.len()];
+    for k in 0..energy.len() - 1 {
+        let (e0, e1) = (energy[k], energy[k + 1]);
+        if e1 <= e0 {
+            continue;
+        }
+        let slope = (values[k + 1] - values[k]) / (e1 - e0);
+        let g0 = grid.partition_point(|&e| e < e0);
+        let g1 = grid.partition_point(|&e| e < e1);
+        for g in g0..g1 {
+            let sigma_at_edge = values[k] + slope * (grid[g] - e0);
+            out[g] += sigma_at_edge * s0[g] + slope * s1[g];
+        }
+    }
+    let v_last = values[values.len() - 1];
+    if v_last != 0.0 {
+        let g0 = grid.partition_point(|&e| e < energy[energy.len() - 1]);
+        for g in g0..s0.len() {
+            out[g] += v_last * s0[g];
+        }
+    }
+    out
 }
 
 impl TransmutationTallies {
@@ -706,6 +834,7 @@ impl TransmutationTallies {
                     fy_mt_idx,
                     fy_batch: (0..n_fy_slots).map(|_| AtomicU64::new(0)).collect(),
                     fy_sums: Mutex::new(vec![0.0; n_fy_slots]),
+                    isomer: None,
                     resolved: None,
                 },
             );
@@ -717,7 +846,156 @@ impl TransmutationTallies {
             moment_curves,
             statistics: None,
             replicas: None,
+            isomer: None,
         })
+    }
+
+    /// Also tally, per material, each MF=40 state's production on each
+    /// interval of its covariance grid, so a transport-coupled uncertainty
+    /// run can draw the isomeric split from the stated MF=40 covariance the
+    /// way a spectrum run does (see [`get_isomer_productions`]).
+    ///
+    /// The covariance is read from `branch`'s `branching_covariance.arrow`
+    /// and placed on the chain's branching lists. A state of a list this
+    /// material scores is binned at each track segment's energy, with the
+    /// production its partial is scored with: one binary search over its few
+    /// edges and one atomic add per segment that produces it, and nothing for
+    /// a list with no stated state. An `(n,n')` state of a parent folded from
+    /// the flux moments costs nothing during transport. Off unless asked for,
+    /// and it does not touch the sums the rates are built from, so they are
+    /// bit-identical with it on or off.
+    ///
+    /// [`get_isomer_productions`]: Self::get_isomer_productions
+    pub fn with_isomer_intervals(
+        mut self,
+        chain: &HashMap<String, ChainNuclide>,
+        branch: &BranchTable,
+    ) -> Result<Self, String> {
+        let lists = crate::branching_rule::build_lists(chain, branch)?;
+        let covariance = IsomerCovariance::from_table(branch, &lists)?;
+        let states = covariance.interval_states(&lists);
+        for mat_data in self.materials.values_mut() {
+            let mut slots = Vec::new();
+            let mut moments = Vec::new();
+            let mut n = 0usize;
+            for state in &states {
+                let scored = mat_data
+                    .nuclide_names
+                    .iter()
+                    .position(|name| *name == state.parent)
+                    .and_then(|i| {
+                        // The first list of the kind that is not emitted
+                        // particles, as the state was placed, with the same
+                        // curve: `ListRule::all` orders both the same way.
+                        mat_data.lists[i]
+                            .iter_mut()
+                            .find(|l| l.rule.kind == state.kind && !l.rule.emits)
+                    })
+                    .filter(|l| {
+                        l.channels.get(state.curve).is_some_and(Option::is_some)
+                            && l.rule.curves[state.curve].target == state.target
+                    });
+                if let Some(list) = scored {
+                    list.intervals.push(IntervalScore {
+                        curve: state.curve,
+                        edges: state.edges.clone(),
+                        own: state.own.clone(),
+                        offset: n,
+                    });
+                    let cells = state.edges.len() - 1;
+                    slots.push((state.parent.clone(), state.key, n, cells));
+                    n += cells;
+                } else if state.kind == INELASTIC {
+                    let moment = self
+                        .moment_curves
+                        .iter()
+                        .position(|c| c.parent == state.parent && c.target == state.target);
+                    if let Some(c) = moment.filter(|&c| !mat_data.moment_scored[c]) {
+                        moments.push((c, state.clone()));
+                    }
+                }
+            }
+            mat_data.isomer = Some(IsomerTally {
+                slots,
+                moments,
+                batch: (0..n).map(|_| AtomicU64::new(0)).collect(),
+                sums: Mutex::new(vec![0.0; n]),
+            });
+        }
+        self.isomer = Some(Arc::new(covariance));
+        Ok(self)
+    }
+
+    /// What [`with_isomer_intervals`](Self::with_isomer_intervals) tallied for
+    /// `material_id`, at the normalization of
+    /// [`get_partial_rates`](Self::get_partial_rates) with the same
+    /// arguments, so a state's intervals and its partial are on one footing.
+    /// `None` when it was not asked for, the material is not tallied, nothing
+    /// was scored, or `volume` is not positive.
+    pub fn get_isomer_productions(
+        &self,
+        material_id: u32,
+        volume: f64,
+        source_rate: f64,
+    ) -> Option<IsomerIntervalProductions> {
+        let covariance = self.isomer.as_ref()?;
+        let mat_data = self.materials.get(&material_id)?;
+        let tally = mat_data.isomer.as_ref()?;
+        let total_particles = mat_data.total_particles.load(Ordering::Relaxed);
+        if total_particles == 0 || volume <= 0.0 {
+            return None;
+        }
+        let scale = source_rate / (total_particles as f64 * volume * 1.0e24);
+        let sums = tally.sums.lock().unwrap_or_else(|p| p.into_inner());
+        let s0 = mat_data.moment_s0.lock().unwrap_or_else(|p| p.into_inner());
+        let s1 = mat_data.moment_s1.lock().unwrap_or_else(|p| p.into_inner());
+        Some(self.isomer_productions_of_sums(covariance, tally, &sums, &s0, &s1, scale))
+    }
+
+    /// The interval productions from one set of raw sums: `sums` the scored
+    /// states' slots, `s0` and `s1` the union-grid moments the `(n,n')`
+    /// states of moment-folded parents are folded from, `scale` the
+    /// partials' normalization. Shared by the nominal tally and each replica.
+    fn isomer_productions_of_sums(
+        &self,
+        covariance: &Arc<IsomerCovariance>,
+        tally: &IsomerTally,
+        sums: &[f64],
+        s0: &[f64],
+        s1: &[f64],
+        scale: f64,
+    ) -> IsomerIntervalProductions {
+        let mut productions = HashMap::new();
+        for (parent, key, offset, cells) in &tally.slots {
+            let w = sums[*offset..offset + cells].iter().map(|v| v * scale);
+            productions.insert((parent.clone(), *key), w.collect());
+        }
+        if !tally.moments.is_empty() && !s1.is_empty() {
+            // The union grid closed as `flux_spectrum` closes it.
+            let mut boundaries = self.union_grid.clone();
+            if let Some(&last) = boundaries.last() {
+                boundaries.push(if last > 0.0 { last * 10.0 } else { 1.0 });
+            }
+            for (c, state) in &tally.moments {
+                let c = &self.moment_curves[*c];
+                let bins = fold_curve_by_bin(&c.energy, &c.values, &self.union_grid, s0, s1);
+                let w = cell_weights(
+                    &state.edges,
+                    state.own.as_ref(),
+                    &bins,
+                    &boundaries,
+                    (&c.energy, &c.values),
+                );
+                productions.insert(
+                    (state.parent.clone(), state.key),
+                    w.into_iter().map(|v| v * scale).collect(),
+                );
+            }
+        }
+        IsomerIntervalProductions {
+            covariance: Arc::clone(covariance),
+            productions,
+        }
     }
 
     /// Also accumulate the per-history covariance of each material's tally
@@ -1246,6 +1524,11 @@ impl TransmutationTallies {
                         if let Some(h) = &mut history {
                             h.add_yield(*ch_idx, p * track_length);
                         }
+                        if let Some(tally) = &mat_data.isomer {
+                            for iv in list.intervals.iter().filter(|iv| iv.curve == k) {
+                                iv.score(tally, energy, p * track_length, &list.rule.curves[k]);
+                            }
+                        }
                     }
                 }
                 if point.clipped > 0.0 {
@@ -1345,6 +1628,9 @@ impl TransmutationTallies {
                 }
             }
 
+            if let Some(tally) = &mat_data.isomer {
+                tally.accumulate();
+            }
             if let Some(resolved) = &mat_data.resolved {
                 resolved.accumulate();
             }
@@ -1620,6 +1906,9 @@ impl TransmutationTallies {
                 *fs = 0.0;
                 accum.store(0, Ordering::Relaxed);
             }
+            if let Some(tally) = &mat_data.isomer {
+                tally.reset();
+            }
             if let Some(resolved) = &mat_data.resolved {
                 resolved.reset();
             }
@@ -1659,10 +1948,11 @@ impl TransmutationTallies {
         mat_ids.sort_unstable();
 
         // Pack: per material, sum_means ++ [flux_sum_means] ++ moment_s0 ++
-        // moment_s1 ++ yield_sums ++ fy_sums ++ diagnostic_sums ++ the
-        // resolved flux when it is on, then the history statistics' raw sums
-        // when they are on. Those are sums of per-history products, so they
-        // add across ranks like everything else here.
+        // moment_s1 ++ yield_sums ++ fy_sums ++ diagnostic_sums ++ the MF=40
+        // interval productions when they are on ++ the resolved flux when it
+        // is on, then the history statistics' raw sums when they are on.
+        // Those are sums of per-history products, so they add across ranks
+        // like everything else here.
         let mut packed: Vec<f64> = Vec::new();
         for id in &mat_ids {
             let mat_data = &self.materials[id];
@@ -1714,6 +2004,9 @@ impl TransmutationTallies {
                     .unwrap_or_else(|p| p.into_inner())
                     .clone(),
             );
+            if let Some(tally) = &mat_data.isomer {
+                packed.extend_from_slice(&tally.sums.lock().unwrap_or_else(|p| p.into_inner()));
+            }
             if let Some(resolved) = &mat_data.resolved {
                 packed.extend_from_slice(&resolved.sums.lock().unwrap_or_else(|p| p.into_inner()));
             }
@@ -1782,6 +2075,12 @@ impl TransmutationTallies {
                     .unwrap_or_else(|p| p.into_inner());
                 let n = d.len();
                 d.copy_from_slice(&packed[off..off + n]);
+                off += n;
+            }
+            if let Some(tally) = &mat_data.isomer {
+                let mut t = tally.sums.lock().unwrap_or_else(|p| p.into_inner());
+                let n = t.len();
+                t.copy_from_slice(&packed[off..off + n]);
                 off += n;
             }
             if let Some(resolved) = &mat_data.resolved {
@@ -2192,6 +2491,7 @@ mod tests {
                 fy_mt_idx: None,
                 fy_batch: Vec::new(),
                 fy_sums: Mutex::new(Vec::new()),
+                isomer: None,
                 resolved: None,
             },
         );
@@ -2200,6 +2500,7 @@ mod tests {
             union_grid,
             moment_curves,
             statistics: None,
+            isomer: None,
             replicas: None,
         }
     }
@@ -2429,6 +2730,138 @@ mod tests {
                 brute * scale
             );
         }
+    }
+
+    /// An `(n,n')` MF=40 state of a parent folded from the moments takes the
+    /// moment fold bin by bin: its intervals sum to the partial, and with an
+    /// interval edge on a union-grid edge the split is the brute-force sum on
+    /// each side of it. Off without the source.
+    #[test]
+    fn moment_folded_states_split_their_partial_by_interval() {
+        let branch = moment_branch();
+        let mut t = one_bin_tally_with_branch(&branch);
+        let material = Material::new(
+            HashMap::from([("U238".to_string(), 1.0)]),
+            "atom",
+            "sum",
+            None,
+        )
+        .unwrap();
+        assert!(t.get_isomer_productions(7, 1.0, 1.0).is_none());
+        let (energy, values) = (vec![1.0e6, 3.0e6, 5.0e6], vec![0.0, 2.0, 1.0]);
+        let c = t
+            .moment_curves
+            .iter()
+            .position(|c| c.target == "U238_m1")
+            .unwrap();
+        // 3 MeV is a breakpoint, so on the union grid.
+        let edges = vec![1.0e-5, 3.0e6, 2.0e7];
+        let state = IntervalState {
+            parent: "U238".to_string(),
+            key: (4, 1),
+            kind: INELASTIC.to_string(),
+            curve: 0,
+            target: "U238_m1".to_string(),
+            own: None,
+            edges: edges.clone(),
+        };
+        t.materials.get_mut(&7).unwrap().isomer = Some(IsomerTally {
+            slots: Vec::new(),
+            moments: vec![(c, state)],
+            batch: Vec::new(),
+            sums: Mutex::new(Vec::new()),
+        });
+        t.isomer = Some(Arc::new(IsomerCovariance::default()));
+        let segments = [
+            (5.0e5, 1.0),
+            (2.0e6, 2.0),
+            (3.5e6, 1.5),
+            (4.9e6, 0.5),
+            (1.4e7, 3.0),
+        ];
+        for &(e, tl) in &segments {
+            t.score(7, e, tl, &material);
+        }
+        t.accumulate_batch(3);
+        let (volume, source_rate) = (2.0, 1.0e12);
+        let got = t.get_isomer_productions(7, volume, source_rate).unwrap();
+        let w = &got.productions[&("U238".to_string(), (4, 1))];
+        let scale = source_rate / (3.0 * volume * 1.0e24);
+        for (j, w) in w.iter().enumerate() {
+            let brute: f64 = segments
+                .iter()
+                .filter(|(e, _)| *e >= edges[j] && *e < edges[j + 1])
+                .map(|&(e, tl)| curve_interp(&energy, &values, e) * tl)
+                .sum();
+            assert!(
+                (w - brute * scale).abs() <= 1e-12 * brute * scale,
+                "{j}: {w} vs {brute}"
+            );
+        }
+        let partial = t.get_partial_rates(7, volume, source_rate)["U238"]["(n,n')"]
+            .iter()
+            .find(|(target, _)| target == "U238_m1")
+            .unwrap()
+            .1;
+        assert!((w.iter().sum::<f64>() - partial).abs() <= 1e-12 * partial);
+    }
+
+    /// A scored state is binned at each segment's energy on its own grid, the
+    /// top edge in the last interval and nothing off the grid; a state summed
+    /// with another into one curve takes its own curve's part.
+    #[test]
+    fn interval_scores_bin_on_their_own_grid() {
+        let tally = IsomerTally {
+            slots: Vec::new(),
+            moments: Vec::new(),
+            batch: (0..4).map(|_| AtomicU64::new(0)).collect(),
+            sums: Mutex::new(vec![0.0; 4]),
+        };
+        let curve = yani::BranchCurve {
+            target: "X".to_string(),
+            quantity: BranchQuantity::CrossSection,
+            energy: vec![1.0, 8.0],
+            values: vec![2.0, 2.0],
+            states: Default::default(),
+            normalisation: None,
+        };
+        let whole = IntervalScore {
+            curve: 0,
+            edges: vec![1.0, 2.0, 8.0],
+            own: None,
+            offset: 0,
+        };
+        let part = IntervalScore {
+            curve: 0,
+            edges: vec![1.0, 4.0, 8.0],
+            own: Some((vec![1.0, 8.0], vec![0.5, 0.5])),
+            offset: 2,
+        };
+        for (e, p) in [(0.5, 1.0), (1.5, 2.0), (2.0, 3.0), (8.0, 4.0), (9.0, 5.0)] {
+            whole.score(&tally, e, p, &curve);
+            part.score(&tally, e, p, &curve);
+        }
+        tally.accumulate();
+        let sums = tally.sums.lock().unwrap().clone();
+        assert_eq!(sums, vec![2.0, 7.0, 1.25, 1.0]);
+        tally.reset();
+        assert_eq!(*tally.sums.lock().unwrap(), vec![0.0; 4]);
+    }
+
+    /// The bin-by-bin moment fold sums to the whole one.
+    #[test]
+    fn fold_by_bin_sums_to_the_fold() {
+        let grid = vec![0.0, 1.0e5, 1.0e6, 3.0e6, 5.0e6, 1.0e7];
+        let s0 = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let s1 = vec![0.0, 1.0e4, 2.0e5, 3.0e5, 1.0e6, 2.0e6];
+        let mut suffix = vec![0.0; s0.len() + 1];
+        for g in (0..s0.len()).rev() {
+            suffix[g] = suffix[g + 1] + s0[g];
+        }
+        let (e, v) = (vec![1.0e6, 3.0e6, 5.0e6], vec![0.0, 2.0, 1.0]);
+        let (whole, _) = fold_curve_from_moments(&e, &v, &grid, &s0, &s1, &suffix);
+        let bins: f64 = fold_curve_by_bin(&e, &v, &grid, &s0, &s1).iter().sum();
+        assert!((whole - bins).abs() <= 1e-12 * whole);
     }
 
     /// Moment curves are the `(n,n')` partials of every chain parent in the
